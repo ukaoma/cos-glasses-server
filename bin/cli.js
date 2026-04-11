@@ -125,6 +125,46 @@ if (!existsSync(envFile) && existsSync(envExample)) {
   console.log(green('  \u2713') + ' Created .env from template')
 }
 
+// Step 5b: Local Whisper detection — voice transcription is FREE if installed,
+// otherwise the server silently falls back to OpenAI API ($0.006/min). Public
+// users won't know they're being billed unless we tell them at startup.
+//
+// Detection mirrors what server/lib/whisper-local.ts looks for at runtime:
+//   - whisper-cli binary (brew install whisper-cpp)
+//   - ggml-large-v3-turbo.bin model (~3.1GB, downloaded from Hugging Face)
+const WHISPER_CLI_PATH = '/opt/homebrew/bin/whisper-cli'
+const WHISPER_MODEL_DIR = join(homedir(), '.local/share/whisper-models')
+const WHISPER_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-large-v3-turbo.bin')
+const WHISPER_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin'
+
+const hasWhisperCli = existsSync(WHISPER_CLI_PATH)
+const hasWhisperModel = existsSync(WHISPER_MODEL_PATH)
+
+if (hasWhisperCli && hasWhisperModel) {
+  console.log(green('  \u2713') + ' whisper.cpp + model ready ' + dim('— voice = local (FREE)'))
+} else if (hasWhisperCli && !hasWhisperModel) {
+  console.log(yellow('  \u26a0') + ' whisper.cpp installed but model missing')
+  console.log('    ' + dim('Downloading large-v3-turbo (~3.1GB) from Hugging Face...'))
+  console.log('    ' + dim('Cancel with Ctrl-C if you prefer to skip — server will use OpenAI API instead.'))
+  try {
+    mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
+    execSync(`curl -fL --progress-bar "${WHISPER_MODEL_URL}" -o "${WHISPER_MODEL_PATH}"`, {
+      stdio: 'inherit',
+      timeout: 600000  // 10 min for slow networks
+    })
+    console.log(green('  \u2713') + ' Model downloaded ' + dim('— voice = local (FREE)'))
+  } catch (err) {
+    console.log(red('  \u2717') + ' Model download failed ' + dim('— voice will use OpenAI API'))
+    console.log('    ' + dim('Manual: curl -fL ' + WHISPER_MODEL_URL + ' -o ' + WHISPER_MODEL_PATH))
+  }
+} else {
+  // No whisper-cli — voice will fall back to OpenAI API
+  console.log(yellow('  \u26a0') + ' whisper.cpp not installed ' + dim('— voice will use OpenAI API ($0.006/min)'))
+  console.log('    For free local voice transcription, run:')
+  console.log('    ' + bold('brew install whisper-cpp'))
+  console.log('    ' + dim('Then re-run npx @gotcos/glasses-server to download the model.'))
+}
+
 // Step 6: Start the server
 console.log('')
 console.log(dim('  Starting server...'))
