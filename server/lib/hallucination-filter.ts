@@ -11,7 +11,7 @@
 //   isFullHallucination(text) — returns true if the text IS a hallucination in its
 //     entirety (silence artifacts, caption training, foreign script, filler-only).
 
-import { getNegativeRules } from './profile.js'
+import { getNegativeRules, getVocabulary, getOwnerName, loadProfileField } from './profile.js'
 
 // ── Whole-chunk silence hallucinations ─────────────────────────────────────
 const KNOWN_HALLUCINATIONS = [
@@ -312,6 +312,76 @@ export function isRepeatedThankYouOnly(text: string): boolean {
   return content.length === 0
 }
 
+// ── Vocab-echo (prompt-regurgitation) hallucination ────────────────────────
+// Whisper is seeded with an initial_prompt = the profile vocabulary (owner +
+// brands + products + people). On silence / music / ambiguous audio it ECHOES
+// that prompt, emitting the seeded terms the user never said. The brand-URL
+// filters above only catch URL echoes; a bare brand-NAME echo slips through.
+// This detector drops a chunk that is NOTHING but seeded vocab terms (+
+// punctuation). Real speech that MENTIONS a term in a sentence keeps its
+// non-vocab content words and is never dropped.
+let _vocabEchoRe: RegExp | null = null
+
+/** Bust the cached vocab matcher after a profile write. */
+export function resetVocabEchoCache(): void { _vocabEchoRe = null }
+
+function getVocabEchoMatcher(): RegExp {
+  if (_vocabEchoRe) return _vocabEchoRe
+  const raw = new Set<string>()
+  const owner = getOwnerName()
+  if (owner) raw.add(owner)
+  for (const v of getVocabulary()) if (v && v.trim()) raw.add(v.trim())
+  // Include whisper_corrections key/value variants so the echo matches whatever
+  // spelling whisper emits ("POS Nation" ↔ "POSNation", "Jewel 360" ↔ "Jewel360").
+  try {
+    const corrRaw = loadProfileField('whisper_corrections', '')
+    if (corrRaw) {
+      const map = JSON.parse(corrRaw) as Record<string, string>
+      for (const [k, val] of Object.entries(map)) { if (k) raw.add(k); if (val) raw.add(val) }
+    }
+  } catch { /* malformed corrections — ignore */ }
+  // Only UNAMBIGUOUS terms trigger an echo drop: multi-word phrases ("POS Nation",
+  // "IT Retail", "Jeremy Sokolic") and brand-shaped single tokens with an internal
+  // capital or digit ("POSNation", "CaratIQ", "Jewel360"). Plain single-word tokens
+  // ("Austin", "Miles", "Ukaoma") are common words / ambiguous and are EXCLUDED —
+  // they carry too much false-drop risk for an always-on list rule.
+  const terms = [...raw].filter(t => {
+    if (t.length < 2) return false
+    if (/\s/.test(t)) return true                 // multi-word phrase
+    return /[A-Z0-9]/.test(t.slice(1))            // single token only if brand-shaped
+  }).sort((a, b) => b.length - a.length)
+  if (terms.length === 0) { _vocabEchoRe = /(?!)/g; return _vocabEchoRe }
+  // Escape regex metachars; flex internal whitespace so "IT Retail" also matches
+  // "ITRetail". Word-bounded so terms don't match inside larger words.
+  const alt = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*')).join('|')
+  _vocabEchoRe = new RegExp(`\\b(?:${alt})\\b`, 'gi')
+  return _vocabEchoRe
+}
+
+/** Count distinct seeded-vocab terms present in `text`. */
+export function countVocabTerms(text: string): number {
+  if (!text) return 0
+  const re = getVocabEchoMatcher()
+  re.lastIndex = 0
+  const found = new Set<string>()
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    found.add(m[0].toLowerCase().replace(/\s+/g, ''))
+    if (m.index === re.lastIndex) re.lastIndex++  // guard against a zero-width match loop
+  }
+  return found.size
+}
+
+/** True iff `text` is non-empty and contains NOTHING but seeded vocab terms (plus
+ *  punctuation/whitespace) — the prompt-echo hallucination shape. Any non-vocab
+ *  content word (incl. connectives like "and"/"the") makes it real speech → false. */
+export function isVocabEchoOnly(text: string): boolean {
+  if (!text || !text.trim()) return false
+  if (countVocabTerms(text) === 0) return false
+  const residual = text.replace(getVocabEchoMatcher(), ' ').replace(/[^a-z0-9]/gi, '')
+  return residual.length === 0
+}
+
 /** Streaming-chunk silence-drop decision. Pure + exported so the gate is testable
  *  (sanitizeStreamTranscript is private). Returns a fallbackReason or null. Contract:
  *    brand-URL-only  -> 'brand_url'        DROP ALWAYS — brand URLs are vocab-seeded,
@@ -320,6 +390,9 @@ export function isRepeatedThankYouOnly(text: string): boolean {
  *                                          third-party URL during speech is preserved.
  *    thank-you-only  -> 'thankyou_silence' DROP only when isQuiet — soft real closings
  *                                          stay (see isRepeatedThankYouOnly).
+ *  Vocab-echo (prompt regurgitation) is handled SEPARATELY in sanitizeStreamTranscript
+ *  because the safe rule is session-aware (drop a silence echo or a back-to-back RUN,
+ *  but keep a single loud one-off that could be a real terse brand/name list).
  *  Real speech (any chunk with content words) always returns null. */
 export function streamSilenceDropReason(text: string, isQuiet: boolean): 'brand_url' | 'url_silence' | 'thankyou_silence' | null {
   if (!text || !text.trim()) return null

@@ -24,7 +24,11 @@ export async function callModelStreaming(
 ): Promise<string> {
   const sid = getOrCreateSession(sessionId)
   const sessionModel = getSessionModel(sid)
-  const resolvedModel = normalizeModelPreference(model) ?? sessionModel ?? DEFAULT_MODEL
+  // COS_G2_DEFAULT_MODEL is the documented default-model switch (CHANGELOG 6.1.0);
+  // it must win over the hardcoded DEFAULT_MODEL on this primary query path, not
+  // just the OpenAI-compat surface.
+  const envDefault = normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL)
+  const resolvedModel = normalizeModelPreference(model) ?? sessionModel ?? envDefault ?? DEFAULT_MODEL
 
   setSessionModel(sid, resolvedModel)
 

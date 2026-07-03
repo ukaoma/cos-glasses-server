@@ -17,6 +17,8 @@ import { enhanceAudio } from './audio-enhance.js'
 import {
   stripInlineHallucinationsOneShot,
   isFullHallucination,
+  isVocabEchoOnly,
+  countVocabTerms,
 } from './hallucination-filter.js'
 import { getOpenAIKey } from './openai-key.js'
 
@@ -173,7 +175,11 @@ export async function transcribeAudioBuffer(audioBuffer: Buffer, opts: { mode?: 
   }
 
   const elapsedMs = performance.now() - tStart
-  if (!text || isFullHallucination(text)) {
+  // A one-shot message/dictation that is NOTHING but a list of seeded vocab terms
+  // (>=2 distinct) is a whisper prompt-echo, not speech — drop it like the meeting
+  // path does. A single terse brand mention stays (could be a real one-word message).
+  const vocabEcho = isVocabEchoOnly(text) && countVocabTerms(text) >= 2
+  if (!text || isFullHallucination(text) || vocabEcho) {
     throw new NoSpeechDetectedError(text || '')
   }
 

@@ -14,7 +14,7 @@ import { getOpenAIKey } from '../lib/openai-key.js'
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
-import { transcribeLocal, isWhisperLocalAvailable, type WhisperWord } from '../lib/whisper-local.js'
+import { transcribeLocal, isWhisperLocalAvailable, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
 import { identifySpeaker, isEmbeddingAvailable, autoEnroll, getEmbeddingCount } from '../lib/speaker-embeddings.js'
@@ -29,6 +29,7 @@ import {
   isFullHallucination as sharedIsFullHallucination,
   clearSessionHallucinationState,
   streamSilenceDropReason,
+  isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
 
 // Silence-hallucination drops (2026-05-29, v5.9.73). Contract in streamSilenceDropReason:
@@ -170,6 +171,18 @@ interface TranscriptSession {
   startTime: number
   title: string
   providerCandidates?: Record<string, ProviderCandidateRecord>
+  // ── Transfer integrity (lost-chunk detection) ──────────────
+  // Every chunkIndex the server received an audio POST for — recorded at
+  // ingest BEFORE any text filtering, so a "received but silent" chunk counts
+  // as delivered (not a gap). A genuine hole (index in [0, maxChunkIndex] that
+  // never arrived = a chunk lost in transit) is the only thing flagged as a gap.
+  // Sorted, de-duplicated. See computeGapReport()/analyzeTranscriptGaps().
+  receivedIndices?: number[]
+  maxChunkIndex?: number
+  // Count of consecutive vocab-echo (prompt-regurgitation) chunks. Reset to 0 by
+  // any real-content chunk. Used to drop a RUN of echoed brand names while keeping
+  // a single loud one-off (which could be a real terse list). See sanitizeStreamTranscript.
+  vocabEchoStreak?: number
 }
 
 const sessions = new Map<string, TranscriptSession>()
@@ -238,11 +251,24 @@ function persistSession(sessionId: string): void {
     const session = sessions.get(sessionId)
     if (!session) return
     const filePath = resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)
+    // chunksIndexed preserves each chunk's original index (a plain filter()
+    // would collapse the sparse array and destroy gap positions on recovery).
+    const chunksIndexed: Array<{ i: number; c: TranscriptChunk }> = []
+    for (let i = 0; i < session.chunks.length; i++) {
+      const c = session.chunks[i]
+      if (c && c.text) chunksIndexed.push({ i, c })
+    }
     const data = JSON.stringify({
       sessionId,
       startTime: session.startTime,
       title: session.title,
-      chunks: session.chunks.filter(c => c && c.text),
+      // `chunks` = legacy dense form, kept for backward compatibility with
+      // existing readers; `chunksIndexed` preserves original indices so gap
+      // detection survives recovery. Recovery prefers chunksIndexed.
+      chunks: chunksIndexed.map(e => e.c),
+      chunksIndexed,
+      receivedIndices: session.receivedIndices ?? [],
+      maxChunkIndex: session.maxChunkIndex ?? -1,
       providerCandidates: session.providerCandidates ?? {},
     })
     writeFileSync(filePath, data, 'utf-8')
@@ -259,13 +285,52 @@ function recoverSessions(): void {
       if (!file.endsWith('.json')) continue
       try {
         const data = JSON.parse(readFileSync(resolve(CHUNK_PERSIST_DIR, file), 'utf-8'))
-        if (data.sessionId && data.chunks && data.chunks.length > 0) {
+        // Reconstruct the (sparse) chunk array. New format keeps original
+        // indices via chunksIndexed; legacy format stored a dense `chunks`.
+        const indexed: Array<{ i: number; c: TranscriptChunk }> | null =
+          Array.isArray(data.chunksIndexed) ? data.chunksIndexed : null
+        const legacy: TranscriptChunk[] | null = Array.isArray(data.chunks) ? data.chunks : null
+        const hasChunks = (indexed && indexed.length > 0) || (legacy && legacy.length > 0)
+        if (data.sessionId && hasChunks) {
           // Only recover sessions less than 4 hours old
           if (Date.now() - data.startTime < 4 * 60 * 60 * 1000) {
+            const chunks: TranscriptChunk[] = []
+            if (indexed) {
+              for (const e of indexed) {
+                if (e && Number.isInteger(e.i) && e.i >= 0 && e.c) chunks[e.i] = e.c
+              }
+            } else if (legacy) {
+              for (let k = 0; k < legacy.length; k++) if (legacy[k]) chunks[k] = legacy[k]
+            }
+            // Restore the received-index ledger. A legacy file (pre-feature)
+            // has no ledger and no way to know whether a chunk was truly lost,
+            // so deriving from stored positions would FALSELY flag a
+            // received-but-silent chunk as a gap. Instead, treat a legacy
+            // session as contiguous (0..maxStored) → it reports 100%, never a
+            // false alarm. New-format files carry their own ledger and are exact.
+            const hasLedger = Array.isArray(data.receivedIndices)
+            let receivedIndices: number[]
+            let maxChunkIndex: number
+            if (hasLedger) {
+              receivedIndices = Array.from(new Set(
+                (data.receivedIndices as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) >= 0),
+              )).sort((a, b) => a - b)
+              maxChunkIndex = typeof data.maxChunkIndex === 'number' && data.maxChunkIndex >= 0
+                ? data.maxChunkIndex
+                : (receivedIndices.length > 0 ? receivedIndices[receivedIndices.length - 1] : -1)
+            } else {
+              let maxStored = -1
+              for (let k = 0; k < chunks.length; k++) if (chunks[k]) maxStored = k
+              receivedIndices = []
+              for (let k = 0; k <= maxStored; k++) receivedIndices.push(k)
+              maxChunkIndex = maxStored
+            }
             const session: TranscriptSession = {
-              chunks: data.chunks,
+              chunks,
               startTime: data.startTime,
               title: data.title || '',
+              receivedIndices,
+              maxChunkIndex,
               providerCandidates: data.providerCandidates && typeof data.providerCandidates === 'object'
                 ? data.providerCandidates
                 : {},
@@ -293,7 +358,8 @@ function recoverSessions(): void {
               console.log(`[session-recovery] Cleaned inline hallucinations from ${cleaned} chunks`)
               persistSession(data.sessionId)  // re-persist cleaned data to disk
             }
-            console.log(`[session-recovery] Recovered ${data.chunks.length} chunks for ${data.sessionId}`)
+            const gaps = computeGapReport(session).missingIndices.length
+            console.log(`[session-recovery] Recovered ${session.chunks.filter(c => c && c.text).length} chunks for ${data.sessionId}${gaps > 0 ? ` (${gaps} lost-chunk gap${gaps > 1 ? 's' : ''})` : ''}`)
           } else {
             // Stale — clean up
             unlinkSync(resolve(CHUNK_PERSIST_DIR, file))
@@ -410,13 +476,106 @@ export function getSession(sessionId: string): TranscriptSession {
   return session
 }
 
-/** Get full accumulated transcript for a session (with speaker labels) */
-export function getSessionTranscript(sessionId: string): string | null {
+/** Insert a non-negative integer into a sorted array, keeping it sorted and
+ *  unique. Common case (a new highest value) is O(1); out-of-order (a retry)
+ *  is a binary-search insert. Mutates `arr`. Exported for unit tests. */
+export function insertSortedUnique(arr: number[], value: number): void {
+  if (!Number.isInteger(value) || value < 0) return
+  const last = arr.length > 0 ? arr[arr.length - 1] : -1
+  if (value > last) { arr.push(value); return }
+  if (value === last) return
+  let lo = 0, hi = arr.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (arr[mid] < value) lo = mid + 1
+    else hi = mid
+  }
+  if (arr[lo] !== value) arr.splice(lo, 0, value)
+}
+
+/** Record that the server received an audio POST for this chunk index.
+ *  Called at ingest before any text filtering, so silent/empty chunks still
+ *  count as delivered (not a gap). */
+function recordReceivedChunk(session: TranscriptSession, chunkIndex: number): void {
+  if (!Number.isInteger(chunkIndex) || chunkIndex < 0) return
+  if (!session.receivedIndices) session.receivedIndices = []
+  insertSortedUnique(session.receivedIndices, chunkIndex)
+  if (session.maxChunkIndex == null || chunkIndex > session.maxChunkIndex) {
+    session.maxChunkIndex = chunkIndex
+  }
+}
+
+export interface TranscriptGapReport {
+  received: number          // distinct chunk indices the server got
+  stored: number            // chunks that survived filtering (have text)
+  maxIndex: number          // highest chunk index seen (-1 if none)
+  expected: number          // maxIndex + 1
+  missingIndices: number[]  // indices in [0, maxIndex] never received = lost in transit
+  completeness: number      // received / expected (1 when nothing expected)
+}
+
+/** Pure gap math over a received-index ledger. Exported for unit tests. */
+export function analyzeChunkGaps(receivedIndices: number[], maxChunkIndex: number, storedCount = 0): TranscriptGapReport {
+  const maxIndex = maxChunkIndex
+  const expected = maxIndex + 1
+  const recvSet = new Set(receivedIndices.filter(n => Number.isInteger(n) && n >= 0))
+  const missingIndices: number[] = []
+  for (let i = 0; i <= maxIndex; i++) {
+    if (!recvSet.has(i)) missingIndices.push(i)
+  }
+  const completeness = expected > 0 ? recvSet.size / expected : 1
+  return { received: recvSet.size, stored: storedCount, maxIndex, expected, missingIndices, completeness }
+}
+
+/** Gap report bound to a live session's ledger + stored-chunk count. */
+function computeGapReport(session: TranscriptSession): TranscriptGapReport {
+  const received = session.receivedIndices ?? []
+  const maxIndex = session.maxChunkIndex ?? (received.length > 0 ? received[received.length - 1] : -1)
+  const stored = session.chunks.filter(c => c && c.text).length
+  return analyzeChunkGaps(received, maxIndex, stored)
+}
+
+/** Transfer-integrity report for a live session — null if the session is gone. */
+export function analyzeTranscriptGaps(sessionId: string): TranscriptGapReport | null {
   const session = sessions.get(sessionId)
   if (!session) return null
-  return session.chunks
-    .map(c => c.speaker ? `[${c.speaker}]: ${c.text}` : c.text)
-    .join('\n')
+  return computeGapReport(session)
+}
+
+/** Get full accumulated transcript for a session (with speaker labels).
+ *  With { withGaps: true }, walks the index sequence and inserts an explicit
+ *  marker wherever one or more chunks were never received — so permanently
+ *  lost audio is visible in the saved transcript instead of silently stitched. */
+export function getSessionTranscript(sessionId: string, opts: { withGaps?: boolean } = {}): string | null {
+  const session = sessions.get(sessionId)
+  if (!session) return null
+  const renderChunk = (c: TranscriptChunk): string => (c.speaker ? `[${c.speaker}]: ${c.text}` : c.text)
+  if (!opts.withGaps) {
+    return session.chunks.map(renderChunk).join('\n')
+  }
+  const report = computeGapReport(session)
+  if (report.missingIndices.length === 0) {
+    return session.chunks.map(renderChunk).join('\n')
+  }
+  const missing = new Set(report.missingIndices)
+  const lines: string[] = []
+  let gapRun = 0
+  const flushGap = (): void => {
+    if (gapRun > 0) {
+      // Marker is intentionally >40 inner chars so it can't match the
+      // bracket-shaped hallucination filter (/^\s*\[[^\]\n]{1,40}\]\s*$/).
+      lines.push(`[… audio gap — ${gapRun} chunk${gapRun > 1 ? 's' : ''} lost in transit, not received by server …]`)
+      gapRun = 0
+    }
+  }
+  for (let i = 0; i <= report.maxIndex; i++) {
+    if (missing.has(i)) { gapRun++; continue }
+    flushGap()
+    const c = session.chunks[i]
+    if (c && c.text) lines.push(renderChunk(c))
+  }
+  flushGap()
+  return lines.join('\n')
 }
 
 /** Get structured chunks with timing + speaker confidence (for blended meeting pipeline) */
@@ -599,6 +758,26 @@ function sanitizeStreamTranscript(sessionId: string, session: TranscriptSession,
       return { text: '', fallbackReason: dropReason }
     }
   }
+  // Vocab-echo (whisper regurgitating its seeded vocab prompt — phantom brand names).
+  // Session-aware so we never drop a real one-off: a chunk that is NOTHING but seeded
+  // terms is dropped only when (a) the audio is quiet (a silence echo), (b) it's the
+  // 2nd+ consecutive such chunk (a RUN — the "repeated multiple times" symptom), or
+  // (c) it exactly repeats a recent chunk. A single loud, non-repeating vocab-only
+  // chunk is KEPT (it could be a real terse brand/name list). Accepted trade: if a
+  // user genuinely dictates a brand list with NO connectives across consecutive
+  // chunks ("POS Nation," | "Thrift Cart," | "and IT Retail"), the middle chunk can
+  // be dropped — rare (whisper usually bundles a spoken list into one chunk, which
+  // is kept) and far less harmful than the phantom-brand spam this prevents.
+  if (trimmedText && STRIP_BRAND_URLS && isVocabEchoOnly(trimmedText)) {
+    const streak = (session.vocabEchoStreak ?? 0) + 1
+    session.vocabEchoStreak = streak
+    if (isQuiet || streak >= 2 || isCrossChunkRepeat(session, trimmedText)) {
+      console.log(`[hallucination] Dropped (vocab_echo, q=${isQuiet ? 1 : 0}, streak=${streak}): "${trimmedText.slice(0, 60)}"`)
+      return { text: '', fallbackReason: 'vocab_echo' }
+    }
+  } else if (trimmedText) {
+    session.vocabEchoStreak = 0
+  }
   if (trimmedText && isServerHallucination(trimmedText)) {
     return { text: '', fallbackReason: 'hallucination' }
   }
@@ -741,6 +920,9 @@ async function processStreamChunk(opts: {
 
   const audioSha256 = sha256Hex(audioBuffer)
   const session = getSession(sessionId)
+  // Transfer integrity: log this index as delivered before any text filtering,
+  // so a silent/hallucination-filtered chunk is NOT mistaken for a lost one.
+  recordReceivedChunk(session, chunkIndex)
   const alreadyCanonical = session.chunks[chunkIndex]
 
   let candidateRecordKey: string | undefined
@@ -819,11 +1001,17 @@ async function processStreamChunk(opts: {
     backend = result.backend
   }
 
+  // Apply deterministic name corrections (whisper_corrections map) on EVERY live
+  // path: the iPhone-ASR candidate path and the cloud fallback skip
+  // transcribeLocal's internal pass, so without this the lens would show names
+  // uncorrected for those sources. Idempotent for the local path.
+  rawText = applyCorrections(rawText)
+
   let sanitized = sanitizeStreamTranscript(sessionId, session, rawText, isQuiet)
   if (candidate && (!sanitized.text || sanitized.fallbackReason)) {
     fallbackReason = sanitized.fallbackReason || 'empty_candidate'
     const result = await transcribeWithServerWhisper(audioBuffer, whisperAudio, whisperContext, isQuiet)
-    rawText = result.text
+    rawText = applyCorrections(result.text)
     words = result.words
     backend = result.backend
     asrProvider = 'server-whisper'

@@ -138,7 +138,13 @@ app.get('/', (_req, res) => {
 })
 
 // Graceful shutdown — stop whisper-server child process
-process.on('SIGTERM', () => { stopWhisperServer(); process.exit(0) })
+process.on('SIGTERM', () => {
+  // Production stops (kill, service managers) send SIGTERM — flush session logs
+  // exactly like SIGINT so active conversations aren't lost on shutdown.
+  try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
+  stopWhisperServer()
+  process.exit(0)
+})
 process.on('SIGINT', () => { logActiveSessionsOnShutdown(); stopWhisperServer(); process.exit(0) })
 
 // Crash protection — log and survive instead of dying mid-meeting
