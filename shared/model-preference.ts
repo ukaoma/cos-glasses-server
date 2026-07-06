@@ -2,7 +2,7 @@ export type ClaudeModelPreference = 'opus' | 'sonnet' | 'haiku'
 export type CodexModelPreference = 'codex-high'
 export type ModelPreference = ClaudeModelPreference | CodexModelPreference
 
-export const DEFAULT_MODEL = 'opus' as const
+export const DEFAULT_MODEL = 'sonnet' as const
 export const CODEX_HIGH_MODEL: CodexModelPreference = 'codex-high'
 
 // Optional codex model passed to `codex exec --model`. Empty (the default) means

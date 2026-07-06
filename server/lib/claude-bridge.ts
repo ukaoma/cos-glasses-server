@@ -12,11 +12,12 @@ import { join } from 'node:path'
 import { appendFileSync } from 'node:fs'
 import crypto from 'node:crypto'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { cosBrainDir } from './launch-dir.js'
 import { logTokenAudit } from './token-audit.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt, buildPrewarmSystemPrompt, getCachedContextInstant } from './context-builder.js'
 import { getHistory, addExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
 import { notifySessionStart, notifyExchange } from './telegram-notify.js'
-import { isClaudeModel, type ClaudeModelPreference } from '../../shared/model-preference.js'
+import { isClaudeModel, DEFAULT_MODEL, type ClaudeModelPreference } from '../../shared/model-preference.js'
 import {
   finishClaudeRun,
   getClaudeEffortLevel,
@@ -182,7 +183,7 @@ export async function preWarmCLI(): Promise<void> {
 
     const proc = spawn('claude', [
       '-p',
-      '--model', 'opus',  // Must match default query model — --resume inherits session model
+      '--model', DEFAULT_MODEL,  // Must match default query model — --resume inherits session model
       '--effort', getClaudeEffortLevel(),
       '--output-format', 'stream-json',
       '--verbose',
@@ -191,7 +192,7 @@ export async function preWarmCLI(): Promise<void> {
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
-      cwd: COS_SCRIPTS_DIR ?? process.cwd(),
+      cwd: COS_SCRIPTS_DIR ?? cosBrainDir() ?? process.cwd(),
     })
 
     let buffer = ''
@@ -419,7 +420,7 @@ export async function callClaudeStreaming(
   // Strip CLAUDECODE env var so claude -p doesn't think it's nested
   const env = { ...process.env }
   delete env.CLAUDECODE
-  const cliCwd = COS_SCRIPTS_DIR ?? process.cwd()
+  const cliCwd = COS_SCRIPTS_DIR ?? cosBrainDir() ?? process.cwd()
   const inactivityMs = INACTIVITY_BY_MODEL[resolvedModel]
   const defaultWallMax = WALL_MAX_BY_MODEL[resolvedModel]
   const wallMax = isExtendedQuery(query) ? WALL_MAX_EXTENDED_MS : defaultWallMax

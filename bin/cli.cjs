@@ -13,6 +13,12 @@ const { homedir } = require('os')
 const PKG_ROOT = resolve(__dirname, '..')
 const CONFIG_DIR = join(homedir(), '.cos-glasses')
 
+// Record where the user ran `npx @gotcos/glasses-server` from. The server spawns
+// with cwd = PKG_ROOT (the npx cache), so without this the user's Starter-Kit COS
+// (AGENTS.md / CLAUDE.md / .cos/) in their launch folder would never be seen.
+// Chat spawns of claude/codex use this dir when it contains a COS brain.
+if (!process.env.COS_LAUNCH_DIR) process.env.COS_LAUNCH_DIR = process.cwd()
+
 const green = (s) => `\x1b[32m${s}\x1b[0m`
 const red = (s) => `\x1b[31m${s}\x1b[0m`
 const yellow = (s) => `\x1b[33m${s}\x1b[0m`
@@ -185,6 +191,12 @@ if (!process.env.BIND_HOST) {
 }
 
 // Step 7: start the bundled server
+try {
+  const ld = process.env.COS_LAUNCH_DIR
+  if (ld && (existsSync(join(ld, '.cos', 'manifest.json')) || existsSync(join(ld, 'AGENTS.md')) || existsSync(join(ld, 'CLAUDE.md')))) {
+    console.log(green('  ✓') + ` COS detected in ${dim(ld)} — glasses chat will load its brain`)
+  }
+} catch { /* detection is best-effort */ }
 console.log('')
 console.log(dim('  Starting server...'))
 console.log('')

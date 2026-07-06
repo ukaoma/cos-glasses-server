@@ -6,7 +6,7 @@
 import { Router } from 'express'
 import { preWarmCLI, logLatency } from '../lib/claude-bridge.js'
 import { callModelStreaming } from '../lib/model-router.js'
-import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
+import { normalizeModelPreference, DEFAULT_MODEL, type ModelPreference } from '../../shared/model-preference.js'
 import { tryInstantResponse } from '../lib/response-cache.js'
 import crypto from 'node:crypto'
 
@@ -79,7 +79,7 @@ function resolveModel(model?: string, _query?: string): ModelPreference {
   if (model === 'cos-sonnet') return 'sonnet'
   if (model === 'cos-haiku') return 'haiku'
   if (model === 'cos-codex-high' || model === 'cos-codex') return 'codex-high'
-  return normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL) ?? 'haiku'
+  return normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL) ?? DEFAULT_MODEL
 }
 
 const MODEL_NAMES: Record<ModelPreference, string> = {

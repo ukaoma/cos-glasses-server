@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { cosBrainDir } from './launch-dir.js'
 import { CODEX_ENGINE_SESSION_TTL_MS, type CodexTrustMode } from './codex-engine-sessions.js'
 import {
   CODEX_HIGH_REASONING_EFFORT,
@@ -80,6 +81,10 @@ export function getCodexExecutionCwd(): string {
   const configured = process.env.CODEX_GLASSES_WORKDIR?.trim()
   if (configured) return resolve(configured)
   if (COS_SCRIPTS_DIR) return resolve(COS_SCRIPTS_DIR, '..', '..')
+  // A Starter-Kit COS in the directory the user launched npx from — Codex
+  // loads its AGENTS.md brain natively when run there.
+  const brain = cosBrainDir()
+  if (brain) return brain
   // Last resort when neither CODEX_GLASSES_WORKDIR nor COS_SCRIPTS_DIR is set:
   // the server's own working dir (codex glasses is an optional, env-configured feature).
   return process.cwd()

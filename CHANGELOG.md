@@ -1,5 +1,27 @@
 # Changelog
 
+## 6.2.1
+
+Foolproofing release — driven by an adversarial onboarding QA pass.
+
+- **The server now prints URLs the phone can actually use.** Boot output lists
+  your real addresses (`http://100.x.x.x:3141` labeled Tailscale, LAN IPs labeled
+  same-Wi-Fi) instead of only the un-pasteable bind address `0.0.0.0`.
+- **Auto-generated API tokens survive restarts.** First boot saves the token to
+  `~/.cos-glasses/.env`, so re-running the server no longer silently rotates the
+  credential your app already saved (the "worked yesterday, 401 today" trap).
+- **Starter-Kit COS inheritance is real now.** Run `npx @gotcos/glasses-server`
+  from your COS folder and glasses chat loads its brain: the launcher records
+  your launch directory, and when it contains `.cos/manifest.json`, `AGENTS.md`,
+  or `CLAUDE.md`, Claude/Codex spawn there (explicit `COS_SCRIPTS_DIR` still wins).
+- **Transfer-integrity report actually surfaces.** 6.2.0 recorded lost chunks but
+  never returned them; the offline-session `finalize` response now includes
+  `transferIntegrity` (received/expected/missing/completeness) and a gap-aware
+  `transcript` with inline `[… audio gap …]` markers.
+- **One default model everywhere: Sonnet.** The query router, the OpenAI-compat
+  surface, and CLI pre-warm all default to Sonnet (was a mix of Opus and Haiku).
+  Set `COS_G2_DEFAULT_MODEL` to override; per-query picks unchanged.
+
 ## 6.2.0
 
 Reliability release — ports the hardening the full COS Glasses app shipped in June.

@@ -1170,11 +1170,16 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/fina
     const chunks = getSessionChunks(sessionId)
     if (!chunks || chunks.length === 0) throw makeHttpError(404, 'offline session has no chunks', 'session_not_found')
     await drainSessionAudioWrites(sessionId)
-    const transcript = getSessionTranscript(sessionId) ?? ''
+    // Gap-aware assembly: chunks lost in transit surface as inline
+    // "[… audio gap …]" markers instead of being silently stitched over.
+    const transcript = getSessionTranscript(sessionId, { withGaps: true }) ?? ''
+    const transferIntegrity = analyzeTranscriptGaps(sessionId)
     res.json({
       sessionId,
       chunks: chunks.length,
       transcriptChars: transcript.length,
+      transcript,
+      transferIntegrity,
       readyToSave: true,
     })
   } catch (err: unknown) {
