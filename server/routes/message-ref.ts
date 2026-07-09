@@ -14,12 +14,16 @@
 // to the archive workstream and is not touched here.
 import { Router } from 'express'
 import { readdirSync, readFileSync } from 'fs'
-import { resolve, dirname } from 'path'
-import { fileURLToPath } from 'url'
+import { resolve } from 'path'
 import { getActiveSessions } from '../lib/conversation.js'
+import { dataPath } from '../lib/data-dir.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const ARCHIVE_DIR = resolve(__dirname, '..', 'data', 'archive')
+// v6.3.0 — read archives from the SAME persistent location the archive-mirror
+// writes to (~/.cos-glasses/data/archive via dataPath), not a package-relative
+// dir. The app repo uses server/data/archive; the public package uses dataPath,
+// so this file must match the package's lib/archive.ts, or npx users' cross-day
+// references + archive-chat detail read an empty/nonexistent directory.
+const ARCHIVE_DIR = dataPath('archive')
 
 export interface ResolvedGlobalMessage {
   globalMsgNum: number
