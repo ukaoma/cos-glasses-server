@@ -17,6 +17,7 @@ import { readdirSync, readFileSync } from 'fs'
 import { resolve } from 'path'
 import { getActiveSessions } from '../lib/conversation.js'
 import { dataPath } from '../lib/data-dir.js'
+import { localDay } from '../lib/local-day.js'
 
 // v6.3.0 — read archives from the SAME persistent location the archive-mirror
 // writes to (~/.cos-glasses/data/archive via dataPath), not a package-relative
@@ -153,7 +154,7 @@ export function maxGlobalMsgNumInDir(dir: string): number {
 }
 
 function resolveFromLiveSessions(num: number): ResolvedGlobalMessage | null {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDay() // local calendar day, not UTC — a live ref in the user's evening must not label tomorrow
   for (const session of getActiveSessions()) {
     const exchanges = (session as { exchanges?: ExchangeLike[] }).exchanges ?? []
     const hit = scanExchanges(exchanges, num, today)

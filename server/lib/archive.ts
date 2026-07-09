@@ -86,7 +86,12 @@ export function loadArchive(date: string): DailyArchive | null {
     return null
   }
   if (result.status === 'missing') return null
-  return result.data
+  // Defense: a valid-JSON but wrong-shape day file (no chats[]) would make the
+  // readers throw 500 AND drop listArchiveDates into its catch → the whole
+  // Message History list vanishes on one bad file. Coerce to an empty day.
+  const data = result.data
+  if (data && !Array.isArray(data.chats)) data.chats = []
+  return data
 }
 
 function saveArchive(archive: DailyArchive): void {
