@@ -6,6 +6,20 @@ import { getActiveSessions } from '../lib/conversation.js'
 
 export const archiveRouter = Router()
 
+// v5.15.6 / pkg v6.3.1 — SECURITY: :date is used to build filesystem paths
+// (loadArchive/getArchiveChats/getArchiveDayMessages/getArchiveChatMessagesNumbered
+// all resolve `<dir>/${date}.json`). Without validation, an encoded traversal
+// (e.g. /api/archive/..%2F..%2Fetc%2Fhosts) reads/renames arbitrary *.json on
+// the host. Validate the segment as a strict YYYY-MM-DD once for every :date
+// route before any fs access.
+archiveRouter.param('date', (req, res, next, date) => {
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ error: 'Invalid date' })
+    return
+  }
+  next()
+})
+
 // GET /api/archive — list all archive dates with summaries
 archiveRouter.get('/archive', (_req, res) => {
   const archives = listArchiveDates()
@@ -23,7 +37,7 @@ archiveRouter.post('/archive/now', async (_req, res) => {
   const todayDate = new Date().toISOString().slice(0, 10)
   let archived = 0
   for (const session of activeSessions) {
-    await appendToArchive(todayDate, session)
+    await appendToArchive(todayDate, session, { skipLLM: true }) // public thrift: no surprise LLM spend on a manual snapshot
     archived++
   }
 

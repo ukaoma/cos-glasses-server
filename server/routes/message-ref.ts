@@ -96,6 +96,9 @@ export function readArchiveChatNumbered(
   date: string,
   chatIndex: number,
 ): Array<{ query: string; text: string; timestamp: number; no?: number }> {
+  // Defense-in-depth against path traversal — `date` builds a `${date}.json`
+  // path. The archive route also validates, but this is exported/reused.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return []
   let day: { chats?: Array<{ id?: number; exchanges?: ExchangeLike[] }> }
   try {
     day = JSON.parse(readFileSync(resolve(dir, `${date}.json`), 'utf8'))

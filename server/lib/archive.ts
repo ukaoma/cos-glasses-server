@@ -1,5 +1,5 @@
 // Daily archive system — persists conversation history beyond session TTL
-// Archives are stored as JSON files per day in server/data/archive/
+// Archives are stored as JSON files per day in ~/.cos-glasses/data/archive/
 // Each day's archive contains one or more "chats" (split by context breaks)
 // Summaries are generated via `claude -p --model sonnet`, budget-capped per day.
 
@@ -15,7 +15,6 @@ import { consumeArchiveLLMBudget } from './archive-budget.js'
 const execAsync = promisify(exec)
 import type { Exchange } from './conversation.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
 import { dataPath } from './data-dir.js'
 const ARCHIVE_DIR = dataPath('archive')
 
