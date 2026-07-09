@@ -20,6 +20,9 @@ import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
+import { messageRefRouter } from './routes/message-ref.js'
+import { archiveRouter } from './routes/archive.js'
+import { sessionsRouter } from './routes/sessions.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { startWhisperServer, stopWhisperServer } from './lib/whisper-local.js'
@@ -131,6 +134,11 @@ app.use('/api', transcribeRouter)
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)
 app.use('/api', openaiKeyRouter)
+// v6.3.0 — Message History, cross-day 'reference message N', and history
+// recovery for public npx users (previously full-COS-server only).
+app.use('/api', messageRefRouter)
+app.use('/api', archiveRouter)
+app.use('/api', sessionsRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models

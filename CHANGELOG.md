@@ -1,5 +1,29 @@
 # Changelog
 
+## 6.3.0
+
+Message History, cross-day references, and history recovery for public installs.
+These features previously required a full COS server; now `npx @gotcos/glasses-server`
+exposes them too, so the G2 app's Message History and "reference message N" work
+on a vanilla install.
+
+- **Message History** — the archive routes (`/api/archive`, `/api/archive/:date/chats`,
+  `/api/archive/:date/chats/:i/messages`, `/api/archive/:date/messages`, `/api/archive/now`)
+  are now served. The daily archive-mirror (already in this package) writes prior-day
+  sessions to disk; these routes browse them. Each day row shows chat count + topic.
+- **Cross-day "reference message N"** — new `/api/message/:num` resolves a permanent
+  message number across live sessions then day archives (newest-first), and
+  `/api/message-counter` publishes the numbering ceiling so a fresh/cleared client
+  never reuses a number. Message numbers were already stored (`globalMsgNum`); this
+  makes them resolvable.
+- **History recovery** — session routes (`/api/sessions/today/all-messages`,
+  `/api/sessions/:id/messages`, recent-sessions index, context-break, end-session)
+  let the app restore recent history and open archived chats.
+
+No change to the public-safe model curation (Sonnet default, no pinned/unreleased
+model ids) or the core query/voice/display paths. Typecheck clean; new routes
+smoke-tested (message-counter, archive list, message lookup).
+
 ## 6.2.1
 
 Foolproofing release — driven by an adversarial onboarding QA pass.

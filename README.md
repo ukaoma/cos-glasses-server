@@ -44,6 +44,8 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 ## What it does
 
 - Ask anything, get a streamed answer on the lens (`/api/query`, `/v1/chat/completions`)
+- Message History + cross-day "reference message N" — your chats are archived by day
+  and every message keeps a permanent number you can recall (`/api/archive`, `/api/message/:num`)
 - Live voice capture + transcription during meetings
 - Local whisper.cpp transcription (free) with OpenAI fallback (optional)
 - Tasks / calendar / people context **if** you run the
