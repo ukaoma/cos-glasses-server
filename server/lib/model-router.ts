@@ -9,8 +9,31 @@ import {
 } from './conversation.js'
 import { DEFAULT_MODEL, isCodexModel, isClaudeModel, normalizeModelPreference } from '../../shared/model-preference.js'
 
-// Chat routes to the user's local Claude Code CLI (opus/sonnet/haiku) or the
-// Codex CLI (codex-high). Any unknown preference falls back to the Claude default
+// Bridges return as soon as their subprocess is spawned, while completion is
+// delivered later through callbacks. This keyed tail queue therefore releases
+// only on a terminal callback (or an early throw), preventing two turns from
+// mutating the same conversation/CLI session concurrently.
+const sessionRunTails = new Map<string, Promise<void>>()
+
+async function acquireSessionRunLock(sessionId: string): Promise<() => void> {
+  const previous = sessionRunTails.get(sessionId) ?? Promise.resolve()
+  let openGate!: () => void
+  const gate = new Promise<void>(resolve => { openGate = resolve })
+  const tail = previous.catch(() => {}).then(() => gate)
+  sessionRunTails.set(sessionId, tail)
+  await previous.catch(() => {})
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    openGate()
+    if (sessionRunTails.get(sessionId) === tail) sessionRunTails.delete(sessionId)
+  }
+}
+
+// Chat routes to the user's local Claude Code CLI or stable Codex live-catalog
+// slots. Any unknown preference falls back to the Claude default
 // so chat always works on a stock install.
 export async function callModelStreaming(
   query: string,
@@ -23,6 +46,12 @@ export async function callModelStreaming(
   options?: CallOptions,
 ): Promise<string> {
   const sid = getOrCreateSession(sessionId)
+  const release = await acquireSessionRunLock(sid)
+  if (options?.abortSignal?.aborted) {
+    release()
+    throw new Error('model-router: request aborted before the model run started.')
+  }
+
   const sessionModel = getSessionModel(sid)
   // COS_G2_DEFAULT_MODEL is the documented default-model switch (CHANGELOG 6.1.0);
   // it must win over the hardcoded DEFAULT_MODEL on this primary query path, not
@@ -32,11 +61,40 @@ export async function callModelStreaming(
 
   setSessionModel(sid, resolvedModel)
 
-  if (isCodexModel(resolvedModel)) {
-    return callCodexStreaming(query, sid, callbacks, resolvedModel, images, reference, globalMsgNum, options)
+  let terminal = false
+  const releaseTerminal = () => {
+    if (terminal) return
+    terminal = true
+    release()
   }
-  if (isClaudeModel(resolvedModel)) {
-    return callClaudeStreaming(query, sid, callbacks, resolvedModel, images, reference, globalMsgNum, options)
+  const lockedCallbacks: StreamCallbacks = {
+    ...callbacks,
+    onDone: (fullText, completedModel, cliSessionId, metadata) => {
+      try {
+        callbacks.onDone(fullText, completedModel, cliSessionId, metadata)
+      } finally {
+        releaseTerminal()
+      }
+    },
+    onError: (error) => {
+      try {
+        callbacks.onError(error)
+      } finally {
+        releaseTerminal()
+      }
+    },
   }
-  return callClaudeStreaming(query, sid, callbacks, DEFAULT_MODEL, images, reference, globalMsgNum, options)
+
+  try {
+    if (isCodexModel(resolvedModel)) {
+      return await callCodexStreaming(query, sid, lockedCallbacks, resolvedModel, images, reference, globalMsgNum, options)
+    }
+    if (isClaudeModel(resolvedModel)) {
+      return await callClaudeStreaming(query, sid, lockedCallbacks, resolvedModel, images, reference, globalMsgNum, options)
+    }
+    return await callClaudeStreaming(query, sid, lockedCallbacks, DEFAULT_MODEL, images, reference, globalMsgNum, options)
+  } catch (err) {
+    releaseTerminal()
+    throw err
+  }
 }

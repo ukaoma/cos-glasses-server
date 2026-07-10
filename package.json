@@ -1,6 +1,6 @@
 {
   "name": "@gotcos/glasses-server",
-  "version": "6.3.1",
+  "version": "6.4.0",
   "description": "COS Glasses — self-hosted AI heads-up-display server for Even G2 smart glasses, powered by your local Claude Code or Codex CLI",
   "type": "module",
   "bin": {
@@ -9,14 +9,25 @@
   "scripts": {
     "start": "node bin/cli.cjs",
     "start:server": "node --import tsx/esm server/index.ts",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["even-g2", "smart-glasses", "claude-code", "codex", "ai", "cos", "heads-up-display", "whisper"],
+  "keywords": [
+    "even-g2",
+    "smart-glasses",
+    "claude-code",
+    "codex",
+    "ai",
+    "cos",
+    "heads-up-display",
+    "whisper"
+  ],
   "files": [
     "bin/cli.cjs",
-    "server/**/*.ts",
-    "server/**/*.js",
-    "shared/**/*.ts",
+    "server",
+    "shared",
+    "!server/**/*.test.ts",
+    "!shared/**/*.test.ts",
     ".env.example",
     ".cos-profile.example.json",
     "README.md",
@@ -48,6 +59,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^22.10.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
   }
 }

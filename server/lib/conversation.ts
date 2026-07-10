@@ -296,14 +296,15 @@ export function replaceLastExchangeWithSummary(
   scheduleCacheUpdate()
 }
 
-export function addExchange(sessionId: string, role: 'user' | 'assistant', content: string, globalMsgNum?: number): void {
+export function addExchange(sessionId: string, role: 'user' | 'assistant', content: string, globalMsgNum?: number): Exchange {
   let session = sessions.get(sessionId)
   if (!session) {
     session = { id: sessionId, exchanges: [], lastActivity: Date.now(), createdAt: Date.now(), modelPreference: null, contextBreaks: [] }
     sessions.set(sessionId, session)
   }
 
-  session.exchanges.push({ role, content, timestamp: Date.now(), globalMsgNum })
+  const exchange: Exchange = { role, content, timestamp: Date.now(), globalMsgNum }
+  session.exchanges.push(exchange)
   session.lastActivity = Date.now()
 
   // Trim to rolling buffer
@@ -313,6 +314,22 @@ export function addExchange(sessionId: string, role: 'user' | 'assistant', conte
 
   scheduleSave()
   scheduleCacheUpdate()
+  return exchange
+}
+
+/** Remove exactly the exchange object returned by addExchange.
+ * Identity matching prevents a failed duplicate prompt from deleting an older,
+ * byte-identical turn in the same conversation. */
+export function removeExchange(sessionId: string, exchange: Exchange): boolean {
+  const session = sessions.get(sessionId)
+  if (!session) return false
+  const index = session.exchanges.indexOf(exchange)
+  if (index < 0) return false
+  session.exchanges.splice(index, 1)
+  session.lastActivity = Date.now()
+  scheduleSave()
+  scheduleCacheUpdate()
+  return true
 }
 
 /** Clear a session — archive + log BEFORE deleting from the live Map.

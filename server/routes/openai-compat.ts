@@ -7,6 +7,10 @@ import { Router } from 'express'
 import { preWarmCLI, logLatency } from '../lib/claude-bridge.js'
 import { callModelStreaming } from '../lib/model-router.js'
 import { normalizeModelPreference, DEFAULT_MODEL, type ModelPreference } from '../../shared/model-preference.js'
+import {
+  getCodexModelCatalog,
+  resolveCodexPreferenceForModelId,
+} from '../lib/codex-model-catalog.js'
 import { tryInstantResponse } from '../lib/response-cache.js'
 import crypto from 'node:crypto'
 
@@ -70,23 +74,31 @@ function validateAuth(req: any, res: any): boolean {
   return true
 }
 
-// Resolve model from OpenAI-compatible model ids. Defaults to Haiku for
-// "Hey Even" speed; Opus/Sonnet/Haiku/Codex High can be explicitly selected.
+// Resolve model from OpenAI-compatible ids, stable app slots, or concrete ids
+// currently advertised by the live Codex catalog.
 function resolveModel(model?: string, _query?: string): ModelPreference {
   const normalized = normalizeModelPreference(model)
   if (normalized) return normalized
+  if (model) {
+    const catalogPreference = resolveCodexPreferenceForModelId(model)
+    if (catalogPreference) return catalogPreference
+  }
   if (model === 'cos-opus') return 'opus'
+  if (model === 'cos-fable') return 'fable'
   if (model === 'cos-sonnet') return 'sonnet'
   if (model === 'cos-haiku') return 'haiku'
-  if (model === 'cos-codex-high' || model === 'cos-codex') return 'codex-high'
+  if (model === 'cos-gpt-frontier' || model === 'cos-codex-high' || model === 'cos-codex') return 'codex-frontier'
+  if (model === 'cos-gpt-balanced') return 'codex-balanced'
   return normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL) ?? DEFAULT_MODEL
 }
 
 const MODEL_NAMES: Record<ModelPreference, string> = {
   opus: 'cos-opus',
+  fable: 'cos-fable',
   sonnet: 'cos-sonnet',
   haiku: 'cos-haiku',
-  'codex-high': 'cos-codex-high',
+  'codex-frontier': 'cos-gpt-frontier',
+  'codex-balanced': 'cos-gpt-balanced',
 }
 
 // Extract the user's latest message from the OpenAI messages array
@@ -247,6 +259,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
   let resolveInflight: (text: string) => void
   let rejectInflight: (err: any) => void
   const inflightPromise = new Promise<string>((res, rej) => { resolveInflight = res; rejectInflight = rej })
+  void inflightPromise.catch(() => { /* duplicate waiters observe the original rejection */ })
   inflightQueries.set(dedupKey, { promise: inflightPromise, timestamp: Date.now() })
 
   // ── Streaming response (SSE) ──
@@ -381,12 +394,23 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
     const fullText = await new Promise<string>((resolve, reject) => {
       let result = ''
       let nsFirstChunkMs = -1
+      let settled = false
+      const fail = (error: unknown) => {
+        if (settled) return
+        settled = true
+        const err = error instanceof Error ? error : new Error(String(error))
+        rejectInflight!(err)
+        inflightQueries.delete(dedupKey)
+        reject(err)
+      }
       callModelStreaming(query, currentSessionIdNS, {
         onChunk: (text) => {
           if (nsFirstChunkMs < 0) nsFirstChunkMs = Date.now() - requestReceivedAt
           result += text
         },
         onDone: (fullText) => {
+          if (settled) return
+          settled = true
           const text = fullText || result
           resolveInflight!(text)
           inflightQueries.delete(dedupKey)
@@ -404,13 +428,13 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
           resolve(text)
         },
         onError: (error) => {
-          rejectInflight!(new Error(error))
-          inflightQueries.delete(dedupKey)
-          reject(new Error(error))
+          fail(new Error(error))
         },
         onToolStatus: () => {},
         onStart: () => {},
-      }, resolvedModel, undefined, undefined, undefined, { lightweight: true }).then(sid => { g2SessionId = sid })
+      }, resolvedModel, undefined, undefined, undefined, { lightweight: true })
+        .then(sid => { g2SessionId = sid })
+        .catch(fail)
     })
 
     res.json({
@@ -433,14 +457,23 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
 })
 
 // GET /v1/models — required by some clients for model discovery
-openaiCompatRouter.get('/v1/models', (_req, res) => {
+openaiCompatRouter.get('/v1/models', async (_req, res) => {
+  const catalog = await getCodexModelCatalog()
   res.json({
     object: 'list',
-    data: [
+	    data: [
 	      { id: 'cos-opus', object: 'model', created: 1709251200, owned_by: 'cos' },
+	      { id: 'cos-fable', object: 'model', created: 1709251200, owned_by: 'cos' },
 	      { id: 'cos-sonnet', object: 'model', created: 1709251200, owned_by: 'cos' },
 	      { id: 'cos-haiku', object: 'model', created: 1709251200, owned_by: 'cos' },
-	      { id: 'cos-codex-high', object: 'model', created: 1709251200, owned_by: 'cos' },
+	      { id: 'cos-gpt-frontier', object: 'model', created: 1709251200, owned_by: 'cos' },
+	      { id: 'cos-gpt-balanced', object: 'model', created: 1709251200, owned_by: 'cos' },
+	      ...catalog.options.filter(option => option.id).map(option => ({
+	        id: option.id,
+	        object: 'model',
+	        created: 1709251200,
+	        owned_by: 'openai',
+	      })),
 	    ],
 	  })
 	})

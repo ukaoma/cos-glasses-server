@@ -25,6 +25,11 @@ import { archiveRouter } from './routes/archive.js'
 import { sessionsRouter } from './routes/sessions.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
+import { getCodexRunConfig } from './lib/codex-run-ledger.js'
+import {
+  startCodexModelCatalogRefresh,
+  stopCodexModelCatalogRefresh,
+} from './lib/codex-model-catalog.js'
 import { startWhisperServer, stopWhisperServer } from './lib/whisper-local.js'
 import { initSileroVAD } from './lib/vad-silero.js'
 import { initSessionCache } from './lib/session-cache-writer.js'
@@ -164,10 +169,16 @@ process.on('SIGTERM', () => {
   // Production stops (kill, service managers) send SIGTERM — flush session logs
   // exactly like SIGINT so active conversations aren't lost on shutdown.
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
+  stopCodexModelCatalogRefresh()
   stopWhisperServer()
   process.exit(0)
 })
-process.on('SIGINT', () => { logActiveSessionsOnShutdown(); stopWhisperServer(); process.exit(0) })
+process.on('SIGINT', () => {
+  logActiveSessionsOnShutdown()
+  stopCodexModelCatalogRefresh()
+  stopWhisperServer()
+  process.exit(0)
+})
 
 // Crash protection — log and survive instead of dying mid-meeting
 process.on('uncaughtException', (err) => {
@@ -228,14 +239,24 @@ app.listen(PORT, BIND_HOST, () => {
     console.log('')
   }
 
-  // Check Claude CLI availability — the chat backend
+  // Check Claude CLI availability. Codex-only installs remain fully valid.
+  let claudeAvailable = false
   try {
     execSync('claude --version', { timeout: 5000, stdio: 'pipe' })
+    claudeAvailable = true
     console.log('[COS API] Claude Code CLI detected')
   } catch {
     console.warn('[COS API] Claude Code CLI not found — install from https://claude.ai/download')
-    console.warn('[COS API]   AI queries will not work without the Claude Code CLI')
+    console.warn('[COS API]   Claude models unavailable; Codex models still work when Codex CLI is installed')
   }
+
+  const codexConfig = getCodexRunConfig()
+  console.log(`[COS API] Codex mode: ${codexConfig.persistenceEnabled ? 'persistent' : 'ephemeral'} · ${codexConfig.reasoningEffort} · ${codexConfig.trustMode}`)
+  console.log(`[COS API] Codex models (${codexConfig.catalogSource}): ${codexConfig.availableModels.map(item => `${item.displayName}=${item.model}`).join(' · ')}`)
+  console.log(`[COS API] Codex workdir: ${codexConfig.cwd}`)
+  // Refresh immediately and then periodically. The catalog module retains the
+  // last-known-good snapshot if Codex is temporarily unavailable.
+  startCodexModelCatalogRefresh()
 
   if (COS_MODE) {
     initSessionCache()
@@ -251,8 +272,10 @@ app.listen(PORT, BIND_HOST, () => {
   const vadOk = initSileroVAD()
   console.log(`[startup] Silero VAD: ${vadOk ? 'active' : 'disabled (model not found)'}`)
 
-  // Pre-warm the Claude CLI so the first query doesn't eat a 2-15s cold start
-  preWarmCLI().catch(err => console.error('[startup] CLI pre-warm error:', err))
+  // Pre-warm Claude only when installed so Codex-only startup stays quiet.
+  if (claudeAvailable) {
+    preWarmCLI().catch(err => console.error('[startup] CLI pre-warm error:', err))
+  }
 
   // Auto-snapshot active sessions every 5 min (survives restarts)
   startAutoSnapshot(5 * 60_000)

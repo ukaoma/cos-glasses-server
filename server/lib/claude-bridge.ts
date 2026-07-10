@@ -15,19 +15,34 @@ import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import { cosBrainDir } from './launch-dir.js'
 import { logTokenAudit } from './token-audit.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt, buildPrewarmSystemPrompt, getCachedContextInstant } from './context-builder.js'
-import { getHistory, addExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
+import { getHistory, addExchange, removeExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
 import { notifySessionStart, notifyExchange } from './telegram-notify.js'
-import { isClaudeModel, DEFAULT_MODEL, type ClaudeModelPreference } from '../../shared/model-preference.js'
+import {
+  isClaudeModel,
+  DEFAULT_MODEL,
+  resolveClaudeCliModelId,
+  resolveCliEffortFlag,
+  ULTRACODE_KEYWORD,
+  type ClaudeModelPreference,
+  type EffortPreference,
+} from '../../shared/model-preference.js'
 import {
   finishClaudeRun,
   getClaudeEffortLevel,
   startClaudeRun,
   updateClaudeRun,
+  type ClaudeRunStatus,
 } from './claude-run-ledger.js'
+import {
+  claudeToolInputPreview,
+  claudeToolResultPreviewLines,
+  type ActivityPreviewLine,
+} from './activity-preview.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
   opus: 180_000,    // 3 minutes — Opus can gap during tool use (WebSearch, reasoning)
+  fable: 180_000,   // 3 minutes — premium thinker, same gap tolerance as Opus
   sonnet: 30_000,   // 30 seconds
   haiku: 15_000,    // 15 seconds
 }
@@ -35,10 +50,12 @@ const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
 // Wall clock max = absolute cap even if actively streaming
 const WALL_MAX_BY_MODEL: Record<ClaudeModelPreference, number> = {
   opus: 600_000,    // 10 minutes
+  fable: 900_000,   // 15 minutes — deepest model, longest single-turn runs
   sonnet: 120_000,  // 2 minutes
   haiku: 60_000,    // 1 minute
 }
 const WALL_MAX_EXTENDED_MS = 900_000     // 15 minutes for slash commands / heavy queries
+const WALL_MAX_DEEP_EFFORT_MS = 1_200_000 // 20 minutes for max/ultracode
 
 // Heartbeat = emit progress status during silence so client knows we're alive
 const HEARTBEAT_INTERVAL_MS = 6_000    // Every 6 seconds
@@ -166,7 +183,7 @@ export function logLatency(entry: LatencyEntry): void {
 }
 
 /**
- * Pre-warm the Claude CLI by running a minimal Haiku query at server boot.
+ * Pre-warm the Claude CLI by running a minimal default-model query at boot.
  * Captures the CLI session ID so the first real query can use --resume.
  * Called from index.ts alongside prewarmContext().
  */
@@ -183,7 +200,7 @@ export async function preWarmCLI(): Promise<void> {
 
     const proc = spawn('claude', [
       '-p',
-      '--model', DEFAULT_MODEL,  // Must match default query model — --resume inherits session model
+      '--model', resolveClaudeCliModelId(DEFAULT_MODEL),
       '--effort', getClaudeEffortLevel(),
       '--output-format', 'stream-json',
       '--verbose',
@@ -207,7 +224,7 @@ export async function preWarmCLI(): Promise<void> {
         if (!trimmed) continue
         try {
           const event = JSON.parse(trimmed)
-          if (event.type === 'result' && event.session_id) {
+          if (event.type === 'result' && event.session_id && !claudeResultErrorMessage(event)) {
             preWarmedCliSessionId = event.session_id
             scheduleCliSessionSave()
             const elapsed = Date.now() - start
@@ -222,7 +239,7 @@ export async function preWarmCLI(): Promise<void> {
       const elapsed = Date.now() - start
       logTokenAudit({
         source: 'g2-prewarm',
-        model: 'opus',
+        model: DEFAULT_MODEL,
         inputChars: 500,  // system prompt + "ready"
         outputChars: 50,
         durationMs: elapsed,
@@ -275,7 +292,21 @@ export interface StreamCallbacks {
   onDone: (fullText: string, model: ModelPreference, cliSessionId?: string, metadata?: ModelRunMetadata) => void
   onError: (error: string) => void
   onToolStatus?: (toolName: string) => void
+  onActivityLine?: (line: ActivityPreviewLine) => void
   onStart?: (model: ModelPreference, sessionId: string, cliSessionId?: string, metadata?: ModelRunMetadata) => void
+}
+
+/** Claude CLI can emit `subtype: success` with `is_error: true`; the boolean
+ * is authoritative and must win before session ids or result text are saved. */
+export function claudeResultErrorMessage(event: any): string | null {
+  if (event?.type !== 'result' || (event?.is_error !== true && event?.subtype !== 'error')) return null
+  const raw = typeof event?.result === 'string' ? event.result
+    : typeof event?.error === 'string' ? event.error
+    : typeof event?.error?.message === 'string' ? event.error.message
+      : typeof event?.message === 'string' ? event.message
+        : ''
+  const detail = raw.replace(/\s+/g, ' ').trim().slice(0, 240)
+  return detail ? `claude-bridge: ${detail}` : 'claude-bridge: Claude CLI returned an error result.'
 }
 
 type Phase = 'context' | 'thinking' | 'searching' | 'generating'
@@ -294,6 +325,7 @@ const PHASE_LABELS: Record<Phase, string> = {
 export interface CallOptions {
   lightweight?: boolean  // Skip async context fetch — use cached context instantly (G2 speed path)
   abortSignal?: AbortSignal
+  effort?: EffortPreference
 }
 
 export async function callClaudeStreaming(
@@ -314,9 +346,12 @@ export async function callClaudeStreaming(
   const historyPrompt = formatHistoryForPrompt(history, contextBreaks, reference)
   const contextPrompt = historyPrompt
 
-  // Resolve model: per-message > session preference > opus default
+  // Resolve model: per-message > session preference > public-server default.
   const sessionModel = getSessionModel(sid)
-  const resolvedModel: ClaudeModelPreference = model ?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : 'opus')
+  const resolvedModel: ClaudeModelPreference = model
+    ?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : DEFAULT_MODEL)
+  const resolvedEffort = options?.effort
+  const cliEffortFlag = resolvedEffort ? resolveCliEffortFlag(resolvedEffort) : getClaudeEffortLevel()
 
   // Notify client immediately — model is known before any async work
   // Pass existing CLI session ID if resuming (new sessions get it after first result)
@@ -358,7 +393,7 @@ export async function callClaudeStreaming(
   // Record user message (with [Photo]/[N Photos] prefix for vision queries)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
   const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
-  addExchange(sid, 'user', historyQuery, globalMsgNum)
+  const pendingUserExchange = addExchange(sid, 'user', historyQuery, globalMsgNum)
 
   // Vision queries need the Read tool to see the image files
   const tools = imagePaths.length > 0 ? 'WebSearch,WebFetch,Read' : 'WebSearch,WebFetch'
@@ -376,8 +411,8 @@ export async function callClaudeStreaming(
 
   // Check if we have a prior CLI session for this COS session.
   // If not, use the pre-warmed session (eliminates 2-15s cold start on first query).
-  if (!existingCliSession && preWarmedCliSessionId && resolvedModel === 'opus') {
-    // Only Opus queries consume the pre-warmed session (pre-warmed with Opus).
+  if (!existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL) {
+    // Only the default model consumes the pre-warmed session.
     // Hey Even (Haiku) cold-starts its own session to avoid model contamination.
     existingCliSession = preWarmedCliSessionId
     // Consume the pre-warmed session — next new session will cold start
@@ -392,8 +427,8 @@ export async function callClaudeStreaming(
 
   const args = [
     '-p',
-    '--model', resolvedModel,
-    '--effort', getClaudeEffortLevel(),
+    '--model', resolveClaudeCliModelId(resolvedModel),
+    '--effort', cliEffortFlag,
     '--output-format', 'stream-json',
     '--verbose',  // Required: stream-json requires --verbose
     '--dangerously-skip-permissions',  // Required: headless CLI mode with no TTY for user prompts
@@ -423,7 +458,10 @@ export async function callClaudeStreaming(
   const cliCwd = COS_SCRIPTS_DIR ?? cosBrainDir() ?? process.cwd()
   const inactivityMs = INACTIVITY_BY_MODEL[resolvedModel]
   const defaultWallMax = WALL_MAX_BY_MODEL[resolvedModel]
-  const wallMax = isExtendedQuery(query) ? WALL_MAX_EXTENDED_MS : defaultWallMax
+  const effortWallMax = resolvedEffort === 'max' || resolvedEffort === 'ultracode'
+    ? Math.max(defaultWallMax, WALL_MAX_DEEP_EFFORT_MS)
+    : defaultWallMax
+  const wallMax = isExtendedQuery(query) ? Math.max(WALL_MAX_EXTENDED_MS, effortWallMax) : effortWallMax
   const startTime = Date.now()
   const run = startClaudeRun({
     cosSessionId: sid,
@@ -434,6 +472,8 @@ export async function callClaudeStreaming(
     timeoutMs: inactivityMs,
     wallMaxMs: wallMax,
     query: fullQuery,
+    effortLevel: resolvedEffort ?? getClaudeEffortLevel(),
+    cliModelId: resolveClaudeCliModelId(resolvedModel),
   })
 
   const proc = spawn('claude', args, {
@@ -448,6 +488,7 @@ export async function callClaudeStreaming(
   let finalized = false        // Guard against double onDone/onError
   let lastActivity = Date.now() // Tracks last stdout data for inactivity timeout
   let receivedStreamEvents = false  // Track if CLI emits stream_event (vs older assistant-only format)
+  const toolInputs = new Map<number, { name: string; json: string }>()
 
   function cleanupImages() {
     for (const p of imagePaths) {
@@ -498,18 +539,33 @@ export async function callClaudeStreaming(
     notifyExchange(sid, query, text)
   }
 
-  function finalizeError(msg: string, exitCode?: number | null) {
+  function finalizeError(
+    msg: string,
+    exitCode?: number | null,
+    status: Exclude<ClaudeRunStatus, 'running'> = 'failed',
+  ) {
     if (finalized) return
     finalized = true
     cleanup()
     cleanupImages()
+    removeExchange(sid, pendingUserExchange)
+    // A failed/cancelled resumed CLI turn may already exist in Claude's own
+    // session transcript even though COS history was rolled back. Never resume
+    // that potentially contaminated CLI session on retry.
+    if (cliSessionMap.delete(resolvedCliKey)) scheduleCliSessionSave()
     finishClaudeRun(run.runId, {
-      status: 'failed',
+      status,
       startedAtMs: startTime,
       error: msg,
       exitCode,
     })
     callbacks.onError(msg)
+  }
+
+  function handleAbort() {
+    if (finalized) return
+    proc.kill('SIGTERM')
+    finalizeError('claude-bridge: client disconnected before Claude completed.', null, 'client_disconnected')
   }
 
   // ─── Heartbeat: emit phase status during silence ───
@@ -558,6 +614,7 @@ export async function callClaudeStreaming(
     clearInterval(heartbeat)
     clearTimeout(inactivityTimer)
     clearTimeout(wallTimer)
+    options?.abortSignal?.removeEventListener('abort', handleAbort)
   }
 
   // ─── Process stdout ───
@@ -577,7 +634,9 @@ export async function callClaudeStreaming(
       try {
         const event = JSON.parse(trimmed)
 
-        if (event.type === 'stream_event') {
+        if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
+          updateClaudeRun(run.runId, { resolvedModelId: event.model })
+        } else if (event.type === 'stream_event') {
           // Real-time token streaming — fires every few tokens during generation
           receivedStreamEvents = true
           const inner = event.event
@@ -590,12 +649,23 @@ export async function callClaudeStreaming(
             callbacks.onToolStatus?.('Reasoning...')
           } else if (inner?.type === 'content_block_start' && inner.content_block?.type === 'tool_use' && inner.content_block.name) {
             const toolName = inner.content_block.name
+            if (typeof inner.index === 'number') toolInputs.set(inner.index, { name: toolName, json: '' })
             if (toolName === 'WebSearch' || toolName === 'WebFetch') {
               phase = 'searching'
             }
             callbacks.onToolStatus?.(toolName)
             if (toolName === 'Read') {
               callbacks.onToolStatus?.('Analyzing photo...')
+            }
+          } else if (inner?.type === 'content_block_delta' && inner.delta?.type === 'input_json_delta' && typeof inner.index === 'number') {
+            const current = toolInputs.get(inner.index)
+            if (current && typeof inner.delta.partial_json === 'string') current.json += inner.delta.partial_json
+          } else if (inner?.type === 'content_block_stop' && typeof inner.index === 'number') {
+            const current = toolInputs.get(inner.index)
+            if (current) {
+              const preview = claudeToolInputPreview(current.name, current.json)
+              if (preview) callbacks.onActivityLine?.(preview)
+              toolInputs.delete(inner.index)
             }
           }
         } else if (event.type === 'assistant') {
@@ -626,7 +696,14 @@ export async function callClaudeStreaming(
               callbacks.onChunk(text)
             }
           }
+        } else if (event.type === 'user') {
+          for (const preview of claudeToolResultPreviewLines(event)) callbacks.onActivityLine?.(preview)
         } else if (event.type === 'result') {
+          const resultError = claudeResultErrorMessage(event)
+          if (resultError) {
+            finalizeError(resultError)
+            continue
+          }
           // Capture CLI session ID for future --resume (avoids cold start on next query)
           if (event.session_id) {
             cliSessionMap.set(resolvedCliKey, event.session_id)
@@ -655,6 +732,11 @@ export async function callClaudeStreaming(
       try {
         const event = JSON.parse(buffer.trim())
         if (event.type === 'result') {
+          const resultError = claudeResultErrorMessage(event)
+          if (resultError) {
+            finalizeError(resultError, code)
+            return
+          }
           finalize(fullText || event.result || '')
           return
         }
@@ -667,17 +749,37 @@ export async function callClaudeStreaming(
       // If we got text but no explicit result event, still finalize
       finalize(fullText)
     } else {
-      cleanup() // No output, no error — just clean up timers
+      finalizeError('claude-bridge: Claude completed without a response.', code)
     }
   })
 
   proc.on('error', (err) => {
     finalizeError(`claude-bridge: ${err.message}`, null)
   })
+  proc.stdin.on('error', (err) => {
+    finalizeError(`claude-bridge: stdin failed — ${err.message}`, null)
+  })
 
-  // Send query via stdin (fullQuery includes image instruction when vision)
-  proc.stdin.write(fullQuery)
-  proc.stdin.end()
+  if (options?.abortSignal) {
+    if (options.abortSignal.aborted) {
+      handleAbort()
+      return sid
+    }
+    options.abortSignal.addEventListener('abort', handleAbort, { once: true })
+  }
+
+  // Ultracode is a CLI-only orchestration keyword; history/chat keeps the
+  // original user text so the keyword never appears on the lens.
+  const cliQuery = resolvedEffort === 'ultracode'
+    ? `${fullQuery}\n\n${ULTRACODE_KEYWORD}`
+    : fullQuery
+  try {
+    proc.stdin.write(cliQuery)
+    proc.stdin.end()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    finalizeError(`claude-bridge: stdin failed — ${message}`, null)
+  }
 
   return sid
 }

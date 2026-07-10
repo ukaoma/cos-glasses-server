@@ -1,5 +1,5 @@
-// Codex bridge — streaming-compatible interface to `codex exec --json`
-// MVP target: local subscription-authenticated GPT-5.5 High via Codex CLI.
+// Codex bridge — streaming-compatible interface to `codex exec --json`.
+// Concrete GPT ids resolve from Codex's live model catalog at run time.
 
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
@@ -10,6 +10,7 @@ import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-build
 import {
   getHistory,
   addExchange,
+  removeExchange,
   formatHistoryForPrompt,
   getOrCreateSession,
   isNewSession,
@@ -27,10 +28,16 @@ import {
 } from './codex-engine-sessions.js'
 import {
   CODEX_HIGH_MODEL,
-  CODEX_HIGH_REASONING_EFFORT,
-  CODEX_MODEL_ID,
   type CodexModelPreference,
+  type EffortPreference,
 } from '../../shared/model-preference.js'
+import {
+  getCodexModelCatalog,
+  resolveCodexEffortForModel,
+  resolveCodexModelOption,
+  resolveCodexServiceTier,
+  type CodexModelOption,
+} from './codex-model-catalog.js'
 import type { CallOptions, StreamCallbacks } from './claude-bridge.js'
 import {
   classifyCodexError,
@@ -43,6 +50,7 @@ import {
   updateCodexRun,
   type CodexRunStatus,
 } from './codex-run-ledger.js'
+import { codexActivityPreviewLines } from './activity-preview.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -71,18 +79,31 @@ export function buildCodexExecArgs(input: {
   imagePaths?: string[]
   persistentCodexSession: boolean
   codexThreadId?: string
+  model?: CodexModelPreference
+  resolvedModel?: CodexModelOption
+  effort?: EffortPreference
 }): string[] {
   const imagePaths = input.imagePaths ?? []
+  const resolvedModel = input.resolvedModel
+    ?? resolveCodexModelOption(input.model ?? CODEX_HIGH_MODEL)
+  const reasoningEffort = resolveCodexEffortForModel(resolvedModel, input.effort)
+  const serviceTier = resolveCodexServiceTier(resolvedModel)
   const args = ['exec']
+
+  const appendModelConfig = () => {
+    if (resolvedModel.id) args.push('--model', resolvedModel.id)
+    args.push('-c', `model_reasoning_effort="${reasoningEffort}"`)
+    if (serviceTier) args.push('-c', `service_tier="${serviceTier}"`)
+  }
+
   if (input.codexThreadId) {
     args.push(
       'resume',
       '--json',
       '--all',
       ...codexSandboxArgs(),
-      '-c', `model_reasoning_effort="${CODEX_HIGH_REASONING_EFFORT}"`,
     )
-    if (CODEX_MODEL_ID) args.push('--model', CODEX_MODEL_ID)
+    appendModelConfig()
     for (const p of imagePaths) args.push('--image', p)
     args.push(input.codexThreadId, '-')
     return args
@@ -92,9 +113,8 @@ export function buildCodexExecArgs(input: {
     '--json',
     '--cd', input.codexCwd,
     ...codexSandboxArgs(),
-    '-c', `model_reasoning_effort="${CODEX_HIGH_REASONING_EFFORT}"`,
   )
-  if (CODEX_MODEL_ID) args.push('--model', CODEX_MODEL_ID)
+  appendModelConfig()
   if (!input.persistentCodexSession) args.push('--ephemeral')
   for (const p of imagePaths) args.push('--image', p)
   args.push('-')
@@ -111,26 +131,36 @@ function buildCodexPrompt(systemPrompt: string, fullQuery: string): string {
   ].join('\n')
 }
 
-function eventText(event: any): string {
+/** Extract only observable assistant response text. Reasoning/tool payloads
+ * must remain invisible even if a future Codex JSON shape also has delta or
+ * content fields. */
+export function extractCodexResponseText(event: any): string {
   const item = event?.item ?? event?.payload ?? event?.message ?? event
+  const eventType = String(event?.type ?? '').toLowerCase()
+  const itemType = String(item?.type ?? '').toLowerCase()
+  const assistantEvent = /(?:^|[._-])(agent_message|assistant_message|output_text)(?:$|[._-])/.test(eventType)
+    || /^(?:agent_message|assistant_message|output_text)$/.test(itemType)
+  if (!assistantEvent) return ''
 
   if (typeof event?.delta === 'string') return event.delta
-  if (typeof event?.text === 'string' && /message|delta|answer/i.test(String(event.type ?? ''))) return event.text
-  if (typeof item?.text === 'string' && /agent_message|message|assistant/i.test(String(item.type ?? event?.type ?? ''))) return item.text
+  if (typeof event?.text === 'string') return event.text
+  if (typeof item?.text === 'string') return item.text
 
   const content = item?.content ?? event?.content
   if (Array.isArray(content)) {
     let text = ''
     for (const block of content) {
       if (typeof block === 'string') text += block
-      if (typeof block?.text === 'string') text += block.text
-      if (typeof block?.content === 'string') text += block.content
+      const blockType = String(block?.type ?? '').toLowerCase()
+      if (/(?:reasoning|thinking|tool|command|input)/.test(blockType)) continue
       if (typeof block?.output_text === 'string') text += block.output_text
+      else if (typeof block?.text === 'string') text += block.text
+      else if (typeof block?.content === 'string') text += block.content
     }
     return text
   }
 
-  if (typeof item?.result === 'string' && /result|completed|answer/i.test(String(event?.type ?? ''))) return item.result
+  if (typeof item?.result === 'string') return item.result
   return ''
 }
 
@@ -156,7 +186,7 @@ function safeCodexUserError(message: string): string {
   if (code === 'codex.cli_unavailable') return 'Codex CLI unavailable. Check server Settings.'
   if (code === 'codex.auth_error') return 'Codex auth failed. Run codex login on the Mac.'
   if (code === 'codex.timeout') return 'Codex timed out. Retry or start a new chat.'
-  if (code === 'codex.permission_denied') return 'Codex permission failed. Check full-access configuration.'
+  if (code === 'codex.permission_denied') return 'Codex permission failed. Check COS_CODEX_SANDBOX and the work directory.'
   return `Codex failed (${code}). Retry or check Codex Debug.`
 }
 
@@ -171,6 +201,12 @@ export async function callCodexStreaming(
   options?: CallOptions,
 ): Promise<string> {
   const sid = getOrCreateSession(sessionId)
+  // Refresh is TTL-cached and coalesced, so every run sees the newest known
+  // catalog without creating duplicate app-server discovery processes.
+  await getCodexModelCatalog()
+  if (options?.abortSignal?.aborted) {
+    throw new Error('codex-bridge: client disconnected before Codex started.')
+  }
   const history = getHistory(sid)
   const session = getSessionRaw(sid)
   const contextBreaks = session?.contextBreaks ?? []
@@ -179,6 +215,8 @@ export async function callCodexStreaming(
   const persistentCodexSession = isCodexPersistenceEnabled()
   const codexCwd = getCodexExecutionCwd()
   const codexTrustMode = getCodexTrustMode()
+  const resolvedCodexModel = resolveCodexModelOption(model)
+  const resolvedCodexEffort = resolveCodexEffortForModel(resolvedCodexModel, options?.effort)
   const engineSession = persistentCodexSession
     ? getCodexEngineSession({ cosSessionId: sid, model, cwd: codexCwd, trustMode: codexTrustMode })
     : null
@@ -192,6 +230,8 @@ export async function callCodexStreaming(
     trustMode: codexTrustMode,
     codexThreadId: engineSession?.codexThreadId,
     expiresAt: engineSession?.expiresAt,
+    cliModel: resolvedCodexModel.id || 'codex-cli-default',
+    reasoningEffort: resolvedCodexEffort,
     query,
   })
   let codexThreadId: string | undefined = engineSession?.codexThreadId
@@ -245,7 +285,7 @@ export async function callCodexStreaming(
   const isFirstQuery = isNewSession(sid)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
   const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
-  addExchange(sid, 'user', historyQuery, globalMsgNum)
+  const pendingUserExchange = addExchange(sid, 'user', historyQuery, globalMsgNum)
 
   let fullQuery: string
   if (imagePaths.length === 1) {
@@ -262,6 +302,9 @@ export async function callCodexStreaming(
     imagePaths,
     persistentCodexSession,
     codexThreadId: engineSession?.codexThreadId,
+    model,
+    resolvedModel: resolvedCodexModel,
+    effort: options?.effort,
   })
 
   const env = { ...process.env }
@@ -352,6 +395,7 @@ export async function callCodexStreaming(
     finalized = true
     cleanup()
     cleanupImages()
+    removeExchange(sid, pendingUserExchange)
     if (engineSession) {
       clearCodexEngineSession(sid, model)
     }
@@ -400,14 +444,6 @@ export async function callCodexStreaming(
     }
   }, WALL_MAX_MS)
 
-  if (options?.abortSignal) {
-    if (options.abortSignal.aborted) {
-      handleAbort()
-    } else {
-      options.abortSignal.addEventListener('abort', handleAbort, { once: true })
-    }
-  }
-
   function handleEvent(event: any) {
     const nextThreadId = extractCodexThreadId(event)
     if (nextThreadId && nextThreadId !== codexThreadId) {
@@ -418,7 +454,9 @@ export async function callCodexStreaming(
     const status = toolStatus(event)
     if (status) callbacks.onToolStatus?.(status)
 
-    const text = eventText(event)
+    for (const preview of codexActivityPreviewLines(event)) callbacks.onActivityLine?.(preview)
+
+    const text = extractCodexResponseText(event)
     if (text) emitText(text)
 
     const type = String(event?.type ?? '')
@@ -468,9 +506,25 @@ export async function callCodexStreaming(
   proc.on('error', (err) => {
     finalizeError(`codex-bridge: ${err.message}`)
   })
+  proc.stdin.on('error', (err) => {
+    finalizeError(`codex-bridge: stdin failed — ${err.message}`)
+  })
 
-  proc.stdin.write(prompt)
-  proc.stdin.end()
+  if (options?.abortSignal) {
+    if (options.abortSignal.aborted) {
+      handleAbort()
+      return sid
+    }
+    options.abortSignal.addEventListener('abort', handleAbort, { once: true })
+  }
+
+  try {
+    proc.stdin.write(prompt)
+    proc.stdin.end()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    finalizeError(`codex-bridge: stdin failed — ${message}`)
+  }
 
   return sid
 }

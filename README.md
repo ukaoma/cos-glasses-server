@@ -1,7 +1,7 @@
 # COS Glasses Server
 
 Self-hosted AI heads-up display for **Even G2 smart glasses**. Runs on your Mac,
-talks to your local **Claude Code** CLI, and pushes answers, voice
+talks to your local **Claude Code or Codex** CLI, and pushes answers, voice
 transcription, and notes to the lens. Your data never leaves your machine, and no
 API key is pasted into the phone for chat.
 
@@ -18,15 +18,20 @@ an **API token** — paste that into the COS Glasses app.
 ## Requirements
 
 - **Node.js 20.11+** — https://nodejs.org
-- **Claude Code CLI** (Opus/Sonnet/Haiku) — https://claude.ai/download, then `claude login`
-  _or_ **Codex CLI** (Codex High) — https://developers.openai.com/codex/, then `codex login`
+- **Claude Code CLI** (Opus/Fable/Sonnet) — https://claude.ai/download, then `claude login`
+  _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - _Optional:_ `brew install whisper-cpp` for free local voice (otherwise OpenAI API)
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
 
 > No `ANTHROPIC_API_KEY` is needed — chat runs through your installed CLI, billed
 > to your existing Claude or Codex subscription. Pick either per query, or set a
-> default with `COS_G2_DEFAULT_MODEL` (`opus`|`sonnet`|`haiku`|`codex-high`).
+> default with `COS_G2_DEFAULT_MODEL` (`opus`|`fable`|`sonnet`|`codex-frontier`|`codex-balanced`).
+> Claude tier aliases and the two GPT slots resolve dynamically, so new model
+> releases do not require a new glasses package. GPT discovery refreshes every
+> 15 minutes and retains its last-known-good catalog through transient failures.
+> Existing `COS_CODEX_MODEL` / `COS_CODEX_REASONING_EFFORT` settings remain
+> supported on the migrated Frontier slot; leave them blank for auto-latest.
 > Codex runs **sandboxed read-only** by default (`COS_CODEX_SANDBOX` to adjust).
 
 ## Connect your phone (the one gotcha)
@@ -44,6 +49,9 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 ## What it does
 
 - Ask anything, get a streamed answer on the lens (`/api/query`, `/v1/chat/completions`)
+- Choose Opus, Fable, Sonnet, GPT Frontier, or GPT Balanced plus High, Extra
+  High, Max, or Ultracode effort; optional redacted tool activity streams only
+  to the authenticated query that requested it
 - Message History + cross-day "reference message N" — your chats are archived by day
   and every message keeps a permanent number you can recall (`/api/archive`, `/api/message/:num`)
 - Live voice capture + transcription during meetings

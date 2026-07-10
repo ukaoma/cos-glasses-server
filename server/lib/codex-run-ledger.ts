@@ -5,11 +5,15 @@ import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import { cosBrainDir } from './launch-dir.js'
 import { CODEX_ENGINE_SESSION_TTL_MS, type CodexTrustMode } from './codex-engine-sessions.js'
 import {
+  CODEX_FRONTIER_MODEL,
   CODEX_HIGH_REASONING_EFFORT,
-  CODEX_MODEL_ID,
   type CodexModelPreference,
 } from '../../shared/model-preference.js'
 import { dataPath } from './data-dir.js'
+import {
+  getCodexModelCatalogSnapshot,
+  resolveCodexModelOption,
+} from './codex-model-catalog.js'
 
 const DEFAULT_MAX_RUNS = 100
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60_000
@@ -59,6 +63,8 @@ interface CodexRunEvent {
 
 export interface CodexRunConfig {
   cliModel: string
+  catalogSource: string
+  availableModels: Array<{ preference: CodexModelPreference; model: string; displayName: string }>
   reasoningEffort: string
   persistenceEnabled: boolean
   cwd: string
@@ -95,8 +101,16 @@ export function getCodexTrustMode(): CodexTrustMode {
 }
 
 export function getCodexRunConfig(): CodexRunConfig {
+  const catalog = getCodexModelCatalogSnapshot()
+  const frontier = resolveCodexModelOption(CODEX_FRONTIER_MODEL)
   return {
-    cliModel: CODEX_MODEL_ID,
+    cliModel: frontier.id || 'codex-cli-default',
+    catalogSource: catalog.source,
+    availableModels: catalog.options.map(option => ({
+      preference: option.preference,
+      model: option.id || 'codex-cli-default',
+      displayName: option.displayName,
+    })),
     reasoningEffort: CODEX_HIGH_REASONING_EFFORT,
     persistenceEnabled: isCodexPersistenceEnabled(),
     cwd: getCodexExecutionCwd(),
@@ -233,6 +247,8 @@ export function startCodexRun(input: {
   codexThreadId?: string
   expiresAt?: string
   query: string
+  cliModel?: string
+  reasoningEffort?: string
 }): CodexRunRecord {
   const now = new Date().toISOString()
   const run: CodexRunRecord = {
@@ -242,8 +258,8 @@ export function startCodexRun(input: {
     createdAt: now,
     updatedAt: now,
     model: input.model,
-    cliModel: CODEX_MODEL_ID,
-    reasoningEffort: CODEX_HIGH_REASONING_EFFORT,
+    cliModel: input.cliModel ?? (resolveCodexModelOption(input.model).id || 'codex-cli-default'),
+    reasoningEffort: input.reasoningEffort ?? CODEX_HIGH_REASONING_EFFORT,
     cwd: input.cwd,
     ephemeral: input.ephemeral,
     resumed: input.resumed,

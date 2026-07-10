@@ -5,7 +5,7 @@ import { Router } from 'express'
 import { callModelStreaming } from '../lib/model-router.js'
 import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
-import { normalizeModelPreference } from '../../shared/model-preference.js'
+import { normalizeEffortPreference, normalizeModelPreference } from '../../shared/model-preference.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -16,7 +16,10 @@ const TOOL_STATUS_MESSAGES: Record<string, string> = {
 export const queryRouter = Router()
 
 queryRouter.post('/query', async (req, res) => {
-  const { query, sessionId, model, image, images, reference, globalMsgNum } = req.body
+  const { query, sessionId, model, effort, image, images, reference, globalMsgNum } = req.body
+  const activityToolMode = req.body.activityToolMode === 'off' || req.body.activityToolMode === 'preview'
+    ? req.body.activityToolMode
+    : 'status'
 
   // Normalize: accept `images` array or legacy `image` string
   let validImages: string[] | undefined
@@ -38,6 +41,7 @@ queryRouter.post('/query', async (req, res) => {
 
   // Validate model if provided
   const validModel = normalizeModelPreference(model)
+  const validEffort = normalizeEffortPreference(effort)
 
   // Validate globalMsgNum if provided
   const validGlobalMsgNum = typeof globalMsgNum === 'number' && globalMsgNum > 0
@@ -80,11 +84,23 @@ queryRouter.post('/query', async (req, res) => {
       },
       onToolStatus: (toolName) => {
         if (!done) {
-          const message = TOOL_STATUS_MESSAGES[toolName] ?? (/\s|\.{3}$/.test(toolName) ? toolName : `Using ${toolName}...`)
+          const message = activityToolMode === 'off'
+            ? 'Processing...'
+            : TOOL_STATUS_MESSAGES[toolName] ?? (/\s|\.{3}$/.test(toolName) ? toolName : `Using ${toolName}...`)
           res.write(`event: tool_status\ndata: ${JSON.stringify({ message })}\n\n`)
           emitDisplay({ type: 'tool_status', data: { message } })
         }
       },
+      // Activity lines stay on this authenticated request stream. The global
+      // display stream is intentionally unauthenticated for Even Hub recovery,
+      // so observable command/output text must never be broadcast there.
+      ...(activityToolMode === 'preview' ? {
+        onActivityLine: (line: { kind: 'input' | 'output'; text: string }) => {
+          if (!done) {
+            res.write(`event: activity_line\ndata: ${JSON.stringify(line)}\n\n`)
+          }
+        },
+      } : {}),
       onDone: (fullText, model, cliSessionId, metadata) => {
         if (!done) {
           done = true
@@ -108,7 +124,7 @@ queryRouter.post('/query', async (req, res) => {
         ? { query: String(reference.query), response: String(reference.response) }
         : undefined,
       validGlobalMsgNum,
-      { abortSignal: abortController.signal },
+      { abortSignal: abortController.signal, effort: validEffort },
     )
   } catch (err: unknown) {
     if (!done) {

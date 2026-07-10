@@ -33,7 +33,9 @@ export interface ClaudeRunRecord {
   updatedAt: string
   model: ClaudeModelPreference
   cliCommand: string
-  effortLevel: ClaudeEffortLevel
+  effortLevel: ClaudeEffortLevel | 'ultracode'
+  cliModelId?: string
+  resolvedModelId?: string
   cwd: string
   resumed: boolean
   trustMode: 'full-access'
@@ -211,6 +213,8 @@ export function startClaudeRun(input: {
   timeoutMs: number
   wallMaxMs: number
   query: string
+  effortLevel?: ClaudeEffortLevel | 'ultracode'
+  cliModelId?: string
 }): ClaudeRunRecord {
   const now = new Date().toISOString()
   const run: ClaudeRunRecord = {
@@ -222,7 +226,8 @@ export function startClaudeRun(input: {
     updatedAt: now,
     model: input.model,
     cliCommand: 'claude -p',
-    effortLevel: getClaudeEffortLevel(),
+    effortLevel: input.effortLevel ?? getClaudeEffortLevel(),
+    cliModelId: input.cliModelId,
     cwd: input.cwd,
     resumed: input.resumed,
     trustMode: 'full-access',

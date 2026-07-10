@@ -1,6 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import type { CodexModelPreference } from '../../shared/model-preference.js'
+import {
+  isCodexModel,
+  normalizeModelPreference,
+  type CodexModelPreference,
+} from '../../shared/model-preference.js'
 
 export const CODEX_ENGINE_SESSION_TTL_MS = 2 * 60 * 60_000
 
@@ -40,8 +44,26 @@ function readStore(): CodexEngineSessionFile {
   if (!existsSync(path)) return { sessions: {}, savedAt: new Date().toISOString() }
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<CodexEngineSessionFile>
+    const sessions: Record<string, CodexEngineSession> = {}
+    for (const raw of Object.values(parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {})) {
+      const model = normalizeModelPreference(raw?.model)
+      if (
+        !model ||
+        !isCodexModel(model) ||
+        typeof raw?.cosSessionId !== 'string' ||
+        typeof raw?.codexThreadId !== 'string' ||
+        typeof raw?.cwd !== 'string' ||
+        (raw?.trustMode !== 'read-only' && raw?.trustMode !== 'workspace-write') ||
+        typeof raw?.lastUsedAt !== 'number' ||
+        typeof raw?.expiresAt !== 'string'
+      ) continue
+      const key = sessionKey(raw.cosSessionId, model)
+      const normalized = { ...raw, key, model } as CodexEngineSession
+      const prior = sessions[key]
+      if (!prior || normalized.lastUsedAt > prior.lastUsedAt) sessions[key] = normalized
+    }
     return {
-      sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
+      sessions,
       savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : new Date().toISOString(),
     }
   } catch {

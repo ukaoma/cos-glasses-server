@@ -9,6 +9,10 @@ import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import { isWhisperLocalAvailable, getWhisperHealth } from '../lib/whisper-local.js'
 import { getOpenAIWhisperBudgetState } from '../lib/openai-whisper-budget.js'
 import { getKeyStatus } from '../lib/openai-key.js'
+import {
+  getCodexModelCatalog,
+  getCodexModelCatalogSnapshot,
+} from '../lib/codex-model-catalog.js'
 
 export const healthRouter = Router()
 
@@ -117,7 +121,15 @@ healthRouter.get('/health', async (_req, res) => {
   const whisper_health = getWhisperHealth()
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
 
-  res.json({ ...checks, features, voice, whisper_health, openai_whisper_budget })
+  const codex_models = getCodexModelCatalogSnapshot()
+  res.json({ ...checks, features, voice, whisper_health, openai_whisper_budget, codex_models })
+})
+
+// Stable app slots backed by Codex's live model/list catalog. This route is
+// authenticated by the global /api middleware; ?refresh=1 forces discovery.
+healthRouter.get('/models', async (req, res) => {
+  const catalog = await getCodexModelCatalog(req.query.refresh === '1')
+  res.json(catalog)
 })
 
 // GET /api/cli-session — returns current CLI session ID for cross-device resume

@@ -1,5 +1,47 @@
 # Changelog
 
+## 6.4.0
+
+Fresh-install parity for COS Glasses builds 170–173, without weakening the
+public server's sandbox defaults.
+
+- **Auto-updating GPT Frontier + Balanced.** Stable client slots resolve to the
+  top two capable models in the newest visible GPT generation through Codex's
+  official `model/list` catalog. The server refreshes at boot and every 15
+  minutes, and each Codex run awaits the same TTL-cached/coalesced refresh
+  before resolving its slot. It preserves the last-known-good catalog on
+  failures and falls back to the CLI default only before any discovery succeeds.
+- **Fable + effort controls.** Fable joins Opus and Sonnet as a first-class
+  Claude tier alias, and High / Extra High / Max / Ultracode now propagate from
+  `/api/query` to both Claude and Codex. Claude aliases remain versionless and
+  1M-context capable; Codex effort is clamped to each live model's advertised
+  support. Per-run ledgers record the concrete resolved model and effort.
+- **Safe live job activity.** `activityToolMode` supports off, status-only, or
+  bounded observable tool input/output previews. ANSI/control data, credential
+  assignments, auth headers, provider tokens, JWTs, URL credentials, and opaque
+  blobs are redacted, including 40–72-character PEM/private-key body chunks.
+  Hidden reasoning is never surfaced.
+- **Same-session run safety.** Turns for one conversation now serialize until
+  the active bridge sends a terminal callback, while different sessions remain
+  concurrent. Failed or cancelled Claude/Codex runs remove the exact pending
+  user exchange by object identity, preventing phantom prompts, duplicate-text
+  deletion, and resume-history contamination.
+- **Authenticated transport boundary.** Activity lines are returned only on the
+  authenticated `/api/query` SSE stream. They are deliberately excluded from
+  the unauthenticated global display bus and its replay buffer.
+- **Public trust model retained.** Codex remains read-only by default with only
+  the existing `workspace-write` opt-in. Existing archive traversal, local-day,
+  malformed-file, starter-kit launch-directory, and conversation behavior are
+  unchanged. Legacy `codex-high` state migrates to the frontier slot without
+  changing saved thread trust mode.
+- **Diagnostics and compatibility.** `/api/models`, health data, and `/v1/models`
+  expose stable slots plus concrete live models. `cos-codex-high` remains an
+  accepted alias for older clients. Existing `COS_CODEX_MODEL` and
+  `COS_CODEX_REASONING_EFFORT` overrides continue to apply to the migrated
+  legacy/frontier slot; leave them unset for auto-latest. A new regression suite covers catalog
+  selection/fallback/refresh, sandbox arguments, migrations, effort mappings,
+  activity redaction, and the display-bus security boundary.
+
 ## 6.3.1
 
 Security + robustness hardening on the 6.3.0 archive routes, from a 3-agent QA pass. (6.3.0 was never published; 6.3.1 is the first release of the expanded route set.)

@@ -34,7 +34,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('')
   console.log('  Requirements:')
   console.log('    - Node.js 20.11+')
-  console.log('    - Claude Code CLI (Opus / Sonnet / Haiku) or Codex CLI (Codex High)')
+  console.log('    - Claude Code CLI (Opus / Fable / Sonnet) or Codex CLI (GPT Frontier / Balanced)')
   console.log('    - Even G2 smart glasses + the COS Glasses app (Even Hub)')
   console.log('')
   console.log('  No API key is needed for chat — it runs through your installed CLI.')
@@ -75,15 +75,15 @@ function normalizeCodexVersion(raw) {
 const claudeVersion = getCliVersion('claude')
 const codexVersion = getCliVersion('codex')
 if (claudeVersion) {
-  console.log(green('  ✓') + ` Claude Code ${claudeVersion} ` + dim('(Opus / Sonnet / Haiku)'))
+  console.log(green('  ✓') + ` Claude Code ${claudeVersion} ` + dim('(Opus / Fable / Sonnet)'))
 } else {
-  console.log(yellow('  ⚠') + ' Claude Code CLI not found ' + dim('— Opus/Sonnet/Haiku unavailable'))
+  console.log(yellow('  ⚠') + ' Claude Code CLI not found ' + dim('— Opus/Fable/Sonnet unavailable'))
   console.log('    Install: ' + bold('https://claude.ai/download'))
 }
 if (codexVersion) {
-  console.log(green('  ✓') + ` Codex CLI ${normalizeCodexVersion(codexVersion)} ` + dim('(Codex High)'))
+  console.log(green('  ✓') + ` Codex CLI ${normalizeCodexVersion(codexVersion)} ` + dim('(GPT Frontier / Balanced)'))
 } else {
-  console.log(yellow('  ⚠') + ' Codex CLI not found ' + dim('— Codex High unavailable'))
+  console.log(yellow('  ⚠') + ' Codex CLI not found ' + dim('— GPT Frontier/Balanced unavailable'))
 }
 if (!claudeVersion && !codexVersion) {
   console.log('')
