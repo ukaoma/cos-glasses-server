@@ -11,6 +11,7 @@ import { promisify } from 'node:util'
 import { logTokenAudit } from './token-audit.js'
 import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { consumeArchiveLLMBudget } from './archive-budget.js'
+import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 
 const execAsync = promisify(exec)
 import type { Exchange } from './conversation.js'
@@ -348,20 +349,30 @@ export function getArchiveChats(date: string): ArchiveChatSummary[] {
   }))
 }
 
-/** Get paired Q&A messages for a specific chat within a day */
-export function getArchiveChatMessages(date: string, chatIndex: number): Array<{ query: string; text: string; timestamp: number }> {
+/** Get paired Q&A messages for a specific chat within a day. Request refs on
+ * the user turn and model-output refs on the assistant turn surface together. */
+export function getArchiveChatMessages(
+  date: string,
+  chatIndex: number,
+): Array<{ query: string; text: string; timestamp: number; attachments?: MediaAttachmentRef[] }> {
   const archive = loadArchive(date)
   if (!archive) return []
   const chat = archive.chats.find(c => c.id === chatIndex)
   if (!chat) return []
 
-  const messages: Array<{ query: string; text: string; timestamp: number }> = []
+  const messages: Array<{ query: string; text: string; timestamp: number; attachments?: MediaAttachmentRef[] }> = []
   for (let i = 0; i < chat.exchanges.length; i++) {
     const ex = chat.exchanges[i]
     if (ex.role === 'user') {
       const next = chat.exchanges[i + 1]
       if (next && next.role === 'assistant') {
-        messages.push({ query: ex.content, text: next.content, timestamp: next.timestamp })
+        const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
+        messages.push({
+          query: ex.content,
+          text: next.content,
+          timestamp: next.timestamp,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        })
         i++ // skip assistant
       }
     }
@@ -374,23 +385,26 @@ export function getArchiveChatMessages(date: string, chatIndex: number): Array<{
  *  (sessionId, timestamp) instead of bare timestamp (collision-prone). */
 export function getArchiveDayMessages(
   date: string,
-): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string }> {
+): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; attachments?: MediaAttachmentRef[] }> {
   const archive = loadArchive(date)
   if (!archive) return []
 
-  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string }> = []
+  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; attachments?: MediaAttachmentRef[] }> = []
   for (const chat of archive.chats) {
     for (let i = 0; i < chat.exchanges.length; i++) {
       const ex = chat.exchanges[i]
       if (ex.role === 'user') {
         const next = chat.exchanges[i + 1]
         if (next && next.role === 'assistant') {
+          const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
           messages.push({
             query: ex.content,
             text: next.content,
             timestamp: next.timestamp,
             chatIndex: chat.id,
             sessionId: chat.sessionId,
+            ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+            ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++
         }

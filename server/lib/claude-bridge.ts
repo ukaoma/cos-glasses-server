@@ -8,14 +8,13 @@
 
 import { spawn } from 'node:child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { appendFileSync } from 'node:fs'
-import crypto from 'node:crypto'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { cosBrainDir } from './launch-dir.js'
 import { logTokenAudit } from './token-audit.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt, buildPrewarmSystemPrompt, getCachedContextInstant } from './context-builder.js'
-import { getHistory, addExchange, removeExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
+import { getHistory, addExchange, setExchangeAttachments, removeExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
 import { notifySessionStart, notifyExchange } from './telegram-notify.js'
 import {
   isClaudeModel,
@@ -38,6 +37,15 @@ import {
   claudeToolResultPreviewLines,
   type ActivityPreviewLine,
 } from './activity-preview.js'
+import {
+  createRunOutputImagePublisher,
+  isRunOutputImagePublisherCommand,
+  type RunOutputImageCollectionStats,
+} from './run-output-images.js'
+import {
+  MAX_ATTACHMENTS_PER_PROMPT,
+  type MediaAttachmentRef,
+} from '../../shared/media-attachment.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -285,6 +293,8 @@ function isExtendedQuery(query: string): boolean {
 export interface ModelRunMetadata {
   codexRunId?: string
   codexThreadId?: string
+  outputAttachments?: MediaAttachmentRef[]
+  outputImageStats?: RunOutputImageCollectionStats
 }
 
 export interface StreamCallbacks {
@@ -333,7 +343,7 @@ export async function callClaudeStreaming(
   sessionId: string | undefined,
   callbacks: StreamCallbacks,
   model?: ClaudeModelPreference,
-  images?: string[],
+  images?: ModelImageInput[],
   reference?: PromptReference,
   globalMsgNum?: number,
   options?: CallOptions,
@@ -362,30 +372,41 @@ export async function callClaudeStreaming(
   // Phase: context loading (skipped in lightweight mode)
   let phase: Phase = 'context'
 
-  let systemPrompt: string
-  if (options?.lightweight) {
-    // G2 speed path — minimal system prompt, context only when needed
-    systemPrompt = buildLightweightSystemPrompt(query, contextPrompt)
-  } else {
-    callbacks.onToolStatus?.('Loading context...')
-    // Full COS path — async context with Python subprocess calls
-    systemPrompt = await buildSystemPrompt(contextPrompt)
+  const imageInputs: ModelImageInput[] = images ?? []
+  const imagePaths = imageInputs.map(input => input.path)
+  const outputImageBudget = Math.max(0, MAX_ATTACHMENTS_PER_PROMPT - imageInputs.length)
+  let outputImagePublisher: ReturnType<typeof createRunOutputImagePublisher> | null = null
+  if (!options?.lightweight && outputImageBudget > 0) {
+    try {
+      outputImagePublisher = createRunOutputImagePublisher({
+        sessionId: sid,
+        globalMsgNum,
+        maxImages: outputImageBudget,
+      })
+    } catch (err) {
+      console.error('[claude-bridge] output image publisher unavailable:', err)
+    }
   }
+
+  let systemPrompt: string
+  try {
+    if (options?.lightweight) {
+      // G2 speed path — minimal system prompt, context only when needed
+      systemPrompt = buildLightweightSystemPrompt(query, contextPrompt)
+    } else {
+      callbacks.onToolStatus?.('Loading context...')
+      // Full COS path — async context with Python subprocess calls
+      systemPrompt = await buildSystemPrompt(contextPrompt)
+    }
+  } catch (err) {
+    outputImagePublisher?.cleanup()
+    throw err
+  }
+  if (outputImagePublisher) systemPrompt = `${systemPrompt}\n\n${outputImagePublisher.promptInstructions}`
 
   // Phase: thinking (waiting for Claude to start)
   phase = 'thinking'
   callbacks.onToolStatus?.('Thinking...')
-
-  // ── Vision: save temp image files if provided ──
-  const imagePaths: string[] = []
-  if (images && images.length > 0) {
-    for (const img of images) {
-      const id = crypto.randomUUID().slice(0, 8)
-      const p = join('/tmp', `cos-vision-${id}.jpg`)
-      writeFileSync(p, Buffer.from(img, 'base64'))
-      imagePaths.push(p)
-    }
-  }
 
   // Check if this is the first query in a new session (before adding exchange)
   const isFirstQuery = isNewSession(sid)
@@ -396,7 +417,10 @@ export async function callClaudeStreaming(
   const pendingUserExchange = addExchange(sid, 'user', historyQuery, globalMsgNum)
 
   // Vision queries need the Read tool to see the image files
-  const tools = imagePaths.length > 0 ? 'WebSearch,WebFetch,Read' : 'WebSearch,WebFetch'
+  const baseTools = imagePaths.length > 0 ? 'WebSearch,WebFetch,Read' : 'WebSearch,WebFetch'
+  const tools = outputImagePublisher
+    ? `${baseTools},${outputImagePublisher.claudeAllowedTool}`
+    : baseTools
 
   // Prepend image instruction when photos are attached
   let fullQuery: string
@@ -455,6 +479,7 @@ export async function callClaudeStreaming(
   // Strip CLAUDECODE env var so claude -p doesn't think it's nested
   const env = { ...process.env }
   delete env.CLAUDECODE
+  if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)
   const cliCwd = COS_SCRIPTS_DIR ?? cosBrainDir() ?? process.cwd()
   const inactivityMs = INACTIVITY_BY_MODEL[resolvedModel]
   const defaultWallMax = WALL_MAX_BY_MODEL[resolvedModel]
@@ -491,16 +516,46 @@ export async function callClaudeStreaming(
   const toolInputs = new Map<number, { name: string; json: string }>()
 
   function cleanupImages() {
-    for (const p of imagePaths) {
-      try { unlinkSync(p) } catch { /* ignore */ }
-    }
+    cleanupModelImageInputs(imageInputs)
   }
 
-  function finalize(text: string) {
+  async function finalize(text: string) {
     if (finalized) return
     finalized = true
     cleanup()
     cleanupImages()
+
+    // Persist text before output-image normalization. A daemon crash during
+    // finalization cannot erase an otherwise successful answer.
+    const assistantExchange = addExchange(sid, 'assistant', text, globalMsgNum)
+    if (imagePaths.length > 0) {
+      replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
+    }
+
+    let outputAttachments: MediaAttachmentRef[] = []
+    let outputImageStats: RunOutputImageCollectionStats | undefined
+    if (outputImagePublisher) {
+      callbacks.onToolStatus?.('Preparing images...')
+      const preparingHeartbeat = setInterval(() => callbacks.onToolStatus?.('Preparing images...'), HEARTBEAT_INTERVAL_MS)
+      preparingHeartbeat.unref?.()
+      try {
+        outputAttachments = await outputImagePublisher.collect()
+      } catch (err) {
+        console.error('[claude-bridge] output image collection failed:', err)
+      } finally {
+        clearInterval(preparingHeartbeat)
+        outputImageStats = outputImagePublisher.stats
+        outputImagePublisher.cleanup()
+      }
+      if (outputAttachments.length > 0) {
+        setExchangeAttachments(sid, assistantExchange, outputAttachments)
+      }
+      if (outputImageStats && outputImageStats.rejected > 0) {
+        callbacks.onToolStatus?.(outputImageStats.attached > 0
+          ? 'Some images could not be attached'
+          : 'Image attachment unavailable')
+      }
+    }
 
     // Token audit — log every completed claude -p call
     const totalMs = Date.now() - startTime
@@ -514,14 +569,6 @@ export async function callClaudeStreaming(
       caller: options?.lightweight ? 'voice_query' : 'full_query',
     })
 
-    addExchange(sid, 'assistant', text, globalMsgNum)
-
-    // Replace photo exchanges with condensed summaries to prevent context rot
-    // while preserving enough context for follow-up questions
-    if (imagePaths.length > 0) {
-      replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
-    }
-
     finishClaudeRun(run.runId, {
       status: 'completed',
       startedAtMs: startTime,
@@ -529,7 +576,10 @@ export async function callClaudeStreaming(
       exitCode: 0,
     })
 
-    callbacks.onDone(text, resolvedModel, cliSessionMap.get(resolvedCliKey))
+    callbacks.onDone(text, resolvedModel, cliSessionMap.get(resolvedCliKey), {
+      ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
+      ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
+    })
 
     // Telegram notifications — fire and forget
     if (isFirstQuery) {
@@ -548,6 +598,7 @@ export async function callClaudeStreaming(
     finalized = true
     cleanup()
     cleanupImages()
+    outputImagePublisher?.cleanup()
     removeExchange(sid, pendingUserExchange)
     // A failed/cancelled resumed CLI turn may already exist in Claude's own
     // session transcript even though COS history was rolled back. Never resume
@@ -604,7 +655,7 @@ export async function callClaudeStreaming(
     proc.kill('SIGTERM')
     if (fullText) {
       // Got partial output — deliver what we have
-      finalize(fullText)
+      void finalize(fullText)
     } else {
       finalizeError(`Wall clock limit reached (${wallMax / 1000}s). Process killed.`)
     }
@@ -663,8 +714,10 @@ export async function callClaudeStreaming(
           } else if (inner?.type === 'content_block_stop' && typeof inner.index === 'number') {
             const current = toolInputs.get(inner.index)
             if (current) {
-              const preview = claudeToolInputPreview(current.name, current.json)
-              if (preview) callbacks.onActivityLine?.(preview)
+              if (!isRunOutputImagePublisherCommand(current.json)) {
+                const preview = claudeToolInputPreview(current.name, current.json)
+                if (preview) callbacks.onActivityLine?.(preview)
+              }
               toolInputs.delete(inner.index)
             }
           }
@@ -711,7 +764,7 @@ export async function callClaudeStreaming(
             updateClaudeRun(run.runId, { cliSessionId: event.session_id })
           }
           // Final result — use accumulated text (more reliable than result.result)
-          finalize(fullText || event.result || '')
+          void finalize(fullText || event.result || '')
         }
         // tool_use/tool_result/other events still reset inactivity (we got stdout data)
       } catch {
@@ -737,7 +790,7 @@ export async function callClaudeStreaming(
             finalizeError(resultError, code)
             return
           }
-          finalize(fullText || event.result || '')
+          void finalize(fullText || event.result || '')
           return
         }
       } catch { /* ignore */ }
@@ -747,7 +800,7 @@ export async function callClaudeStreaming(
       finalizeError(`claude-bridge: exit ${code} — ${stderr.trim().slice(0, 200)}`, code)
     } else if (fullText) {
       // If we got text but no explicit result event, still finalize
-      finalize(fullText)
+      void finalize(fullText)
     } else {
       finalizeError('claude-bridge: Claude completed without a response.', code)
     }

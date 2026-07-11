@@ -67,10 +67,10 @@ describe('buildCodexExecArgs', () => {
     })
     expect(args).toEqual([
       'exec',
-      '--json',
-      '--cd', '/tmp/cos',
       '--sandbox', 'read-only',
       '--skip-git-repo-check',
+      '--json',
+      '--cd', '/tmp/cos',
       '--model', 'gpt-5.6-sol',
       '-c', 'model_reasoning_effort="max"',
       '-c', 'service_tier="priority"',
@@ -104,5 +104,24 @@ describe('buildCodexExecArgs', () => {
     expect(args).toContain('read-only')
     expect(args).not.toContain('--model')
     expect(args).not.toContain('service_tier="priority"')
+  })
+
+  it('places the run-scoped writable directory before resume without weakening the sandbox', () => {
+    const args = buildCodexExecArgs({
+      codexCwd: '/tmp/cos',
+      persistentCodexSession: true,
+      codexThreadId: 'thread-123',
+      resolvedModel: frontier,
+      publisherWritableDirectory: '/tmp/cos-output-private',
+    })
+    expect(args.slice(0, 7)).toEqual([
+      'exec',
+      '--sandbox', 'read-only',
+      '--skip-git-repo-check',
+      '--add-dir', '/tmp/cos-output-private',
+      'resume',
+    ])
+    expect(args).not.toContain('danger-full-access')
+    expect(args.indexOf('--add-dir')).toBeLessThan(args.indexOf('resume'))
   })
 })

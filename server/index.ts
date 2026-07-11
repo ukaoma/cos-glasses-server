@@ -1,12 +1,12 @@
-// Load .env FIRST — ESM evaluates this module before subsequent imports,
-// ensuring process.env is populated before python-bridge.ts reads COS_SCRIPTS_DIR.
-import './env.js'
+// Load env and claim the one server slot before any mutable module initializes.
+import './bootstrap.js'
 
 import express from 'express'
 import cors from 'cors'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer as createHttpsServer } from 'node:https'
+import { createServer as createHttpServer } from 'node:http'
 import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs'
 import { networkInterfaces, homedir } from 'node:os'
 import { join } from 'node:path'
@@ -23,6 +23,7 @@ import { openaiKeyRouter } from './routes/openai-key.js'
 import { messageRefRouter } from './routes/message-ref.js'
 import { archiveRouter } from './routes/archive.js'
 import { sessionsRouter } from './routes/sessions.js'
+import { mediaRouter, mediaBodyParser } from './routes/media.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
@@ -35,6 +36,8 @@ import { initSileroVAD } from './lib/vad-silero.js'
 import { initSessionCache } from './lib/session-cache-writer.js'
 import { initSpeakerEmbeddings } from './lib/speaker-embeddings.js'
 import { logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
+import { getMediaStore } from './lib/media-store.js'
+import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
 
 const app = express()
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
@@ -104,8 +107,6 @@ app.use(cors({
     cb(new Error('CORS blocked'))
   },
 }))
-app.use(express.json({ limit: '10mb' }))
-
 // Auth middleware — always active (token is auto-generated if not set)
 app.use('/api', (req, res, next) => {
   // Allow health checks, display stream, and client diagnostics without auth.
@@ -124,6 +125,11 @@ app.use('/api', (req, res, next) => {
   }
   next()
 })
+
+// Authenticate before parsing large upload bodies. The 16 MB allowance stays
+// scoped to /api/media; every other route retains the 10 MB ceiling.
+app.use('/api/media', mediaBodyParser)
+app.use(express.json({ limit: '10mb' }))
 
 // Request counter — must be before route registrations
 app.use((_req, _res, next) => {
@@ -144,6 +150,7 @@ app.use('/api', openaiKeyRouter)
 app.use('/api', messageRefRouter)
 app.use('/api', archiveRouter)
 app.use('/api', sessionsRouter)
+app.use('/api', mediaRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models
@@ -180,7 +187,8 @@ process.on('SIGINT', () => {
   process.exit(0)
 })
 
-// Crash protection — log and survive instead of dying mid-meeting
+// Crash protection for runtime work. Listener failures are handled separately
+// and exit immediately so a supervisor can restart a clean, unified process.
 process.on('uncaughtException', (err) => {
   console.error('[CRASH GUARD] Uncaught exception (server stays alive):', err.message)
   console.error(err.stack)
@@ -195,19 +203,24 @@ process.on('unhandledRejection', (reason: any) => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT ?? '3143', 10)
 const certDir = path.join(__dirname, 'certs')
+const listeners: RequiredListener[] = []
 if (existsSync(path.join(certDir, 'cert.pem'))) {
   const httpsServer = createHttpsServer({
     cert: readFileSync(path.join(certDir, 'cert.pem')),
     key: readFileSync(path.join(certDir, 'key.pem')),
   }, app)
-  httpsServer.listen(HTTPS_PORT, BIND_HOST, () => {
-    console.log(`[COS API] HTTPS server running on https://${BIND_HOST}:${HTTPS_PORT}`)
-  })
+  listeners.push({ server: httpsServer, port: HTTPS_PORT, host: BIND_HOST, label: 'HTTPS' })
 } else {
   console.log('[COS API] No certs found — HTTPS disabled (drop cert.pem/key.pem in server/certs to enable)')
 }
 
-app.listen(PORT, BIND_HOST, () => {
+const httpServer = createHttpServer(app)
+listeners.push({ server: httpServer, port: PORT, host: BIND_HOST, label: 'HTTP' })
+
+listenRequiredServers(listeners).then(() => {
+  if (listeners.some(listener => listener.label === 'HTTPS')) {
+    console.log(`[COS API] HTTPS server running on https://${BIND_HOST}:${HTTPS_PORT}`)
+  }
   console.log(`[COS API] HTTP server running on http://${BIND_HOST}:${PORT}`)
   console.log(`[COS API] Mode: ${COS_MODE ? 'COS pipeline' : 'standalone'}`)
 
@@ -279,4 +292,10 @@ app.listen(PORT, BIND_HOST, () => {
 
   // Auto-snapshot active sessions every 5 min (survives restarts)
   startAutoSnapshot(5 * 60_000)
+
+  // Durable media GC (staged/reserved expiry + generated-image content TTL).
+  getMediaStore().startGC()
+}).catch((error: NodeJS.ErrnoException) => {
+  console.error(`[COS API] Fatal listener startup: ${error.message}`)
+  process.exit(error.code === 'EADDRINUSE' ? 75 : 74)
 })

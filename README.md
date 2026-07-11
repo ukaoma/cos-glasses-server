@@ -11,9 +11,12 @@ API key is pasted into the phone for chat.
 npx @gotcos/glasses-server
 ```
 
-The launcher checks Node, finds your CLI, downloads the local voice model, writes
-`~/.cos-glasses/.env`, and starts the server on `0.0.0.0:3141`. On boot it prints
-an **API token** — paste that into the COS Glasses app.
+The launcher checks Node, finds your CLI, checks voice and image processing,
+downloads the local voice model when needed, writes `~/.cos-glasses/.env`, and
+starts the server on `0.0.0.0:3141`. On boot it prints
+an **API token** — paste that into the COS Glasses app. Only one COS Glasses
+server may run on a Mac at a time; a second `npx` or source runner exits before
+opening ports or touching shared conversation/media state.
 
 ## Requirements
 
@@ -22,6 +25,7 @@ an **API token** — paste that into the COS Glasses app.
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - _Optional:_ `brew install whisper-cpp` for free local voice (otherwise OpenAI API)
+- _Optional:_ `brew install ffmpeg` for phone/output image attachments (text chat remains available without it)
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
 
 > No `ANTHROPIC_API_KEY` is needed — chat runs through your installed CLI, billed
@@ -54,6 +58,8 @@ The built-in IP allowlist blocks public-internet traffic regardless.
   to the authenticated query that requested it
 - Message History + cross-day "reference message N" — your chats are archived by day
   and every message keeps a permanent number you can recall (`/api/archive`, `/api/message/:num`)
+- Send phone photos with queued prompts, and review assistant-selected generated,
+  research, or explicitly used email images in Messages and on the G2 lens
 - Live voice capture + transcription during meetings
 - Local whisper.cpp transcription (free) with OpenAI fallback (optional)
 - Tasks / calendar / people context **if** you run the
@@ -65,7 +71,8 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
 optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 `COS_API_TOKEN` (auto if unset), `OPENAI_API_KEY` (cloud voice fallback),
-`COS_SCRIPTS_DIR` (full pipeline). Your name + transcription vocabulary live in
+`COS_SCRIPTS_DIR` (full pipeline), and `COS_MEDIA_ROOT` (optional image-store
+location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
 `~/.cos-glasses/.cos-profile.json` (see `.cos-profile.example.json`).
 
 ## Run from source
@@ -82,6 +89,7 @@ BIND_HOST=0.0.0.0 npm run start:server
 - *Phone can't connect* — check `BIND_HOST=0.0.0.0`, the same Tailscale account on both devices, and the correct `100.x` IP + token.
 - *AI queries fail* — run `claude --version` / `codex --version`, then `claude login` / `codex login`.
 - *Voice getting billed?* — install `whisper-cpp` for free local transcription.
+- *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
 
 ## License
 

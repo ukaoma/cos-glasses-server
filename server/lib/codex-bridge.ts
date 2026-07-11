@@ -1,15 +1,14 @@
 // Codex bridge — streaming-compatible interface to `codex exec --json`.
 // Concrete GPT ids resolve from Codex's live model catalog at run time.
 
-import { spawn } from 'node:child_process'
-import { writeFileSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
-import crypto from 'node:crypto'
+import { spawn, spawnSync } from 'node:child_process'
 import { logTokenAudit } from './token-audit.js'
+import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-builder.js'
 import {
   getHistory,
   addExchange,
+  setExchangeAttachments,
   removeExchange,
   formatHistoryForPrompt,
   getOrCreateSession,
@@ -51,6 +50,15 @@ import {
   type CodexRunStatus,
 } from './codex-run-ledger.js'
 import { codexActivityPreviewLines } from './activity-preview.js'
+import {
+  createRunOutputImagePublisher,
+  isRunOutputImagePublisherCommand,
+  type RunOutputImageCollectionStats,
+} from './run-output-images.js'
+import {
+  MAX_ATTACHMENTS_PER_PROMPT,
+  type MediaAttachmentRef,
+} from '../../shared/media-attachment.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -74,6 +82,25 @@ function codexSandboxArgs(): string[] {
   return ['--sandbox', mode, '--skip-git-repo-check']
 }
 
+let addDirSupported: boolean | undefined
+
+/** Older Codex CLIs do not expose --add-dir. Probe lazily and disable only
+ * output publishing when unavailable; chat remains read-only and functional. */
+export function codexSupportsAdditionalDir(): boolean {
+  if (addDirSupported !== undefined) return addDirSupported
+  try {
+    const result = spawnSync('codex', ['exec', '--help'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    addDirSupported = result.status === 0 && `${result.stdout}\n${result.stderr}`.includes('--add-dir')
+  } catch {
+    addDirSupported = false
+  }
+  return addDirSupported
+}
+
 export function buildCodexExecArgs(input: {
   codexCwd: string
   imagePaths?: string[]
@@ -82,13 +109,20 @@ export function buildCodexExecArgs(input: {
   model?: CodexModelPreference
   resolvedModel?: CodexModelOption
   effort?: EffortPreference
+  publisherWritableDirectory?: string
 }): string[] {
   const imagePaths = input.imagePaths ?? []
   const resolvedModel = input.resolvedModel
     ?? resolveCodexModelOption(input.model ?? CODEX_HIGH_MODEL)
   const reasoningEffort = resolveCodexEffortForModel(resolvedModel, input.effort)
   const serviceTier = resolveCodexServiceTier(resolvedModel)
-  const args = ['exec']
+  // Sandbox + publisher capability are global `codex exec` options and MUST
+  // appear before the `resume` subcommand. The publisher grants write access
+  // only to its random run directory; the rest of the host stays read-only.
+  const args = ['exec', ...codexSandboxArgs()]
+  if (input.publisherWritableDirectory) {
+    args.push('--add-dir', input.publisherWritableDirectory)
+  }
 
   const appendModelConfig = () => {
     if (resolvedModel.id) args.push('--model', resolvedModel.id)
@@ -101,7 +135,6 @@ export function buildCodexExecArgs(input: {
       'resume',
       '--json',
       '--all',
-      ...codexSandboxArgs(),
     )
     appendModelConfig()
     for (const p of imagePaths) args.push('--image', p)
@@ -112,7 +145,6 @@ export function buildCodexExecArgs(input: {
   args.push(
     '--json',
     '--cd', input.codexCwd,
-    ...codexSandboxArgs(),
   )
   appendModelConfig()
   if (!input.persistentCodexSession) args.push('--ephemeral')
@@ -195,7 +227,7 @@ export async function callCodexStreaming(
   sessionId: string | undefined,
   callbacks: StreamCallbacks,
   model: CodexModelPreference = CODEX_HIGH_MODEL,
-  images?: string[],
+  images?: ModelImageInput[],
   reference?: PromptReference,
   globalMsgNum?: number,
   options?: CallOptions,
@@ -220,6 +252,9 @@ export async function callCodexStreaming(
   const engineSession = persistentCodexSession
     ? getCodexEngineSession({ cosSessionId: sid, model, cwd: codexCwd, trustMode: codexTrustMode })
     : null
+  const imageInputs: ModelImageInput[] = images ?? []
+  const imagePaths = imageInputs.map(input => input.path)
+  const outputImageBudget = Math.max(0, MAX_ATTACHMENTS_PER_PROMPT - imageInputs.length)
   const startTime = Date.now()
   const run = startCodexRun({
     cosSessionId: sid,
@@ -234,6 +269,19 @@ export async function callCodexStreaming(
     reasoningEffort: resolvedCodexEffort,
     query,
   })
+  let outputImagePublisher: ReturnType<typeof createRunOutputImagePublisher> | null = null
+  if (!options?.lightweight && outputImageBudget > 0 && codexSupportsAdditionalDir()) {
+    try {
+      outputImagePublisher = createRunOutputImagePublisher({
+        sessionId: sid,
+        globalMsgNum,
+        runId: run.runId,
+        maxImages: outputImageBudget,
+      })
+    } catch (err) {
+      console.error('[codex-bridge] output image publisher unavailable:', err)
+    }
+  }
   let codexThreadId: string | undefined = engineSession?.codexThreadId
   callbacks.onStart?.(model, sid, undefined, { codexRunId: run.runId, codexThreadId })
 
@@ -247,6 +295,7 @@ export async function callCodexStreaming(
       systemPrompt = await buildSystemPrompt(contextPrompt)
     }
   } catch (err: any) {
+    outputImagePublisher?.cleanup()
     finishCodexRun(run.runId, {
       status: 'failed',
       startedAtMs: startTime,
@@ -255,32 +304,10 @@ export async function callCodexStreaming(
     })
     throw err
   }
+  if (outputImagePublisher) systemPrompt = `${systemPrompt}\n\n${outputImagePublisher.promptInstructions}`
 
   phase = 'thinking'
   callbacks.onToolStatus?.('Reasoning...')
-
-  const imagePaths: string[] = []
-  try {
-    if (images && images.length > 0) {
-      for (const img of images) {
-        const id = crypto.randomUUID().slice(0, 8)
-        const p = join('/tmp', `cos-vision-${id}.jpg`)
-        writeFileSync(p, Buffer.from(img, 'base64'))
-        imagePaths.push(p)
-      }
-    }
-  } catch (err: any) {
-    for (const p of imagePaths) {
-      try { unlinkSync(p) } catch { /* ignore */ }
-    }
-    finishCodexRun(run.runId, {
-      status: 'failed',
-      startedAtMs: startTime,
-      error: `codex-bridge: image staging failed — ${err?.message ?? 'unknown error'}`,
-      exitCode: null,
-    })
-    throw err
-  }
 
   const isFirstQuery = isNewSession(sid)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
@@ -305,10 +332,12 @@ export async function callCodexStreaming(
     model,
     resolvedModel: resolvedCodexModel,
     effort: options?.effort,
+    publisherWritableDirectory: outputImagePublisher?.writableDirectory,
   })
 
   const env = { ...process.env }
   delete env.CLAUDECODE
+  if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)
 
   const proc = spawn('codex', args, {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -324,9 +353,7 @@ export async function callCodexStreaming(
   const emittedBlocks = new Set<string>()
 
   function cleanupImages() {
-    for (const p of imagePaths) {
-      try { unlinkSync(p) } catch { /* ignore */ }
-    }
+    cleanupModelImageInputs(imageInputs)
   }
 
   function cleanup() {
@@ -344,11 +371,41 @@ export async function callCodexStreaming(
     callbacks.onChunk(text)
   }
 
-  function finalize(text: string) {
+  async function finalize(text: string) {
     if (finalized) return
     finalized = true
     cleanup()
     cleanupImages()
+
+    const assistantExchange = addExchange(sid, 'assistant', text, globalMsgNum)
+    if (imagePaths.length > 0) {
+      replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
+    }
+
+    let outputAttachments: MediaAttachmentRef[] = []
+    let outputImageStats: RunOutputImageCollectionStats | undefined
+    if (outputImagePublisher) {
+      callbacks.onToolStatus?.('Preparing images...')
+      const preparingHeartbeat = setInterval(() => callbacks.onToolStatus?.('Preparing images...'), HEARTBEAT_INTERVAL_MS)
+      preparingHeartbeat.unref?.()
+      try {
+        outputAttachments = await outputImagePublisher.collect()
+      } catch (err) {
+        console.error('[codex-bridge] output image collection failed:', err)
+      } finally {
+        clearInterval(preparingHeartbeat)
+        outputImageStats = outputImagePublisher.stats
+        outputImagePublisher.cleanup()
+      }
+      if (outputAttachments.length > 0) {
+        setExchangeAttachments(sid, assistantExchange, outputAttachments)
+      }
+      if (outputImageStats && outputImageStats.rejected > 0) {
+        callbacks.onToolStatus?.(outputImageStats.attached > 0
+          ? 'Some images could not be attached'
+          : 'Image attachment unavailable')
+      }
+    }
 
     const totalMs = Date.now() - startTime
     logTokenAudit({
@@ -376,12 +433,12 @@ export async function callCodexStreaming(
       output: text,
       exitCode: 0,
     })
-    addExchange(sid, 'assistant', text, globalMsgNum)
-    if (imagePaths.length > 0) {
-      replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
-    }
-
-    callbacks.onDone(text, model, undefined, { codexRunId: run.runId, codexThreadId })
+    callbacks.onDone(text, model, undefined, {
+      codexRunId: run.runId,
+      codexThreadId,
+      ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
+      ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
+    })
 
     if (isFirstQuery) {
       notifySessionStart(sid, query)
@@ -395,6 +452,7 @@ export async function callCodexStreaming(
     finalized = true
     cleanup()
     cleanupImages()
+    outputImagePublisher?.cleanup()
     removeExchange(sid, pendingUserExchange)
     if (engineSession) {
       clearCodexEngineSession(sid, model)
@@ -438,7 +496,7 @@ export async function callCodexStreaming(
   const wallTimer = setTimeout(() => {
     proc.kill('SIGTERM')
     if (fullText) {
-      finalize(fullText)
+      void finalize(fullText)
     } else {
       finalizeError(`Wall clock limit reached (${WALL_MAX_MS / 1000}s). Codex process killed.`)
     }
@@ -454,14 +512,17 @@ export async function callCodexStreaming(
     const status = toolStatus(event)
     if (status) callbacks.onToolStatus?.(status)
 
-    for (const preview of codexActivityPreviewLines(event)) callbacks.onActivityLine?.(preview)
+    const command = event?.item?.command ?? event?.item?.input ?? event?.payload?.command ?? event?.payload?.input
+    if (!isRunOutputImagePublisherCommand(command)) {
+      for (const preview of codexActivityPreviewLines(event)) callbacks.onActivityLine?.(preview)
+    }
 
     const text = extractCodexResponseText(event)
     if (text) emitText(text)
 
     const type = String(event?.type ?? '')
     if (type === 'turn.completed') {
-      finalize(fullText)
+      void finalize(fullText)
     } else if (type === 'turn.failed' || type === 'error') {
       finalizeError(`codex-bridge: ${event?.error ?? event?.message ?? 'unknown error'}`)
     }
@@ -497,7 +558,7 @@ export async function callCodexStreaming(
     if (code !== 0) {
       finalizeError(`codex-bridge: exit ${code} — ${stderr.trim().slice(0, 240)}`, code)
     } else if (fullText) {
-      finalize(fullText)
+      void finalize(fullText)
     } else {
       finalizeError('codex-bridge: Codex completed without a response.')
     }

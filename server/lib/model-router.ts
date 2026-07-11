@@ -8,6 +8,7 @@ import {
   type PromptReference,
 } from './conversation.js'
 import { DEFAULT_MODEL, isCodexModel, isClaudeModel, normalizeModelPreference } from '../../shared/model-preference.js'
+import type { ModelImageInput } from './model-image-input.js'
 
 // Bridges return as soon as their subprocess is spawned, while completion is
 // delivered later through callbacks. This keyed tail queue therefore releases
@@ -40,7 +41,7 @@ export async function callModelStreaming(
   sessionId: string | undefined,
   callbacks: StreamCallbacks,
   model?: ModelPreference,
-  images?: string[],
+  images?: ModelImageInput[],
   reference?: PromptReference,
   globalMsgNum?: number,
   options?: CallOptions,

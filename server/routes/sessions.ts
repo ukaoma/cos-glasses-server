@@ -7,6 +7,7 @@ import { buildSessionLogEntry, writeSessionLog } from '../lib/session-log.js'
 import { getArchiveDayMessages } from '../lib/archive.js'
 import { localDay } from '../lib/local-day.js'
 import { clearCodexEngineSession } from '../lib/codex-engine-sessions.js'
+import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 
 export const sessionsRouter = Router()
 
@@ -48,14 +49,30 @@ sessionsRouter.get('/sessions/:id/messages', (req, res) => {
     return
   }
 
-  // Pair user+assistant exchanges into client message format
-  const messages: Array<{ query: string; text: string; timestamp: number }> = []
+  // Pair user+assistant exchanges into client message format. Request refs on
+  // the user turn and output refs on the assistant turn become one safe list.
+  const messages: Array<{
+    query: string
+    text: string
+    timestamp: number
+    no?: number
+    sessionId: string
+    attachments?: MediaAttachmentRef[]
+  }> = []
   for (let i = 0; i < exchanges.length; i++) {
     const ex = exchanges[i]
     if (ex.role === 'user') {
       const next = exchanges[i + 1]
       if (next && next.role === 'assistant') {
-        messages.push({ query: ex.content, text: next.content, timestamp: next.timestamp })
+        const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
+        messages.push({
+          query: ex.content,
+          text: next.content,
+          timestamp: next.timestamp,
+          sessionId: req.params.id,
+          ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+          ...(attachments.length > 0 ? { attachments } : {}),
+        })
         i++ // skip the assistant exchange
       }
     }
@@ -230,7 +247,16 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
     source: 'archive' as const,
   }))
 
-  const liveMessages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; source: 'live' }> = []
+  const liveMessages: Array<{
+    query: string
+    text: string
+    timestamp: number
+    chatIndex: number
+    sessionId: string
+    source: 'live'
+    no?: number
+    attachments?: MediaAttachmentRef[]
+  }> = []
   const liveSessions = getActiveSessions()
   for (const session of liveSessions) {
     const sessionDay = localDay(session.lastActivity)
@@ -240,6 +266,7 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
       if (ex.role === 'user') {
         const next = session.exchanges[i + 1]
         if (next && next.role === 'assistant') {
+          const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
           liveMessages.push({
             query: ex.content,
             text: next.content,
@@ -247,6 +274,8 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
             chatIndex: -1,
             sessionId: session.id,
             source: 'live',
+            ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+            ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++
         }

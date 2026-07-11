@@ -6,6 +6,9 @@ import { callModelStreaming } from '../lib/model-router.js'
 import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
 import { normalizeEffortPreference, normalizeModelPreference } from '../../shared/model-preference.js'
+import { QueryAttachmentError, resolveQueryAttachments } from '../lib/query-attachments.js'
+import { getMediaStore } from '../lib/media-store.js'
+import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -16,26 +19,29 @@ const TOOL_STATUS_MESSAGES: Record<string, string> = {
 export const queryRouter = Router()
 
 queryRouter.post('/query', async (req, res) => {
-  const { query, sessionId, model, effort, image, images, reference, globalMsgNum } = req.body
+  const { query, sessionId, model, effort, reference, globalMsgNum } = req.body
   const activityToolMode = req.body.activityToolMode === 'off' || req.body.activityToolMode === 'preview'
     ? req.body.activityToolMode
     : 'status'
 
-  // Normalize: accept `images` array or legacy `image` string
-  let validImages: string[] | undefined
-  if (Array.isArray(images) && images.length > 0) {
-    // Filter to valid non-empty strings, cap at 5
-    validImages = images.filter((img: unknown) => typeof img === 'string' && img.length > 0).slice(0, 5)
-    if (validImages.length === 0) validImages = undefined
-  } else if (typeof image === 'string' && image.length > 0) {
-    // Backward compat: wrap single image as array
-    validImages = [image]
+  // Resolve durable attachment ids and legacy base64 images through one
+  // validation/normalization path before opening SSE.
+  let resolvedAttachments
+  try {
+    resolvedAttachments = await resolveQueryAttachments(req.body)
+  } catch (err) {
+    if (err instanceof QueryAttachmentError) {
+      return res.status(err.status).json({ error: err.code, detail: err.message })
+    }
+    return res.status(500).json({ error: errMsg(err) })
   }
+  const imageInputs = resolvedAttachments.inputs.length > 0 ? resolvedAttachments.inputs : undefined
+  const attachmentRefs = resolvedAttachments.refs
 
   const resolvedQuery = typeof query === 'string' ? query : ''
 
   // Vision queries can have an empty query (default to "describe what you see")
-  if ((!resolvedQuery || typeof resolvedQuery !== 'string') && !validImages) {
+  if ((!resolvedQuery || typeof resolvedQuery !== 'string') && !imageInputs) {
     return res.status(400).json({ error: 'query string or image required' })
   }
 
@@ -102,9 +108,22 @@ queryRouter.post('/query', async (req, res) => {
         },
       } : {}),
       onDone: (fullText, model, cliSessionId, metadata) => {
+        // Durable association is independent of the SSE socket. Backgrounding
+        // the phone cannot leave request media reserved until expiry.
+        if (resolvedAttachments.ids.length > 0) {
+          getMediaStore().associate(resolvedAttachments.ids, {
+            sessionId: sid,
+            ...(validGlobalMsgNum ? { globalMsgNum: validGlobalMsgNum } : {}),
+          }).catch((err) => console.error('[query] attachment association failed:', err))
+        }
         if (!done) {
           done = true
-          const payload = { text: fullText, sessionId: sid, model, cliSessionId, ...metadata }
+          const attachments = mergeMediaAttachmentRefs(attachmentRefs, metadata?.outputAttachments)
+          const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
+          const payload = {
+            text: fullText, sessionId: sid, model, cliSessionId, ...runMetadata,
+            ...(attachments.length > 0 ? { attachments } : {}),
+          }
           res.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`)
           emitDisplay({ type: 'done', data: payload })
           res.end()
@@ -118,7 +137,7 @@ queryRouter.post('/query', async (req, res) => {
           res.end()
         }
       },
-    }, validModel, validImages,
+    }, validModel, imageInputs,
       // Pass reference if provided (for "recall message N" feature)
       reference && typeof reference === 'object' && reference.query && reference.response
         ? { query: String(reference.query), response: String(reference.response) }

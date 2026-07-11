@@ -13,6 +13,8 @@ import {
   getCodexModelCatalog,
   getCodexModelCatalogSnapshot,
 } from '../lib/codex-model-catalog.js'
+import { isMediaProcessingReady } from '../lib/image-safety.js'
+import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 
 export const healthRouter = Router()
 
@@ -110,6 +112,8 @@ healthRouter.get('/health', async (_req, res) => {
     cos_pipeline: COS_MODE,
     whisper: isWhisperLocalAvailable(),
     iphoneAsrCandidates: process.env.COS_IOS_ASR_CANDIDATES === '1',
+    mediaProcessingReady: await isMediaProcessingReady(),
+    g2LensVariant: G2_LENS_VARIANT_CAPABILITY,
   }
   const voice = {
     hasKey: keyStatus.hasKey,

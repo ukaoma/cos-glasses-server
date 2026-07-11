@@ -40,7 +40,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('  No API key is needed for chat — it runs through your installed CLI.')
   console.log('  Config persists at ~/.cos-glasses/.env')
   console.log('')
-  console.log('  Setup guide: https://www.gotcos.com')
+  console.log('  Setup guide: https://www.gotcos.com/wizard/')
   console.log('')
   process.exit(0)
 }
@@ -60,9 +60,9 @@ if (nodeMajor < 20 || (nodeMajor === 20 && nodeMinor < 11)) {
 console.log(green('  ✓') + ` Node.js ${process.versions.node}`)
 
 // Step 2: agent CLI detection — at least one of Claude Code / Codex is required
-function getCliVersion(command) {
+function getCliVersion(command, versionArg = '--version') {
   try {
-    return execSync(`${command} --version 2>&1`, { shell: '/bin/sh', stdio: 'pipe', timeout: 5000 }).toString().trim()
+    return execSync(`${command} ${versionArg} 2>&1`, { shell: '/bin/sh', stdio: 'pipe', timeout: 5000 }).toString().trim()
   } catch {
     return null
   }
@@ -184,13 +184,25 @@ if (whisperCliPath && hasValidModel) {
   console.log('    Free local voice: ' + bold('brew install whisper-cpp') + dim('  (no Homebrew? https://brew.sh)'))
 }
 
-// Step 6: phone reachability — the glasses' phone app must reach this server.
+// Step 6: image capability — ffmpeg validates, strips metadata, normalizes,
+// and builds the exact 288x144 G2 variant. It is optional so text/voice remain
+// useful on a minimal install, but the launcher should make the gap visible.
+const ffmpegVersion = getCliVersion('ffmpeg', '-version')
+if (ffmpegVersion) {
+  const firstLine = ffmpegVersion.split('\n')[0].trim()
+  console.log(green('  ✓') + ` ${firstLine} ` + dim('— phone + lens images ready'))
+} else {
+  console.log(yellow('  ⚠') + ' ffmpeg not installed ' + dim('— phone and answer images disabled'))
+  console.log('    Enable photos: ' + bold('brew install ffmpeg') + dim('  (text + voice still work)'))
+}
+
+// Step 7: phone reachability — the glasses' phone app must reach this server.
 if (!process.env.BIND_HOST) {
   process.env.BIND_HOST = '0.0.0.0'
   console.log(yellow('  ⚠') + ' BIND_HOST not set — defaulting to 0.0.0.0 so your phone can reach the server')
 }
 
-// Step 7: start the bundled server
+// Step 8: start the bundled server
 try {
   const ld = process.env.COS_LAUNCH_DIR
   if (ld && (existsSync(join(ld, '.cos', 'manifest.json')) || existsSync(join(ld, 'AGENTS.md')) || existsSync(join(ld, 'CLAUDE.md')))) {

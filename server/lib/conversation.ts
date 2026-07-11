@@ -13,6 +13,7 @@ import { logSessionEnd, buildSessionLogEntry, writeSessionLog } from './session-
 import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { localDay } from './local-day.js'
 import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
+import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 
 export type { ModelPreference }
 
@@ -21,6 +22,10 @@ export interface Exchange {
   content: string
   timestamp: number
   globalMsgNum?: number  // Client's global message number for this Q&A pair
+  /** Public attachment refs may live on either half of a Q&A pair: request
+   * photos on the user exchange, model-published images on the assistant
+   * exchange. Bytes, filesystem paths, and capabilities never persist here. */
+  attachments?: MediaAttachmentRef[]
 }
 
 interface Session {
@@ -73,6 +78,15 @@ function loadFromDisk(): void {
   for (const [id, session] of Object.entries(result.data.sessions)) {
     if (!session.contextBreaks) session.contextBreaks = []
     session.modelPreference = normalizeModelPreference(session.modelPreference) ?? null
+    // Persistence boundary: malformed refs are dropped without sacrificing
+    // the surrounding exchange or the rest of the recovered session.
+    for (const exchange of session.exchanges) {
+      if ('attachments' in exchange && exchange.attachments !== undefined) {
+        const refs = parseMediaAttachmentRefs(exchange.attachments)
+        if (refs.length > 0) exchange.attachments = refs
+        else delete exchange.attachments
+      }
+    }
     sessions.set(id, session)
     loaded++
   }
@@ -296,14 +310,26 @@ export function replaceLastExchangeWithSummary(
   scheduleCacheUpdate()
 }
 
-export function addExchange(sessionId: string, role: 'user' | 'assistant', content: string, globalMsgNum?: number): Exchange {
+export function addExchange(
+  sessionId: string,
+  role: 'user' | 'assistant',
+  content: string,
+  globalMsgNum?: number,
+  attachments?: MediaAttachmentRef[],
+): Exchange {
   let session = sessions.get(sessionId)
   if (!session) {
     session = { id: sessionId, exchanges: [], lastActivity: Date.now(), createdAt: Date.now(), modelPreference: null, contextBreaks: [] }
     sessions.set(sessionId, session)
   }
 
-  const exchange: Exchange = { role, content, timestamp: Date.now(), globalMsgNum }
+  const exchange: Exchange = {
+    role,
+    content,
+    timestamp: Date.now(),
+    globalMsgNum,
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
+  }
   session.exchanges.push(exchange)
   session.lastActivity = Date.now()
 
@@ -315,6 +341,25 @@ export function addExchange(sessionId: string, role: 'user' | 'assistant', conte
   scheduleSave()
   scheduleCacheUpdate()
   return exchange
+}
+
+/** Attach validated refs to an already-persisted exchange. Bridges save the
+ * assistant text first, then use this after slower output-image preparation.
+ * Object identity prevents a concurrent turn from receiving the refs. */
+export function setExchangeAttachments(
+  sessionId: string,
+  exchange: Exchange,
+  attachments: unknown,
+): boolean {
+  const session = sessions.get(sessionId)
+  if (!session || !session.exchanges.includes(exchange)) return false
+  const refs = parseMediaAttachmentRefs(attachments)
+  if (refs.length > 0) exchange.attachments = refs
+  else delete exchange.attachments
+  session.lastActivity = Date.now()
+  scheduleSave()
+  scheduleCacheUpdate()
+  return true
 }
 
 /** Remove exactly the exchange object returned by addExchange.

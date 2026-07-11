@@ -1,5 +1,46 @@
 # Changelog
 
+## 6.5.0
+
+Durable phone photos and assistant-selected output images for COS Glasses
+build 179, while preserving the public server's sandbox and privacy boundary.
+
+- **One media contract.** Authenticated phone uploads become opaque attachment
+  refs, survive queues/restarts/archives/numbered-message recall, and resolve to
+  normalized server-owned files for Claude/Codex. Bytes and storage paths never
+  enter SSE, run ledgers, or archives.
+- **Answer images.** Claude or Codex can publish an already-local generated,
+  researched, or explicitly used email image through a private run-scoped
+  capability. The server accepts JPEG/PNG/WebP/HEIC/HEIF/AVIF up to 16 MiB and
+  16 megapixels, strips metadata, re-encodes through the existing media store,
+  and appends refs to the completed answer.
+- **No mailbox or URL crawler.** The publisher rejects URLs, data URIs, base64,
+  unrelated discovery, symlinks, directory replacement, content-id tampering,
+  over-capacity output, and manifest fields that could carry private paths.
+- **Codex remains read-only.** Output publishing adds only the random private
+  run directory via `codex exec --add-dir`; global sandbox flags precede
+  `resume`. Older CLIs without `--add-dir` keep chat working and simply disable
+  Codex output-image publishing. There is no full-access fallback.
+- **Durable finalization.** Assistant text is persisted before image
+  normalization, request media associates even if SSE disconnects, partial
+  image failures do not discard successful refs, and completion emits one
+  canonical `attachments` list with safe aggregate stats.
+- **Lens contract.** `/api/health` advertises `mediaProcessingReady` and
+  `g2LensVariant=png-288x144-v1`; the media endpoint serves the validated phone,
+  thumbnail, and exact 288×144 G2 variants expected by build 179.
+- **Fresh-install diagnostics.** The npm launcher now reports whether ffmpeg is
+  ready for phone/output/lens images, gives a non-blocking install command when
+  absent, and sends setup questions directly to `gotcos.com/wizard/`.
+- **One server owner.** The public runner now claims the same atomic
+  machine-wide lock as the installed LaunchAgent before mutable modules load.
+  A duplicate exits with code 75, and HTTP/HTTPS listeners bind as one required
+  set: if either port is occupied, any earlier listener closes and the process
+  exits instead of surviving half-bound with separate SSE and media state.
+
+Release evidence: TypeScript, 130/130 tests across 23 files, package dry-run
+including the executable publisher and startup hardening, and a live duplicate
+start against the installed LaunchAgent rejected before server initialization.
+
 ## 6.4.0
 
 Fresh-install parity for COS Glasses builds 170–173, without weakening the

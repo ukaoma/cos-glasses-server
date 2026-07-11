@@ -18,6 +18,7 @@ import { resolve } from 'path'
 import { getActiveSessions } from '../lib/conversation.js'
 import { dataPath } from '../lib/data-dir.js'
 import { localDay } from '../lib/local-day.js'
+import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 
 // v6.3.0 — read archives from the SAME persistent location the archive-mirror
 // writes to (~/.cos-glasses/data/archive via dataPath), not a package-relative
@@ -31,6 +32,7 @@ export interface ResolvedGlobalMessage {
   date: string
   query: string
   response: string
+  attachments?: MediaAttachmentRef[]
 }
 
 interface ExchangeLike {
@@ -38,11 +40,12 @@ interface ExchangeLike {
   content?: string
   timestamp?: number
   globalMsgNum?: number
+  attachments?: unknown
 }
 
 /** Pair the stamped exchange with its other half: a user turn pairs forward
  *  to the next assistant turn; an assistant turn pairs backward. */
-function pairExchange(exchanges: ExchangeLike[], i: number): { query: string; response: string } {
+function pairExchange(exchanges: ExchangeLike[], i: number): { query: string; response: string; attachments: MediaAttachmentRef[] } {
   const hit = exchanges[i]
   const user = hit.role === 'user'
     ? hit
@@ -50,14 +53,21 @@ function pairExchange(exchanges: ExchangeLike[], i: number): { query: string; re
   const assistant = hit.role === 'assistant'
     ? hit
     : exchanges.slice(i + 1).find((e) => e?.role === 'assistant')
-  return { query: user?.content ?? '', response: assistant?.content ?? '' }
+  return {
+    query: user?.content ?? '',
+    response: assistant?.content ?? '',
+    attachments: mergeMediaAttachmentRefs(user?.attachments, assistant?.attachments),
+  }
 }
 
 function scanExchanges(exchanges: ExchangeLike[], num: number, date: string): ResolvedGlobalMessage | null {
   for (let i = 0; i < exchanges.length; i++) {
     if (exchanges[i]?.globalMsgNum !== num) continue
-    const { query, response } = pairExchange(exchanges, i)
-    return { globalMsgNum: num, date, query, response }
+    const { query, response, attachments } = pairExchange(exchanges, i)
+    return {
+      globalMsgNum: num, date, query, response,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    }
   }
   return null
 }
@@ -96,7 +106,7 @@ export function readArchiveChatNumbered(
   dir: string,
   date: string,
   chatIndex: number,
-): Array<{ query: string; text: string; timestamp: number; no?: number }> {
+): Array<{ query: string; text: string; timestamp: number; no?: number; attachments?: MediaAttachmentRef[] }> {
   // Defense-in-depth against path traversal — `date` builds a `${date}.json`
   // path. The archive route also validates, but this is exported/reused.
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return []
@@ -109,17 +119,19 @@ export function readArchiveChatNumbered(
   const chat = (Array.isArray(day?.chats) ? day.chats : []).find((c) => c?.id === chatIndex)
   if (!chat) return []
   const exchanges: ExchangeLike[] = Array.isArray(chat.exchanges) ? chat.exchanges : []
-  const out: Array<{ query: string; text: string; timestamp: number; no?: number }> = []
+  const out: Array<{ query: string; text: string; timestamp: number; no?: number; attachments?: MediaAttachmentRef[] }> = []
   for (let i = 0; i < exchanges.length; i++) {
     const ex = exchanges[i]
     if (ex?.role !== 'user') continue
     const next = exchanges[i + 1]
     if (next?.role !== 'assistant') continue
+    const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
     out.push({
       query: ex.content ?? '',
       text: next.content ?? '',
       timestamp: next.timestamp ?? ex.timestamp ?? 0,
       no: ex.globalMsgNum ?? next.globalMsgNum,
+      ...(attachments.length > 0 ? { attachments } : {}),
     })
     i++
   }
