@@ -16,7 +16,10 @@ downloads the local voice model when needed, writes `~/.cos-glasses/.env`, and
 starts the server on `0.0.0.0:3141`. On boot it prints
 an **API token** — paste that into the COS Glasses app. Only one COS Glasses
 server may run on a Mac at a time; a second `npx` or source runner exits before
-opening ports or touching shared conversation/media state.
+opening ports or touching shared conversation/media state. Version 6.6.0 also
+gives that server a durable identity and boot-scoped display replay, allowing
+build 188+ to reconnect after a Tailscale, Wi-Fi, or process interruption
+without silently losing completed replies.
 
 ## Requirements
 
@@ -87,6 +90,7 @@ BIND_HOST=0.0.0.0 npm run start:server
 ## Troubleshooting
 
 - *Phone can't connect* — check `BIND_HOST=0.0.0.0`, the same Tailscale account on both devices, and the correct `100.x` IP + token.
+- *Safari connects but the app does not* — confirm `npx @gotcos/glasses-server@latest` is 6.6.0+, then use the app's server reconnect/edit control to verify the current URL and token. Do not run a second source or `npx` server alongside it.
 - *AI queries fail* — run `claude --version` / `codex --version`, then `claude login` / `codex login`.
 - *Voice getting billed?* — install `whisper-cpp` for free local transcription.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.

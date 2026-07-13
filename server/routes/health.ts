@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { COS_SCRIPTS_DIR, COS_MODE, PYTHON_BIN } from '../lib/python-bridge.js'
-import { serverMetrics } from '../index.js'
+import { serverMetrics } from '../lib/server-metrics.js'
+import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import { isWhisperLocalAvailable, getWhisperHealth } from '../lib/whisper-local.js'
@@ -133,7 +134,7 @@ healthRouter.get('/health', async (_req, res) => {
 // authenticated by the global /api middleware; ?refresh=1 forces discovery.
 healthRouter.get('/models', async (req, res) => {
   const catalog = await getCodexModelCatalog(req.query.refresh === '1')
-  res.json(catalog)
+  res.json({ ...catalog, serverInstanceId: getServerInstanceId() })
 })
 
 // GET /api/cli-session — returns current CLI session ID for cross-device resume

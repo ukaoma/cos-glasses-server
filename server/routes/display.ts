@@ -2,15 +2,28 @@
 // Any connected glasses client receives real-time query responses
 // regardless of which interface submitted the query
 
-import { Router } from 'express'
-import { onDisplay, emitDisplay } from '../lib/display-bus.js'
+import { Router, type Response } from 'express'
+import {
+  emitDisplay,
+  getDisplayWatermark,
+  onDisplay,
+  replayDisplayEvents,
+  type PublishedDisplayEvent,
+} from '../lib/display-bus.js'
 
 export const displayRouter = Router()
 
-// Replay buffer — last N events so reconnecting clients don't miss in-flight data
-const REPLAY_BUFFER_SIZE = 20
-let eventId = 0
-const replayBuffer: Array<{ id: number; type: string; data: string }> = []
+function writeEvent(res: Response, event: PublishedDisplayEvent): void {
+  const data = JSON.stringify({
+    ...event.data,
+    _cosDisplayCursor: {
+      bootId: event.bootId,
+      eventId: event.eventId,
+      publishedAt: event.publishedAt,
+    },
+  })
+  res.write(`id: ${event.bootId}:${event.eventId}\nevent: ${event.type}\ndata: ${data}\n\n`)
+}
 
 displayRouter.get('/display-stream', (req, res) => {
   res.writeHead(200, {
@@ -25,15 +38,29 @@ displayRouter.get('/display-stream', (req, res) => {
   // Tell EventSource to retry quickly on disconnect (3s instead of browser default ~5-10s)
   res.write('retry: 3000\n\n')
 
-  // Replay missed events if client sends Last-Event-ID (browser does this automatically)
-  const lastId = parseInt(req.headers['last-event-id'] as string, 10)
-  if (!isNaN(lastId) && lastId > 0) {
-    const missed = replayBuffer.filter(e => e.id > lastId)
-    for (const e of missed) {
-      res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${e.data}\n\n`)
-    }
-    if (missed.length > 0) {
-      console.log(`[display-bus] Replayed ${missed.length} events for reconnecting client (from id ${lastId})`)
+  const headerCursor = String(req.headers['last-event-id'] ?? '')
+  const [headerBootId, headerEventId] = headerCursor.includes(':')
+    ? headerCursor.split(':', 2)
+    : ['', headerCursor]
+  const cursorBootId = String(req.query.bootId ?? headerBootId ?? '') || null
+  const cursorEventId = Number(req.query.eventId ?? headerEventId ?? 0)
+  const replay = replayDisplayEvents(cursorBootId, Number.isFinite(cursorEventId) ? cursorEventId : 0)
+
+  // Ready is a transport handshake, not proof that replay was consumed. It
+  // must precede application events so build 188 can finish admission first.
+  const watermark = getDisplayWatermark()
+  res.write(`event: ready\ndata: ${JSON.stringify(watermark)}\n\n`)
+  if (replay.gap) {
+    res.write(`event: replay_gap\ndata: ${JSON.stringify({
+      reason: replay.reason,
+      requested: { bootId: cursorBootId, eventId: cursorEventId },
+      watermark,
+      oldestEventId: replay.oldestEventId,
+    })}\n\n`)
+  } else {
+    for (const event of replay.events) writeEvent(res, event)
+    if (replay.events.length > 0) {
+      console.log(`[display-bus] Replayed ${replay.events.length} publish-owned events after ${cursorEventId}`)
     }
   }
 
@@ -43,13 +70,7 @@ displayRouter.get('/display-stream', (req, res) => {
   }, 15_000)
 
   const unsub = onDisplay((event) => {
-    eventId++
-    const data = JSON.stringify(event.data)
-    // Buffer for replay
-    replayBuffer.push({ id: eventId, type: event.type, data })
-    if (replayBuffer.length > REPLAY_BUFFER_SIZE) replayBuffer.shift()
-    // Send with id for Last-Event-ID tracking
-    try { res.write(`id: ${eventId}\nevent: ${event.type}\ndata: ${data}\n\n`) } catch { /* client gone */ }
+    try { writeEvent(res, event) } catch { /* client gone */ }
   })
 
   req.on('close', () => {

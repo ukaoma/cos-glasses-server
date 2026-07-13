@@ -1,5 +1,30 @@
 # Changelog
 
+## 6.6.0
+
+Reconnect compatibility for COS Glasses build 188, without importing private
+COS day-context or Mac service-control behavior into the public package.
+
+- **Stable logical server identity.** The server creates one atomic UUID under
+  `~/.cos-glasses/server-instance-id`, preserves it across process and network
+  restarts, and returns it from authenticated `/api/models` probes. Files are
+  mode `0600`; identity is minted only after every required listener binds.
+- **Boot-scoped display cursors.** Display events receive one publish-owned ID
+  before fan-out, so multiple subscribers see the same cursor and cannot
+  duplicate replay records. Each process boot has a distinct UUID.
+- **Deterministic reconnect handshake.** `/api/display-stream` emits `ready`
+  before application events, accepts boot/event cursors, replays the last 200
+  publish-owned events, and reports typed `boot_changed`, `cursor_ahead`, or
+  `buffer_overflow` gaps so clients reconcile durable history instead of
+  guessing or silently dropping replies.
+- **Privacy boundary preserved.** Authenticated query activity remains off the
+  unauthenticated global display bus. The npm server does not include private
+  daily evidence exports, personal COS paths, launchd ownership, or remote
+  machine-restart controls.
+- **Backward compatible.** Older clients can continue opening the same SSE
+  endpoint and ignoring the additive `ready`, cursor metadata, and replay-gap
+  events.
+
 ## 6.5.0
 
 Durable phone photos and assistant-selected output images for COS Glasses
