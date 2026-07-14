@@ -1,5 +1,30 @@
 # Changelog
 
+## 6.7.0
+
+Durable prompt recovery and self-healing local transcription for COS Glasses
+builds 190–191.
+
+- **Audio is durable before transcription.** Prompt chunks are acknowledged only
+  after atomic storage under `~/.cos-glasses/data/prompt-drafts`, survive server
+  and package restarts for 72 hours, and can be finalized or retried by draft ID.
+- **Live warm transcription.** Each saved chunk is transcribed locally while the
+  user continues speaking. Finalization reuses matching-quality cached work or
+  independently produces the requested final quality.
+- **No-key preservation.** Warm transcription never requires an OpenAI key. If
+  every backend is unavailable, the API returns a typed retryable `503` and keeps
+  the acknowledged audio instead of losing the recording behind a generic 500.
+- **Whisper self-recovery.** A single inference timeout no longer leaves the
+  in-memory availability flag permanently false. The next chunk performs one
+  bounded, single-flight health reconciliation; successful inference closes the
+  circuit, while repeated inference failures retain the controlled restart path.
+- **Private-by-default storage.** Draft directories are `0700`, audio and metadata
+  are `0600`, metadata updates are atomic, corrupt metadata is quarantined, and
+  per-chunk/per-draft limits prevent unbounded disk growth.
+- **Public boundary retained.** The npm package includes only generic prompt
+  recovery and text cleanup. It does not add private COS day-context, personal
+  paths, LaunchAgent controls, or remote machine restart authority.
+
 ## 6.6.0
 
 Reconnect compatibility for COS Glasses build 188, without importing private

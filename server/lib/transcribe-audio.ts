@@ -1,8 +1,8 @@
 import {
-  isWhisperLocalAvailable,
   transcribeLocal,
   transcribeHighQuality,
   getWhisperBackend,
+  applyCorrections,
 } from './whisper-local.js'
 import { getVocabulary, getOwnerName } from './profile.js'
 import { applyFuzzyCorrections } from './fuzzy-correct.js'
@@ -20,7 +20,7 @@ import {
   isVocabEchoOnly,
   countVocabTerms,
 } from './hallucination-filter.js'
-import { getOpenAIKey } from './openai-key.js'
+import { getOpenAIKey, tryGetOpenAIKey } from './openai-key.js'
 
 export { OpenAIWhisperBudgetExhaustedError, estimateAudioSeconds }
 
@@ -30,8 +30,21 @@ export interface TranscribeAudioResult {
   text: string
   backend: string
   mode: TranscribeMode
+  requestedMode: TranscribeMode
+  actualQuality: 'hq' | 'fast' | 'cloud'
+  degraded: boolean
   elapsedMs: number
   audioBytes: number
+}
+
+export type TranscriptionBackendPolicy = 'automatic' | 'local-only'
+
+export class TranscriptionUnavailableError extends Error {
+  readonly status = 503
+  constructor(readonly reason: 'local_asr_unavailable' | 'local_asr_restarting' | 'openai_key_missing', message?: string) {
+    super(message ?? reason)
+    this.name = 'TranscriptionUnavailableError'
+  }
 }
 
 export class NoSpeechDetectedError extends Error {
@@ -54,6 +67,10 @@ const HQ_MAX_SECONDS = 60
  *  aren't double-counted. */
 async function transcribeCloud(audioBuffer: Buffer): Promise<string> {
   assertOpenAIWhisperBudget()
+
+  if (!tryGetOpenAIKey()) {
+    throw new TranscriptionUnavailableError('openai_key_missing', 'OpenAI key missing; local audio is preserved for retry')
+  }
 
   const key = getOpenAIKey()
   const audioSeconds = estimateAudioSeconds(audioBuffer)
@@ -106,8 +123,12 @@ export function resolveTranscribeMode(raw: unknown): TranscribeMode {
   return String(raw ?? '').toLowerCase() === 'fast' ? 'fast' : 'hq'
 }
 
-export async function transcribeAudioBuffer(audioBuffer: Buffer, opts: { mode?: TranscribeMode } = {}): Promise<TranscribeAudioResult> {
+export async function transcribeAudioBuffer(
+  audioBuffer: Buffer,
+  opts: { mode?: TranscribeMode; policy?: TranscriptionBackendPolicy } = {},
+): Promise<TranscribeAudioResult> {
   const requestedMode = opts.mode ?? 'hq'
+  const policy = opts.policy ?? 'automatic'
   const audioSeconds = estimateAudioSeconds(audioBuffer)
   const effectiveMode: TranscribeMode =
     requestedMode === 'hq' && audioSeconds > HQ_MAX_SECONDS ? 'fast' : requestedMode
@@ -118,39 +139,63 @@ export async function transcribeAudioBuffer(audioBuffer: Buffer, opts: { mode?: 
 
   let text: string
   let backend: string
+  let actualQuality: 'hq' | 'fast' | 'cloud'
   const tStart = performance.now()
 
-  if (effectiveMode === 'hq' && isWhisperLocalAvailable()) {
+  if (effectiveMode === 'hq') {
     try {
       const enhanced = await enhanceAudio(audioBuffer)
       const result = await transcribeHighQuality(enhanced)
       text = result.text
       backend = 'hq-large-v3'
+      actualQuality = 'hq'
     } catch (hqErr: any) {
       console.warn(`[transcribe] HQ path failed, falling back to fast: ${hqErr.message}`)
       try {
         const result = await transcribeLocal(audioBuffer)
         text = result.text
         backend = `fast-local-${result.backend}`
+        actualQuality = 'fast'
       } catch (localErr: any) {
+        if (policy === 'local-only') {
+          throw new TranscriptionUnavailableError('local_asr_unavailable', `Local transcription unavailable; audio is preserved for retry (${localErr.message})`)
+        }
         console.warn(`[transcribe] Fast local also failed, falling back to cloud: ${localErr.message}`)
         text = await transcribeCloud(audioBuffer)
         backend = 'cloud'
+        actualQuality = 'cloud'
       }
     }
-  } else if (effectiveMode === 'fast' && isWhisperLocalAvailable()) {
+  } else if (effectiveMode === 'fast') {
     try {
       const result = await transcribeLocal(audioBuffer)
       text = result.text
       backend = `fast-local-${result.backend}`
+      actualQuality = 'fast'
     } catch (localErr: any) {
+      if (policy === 'local-only') {
+        throw new TranscriptionUnavailableError('local_asr_unavailable', `Local transcription unavailable; audio is preserved for retry (${localErr.message})`)
+      }
       console.warn(`[transcribe] Local whisper failed (${getWhisperBackend()}), falling back to cloud: ${localErr.message}`)
       text = await transcribeCloud(audioBuffer)
       backend = 'cloud'
+      actualQuality = 'cloud'
     }
   } else {
+    if (policy === 'local-only') {
+      throw new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription unavailable; audio is preserved for retry')
+    }
     text = await transcribeCloud(audioBuffer)
     backend = 'cloud'
+    actualQuality = 'cloud'
+  }
+
+  if (text && text.length > 0) {
+    try {
+      text = applyCorrections(text)
+    } catch (corrErr: any) {
+      console.warn(`[transcribe] applyCorrections failed (non-fatal): ${corrErr.message}`)
+    }
   }
 
   if (text && text.length > 0) {
@@ -187,6 +232,9 @@ export async function transcribeAudioBuffer(audioBuffer: Buffer, opts: { mode?: 
     text: text.trim(),
     backend,
     mode: effectiveMode,
+    requestedMode,
+    actualQuality,
+    degraded: requestedMode === 'hq' && actualQuality !== 'hq',
     elapsedMs,
     audioBytes: audioBuffer.length,
   }

@@ -9,9 +9,9 @@
 
 import { writeFileSync, renameSync, existsSync, readFileSync } from 'node:fs'
 
-export function atomicWriteFileSync(path: string, data: string | Buffer): void {
+export function atomicWriteFileSync(path: string, data: string | Buffer, options: { mode?: number } = {}): void {
   const tmp = `${path}.tmp`
-  writeFileSync(tmp, data)
+  writeFileSync(tmp, data, options.mode === undefined ? undefined : { mode: options.mode })
   renameSync(tmp, path)
 }
 

@@ -147,6 +147,8 @@ let serverProcess: ReturnType<typeof spawn> | null = null
 let serverConsecutiveFailures = 0
 const SERVER_FAILURE_THRESHOLD = 3   // After 3 consecutive failures, auto-restart
 let serverRestarting = false          // Prevents concurrent restart attempts
+let serverStarting = false            // Initial model load is not a circuit failure
+let serverHealthProbe: Promise<boolean> | null = null
 
 // Check CLI availability at import time
 try {
@@ -163,6 +165,16 @@ try {
  * Called from index.ts at server boot. Non-blocking.
  */
 export async function startWhisperServer(): Promise<void> {
+  if (serverStarting) return
+  serverStarting = true
+  try {
+    await startWhisperServerAttempt()
+  } finally {
+    serverStarting = false
+  }
+}
+
+async function startWhisperServerAttempt(): Promise<void> {
   if (!existsSync(WHISPER_SERVER) || !existsSync(MODEL_PATH)) {
     console.log('[whisper-local] whisper-server or model not found — using CLI fallback')
     return
@@ -310,9 +322,37 @@ export function getWhisperHealth(): {
     server: serverAvailable,
     cli: cliAvailable,
     consecutiveFailures: serverConsecutiveFailures,
-    restarting: serverRestarting,
+    restarting: serverRestarting || serverStarting,
     circuitOpen: serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD,
   }
+}
+
+/**
+ * Reconcile a cached unavailable flag with the daemon's live health endpoint.
+ * Only successful inference resets the failure count: /health can be responsive
+ * while the model worker is still hung, and that case must retain the existing
+ * three-strike controlled restart.
+ */
+async function reconcileWhisperServerHealth(): Promise<boolean> {
+  if (serverAvailable) return true
+  if (serverRestarting || serverStarting) return false
+  if (serverHealthProbe) return serverHealthProbe
+
+  serverHealthProbe = (async () => {
+    try {
+      const res = await fetch(`${WHISPER_SERVER_URL}/health`, { signal: AbortSignal.timeout(1_000) })
+      if (!res.ok) return false
+      serverAvailable = true
+      console.log(`[whisper-local] Health endpoint recovered; retrying inference after ${serverConsecutiveFailures} failure(s)`)
+      return true
+    } catch {
+      return false
+    }
+  })().finally(() => {
+    serverHealthProbe = null
+  })
+
+  return serverHealthProbe
 }
 
 /**
@@ -590,6 +630,14 @@ export function resetDecoderCaches(): void {
  */
 export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQuiet?: boolean): Promise<{ text: string; backend: 'server' | 'cli'; words?: WhisperWord[] }> {
   const start = Date.now()
+
+  if (!serverAvailable) {
+    await reconcileWhisperServerHealth()
+  }
+
+  if (!serverAvailable && (serverStarting || serverRestarting)) {
+    throw new Error('whisper-server starting — use preserved/cloud fallback')
+  }
 
   // Try whisper-server first (fastest: ~50-100ms, includes DTW word timestamps)
   if (serverAvailable) {

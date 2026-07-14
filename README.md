@@ -63,6 +63,8 @@ The built-in IP allowlist blocks public-internet traffic regardless.
   and every message keeps a permanent number you can recall (`/api/archive`, `/api/message/:num`)
 - Send phone photos with queued prompts, and review assistant-selected generated,
   research, or explicitly used email images in Messages and on the G2 lens
+- Recover long voice prompts after phone, network, or server interruptions. Audio
+  chunks are saved before transcription and retained locally for 72 hours.
 - Live voice capture + transcription during meetings
 - Local whisper.cpp transcription (free) with OpenAI fallback (optional)
 - Tasks / calendar / people context **if** you run the
@@ -94,6 +96,7 @@ BIND_HOST=0.0.0.0 npm run start:server
 - *AI queries fail* — run `claude --version` / `codex --version`, then `claude login` / `codex login`.
 - *Voice getting billed?* — install `whisper-cpp` for free local transcription.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
+- *Prompt recovery unavailable?* — update with `npx @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
 
 ## License
 

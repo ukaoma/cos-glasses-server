@@ -112,6 +112,7 @@ healthRouter.get('/health', async (_req, res) => {
     voice: keyStatus.hasKey,
     cos_pipeline: COS_MODE,
     whisper: isWhisperLocalAvailable(),
+    promptRecovery: true,
     iphoneAsrCandidates: process.env.COS_IOS_ASR_CANDIDATES === '1',
     mediaProcessingReady: await isMediaProcessingReady(),
     g2LensVariant: G2_LENS_VARIANT_CAPABILITY,
