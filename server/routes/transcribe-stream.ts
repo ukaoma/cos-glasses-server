@@ -4,7 +4,7 @@
 
 import { Router } from 'express'
 import { createHash } from 'node:crypto'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, renameSync, statSync } from 'node:fs'
+import { chmodSync, readFileSync, writeFileSync, existsSync, lstatSync, mkdirSync, readdirSync, unlinkSync, rmSync, renameSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,6 +31,16 @@ import {
   streamSilenceDropReason,
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
+import { dataPath } from '../lib/data-dir.js'
+
+function ensurePrivateDirectory(path: string): void {
+  if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 })
+  const stat = lstatSync(path)
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`Unsafe private audio directory: ${path}`)
+  }
+  try { chmodSync(path, 0o700) } catch { /* individual writes still force 0600 */ }
+}
 
 // Silence-hallucination drops (2026-05-29, v5.9.73). Contract in streamSilenceDropReason:
 //   brand-URL-only -> dropped ALWAYS (vocab-seeded, never real speech).
@@ -41,13 +51,13 @@ const STRIP_BRAND_URLS = process.env.COS_WHISPER_STRIP_BRAND_URLS !== '0'
 const THANKYOU_FILTER = process.env.COS_WHISPER_THANKYOU_FILTER !== '0'
 
 // Audio persistence: save G2-mic chunks for speakers who need more training data
-import { dataPath } from '../lib/data-dir.js'
 const AUDIO_SAVE_DIR = dataPath('training-audio')
+ensurePrivateDirectory(AUDIO_SAVE_DIR)
 const MAX_SAVED_CHUNKS_PER_SPEAKER = 30  // ~5 min of audio per speaker, cleaned after training
 
 // Unrecognized speaker audio: save Ext chunks for retroactive enrollment
 const EXT_AUDIO_DIR = dataPath('ext-audio')
-if (!existsSync(EXT_AUDIO_DIR)) mkdirSync(EXT_AUDIO_DIR, { recursive: true })
+ensurePrivateDirectory(EXT_AUDIO_DIR)
 const EXT_AUDIO_TTL_MS = 72 * 60 * 60 * 1000  // 72-hour retention
 const MAX_EXT_CHUNKS_PER_SESSION = 40  // cap per session to avoid runaway storage
 const extAudioCounts = new Map<string, number>()  // sessionId → chunk count
@@ -73,15 +83,26 @@ const _unused_hallucination_constants_placeholder = 0 as const
 
 // Session audio persistence: save all WAV chunks for batch re-transcription at save time
 const SESSION_AUDIO_DIR = dataPath('session-audio')
-if (!existsSync(SESSION_AUDIO_DIR)) mkdirSync(SESSION_AUDIO_DIR, { recursive: true })
+ensurePrivateDirectory(SESSION_AUDIO_DIR)
 const PENDING_BATCH_DIR = dataPath('pending-batch')
-if (!existsSync(PENDING_BATCH_DIR)) mkdirSync(PENDING_BATCH_DIR, { recursive: true })
+ensurePrivateDirectory(PENDING_BATCH_DIR)
 const MAX_SESSION_AUDIO_BYTES = 500 * 1024 * 1024  // 500MB cap per session (~2hr meeting ≈ 260MB)
+const PRESERVED_SESSION_AUDIO_MARKER = '_meeting_save_preserved.marker'
+const PRESERVED_SESSION_AUDIO_TTL_MS = 2 * 60 * 60 * 1000
 const MAX_CANDIDATE_WAV_BASE64_CHARS = 8 * 1024 * 1024  // stay below server/index.ts 10mb JSON parser cap
 const MAX_CANDIDATE_TEXT_CHARS = 8000
 const MAX_CANDIDATE_WORDS = 1200
 const sessionAudioBytes = new Map<string, number>()  // track per-session byte count
 const sessionAudioWrites = new Map<string, Set<Promise<void>>>()
+
+function hasFreshPreservedAudioMarker(dirPath: string): boolean {
+  try {
+    const marker = resolve(dirPath, PRESERVED_SESSION_AUDIO_MARKER)
+    return existsSync(marker) && Date.now() - statSync(marker).mtimeMs <= PRESERVED_SESSION_AUDIO_TTL_MS
+  } catch {
+    return false
+  }
+}
 
 // In-memory training audio counts — lazy-initialized from disk on first access per speaker
 const trainingAudioCounts = new Map<string, number>()
@@ -191,7 +212,7 @@ const CLOSED_SESSIONS_FILE = dataPath('closed-transcript-sessions.json')
 
 // Incremental chunk persistence — survive server restarts
 const CHUNK_PERSIST_DIR = dataPath('active-sessions')
-if (!existsSync(CHUNK_PERSIST_DIR)) mkdirSync(CHUNK_PERSIST_DIR, { recursive: true })
+ensurePrivateDirectory(CHUNK_PERSIST_DIR)
 
 function readClosedSessions(): Record<string, number> {
   if (!existsSync(CLOSED_SESSIONS_FILE)) return {}
@@ -219,8 +240,9 @@ function persistClosedSessions(): void {
   }
   try {
     const tmp = `${CLOSED_SESSIONS_FILE}.tmp`
-    writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf-8')
+    writeFileSync(tmp, JSON.stringify(merged, null, 2), { encoding: 'utf-8', mode: 0o600 })
     renameSync(tmp, CLOSED_SESSIONS_FILE)
+    try { chmodSync(CLOSED_SESSIONS_FILE, 0o600) } catch {}
   } catch { /* best-effort tombstones */ }
 }
 
@@ -239,8 +261,9 @@ function recoverClosedSessions(): void {
   if (dirty) {
     try {
       const tmp = `${CLOSED_SESSIONS_FILE}.tmp`
-      writeFileSync(tmp, JSON.stringify(closed, null, 2), 'utf-8')
+      writeFileSync(tmp, JSON.stringify(closed, null, 2), { encoding: 'utf-8', mode: 0o600 })
       renameSync(tmp, CLOSED_SESSIONS_FILE)
+      try { chmodSync(CLOSED_SESSIONS_FILE, 0o600) } catch {}
     } catch {}
   }
 }
@@ -271,7 +294,8 @@ function persistSession(sessionId: string): void {
       maxChunkIndex: session.maxChunkIndex ?? -1,
       providerCandidates: session.providerCandidates ?? {},
     })
-    writeFileSync(filePath, data, 'utf-8')
+    writeFileSync(filePath, data, { encoding: 'utf-8', mode: 0o600 })
+    try { chmodSync(filePath, 0o600) } catch { /* best effort on recovered installs */ }
   } catch { /* non-critical — don't break transcription for persistence */ }
 }
 
@@ -371,7 +395,7 @@ function recoverSessions(): void {
     try {
       if (existsSync(SESSION_AUDIO_DIR)) {
         for (const dir of readdirSync(SESSION_AUDIO_DIR)) {
-          if (!recoveredIds.has(dir)) {
+          if (!recoveredIds.has(dir) && !hasFreshPreservedAudioMarker(resolve(SESSION_AUDIO_DIR, dir))) {
             rmSync(resolve(SESSION_AUDIO_DIR, dir), { recursive: true, force: true })
             console.log(`[session-recovery] Cleaned orphaned session-audio: ${dir}`)
           }
@@ -412,7 +436,7 @@ setInterval(() => {
   // Purge orphaned session-audio dirs (no matching active session)
   try {
     for (const dir of readdirSync(SESSION_AUDIO_DIR)) {
-      if (!sessions.has(dir)) {
+      if (!sessions.has(dir) && !hasFreshPreservedAudioMarker(resolve(SESSION_AUDIO_DIR, dir))) {
         rmSync(resolve(SESSION_AUDIO_DIR, dir), { recursive: true, force: true })
       }
     }
@@ -585,6 +609,23 @@ export function getSessionChunks(sessionId: string): TranscriptChunk[] | null {
   return session.chunks.filter(c => c && c.text)
 }
 
+export interface IndexedTranscriptChunk {
+  chunkIndex: number
+  chunk: TranscriptChunk
+}
+
+/** Preserve original raw-WAV indices for post-meeting batch assembly. */
+export function getSessionChunkEntries(sessionId: string): IndexedTranscriptChunk[] | null {
+  const session = sessions.get(sessionId)
+  if (!session) return null
+  const entries: IndexedTranscriptChunk[] = []
+  for (let chunkIndex = 0; chunkIndex < session.chunks.length; chunkIndex++) {
+    const chunk = session.chunks[chunkIndex]
+    if (chunk?.text) entries.push({ chunkIndex, chunk })
+  }
+  return entries
+}
+
 /** Get session start time */
 export function getSessionStartTime(sessionId: string): number | null {
   return sessions.get(sessionId)?.startTime ?? null
@@ -592,18 +633,34 @@ export function getSessionStartTime(sessionId: string): number | null {
 
 /** Move session audio to pending-batch before deletion (batch re-transcription needs it) */
 export function moveSessionAudioToPending(sessionId: string): string | null {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
   const srcDir = resolve(SESSION_AUDIO_DIR, sessionId)
   if (!existsSync(srcDir)) return null
-  const destDir = resolve(PENDING_BATCH_DIR, sessionId)
+  let destDir = resolve(PENDING_BATCH_DIR, sessionId)
   try {
+    // A prior interrupted finalization can leave the canonical destination in
+    // place. Never sacrifice the new raw audio: choose a private unique sibling.
+    if (existsSync(destDir)) {
+      let suffix = `${Date.now()}_${process.pid}`
+      destDir = resolve(PENDING_BATCH_DIR, `${sessionId}_${suffix}`)
+      while (existsSync(destDir)) {
+        suffix = `${Date.now()}_${process.pid}_${Math.random().toString(16).slice(2, 8)}`
+        destDir = resolve(PENDING_BATCH_DIR, `${sessionId}_${suffix}`)
+      }
+    }
     // Rename is atomic on same filesystem
     renameSync(srcDir, destDir)
+    try { chmodSync(destDir, 0o700) } catch {}
     // Write marker file with move timestamp. The cleanup interval checks THIS file's
     // mtime for TTL, not individual chunk files (whose mtimes date from original write).
     // Without this marker, meetings > 1 hour have first chunks older than the 1-hour
     // TTL, causing the interval to purge pending-batch before batch re-transcription
     // can run. Observed 2026-04-13: 103-min meeting lost audio to this race condition.
-    try { writeFileSync(resolve(destDir, '_batch_pending.marker'), String(Date.now()), 'utf-8') } catch {}
+    try {
+      const markerPath = resolve(destDir, '_batch_pending.marker')
+      writeFileSync(markerPath, String(Date.now()), { encoding: 'utf-8', mode: 0o600 })
+      chmodSync(markerPath, 0o600)
+    } catch {}
     return destDir
   } catch (err: unknown) {
     console.warn(`[session-audio] Failed to move to pending-batch: ${errMsg(err)}`)
@@ -611,12 +668,17 @@ export function moveSessionAudioToPending(sessionId: string): string | null {
   }
 }
 
+export function hasSessionAudio(sessionId: string): boolean {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return false
+  try { return statSync(resolve(SESSION_AUDIO_DIR, sessionId)).isDirectory() } catch { return false }
+}
+
 export function getSessionProviderCandidates(sessionId: string): Record<string, ProviderCandidateRecord> {
   return sessions.get(sessionId)?.providerCandidates ?? {}
 }
 
 /** Delete session after save */
-export function deleteSession(sessionId: string): void {
+export function deleteSession(sessionId: string, options: { preserveAudio?: boolean } = {}): void {
   sessions.delete(sessionId)
   sessionAudioBytes.delete(sessionId)
   // Clean up inline hallucination tracking (was leaking until 4-hour interval fired)
@@ -633,7 +695,15 @@ export function deleteSession(sessionId: string): void {
   try { unlinkSync(resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)) } catch {}
   // Clean up session audio if it wasn't moved to pending-batch
   const audioDir = resolve(SESSION_AUDIO_DIR, sessionId)
-  try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
+  if (options.preserveAudio && existsSync(audioDir)) {
+    try {
+      const marker = resolve(audioDir, PRESERVED_SESSION_AUDIO_MARKER)
+      writeFileSync(marker, String(Date.now()), { encoding: 'utf8', mode: 0o600 })
+      chmodSync(marker, 0o600)
+    } catch {}
+  } else {
+    try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
+  }
 }
 
 function isIosAsrCandidateEnabled(): boolean {
@@ -695,7 +765,7 @@ async function readRawBody(req: AsyncIterable<Buffer | Uint8Array | string>): Pr
 
 async function persistRawSessionAudioChunk(sessionId: string, chunkIndex: number, audioBuffer: Buffer): Promise<void> {
   const sessionDir = resolve(SESSION_AUDIO_DIR, sessionId)
-  if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
+  ensurePrivateDirectory(sessionDir)
   const chunkPath = resolve(sessionDir, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`)
   const existingSize = existsSync(chunkPath) ? statSync(chunkPath).size : 0
   const currentBytes = sessionAudioBytes.get(sessionId) ?? 0
@@ -704,7 +774,7 @@ async function persistRawSessionAudioChunk(sessionId: string, chunkIndex: number
     if (chunkIndex % 50 === 0) console.warn(`[session-audio] Session ${sessionId} hit 500MB cap — skipping WAV saves`)
     return
   }
-  const writeJob = writeFile(chunkPath, audioBuffer)
+  const writeJob = writeFile(chunkPath, audioBuffer, { mode: 0o600 })
   await trackSessionAudioWrite(sessionId, writeJob)
   sessionAudioBytes.set(sessionId, Math.max(0, nextBytes))
 }
@@ -856,12 +926,12 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
     if (embCount < 20) {
       try {
         const speakerDir = resolve(AUDIO_SAVE_DIR, speaker.replace(/\s+/g, '_'))
-        if (!existsSync(speakerDir)) mkdirSync(speakerDir, { recursive: true })
+        ensurePrivateDirectory(speakerDir)
         const existing = getTrainingCount(speakerDir)
         if (existing < MAX_SAVED_CHUNKS_PER_SPEAKER) {
           const filename = `${sessionId}_chunk${chunkIndex}_sim${embeddingResult.similarity.toFixed(2)}.wav`
           const savePath = resolve(speakerDir, filename)
-          writeFile(savePath, audioBuffer).catch(err =>
+          writeFile(savePath, audioBuffer, { mode: 0o600 }).catch(err =>
             console.warn(`[training-audio] Async save failed for ${speaker}: ${err.message}`)
           )
           trainingAudioCounts.set(speakerDir, existing + 1)
@@ -877,11 +947,11 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
 
   if (speaker === 'Ext' && audioBuffer.length >= 16000) {
     const extSessionDir = resolve(EXT_AUDIO_DIR, sessionId)
-    if (!existsSync(extSessionDir)) mkdirSync(extSessionDir, { recursive: true })
+    ensurePrivateDirectory(extSessionDir)
     const extCount = extAudioCounts.get(sessionId) ?? 0
     if (extCount < MAX_EXT_CHUNKS_PER_SESSION) {
       const filename = `ext_chunk${chunkIndex}_${Date.now()}.wav`
-      writeFile(resolve(extSessionDir, filename), audioBuffer).catch(err =>
+      writeFile(resolve(extSessionDir, filename), audioBuffer, { mode: 0o600 }).catch(err =>
         console.warn(`[ext-audio] Save failed: ${err.message}`)
       )
       extAudioCounts.set(sessionId, extCount + 1)
@@ -910,6 +980,8 @@ async function processStreamChunk(opts: {
   audioBuffer: Buffer
   candidate?: StreamCandidateInput
   clientElapsed?: number
+  /** Original client recording start, applied only before canonical chunks. */
+  startTimeOverride?: number
 }): Promise<{ text: string; speaker: string; chunkIndex: number; elapsed: number; sessionId: string; backend?: string; asrProvider?: string; fallbackReason?: string }> {
   const { sessionId, chunkIndex, clientSpeaker, audioBuffer, candidate } = opts
   const tReq = performance.now()
@@ -920,6 +992,9 @@ async function processStreamChunk(opts: {
 
   const audioSha256 = sha256Hex(audioBuffer)
   const session = getSession(sessionId)
+  if (opts.startTimeOverride && session.chunks.filter(Boolean).length === 0) {
+    session.startTime = opts.startTimeOverride
+  }
   // Transfer integrity: log this index as delivered before any text filtering,
   // so a silent/hallucination-filtered chunk is NOT mistaken for a lost one.
   recordReceivedChunk(session, chunkIndex)
@@ -1019,7 +1094,10 @@ async function processStreamChunk(opts: {
   }
 
   const { speaker, similarity } = await speakerPromise
-  const elapsed = Date.now() - session.startTime
+  // Client time is authoritative for live network jitter and deferred replay.
+  const elapsed = Number.isFinite(opts.clientElapsed) && (opts.clientElapsed as number) >= 0
+    ? Math.round(opts.clientElapsed as number)
+    : Date.now() - session.startTime
   const trimmedText = sanitized.text
 
   if (!trimmedText) {
@@ -1094,8 +1172,23 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
     const chunkIndex = parseInt((req.query.chunkIndex as string) || '0', 10)
     const clientSpeaker = (req.query.speaker as string) || 'Unknown'
+    const clientElapsedRaw = Number(req.query.elapsed)
+    const clientElapsed = Number.isFinite(clientElapsedRaw) && clientElapsedRaw >= 0
+      ? clientElapsedRaw
+      : undefined
+    const startTimeRaw = Number(req.query.startTime)
+    const startTimeOverride = Number.isFinite(startTimeRaw) && startTimeRaw > 0
+      ? startTimeRaw
+      : undefined
     const audioBuffer = await readRawBody(req)
-    res.json(await processStreamChunk({ sessionId, chunkIndex, clientSpeaker, audioBuffer }))
+    res.json(await processStreamChunk({
+      sessionId,
+      chunkIndex,
+      clientSpeaker,
+      audioBuffer,
+      clientElapsed,
+      startTimeOverride,
+    }))
   } catch (err: unknown) {
     sendStreamError(res, err)
   }

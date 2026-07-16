@@ -1,5 +1,35 @@
 # Changelog
 
+## 6.8.0
+
+Public-safe meeting finalization for COS Glasses build 199.
+
+- **Authenticated meeting save.** `POST /api/meeting/save` finalizes an existing
+  `transcribe-stream` session without adding coaching, private classification,
+  personal paths, or COS-only enrichment to the public package. Lost-chunk gaps,
+  original client timing, provider evidence, and sparse raw-audio indices remain
+  intact through deferred iPhone replay and save.
+- **Durable standalone archive.** Canonical markdown and structured sidecars are
+  published atomically under `dataPath('recordings', 'YYYY-MM')`. Directories are
+  `0700`, files are `0600`, filenames are path-safe and session-unique, and an
+  fsync-backed sidecar-first/markdown-last commit keeps incomplete pairs hidden.
+- **Review on the current client.** Authenticated `GET /api/meetings`, literal
+  `GET /api/meetings/detail`, and the build199-compatible dynamic detail route
+  list and read standalone recordings after process/package restarts. Traversal,
+  unsafe filenames, symlinked roots/months/files, absolute-path disclosure, and
+  cross-domain detail mismatches fail closed.
+- **Transcript-quality bouncer.** Post-meeting batch text must preserve at least
+  50% live coverage, provide independent evidence when no live baseline exists,
+  and avoid repeated long segments/sentences/prefixes. Mixed timestamp coverage
+  falls back to complete batch text instead of dropping text-only segments.
+- **Recovery evidence wins.** Canonical streaming text remains untouched when a
+  batch is rejected or cannot be applied. Pending WAVs are deleted only after
+  accepted text and its sidecar decision are both durable; every other outcome
+  retains audio for bounded two-hour cleanup. HQ batch decoders serialize and
+  refresh their cleanup lease while queued or active.
+- **Capability detection.** `/api/health` now advertises
+  `features.meetingFinalization` for compatible clients.
+
 ## 6.7.0
 
 Durable prompt recovery and self-healing local transcription for COS Glasses

@@ -18,6 +18,8 @@ import { queryRouter } from './routes/query.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
+import { meetingRouter } from './routes/meeting.js'
+import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
 import { messageRefRouter } from './routes/message-ref.js'
@@ -141,6 +143,8 @@ app.use('/api', queryRouter)
 app.use('/api', transcribeRouter)
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)
+app.use('/api', meetingRouter)
+app.use('/api', meetingsRouter)
 app.use('/api', openaiKeyRouter)
 // v6.3.0 — Message History, cross-day 'reference message N', and history
 // recovery for public npx users (previously full-COS-server only).
