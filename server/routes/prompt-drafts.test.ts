@@ -9,6 +9,7 @@ let draftDir = ''
 let server: Server | null = null
 let baseUrl = ''
 let transcribeAudioBuffer: ReturnType<typeof vi.fn>
+let emitDisplay: ReturnType<typeof vi.fn>
 
 class MockNoSpeechDetectedError extends Error { readonly rawText = '' }
 class MockBudgetError extends Error { readonly spentTodayUsd = 5; readonly capUsd = 5 }
@@ -34,6 +35,10 @@ async function startServer(): Promise<void> {
     AUTOCLEAN_MAX_CHARS: 8000,
     autoCleanDictation: async (text: string) => text,
   }))
+  vi.doMock('../lib/display-bus.js', () => {
+    emitDisplay = vi.fn((event) => event)
+    return { emitDisplay }
+  })
   const { promptDraftsRouter } = await import('./prompt-drafts.js')
   const app = express()
   app.use('/api', promptDraftsRouter)
@@ -81,6 +86,7 @@ describe('public prompt draft recovery contract', () => {
     vi.doUnmock('../lib/transcribe-audio.js')
     vi.doUnmock('../lib/whisper-local.js')
     vi.doUnmock('../lib/dictation-clean.js')
+    vi.doUnmock('../lib/display-bus.js')
     delete process.env.COS_PROMPT_DRAFT_DIR
     delete process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE
     if (draftDir) rmSync(draftDir, { recursive: true, force: true })
@@ -95,6 +101,10 @@ describe('public prompt draft recovery contract', () => {
     const uploaded = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
     expect(uploaded.status).toBe(200)
     expect(uploaded.json).toMatchObject({ acked: true, transcriptPending: true, receivedChunkIndexes: [0] })
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId: started.json.draftId, chunkIndex: 0, text: 'warm text' },
+    }))
 
     const finalized = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize`)
     expect(finalized.status).toBe(200)
@@ -117,5 +127,34 @@ describe('public prompt draft recovery contract', () => {
     const recovered = await httpRequest('GET', `/api/prompt-drafts/${draftId}`)
     expect(recovered.status).toBe(200)
     expect(recovered.json.receivedChunkIndexes).toEqual([0])
+  })
+
+  it('never publishes stale warm text after a chunk index is replaced', async () => {
+    let resolveFirst!: (value: any) => void
+    transcribeAudioBuffer
+      .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve }))
+      .mockResolvedValueOnce({
+        text: 'replacement words', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+      })
+
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    const first = await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
+    const replacement = await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 2))
+    expect(first.status).toBe(200)
+    expect(replacement.status).toBe(200)
+
+    resolveFirst({
+      text: 'stale words', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+    })
+
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId, chunkIndex: 0, text: 'replacement words' },
+    }))
+    expect(emitDisplay).not.toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId, chunkIndex: 0, text: 'stale words' },
+    })
   })
 })

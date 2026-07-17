@@ -1,5 +1,25 @@
 # Changelog
 
+## 6.9.0
+
+Live recoverable prompt transcription for COS Glasses builds 200+.
+
+- **Words appear while speaking.** After each audio chunk is durably acknowledged,
+  its sanitized fast/local transcript is published on the existing authenticated,
+  replayable display stream as `prompt_transcript`; the phone/G2 client can fill
+  the Listening body without adding another recorder, polling loop, or ASR job.
+- **Recovery remains authoritative.** The event is optional presentation state.
+  Stored WAV chunks, final HQ transcription, glossary cleanup, editing, retry,
+  and send behavior remain unchanged and continue even if no display client is
+  connected.
+- **Stale retries cannot repaint.** The server rechecks the exact draft, chunk
+  index, and audio bytes after warm transcription. Replaced audio never emits
+  its obsolete words, while client-side draft scoping, ordering, and replay
+  deduplication handle reconnects safely.
+- **Public boundary retained.** This release adds no private COS paths, personal
+  data, LaunchAgent controls, remote restart authority, or machine-management
+  endpoints.
+
 ## 6.8.0
 
 Public-safe meeting finalization for COS Glasses build 199.

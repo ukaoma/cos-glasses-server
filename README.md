@@ -64,7 +64,9 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 - Send phone photos with queued prompts, and review assistant-selected generated,
   research, or explicitly used email images in Messages and on the G2 lens
 - Recover long voice prompts after phone, network, or server interruptions. Audio
-  chunks are saved before transcription and retained locally for 72 hours.
+  chunks are saved before transcription and retained locally for 72 hours. On
+  compatible app builds, their warm transcript also appears live while speaking;
+  final HQ transcription remains authoritative.
 - Live voice capture + transcription during meetings
 - Local whisper.cpp transcription (free) with OpenAI fallback (optional)
 - Tasks / calendar / people context **if** you run the

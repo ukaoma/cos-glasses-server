@@ -38,6 +38,7 @@ import { createBreaker } from '../lib/claude-circuit.js'
 import { logTokenAudit } from '../lib/token-audit.js'
 import { atomicWriteFileSync } from '../lib/atomic-fs.js'
 import { dataPath } from '../lib/data-dir.js'
+import { emitDisplay } from '../lib/display-bus.js'
 
 export const promptDraftsRouter = Router()
 
@@ -234,7 +235,17 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/chunks', async (req, res) => {
     const nextTotal = Object.values(before.chunkBytes).reduce((sum, bytes) => sum + bytes, 0) - existingBytes + audio.length
     if (nextTotal > MAX_DRAFT_BYTES) return res.status(413).json({ error: 'prompt draft too large' })
     const meta = await savePromptDraftChunk(req.params.draftId, chunkIndex, audio)
-    warmTail = warmTail.then(() => transcribeChunk(req.params.draftId, chunkIndex, audio, 'fast', 'warm').then(() => undefined)).catch(err => {
+    warmTail = warmTail.then(async () => {
+      const text = await transcribeChunk(req.params.draftId, chunkIndex, audio, 'fast', 'warm')
+      // The durability ACK above remains immediate. Publish the optional warm
+      // transcript only after rechecking that this exact audio still owns the
+      // chunk index; a retry/replacement must never paint stale words.
+      if (!isCurrentChunk(req.params.draftId, chunkIndex, audio)) return
+      emitDisplay({
+        type: 'prompt_transcript',
+        data: { draftId: req.params.draftId, chunkIndex, text },
+      })
+    }).catch(err => {
       console.warn(`[prompt-draft] warm transcription failed ${req.params.draftId}/${chunkIndex}: ${err.message}`)
     })
     res.json({ draftId: meta.draftId, chunkIndex, acked: true, receivedChunkIndexes: meta.receivedChunkIndexes, chunkBytes: meta.chunkBytes[String(chunkIndex)] ?? audio.length, transcriptPending: true, expiresAt: meta.expiresAt })
