@@ -62,6 +62,27 @@ describe('per-session model run lock', () => {
     mocks.claudeCallbacks[1].onDone('second answer', 'sonnet')
   })
 
+  it('awaits an async terminal callback before starting the same-session successor', async () => {
+    let releaseTerminal!: () => void
+    const terminalGate = new Promise<void>(resolve => { releaseTerminal = resolve })
+    const firstCallbacks = callbacks()
+    firstCallbacks.onDone.mockImplementation(async () => { await terminalGate })
+
+    await callModelStreaming('first', 'async-terminal-session', firstCallbacks, 'sonnet')
+    const second = callModelStreaming('second', 'async-terminal-session', callbacks(), 'sonnet')
+    await Promise.resolve()
+
+    const terminal = mocks.claudeCallbacks[0].onDone('first answer', 'sonnet')
+    await Promise.resolve()
+    expect(mocks.callClaudeStreaming).toHaveBeenCalledTimes(1)
+
+    releaseTerminal()
+    await terminal
+    await second
+    expect(mocks.callClaudeStreaming).toHaveBeenCalledTimes(2)
+    await mocks.claudeCallbacks[1].onDone('second answer', 'sonnet')
+  })
+
   it('allows different sessions to run concurrently', async () => {
     await Promise.all([
       callModelStreaming('one', 'session-a', callbacks(), 'sonnet'),

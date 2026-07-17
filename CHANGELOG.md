@@ -1,5 +1,29 @@
 # Changelog
 
+## 6.10.0
+
+Opt-in server-owned durable query jobs for COS Glasses build 204+.
+
+- **Accepted means durable.** With `COS_DURABLE_QUERY_JOBS=1`, the server
+  appends and fsyncs an immutable job before returning 202. Provider execution
+  is no longer owned by the phone's current request, WebView, or SSE subscriber.
+- **Reconnect without duplication.** The client can recover an ambiguous
+  admission by its stable client job ID, replay ordered bounded events, and
+  acknowledge one terminal projection idempotently after message, queue,
+  counter, and session state are durable on the phone.
+- **Crash and cancellation fences.** Provider ownership is persisted before
+  input, session-scoped leases prevent overlapping orphan continuations after a
+  restart, cancellation is durable, and answer-ready ownership gates
+  conversation, image, notification, and Done side effects.
+- **Private bounded storage.** The append-only journal uses private directory
+  and file modes, repairs torn tails, bounds progress/activity payloads, and
+  retains terminal jobs for exactly seven days.
+- **Safe rollout and rollback.** The health capability advertises exact protocol
+  version 1 only when configured and the store is ready. Removing the flag
+  blocks new durable admissions but leaves GET/events/cancel/ack available so
+  accepted jobs drain; legacy queries, first turns, handoffs, and older clients
+  remain unchanged.
+
 ## 6.9.0
 
 Live recoverable prompt transcription for COS Glasses builds 200+.

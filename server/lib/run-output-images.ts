@@ -80,6 +80,7 @@ export interface RunOutputImageCollectionStats {
 
 export const RUN_OUTPUT_IMAGE_DIR_PREFIX = 'cos-glasses-output-images-'
 export const RUN_OUTPUT_IMAGE_STALE_MS = 2 * 60 * 60_000
+export const RUN_OUTPUT_IMAGE_COLLECTION_TIMEOUT_MS = 2 * 60_000
 const MANIFEST_MAX_BYTES = 64 * 1024
 export const RUN_OUTPUT_IMAGE_COLLECTION_CONCURRENCY = 2
 const ASSOCIATION_ATTEMPTS = 2
@@ -91,6 +92,49 @@ const LABELS: Record<OutputImageProvenance, string> = {
   email: 'Email image',
 }
 const HELPER_PATH = resolve(import.meta.dirname, '..', 'bin', 'cos-output-image-publisher.mjs')
+
+/**
+ * Keep answer post-processing bounded independently of provider generation.
+ * The answer is already durable when bridges call this helper, so an image
+ * collector stall must not retain the session lease or strand finalization.
+ */
+export async function collectRunOutputImagesBounded(
+  publisher: Pick<RunOutputImagePublisher, 'collect'>,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<MediaAttachmentRef[]> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? RUN_OUTPUT_IMAGE_COLLECTION_TIMEOUT_MS)
+  const signal = options.signal
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : Object.assign(new Error('Output image collection aborted.'), { code: 'output_image_collection_aborted' })
+  }
+
+  let timer: NodeJS.Timeout | undefined
+  let abortHandler: (() => void) | undefined
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(Object.assign(
+        new Error('Output image collection exceeded its post-answer deadline.'),
+        { code: 'output_image_collection_timeout' },
+      ))
+    }, timeoutMs)
+    timer.unref?.()
+    if (signal) {
+      abortHandler = () => reject(signal.reason instanceof Error
+        ? signal.reason
+        : Object.assign(new Error('Output image collection aborted.'), { code: 'output_image_collection_aborted' }))
+      signal.addEventListener('abort', abortHandler, { once: true })
+    }
+  })
+
+  try {
+    return await Promise.race([publisher.collect(), guard])
+  } finally {
+    if (timer) clearTimeout(timer)
+    if (signal && abortHandler) signal.removeEventListener('abort', abortHandler)
+  }
+}
 
 interface ManifestPublishEntry {
   v: 1

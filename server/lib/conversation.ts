@@ -10,7 +10,7 @@ import { notifySessionStart, notifySessionEnd } from './telegram-notify.js'
 import { appendToArchive, type SessionToArchive } from './archive.js'
 import { updateGlassesSessionCache, scheduleCacheUpdate, setSessionProvider } from './session-cache-writer.js'
 import { logSessionEnd, buildSessionLogEntry, writeSessionLog } from './session-log.js'
-import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
+import { atomicWriteFileSync, durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { localDay } from './local-day.js'
 import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
 import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
@@ -22,10 +22,30 @@ export interface Exchange {
   content: string
   timestamp: number
   globalMsgNum?: number  // Client's global message number for this Q&A pair
+  /** Durable query provenance. Legacy exchanges omit both fields. */
+  clientJobId?: string
+  generation?: number
   /** Public attachment refs may live on either half of a Q&A pair: request
    * photos on the user exchange, model-published images on the assistant
    * exchange. Bytes, filesystem paths, and capabilities never persist here. */
   attachments?: MediaAttachmentRef[]
+}
+
+export interface ExchangeJobProvenance {
+  clientJobId?: string
+  generation?: number
+}
+
+/** A durable job generation is the exact reconciliation/removal identity.
+ * Requiring both fields prevents a stale generation from mutating its retry. */
+export interface ExchangeJobIdentity {
+  clientJobId: string
+  generation: number
+}
+
+export interface ReconciledExchange {
+  exchange: Exchange
+  created: boolean
 }
 
 interface Session {
@@ -58,6 +78,46 @@ interface SessionsFile {
   savedAt: string
 }
 
+const MAX_CLIENT_JOB_ID_LENGTH = 128
+const SAFE_CLIENT_JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+
+function validClientJobId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_CLIENT_JOB_ID_LENGTH
+    && SAFE_CLIENT_JOB_ID_RE.test(value)
+}
+
+function validGeneration(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+}
+
+function normalizedExchangeProvenance(
+  provenance: ExchangeJobProvenance | undefined,
+): ExchangeJobProvenance {
+  if (!provenance || !validClientJobId(provenance.clientJobId)) return {}
+  return {
+    clientJobId: provenance.clientJobId,
+    ...(validGeneration(provenance.generation) ? { generation: provenance.generation } : {}),
+  }
+}
+
+function validateLoadedExchangeProvenance(exchange: Exchange): void {
+  if (!validClientJobId(exchange.clientJobId)) {
+    delete exchange.clientJobId
+    delete exchange.generation
+    return
+  }
+  if (!validGeneration(exchange.generation)) delete exchange.generation
+}
+
+function matchesJobIdentity(exchange: Exchange, identity: ExchangeJobIdentity): boolean {
+  return exchange.clientJobId === identity.clientJobId
+    && exchange.generation === identity.generation
+}
+
 function loadFromDisk(): void {
   const result = loadJsonOrQuarantine<SessionsFile>(SESSION_FILE)
   if (result.status === 'missing') return // fresh start
@@ -81,6 +141,7 @@ function loadFromDisk(): void {
     // Persistence boundary: malformed refs are dropped without sacrificing
     // the surrounding exchange or the rest of the recovered session.
     for (const exchange of session.exchanges) {
+      validateLoadedExchangeProvenance(exchange)
       if ('attachments' in exchange && exchange.attachments !== undefined) {
         const refs = parseMediaAttachmentRefs(exchange.attachments)
         if (refs.length > 0) exchange.attachments = refs
@@ -118,6 +179,29 @@ function saveToDisk(): void {
     atomicWriteFileSync(SESSION_FILE, JSON.stringify(data, null, 2))
   } catch (err) {
     console.error('[conversation] Failed to save sessions:', err)
+  }
+}
+
+/** Force the current in-memory conversation projection across an fsync-backed
+ * durability boundary. Durable query jobs call this only at terminal/recovery
+ * boundaries; the existing 500ms coalesced writer remains the normal hot path.
+ * Unlike saveToDisk(), failures are surfaced to the caller so it can suppress
+ * a compatibility notification and leave boot reconciliation to repair it. */
+export function flushConversationToDisk(): void {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  try {
+    mkdirSync(dirname(SESSION_FILE), { recursive: true })
+    const data: SessionsFile = {
+      sessions: Object.fromEntries(sessions),
+      savedAt: new Date().toISOString(),
+    }
+    durableAtomicWriteFileSync(SESSION_FILE, JSON.stringify(data, null, 2), { mode: 0o600 })
+  } catch (err) {
+    console.error('[conversation] Failed durable terminal flush:', err)
+    throw err
   }
 }
 
@@ -316,6 +400,7 @@ export function addExchange(
   content: string,
   globalMsgNum?: number,
   attachments?: MediaAttachmentRef[],
+  provenance?: ExchangeJobProvenance,
 ): Exchange {
   let session = sessions.get(sessionId)
   if (!session) {
@@ -328,6 +413,7 @@ export function addExchange(
     content,
     timestamp: Date.now(),
     globalMsgNum,
+    ...normalizedExchangeProvenance(provenance),
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
   }
   session.exchanges.push(exchange)
@@ -375,6 +461,113 @@ export function removeExchange(sessionId: string, exchange: Exchange): boolean {
   scheduleSave()
   scheduleCacheUpdate()
   return true
+}
+
+/** Return the exchanges owned by one exact durable job generation. The
+ * returned objects are the live exchange objects, matching getHistory's
+ * existing shallow-copy behavior. */
+export function findExchangesByJobIdentity(
+  sessionId: string,
+  identity: ExchangeJobIdentity,
+): Exchange[] {
+  const session = sessions.get(sessionId)
+  if (!session || !validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) return []
+  return session.exchanges.filter(exchange => matchesJobIdentity(exchange, identity))
+}
+
+/** Remove only exchanges owned by one exact job generation. A role filter is
+ * used by failed runs to roll back their pending user turn without touching a
+ * completed assistant exchange or a newer retry generation. */
+export function removeExchangesByJobIdentity(
+  sessionId: string,
+  identity: ExchangeJobIdentity,
+  role?: Exchange['role'],
+): number {
+  const session = sessions.get(sessionId)
+  if (!session || !validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) return 0
+
+  const before = session.exchanges.length
+  session.exchanges = session.exchanges.filter(exchange => (
+    !matchesJobIdentity(exchange, identity) || (role !== undefined && exchange.role !== role)
+  ))
+  const removed = before - session.exchanges.length
+  if (removed === 0) return 0
+
+  session.lastActivity = Date.now()
+  scheduleSave()
+  scheduleCacheUpdate()
+  return removed
+}
+
+/** Idempotently create or update one side of a durable job exchange pair.
+ * Duplicate same-role rows for the exact identity are collapsed in the same
+ * synchronous mutation before the existing coalesced save/cache path runs.
+ * Other jobs, generations, and the opposite role are never changed. */
+export function reconcileExchangeByJobIdentity(
+  sessionId: string,
+  identity: ExchangeJobIdentity,
+  role: Exchange['role'],
+  content: string,
+  globalMsgNum?: number,
+  attachments?: MediaAttachmentRef[],
+): ReconciledExchange {
+  if (!validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) {
+    throw new Error('conversation: invalid durable job identity')
+  }
+
+  let session = sessions.get(sessionId)
+  if (!session) {
+    const now = Date.now()
+    session = {
+      id: sessionId,
+      exchanges: [],
+      lastActivity: now,
+      createdAt: now,
+      modelPreference: null,
+      contextBreaks: [],
+    }
+    sessions.set(sessionId, session)
+  }
+
+  const matchingIndexes: number[] = []
+  for (let i = 0; i < session.exchanges.length; i++) {
+    const exchange = session.exchanges[i]
+    if (exchange.role === role && matchesJobIdentity(exchange, identity)) matchingIndexes.push(i)
+  }
+
+  const validatedAttachments = parseMediaAttachmentRefs(attachments)
+  let exchange: Exchange
+  const created = matchingIndexes.length === 0
+  if (created) {
+    exchange = {
+      role,
+      content,
+      timestamp: Date.now(),
+      globalMsgNum,
+      clientJobId: identity.clientJobId,
+      generation: identity.generation,
+      ...(validatedAttachments.length > 0 ? { attachments: validatedAttachments } : {}),
+    }
+    session.exchanges.push(exchange)
+  } else {
+    exchange = session.exchanges[matchingIndexes[0]]
+    exchange.content = content
+    exchange.globalMsgNum = globalMsgNum
+    if (validatedAttachments.length > 0) exchange.attachments = validatedAttachments
+    else delete exchange.attachments
+
+    // Remove from the end so earlier indexes stay stable; retain the oldest
+    // row's timestamp and position to preserve conversation ordering.
+    for (let i = matchingIndexes.length - 1; i >= 1; i--) {
+      session.exchanges.splice(matchingIndexes[i], 1)
+    }
+  }
+
+  while (session.exchanges.length > MAX_EXCHANGES) session.exchanges.shift()
+  session.lastActivity = Date.now()
+  scheduleSave()
+  scheduleCacheUpdate()
+  return { exchange, created }
 }
 
 /** Clear a session — archive + log BEFORE deleting from the live Map.

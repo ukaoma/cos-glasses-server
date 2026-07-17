@@ -56,6 +56,10 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 ## What it does
 
 - Ask anything, get a streamed answer on the lens (`/api/query`, `/v1/chat/completions`)
+- With COS Glasses build 204+, opt into server-owned durable queries with
+  `COS_DURABLE_QUERY_JOBS=1`: accepted work survives phone backgrounding,
+  WebView reloads, and network handoffs, then reattaches without duplicate work
+  or duplicate replies
 - Choose Opus, Fable, Sonnet, GPT Frontier, or GPT Balanced plus High, Extra
   High, Max, or Ultracode effort; optional redacted tool activity streams only
   to the authenticated query that requested it
@@ -78,7 +82,8 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
 optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 `COS_API_TOKEN` (auto if unset), `OPENAI_API_KEY` (cloud voice fallback),
-`COS_SCRIPTS_DIR` (full pipeline), and `COS_MEDIA_ROOT` (optional image-store
+`COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
+server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
 `~/.cos-glasses/.cos-profile.json` (see `.cos-profile.example.json`).
 
@@ -99,6 +104,10 @@ BIND_HOST=0.0.0.0 npm run start:server
 - *Voice getting billed?* — install `whisper-cpp` for free local transcription.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
 - *Prompt recovery unavailable?* — update with `npx @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
+- *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+ and
+  `COS_DURABLE_QUERY_JOBS=1`. Restart once, then confirm `/api/health` reports
+  `features.durableQueryJobs: true`, protocol `1`, and state `ready`. To roll
+  back, remove the flag; accepted jobs still drain while new prompts use legacy streaming.
 
 ## License
 

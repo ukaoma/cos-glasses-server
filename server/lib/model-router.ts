@@ -16,7 +16,7 @@ import type { ModelImageInput } from './model-image-input.js'
 // mutating the same conversation/CLI session concurrently.
 const sessionRunTails = new Map<string, Promise<void>>()
 
-async function acquireSessionRunLock(sessionId: string): Promise<() => void> {
+export async function acquireModelSessionRunLock(sessionId: string): Promise<() => void> {
   const previous = sessionRunTails.get(sessionId) ?? Promise.resolve()
   let openGate!: () => void
   const gate = new Promise<void>(resolve => { openGate = resolve })
@@ -47,7 +47,7 @@ export async function callModelStreaming(
   options?: CallOptions,
 ): Promise<string> {
   const sid = getOrCreateSession(sessionId)
-  const release = await acquireSessionRunLock(sid)
+  const release = options?.sessionLockHeld ? (() => {}) : await acquireModelSessionRunLock(sid)
   if (options?.abortSignal?.aborted) {
     release()
     throw new Error('model-router: request aborted before the model run started.')
@@ -70,16 +70,16 @@ export async function callModelStreaming(
   }
   const lockedCallbacks: StreamCallbacks = {
     ...callbacks,
-    onDone: (fullText, completedModel, cliSessionId, metadata) => {
+    onDone: async (fullText, completedModel, cliSessionId, metadata) => {
       try {
-        callbacks.onDone(fullText, completedModel, cliSessionId, metadata)
+        return await callbacks.onDone(fullText, completedModel, cliSessionId, metadata)
       } finally {
         releaseTerminal()
       }
     },
-    onError: (error) => {
+    onError: async (error) => {
       try {
-        callbacks.onError(error)
+        await callbacks.onError(error)
       } finally {
         releaseTerminal()
       }

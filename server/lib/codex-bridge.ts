@@ -51,6 +51,7 @@ import {
 } from './codex-run-ledger.js'
 import { codexActivityPreviewLines } from './activity-preview.js'
 import {
+  collectRunOutputImagesBounded,
   createRunOutputImagePublisher,
   isRunOutputImagePublisherCommand,
   type RunOutputImageCollectionStats,
@@ -283,7 +284,12 @@ export async function callCodexStreaming(
     }
   }
   let codexThreadId: string | undefined = engineSession?.codexThreadId
-  callbacks.onStart?.(model, sid, undefined, { codexRunId: run.runId, codexThreadId })
+  callbacks.onStart?.(model, sid, undefined, {
+    codexRunId: run.runId,
+    codexThreadId,
+    clientJobId: options?.clientJobId,
+    generation: options?.generation,
+  })
 
   let phase: Phase = 'context'
   let systemPrompt: string
@@ -312,7 +318,18 @@ export async function callCodexStreaming(
   const isFirstQuery = isNewSession(sid)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
   const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
-  const pendingUserExchange = addExchange(sid, 'user', historyQuery, globalMsgNum)
+  const exchangeProvenance = {
+    clientJobId: options?.clientJobId,
+    generation: options?.generation,
+  }
+  const pendingUserExchange = addExchange(
+    sid,
+    'user',
+    historyQuery,
+    globalMsgNum,
+    undefined,
+    exchangeProvenance,
+  )
 
   let fullQuery: string
   if (imagePaths.length === 1) {
@@ -363,6 +380,41 @@ export async function callCodexStreaming(
     options?.abortSignal?.removeEventListener('abort', handleAbort)
   }
 
+  function clearEngineSessionBestEffort(reason: string) {
+    if (!engineSession) return
+    try {
+      clearCodexEngineSession(sid, model)
+    } catch (error) {
+      console.error(`[codex-bridge] engine session clear failed (${reason}):`, error)
+    }
+  }
+
+  function saveEngineSessionBestEffort() {
+    if (!persistentCodexSession || !codexThreadId) return
+    try {
+      const saved = saveCodexEngineSession({
+        cosSessionId: sid,
+        model,
+        codexThreadId,
+        cwd: codexCwd,
+        trustMode: codexTrustMode,
+      })
+      updateCodexRun(run.runId, { codexThreadId, expiresAt: saved.expiresAt })
+    } catch (error) {
+      // The resumable-thread cache is an optimization. Its filesystem failure
+      // must never suppress the durable query terminal callback.
+      console.error('[codex-bridge] engine session save failed:', error)
+    }
+  }
+
+  function finishRunBestEffort(input: Parameters<typeof finishCodexRun>[1]) {
+    try {
+      finishCodexRun(run.runId, input)
+    } catch (error) {
+      console.error('[codex-bridge] run ledger finalization failed:', error)
+    }
+  }
+
   function emitText(text: string) {
     if (!text || emittedBlocks.has(text)) return
     emittedBlocks.add(text)
@@ -377,7 +429,49 @@ export async function callCodexStreaming(
     cleanup()
     cleanupImages()
 
-    const assistantExchange = addExchange(sid, 'assistant', text, globalMsgNum)
+    // The coordinator persists the final provider text before conversation
+    // mutation, condensation, or output-image normalization can stall/crash.
+    try {
+      const answerOwned = await callbacks.onAnswerReady?.(text)
+      if (answerOwned === false) {
+        outputImagePublisher?.cleanup()
+        removeExchange(sid, pendingUserExchange)
+        clearEngineSessionBestEffort('answer_ownership_lost')
+        finishRunBestEffort({
+          status: 'failed',
+          startedAtMs: startTime,
+          error: 'codex-bridge: durable answer ownership was lost.',
+          exitCode: null,
+        })
+        return
+      }
+    } catch (error) {
+      console.error('[codex-bridge] durable answer barrier failed:', error)
+      outputImagePublisher?.cleanup()
+      removeExchange(sid, pendingUserExchange)
+      clearEngineSessionBestEffort('answer_barrier')
+      finishRunBestEffort({
+        status: 'failed',
+        startedAtMs: startTime,
+        error: 'codex-bridge: durable answer persistence failed.',
+        exitCode: null,
+      })
+      try {
+        await callbacks.onError('codex-bridge: durable answer persistence failed.')
+      } catch (callbackError) {
+        console.error('[codex-bridge] durable barrier error callback failed:', callbackError)
+      }
+      return
+    }
+
+    const assistantExchange = addExchange(
+      sid,
+      'assistant',
+      text,
+      globalMsgNum,
+      undefined,
+      exchangeProvenance,
+    )
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
     }
@@ -389,7 +483,9 @@ export async function callCodexStreaming(
       const preparingHeartbeat = setInterval(() => callbacks.onToolStatus?.('Preparing images...'), HEARTBEAT_INTERVAL_MS)
       preparingHeartbeat.unref?.()
       try {
-        outputAttachments = await outputImagePublisher.collect()
+        outputAttachments = await collectRunOutputImagesBounded(outputImagePublisher, {
+          signal: options?.abortSignal,
+        })
       } catch (err) {
         console.error('[codex-bridge] output image collection failed:', err)
       } finally {
@@ -416,29 +512,27 @@ export async function callCodexStreaming(
       durationMs: totalMs,
       caller: options?.lightweight ? 'voice_query' : 'full_query',
     })
-    if (persistentCodexSession && codexThreadId) {
-      const saved = saveCodexEngineSession({
-        cosSessionId: sid,
-        model,
-        codexThreadId,
-        cwd: codexCwd,
-        trustMode: codexTrustMode,
-      })
-      updateCodexRun(run.runId, { codexThreadId, expiresAt: saved.expiresAt })
-    }
+    saveEngineSessionBestEffort()
 
-    finishCodexRun(run.runId, {
+    finishRunBestEffort({
       status: 'completed',
       startedAtMs: startTime,
       output: text,
       exitCode: 0,
     })
-    callbacks.onDone(text, model, undefined, {
-      codexRunId: run.runId,
-      codexThreadId,
-      ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
-      ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
-    })
+    try {
+      const terminalOwned = await callbacks.onDone(text, model, undefined, {
+        codexRunId: run.runId,
+        codexThreadId,
+        clientJobId: options?.clientJobId,
+        generation: options?.generation,
+        ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
+        ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
+      })
+      if (terminalOwned === false) return
+    } catch (error) {
+      console.error('[codex-bridge] terminal completion callback failed:', error)
+    }
 
     if (isFirstQuery) {
       notifySessionStart(sid, query)
@@ -447,23 +541,25 @@ export async function callCodexStreaming(
     notifyExchange(sid, query, text)
   }
 
-  function finalizeError(msg: string, exitCode?: number | null, status: Exclude<CodexRunStatus, 'running'> = 'failed') {
+  async function finalizeError(msg: string, exitCode?: number | null, status: Exclude<CodexRunStatus, 'running'> = 'failed') {
     if (finalized) return
     finalized = true
     cleanup()
     cleanupImages()
     outputImagePublisher?.cleanup()
     removeExchange(sid, pendingUserExchange)
-    if (engineSession) {
-      clearCodexEngineSession(sid, model)
-    }
-    finishCodexRun(run.runId, {
+    clearEngineSessionBestEffort('provider_error')
+    finishRunBestEffort({
       status,
       startedAtMs: startTime,
       error: msg,
       exitCode,
     })
-    callbacks.onError(safeCodexUserError(msg))
+    try {
+      await callbacks.onError(safeCodexUserError(msg))
+    } catch (error) {
+      console.error('[codex-bridge] terminal error callback failed:', error)
+    }
   }
 
   function handleAbort() {
@@ -580,11 +676,38 @@ export async function callCodexStreaming(
   }
 
   try {
+    const providerOwned = await callbacks.onProviderProcess?.({
+      provider: 'codex',
+      runId: run.runId,
+      pid: proc.pid,
+      clientJobId: options?.clientJobId,
+      generation: options?.generation,
+    })
+    if (providerOwned === false) {
+      proc.kill('SIGTERM')
+      finalized = true
+      cleanup()
+      cleanupImages()
+      outputImagePublisher?.cleanup()
+      removeExchange(sid, pendingUserExchange)
+      clearEngineSessionBestEffort('provider_ownership_lost')
+      finishRunBestEffort({
+        status: 'failed',
+        startedAtMs: startTime,
+        error: 'codex-bridge: durable provider ownership was lost.',
+        exitCode: null,
+      })
+      return sid
+    }
+    if (finalized) return sid
     proc.stdin.write(prompt)
     proc.stdin.end()
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    finalizeError(`codex-bridge: stdin failed — ${message}`)
+    if (!finalized) {
+      proc.kill('SIGTERM')
+      await finalizeError(`codex-bridge: provider start failed — ${message}`)
+    }
   }
 
   return sid

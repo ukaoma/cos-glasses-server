@@ -38,6 +38,7 @@ import {
   type ActivityPreviewLine,
 } from './activity-preview.js'
 import {
+  collectRunOutputImagesBounded,
   createRunOutputImagePublisher,
   isRunOutputImagePublisherCommand,
   type RunOutputImageCollectionStats,
@@ -291,19 +292,34 @@ function isExtendedQuery(query: string): boolean {
 }
 
 export interface ModelRunMetadata {
+  claudeRunId?: string
+  clientJobId?: string
+  generation?: number
   codexRunId?: string
   codexThreadId?: string
   outputAttachments?: MediaAttachmentRef[]
   outputImageStats?: RunOutputImageCollectionStats
 }
 
+/** Public-safe provider launch metadata for durable job coordination. It
+ * deliberately exposes no ChildProcess object, kill handle, paths, or env. */
+export interface ProviderProcessMetadata {
+  provider: 'claude' | 'codex'
+  runId: string
+  pid?: number
+  clientJobId?: string
+  generation?: number
+}
+
 export interface StreamCallbacks {
   onChunk: (text: string) => void
-  onDone: (fullText: string, model: ModelPreference, cliSessionId?: string, metadata?: ModelRunMetadata) => void
-  onError: (error: string) => void
+  onAnswerReady?: (fullText: string) => boolean | void | Promise<boolean | void>
+  onDone: (fullText: string, model: ModelPreference, cliSessionId?: string, metadata?: ModelRunMetadata) => boolean | void | Promise<boolean | void>
+  onError: (error: string) => void | Promise<void>
   onToolStatus?: (toolName: string) => void
   onActivityLine?: (line: ActivityPreviewLine) => void
   onStart?: (model: ModelPreference, sessionId: string, cliSessionId?: string, metadata?: ModelRunMetadata) => void
+  onProviderProcess?: (metadata: ProviderProcessMetadata) => boolean | void | Promise<boolean | void>
 }
 
 /** Claude CLI can emit `subtype: success` with `is_error: true`; the boolean
@@ -336,6 +352,10 @@ export interface CallOptions {
   lightweight?: boolean  // Skip async context fetch — use cached context instantly (G2 speed path)
   abortSignal?: AbortSignal
   effort?: EffortPreference
+  clientJobId?: string
+  generation?: number
+  /** Durable coordinator already owns the per-session provider lease. */
+  sessionLockHeld?: boolean
 }
 
 export async function callClaudeStreaming(
@@ -367,7 +387,10 @@ export async function callClaudeStreaming(
   // Pass existing CLI session ID if resuming (new sessions get it after first result)
   const resolvedCliKey = cliSessionKey(sid, resolvedModel)
   let existingCliSession = cliSessionMap.get(resolvedCliKey)
-  callbacks.onStart?.(resolvedModel, sid, existingCliSession)
+  callbacks.onStart?.(resolvedModel, sid, existingCliSession, {
+    clientJobId: options?.clientJobId,
+    generation: options?.generation,
+  })
 
   // Phase: context loading (skipped in lightweight mode)
   let phase: Phase = 'context'
@@ -414,7 +437,18 @@ export async function callClaudeStreaming(
   // Record user message (with [Photo]/[N Photos] prefix for vision queries)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
   const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
-  const pendingUserExchange = addExchange(sid, 'user', historyQuery, globalMsgNum)
+  const exchangeProvenance = {
+    clientJobId: options?.clientJobId,
+    generation: options?.generation,
+  }
+  const pendingUserExchange = addExchange(
+    sid,
+    'user',
+    historyQuery,
+    globalMsgNum,
+    undefined,
+    exchangeProvenance,
+  )
 
   // Vision queries need the Read tool to see the image files
   const baseTools = imagePaths.length > 0 ? 'WebSearch,WebFetch,Read' : 'WebSearch,WebFetch'
@@ -519,15 +553,62 @@ export async function callClaudeStreaming(
     cleanupModelImageInputs(imageInputs)
   }
 
+  function abandonLostDurableOwnership(message: string) {
+    finalized = true
+    cleanup()
+    cleanupImages()
+    outputImagePublisher?.cleanup()
+    removeExchange(sid, pendingUserExchange)
+    if (cliSessionMap.delete(resolvedCliKey)) scheduleCliSessionSave()
+    finishClaudeRun(run.runId, {
+      status: 'failed',
+      startedAtMs: startTime,
+      error: message,
+      exitCode: null,
+    })
+  }
+
   async function finalize(text: string) {
     if (finalized) return
     finalized = true
     cleanup()
     cleanupImages()
 
-    // Persist text before output-image normalization. A daemon crash during
-    // finalization cannot erase an otherwise successful answer.
-    const assistantExchange = addExchange(sid, 'assistant', text, globalMsgNum)
+    // The coordinator persists the final provider text before conversation
+    // mutation, condensation, or output-image normalization can stall/crash.
+    try {
+      const answerOwned = await callbacks.onAnswerReady?.(text)
+      if (answerOwned === false) {
+        abandonLostDurableOwnership('claude-bridge: durable answer ownership was lost.')
+        return
+      }
+    } catch (error) {
+      console.error('[claude-bridge] durable answer barrier failed:', error)
+      outputImagePublisher?.cleanup()
+      removeExchange(sid, pendingUserExchange)
+      if (cliSessionMap.delete(resolvedCliKey)) scheduleCliSessionSave()
+      finishClaudeRun(run.runId, {
+        status: 'failed',
+        startedAtMs: startTime,
+        error: 'claude-bridge: durable answer persistence failed.',
+        exitCode: null,
+      })
+      try {
+        await callbacks.onError('claude-bridge: durable answer persistence failed.')
+      } catch (callbackError) {
+        console.error('[claude-bridge] durable barrier error callback failed:', callbackError)
+      }
+      return
+    }
+
+    const assistantExchange = addExchange(
+      sid,
+      'assistant',
+      text,
+      globalMsgNum,
+      undefined,
+      exchangeProvenance,
+    )
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
     }
@@ -539,7 +620,9 @@ export async function callClaudeStreaming(
       const preparingHeartbeat = setInterval(() => callbacks.onToolStatus?.('Preparing images...'), HEARTBEAT_INTERVAL_MS)
       preparingHeartbeat.unref?.()
       try {
-        outputAttachments = await outputImagePublisher.collect()
+        outputAttachments = await collectRunOutputImagesBounded(outputImagePublisher, {
+          signal: options?.abortSignal,
+        })
       } catch (err) {
         console.error('[claude-bridge] output image collection failed:', err)
       } finally {
@@ -576,10 +659,14 @@ export async function callClaudeStreaming(
       exitCode: 0,
     })
 
-    callbacks.onDone(text, resolvedModel, cliSessionMap.get(resolvedCliKey), {
+    const terminalOwned = await callbacks.onDone(text, resolvedModel, cliSessionMap.get(resolvedCliKey), {
+      claudeRunId: run.runId,
+      clientJobId: options?.clientJobId,
+      generation: options?.generation,
       ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
       ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
     })
+    if (terminalOwned === false) return
 
     // Telegram notifications — fire and forget
     if (isFirstQuery) {
@@ -589,7 +676,7 @@ export async function callClaudeStreaming(
     notifyExchange(sid, query, text)
   }
 
-  function finalizeError(
+  async function finalizeError(
     msg: string,
     exitCode?: number | null,
     status: Exclude<ClaudeRunStatus, 'running'> = 'failed',
@@ -610,7 +697,7 @@ export async function callClaudeStreaming(
       error: msg,
       exitCode,
     })
-    callbacks.onError(msg)
+    await callbacks.onError(msg)
   }
 
   function handleAbort() {
@@ -827,11 +914,27 @@ export async function callClaudeStreaming(
     ? `${fullQuery}\n\n${ULTRACODE_KEYWORD}`
     : fullQuery
   try {
+    const providerOwned = await callbacks.onProviderProcess?.({
+      provider: 'claude',
+      runId: run.runId,
+      pid: proc.pid,
+      clientJobId: options?.clientJobId,
+      generation: options?.generation,
+    })
+    if (providerOwned === false) {
+      proc.kill('SIGTERM')
+      abandonLostDurableOwnership('claude-bridge: durable provider ownership was lost.')
+      return sid
+    }
+    if (finalized) return sid
     proc.stdin.write(cliQuery)
     proc.stdin.end()
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    finalizeError(`claude-bridge: stdin failed — ${message}`, null)
+    if (!finalized) {
+      proc.kill('SIGTERM')
+      await finalizeError(`claude-bridge: provider start failed — ${message}`, null)
+    }
   }
 
   return sid

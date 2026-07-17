@@ -43,6 +43,13 @@ import { getMediaStore } from './lib/media-store.js'
 import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
 import { serverMetrics } from './lib/server-metrics.js'
 import { initializeServerInstanceId } from './lib/server-instance-id.js'
+import { createQueryJobsRouter } from './routes/query-jobs.js'
+import {
+  initQueryJobRuntime,
+  preparePublicDurableQueryAdmission,
+  queryJobCoordinator,
+  shutdownQueryJobRuntime,
+} from './lib/query-job-runtime.js'
 
 const app = express()
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
@@ -139,6 +146,9 @@ app.use((_req, _res, next) => {
 // API routes
 app.use('/api', healthRouter)
 app.use('/api', diagRouter)
+app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
+  prepareAdmission: preparePublicDurableQueryAdmission,
+}))
 app.use('/api', queryRouter)
 app.use('/api', transcribeRouter)
 app.use('/api', displayRouter)
@@ -173,21 +183,28 @@ app.get('/', (_req, res) => {
   )
 })
 
-// Graceful shutdown — stop whisper-server child process
-process.on('SIGTERM', () => {
-  // Production stops (kill, service managers) send SIGTERM — flush session logs
-  // exactly like SIGINT so active conversations aren't lost on shutdown.
+// Graceful shutdown persists an interrupted terminal before provider abort.
+// The bounded force-exit keeps service managers from hanging forever on a
+// broken disk while retaining the previous session/catalog/Whisper cleanup.
+let gracefulShutdownStarted = false
+async function gracefulShutdown(): Promise<void> {
+  if (gracefulShutdownStarted) return
+  gracefulShutdownStarted = true
+  const forceExit = setTimeout(() => process.exit(1), 8_000)
+  forceExit.unref?.()
+  try {
+    await shutdownQueryJobRuntime('server_shutdown')
+  } catch (error) {
+    console.error('[query-jobs] graceful interruption failed:', error)
+  }
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
   stopCodexModelCatalogRefresh()
   stopWhisperServer()
+  clearTimeout(forceExit)
   process.exit(0)
-})
-process.on('SIGINT', () => {
-  logActiveSessionsOnShutdown()
-  stopCodexModelCatalogRefresh()
-  stopWhisperServer()
-  process.exit(0)
-})
+}
+process.on('SIGTERM', () => { void gracefulShutdown() })
+process.on('SIGINT', () => { void gracefulShutdown() })
 
 // Crash protection for runtime work. Listener failures are handled separately
 // and exit immediately so a supervisor can restart a clean, unified process.
@@ -227,6 +244,18 @@ listenRequiredServers(listeners).then(() => {
   console.log(`[COS API] HTTP server running on http://${BIND_HOST}:${PORT}`)
   console.log(`[COS API] Server instance: ${serverInstanceId}`)
   console.log(`[COS API] Mode: ${COS_MODE ? 'COS pipeline' : 'standalone'}`)
+
+  void initQueryJobRuntime().then(health => {
+    if (process.env.COS_DURABLE_QUERY_JOBS === '1') {
+      console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
+    } else {
+      console.log('[COS API] Durable query jobs: disabled (set COS_DURABLE_QUERY_JOBS=1 to enable)')
+    }
+  }).catch(error => {
+    // The store remains degraded and rejects admission. Legacy /api/query is
+    // still mounted, so disabling the feature flag is an immediate rollback.
+    console.error('[COS API] Durable query-job store unavailable:', error)
+  })
 
   // Print ADDRESSES THE PHONE CAN ACTUALLY REACH. The bind address (0.0.0.0) is
   // not paste-able — enumerate real interfaces and label the Tailscale one.

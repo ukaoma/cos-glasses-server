@@ -16,8 +16,39 @@ import {
 } from '../lib/codex-model-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
 import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
+import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
+import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 
 export const healthRouter = Router()
+
+function durableQueryJobStatus() {
+  const configured = durableQueryJobsCapability()
+  const runtime = getQueryJobRuntimeHealth()
+  return {
+    configured: configured.enabled,
+    enabled: configured.enabled
+      && runtime.store.state === 'ready'
+      && !runtime.shuttingDown,
+    protocolVersion: configured.protocolVersion,
+    activeRuns: runtime.activeRuns,
+    shuttingDown: runtime.shuttingDown,
+    callbackPersistenceFailures: runtime.callbackPersistenceFailures,
+    terminalProjectionFailures: runtime.terminalProjectionFailures,
+    store: {
+      state: runtime.store.state,
+      hydratedJobs: runtime.store.hydratedJobs,
+      retainedIdentities: runtime.store.retainedIdentities,
+      subscribers: runtime.store.subscribers,
+      malformedRows: runtime.store.malformedRows,
+      journalFailures: runtime.store.journalFailures,
+      interruptedOnBoot: runtime.store.interruptedOnBoot,
+      lastErrorCode: runtime.store.lastErrorCode,
+      lastSuccessfulWriteAt: runtime.store.lastSuccessfulWriteAt,
+      rootFingerprint: runtime.store.rootFingerprint,
+      counts: runtime.store.counts,
+    },
+  }
+}
 
 healthRouter.get('/health', async (_req, res) => {
   const checks: Record<string, string | number> = {
@@ -106,6 +137,7 @@ healthRouter.get('/health', async (_req, res) => {
   // restart. The nested voice block also exposes the source so future wizard
   // work can decide whether to prompt for a key.
   const keyStatus = getKeyStatus()
+  const durableJobs = durableQueryJobStatus()
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -117,6 +149,8 @@ healthRouter.get('/health', async (_req, res) => {
     iphoneAsrCandidates: process.env.COS_IOS_ASR_CANDIDATES === '1',
     mediaProcessingReady: await isMediaProcessingReady(),
     g2LensVariant: G2_LENS_VARIANT_CAPABILITY,
+    durableQueryJobs: durableJobs.enabled,
+    durableQueryJobsProtocol: durableJobs.protocolVersion,
   }
   const voice = {
     hasKey: keyStatus.hasKey,
@@ -129,14 +163,40 @@ healthRouter.get('/health', async (_req, res) => {
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
 
   const codex_models = getCodexModelCatalogSnapshot()
-  res.json({ ...checks, features, voice, whisper_health, openai_whisper_budget, codex_models })
+  res.json({
+    ...checks,
+    features,
+    voice,
+    whisper_health,
+    openai_whisper_budget,
+    codex_models,
+    // /api/health is intentionally unauthenticated for setup diagnostics.
+    // Publish capability only; job counts, retention identities, subscriber
+    // counts, and the storage fingerprint remain internal.
+    durable_query_jobs: {
+      configured: durableJobs.configured,
+      enabled: durableJobs.enabled,
+      protocolVersion: durableJobs.protocolVersion,
+      state: durableJobs.store.state,
+    },
+  })
 })
 
 // Stable app slots backed by Codex's live model/list catalog. This route is
 // authenticated by the global /api middleware; ?refresh=1 forces discovery.
 healthRouter.get('/models', async (req, res) => {
   const catalog = await getCodexModelCatalog(req.query.refresh === '1')
-  res.json({ ...catalog, serverInstanceId: getServerInstanceId() })
+  const durableJobs = durableQueryJobStatus()
+  res.json({
+    ...catalog,
+    serverInstanceId: getServerInstanceId(),
+    capabilities: {
+      durableQueryJobs: {
+        enabled: durableJobs.enabled,
+        protocolVersion: durableJobs.protocolVersion,
+      },
+    },
+  })
 })
 
 // GET /api/cli-session — returns current CLI session ID for cross-device resume

@@ -18,10 +18,34 @@ import { MediaStore } from './media-store.js'
 import {
   _touchRunOutputImageDirForTests,
   cleanupStaleRunOutputImageDirs,
+  collectRunOutputImagesBounded,
   createRunOutputImagePublisher,
   isRunOutputImagePublisherCommand,
   RUN_OUTPUT_IMAGE_DIR_PREFIX,
 } from './run-output-images.js'
+
+describe('bounded run output image collection', () => {
+  it('returns normal collections unchanged', async () => {
+    const refs: [] = []
+    await expect(collectRunOutputImagesBounded({ collect: async () => refs }, { timeoutMs: 50 }))
+      .resolves.toBe(refs)
+  })
+
+  it('rejects a stalled collection at its post-answer deadline', async () => {
+    const stalled = { collect: () => new Promise<never>(() => {}) }
+    await expect(collectRunOutputImagesBounded(stalled, { timeoutMs: 10 }))
+      .rejects.toMatchObject({ code: 'output_image_collection_timeout' })
+  })
+
+  it('rejects promptly when durable-job ownership aborts the tail', async () => {
+    const controller = new AbortController()
+    const stalled = { collect: () => new Promise<never>(() => {}) }
+    const pending = collectRunOutputImagesBounded(stalled, { signal: controller.signal, timeoutMs: 1_000 })
+    const reason = Object.assign(new Error('postprocess timeout'), { code: 'postprocess_timeout' })
+    controller.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+  })
+})
 
 let ffmpegAvailable = false
 let jpeg: Buffer

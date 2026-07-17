@@ -5,7 +5,7 @@ describe('bridge pending-turn rollback contract', () => {
   for (const file of ['claude-bridge.ts', 'codex-bridge.ts']) {
     it(`${file} removes its exact pending user exchange on terminal failure`, () => {
       const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
-      expect(source).toContain("const pendingUserExchange = addExchange(sid, 'user'")
+      expect(source).toMatch(/const pendingUserExchange = addExchange\(\s*sid,\s*'user'/)
       const failureStart = source.indexOf('function finalizeError')
       const failureEnd = source.indexOf('\n  }', failureStart)
       const failureBody = source.slice(failureStart, failureEnd)
