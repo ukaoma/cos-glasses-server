@@ -1,5 +1,31 @@
 # Changelog
 
+## 6.11.0
+
+Local-first meeting recovery for COS Glasses build 209+.
+
+- **Record through network loss.** The server advertises a versioned
+  `localFirstMeetings` capability with its stable instance ID. Compatible
+  clients can keep audio locally, reconnect to the same server, and reconcile
+  the exact sparse set of chunks it durably received.
+- **Durable means acknowledged.** Raw meeting WAVs and the received-index
+  ledger are committed atomically before a chunk receives success. Storage
+  failures return typed retryable errors; capacity exhaustion returns `507`
+  instead of silently discarding audio.
+- **Long meetings stay alive.** Active-session retention is measured from the
+  last durable activity, not the meeting start time, so recordings longer than
+  four hours are not mistaken for abandoned sessions.
+- **Safe reconnect and close.** Authenticated session-status responses expose
+  exact compressed receive ranges, retention, and closed/saved state. Durable
+  tombstones prevent a late or replaying client from recreating a completed
+  meeting after a restart.
+- **Idempotent finalization.** Repeating `POST /api/meeting/save` for an already
+  saved session returns the original versioned receipt and filename without
+  creating a second meeting.
+- **Backward compatible.** Existing live transcription, meeting save, prompt
+  recovery, durable queries, and older clients retain their prior routes and
+  fields. The new capability, receipt fields, and status route are additive.
+
 ## 6.10.0
 
 Opt-in server-owned durable query jobs for COS Glasses build 204+.

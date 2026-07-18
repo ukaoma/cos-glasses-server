@@ -72,6 +72,10 @@ The built-in IP allowlist blocks public-internet traffic regardless.
   compatible app builds, their warm transcript also appears live while speaking;
   final HQ transcription remains authoritative.
 - Live voice capture + transcription during meetings
+- With COS Glasses build 209+ and server 6.11.0+, meetings continue recording
+  locally through a network interruption. Reconnecting reconciles the exact
+  chunks already stored by the Mac, uploads only missing audio, and finalizes
+  through an idempotent save receipt without duplicating the meeting.
 - Local whisper.cpp transcription (free) with OpenAI fallback (optional)
 - Tasks / calendar / people context **if** you run the
   [COS Starter Kit](https://www.gotcos.com) (`COS_SCRIPTS_DIR`); otherwise it is
@@ -108,6 +112,11 @@ BIND_HOST=0.0.0.0 npm run start:server
   `COS_DURABLE_QUERY_JOBS=1`. Restart once, then confirm `/api/health` reports
   `features.durableQueryJobs: true`, protocol `1`, and state `ready`. To roll
   back, remove the flag; accepted jobs still drain while new prompts use legacy streaming.
+- *Offline meeting recovery unavailable?* — build 209+ requires server 6.11.0+.
+  Restart once, then confirm `/api/health` reports
+  `features.localFirstMeetings: true` and
+  `capabilities.localFirstMeetings.protocolVersion: 1`. Older app builds keep
+  using their existing live-transcription and meeting-save paths.
 
 ## License
 
