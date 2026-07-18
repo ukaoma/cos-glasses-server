@@ -31,6 +31,7 @@ import {
   getSessionProviderCandidates,
   getSessionStartTime,
   getSessionTranscript,
+  getMeetingSessionStatus,
   hasSessionAudio,
   moveSessionAudioToPending,
   type IndexedTranscriptChunk,
@@ -38,6 +39,7 @@ import {
   type TranscriptChunk,
   type TranscriptGapReport,
 } from './transcribe-stream.js'
+import { getServerInstanceId } from '../lib/server-instance-id.js'
 
 interface MeetingSessionSource {
   getTranscript(sessionId: string): string | null
@@ -98,6 +100,8 @@ function publicSaveResponse(saved: SavedMeeting, replayed = false): Record<strin
     ? Math.floor(integrity.completeness * 1_000) / 10
     : 100
   return {
+    receiptVersion: 1,
+    serverInstanceId: getServerInstanceId(),
     saved: true,
     // Keep the build199 string field without leaking an absolute host path.
     filepath: `recordings/${saved.month}/${saved.filename}`,
@@ -124,6 +128,33 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const emit = deps.emit ?? emitDisplay
   const router = Router()
   const savingSessions = new Set<string>()
+
+  router.get('/meeting/sessions/:sessionId/status', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const serverInstanceId = getServerInstanceId()
+    if (!serverInstanceId) {
+      res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
+      return
+    }
+    const saved = store.findBySessionId(sessionId)
+    const live = getMeetingSessionStatus(sessionId)
+    res.set('Cache-Control', 'private, no-store')
+    res.json({
+      sessionId,
+      state: saved ? 'saved' : live.state,
+      serverInstanceId,
+      receivedRanges: live.receivedRanges,
+      receivedCount: live.receivedCount,
+      maxChunkIndex: live.maxChunkIndex,
+      lastActivityAt: live.lastActivityAt,
+      retainedUntil: saved ? null : live.retainedUntil,
+      saveReceipt: saved ? publicSaveResponse(saved) : null,
+    })
+  })
 
   router.post('/meeting/save', async (req, res) => {
     let lockedSessionId: string | null = null

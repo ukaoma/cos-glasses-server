@@ -32,6 +32,13 @@ import {
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
 import { dataPath } from '../lib/data-dir.js'
+import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
+import {
+  LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
+  compressIndexRanges,
+  retainedUntilIso,
+  type IndexRange,
+} from '../lib/local-first-meetings-contract.js'
 
 function ensurePrivateDirectory(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -200,6 +207,8 @@ interface TranscriptSession {
   // Sorted, de-duplicated. See computeGapReport()/analyzeTranscriptGaps().
   receivedIndices?: number[]
   maxChunkIndex?: number
+  /** Persisted idle-retention clock. Meeting date/duration still use startTime. */
+  lastActivityAt: number
   // Count of consecutive vocab-echo (prompt-regurgitation) chunks. Reset to 0 by
   // any real-content chunk. Used to drop a RUN of echoed brand names while keeping
   // a single loud one-off (which could be a real terse list). See sanitizeStreamTranscript.
@@ -207,22 +216,60 @@ interface TranscriptSession {
 }
 
 const sessions = new Map<string, TranscriptSession>()
-const CLOSED_SESSION_TTL_MS = 4 * 60 * 60 * 1000
+const CLOSED_SESSION_TTL_MS = LOCAL_FIRST_MEETING_IDLE_RETENTION_MS
 const CLOSED_SESSIONS_FILE = dataPath('closed-transcript-sessions.json')
+
+interface ClosedTranscriptSession {
+  closedAt: number
+  lastActivityAt: number
+  receivedIndices: number[]
+  maxChunkIndex: number
+  reason: 'saved' | 'expired' | 'closed'
+}
+
+const closedSessionRecords = new Map<string, ClosedTranscriptSession>()
 
 // Incremental chunk persistence — survive server restarts
 const CHUNK_PERSIST_DIR = dataPath('active-sessions')
 ensurePrivateDirectory(CHUNK_PERSIST_DIR)
 
-function readClosedSessions(): Record<string, number> {
+function readClosedSessions(): Record<string, ClosedTranscriptSession> {
   if (!existsSync(CLOSED_SESSIONS_FILE)) return {}
   try {
     const parsed = JSON.parse(readFileSync(CLOSED_SESSIONS_FILE, 'utf-8')) as unknown
     if (!parsed || typeof parsed !== 'object') return {}
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>)
-        .filter(([id, ts]) => /^[A-Za-z0-9:_-]{3,96}$/.test(id) && typeof ts === 'number'),
-    ) as Record<string, number>
+    const normalized: Record<string, ClosedTranscriptSession> = {}
+    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!/^[A-Za-z0-9:_-]{3,96}$/.test(id)) continue
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        normalized[id] = {
+          closedAt: value,
+          lastActivityAt: value,
+          receivedIndices: [],
+          maxChunkIndex: -1,
+          reason: 'closed',
+        }
+        continue
+      }
+      if (!value || typeof value !== 'object') continue
+      const raw = value as Record<string, unknown>
+      const closedAt = typeof raw.closedAt === 'number' && Number.isFinite(raw.closedAt) ? raw.closedAt : null
+      if (closedAt == null) continue
+      const lastActivityAt = typeof raw.lastActivityAt === 'number' && Number.isFinite(raw.lastActivityAt)
+        ? raw.lastActivityAt
+        : closedAt
+      const receivedIndices = Array.isArray(raw.receivedIndices)
+        ? Array.from(new Set(
+          raw.receivedIndices.filter((entry): entry is number => Number.isInteger(entry) && (entry as number) >= 0),
+        )).sort((a, b) => a - b)
+        : []
+      const maxChunkIndex = typeof raw.maxChunkIndex === 'number' && Number.isInteger(raw.maxChunkIndex)
+        ? raw.maxChunkIndex
+        : (receivedIndices.at(-1) ?? -1)
+      const reason = raw.reason === 'saved' || raw.reason === 'expired' ? raw.reason : 'closed'
+      normalized[id] = { closedAt, lastActivityAt, receivedIndices, maxChunkIndex, reason }
+    }
+    return normalized
   } catch {
     try {
       renameSync(CLOSED_SESSIONS_FILE, `${CLOSED_SESSIONS_FILE}.corrupt.${Date.now()}`)
@@ -234,25 +281,31 @@ function readClosedSessions(): Record<string, number> {
 function persistClosedSessions(): void {
   const now = Date.now()
   const merged = readClosedSessions()
-  for (const id of deletedSessions) merged[id] = now
-  for (const [id, closedAt] of Object.entries(merged)) {
-    if (now - closedAt > CLOSED_SESSION_TTL_MS) delete merged[id]
+  for (const id of deletedSessions) {
+    merged[id] = closedSessionRecords.get(id) ?? {
+      closedAt: now,
+      lastActivityAt: now,
+      receivedIndices: [],
+      maxChunkIndex: -1,
+      reason: 'closed',
+    }
+  }
+  for (const [id, record] of Object.entries(merged)) {
+    if (now - record.closedAt > CLOSED_SESSION_TTL_MS) delete merged[id]
   }
   try {
-    const tmp = `${CLOSED_SESSIONS_FILE}.tmp`
-    writeFileSync(tmp, JSON.stringify(merged, null, 2), { encoding: 'utf-8', mode: 0o600 })
-    renameSync(tmp, CLOSED_SESSIONS_FILE)
-    try { chmodSync(CLOSED_SESSIONS_FILE, 0o600) } catch {}
-  } catch { /* best-effort tombstones */ }
+    durableAtomicWriteFileSync(CLOSED_SESSIONS_FILE, JSON.stringify(merged, null, 2), { mode: 0o600 })
+  } catch { /* best-effort tombstones; saved receipts remain authoritative */ }
 }
 
 function recoverClosedSessions(): void {
   const now = Date.now()
   const closed = readClosedSessions()
   let dirty = false
-  for (const [id, closedAt] of Object.entries(closed)) {
-    if (now - closedAt <= CLOSED_SESSION_TTL_MS) {
-      deletedSessions.add(id)
+  for (const [id, record] of Object.entries(closed)) {
+    if (now - record.closedAt <= CLOSED_SESSION_TTL_MS) {
+      rememberDeletedSession(id)
+      closedSessionRecords.set(id, record)
     } else {
       delete closed[id]
       dirty = true
@@ -260,20 +313,17 @@ function recoverClosedSessions(): void {
   }
   if (dirty) {
     try {
-      const tmp = `${CLOSED_SESSIONS_FILE}.tmp`
-      writeFileSync(tmp, JSON.stringify(closed, null, 2), { encoding: 'utf-8', mode: 0o600 })
-      renameSync(tmp, CLOSED_SESSIONS_FILE)
-      try { chmodSync(CLOSED_SESSIONS_FILE, 0o600) } catch {}
+      durableAtomicWriteFileSync(CLOSED_SESSIONS_FILE, JSON.stringify(closed, null, 2), { mode: 0o600 })
     } catch {}
   }
 }
 
-/** Persist a session's chunks to disk (called after each new chunk) */
-function persistSession(sessionId: string): void {
-  try {
-    const session = sessions.get(sessionId)
-    if (!session) return
-    const filePath = resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)
+/** Persist a session before acknowledging any chunk. Throws on failure so a
+ *  client never interprets a non-durable index as accepted. */
+function persistSessionRequired(sessionId: string): void {
+  const session = sessions.get(sessionId)
+  if (!session) throw makeHttpError(404, 'session not found', 'session_not_found')
+  const filePath = resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)
     // chunksIndexed preserves each chunk's original index (a plain filter()
     // would collapse the sparse array and destroy gap positions on recovery).
     const chunksIndexed: Array<{ i: number; c: TranscriptChunk }> = []
@@ -281,9 +331,10 @@ function persistSession(sessionId: string): void {
       const c = session.chunks[i]
       if (c && c.text) chunksIndexed.push({ i, c })
     }
-    const data = JSON.stringify({
+  const data = JSON.stringify({
       sessionId,
       startTime: session.startTime,
+      lastActivityAt: session.lastActivityAt,
       title: session.title,
       // `chunks` = legacy dense form, kept for backward compatibility with
       // existing readers; `chunksIndexed` preserves original indices so gap
@@ -294,9 +345,16 @@ function persistSession(sessionId: string): void {
       maxChunkIndex: session.maxChunkIndex ?? -1,
       providerCandidates: session.providerCandidates ?? {},
     })
-    writeFileSync(filePath, data, { encoding: 'utf-8', mode: 0o600 })
-    try { chmodSync(filePath, 0o600) } catch { /* best effort on recovered installs */ }
-  } catch { /* non-critical — don't break transcription for persistence */ }
+  try {
+    durableAtomicWriteFileSync(filePath, data, { mode: 0o600 })
+  } catch (error) {
+    console.error(`[transcribe-stream] Durable session write failed for ${sessionId}: ${errMsg(error)}`)
+    throw makeHttpError(503, 'meeting session persistence unavailable', 'session_persistence_failed')
+  }
+}
+
+function persistSessionBestEffort(sessionId: string): void {
+  try { persistSessionRequired(sessionId) } catch { /* recovery cleanup is non-admission work */ }
 }
 
 /** Recover sessions from disk on server restart */
@@ -315,9 +373,14 @@ function recoverSessions(): void {
           Array.isArray(data.chunksIndexed) ? data.chunksIndexed : null
         const legacy: TranscriptChunk[] | null = Array.isArray(data.chunks) ? data.chunks : null
         const hasChunks = (indexed && indexed.length > 0) || (legacy && legacy.length > 0)
-        if (data.sessionId && hasChunks) {
-          // Only recover sessions less than 4 hours old
-          if (Date.now() - data.startTime < 4 * 60 * 60 * 1000) {
+        const persistedStat = statSync(resolve(CHUNK_PERSIST_DIR, file))
+        const lastActivityAt = typeof data.lastActivityAt === 'number' && Number.isFinite(data.lastActivityAt)
+          ? data.lastActivityAt
+          : (Number.isFinite(persistedStat.mtimeMs) ? persistedStat.mtimeMs : data.startTime)
+        if (data.sessionId && (hasChunks || Array.isArray(data.receivedIndices) || Number.isFinite(lastActivityAt))) {
+          // Active retention is idle-based. Long meetings are not purged merely
+          // because their original start time is old.
+          if (Date.now() - lastActivityAt < LOCAL_FIRST_MEETING_IDLE_RETENTION_MS) {
             const chunks: TranscriptChunk[] = []
             if (indexed) {
               for (const e of indexed) {
@@ -353,6 +416,7 @@ function recoverSessions(): void {
               chunks,
               startTime: data.startTime,
               title: data.title || '',
+              lastActivityAt,
               receivedIndices,
               maxChunkIndex,
               providerCandidates: data.providerCandidates && typeof data.providerCandidates === 'object'
@@ -380,12 +444,32 @@ function recoverSessions(): void {
             recoveredIds.add(data.sessionId)
             if (cleaned > 0) {
               console.log(`[session-recovery] Cleaned inline hallucinations from ${cleaned} chunks`)
-              persistSession(data.sessionId)  // re-persist cleaned data to disk
+              persistSessionBestEffort(data.sessionId)  // re-persist cleaned data to disk
             }
             const gaps = computeGapReport(session).missingIndices.length
             console.log(`[session-recovery] Recovered ${session.chunks.filter(c => c && c.text).length} chunks for ${data.sessionId}${gaps > 0 ? ` (${gaps} lost-chunk gap${gaps > 1 ? 's' : ''})` : ''}`)
           } else {
-            // Stale — clean up
+            // A stale unsaved session is a real closed state, not a missing
+            // session that a late/zombie client may silently recreate. Keep
+            // its exact receive ledger for one tombstone horizon after boot.
+            const receivedIndices = Array.isArray(data.receivedIndices)
+              ? Array.from(new Set(
+                (data.receivedIndices as unknown[])
+                  .filter((value): value is number => Number.isInteger(value) && (value as number) >= 0),
+              )).sort((left, right) => left - right)
+              : []
+            const maxChunkIndex = typeof data.maxChunkIndex === 'number' && Number.isInteger(data.maxChunkIndex)
+              ? data.maxChunkIndex
+              : (receivedIndices.at(-1) ?? -1)
+            closedSessionRecords.set(data.sessionId, {
+              closedAt: Date.now(),
+              lastActivityAt,
+              receivedIndices,
+              maxChunkIndex,
+              reason: 'expired',
+            })
+            rememberDeletedSession(data.sessionId)
+            persistClosedSessions()
             unlinkSync(resolve(CHUNK_PERSIST_DIR, file))
           }
         }
@@ -410,6 +494,12 @@ function recoverSessions(): void {
 // Declared BEFORE deleteSession to avoid TDZ hazard (deleteSession references these).
 const deletedSessions = new Set<string>()
 const DELETED_SESSION_CAP = 50  // keep last 50 deleted IDs, trim older on overflow
+function rememberDeletedSession(sessionId: string): void {
+  deletedSessions.add(sessionId)
+  if (deletedSessions.size <= DELETED_SESSION_CAP) return
+  const entries = Array.from(deletedSessions)
+  for (const id of entries.slice(0, entries.length - DELETED_SESSION_CAP)) deletedSessions.delete(id)
+}
 export function isSessionDeleted(sessionId: string): boolean {
   return deletedSessions.has(sessionId)
 }
@@ -418,19 +508,12 @@ export function isSessionDeleted(sessionId: string): boolean {
 recoverClosedSessions()
 recoverSessions()
 
-// Auto-cleanup sessions older than 4 hours
+// Auto-cleanup sessions idle for the advertised retention horizon.
 setInterval(() => {
-  const cutoff = Date.now() - 4 * 60 * 60 * 1000
+  const cutoff = Date.now() - LOCAL_FIRST_MEETING_IDLE_RETENTION_MS
   for (const [id, session] of sessions) {
-    if (session.startTime < cutoff) {
-      sessions.delete(id)
-      sessionAudioBytes.delete(id)
-      sessionAudioWrites.delete(id)
-      clearSessionHallucinationState(id)
-      // Clean up persisted file too
-      try { unlinkSync(resolve(CHUNK_PERSIST_DIR, `${id}.json`)) } catch {}
-      // Clean up session audio
-      try { rmSync(resolve(SESSION_AUDIO_DIR, id), { recursive: true, force: true }) } catch {}
+    if (session.lastActivityAt < cutoff) {
+      closeTranscriptSession(id, 'expired')
     }
   }
   // Purge orphaned session-audio dirs (no matching active session)
@@ -493,7 +576,8 @@ setInterval(() => {
 export function getSession(sessionId: string): TranscriptSession {
   let session = sessions.get(sessionId)
   if (!session) {
-    session = { chunks: [], startTime: Date.now(), title: '', providerCandidates: {} }
+    const now = Date.now()
+    session = { chunks: [], startTime: now, lastActivityAt: now, title: '', providerCandidates: {} }
     sessions.set(sessionId, session)
   }
   if (!session.providerCandidates) session.providerCandidates = {}
@@ -677,19 +761,81 @@ export function getSessionProviderCandidates(sessionId: string): Record<string, 
   return sessions.get(sessionId)?.providerCandidates ?? {}
 }
 
+export interface MeetingSessionStatusSnapshot {
+  state: 'active' | 'closed' | 'missing'
+  receivedRanges: IndexRange[]
+  receivedCount: number
+  maxChunkIndex: number
+  lastActivityAt: string | null
+  retainedUntil: string | null
+}
+
+export function getMeetingSessionStatus(sessionId: string): MeetingSessionStatusSnapshot {
+  const active = sessions.get(sessionId)
+  if (active) {
+    const received = active.receivedIndices ?? []
+    return {
+      state: 'active',
+      receivedRanges: compressIndexRanges(received),
+      receivedCount: received.length,
+      maxChunkIndex: active.maxChunkIndex ?? (received.at(-1) ?? -1),
+      lastActivityAt: new Date(active.lastActivityAt).toISOString(),
+      retainedUntil: retainedUntilIso(active.lastActivityAt),
+    }
+  }
+  const closed = closedSessionRecords.get(sessionId)
+  if (closed) {
+    return {
+      state: 'closed',
+      receivedRanges: compressIndexRanges(closed.receivedIndices),
+      receivedCount: closed.receivedIndices.length,
+      maxChunkIndex: closed.maxChunkIndex,
+      lastActivityAt: new Date(closed.lastActivityAt).toISOString(),
+      retainedUntil: new Date(closed.closedAt + CLOSED_SESSION_TTL_MS).toISOString(),
+    }
+  }
+  return {
+    state: 'missing',
+    receivedRanges: [],
+    receivedCount: 0,
+    maxChunkIndex: -1,
+    lastActivityAt: null,
+    retainedUntil: null,
+  }
+}
+
+function closeTranscriptSession(
+  sessionId: string,
+  reason: ClosedTranscriptSession['reason'],
+  options: { preserveAudio?: boolean } = {},
+): void {
+  const session = sessions.get(sessionId)
+  const now = Date.now()
+  const receivedIndices = [...(session?.receivedIndices ?? [])]
+  const maxChunkIndex = session?.maxChunkIndex ?? (receivedIndices.at(-1) ?? -1)
+  closedSessionRecords.set(sessionId, {
+    closedAt: now,
+    lastActivityAt: session?.lastActivityAt ?? now,
+    receivedIndices,
+    maxChunkIndex,
+    reason,
+  })
+  finishClosingTranscriptSession(sessionId, options)
+}
+
 /** Delete session after save */
 export function deleteSession(sessionId: string, options: { preserveAudio?: boolean } = {}): void {
+  closeTranscriptSession(sessionId, 'saved', options)
+}
+
+function finishClosingTranscriptSession(sessionId: string, options: { preserveAudio?: boolean }): void {
   sessions.delete(sessionId)
   sessionAudioBytes.delete(sessionId)
+  sessionAudioWrites.delete(sessionId)
   // Clean up inline hallucination tracking (was leaking until 4-hour interval fired)
   clearSessionHallucinationState(sessionId)
   // Track as deleted so orphan heartbeats get 410 Gone (prevents zombie client spam)
-  deletedSessions.add(sessionId)
-  if (deletedSessions.size > DELETED_SESSION_CAP) {
-    // Trim oldest entries to prevent unbounded growth
-    const arr = Array.from(deletedSessions)
-    for (const id of arr.slice(0, arr.length - DELETED_SESSION_CAP)) deletedSessions.delete(id)
-  }
+  rememberDeletedSession(sessionId)
   persistClosedSessions()
   // Clean up persisted file
   try { unlinkSync(resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)) } catch {}
@@ -768,14 +914,27 @@ async function persistRawSessionAudioChunk(sessionId: string, chunkIndex: number
   ensurePrivateDirectory(sessionDir)
   const chunkPath = resolve(sessionDir, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`)
   const existingSize = existsSync(chunkPath) ? statSync(chunkPath).size : 0
-  const currentBytes = sessionAudioBytes.get(sessionId) ?? 0
-  const nextBytes = currentBytes - existingSize + audioBuffer.length
-  if (nextBytes > MAX_SESSION_AUDIO_BYTES && !existsSync(chunkPath)) {
-    if (chunkIndex % 50 === 0) console.warn(`[session-audio] Session ${sessionId} hit 500MB cap — skipping WAV saves`)
-    return
+  let currentBytes = sessionAudioBytes.get(sessionId)
+  if (currentBytes == null) {
+    currentBytes = 0
+    try {
+      for (const filename of readdirSync(sessionDir)) {
+        if (!/^chunk_\d{4}\.wav$/.test(filename)) continue
+        currentBytes += statSync(resolve(sessionDir, filename)).size
+      }
+    } catch (error) {
+      throw makeHttpError(503, `meeting audio inventory failed: ${errMsg(error)}`, 'session_audio_persistence_failed')
+    }
   }
-  const writeJob = writeFile(chunkPath, audioBuffer, { mode: 0o600 })
-  await trackSessionAudioWrite(sessionId, writeJob)
+  const nextBytes = currentBytes - existingSize + audioBuffer.length
+  if (nextBytes > MAX_SESSION_AUDIO_BYTES) {
+    throw makeHttpError(507, 'meeting audio capacity exceeded', 'meeting_audio_capacity_exceeded')
+  }
+  try {
+    durableAtomicWriteFileSync(chunkPath, audioBuffer, { mode: 0o600 })
+  } catch (error) {
+    throw makeHttpError(503, `meeting audio persistence failed: ${errMsg(error)}`, 'session_audio_persistence_failed')
+  }
   sessionAudioBytes.set(sessionId, Math.max(0, nextBytes))
 }
 
@@ -995,9 +1154,6 @@ async function processStreamChunk(opts: {
   if (opts.startTimeOverride && session.chunks.filter(Boolean).length === 0) {
     session.startTime = opts.startTimeOverride
   }
-  // Transfer integrity: log this index as delivered before any text filtering,
-  // so a silent/hallucination-filtered chunk is NOT mistaken for a lost one.
-  recordReceivedChunk(session, chunkIndex)
   const alreadyCanonical = session.chunks[chunkIndex]
 
   let candidateRecordKey: string | undefined
@@ -1020,21 +1176,24 @@ async function processStreamChunk(opts: {
   // Do not let late duplicate/replayed candidates replace canonical raw audio.
   // Batch re-transcription relies on chunk_000N.wav matching the accepted chunk.
   if (alreadyCanonical?.canonical) {
+    session.lastActivityAt = Date.now()
+    recordReceivedChunk(session, chunkIndex)
     if (candidate && candidateRecordKey) {
       session.providerCandidates![candidateRecordKey].accepted =
         alreadyCanonical.asrProvider === 'iphone-whisperkit-beta' && alreadyCanonical.audioSha256 === audioSha256
       session.providerCandidates![candidateRecordKey].fallbackReason =
         session.providerCandidates![candidateRecordKey].accepted ? undefined : 'canonical_exists'
-      persistSession(sessionId)
     }
+    persistSessionRequired(sessionId)
     return canonicalChunkResponse(alreadyCanonical, sessionId, chunkIndex)
   }
 
   await persistRawSessionAudioChunk(sessionId, chunkIndex, audioBuffer)
-
-  if (candidate) {
-    persistSession(sessionId)
-  }
+  // Commit the received-index ledger only after the canonical raw WAV is
+  // durable. A failure is typed non-2xx and a retry remains safe.
+  session.lastActivityAt = Date.now()
+  recordReceivedChunk(session, chunkIndex)
+  persistSessionRequired(sessionId)
 
   const pcmData = audioBuffer.subarray(44)
   let sumSq = 0
@@ -1105,8 +1264,8 @@ async function processStreamChunk(opts: {
     if (candidate && candidateRecordKey && session.providerCandidates?.[candidateRecordKey]) {
       session.providerCandidates[candidateRecordKey].accepted = false
       session.providerCandidates[candidateRecordKey].fallbackReason = sanitized.fallbackReason || fallbackReason || 'empty'
-      persistSession(sessionId)
     }
+    persistSessionRequired(sessionId)
     return { text: '', speaker: clientSpeaker, chunkIndex, elapsed, sessionId, backend, asrProvider, fallbackReason: sanitized.fallbackReason || fallbackReason }
   }
 
@@ -1132,8 +1291,9 @@ async function processStreamChunk(opts: {
         finalExisting.asrProvider === 'iphone-whisperkit-beta' && finalExisting.audioSha256 === audioSha256
       session.providerCandidates[candidateRecordKey].fallbackReason =
         session.providerCandidates[candidateRecordKey].accepted ? undefined : 'canonical_exists'
-      persistSession(sessionId)
     }
+    session.lastActivityAt = Date.now()
+    persistSessionRequired(sessionId)
     return canonicalChunkResponse(finalExisting, sessionId, chunkIndex)
   }
   session.chunks[chunkIndex] = chunk
@@ -1144,7 +1304,8 @@ async function processStreamChunk(opts: {
     }
   }
   const tPersist = performance.now()
-  persistSession(sessionId)
+  session.lastActivityAt = Date.now()
+  persistSessionRequired(sessionId)
   console.log(`[perf] persistSession: ${(performance.now() - tPersist).toFixed(1)}ms (${session.chunks.filter(c => c).length} chunks)`)
 
   emitDisplay({ type: 'transcript_chunk', data: { text: trimmedText, speaker, chunkIndex, elapsed, sessionId } })
@@ -1207,7 +1368,8 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (
       : undefined
     if (startTime && session.chunks.filter(Boolean).length === 0) session.startTime = startTime
     if (typeof body.title === 'string') session.title = body.title.slice(0, 160)
-    persistSession(sessionId)
+    session.lastActivityAt = Date.now()
+    persistSessionRequired(sessionId)
     res.json({ sessionId, startTime: session.startTime, chunks: session.chunks.filter(Boolean).length })
   } catch (err: unknown) {
     sendStreamError(res, err)

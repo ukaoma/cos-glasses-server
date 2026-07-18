@@ -23,6 +23,8 @@ beforeAll(async () => {
   const runtime = await import('../lib/query-job-runtime.js')
   await runtime.initQueryJobRuntime()
   shutdown = () => runtime.shutdownQueryJobRuntime('test_shutdown')
+  const identity = await import('../lib/server-instance-id.js')
+  identity.initializeServerInstanceId(join(root, 'server-instance-id'))
   const { healthRouter } = await import('./health.js')
   const app = express()
   app.use('/api', healthRouter)
@@ -60,6 +62,14 @@ describe('public durable-query capability health', () => {
     expect(JSON.stringify(body)).not.toContain(root)
     expect(body.durable_query_jobs).not.toHaveProperty('store')
     expect(body.durable_query_jobs).not.toHaveProperty('retainedIdentities')
+    expect(body.features.localFirstMeetings).toBe(true)
+    expect(body.capabilities?.localFirstMeetings).toMatchObject({
+      protocolVersion: 1,
+      idempotentSave: true,
+      sessionStatus: true,
+      retentionMs: 4 * 60 * 60 * 1000,
+    })
+    expect(body.capabilities.localFirstMeetings.serverInstanceId).toMatch(/^[0-9a-f-]{36}$/i)
   }, 20_000)
 
   it('publishes the same authenticated model-catalog capability shape', async () => {
@@ -69,6 +79,11 @@ describe('public durable-query capability health', () => {
     expect(body.capabilities?.durableQueryJobs).toEqual({
       enabled: true,
       protocolVersion: 1,
+    })
+    expect(body.capabilities?.localFirstMeetings).toMatchObject({
+      protocolVersion: 1,
+      idempotentSave: true,
+      sessionStatus: true,
     })
   }, 20_000)
 

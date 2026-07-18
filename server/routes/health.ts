@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { COS_SCRIPTS_DIR, COS_MODE, PYTHON_BIN } from '../lib/python-bridge.js'
 import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
+import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import { isWhisperLocalAvailable, getWhisperHealth } from '../lib/whisper-local.js'
@@ -138,6 +139,7 @@ healthRouter.get('/health', async (_req, res) => {
   // work can decide whether to prompt for a key.
   const keyStatus = getKeyStatus()
   const durableJobs = durableQueryJobStatus()
+  const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -151,6 +153,7 @@ healthRouter.get('/health', async (_req, res) => {
     g2LensVariant: G2_LENS_VARIANT_CAPABILITY,
     durableQueryJobs: durableJobs.enabled,
     durableQueryJobsProtocol: durableJobs.protocolVersion,
+    localFirstMeetings: localFirstMeetings !== null,
   }
   const voice = {
     hasKey: keyStatus.hasKey,
@@ -170,6 +173,7 @@ healthRouter.get('/health', async (_req, res) => {
     whisper_health,
     openai_whisper_budget,
     codex_models,
+    capabilities: localFirstMeetings ? { localFirstMeetings } : {},
     // /api/health is intentionally unauthenticated for setup diagnostics.
     // Publish capability only; job counts, retention identities, subscriber
     // counts, and the storage fingerprint remain internal.
@@ -187,6 +191,7 @@ healthRouter.get('/health', async (_req, res) => {
 healthRouter.get('/models', async (req, res) => {
   const catalog = await getCodexModelCatalog(req.query.refresh === '1')
   const durableJobs = durableQueryJobStatus()
+  const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   res.json({
     ...catalog,
     serverInstanceId: getServerInstanceId(),
@@ -195,6 +200,7 @@ healthRouter.get('/models', async (req, res) => {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,
       },
+      ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
   })
 })

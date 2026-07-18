@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MeetingStore } from '../lib/meeting-store.js'
+import { initializeServerInstanceId } from '../lib/server-instance-id.js'
 import type { BatchTranscription } from '../lib/batch-transcript-quality.js'
 import { createMeetingRouter } from './meeting.js'
 import { createMeetingsRouter } from './meetings.js'
@@ -22,6 +23,7 @@ interface HarnessOptions {
 async function harness(options: HarnessOptions) {
   const parent = mkdtempSync(join(tmpdir(), 'cos-meeting-route-'))
   roots.push(parent)
+  initializeServerInstanceId(join(parent, 'server-instance-id'))
   const recordingsRoot = join(parent, 'data', 'recordings')
   const pendingAudio = join(parent, 'data', 'pending-batch', 'meeting_route_001')
   mkdirSync(pendingAudio, { recursive: true })
@@ -151,6 +153,8 @@ describe('meeting save/list/detail API', () => {
     expect(savedRes.headers.get('cache-control')).toBe('private, no-store')
     const saved = await savedRes.json() as any
     expect(saved).toMatchObject({
+      receiptVersion: 1,
+      serverInstanceId: expect.any(String),
       saved: true,
       filename: expect.stringMatching(/^2026-07-15_Route_integration_[a-f0-9]{8}\.md$/),
       filepath: expect.stringMatching(/^recordings\/2026-07\//),
@@ -165,6 +169,21 @@ describe('meeting save/list/detail API', () => {
       },
     })
     expect(saved.filepath.startsWith('/')).toBe(false)
+    const status = await h.api('/api/meeting/sessions/meeting_route_001/status')
+    expect(status.status).toBe(200)
+    expect(status.headers.get('cache-control')).toBe('private, no-store')
+    expect(await status.json()).toMatchObject({
+      sessionId: 'meeting_route_001',
+      state: 'saved',
+      serverInstanceId: saved.serverInstanceId,
+      receivedRanges: [],
+      receivedCount: 0,
+      maxChunkIndex: -1,
+      saveReceipt: {
+        receiptVersion: 1,
+        filename: saved.filename,
+      },
+    })
     await Promise.all(h.background)
     expect(h.deleted).toHaveBeenCalledWith('meeting_route_001', { preserveAudio: false })
     expect(existsSync(h.pendingAudio)).toBe(false)
