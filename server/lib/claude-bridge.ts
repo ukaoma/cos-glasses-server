@@ -47,6 +47,7 @@ import {
   MAX_ATTACHMENTS_PER_PROMPT,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
+import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -325,12 +326,15 @@ export interface StreamCallbacks {
 /** Claude CLI can emit `subtype: success` with `is_error: true`; the boolean
  * is authoritative and must win before session ids or result text are saved. */
 export function claudeResultErrorMessage(event: any): string | null {
-  if (event?.type !== 'result' || (event?.is_error !== true && event?.subtype !== 'error')) return null
+  if (event?.type !== 'result') return null
   const raw = typeof event?.result === 'string' ? event.result
     : typeof event?.error === 'string' ? event.error
     : typeof event?.error?.message === 'string' ? event.error.message
       : typeof event?.message === 'string' ? event.message
         : ''
+  const authFailure = terminalProviderAuthFailure('claude', raw, event?.error)
+  if (authFailure) return authFailure
+  if (event?.is_error !== true && event?.subtype !== 'error') return null
   const detail = raw.replace(/\s+/g, ' ').trim().slice(0, 240)
   return detail ? `claude-bridge: ${detail}` : 'claude-bridge: Claude CLI returned an error result.'
 }
@@ -545,6 +549,7 @@ export async function callClaudeStreaming(
   let stderr = ''
   let buffer = ''
   let finalized = false        // Guard against double onDone/onError
+  let terminalTextError: string | null = null
   let lastActivity = Date.now() // Tracks last stdout data for inactivity timeout
   let receivedStreamEvents = false  // Track if CLI emits stream_event (vs older assistant-only format)
   const toolInputs = new Map<number, { name: string; json: string }>()
@@ -570,6 +575,13 @@ export async function callClaudeStreaming(
 
   async function finalize(text: string) {
     if (finalized) return
+    const responseAuthFailure = terminalProviderAuthFailure('claude', text)
+    const authFailure = responseAuthFailure
+      ?? (!text.trim() ? terminalTextError ?? terminalProviderAuthFailure('claude', stderr) : null)
+    if (authFailure) {
+      await finalizeError(authFailure, 0)
+      return
+    }
     finalized = true
     cleanup()
     cleanupImages()
@@ -831,9 +843,16 @@ export async function callClaudeStreaming(
               text = event.content
             }
             if (text) {
-              phase = 'generating'
-              fullText += text
-              callbacks.onChunk(text)
+              // Withhold only strongly machine-shaped provider auth output so
+              // credentials cannot flash through onChunk. Human sign-in
+              // instructions do not match the terminal classifier.
+              const authFailure = terminalProviderAuthFailure('claude', text)
+              if (authFailure) terminalTextError = authFailure
+              else {
+                phase = 'generating'
+                fullText += text
+                callbacks.onChunk(text)
+              }
             }
           }
         } else if (event.type === 'user') {
@@ -855,7 +874,9 @@ export async function callClaudeStreaming(
         }
         // tool_use/tool_result/other events still reset inactivity (we got stdout data)
       } catch {
-        // Not valid JSON — ignore partial lines
+        // Older CLI builds can emit a terminal auth error as plain text while
+        // still exiting 0. Remember only the canonical classification.
+        terminalTextError ??= terminalProviderAuthFailure('claude', trimmed)
       }
     }
   })
@@ -883,13 +904,19 @@ export async function callClaudeStreaming(
       } catch { /* ignore */ }
     }
 
-    if (code !== 0 && !fullText) {
-      finalizeError(`claude-bridge: exit ${code} — ${stderr.trim().slice(0, 200)}`, code)
-    } else if (fullText) {
-      // If we got text but no explicit result event, still finalize
+    if (fullText) {
+      // If we got text but no explicit result event, still finalize. A sole,
+      // machine-shaped auth response is classified inside finalize.
       void finalize(fullText)
     } else {
-      finalizeError('claude-bridge: Claude completed without a response.', code)
+      const authFailure = terminalTextError ?? terminalProviderAuthFailure('claude', stderr, buffer)
+      if (authFailure) {
+        finalizeError(authFailure, code)
+      } else if (code !== 0) {
+        finalizeError(`claude-bridge: exit ${code} — ${stderr.trim().slice(0, 200)}`, code)
+      } else {
+        finalizeError('claude-bridge: Claude completed without a response.', code)
+      }
     }
   })
 

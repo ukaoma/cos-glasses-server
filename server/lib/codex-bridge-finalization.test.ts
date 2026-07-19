@@ -69,7 +69,7 @@ vi.mock('./codex-model-catalog.js', () => ({
   resolveCodexServiceTier: () => undefined,
 }))
 vi.mock('./codex-run-ledger.js', () => ({
-  classifyCodexError: () => 'codex.error',
+  classifyCodexError: (message: string) => message.includes('authentication required') ? 'codex.auth_error' : 'codex.error',
   extractCodexThreadId: () => undefined,
   finishCodexRun: vi.fn(),
   getCodexExecutionCwd: () => '/tmp',
@@ -121,6 +121,53 @@ afterEach(() => {
 })
 
 describe('Codex detached finalization', () => {
+  it('turns exit-zero auth output into one typed provider failure', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    state.child.stdout.emit('data', Buffer.from([
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'API Error: 401 Unauthorized Bearer sk-supersecret must never escape' },
+      }),
+      JSON.stringify({ type: 'turn.completed' }),
+      '',
+    ].join('\n')))
+    await vi.waitFor(() => expect(callbackSet.onError).toHaveBeenCalledTimes(1))
+    expect(callbackSet.onError).toHaveBeenCalledWith('Codex auth failed. Run codex login on the Mac.')
+    expect(callbackSet.onChunk).not.toHaveBeenCalled()
+    expect(callbackSet.onAnswerReady).not.toHaveBeenCalled()
+    expect(callbackSet.onDone).not.toHaveBeenCalled()
+  })
+
+  it('streams and completes a normal answer beginning with a sign-in instruction', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    const answer = 'Please sign in to the customer portal, then choose Billing.'
+    state.child.stdout.emit('data', Buffer.from([
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: answer } }),
+      JSON.stringify({ type: 'turn.completed' }),
+      '',
+    ].join('\n')))
+    await vi.waitFor(() => expect(callbackSet.onDone).toHaveBeenCalledTimes(1))
+    expect(callbackSet.onChunk).toHaveBeenCalledWith(answer)
+    expect(callbackSet.onDone.mock.calls[0]?.[0]).toBe(answer)
+    expect(callbackSet.onError).not.toHaveBeenCalled()
+  })
+
+  it('classifies a structured 403 terminal event without exposing provider detail', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    state.child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'turn.failed',
+      error: { status: 403, message: 'Forbidden Bearer sk-supersecret must never escape' },
+    })}\n`))
+    await vi.waitFor(() => expect(callbackSet.onError).toHaveBeenCalledTimes(1))
+    expect(callbackSet.onError).toHaveBeenCalledWith('Codex auth failed. Run codex login on the Mac.')
+    expect(String(callbackSet.onError.mock.calls[0]?.[0] ?? '')).not.toContain('sk-supersecret')
+    expect(callbackSet.onAnswerReady).not.toHaveBeenCalled()
+    expect(callbackSet.onDone).not.toHaveBeenCalled()
+  })
+
   it('still invokes one completion when engine-session save throws', async () => {
     state.saveThrows = true
     const callbackSet = callbacks()

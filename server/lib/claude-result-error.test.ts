@@ -18,6 +18,14 @@ describe('Claude terminal result errors', () => {
     expect(claudeResultErrorMessage({ type: 'result', subtype: 'success', is_error: true, result: 'There is an issue.' })).toContain('There is an issue.')
     expect(claudeResultErrorMessage({ type: 'result', subtype: 'error', error: 'bad model' })).toContain('bad model')
     expect(claudeResultErrorMessage({ type: 'result', subtype: 'success', is_error: false, result: 'answer' })).toBeNull()
+    expect(claudeResultErrorMessage({
+      type: 'result', subtype: 'success', is_error: false,
+      result: 'API Error: 401 Unauthorized Bearer sk-supersecret must never escape',
+    })).toBe('claude-bridge: authentication required.')
+    expect(claudeResultErrorMessage({
+      type: 'result', subtype: 'success', is_error: false,
+      result: 'A 401 Unauthorized response means the credentials were rejected.',
+    })).toBeNull()
   })
 
   it('checks result errors before saving a resumable session and returns on late abort', () => {

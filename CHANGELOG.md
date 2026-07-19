@@ -1,5 +1,35 @@
 # Changelog
 
+## 6.12.1
+
+Public-safe CLI diagnostics for the COS Glasses Recovery Center.
+
+- **Both local agents are visible.** Authenticated clients can inspect a
+  versioned Claude Code and Codex status summary at `/api/cli/debug`, including
+  provider support, persistence readiness, workspace configuration, and the
+  latest run's safe status metadata.
+- **False success is fenced.** Claude Code or Codex output that reports a
+  machine-shaped authentication failure while the CLI exits `0` is finalized
+  as a typed `auth_error`, never projected as a completed assistant reply.
+- **Build 210 stays compatible.** Sanitized `/api/cli/runs` and
+  `/api/codex/runs` projections preserve the fields older Recovery Centers can
+  render while newer clients adopt the combined contract.
+- **Diagnostics do not become an exfiltration path.** Responses use explicit
+  allowlists and omit commands, filesystem paths, trust modes, prompts,
+  answers, tool payloads, content previews, raw run/session/thread IDs,
+  resumable handles, environment values, and tokens. Legacy display IDs are
+  omitted and workspace state is a fixed label only.
+- **Authentication is mandatory.** All three diagnostic routes remain behind
+  the existing `/api` token boundary. Preview-enabled ledger fixtures are
+  covered by recursive forbidden-field and private-value tests.
+- **Unauthenticated health is capability-only.** `/api/health` and
+  `/api/models` advertise `capabilities.cliDebug`; health exposes only a CLI
+  session-availability boolean rather than the resumable session ID.
+- **Backward compatible.** Query, prompt, meeting, media, display, model, and
+  recovery behavior is unchanged. Older clients and servers continue to use
+  their existing paths; a missing CLI Debug capability remains an unsupported
+  feature rather than a connection failure.
+
 ## 6.12.0
 
 Local-first transcription policy and capability-safe recovery diagnostics for

@@ -60,6 +60,7 @@ import {
   MAX_ATTACHMENTS_PER_PROMPT,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
+import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -366,6 +367,7 @@ export async function callCodexStreaming(
   let stderr = ''
   let buffer = ''
   let finalized = false
+  let terminalTextError: string | null = null
   let lastActivity = Date.now()
   const emittedBlocks = new Set<string>()
 
@@ -425,6 +427,13 @@ export async function callCodexStreaming(
 
   async function finalize(text: string) {
     if (finalized) return
+    const responseAuthFailure = terminalProviderAuthFailure('codex', text)
+    const authFailure = responseAuthFailure
+      ?? (!text.trim() ? terminalTextError ?? terminalProviderAuthFailure('codex', stderr) : null)
+    if (authFailure) {
+      await finalizeError(authFailure, 0)
+      return
+    }
     finalized = true
     cleanup()
     cleanupImages()
@@ -614,13 +623,32 @@ export async function callCodexStreaming(
     }
 
     const text = extractCodexResponseText(event)
-    if (text) emitText(text)
+    if (text) {
+      // Withhold only strongly machine-shaped provider auth output so
+      // credentials cannot flash through onChunk. Human sign-in instructions
+      // do not match the terminal classifier.
+      const authFailure = terminalProviderAuthFailure('codex', text)
+      if (authFailure) terminalTextError = authFailure
+      else emitText(text)
+    }
 
     const type = String(event?.type ?? '')
     if (type === 'turn.completed') {
       void finalize(fullText)
     } else if (type === 'turn.failed' || type === 'error') {
-      finalizeError(`codex-bridge: ${event?.error ?? event?.message ?? 'unknown error'}`)
+      const rawProviderError = typeof event?.error === 'string' ? event.error
+        : typeof event?.error?.message === 'string' ? event.error.message
+          : typeof event?.message === 'string' ? event.message
+            : 'unknown error'
+      const structuredProviderError = event?.error && typeof event.error === 'object'
+        ? JSON.stringify(event.error)
+        : ''
+      const authenticationError = terminalProviderAuthFailure(
+        'codex',
+        rawProviderError,
+        structuredProviderError,
+      )
+      finalizeError(authenticationError ?? `codex-bridge: ${rawProviderError}`)
     }
   }
 
@@ -636,7 +664,9 @@ export async function callCodexStreaming(
       try {
         handleEvent(JSON.parse(trimmed))
       } catch {
-        // Ignore non-JSON status lines from older CLI builds.
+        // Older CLI builds can emit a terminal auth error as plain text while
+        // still exiting 0. Remember only the canonical classification.
+        terminalTextError ??= terminalProviderAuthFailure('codex', trimmed)
       }
     }
   })
@@ -651,10 +681,15 @@ export async function callCodexStreaming(
       try { handleEvent(JSON.parse(buffer.trim())) } catch { /* ignore */ }
     }
     if (finalized) return
-    if (code !== 0) {
-      finalizeError(`codex-bridge: exit ${code} — ${stderr.trim().slice(0, 240)}`, code)
-    } else if (fullText) {
+    if (fullText) {
       void finalize(fullText)
+      return
+    }
+    const authFailure = terminalTextError ?? terminalProviderAuthFailure('codex', stderr, buffer)
+    if (authFailure) {
+      finalizeError(authFailure, code)
+    } else if (code !== 0) {
+      finalizeError(`codex-bridge: exit ${code} — ${stderr.trim().slice(0, 240)}`, code)
     } else {
       finalizeError('codex-bridge: Codex completed without a response.')
     }

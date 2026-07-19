@@ -76,6 +76,13 @@ describe('public durable-query capability health', () => {
       restartServer: false,
       managed: false,
     })
+    expect(body.capabilities?.cliDebug).toEqual({
+      schemaVersion: 1,
+      providers: { claude: true, codex: true },
+      metadataOnly: true,
+    })
+    expect(typeof body.cli_session_available).toBe('boolean')
+    expect(body).not.toHaveProperty('cli_session_id')
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
       protocolVersion: 1,
       idempotentSave: true,
@@ -109,6 +116,11 @@ describe('public durable-query capability health', () => {
       restartWhisper: false,
       restartServer: false,
       managed: false,
+    })
+    expect(body.capabilities?.cliDebug).toEqual({
+      schemaVersion: 1,
+      providers: { claude: true, codex: true },
+      metadataOnly: true,
     })
   }, 20_000)
 

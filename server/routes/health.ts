@@ -20,6 +20,7 @@ import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { getTranscriptionPolicySnapshot } from '../lib/transcription-policy.js'
+import { CLI_DEBUG_CAPABILITY } from '../lib/cli-debug-view.js'
 
 export const healthRouter = Router()
 
@@ -53,7 +54,7 @@ function durableQueryJobStatus() {
 }
 
 healthRouter.get('/health', async (_req, res) => {
-  const checks: Record<string, string | number> = {
+  const checks: Record<string, string | number | boolean> = {
     status: 'ok',
     mode: COS_MODE ? 'cos' : 'standalone',
     server: 'ok',
@@ -128,9 +129,11 @@ healthRouter.get('/health', async (_req, res) => {
 
   checks.silero_vad = isSileroAvailable() ? 'active' : 'disabled'
 
-  // Include CLI session ID if available (pre-warmed or active)
+  // Health is unauthenticated. Publish only availability; the actual CLI
+  // session id is a resumable runtime handle and belongs on authenticated
+  // query/debug surfaces.
   const cliSid = getAvailableCliSessionId()
-  if (cliSid) checks.cli_session_id = cliSid
+  checks.cli_session_available = Boolean(cliSid)
 
   // Feature summary for client capability detection.
   // v5.9.5 — voice.hasKey reflects the centralized resolver (env > saved file >
@@ -185,6 +188,7 @@ healthRouter.get('/health', async (_req, res) => {
     capabilities: {
       transcription,
       recovery,
+      cliDebug: CLI_DEBUG_CAPABILITY,
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
     // /api/health is intentionally unauthenticated for setup diagnostics.
@@ -215,6 +219,7 @@ healthRouter.get('/models', async (req, res) => {
         protocolVersion: durableJobs.protocolVersion,
       },
       transcription,
+      cliDebug: CLI_DEBUG_CAPABILITY,
       recovery: {
         status: false,
         restartWhisper: false,
