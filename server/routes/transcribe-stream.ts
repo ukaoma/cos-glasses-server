@@ -1,5 +1,6 @@
 // POST /api/transcribe-stream — Streaming transcription for continuous meeting capture
-// Uses local Whisper (50ms) with OpenAI API fallback.
+// Uses local Whisper. OpenAI API fallback is disabled by default and requires
+// both COS_OPENAI_WHISPER_FALLBACK=1 and a configured key.
 // Streams speaker-labeled transcript chunks for live meeting capture.
 
 import { Router } from 'express'
@@ -10,11 +11,13 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getVocabulary, getOwnerName } from '../lib/profile.js'
 import { getOpenAIKey } from '../lib/openai-key.js'
+import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from '../lib/transcription-policy.js'
+import { TranscriptionUnavailableError } from '../lib/transcribe-audio.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
-import { transcribeLocal, isWhisperLocalAvailable, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
+import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
 import { identifySpeaker, isEmbeddingAvailable, autoEnroll, getEmbeddingCount } from '../lib/speaker-embeddings.js'
@@ -1044,18 +1047,26 @@ function canonicalChunkResponse(
 }
 
 async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Buffer, whisperContext: string, isQuiet: boolean): Promise<{ text: string; words?: WhisperWord[]; backend: string }> {
-  if (isWhisperLocalAvailable()) {
-    try {
-      const result = await transcribeLocal(whisperAudio, whisperContext || undefined, isQuiet)
-      return { text: result.text, words: result.words, backend: `local-${result.backend}` }
-    } catch (err: unknown) {
-      console.warn(`[transcribe-stream] Local Whisper failed, falling back to cloud: ${errMsg(err)}`)
-      const text = await transcribeViaCloud(whisperAudio)
-      return { text, words: undefined, backend: 'cloud' }
+  // The worker owns reconciliation of stale health. Always attempt local ASR
+  // once; an availability snapshot must not divert meeting audio to cloud.
+  try {
+    const result = await transcribeLocal(whisperAudio, whisperContext || undefined, isQuiet)
+    return { text: result.text, words: result.words, backend: `local-${result.backend}` }
+  } catch (err: unknown) {
+    if (!isOpenAIWhisperFallbackReady()) {
+      const fallback = getTranscriptionPolicySnapshot()
+      console.warn(`[transcribe-stream] Local Whisper unavailable; preserving chunk for retry: ${errMsg(err)}`)
+      throw new TranscriptionUnavailableError(
+        fallback.openaiFallbackConfigured ? 'openai_key_missing' : 'local_asr_unavailable',
+        fallback.openaiFallbackConfigured
+          ? 'Local transcription is unavailable; audio is preserved for retry and the configured OpenAI fallback has no key'
+          : 'Local transcription is unavailable; audio is preserved for retry',
+      )
     }
+    console.warn(`[transcribe-stream] Local Whisper failed; using explicitly enabled OpenAI fallback: ${errMsg(err)}`)
+    const text = await transcribeViaCloud(whisperAudio)
+    return { text, words: undefined, backend: 'cloud' }
   }
-  const text = await transcribeViaCloud(whisperAudio)
-  return { text, words: undefined, backend: 'cloud' }
 }
 
 function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
@@ -1315,6 +1326,14 @@ async function processStreamChunk(opts: {
 }
 
 function sendStreamError(res: { status: (code: number) => { json: (body: unknown) => unknown } }, err: unknown): unknown {
+  if (err instanceof TranscriptionUnavailableError) {
+    console.warn(`[transcribe-stream] ${err.message}`)
+    return res.status(err.status).json({
+      error: err.message,
+      reason: err.reason,
+      retryable: true,
+    })
+  }
   if (err instanceof OpenAIWhisperBudgetExhaustedError) {
     console.error(`[transcribe-stream] ${err.message}`)
     return res.status(503).json({
@@ -1487,9 +1506,18 @@ transcribeStreamRouter.post('/transcribe-stream/candidates', async (req, res) =>
  *  A hung whisper-server + long meeting is the exact scenario this guards against —
  *  chunks stay empty on budget-exceeded instead of silently billing per chunk. */
 async function transcribeViaCloud(audioBuffer: Buffer): Promise<string> {
-  assertOpenAIWhisperBudget()
+  if (!isOpenAIWhisperFallbackReady()) {
+    const fallback = getTranscriptionPolicySnapshot()
+    throw new TranscriptionUnavailableError(
+      fallback.openaiFallbackConfigured ? 'openai_key_missing' : 'local_asr_unavailable',
+      fallback.openaiFallbackConfigured
+        ? 'Local transcription is unavailable; audio is preserved for retry and the configured OpenAI fallback has no key'
+        : 'Local transcription is unavailable; audio is preserved for retry',
+    )
+  }
 
   const key = getOpenAIKey()
+  assertOpenAIWhisperBudget()
   const audioSeconds = estimateAudioSeconds(audioBuffer)
 
   const isWav = audioBuffer.length >= 4 && audioBuffer.toString('ascii', 0, 4) === 'RIFF'

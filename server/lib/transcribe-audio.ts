@@ -21,6 +21,7 @@ import {
   countVocabTerms,
 } from './hallucination-filter.js'
 import { getOpenAIKey, tryGetOpenAIKey } from './openai-key.js'
+import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from './transcription-policy.js'
 
 export { OpenAIWhisperBudgetExhaustedError, estimateAudioSeconds }
 
@@ -61,17 +62,30 @@ export class NoSpeechDetectedError extends Error {
 // ceiling (anything longer is a dictation, not a query — use meetings instead).
 const HQ_MAX_SECONDS = 60
 
+function unavailableAfterLocalFailure(): TranscriptionUnavailableError | null {
+  const fallback = getTranscriptionPolicySnapshot()
+  if (fallback.openaiFallbackReady) return null
+  return fallback.openaiFallbackConfigured
+    ? new TranscriptionUnavailableError('openai_key_missing', 'Local transcription is unavailable and the explicitly configured OpenAI fallback has no key')
+    : new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
+}
+
 /** Transcribe via OpenAI Whisper API (cloud fallback).
  *  Budget-gated: throws OpenAIWhisperBudgetExhaustedError if today's $5 cap is spent.
  *  Ledger only ticks on SUCCESSFUL responses so retries that never reach the API
  *  aren't double-counted. */
 async function transcribeCloud(audioBuffer: Buffer): Promise<string> {
-  assertOpenAIWhisperBudget()
-
-  if (!tryGetOpenAIKey()) {
-    throw new TranscriptionUnavailableError('openai_key_missing', 'OpenAI key missing; local audio is preserved for retry')
+  // Defense in depth: every cloud chokepoint rechecks the explicit two-factor
+  // opt-in. A key alone is never authority to upload user audio.
+  if (!isOpenAIWhisperFallbackReady()) {
+    throw unavailableAfterLocalFailure()!
   }
 
+  if (!tryGetOpenAIKey()) {
+    throw new TranscriptionUnavailableError('openai_key_missing', 'OpenAI key missing; retry after local Whisper recovers')
+  }
+
+  assertOpenAIWhisperBudget()
   const key = getOpenAIKey()
   const audioSeconds = estimateAudioSeconds(audioBuffer)
 
@@ -157,10 +171,14 @@ export async function transcribeAudioBuffer(
         backend = `fast-local-${result.backend}`
         actualQuality = 'fast'
       } catch (localErr: any) {
-        if (policy === 'local-only') {
-          throw new TranscriptionUnavailableError('local_asr_unavailable', `Local transcription unavailable; audio is preserved for retry (${localErr.message})`)
+        const unavailable = policy === 'local-only'
+          ? new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
+          : unavailableAfterLocalFailure()
+        if (unavailable) {
+          console.warn(`[transcribe] Fast local unavailable; preserving audio for retry: ${localErr.message}`)
+          throw unavailable
         }
-        console.warn(`[transcribe] Fast local also failed, falling back to cloud: ${localErr.message}`)
+        console.warn(`[transcribe] Fast local also failed; using explicitly enabled OpenAI fallback: ${localErr.message}`)
         text = await transcribeCloud(audioBuffer)
         backend = 'cloud'
         actualQuality = 'cloud'
@@ -173,17 +191,24 @@ export async function transcribeAudioBuffer(
       backend = `fast-local-${result.backend}`
       actualQuality = 'fast'
     } catch (localErr: any) {
-      if (policy === 'local-only') {
-        throw new TranscriptionUnavailableError('local_asr_unavailable', `Local transcription unavailable; audio is preserved for retry (${localErr.message})`)
+      const unavailable = policy === 'local-only'
+        ? new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
+        : unavailableAfterLocalFailure()
+      if (unavailable) {
+        console.warn(`[transcribe] Local unavailable; preserving audio for retry: ${localErr.message}`)
+        throw unavailable
       }
-      console.warn(`[transcribe] Local whisper failed (${getWhisperBackend()}), falling back to cloud: ${localErr.message}`)
+      console.warn(`[transcribe] Local whisper failed (${getWhisperBackend()}); using explicitly enabled OpenAI fallback: ${localErr.message}`)
       text = await transcribeCloud(audioBuffer)
       backend = 'cloud'
       actualQuality = 'cloud'
     }
   } else {
-    if (policy === 'local-only') {
-      throw new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription unavailable; audio is preserved for retry')
+    const unavailable = policy === 'local-only'
+      ? new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
+      : unavailableAfterLocalFailure()
+    if (unavailable) {
+      throw unavailable
     }
     text = await transcribeCloud(audioBuffer)
     backend = 'cloud'

@@ -636,7 +636,7 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
   }
 
   if (!serverAvailable && (serverStarting || serverRestarting)) {
-    throw new Error('whisper-server starting — use preserved/cloud fallback')
+    throw new Error('whisper-server starting — preserve audio for retry')
   }
 
   // Try whisper-server first (fastest: ~50-100ms, includes DTW word timestamps)
@@ -690,13 +690,15 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
     restartWhisperServer()
   }
 
-  // Throw so caller uses cloud fallback — CLI is intentionally skipped for real-time
-  throw new Error('whisper-server unavailable — use cloud fallback')
+  // Throw so the caller applies the configured recovery policy. CLI is
+  // intentionally skipped for real-time transcription.
+  throw new Error('whisper-server unavailable — apply configured recovery policy')
 }
 
 /**
  * Auto-restart whisper-server after circuit breaker triggers.
- * Non-blocking — runs in background while callers use cloud fallback.
+ * Non-blocking — runs in background while callers preserve audio or apply the
+ * explicitly configured fallback policy.
  */
 async function restartWhisperServer(): Promise<void> {
   if (serverRestarting) return
@@ -734,7 +736,7 @@ async function restartWhisperServer(): Promise<void> {
       // Without this, the counter stays >= threshold but serverRestarting is false,
       // so every subsequent call would re-trigger restart in a tight loop
       serverConsecutiveFailures = 0
-      console.error('[whisper-local] Server restart failed — reset counter, will retry after next 3 failures. Using cloud fallback.')
+      console.error('[whisper-local] Server restart failed — reset counter, will retry after next 3 failures. Caller recovery policy remains active.')
     }
   } catch (err: any) {
     serverConsecutiveFailures = 0  // Same reset — allow future retry cycle

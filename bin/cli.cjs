@@ -133,7 +133,8 @@ if (!existsSync(PROFILE_FILE) && existsSync(PROFILE_EXAMPLE)) {
 }
 if (!process.env.COS_PROFILE_PATH) process.env.COS_PROFILE_PATH = PROFILE_FILE
 
-// Step 5: local Whisper detection + model download (free voice; OpenAI fallback otherwise)
+// Step 5: local Whisper detection + model download. Voice stays local-only by
+// default; cloud fallback requires an explicit flag plus a configured key.
 const WHISPER_KNOWN_PATHS = ['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli']
 const WHISPER_MODEL_DIR = join(homedir(), '.local/share/whisper-models')
 const WHISPER_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-large-v3-turbo.bin')
@@ -161,10 +162,10 @@ if (whisperCliPath && hasValidModel) {
   if (existsSync(WHISPER_MODEL_PATH)) { try { unlinkSync(WHISPER_MODEL_PATH) } catch {} }
   if (existsSync(WHISPER_MODEL_PARTIAL)) { try { unlinkSync(WHISPER_MODEL_PARTIAL) } catch {} }
   console.log(yellow('  ⚠') + ' whisper.cpp installed but model missing')
-  console.log('    ' + dim('Downloading ggml-large-v3-turbo (~1.5 GB). Ctrl-C to skip (uses OpenAI API instead).'))
+  console.log('    ' + dim('Downloading ggml-large-v3-turbo (~1.5 GB). Ctrl-C to skip (voice remains unavailable by default).'))
   console.log('    ' + dim('Skip permanently: SKIP_WHISPER_DOWNLOAD=1 npx @gotcos/glasses-server'))
   if (process.env.SKIP_WHISPER_DOWNLOAD === '1') {
-    console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — voice will use OpenAI API')
+    console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — local voice unavailable')
   } else {
     try {
       mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
@@ -175,13 +176,18 @@ if (whisperCliPath && hasValidModel) {
       console.log(green('  ✓') + ' Model downloaded ' + dim('— voice = local (FREE)'))
     } catch (err) {
       try { unlinkSync(WHISPER_MODEL_PARTIAL) } catch {}
-      console.log(red('  ✗') + ' Model download failed ' + dim('— voice will use OpenAI API'))
+      console.log(red('  ✗') + ' Model download failed ' + dim('— local voice unavailable'))
       console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
     }
   }
 } else {
-  console.log(yellow('  ⚠') + ' whisper.cpp not installed ' + dim('— voice will use OpenAI API ($0.006/min)'))
+  console.log(yellow('  ⚠') + ' whisper.cpp not installed ' + dim('— local voice unavailable'))
   console.log('    Free local voice: ' + bold('brew install whisper-cpp') + dim('  (no Homebrew? https://brew.sh)'))
+}
+if (process.env.COS_OPENAI_WHISPER_FALLBACK === '1') {
+  console.log(yellow('  ⚠') + ' Explicit OpenAI Whisper fallback requested ' + dim('— activates only if a key resolves; see /api/health'))
+} else {
+  console.log(green('  ✓') + ' Transcription policy: local-only ' + dim('— a key alone never uploads audio'))
 }
 
 // Step 6: image capability — ffmpeg validates, strips metadata, normalizes,

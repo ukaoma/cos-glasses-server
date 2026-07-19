@@ -19,6 +19,7 @@ import { isMediaProcessingReady } from '../lib/image-safety.js'
 import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
+import { getTranscriptionPolicySnapshot } from '../lib/transcription-policy.js'
 
 export const healthRouter = Router()
 
@@ -140,6 +141,13 @@ healthRouter.get('/health', async (_req, res) => {
   const keyStatus = getKeyStatus()
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
+  const transcription = getTranscriptionPolicySnapshot()
+  const recovery = {
+    status: false,
+    restartWhisper: false,
+    restartServer: false,
+    managed: false,
+  }
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -154,6 +162,7 @@ healthRouter.get('/health', async (_req, res) => {
     durableQueryJobs: durableJobs.enabled,
     durableQueryJobsProtocol: durableJobs.protocolVersion,
     localFirstMeetings: localFirstMeetings !== null,
+    transcriptionPolicy: transcription.mode,
   }
   const voice = {
     hasKey: keyStatus.hasKey,
@@ -173,7 +182,11 @@ healthRouter.get('/health', async (_req, res) => {
     whisper_health,
     openai_whisper_budget,
     codex_models,
-    capabilities: localFirstMeetings ? { localFirstMeetings } : {},
+    capabilities: {
+      transcription,
+      recovery,
+      ...(localFirstMeetings ? { localFirstMeetings } : {}),
+    },
     // /api/health is intentionally unauthenticated for setup diagnostics.
     // Publish capability only; job counts, retention identities, subscriber
     // counts, and the storage fingerprint remain internal.
@@ -192,6 +205,7 @@ healthRouter.get('/models', async (req, res) => {
   const catalog = await getCodexModelCatalog(req.query.refresh === '1')
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
+  const transcription = getTranscriptionPolicySnapshot()
   res.json({
     ...catalog,
     serverInstanceId: getServerInstanceId(),
@@ -199,6 +213,13 @@ healthRouter.get('/models', async (req, res) => {
       durableQueryJobs: {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,
+      },
+      transcription,
+      recovery: {
+        status: false,
+        restartWhisper: false,
+        restartServer: false,
+        managed: false,
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },

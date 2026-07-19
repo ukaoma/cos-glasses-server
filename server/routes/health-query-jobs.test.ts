@@ -63,6 +63,19 @@ describe('public durable-query capability health', () => {
     expect(body.durable_query_jobs).not.toHaveProperty('store')
     expect(body.durable_query_jobs).not.toHaveProperty('retainedIdentities')
     expect(body.features.localFirstMeetings).toBe(true)
+    expect(body.features.transcriptionPolicy).toBe('local-only')
+    expect(body.capabilities?.transcription).toEqual({
+      mode: 'local-only',
+      localRequired: true,
+      openaiFallbackConfigured: false,
+      openaiFallbackReady: false,
+    })
+    expect(body.capabilities?.recovery).toEqual({
+      status: false,
+      restartWhisper: false,
+      restartServer: false,
+      managed: false,
+    })
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
       protocolVersion: 1,
       idempotentSave: true,
@@ -84,6 +97,18 @@ describe('public durable-query capability health', () => {
       protocolVersion: 1,
       idempotentSave: true,
       sessionStatus: true,
+    })
+    expect(body.capabilities?.transcription).toEqual({
+      mode: 'local-only',
+      localRequired: true,
+      openaiFallbackConfigured: false,
+      openaiFallbackReady: false,
+    })
+    expect(body.capabilities?.recovery).toEqual({
+      status: false,
+      restartWhisper: false,
+      restartServer: false,
+      managed: false,
     })
   }, 20_000)
 

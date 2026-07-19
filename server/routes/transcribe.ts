@@ -9,6 +9,7 @@ import {
   resolveTranscribeMode,
   NoSpeechDetectedError,
   OpenAIWhisperBudgetExhaustedError,
+  TranscriptionUnavailableError,
 } from '../lib/transcribe-audio.js'
 
 export const transcribeRouter = Router()
@@ -48,6 +49,14 @@ transcribeRouter.post('/transcribe', async (req, res) => {
         reason: 'openai_whisper_budget_exhausted',
         spent_today_usd: err.spentTodayUsd,
         cap_usd: err.capUsd,
+      })
+    }
+    if (err instanceof TranscriptionUnavailableError) {
+      console.warn(`[transcribe] ${err.message}`)
+      return res.status(err.status).json({
+        error: err.message,
+        reason: err.reason,
+        retryable: true,
       })
     }
     res.status(500).json({ error: err.message })

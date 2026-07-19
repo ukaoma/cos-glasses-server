@@ -27,7 +27,7 @@ without silently losing completed replies.
 - **Claude Code CLI** (Opus/Fable/Sonnet) — https://claude.ai/download, then `claude login`
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
-- _Optional:_ `brew install whisper-cpp` for free local voice (otherwise OpenAI API)
+- `brew install whisper-cpp` for free local voice (the launcher can download the model)
 - _Optional:_ `brew install ffmpeg` for phone/output image attachments (text chat remains available without it)
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
 
@@ -76,7 +76,10 @@ The built-in IP allowlist blocks public-internet traffic regardless.
   locally through a network interruption. Reconnecting reconciles the exact
   chunks already stored by the Mac, uploads only missing audio, and finalizes
   through an idempotent save receipt without duplicating the meeting.
-- Local whisper.cpp transcription (free) with OpenAI fallback (optional)
+- Local whisper.cpp transcription (free and local-only by default). OpenAI
+  Whisper fallback is optional and requires both the exact
+  `COS_OPENAI_WHISPER_FALLBACK=1` opt-in and a configured key; a key alone never
+  uploads audio.
 - Tasks / calendar / people context **if** you run the
   [COS Starter Kit](https://www.gotcos.com) (`COS_SCRIPTS_DIR`); otherwise it is
   glasses + AI only
@@ -85,7 +88,8 @@ The built-in IP allowlist blocks public-internet traffic regardless.
 
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
 optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
-`COS_API_TOKEN` (auto if unset), `OPENAI_API_KEY` (cloud voice fallback),
+`COS_API_TOKEN` (auto if unset), `COS_OPENAI_WHISPER_FALLBACK=1` plus
+`OPENAI_API_KEY` (explicit cloud voice fallback),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
@@ -105,7 +109,13 @@ BIND_HOST=0.0.0.0 npm run start:server
 - *Phone can't connect* — check `BIND_HOST=0.0.0.0`, the same Tailscale account on both devices, and the correct `100.x` IP + token.
 - *Safari connects but the app does not* — confirm `npx @gotcos/glasses-server@latest` is 6.6.0+, then use the app's server reconnect/edit control to verify the current URL and token. Do not run a second source or `npx` server alongside it.
 - *AI queries fail* — run `claude --version` / `codex --version`, then `claude login` / `codex login`.
-- *Voice getting billed?* — install `whisper-cpp` for free local transcription.
+- *Voice getting billed?* — voice is local-only by default in 6.12.0+. Confirm
+  `/api/health` reports `capabilities.transcription.mode: "local-only"`. Remove
+  `COS_OPENAI_WHISPER_FALLBACK` (or set it to `0`) to disable an earlier opt-in.
+- *Local voice unavailable?* — install `whisper-cpp`, restart the server, and
+  confirm `/api/health` reports `features.whisper: true`. A typed retryable 503
+  keeps compatible prompt/meeting audio available for retry instead of silently
+  sending it to OpenAI.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
 - *Prompt recovery unavailable?* — update with `npx @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
 - *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+ and

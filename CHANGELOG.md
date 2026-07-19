@@ -1,5 +1,30 @@
 # Changelog
 
+## 6.12.0
+
+Local-first transcription policy and capability-safe recovery diagnostics for
+COS Glasses build 210+.
+
+- **Local means local.** Prompt, one-shot, and meeting transcription now remain
+  on local Whisper by default. Finding an OpenAI key is not permission to upload
+  audio. Cloud Whisper is reachable only when the exact
+  `COS_OPENAI_WHISPER_FALLBACK=1` opt-in and a resolved key are both present.
+- **Every cloud chokepoint is fenced.** Both one-shot/prompt finalization and
+  continuous meeting transcription recheck the policy immediately before any
+  OpenAI request, preventing a future call-site regression from bypassing the
+  top-level selection logic.
+- **Failure stays recoverable.** A local ASR outage returns a typed retryable
+  `503` instead of silently switching providers. Durable prompt chunks and raw
+  meeting audio remain available for retry; meeting receipt and batch-audio
+  retention behavior is unchanged.
+- **Clients can tell policy from health.** `/api/health` and `/api/models`
+  publish additive `capabilities.transcription` fields. Public installs also
+  advertise every privileged recovery control as unsupported, allowing newer
+  phone Recovery Centers to hide controls instead of reporting false outages.
+- **Backward compatible.** Existing routes and response fields remain in place.
+  Older apps keep their current query, prompt, meeting, image, and display
+  paths; cloud fallback remains available to operators who explicitly enable it.
+
 ## 6.11.0
 
 Local-first meeting recovery for COS Glasses build 209+.
