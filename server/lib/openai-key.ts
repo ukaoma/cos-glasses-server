@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { secureExistingPrivateFile } from './secure-user-config.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -61,6 +62,7 @@ export function clearCachedKey(): void {
 function readConfigFile(): KeyConfigFile | null {
   if (!existsSync(KEY_FILE_PATH)) return null
   try {
+    secureExistingPrivateFile(KEY_FILE_PATH)
     const raw = readFileSync(KEY_FILE_PATH, 'utf-8')
     const parsed = JSON.parse(raw) as Partial<KeyConfigFile>
     if (!parsed || typeof parsed.key !== 'string' || !parsed.key.trim()) return null

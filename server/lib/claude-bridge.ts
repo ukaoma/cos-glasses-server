@@ -48,6 +48,7 @@ import {
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
+import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -214,7 +215,7 @@ export async function preWarmCLI(): Promise<void> {
       '--effort', getClaudeEffortLevel(),
       '--output-format', 'stream-json',
       '--verbose',
-      '--dangerously-skip-permissions',
+      ...claudePermissionArgs(getClaudeTrustMode(), null),
       '--system-prompt', buildPrewarmSystemPrompt(),
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -493,20 +494,19 @@ export async function callClaudeStreaming(
     '--effort', cliEffortFlag,
     '--output-format', 'stream-json',
     '--verbose',  // Required: stream-json requires --verbose
-    '--dangerously-skip-permissions',  // Required: headless CLI mode with no TTY for user prompts
     '--system-prompt', systemPrompt,
   ]
 
   // Full COS path gets tools + partial messages; lightweight gets web search only
   if (options?.lightweight) {
     if (imagePaths.length > 0) {
-      args.push('--allowedTools', tools)
+      args.push(...claudePermissionArgs(getClaudeTrustMode(), tools))
     } else {
       // Lightweight: web search for general questions, no Bash/Read/Write (saves 5-10s)
-      args.push('--allowedTools', 'WebSearch,WebFetch')
+      args.push(...claudePermissionArgs(getClaudeTrustMode(), 'WebSearch,WebFetch'))
     }
   } else {
-    args.push('--allowedTools', tools, '--include-partial-messages')
+    args.push(...claudePermissionArgs(getClaudeTrustMode(), tools), '--include-partial-messages')
   }
 
   if (existingCliSession) {

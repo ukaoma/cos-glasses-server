@@ -14,6 +14,7 @@ import { atomicWriteFileSync, durableAtomicWriteFileSync, loadJsonOrQuarantine }
 import { localDay } from './local-day.js'
 import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
 import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
+import { secureExistingPrivateFile } from './secure-user-config.js'
 
 export type { ModelPreference }
 
@@ -119,6 +120,7 @@ function matchesJobIdentity(exchange: Exchange, identity: ExchangeJobIdentity): 
 }
 
 function loadFromDisk(): void {
+  secureExistingPrivateFile(SESSION_FILE)
   const result = loadJsonOrQuarantine<SessionsFile>(SESSION_FILE)
   if (result.status === 'missing') return // fresh start
 

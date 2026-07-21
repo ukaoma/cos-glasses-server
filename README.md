@@ -43,6 +43,10 @@ without silently losing completed replies.
 > Existing `COS_CODEX_MODEL` / `COS_CODEX_REASONING_EFFORT` settings remain
 > supported on the migrated Frontier slot; leave them blank for auto-latest.
 > Codex runs **sandboxed read-only** by default (`COS_CODEX_SANDBOX` to adjust).
+> Claude preserves the established trusted-machine mode for compatibility.
+> Set `COS_CLAUDE_TRUST_MODE=allowlist` to remove Claude's permission bypass
+> and restrict it to COS's explicit per-query tool allowlist; undeclared tools
+> then fail closed without prompting.
 
 ## Connect your phone (the one gotcha)
 
@@ -54,7 +58,9 @@ The glasses app runs on your iPhone and must reach this server on your Mac.
 4. Either way, paste the **API token** the server printed at boot.
 
 To restrict the server to localhost only, set `BIND_HOST=127.0.0.1` in `~/.cos-glasses/.env`.
-The built-in IP allowlist blocks public-internet traffic regardless.
+The built-in IP allowlist blocks public-internet traffic regardless. Its mesh
+range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
+`100.0.0.0/8`; RFC1918 LAN ranges remain supported.
 
 ## What it does
 
@@ -97,6 +103,9 @@ optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
 `~/.cos-glasses/.cos-profile.json` (see `.cos-profile.example.json`).
+Telegram activity export is disabled by default even when a private COS
+pipeline contains `.telegram_config.json`; enable it only with the explicit
+`COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
 
 ## Run from source
 

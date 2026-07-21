@@ -3,17 +3,16 @@
 // Each day's archive contains one or more "chats" (split by context breaks)
 // Summaries are generated via `claude -p --model sonnet`, budget-capped per day.
 
-import { mkdirSync, readdirSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
+import { spawn } from 'node:child_process'
 import { logTokenAudit } from './token-audit.js'
 import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { consumeArchiveLLMBudget } from './archive-budget.js'
 import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
+import { secureExistingPrivateFile } from './secure-user-config.js'
 
-const execAsync = promisify(exec)
 import type { Exchange } from './conversation.js'
 
 import { dataPath } from './data-dir.js'
@@ -65,7 +64,8 @@ export interface SessionToArchive {
 // ── Directory management ────────────────────────────────────
 
 function ensureArchiveDir(): string {
-  mkdirSync(ARCHIVE_DIR, { recursive: true })
+  mkdirSync(ARCHIVE_DIR, { recursive: true, mode: 0o700 })
+  chmodSync(ARCHIVE_DIR, 0o700)
   return ARCHIVE_DIR
 }
 
@@ -76,7 +76,9 @@ function archivePath(date: string): string {
 // ── Read/Write ──────────────────────────────────────────────
 
 export function loadArchive(date: string): DailyArchive | null {
-  const result = loadJsonOrQuarantine<DailyArchive>(archivePath(date))
+  const path = archivePath(date)
+  secureExistingPrivateFile(path)
+  const result = loadJsonOrQuarantine<DailyArchive>(path)
   if (result.status === 'corrupt') {
     // Loud — a silent return masked archive corruption as "day unavailable"
     console.error(
@@ -178,6 +180,54 @@ function fallbackDaySummary(chats: ArchivedChat[]): string {
   return summaries.slice(0, 2).join(', ').slice(0, 60) || 'Day activity'
 }
 
+/**
+ * Run the archive summarizer without invoking a shell.
+ *
+ * The archived query text is user-controlled. It must travel over stdin, never
+ * through a command string, so shell metacharacters remain inert data.
+ */
+function runClaudeArchiveSummary(input: string, instruction: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('claude', ['-p', '--model', 'sonnet', instruction], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve(stdout)
+    }
+
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM')
+      finish(new Error('Archive summary timed out'))
+    }, 15_000)
+    timer.unref?.()
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (stdout.length < 16_384) stdout += chunk.toString().slice(0, 16_384 - stdout.length)
+    })
+    proc.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4_096) stderr += chunk.toString().slice(0, 4_096 - stderr.length)
+    })
+    proc.on('error', error => finish(error))
+    proc.on('close', code => {
+      if (code === 0) finish()
+      else finish(new Error(`Archive summary exited ${code}: ${stderr.trim()}`))
+    })
+
+    // Ignore EPIPE here; the close/error handlers above own the final outcome.
+    proc.stdin.on('error', () => {})
+    proc.stdin.end(input)
+  })
+}
+
 /** Generate a <60 char summary for a single chat via claude -p.
  *  Budget-capped: if MAX_DAILY_ARCHIVE_LLM_CALLS is exhausted or `skipLLM` is
  *  passed, returns a deterministic string fallback. */
@@ -196,9 +246,9 @@ export async function generateChatSummary(exchanges: Exchange[], skipLLM = false
 
   const startMs = Date.now()
   try {
-    const { stdout } = await execAsync(
-      `echo ${JSON.stringify(userQueries)} | claude -p --model sonnet "Summarize these COS Glasses queries into a single title under 60 characters. Just the title, no quotes, no explanation."`,
-      { timeout: 15_000 }
+    const stdout = await runClaudeArchiveSummary(
+      userQueries,
+      'Summarize these COS Glasses queries into a single title under 60 characters. Just the title, no quotes, no explanation.',
     )
     const result = stdout.trim()
 
@@ -237,9 +287,9 @@ export async function generateDaySummary(chats: ArchivedChat[], skipLLM = false)
 
   const startMs = Date.now()
   try {
-    const { stdout } = await execAsync(
-      `echo ${JSON.stringify(allQueries)} | claude -p --model sonnet "Summarize these COS Glasses queries from one day into a daily title under 60 characters. Just the title, no quotes."`,
-      { timeout: 15_000 }
+    const stdout = await runClaudeArchiveSummary(
+      allQueries,
+      'Summarize these COS Glasses queries from one day into a daily title under 60 characters. Just the title, no quotes.',
     )
     const result = stdout.trim()
 

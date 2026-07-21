@@ -9,6 +9,7 @@
 
 import {
   closeSync,
+  chmodSync,
   constants,
   existsSync,
   fchmodSync,
@@ -23,9 +24,12 @@ import { randomBytes } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 
 export function atomicWriteFileSync(path: string, data: string | Buffer, options: { mode?: number } = {}): void {
+  const mode = options.mode ?? 0o600
   const tmp = `${path}.tmp`
-  writeFileSync(tmp, data, options.mode === undefined ? undefined : { mode: options.mode })
+  writeFileSync(tmp, data, { mode })
+  chmodSync(tmp, mode)
   renameSync(tmp, path)
+  chmodSync(path, mode)
 }
 
 /**

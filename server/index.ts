@@ -52,6 +52,11 @@ import {
   queryJobCoordinator,
   shutdownQueryJobRuntime,
 } from './lib/query-job-runtime.js'
+import {
+  isAllowedNetworkIp,
+  isAllowedNetworkOrigin,
+  isTailscaleIpv4,
+} from './lib/network-policy.js'
 
 const app = express()
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
@@ -94,15 +99,7 @@ if (API_TOKEN_AUTO) {
 // local + meshnet (Tailscale/CGNAT) + LAN consumers working.
 app.use((req, res, next) => {
   const ip = req.ip || req.socket.remoteAddress || ''
-  // Normalize IPv6-mapped IPv4 (::ffff:127.0.0.1 → 127.0.0.1)
-  const cleanIp = ip.replace(/^::ffff:/, '')
-  const allowed =
-    cleanIp === '127.0.0.1' || cleanIp === '::1' ||               // localhost
-    /^100\./.test(cleanIp) ||                                       // meshnet (CGNAT)
-    /^10\./.test(cleanIp) ||                                        // private 10.x
-    /^172\.(1[6-9]|2\d|3[01])\./.test(cleanIp) ||                  // private 172.16-31.x
-    /^192\.168\./.test(cleanIp)                                     // private 192.168.x
-  if (!allowed) {
+  if (!isAllowedNetworkIp(ip)) {
     res.status(403).json({ error: 'forbidden — not on allowed network' })
     return
   }
@@ -114,10 +111,7 @@ app.use(cors({
   origin: (origin, cb) => {
     // Allow requests with no origin (same-origin, curl, SSE) or "null" origin (file:// WebViews like Even Hub)
     if (!origin || origin === 'null') return cb(null, true)
-    // Allow localhost variants
-    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true)
-    // Allow private network IPs (10.x.x.x, 172.16-31.x.x, 192.168.x.x, 100.x.x.x for Meshnet/CGNAT)
-    if (/^https?:\/\/(10|172\.(1[6-9]|2\d|3[01])|192\.168|100)(\.\d+){2,3}(:\d+)?$/.test(origin)) return cb(null, true)
+    if (isAllowedNetworkOrigin(origin)) return cb(null, true)
     cb(new Error('CORS blocked'))
   },
 }))
@@ -274,7 +268,7 @@ listenRequiredServers(listeners).then(() => {
     for (const [name, infos] of Object.entries(nets)) {
       for (const info of infos ?? []) {
         if (info.family !== 'IPv4' || info.internal) continue
-        const isTailscale = info.address.startsWith('100.') || name.startsWith('utun') || name.startsWith('tailscale')
+        const isTailscale = isTailscaleIpv4(info.address) || name.startsWith('tailscale')
         addrs.push({ ip: info.address, label: isTailscale ? 'Tailscale — works from anywhere' : `${name} — same Wi-Fi only` })
       }
     }

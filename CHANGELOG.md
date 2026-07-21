@@ -1,5 +1,33 @@
 # Changelog
 
+## 6.12.3
+
+Security hardening from the public launch review, without changing app/server
+wire contracts.
+
+- **Stored prompts never enter a shell command.** Archive title generation now
+  launches Claude with an argument array and sends user content over stdin. A
+  regression test proves command substitutions and backticks remain inert.
+- **Claude can run in a real allowlist mode.** Existing installs retain trusted
+  mode for backward compatibility. Setting `COS_CLAUDE_TRUST_MODE=allowlist`
+  removes the permission bypass, restricts Claude to COS's explicit per-query
+  tools, and denies undeclared tools without an interactive prompt.
+- **Tailscale matching is exact.** Network and CORS policy now accept only the
+  assigned `100.64.0.0/10` CGNAT range rather than every `100.x` address.
+  Localhost and RFC1918 LAN access remain unchanged.
+- **Durable local state is private.** Runtime data and archive directories are
+  repaired to `0700`; atomic state, conversation archives, session logs, and
+  the saved OpenAI key are created or repaired to `0600`. Credential writes use
+  private, exclusive, fsync-backed atomic publication.
+- **Telegram export requires consent.** Merely finding a private
+  `.telegram_config.json` no longer enables activity export. Operators must set
+  the exact `COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
+- **Canonical history remains exact.** Operational previews and provider
+  ledgers keep their existing redaction, while durable prompts/answers are not
+  silently mutated; recovery, retries, and `reference message N` remain intact.
+- **Backward compatible.** Query, prompt recovery, meetings, media, display,
+  diagnostics, transcription, and protocol response shapes are unchanged.
+
 ## 6.12.2
 
 First-install hardening for public `npx` users.

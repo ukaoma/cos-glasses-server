@@ -2,7 +2,7 @@
 // so COS can query Glasses sessions by original UUID, date, domain, or content.
 // Fires on: TTL expiry, explicit /api/sessions/:id/end, server shutdown.
 
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import type { Exchange } from './conversation.js'
 
@@ -143,7 +143,8 @@ export function writeSessionLog(entry: SessionLogEntry): boolean {
 
   try {
     mkdirSync(dirname(logPath), { recursive: true })
-    appendFileSync(logPath, JSON.stringify(entry) + '\n')
+    appendFileSync(logPath, JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600 })
+    chmodSync(logPath, 0o600)
     console.log(`[session-log] Logged session ${entry.session_id} (${entry.end_reason}, ${entry.duration_minutes}m, ${entry.total_message_count} msgs)`)
     return true
   } catch (err) {

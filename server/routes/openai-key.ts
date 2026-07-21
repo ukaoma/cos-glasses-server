@@ -15,11 +15,12 @@
 // of pretending the saved value is in use.
 
 import { Router } from 'express'
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { errMsg } from '../lib/utils.js'
-import { atomicWriteFileSync } from '../lib/atomic-fs.js'
+import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { KEY_FILE_PATH, clearCachedKey, getKeyStatus } from '../lib/openai-key.js'
+import { securePrivateDirectory } from '../lib/secure-user-config.js'
 
 export const openaiKeyRouter = Router()
 
@@ -79,9 +80,9 @@ openaiKeyRouter.post('/openai-key/set', async (req, res) => {
     // Ensure parent dir exists (server/data/ is gitignored but may not exist
     // on a fresh checkout that's never run a budget write).
     const parent = dirname(KEY_FILE_PATH)
-    if (!existsSync(parent)) mkdirSync(parent, { recursive: true })
+    securePrivateDirectory(parent)
 
-    atomicWriteFileSync(KEY_FILE_PATH, payload)
+    durableAtomicWriteFileSync(KEY_FILE_PATH, payload, { mode: 0o600 })
     clearCachedKey()
 
     const status = getKeyStatus()

@@ -13,7 +13,14 @@ interface TelegramConfig {
 
 let config: TelegramConfig | null = null
 
+export function telegramNotificationsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.COS_TELEGRAM_NOTIFICATIONS === '1'
+}
+
 function loadConfig(): TelegramConfig | null {
+  // A credential file is not consent to export conversation activity. Require
+  // the same kind of explicit opt-in used by cloud transcription fallback.
+  if (!telegramNotificationsEnabled()) return null
   if (config) return config
   if (!COS_SCRIPTS_DIR) return null
 
