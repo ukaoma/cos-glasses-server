@@ -2,7 +2,7 @@
 // Both Python (COS scripts) and TypeScript (G2 glasses) write to the same JSONL.
 // No LLM calls. Pure file append.
 
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, chmodSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -43,7 +43,8 @@ export function logTokenAudit(entry: TokenAuditEntry): void {
     caller: entry.caller,
   }
   try {
-    appendFileSync(AUDIT_FILE, JSON.stringify(record) + '\n')
+    appendFileSync(AUDIT_FILE, JSON.stringify(record) + '\n', { encoding: 'utf8', mode: 0o600 })
+    chmodSync(AUDIT_FILE, 0o600)
   } catch {
     // Never let logging break the actual call
   }

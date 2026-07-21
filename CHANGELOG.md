@@ -1,5 +1,17 @@
 # Changelog
 
+## 6.12.5
+
+Extends the file-permission hardening to the remaining append-only logs that
+the launch review named.
+
+- **Run ledgers and the token-audit log are private at the file level.** The
+  Claude and Codex run ledgers and the token-audit JSONL now create with mode
+  0600 and repair existing files with chmod, matching the session-log and
+  atomic-fs writers. They already sat under the 0700 data directory; this
+  closes the file-level bit for defense in depth and covers the token-audit log
+  specifically, which lives beside the data directory rather than inside it.
+
 ## 6.12.4
 
 Completes the public launch security review with a constant-time token check.

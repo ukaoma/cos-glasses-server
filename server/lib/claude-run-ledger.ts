@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import { dataPath } from './data-dir.js'
@@ -118,7 +118,8 @@ function appendEvent(event: ClaudeRunEvent): void {
   try {
     const path = getClaudeLedgerPath()
     mkdirSync(dirname(path), { recursive: true })
-    appendFileSync(path, JSON.stringify(event) + '\n')
+    appendFileSync(path, JSON.stringify(event) + '\n', { encoding: 'utf8', mode: 0o600 })
+    chmodSync(path, 0o600)
   } catch (err) {
     console.warn('[claude-run-ledger] write skipped:', err)
   }
