@@ -8,7 +8,7 @@ API key is pasted into the phone for chat.
 ## Quick start
 
 ```bash
-npx @gotcos/glasses-server
+npx --yes @gotcos/glasses-server@latest
 ```
 
 The launcher checks Node, finds your CLI, checks voice and image processing,
@@ -24,7 +24,10 @@ without silently losing completed replies.
 ## Requirements
 
 - **Node.js 20.11+** — https://nodejs.org
-- **Claude Code CLI** (Opus/Fable/Sonnet) — https://claude.ai/download, then `claude login`
+- **Claude Code CLI** (Opus/Fable/Sonnet). Claude Desktop alone does not install
+  the terminal command. Install it on one line with
+  `npm install -g @anthropic-ai/claude-code` (**never with `sudo`**), then run
+  `claude` and finish the browser sign-in
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - `brew install whisper-cpp` for free local voice (the launcher can download the model)
@@ -106,9 +109,20 @@ BIND_HOST=0.0.0.0 npm run start:server
 
 ## Troubleshooting
 
+- *Claude Desktop is installed but COS says Claude Code is missing* — Desktop
+  and the terminal CLI are separate. Run
+  `npm install -g @anthropic-ai/claude-code` on one line without `sudo`, then
+  run `claude` and complete sign-in. Verify with `claude --version` before
+  starting COS again.
+- *npm reports EACCES or a root-owned cache* — never run COS or npm with
+  `sudo`, and do not recursively change system ownership. Use a private COS
+  cache instead:
+  `npm_config_cache="$HOME/.cos-glasses/npm-cache" npx --yes @gotcos/glasses-server@latest`.
+  Version 6.12.2+ never runs a second install from inside npm's temporary cache.
 - *Phone can't connect* — check `BIND_HOST=0.0.0.0`, the same Tailscale account on both devices, and the correct `100.x` IP + token.
-- *Safari connects but the app does not* — confirm `npx @gotcos/glasses-server@latest` is 6.6.0+, then use the app's server reconnect/edit control to verify the current URL and token. Do not run a second source or `npx` server alongside it.
-- *AI queries fail* — run `claude --version` / `codex --version`, then `claude login` / `codex login`.
+- *Safari connects but the app does not* — confirm `npx --yes @gotcos/glasses-server@latest` is 6.6.0+, then use the app's server reconnect/edit control to verify the current URL and token. Do not run a second source or `npx` server alongside it.
+- *AI queries fail* — run `claude auth status` / `codex login status`, then
+  `claude auth login` / `codex login` when the provider reports signed out.
 - *Voice getting billed?* — voice is local-only by default in 6.12.0+. Confirm
   `/api/health` reports `capabilities.transcription.mode: "local-only"`. Remove
   `COS_OPENAI_WHISPER_FALLBACK` (or set it to `0`) to disable an earlier opt-in.
@@ -117,7 +131,7 @@ BIND_HOST=0.0.0.0 npm run start:server
   keeps compatible prompt/meeting audio available for retry instead of silently
   sending it to OpenAI.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
-- *Prompt recovery unavailable?* — update with `npx @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
+- *Prompt recovery unavailable?* — update with `npx --yes @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
 - *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+ and
   `COS_DURABLE_QUERY_JOBS=1`. Restart once, then confirm `/api/health` reports
   `features.durableQueryJobs: true`, protocol `1`, and state `ready`. To roll

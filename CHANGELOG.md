@@ -1,5 +1,28 @@
 # Changelog
 
+## 6.12.2
+
+First-install hardening for public `npx` users.
+
+- **No nested install inside npm's cache.** The launcher resolves the declared
+  `tsx` dependency from npm's existing `npx` dependency tree and never runs a
+  second `npm install` from the ephemeral package directory.
+- **Permission failures do not spread.** A broken or incomplete package fails
+  closed with a user-owned isolated-cache recovery command. COS never suggests
+  `sudo npm`, broad ownership changes, or writing through a root-owned cache.
+- **Claude Desktop is no longer mistaken for Claude Code.** First-run guidance
+  explicitly requires the terminal CLI, keeps the scoped npm command on one
+  copyable line, forbids `sudo`, and explains the interactive sign-in step.
+- **Known signed-out agents fail before startup.** Installed Claude/Codex
+  binaries are checked before first-query readiness. Older CLI versions whose
+  authentication state cannot be proven show a warning instead of a false
+  signed-in claim.
+- **Local credentials are private.** `~/.cos-glasses` is repaired to `0700`;
+  the token and profile files are repaired to `0600`; symlinked credential
+  paths fail closed; auto-generated tokens are persisted with an atomic write.
+- **Runtime behavior is unchanged.** Query, prompt recovery, meetings, media,
+  diagnostics, transcription, display, and server data contracts are untouched.
+
 ## 6.12.1
 
 Public-safe CLI diagnostics for the COS Glasses Recovery Center.
