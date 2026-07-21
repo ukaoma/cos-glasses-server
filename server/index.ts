@@ -57,6 +57,7 @@ import {
   isAllowedNetworkOrigin,
   isTailscaleIpv4,
 } from './lib/network-policy.js'
+import { timingSafeTokenEqual } from './lib/token-auth.js'
 
 const app = express()
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
@@ -128,7 +129,7 @@ app.use('/api', (req, res, next) => {
     req.path === '/diag/client' ||
     req.path === '/diag/health'
   ) return next()
-  if (req.headers['x-cos-token'] !== API_TOKEN) {
+  if (!timingSafeTokenEqual(req.headers['x-cos-token'], API_TOKEN)) {
     return res.status(401).json({ error: 'unauthorized' })
   }
   next()

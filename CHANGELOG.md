@@ -1,5 +1,18 @@
 # Changelog
 
+## 6.12.4
+
+Completes the public launch security review with a constant-time token check.
+
+- **API tokens compare in constant time.** The `/api` middleware and the
+  OpenAI-compatible `/v1/chat/completions` Bearer check no longer use a plain
+  `!==` string compare, which short-circuits on the first differing byte and
+  leaks token bytes through response timing. Both now hash each side to a fixed
+  SHA-256 digest and compare with `crypto.timingSafeEqual`. Missing headers,
+  duplicated headers, and length-mismatched tokens fail closed without throwing.
+  A new `token-auth` test pins the behavior. 401 responses are otherwise
+  unchanged.
+
 ## 6.12.3
 
 Security hardening from the public launch review, without changing app/server

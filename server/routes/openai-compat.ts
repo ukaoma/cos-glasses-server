@@ -13,6 +13,7 @@ import {
 } from '../lib/codex-model-catalog.js'
 import { tryInstantResponse } from '../lib/response-cache.js'
 import crypto from 'node:crypto'
+import { timingSafeTokenEqual } from '../lib/token-auth.js'
 
 export const openaiCompatRouter = Router()
 
@@ -66,7 +67,7 @@ function validateAuth(req: any, res: any): boolean {
   }
 
   const token = auth.slice(7)
-  if (token !== cosToken) {
+  if (!timingSafeTokenEqual(token, cosToken)) {
     res.status(401).json({ error: { message: 'Invalid token', type: 'invalid_request_error' } })
     return false
   }
