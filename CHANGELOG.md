@@ -1,5 +1,25 @@
 # Changelog
 
+## 6.12.6
+
+Pairs with COS Glasses build 222 to harden local-first meeting recovery and
+local Whisper supervision while preserving the existing public API surface.
+
+- **Meeting work stays on its admitting Mac.** Capability-aware clients pin
+  upload, status, and save requests to one `serverInstanceId`; a mismatch fails
+  before audio is consumed. Legacy unpinned clients continue to work.
+- **Receipt is not transcription.** Durable ledgers distinguish raw audio
+  receipt, completed ASR, and canonical transcript text. Silent chunks persist
+  as terminal empty completions, so replay does not rerun ASR or invent text.
+- **Whisper recovery is single-owner.** Concurrent start/restart requests are
+  serialized and coalesced. COS reaps only a process tree proven to own the
+  configured model and port 8178, verifies the port is clear, and launches one
+  replacement. An unrelated Whisper process is never killed; uncertain
+  ownership fails closed.
+- **Backward compatible.** Existing query, prompt recovery, media, display,
+  diagnostics, transcription, and legacy meeting contracts retain their prior
+  behavior. The new capability flags are additive.
+
 ## 6.12.5
 
 Extends the file-permission hardening to the remaining append-only logs that

@@ -42,6 +42,7 @@ import {
   retainedUntilIso,
   type IndexRange,
 } from '../lib/local-first-meetings-contract.js'
+import { getServerInstanceId } from '../lib/server-instance-id.js'
 
 function ensurePrivateDirectory(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -209,6 +210,10 @@ interface TranscriptSession {
   // never arrived = a chunk lost in transit) is the only thing flagged as a gap.
   // Sorted, de-duplicated. See computeGapReport()/analyzeTranscriptGaps().
   receivedIndices?: number[]
+  /** Durable ASR terminal outcomes. Raw receive alone never implies completion. */
+  asrCompletedIndices?: number[]
+  /** Exact replay records for silent/filtered ASR completions. */
+  emptyCompletions?: Record<string, EmptyTranscriptCompletion>
   maxChunkIndex?: number
   /** Persisted idle-retention clock. Meeting date/duration still use startTime. */
   lastActivityAt: number
@@ -226,8 +231,35 @@ interface ClosedTranscriptSession {
   closedAt: number
   lastActivityAt: number
   receivedIndices: number[]
+  asrCompletedIndices: number[]
+  canonicalIndices: number[]
   maxChunkIndex: number
   reason: 'saved' | 'expired' | 'closed'
+}
+
+interface EmptyTranscriptCompletion {
+  text: ''
+  speaker: string
+  elapsed: number
+  backend?: string
+  asrProvider?: string
+  fallbackReason?: string
+  audioSha256?: string
+  canonical: false
+}
+
+interface StreamChunkCompletionResponse {
+  text: string
+  speaker: string
+  chunkIndex: number
+  elapsed: number
+  sessionId: string
+  serverInstanceId: string
+  asrCompleted: true
+  canonical: boolean
+  backend?: string
+  asrProvider?: string
+  fallbackReason?: string
 }
 
 const closedSessionRecords = new Map<string, ClosedTranscriptSession>()
@@ -249,6 +281,8 @@ function readClosedSessions(): Record<string, ClosedTranscriptSession> {
           closedAt: value,
           lastActivityAt: value,
           receivedIndices: [],
+          asrCompletedIndices: [],
+          canonicalIndices: [],
           maxChunkIndex: -1,
           reason: 'closed',
         }
@@ -269,8 +303,26 @@ function readClosedSessions(): Record<string, ClosedTranscriptSession> {
       const maxChunkIndex = typeof raw.maxChunkIndex === 'number' && Number.isInteger(raw.maxChunkIndex)
         ? raw.maxChunkIndex
         : (receivedIndices.at(-1) ?? -1)
+      const asrCompletedIndices = Array.isArray(raw.asrCompletedIndices)
+        ? Array.from(new Set(raw.asrCompletedIndices.filter(
+          (entry): entry is number => Number.isInteger(entry) && (entry as number) >= 0,
+        ))).sort((a, b) => a - b)
+        : []
+      const canonicalIndices = Array.isArray(raw.canonicalIndices)
+        ? Array.from(new Set(raw.canonicalIndices.filter(
+          (entry): entry is number => Number.isInteger(entry) && (entry as number) >= 0,
+        ))).sort((a, b) => a - b)
+        : []
       const reason = raw.reason === 'saved' || raw.reason === 'expired' ? raw.reason : 'closed'
-      normalized[id] = { closedAt, lastActivityAt, receivedIndices, maxChunkIndex, reason }
+      normalized[id] = {
+        closedAt,
+        lastActivityAt,
+        receivedIndices,
+        asrCompletedIndices,
+        canonicalIndices,
+        maxChunkIndex,
+        reason,
+      }
     }
     return normalized
   } catch {
@@ -289,6 +341,8 @@ function persistClosedSessions(): void {
       closedAt: now,
       lastActivityAt: now,
       receivedIndices: [],
+      asrCompletedIndices: [],
+      canonicalIndices: [],
       maxChunkIndex: -1,
       reason: 'closed',
     }
@@ -345,6 +399,8 @@ function persistSessionRequired(sessionId: string): void {
       chunks: chunksIndexed.map(e => e.c),
       chunksIndexed,
       receivedIndices: session.receivedIndices ?? [],
+      asrCompletedIndices: session.asrCompletedIndices ?? [],
+      emptyCompletions: session.emptyCompletions ?? {},
       maxChunkIndex: session.maxChunkIndex ?? -1,
       providerCandidates: session.providerCandidates ?? {},
     })
@@ -387,10 +443,10 @@ function recoverSessions(): void {
             const chunks: TranscriptChunk[] = []
             if (indexed) {
               for (const e of indexed) {
-                if (e && Number.isInteger(e.i) && e.i >= 0 && e.c) chunks[e.i] = e.c
+                if (e && Number.isInteger(e.i) && e.i >= 0 && e.c) chunks[e.i] = { ...e.c, canonical: true }
               }
             } else if (legacy) {
-              for (let k = 0; k < legacy.length; k++) if (legacy[k]) chunks[k] = legacy[k]
+              for (let k = 0; k < legacy.length; k++) if (legacy[k]) chunks[k] = { ...legacy[k], canonical: true }
             }
             // Restore the received-index ledger. A legacy file (pre-feature)
             // has no ledger and no way to know whether a chunk was truly lost,
@@ -415,12 +471,36 @@ function recoverSessions(): void {
               for (let k = 0; k <= maxStored; k++) receivedIndices.push(k)
               maxChunkIndex = maxStored
             }
+            const emptyCompletions: Record<string, EmptyTranscriptCompletion> = {}
+            if (data.emptyCompletions && typeof data.emptyCompletions === 'object') {
+              for (const [key, value] of Object.entries(data.emptyCompletions as Record<string, unknown>)) {
+                if (!/^\d+$/.test(key) || !value || typeof value !== 'object') continue
+                const item = value as Partial<EmptyTranscriptCompletion>
+                if (item.text !== '' || typeof item.speaker !== 'string' || typeof item.elapsed !== 'number') continue
+                emptyCompletions[key] = { ...item, text: '', canonical: false } as EmptyTranscriptCompletion
+              }
+            }
+            const canonical: number[] = []
+            for (let k = 0; k < chunks.length; k++) if (chunks[k]?.text) canonical.push(k)
+            const asrCompletedIndices = Array.isArray(data.asrCompletedIndices)
+              ? Array.from(new Set(
+                (data.asrCompletedIndices as unknown[]).filter(
+                  (n): n is number => Number.isInteger(n) && (n as number) >= 0,
+                ),
+              )).sort((a, b) => a - b)
+              : []
+            // Canonical chunks and durable empty completion records are always
+            // terminal ASR outcomes. Never infer completion from raw receive.
+            for (const index of canonical) insertSortedUnique(asrCompletedIndices, index)
+            for (const key of Object.keys(emptyCompletions)) insertSortedUnique(asrCompletedIndices, Number(key))
             const session: TranscriptSession = {
               chunks,
               startTime: data.startTime,
               title: data.title || '',
               lastActivityAt,
               receivedIndices,
+              asrCompletedIndices,
+              emptyCompletions,
               maxChunkIndex,
               providerCandidates: data.providerCandidates && typeof data.providerCandidates === 'object'
                 ? data.providerCandidates
@@ -464,10 +544,23 @@ function recoverSessions(): void {
             const maxChunkIndex = typeof data.maxChunkIndex === 'number' && Number.isInteger(data.maxChunkIndex)
               ? data.maxChunkIndex
               : (receivedIndices.at(-1) ?? -1)
+            const canonicalIndices = Array.isArray(data.chunksIndexed)
+              ? (data.chunksIndexed as Array<{ i?: unknown; c?: TranscriptChunk }>)
+                .filter(entry => Number.isInteger(entry?.i) && (entry.i as number) >= 0 && entry.c?.text)
+                .map(entry => entry.i as number)
+              : []
+            const asrCompletedIndices = Array.isArray(data.asrCompletedIndices)
+              ? Array.from(new Set((data.asrCompletedIndices as unknown[]).filter(
+                (value): value is number => Number.isInteger(value) && (value as number) >= 0,
+              ))).sort((left, right) => left - right)
+              : [...canonicalIndices]
+            for (const index of canonicalIndices) insertSortedUnique(asrCompletedIndices, index)
             closedSessionRecords.set(data.sessionId, {
               closedAt: Date.now(),
               lastActivityAt,
               receivedIndices,
+              asrCompletedIndices,
+              canonicalIndices,
               maxChunkIndex,
               reason: 'expired',
             })
@@ -580,10 +673,22 @@ export function getSession(sessionId: string): TranscriptSession {
   let session = sessions.get(sessionId)
   if (!session) {
     const now = Date.now()
-    session = { chunks: [], startTime: now, lastActivityAt: now, title: '', providerCandidates: {} }
+    session = {
+      chunks: [],
+      startTime: now,
+      lastActivityAt: now,
+      title: '',
+      providerCandidates: {},
+      receivedIndices: [],
+      asrCompletedIndices: [],
+      emptyCompletions: {},
+    }
     sessions.set(sessionId, session)
   }
   if (!session.providerCandidates) session.providerCandidates = {}
+  if (!session.receivedIndices) session.receivedIndices = []
+  if (!session.asrCompletedIndices) session.asrCompletedIndices = []
+  if (!session.emptyCompletions) session.emptyCompletions = {}
   return session
 }
 
@@ -614,6 +719,20 @@ function recordReceivedChunk(session: TranscriptSession, chunkIndex: number): vo
   if (session.maxChunkIndex == null || chunkIndex > session.maxChunkIndex) {
     session.maxChunkIndex = chunkIndex
   }
+}
+
+function recordAsrCompleted(session: TranscriptSession, chunkIndex: number): void {
+  if (!Number.isInteger(chunkIndex) || chunkIndex < 0) return
+  if (!session.asrCompletedIndices) session.asrCompletedIndices = []
+  insertSortedUnique(session.asrCompletedIndices, chunkIndex)
+}
+
+function canonicalIndices(session: TranscriptSession): number[] {
+  const result: number[] = []
+  for (let index = 0; index < session.chunks.length; index++) {
+    if (session.chunks[index]?.text) result.push(index)
+  }
+  return result
 }
 
 export interface TranscriptGapReport {
@@ -768,6 +887,10 @@ export interface MeetingSessionStatusSnapshot {
   state: 'active' | 'closed' | 'missing'
   receivedRanges: IndexRange[]
   receivedCount: number
+  asrCompletedRanges: IndexRange[]
+  asrCompletedCount: number
+  canonicalRanges: IndexRange[]
+  canonicalCount: number
   maxChunkIndex: number
   lastActivityAt: string | null
   retainedUntil: string | null
@@ -777,10 +900,16 @@ export function getMeetingSessionStatus(sessionId: string): MeetingSessionStatus
   const active = sessions.get(sessionId)
   if (active) {
     const received = active.receivedIndices ?? []
+    const asrCompleted = active.asrCompletedIndices ?? []
+    const canonical = canonicalIndices(active)
     return {
       state: 'active',
       receivedRanges: compressIndexRanges(received),
       receivedCount: received.length,
+      asrCompletedRanges: compressIndexRanges(asrCompleted),
+      asrCompletedCount: asrCompleted.length,
+      canonicalRanges: compressIndexRanges(canonical),
+      canonicalCount: canonical.length,
       maxChunkIndex: active.maxChunkIndex ?? (received.at(-1) ?? -1),
       lastActivityAt: new Date(active.lastActivityAt).toISOString(),
       retainedUntil: retainedUntilIso(active.lastActivityAt),
@@ -792,6 +921,10 @@ export function getMeetingSessionStatus(sessionId: string): MeetingSessionStatus
       state: 'closed',
       receivedRanges: compressIndexRanges(closed.receivedIndices),
       receivedCount: closed.receivedIndices.length,
+      asrCompletedRanges: compressIndexRanges(closed.asrCompletedIndices),
+      asrCompletedCount: closed.asrCompletedIndices.length,
+      canonicalRanges: compressIndexRanges(closed.canonicalIndices),
+      canonicalCount: closed.canonicalIndices.length,
       maxChunkIndex: closed.maxChunkIndex,
       lastActivityAt: new Date(closed.lastActivityAt).toISOString(),
       retainedUntil: new Date(closed.closedAt + CLOSED_SESSION_TTL_MS).toISOString(),
@@ -801,6 +934,10 @@ export function getMeetingSessionStatus(sessionId: string): MeetingSessionStatus
     state: 'missing',
     receivedRanges: [],
     receivedCount: 0,
+    asrCompletedRanges: [],
+    asrCompletedCount: 0,
+    canonicalRanges: [],
+    canonicalCount: 0,
     maxChunkIndex: -1,
     lastActivityAt: null,
     retainedUntil: null,
@@ -815,11 +952,15 @@ function closeTranscriptSession(
   const session = sessions.get(sessionId)
   const now = Date.now()
   const receivedIndices = [...(session?.receivedIndices ?? [])]
+  const asrCompletedIndices = [...(session?.asrCompletedIndices ?? [])]
+  const canonical = session ? canonicalIndices(session) : []
   const maxChunkIndex = session?.maxChunkIndex ?? (receivedIndices.at(-1) ?? -1)
   closedSessionRecords.set(sessionId, {
     closedAt: now,
     lastActivityAt: session?.lastActivityAt ?? now,
     receivedIndices,
+    asrCompletedIndices,
+    canonicalIndices: canonical,
     maxChunkIndex,
     reason,
   })
@@ -864,6 +1005,23 @@ function makeHttpError(status: number, message: string, reason?: string): Error 
   err.status = status
   err.reason = reason
   return err
+}
+
+function assertPinnedServerIdentity(headerValue: unknown, queryValue: unknown): string {
+  const headerPin = typeof headerValue === 'string' ? headerValue.trim() : ''
+  const queryPin = typeof queryValue === 'string' ? queryValue.trim() : ''
+  if (headerPin && queryPin && headerPin !== queryPin) {
+    throw makeHttpError(409, 'conflicting server identity pins', 'server_instance_mismatch')
+  }
+  const supplied = headerPin || queryPin
+  const serverInstanceId = getServerInstanceId()
+  // Omission is the legacy route contract. Capability-admitted clients pin.
+  if (!supplied) return serverInstanceId ?? ''
+  if (!serverInstanceId) throw makeHttpError(503, 'server identity unavailable', 'server_identity_unavailable')
+  if (supplied !== serverInstanceId) {
+    throw makeHttpError(409, 'server identity mismatch', 'server_instance_mismatch')
+  }
+  return serverInstanceId
 }
 
 function validateSessionId(sessionId: string): void {
@@ -1033,16 +1191,36 @@ function canonicalChunkResponse(
   existing: TranscriptChunk,
   sessionId: string,
   chunkIndex: number,
-): { text: string; speaker: string; chunkIndex: number; elapsed: number; sessionId: string; backend?: string; asrProvider?: string; fallbackReason?: string } {
+): StreamChunkCompletionResponse {
+  const serverInstanceId = getServerInstanceId() ?? ''
   return {
     text: existing.text,
     speaker: existing.speaker,
     chunkIndex,
     elapsed: existing.elapsed,
     sessionId,
+    serverInstanceId,
+    asrCompleted: true,
+    canonical: true,
     backend: existing.backend,
     asrProvider: existing.asrProvider,
     fallbackReason: existing.fallbackReason,
+  }
+}
+
+function emptyChunkResponse(
+  existing: EmptyTranscriptCompletion,
+  sessionId: string,
+  chunkIndex: number,
+): StreamChunkCompletionResponse {
+  const serverInstanceId = getServerInstanceId() ?? ''
+  return {
+    ...existing,
+    chunkIndex,
+    sessionId,
+    serverInstanceId,
+    asrCompleted: true,
+    canonical: false,
   }
 }
 
@@ -1152,7 +1330,7 @@ async function processStreamChunk(opts: {
   clientElapsed?: number
   /** Original client recording start, applied only before canonical chunks. */
   startTimeOverride?: number
-}): Promise<{ text: string; speaker: string; chunkIndex: number; elapsed: number; sessionId: string; backend?: string; asrProvider?: string; fallbackReason?: string }> {
+}): Promise<StreamChunkCompletionResponse> {
   const { sessionId, chunkIndex, clientSpeaker, audioBuffer, candidate } = opts
   const tReq = performance.now()
   validateSessionId(sessionId)
@@ -1166,6 +1344,7 @@ async function processStreamChunk(opts: {
     session.startTime = opts.startTimeOverride
   }
   const alreadyCanonical = session.chunks[chunkIndex]
+  const alreadyEmpty = session.emptyCompletions?.[String(chunkIndex)]
 
   let candidateRecordKey: string | undefined
   if (candidate) {
@@ -1186,9 +1365,10 @@ async function processStreamChunk(opts: {
 
   // Do not let late duplicate/replayed candidates replace canonical raw audio.
   // Batch re-transcription relies on chunk_000N.wav matching the accepted chunk.
-  if (alreadyCanonical?.canonical) {
+  if (alreadyCanonical?.text) {
     session.lastActivityAt = Date.now()
     recordReceivedChunk(session, chunkIndex)
+    recordAsrCompleted(session, chunkIndex)
     if (candidate && candidateRecordKey) {
       session.providerCandidates![candidateRecordKey].accepted =
         alreadyCanonical.asrProvider === 'iphone-whisperkit-beta' && alreadyCanonical.audioSha256 === audioSha256
@@ -1197,6 +1377,13 @@ async function processStreamChunk(opts: {
     }
     persistSessionRequired(sessionId)
     return canonicalChunkResponse(alreadyCanonical, sessionId, chunkIndex)
+  }
+  if (alreadyEmpty) {
+    session.lastActivityAt = Date.now()
+    recordReceivedChunk(session, chunkIndex)
+    recordAsrCompleted(session, chunkIndex)
+    persistSessionRequired(sessionId)
+    return emptyChunkResponse(alreadyEmpty, sessionId, chunkIndex)
   }
 
   await persistRawSessionAudioChunk(sessionId, chunkIndex, audioBuffer)
@@ -1276,8 +1463,21 @@ async function processStreamChunk(opts: {
       session.providerCandidates[candidateRecordKey].accepted = false
       session.providerCandidates[candidateRecordKey].fallbackReason = sanitized.fallbackReason || fallbackReason || 'empty'
     }
+    const emptyCompletion: EmptyTranscriptCompletion = {
+      text: '',
+      speaker: clientSpeaker,
+      elapsed,
+      backend,
+      asrProvider,
+      fallbackReason: sanitized.fallbackReason || fallbackReason,
+      audioSha256,
+      canonical: false,
+    }
+    session.emptyCompletions ??= {}
+    session.emptyCompletions[String(chunkIndex)] = emptyCompletion
+    recordAsrCompleted(session, chunkIndex)
     persistSessionRequired(sessionId)
-    return { text: '', speaker: clientSpeaker, chunkIndex, elapsed, sessionId, backend, asrProvider, fallbackReason: sanitized.fallbackReason || fallbackReason }
+    return emptyChunkResponse(emptyCompletion, sessionId, chunkIndex)
   }
 
   const chunk: TranscriptChunk = {
@@ -1296,7 +1496,7 @@ async function processStreamChunk(opts: {
     canonical: true,
   }
   const finalExisting = session.chunks[chunkIndex]
-  if (finalExisting?.canonical) {
+  if (finalExisting?.text) {
     if (candidate && candidateRecordKey && session.providerCandidates?.[candidateRecordKey]) {
       session.providerCandidates[candidateRecordKey].accepted =
         finalExisting.asrProvider === 'iphone-whisperkit-beta' && finalExisting.audioSha256 === audioSha256
@@ -1304,10 +1504,12 @@ async function processStreamChunk(opts: {
         session.providerCandidates[candidateRecordKey].accepted ? undefined : 'canonical_exists'
     }
     session.lastActivityAt = Date.now()
+    recordAsrCompleted(session, chunkIndex)
     persistSessionRequired(sessionId)
     return canonicalChunkResponse(finalExisting, sessionId, chunkIndex)
   }
   session.chunks[chunkIndex] = chunk
+  recordAsrCompleted(session, chunkIndex)
   if (candidate && candidateRecordKey) {
     if (session.providerCandidates?.[candidateRecordKey]) {
       session.providerCandidates[candidateRecordKey].accepted = asrProvider === 'iphone-whisperkit-beta'
@@ -1322,7 +1524,7 @@ async function processStreamChunk(opts: {
   emitDisplay({ type: 'transcript_chunk', data: { text: trimmedText, speaker, chunkIndex, elapsed, sessionId } })
 
   console.log(`[perf] TOTAL request: ${(performance.now() - tReq).toFixed(1)}ms | chunk #${chunkIndex} | ${audioBuffer.length}b | rms=${Math.round(rms)} q=${isQuiet ? 1 : 0} | ${asrProvider} | "${trimmedText.slice(0, 50)}"`)
-  return { text: trimmedText, speaker, chunkIndex, elapsed, sessionId, backend, asrProvider, fallbackReason }
+  return canonicalChunkResponse(chunk, sessionId, chunkIndex)
 }
 
 function sendStreamError(res: { status: (code: number) => { json: (body: unknown) => unknown } }, err: unknown): unknown {
@@ -1349,6 +1551,8 @@ function sendStreamError(res: { status: (code: number) => { json: (body: unknown
 
 transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
   try {
+    // Reject a wrong Mac before consuming or persisting any upload bytes.
+    assertPinnedServerIdentity(req.get('X-COS-Server-Instance'), req.query.serverInstanceId)
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
     const chunkIndex = parseInt((req.query.chunkIndex as string) || '0', 10)
     const clientSpeaker = (req.query.speaker as string) || 'Unknown'

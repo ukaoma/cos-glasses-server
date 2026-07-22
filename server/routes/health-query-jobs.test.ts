@@ -87,6 +87,8 @@ describe('public durable-query capability health', () => {
       protocolVersion: 1,
       idempotentSave: true,
       sessionStatus: true,
+      pinnedServerIdentity: true,
+      asrCompletionStatus: true,
       retentionMs: 4 * 60 * 60 * 1000,
     })
     expect(body.capabilities.localFirstMeetings.serverInstanceId).toMatch(/^[0-9a-f-]{36}$/i)
@@ -104,6 +106,8 @@ describe('public durable-query capability health', () => {
       protocolVersion: 1,
       idempotentSave: true,
       sessionStatus: true,
+      pinnedServerIdentity: true,
+      asrCompletionStatus: true,
     })
     expect(body.capabilities?.transcription).toEqual({
       mode: 'local-only',

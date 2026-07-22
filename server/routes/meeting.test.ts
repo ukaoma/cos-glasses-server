@@ -178,6 +178,10 @@ describe('meeting save/list/detail API', () => {
       serverInstanceId: saved.serverInstanceId,
       receivedRanges: [],
       receivedCount: 0,
+      asrCompletedRanges: [],
+      asrCompletedCount: 0,
+      canonicalRanges: [],
+      canonicalCount: 0,
       maxChunkIndex: -1,
       saveReceipt: {
         receiptVersion: 1,
@@ -212,6 +216,25 @@ describe('meeting save/list/detail API', () => {
     expect(replay.status).toBe(200)
     expect(await replay.json()).toMatchObject({ replayed: true, filename: saved.filename })
     expect(readdirSync(join(h.recordingsRoot, '2026-07')).filter(name => name.endsWith('.md'))).toHaveLength(1)
+  })
+
+  it('rejects mismatched status/save pins before any meeting mutation', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    const wrongStatus = await h.api('/api/meeting/sessions/meeting_route_001/status?serverInstanceId=wrong-server', {
+      headers: { 'x-cos-server-instance': 'wrong-server' },
+    })
+    expect(wrongStatus.status).toBe(409)
+    expect(await wrongStatus.json()).toMatchObject({ reason: 'server_instance_mismatch' })
+
+    const wrongSave = await h.api('/api/meeting/save', {
+      method: 'POST',
+      headers: { 'x-cos-server-instance': 'wrong-server' },
+      body: JSON.stringify({ sessionId: 'meeting_route_001', serverInstanceId: 'wrong-server' }),
+    })
+    expect(wrongSave.status).toBe(409)
+    expect(await wrongSave.json()).toMatchObject({ reason: 'server_instance_mismatch' })
+    expect(h.deleted).not.toHaveBeenCalled()
+    expect(h.store.findBySessionId('meeting_route_001')).toBeNull()
   })
 
   it('retains rejected raw audio and canonical streaming text', async () => {

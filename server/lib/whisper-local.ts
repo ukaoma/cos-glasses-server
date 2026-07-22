@@ -6,7 +6,8 @@
 //   2. whisper-cli (spawned per request, model loaded from disk) → ~500-700ms
 //   3. OpenAI API (cloud, handled by transcribe.ts) → ~1000-3000ms
 
-import { spawn, execSync } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -142,13 +143,170 @@ const WHISPER_SERVER_URL = `http://127.0.0.1:${WHISPER_SERVER_PORT}`
 let cliAvailable = false
 let serverAvailable = false
 let serverProcess: ReturnType<typeof spawn> | null = null
+const ownedServerChildren = new Set<ChildProcess>()
 
 // Circuit breaker: track consecutive server failures to detect hung process
 let serverConsecutiveFailures = 0
 const SERVER_FAILURE_THRESHOLD = 3   // After 3 consecutive failures, auto-restart
-let serverRestarting = false          // Prevents concurrent restart attempts
+let serverRestarting = false          // Exposed in the existing health shape
 let serverStarting = false            // Initial model load is not a circuit failure
+let serverStartPromise: Promise<void> | null = null
+let serverRestartPromise: Promise<WhisperRestartResult> | null = null
 let serverHealthProbe: Promise<boolean> | null = null
+
+interface ProcessEntry {
+  pid: number
+  ppid: number
+  command: string
+}
+
+export interface WhisperRestartResult {
+  status: 'recovered' | 'failed'
+  error?: string
+}
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+function listProcesses(): ProcessEntry[] {
+  // `command=` includes arguments, which lets us distinguish this COS-owned
+  // port/model signature from unrelated whisper-server instances.
+  const output = execFileSync('ps', ['-axww', '-o', 'pid=,ppid=,command='], { encoding: 'utf8' })
+  return output.split('\n').flatMap(line => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/)
+    if (!match) return []
+    return [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }]
+  })
+}
+
+function listeningPids(): number[] {
+  try {
+    const output = execFileSync(
+      'lsof',
+      ['-nP', `-iTCP:${WHISPER_SERVER_PORT}`, '-sTCP:LISTEN', '-t'],
+      { encoding: 'utf8' },
+    )
+    return output.split(/\s+/).map(Number).filter(pid => Number.isInteger(pid) && pid > 0)
+  } catch (err: any) {
+    // lsof uses exit 1 for "no matches". Anything else means we could not
+    // prove the port state, so startup must fail closed.
+    if (err?.status === 1) return []
+    throw new Error(`unable to inspect whisper-server port ${WHISPER_SERVER_PORT}: ${err?.message ?? err}`)
+  }
+}
+
+function isCosWhisperServerCommand(command: string): boolean {
+  const executable = /(?:^|\s)(?:\S*\/)?whisper-server(?:\s|$)/.test(command)
+  const configuredPort = new RegExp(`(?:^|\\s)--port(?:=|\\s+)${WHISPER_SERVER_PORT}(?:\\s|$)`).test(command)
+  return executable && configuredPort && command.includes(MODEL_PATH)
+}
+
+function collectDescendants(processes: ProcessEntry[], roots: Iterable<number>): Set<number> {
+  const descendants = new Set<number>(roots)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const entry of processes) {
+      if (!descendants.has(entry.pid) && descendants.has(entry.ppid)) {
+        descendants.add(entry.pid)
+        changed = true
+      }
+    }
+  }
+  return descendants
+}
+
+function signalPid(pid: number): void {
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch (err: any) {
+    if (err?.code !== 'ESRCH') throw err
+  }
+}
+
+async function waitForOwnedChildClose(child: ChildProcess, timeoutMs = 2_000): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  return new Promise(resolve => {
+    let settled = false
+    const finish = (closed: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      child.off('close', onClose)
+      resolve(closed)
+    }
+    const onClose = () => finish(true)
+    const timeout = setTimeout(() => finish(false), timeoutMs)
+    child.once('close', onClose)
+  })
+}
+
+/**
+ * Kill every whisper-server we own or can identify as stale, plus all of its
+ * descendants. Direct children are awaited so Node reaps them before another
+ * model process is allowed to bind the port.
+ */
+async function killAndReapWhisperProcesses(): Promise<void> {
+  serverAvailable = false
+
+  for (let round = 0; round < 3; round++) {
+    const processes = listProcesses()
+    const ownedPids = [...ownedServerChildren]
+      .map(child => child.pid)
+      .filter((pid): pid is number => typeof pid === 'number')
+    const staleWhisperPids = processes
+      .filter(entry => isCosWhisperServerCommand(entry.command))
+      .map(entry => entry.pid)
+    const targets = collectDescendants(processes, [...ownedPids, ...staleWhisperPids])
+
+    if (targets.size === 0 && ownedServerChildren.size === 0) break
+
+    // Descendants first prevents a model worker from surviving its supervisor.
+    const depth = new Map<number, number>()
+    const byPid = new Map(processes.map(entry => [entry.pid, entry]))
+    const getDepth = (pid: number): number => {
+      if (depth.has(pid)) return depth.get(pid)!
+      const parent = byPid.get(pid)?.ppid
+      const value = parent && targets.has(parent) ? getDepth(parent) + 1 : 0
+      depth.set(pid, value)
+      return value
+    }
+    const orderedTargets = [...targets].sort((a, b) => getDepth(b) - getDepth(a))
+
+    for (const pid of orderedTargets) {
+      const ownedChild = [...ownedServerChildren].find(child => child.pid === pid)
+      if (ownedChild) {
+        try { ownedChild.kill('SIGKILL') } catch { /* already exited */ }
+      } else {
+        signalPid(pid)
+      }
+    }
+
+    const closeResults = await Promise.all([...ownedServerChildren].map(child => waitForOwnedChildClose(child)))
+    if (closeResults.some(closed => !closed)) {
+      throw new Error('owned whisper-server child did not exit after SIGKILL')
+    }
+    await sleep(50)
+  }
+
+  const remaining = listProcesses().filter(entry => isCosWhisperServerCommand(entry.command))
+  if (remaining.length > 0) {
+    throw new Error(`stale whisper-server process(es) remain: ${remaining.map(entry => entry.pid).join(', ')}`)
+  }
+
+  serverProcess = null
+}
+
+async function proveWhisperPortClear(): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const pids = listeningPids()
+    if (pids.length === 0) return
+    if (attempt < 19) await sleep(250)
+  }
+  const pids = listeningPids()
+  throw new Error(
+    `whisper-server port ${WHISPER_SERVER_PORT} remains occupied${pids.length ? ` by PID(s) ${pids.join(', ')}` : ''}`,
+  )
+}
 
 // Check CLI availability at import time
 try {
@@ -165,45 +323,38 @@ try {
  * Called from index.ts at server boot. Non-blocking.
  */
 export async function startWhisperServer(): Promise<void> {
-  if (serverStarting) return
+  if (serverRestartPromise) {
+    const result = await serverRestartPromise
+    if (result.status === 'failed') {
+      throw new Error(result.error ?? 'whisper-server restart failed')
+    }
+    return
+  }
+  if (serverStartPromise) return serverStartPromise
+  if (serverAvailable && serverProcess) return
+
   serverStarting = true
+  const operation = startWhisperServerAttempt()
+  serverStartPromise = operation
   try {
-    await startWhisperServerAttempt()
+    await operation
   } finally {
+    if (serverStartPromise === operation) serverStartPromise = null
     serverStarting = false
   }
 }
 
-async function startWhisperServerAttempt(): Promise<void> {
+async function startWhisperServerAttempt(preflightCompleted = false): Promise<void> {
   if (!existsSync(WHISPER_SERVER) || !existsSync(MODEL_PATH)) {
     console.log('[whisper-local] whisper-server or model not found — using CLI fallback')
     return
   }
 
-  // Check if already running
-  try {
-    const res = await fetch(`${WHISPER_SERVER_URL}/health`, { signal: AbortSignal.timeout(1000) })
-    if (res.ok) {
-      serverAvailable = true
-      console.log('[whisper-local] whisper-server already running on port', WHISPER_SERVER_PORT)
-      return
-    }
-  } catch {
-    // Not running — kill any zombie processes before starting fresh
-    try {
-      execSync('pkill -9 -f "whisper-server"', { stdio: 'ignore' })
-      console.log('[whisper-local] Killed stale whisper-server processes')
-    } catch { /* none running */ }
-
-    // Wait for port to actually clear (up to 5s)
-    for (let i = 0; i < 10; i++) {
-      try {
-        execSync('lsof -i :8178 -t', { stdio: 'ignore' })
-        await new Promise(r => setTimeout(r, 500))
-      } catch {
-        break // Port clear
-      }
-    }
+  // The API process is the sole Whisper owner. Never adopt an untracked daemon:
+  // reap stale trees, then prove the fixed local port is free before spawning.
+  if (!preflightCompleted) {
+    await killAndReapWhisperProcesses()
+    await proveWhisperPortClear()
   }
 
   // Assemble startup args. VAD only attaches if the ggml model is actually on
@@ -237,51 +388,61 @@ async function startWhisperServerAttempt(): Promise<void> {
 
   console.log('[whisper-local] Starting whisper-server...')
 
-  serverProcess = spawn(WHISPER_SERVER, serverArgs, {
+  const child = spawn(WHISPER_SERVER, serverArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,  // Dies with parent
   })
+  serverProcess = child
+  ownedServerChildren.add(child)
 
-  // Wait for server to be ready — poll /health every 2s (large models take ~20s to load)
-  return new Promise<void>((resolve) => {
-    const maxWaitMs = 45_000
-    const pollIntervalMs = 2_000
-    const startTime = Date.now()
-
-    const pollTimer = setInterval(async () => {
-      try {
-        const res = await fetch(`${WHISPER_SERVER_URL}/health`, { signal: AbortSignal.timeout(1000) })
-        if (res.ok) {
-          clearInterval(pollTimer)
-          serverAvailable = true
-          const loadTime = ((Date.now() - startTime) / 1000).toFixed(1)
-          console.log(`[whisper-local] whisper-server ready on port ${WHISPER_SERVER_PORT} (loaded in ${loadTime}s)`)
-          resolve()
-        }
-      } catch {
-        // Not ready yet — keep polling
-        if (Date.now() - startTime > maxWaitMs) {
-          clearInterval(pollTimer)
-          console.warn(`[whisper-local] whisper-server startup timeout (${maxWaitMs / 1000}s) — using CLI fallback`)
-          resolve()
-        }
-      }
-    }, pollIntervalMs)
-
-    serverProcess!.on('error', (err) => {
-      clearInterval(pollTimer)
-      console.error('[whisper-local] whisper-server failed to start:', err.message)
-      resolve()
-    })
-
-    serverProcess!.on('close', (code) => {
-      serverAvailable = false
-      serverProcess = null
-      if (code !== null && code !== 0) {
-        console.warn(`[whisper-local] whisper-server exited with code ${code}`)
-      }
-    })
+  child.once('close', (code) => {
+    ownedServerChildren.delete(child)
+    if (serverProcess !== child) return
+    serverAvailable = false
+    serverProcess = null
+    if (code !== null && code !== 0) {
+      console.warn(`[whisper-local] whisper-server exited with code ${code}`)
+    }
   })
+
+  // Wait for server to be ready — poll /health every 2s (large models take ~20s to load).
+  // Polls are sequential, so a slow health request cannot overlap the next one.
+  const maxWaitMs = 45_000
+  const pollIntervalMs = 2_000
+  const startTime = Date.now()
+  let spawnError: Error | null = null
+  let childClosed = false
+  child.once('error', err => { spawnError = err })
+  child.once('close', () => { childClosed = true })
+
+  while (Date.now() - startTime <= maxWaitMs && !spawnError && !childClosed) {
+    try {
+      const res = await fetch(`${WHISPER_SERVER_URL}/health`, { signal: AbortSignal.timeout(1000) })
+      if (res.ok) {
+        serverAvailable = true
+        const loadTime = ((Date.now() - startTime) / 1000).toFixed(1)
+        console.log(`[whisper-local] whisper-server ready on port ${WHISPER_SERVER_PORT} (loaded in ${loadTime}s)`)
+        return
+      }
+    } catch {
+      // Model is still loading.
+    }
+    if (!spawnError && !childClosed && Date.now() - startTime <= maxWaitMs) {
+      await sleep(pollIntervalMs)
+    }
+  }
+
+  // Event-listener assignment is opaque to TypeScript's control-flow analysis.
+  const caughtSpawnError = spawnError as Error | null
+  const failure = caughtSpawnError
+    ? `whisper-server failed to start: ${caughtSpawnError.message}`
+    : childClosed
+      ? 'whisper-server exited before becoming healthy'
+      : `whisper-server startup timeout (${maxWaitMs / 1000}s)`
+  console.error(`[whisper-local] ${failure} — reaping child and keeping local backend unavailable`)
+  await killAndReapWhisperProcesses()
+  await proveWhisperPortClear()
+  throw new Error(failure)
 }
 
 /**
@@ -671,7 +832,7 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
       if (serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD && !serverRestarting) {
         console.error(`[whisper-local] ⚠ CIRCUIT BREAKER OPEN — ${serverConsecutiveFailures} consecutive failures. Auto-restarting server...`)
         // Non-blocking restart in background
-        restartWhisperServer()
+        void restartWhisperServer()
       } else if (serverConsecutiveFailures < SERVER_FAILURE_THRESHOLD) {
         console.warn(`[whisper-local] Server failed (${serverConsecutiveFailures}/${SERVER_FAILURE_THRESHOLD} before restart): ${err.message}`)
       }
@@ -687,7 +848,7 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
   serverConsecutiveFailures++
   if (serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD && !serverRestarting) {
     console.error(`[whisper-local] CIRCUIT BREAKER OPEN — ${serverConsecutiveFailures} consecutive failures (server unavailable). Auto-restarting...`)
-    restartWhisperServer()
+    void restartWhisperServer()
   }
 
   // Throw so the caller applies the configured recovery policy. CLI is
@@ -700,48 +861,46 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
  * Non-blocking — runs in background while callers preserve audio or apply the
  * explicitly configured fallback policy.
  */
-async function restartWhisperServer(): Promise<void> {
-  if (serverRestarting) return
+export async function restartWhisperServer(): Promise<WhisperRestartResult> {
+  if (serverRestartPromise) return serverRestartPromise
+
   serverRestarting = true
-
-  try {
-    // Kill any existing server process
-    if (serverProcess) {
-      try { serverProcess.kill('SIGKILL') } catch {}
-      serverProcess = null
-    }
-    // Also kill any zombie processes
+  const priorStart = serverStartPromise
+  const operation = (async (): Promise<WhisperRestartResult> => {
     try {
-      execSync('pkill -9 -f "whisper-server"', { stdio: 'ignore' })
-    } catch { /* none running */ }
-
-    // Wait for port to clear
-    for (let i = 0; i < 6; i++) {
-      try {
-        execSync('lsof -i :8178 -t', { stdio: 'ignore' })
-        await new Promise(r => setTimeout(r, 500))
-      } catch {
-        break
+      // A restart requested during model load runs immediately after that single
+      // start attempt completes, then owns the lifecycle until recovery finishes.
+      if (priorStart) {
+        try { await priorStart } catch { /* restart performs its own clean recovery */ }
       }
-    }
 
-    console.log('[whisper-local] Restarting whisper-server (model load ~20s)...')
-    await startWhisperServer()
+      await killAndReapWhisperProcesses()
+      await proveWhisperPortClear()
 
-    if (serverAvailable) {
+      console.log('[whisper-local] Restarting whisper-server (model load ~20s)...')
+      await startWhisperServerAttempt(true)
+      if (!serverAvailable) {
+        throw new Error('whisper-server did not become healthy')
+      }
       serverConsecutiveFailures = 0
       console.log('[whisper-local] Server restarted successfully — circuit breaker CLOSED')
-    } else {
-      // Reset counter so the next N failures can trigger another restart attempt
-      // Without this, the counter stays >= threshold but serverRestarting is false,
-      // so every subsequent call would re-trigger restart in a tight loop
+      return { status: 'recovered' }
+    } catch (err: any) {
+      serverAvailable = false
+      // Preserve the existing retry cadence: one failed recovery consumes this
+      // breaker cycle, and the next three failed calls may request one new cycle.
       serverConsecutiveFailures = 0
-      console.error('[whisper-local] Server restart failed — reset counter, will retry after next 3 failures. Caller recovery policy remains active.')
+      const message = err?.message ?? String(err)
+      console.error(`[whisper-local] Server restart error: ${message} — will retry after next 3 failures`)
+      return { status: 'failed', error: message }
     }
-  } catch (err: any) {
-    serverConsecutiveFailures = 0  // Same reset — allow future retry cycle
-    console.error(`[whisper-local] Server restart error: ${err.message} — will retry after next 3 failures`)
+  })()
+
+  serverRestartPromise = operation
+  try {
+    return await operation
   } finally {
+    if (serverRestartPromise === operation) serverRestartPromise = null
     serverRestarting = false
   }
 }

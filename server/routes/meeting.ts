@@ -120,6 +120,16 @@ function publicSaveResponse(saved: SavedMeeting, replayed = false): Record<strin
   }
 }
 
+function suppliedServerPin(
+  req: { get: (name: string) => string | undefined },
+  fallback: unknown,
+): string | null {
+  const header = req.get('X-COS-Server-Instance')?.trim() ?? ''
+  const secondary = typeof fallback === 'string' ? fallback.trim() : ''
+  if (header && secondary && header !== secondary) return '__conflict__'
+  return header || secondary || null
+}
+
 export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router {
   const store = deps.store ?? getMeetingStore()
   const sessions = deps.sessions ?? defaultSessionSource
@@ -140,6 +150,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
       return
     }
+    const pin = suppliedServerPin(req, req.query.serverInstanceId)
+    if (pin && pin !== serverInstanceId) {
+      res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
+      return
+    }
     const saved = store.findBySessionId(sessionId)
     const live = getMeetingSessionStatus(sessionId)
     res.set('Cache-Control', 'private, no-store')
@@ -149,6 +164,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       serverInstanceId,
       receivedRanges: live.receivedRanges,
       receivedCount: live.receivedCount,
+      asrCompletedRanges: live.asrCompletedRanges,
+      asrCompletedCount: live.asrCompletedCount,
+      canonicalRanges: live.canonicalRanges,
+      canonicalCount: live.canonicalCount,
       maxChunkIndex: live.maxChunkIndex,
       lastActivityAt: live.lastActivityAt,
       retainedUntil: saved ? null : live.retainedUntil,
@@ -175,6 +194,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       }
       if (body?.domain !== undefined && typeof body.domain !== 'string') {
         res.status(400).json({ error: 'Invalid domain', reason: 'invalid_domain' })
+        return
+      }
+      const serverInstanceId = getServerInstanceId()
+      if (!serverInstanceId) {
+        res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
+        return
+      }
+      const pin = suppliedServerPin(req, body?.serverInstanceId)
+      if (pin && pin !== serverInstanceId) {
+        res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
         return
       }
 

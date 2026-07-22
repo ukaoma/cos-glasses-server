@@ -14,6 +14,8 @@ describe('local-first meetings server contract', () => {
       serverInstanceId: 'server-stable-id',
       idempotentSave: true,
       sessionStatus: true,
+      pinnedServerIdentity: true,
+      asrCompletionStatus: true,
       retentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
     })
   })

@@ -6,6 +6,10 @@ export interface LocalFirstMeetingsCapability {
   serverInstanceId: string
   idempotentSave: true
   sessionStatus: true
+  /** Capability-admitted clients pin every upload/status/save to one Mac. */
+  pinnedServerIdentity: true
+  /** Status and upload receipts distinguish raw receive, ASR completion, and canonical text. */
+  asrCompletionStatus: true
   retentionMs: number
 }
 
@@ -19,6 +23,8 @@ export function localFirstMeetingsCapability(serverInstanceId: string | null): L
     serverInstanceId,
     idempotentSave: true,
     sessionStatus: true,
+    pinnedServerIdentity: true,
+    asrCompletionStatus: true,
     retentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
   }
 }
