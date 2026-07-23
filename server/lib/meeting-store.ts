@@ -28,6 +28,7 @@ const SAFE_FILENAME_PATTERN = /^\d{4}-\d{2}-\d{2}_[A-Za-z0-9][A-Za-z0-9_-]{0,95}
 const DOMAIN_PATTERN = /^[a-z][a-z0-9_]{0,31}$/
 const MAX_MEETING_BYTES = 10 * 1024 * 1024
 const DETAIL_CHUNK_ESTIMATE_CHARS = 1_700
+export const MEETING_SOURCE_MAX_BYTES = 100_000
 
 export class MeetingStoreError extends Error {
   constructor(
@@ -71,6 +72,10 @@ export interface MeetingDetail extends MeetingMeta {
   attendees: string[]
   /** Additive field for API consumers that want the exact canonical record. */
   transcript: string
+  /** Bounded canonical meeting markdown for model-grounded follow-up prompts. */
+  sourceContent: string
+  /** True when sourceContent is a UTF-8-safe prefix of a larger record. */
+  sourceTruncated: boolean
 }
 
 export interface SaveMeetingInput {
@@ -271,6 +276,7 @@ function parseMeeting(content: string, filename: string, month: string): Meeting
   const decisions = parseListSection(content, ['Decisions', 'Decisions Made'], 10)
   const actionItems = parseActions(content)
   const attendees = parseAttendees(content)
+  const source = boundedMeetingSource(content)
 
   return {
     filename,
@@ -288,7 +294,20 @@ function parseMeeting(content: string, filename: string, month: string): Meeting
     actionItems,
     attendees,
     transcript,
+    ...source,
   }
+}
+
+/** Return enough canonical source for grounded meeting follow-ups without
+ * allowing an unexpectedly large archive record to inflate every response.
+ * The boundary backs up over UTF-8 continuation bytes so the prefix never
+ * ends with a replacement character. */
+export function boundedMeetingSource(content: string): { sourceContent: string; sourceTruncated: boolean } {
+  const bytes = Buffer.from(content, 'utf8')
+  if (bytes.length <= MEETING_SOURCE_MAX_BYTES) return { sourceContent: content, sourceTruncated: false }
+  let end = MEETING_SOURCE_MAX_BYTES
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1
+  return { sourceContent: bytes.subarray(0, end).toString('utf8'), sourceTruncated: true }
 }
 
 function toMeta(detail: MeetingDetail): MeetingMeta {

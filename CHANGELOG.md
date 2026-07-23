@@ -1,5 +1,19 @@
 # Changelog
 
+## 6.12.7
+
+Pairs the public server with COS Glasses build 227+ meeting follow-ups while
+preserving every existing meeting response field and legacy client contract.
+
+- **Meeting follow-ups receive canonical source context.** Authenticated
+  meeting-detail responses now add `sourceContent` and `sourceTruncated`, so
+  the glasses can attach the actual meeting record before a follow-up query.
+- **Bounded and UTF-8 safe.** Source context is capped at 100 KB without
+  splitting a multibyte character. Existing summary and transcript fields are
+  unchanged.
+- **Backward compatible.** Older clients ignore the additive fields; newer
+  clients no longer display the server-update warning on public installs.
+
 ## 6.12.6
 
 Pairs with COS Glasses build 222 to harden local-first meeting recovery and

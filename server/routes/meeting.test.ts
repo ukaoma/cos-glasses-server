@@ -205,9 +205,16 @@ describe('meeting save/list/detail API', () => {
     const detail = await detailRes.json() as any
     expect(detail.summary).toContain('improved batch transcript')
     expect(detail.transcript).toContain('improved batch transcript')
+    expect(detail.sourceContent).toContain('# Route integration')
+    expect(detail.sourceContent).toContain('## Transcript')
+    expect(detail.sourceTruncated).toBe(false)
 
     const compatibleDetail = await h.api(`/api/meetings/personal/2026-07/${encodeURIComponent(saved.filename)}`)
     expect(compatibleDetail.status).toBe(200)
+    expect(await compatibleDetail.json()).toMatchObject({
+      sourceContent: expect.stringContaining('## Transcript'),
+      sourceTruncated: false,
+    })
 
     const replay = await h.api('/api/meeting/save', {
       method: 'POST',

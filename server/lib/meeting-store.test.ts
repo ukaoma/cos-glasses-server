@@ -13,7 +13,13 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { MeetingStore, MeetingStoreError, type SaveMeetingInput } from './meeting-store.js'
+import {
+  boundedMeetingSource,
+  MEETING_SOURCE_MAX_BYTES,
+  MeetingStore,
+  MeetingStoreError,
+  type SaveMeetingInput,
+} from './meeting-store.js'
 
 const roots: string[] = []
 
@@ -96,10 +102,22 @@ describe('MeetingStore', () => {
     const detail = store.detail('personal', '2026-07', saved.filename)
     expect(detail.summary).toContain('We reviewed the launch plan')
     expect(detail.transcript).toContain('[Speaker B]: I will own the follow-up.')
+    expect(detail.sourceContent).toContain('# Weekly planning')
+    expect(detail.sourceContent).toContain('## Transcript')
+    expect(detail.sourceTruncated).toBe(false)
     expect(detail.topics).toEqual([])
     expect(detail.decisions).toEqual([])
     expect(detail.actionItems).toEqual([])
     expect(detail.attendees).toEqual([])
+  })
+
+  it('bounds canonical meeting source on a UTF-8-safe boundary', () => {
+    const content = `${'a'.repeat(MEETING_SOURCE_MAX_BYTES - 1)}▲tail`
+    const source = boundedMeetingSource(content)
+
+    expect(source.sourceTruncated).toBe(true)
+    expect(Buffer.byteLength(source.sourceContent, 'utf8')).toBeLessThanOrEqual(MEETING_SOURCE_MAX_BYTES)
+    expect(source.sourceContent).not.toContain('\uFFFD')
   })
 
   it('survives a new store instance and replays save identity from disk', () => {
