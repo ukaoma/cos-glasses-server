@@ -264,6 +264,12 @@ interface StreamChunkCompletionResponse {
 
 const closedSessionRecords = new Map<string, ClosedTranscriptSession>()
 
+/** Conservative lifecycle count used by the local service manager. A restart
+ * is unsafe while any live transcription session owns audio state. */
+export function getActiveTranscriptionSessionCount(): number {
+  return sessions.size
+}
+
 // Incremental chunk persistence — survive server restarts
 const CHUNK_PERSIST_DIR = dataPath('active-sessions')
 ensurePrivateDirectory(CHUNK_PERSIST_DIR)

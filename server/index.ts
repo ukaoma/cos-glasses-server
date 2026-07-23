@@ -28,6 +28,7 @@ import { sessionsRouter } from './routes/sessions.js'
 import { mediaRouter, mediaBodyParser } from './routes/media.js'
 import { promptDraftsRouter } from './routes/prompt-drafts.js'
 import { cliDebugRouter } from './routes/cli-debug.js'
+import { maintenanceRouter } from './routes/maintenance.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
@@ -167,6 +168,7 @@ app.use('/api', sessionsRouter)
 app.use('/api', mediaRouter)
 app.use('/api', promptDraftsRouter)
 app.use('/api', cliDebugRouter)
+app.use('/api', maintenanceRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models

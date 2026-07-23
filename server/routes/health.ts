@@ -21,6 +21,7 @@ import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { getTranscriptionPolicySnapshot } from '../lib/transcription-policy.js'
 import { CLI_DEBUG_CAPABILITY } from '../lib/cli-debug-view.js'
+import { managedRuntimeCapability, managedServerVersion } from '../lib/managed-runtime.js'
 
 export const healthRouter = Router()
 
@@ -145,12 +146,7 @@ healthRouter.get('/health', async (_req, res) => {
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
-  const recovery = {
-    status: false,
-    restartWhisper: false,
-    restartServer: false,
-    managed: false,
-  }
+  const recovery = managedRuntimeCapability()
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -180,6 +176,7 @@ healthRouter.get('/health', async (_req, res) => {
   const codex_models = getCodexModelCatalogSnapshot()
   res.json({
     ...checks,
+    server_version: managedServerVersion(),
     features,
     voice,
     whisper_health,
@@ -220,12 +217,7 @@ healthRouter.get('/models', async (req, res) => {
       },
       transcription,
       cliDebug: CLI_DEBUG_CAPABILITY,
-      recovery: {
-        status: false,
-        restartWhisper: false,
-        restartServer: false,
-        managed: false,
-      },
+      recovery: managedRuntimeCapability(),
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
   })

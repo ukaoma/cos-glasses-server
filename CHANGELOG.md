@@ -500,3 +500,10 @@ it directly, with no second repository to clone.
   can reach the server over your mesh/LAN. The IP allowlist blocks public traffic.
 - **Persistent config** at `~/.cos-glasses/.env`.
 - Requires Node.js 20.11+.
+# 6.13.0
+
+- Added a non-interactive managed-server entrypoint for the COS Control macOS app.
+- Added authenticated maintenance status and guarded local Whisper restart contracts.
+- Added `--prepare-only` to the existing guided launcher so first-run dependencies can be prepared without leaving a second server process running.
+- Added a provider-neutral managed work-folder setting while preserving the existing interactive launch-directory behavior.
+- Kept the existing `npx @gotcos/glasses-server` foreground workflow fully compatible.

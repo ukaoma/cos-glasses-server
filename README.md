@@ -11,6 +11,16 @@ API key is pasted into the phone for chat.
 npx --yes @gotcos/glasses-server@latest
 ```
 
+For the optional COS Control macOS menu bar app, prepare dependencies without
+leaving a foreground server running:
+
+```bash
+npx --yes @gotcos/glasses-server@latest --prepare-only
+```
+
+COS Control then installs the same npm package as a launchd-managed runtime.
+The original foreground command remains supported and unchanged.
+
 The launcher checks Node, finds your CLI, checks voice and image processing,
 downloads the local voice model when needed, writes `~/.cos-glasses/.env`, and
 starts the server on `0.0.0.0:3141`. On boot it prints

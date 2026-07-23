@@ -14,16 +14,22 @@ import { join, resolve } from 'node:path'
 
 let cached: string | null | undefined
 
-/** The user's launch directory IF it contains a COS brain; otherwise null. */
-export function cosBrainDir(): string | null {
-  if (cached !== undefined) return cached
-  const raw = process.env.COS_LAUNCH_DIR?.trim()
-  if (!raw) { cached = null; return cached }
-  const dir = resolve(raw)
+export function resolveCosBrainDir(raw: string | undefined): string | null {
+  const candidate = raw?.trim()
+  if (!candidate) return null
+  const dir = resolve(candidate)
   const hasBrain =
     existsSync(join(dir, '.cos', 'manifest.json')) ||
     existsSync(join(dir, 'AGENTS.md')) ||
     existsSync(join(dir, 'CLAUDE.md'))
-  cached = hasBrain ? dir : null
+  return hasBrain ? dir : null
+}
+
+/** The user's launch directory IF it contains a COS brain; otherwise null. */
+export function cosBrainDir(): string | null {
+  if (cached !== undefined) return cached
+  // COS_WORKDIR is the provider-neutral managed setting. COS_LAUNCH_DIR stays
+  // as the interactive npx compatibility path.
+  cached = resolveCosBrainDir(process.env.COS_WORKDIR ?? process.env.COS_LAUNCH_DIR)
   return cached
 }

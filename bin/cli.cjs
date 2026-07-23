@@ -41,6 +41,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('')
   console.log('  Usage:')
   console.log('    npx --yes @gotcos/glasses-server@latest')
+  console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
   console.log('')
   console.log('  Requirements:')
   console.log('    - Node.js 20.11+')
@@ -332,6 +333,13 @@ if (!localVoiceReady) {
   console.log('    Text chat can start. Under the default local-only policy, voice prompts remain unavailable.')
   console.log('    Install: ' + bold('brew install whisper-cpp'))
   console.log('    Then stop COS with Ctrl-C and rerun: ' + bold('npx --yes @gotcos/glasses-server@latest'))
+}
+if (process.argv.includes('--prepare-only')) {
+  console.log('')
+  console.log(green('  ✓ Guided setup complete'))
+  console.log('    COS Control can now install and manage the background server.')
+  console.log('')
+  process.exit(0)
 }
 console.log('')
 console.log(dim('  Starting server...'))
