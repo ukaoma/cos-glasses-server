@@ -1,3 +1,15 @@
+## 6.14.1
+
+- Keep real-time `large-v3-turbo` stable on VAD-empty audio by using
+  whisper-server compact JSON instead of the nullable `verbose_json` language
+  path that can crash native whisper.cpp.
+- Prevent long sessions from stalling on unread native output by discarding
+  whisper-server stdout and stderr under the existing owner-safe supervisor.
+- Isolate meeting-save full `large-v3` polish from live Metal inference by
+  running batch HQ on CPU with eight threads. Interactive HQ retains GPU speed.
+- Reap timed-out HQ children before the queue advances, with SIGKILL escalation
+  if SIGTERM does not exit within two seconds.
+
 ## 6.14.0
 
 - Add voice (TTS + speaker) and additive glasses routes to the public server: `tts`, `voice`, `glossary`, `handoffs`, `recovery`, `prompt-edit`, `bookmarks`. Brings server-side voice + companion utilities to public installs; COS-integration routes remain private.

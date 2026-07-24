@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 class FakeChild extends EventEmitter {
@@ -119,6 +120,38 @@ describe('whisper-server health reconciliation', () => {
       'http://127.0.0.1:8178/health',
       'http://127.0.0.1:8178/inference',
     ])
+  })
+
+  it('uses compact JSON and accepts a VAD-empty transcript without native verbose serialization', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
+        const body = init.body as FormData
+        expect(body.get('response_format')).toBe('json')
+        return { ok: true, json: async () => ({ text: '' }) }
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { transcribeLocal } = await import('./whisper-local.js')
+    await expect(transcribeLocal(Buffer.alloc(3200))).resolves.toMatchObject({
+      text: '',
+      backend: 'server',
+    })
+  })
+
+  it('rejects malformed compact JSON instead of acknowledging false silence', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) }))
+    const { transcribeLocal } = await import('./whisper-local.js')
+    await expect(transcribeLocal(Buffer.alloc(3200))).rejects.toThrow(/invalid compact JSON/i)
+  })
+
+  it('keeps meeting-save polish off live Metal', () => {
+    const source = readFileSync(new URL('./whisper-local.ts', import.meta.url), 'utf8')
+    expect(source).toContain("const isolateBatchFromLiveMetal = opts.priority === 'batch'")
+    expect(source).toContain("...(isolateBatchFromLiveMetal ? ['-ng'] : ['-fa'])")
+    expect(source).toContain("'-t', isolateBatchFromLiveMetal ? '8' : '16'")
   })
 
   it('serializes concurrent restarts and starts exactly one child', async () => {

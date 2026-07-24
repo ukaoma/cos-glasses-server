@@ -42,9 +42,8 @@ export interface WhisperSegment {
   words?: WhisperWord[]
 }
 
-interface WhisperVerboseResponse {
-  text: string
-  segments?: WhisperSegment[]
+interface WhisperJsonResponse {
+  text?: unknown
 }
 
 // Resolve whisper.cpp binaries across Homebrew prefixes (Apple Silicon
@@ -144,6 +143,7 @@ let cliAvailable = false
 let serverAvailable = false
 let serverProcess: ReturnType<typeof spawn> | null = null
 const ownedServerChildren = new Set<ChildProcess>()
+const ownedHqChildren = new Set<ReturnType<typeof spawn>>()
 
 // Circuit breaker: track consecutive server failures to detect hung process
 let serverConsecutiveFailures = 0
@@ -389,7 +389,9 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
   console.log('[whisper-local] Starting whisper-server...')
 
   const child = spawn(WHISPER_SERVER, serverArgs, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // whisper-server writes per-inference diagnostics. Unread pipes eventually
+    // fill and block the daemon, so the supervisor must not leave them buffered.
+    stdio: 'ignore',
     detached: false,  // Dies with parent
   })
   serverProcess = child
@@ -455,6 +457,10 @@ export function stopWhisperServer(): void {
     serverAvailable = false
     console.log('[whisper-local] whisper-server stopped')
   }
+  for (const proc of ownedHqChildren) {
+    try { proc.kill('SIGKILL') } catch { /* already exited */ }
+  }
+  ownedHqChildren.clear()
 }
 
 export function isWhisperLocalAvailable(): boolean {
@@ -523,7 +529,11 @@ async function reconcileWhisperServerHealth(): Promise<boolean> {
  * Falls back to turbo weights if large-v3 not on disk or COS_BATCH_LARGE_V3=0.
  * Falls back to transcribeLocal if whisper-cli unavailable entirely.
  */
-export async function transcribeHighQuality(audioBuffer: Buffer, context?: string): Promise<{ text: string; words?: WhisperWord[] }> {
+export async function transcribeHighQuality(
+  audioBuffer: Buffer,
+  context?: string,
+  opts: { priority?: 'interactive' | 'batch' } = {},
+): Promise<{ text: string; words?: WhisperWord[] }> {
   if (!cliAvailable) {
     // Fall back to server (no beam search available via HTTP API)
     return transcribeLocal(audioBuffer, context)
@@ -541,12 +551,13 @@ export async function transcribeHighQuality(audioBuffer: Buffer, context?: strin
     writeFileSync(tmpWav, audioBuffer)
 
     const text = await new Promise<string>((resolve, reject) => {
+      const isolateBatchFromLiveMetal = opts.priority === 'batch'
       const args = [
         '-m', modelPath,
         '-f', tmpWav,
-        '-t', '16',           // Use more threads for batch (no real-time pressure)
+        '-t', isolateBatchFromLiveMetal ? '8' : '16',
         '-l', 'en',
-        '-fa',                // Flash attention — Metal win, same flag streaming uses
+        ...(isolateBatchFromLiveMetal ? ['-ng'] : ['-fa']),
         '-bs', '5',           // Beam search width 5 (default disabled)
         '-bo', '5',           // Best-of-5 candidates (default 2)
         '--no-timestamps',
@@ -562,6 +573,7 @@ export async function transcribeHighQuality(audioBuffer: Buffer, context?: strin
       const proc = spawn(WHISPER_CLI, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
       })
+      ownedHqChildren.add(proc)
 
       let stdout = ''
       let stderr = ''
@@ -573,13 +585,24 @@ export async function transcribeHighQuality(audioBuffer: Buffer, context?: strin
       // multiplier × beam-search overhead = ~240s safety ceiling for HQ.
       // Turbo retains the old 60s ceiling.
       const timeoutMs = useLargeV3 ? 240_000 : 60_000
+      let timedOut = false
+      let forceKill: ReturnType<typeof setTimeout> | null = null
       const timeout = setTimeout(() => {
-        proc.kill('SIGTERM')
-        reject(new Error(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${useLargeV3 ? 'large-v3' : 'turbo'})`))
+        timedOut = true
+        try { proc.kill('SIGTERM') } catch { /* already exited */ }
+        forceKill = setTimeout(() => {
+          try { proc.kill('SIGKILL') } catch { /* already exited */ }
+        }, 2_000)
       }, timeoutMs)
 
       proc.on('close', (code) => {
+        ownedHqChildren.delete(proc)
         clearTimeout(timeout)
+        if (forceKill) clearTimeout(forceKill)
+        if (timedOut) {
+          reject(new Error(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${useLargeV3 ? 'large-v3' : 'turbo'})`))
+          return
+        }
         if (code !== 0) {
           reject(new Error(`whisper-cli HQ exit ${code}: ${stderr.trim().slice(0, 200)}`))
           return
@@ -588,7 +611,9 @@ export async function transcribeHighQuality(audioBuffer: Buffer, context?: strin
       })
 
       proc.on('error', (err) => {
+        ownedHqChildren.delete(proc)
         clearTimeout(timeout)
+        if (forceKill) clearTimeout(forceKill)
         reject(new Error(`whisper-cli HQ spawn error: ${err.message}`))
       })
     })
@@ -626,14 +651,17 @@ function buildPrompt(context?: string, isQuiet?: boolean): string {
 
 /**
  * Transcribe via whisper-server (persistent daemon, ~50-100ms).
- * Returns text + optional word-level timestamps from DTW alignment.
+ *
+ * Compact JSON intentionally avoids whisper.cpp's verbose_json language field,
+ * which can receive a null C string after VAD returns no speech and crash the
+ * native server before an HTTP response exists.
  */
 async function transcribeViaServer(audioBuffer: Buffer, context?: string, isQuiet?: boolean): Promise<{ text: string; words?: WhisperWord[] }> {
   const formData = new FormData()
   // Convert Buffer to Uint8Array to satisfy Blob's BlobPart type constraint
   const blob = new Blob([new Uint8Array(audioBuffer)], { type: 'audio/wav' })
   formData.append('file', blob, 'recording.wav')
-  formData.append('response_format', 'verbose_json')  // includes segments[].words[] with DTW
+  formData.append('response_format', 'json')
   formData.append('prompt', buildPrompt(context, isQuiet))
   // Anti-hallucination handled by client-side filter + context filtering.
   // Whisper-level entropy/logprob thresholds were too aggressive — silently dropped
@@ -650,20 +678,11 @@ async function transcribeViaServer(audioBuffer: Buffer, context?: string, isQuie
     throw new Error(`whisper-server ${response.status}: ${await response.text()}`)
   }
 
-  const result = await response.json() as WhisperVerboseResponse
-  const text = result.text?.trim() || ''
-
-  // Extract word-level timestamps from DTW-aligned segments (defensive — may be absent)
-  let words: WhisperWord[] | undefined
-  if (result.segments && result.segments.length > 0) {
-    const extracted = result.segments.flatMap(s => {
-      if (!s.words || !Array.isArray(s.words)) return []
-      return s.words.filter(w => typeof w.start === 'number' && typeof w.end === 'number')
-    })
-    if (extracted.length > 0) words = extracted
+  const result = await response.json() as WhisperJsonResponse
+  if (typeof result.text !== 'string') {
+    throw new Error('whisper-server returned invalid compact JSON: missing string text')
   }
-
-  return { text, words }
+  return { text: result.text.trim() }
 }
 
 /**

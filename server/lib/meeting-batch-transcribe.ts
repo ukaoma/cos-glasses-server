@@ -172,7 +172,7 @@ async function transcribeSegments(
       const combined = concatenateWavChunks(audioDir, segment.startChunkIdx, segment.endChunkIdx)
       const enhanced = await enhanceAudio(combined)
       const previousText = results.at(-1)?.text
-      const result = await transcribeHighQuality(enhanced, previousText?.slice(-250))
+      const result = await transcribeHighQuality(enhanced, previousText?.slice(-250), { priority: 'batch' })
       const text = previousText ? stripOverlap(result.text, previousText) : result.text
       const words = result.words ?? []
       results.push({
