@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": 2,
+  "entrypoint": "bin/managed-server.cjs",
+  "listenerOwnership": "entrypoint-process",
+  "requiredEnvironment": [
+    "COS_API_TOKEN",
+    "COS_SERVER_GENERATION_ID",
+    "COS_MAINTENANCE_GATE_PATH"
+  ],
+  "optionalEnvironment": [
+    "COS_WORKDIR",
+    "PORT",
+    "HTTPS_PORT",
+    "BIND_HOST",
+    "COS_DURABLE_QUERY_JOBS"
+  ],
+  "maintenance": {
+    "scope": "cross_boot",
+    "adoptionRequired": true,
+    "networkRestartEndpoint": false
+  }
+}

@@ -175,6 +175,17 @@ try {
   process.exit(1)
 }
 
+// Controller probes are deliberately read-only. They verify Node, agent auth,
+// and the packaged runtime without creating config, downloading models,
+// changing permissions, or starting a listener.
+if (process.argv.includes('--prepare-only')) {
+  console.log('')
+  console.log(green('  ✓ Non-mutating readiness check complete'))
+  console.log('    COS Control can perform guided installation without hidden setup side effects.')
+  console.log('')
+  process.exit(0)
+}
+
 // Step 4: persistent config at ~/.cos-glasses/ (survives npx cache churn)
 function securePrivateDirectory(dir) {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -333,13 +344,6 @@ if (!localVoiceReady) {
   console.log('    Text chat can start. Under the default local-only policy, voice prompts remain unavailable.')
   console.log('    Install: ' + bold('brew install whisper-cpp'))
   console.log('    Then stop COS with Ctrl-C and rerun: ' + bold('npx --yes @gotcos/glasses-server@latest'))
-}
-if (process.argv.includes('--prepare-only')) {
-  console.log('')
-  console.log(green('  ✓ Guided setup complete'))
-  console.log('    COS Control can now install and manage the background server.')
-  console.log('')
-  process.exit(0)
 }
 console.log('')
 console.log(dim('  Starting server...'))

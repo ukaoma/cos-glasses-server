@@ -40,6 +40,7 @@ import {
   type TranscriptGapReport,
 } from './transcribe-stream.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
+import { acquireMaintenanceWork, type MaintenanceWorkLease } from '../lib/maintenance-lifecycle.js'
 
 interface MeetingSessionSource {
   getTranscript(sessionId: string): string | null
@@ -177,6 +178,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
   router.post('/meeting/save', async (req, res) => {
     let lockedSessionId: string | null = null
+    let maintenanceLease: MaintenanceWorkLease | undefined
     try {
       const body = req.body as Record<string, unknown> | undefined
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
@@ -219,6 +221,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         res.status(409).json({ error: 'Meeting save already in progress', reason: 'save_in_progress' })
         return
       }
+      // Saving/finalizing an already-recording session is a drain
+      // continuation. It must remain admitted so existing audio can reach a
+      // durable terminal while all genuinely new work is closed.
+      maintenanceLease = acquireMaintenanceWork('meeting_save', { allowDuringDrain: true })
       savingSessions.add(sessionId)
       lockedSessionId = sessionId
 
@@ -300,20 +306,30 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.json(publicSaveResponse(saved))
 
       if (audioWritesReady && pendingAudioDir && chunkEntries.length > 0) {
-        const task = finalizeBatch({
-          audioDir: pendingAudioDir,
-          entries: chunkEntries.map(entry => ({ ...entry, chunk: { ...entry.chunk } })),
-          streamingWordCount: countWords(transcript),
-          meetingPath: saved.filepath,
-          sidecarPath: saved.sidecarPath,
-          runBatch,
+        // Acquire before the foreground save lease can leave scope: there is
+        // no zero-count proof gap between pending-audio handoff and the queued
+        // background finalizer.
+        const batchLease = acquireMaintenanceWork('meeting_batch_finalization', {
+          allowDuringDrain: true,
+          phase: 'queued',
+        })
+        const task = Promise.resolve().then(() => {
+          batchLease.setPhase('active')
+          return finalizeBatch({
+            audioDir: pendingAudioDir,
+            entries: chunkEntries.map(entry => ({ ...entry, chunk: { ...entry.chunk } })),
+            streamingWordCount: countWords(transcript),
+            meetingPath: saved.filepath,
+            sidecarPath: saved.sidecarPath,
+            runBatch,
+          })
         }).catch(error => {
           // Raw audio deliberately remains for the existing two-hour cleanup.
           console.error(
             `[meeting/save] Batch finalization failed for ${sessionId}: `
             + `${error instanceof Error ? error.message : String(error)}`,
           )
-        })
+        }).finally(() => batchLease.release())
         scheduleBackground(task)
       }
     } catch (error) {
@@ -324,6 +340,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       console.error('[meeting/save] Finalization failed:', error)
       res.status(500).json({ error: 'Meeting save failed', reason: 'meeting_save_error' })
     } finally {
+      maintenanceLease?.release()
       if (lockedSessionId) savingSessions.delete(lockedSessionId)
     }
   })

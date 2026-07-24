@@ -43,6 +43,11 @@ import {
   type IndexRange,
 } from '../lib/local-first-meetings-contract.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
+import {
+  acquireMaintenanceWork,
+  maintenanceAdmissionsOpen,
+  type MaintenanceWorkLease,
+} from '../lib/maintenance-lifecycle.js'
 
 function ensurePrivateDirectory(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -606,12 +611,17 @@ export function isSessionDeleted(sessionId: string): boolean {
   return deletedSessions.has(sessionId)
 }
 
-// Recover any sessions from prior server instance.
-recoverClosedSessions()
-recoverSessions()
+// A committed cross-boot maintenance operation owns durable state until the
+// trusted controller adopts the candidate. Boot recovery must not mutate or
+// promote sessions while that gate is closed.
+if (maintenanceAdmissionsOpen()) {
+  recoverClosedSessions()
+  recoverSessions()
+}
 
 // Auto-cleanup sessions idle for the advertised retention horizon.
 setInterval(() => {
+  if (!maintenanceAdmissionsOpen()) return
   const cutoff = Date.now() - LOCAL_FIRST_MEETING_IDLE_RETENTION_MS
   for (const [id, session] of sessions) {
     if (session.lastActivityAt < cutoff) {
@@ -1556,10 +1566,14 @@ function sendStreamError(res: { status: (code: number) => { json: (body: unknown
 }
 
 transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     // Reject a wrong Mac before consuming or persisting any upload bytes.
     assertPinnedServerIdentity(req.get('X-COS-Server-Instance'), req.query.serverInstanceId)
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
+    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+      allowDuringDrain: sessions.has(sessionId),
+    })
     const chunkIndex = parseInt((req.query.chunkIndex as string) || '0', 10)
     const clientSpeaker = (req.query.speaker as string) || 'Unknown'
     const clientElapsedRaw = Number(req.query.elapsed)
@@ -1581,15 +1595,21 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
     }))
   } catch (err: unknown) {
     sendStreamError(res, err)
+  } finally {
+    maintenanceLease?.release()
   }
 })
 
 transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const body = req.body ?? {}
     const sessionId = String(body.sessionId ?? '')
     validateSessionId(sessionId)
+    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+      allowDuringDrain: sessions.has(sessionId),
+    })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
     const session = getSession(sessionId)
     const startTime = typeof body.startTime === 'number' && Number.isFinite(body.startTime)
@@ -1602,14 +1622,20 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (
     res.json({ sessionId, startTime: session.startTime, chunks: session.chunks.filter(Boolean).length })
   } catch (err: unknown) {
     sendStreamError(res, err)
+  } finally {
+    maintenanceLease?.release()
   }
 })
 
 transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/chunks', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const sessionId = String(req.params.sessionId ?? '')
     validateSessionId(sessionId)
+    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+      allowDuringDrain: sessions.has(sessionId),
+    })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
     const body = req.body ?? {}
     const chunkIndex = Number(body.chunkIndex)
@@ -1642,14 +1668,20 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/chun
     res.json({ ...result, offlineReplay: true })
   } catch (err: unknown) {
     sendStreamError(res, err)
+  } finally {
+    maintenanceLease?.release()
   }
 })
 
 transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/finalize', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const sessionId = String(req.params.sessionId ?? '')
     validateSessionId(sessionId)
+    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+      allowDuringDrain: sessions.has(sessionId),
+    })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
     const chunks = getSessionChunks(sessionId)
     if (!chunks || chunks.length === 0) throw makeHttpError(404, 'offline session has no chunks', 'session_not_found')
@@ -1668,16 +1700,22 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/fina
     })
   } catch (err: unknown) {
     sendStreamError(res, err)
+  } finally {
+    maintenanceLease?.release()
   }
 })
 
 transcribeStreamRouter.post('/transcribe-stream/candidates', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const body = req.body ?? {}
     const sessionId = String(body.sessionId ?? '')
     const chunkIndex = Number(body.chunkIndex)
     validateSessionId(sessionId)
+    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+      allowDuringDrain: sessions.has(sessionId),
+    })
     validateChunkIndex(chunkIndex)
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
     if (chunkIndex > 0 && !sessions.has(sessionId)) {
@@ -1708,6 +1746,8 @@ transcribeStreamRouter.post('/transcribe-stream/candidates', async (req, res) =>
     res.json(result)
   } catch (err: unknown) {
     sendStreamError(res, err)
+  } finally {
+    maintenanceLease?.release()
   }
 })
 

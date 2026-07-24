@@ -26,6 +26,7 @@
   "files": [
     "bin/cli.cjs",
     "bin/managed-server.cjs",
+    "managed-runtime-contract.json",
     "server",
     "shared",
     "!server/**/*.test.ts",

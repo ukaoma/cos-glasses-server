@@ -39,6 +39,13 @@ import { logTokenAudit } from '../lib/token-audit.js'
 import { atomicWriteFileSync } from '../lib/atomic-fs.js'
 import { dataPath } from '../lib/data-dir.js'
 import { emitDisplay } from '../lib/display-bus.js'
+import {
+  acquireMaintenanceWork,
+  maintenanceAdmissionsOpen,
+  MaintenanceLifecycleError,
+  maintenanceErrorPayload,
+  type MaintenanceWorkLease,
+} from '../lib/maintenance-lifecycle.js'
 
 export const promptDraftsRouter = Router()
 
@@ -138,6 +145,12 @@ function sanitizeTranscript(draftId: string, text: string, learnInline = true): 
 }
 
 async function sendDraftError(res: Response, draftId: string, err: any): Promise<void> {
+  // Maintenance rejection is an admission result, not a draft failure. Keep
+  // the recoverable draft untouched so the phone can retry after maintenance.
+  if (err instanceof MaintenanceLifecycleError) {
+    if (err.retryAfterSeconds != null) res.setHeader('Retry-After', String(err.retryAfterSeconds))
+    return void res.status(err.status).json({ ...maintenanceErrorPayload(err), draftPreserved: true })
+  }
   if (err instanceof NoSpeechDetectedError) return void res.status(204).send()
   if (err instanceof OpenAIWhisperBudgetExhaustedError) {
     await markPromptDraftError(draftId, err.message)
@@ -211,31 +224,53 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
   return { draftId, text: finalText, recovered: true, chunkCount: finalized.receivedChunkIndexes.length, missingChunks: getMissingChunkIndexes(finalized), expiresAt: finalized.expiresAt }
 }
 
-const prunedAtBoot = prunePromptDrafts()
+const prunedAtBoot = maintenanceAdmissionsOpen() ? prunePromptDrafts() : 0
 if (prunedAtBoot) console.log(`[prompt-draft] pruned ${prunedAtBoot} expired draft(s)`)
-const pruneTimer = setInterval(() => prunePromptDrafts(), 60 * 60 * 1000)
+const pruneTimer = setInterval(() => {
+  if (maintenanceAdmissionsOpen()) prunePromptDrafts()
+}, 60 * 60 * 1000)
 pruneTimer.unref?.()
 
 promptDraftsRouter.post('/prompt-drafts/start', (req, res) => {
-  const requestedId = typeof req.body?.recoveryId === 'string' ? req.body.recoveryId : undefined
-  const meta = createPromptDraft(requestedId)
-  res.json({ draftId: meta.draftId, recoveryId: requestedId ?? meta.draftId, remapped: Boolean(requestedId && requestedId !== meta.draftId), expiresAt: meta.expiresAt, status: meta.status })
+  let maintenanceLease: MaintenanceWorkLease | undefined
+  try {
+    maintenanceLease = acquireMaintenanceWork('prompt_draft_write')
+    const requestedId = typeof req.body?.recoveryId === 'string' ? req.body.recoveryId : undefined
+    const meta = createPromptDraft(requestedId)
+    res.json({ draftId: meta.draftId, recoveryId: requestedId ?? meta.draftId, remapped: Boolean(requestedId && requestedId !== meta.draftId), expiresAt: meta.expiresAt, status: meta.status })
+  } catch (err: any) {
+    if (err instanceof MaintenanceLifecycleError) {
+      if (err.retryAfterSeconds != null) res.setHeader('Retry-After', String(err.retryAfterSeconds))
+      res.status(err.status).json(maintenanceErrorPayload(err))
+      return
+    }
+    res.status(err.status ?? 500).json({ error: err.message })
+  } finally {
+    maintenanceLease?.release()
+  }
 })
 
 promptDraftsRouter.post('/prompt-drafts/:draftId/chunks', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     const raw = Array.isArray(req.query.chunkIndex) ? req.query.chunkIndex[0] : req.query.chunkIndex
     const chunkIndex = Number(raw)
     if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= MAX_CHUNKS) return res.status(400).json({ error: 'invalid chunkIndex' })
-    const audio = await readRawBody(req)
-    if (audio.length < 44) return res.status(400).json({ error: 'audio too short' })
     const before = loadPromptDraftMeta(req.params.draftId)
     if (!before) return res.status(404).json({ error: 'draft not found' })
+    maintenanceLease = acquireMaintenanceWork('prompt_draft_write')
+    const audio = await readRawBody(req)
+    if (audio.length < 44) return res.status(400).json({ error: 'audio too short' })
     const existingBytes = before.chunkBytes[String(chunkIndex)] ?? 0
     const nextTotal = Object.values(before.chunkBytes).reduce((sum, bytes) => sum + bytes, 0) - existingBytes + audio.length
     if (nextTotal > MAX_DRAFT_BYTES) return res.status(413).json({ error: 'prompt draft too large' })
     const meta = await savePromptDraftChunk(req.params.draftId, chunkIndex, audio)
+    const warmLease = acquireMaintenanceWork('prompt_draft_warm', {
+      allowDuringDrain: true,
+      phase: 'queued',
+    })
     warmTail = warmTail.then(async () => {
+      warmLease.setPhase('active')
       const text = await transcribeChunk(req.params.draftId, chunkIndex, audio, 'fast', 'warm')
       // The durability ACK above remains immediate. Publish the optional warm
       // transcript only after rechecking that this exact audio still owns the
@@ -247,10 +282,16 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/chunks', async (req, res) => {
       })
     }).catch(err => {
       console.warn(`[prompt-draft] warm transcription failed ${req.params.draftId}/${chunkIndex}: ${err.message}`)
-    })
+    }).finally(() => warmLease.release())
     res.json({ draftId: meta.draftId, chunkIndex, acked: true, receivedChunkIndexes: meta.receivedChunkIndexes, chunkBytes: meta.chunkBytes[String(chunkIndex)] ?? audio.length, transcriptPending: true, expiresAt: meta.expiresAt })
   } catch (err: any) {
+    if (err instanceof MaintenanceLifecycleError) {
+      if (err.retryAfterSeconds != null) res.setHeader('Retry-After', String(err.retryAfterSeconds))
+      return void res.status(err.status).json(maintenanceErrorPayload(err))
+    }
     res.status(err.status ?? (err.message === 'draft not found' ? 404 : 500)).json({ error: err.message })
+  } finally {
+    maintenanceLease?.release()
   }
 })
 
@@ -262,7 +303,9 @@ async function finalizeRequest(req: any, res: Response): Promise<void> {
     const key = `${req.params.draftId}:${mode}`
     let job = finalizeJobs.get(key)
     if (!job) {
+      const finalizeLease = acquireMaintenanceWork('prompt_draft_finalize')
       job = finalizeDraft(req.params.draftId, mode, routeAutoClean(req), abort.signal)
+        .finally(() => finalizeLease.release())
       finalizeJobs.set(key, job)
       job.finally(() => finalizeJobs.delete(key)).catch(() => {})
     }

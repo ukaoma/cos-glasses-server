@@ -26,6 +26,7 @@ import {
   type QueryJobRequest,
   type QueryJobSnapshot,
 } from './query-job-types.js'
+import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -161,6 +162,12 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           resolvedAttachments.refs,
           metadata?.outputAttachments,
         )
+        // Acquire before the durable terminal callback can release the main
+        // query lease. Attachment association is a post-terminal write and
+        // must not create a zero-count maintenance proof gap.
+        const attachmentLease = resolvedAttachments.ids.length > 0
+          ? acquireMaintenanceWork('query_attachment_write', { allowDuringDrain: true })
+          : undefined
         const linkage = {
           provider: providerFor(model),
           resolvedModel: model,
@@ -171,34 +178,38 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
         } as const
         // Publish compatibility completion only after the durable terminal is
         // fsynced. Display subscribers can disappear without owning this job.
-        const terminalOwned = await callbacks.onDone({
-          text: fullText,
-          attachments,
-          outputImageStats: metadata?.outputImageStats,
-          ...linkage,
-        })
-        if (!terminalOwned) return
-        if (resolvedAttachments.ids.length > 0) {
-          await getMediaStore().associate(resolvedAttachments.ids, {
+        try {
+          const terminalOwned = await callbacks.onDone({
+            text: fullText,
+            attachments,
+            outputImageStats: metadata?.outputImageStats,
+            ...linkage,
+          })
+          if (!terminalOwned) return
+          if (resolvedAttachments.ids.length > 0) {
+            await getMediaStore().associate(resolvedAttachments.ids, {
+              sessionId: request.sessionId,
+              ...(request.globalMsgNum ? { globalMsgNum: request.globalMsgNum } : {}),
+            }).catch(error => console.error('[query-jobs] attachment association failed:', error))
+          }
+          const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
+          emitDisplay({ type: 'done', data: {
+            jobId,
+            clientJobId: request.clientJobId,
+            generation: request.generation,
+            turnId,
+            messageEra: request.messageEra,
+            globalMsgNum: request.globalMsgNum,
+            text: fullText,
             sessionId: request.sessionId,
-            ...(request.globalMsgNum ? { globalMsgNum: request.globalMsgNum } : {}),
-          }).catch(error => console.error('[query-jobs] attachment association failed:', error))
+            model,
+            cliSessionId,
+            ...runMetadata,
+            ...(attachments.length > 0 ? { attachments } : {}),
+          } })
+        } finally {
+          attachmentLease?.release()
         }
-        const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
-        emitDisplay({ type: 'done', data: {
-          jobId,
-          clientJobId: request.clientJobId,
-          generation: request.generation,
-          turnId,
-          messageEra: request.messageEra,
-          globalMsgNum: request.globalMsgNum,
-          text: fullText,
-          sessionId: request.sessionId,
-          model,
-          cliSessionId,
-          ...runMetadata,
-          ...(attachments.length > 0 ? { attachments } : {}),
-        } })
       },
       onError: async error => {
         const terminalOwned = await callbacks.onError(error)
@@ -239,6 +250,7 @@ export const queryJobStore = new QueryJobStore({
 export const queryJobCoordinator = new QueryJobCoordinator(queryJobStore, runner, {
   projectTerminal: projectPublicConversationTerminal,
   acquireSessionLock: acquireModelSessionRunLock,
+  acquireMaintenanceWork: () => acquireMaintenanceWork('durable_query', { phase: 'queued' }),
 })
 
 export function initQueryJobRuntime() {

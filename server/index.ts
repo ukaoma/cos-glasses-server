@@ -59,6 +59,13 @@ import {
   isTailscaleIpv4,
 } from './lib/network-policy.js'
 import { timingSafeTokenEqual } from './lib/token-auth.js'
+import { isManagedRuntime } from './lib/managed-runtime.js'
+import {
+  acquireMaintenanceWork,
+  MaintenanceLifecycleError,
+  maintenanceAdmissionsOpen,
+  maintenanceErrorPayload,
+} from './lib/maintenance-lifecycle.js'
 
 const app = express()
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
@@ -75,6 +82,9 @@ const BIND_HOST = process.env.BIND_HOST ?? '0.0.0.0'
 
 // API token — auto-generate if not set so every session is authenticated.
 const API_TOKEN_AUTO = !process.env.COS_API_TOKEN
+if (isManagedRuntime() && API_TOKEN_AUTO) {
+  throw new Error('Managed COS startup requires a pre-provisioned COS_API_TOKEN.')
+}
 const API_TOKEN = process.env.COS_API_TOKEN ?? `_${randomBytes(32).toString('base64url')}`
 process.env.COS_API_TOKEN = API_TOKEN  // make available to routes that check it
 // Persist an auto-generated token to ~/.cos-glasses/.env so it SURVIVES restarts.
@@ -134,6 +144,42 @@ app.use('/api', (req, res, next) => {
     return res.status(401).json({ error: 'unauthorized' })
   }
   next()
+})
+
+// Fail-closed catch-all for mutation routes that do not own a more specific
+// lifecycle lease below. This closes the admission/drain race for secondary
+// state-changing APIs (media, sessions, settings, diagnostics) without
+// double-owning provider and recording continuations whose routes retain work
+// through their true terminal boundary.
+app.use('/api', (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+  const lifecycleOwned = (req.path === '/query-jobs' && req.method === 'POST')
+    || req.path === '/query'
+    || req.path === '/transcribe'
+    || req.path.startsWith('/transcribe-stream')
+    || req.path === '/meeting/save'
+    || req.path.startsWith('/prompt-drafts')
+    || req.path.startsWith('/maintenance/drain')
+  if (lifecycleOwned) return next()
+
+  try {
+    const lease = acquireMaintenanceWork('api_mutation')
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      lease.release()
+    }
+    res.once('finish', release)
+    res.once('close', release)
+    next()
+  } catch (error) {
+    if (error instanceof MaintenanceLifecycleError) {
+      if (error.retryAfterSeconds != null) res.setHeader('Retry-After', String(error.retryAfterSeconds))
+      return res.status(error.status).json(maintenanceErrorPayload(error))
+    }
+    return res.status(500).json({ error: 'maintenance_internal_error', retryable: false })
+  }
 })
 
 // Authenticate before parsing large upload bodies. The 16 MB allowance stays
@@ -244,6 +290,7 @@ listeners.push({ server: httpServer, port: PORT, host: BIND_HOST, label: 'HTTP' 
 
 listenRequiredServers(listeners).then(() => {
   const serverInstanceId = initializeServerInstanceId()
+  const startupAdmissionsOpen = maintenanceAdmissionsOpen()
   if (listeners.some(listener => listener.label === 'HTTPS')) {
     console.log(`[COS API] HTTPS server running on https://${BIND_HOST}:${HTTPS_PORT}`)
   }
@@ -251,17 +298,21 @@ listenRequiredServers(listeners).then(() => {
   console.log(`[COS API] Server instance: ${serverInstanceId}`)
   console.log(`[COS API] Mode: ${COS_MODE ? 'COS pipeline' : 'standalone'}`)
 
-  void initQueryJobRuntime().then(health => {
-    if (process.env.COS_DURABLE_QUERY_JOBS === '1') {
-      console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
-    } else {
-      console.log('[COS API] Durable query jobs: disabled (set COS_DURABLE_QUERY_JOBS=1 to enable)')
-    }
-  }).catch(error => {
-    // The store remains degraded and rejects admission. Legacy /api/query is
-    // still mounted, so disabling the feature flag is an immediate rollback.
-    console.error('[COS API] Durable query-job store unavailable:', error)
-  })
+  if (startupAdmissionsOpen) {
+    void initQueryJobRuntime().then(health => {
+      if (process.env.COS_DURABLE_QUERY_JOBS === '1') {
+        console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
+      } else {
+        console.log('[COS API] Durable query jobs: disabled (set COS_DURABLE_QUERY_JOBS=1 to enable)')
+      }
+    }).catch(error => {
+      // The store remains degraded and rejects admission. Legacy /api/query is
+      // still mounted, so disabling the feature flag is an immediate rollback.
+      console.error('[COS API] Durable query-job store unavailable:', error)
+    })
+  } else {
+    console.log('[COS API] Startup maintenance gate is closed — durable recovery waits for controller adoption')
+  }
 
   // Print ADDRESSES THE PHONE CAN ACTUALLY REACH. The bind address (0.0.0.0) is
   // not paste-able — enumerate real interfaces and label the Tailscale one.
@@ -283,8 +334,10 @@ listenRequiredServers(listeners).then(() => {
     }
   } catch { /* interface enumeration is best-effort */ }
 
-  // Print the full API token when auto-generated — the user pastes it into the app.
-  if (API_TOKEN_AUTO) {
+  // Interactive standalone startup may print a newly generated pairing token.
+  // Managed startup never generates or logs credentials; COS Control copies the
+  // pre-provisioned token through the local pasteboard flow instead.
+  if (API_TOKEN_AUTO && !isManagedRuntime()) {
     console.log('')
     console.log(`[COS API] API Token: ${API_TOKEN}`)
     console.log('[COS API]   ^ paste this into the COS Glasses app' + (API_TOKEN_PERSISTED ? ' — saved to ~/.cos-glasses/.env so it stays the same across restarts' : ' (set COS_API_TOKEN in .env for a fixed token)'))
@@ -308,32 +361,34 @@ listenRequiredServers(listeners).then(() => {
   console.log(`[COS API] Codex workdir: ${codexConfig.cwd}`)
   // Refresh immediately and then periodically. The catalog module retains the
   // last-known-good snapshot if Codex is temporarily unavailable.
-  startCodexModelCatalogRefresh()
+  if (startupAdmissionsOpen) {
+    startCodexModelCatalogRefresh()
 
-  if (COS_MODE) {
-    initSessionCache()
-    // Pre-warm context cache so first query doesn't wait for the pipeline
-    prewarmContext()
+    if (COS_MODE) {
+      initSessionCache()
+      // Pre-warm context cache so first query doesn't wait for the pipeline
+      prewarmContext()
+    }
+    // Start local whisper-server (model stays in RAM for ~50ms transcription)
+    startWhisperServer().catch(err => console.error('[startup] Whisper server error:', err))
+    // Initialize speaker embeddings (voiceprint-based diarization) — fails soft if model absent
+    const embeddingOk = initSpeakerEmbeddings()
+    console.log(`[startup] Speaker embeddings: ${embeddingOk ? 'active' : 'disabled (model not found)'}`)
+    // Initialize Silero VAD (silence trimming before Whisper) — fails soft if model absent
+    const vadOk = initSileroVAD()
+    console.log(`[startup] Silero VAD: ${vadOk ? 'active' : 'disabled (model not found)'}`)
+
+    // Pre-warm Claude only when installed so Codex-only startup stays quiet.
+    if (claudeAvailable) {
+      preWarmCLI().catch(err => console.error('[startup] CLI pre-warm error:', err))
+    }
+
+    // Auto-snapshot active sessions every 5 min (survives restarts)
+    startAutoSnapshot(5 * 60_000)
+
+    // Durable media GC (staged/reserved expiry + generated-image content TTL).
+    getMediaStore().startGC()
   }
-  // Start local whisper-server (model stays in RAM for ~50ms transcription)
-  startWhisperServer().catch(err => console.error('[startup] Whisper server error:', err))
-  // Initialize speaker embeddings (voiceprint-based diarization) — fails soft if model absent
-  const embeddingOk = initSpeakerEmbeddings()
-  console.log(`[startup] Speaker embeddings: ${embeddingOk ? 'active' : 'disabled (model not found)'}`)
-  // Initialize Silero VAD (silence trimming before Whisper) — fails soft if model absent
-  const vadOk = initSileroVAD()
-  console.log(`[startup] Silero VAD: ${vadOk ? 'active' : 'disabled (model not found)'}`)
-
-  // Pre-warm Claude only when installed so Codex-only startup stays quiet.
-  if (claudeAvailable) {
-    preWarmCLI().catch(err => console.error('[startup] CLI pre-warm error:', err))
-  }
-
-  // Auto-snapshot active sessions every 5 min (survives restarts)
-  startAutoSnapshot(5 * 60_000)
-
-  // Durable media GC (staged/reserved expiry + generated-image content TTL).
-  getMediaStore().startGC()
 }).catch((error: NodeJS.ErrnoException) => {
   console.error(`[COS API] Fatal listener startup: ${error.message}`)
   process.exit(error.code === 'EADDRINUSE' ? 75 : 74)

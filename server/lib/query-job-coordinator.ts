@@ -16,6 +16,7 @@ import {
   type QueryJobSnapshot,
   type QueryJobStoreHealth,
 } from './query-job-types.js'
+import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -68,6 +69,9 @@ export interface QueryJobCoordinatorOptions {
   /** Idempotent projection of a terminal journal record into canonical
    * conversation state. The journal remains authoritative if this fails. */
   projectTerminal?: (job: QueryJobSnapshot, request: QueryJobRequest) => void | Promise<void>
+  /** Acquired synchronously before serialized admission and retained through
+   * the provider terminal, so maintenance proof covers queued transitions. */
+  acquireMaintenanceWork?: () => MaintenanceWorkLease
 }
 
 interface ActiveRun {
@@ -76,6 +80,7 @@ interface ActiveRun {
   request: QueryJobRequest
   controller: AbortController
   release?: () => void
+  maintenanceLease?: MaintenanceWorkLease
   released: boolean
   callbackTail: Promise<void>
   partialText: string
@@ -114,6 +119,7 @@ export class QueryJobCoordinator {
   private readonly partialFlushChars: number
   private readonly providerTimeoutMs: number
   private readonly active = new Map<string, ActiveRun>()
+  private readonly admittedMaintenance = new Map<string, MaintenanceWorkLease>()
   private admissionTail: Promise<void> = Promise.resolve()
   private shuttingDown = false
   private callbackPersistenceFailures = 0
@@ -148,6 +154,7 @@ export class QueryJobCoordinator {
    * two simultaneous retries without a sessionId cannot allocate two sessions
    * and conflict solely because the client had not learned the first one. */
   submit(raw: unknown): Promise<QueryJobAdmissionResult> {
+    const maintenanceLease = this.options.acquireMaintenanceWork?.()
     let resolve!: (value: QueryJobAdmissionResult) => void
     let reject!: (reason?: unknown) => void
     const result = new Promise<QueryJobAdmissionResult>((res, rej) => {
@@ -160,8 +167,14 @@ export class QueryJobCoordinator {
         const normalized = await this.assignSession(raw)
         const admission = await this.store.admit(normalized)
         resolve(admission)
-        if (admission.created) queueMicrotask(() => { void this.execute(admission.job.jobId) })
+        if (admission.created) {
+          if (maintenanceLease) this.admittedMaintenance.set(admission.job.jobId, maintenanceLease)
+          queueMicrotask(() => { void this.execute(admission.job.jobId) })
+        } else {
+          maintenanceLease?.release()
+        }
       } catch (error) {
+        maintenanceLease?.release()
         reject(error)
       }
     })
@@ -186,14 +199,30 @@ export class QueryJobCoordinator {
   }
 
   private async execute(jobId: string): Promise<void> {
+    const maintenanceLease = this.admittedMaintenance.get(jobId)
+    this.admittedMaintenance.delete(jobId)
     const starting = await this.store.markStarting(jobId).catch(() => null)
-    if (!starting?.applied) return
-    const execution = await this.store.getExecution(jobId)
+    if (!starting?.applied) {
+      maintenanceLease?.release()
+      return
+    }
+    maintenanceLease?.setPhase('active')
+    let execution
+    try {
+      execution = await this.store.getExecution(jobId)
+    } catch {
+      maintenanceLease?.release()
+      return
+    }
     let release: (() => void) | undefined
     try {
       release = await this.options.acquireSessionLock?.(execution.request.sessionId)
     } catch (error) {
-      await this.store.fail(jobId, error)
+      try {
+        await this.store.fail(jobId, error)
+      } finally {
+        maintenanceLease?.release()
+      }
       return
     }
 
@@ -207,6 +236,7 @@ export class QueryJobCoordinator {
       request: execution.request,
       controller: new AbortController(),
       release,
+      maintenanceLease,
       released: false,
       callbackTail: Promise.resolve(),
       partialText: '',
@@ -536,6 +566,7 @@ export class QueryJobCoordinator {
     if (!active.released) {
       active.released = true
       active.release?.()
+      active.maintenanceLease?.release()
     }
   }
 
@@ -548,6 +579,7 @@ export class QueryJobCoordinator {
     if (!active.released) {
       active.released = true
       active.release?.()
+      active.maintenanceLease?.release()
     }
   }
 

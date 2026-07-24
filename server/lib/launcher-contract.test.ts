@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest'
 
 const root = resolve(import.meta.dirname, '../..')
 const launcher = readFileSync(resolve(root, 'bin/cli.cjs'), 'utf8')
+const managedLauncher = readFileSync(resolve(root, 'bin/managed-server.cjs'), 'utf8')
 const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
+  files?: string[]
   dependencies?: Record<string, string>
 }
 
@@ -79,5 +81,40 @@ exit 1
     expect(launcher).toContain('brew install whisper-cpp')
     expect(launcher).toContain('npx --yes @gotcos/glasses-server@latest')
     expect(launcher).not.toContain('Ctrl-C to skip')
+  })
+
+  it('keeps controller readiness probes non-mutating', () => {
+    const temp = mkdtempSync(resolve(tmpdir(), 'cos-launcher-prepare-'))
+    const bin = resolve(temp, 'bin')
+    const home = resolve(temp, 'home')
+    mkdirSync(bin)
+    mkdirSync(home)
+    const claude = resolve(bin, 'claude')
+    writeFileSync(claude, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.215"; exit 0; fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then echo '{"loggedIn":true}'; exit 0; fi
+exit 1
+`)
+    chmodSync(claude, 0o755)
+
+    try {
+      const result = spawnSync(process.execPath, [resolve(root, 'bin/cli.cjs'), '--prepare-only'], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+      })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Non-mutating readiness check complete')
+      expect(existsSync(resolve(home, '.cos-glasses'))).toBe(false)
+      expect(existsSync(resolve(home, '.local/share/whisper-models'))).toBe(false)
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
+  })
+
+  it('makes the launchd-owned managed entrypoint the listener owner', () => {
+    expect(pkg.files).toContain('managed-runtime-contract.json')
+    expect(managedLauncher).toContain("require('tsx/cjs')")
+    expect(managedLauncher).toContain("require(resolve(PKG_ROOT, 'server/index.ts'))")
+    expect(managedLauncher).not.toMatch(/spawn\s*\(|fork\s*\(|execFile\s*\(/)
   })
 })

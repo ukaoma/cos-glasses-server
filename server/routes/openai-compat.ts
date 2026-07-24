@@ -14,6 +14,11 @@ import {
 import { tryInstantResponse } from '../lib/response-cache.js'
 import crypto from 'node:crypto'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
+import {
+  acquireMaintenanceWork,
+  MaintenanceLifecycleError,
+  type MaintenanceWorkLease,
+} from '../lib/maintenance-lifecycle.js'
 
 export const openaiCompatRouter = Router()
 
@@ -131,6 +136,27 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
     })
   }
 
+  // Admission closes before cache lookup, dedup bookkeeping, latency logging,
+  // or provider work. Maintenance therefore has one linearization point for
+  // every OpenAI-compatible request, including instant and duplicate replies.
+  let maintenanceLease: MaintenanceWorkLease
+  try {
+    maintenanceLease = acquireMaintenanceWork('openai_query')
+  } catch (error) {
+    if (error instanceof MaintenanceLifecycleError) {
+      if (error.retryAfterSeconds != null) res.setHeader('Retry-After', String(error.retryAfterSeconds))
+      return res.status(error.status).json({
+        error: {
+          message: error.message,
+          type: 'server_error',
+          code: error.code,
+          retryable: error.retryable,
+        },
+      })
+    }
+    throw error
+  }
+
 
   // Log request entry — tells us if Even sends stream: true or false
   console.log(`[g2] Request: stream=${!!stream}, query="${query.slice(0, 50)}"`)
@@ -184,11 +210,12 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
       res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
       res.write('data: [DONE]\n\n')
       res.end()
+      maintenanceLease.release()
       return
     }
 
     // Non-streaming cache response
-    return res.json({
+    const response = res.json({
       id: completionId,
       object: 'chat.completion',
       created: timestamp,
@@ -200,6 +227,8 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
       }],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     })
+    maintenanceLease.release()
+    return response
   }
 
   // ── Dedup guard — if same query is already in-flight within 2s, reuse result ──
@@ -241,9 +270,10 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
         res.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created: timestamp, model: responseModel, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`)
         res.write('data: [DONE]\n\n')
         res.end()
+        maintenanceLease.release()
         return
       }
-      return res.json({
+      const response = res.json({
         id: completionId,
         object: 'chat.completion',
         created: timestamp,
@@ -251,6 +281,8 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
         choices: [{ index: 0, message: { role: 'assistant', content: dedupResult }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       })
+      maintenanceLease.release()
+      return response
     } catch {
       // Original request failed — fall through to make a fresh request
     }
@@ -311,11 +343,12 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
           }
         },
         onDone: (fullText) => {
-          if (!done) {
-            done = true
-            resolveInflight!(fullText || '')
-            inflightQueries.delete(dedupKey)
-            logLatency({
+          try {
+            if (!done) {
+              done = true
+              resolveInflight!(fullText || '')
+              inflightQueries.delete(dedupKey)
+              logLatency({
               timestamp: new Date().toISOString(),
               query: query.slice(0, 50),
               ttfb_ms: actualTtfbMs,
@@ -325,35 +358,42 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
               contextInjected: /\b(schedule|calendar|meeting|task|tasks|today|tomorrow|next meeting|who do i meet|what's next)\b/i.test(query),
               cacheHit: false,
               stream_requested: true,
-            })
-            // Final chunk with finish_reason
-            const finalChunk = {
+              })
+              // Final chunk with finish_reason
+              const finalChunk = {
               id: completionId,
               object: 'chat.completion.chunk',
               created: timestamp,
               model: responseModel,
               choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              }
+              res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+              res.write('data: [DONE]\n\n')
+              res.end()
             }
-            res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-            res.write('data: [DONE]\n\n')
-            res.end()
+          } finally {
+            maintenanceLease.release()
           }
         },
         onError: (error) => {
-          if (!done) {
-            done = true
-            rejectInflight!(new Error(error))
-            inflightQueries.delete(dedupKey)
-            const errChunk = {
+          try {
+            if (!done) {
+              done = true
+              rejectInflight!(new Error(error))
+              inflightQueries.delete(dedupKey)
+              const errChunk = {
               id: completionId,
               object: 'chat.completion.chunk',
               created: timestamp,
               model: responseModel,
               choices: [{ index: 0, delta: { content: `Error: ${error}` }, finish_reason: 'stop' }],
+              }
+              res.write(`data: ${JSON.stringify(errChunk)}\n\n`)
+              res.write('data: [DONE]\n\n')
+              res.end()
             }
-            res.write(`data: ${JSON.stringify(errChunk)}\n\n`)
-            res.write('data: [DONE]\n\n')
-            res.end()
+          } finally {
+            maintenanceLease.release()
           }
         },
         onToolStatus: (status) => {
@@ -367,6 +407,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
       // Persist session ID for multi-turn context on subsequent G2 queries
       g2SessionId = returnedSid
     } catch (err: any) {
+      maintenanceLease.release()
       if (!done) {
         done = true
         rejectInflight!(err)
@@ -399,6 +440,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
       const fail = (error: unknown) => {
         if (settled) return
         settled = true
+        maintenanceLease.release()
         const err = error instanceof Error ? error : new Error(String(error))
         rejectInflight!(err)
         inflightQueries.delete(dedupKey)
@@ -412,21 +454,25 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
         onDone: (fullText) => {
           if (settled) return
           settled = true
-          const text = fullText || result
-          resolveInflight!(text)
-          inflightQueries.delete(dedupKey)
-          logLatency({
-            timestamp: new Date().toISOString(),
-            query: query.slice(0, 50),
-            ttfb_ms: nsFirstChunkMs,
-            total_ms: Date.now() - requestReceivedAt,
-            model: resolvedModel,
-            resumed: !!currentSessionIdNS,
-            contextInjected: /\b(schedule|calendar|meeting|task|tasks|today|tomorrow)\b/i.test(query),
-            cacheHit: false,
-            stream_requested: false,
-          })
-          resolve(text)
+          try {
+            const text = fullText || result
+            resolveInflight!(text)
+            inflightQueries.delete(dedupKey)
+            logLatency({
+              timestamp: new Date().toISOString(),
+              query: query.slice(0, 50),
+              ttfb_ms: nsFirstChunkMs,
+              total_ms: Date.now() - requestReceivedAt,
+              model: resolvedModel,
+              resumed: !!currentSessionIdNS,
+              contextInjected: /\b(schedule|calendar|meeting|task|tasks|today|tomorrow)\b/i.test(query),
+              cacheHit: false,
+              stream_requested: false,
+            })
+            resolve(text)
+          } finally {
+            maintenanceLease.release()
+          }
         },
         onError: (error) => {
           fail(new Error(error))

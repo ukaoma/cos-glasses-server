@@ -9,6 +9,11 @@ import { normalizeEffortPreference, normalizeModelPreference } from '../../share
 import { QueryAttachmentError, resolveQueryAttachments } from '../lib/query-attachments.js'
 import { getMediaStore } from '../lib/media-store.js'
 import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
+import {
+  acquireMaintenanceWork,
+  MaintenanceLifecycleError,
+  maintenanceErrorPayload,
+} from '../lib/maintenance-lifecycle.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -19,6 +24,16 @@ const TOOL_STATUS_MESSAGES: Record<string, string> = {
 export const queryRouter = Router()
 
 queryRouter.post('/query', async (req, res) => {
+  let maintenanceLease
+  try {
+    maintenanceLease = acquireMaintenanceWork('legacy_query')
+  } catch (error) {
+    if (error instanceof MaintenanceLifecycleError) {
+      if (error.retryAfterSeconds != null) res.setHeader('Retry-After', String(error.retryAfterSeconds))
+      return res.status(error.status).json(maintenanceErrorPayload(error))
+    }
+    throw error
+  }
   const { query, sessionId, model, effort, reference, globalMsgNum } = req.body
   const activityToolMode = req.body.activityToolMode === 'off' || req.body.activityToolMode === 'preview'
     ? req.body.activityToolMode
@@ -31,8 +46,10 @@ queryRouter.post('/query', async (req, res) => {
     resolvedAttachments = await resolveQueryAttachments(req.body)
   } catch (err) {
     if (err instanceof QueryAttachmentError) {
+      maintenanceLease.release()
       return res.status(err.status).json({ error: err.code, detail: err.message })
     }
+    maintenanceLease.release()
     return res.status(500).json({ error: errMsg(err) })
   }
   const imageInputs = resolvedAttachments.inputs.length > 0 ? resolvedAttachments.inputs : undefined
@@ -42,6 +59,7 @@ queryRouter.post('/query', async (req, res) => {
 
   // Vision queries can have an empty query (default to "describe what you see")
   if ((!resolvedQuery || typeof resolvedQuery !== 'string') && !imageInputs) {
+    maintenanceLease.release()
     return res.status(400).json({ error: 'query string or image required' })
   }
 
@@ -107,34 +125,43 @@ queryRouter.post('/query', async (req, res) => {
           }
         },
       } : {}),
-      onDone: (fullText, model, cliSessionId, metadata) => {
-        // Durable association is independent of the SSE socket. Backgrounding
-        // the phone cannot leave request media reserved until expiry.
-        if (resolvedAttachments.ids.length > 0) {
-          getMediaStore().associate(resolvedAttachments.ids, {
-            sessionId: sid,
-            ...(validGlobalMsgNum ? { globalMsgNum: validGlobalMsgNum } : {}),
-          }).catch((err) => console.error('[query] attachment association failed:', err))
-        }
-        if (!done) {
-          done = true
-          const attachments = mergeMediaAttachmentRefs(attachmentRefs, metadata?.outputAttachments)
-          const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
-          const payload = {
-            text: fullText, sessionId: sid, model, cliSessionId, ...runMetadata,
-            ...(attachments.length > 0 ? { attachments } : {}),
+      onDone: async (fullText, model, cliSessionId, metadata) => {
+        try {
+          // Durable association is independent of the SSE socket.
+          // Backgrounding the phone cannot leave request media reserved until
+          // expiry or make maintenance proof outrun the pending write.
+          if (resolvedAttachments.ids.length > 0) {
+            await getMediaStore().associate(resolvedAttachments.ids, {
+              sessionId: sid,
+              ...(validGlobalMsgNum ? { globalMsgNum: validGlobalMsgNum } : {}),
+            }).catch((err) => console.error('[query] attachment association failed:', err))
           }
-          res.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`)
-          emitDisplay({ type: 'done', data: payload })
-          res.end()
+          if (!done) {
+            done = true
+            const attachments = mergeMediaAttachmentRefs(attachmentRefs, metadata?.outputAttachments)
+            const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
+            const payload = {
+              text: fullText, sessionId: sid, model, cliSessionId, ...runMetadata,
+              ...(attachments.length > 0 ? { attachments } : {}),
+            }
+            res.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`)
+            emitDisplay({ type: 'done', data: payload })
+            res.end()
+          }
+        } finally {
+          maintenanceLease.release()
         }
       },
       onError: (error) => {
-        if (!done) {
-          done = true
-          res.write(`event: error\ndata: ${JSON.stringify({ error })}\n\n`)
-          emitDisplay({ type: 'error', data: { error } })
-          res.end()
+        try {
+          if (!done) {
+            done = true
+            res.write(`event: error\ndata: ${JSON.stringify({ error })}\n\n`)
+            emitDisplay({ type: 'error', data: { error } })
+            res.end()
+          }
+        } finally {
+          maintenanceLease.release()
         }
       },
     }, validModel, imageInputs,
@@ -146,6 +173,7 @@ queryRouter.post('/query', async (req, res) => {
       { abortSignal: abortController.signal, effort: validEffort },
     )
   } catch (err: unknown) {
+    maintenanceLease.release()
     if (!done) {
       done = true
       res.write(`event: error\ndata: ${JSON.stringify({ error: errMsg(err) })}\n\n`)

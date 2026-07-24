@@ -74,8 +74,10 @@ describe('public durable-query capability health', () => {
       status: false,
       restartWhisper: false,
       restartServer: false,
+      maintenanceDrain: false,
+      lifecycleProof: false,
       managed: false,
-      contractVersion: 1,
+      contractVersion: 2,
     })
     expect(body.capabilities?.cliDebug).toEqual({
       schemaVersion: 1,
@@ -120,8 +122,10 @@ describe('public durable-query capability health', () => {
       status: false,
       restartWhisper: false,
       restartServer: false,
+      maintenanceDrain: false,
+      lifecycleProof: false,
       managed: false,
-      contractVersion: 1,
+      contractVersion: 2,
     })
     expect(body.capabilities?.cliDebug).toEqual({
       schemaVersion: 1,

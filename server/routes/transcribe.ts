@@ -11,6 +11,12 @@ import {
   OpenAIWhisperBudgetExhaustedError,
   TranscriptionUnavailableError,
 } from '../lib/transcribe-audio.js'
+import {
+  acquireMaintenanceWork,
+  MaintenanceLifecycleError,
+  maintenanceErrorPayload,
+  type MaintenanceWorkLease,
+} from '../lib/maintenance-lifecycle.js'
 
 export const transcribeRouter = Router()
 
@@ -23,7 +29,9 @@ function resolveMode(req: { body?: { mode?: string }; query?: { mode?: string | 
 
 // Accept raw binary body up to 25MB (Whisper limit).
 transcribeRouter.post('/transcribe', async (req, res) => {
+  let maintenanceLease: MaintenanceWorkLease | undefined
   try {
+    maintenanceLease = acquireMaintenanceWork('one_shot_transcription')
     const chunks: Buffer[] = []
     for await (const chunk of req) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
@@ -38,6 +46,10 @@ transcribeRouter.post('/transcribe', async (req, res) => {
     console.log(`[perf] /transcribe: ${result.elapsedMs.toFixed(1)}ms | mode=${result.mode} | ${result.backend} | ${result.audioBytes}b | ${result.text.length} chars`)
     res.json({ text: result.text, backend: result.backend, mode: result.mode })
   } catch (err: any) {
+    if (err instanceof MaintenanceLifecycleError) {
+      if (err.retryAfterSeconds != null) res.setHeader('Retry-After', String(err.retryAfterSeconds))
+      return res.status(err.status).json(maintenanceErrorPayload(err))
+    }
     if (err instanceof NoSpeechDetectedError) {
       console.log(`[perf] /transcribe: DROPPED (hallucination or empty): ${err.rawText.length} chars`)
       return res.status(204).send()
@@ -60,5 +72,7 @@ transcribeRouter.post('/transcribe', async (req, res) => {
       })
     }
     res.status(500).json({ error: err.message })
+  } finally {
+    maintenanceLease?.release()
   }
 })
