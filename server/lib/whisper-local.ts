@@ -8,7 +8,7 @@
 
 import { spawn, execFileSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
@@ -523,6 +523,54 @@ async function reconcileWhisperServerHealth(): Promise<boolean> {
 }
 
 /**
+ * Parse whisper-cli `-ojf` JSON into plain text + timed words.
+ *
+ * Batch/save path only. Never uses whisper-server `verbose_json` (the live
+ * VAD-empty crash vector). Special tokens like `[_BEG_]` / `<|...|>` are dropped.
+ */
+export function parseWhisperCliFullJson(raw: string): { text: string; words: WhisperWord[] } {
+  const data = JSON.parse(raw) as {
+    transcription?: Array<{
+      text?: unknown
+      tokens?: Array<{
+        text?: unknown
+        p?: unknown
+        offsets?: { from?: unknown; to?: unknown }
+      }>
+    }>
+  }
+  const segments = Array.isArray(data.transcription) ? data.transcription : []
+  const texts: string[] = []
+  const words: WhisperWord[] = []
+
+  for (const segment of segments) {
+    if (typeof segment.text === 'string' && segment.text.trim()) {
+      texts.push(segment.text.trim())
+    }
+    for (const token of Array.isArray(segment.tokens) ? segment.tokens : []) {
+      const tokenText = typeof token.text === 'string' ? token.text.trim() : ''
+      if (!tokenText) continue
+      if (tokenText.startsWith('[') && tokenText.endsWith(']')) continue
+      if (tokenText.startsWith('<|') && tokenText.endsWith('|>')) continue
+      const fromMs = typeof token.offsets?.from === 'number' ? token.offsets.from : Number(token.offsets?.from)
+      const toMs = typeof token.offsets?.to === 'number' ? token.offsets.to : Number(token.offsets?.to)
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) continue
+      words.push({
+        word: tokenText,
+        start: fromMs / 1000,
+        end: toMs / 1000,
+        probability: typeof token.p === 'number' && Number.isFinite(token.p) ? token.p : 0,
+      })
+    }
+  }
+
+  return {
+    text: texts.join(' ').replace(/\s+/g, ' ').trim(),
+    words,
+  }
+}
+
+/**
  * High-quality transcription for batch/post-meeting use.
  * Uses the full Whisper large-v3 (32-layer) decoder + Silero VAD + beam search.
  * Per 2026-04-16 bake-off: +43% speech capture vs turbo on real G2 audio.
@@ -542,6 +590,10 @@ export async function transcribeHighQuality(
   const start = Date.now()
   const id = crypto.randomUUID().slice(0, 8)
   const tmpWav = join('/tmp', `cos-whisper-hq-${id}.wav`)
+  const outBase = join('/tmp', `cos-whisper-hq-${id}`)
+  const jsonPath = `${outBase}.json`
+  // Word clocks only on post-meeting CPU polish. Live stays compact JSON.
+  const captureBatchWords = opts.priority === 'batch'
 
   const modelPath = resolveBatchModel()
   const useLargeV3 = modelPath === BATCH_MODEL_LARGE_V3
@@ -564,6 +616,9 @@ export async function transcribeHighQuality(
         '-np',
         '--prompt', buildPrompt(context),
       ]
+      if (captureBatchWords) {
+        args.push('-ojf', '-of', outBase)
+      }
       if (useVad) {
         // Same VAD model the streaming path uses. Strips silence windows
         // before the decoder sees them — prevents the silence-hallucination
@@ -618,13 +673,40 @@ export async function transcribeHighQuality(
       })
     })
 
-    const corrected = applyCorrections(text)
+    let finalText = text
+    let words: WhisperWord[] | undefined
+    if (captureBatchWords) {
+      try {
+        if (existsSync(jsonPath)) {
+          const parsed = parseWhisperCliFullJson(readFileSync(jsonPath, 'utf8'))
+          if (parsed.text) finalText = parsed.text
+          words = parsed.words.length > 0
+            ? parsed.words.map(w => ({ ...w, word: applyCorrections(w.word) }))
+            : []
+        }
+      } catch (err) {
+        console.warn(
+          `[whisper-hq] Batch word JSON parse failed; keeping text-only polish: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
+    const corrected = applyCorrections(finalText)
     const elapsed = Date.now() - start
     const modelTag = useLargeV3 ? 'large-v3' : 'turbo'
-    console.log(`[whisper-hq] Batch transcribed in ${elapsed}ms (${modelTag}${useVad ? '+vad' : ''}): "${corrected.slice(0, 80)}${corrected.length > 80 ? '...' : ''}"`)
-    return { text: corrected }
+    console.log(
+      `[whisper-hq] Batch transcribed in ${elapsed}ms ` +
+      `(${modelTag}${useVad ? '+vad' : ''}${captureBatchWords ? '+words' : ''}` +
+      `${words ? `, ${words.length} words` : ''}): ` +
+      `"${corrected.slice(0, 80)}${corrected.length > 80 ? '...' : ''}"`,
+    )
+    return words ? { text: corrected, words } : { text: corrected }
   } finally {
     try { unlinkSync(tmpWav) } catch { /* cleanup */ }
+    if (captureBatchWords) {
+      try { unlinkSync(jsonPath) } catch { /* cleanup */ }
+    }
   }
 }
 

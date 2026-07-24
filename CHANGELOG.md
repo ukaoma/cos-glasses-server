@@ -1,3 +1,10 @@
+## 6.14.2
+
+- Restore timed words on post-meeting CPU polish only: whisper-cli `-ojf`
+  token offsets feed speaker-word mapping after save. Live ASR stays on
+  compact `json` (no `verbose_json`); VAD-empty CLI windows return empty
+  transcription safely without reintroducing the live daemon crash.
+
 ## 6.14.1
 
 - Keep real-time `large-v3-turbo` stable on VAD-empty audio by using

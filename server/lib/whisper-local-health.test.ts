@@ -152,6 +152,8 @@ describe('whisper-server health reconciliation', () => {
     expect(source).toContain("const isolateBatchFromLiveMetal = opts.priority === 'batch'")
     expect(source).toContain("...(isolateBatchFromLiveMetal ? ['-ng'] : ['-fa'])")
     expect(source).toContain("'-t', isolateBatchFromLiveMetal ? '8' : '16'")
+    expect(source).toContain("const captureBatchWords = opts.priority === 'batch'")
+    expect(source).toContain("args.push('-ojf', '-of', outBase)")
   })
 
   it('serializes concurrent restarts and starts exactly one child', async () => {
