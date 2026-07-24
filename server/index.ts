@@ -29,6 +29,13 @@ import { mediaRouter, mediaBodyParser } from './routes/media.js'
 import { promptDraftsRouter } from './routes/prompt-drafts.js'
 import { cliDebugRouter } from './routes/cli-debug.js'
 import { maintenanceRouter } from './routes/maintenance.js'
+import { ttsRouter } from './routes/tts.js'
+import { voiceRouter } from './routes/voice.js'
+import { glossaryRouter } from './routes/glossary.js'
+import { handoffsRouter } from './routes/handoffs.js'
+import { recoveryRouter } from './routes/recovery.js'
+import { promptEditRouter } from './routes/prompt-edit.js'
+import { bookmarksRouter } from './routes/bookmarks.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
@@ -215,6 +222,13 @@ app.use('/api', mediaRouter)
 app.use('/api', promptDraftsRouter)
 app.use('/api', cliDebugRouter)
 app.use('/api', maintenanceRouter)
+app.use('/api', ttsRouter)
+app.use('/api', voiceRouter)
+app.use('/api', glossaryRouter)
+app.use('/api', handoffsRouter)
+app.use('/api', recoveryRouter)
+app.use('/api', promptEditRouter)
+app.use('/api', bookmarksRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models

@@ -1,3 +1,7 @@
+## 6.14.0
+
+- Add voice (TTS + speaker) and additive glasses routes to the public server: `tts`, `voice`, `glossary`, `handoffs`, `recovery`, `prompt-edit`, `bookmarks`. Brings server-side voice + companion utilities to public installs; COS-integration routes remain private.
+
 # Changelog
 
 ## 6.12.7
