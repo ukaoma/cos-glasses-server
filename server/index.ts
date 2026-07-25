@@ -44,6 +44,7 @@ import {
   stopCodexModelCatalogRefresh,
 } from './lib/codex-model-catalog.js'
 import { startWhisperServer, stopWhisperServer } from './lib/whisper-local.js'
+import { startLocalTtsServer, stopLocalTtsServer } from './lib/tts-local.js'
 import { initSileroVAD } from './lib/vad-silero.js'
 import { initSessionCache } from './lib/session-cache-writer.js'
 import { initSpeakerEmbeddings } from './lib/speaker-embeddings.js'
@@ -266,6 +267,7 @@ async function gracefulShutdown(): Promise<void> {
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
   stopCodexModelCatalogRefresh()
   stopWhisperServer()
+  stopLocalTtsServer()
   clearTimeout(forceExit)
   process.exit(0)
 }
@@ -385,6 +387,7 @@ listenRequiredServers(listeners).then(() => {
     }
     // Start local whisper-server (model stays in RAM for ~50ms transcription)
     startWhisperServer().catch(err => console.error('[startup] Whisper server error:', err))
+    startLocalTtsServer().catch(err => console.error('[startup] Local TTS server error:', err))
     // Initialize speaker embeddings (voiceprint-based diarization) — fails soft if model absent
     const embeddingOk = initSpeakerEmbeddings()
     console.log(`[startup] Speaker embeddings: ${embeddingOk ? 'active' : 'disabled (model not found)'}`)

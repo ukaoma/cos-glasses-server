@@ -47,6 +47,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('    - Node.js 20.11+')
   console.log('    - Claude Code CLI (not Claude Desktop) or Codex CLI')
   console.log('    - Even G2 smart glasses + the COS Glasses app (Even Hub)')
+  console.log('    - Optional local Kokoro voice: Apple silicon + Python 3.11-3.13')
   console.log('')
   console.log('  No API key is needed for chat — it runs through your installed CLI.')
   console.log('  Config persists at ~/.cos-glasses/.env')
@@ -175,13 +176,25 @@ try {
   process.exit(1)
 }
 
-// Controller probes are deliberately read-only. They verify Node, agent auth,
-// and the packaged runtime without creating config, downloading models,
-// changing permissions, or starting a listener.
+// Controller probes do not mutate COS state. They verify Node, agent auth,
+// and the packaged runtime without creating COS config, downloading Kokoro
+// models, installing Kokoro packages, changing COS permissions, or starting a
+// listener. An invoked agent CLI may still maintain its own user cache.
 if (process.argv.includes('--prepare-only')) {
+  if (process.platform === 'darwin' && process.arch === 'arm64') {
+    const python = ['python3.13', 'python3.12', 'python3.11']
+      .map((command) => ({ command, version: getCliVersion(command, '--version') }))
+      .find((candidate) => candidate.version)
+    if (python) {
+      console.log(green('  ✓') + ` Local voice Python ${python.version.replace(/^Python\s+/i, '')}`)
+    } else {
+      console.log(yellow('  ⚠') + ' Local Kokoro voice needs Python 3.11-3.13')
+      console.log('    Install: ' + bold('brew install python@3.13 ffmpeg espeak-ng'))
+    }
+  }
   console.log('')
   console.log(green('  ✓ Non-mutating readiness check complete'))
-  console.log('    COS Control can perform guided installation without hidden setup side effects.')
+  console.log('    This checks prerequisites only; normal server start provisions optional models.')
   console.log('')
   process.exit(0)
 }

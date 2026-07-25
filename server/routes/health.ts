@@ -24,6 +24,7 @@ import { CLI_DEBUG_CAPABILITY } from '../lib/cli-debug-view.js'
 import { managedRuntimeCapability, managedServerVersion } from '../lib/managed-runtime.js'
 import { getServerGenerationId } from '../lib/managed-runtime.js'
 import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
+import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 
 export const healthRouter = Router()
 
@@ -57,6 +58,7 @@ function durableQueryJobStatus() {
 }
 
 healthRouter.get('/health', async (_req, res) => {
+  await refreshLocalTtsHealth()
   const checks: Record<string, string | number | boolean> = {
     status: 'ok',
     mode: COS_MODE ? 'cos' : 'standalone',
@@ -150,10 +152,11 @@ healthRouter.get('/health', async (_req, res) => {
   const transcription = getTranscriptionPolicySnapshot()
   const recovery = managedRuntimeCapability()
   const maintenance = maintenanceLifecycle.snapshot()
+  const tts_local = getLocalTtsHealth()
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
-    voice: keyStatus.hasKey,
+    voice: keyStatus.hasKey || tts_local.ready,
     cos_pipeline: COS_MODE,
     whisper: isWhisperLocalAvailable(),
     promptRecovery: true,
@@ -167,15 +170,17 @@ healthRouter.get('/health', async (_req, res) => {
     transcriptionPolicy: transcription.mode,
   }
   const voice = {
+    available: keyStatus.hasKey || tts_local.ready,
     hasKey: keyStatus.hasKey,
     keySource: keyStatus.source,
+    localReady: tts_local.ready,
+    engine: tts_local.engine,
   }
 
   // Whisper-server health + cloud budget — exposed so glasses + dashboards can
   // see whether we're at risk of falling to cloud and how much budget remains.
   const whisper_health = getWhisperHealth()
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
-
   const codex_models = getCodexModelCatalogSnapshot()
   res.json({
     ...checks,
@@ -187,6 +192,7 @@ healthRouter.get('/health', async (_req, res) => {
     voice,
     whisper_health,
     openai_whisper_budget,
+    tts_local,
     codex_models,
     capabilities: {
       transcription,

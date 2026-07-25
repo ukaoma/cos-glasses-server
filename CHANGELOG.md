@@ -1,3 +1,23 @@
+## 6.15.0
+
+- Add local-first spoken reply playback through a Mac-owned Kokoro sidecar on
+  Apple silicon. The existing OpenAI TTS path remains available as an explicit
+  engine choice and as the bounded fallback for `local_first` only when a key
+  and budget are available.
+- Preserve cancellation across the local synthesis boundary so abandoned
+  requests return 499 and can never become accidental cloud fallbacks. An
+  explicitly selected local engine fails closed when Kokoro is unavailable.
+- Keep cache entries and resumable sessions engine-aware, expose additive
+  `tts_local` and voice-engine health, and announce a real Kokoro-to-OpenAI
+  fallback only after cloud audio succeeds.
+- Bootstrap the pinned private Python environment asynchronously on first run,
+  avoiding an API event-loop stall while dependencies install. The local
+  sidecar is limited to Apple silicon macOS; other hosts retain their existing
+  OpenAI behavior.
+- Add opt-in, public-safe pronunciation overrides through
+  `COS_TTS_PRONUNCIATIONS_JSON`. The published package contains no personal
+  pronunciation dictionary or machine-specific path.
+
 ## 6.14.2
 
 - Restore timed words on post-meeting CPU polish only: whisper-cli `-ojf`

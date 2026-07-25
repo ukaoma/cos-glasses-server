@@ -13,11 +13,12 @@
 
 import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
-import { getOpenAIKey } from '../lib/openai-key.js'
+import { getOpenAIKey, tryGetOpenAIKey } from '../lib/openai-key.js'
 import {
   assertOpenAITtsBudget,
   recordOpenAITtsUsage,
   OpenAITtsBudgetExhaustedError,
+  getOpenAITtsBudgetState,
 } from '../lib/openai-tts-budget.js'
 import {
   hashKey,
@@ -28,10 +29,32 @@ import {
   abortEntry,
   createSession,
   peekSession,
+  rebindSessionHash,
   reapExpiredSessions,
   waitForInFlight,
   getCacheStats,
 } from '../lib/tts-cache.js'
+import {
+  canFallbackToLocal,
+  canFallbackToOpenAI,
+  decideInitialBackend,
+  getTtsEngineMode,
+  isKokoroVoiceId,
+  isOpenAIVoiceId,
+  KOKORO_VOICE_OPTIONS,
+  mapOpenAIVoiceToLocal,
+  OPENAI_VOICE_OPTIONS,
+  type TtsEnginePreference,
+  type TtsRouteDecision,
+} from '../lib/tts-engine.js'
+import {
+  isLocalTtsReady,
+  synthesizeLocalTts,
+  recordLocalTtsFallbackToOpenAI,
+} from '../lib/tts-local.js'
+import { applyLocalPronunciation, applyOpenAIPronunciation } from '../lib/tts-pronounce.js'
+import { emitDisplay } from '../lib/display-bus.js'
+import { spawn } from 'node:child_process'
 
 export const ttsRouter = Router()
 
@@ -191,24 +214,124 @@ export function splitForFastPrefix(text: string): { prefix: string; tail: string
   return { prefix, tail }
 }
 
-/** Drain an OpenAI TTS response into the in-memory + disk cache for the given
- *  hash. Used by both the play-route cache-miss path and the prepare-route
- *  pre-warm path. Returns true on success, false if anything aborted/failed —
- *  the cache entry is rolled back via abortEntry on failure so the next request
- *  for the same hash can try again from a clean slate.
- *
- *  Does NOT write to any HTTP response; callers serve out of the cache after
- *  this resolves. Budget billing fires on first byte (same rule as today). */
-async function generateIntoCache(
+function openaiBudgetOk(): boolean {
+  try {
+    assertOpenAITtsBudget()
+    return true
+  } catch (err) {
+    if (err instanceof OpenAITtsBudgetExhaustedError) return false
+    throw err
+  }
+}
+
+function resolveDecision(
+  requestedVoice: string,
+  enginePreference: TtsEnginePreference | null = null,
+): TtsRouteDecision {
+  const localReady = isLocalTtsReady()
+  const preferOpenAI = enginePreference === 'openai'
+  return decideInitialBackend({
+    openaiVoice: requestedVoice,
+    openaiKeyPresent: !!tryGetOpenAIKey(),
+    openaiBudgetOk: openaiBudgetOk(),
+    localReady,
+    preferOpenAI,
+    enginePreference,
+  })
+}
+
+/** Settings / API: engine local|kokoro|openai|cloud. Null = daemon default. */
+function parseEnginePreference(body: unknown): TtsEnginePreference | null {
+  if (!body || typeof body !== 'object') return null
+  const b = body as Record<string, unknown>
+  if (typeof b.engine === 'string') {
+    const eng = b.engine.trim().toLowerCase()
+    if (eng === 'local' || eng === 'kokoro') return 'local'
+    if (eng === 'openai' || eng === 'cloud') return 'openai'
+  }
+  if (b.preferOpenAI === true || b.prefer_openai === true) return 'openai'
+  if (b.forceLocal === true || b.force_local === true) return 'local'
+  return null
+}
+
+function normalizeRequestedVoice(
+  voice: unknown,
+  enginePreference: TtsEnginePreference | null,
+): string {
+  const raw = typeof voice === 'string' ? voice.trim() : ''
+  if (enginePreference === 'local') {
+    if (raw && (isKokoroVoiceId(raw) || isOpenAIVoiceId(raw))) return raw
+    return 'am_echo'
+  }
+  if (enginePreference === 'openai') {
+    if (raw && isOpenAIVoiceId(raw)) return raw
+    return DEFAULT_VOICE
+  }
+  // Daemon default / legacy clients: accept either catalog.
+  if (raw && (isOpenAIVoiceId(raw) || isKokoroVoiceId(raw))) return raw
+  return DEFAULT_VOICE
+}
+
+function hashForDecision(
+  decision: TtsRouteDecision,
+  format: string,
+  text: string,
+  instructions: string,
+): string {
+  const instr = decision.backend === 'openai' ? instructions : undefined
+  // Hash the spoken form so operator lexicon updates invalidate stale cache.
+  const spoken =
+    decision.backend === 'local'
+      ? applyLocalPronunciation(text)
+      : applyOpenAIPronunciation(text)
+  return hashKey(decision.engineTag, decision.backendVoice, format, spoken, instr)
+}
+
+/** Incident dedupe — /prepare can resolve the same outage 2–3× (prefix/tail). */
+let lastFallbackNotifyAt = 0
+const FALLBACK_NOTIFY_DEDUPE_MS = 30_000
+
+/** Log an attempted escape without mutating the successful-fallback health field. */
+function noteKokoroFallbackPending(reason: string): void {
+  console.warn('[tts] Kokoro unavailable; attempting OpenAI fallback:', reason.slice(0, 160))
+}
+
+/** User-visible alert after OpenAI fallback audio actually succeeds. */
+function announceKokoroFallbackToOpenAI(reason: string): void {
+  recordLocalTtsFallbackToOpenAI(reason)
+  const now = Date.now()
+  if (now - lastFallbackNotifyAt < FALLBACK_NOTIFY_DEDUPE_MS) {
+    console.warn('[tts] fallback notify deduped:', reason.slice(0, 120))
+    return
+  }
+  lastFallbackNotifyAt = now
+
+  try {
+    emitDisplay({
+      type: 'tool_status',
+      data: { message: 'TTS: Kokoro failed -> OpenAI' },
+    })
+  } catch { /* display bus optional */ }
+  try {
+    spawn(
+      'osascript',
+      [
+        '-e',
+        'display notification "Kokoro TTS failed — using OpenAI" with title "COS Glasses" sound name "Basso"',
+      ],
+      { stdio: 'ignore', detached: true },
+    ).unref()
+  } catch { /* notification optional */ }
+}
+
+async function generateOpenAIIntoCache(
   hash: string,
   text: string,
   voice: string,
   format: string,
+  instructions: string,
   signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  // Cheap pre-check — if it's already cached, skip everything.
-  if (getCached(hash)) return { ok: true }
-
   let key: string
   try {
     key = getOpenAIKey()
@@ -216,9 +339,16 @@ async function generateIntoCache(
     return { ok: false, status: 503, message: errMsg(err) }
   }
 
-  // Try to reserve the slot. Null means another writer beat us to it; wait
-  // for them rather than racing OpenAI. This is the dedup mechanism that
-  // makes parallel /prepare pre-warm + concurrent /play GETs safe.
+  try {
+    assertOpenAITtsBudget()
+  } catch (err) {
+    if (err instanceof OpenAITtsBudgetExhaustedError) {
+      return { ok: false, status: 429, message: err.message }
+    }
+    throw err
+  }
+
+  const spoken = applyOpenAIPronunciation(text)
   const slot = startEntry(hash, voice, format)
   if (!slot) {
     const served = await waitForInFlight(hash, 30_000)
@@ -238,9 +368,9 @@ async function generateIntoCache(
       body: JSON.stringify({
         model: 'gpt-4o-mini-tts',
         voice,
-        input: text,
+        input: spoken,
         response_format: format,
-        ...(DEFAULT_INSTRUCTIONS ? { instructions: DEFAULT_INSTRUCTIONS } : {}),
+        ...(instructions ? { instructions } : {}),
       }),
       signal,
     })
@@ -269,7 +399,7 @@ async function generateIntoCache(
         const buf = Buffer.from(value)
         if (!firstByteSeen) {
           firstByteSeen = true
-          recordOpenAITtsUsage(text.length)
+          recordOpenAITtsUsage(spoken.length)
         }
         appendBytes(hash, buf)
       }
@@ -288,117 +418,376 @@ async function generateIntoCache(
   }
 }
 
+async function generateLocalIntoCache(
+  hash: string,
+  text: string,
+  voice: string,
+  format: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  if (!isLocalTtsReady()) {
+    return { ok: false, status: 503, message: 'local TTS sidecar not ready' }
+  }
+  const spoken = applyLocalPronunciation(text)
+  const slot = startEntry(hash, voice, format)
+  if (!slot) {
+    const served = await waitForInFlight(hash, 30_000)
+    if (served) return { ok: true }
+    return { ok: false, status: 502, message: 'in-flight peer failed or timed out' }
+  }
+  try {
+    // Local path ignores COS_VOICE_INSTRUCTIONS / per-request instructions.
+    const bytes = await synthesizeLocalTts({ text: spoken, voice, format, signal })
+    if (!bytes.length) {
+      abortEntry(hash)
+      return { ok: false, status: 502, message: 'local TTS returned empty body' }
+    }
+    appendBytes(hash, bytes)
+    completeEntry(hash)
+    return { ok: true }
+  } catch (err) {
+    abortEntry(hash)
+    if ((err as { name?: string })?.name === 'AbortError') {
+      return { ok: false, status: 499, message: 'client closed request' }
+    }
+    return { ok: false, status: 502, message: `local TTS failed: ${errMsg(err)}` }
+  }
+}
+
+/** Drain TTS audio into cache for a resolved backend decision. */
+async function generateIntoCache(
+  hash: string,
+  text: string,
+  decision: TtsRouteDecision,
+  format: string,
+  instructions: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  if (getCached(hash)) return { ok: true }
+  if (decision.backend === 'local') {
+    return generateLocalIntoCache(hash, text, decision.backendVoice, format, signal)
+  }
+  return generateOpenAIIntoCache(
+    hash,
+    text,
+    decision.backendVoice,
+    format,
+    instructions,
+    signal,
+  )
+}
+
+/** Resolve → hash → generate, with local↔OpenAI fallbacks. */
+async function generateWithFallback(opts: {
+  text: string
+  openaiVoice: string
+  format: string
+  instructions: string
+  enginePreference?: TtsEnginePreference | null
+  signal?: AbortSignal
+  sessionId?: string
+}): Promise<{ ok: true; hash: string } | { ok: false; status: number; message: string }> {
+  const enginePreference = opts.enginePreference ?? null
+  const preferOpenAI = enginePreference === 'openai'
+  const forceLocal = enginePreference === 'local'
+  let decision: TtsRouteDecision
+  try {
+    decision = resolveDecision(opts.openaiVoice, enginePreference)
+  } catch (err) {
+    return { ok: false, status: 503, message: errMsg(err) }
+  }
+
+  // Soft-escape: wanted Kokoro (daemon local_first or forced local) but got OpenAI.
+  const softEscapedToOpenAI =
+    decision.backend === 'openai' &&
+    !preferOpenAI &&
+    (forceLocal || getTtsEngineMode() === 'local_first') &&
+    !isLocalTtsReady()
+  if (softEscapedToOpenAI) {
+    noteKokoroFallbackPending(
+      forceLocal
+        ? 'Local selected but sidecar not ready'
+        : 'sidecar not ready at request time',
+    )
+  }
+
+  const hash = hashForDecision(decision, opts.format, opts.text, opts.instructions)
+  const primary = await generateIntoCache(
+    hash,
+    opts.text,
+    decision,
+    opts.format,
+    opts.instructions,
+    opts.signal,
+  )
+  if (primary.ok) {
+    if (softEscapedToOpenAI) {
+      announceKokoroFallbackToOpenAI(
+        forceLocal
+          ? 'Local selected but sidecar not ready'
+          : 'sidecar not ready at request time',
+      )
+    }
+    return { ok: true, hash }
+  }
+
+  const mode = getTtsEngineMode()
+  if (
+    decision.backend === 'openai' &&
+    primary.status !== 499 &&
+    canFallbackToLocal(mode, isLocalTtsReady(), preferOpenAI)
+  ) {
+    console.warn('[tts] OpenAI failed; falling back to local Kokoro:', primary.status, primary.message)
+    const localDecision: TtsRouteDecision = {
+      backend: 'local',
+      engineTag: 'kokoro',
+      backendVoice: mapOpenAIVoiceToLocal(opts.openaiVoice),
+      openaiVoice: opts.openaiVoice,
+    }
+    const localHash = hashForDecision(localDecision, opts.format, opts.text, opts.instructions)
+    const localResult = await generateIntoCache(
+      localHash,
+      opts.text,
+      localDecision,
+      opts.format,
+      opts.instructions,
+      opts.signal,
+    )
+    if (localResult.ok) {
+      if (opts.sessionId) rebindSessionHash(opts.sessionId, localHash)
+      return { ok: true, hash: localHash }
+    }
+    return localResult
+  }
+
+  if (
+    decision.backend === 'local' &&
+    primary.status !== 499 &&
+    canFallbackToOpenAI(mode, !!tryGetOpenAIKey(), openaiBudgetOk(), forceLocal)
+  ) {
+    const failReason = `${primary.status}: ${primary.message}`
+    noteKokoroFallbackPending(failReason)
+    const openaiVoice = isOpenAIVoiceId(opts.openaiVoice) ? opts.openaiVoice : DEFAULT_VOICE
+    const openaiDecision: TtsRouteDecision = {
+      backend: 'openai',
+      engineTag: 'openai',
+      backendVoice: openaiVoice,
+      openaiVoice: opts.openaiVoice,
+    }
+    const openaiHash = hashForDecision(openaiDecision, opts.format, opts.text, opts.instructions)
+    const openaiResult = await generateIntoCache(
+      openaiHash,
+      opts.text,
+      openaiDecision,
+      opts.format,
+      opts.instructions,
+      opts.signal,
+    )
+    if (openaiResult.ok) {
+      announceKokoroFallbackToOpenAI(failReason)
+      if (opts.sessionId) rebindSessionHash(opts.sessionId, openaiHash)
+      return { ok: true, hash: openaiHash }
+    }
+    return openaiResult
+  }
+
+  return primary
+}
+
+ttsRouter.get('/tts/voices', (_req, res) => {
+  res.json({
+    defaultEngine: getTtsEngineMode() === 'openai' || getTtsEngineMode() === 'openai_primary'
+      ? 'openai'
+      : 'local',
+    localReady: isLocalTtsReady(),
+    openai: OPENAI_VOICE_OPTIONS,
+    local: KOKORO_VOICE_OPTIONS,
+  })
+})
+
+/** Preserve the legacy /tts/stream first-byte contract for OpenAI-backed
+ * playback. Fallback alerts fire only after a real audio byte succeeds. */
+async function streamOpenAIToResponse(
+  res: import('express').Response,
+  opts: {
+    text: string
+    voice: string
+    format: string
+    instructions: string
+    signal: AbortSignal
+    onFirstByte?: () => void
+  },
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  let key: string
+  try {
+    key = getOpenAIKey()
+    assertOpenAITtsBudget()
+  } catch (err) {
+    if (err instanceof OpenAITtsBudgetExhaustedError) {
+      return { ok: false, status: 429, message: err.message }
+    }
+    return { ok: false, status: 503, message: errMsg(err) }
+  }
+
+  const spoken = applyOpenAIPronunciation(opts.text)
+  let upstream: Response
+  try {
+    upstream = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini-tts',
+        voice: opts.voice,
+        input: spoken,
+        response_format: opts.format,
+        ...(opts.instructions ? { instructions: opts.instructions } : {}),
+      }),
+      signal: opts.signal,
+    })
+  } catch (err) {
+    if (opts.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
+      return { ok: false, status: 499, message: 'client closed request' }
+    }
+    return { ok: false, status: 502, message: `OpenAI TTS fetch failed: ${errMsg(err)}` }
+  }
+  if (!upstream.ok || !upstream.body) {
+    const body = await upstream.text().catch(() => '')
+    return {
+      ok: false,
+      status: upstream.status || 502,
+      message: `OpenAI TTS ${upstream.status}: ${body.slice(0, 300)}`,
+    }
+  }
+
+  res.writeHead(200, {
+    'Content-Type': FORMAT_MIME[opts.format] ?? 'audio/mpeg',
+    'Cache-Control': 'no-cache',
+    'Transfer-Encoding': 'chunked',
+    'X-Accel-Buffering': 'no',
+    'Access-Control-Allow-Origin': '*',
+  })
+  res.flushHeaders()
+  const reader = upstream.body.getReader()
+  let firstByte = false
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value?.length) continue
+      if (!firstByte) {
+        firstByte = true
+        recordOpenAITtsUsage(spoken.length)
+        opts.onFirstByte?.()
+      }
+      if (!res.write(Buffer.from(value))) {
+        await new Promise<void>((resolve) => res.once('drain', resolve))
+      }
+    }
+    res.end()
+    return { ok: true }
+  } catch (err) {
+    if (!res.writableEnded) res.end()
+    if (opts.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
+      return { ok: false, status: 499, message: 'client closed request' }
+    }
+    return { ok: false, status: 502, message: `OpenAI TTS stream failed: ${errMsg(err)}` }
+  } finally {
+    try { reader.releaseLock() } catch { /* already released */ }
+  }
+}
+
 ttsRouter.post('/tts/stream', async (req, res) => {
   try {
-    const { text, voice, format, instructions } = req.body ?? {}
+    const { text, format, instructions } = req.body ?? {}
+    const enginePreference = parseEnginePreference(req.body)
 
     if (typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({ error: 'text is required (non-empty string)' })
     }
 
-    const requestedVoice = typeof voice === 'string' && SUPPORTED_VOICES.has(voice)
-      ? voice : DEFAULT_VOICE
+    const requestedVoice = normalizeRequestedVoice(req.body?.voice, enginePreference)
     const requestedFormat = typeof format === 'string' && SUPPORTED_FORMATS.has(format)
       ? format : 'mp3'
     const requestedInstructions = typeof instructions === 'string' && instructions.trim().length > 0
       ? instructions : DEFAULT_INSTRUCTIONS
 
-    // Budget gate — throw before the OpenAI call so we don't bill an aborted request.
-    try {
-      assertOpenAITtsBudget()
-    } catch (err) {
-      if (err instanceof OpenAITtsBudgetExhaustedError) {
-        return res.status(429).json({
-          error: err.message,
-          spentTodayUsd: err.spentTodayUsd,
-          capUsd: err.capUsd,
-        })
-      }
-      throw err
-    }
-
-    // Resolve the OpenAI key — surfaces a clean 503 if no key is reachable.
-    let key: string
-    try {
-      key = getOpenAIKey()
-    } catch (err) {
-      return res.status(503).json({ error: errMsg(err) })
-    }
-
     const cleaned = stripMarkdownLight(text).trim()
     const capped = trimToCap(cleaned)
-    const charCount = capped.length
 
-    // Abort the upstream OpenAI request if the client disconnects mid-stream
-    // (e.g. user toggled Voice Mode off, or started a new query).
     const upstreamController = new AbortController()
     res.once('close', () => {
       if (!res.writableEnded) upstreamController.abort()
     })
 
-    const openaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini-tts',
-        voice: requestedVoice,
-        input: capped,
-        response_format: requestedFormat,
-        ...(requestedInstructions ? { instructions: requestedInstructions } : {}),
-      }),
-      signal: upstreamController.signal,
-    })
-
-    if (!openaiRes.ok || !openaiRes.body) {
-      const errText = await openaiRes.text().catch(() => '')
-      return res.status(openaiRes.status || 502).json({
-        error: `OpenAI TTS ${openaiRes.status}: ${errText.slice(0, 300)}`,
-      })
+    let decision: TtsRouteDecision
+    try {
+      decision = resolveDecision(requestedVoice, enginePreference)
+    } catch (err) {
+      return res.status(503).json({ error: errMsg(err) })
     }
 
-    // Set headers for the audio stream — flush immediately so the browser can
-    // start consuming bytes as soon as they arrive.
-    res.writeHead(200, {
-      'Content-Type': FORMAT_MIME[requestedFormat] ?? 'audio/mpeg',
-      'Cache-Control': 'no-cache',
-      'Transfer-Encoding': 'chunked',
-      'X-Accel-Buffering': 'no',
-      'Access-Control-Allow-Origin': '*',
+    const streamOpenAI = (fallbackReason?: string) => streamOpenAIToResponse(res, {
+      text: capped,
+      voice: isOpenAIVoiceId(requestedVoice) ? requestedVoice : DEFAULT_VOICE,
+      format: requestedFormat,
+      instructions: requestedInstructions,
+      signal: upstreamController.signal,
+      ...(fallbackReason
+        ? { onFirstByte: () => announceKokoroFallbackToOpenAI(fallbackReason) }
+        : {}),
     })
-    res.flushHeaders()
 
-    // Pipe the upstream Web ReadableStream to the Express response. We track
-    // first-byte success so the budget ledger only ticks on a real (billable)
-    // response — aborts before any bytes don't count.
-    const reader = openaiRes.body.getReader()
-    let firstByteSeen = false
+    if (decision.backend === 'openai') {
+      const escapedLocalFirst = enginePreference !== 'openai' && getTtsEngineMode() === 'local_first'
+      if (escapedLocalFirst) noteKokoroFallbackPending('sidecar not ready at request time')
+      const streamed = await streamOpenAI(escapedLocalFirst ? 'sidecar not ready at request time' : undefined)
+      if (!streamed.ok && !res.headersSent) {
+        return res.status(streamed.status).json({ error: streamed.message })
+      }
+      return
+    }
+
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value && value.length > 0) {
-          if (!firstByteSeen) {
-            firstByteSeen = true
-            recordOpenAITtsUsage(charCount)
-          }
-          if (!res.write(Buffer.from(value))) {
-            // Backpressure — wait for drain before pulling more bytes.
-            await new Promise<void>((resolve) => res.once('drain', () => resolve()))
-          }
-        }
-      }
-      res.end()
+      const spoken = applyLocalPronunciation(capped)
+      const bytes = await synthesizeLocalTts({
+        text: spoken,
+        voice: decision.backendVoice,
+        format: requestedFormat,
+        signal: upstreamController.signal,
+      })
+      if (upstreamController.signal.aborted) return
+      res.writeHead(200, {
+        'Content-Type': FORMAT_MIME[requestedFormat] ?? 'audio/mpeg',
+        'Content-Length': String(bytes.length),
+        'Cache-Control': 'no-cache',
+        'Access-Control-Allow-Origin': '*',
+      })
+      res.end(bytes)
+      return
     } catch (err) {
-      // AbortError = client closed the stream; not an error worth logging loudly.
-      if ((err as { name?: string })?.name !== 'AbortError') {
-        console.error('[tts] Stream pipe error:', errMsg(err))
+      if (upstreamController.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
+        if (!res.headersSent) res.status(499).json({ error: 'client closed request' })
+        return
       }
-      if (!res.writableEnded) res.end()
-    } finally {
-      try { reader.releaseLock() } catch { /* already released */ }
+      const reason = `local TTS failed: ${errMsg(err)}`
+      const forceLocal = enginePreference === 'local'
+      if (!canFallbackToOpenAI(
+        getTtsEngineMode(),
+        !!tryGetOpenAIKey(),
+        openaiBudgetOk(),
+        forceLocal,
+      )) {
+        return res.status(502).json({ error: reason })
+      }
+      noteKokoroFallbackPending(reason)
+      const streamed = await streamOpenAI(reason)
+      if (!streamed.ok && !res.headersSent) {
+        return res.status(streamed.status).json({ error: streamed.message })
+      }
+      return
     }
   } catch (err) {
     if (!res.headersSent) {
@@ -429,105 +818,96 @@ ttsRouter.post('/tts/stream', async (req, res) => {
 // UUID IS the auth — short-lived (60s) and one-shot.
 ttsRouter.post('/tts/prepare', async (req, res) => {
   try {
-    const { text, voice, format, instructions, fast } = req.body ?? {}
+    const { text, format, instructions, fast } = req.body ?? {}
+    const enginePreference = parseEnginePreference(req.body)
 
     if (typeof text !== 'string' || text.trim().length === 0) {
       return res.status(400).json({ error: 'text is required (non-empty string)' })
     }
 
-    const requestedVoice = typeof voice === 'string' && SUPPORTED_VOICES.has(voice)
-      ? voice : DEFAULT_VOICE
+    const requestedVoice = normalizeRequestedVoice(req.body?.voice, enginePreference)
     const requestedFormat = typeof format === 'string' && SUPPORTED_FORMATS.has(format)
       ? format : 'mp3'
     const requestedInstructions = typeof instructions === 'string' && instructions.trim().length > 0
       ? instructions : DEFAULT_INSTRUCTIONS
     const fastMode = fast === true
 
-    // Budget gate — fail fast on prepare so we don't even hand out a session
-    // that would 429 on play. Cache hits intentionally still go through the
-    // full /play path (which short-circuits before billing), so we don't
-    // double-check budget here for hits — prepare is cheap regardless.
+    // Fail closed only when NEITHER OpenAI nor local can serve.
+    let decision: TtsRouteDecision
     try {
-      assertOpenAITtsBudget()
+      decision = resolveDecision(requestedVoice, enginePreference)
     } catch (err) {
-      if (err instanceof OpenAITtsBudgetExhaustedError) {
+      const budget = getOpenAITtsBudgetState()
+      if (!tryGetOpenAIKey()) {
+        return res.status(503).json({ error: errMsg(err) })
+      }
+      if (!openaiBudgetOk() && !isLocalTtsReady()) {
         return res.status(429).json({
-          error: err.message,
-          spentTodayUsd: err.spentTodayUsd,
-          capUsd: err.capUsd,
+          error: errMsg(err),
+          spentTodayUsd: budget.usdToday,
+          capUsd: budget.capUsd,
         })
       }
-      throw err
+      return res.status(503).json({ error: errMsg(err) })
     }
-
-    // requestedInstructions is intentionally NOT part of the session entry or
-    // the cache key today — no client surface passes it, and the server-side
-    // DEFAULT_INSTRUCTIONS is read at OpenAI-call time. If we ever surface
-    // per-message instructions, both must change in lockstep.
-    void requestedInstructions
 
     const cleaned = stripMarkdownLight(text).trim()
     const capped = trimToCap(cleaned)
+    const preferOpenAI = enginePreference === 'openai'
+    const forceLocal = enginePreference === 'local'
 
-    // v5.9.5 path (or fast=true with a short message that doesn't split):
-    // single session, behavior unchanged from v5.9.5. The play route will
-    // either hit the cache or call OpenAI on demand.
+    const mintAndWarm = (chunk: string) => {
+      const hash = hashForDecision(decision, requestedFormat, chunk, requestedInstructions)
+      const uuid = createSession({
+        hash,
+        text: chunk,
+        voice: requestedVoice,
+        format: requestedFormat,
+        preferOpenAI,
+        forceLocal,
+      })
+      // Detached preparation is deliberately local-only. It must never retain
+      // authority to spend cloud budget after the client cancels or closes.
+      // OpenAI generation (including Kokoro fallback) begins only from the
+      // live /play request, whose AbortSignal follows the connected client.
+      if (decision.backend === 'local') {
+        void generateIntoCache(
+          hash,
+          chunk,
+          decision,
+          requestedFormat,
+          requestedInstructions,
+        ).then((r) => {
+          if (!r.ok && r.status !== 499) {
+            console.warn('[tts/prepare] local pre-warm failed:', r.status, r.message)
+          }
+        })
+      }
+      return { hash, uuid }
+    }
+
+    const engineMeta = {
+      engine: decision.engineTag,
+      backend: decision.backend,
+      voice: decision.backendVoice,
+      localReady: isLocalTtsReady(),
+    }
+
     if (!fastMode) {
-      const hash = hashKey(capped, requestedVoice, requestedFormat)
-      const uuid = createSession({ hash, text: capped, voice: requestedVoice, format: requestedFormat })
-      return res.json({ url: `/api/tts/play/${uuid}` })
+      const { uuid } = mintAndWarm(capped)
+      return res.json({ url: `/api/tts/play/${uuid}`, ...engineMeta })
     }
 
-    // v5.9.6 fast path: split into prefix + tail, mint 1-2 sessions, and
-    // pre-warm OpenAI for both in parallel. The very next GET on either
-    // session piggybacks on the in-flight pre-warm via waitForInFlight
-    // (no double-bill), so first-audio drops from ~10s to ~1.5s on long
-    // replies. Falls back to single-URL behavior automatically when the
-    // splitter decides the message is too short to benefit from chunking.
     const { prefix, tail } = splitForFastPrefix(capped)
-
-    const prefixHash = hashKey(prefix, requestedVoice, requestedFormat)
-    const prefixUuid = createSession({
-      hash: prefixHash,
-      text: prefix,
-      voice: requestedVoice,
-      format: requestedFormat,
-    })
-
-    // Pre-warm OpenAI for the prefix. fire-and-forget; generateIntoCache
-    // dedups internally if another caller (parallel /prepare or a racing
-    // /play GET) is already on this hash, so we can call it unconditionally.
-    void generateIntoCache(prefixHash, prefix, requestedVoice, requestedFormat)
-      .then((r) => {
-        if (!r.ok && r.status !== 499) {
-          console.warn('[tts/prepare] prefix pre-warm failed:', r.status, r.message)
-        }
-      })
-
+    const prefixMint = mintAndWarm(prefix)
     if (tail.length === 0) {
-      // Short message — single chunk, no tailUrl. Client falls back to the
-      // v5.9.5 single-URL playback path automatically.
-      return res.json({ url: `/api/tts/play/${prefixUuid}` })
+      return res.json({ url: `/api/tts/play/${prefixMint.uuid}`, ...engineMeta })
     }
-
-    const tailHash = hashKey(tail, requestedVoice, requestedFormat)
-    const tailUuid = createSession({
-      hash: tailHash,
-      text: tail,
-      voice: requestedVoice,
-      format: requestedFormat,
-    })
-
-    void generateIntoCache(tailHash, tail, requestedVoice, requestedFormat)
-      .then((r) => {
-        if (!r.ok && r.status !== 499) {
-          console.warn('[tts/prepare] tail pre-warm failed:', r.status, r.message)
-        }
-      })
-
+    const tailMint = mintAndWarm(tail)
     res.json({
-      url: `/api/tts/play/${prefixUuid}`,
-      tailUrl: `/api/tts/play/${tailUuid}`,
+      url: `/api/tts/play/${prefixMint.uuid}`,
+      tailUrl: `/api/tts/play/${tailMint.uuid}`,
+      ...engineMeta,
     })
   } catch (err) {
     res.status(500).json({ error: errMsg(err) })
@@ -647,32 +1027,31 @@ ttsRouter.get('/tts/play/:session', async (req, res) => {
     return serveCachedBody(req, res, inFlight.bytes, inFlight.sizeBytes, mime)
   }
 
-  // True cold miss: no cache entry, no pre-warm. Drive OpenAI ourselves.
-  // generateIntoCache handles abort/budget/upstream errors and writes into
-  // the cache; we serve out of the cache after it completes. Identical
-  // behavior to v5.9.5, just refactored through the shared helper.
+  // True cold miss: no cache entry, no pre-warm. Resolve engine + generate
+  // (with openai_primary → local fallback). Session hash may rebind on fallback.
   const upstreamController = new AbortController()
   res.once('close', () => {
-    // Client bailed before we wrote a response (e.g. user toggled SPEAK off
-    // mid-generation, or REPLAY was cancelled). Tear down the upstream
-    // OpenAI request — abortEntry inside generateIntoCache rolls back the
-    // cache slot so the next request for this hash regenerates from scratch.
     if (!res.writableEnded) upstreamController.abort()
   })
 
-  const result = await generateIntoCache(
-    session.hash,
-    session.text,
-    session.voice,
-    session.format,
-    upstreamController.signal,
-  )
+  const enginePreference: TtsEnginePreference | null = session.forceLocal
+    ? 'local'
+    : session.preferOpenAI
+      ? 'openai'
+      : null
+  const result = await generateWithFallback({
+    text: session.text,
+    openaiVoice: session.voice,
+    format: session.format,
+    instructions: DEFAULT_INSTRUCTIONS,
+    enginePreference,
+    signal: upstreamController.signal,
+    sessionId: req.params.session,
+  })
 
   if (!result.ok) {
     if (result.status !== 499 && result.status !== 502) {
-      // 499 = client hung up, already handled. 502 includes drain errors
-      // we already log inside generateIntoCache for non-aborts.
-      console.error('[tts/play] generateIntoCache failed:', result.status, result.message)
+      console.error('[tts/play] generateWithFallback failed:', result.status, result.message)
     }
     if (!res.headersSent) {
       return res.status(result.status === 499 ? 499 : (result.status || 502))
@@ -685,11 +1064,8 @@ ttsRouter.get('/tts/play/:session', async (req, res) => {
 
   if (res.writableEnded) return
 
-  const served = getCached(session.hash)
+  const served = getCached(result.hash)
   if (!served) {
-    // Vanishingly unlikely — generateIntoCache reported ok but the entry was
-    // evicted between completeEntry and our read. Fall through with a 502
-    // so the client can REPLAY (which will regenerate cleanly).
     return res.status(502).json({ error: 'cache entry vanished post-write' })
   }
   serveCachedBody(req, res, served.bytes, served.sizeBytes, mime)
@@ -698,9 +1074,11 @@ ttsRouter.get('/tts/play/:session', async (req, res) => {
 // GET /api/tts/budget — diagnostics for the daily TTS spend + cache stats.
 ttsRouter.get('/tts/budget', async (_req, res) => {
   try {
-    const { getOpenAITtsBudgetState } = await import('../lib/openai-tts-budget.js')
+    const { getLocalTtsHealth } = await import('../lib/tts-local.js')
     res.json({
       ...getOpenAITtsBudgetState(),
+      engineMode: getTtsEngineMode(),
+      tts_local: getLocalTtsHealth(),
       cache: getCacheStats(),
     })
   } catch (err) {

@@ -11,8 +11,8 @@ API key is pasted into the phone for chat.
 npx --yes @gotcos/glasses-server@latest
 ```
 
-For the optional COS Control macOS menu bar app, prepare dependencies without
-leaving a foreground server running:
+For the optional COS Control macOS menu bar app, run the same non-mutating
+readiness check it uses before guided installation:
 
 ```bash
 npx --yes @gotcos/glasses-server@latest --prepare-only
@@ -21,9 +21,13 @@ npx --yes @gotcos/glasses-server@latest --prepare-only
 COS Control then installs the same npm package as a launchd-managed runtime.
 The original foreground command remains supported and unchanged.
 
-The launcher checks Node, finds your CLI, checks voice and image processing,
-downloads the local voice model when needed, writes `~/.cos-glasses/.env`, and
-starts the server on `0.0.0.0:3141`. On boot it prints
+Normal server start checks Node, finds your CLI, checks voice and image
+processing, writes `~/.cos-glasses/.env`, and starts the server on
+`0.0.0.0:3141`. Optional Whisper and Kokoro models are provisioned when their
+local services start; `--prepare-only` intentionally does not download or
+install optional models, write COS configuration, or start a listener. It may
+invoke an installed agent CLI's read-only version/auth probe, and that CLI may
+maintain its own user cache. On boot the server prints
 an **API token** — paste that into the COS Glasses app. Only one COS Glasses
 server may run on a Mac at a time; a second `npx` or source runner exits before
 opening ports or touching shared conversation/media state. Version 6.6.0 also
@@ -41,7 +45,10 @@ without silently losing completed replies.
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - `brew install whisper-cpp` for free local voice (the launcher can download the model)
-- _Optional:_ `brew install ffmpeg` for phone/output image attachments (text chat remains available without it)
+- _Optional:_ `brew install python@3.13 ffmpeg espeak-ng` for local Kokoro
+  spoken replies on Apple silicon (Python 3.11-3.13 is supported). `ffmpeg`
+  also enables phone/output image attachments; text chat remains available
+  without these optional dependencies.
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
 
 > No `ANTHROPIC_API_KEY` is needed — chat runs through your installed CLI, billed
@@ -99,6 +106,11 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   Whisper fallback is optional and requires both the exact
   `COS_OPENAI_WHISPER_FALLBACK=1` opt-in and a configured key; a key alone never
   uploads audio.
+- Local-first spoken reply playback through Kokoro on Apple silicon. The first
+  use creates a private Python environment and downloads its model without
+  blocking the API. Selecting Local fails closed; `local_first` can fall back
+  to OpenAI TTS only when a key and budget are available. `/api/health`
+  reports the independent `tts_local` state and current engine.
 - Tasks / calendar / people context **if** you run the
   [COS Starter Kit](https://www.gotcos.com) (`COS_SCRIPTS_DIR`); otherwise it is
   glasses + AI only
@@ -108,7 +120,11 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
 optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 `COS_API_TOKEN` (auto if unset), `COS_OPENAI_WHISPER_FALLBACK=1` plus
-`OPENAI_API_KEY` (explicit cloud voice fallback),
+`OPENAI_API_KEY` (explicit cloud transcription/TTS fallback),
+`COS_TTS_ENGINE` (`local_first` or `openai_primary`),
+`COS_TTS_KOKORO_VOICE` (local voice id),
+`COS_TTS_LOCAL_DISABLE=1` (disable the sidecar), and
+`COS_TTS_PRONUNCIATIONS_JSON` (optional local/cloud pronunciation overrides),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
@@ -149,6 +165,12 @@ BIND_HOST=0.0.0.0 npm run start:server
   confirm `/api/health` reports `features.whisper: true`. A typed retryable 503
   keeps compatible prompt/meeting audio available for retry instead of silently
   sending it to OpenAI.
+- *Local spoken replies unavailable?* — on Apple silicon, install
+  `python@3.13 ffmpeg espeak-ng`, restart the server, and wait for the
+  first-run Kokoro model download. Confirm `/api/health` reports
+  `tts_local.ready: true`.
+  Selecting Local never falls back to cloud; set `COS_TTS_ENGINE=openai_primary`
+  only when OpenAI playback is intentionally configured.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
 - *Prompt recovery unavailable?* — update with `npx --yes @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
 - *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+ and

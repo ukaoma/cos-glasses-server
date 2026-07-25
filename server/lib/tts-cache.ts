@@ -67,6 +67,10 @@ interface SessionEntry {
   text: string
   voice: string
   format: string
+  /** One-shot OpenAI opt-in for this session (play cold-miss must honor it). */
+  preferOpenAI?: boolean
+  /** Settings forced Local/Kokoro — do not auto-escape to OpenAI on play miss. */
+  forceLocal?: boolean
   expiresAt: number
 }
 
@@ -114,8 +118,18 @@ let totalDiskBytes = 0  // on-disk bytes (sum of all sidecar sizeBytes)
  *  a different voice for the same text correctly misses (and gets its own
  *  entry). Hash is sha256 truncated to 16 hex chars — collision probability is
  *  ~negligible for our scale. */
-export function hashKey(text: string, voice: string, format: string): string {
-  return createHash('sha256').update(`${voice}\0${format}\0${text}`).digest('hex').slice(0, 16)
+export function hashKey(
+  engine: string,
+  mappedVoice: string,
+  format: string,
+  text: string,
+  instructions?: string,
+): string {
+  let material = `${engine}\0${mappedVoice}\0${format}\0${text}`
+  if (engine === 'openai' && instructions && instructions.trim().length > 0) {
+    material += `\0${instructions.trim()}`
+  }
+  return createHash('sha256').update(material).digest('hex').slice(0, 16)
 }
 
 function ensureDiskDir(): void {
@@ -510,6 +524,18 @@ export function peekSession(uuid: string): SessionEntry | null {
     return null
   }
   return s
+}
+
+/** Rebind a live session to a new cache hash (openai -> local fallback). */
+export function rebindSessionHash(uuid: string, hash: string): boolean {
+  const s = sessions.get(uuid)
+  if (!s) return false
+  if (s.expiresAt < Date.now()) {
+    sessions.delete(uuid)
+    return false
+  }
+  s.hash = hash
+  return true
 }
 
 /** Strict one-shot lookup — kept for callers that want to invalidate the
