@@ -45,8 +45,8 @@ without silently losing completed replies.
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - `brew install whisper-cpp` for free local voice (the launcher can download the model)
-- _Optional:_ `brew install python@3.13 ffmpeg espeak-ng` for local Kokoro
-  spoken replies on Apple silicon (Python 3.11-3.13 is supported). `ffmpeg`
+- _Optional:_ `brew install python@3.12 ffmpeg espeak-ng` for local Kokoro
+  spoken replies on Apple silicon (Python 3.11-3.12 is supported). `ffmpeg`
   also enables phone/output image attachments; text chat remains available
   without these optional dependencies.
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
@@ -166,9 +166,11 @@ BIND_HOST=0.0.0.0 npm run start:server
   keeps compatible prompt/meeting audio available for retry instead of silently
   sending it to OpenAI.
 - *Local spoken replies unavailable?* — on Apple silicon, install
-  `python@3.13 ffmpeg espeak-ng`, restart the server, and wait for the
+  `python@3.12 ffmpeg espeak-ng`, restart the server, and wait for the
   first-run Kokoro model download. Confirm `/api/health` reports
   `tts_local.ready: true`.
+  If Python lives outside the normal Homebrew paths, set its absolute 3.11 or
+  3.12 path as `COS_TTS_BOOTSTRAP_PYTHON` in `~/.cos-glasses/.env`.
   Selecting Local never falls back to cloud; set `COS_TTS_ENGINE=openai_primary`
   only when OpenAI playback is intentionally configured.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.

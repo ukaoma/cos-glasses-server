@@ -111,6 +111,54 @@ exit 1
     }
   })
 
+  it('makes an explicit Kokoro Python override authoritative in readiness checks', () => {
+    const temp = mkdtempSync(resolve(tmpdir(), 'cos-launcher-kokoro-python-'))
+    const bin = resolve(temp, 'bin')
+    const home = resolve(temp, 'home')
+    mkdirSync(bin)
+    mkdirSync(home)
+    const claude = resolve(bin, 'claude')
+    const python313 = resolve(bin, 'python3.13')
+    const python311 = resolve(bin, 'python3.11')
+    writeFileSync(claude, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "2.1.215"; exit 0; fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then echo '{"loggedIn":true}'; exit 0; fi
+exit 1
+`)
+    writeFileSync(python313, '#!/bin/sh\necho "Python 3.13.5"\n')
+    writeFileSync(python311, '#!/bin/sh\necho "Python 3.11.14"\n')
+    for (const executable of [claude, python313, python311]) chmodSync(executable, 0o755)
+
+    try {
+      const incompatible = spawnSync(process.execPath, [resolve(root, 'bin/cli.cjs'), '--prepare-only'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${bin}:/usr/bin:/bin`,
+          COS_TTS_BOOTSTRAP_PYTHON: python313,
+        },
+      })
+      expect(incompatible.status).toBe(0)
+      expect(incompatible.stdout).toContain('Local Kokoro voice needs Python 3.11 or 3.12')
+      expect(incompatible.stdout).not.toContain('Local voice Python 3.11.14')
+
+      const compatible = spawnSync(process.execPath, [resolve(root, 'bin/cli.cjs'), '--prepare-only'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${bin}:/usr/bin:/bin`,
+          COS_TTS_BOOTSTRAP_PYTHON: python311,
+        },
+      })
+      expect(compatible.status).toBe(0)
+      expect(compatible.stdout).toContain('Local voice Python 3.11.14')
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
+  })
+
   it('makes the launchd-owned managed entrypoint the listener owner', () => {
     expect(pkg.files).toContain('managed-runtime-contract.json')
     expect(managedLauncher).toContain("require('tsx/cjs')")

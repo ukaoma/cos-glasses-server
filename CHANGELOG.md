@@ -1,3 +1,12 @@
+## 6.15.1
+
+- Fix Kokoro first-run provisioning by selecting only Python 3.11 or 3.12,
+  the actual compatibility intersection of the pinned `numpy` and `misaki`
+  dependencies. Python 3.13 is no longer advertised or selected.
+- Reject an incompatible `COS_TTS_BOOTSTRAP_PYTHON` before installation and
+  automatically rebuild stale or partial TTS virtual environments instead of
+  repeatedly failing inside pip.
+
 ## 6.15.0
 
 - Add local-first spoken reply playback through a Mac-owned Kokoro sidecar on

@@ -4,7 +4,7 @@
 // Runs the bundled server for Even G2 smart glasses. The server ships INSIDE this
 // package — there is no clone. Config persists at ~/.cos-glasses/.
 
-const { execSync, spawn } = require('child_process')
+const { execFileSync, execSync, spawn } = require('child_process')
 const {
   existsSync,
   mkdirSync,
@@ -47,7 +47,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('    - Node.js 20.11+')
   console.log('    - Claude Code CLI (not Claude Desktop) or Codex CLI')
   console.log('    - Even G2 smart glasses + the COS Glasses app (Even Hub)')
-  console.log('    - Optional local Kokoro voice: Apple silicon + Python 3.11-3.13')
+  console.log('    - Optional local Kokoro voice: Apple silicon + Python 3.11 or 3.12')
   console.log('')
   console.log('  No API key is needed for chat — it runs through your installed CLI.')
   console.log('  Config persists at ~/.cos-glasses/.env')
@@ -78,6 +78,21 @@ function getCliVersion(command, versionArg = '--version') {
   } catch {
     return null
   }
+}
+function compatibleKokoroPython() {
+  const configured = process.env.COS_TTS_BOOTSTRAP_PYTHON?.trim()
+  const candidates = configured ? [configured] : ['python3.12', 'python3.11', 'python3']
+  for (const command of candidates) {
+    let version = null
+    try {
+      version = execFileSync(command, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 }).trim()
+    } catch { /* try the next interpreter */ }
+    const match = version?.match(/^Python\s+(\d+)\.(\d+)/i)
+    if (match && Number(match[1]) === 3 && [11, 12].includes(Number(match[2]))) {
+      return { command, version }
+    }
+  }
+  return null
 }
 function normalizeCodexVersion(raw) {
   if (!raw) return 'available'
@@ -182,14 +197,12 @@ try {
 // listener. An invoked agent CLI may still maintain its own user cache.
 if (process.argv.includes('--prepare-only')) {
   if (process.platform === 'darwin' && process.arch === 'arm64') {
-    const python = ['python3.13', 'python3.12', 'python3.11']
-      .map((command) => ({ command, version: getCliVersion(command, '--version') }))
-      .find((candidate) => candidate.version)
+    const python = compatibleKokoroPython()
     if (python) {
       console.log(green('  ✓') + ` Local voice Python ${python.version.replace(/^Python\s+/i, '')}`)
     } else {
-      console.log(yellow('  ⚠') + ' Local Kokoro voice needs Python 3.11-3.13')
-      console.log('    Install: ' + bold('brew install python@3.13 ffmpeg espeak-ng'))
+      console.log(yellow('  ⚠') + ' Local Kokoro voice needs Python 3.11 or 3.12')
+      console.log('    Install: ' + bold('brew install python@3.12 ffmpeg espeak-ng'))
     }
   }
   console.log('')
