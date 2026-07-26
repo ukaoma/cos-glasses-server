@@ -61,6 +61,7 @@ import {
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
+import { terminateProviderProcess } from './provider-process-lifecycle.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -361,12 +362,14 @@ export async function callCodexStreaming(
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
     cwd: codexCwd,
+    detached: true,
   })
 
   let fullText = ''
   let stderr = ''
   let buffer = ''
   let finalized = false
+  let terminationRequested = false
   let terminalTextError: string | null = null
   let lastActivity = Date.now()
   const emittedBlocks = new Set<string>()
@@ -571,10 +574,43 @@ export async function callCodexStreaming(
     }
   }
 
-  function handleAbort() {
+  function abandonLostDurableOwnership(message: string) {
     if (finalized) return
-    proc.kill('SIGTERM')
-    finalizeError('codex-bridge: client disconnected before Codex completed.', null, 'client_disconnected')
+    finalized = true
+    cleanup()
+    cleanupImages()
+    outputImagePublisher?.cleanup()
+    removeExchange(sid, pendingUserExchange)
+    clearEngineSessionBestEffort('provider_ownership_lost')
+    finishRunBestEffort({
+      status: 'failed',
+      startedAtMs: startTime,
+      error: message,
+      exitCode: null,
+    })
+  }
+
+  async function terminateForTerminal(
+    reason: string,
+    onClosed: (result: Awaited<ReturnType<typeof terminateProviderProcess>>) => void | Promise<void>,
+  ) {
+    if (finalized || terminationRequested) return
+    terminationRequested = true
+    cleanup()
+    const result = await terminateProviderProcess(proc)
+    if (!result.closed) {
+      console.error(`[codex-bridge] provider did not close after SIGKILL (${reason}); retaining lifecycle ownership`)
+      return
+    }
+    await onClosed(result)
+  }
+
+  function handleAbort() {
+    void terminateForTerminal('client disconnect', result => finalizeError(
+        'codex-bridge: client disconnected before Codex completed.',
+        result.code,
+        'client_disconnected',
+      ))
   }
 
   const heartbeat = setInterval(() => {
@@ -583,28 +619,30 @@ export async function callCodexStreaming(
   }, HEARTBEAT_INTERVAL_MS)
 
   let inactivityTimer = setTimeout(() => {
-    proc.kill('SIGTERM')
     const elapsed = Math.round((Date.now() - startTime) / 1000)
-    finalizeError(`No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Codex process killed.`)
+    void terminateForTerminal('inactivity timeout', result => finalizeError(
+      `No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Codex process killed.`,
+      result.code,
+    ))
   }, INACTIVITY_MS)
 
   function resetInactivity() {
     lastActivity = Date.now()
     clearTimeout(inactivityTimer)
     inactivityTimer = setTimeout(() => {
-      proc.kill('SIGTERM')
       const elapsed = Math.round((Date.now() - startTime) / 1000)
-      finalizeError(`No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Codex process killed.`)
+      void terminateForTerminal('inactivity timeout', result => finalizeError(
+        `No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Codex process killed.`,
+        result.code,
+      ))
     }, INACTIVITY_MS)
   }
 
   const wallTimer = setTimeout(() => {
-    proc.kill('SIGTERM')
-    if (fullText) {
-      void finalize(fullText)
-    } else {
-      finalizeError(`Wall clock limit reached (${WALL_MAX_MS / 1000}s). Codex process killed.`)
-    }
+    void terminateForTerminal('wall timeout', result => {
+      if (fullText) return finalize(fullText)
+      return finalizeError(`Wall clock limit reached (${WALL_MAX_MS / 1000}s). Codex process killed.`, result.code)
+    })
   }, WALL_MAX_MS)
 
   function handleEvent(event: any) {
@@ -677,6 +715,7 @@ export async function callCodexStreaming(
   })
 
   proc.on('close', (code) => {
+    if (terminationRequested) return
     if (buffer.trim()) {
       try { handleEvent(JSON.parse(buffer.trim())) } catch { /* ignore */ }
     }
@@ -696,9 +735,11 @@ export async function callCodexStreaming(
   })
 
   proc.on('error', (err) => {
+    if (terminationRequested) return
     finalizeError(`codex-bridge: ${err.message}`)
   })
   proc.stdin.on('error', (err) => {
+    if (terminationRequested) return
     finalizeError(`codex-bridge: stdin failed — ${err.message}`)
   })
 
@@ -719,18 +760,8 @@ export async function callCodexStreaming(
       generation: options?.generation,
     })
     if (providerOwned === false) {
-      proc.kill('SIGTERM')
-      finalized = true
-      cleanup()
-      cleanupImages()
-      outputImagePublisher?.cleanup()
-      removeExchange(sid, pendingUserExchange)
-      clearEngineSessionBestEffort('provider_ownership_lost')
-      finishRunBestEffort({
-        status: 'failed',
-        startedAtMs: startTime,
-        error: 'codex-bridge: durable provider ownership was lost.',
-        exitCode: null,
+      await terminateForTerminal('provider ownership lost', () => {
+        abandonLostDurableOwnership('codex-bridge: durable provider ownership was lost.')
       })
       return sid
     }
@@ -740,8 +771,10 @@ export async function callCodexStreaming(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (!finalized) {
-      proc.kill('SIGTERM')
-      await finalizeError(`codex-bridge: provider start failed — ${message}`)
+      await terminateForTerminal('provider start failure', result => finalizeError(
+        `codex-bridge: provider start failed — ${message}`,
+        result.code,
+      ))
     }
   }
 

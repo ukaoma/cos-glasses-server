@@ -27,7 +27,11 @@ export function requireApiToken(apiToken: string): RequestHandler {
   return (req, res, next) => {
     if (isPublicApiRequest(req.method, req.path)) return next()
     if (!timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)) {
-      return res.status(401).json({ error: 'unauthorized' })
+      return res.status(401).json({
+        error: 'unauthorized',
+        reason: 'pairing_token_rejected',
+        message: 'In COS Control choose Copy Pairing Token, then paste the complete value into COS Glasses.',
+      })
     }
     next()
   }

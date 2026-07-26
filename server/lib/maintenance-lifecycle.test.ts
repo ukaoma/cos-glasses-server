@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MaintenanceLifecycle,
   MaintenanceLifecycleError,
@@ -146,6 +146,49 @@ describe('maintenance lifecycle rev4 committed operations', () => {
     candidate.releaseDrain(candidateIdentity, credentials(leaseId))
     expect(candidate.credentialsValid(credentials(leaseId))).toBe(false)
     expect(candidate.snapshot()).toMatchObject({ state: 'accepting', admissionsOpen: true })
+  })
+
+  it('starts deferred runtime exactly once after an authenticated cross-boot release', async () => {
+    const fixtureState = fixture()
+    const source = new MaintenanceLifecycle(fixtureState.options)
+    const leaseId = source.beginDrain(crossBootRequest())
+    fixtureState.setIdentity('boot-b', 'generation-b')
+    const candidate = new MaintenanceLifecycle(fixtureState.options)
+    const startRuntime = vi.fn()
+    candidate.onAdmissionsOpen(startRuntime)
+    await Promise.resolve()
+    expect(startRuntime).not.toHaveBeenCalled()
+
+    const candidateIdentity = {
+      serverInstanceId: 'instance-a', bootId: 'boot-b', generationId: 'generation-b', operationId: 'operation-1',
+    }
+    candidate.adoptDrain(candidateIdentity, credentials(leaseId))
+    await Promise.resolve()
+    expect(startRuntime).not.toHaveBeenCalled()
+
+    candidate.releaseDrain(candidateIdentity, credentials(leaseId))
+    await Promise.resolve()
+    expect(startRuntime).toHaveBeenCalledTimes(1)
+  })
+
+  it('delivers deferred runtime initialization on an already-open fresh boot', async () => {
+    const { options } = fixture()
+    const lifecycle = new MaintenanceLifecycle(options)
+    const startRuntime = vi.fn()
+    lifecycle.onAdmissionsOpen(startRuntime)
+    await Promise.resolve()
+    expect(startRuntime).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a stale admissions-open microtask when a drain closes first', async () => {
+    const { options } = fixture()
+    const lifecycle = new MaintenanceLifecycle(options)
+    const startRuntime = vi.fn()
+    lifecycle.onAdmissionsOpen(startRuntime)
+    lifecycle.beginDrain(crossBootRequest())
+    await Promise.resolve()
+    expect(startRuntime).not.toHaveBeenCalled()
+    expect(lifecycle.snapshot()).toMatchObject({ state: 'draining', admissionsOpen: false })
   })
 
   it('permits a pre-authorized rollback boot to replace a failed candidate adoption', () => {

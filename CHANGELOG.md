@@ -1,3 +1,27 @@
+## 6.15.4
+
+- Start Whisper, Kokoro, model discovery, and local audio prerequisites while
+  a managed successor remains behind the authenticated maintenance gate. Start
+  durable recovery, session warming, snapshots, and media GC exactly once after
+  the controller releases admissions, so routine restarts cannot strand local
+  services or prematurely mutate durable state.
+- Bound Whisper process and port inspection to two seconds per probe, move it
+  off the Node event loop, expose startup phase/error diagnostics, and only reap
+  processes whose executable is actually `whisper-server` with the COS model
+  and port signature.
+- Migrate legacy bare MCP server selectors to `mcp__server__*` and warn once for
+  rejected local/invalid selectors without relaxing the safe tool boundary.
+- Terminate abandoned, timed-out, start-failed, and ownership-lost provider
+  runs without orphaning tool subprocesses. Termination targets the detached
+  process group, escalates from SIGTERM to SIGKILL, and releases lifecycle
+  ownership only after Node observes process close. Control's provider proof
+  uses the same process-owned cancellation boundary.
+- Expose persistent Whisper prerequisite state separately from batch-only CLI
+  availability, plus an additive readiness summary so HTTP-200 liveness cannot
+  hide a configured local subsystem failure.
+- Keep the stable `unauthorized` error code while adding non-secret guidance to
+  copy and paste the complete pairing token from COS Control.
+
 ## 6.15.3
 
 - Make `COS_WORKDIR` the authoritative Claude, Codex, and Cursor workspace.

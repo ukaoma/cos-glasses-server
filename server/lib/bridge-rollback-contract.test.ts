@@ -15,7 +15,10 @@ describe('bridge pending-turn rollback contract', () => {
 
   it('Claude cancellation is wired to terminal rollback', () => {
     const source = readFileSync(new URL('./claude-bridge.ts', import.meta.url), 'utf8')
-    expect(source).toContain("finalizeError('claude-bridge: client disconnected before Claude completed.'")
+    expect(source).toContain('const result = await terminateProviderProcess(proc)')
+    expect(source).toContain("terminateForTerminal('client disconnect'")
+    expect(source).toContain('claude-bridge: client disconnected before Claude completed.')
+    expect(source).toContain('if (!result.closed)')
     expect(source).toContain("options.abortSignal.addEventListener('abort', handleAbort")
     expect(source).toContain('cliSessionMap.delete(resolvedCliKey)')
     expect(source).toContain('scheduleCliSessionSave()')

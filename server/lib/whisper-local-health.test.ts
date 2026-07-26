@@ -24,6 +24,13 @@ interface LifecycleMocks {
   portSnapshots?: number[][]
 }
 
+interface ProcessProbeOptions {
+  timeout?: number
+  maxBuffer?: number
+}
+
+type ProcessProbeError = Error & { code?: number | string }
+
 function installLifecycleMocks(options: LifecycleMocks = {}) {
   const children = [...(options.children ?? [new FakeChild(500)])]
   const processSnapshots = [...(options.processSnapshots ?? ['', ''])]
@@ -36,33 +43,42 @@ function installLifecycleMocks(options: LifecycleMocks = {}) {
     if (!child) throw new Error('unexpected extra whisper-server spawn')
     return child
   })
-  const execFileSyncMock = vi.fn((file: string) => {
-    if (file === 'ps') {
+  const execFileMock = vi.fn((
+    file: string,
+    _args: string[],
+    _options: ProcessProbeOptions,
+    callback: (error: ProcessProbeError | null, stdout: string, stderr: string) => void,
+  ) => {
+    if (file.endsWith('/ps') || file === 'ps') {
       if (processSnapshots.length > 0) lastProcessSnapshot = processSnapshots.shift()!
-      return lastProcessSnapshot
+      callback(null, lastProcessSnapshot, '')
+      return {} as any
     }
-    if (file === 'lsof') {
+    if (file.endsWith('/lsof') || file === 'lsof') {
       if (portSnapshots.length > 0) lastPortSnapshot = portSnapshots.shift()!
       if (lastPortSnapshot.length === 0) {
-        const err = new Error('no listeners') as Error & { status: number }
-        err.status = 1
-        throw err
+      const err = new Error('no listeners') as ProcessProbeError
+        err.code = 1
+        callback(err, '', '')
+        return {} as any
       }
-      return `${lastPortSnapshot.join('\n')}\n`
+      callback(null, `${lastPortSnapshot.join('\n')}\n`, '')
+      return {} as any
     }
-    throw new Error(`unexpected executable: ${file}`)
+    callback(new Error(`unexpected executable: ${file}`), '', '')
+    return {} as any
   })
 
   vi.doMock('node:child_process', () => ({
     spawn: spawnMock,
-    execFileSync: execFileSyncMock,
+    execFile: execFileMock,
   }))
   vi.doMock('node:fs', async importOriginal => ({
     ...(await importOriginal<typeof import('node:fs')>()),
     existsSync: () => true,
   }))
 
-  return { spawnMock, execFileSyncMock }
+  return { spawnMock, execFileMock }
 }
 
 describe('whisper-server health reconciliation', () => {
@@ -234,6 +250,82 @@ describe('whisper-server health reconciliation', () => {
       [991, 'SIGKILL'],
     ])
     expect(spawnMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('never kills a diagnostic shell whose arguments merely mention the Whisper signature', async () => {
+    const modelPath = `${process.env.HOME}/.local/share/whisper-models/ggml-large-v3-turbo.bin`
+    const { spawnMock } = installLifecycleMocks({
+      processSnapshots: [
+        `991 1 /bin/zsh -lc grep whisper-server ${modelPath} --port 8178\n`,
+        `991 1 /bin/zsh -lc grep whisper-server ${modelPath} --port 8178\n`,
+      ],
+    })
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+    const { restartWhisperServer } = await import('./whisper-local.js')
+
+    await expect(restartWhisperServer()).resolves.toEqual({ status: 'recovered' })
+    expect(killSpy).not.toHaveBeenCalled()
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed with an actionable health error when the bounded process probe times out', async () => {
+    const { spawnMock, execFileMock } = installLifecycleMocks()
+    execFileMock.mockImplementation((
+      file: string,
+      _args: string[],
+      options: ProcessProbeOptions,
+      callback: (error: ProcessProbeError | null, stdout: string, stderr: string) => void,
+    ) => {
+      expect(file).toMatch(/\/ps$/)
+      expect(options.timeout).toBe(2_000)
+      expect(options.maxBuffer).toBe(1024 * 1024)
+      const error = new Error('probe timed out') as ProcessProbeError
+      error.code = 'ETIMEDOUT'
+      callback(error, '', '')
+      return {} as any
+    })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { getWhisperHealth, startWhisperServer } = await import('./whisper-local.js')
+
+    await expect(startWhisperServer()).rejects.toThrow(/unable to inspect process table.*timed out/i)
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(logSpy.mock.calls.some(call => call.join(' ').includes('preflight: inspecting'))).toBe(true)
+    expect(getWhisperHealth()).toMatchObject({
+      server: false,
+      restarting: false,
+      startupState: 'failed',
+      lastError: expect.stringMatching(/unable to inspect process table.*timed out/i),
+    })
+  })
+
+  it('fails closed with an actionable health error when the bounded port probe times out', async () => {
+    const { spawnMock, execFileMock } = installLifecycleMocks()
+    execFileMock.mockImplementation((
+      file: string,
+      _args: string[],
+      options: ProcessProbeOptions,
+      callback: (error: ProcessProbeError | null, stdout: string, stderr: string) => void,
+    ) => {
+      expect(options.timeout).toBe(2_000)
+      expect(options.maxBuffer).toBe(1024 * 1024)
+      if (file.endsWith('/ps')) {
+        callback(null, '', '')
+      } else {
+        const error = new Error('lsof probe timed out') as ProcessProbeError
+        error.code = 'ETIMEDOUT'
+        callback(error, '', '')
+      }
+      return {} as any
+    })
+    const { getWhisperHealth, startWhisperServer } = await import('./whisper-local.js')
+
+    await expect(startWhisperServer()).rejects.toThrow(/unable to inspect whisper-server port 8178.*timed out/i)
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(getWhisperHealth()).toMatchObject({
+      startupState: 'failed',
+      lastError: expect.stringMatching(/unable to inspect whisper-server port 8178.*timed out/i),
+    })
   })
 
   it('fails closed without spawning while port 8178 remains occupied', async () => {

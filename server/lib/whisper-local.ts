@@ -6,10 +6,10 @@
 //   2. whisper-cli (spawned per request, model loaded from disk) → ~500-700ms
 //   3. OpenAI API (cloud, handled by transcribe.ts) → ~1000-3000ms
 
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
 import { getVocabulary, getOwnerName } from './profile.js'
@@ -137,6 +137,10 @@ function getWhisperPrompt(): string {
 // whisper-server runs on this port (started at server boot or by LaunchAgent)
 const WHISPER_SERVER_PORT = 8178
 const WHISPER_SERVER_URL = `http://127.0.0.1:${WHISPER_SERVER_PORT}`
+const PROCESS_PROBE_TIMEOUT_MS = 2_000
+const PROCESS_PROBE_MAX_BUFFER = 1024 * 1024
+const PS_BIN = '/bin/ps'
+const LSOF_BIN = existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof'
 
 // Track which backends are available
 let cliAvailable = false
@@ -153,6 +157,10 @@ let serverStarting = false            // Initial model load is not a circuit fai
 let serverStartPromise: Promise<void> | null = null
 let serverRestartPromise: Promise<WhisperRestartResult> | null = null
 let serverHealthProbe: Promise<boolean> | null = null
+type WhisperStartupState = 'not_started' | 'preflight' | 'loading' | 'ready' | 'unavailable' | 'failed' | 'stopped'
+let serverStartupState: WhisperStartupState = 'not_started'
+let serverLastAttemptAt: string | null = null
+let serverLastError: string | null = null
 
 interface ProcessEntry {
   pid: number
@@ -167,10 +175,34 @@ export interface WhisperRestartResult {
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
-function listProcesses(): ProcessEntry[] {
+function boundedError(value: unknown): string {
+  const message = value instanceof Error ? value.message : String(value)
+  return message.replace(/[\r\n\t]+/g, ' ').slice(0, 240)
+}
+
+function runProcessProbe(file: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, {
+      encoding: 'utf8',
+      timeout: PROCESS_PROBE_TIMEOUT_MS,
+      maxBuffer: PROCESS_PROBE_MAX_BUFFER,
+      killSignal: 'SIGKILL',
+    }, (error, stdout) => {
+      if (error) reject(error)
+      else resolve(String(stdout))
+    })
+  })
+}
+
+async function listProcesses(): Promise<ProcessEntry[]> {
   // `command=` includes arguments, which lets us distinguish this COS-owned
   // port/model signature from unrelated whisper-server instances.
-  const output = execFileSync('ps', ['-axww', '-o', 'pid=,ppid=,command='], { encoding: 'utf8' })
+  let output: string
+  try {
+    output = await runProcessProbe(PS_BIN, ['-axww', '-o', 'pid=,ppid=,command='])
+  } catch (error) {
+    throw new Error(`unable to inspect process table: ${boundedError(error)}`)
+  }
   return output.split('\n').flatMap(line => {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/)
     if (!match) return []
@@ -178,24 +210,25 @@ function listProcesses(): ProcessEntry[] {
   })
 }
 
-function listeningPids(): number[] {
+async function listeningPids(): Promise<number[]> {
   try {
-    const output = execFileSync(
-      'lsof',
+    const output = await runProcessProbe(
+      LSOF_BIN,
       ['-nP', `-iTCP:${WHISPER_SERVER_PORT}`, '-sTCP:LISTEN', '-t'],
-      { encoding: 'utf8' },
     )
     return output.split(/\s+/).map(Number).filter(pid => Number.isInteger(pid) && pid > 0)
   } catch (err: any) {
     // lsof uses exit 1 for "no matches". Anything else means we could not
     // prove the port state, so startup must fail closed.
-    if (err?.status === 1) return []
-    throw new Error(`unable to inspect whisper-server port ${WHISPER_SERVER_PORT}: ${err?.message ?? err}`)
+    if (err?.code === 1 || err?.status === 1) return []
+    throw new Error(`unable to inspect whisper-server port ${WHISPER_SERVER_PORT}: ${boundedError(err)}`)
   }
 }
 
 function isCosWhisperServerCommand(command: string): boolean {
-  const executable = /(?:^|\s)(?:\S*\/)?whisper-server(?:\s|$)/.test(command)
+  const firstToken = command.trim().match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/)
+  const executablePath = firstToken?.[1] ?? firstToken?.[2] ?? firstToken?.[3] ?? ''
+  const executable = basename(executablePath) === 'whisper-server'
   const configuredPort = new RegExp(`(?:^|\\s)--port(?:=|\\s+)${WHISPER_SERVER_PORT}(?:\\s|$)`).test(command)
   return executable && configuredPort && command.includes(MODEL_PATH)
 }
@@ -249,7 +282,7 @@ async function killAndReapWhisperProcesses(): Promise<void> {
   serverAvailable = false
 
   for (let round = 0; round < 3; round++) {
-    const processes = listProcesses()
+    const processes = await listProcesses()
     const ownedPids = [...ownedServerChildren]
       .map(child => child.pid)
       .filter((pid): pid is number => typeof pid === 'number')
@@ -288,7 +321,7 @@ async function killAndReapWhisperProcesses(): Promise<void> {
     await sleep(50)
   }
 
-  const remaining = listProcesses().filter(entry => isCosWhisperServerCommand(entry.command))
+  const remaining = (await listProcesses()).filter(entry => isCosWhisperServerCommand(entry.command))
   if (remaining.length > 0) {
     throw new Error(`stale whisper-server process(es) remain: ${remaining.map(entry => entry.pid).join(', ')}`)
   }
@@ -298,11 +331,11 @@ async function killAndReapWhisperProcesses(): Promise<void> {
 
 async function proveWhisperPortClear(): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt++) {
-    const pids = listeningPids()
+    const pids = await listeningPids()
     if (pids.length === 0) return
     if (attempt < 19) await sleep(250)
   }
-  const pids = listeningPids()
+  const pids = await listeningPids()
   throw new Error(
     `whisper-server port ${WHISPER_SERVER_PORT} remains occupied${pids.length ? ` by PID(s) ${pids.join(', ')}` : ''}`,
   )
@@ -334,10 +367,17 @@ export async function startWhisperServer(): Promise<void> {
   if (serverAvailable && serverProcess) return
 
   serverStarting = true
+  serverStartupState = 'preflight'
+  serverLastAttemptAt = new Date().toISOString()
+  serverLastError = null
   const operation = startWhisperServerAttempt()
   serverStartPromise = operation
   try {
     await operation
+  } catch (error) {
+    serverStartupState = 'failed'
+    serverLastError = boundedError(error)
+    throw error
   } finally {
     if (serverStartPromise === operation) serverStartPromise = null
     serverStarting = false
@@ -346,6 +386,8 @@ export async function startWhisperServer(): Promise<void> {
 
 async function startWhisperServerAttempt(preflightCompleted = false): Promise<void> {
   if (!existsSync(WHISPER_SERVER) || !existsSync(MODEL_PATH)) {
+    serverStartupState = 'unavailable'
+    serverLastError = 'whisper-server or model not found'
     console.log('[whisper-local] whisper-server or model not found — using CLI fallback')
     return
   }
@@ -353,9 +395,12 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
   // The API process is the sole Whisper owner. Never adopt an untracked daemon:
   // reap stale trees, then prove the fixed local port is free before spawning.
   if (!preflightCompleted) {
+    console.log('[whisper-local] preflight: inspecting owned processes and port 8178')
+    serverStartupState = 'preflight'
     await killAndReapWhisperProcesses()
     await proveWhisperPortClear()
   }
+  serverStartupState = 'loading'
 
   // Assemble startup args. VAD only attaches if the ggml model is actually on
   // disk — missing-file is logged, not fatal (server still boots without VAD).
@@ -402,6 +447,8 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
     if (serverProcess !== child) return
     serverAvailable = false
     serverProcess = null
+    serverStartupState = 'failed'
+    serverLastError = `whisper-server exited${code == null ? '' : ` with code ${code}`}`
     if (code !== null && code !== 0) {
       console.warn(`[whisper-local] whisper-server exited with code ${code}`)
     }
@@ -422,6 +469,8 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
       const res = await fetch(`${WHISPER_SERVER_URL}/health`, { signal: AbortSignal.timeout(1000) })
       if (res.ok) {
         serverAvailable = true
+        serverStartupState = 'ready'
+        serverLastError = null
         const loadTime = ((Date.now() - startTime) / 1000).toFixed(1)
         console.log(`[whisper-local] whisper-server ready on port ${WHISPER_SERVER_PORT} (loaded in ${loadTime}s)`)
         return
@@ -444,6 +493,8 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
   console.error(`[whisper-local] ${failure} — reaping child and keeping local backend unavailable`)
   await killAndReapWhisperProcesses()
   await proveWhisperPortClear()
+  serverStartupState = 'failed'
+  serverLastError = failure
   throw new Error(failure)
 }
 
@@ -461,6 +512,7 @@ export function stopWhisperServer(): void {
     try { proc.kill('SIGKILL') } catch { /* already exited */ }
   }
   ownedHqChildren.clear()
+  serverStartupState = 'stopped'
 }
 
 export function isWhisperLocalAvailable(): boolean {
@@ -480,17 +532,25 @@ export function getWhisperBackend(): 'server' | 'cli' | 'none' {
 /** Detailed health status for diagnostics (/api/health) */
 export function getWhisperHealth(): {
   server: boolean
+  serverConfigured: boolean
   cli: boolean
   consecutiveFailures: number
   restarting: boolean
   circuitOpen: boolean
+  startupState: WhisperStartupState
+  lastAttemptAt: string | null
+  lastError: string | null
 } {
   return {
     server: serverAvailable,
+    serverConfigured: existsSync(WHISPER_SERVER) && existsSync(MODEL_PATH),
     cli: cliAvailable,
     consecutiveFailures: serverConsecutiveFailures,
     restarting: serverRestarting || serverStarting,
     circuitOpen: serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD,
+    startupState: serverStartupState,
+    lastAttemptAt: serverLastAttemptAt,
+    lastError: serverLastError,
   }
 }
 
@@ -966,6 +1026,9 @@ export async function restartWhisperServer(): Promise<WhisperRestartResult> {
   if (serverRestartPromise) return serverRestartPromise
 
   serverRestarting = true
+  serverStartupState = 'preflight'
+  serverLastAttemptAt = new Date().toISOString()
+  serverLastError = null
   const priorStart = serverStartPromise
   const operation = (async (): Promise<WhisperRestartResult> => {
     try {
@@ -984,6 +1047,8 @@ export async function restartWhisperServer(): Promise<WhisperRestartResult> {
         throw new Error('whisper-server did not become healthy')
       }
       serverConsecutiveFailures = 0
+      serverStartupState = 'ready'
+      serverLastError = null
       console.log('[whisper-local] Server restarted successfully — circuit breaker CLOSED')
       return { status: 'recovered' }
     } catch (err: any) {
@@ -992,6 +1057,8 @@ export async function restartWhisperServer(): Promise<WhisperRestartResult> {
       // breaker cycle, and the next three failed calls may request one new cycle.
       serverConsecutiveFailures = 0
       const message = err?.message ?? String(err)
+      serverStartupState = 'failed'
+      serverLastError = boundedError(message)
       console.error(`[whisper-local] Server restart error: ${message} — will retry after next 3 failures`)
       return { status: 'failed', error: message }
     }

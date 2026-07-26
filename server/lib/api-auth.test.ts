@@ -58,6 +58,22 @@ describe('global API authentication boundary', () => {
     expect((await request(`/api/tts/prepare?token=${TOKEN}`)).status).toBe(401)
   })
 
+  it('returns actionable, non-secret pairing guidance without changing the stable error code', async () => {
+    const missing = await request('/api/models')
+    const wrong = await request('/api/models', { headers: { 'x-cos-token': 'not-the-token' } })
+    expect(missing.status).toBe(401)
+    expect(wrong.status).toBe(401)
+    const missingBody = await missing.json()
+    const wrongBody = await wrong.json()
+    expect(missingBody).toEqual(wrongBody)
+    expect(missingBody).toMatchObject({
+      error: 'unauthorized',
+      reason: 'pairing_token_rejected',
+    })
+    expect(missingBody.message).toContain('Copy Pairing Token')
+    expect(JSON.stringify(missingBody)).not.toContain(TOKEN)
+  })
+
   it('continues to accept X-Cos-Token on protected routes', async () => {
     const response = await request('/api/tts/prepare', {
       headers: { 'x-cos-token': TOKEN },

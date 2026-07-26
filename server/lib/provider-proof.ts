@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { cosBrainDir } from './launch-dir.js'
+import { terminateProviderProcess } from './provider-process-lifecycle.js'
 
 export type ProofProvider = 'claude' | 'codex'
 
@@ -21,6 +22,7 @@ interface ProcessResult {
   stdout: string
   stderr: string
   timedOut: boolean
+  aborted: boolean
 }
 
 function runBounded(
@@ -28,15 +30,20 @@ function runBounded(
   args: string[],
   input: string,
   timeoutMs = 120_000,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
   return new Promise((resolvePromise) => {
+    if (signal?.aborted) {
+      resolvePromise({ code: null, stdout: '', stderr: '', timedOut: false, aborted: true })
+      return
+    }
     const env = { ...process.env }
     delete env.CLAUDECODE
     const child = spawn(command, args, {
       cwd: cosBrainDir() ?? process.cwd(),
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      detached: false,
+      detached: true,
     })
     let stdout = ''
     let stderr = ''
@@ -48,15 +55,25 @@ function runBounded(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
       resolvePromise(result)
     }
     const timer = setTimeout(() => {
-      try { child.kill('SIGKILL') } catch { /* already exited */ }
-      finish({ code: null, stdout, stderr, timedOut: true })
+      void terminateProviderProcess(child, { termGraceMs: 50 }).then(result => {
+        if (result.closed) finish({ code: result.code, stdout, stderr, timedOut: true, aborted: false })
+        else console.error('[provider-proof] timed-out provider did not close after SIGKILL; retaining request ownership')
+      })
     }, timeoutMs)
     timer.unref?.()
-    child.once('error', err => finish({ code: null, stdout, stderr: err.message, timedOut: false }))
-    child.once('close', code => finish({ code, stdout, stderr, timedOut: false }))
+    const abort = () => {
+      void terminateProviderProcess(child).then(result => {
+        if (result.closed) finish({ code: result.code, stdout, stderr, timedOut: false, aborted: true })
+        else console.error('[provider-proof] canceled provider did not close after SIGKILL; retaining request ownership')
+      })
+    }
+    child.once('error', err => finish({ code: null, stdout, stderr: err.message, timedOut: false, aborted: false }))
+    child.once('close', code => finish({ code, stdout, stderr, timedOut: false, aborted: false }))
+    signal?.addEventListener('abort', abort, { once: true })
     child.stdin.on('error', () => { /* close/error is authoritative */ })
     child.stdin.end(input)
   })
@@ -94,12 +111,13 @@ export function codexProofText(stdout: string): string {
 }
 
 function safeProofError(result: ProcessResult): string {
+  if (result.aborted) return 'provider proof canceled'
   if (result.timedOut) return 'provider proof timed out'
   if (result.code !== 0) return `provider process exited ${result.code ?? 'before launch'}`
   return 'provider returned no valid proof response'
 }
 
-async function executeProof(provider: ProofProvider): Promise<ProviderProofResult> {
+async function executeProof(provider: ProofProvider, signal?: AbortSignal): Promise<ProviderProofResult> {
   const started = Date.now()
   const result = provider === 'claude'
     ? await runBounded('claude', [
@@ -110,7 +128,7 @@ async function executeProof(provider: ProofProvider): Promise<ProviderProofResul
       '--allowedTools', '',
       '--system-prompt', PROOF_PROMPT,
       PROOF_PROMPT,
-    ], '')
+    ], '', 120_000, signal)
     : await runBounded('codex', [
       'exec',
       '--sandbox', 'read-only',
@@ -119,7 +137,7 @@ async function executeProof(provider: ProofProvider): Promise<ProviderProofResul
       '--cd', cosBrainDir() ?? process.cwd(),
       '--ephemeral',
       '-',
-    ], PROOF_PROMPT)
+    ], PROOF_PROMPT, 120_000, signal)
   const text = provider === 'claude'
     ? claudeProofText(result.stdout)
     : codexProofText(result.stdout)
@@ -134,12 +152,12 @@ async function executeProof(provider: ProofProvider): Promise<ProviderProofResul
 }
 
 /** Actual no-tool model turn, cached only after success for this server boot. */
-export async function runProviderProof(provider: ProofProvider): Promise<ProviderProofResult> {
+export async function runProviderProof(provider: ProofProvider, signal?: AbortSignal): Promise<ProviderProofResult> {
   const cached = successCache.get(provider)
   if (cached) return { ...cached, cached: true }
   const existing = inFlight.get(provider)
   if (existing) return existing
-  const operation = executeProof(provider).then(result => {
+  const operation = executeProof(provider, signal).then(result => {
     if (result.ok) successCache.set(provider, result)
     return result
   }).finally(() => {

@@ -54,6 +54,7 @@ import {
 } from './claude-tool-access.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
+import { terminateProviderProcess } from './provider-process-lifecycle.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -553,12 +554,14 @@ export async function callClaudeStreaming(
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
     cwd: cliCwd,
+    detached: true,
   })
 
   let fullText = ''
   let stderr = ''
   let buffer = ''
   let finalized = false        // Guard against double onDone/onError
+  let terminationRequested = false // Forced terminal callbacks wait for confirmed process close
   let terminalTextError: string | null = null
   let lastActivity = Date.now() // Tracks last stdout data for inactivity timeout
   let receivedStreamEvents = false  // Track if CLI emits stream_event (vs older assistant-only format)
@@ -722,10 +725,27 @@ export async function callClaudeStreaming(
     await callbacks.onError(msg)
   }
 
+  async function terminateForTerminal(
+    reason: string,
+    onClosed: (result: Awaited<ReturnType<typeof terminateProviderProcess>>) => void | Promise<void>,
+  ) {
+    if (finalized || terminationRequested) return
+    terminationRequested = true
+    cleanup()
+    const result = await terminateProviderProcess(proc)
+    if (!result.closed) {
+      console.error(`[claude-bridge] provider did not close after SIGKILL (${reason}); retaining lifecycle ownership`)
+      return
+    }
+    await onClosed(result)
+  }
+
   function handleAbort() {
-    if (finalized) return
-    proc.kill('SIGTERM')
-    finalizeError('claude-bridge: client disconnected before Claude completed.', null, 'client_disconnected')
+    void terminateForTerminal('client disconnect', result => finalizeError(
+        'claude-bridge: client disconnected before Claude completed.',
+        result.code,
+        'client_disconnected',
+      ))
   }
 
   // ─── Heartbeat: emit phase status during silence ───
@@ -743,31 +763,35 @@ export async function callClaudeStreaming(
   // ─── Inactivity timeout: resets on any stdout data ───
 
   let inactivityTimer = setTimeout(() => {
-    proc.kill('SIGTERM')
     const elapsed = Math.round((Date.now() - startTime) / 1000)
-    finalizeError(`No output for ${inactivityMs / 1000}s (${elapsed}s total). Process killed.`)
+    void terminateForTerminal('inactivity timeout', result => finalizeError(
+      `No output for ${inactivityMs / 1000}s (${elapsed}s total). Process killed.`,
+      result.code,
+    ))
   }, inactivityMs)
 
   function resetInactivity() {
     lastActivity = Date.now()
     clearTimeout(inactivityTimer)
     inactivityTimer = setTimeout(() => {
-      proc.kill('SIGTERM')
       const elapsed = Math.round((Date.now() - startTime) / 1000)
-      finalizeError(`No output for ${inactivityMs / 1000}s (${elapsed}s total). Process killed.`)
+      void terminateForTerminal('inactivity timeout', result => finalizeError(
+        `No output for ${inactivityMs / 1000}s (${elapsed}s total). Process killed.`,
+        result.code,
+      ))
     }, inactivityMs)
   }
 
   // ─── Wall clock max: absolute cap ───
 
   const wallTimer = setTimeout(() => {
-    proc.kill('SIGTERM')
-    if (fullText) {
-      // Got partial output — deliver what we have
-      void finalize(fullText)
-    } else {
-      finalizeError(`Wall clock limit reached (${wallMax / 1000}s). Process killed.`)
-    }
+    void terminateForTerminal('wall timeout', result => {
+      if (fullText) {
+        // Got partial output — deliver only after the process tree is closed.
+        return finalize(fullText)
+      }
+      return finalizeError(`Wall clock limit reached (${wallMax / 1000}s). Process killed.`, result.code)
+    })
   }, wallMax)
 
   function cleanup() {
@@ -898,6 +922,7 @@ export async function callClaudeStreaming(
   })
 
   proc.on('close', (code) => {
+    if (terminationRequested) return
     // Process any remaining buffer
     if (buffer.trim()) {
       try {
@@ -931,9 +956,11 @@ export async function callClaudeStreaming(
   })
 
   proc.on('error', (err) => {
+    if (terminationRequested) return
     finalizeError(`claude-bridge: ${err.message}`, null)
   })
   proc.stdin.on('error', (err) => {
+    if (terminationRequested) return
     finalizeError(`claude-bridge: stdin failed — ${err.message}`, null)
   })
 
@@ -959,8 +986,9 @@ export async function callClaudeStreaming(
       generation: options?.generation,
     })
     if (providerOwned === false) {
-      proc.kill('SIGTERM')
-      abandonLostDurableOwnership('claude-bridge: durable provider ownership was lost.')
+      await terminateForTerminal('provider ownership lost', () => {
+        abandonLostDurableOwnership('claude-bridge: durable provider ownership was lost.')
+      })
       return sid
     }
     if (finalized) return sid
@@ -969,8 +997,10 @@ export async function callClaudeStreaming(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (!finalized) {
-      proc.kill('SIGTERM')
-      await finalizeError(`claude-bridge: provider start failed — ${message}`, null)
+      await terminateForTerminal('provider start failure', result => finalizeError(
+        `claude-bridge: provider start failed — ${message}`,
+        result.code,
+      ))
     }
   }
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({
   child: null as any,
@@ -6,6 +6,8 @@ const state = vi.hoisted(() => ({
   clearThrows: false,
   saveCalls: 0,
   clearCalls: 0,
+  terminateProviderProcess: vi.fn(),
+  resolveTermination: null as null | ((value: any) => void),
 }))
 
 vi.mock('node:child_process', async () => {
@@ -15,6 +17,8 @@ vi.mock('node:child_process', async () => {
     stderr = new EventEmitter()
     stdin = Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() })
     pid = 4321
+    exitCode = null
+    signalCode = null
     kill = vi.fn()
   }
   return {
@@ -83,6 +87,9 @@ vi.mock('./run-output-images.js', () => ({
   createRunOutputImagePublisher: vi.fn(),
   isRunOutputImagePublisherCommand: () => false,
 }))
+vi.mock('./provider-process-lifecycle.js', () => ({
+  terminateProviderProcess: state.terminateProviderProcess,
+}))
 
 import { callCodexStreaming } from './codex-bridge.js'
 
@@ -112,12 +119,24 @@ function emitCompletedAnswer() {
   ].join('\n')))
 }
 
+beforeEach(() => {
+  state.terminateProviderProcess.mockResolvedValue({
+    closed: true,
+    escalated: false,
+    code: null,
+    signal: 'SIGTERM',
+  })
+})
+
 afterEach(() => {
+  vi.useRealTimers()
   state.child = null
   state.saveThrows = false
   state.clearThrows = false
   state.saveCalls = 0
   state.clearCalls = 0
+  state.terminateProviderProcess.mockReset()
+  state.resolveTermination = null
 })
 
 describe('Codex detached finalization', () => {
@@ -212,10 +231,30 @@ describe('Codex detached finalization', () => {
   it('never writes the prompt when durable provider ownership is lost', async () => {
     const callbackSet = callbacks({ onProviderProcess: vi.fn(async () => false) })
     await start(callbackSet)
-    expect(state.child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(state.terminateProviderProcess).toHaveBeenCalledWith(state.child)
+    expect(state.child.kill).not.toHaveBeenCalled()
     expect(state.child.stdin.write).not.toHaveBeenCalled()
     expect(callbackSet.onDone).not.toHaveBeenCalled()
     expect(callbackSet.onError).not.toHaveBeenCalled()
+  })
+
+  it('holds timeout finalization until the provider tree confirms close', async () => {
+    vi.useFakeTimers()
+    state.terminateProviderProcess.mockImplementation(() => new Promise(resolve => {
+      state.resolveTermination = resolve
+    }))
+    const callbackSet = callbacks()
+    await start(callbackSet)
+
+    await vi.advanceTimersByTimeAsync(180_000)
+    expect(state.terminateProviderProcess).toHaveBeenCalledWith(state.child)
+    expect(callbackSet.onError).not.toHaveBeenCalled()
+
+    state.resolveTermination!({ closed: true, escalated: true, code: null, signal: 'SIGKILL' })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(callbackSet.onError).toHaveBeenCalledTimes(1)
+    expect(callbackSet.onDone).not.toHaveBeenCalled()
   })
 
   it('still invokes one provider error when finalizeError engine-session clear throws', async () => {

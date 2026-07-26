@@ -295,6 +295,21 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
   void inflightPromise.catch(() => { /* duplicate waiters observe the original rejection */ })
   inflightQueries.set(dedupKey, { promise: inflightPromise, timestamp: Date.now() })
 
+  // Register disconnect cancellation before the provider starts. G2 can abort
+  // its first fetch while Claude/Codex continues running; without this signal
+  // the provider and its maintenance lease can strand a Control restart for
+  // the full model timeout. The lease is released only after the bridge reaches
+  // its terminal callback/catch, never merely because the socket disappeared.
+  const providerAbort = new AbortController()
+  let responseFinished = false
+  let clientDisconnected = false
+  res.once('finish', () => { responseFinished = true })
+  res.once('close', () => {
+    if (responseFinished) return
+    clientDisconnected = true
+    providerAbort.abort(new Error('G2 client disconnected'))
+  })
+
   // ── Streaming response (SSE) ──
   if (stream) {
     res.writeHead(200, {
@@ -326,7 +341,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
     try {
       const returnedSid = await callModelStreaming(query, currentSessionId, {
         onChunk: (text) => {
-          if (!done) {
+          if (!done && !clientDisconnected) {
             if (!firstChunkLogged) {
               firstChunkLogged = true
               actualTtfbMs = Date.now() - requestReceivedAt
@@ -360,16 +375,18 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
               stream_requested: true,
               })
               // Final chunk with finish_reason
-              const finalChunk = {
-              id: completionId,
-              object: 'chat.completion.chunk',
-              created: timestamp,
-              model: responseModel,
-              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              if (!clientDisconnected) {
+                const finalChunk = {
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created: timestamp,
+                  model: responseModel,
+                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                }
+                res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
+                res.write('data: [DONE]\n\n')
+                res.end()
               }
-              res.write(`data: ${JSON.stringify(finalChunk)}\n\n`)
-              res.write('data: [DONE]\n\n')
-              res.end()
             }
           } finally {
             maintenanceLease.release()
@@ -381,29 +398,34 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
               done = true
               rejectInflight!(new Error(error))
               inflightQueries.delete(dedupKey)
-              const errChunk = {
-              id: completionId,
-              object: 'chat.completion.chunk',
-              created: timestamp,
-              model: responseModel,
-              choices: [{ index: 0, delta: { content: `Error: ${error}` }, finish_reason: 'stop' }],
+              if (!clientDisconnected) {
+                const errChunk = {
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created: timestamp,
+                  model: responseModel,
+                  choices: [{ index: 0, delta: { content: `Error: ${error}` }, finish_reason: 'stop' }],
+                }
+                res.write(`data: ${JSON.stringify(errChunk)}\n\n`)
+                res.write('data: [DONE]\n\n')
+                res.end()
               }
-              res.write(`data: ${JSON.stringify(errChunk)}\n\n`)
-              res.write('data: [DONE]\n\n')
-              res.end()
             }
           } finally {
             maintenanceLease.release()
           }
         },
         onToolStatus: (status) => {
-          if (!done) {
+          if (!done && !clientDisconnected) {
             // SSE comment — invisible to JSON parsers but keeps connection alive
             res.write(`: ${status}\n\n`)
           }
         },
         onStart: () => {},
-      }, resolvedModel, undefined, undefined, undefined, { lightweight: true })
+      }, resolvedModel, undefined, undefined, undefined, {
+        lightweight: true,
+        abortSignal: providerAbort.signal,
+      })
       // Persist session ID for multi-turn context on subsequent G2 queries
       g2SessionId = returnedSid
     } catch (err: any) {
@@ -412,13 +434,13 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
         done = true
         rejectInflight!(err)
         inflightQueries.delete(dedupKey)
-        res.write(`data: ${JSON.stringify({ error: { message: err.message } })}\n\n`)
-        res.write('data: [DONE]\n\n')
-        res.end()
+        if (!clientDisconnected) {
+          res.write(`data: ${JSON.stringify({ error: { message: err.message } })}\n\n`)
+          res.write('data: [DONE]\n\n')
+          res.end()
+        }
       }
     }
-
-    req.on('close', () => { done = true })
     return
   }
 
@@ -479,11 +501,15 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
         },
         onToolStatus: () => {},
         onStart: () => {},
-      }, resolvedModel, undefined, undefined, undefined, { lightweight: true })
+      }, resolvedModel, undefined, undefined, undefined, {
+        lightweight: true,
+        abortSignal: providerAbort.signal,
+      })
         .then(sid => { g2SessionId = sid })
         .catch(fail)
     })
 
+    if (clientDisconnected) return
     res.json({
       id: completionId,
       object: 'chat.completion',
@@ -497,6 +523,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     })
   } catch (err: any) {
+    if (clientDisconnected) return
     res.status(500).json({
       error: { message: err.message, type: 'server_error' },
     })

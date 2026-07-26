@@ -69,12 +69,14 @@ import {
 } from './lib/network-policy.js'
 import { requireApiToken } from './lib/api-auth.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
+import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
   acquireMaintenanceWork,
   maintenanceOperationCredentialsValid,
   MaintenanceLifecycleError,
   maintenanceAdmissionsOpen,
   maintenanceErrorPayload,
+  onMaintenanceAdmissionsOpen,
 } from './lib/maintenance-lifecycle.js'
 
 const app = express()
@@ -153,6 +155,7 @@ app.use('/api', (req, res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
   const lifecycleOwned = (req.path === '/query-jobs' && req.method === 'POST')
     || req.path === '/query'
+    || req.path === '/diagnostics/provider-proof'
     || req.path === '/transcribe'
     || req.path.startsWith('/transcribe-stream')
     || req.path === '/meeting/save'
@@ -326,20 +329,8 @@ listenRequiredServers(listeners).then(() => {
   console.log(`[COS API] Server instance: ${serverInstanceId}`)
   console.log(`[COS API] Mode: ${COS_MODE ? 'COS pipeline' : 'standalone'}`)
 
-  if (startupAdmissionsOpen) {
-    void initQueryJobRuntime().then(health => {
-      if (process.env.COS_DURABLE_QUERY_JOBS === '1') {
-        console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
-      } else {
-        console.log('[COS API] Durable query jobs: disabled (set COS_DURABLE_QUERY_JOBS=1 to enable)')
-      }
-    }).catch(error => {
-      // The store remains degraded and rejects admission. Legacy /api/query is
-      // still mounted, so disabling the feature flag is an immediate rollback.
-      console.error('[COS API] Durable query-job store unavailable:', error)
-    })
-  } else {
-    console.log('[COS API] Startup maintenance gate is closed — durable recovery waits for controller adoption')
+  if (!startupAdmissionsOpen) {
+    console.log('[COS API] Startup maintenance gate is closed — durable recovery waits for controller release')
   }
 
   // Print ADDRESSES THE PHONE CAN ACTUALLY REACH. The bind address (0.0.0.0) is
@@ -387,16 +378,20 @@ listenRequiredServers(listeners).then(() => {
   console.log(`[COS API] Codex mode: ${codexConfig.persistenceEnabled ? 'persistent' : 'ephemeral'} · ${codexConfig.reasoningEffort} · ${codexConfig.trustMode}`)
   console.log(`[COS API] Codex models (${codexConfig.catalogSource}): ${codexConfig.availableModels.map(item => `${item.displayName}=${item.model}`).join(' · ')}`)
   console.log(`[COS API] Codex workdir: ${codexConfig.cwd}`)
-  // Refresh immediately and then periodically. The catalog module retains the
-  // last-known-good snapshot if Codex is temporarily unavailable.
-  if (startupAdmissionsOpen) {
-    startCodexModelCatalogRefresh()
+  reportClaudeExtraToolConfiguration()
 
-    if (COS_MODE) {
-      initSessionCache()
-      // Pre-warm context cache so first query doesn't wait for the pipeline
-      prewarmContext()
-    }
+  // These services do not admit or mutate user work. They must start while a
+  // managed successor is still behind the cross-boot gate so COS Control can
+  // prove the candidate before opening admissions. Keeping this idempotent also
+  // prevents a release notification from creating duplicate sidecars.
+  let proofSafeServicesStarted = false
+  const startProofSafeServices = () => {
+    if (proofSafeServicesStarted) return
+    proofSafeServicesStarted = true
+
+    // Refresh immediately and then periodically. The catalog retains the last
+    // known-good snapshot if Codex is temporarily unavailable.
+    startCodexModelCatalogRefresh()
     // Start local whisper-server (model stays in RAM for ~50ms transcription)
     startWhisperServer().catch(err => console.error('[startup] Whisper server error:', err))
     startLocalTtsServer().catch(err => console.error('[startup] Local TTS server error:', err))
@@ -406,6 +401,33 @@ listenRequiredServers(listeners).then(() => {
     // Initialize Silero VAD (silence trimming before Whisper) — fails soft if model absent
     const vadOk = initSileroVAD()
     console.log(`[startup] Silero VAD: ${vadOk ? 'active' : 'disabled (model not found)'}`)
+  }
+
+  // Durable recovery and state-mutating background work remain closed until an
+  // authenticated controller release. The lifecycle callback is delivered for
+  // both an already-open fresh boot and a later cross-boot release.
+  let admittedRuntimeStarted = false
+  const startAdmittedRuntime = () => {
+    if (admittedRuntimeStarted) return
+    admittedRuntimeStarted = true
+
+    void initQueryJobRuntime().then(health => {
+      if (process.env.COS_DURABLE_QUERY_JOBS === '1') {
+        console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
+      } else {
+        console.log('[COS API] Durable query jobs: disabled (set COS_DURABLE_QUERY_JOBS=1 to enable)')
+      }
+    }).catch(error => {
+      // The store remains degraded and rejects admission. Legacy /api/query is
+      // still mounted, so disabling the feature flag is an immediate rollback.
+      console.error('[COS API] Durable query-job store unavailable:', error)
+    })
+
+    if (COS_MODE) {
+      initSessionCache()
+      // Pre-warm context cache so first query doesn't wait for the pipeline
+      prewarmContext()
+    }
 
     // Pre-warm Claude only when installed so Codex-only startup stays quiet.
     if (claudeAvailable) {
@@ -418,6 +440,9 @@ listenRequiredServers(listeners).then(() => {
     // Durable media GC (staged/reserved expiry + generated-image content TTL).
     getMediaStore().startGC()
   }
+
+  startProofSafeServices()
+  onMaintenanceAdmissionsOpen(startAdmittedRuntime)
 }).catch((error: NodeJS.ErrnoException) => {
   console.error(`[COS API] Fatal listener startup: ${error.message}`)
   process.exit(error.code === 'EADDRINUSE' ? 75 : 74)

@@ -180,6 +180,23 @@ healthRouter.get('/health', async (_req, res) => {
   // Whisper-server health + cloud budget — exposed so glasses + dashboards can
   // see whether we're at risk of falling to cloud and how much budget remains.
   const whisper_health = getWhisperHealth()
+  const whisperReadiness = !whisper_health.serverConfigured
+    ? 'not_configured'
+    : whisper_health.server
+      ? 'ready'
+      : whisper_health.startupState === 'preflight' || whisper_health.startupState === 'loading'
+        ? 'starting'
+        : 'degraded'
+  const readiness = {
+    // /api/health remains a liveness endpoint and intentionally returns HTTP
+    // 200 while the server can answer. This separate field prevents an HTTP-
+    // green response from hiding a configured local subsystem failure.
+    status: whisperReadiness === 'degraded' ? 'degraded' : 'ready',
+    admissions: maintenance.admissionsOpen ? 'open' : 'maintenance',
+    whisper: whisperReadiness,
+    whisperError: whisper_health.lastError,
+    localTts: tts_local.ready ? 'ready' : 'unavailable',
+  }
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
   const codex_models = getCodexModelCatalogSnapshot()
   res.json({
@@ -190,6 +207,7 @@ healthRouter.get('/health', async (_req, res) => {
     generation_id: getServerGenerationId(),
     features,
     voice,
+    readiness,
     whisper_health,
     openai_whisper_budget,
     tts_local,

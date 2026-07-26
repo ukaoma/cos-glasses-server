@@ -310,6 +310,7 @@ export class MaintenanceLifecycle {
   private blockedGateReason: BlockedGateReason | null = null
   private blockedGateVersion: number | null = null
   private readonly work = new Map<string, WorkEntry>()
+  private readonly admissionsOpenListeners = new Set<() => void>()
 
   constructor(options: MaintenanceLifecycleOptions = {}) {
     this.path = options.path ?? process.env.COS_MAINTENANCE_GATE_PATH?.trim() ?? DEFAULT_GATE_PATH
@@ -356,9 +357,42 @@ export class MaintenanceLifecycle {
     try {
       removeGate(this.path)
       this.gate = null
+      this.notifyAdmissionsOpen()
     } catch {
       this.blockedGateReason = 'invalid_schema'
     }
+  }
+
+  /**
+   * Register deferred runtime initialization that is safe only after the
+   * durable maintenance gate opens. Delivery is asynchronous so the release
+   * response is never held open by model/cache initialization. The callback is
+   * also delivered for an already-open lifecycle, closing the boot/release
+   * race without forcing index.ts to poll.
+   */
+  onAdmissionsOpen(listener: () => void): () => void {
+    this.expireSameBootGateIfPermitted()
+    this.admissionsOpenListeners.add(listener)
+    if (!this.gate && !this.blockedGateReason) this.deliverAdmissionsOpen(listener)
+    return () => { this.admissionsOpenListeners.delete(listener) }
+  }
+
+  private deliverAdmissionsOpen(listener: () => void): void {
+    queueMicrotask(() => {
+      if (!this.admissionsOpenListeners.has(listener)) return
+      // State may have closed again between scheduling and microtask delivery.
+      // Never start admitted runtime from a stale accepting notification.
+      this.expireSameBootGateIfPermitted()
+      if (this.gate || this.blockedGateReason) return
+      try { listener() } catch (error) {
+        console.error('[maintenance] admissions-open listener failed:', error)
+      }
+    })
+  }
+
+  private notifyAdmissionsOpen(): void {
+    if (this.gate || this.blockedGateReason) return
+    for (const listener of this.admissionsOpenListeners) this.deliverAdmissionsOpen(listener)
   }
 
   private credentialsMatch(credentials: MaintenanceOperationCredentials): {
@@ -615,6 +649,7 @@ export class MaintenanceLifecycle {
       )
     }
     this.gate = null
+    this.notifyAdmissionsOpen()
   }
 
   cancelDrain(identity: MaintenanceOperationIdentity, credentials: MaintenanceOperationCredentials): void {
@@ -641,6 +676,7 @@ export class MaintenanceLifecycle {
       )
     }
     this.gate = null
+    this.notifyAdmissionsOpen()
   }
 
   snapshot(credentials: MaintenanceOperationCredentials = {}, extraActiveByKind: Record<string, number> = {}) {
@@ -739,6 +775,10 @@ export function maintenanceOperationCredentialsValid(
 /** Read-only boot/background-worker admission check. */
 export function maintenanceAdmissionsOpen(): boolean {
   return maintenanceLifecycle.snapshot().admissionsOpen
+}
+
+export function onMaintenanceAdmissionsOpen(listener: () => void): () => void {
+  return maintenanceLifecycle.onAdmissionsOpen(listener)
 }
 
 export function maintenanceErrorPayload(error: MaintenanceLifecycleError) {
