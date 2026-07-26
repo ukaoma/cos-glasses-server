@@ -7,8 +7,9 @@
 // spawns of claude/codex use IT as their working directory — so the CLIs load
 // the user's brain exactly as they would in a terminal session in that folder.
 //
-// Precedence stays: COS_SCRIPTS_DIR (full COS pipeline) > detected brain dir >
-// process.cwd(). Explicit config always wins.
+// Provider precedence is: selected COS_WORKDIR > legacy provider override >
+// COS_SCRIPTS_DIR repository root > process.cwd(). Pipeline data still uses
+// COS_SCRIPTS_DIR independently.
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -32,4 +33,29 @@ export function cosBrainDir(): string | null {
   // as the interactive npx compatibility path.
   cached = resolveCosBrainDir(process.env.COS_WORKDIR ?? process.env.COS_LAUNCH_DIR)
   return cached
+}
+
+/**
+ * Resolve the provider working directory from one authoritative contract.
+ * COS_WORKDIR (via cosBrainDir) is the user-selected agent workspace and must
+ * outrank legacy provider-specific and pipeline locations. COS_SCRIPTS_DIR is
+ * still used by the Python pipeline; it is only a cwd fallback here.
+ */
+export function resolveProviderWorkDir(options: {
+  legacyProviderDir?: string | null
+  scriptsDir?: string | null
+  fallback?: string
+} = {}): string {
+  const brain = cosBrainDir()
+  if (brain) return brain
+  const legacy = options.legacyProviderDir?.trim()
+  if (legacy) return resolve(legacy)
+  const scripts = options.scriptsDir?.trim()
+  if (scripts) return resolve(scripts, '..', '..')
+  return resolve(options.fallback ?? process.cwd())
+}
+
+/** Test-only cache reset for environment-precedence coverage. */
+export function resetCosBrainDirCacheForTests(): void {
+  cached = undefined
 }

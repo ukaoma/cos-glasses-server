@@ -1,3 +1,10 @@
+## 6.15.3
+
+- Make `COS_WORKDIR` the authoritative Claude, Codex, and Cursor workspace.
+  Legacy provider-specific and `COS_SCRIPTS_DIR` paths remain compatibility
+  fallbacks, so pipeline scripts can stay separate from the agent workspace.
+- Add workspace-precedence coverage for migrated LaunchAgent environments.
+
 ## 6.15.2
 
 - Validate the inherited Kokoro Python runtime before skipping bootstrap, so a

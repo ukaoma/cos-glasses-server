@@ -23,7 +23,7 @@ vi.mock('node:child_process', async () => {
 })
 
 vi.mock('./python-bridge.js', () => ({ COS_SCRIPTS_DIR: '/tmp' }))
-vi.mock('./launch-dir.js', () => ({ cosBrainDir: () => '/tmp' }))
+vi.mock('./launch-dir.js', () => ({ resolveProviderWorkDir: () => '/tmp' }))
 vi.mock('./token-audit.js', () => ({ logTokenAudit: vi.fn() }))
 vi.mock('./model-image-input.js', () => ({ cleanupModelImageInputs: vi.fn() }))
 vi.mock('./context-builder.js', () => ({

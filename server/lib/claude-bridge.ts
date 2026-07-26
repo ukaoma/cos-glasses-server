@@ -11,7 +11,7 @@ import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs'
 import { appendFileSync } from 'node:fs'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
-import { cosBrainDir } from './launch-dir.js'
+import { resolveProviderWorkDir } from './launch-dir.js'
 import { logTokenAudit } from './token-audit.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt, buildPrewarmSystemPrompt, getCachedContextInstant } from './context-builder.js'
 import { getHistory, addExchange, setExchangeAttachments, removeExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
@@ -225,7 +225,7 @@ export async function preWarmCLI(): Promise<void> {
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
-      cwd: COS_SCRIPTS_DIR ?? cosBrainDir() ?? process.cwd(),
+      cwd: resolveProviderWorkDir({ scriptsDir: COS_SCRIPTS_DIR }),
     })
 
     let buffer = ''
@@ -528,7 +528,7 @@ export async function callClaudeStreaming(
   const env = { ...process.env }
   delete env.CLAUDECODE
   if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)
-  const cliCwd = COS_SCRIPTS_DIR ?? cosBrainDir() ?? process.cwd()
+  const cliCwd = resolveProviderWorkDir({ scriptsDir: COS_SCRIPTS_DIR })
   const inactivityMs = INACTIVITY_BY_MODEL[resolvedModel]
   const defaultWallMax = WALL_MAX_BY_MODEL[resolvedModel]
   const effortWallMax = resolvedEffort === 'max' || resolvedEffort === 'ultracode'
