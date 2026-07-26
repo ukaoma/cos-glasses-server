@@ -62,6 +62,12 @@ export class NoSpeechDetectedError extends Error {
 // ceiling (anything longer is a dictation, not a query — use meetings instead).
 const HQ_MAX_SECONDS = 60
 
+/** Short interactive clips use light enhance (highpass only). Override via env. */
+function hqEnhanceLightMaxSeconds(): number {
+  const value = Number.parseInt(process.env.COS_HQ_ENHANCE_LIGHT_MAX_SEC || '15', 10)
+  return Number.isFinite(value) && value >= 0 ? value : 15
+}
+
 function unavailableAfterLocalFailure(): TranscriptionUnavailableError | null {
   const fallback = getTranscriptionPolicySnapshot()
   if (fallback.openaiFallbackReady) return null
@@ -158,10 +164,12 @@ export async function transcribeAudioBuffer(
 
   if (effectiveMode === 'hq') {
     try {
-      const enhanced = await enhanceAudio(audioBuffer)
+      const lightMax = hqEnhanceLightMaxSeconds()
+      const enhanceProfile = audioSeconds < lightMax ? 'light' as const : 'full' as const
+      const enhanced = await enhanceAudio(audioBuffer, { profile: enhanceProfile })
       const result = await transcribeHighQuality(enhanced)
       text = result.text
-      backend = 'hq-large-v3'
+      backend = enhanceProfile === 'light' ? 'hq-large-v3-light' : 'hq-large-v3'
       actualQuality = 'hq'
     } catch (hqErr: any) {
       console.warn(`[transcribe] HQ path failed, falling back to fast: ${hqErr.message}`)

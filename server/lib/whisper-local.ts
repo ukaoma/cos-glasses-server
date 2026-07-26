@@ -664,14 +664,22 @@ export async function transcribeHighQuality(
 
     const text = await new Promise<string>((resolve, reject) => {
       const isolateBatchFromLiveMetal = opts.priority === 'batch'
+      // Interactive HQ: narrower beam (default 2) for latency. Meeting batch keeps 5.
+      // Override: COS_HQ_BEAM_INTERACTIVE=N
+      const interactiveBeamRaw = Number.parseInt(process.env.COS_HQ_BEAM_INTERACTIVE || '2', 10)
+      const interactiveBeam = Number.isFinite(interactiveBeamRaw) && interactiveBeamRaw >= 1
+        ? Math.min(interactiveBeamRaw, 5)
+        : 2
+      const beam = isolateBatchFromLiveMetal ? 5 : interactiveBeam
+      const bestOf = beam
       const args = [
         '-m', modelPath,
         '-f', tmpWav,
         '-t', isolateBatchFromLiveMetal ? '8' : '16',
         '-l', 'en',
         ...(isolateBatchFromLiveMetal ? ['-ng'] : ['-fa']),
-        '-bs', '5',           // Beam search width 5 (default disabled)
-        '-bo', '5',           // Best-of-5 candidates (default 2)
+        '-bs', String(beam),
+        '-bo', String(bestOf),
         '--no-timestamps',
         '-np',
         '--prompt', buildPrompt(context),

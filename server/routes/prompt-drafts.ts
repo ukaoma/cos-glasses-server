@@ -52,9 +52,18 @@ export const promptDraftsRouter = Router()
 const MAX_CHUNK_BYTES = 25 * 1024 * 1024
 const MAX_DRAFT_BYTES = 256 * 1024 * 1024
 const MAX_CHUNKS = 600
+/** Purpose-scoped keys (legacy). Prefer modeQualityJobs for HQ warm↔finalize dedupe. */
 const chunkTranscriptJobs = new Map<string, Promise<string>>()
+/** Shared decode per draft/chunk/mode/hash — warm:hq and final:hq await the same promise. */
+const modeQualityJobs = new Map<string, Promise<string>>()
 const finalizeJobs = new Map<string, Promise<any>>()
 let warmTail: Promise<void> = Promise.resolve()
+let hqWarmTail: Promise<void> = Promise.resolve()
+
+/** Speculative HQ warm while speaking. Set COS_HQ_SPECULATIVE_WARM=0 to restore Fast-only warm. */
+function speculativeHqWarmEnabled(): boolean {
+  return !['0', 'false', 'off'].includes((process.env.COS_HQ_SPECULATIVE_WARM ?? '1').toLowerCase())
+}
 
 const autoCleanBreaker = createBreaker({ label: 'dictation-autoclean' })
 const autoCleanCountFile = () => process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE || dataPath('.dictation_autoclean_count.json')
@@ -164,14 +173,49 @@ async function sendDraftError(res: Response, draftId: string, err: any): Promise
   res.status(err.status ?? 500).json({ error: err.message })
 }
 
+function modeQualityKey(draftId: string, chunkIndex: number, mode: 'hq' | 'fast', hash: string): string {
+  return `${draftId}:${chunkIndex}:${mode}:${hash}`
+}
+
 async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffer, mode: 'hq' | 'fast', purpose: 'warm' | 'final'): Promise<string> {
   const hash = audioHash(audio)
-  const key = `${draftId}:${chunkIndex}:${purpose}:${mode}:${hash}`
-  const existing = chunkTranscriptJobs.get(key)
+  const purposeKey = `${draftId}:${chunkIndex}:${purpose}:${mode}:${hash}`
+  const sharedKey = modeQualityKey(draftId, chunkIndex, mode, hash)
+
+  // HQ warm and HQ finalize must share one decode (plan step 8a).
+  const existingShared = modeQualityJobs.get(sharedKey)
+  if (existingShared) {
+    try {
+      const text = await existingShared
+      if (purpose === 'final' && text) {
+        const current = loadPromptDraftMeta(draftId)
+        const warm = current?.warmTranscripts?.[String(chunkIndex)]
+        const cachedFinal = current?.finalTranscripts?.[String(chunkIndex)]
+        if (!cachedFinal || cachedFinal.hash !== hash) {
+          await markPromptDraftChunkTranscript(draftId, chunkIndex, {
+            text,
+            hash,
+            requestedMode: warm?.requestedMode ?? mode,
+            actualQuality: warm?.actualQuality ?? (mode === 'hq' ? 'hq' : 'fast'),
+            backend: warm?.backend ?? 'shared-inflight',
+            degraded: warm?.degraded ?? false,
+          }, 'final')
+        }
+      }
+      return text
+    } catch {
+      // Shared warm failed under local-only; fall through so finalize can retry with automatic.
+    }
+  }
+
+  const existing = chunkTranscriptJobs.get(purposeKey)
   if (existing) return existing
+
   const job = (async () => {
     try {
-      const result = await transcribeAudioBuffer(audio, { mode, policy: purpose === 'warm' ? 'local-only' : 'automatic' })
+      // Speculative warm is always local-only. Finalize may use automatic cloud fallback.
+      const policy = purpose === 'warm' ? 'local-only' as const : 'automatic' as const
+      const result = await transcribeAudioBuffer(audio, { mode, policy })
       if (!isCurrentChunk(draftId, chunkIndex, audio)) return ''
       const text = sanitizeTranscript(draftId, result.text)
       const record: PromptDraftTranscriptRecord = {
@@ -179,7 +223,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
         backend: result.backend, degraded: result.degraded,
       }
       await markPromptDraftChunkTranscript(draftId, chunkIndex, record, purpose)
-      console.log(`[prompt-draft] chunk ${draftId}/${chunkIndex}: ${result.elapsedMs.toFixed(1)}ms | ${result.backend} | ${text.length} chars`)
+      console.log(`[prompt-draft] chunk ${draftId}/${chunkIndex}: ${result.elapsedMs.toFixed(1)}ms | ${result.backend} | ${purpose}/${mode} | ${text.length} chars`)
       return text
     } catch (err) {
       if (err instanceof NoSpeechDetectedError) {
@@ -190,10 +234,12 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
       }
       throw err
     } finally {
-      chunkTranscriptJobs.delete(key)
+      chunkTranscriptJobs.delete(purposeKey)
+      modeQualityJobs.delete(sharedKey)
     }
   })()
-  chunkTranscriptJobs.set(key, job)
+  chunkTranscriptJobs.set(purposeKey, job)
+  modeQualityJobs.set(sharedKey, job)
   return job
 }
 
@@ -203,9 +249,17 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
   const texts: string[] = []
   for (const chunk of readPromptDraftChunks(draftId)) {
     try {
+      const hash = audioHash(chunk.audioBuffer)
+      // Await in-flight HQ warm before deciding cache miss (plan step 8b belt).
+      if (mode === 'hq') {
+        const inflight = modeQualityJobs.get(modeQualityKey(draftId, chunk.chunkIndex, 'hq', hash))
+        if (inflight) {
+          try { await inflight } catch { /* finalize may retry with automatic below */ }
+        }
+      }
       const current = loadPromptDraftMeta(draftId)
       const cached = current?.finalTranscripts?.[String(chunk.chunkIndex)] ?? current?.warmTranscripts?.[String(chunk.chunkIndex)]
-      const reusable = Boolean(cached && cached.hash === audioHash(chunk.audioBuffer) && (mode === 'fast' ? cached.actualQuality === 'fast' : cached.actualQuality === 'hq'))
+      const reusable = Boolean(cached && cached.hash === hash && (mode === 'fast' ? cached.actualQuality === 'fast' : cached.actualQuality === 'hq'))
       const raw = reusable ? cached!.text : await transcribeChunk(draftId, chunk.chunkIndex, chunk.audioBuffer, mode, 'final')
       const text = sanitizeTranscript(draftId, raw, !reusable)
       if (text.trim()) texts.push(text.trim())
@@ -265,10 +319,13 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/chunks', async (req, res) => {
     const nextTotal = Object.values(before.chunkBytes).reduce((sum, bytes) => sum + bytes, 0) - existingBytes + audio.length
     if (nextTotal > MAX_DRAFT_BYTES) return res.status(413).json({ error: 'prompt draft too large' })
     const meta = await savePromptDraftChunk(req.params.draftId, chunkIndex, audio)
+    const requestedMode = routeMode(req)
     const warmLease = acquireMaintenanceWork('prompt_draft_warm', {
       allowDuringDrain: true,
       phase: 'queued',
     })
+    // Fast warm feeds the live HUD. Speculative HQ (when Settings HQ / default)
+    // overwrites warmTranscripts with actualQuality=hq for near-instant finalize.
     warmTail = warmTail.then(async () => {
       warmLease.setPhase('active')
       const text = await transcribeChunk(req.params.draftId, chunkIndex, audio, 'fast', 'warm')
@@ -283,6 +340,21 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/chunks', async (req, res) => {
     }).catch(err => {
       console.warn(`[prompt-draft] warm transcription failed ${req.params.draftId}/${chunkIndex}: ${err.message}`)
     }).finally(() => warmLease.release())
+
+    if (requestedMode === 'hq' && speculativeHqWarmEnabled()) {
+      const hqLease = acquireMaintenanceWork('prompt_draft_warm', {
+        allowDuringDrain: true,
+        phase: 'queued',
+      })
+      hqWarmTail = hqWarmTail.then(async () => {
+        hqLease.setPhase('active')
+        // Cache only — never emitDisplay HQ (avoids HUD flicker). local-only via purpose=warm.
+        await transcribeChunk(req.params.draftId, chunkIndex, audio, 'hq', 'warm')
+      }).catch(err => {
+        console.warn(`[prompt-draft] speculative HQ warm failed ${req.params.draftId}/${chunkIndex}: ${err.message}`)
+      }).finally(() => hqLease.release())
+    }
+
     res.json({ draftId: meta.draftId, chunkIndex, acked: true, receivedChunkIndexes: meta.receivedChunkIndexes, chunkBytes: meta.chunkBytes[String(chunkIndex)] ?? audio.length, transcriptPending: true, expiresAt: meta.expiresAt })
   } catch (err: any) {
     if (err instanceof MaintenanceLifecycleError) {

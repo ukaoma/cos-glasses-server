@@ -1,3 +1,18 @@
+## 6.15.5
+
+- **Speculative HQ warm (no EHPK).** While a prompt-draft chunk is acknowledged,
+  Fast warm still paints the HUD and, when Settings HQ is active (default), a
+  background large-v3 warm overwrites `warmTranscripts` with `actualQuality=hq`
+  under `local-only` (never OpenAI mid-speak). Finalize reuses that cache so
+  Render is dominated by the last unfinished chunk, not a cold full re-decode.
+  Killswitch: `COS_HQ_SPECULATIVE_WARM=0`.
+- **Finalize dedupe.** In-flight HQ warm and finalize share one decode via a
+  purpose-agnostic job key so Render cannot start a second large-v3 while warm
+  is still running.
+- **Interactive HQ latency knobs.** Interactive beam defaults to 2 (meetings
+  keep beam 5); short clips (&lt;15s) use light ffmpeg enhance (highpass only).
+  Env: `COS_HQ_BEAM_INTERACTIVE`, `COS_HQ_ENHANCE_LIGHT_MAX_SEC`.
+
 ## 6.15.4
 
 - Start Whisper, Kokoro, model discovery, and local audio prerequisites while

@@ -76,6 +76,7 @@ describe('public prompt draft recovery contract', () => {
     draftDir = mkdtempSync(join(tmpdir(), 'cos-public-prompt-drafts-'))
     process.env.COS_PROMPT_DRAFT_DIR = draftDir
     process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE = join(draftDir, 'autoclean-count.json')
+    delete process.env.COS_HQ_SPECULATIVE_WARM
     await startServer()
   })
 
@@ -89,13 +90,23 @@ describe('public prompt draft recovery contract', () => {
     vi.doUnmock('../lib/display-bus.js')
     delete process.env.COS_PROMPT_DRAFT_DIR
     delete process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE
+    delete process.env.COS_HQ_SPECULATIVE_WARM
     if (draftDir) rmSync(draftDir, { recursive: true, force: true })
   })
 
-  it('acknowledges durable audio, warms locally, and finalizes independently', async () => {
-    transcribeAudioBuffer
-      .mockResolvedValueOnce({ text: 'warm text', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200 })
-      .mockResolvedValueOnce({ text: 'final recovered text', backend: 'hq-local-test', mode: 'hq', requestedMode: 'hq', actualQuality: 'hq', degraded: false, elapsedMs: 80, audioBytes: 3200 })
+  it('acknowledges durable audio, speculative HQ-warms, and finalizes from HQ cache', async () => {
+    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string; policy?: string }) => {
+      if (opts?.mode === 'hq') {
+        return {
+          text: 'hq polished text', backend: 'hq-large-v3', mode: 'hq', requestedMode: 'hq',
+          actualQuality: 'hq', degraded: false, elapsedMs: 80, audioBytes: 3200,
+        }
+      }
+      return {
+        text: 'warm text', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
+        actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+      }
+    })
 
     const started = await httpRequest('POST', '/api/prompt-drafts/start')
     const uploaded = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
@@ -105,12 +116,74 @@ describe('public prompt draft recovery contract', () => {
       type: 'prompt_transcript',
       data: { draftId: started.json.draftId, chunkIndex: 0, text: 'warm text' },
     }))
+    await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'hq', policy: 'local-only' },
+    ))
 
+    const beforeFinalize = transcribeAudioBuffer.mock.calls.length
     const finalized = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize`)
     expect(finalized.status).toBe(200)
-    expect(finalized.json).toMatchObject({ text: 'final recovered text', recovered: true, chunkCount: 1, missingChunks: [] })
+    expect(finalized.json).toMatchObject({ text: 'hq polished text', recovered: true, chunkCount: 1, missingChunks: [] })
+    // Finalize reused HQ warm cache — no extra automatic decode.
+    expect(transcribeAudioBuffer.mock.calls.length).toBe(beforeFinalize)
     expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), { mode: 'fast', policy: 'local-only' })
-    expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'automatic' })
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'automatic' })
+    // HQ text never painted to HUD
+    expect(emitDisplay).not.toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId: started.json.draftId, chunkIndex: 0, text: 'hq polished text' },
+    })
+  })
+
+  it('does not speculative-HQ-warm when mode=fast', async () => {
+    transcribeAudioBuffer.mockResolvedValue({
+      text: 'fast only', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
+      actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+    })
+
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+    await new Promise(r => setTimeout(r, 50))
+    expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), { mode: 'fast', policy: 'local-only' })
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'local-only' })
+  })
+
+  it('awaits in-flight HQ warm on finalize instead of double-decoding', async () => {
+    let resolveHq!: (value: any) => void
+    const hqPromise = new Promise(resolve => { resolveHq = resolve })
+    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string }) => {
+      if (opts?.mode === 'hq') return hqPromise
+      return {
+        text: 'warm text', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
+        actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+      }
+    })
+
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+    await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'hq', policy: 'local-only' },
+    ))
+
+    const finalizePromise = httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
+    // Let finalize reach the in-flight await
+    await new Promise(r => setTimeout(r, 30))
+    const callsWhileWaiting = transcribeAudioBuffer.mock.calls.length
+    resolveHq({
+      text: 'hq from warm', backend: 'hq-large-v3', mode: 'hq', requestedMode: 'hq',
+      actualQuality: 'hq', degraded: false, elapsedMs: 90, audioBytes: 3200,
+    })
+    const finalized = await finalizePromise
+    expect(finalized.status).toBe(200)
+    expect(finalized.json.text).toBe('hq from warm')
+    // No second HQ decode with automatic while warm was in flight
+    expect(transcribeAudioBuffer.mock.calls.length).toBe(callsWhileWaiting)
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'automatic' })
   })
 
   it('keeps acknowledged audio retryable when every transcription backend is unavailable', async () => {
@@ -130,6 +203,12 @@ describe('public prompt draft recovery contract', () => {
   })
 
   it('never publishes stale warm text after a chunk index is replaced', async () => {
+    // Isolate Fast-warm race without speculative HQ competing for mock order.
+    await new Promise<void>(resolve => server ? server.close(() => resolve()) : resolve())
+    server = null
+    process.env.COS_HQ_SPECULATIVE_WARM = '0'
+    await startServer()
+
     let resolveFirst!: (value: any) => void
     transcribeAudioBuffer
       .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve }))

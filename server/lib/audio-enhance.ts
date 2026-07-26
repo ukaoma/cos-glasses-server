@@ -2,10 +2,9 @@
 // Extracted so both batch (post-meeting) and one-shot (message query HQ) paths
 // can use the same filter chain.
 //
-// Filter chain:
-//   highpass=f=80  — kills low-freq rumble (HVAC, body noise, table thumps)
-//   afftdn=nt=w    — FFT-based denoiser (white noise, fan hum)
-//   loudnorm       — EBU R128 loudness normalization (fixes quiet speakers)
+// Filter chains:
+//   light — highpass=f=80 only (short interactive clips; lower latency)
+//   full  — highpass + afftdn + loudnorm (meetings / longer outdoor audio)
 //
 // Graceful: returns the original buffer if ffmpeg is missing, fails, or times out.
 // Callers should never crash a user request because enhancement couldn't run.
@@ -16,7 +15,10 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 const FFMPEG_TIMEOUT_MS = 30_000
-const FILTER_CHAIN = 'highpass=f=80,afftdn=nt=w,loudnorm=I=-16:LRA=11:TP=-1.5'
+const FILTER_FULL = 'highpass=f=80,afftdn=nt=w,loudnorm=I=-16:LRA=11:TP=-1.5'
+const FILTER_LIGHT = 'highpass=f=80'
+
+export type EnhanceProfile = 'light' | 'full'
 
 /**
  * Enhance raw audio (WAV/webm/etc) and return a 16kHz mono WAV buffer suitable
@@ -25,7 +27,12 @@ const FILTER_CHAIN = 'highpass=f=80,afftdn=nt=w,loudnorm=I=-16:LRA=11:TP=-1.5'
  *
  * Returns the ORIGINAL buffer unchanged on any failure. Logs the reason.
  */
-export async function enhanceAudio(audioBuffer: Buffer): Promise<Buffer> {
+export async function enhanceAudio(
+  audioBuffer: Buffer,
+  opts: { profile?: EnhanceProfile } = {},
+): Promise<Buffer> {
+  const profile: EnhanceProfile = opts.profile === 'light' ? 'light' : 'full'
+  const filterChain = profile === 'light' ? FILTER_LIGHT : FILTER_FULL
   const id = randomUUID().slice(0, 8)
   const inputPath = join('/tmp', `cos-enhance-in-${id}`)
   const outputPath = join('/tmp', `cos-enhance-out-${id}.wav`)
@@ -36,7 +43,7 @@ export async function enhanceAudio(audioBuffer: Buffer): Promise<Buffer> {
     const enhanced = await new Promise<Buffer>((resolve, reject) => {
       const proc = spawn('ffmpeg', [
         '-i', inputPath,
-        '-af', FILTER_CHAIN,
+        '-af', filterChain,
         '-ar', '16000',
         '-ac', '1',
         '-f', 'wav',
@@ -78,7 +85,7 @@ export async function enhanceAudio(audioBuffer: Buffer): Promise<Buffer> {
     return enhanced
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.warn(`[audio-enhance] ffmpeg failed, returning original buffer: ${msg}`)
+    console.warn(`[audio-enhance] ffmpeg failed (${profile}), returning original buffer: ${msg}`)
     return audioBuffer
   } finally {
     try { unlinkSync(inputPath) } catch { /* ignore */ }
