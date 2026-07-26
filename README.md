@@ -125,6 +125,10 @@ optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 `COS_TTS_KOKORO_VOICE` (local voice id),
 `COS_TTS_LOCAL_DISABLE=1` (disable the sidecar), and
 `COS_TTS_PRONUNCIATIONS_JSON` (optional local/cloud pronunciation overrides),
+`COS_EXTRA_TOOLS` (comma-separated `mcp__server__tool` or
+`mcp__server__*` selectors shared by full and lightweight Claude paths),
+`COS_CLAUDE_MCP_CONFIG` (optional absolute config path when `.mcp.json` is not
+in the managed CLI working directory),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in

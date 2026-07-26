@@ -20,7 +20,10 @@ describe('maintenance admission wiring', () => {
   })
 
   it('fails closed for secondary mutations and exposes no Whisper restart route', () => {
-    expect(source('server/index.ts')).toContain("acquireMaintenanceWork('api_mutation')")
+    expect(source('server/index.ts')).toContain("acquireMaintenanceWork('api_mutation', {")
+    expect(source('server/index.ts')).toContain("req.path === '/diagnostics/provider-proof'")
+    expect(source('server/index.ts')).toContain("req.path === '/tts/prepare'")
+    expect(source('server/index.ts')).toContain('maintenanceOperationCredentialsValid')
     expect(source('server/routes/maintenance.ts')).not.toContain("maintenance/whisper/restart")
     expect(source('server/routes/maintenance.ts')).not.toContain('restartWhisperServer')
   })

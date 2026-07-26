@@ -436,6 +436,16 @@ export class MaintenanceLifecycle {
     }
   }
 
+  /** Verify only the controller-held operation secret. This does not adopt or
+   * release a gate; it lets the loopback controller run bounded post-boot
+   * proofs while normal admissions remain closed. */
+  credentialsValid(credentials: MaintenanceOperationCredentials): boolean {
+    this.expireSameBootGateIfPermitted()
+    if (!this.gate || this.blockedGateReason) return false
+    const proof = this.credentialsMatch(credentials)
+    return proof.leaseMatches && proof.operationMatches && proof.nonceMatches
+  }
+
   beginDrain(request: MaintenanceDrainRequest): string {
     this.expireSameBootGateIfPermitted()
     if (!this.managed()) {
@@ -718,6 +728,12 @@ export function acquireMaintenanceWork(
   options?: { allowDuringDrain?: boolean; phase?: MaintenanceWorkPhase },
 ): MaintenanceWorkLease {
   return maintenanceLifecycle.acquire(kind, options)
+}
+
+export function maintenanceOperationCredentialsValid(
+  credentials: MaintenanceOperationCredentials,
+): boolean {
+  return maintenanceLifecycle.credentialsValid(credentials)
 }
 
 /** Read-only boot/background-worker admission check. */

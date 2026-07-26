@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { refreshLocalTtsHealth, synthesizeLocalTts } from './tts-local.js'
 
 describe('local TTS cancellation safety', () => {
@@ -55,5 +56,13 @@ describe('local TTS sidecar identity', () => {
     await refreshLocalTtsHealth()
 
     expect(healthFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates an inherited venv and schedules bounded startup recovery', () => {
+    const source = readFileSync(new URL('./tts-local.ts', import.meta.url), 'utf8')
+    expect(source).toContain('assert (sys.version_info.major, sys.version_info.minor) in ((3, 11), (3, 12))')
+    expect(source).toContain('import fastapi, mlx_audio, misaki, numpy, soundfile, uvicorn')
+    expect(source).toContain('scheduleLocalTtsRetry()')
+    expect(source).toContain('Math.min(300_000')
   })
 })

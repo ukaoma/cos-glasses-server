@@ -15,6 +15,7 @@ import { randomBytes } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { diagRouter } from './routes/diag.js'
 import { queryRouter } from './routes/query.js'
+import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
@@ -70,6 +71,7 @@ import { requireApiToken } from './lib/api-auth.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import {
   acquireMaintenanceWork,
+  maintenanceOperationCredentialsValid,
   MaintenanceLifecycleError,
   maintenanceAdmissionsOpen,
   maintenanceErrorPayload,
@@ -158,8 +160,29 @@ app.use('/api', (req, res, next) => {
     || req.path.startsWith('/maintenance/drain')
   if (lifecycleOwned) return next()
 
+  // COS Control must prove the candidate while a committed cross-boot gate is
+  // still closed. Permit only its two bounded loopback proofs, and only with
+  // the controller-held operation receipt. Normal phone/LAN admissions stay
+  // closed throughout the update.
+  const address = req.socket.remoteAddress ?? ''
+  const loopback = address === '::1' || address === '127.0.0.1'
+    || address.startsWith('127.') || address.startsWith('::ffff:127.')
+  const controllerProofPath = req.path === '/diagnostics/provider-proof'
+    || req.path === '/tts/prepare'
+  const controllerProof = loopback && controllerProofPath
+    && maintenanceOperationCredentialsValid({
+      leaseId: typeof req.headers['x-cos-maintenance-lease'] === 'string'
+        ? req.headers['x-cos-maintenance-lease'] : undefined,
+      operationId: typeof req.headers['x-cos-maintenance-operation'] === 'string'
+        ? req.headers['x-cos-maintenance-operation'] : undefined,
+      nonce: typeof req.headers['x-cos-maintenance-nonce'] === 'string'
+        ? req.headers['x-cos-maintenance-nonce'] : undefined,
+    })
+
   try {
-    const lease = acquireMaintenanceWork('api_mutation')
+    const lease = acquireMaintenanceWork('api_mutation', {
+      allowDuringDrain: controllerProof,
+    })
     let released = false
     const release = () => {
       if (released) return
@@ -196,6 +219,7 @@ app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
 app.use('/api', queryRouter)
+app.use('/api', providerProofRouter)
 app.use('/api', transcribeRouter)
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)

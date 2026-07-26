@@ -47,6 +47,11 @@ import {
   MAX_ATTACHMENTS_PER_PROMPT,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
+import {
+  buildClaudeToolList,
+  claudeMcpConfigArgs,
+  claudeToolCapabilityPrompt,
+} from './claude-tool-access.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
 
@@ -430,6 +435,18 @@ export async function callClaudeStreaming(
     outputImagePublisher?.cleanup()
     throw err
   }
+  const allowedToolList = buildClaudeToolList({
+    includeRead: imagePaths.length > 0,
+    publisherTool: outputImagePublisher?.claudeAllowedTool,
+  })
+  let mcpConfigArgs: string[]
+  try {
+    mcpConfigArgs = claudeMcpConfigArgs()
+  } catch (err) {
+    outputImagePublisher?.cleanup()
+    throw err
+  }
+  systemPrompt = `${systemPrompt}\n\n${claudeToolCapabilityPrompt(allowedToolList)}`
   if (outputImagePublisher) systemPrompt = `${systemPrompt}\n\n${outputImagePublisher.promptInstructions}`
 
   // Phase: thinking (waiting for Claude to start)
@@ -456,10 +473,7 @@ export async function callClaudeStreaming(
   )
 
   // Vision queries need the Read tool to see the image files
-  const baseTools = imagePaths.length > 0 ? 'WebSearch,WebFetch,Read' : 'WebSearch,WebFetch'
-  const tools = outputImagePublisher
-    ? `${baseTools},${outputImagePublisher.claudeAllowedTool}`
-    : baseTools
+  const tools = allowedToolList.join(',')
 
   // Prepend image instruction when photos are attached
   let fullQuery: string
@@ -495,16 +509,12 @@ export async function callClaudeStreaming(
     '--output-format', 'stream-json',
     '--verbose',  // Required: stream-json requires --verbose
     '--system-prompt', systemPrompt,
+    ...mcpConfigArgs,
   ]
 
-  // Full COS path gets tools + partial messages; lightweight gets web search only
+  // Full and lightweight paths share the same explicit MCP selector contract.
   if (options?.lightweight) {
-    if (imagePaths.length > 0) {
-      args.push(...claudePermissionArgs(getClaudeTrustMode(), tools))
-    } else {
-      // Lightweight: web search for general questions, no Bash/Read/Write (saves 5-10s)
-      args.push(...claudePermissionArgs(getClaudeTrustMode(), 'WebSearch,WebFetch'))
-    }
+    args.push(...claudePermissionArgs(getClaudeTrustMode(), tools))
   } else {
     args.push(...claudePermissionArgs(getClaudeTrustMode(), tools), '--include-partial-messages')
   }

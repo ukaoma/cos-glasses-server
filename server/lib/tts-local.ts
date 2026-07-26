@@ -35,6 +35,9 @@ let localVoice: string | null = null
 let lastFallbackToOpenAI: { at: string; reason: string } | null = null
 let lastHealthProbeAt = 0
 let healthProbeInFlight: Promise<boolean> | null = null
+let retryTimer: ReturnType<typeof setTimeout> | null = null
+let retryAttempt = 0
+let stopRequested = false
 
 const HEALTH_REFRESH_INTERVAL_MS = 2_000
 const HEALTH_REFRESH_TIMEOUT_MS = 400
@@ -84,13 +87,54 @@ function candidatePythons(): string[] {
   return out.filter((p) => p && existsSync(p))
 }
 
-function resolvePython(): string | null {
-  const hits = candidatePythons()
-  return hits[0] ?? null
+/** A path existing is not enough. Upgrades may inherit a Python 3.13 venv or
+ * a partial environment whose imports fail. Probe the exact sidecar runtime
+ * before bypassing bootstrap. */
+async function ttsPythonReady(path: string): Promise<boolean> {
+  const probe = [
+    'import sys',
+    'assert (sys.version_info.major, sys.version_info.minor) in ((3, 11), (3, 12))',
+    'import fastapi, mlx_audio, misaki, numpy, soundfile, uvicorn',
+  ].join('; ')
+  return await new Promise<boolean>((resolvePromise) => {
+    let settled = false
+    const child = spawn(path, ['-c', probe], {
+      stdio: 'ignore',
+      detached: false,
+      env: process.env,
+    })
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill('SIGKILL') } catch { /* already exited */ }
+      resolvePromise(false)
+    }, 15_000)
+    timer.unref?.()
+    child.once('error', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolvePromise(false)
+    })
+    child.once('exit', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolvePromise(code === 0)
+    })
+  })
+}
+
+async function resolveReadyPython(): Promise<string | null> {
+  for (const path of candidatePythons()) {
+    if (await ttsPythonReady(path)) return path
+    console.warn(`[tts-local] existing Python runtime is incompatible or incomplete: ${path}`)
+  }
+  return null
 }
 
 async function ensureBootstrap(): Promise<string | null> {
-  let py = resolvePython()
+  let py = await resolveReadyPython()
   if (py) return py
   if (!existsSync(BOOTSTRAP)) {
     lastError = `TTS bootstrap missing at ${BOOTSTRAP}`
@@ -119,9 +163,34 @@ async function ensureBootstrap(): Promise<string | null> {
     console.error('[tts-local]', lastError)
     return null
   }
-  py = resolvePython()
-  if (!py) lastError = 'TTS bootstrap finished but python still missing'
+  py = await resolveReadyPython()
+  if (!py) lastError = 'TTS bootstrap finished but its Python runtime is incompatible or incomplete'
   return py
+}
+
+function clearRetryTimer(): void {
+  if (!retryTimer) return
+  clearTimeout(retryTimer)
+  retryTimer = null
+}
+
+function scheduleLocalTtsRetry(): void {
+  if (stopRequested || retryTimer || serverStarting || serverAvailable) return
+  // Retry forever but cap the quiet background cadence at five minutes. This
+  // recovers interrupted first-run model downloads and dependencies installed
+  // after boot without hot-looping a permanently unsupported setup.
+  const delayMs = Math.min(300_000, 10_000 * (2 ** Math.min(retryAttempt, 5)))
+  retryAttempt += 1
+  console.warn(`[tts-local] retrying Kokoro startup in ${Math.round(delayMs / 1000)}s`)
+  retryTimer = setTimeout(() => {
+    retryTimer = null
+    void startLocalTtsServer().catch((err) => {
+      lastError = err instanceof Error ? err.message : String(err)
+      console.error('[tts-local] retry failed:', lastError)
+      scheduleLocalTtsRetry()
+    })
+  }, delayMs)
+  retryTimer.unref?.()
 }
 
 async function probeHealth(timeoutMs = 1500): Promise<boolean> {
@@ -227,6 +296,8 @@ export async function startLocalTtsServer(): Promise<void> {
     console.warn('[tts-local]', lastError)
     return
   }
+  stopRequested = false
+  clearRetryTimer()
   serverStarting = true
   try {
     if (await probeHealth(1500)) {
@@ -268,19 +339,24 @@ export async function startLocalTtsServer(): Promise<void> {
       },
     )
     serverProcess = child
+    let childExited = false
     child.on('exit', (code, signal) => {
+      childExited = true
       if (serverProcess === child) {
         serverProcess = null
         serverAvailable = false
         lastError = `sidecar exited code=${code} signal=${signal}`
         console.warn('[tts-local]', lastError)
+        scheduleLocalTtsRetry()
       }
     })
 
     const maxWaitMs = 120_000
     const started = Date.now()
-    while (Date.now() - started < maxWaitMs) {
+    while (Date.now() - started < maxWaitMs && !childExited) {
       if (await probeHealth(1500)) {
+        retryAttempt = 0
+        clearRetryTimer()
         console.log(
           `[tts-local] ready on ${TTS_PORT} engine=${engineVersion} voice=${localVoice} ` +
             `(${((Date.now() - started) / 1000).toFixed(1)}s)`,
@@ -289,17 +365,22 @@ export async function startLocalTtsServer(): Promise<void> {
       }
       await new Promise((r) => setTimeout(r, 1500))
     }
-    lastError = `sidecar startup timeout (${maxWaitMs / 1000}s)`
+    lastError = childExited
+      ? lastError || 'sidecar exited before becoming ready'
+      : `sidecar startup timeout (${maxWaitMs / 1000}s)`
     console.error('[tts-local]', lastError)
     try { child.kill('SIGKILL') } catch { /* ignore */ }
     serverProcess = null
     serverAvailable = false
   } finally {
     serverStarting = false
+    if (!serverAvailable) scheduleLocalTtsRetry()
   }
 }
 
 export function stopLocalTtsServer(): void {
+  stopRequested = true
+  clearRetryTimer()
   if (!serverProcess) return
   try {
     serverProcess.kill('SIGTERM')

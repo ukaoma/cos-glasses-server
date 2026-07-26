@@ -77,6 +77,9 @@ describe('maintenance lifecycle rev4 committed operations', () => {
       expiresAt: null,
     })
     expect(() => lifecycle.acquire('legacy_query')).toThrowError(MaintenanceLifecycleError)
+    expect(lifecycle.credentialsValid(credentials(leaseId))).toBe(true)
+    expect(lifecycle.credentialsValid(credentials(leaseId, 'wrong-operation'))).toBe(false)
+    expect(lifecycle.credentialsValid(credentials('wrong-lease'))).toBe(false)
     expect(lifecycle.snapshot(credentials(leaseId))).toMatchObject({
       state: 'draining', activeTotal: 1, queuedTransitions: 1, safeToRestart: false,
       restartProof: {
@@ -141,6 +144,7 @@ describe('maintenance lifecycle rev4 committed operations', () => {
       credentials(leaseId, 'operation-1', 'wrong_nonce_that_is_long_enough_1234567890'),
     )).toThrowError(/credentials/i)
     candidate.releaseDrain(candidateIdentity, credentials(leaseId))
+    expect(candidate.credentialsValid(credentials(leaseId))).toBe(false)
     expect(candidate.snapshot()).toMatchObject({ state: 'accepting', admissionsOpen: true })
   })
 

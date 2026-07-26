@@ -1,3 +1,16 @@
+## 6.15.2
+
+- Validate the inherited Kokoro Python runtime before skipping bootstrap, so a
+  stale Python 3.13 or partial venv is repaired during a normal managed update.
+- Retry failed Kokoro cold starts with bounded exponential backoff instead of
+  latching local speech unavailable until the whole server restarts.
+- Add explicit MCP selector/config support to both Claude query paths and tell
+  the model the exact permission selectors without fabricating connector
+  health, authentication, or handshake machinery.
+- Add an authenticated, boot-cached transactional provider proof for COS
+  Control. It performs a real no-tool model turn and exposes no provider output
+  or credentials.
+
 ## 6.15.1
 
 - Fix prepared TTS playback for native audio clients by allowing only
