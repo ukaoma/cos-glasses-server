@@ -495,9 +495,10 @@ function sweepStaleByAge(): void {
   }
 }
 
-/** Allocate a new session UUID pointing at a (hash, text, voice, format)
- *  bundle. The play route consumes the session; expired sessions are reaped
- *  by the periodic sweeper below. */
+/** Allocate a new random v4 session UUID pointing at one
+ *  (hash, text, voice, format) bundle. The play route may reread it for native
+ *  Range refills during the 60-second TTL; expired sessions are rejected and
+ *  reaped by the periodic sweeper below. */
 export function createSession(s: Omit<SessionEntry, 'expiresAt'>): string {
   const uuid = randomUUID()
   sessions.set(uuid, { ...s, expiresAt: Date.now() + SESSION_TTL_MS })

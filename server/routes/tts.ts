@@ -810,12 +810,14 @@ ttsRouter.post('/tts/stream', async (req, res) => {
 //   1. Client POSTs {text, voice, format} here. We strip+trim+budget-check,
 //      hash the (text, voice, format) tuple, and return a session URL.
 //   2. Client sets audio.src = `${apiBase}${sessionUrl}` and calls .play().
-//   3. The browser GETs /api/tts/play/:session, which consumes the session
-//      and either serves cached bytes (instant) or kicks off OpenAI fresh.
+//   3. The browser GETs /api/tts/play/:session using the session as a bearer
+//      capability. Range refills may reuse it during its 60-second lifetime;
+//      the route serves cached bytes or starts live generation on a cold miss.
 //
 // The two-step pattern is required because authentication on the play route
 // would force XHR (no Range support, no progressive decoding). The session
-// UUID IS the auth — short-lived (60s) and one-shot.
+// UUID IS the auth — cryptographically random, short-lived (60s), and scoped
+// to one prepared audio item. It is re-readable only for native Range refills.
 ttsRouter.post('/tts/prepare', async (req, res) => {
   try {
     const { text, format, instructions, fast } = req.body ?? {}

@@ -1,5 +1,9 @@
 ## 6.15.1
 
+- Fix prepared TTS playback for native audio clients by allowing only
+  `GET`/`HEAD /api/tts/play/<UUID>` through the global API-token boundary. The
+  authenticated prepare route mints a random, audio-scoped capability that
+  expires after 60 seconds; all other TTS routes remain token-protected.
 - Fix Kokoro first-run provisioning by selecting only Python 3.11 or 3.12,
   the actual compatibility intersection of the pinned `numpy` and `misaki`
   dependencies. Python 3.13 is no longer advertised or selected.

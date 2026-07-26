@@ -66,7 +66,7 @@ import {
   isAllowedNetworkOrigin,
   isTailscaleIpv4,
 } from './lib/network-policy.js'
-import { timingSafeTokenEqual } from './lib/token-auth.js'
+import { requireApiToken } from './lib/api-auth.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import {
   acquireMaintenanceWork,
@@ -135,24 +135,12 @@ app.use(cors({
     cb(new Error('CORS blocked'))
   },
 }))
-// Auth middleware — always active (token is auto-generated if not set)
-app.use('/api', (req, res, next) => {
-  // Allow health checks, display stream, and client diagnostics without auth.
-  // Diagnostics are whitelisted because the client needs to report crashes
-  // that may happen before the wizard has supplied an API token, and
-  // enforcing auth on a debug telemetry endpoint adds risk during the exact
-  // boot window we're trying to observe.
-  if (
-    req.path === '/health' ||
-    req.path === '/display-stream' ||
-    req.path === '/diag/client' ||
-    req.path === '/diag/health'
-  ) return next()
-  if (!timingSafeTokenEqual(req.headers['x-cos-token'], API_TOKEN)) {
-    return res.status(401).json({ error: 'unauthorized' })
-  }
-  next()
-})
+// Auth middleware — always active (token is auto-generated if not set).
+// Mounted before body parsers so rejected uploads cannot consume parse memory.
+// The only capability-URL exception is a canonical /tts/play/<UUID> GET/HEAD;
+// authenticated /tts/prepare mints it for native audio players that cannot set
+// X-Cos-Token headers.
+app.use('/api', requireApiToken(API_TOKEN))
 
 // Fail-closed catch-all for mutation routes that do not own a more specific
 // lifecycle lease below. This closes the admission/drain race for secondary
