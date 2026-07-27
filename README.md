@@ -163,6 +163,33 @@ Telegram activity export is disabled by default even when a private COS
 pipeline contains `.telegram_config.json`; enable it only with the explicit
 `COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
 
+## Speaker diarization (opt-in)
+
+Out of the box, transcripts label the wearer and everyone else — `Me` and
+`Ext`. Named per-speaker diarization needs a ~26 MB voiceprint model that is
+deliberately **not** shipped in the npm package, so it is a bolt-on:
+
+```bash
+mkdir -p ~/.cos-glasses/models
+# put 3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx there, then restart
+```
+
+The server searches, in order: `COS_SPEAKER_MODEL_PATH` (explicit full path to
+the `.onnx`), `~/.cos-glasses/models/`, then a bundled `server/models/` copy
+(source checkouts only). **Use the data home, not the installed package** —
+anything inside the package is destroyed by the next update, while
+`~/.cos-glasses/` survives.
+
+Verify with `/api/health`: `speaker_id` reads `active` once the model loads and
+`unavailable` while it is missing, so the amplitude fallback can never be
+mistaken for working diarization. The model is read once at startup — restart
+the server after adding it.
+
+The wearer's label comes from `owner_speaker_label` in
+`~/.cos-glasses/.cos-profile.json` (default `Me`); set it to match the profile
+name you enrol under. Train voices via `/api/voice/enroll?name=…`; profiles
+persist in `~/.cos-glasses/data/voice-profiles.json`.
+
 ## HQ dictation
 
 Prompt dictation defaults to HQ. The phone owns the preference: **Fast mode

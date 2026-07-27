@@ -17,9 +17,50 @@ const require = createRequire(import.meta.url)
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
-const MODEL_PATH = resolve(__dirname, '..', 'models',
-  '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx')
 import { DATA_DIR } from './data-dir.js'
+
+export const SPEAKER_MODEL_FILENAME = '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx'
+
+/** Where the voiceprint model may live, in priority order:
+ *
+ *  1. COS_SPEAKER_MODEL_PATH — explicit override (full path to the .onnx).
+ *  2. <data home>/models/    — the bolt-on location. The model is ~26 MB and is
+ *     deliberately NOT in the npm tarball, so a managed install has no bundled
+ *     copy. The data home survives generation swaps; anything inside the
+ *     installed package does not, and a model dropped there is destroyed by the
+ *     next update.
+ *  3. server/models/         — bundled, which only exists in a source checkout.
+ *
+ *  Diarization is opt-in by design: with no model the system stays on amplitude
+ *  fallback (wearer vs Ext) rather than failing. speakerModelState() exists so
+ *  that choice is VISIBLE in /api/health instead of silently degrading.
+ */
+export function speakerModelCandidates(): string[] {
+  const override = process.env.COS_SPEAKER_MODEL_PATH?.trim()
+  return [
+    ...(override ? [resolve(override)] : []),
+    resolve(DATA_DIR, '..', 'models', SPEAKER_MODEL_FILENAME),
+    resolve(__dirname, '..', 'models', SPEAKER_MODEL_FILENAME),
+  ]
+}
+
+function resolveSpeakerModelPath(): string | null {
+  return speakerModelCandidates().find(existsSync) ?? null
+}
+
+/** Reported on /api/health so a missing model is never mistaken for working. */
+export function speakerModelState(): {
+  state: 'active' | 'unavailable'
+  path: string | null
+  searched: string[]
+} {
+  const path = resolveSpeakerModelPath()
+  return {
+    state: path && extractor ? 'active' : 'unavailable',
+    path,
+    searched: speakerModelCandidates(),
+  }
+}
 const PROFILES_PATH = resolve(DATA_DIR, 'voice-profiles.json')
 const CALIBRATION_LOG = resolve(DATA_DIR, 'speaker-calibration.jsonl')
 
@@ -64,8 +105,13 @@ export function initSpeakerEmbeddings(): boolean {
 
   initialized = true
 
-  if (!existsSync(MODEL_PATH)) {
-    console.log('[speaker] Model not found at', MODEL_PATH, '— embedding disabled, using amplitude fallback')
+  const modelPath = resolveSpeakerModelPath()
+  if (!modelPath) {
+    console.log(
+      '[speaker] Voiceprint model not found — embedding disabled, using amplitude fallback.',
+      `Searched: ${speakerModelCandidates().join(', ')}.`,
+      `Drop ${SPEAKER_MODEL_FILENAME} in the second path (or set COS_SPEAKER_MODEL_PATH) to enable speaker diarization.`,
+    )
     return false
   }
 
@@ -73,7 +119,7 @@ export function initSpeakerEmbeddings(): boolean {
     sherpaOnnx = require('sherpa-onnx-node')
 
     extractor = new sherpaOnnx.SpeakerEmbeddingExtractor({
-      model: MODEL_PATH,
+      model: modelPath,
       numThreads: 2,
       provider: 'cpu',
     })

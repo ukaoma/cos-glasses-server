@@ -7,6 +7,7 @@ import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
+import { speakerModelState } from '../lib/speaker-embeddings.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import {
   isWhisperLocalAvailable,
@@ -175,6 +176,12 @@ healthRouter.get('/health', async (_req, res) => {
   }
 
   checks.silero_vad = isSileroAvailable() ? 'active' : 'disabled'
+
+  // Speaker diarization is opt-in (the ~26 MB voiceprint model ships outside the
+  // npm tarball), so publish its state rather than letting the amplitude
+  // fallback masquerade as working diarization. Availability only — the resolved
+  // path is a local filesystem detail and health is unauthenticated.
+  checks.speaker_id = speakerModelState().state
 
   // Health is unauthenticated. Publish only availability; the actual CLI
   // session id is a resumable runtime handle and belongs on authenticated
