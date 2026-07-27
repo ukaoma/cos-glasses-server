@@ -8,6 +8,7 @@ import { getArchiveDayMessages } from '../lib/archive.js'
 import { localDay } from '../lib/local-day.js'
 import { clearCodexEngineSession } from '../lib/codex-engine-sessions.js'
 import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
+import { currentMessageEra, exchangeBelongsToEra } from '../lib/message-era.js'
 
 export const sessionsRouter = Router()
 
@@ -241,11 +242,14 @@ sessionsRouter.get('/sessions/today/live-chats', (_req, res) => {
 // back to the archived chat's sessionId via getArchiveDayMessages.
 sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
   const todayDate = localDay()
+  const era = currentMessageEra()
 
-  const archivedMessages = getArchiveDayMessages(todayDate).map(m => ({
-    ...m,
-    source: 'archive' as const,
-  }))
+  const archivedMessages = getArchiveDayMessages(todayDate)
+    .filter(m => exchangeBelongsToEra(m, era))
+    .map(m => ({
+      ...m,
+      source: 'archive' as const,
+    }))
 
   const liveMessages: Array<{
     query: string
@@ -255,6 +259,8 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
     sessionId: string
     source: 'live'
     no?: number
+    globalMsgNum?: number
+    messageEra?: string
     attachments?: MediaAttachmentRef[]
   }> = []
   const liveSessions = getActiveSessions()
@@ -264,9 +270,12 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
     for (let i = 0; i < session.exchanges.length; i++) {
       const ex = session.exchanges[i]
       if (ex.role === 'user') {
+        if (!exchangeBelongsToEra(ex, era)) continue
         const next = session.exchanges[i + 1]
         if (next && next.role === 'assistant') {
           const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
+          const globalMsgNum = ex.globalMsgNum ?? next.globalMsgNum
+          const messageEra = ex.messageEra ?? next.messageEra
           liveMessages.push({
             query: ex.content,
             text: next.content,
@@ -274,7 +283,8 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
             chatIndex: -1,
             sessionId: session.id,
             source: 'live',
-            ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+            ...(globalMsgNum != null ? { no: globalMsgNum, globalMsgNum } : {}),
+            ...(messageEra ? { messageEra } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++

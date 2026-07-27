@@ -15,6 +15,7 @@ import { localDay } from './local-day.js'
 import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
 import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 import { secureExistingPrivateFile } from './secure-user-config.js'
+import { currentMessageEra } from './message-era.js'
 
 export type { ModelPreference }
 
@@ -26,6 +27,8 @@ export interface Exchange {
   /** Durable query provenance. Legacy exchanges omit both fields. */
   clientJobId?: string
   generation?: number
+  /** Short-number namespace. Missing means the original legacy era. */
+  messageEra?: string
   /** Public attachment refs may live on either half of a Q&A pair: request
    * photos on the user exchange, model-published images on the assistant
    * exchange. Bytes, filesystem paths, and capabilities never persist here. */
@@ -415,6 +418,7 @@ export function addExchange(
     content,
     timestamp: Date.now(),
     globalMsgNum,
+    messageEra: currentMessageEra(),
     ...normalizedExchangeProvenance(provenance),
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
   }
@@ -512,6 +516,7 @@ export function reconcileExchangeByJobIdentity(
   content: string,
   globalMsgNum?: number,
   attachments?: MediaAttachmentRef[],
+  messageEra?: string,
 ): ReconciledExchange {
   if (!validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) {
     throw new Error('conversation: invalid durable job identity')
@@ -538,6 +543,10 @@ export function reconcileExchangeByJobIdentity(
   }
 
   const validatedAttachments = parseMediaAttachmentRefs(attachments)
+  const projectedMessageEra = typeof messageEra === 'string'
+    && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(messageEra)
+    ? messageEra
+    : currentMessageEra()
   let exchange: Exchange
   const created = matchingIndexes.length === 0
   if (created) {
@@ -546,6 +555,7 @@ export function reconcileExchangeByJobIdentity(
       content,
       timestamp: Date.now(),
       globalMsgNum,
+      messageEra: projectedMessageEra,
       clientJobId: identity.clientJobId,
       generation: identity.generation,
       ...(validatedAttachments.length > 0 ? { attachments: validatedAttachments } : {}),
@@ -555,6 +565,7 @@ export function reconcileExchangeByJobIdentity(
     exchange = session.exchanges[matchingIndexes[0]]
     exchange.content = content
     exchange.globalMsgNum = globalMsgNum
+    exchange.messageEra = projectedMessageEra
     if (validatedAttachments.length > 0) exchange.attachments = validatedAttachments
     else delete exchange.attachments
 

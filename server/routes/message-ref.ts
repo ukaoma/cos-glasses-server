@@ -6,7 +6,7 @@
 // fresh client continues the sequence instead of reusing numbers.
 //
 //   GET /api/message/:num     → { globalMsgNum, date, query, response }  (404 when unknown)
-//   GET /api/message-counter  → { max }
+//   GET /api/message-counter  → { max, era }
 //
 // Resolution order (per the prompt-queue/archive plan): live in-memory
 // sessions first (covers the mirror's 15-minute lag), then day archives
@@ -19,6 +19,11 @@ import { getActiveSessions } from '../lib/conversation.js'
 import { dataPath } from '../lib/data-dir.js'
 import { localDay } from '../lib/local-day.js'
 import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
+import {
+  LEGACY_MESSAGE_ERA,
+  currentMessageEra,
+  exchangeBelongsToEra,
+} from '../lib/message-era.js'
 
 // v6.3.0 — read archives from the SAME persistent location the archive-mirror
 // writes to (~/.cos-glasses/data/archive via dataPath), not a package-relative
@@ -40,6 +45,7 @@ interface ExchangeLike {
   content?: string
   timestamp?: number
   globalMsgNum?: number
+  messageEra?: string
   attachments?: unknown
 }
 
@@ -60,9 +66,16 @@ function pairExchange(exchanges: ExchangeLike[], i: number): { query: string; re
   }
 }
 
-function scanExchanges(exchanges: ExchangeLike[], num: number, date: string): ResolvedGlobalMessage | null {
+function scanExchanges(
+  exchanges: ExchangeLike[],
+  num: number,
+  date: string,
+  /** Pass null to match any era (post-reset short-ref fallback). */
+  era: string | null = currentMessageEra(),
+): ResolvedGlobalMessage | null {
   for (let i = 0; i < exchanges.length; i++) {
     if (exchanges[i]?.globalMsgNum !== num) continue
+    if (era != null && !exchangeBelongsToEra(exchanges[i] ?? {}, era)) continue
     const { query, response, attachments } = pairExchange(exchanges, i)
     return {
       globalMsgNum: num, date, query, response,
@@ -74,7 +87,11 @@ function scanExchanges(exchanges: ExchangeLike[], num: number, date: string): Re
 
 /** Resolve a global message number from the day archives, newest-first.
  *  Exported with an explicit dir for tests. */
-export function resolveFromArchiveDir(dir: string, num: number): ResolvedGlobalMessage | null {
+export function resolveFromArchiveDir(
+  dir: string,
+  num: number,
+  era: string | null = LEGACY_MESSAGE_ERA,
+): ResolvedGlobalMessage | null {
   let files: string[] = []
   try {
     files = readdirSync(dir).filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort().reverse()
@@ -87,7 +104,12 @@ export function resolveFromArchiveDir(dir: string, num: number): ResolvedGlobalM
       const chats = Array.isArray(day?.chats) ? day.chats : []
       for (const chat of chats) {
         const exchanges = Array.isArray(chat?.exchanges) ? chat.exchanges : []
-        const hit = scanExchanges(exchanges, num, typeof day?.date === 'string' ? day.date : f.slice(0, 10))
+        const hit = scanExchanges(
+          exchanges,
+          num,
+          typeof day?.date === 'string' ? day.date : f.slice(0, 10),
+          era,
+        )
         if (hit) return hit
       }
     } catch {
@@ -143,8 +165,8 @@ export function getArchiveChatMessagesNumbered(date: string, chatIndex: number) 
   return readArchiveChatNumbered(ARCHIVE_DIR, date, chatIndex)
 }
 
-/** Highest stamped number across the day archives (0 when none). */
-export function maxGlobalMsgNumInDir(dir: string): number {
+/** Highest stamped number across the day archives for one era (0 when none). */
+export function maxGlobalMsgNumInDir(dir: string, era = LEGACY_MESSAGE_ERA): number {
   let max = 0
   let files: string[] = []
   try {
@@ -157,6 +179,7 @@ export function maxGlobalMsgNumInDir(dir: string): number {
       const day = JSON.parse(readFileSync(resolve(dir, f), 'utf8'))
       for (const chat of Array.isArray(day?.chats) ? day.chats : []) {
         for (const ex of Array.isArray(chat?.exchanges) ? chat.exchanges : []) {
+          if (!exchangeBelongsToEra(ex ?? {}, era)) continue
           if (typeof ex?.globalMsgNum === 'number' && ex.globalMsgNum > max) max = ex.globalMsgNum
         }
       }
@@ -165,11 +188,14 @@ export function maxGlobalMsgNumInDir(dir: string): number {
   return max
 }
 
-function resolveFromLiveSessions(num: number): ResolvedGlobalMessage | null {
+function resolveFromLiveSessions(
+  num: number,
+  era: string | null = currentMessageEra(),
+): ResolvedGlobalMessage | null {
   const today = localDay() // local calendar day, not UTC — a live ref in the user's evening must not label tomorrow
   for (const session of getActiveSessions()) {
     const exchanges = (session as { exchanges?: ExchangeLike[] }).exchanges ?? []
-    const hit = scanExchanges(exchanges, num, today)
+    const hit = scanExchanges(exchanges, num, today, era)
     if (hit) return hit
   }
   return null
@@ -183,7 +209,13 @@ messageRefRouter.get('/message/:num', (req, res) => {
     res.status(400).json({ error: 'invalid message number' })
     return
   }
-  const hit = resolveFromLiveSessions(num) ?? resolveFromArchiveDir(ARCHIVE_DIR, num)
+  // Prefer the current era so short refs stay unambiguous after a reset.
+  // Fall back across eras so "recall message 562" still works for pre-reset
+  // stamps once numbering restarts at #1.
+  const hit = resolveFromLiveSessions(num)
+    ?? resolveFromArchiveDir(ARCHIVE_DIR, num, currentMessageEra())
+    ?? resolveFromLiveSessions(num, null)
+    ?? resolveFromArchiveDir(ARCHIVE_DIR, num, null)
   if (!hit) {
     res.status(404).json({ error: `message ${num} not found` })
     return
@@ -192,11 +224,13 @@ messageRefRouter.get('/message/:num', (req, res) => {
 })
 
 messageRefRouter.get('/message-counter', (_req, res) => {
+  const era = currentMessageEra()
   let liveMax = 0
   for (const session of getActiveSessions()) {
     for (const ex of ((session as { exchanges?: ExchangeLike[] }).exchanges ?? [])) {
+      if (!exchangeBelongsToEra(ex, era)) continue
       if (typeof ex?.globalMsgNum === 'number' && ex.globalMsgNum > liveMax) liveMax = ex.globalMsgNum
     }
   }
-  res.json({ max: Math.max(liveMax, maxGlobalMsgNumInDir(ARCHIVE_DIR)) })
+  res.json({ max: Math.max(liveMax, maxGlobalMsgNumInDir(ARCHIVE_DIR, era)), era })
 })

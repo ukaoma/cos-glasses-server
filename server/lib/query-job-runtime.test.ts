@@ -80,13 +80,14 @@ beforeEach(async () => {
     content: string,
     globalMsgNum?: number,
     attachments?: unknown[],
+    messageEra?: string,
   ) => ({
     exchange: (() => {
       const matching = mocks.exchanges.filter(exchange => exchange.role === role
         && exchange.clientJobId === identity.clientJobId
         && exchange.generation === identity.generation)
       const exchange = matching[0] ?? { role, timestamp: Date.now(), ...identity }
-      Object.assign(exchange, { content, globalMsgNum, attachments })
+      Object.assign(exchange, { content, globalMsgNum, attachments, messageEra })
       if (matching.length === 0) mocks.exchanges.push(exchange)
       for (const duplicate of matching.slice(1)) mocks.exchanges.splice(mocks.exchanges.indexOf(duplicate), 1)
       return exchange
@@ -320,6 +321,34 @@ describe('public durable query runtime', () => {
     ]))
     expect(mocks.flushConversation).toHaveBeenCalled()
     await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
+  it('rejects durable admission when a reset era is active and the client era is wrong', async () => {
+    const eraDir = await mkdtemp(join(tmpdir(), 'cos-era-admit-'))
+    process.env.COS_DATA_DIR = eraDir
+    vi.resetModules()
+    const era = await import('./message-era.js')
+    const created = era.createMessageEra(1_700_000_000_300)
+    const runtime = await import('./query-job-runtime.js')
+    await expect(runtime.preparePublicDurableQueryAdmission({
+      clientJobId: randomUUID(),
+      generation: 1,
+      query: 'stale client',
+      sessionId: 'runtime-session',
+      messageEra: 'legacy',
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'message_era_mismatch',
+    })
+    const ok = await runtime.preparePublicDurableQueryAdmission({
+      clientJobId: randomUUID(),
+      generation: 1,
+      query: 'fresh client',
+      sessionId: 'runtime-session',
+      messageEra: created.era,
+    })
+    expect(ok).toMatchObject({ messageEra: created.era })
+    await rm(eraDir, { recursive: true, force: true })
   })
 
   it('removes bridge-written turns when a crash leaves the journal nonterminal', async () => {

@@ -18,6 +18,7 @@ import {
   MaintenanceLifecycleError,
   maintenanceErrorPayload,
 } from '../lib/maintenance-lifecycle.js'
+import { currentMessageEra, LEGACY_MESSAGE_ERA } from '../lib/message-era.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -38,13 +39,31 @@ queryRouter.post('/query', async (req, res) => {
     }
     throw error
   }
-  const { query, sessionId, model, effort, reference, globalMsgNum } = req.body
+  const { query, sessionId, model, effort, reference, globalMsgNum, messageEra } = req.body
   const activityToolMode = req.body.activityToolMode === 'off' || req.body.activityToolMode === 'preview'
     ? req.body.activityToolMode
     : 'status'
   // Glasses Settings default is Agent. Only an explicit "ask" stays read-only —
   // omit/unknown must not silently force Ask (6.16.3 durable-only gap).
   const cursorExecutionMode = req.body.cursorExecutionMode === 'ask' ? 'ask' as const : 'agent' as const
+
+  // Once a reset era exists, reject pre-era clients before they can stamp a
+  // five-digit number into the fresh namespace. Companion learns the era from
+  // /api/message-counter and includes it on every query.
+  const activeMessageEra = currentMessageEra()
+  if (activeMessageEra !== LEGACY_MESSAGE_ERA && messageEra !== activeMessageEra) {
+    console.warn('[query] message era mismatch', {
+      sessionId: typeof sessionId === 'string' ? sessionId : undefined,
+      sentEra: typeof messageEra === 'string' ? messageEra : '(missing)',
+      expectedEra: activeMessageEra,
+    })
+    maintenanceLease.release()
+    return res.status(409).json({
+      error: 'message_era_mismatch',
+      detail: 'Reopen or update COS Glasses to start the fresh message list.',
+      era: activeMessageEra,
+    })
+  }
 
   // Resolve durable attachment ids and legacy base64 images through one
   // validation/normalization path before opening SSE.

@@ -5,6 +5,7 @@ import { emitDisplay } from './display-bus.js'
 import { resolveQueryAttachments } from './query-attachments.js'
 import { getMediaStore } from './media-store.js'
 import { dataPath } from './data-dir.js'
+import { currentMessageEra, LEGACY_MESSAGE_ERA } from './message-era.js'
 import { durableQueryJobsEnabled } from './query-job-feature.js'
 import { QueryJobCoordinator, type QueryJobRunner } from './query-job-coordinator.js'
 import { QueryJobStore } from './query-job-store.js'
@@ -36,17 +37,42 @@ const TOOL_STATUS_MESSAGES: Record<string, string> = {
   Read: 'Analyzing photo...',
 }
 
+export class QueryJobAdmissionPreparationError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string) {
+    super(message)
+    this.name = 'QueryJobAdmissionPreparationError'
+  }
+}
+
 /** Resolve image bytes/ids before returning 202. The journal receives only
  * validated refs and ids; base64 bytes and provider-local paths are dropped by
- * the strict QueryJobRequest parser before persistence. */
+ * the strict QueryJobRequest parser before persistence. Once a reset era
+ * exists, reject pre-era clients before they stamp five-digit numbers into
+ * the fresh namespace. */
 export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<unknown> {
   if (!raw || typeof raw !== 'object') return raw
   const input = raw as Record<string, unknown>
-  const resolved = await resolveQueryAttachments(input)
-  return {
-    ...input,
-    attachmentIds: resolved.ids,
-    attachmentRefs: resolved.refs,
+  const activeEra = currentMessageEra()
+  if (activeEra !== LEGACY_MESSAGE_ERA && input.messageEra !== activeEra) {
+    throw new QueryJobAdmissionPreparationError(
+      409,
+      'message_era_mismatch',
+      'Reopen or update COS Glasses to start the fresh message list.',
+    )
+  }
+  try {
+    const resolved = await resolveQueryAttachments(input)
+    return {
+      ...input,
+      messageEra: activeEra,
+      attachmentIds: resolved.ids,
+      attachmentRefs: resolved.refs,
+    }
+  } catch (error: any) {
+    if (Number.isInteger(error?.status) && typeof error?.code === 'string') {
+      throw new QueryJobAdmissionPreparationError(error.status, error.code, error.message)
+    }
+    throw error
   }
 }
 
@@ -87,6 +113,7 @@ async function projectPublicConversationTerminal(
     userContent,
     request.globalMsgNum,
     request.attachmentRefs,
+    request.messageEra,
   )
   reconcileExchangeByJobIdentity(
     request.sessionId,
@@ -95,6 +122,7 @@ async function projectPublicConversationTerminal(
     job.response ?? job.partialText,
     request.globalMsgNum,
     mergeMediaAttachmentRefs(outputAttachments, existingOutputAttachments),
+    request.messageEra,
   )
   flushConversationToDisk()
 }

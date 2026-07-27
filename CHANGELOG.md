@@ -1,3 +1,14 @@
+## 6.16.7
+
+- **Message-number era reset on managed public installs.** Companion burn
+  fixes never lowered the archive ceiling (`/api/message-counter` still
+  reported `max: 17931` with no `era`). Ported `message-era` under
+  `~/.cos-glasses/data`, era-scoped counter + lookup, stamp `messageEra` on
+  exchanges, and `409 message_era_mismatch` on legacy `/api/query` + durable
+  admission after a reset. Ops: `npx tsx server/scripts/reset-message-era.ts
+  --confirm`, restart LaunchAgent, phone reconnect → live list clears and
+  numbering restarts near #1. Archives retained.
+
 ## 6.16.6
 
 - **HQ finalize no longer loses to late Fast warm.** Fast warm and speculative

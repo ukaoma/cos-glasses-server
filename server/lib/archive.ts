@@ -435,11 +435,11 @@ export function getArchiveChatMessages(
  *  (sessionId, timestamp) instead of bare timestamp (collision-prone). */
 export function getArchiveDayMessages(
   date: string,
-): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; attachments?: MediaAttachmentRef[] }> {
+): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; attachments?: MediaAttachmentRef[] }> {
   const archive = loadArchive(date)
   if (!archive) return []
 
-  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; attachments?: MediaAttachmentRef[] }> = []
+  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; attachments?: MediaAttachmentRef[] }> = []
   for (const chat of archive.chats) {
     for (let i = 0; i < chat.exchanges.length; i++) {
       const ex = chat.exchanges[i]
@@ -447,13 +447,16 @@ export function getArchiveDayMessages(
         const next = chat.exchanges[i + 1]
         if (next && next.role === 'assistant') {
           const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
+          const globalMsgNum = ex.globalMsgNum ?? next.globalMsgNum
+          const messageEra = ex.messageEra ?? next.messageEra
           messages.push({
             query: ex.content,
             text: next.content,
             timestamp: next.timestamp,
             chatIndex: chat.id,
             sessionId: chat.sessionId,
-            ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+            ...(globalMsgNum != null ? { no: globalMsgNum, globalMsgNum } : {}),
+            ...(messageEra ? { messageEra } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++
