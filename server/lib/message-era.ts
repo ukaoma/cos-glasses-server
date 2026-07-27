@@ -4,7 +4,12 @@
 //
 // Public package stores state under ~/.cos-glasses/data (dataPath), matching
 // sessions/archive — never a package-relative path that vanishes on npx upgrade.
+//
+// Disk is authoritative across processes: reset-message-era.ts writes the file
+// in a one-shot CLI; the long-lived server re-reads when mtime changes so a
+// reset is visible without relying solely on an in-process cache flush.
 
+import { statSync } from 'node:fs'
 import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 
@@ -19,6 +24,15 @@ export interface MessageEraState {
 const MESSAGE_ERA_FILE = dataPath('message-era.json')
 
 let cached: MessageEraState | null = null
+let cachedMtimeMs = Number.NaN
+
+function fileMtimeMs(): number {
+  try {
+    return statSync(MESSAGE_ERA_FILE).mtimeMs
+  } catch {
+    return Number.NaN
+  }
+}
 
 function validState(value: unknown): value is MessageEraState {
   if (!value || typeof value !== 'object') return false
@@ -32,13 +46,17 @@ function validState(value: unknown): value is MessageEraState {
 }
 
 export function currentMessageEraState(): MessageEraState {
-  if (cached) return cached
+  const mtimeMs = fileMtimeMs()
+  if (cached && Object.is(mtimeMs, cachedMtimeMs)) return cached
+
   const loaded = loadJsonOrQuarantine<unknown>(MESSAGE_ERA_FILE)
   if (loaded.status === 'ok' && validState(loaded.data)) {
     cached = loaded.data
+    cachedMtimeMs = mtimeMs
     return cached
   }
   cached = { v: 1, era: LEGACY_MESSAGE_ERA, startedAt: 0 }
+  cachedMtimeMs = mtimeMs
   return cached
 }
 
@@ -65,10 +83,12 @@ export function createMessageEra(now = Date.now()): MessageEraState {
   }
   atomicWriteFileSync(MESSAGE_ERA_FILE, JSON.stringify(next, null, 2), { mode: 0o600 })
   cached = next
+  cachedMtimeMs = fileMtimeMs()
   return next
 }
 
 /** Test/helper: drop in-memory cache so the next read hits disk. */
 export function __resetMessageEraCacheForTests(): void {
   cached = null
+  cachedMtimeMs = Number.NaN
 }

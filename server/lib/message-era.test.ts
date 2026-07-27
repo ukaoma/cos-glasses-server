@@ -52,4 +52,18 @@ describe('message-number eras (public)', () => {
     mod.__resetMessageEraCacheForTests()
     expect(mod.currentMessageEra()).toBe('era-manual')
   })
+
+  it('picks up an on-disk era rewrite without an explicit cache clear (reset CLI vs live server)', async () => {
+    const mod = await import('./message-era.js')
+    const first = mod.createMessageEra(1_700_000_000_200)
+    expect(mod.currentMessageEra()).toBe(first.era)
+
+    // Simulate reset-message-era.ts writing from another process while this
+    // module keeps its prior in-memory cache — mtime change must reload.
+    await new Promise((r) => setTimeout(r, 20))
+    writeFileSync(join(dir, 'message-era.json'), JSON.stringify({
+      v: 1, era: 'era-from-other-process', startedAt: 99,
+    }))
+    expect(mod.currentMessageEra()).toBe('era-from-other-process')
+  })
 })

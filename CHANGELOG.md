@@ -1,3 +1,12 @@
+## 6.16.9
+
+- **Message-era reset visible to a running server.** `currentMessageEraState`
+  re-reads `message-era.json` when mtime changes, so
+  `reset-message-era.ts --confirm` (separate process) is picked up without
+  depending on a stale in-memory `legacy` cache. Restart still recommended
+  so live sessions stop serving pre-reset stamps; reset script prints verify
+  steps.
+
 ## 6.16.8
 
 - **Per-exchange model stamps on managed installs.** History badges were

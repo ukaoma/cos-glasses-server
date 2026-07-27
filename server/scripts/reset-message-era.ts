@@ -19,4 +19,10 @@ console.log(JSON.stringify({
   ...next,
   history: 'retained',
   restartRequired: true,
+  verify: 'GET /api/message-counter should return { max: 0 or small, era: "<era above>" } after server restart',
+  nextSteps: [
+    'Restart LaunchAgent / Control Update Server generation',
+    'Phone reconnect so syncMessageEra clears the live list',
+    'Send a test message — expect #1 (or low single digits)',
+  ],
 }, null, 2))
