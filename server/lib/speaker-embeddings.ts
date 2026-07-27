@@ -8,8 +8,14 @@
 import { resolve } from 'node:path'
 import { errMsg } from './utils.js'
 import { getOwnerSpeakerLabel } from './profile.js'
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+
+/** A real voiceprint model is ~26 MB; anything this small is a bad download. */
+const MIN_MODEL_BYTES = 1_000_000
+const PROBE_TIMEOUT_MS = 30_000
 
 // sherpa-onnx-node is CJS — use createRequire for ESM compat
 import { createRequire } from 'node:module'
@@ -24,12 +30,18 @@ export const SPEAKER_MODEL_FILENAME = '3dspeaker_speech_eres2net_sv_en_voxceleb_
 /** Where the voiceprint model may live, in priority order:
  *
  *  1. COS_SPEAKER_MODEL_PATH — explicit override (full path to the .onnx).
- *  2. <data home>/models/    — the bolt-on location. The model is ~26 MB and is
+ *  2. ~/.cos-glasses/models/ — the bolt-on location. The model is ~26 MB and is
  *     deliberately NOT in the npm tarball, so a managed install has no bundled
  *     copy. The data home survives generation swaps; anything inside the
  *     installed package does not, and a model dropped there is destroyed by the
  *     next update.
  *  3. server/models/         — bundled, which only exists in a source checkout.
+ *
+ *  Anchored on homedir() rather than DATA_DIR/'..' on purpose: path.resolve is
+ *  purely lexical, so deriving a sibling of a relocated COS_DATA_DIR could point
+ *  the "durable" candidate at an unwritable root, or — if COS_DATA_DIR were ever
+ *  set inside the package — collapse it back onto the very directory an update
+ *  destroys, silently reintroducing the bug this ordering exists to fix.
  *
  *  Diarization is opt-in by design: with no model the system stays on amplitude
  *  fallback (wearer vs Ext) rather than failing. speakerModelState() exists so
@@ -39,28 +51,19 @@ export function speakerModelCandidates(): string[] {
   const override = process.env.COS_SPEAKER_MODEL_PATH?.trim()
   return [
     ...(override ? [resolve(override)] : []),
-    resolve(DATA_DIR, '..', 'models', SPEAKER_MODEL_FILENAME),
+    resolve(homedir(), '.cos-glasses', 'models', SPEAKER_MODEL_FILENAME),
     resolve(__dirname, '..', 'models', SPEAKER_MODEL_FILENAME),
   ]
 }
 
 function resolveSpeakerModelPath(): string | null {
-  return speakerModelCandidates().find(existsSync) ?? null
+  // isFile, not existsSync: a directory passes an existence check and would be
+  // handed to the native loader as a model.
+  return speakerModelCandidates().find(p => {
+    try { return statSync(p).isFile() } catch { return false }
+  }) ?? null
 }
 
-/** Reported on /api/health so a missing model is never mistaken for working. */
-export function speakerModelState(): {
-  state: 'active' | 'unavailable'
-  path: string | null
-  searched: string[]
-} {
-  const path = resolveSpeakerModelPath()
-  return {
-    state: path && extractor ? 'active' : 'unavailable',
-    path,
-    searched: speakerModelCandidates(),
-  }
-}
 const PROFILES_PATH = resolve(DATA_DIR, 'voice-profiles.json')
 const CALIBRATION_LOG = resolve(DATA_DIR, 'speaker-calibration.jsonl')
 
@@ -99,18 +102,108 @@ interface ProfileStore {
   profiles: VoiceProfile[]
 }
 
+/** Cheap structural screen for a downloaded model.
+ *
+ *  Catches the common bad downloads — an HTML error/redirect page saved as
+ *  .onnx, or a truncated transfer — before the file reaches the native runtime.
+ *  ONNX is protobuf: field 1 (ir_version, varint) encodes as a leading 0x08.
+ *  This is a screen, not validation; probeModelSafely() is the real gate. */
+function looksLikeOnnxModel(path: string): boolean {
+  try {
+    if (statSync(path).size < MIN_MODEL_BYTES) return false
+    const head = Buffer.alloc(1)
+    const fd = openSync(path, 'r')
+    try { readSync(fd, head, 0, 1, 0) } finally { closeSync(fd) }
+    return head[0] === 0x08
+  } catch { return false }
+}
+
+/** Load the model in a throwaway child process first.
+ *
+ *  onnxruntime does not throw on a malformed or mismatched model — it calls
+ *  std::terminate, so the process dies with SIGABRT (or SIGSEGV for a valid-but-
+ *  wrong model). No try/catch can intercept that. In a managed install the
+ *  LaunchAgent has KeepAlive, so the death becomes a permanent restart loop that
+ *  takes down queries, meetings, and transcription — the whole server, over an
+ *  optional feature.
+ *
+ *  Absorbing that crash in a child keeps a bad file a diarization problem
+ *  instead of an outage. Cost is one short-lived process, once, and only when a
+ *  model is actually present. */
+function probeModelSafely(modelPath: string): { ok: true } | { ok: false; reason: string } {
+  const script =
+    "const{SpeakerEmbeddingExtractor}=require('sherpa-onnx-node');" +
+    "new SpeakerEmbeddingExtractor({model:process.argv[1],numThreads:1,provider:'cpu'});"
+  const probe = spawnSync(process.execPath, ['-e', script, modelPath], {
+    cwd: resolve(__dirname, '..', '..'), // package root, so sherpa-onnx-node resolves
+    timeout: PROBE_TIMEOUT_MS,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  if (probe.signal) return { ok: false, reason: `native runtime aborted (${probe.signal})` }
+  if (probe.error) return { ok: false, reason: probe.error.message }
+  if (probe.status !== 0) {
+    const stderr = String(probe.stderr ?? '').trim().split('\n').pop() ?? ''
+    return { ok: false, reason: stderr || `probe exited ${probe.status}` }
+  }
+  return { ok: true }
+}
+
 /** Initialize speaker embedding system. Returns false if model missing (graceful degradation). */
 export function initSpeakerEmbeddings(): boolean {
   if (initialized) return extractor !== null
 
   initialized = true
 
+  const override = process.env.COS_SPEAKER_MODEL_PATH?.trim()
+  if (override) {
+    const overridePath = resolve(override)
+    let usable = false
+    try { usable = statSync(overridePath).isFile() } catch { usable = false }
+    if (!usable) {
+      // Falling through silently would leave the operator believing an override
+      // they mistyped (or pointed at a directory) is in effect.
+      console.warn(
+        `[speaker] COS_SPEAKER_MODEL_PATH=${overridePath} is not a readable file — ignoring it`,
+        'and falling back to the remaining candidates.',
+      )
+    }
+    if (override !== overridePath) {
+      // Relative paths resolve against cwd, which under launchd is the installed
+      // package — a location the next update deletes.
+      console.warn(
+        `[speaker] COS_SPEAKER_MODEL_PATH is relative; resolved against the working directory to ${overridePath}.`,
+        'Use an absolute path so it cannot move with the process.',
+      )
+    }
+  }
+
   const modelPath = resolveSpeakerModelPath()
   if (!modelPath) {
+    const boltOn = resolve(homedir(), '.cos-glasses', 'models')
     console.log(
-      '[speaker] Voiceprint model not found — embedding disabled, using amplitude fallback.',
+      '[speaker] Voiceprint model not found — embedding disabled, speaker labels come from the client.',
       `Searched: ${speakerModelCandidates().join(', ')}.`,
-      `Drop ${SPEAKER_MODEL_FILENAME} in the second path (or set COS_SPEAKER_MODEL_PATH) to enable speaker diarization.`,
+      // Name the durable directory outright. An ordinal ("the second path")
+      // shifts with the override and pointed users at the package copy, which
+      // the next update deletes.
+      `To enable diarization put ${SPEAKER_MODEL_FILENAME} in ${boltOn}/ and restart.`,
+    )
+    return false
+  }
+
+  if (!looksLikeOnnxModel(modelPath)) {
+    console.error(
+      `[speaker] ${modelPath} does not look like an ONNX model (too small, or not protobuf) —`,
+      'embedding disabled. A partial download or an HTML error page saved as .onnx does this.',
+    )
+    return false
+  }
+
+  const probe = probeModelSafely(modelPath)
+  if (!probe.ok) {
+    console.error(
+      `[speaker] ${modelPath} failed to load — embedding disabled. Reason: ${probe.reason}.`,
+      'The server is otherwise unaffected; replace the model file and restart.',
     )
     return false
   }
@@ -376,6 +469,30 @@ export function extractEmbedding(wavBuffer: Buffer): Float32Array | null {
 /** Check if the embedding system is available */
 export function isEmbeddingAvailable(): boolean {
   return extractor !== null && manager !== null
+}
+
+/** Reported on /api/health so an amplitude fallback is never mistaken for real
+ *  diarization.
+ *
+ *  `state` is the RUNTIME truth (isEmbeddingAvailable), not "is a model file on
+ *  disk". Those diverge in both directions: a model deleted after a successful
+ *  load leaves diarization working from memory, and a model present alongside a
+ *  broken/ABI-mismatched sherpa-onnx never loads at all. `error` distinguishes
+ *  that second case — a model is installed but the runtime rejected it — from a
+ *  simply unconfigured install, which otherwise look identical to an operator.
+ *
+ *  Declared after the module state it reads: hoisting it above `extractor`
+ *  would make any import-time caller throw a ReferenceError on an
+ *  unauthenticated endpoint. */
+export function speakerModelState(): {
+  state: 'active' | 'unavailable' | 'error'
+  path: string | null
+  searched: string[]
+} {
+  const path = resolveSpeakerModelPath()
+  const running = isEmbeddingAvailable()
+  const state = running ? 'active' : (path && initialized ? 'error' : 'unavailable')
+  return { state, path, searched: speakerModelCandidates() }
 }
 
 /** Compute actual cosine similarity between two raw embedding vectors */

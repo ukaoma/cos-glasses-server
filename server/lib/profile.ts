@@ -1,16 +1,38 @@
 // Profile loader — reads user identity from .cos-profile.json (gitignored)
 // Falls back to generic defaults for users who haven't configured a profile
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 
 const APP_ROOT = resolve(import.meta.dirname, '../..')
+
+/** The profile in the data home. Survives updates; the APP_ROOT copy does not. */
+export function homeProfilePath(): string {
+  return resolve(homedir(), '.cos-glasses', '.cos-profile.json')
+}
+
 // Single canonical path — used by BOTH the reader and the writer so a glossary
 // PUT can never write to a different file than the cache reads from. Lazy +
 // env-overridable (COS_PROFILE_PATH) so tests can target a temp file.
+//
+// APP_ROOT is the INSTALLED PACKAGE root. For a managed install that is inside
+// the generation directory, which an update replaces wholesale — so a profile
+// there is destroyed on every upgrade, and a fresh managed install has no
+// profile at all (loadProfile() catches to {} and every field silently takes
+// its default). Relying on COS_PROFILE_PATH alone is not enough either: the
+// launcher rebuilds its environment from the release manifest rather than the
+// existing plist, so an operator-set value is dropped by the next
+// install/update/repair. Prefer the data home whenever a profile lives there.
+//
+// Order: explicit override → ~/.cos-glasses/.cos-profile.json → package root.
 function profilePath(): string {
-  return process.env.COS_PROFILE_PATH || resolve(APP_ROOT, '.cos-profile.json')
+  const override = process.env.COS_PROFILE_PATH?.trim()
+  if (override) return resolve(override)
+  const home = homeProfilePath()
+  if (existsSync(home)) return home
+  return resolve(APP_ROOT, '.cos-profile.json')
 }
 
 let profileCache: Record<string, unknown> | null = null

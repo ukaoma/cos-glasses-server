@@ -165,9 +165,11 @@ pipeline contains `.telegram_config.json`; enable it only with the explicit
 
 ## Speaker diarization (opt-in)
 
-Out of the box, transcripts label the wearer and everyone else — `Me` and
-`Ext`. Named per-speaker diarization needs a ~26 MB voiceprint model that is
-deliberately **not** shipped in the npm package, so it is a bolt-on:
+Without a voiceprint model this server does not classify speakers at all — it
+passes through whatever label the client sends (`Unknown` when the client sends
+nothing; the COS companion sends its own wearer/`Ext` labels). Named
+per-speaker diarization needs a ~26 MB voiceprint model that is deliberately
+**not** shipped in the npm package, so it is a bolt-on:
 
 ```bash
 mkdir -p ~/.cos-glasses/models
@@ -180,15 +182,35 @@ the `.onnx`), `~/.cos-glasses/models/`, then a bundled `server/models/` copy
 anything inside the package is destroyed by the next update, while
 `~/.cos-glasses/` survives.
 
-Verify with `/api/health`: `speaker_id` reads `active` once the model loads and
-`unavailable` while it is missing, so the amplitude fallback can never be
-mistaken for working diarization. The model is read once at startup — restart
-the server after adding it.
+Use an **absolute** path if you set `COS_SPEAKER_MODEL_PATH` — a relative one
+resolves against the working directory, which under the managed LaunchAgent is
+the installed package.
+
+Verify with `/api/health` → `speaker_id`:
+
+| Value | Meaning |
+|---|---|
+| `active` | model loaded, diarization running |
+| `unavailable` | no model found — labels come from the client |
+| `error` | a model is present but the runtime rejected it (see the startup log) |
+
+The model is read once at startup, so restart after adding it. A corrupt or
+mismatched `.onnx` is screened and probed in a child process first, so a bad
+download disables diarization instead of taking the server down — but it does
+mean a wrong file fails silently apart from that log line.
 
 The wearer's label comes from `owner_speaker_label` in
 `~/.cos-glasses/.cos-profile.json` (default `Me`); set it to match the profile
-name you enrol under. Train voices via `/api/voice/enroll?name=…`; profiles
-persist in `~/.cos-glasses/data/voice-profiles.json`.
+name you enrol under. Train voices via `/api/voice/enroll?name=…` (the default
+name is `owner_speaker_label`); profiles persist in
+`~/.cos-glasses/data/voice-profiles.json`.
+
+**Upgrading from an older server:** before this release the enrollment default
+was hardcoded to `MU`, so an existing install may hold a profile under that name
+while `owner_speaker_label` resolves to `Me`. `/api/voice/status` will then
+report `enrolled: false`. Set `owner_speaker_label` to `MU` to keep the existing
+voiceprints rather than re-enrolling, which would split the same voice across two
+profiles.
 
 ## HQ dictation
 

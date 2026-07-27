@@ -1,3 +1,34 @@
+## Unreleased
+
+- **Speaker diarization is now a bolt-on any install can enable.** The ~26 MB
+  voiceprint model stays out of the npm package, but the loader no longer looks
+  only inside the package (where a managed install has no copy, and where a
+  hand-placed one is destroyed by the next update). Resolution order:
+  `COS_SPEAKER_MODEL_PATH` → `~/.cos-glasses/models/` → bundled `server/models/`
+  (source checkouts). Put the model in `~/.cos-glasses/models/` and restart.
+- **A bad model file can no longer take the server down.** onnxruntime aborts
+  the process on a malformed or mismatched model rather than throwing, which
+  under a KeepAlive LaunchAgent became a permanent restart loop that killed
+  queries, meetings, and transcription over an optional feature. The file is now
+  screened structurally and loaded in a throwaway child process first, so a
+  truncated download or an HTML error page saved as `.onnx` disables diarization
+  and nothing else.
+- **`/api/health` reports `speaker_id`** as `active` / `unavailable` / `error`,
+  so a server running without voiceprints is no longer indistinguishable from
+  one doing real diarization. `error` means a model is installed but the runtime
+  rejected it.
+- **Profile config is read from the data home.** `.cos-profile.json` is now
+  loaded from `~/.cos-glasses/` when present, ahead of the package-root copy.
+  Managed installs previously resolved it inside the generation directory, where
+  no profile exists and every field silently took its default — losing
+  transcription vocabulary, whisper corrections, and the wearer label.
+- **`/api/voice/enroll` and `/api/voice/status` no longer hardcode `MU`.** Both
+  use `owner_speaker_label` (default `Me`), matching what identification already
+  used. **Upgrade note:** an install that enrolled under the old default holds a
+  profile named `MU`; `/api/voice/status` will report `enrolled: false` until you
+  set `owner_speaker_label` to `MU`. Do that rather than re-enrolling, which
+  splits one voice across two profiles.
+
 ## 6.16.9
 
 - **Message-era reset visible to a running server.** `currentMessageEraState`
