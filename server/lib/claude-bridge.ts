@@ -484,6 +484,7 @@ export async function callClaudeStreaming(
     globalMsgNum,
     undefined,
     exchangeProvenance,
+    resolvedModel,
   )
 
   // Vision queries need the Read tool to see the image files
@@ -646,6 +647,7 @@ export async function callClaudeStreaming(
       globalMsgNum,
       undefined,
       exchangeProvenance,
+      resolvedModel,
     )
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)

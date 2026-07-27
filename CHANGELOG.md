@@ -1,3 +1,14 @@
+## 6.16.8
+
+- **Per-exchange model stamps on managed installs.** History badges were
+  defaulting to Opus whenever the server pair had no `modelPreference`
+  (Jul 19 `#228`–`#231` archives are unstamped — client `DEFAULT_MODEL`).
+  Bridges now stamp the actual run model on each exchange; archive +
+  today/all-messages emit via `resolveExchangePairModel`. Unstamped
+  legacy rows stay unlabeled server-side (phone still defaults those to
+  Opus — cannot invent Grok without evidence). New Cursor/Codex/Claude
+  turns keep truthful badges after reconnect/merge.
+
 ## 6.16.7
 
 - **Message-number era reset on managed public installs.** Companion burn

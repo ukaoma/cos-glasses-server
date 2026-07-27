@@ -331,6 +331,7 @@ export async function callCodexStreaming(
     globalMsgNum,
     undefined,
     exchangeProvenance,
+    model,
   )
 
   let fullQuery: string
@@ -483,6 +484,7 @@ export async function callCodexStreaming(
       globalMsgNum,
       undefined,
       exchangeProvenance,
+      model,
     )
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)

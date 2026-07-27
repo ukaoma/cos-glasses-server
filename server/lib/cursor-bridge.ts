@@ -310,9 +310,10 @@ export async function callCursorStreaming(
   const pendingUserExchange = durableIdentity
     ? reconcileExchangeByJobIdentity(
       sid, durableIdentity, 'user', historyQuery, globalMsgNum, inboundAttachments,
+      undefined, model,
     ).exchange
     : addExchange(
-      sid, 'user', historyQuery, globalMsgNum, inboundAttachments, durableIdentity,
+      sid, 'user', historyQuery, globalMsgNum, inboundAttachments, durableIdentity, model,
     )
 
   let fullQuery = query
@@ -446,8 +447,10 @@ export async function callCursorStreaming(
     }
 
     const assistantExchange = durableIdentity
-      ? reconcileExchangeByJobIdentity(sid, durableIdentity, 'assistant', text, globalMsgNum).exchange
-      : addExchange(sid, 'assistant', text, globalMsgNum, undefined, durableIdentity)
+      ? reconcileExchangeByJobIdentity(
+        sid, durableIdentity, 'assistant', text, globalMsgNum, undefined, undefined, model,
+      ).exchange
+      : addExchange(sid, 'assistant', text, globalMsgNum, undefined, durableIdentity, model)
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
     }

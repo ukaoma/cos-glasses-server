@@ -2,7 +2,7 @@
 import { Router } from 'express'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { getRecentSessions, getHistory, sessionExists, addContextBreak, endSession, getSessionRaw, getActiveSessions } from '../lib/conversation.js'
+import { getRecentSessions, getHistory, sessionExists, addContextBreak, endSession, getSessionRaw, getActiveSessions, resolveExchangePairModel } from '../lib/conversation.js'
 import { buildSessionLogEntry, writeSessionLog } from '../lib/session-log.js'
 import { getArchiveDayMessages } from '../lib/archive.js'
 import { localDay } from '../lib/local-day.js'
@@ -58,20 +58,24 @@ sessionsRouter.get('/sessions/:id/messages', (req, res) => {
     timestamp: number
     no?: number
     sessionId: string
+    modelPreference?: string
     attachments?: MediaAttachmentRef[]
   }> = []
+  const session = getSessionRaw(req.params.id)
   for (let i = 0; i < exchanges.length; i++) {
     const ex = exchanges[i]
     if (ex.role === 'user') {
       const next = exchanges[i + 1]
       if (next && next.role === 'assistant') {
         const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
+        const modelPreference = resolveExchangePairModel(ex, next, session?.modelPreference)
         messages.push({
           query: ex.content,
           text: next.content,
           timestamp: next.timestamp,
           sessionId: req.params.id,
           ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+          ...(modelPreference ? { modelPreference } : {}),
           ...(attachments.length > 0 ? { attachments } : {}),
         })
         i++ // skip the assistant exchange
@@ -261,6 +265,7 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
     no?: number
     globalMsgNum?: number
     messageEra?: string
+    modelPreference?: string
     attachments?: MediaAttachmentRef[]
   }> = []
   const liveSessions = getActiveSessions()
@@ -276,6 +281,7 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
           const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
           const globalMsgNum = ex.globalMsgNum ?? next.globalMsgNum
           const messageEra = ex.messageEra ?? next.messageEra
+          const modelPreference = resolveExchangePairModel(ex, next, session.modelPreference)
           liveMessages.push({
             query: ex.content,
             text: next.content,
@@ -285,6 +291,7 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
             source: 'live',
             ...(globalMsgNum != null ? { no: globalMsgNum, globalMsgNum } : {}),
             ...(messageEra ? { messageEra } : {}),
+            ...(modelPreference ? { modelPreference } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++

@@ -29,6 +29,9 @@ export interface Exchange {
   generation?: number
   /** Short-number namespace. Missing means the original legacy era. */
   messageEra?: string
+  /** Per-exchange model badge. Prefer this over session.modelPreference when
+   * rendering history so Cursor/Codex turns do not inherit an Opus default. */
+  modelPreference?: ModelPreference
   /** Public attachment refs may live on either half of a Q&A pair: request
    * photos on the user exchange, model-published images on the assistant
    * exchange. Bytes, filesystem paths, and capabilities never persist here. */
@@ -147,6 +150,9 @@ function loadFromDisk(): void {
     // the surrounding exchange or the rest of the recovered session.
     for (const exchange of session.exchanges) {
       validateLoadedExchangeProvenance(exchange)
+      const exchangeModel = normalizeModelPreference(exchange.modelPreference)
+      if (exchangeModel) exchange.modelPreference = exchangeModel
+      else delete exchange.modelPreference
       if ('attachments' in exchange && exchange.attachments !== undefined) {
         const refs = parseMediaAttachmentRefs(exchange.attachments)
         if (refs.length > 0) exchange.attachments = refs
@@ -406,6 +412,7 @@ export function addExchange(
   globalMsgNum?: number,
   attachments?: MediaAttachmentRef[],
   provenance?: ExchangeJobProvenance,
+  modelPreference?: ModelPreference | null,
 ): Exchange {
   let session = sessions.get(sessionId)
   if (!session) {
@@ -413,6 +420,7 @@ export function addExchange(
     sessions.set(sessionId, session)
   }
 
+  const stampedModel = normalizeModelPreference(modelPreference)
   const exchange: Exchange = {
     role,
     content,
@@ -420,6 +428,7 @@ export function addExchange(
     globalMsgNum,
     messageEra: currentMessageEra(),
     ...normalizedExchangeProvenance(provenance),
+    ...(stampedModel ? { modelPreference: stampedModel } : {}),
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
   }
   session.exchanges.push(exchange)
@@ -517,6 +526,7 @@ export function reconcileExchangeByJobIdentity(
   globalMsgNum?: number,
   attachments?: MediaAttachmentRef[],
   messageEra?: string,
+  modelPreference?: ModelPreference | null,
 ): ReconciledExchange {
   if (!validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) {
     throw new Error('conversation: invalid durable job identity')
@@ -547,6 +557,7 @@ export function reconcileExchangeByJobIdentity(
     && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(messageEra)
     ? messageEra
     : currentMessageEra()
+  const stampedModel = normalizeModelPreference(modelPreference)
   let exchange: Exchange
   const created = matchingIndexes.length === 0
   if (created) {
@@ -558,6 +569,7 @@ export function reconcileExchangeByJobIdentity(
       messageEra: projectedMessageEra,
       clientJobId: identity.clientJobId,
       generation: identity.generation,
+      ...(stampedModel ? { modelPreference: stampedModel } : {}),
       ...(validatedAttachments.length > 0 ? { attachments: validatedAttachments } : {}),
     }
     session.exchanges.push(exchange)
@@ -566,6 +578,7 @@ export function reconcileExchangeByJobIdentity(
     exchange.content = content
     exchange.globalMsgNum = globalMsgNum
     exchange.messageEra = projectedMessageEra
+    if (stampedModel) exchange.modelPreference = stampedModel
     if (validatedAttachments.length > 0) exchange.attachments = validatedAttachments
     else delete exchange.attachments
 
@@ -626,6 +639,20 @@ export async function clearSession(sessionId: string): Promise<void> {
 
 export function getSessionModel(sessionId: string): ModelPreference | null {
   return sessions.get(sessionId)?.modelPreference ?? null
+}
+
+/** Prefer per-exchange stamps; fall back to session model for pre-stamp rows. */
+export function resolveExchangePairModel(
+  user: Pick<Exchange, 'modelPreference'> | undefined,
+  assistant: Pick<Exchange, 'modelPreference'> | undefined,
+  sessionModel: ModelPreference | null | undefined,
+): ModelPreference | undefined {
+  return normalizeModelPreference(
+    assistant?.modelPreference
+      ?? user?.modelPreference
+      ?? sessionModel
+      ?? undefined,
+  )
 }
 
 export function setSessionModel(sessionId: string, model: ModelPreference | null): void {
