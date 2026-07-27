@@ -1,4 +1,4 @@
-## Unreleased
+## 6.17.0
 
 - **Speaker diarization is now a bolt-on any install can enable.** The ~26 MB
   voiceprint model stays out of the npm package, but the loader no longer looks
