@@ -78,7 +78,7 @@ export interface TrainingStatus {
 
 function getApiKey(): string {
   const key = loadCosEnvKey('FIREFLIES_API_KEY')
-  if (!key) throw new Error('FIREFLIES_API_KEY not found — set it in MU-Chief-Staff/.env')
+  if (!key) throw new Error('FIREFLIES_API_KEY not found — set it in your COS environment')
   return key
 }
 

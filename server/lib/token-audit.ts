@@ -23,11 +23,16 @@ function estimateTokens(chars: number): number {
 
 export interface TokenAuditEntry {
   source: string       // "g2-voice", "g2-prewarm", "g2-archive", "g2-query"
-  model: string        // "opus", "sonnet", "haiku"
+  model: string        // "opus", "sonnet", "haiku", "cursor-composer", ...
   inputChars: number
   outputChars: number
   durationMs: number
   caller: string       // "voice_query", "prewarm", "chat_summary", "day_summary"
+  turnId?: string
+  runId?: string
+  sessionId?: string
+  clientJobId?: string
+  usageKind?: 'provider_final' | 'estimated'
 }
 
 export function logTokenAudit(entry: TokenAuditEntry): void {
@@ -41,6 +46,11 @@ export function logTokenAudit(entry: TokenAuditEntry): void {
     est_output_tokens: estimateTokens(entry.outputChars),
     duration_ms: entry.durationMs,
     caller: entry.caller,
+    usage_kind: entry.usageKind ?? 'estimated',
+    ...(entry.turnId ? { turn_id: entry.turnId } : {}),
+    ...(entry.runId ? { run_id: entry.runId } : {}),
+    ...(entry.sessionId ? { session_id: entry.sessionId } : {}),
+    ...(entry.clientJobId ? { client_job_id: entry.clientJobId } : {}),
   }
   try {
     appendFileSync(AUDIT_FILE, JSON.stringify(record) + '\n', { encoding: 'utf8', mode: 0o600 })

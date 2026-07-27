@@ -3,7 +3,19 @@ export type ClaudeModelPreference = 'opus' | 'fable' | 'sonnet' | 'haiku'
 // Stable app-level slots. Concrete GPT model ids resolve at runtime from the
 // local Codex CLI catalog, so a shipped glasses app keeps tracking new releases.
 export type CodexModelPreference = 'codex-frontier' | 'codex-balanced'
-export type ModelPreference = ClaudeModelPreference | CodexModelPreference
+// Cursor Agent CLI slots. Concrete ids (composer-2.5 / cursor-grok-4.5-high)
+// resolve from `agent models` at runtime. Slots stay recognized in normalize
+// even when features.cursor is false so version skew fail-closes instead of
+// silently remapping to Claude.
+export type CursorModelPreference = 'cursor-grok' | 'cursor-composer'
+/** Cursor Agent CLI execution posture for glasses queries. */
+export type CursorExecutionMode = 'ask' | 'agent'
+export type ModelPreference = ClaudeModelPreference | CodexModelPreference | CursorModelPreference
+
+/** Invalid/omitted → ask (safe for old clients that don't send a mode). */
+export function normalizeCursorExecutionMode(value: unknown): CursorExecutionMode {
+  return value === 'agent' ? 'agent' : 'ask'
+}
 
 // Preserve the public server's established fast, broadly available default.
 export const DEFAULT_MODEL = 'sonnet' as const
@@ -11,6 +23,8 @@ export const CODEX_FRONTIER_MODEL: CodexModelPreference = 'codex-frontier'
 export const CODEX_BALANCED_MODEL: CodexModelPreference = 'codex-balanced'
 // Backward-compatible export for callers that predate the two-slot catalog.
 export const CODEX_HIGH_MODEL: CodexModelPreference = CODEX_FRONTIER_MODEL
+export const CURSOR_GROK_MODEL: CursorModelPreference = 'cursor-grok'
+export const CURSOR_COMPOSER_MODEL: CursorModelPreference = 'cursor-composer'
 // Existing 6.1–6.3 installs may pin the legacy codex-high slot. Frontier is its
 // migration target; Balanced remains auto-catalog even when this override is set.
 export const CODEX_MODEL_ID = process.env.COS_CODEX_MODEL?.trim() ?? ''
@@ -33,6 +47,8 @@ export const MODEL_OPTIONS: ModelPreference[] = [
   'sonnet',
   CODEX_FRONTIER_MODEL,
   CODEX_BALANCED_MODEL,
+  CURSOR_GROK_MODEL,
+  CURSOR_COMPOSER_MODEL,
 ]
 
 const MODEL_SET = new Set<ModelPreference>([
@@ -42,6 +58,8 @@ const MODEL_SET = new Set<ModelPreference>([
   'haiku',
   CODEX_FRONTIER_MODEL,
   CODEX_BALANCED_MODEL,
+  CURSOR_GROK_MODEL,
+  CURSOR_COMPOSER_MODEL,
 ])
 
 // Bare Claude tier aliases resolve to the newest model in that tier at spawn.
@@ -127,12 +145,22 @@ export function isCodexModel(model: ModelPreference): model is CodexModelPrefere
   return model === CODEX_FRONTIER_MODEL || model === CODEX_BALANCED_MODEL
 }
 
+export function isCursorModel(model: ModelPreference): model is CursorModelPreference {
+  return model === CURSOR_GROK_MODEL || model === CURSOR_COMPOSER_MODEL
+}
+
 export interface RuntimeCodexModelLabel {
   preference: CodexModelPreference
   displayName: string
 }
 
+export interface RuntimeCursorModelLabel {
+  preference: CursorModelPreference
+  displayName: string
+}
+
 const runtimeCodexLabels: Partial<Record<CodexModelPreference, string>> = {}
+const runtimeCursorLabels: Partial<Record<CursorModelPreference, string>> = {}
 
 export function setRuntimeCodexModelLabels(options: RuntimeCodexModelLabel[]): void {
   for (const option of options) {
@@ -147,6 +175,19 @@ export function resetRuntimeCodexModelLabels(): void {
   delete runtimeCodexLabels[CODEX_BALANCED_MODEL]
 }
 
+export function setRuntimeCursorModelLabels(options: RuntimeCursorModelLabel[]): void {
+  for (const option of options) {
+    if (!isCursorModel(option.preference)) continue
+    const label = typeof option.displayName === 'string' ? option.displayName.trim() : ''
+    if (label) runtimeCursorLabels[option.preference] = label
+  }
+}
+
+export function resetRuntimeCursorModelLabels(): void {
+  delete runtimeCursorLabels[CURSOR_GROK_MODEL]
+  delete runtimeCursorLabels[CURSOR_COMPOSER_MODEL]
+}
+
 export function modelLabel(model: ModelPreference): string {
   switch (model) {
     case 'fable': return 'Fable'
@@ -154,6 +195,8 @@ export function modelLabel(model: ModelPreference): string {
     case 'haiku': return 'Haiku'
     case 'codex-frontier': return runtimeCodexLabels[model] ?? 'GPT Frontier'
     case 'codex-balanced': return runtimeCodexLabels[model] ?? 'GPT Balanced'
+    case 'cursor-grok': return runtimeCursorLabels[model] ?? 'Grok 4.5 Fast'
+    case 'cursor-composer': return runtimeCursorLabels[model] ?? 'Composer 2.5 Fast'
     case 'opus':
     default:
       return 'Opus'
@@ -167,6 +210,8 @@ export function modelShortLabel(model: ModelPreference): string {
     case 'haiku': return 'Haiku'
     case 'codex-frontier': return 'GPT Max'
     case 'codex-balanced': return 'GPT Bal'
+    case 'cursor-grok': return 'Grok'
+    case 'cursor-composer': return 'Composer'
     case 'opus':
     default:
       return 'Opus'
@@ -180,6 +225,8 @@ export function modelButtonLabel(model: ModelPreference): string {
     case 'haiku': return 'HAIKU'
     case 'codex-frontier': return 'GPT MAX'
     case 'codex-balanced': return 'GPT BAL'
+    case 'cursor-grok': return 'GROK'
+    case 'cursor-composer': return 'CMP'
     case 'opus':
     default:
       return 'OPUS'
@@ -193,12 +240,13 @@ export function modelTag(model: ModelPreference): string {
     case 'haiku': return 'H'
     case 'codex-frontier': return 'GF'
     case 'codex-balanced': return 'GB'
+    case 'cursor-grok': return 'GK'
+    case 'cursor-composer': return 'C2'
     case 'opus':
     default:
       return 'O'
   }
 }
-
 export function modelBracketTag(model: ModelPreference): string {
   return ` [${modelTag(model)}]`
 }

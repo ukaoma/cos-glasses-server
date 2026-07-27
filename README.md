@@ -1,7 +1,7 @@
 # COS Glasses Server
 
 Self-hosted AI heads-up display for **Even G2 smart glasses**. Runs on your Mac,
-talks to your local **Claude Code or Codex** CLI, and pushes answers, voice
+talks to your local **Claude Code, Codex, or Cursor Agent** CLI, and pushes answers, voice
 transcription, and notes to the lens. Your data never leaves your machine, and no
 API key is pasted into the phone for chat.
 
@@ -43,6 +43,11 @@ without silently losing completed replies.
   `npm install -g @anthropic-ai/claude-code` (**never with `sudo`**), then run
   `claude` and finish the browser sign-in
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
+- _Optional:_ **Cursor Agent CLI** for Composer 2.5 Fast and Grok 4.5 Fast.
+  Ensure `agent` is on `PATH`, run `agent login`, and verify `agent models`
+  lists `composer-2.5-fast` and `cursor-grok-4.5-high-fast`. COS exposes the
+  Cursor slots only after both models resolve; it never silently substitutes
+  Claude or Codex.
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - `brew install whisper-cpp` for free local voice (the launcher can download the model)
 - _Optional:_ `brew install python@3.12 ffmpeg espeak-ng` for local Kokoro
@@ -51,12 +56,18 @@ without silently losing completed replies.
   without these optional dependencies.
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
 
-> No `ANTHROPIC_API_KEY` is needed — chat runs through your installed CLI, billed
-> to your existing Claude or Codex subscription. Pick either per query, or set a
-> default with `COS_G2_DEFAULT_MODEL` (`opus`|`fable`|`sonnet`|`codex-frontier`|`codex-balanced`).
+> No provider API key is needed for chat when using signed-in CLIs. Usage is
+> billed to the corresponding Claude, Codex, or Cursor subscription. Pick a
+> provider per query, or set a default with `COS_G2_DEFAULT_MODEL`
+> (`opus`|`fable`|`sonnet`|`codex-frontier`|`codex-balanced`|`cursor-grok`|`cursor-composer`).
 > Claude tier aliases and the two GPT slots resolve dynamically, so new model
 > releases do not require a new glasses package. GPT discovery refreshes every
 > 15 minutes and retains its last-known-good catalog through transient failures.
+> Cursor discovery also refreshes every 15 minutes and retains its last-known-good
+> catalog through transient failures.
+> Cursor **Agent** mode can edit files and run shell commands in the selected
+> workspace. Choose **Ask** mode when you want a non-editing answer; clients that
+> omit the execution mode default to Ask.
 > Existing `COS_CODEX_MODEL` / `COS_CODEX_REASONING_EFFORT` settings remain
 > supported on the migrated Frontier slot; leave them blank for auto-latest.
 > Codex runs **sandboxed read-only** by default (`COS_CODEX_SANDBOX` to adjust).
@@ -86,9 +97,10 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   `COS_DURABLE_QUERY_JOBS=1`: accepted work survives phone backgrounding,
   WebView reloads, and network handoffs, then reattaches without duplicate work
   or duplicate replies
-- Choose Opus, Fable, Sonnet, GPT Frontier, or GPT Balanced plus High, Extra
-  High, Max, or Ultracode effort; optional redacted tool activity streams only
-  to the authenticated query that requested it
+- Choose Opus, Fable, Sonnet, GPT Frontier, GPT Balanced, Composer 2.5 Fast, or
+  Grok 4.5 Fast. Cursor slots fail closed when the local CLI or concrete model
+  is unavailable; optional redacted tool activity streams only to the
+  authenticated query that requested it
 - Message History + cross-day "reference message N" — your chats are archived by day
   and every message keeps a permanent number you can recall (`/api/archive`, `/api/message/:num`)
 - Send phone photos with queued prompts, and review assistant-selected generated,
@@ -133,6 +145,8 @@ optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 `mcp__server__*` selectors shared by full and lightweight Claude paths),
 `COS_CLAUDE_MCP_CONFIG` (optional absolute config path when `.mcp.json` is not
 in the managed CLI working directory),
+`COS_CURSOR_AGENT_BIN` (optional absolute Cursor `agent` binary),
+`COS_CURSOR_PERSIST_SESSIONS=0` (disable Cursor session resume),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
@@ -190,8 +204,14 @@ BIND_HOST=0.0.0.0 npm run start:server
   Version 6.12.2+ never runs a second install from inside npm's temporary cache.
 - *Phone can't connect* — check `BIND_HOST=0.0.0.0`, the same Tailscale account on both devices, and the correct `100.x` IP + token.
 - *Safari connects but the app does not* — confirm `npx --yes @gotcos/glasses-server@latest` is 6.6.0+, then use the app's server reconnect/edit control to verify the current URL and token. Do not run a second source or `npx` server alongside it.
-- *AI queries fail* — run `claude auth status` / `codex login status`, then
-  `claude auth login` / `codex login` when the provider reports signed out.
+- *AI queries fail* — run `claude auth status`, `codex login status`, or
+  `agent status` for the selected provider, then authenticate with
+  `claude auth login`, `codex login`, or `agent login` when signed out.
+- *Composer or Grok is missing* — update to server 6.16.1+, confirm `agent` is
+  discoverable on the service `PATH`, and run `agent models`. `/api/health`
+  must report `features.cursor: true`; authenticated `/api/models` must include
+  both `cursor-composer` and `cursor-grok`. Missing models fail closed instead
+  of falling through to another provider.
 - *Voice getting billed?* — voice is local-only by default in 6.12.0+. Confirm
   `/api/health` reports `capabilities.transcription.mode: "local-only"`. Remove
   `COS_OPENAI_WHISPER_FALLBACK` (or set it to `0`) to disable an earlier opt-in.

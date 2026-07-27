@@ -9,6 +9,10 @@ import {
   listCodexRuns,
 } from '../lib/codex-run-ledger.js'
 import {
+  getCursorRunConfig,
+  listCursorRuns,
+} from '../lib/cursor-run-ledger.js'
+import {
   safeCliDebugResponse,
   safeLegacyClaudeResponse,
   safeLegacyCodexResponse,
@@ -38,13 +42,17 @@ cliDebugRouter.get('/cli/debug', (req, res) => {
   const model = optionalClaudeModel(req.query.model)
   const claudeConfig = getClaudeRunConfig()
   const codexConfig = getCodexRunConfig()
+  const cursorConfig = getCursorRunConfig()
   const claudeRuns = listClaudeRuns(limit, sessionId, model)
   const codexRuns = listCodexRuns(limit, sessionId)
+  const cursorRuns = listCursorRuns(limit, sessionId)
   res.json(safeCliDebugResponse(
     claudeConfig,
     claudeRuns[0],
     codexConfig,
     codexRuns[0],
+    cursorConfig,
+    cursorRuns[0],
   ))
 })
 

@@ -1,3 +1,22 @@
+## 6.16.1
+
+- **Cursor Agent models (Composer 2.5 / Grok 4.5).** Managed installs now ship
+  the Cursor bridge, model catalog, engine sessions, and run ledger. `/api/health`
+  advertises `features.cursor` + `cursor_models`; authenticated `/api/models`
+  merges Cursor slots with Codex. Fail-closed: unresolved Cursor never falls
+  through to Claude/Codex.
+- **Cursor-complete setup and diagnostics.** The public launcher now accepts a
+  Cursor-only installation after `agent models` proves both slots, including the
+  `~/.local/bin/agent` fallback used by launchd. Authenticated CLI diagnostics
+  include redacted Cursor run state alongside Claude and Codex.
+- **Silero VAD in the npm tarball.** `.npmignore` previously excluded
+  `server/models/`, so managed 6.16.0 ran with `silero_vad: disabled` and
+  untrimmed audio. Package now ships `server/models/silero_vad.onnx`.
+- **HQ path retained.** Speculative HQ warm + interactive beam/light enhance from
+  6.15.5/6.16.0 remain the default Render path.
+- **Public-package boundary.** The tarball contract excludes runtime data,
+  certificates, tests, operator-specific paths, and operator-specific names.
+
 ## 6.16.0
 
 - **Truthful HQ results.** An HQ request is reported as HQ only when the full

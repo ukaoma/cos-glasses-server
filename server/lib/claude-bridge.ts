@@ -303,8 +303,11 @@ export interface ModelRunMetadata {
   claudeRunId?: string
   clientJobId?: string
   generation?: number
+  turnId?: string
   codexRunId?: string
   codexThreadId?: string
+  cursorRunId?: string
+  cursorChatId?: string
   outputAttachments?: MediaAttachmentRef[]
   outputImageStats?: RunOutputImageCollectionStats
 }
@@ -312,7 +315,7 @@ export interface ModelRunMetadata {
 /** Public-safe provider launch metadata for durable job coordination. It
  * deliberately exposes no ChildProcess object, kill handle, paths, or env. */
 export interface ProviderProcessMetadata {
-  provider: 'claude' | 'codex'
+  provider: 'claude' | 'codex' | 'cursor'
   runId: string
   pid?: number
   clientJobId?: string
@@ -365,6 +368,16 @@ export interface CallOptions {
   effort?: EffortPreference
   clientJobId?: string
   generation?: number
+  /** Alias used by Cursor/durable-job callers; preferred over `generation`. */
+  jobGeneration?: number
+  turnId?: string
+  surface?: 'query' | 'openai_compat' | 'unknown'
+  messageEra?: string
+  globalMsgNum?: number
+  /** Optional prompt block prepended for handoff-style context. */
+  handoffContext?: { promptBlock?: string }
+  /** Cursor ask vs full agent. Omitted → ask. */
+  cursorExecutionMode?: import('../../shared/model-preference.js').CursorExecutionMode
   /** Durable coordinator already owns the per-session provider lease. */
   sessionLockHeld?: boolean
 }

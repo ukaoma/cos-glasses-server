@@ -1,7 +1,7 @@
 {
   "name": "@gotcos/glasses-server",
-  "version": "6.16.0",
-  "description": "COS Glasses — self-hosted AI heads-up-display server for Even G2 smart glasses, powered by your local Claude Code or Codex CLI",
+  "version": "6.16.1",
+  "description": "COS Glasses — self-hosted AI heads-up-display server for Even G2 smart glasses, powered by Claude Code, Codex, or Cursor Agent CLI",
   "type": "module",
   "bin": {
     "glasses-server": "bin/cli.cjs",
@@ -21,13 +21,18 @@
     "ai",
     "cos",
     "heads-up-display",
-    "whisper"
+    "whisper",
+    "cursor"
   ],
   "files": [
     "bin/cli.cjs",
     "bin/managed-server.cjs",
     "managed-runtime-contract.json",
     "server",
+    "!server/data/**",
+    "!server/certs/**",
+    "!server/models/**",
+    "server/models/silero_vad.onnx",
     "shared",
     "!server/**/*.test.ts",
     "!shared/**/*.test.ts",

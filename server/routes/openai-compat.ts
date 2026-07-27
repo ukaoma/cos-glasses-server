@@ -11,7 +11,9 @@ import {
   getCodexModelCatalog,
   resolveCodexPreferenceForModelId,
 } from '../lib/codex-model-catalog.js'
+import { resolveCursorPreferenceForModelId } from '../lib/cursor-model-catalog.js'
 import { tryInstantResponse } from '../lib/response-cache.js'
+
 import crypto from 'node:crypto'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import {
@@ -80,14 +82,31 @@ function validateAuth(req: any, res: any): boolean {
   return true
 }
 
+/**
+ * Pick the model id an OpenAI-compatible request asked for. A `?model=` on the
+ * completion URL wins over the request body, so an Even "Add Agent" endpoint
+ * can pin a slot even though the client hardcodes a generic body model.
+ */
+export function selectOpenAICompatibleModel(
+  bodyModel?: string,
+  urlModel?: string,
+): string | undefined {
+  const fromUrl = urlModel?.trim()
+  if (fromUrl) return fromUrl
+  const fromBody = bodyModel?.trim()
+  return fromBody || undefined
+}
+
 // Resolve model from OpenAI-compatible ids, stable app slots, or concrete ids
-// currently advertised by the live Codex catalog.
-function resolveModel(model?: string, _query?: string): ModelPreference {
+// currently advertised by the live Codex / Cursor catalogs.
+export function resolveModel(model?: string, _query?: string): ModelPreference {
   const normalized = normalizeModelPreference(model)
   if (normalized) return normalized
   if (model) {
     const catalogPreference = resolveCodexPreferenceForModelId(model)
     if (catalogPreference) return catalogPreference
+    const cursorPreference = resolveCursorPreferenceForModelId(model)
+    if (cursorPreference) return cursorPreference
   }
   if (model === 'cos-opus') return 'opus'
   if (model === 'cos-fable') return 'fable'
@@ -105,8 +124,9 @@ const MODEL_NAMES: Record<ModelPreference, string> = {
   haiku: 'cos-haiku',
   'codex-frontier': 'cos-gpt-frontier',
   'codex-balanced': 'cos-gpt-balanced',
+  'cursor-grok': 'cursor-grok',
+  'cursor-composer': 'cursor-composer',
 }
-
 // Extract the user's latest message from the OpenAI messages array
 function extractUserQuery(messages: Array<{ role: string; content: string }>): string {
   // Find the last user message
@@ -162,7 +182,11 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
   console.log(`[g2] Request: stream=${!!stream}, query="${query.slice(0, 50)}"`)
 
   const requestReceivedAt = Date.now()
-  const resolvedModel = resolveModel(model, query)
+  const selectedModel = selectOpenAICompatibleModel(
+    model,
+    typeof req.query.model === 'string' ? req.query.model : undefined,
+  )
+  const resolvedModel = resolveModel(selectedModel, query)
   const completionId = `chatcmpl-${crypto.randomUUID().slice(0, 12)}`
   const timestamp = Math.floor(Date.now() / 1000)
   const responseModel = MODEL_NAMES[resolvedModel]

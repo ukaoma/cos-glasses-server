@@ -10,6 +10,7 @@ import { QueryJobCoordinator, type QueryJobRunner } from './query-job-coordinato
 import { QueryJobStore } from './query-job-store.js'
 import {
   isCodexModel,
+  isCursorModel,
   normalizeEffortPreference,
   normalizeModelPreference,
   type ModelPreference,
@@ -48,7 +49,8 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
   }
 }
 
-function providerFor(model: ModelPreference): 'claude' | 'codex' {
+function providerFor(model: ModelPreference): 'claude' | 'codex' | 'cursor' {
+  if (isCursorModel(model)) return 'cursor'
   return isCodexModel(model) ? 'codex' : 'claude'
 }
 
@@ -122,6 +124,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           claudeRunId: metadata?.claudeRunId,
           codexRunId: metadata?.codexRunId,
           codexThreadId: metadata?.codexThreadId,
+          cursorRunId: metadata?.cursorRunId,
         } as const
         await callbacks.onStart({ sessionId, ...linkage })
         emitDisplay({ type: 'start', data: {
@@ -142,7 +145,9 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
         ...(activeModel ? { resolvedModel: activeModel } : {}),
         ...(metadata.provider === 'claude'
           ? { claudeRunId: metadata.runId }
-          : { codexRunId: metadata.runId }),
+          : metadata.provider === 'cursor'
+            ? { cursorRunId: metadata.runId }
+            : { codexRunId: metadata.runId }),
       }),
       onChunk: text => { callbacks.onChunk(text) },
       onToolStatus: toolName => {
@@ -175,6 +180,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           claudeRunId: metadata?.claudeRunId,
           codexRunId: metadata?.codexRunId,
           codexThreadId: metadata?.codexThreadId,
+          cursorRunId: metadata?.cursorRunId,
         } as const
         // Publish compatibility completion only after the durable terminal is
         // fsynced. Display subscribers can disappear without owning this job.

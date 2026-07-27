@@ -52,7 +52,16 @@ describe('public durable-query capability health', () => {
     expect(body.features).toMatchObject({
       durableQueryJobs: true,
       durableQueryJobsProtocol: 1,
+      cursor: expect.any(Boolean),
     })
+    expect(body.cursor_models).toMatchObject({
+      source: expect.any(String),
+      options: [
+        expect.objectContaining({ preference: 'cursor-grok' }),
+        expect.objectContaining({ preference: 'cursor-composer' }),
+      ],
+    })
+    expect(body.cursor_models).not.toHaveProperty('agentBinary')
     expect(body.durable_query_jobs).toMatchObject({
       configured: true,
       enabled: true,
@@ -87,7 +96,7 @@ describe('public durable-query capability health', () => {
     })
     expect(body.capabilities?.cliDebug).toEqual({
       schemaVersion: 1,
-      providers: { claude: true, codex: true },
+      providers: { claude: true, codex: true, cursor: true },
       metadataOnly: true,
     })
     expect(typeof body.cli_session_available).toBe('boolean')
@@ -107,6 +116,11 @@ describe('public durable-query capability health', () => {
     const response = await fetch(`${base}/api/models`)
     expect(response.status).toBe(200)
     const body = await response.json() as any
+    expect(typeof body.cursorReady).toBe('boolean')
+    expect(body.cursor?.options).toEqual([
+      expect.objectContaining({ preference: 'cursor-grok' }),
+      expect.objectContaining({ preference: 'cursor-composer' }),
+    ])
     expect(body.capabilities?.durableQueryJobs).toEqual({
       enabled: true,
       protocolVersion: 1,
@@ -141,7 +155,7 @@ describe('public durable-query capability health', () => {
     })
     expect(body.capabilities?.cliDebug).toEqual({
       schemaVersion: 1,
-      providers: { claude: true, codex: true },
+      providers: { claude: true, codex: true, cursor: true },
       metadataOnly: true,
     })
   }, 20_000)

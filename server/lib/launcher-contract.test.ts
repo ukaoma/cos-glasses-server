@@ -8,11 +8,21 @@ const root = resolve(import.meta.dirname, '../..')
 const launcher = readFileSync(resolve(root, 'bin/cli.cjs'), 'utf8')
 const managedLauncher = readFileSync(resolve(root, 'bin/managed-server.cjs'), 'utf8')
 const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
+  version?: string
   files?: string[]
   dependencies?: Record<string, string>
 }
+const packageLock = JSON.parse(readFileSync(resolve(root, 'package-lock.json'), 'utf8')) as {
+  version?: string
+  packages?: Record<string, { version?: string }>
+}
 
 describe('public npx launcher install contract', () => {
+  it('keeps package and lockfile release versions aligned', () => {
+    expect(packageLock.version).toBe(pkg.version)
+    expect(packageLock.packages?.['']?.version).toBe(pkg.version)
+  })
+
   it('resolves the dependency npm already installed instead of mutating the npx cache', () => {
     expect(pkg.dependencies?.tsx).toBeTruthy()
     expect(launcher).toContain("require.resolve('tsx/esm', { paths: [PKG_ROOT] })")
@@ -34,8 +44,42 @@ describe('public npx launcher install contract', () => {
   it('checks provider authentication before claiming first-query readiness', () => {
     expect(launcher).toContain("commandResult('claude auth status --json')")
     expect(launcher).toContain("commandResult('codex login status')")
+    expect(launcher).toContain("execFileSync(binary, ['models']")
     expect(launcher).toContain('No signed-in agent CLI is ready')
     expect(launcher).toContain('claude auth login')
+    expect(launcher).toContain('agent login')
+  })
+
+  it('accepts a Cursor-only install only when both public model slots resolve', () => {
+    const temp = mkdtempSync(resolve(tmpdir(), 'cos-launcher-cursor-'))
+    const bin = resolve(temp, 'bin')
+    const home = resolve(temp, 'home')
+    mkdirSync(bin)
+    mkdirSync(home)
+    const agent = resolve(bin, 'agent')
+    writeFileSync(agent, `#!/bin/sh
+if [ "$1" = "about" ]; then echo "Cursor Agent CLI Version 2026.07"; exit 0; fi
+if [ "$1" = "models" ]; then
+  echo "composer-2.5-fast - Composer 2.5 Fast"
+  echo "cursor-grok-4.5-high-fast - Grok 4.5 Fast"
+  exit 0
+fi
+exit 1
+`)
+    chmodSync(agent, 0o755)
+
+    try {
+      const result = spawnSync(process.execPath, [resolve(root, 'bin/cli.cjs'), '--prepare-only'], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+      })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Cursor Agent Cursor Agent CLI Version 2026.07')
+      expect(result.stdout).toContain('(Composer 2.5 / Grok 4.5)')
+      expect(result.stdout).toContain('Non-mutating readiness check complete')
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
   })
 
   it('fails before startup when the only installed provider is signed out', () => {
@@ -164,5 +208,40 @@ exit 1
     expect(managedLauncher).toContain("require('tsx/cjs')")
     expect(managedLauncher).toContain("require(resolve(PKG_ROOT, 'server/index.ts'))")
     expect(managedLauncher).not.toMatch(/spawn\s*\(|fork\s*\(|execFile\s*\(/)
+  })
+
+  it('packs Cursor models and Silero while excluding private runtime state', () => {
+    const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+      cwd: root,
+      encoding: 'utf8',
+    })
+    expect(packed.status, packed.stderr).toBe(0)
+    const report = JSON.parse(packed.stdout) as Array<{ files?: Array<{ path?: string }> }>
+    const paths = new Set((report[0]?.files ?? []).map(file => file.path))
+
+    for (const required of [
+      'server/lib/cursor-bridge.ts',
+      'server/lib/cursor-engine-sessions.ts',
+      'server/lib/cursor-model-catalog.ts',
+      'server/lib/cursor-run-ledger.ts',
+      'server/models/silero_vad.onnx',
+    ]) {
+      expect(paths.has(required), `missing from npm tarball: ${required}`).toBe(true)
+    }
+    expect([...paths].some(path => path?.includes('/data/'))).toBe(false)
+    expect([...paths].some(path => path?.includes('/certs/'))).toBe(false)
+    expect([...paths].some(path => path?.endsWith('.test.ts'))).toBe(false)
+  })
+
+  it('keeps operator-specific paths and identities out of the public Cursor bridge', () => {
+    const publicCursorSource = [
+      'server/lib/cursor-bridge.ts',
+      'server/lib/cursor-engine-sessions.ts',
+      'server/lib/cursor-model-catalog.ts',
+      'server/lib/cursor-run-ledger.ts',
+    ].map(path => readFileSync(resolve(root, path), 'utf8')).join('\n')
+
+    expect(publicCursorSource).not.toMatch(/\/Users\//)
+    expect(publicCursorSource).not.toMatch(/\b(?:Miles|Ukaoma|MU-Chief-Staff)\b/i)
   })
 })

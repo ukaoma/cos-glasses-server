@@ -292,6 +292,7 @@ export class QueryJobCoordinator {
             claudeRunId: snapshot.claudeRunId,
             codexRunId: snapshot.codexRunId,
             codexThreadId: snapshot.codexThreadId,
+            cursorRunId: snapshot.cursorRunId,
           })
           // Generation is already durable, but bridge post-processing missed
           // its deadline. Abort that tail after committing the answer so the

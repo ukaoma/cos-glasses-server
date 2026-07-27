@@ -1,7 +1,9 @@
 # Runtime state — never ship in the tarball
-server/data/
-server/certs/
-server/models/
+server/data/**
+server/certs/**
+# Ship Silero VAD weights (required for trimSilence). Keep other large models out.
+server/models/*
+!server/models/silero_vad.onnx
 
 # Dev-only
 tsconfig.json

@@ -1,5 +1,6 @@
 import { callClaudeStreaming, type CallOptions, type StreamCallbacks } from './claude-bridge.js'
 import { callCodexStreaming } from './codex-bridge.js'
+import { callCursorStreaming } from './cursor-bridge.js'
 import {
   getOrCreateSession,
   getSessionModel,
@@ -7,7 +8,18 @@ import {
   type ModelPreference,
   type PromptReference,
 } from './conversation.js'
-import { DEFAULT_MODEL, isCodexModel, isClaudeModel, normalizeModelPreference } from '../../shared/model-preference.js'
+import {
+  DEFAULT_MODEL,
+  isCodexModel,
+  isClaudeModel,
+  isCursorModel,
+  normalizeModelPreference,
+} from '../../shared/model-preference.js'
+import {
+  getCursorModelCatalog,
+  isCursorProviderReady,
+  resolveCursorModelOption,
+} from './cursor-model-catalog.js'
 import type { ModelImageInput } from './model-image-input.js'
 
 // Bridges return as soon as their subprocess is spawned, while completion is
@@ -87,6 +99,19 @@ export async function callModelStreaming(
   }
 
   try {
+    // Cursor slots fail closed — never fall through to Claude/Codex.
+    if (isCursorModel(resolvedModel)) {
+      await getCursorModelCatalog()
+      const option = resolveCursorModelOption(resolvedModel)
+      if (!isCursorProviderReady() || !option?.id) {
+        const message = !option?.id
+          ? `cursor-bridge: Cursor model slot ${resolvedModel} is not resolved. Check agent models / login.`
+          : 'cursor-bridge: Cursor CLI unavailable. Install agent and run agent login.'
+        await lockedCallbacks.onError(message)
+        return sid
+      }
+      return await callCursorStreaming(query, sid, lockedCallbacks, resolvedModel, images, reference, globalMsgNum, options)
+    }
     if (isCodexModel(resolvedModel)) {
       return await callCodexStreaming(query, sid, lockedCallbacks, resolvedModel, images, reference, globalMsgNum, options)
     }

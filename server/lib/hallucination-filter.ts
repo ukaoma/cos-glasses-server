@@ -343,7 +343,7 @@ function getVocabEchoMatcher(): RegExp {
   // Only UNAMBIGUOUS terms trigger an echo drop: multi-word phrases ("POS Nation",
   // "IT Retail", "Jeremy Sokolic") and brand-shaped single tokens with an internal
   // capital or digit ("POSNation", "CaratIQ", "Jewel360"). Plain single-word tokens
-  // ("Austin", "Miles", "Ukaoma") are common words / ambiguous and are EXCLUDED —
+  // Common words and ambiguous proper nouns are deliberately excluded —
   // they carry too much false-drop risk for an always-on list rule.
   const terms = [...raw].filter(t => {
     if (t.length < 2) return false

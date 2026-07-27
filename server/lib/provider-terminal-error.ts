@@ -1,4 +1,4 @@
-export type CliProvider = 'claude' | 'codex'
+export type CliProvider = 'claude' | 'codex' | 'cursor'
 
 const AUTH_CODE = /^(?:401|403|unauthori[sz]ed|forbidden|authentication_error|authorization_error|invalid_api_key|not_authenticated)$/i
 // Match whole, terminal-looking provider failures only. Natural assistant

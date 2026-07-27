@@ -16,7 +16,7 @@ const {
   renameSync,
   chmodSync,
 } = require('fs')
-const { join, resolve } = require('path')
+const { delimiter, join, resolve } = require('path')
 const { homedir } = require('os')
 
 // bin/cli.cjs -> package root is one level up. The server lives at <root>/server.
@@ -45,7 +45,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('')
   console.log('  Requirements:')
   console.log('    - Node.js 20.11+')
-  console.log('    - Claude Code CLI (not Claude Desktop) or Codex CLI')
+  console.log('    - Claude Code CLI, Codex CLI, or Cursor Agent CLI')
   console.log('    - Even G2 smart glasses + the COS Glasses app (Even Hub)')
   console.log('    - Optional local Kokoro voice: Apple silicon + Python 3.11 or 3.12')
   console.log('')
@@ -71,7 +71,7 @@ if (nodeMajor < 20 || (nodeMajor === 20 && nodeMinor < 11)) {
 }
 console.log(green('  ✓') + ` Node.js ${process.versions.node}`)
 
-// Step 2: agent CLI detection — at least one of Claude Code / Codex is required
+// Step 2: agent CLI detection — at least one supported, signed-in CLI is required.
 function getCliVersion(command, versionArg = '--version') {
   try {
     return execSync(`${command} ${versionArg} 2>&1`, { shell: '/bin/sh', stdio: 'pipe', timeout: 5000 }).toString().trim()
@@ -128,10 +128,57 @@ function codexAuthState() {
   if (/not logged in|logged out|sign[ -]?in required/i.test(result.output)) return 'signed-out'
   return 'unknown'
 }
+function resolveCursorAgentBinary() {
+  const configured = process.env.COS_CURSOR_AGENT_BIN?.trim()
+  if (configured && existsSync(configured)) return configured
+  for (const entry of (process.env.PATH || '').split(delimiter).filter(Boolean)) {
+    const candidate = resolve(entry, 'agent')
+    if (existsSync(candidate)) return candidate
+  }
+  const homeLocal = resolve(homedir(), '.local', 'bin', 'agent')
+  return existsSync(homeLocal) ? homeLocal : null
+}
+function cursorCliState() {
+  const binary = resolveCursorAgentBinary()
+  if (!binary) return { binary: null, version: null, auth: null }
+
+  let version = 'available'
+  try {
+    const about = execFileSync(binary, ['about'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 5000,
+    }).trim()
+    const versionLine = about.split('\n').map((line) => line.trim()).find((line) => /CLI Version|cursor|agent/i.test(line))
+    if (versionLine) version = versionLine
+  } catch { /* `agent models` below is the readiness proof */ }
+
+  try {
+    const models = execFileSync(binary, ['models'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 7000,
+    })
+    const required = ['composer-2.5-fast', 'cursor-grok-4.5-high-fast']
+    return {
+      binary,
+      version,
+      auth: required.every((model) => models.includes(model)) ? 'ready' : 'models-unresolved',
+    }
+  } catch (err) {
+    const output = `${err.stdout?.toString() || ''}\n${err.stderr?.toString() || ''}`
+    return {
+      binary,
+      version,
+      auth: /not logged in|logged out|sign[ -]?in required|authenticate/i.test(output) ? 'signed-out' : 'unknown',
+    }
+  }
+}
 const claudeVersion = getCliVersion('claude')
 const codexVersion = getCliVersion('codex')
 const claudeAuth = claudeVersion ? claudeAuthState() : null
 const codexAuth = codexVersion ? codexAuthState() : null
+const cursor = cursorCliState()
 if (claudeVersion) {
   if (claudeAuth === 'signed-out') {
     console.log(yellow('  ⚠') + ` Claude Code ${claudeVersion} installed — sign-in required`)
@@ -161,14 +208,33 @@ if (codexVersion) {
 } else {
   console.log(yellow('  ⚠') + ' Codex CLI not found ' + dim('— GPT Frontier/Balanced unavailable'))
 }
-const hasUsableAgent = (claudeVersion && claudeAuth !== 'signed-out') || (codexVersion && codexAuth !== 'signed-out')
+if (cursor.binary) {
+  if (cursor.auth === 'ready') {
+    console.log(green('  ✓') + ` Cursor Agent ${cursor.version} ` + dim('(Composer 2.5 / Grok 4.5)'))
+  } else if (cursor.auth === 'signed-out') {
+    console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — sign-in required`)
+    console.log('    Run: ' + bold('agent login'))
+  } else if (cursor.auth === 'models-unresolved') {
+    console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — required models unresolved`)
+    console.log('    Verify: ' + bold('agent models') + ' includes Composer 2.5 Fast and Grok 4.5 Fast')
+  } else {
+    console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — readiness unavailable`)
+    console.log('    Verify: ' + bold('agent models'))
+  }
+} else {
+  console.log(yellow('  ⚠') + ' Cursor Agent CLI not found ' + dim('— Composer/Grok unavailable'))
+}
+const hasUsableAgent = (claudeVersion && claudeAuth !== 'signed-out')
+  || (codexVersion && codexAuth !== 'signed-out')
+  || cursor.auth === 'ready'
 if (!hasUsableAgent) {
   console.log('')
   console.log(red('  ✗ No signed-in agent CLI is ready'))
-  console.log('    Claude Desktop alone is not enough; COS needs a terminal CLI.')
+  console.log('    Claude Desktop alone is not enough; COS needs a signed-in terminal CLI.')
   console.log('    Install Claude Code (no sudo): ' + bold('npm install -g @anthropic-ai/claude-code'))
   console.log('    Then run:                       ' + bold('claude auth login'))
   console.log('    or Codex CLI:        ' + bold('https://developers.openai.com/codex/') + ' then ' + bold('codex login'))
+  console.log('    or Cursor Agent CLI: run ' + bold('agent login') + ', then verify ' + bold('agent models'))
   console.log('    Setup help:          ' + bold('https://www.gotcos.com/wizard/'))
   console.log('')
   process.exit(1)

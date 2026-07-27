@@ -19,6 +19,12 @@ import {
   getCodexModelCatalog,
   getCodexModelCatalogSnapshot,
 } from '../lib/codex-model-catalog.js'
+import {
+  getCursorModelCatalog,
+  getCursorModelCatalogSnapshot,
+  isCursorProviderReady,
+  resolveAgentBinary,
+} from '../lib/cursor-model-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
 import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
@@ -70,6 +76,7 @@ healthRouter.get('/health', async (_req, res) => {
     python: 'unknown',
     claude: 'unknown',
     codex: 'unknown',
+    cursor: 'unknown',
     uptime_seconds: Math.floor((Date.now() - serverMetrics.startedAt) / 1000),
     request_count: serverMetrics.requestCount,
   }
@@ -77,6 +84,7 @@ healthRouter.get('/health', async (_req, res) => {
   // Feature detection flags
   let claudeAvailable = false
   let codexAvailable = false
+  let cursorAvailable = false
 
   // Check Python venv (COS mode only)
   if (PYTHON_BIN) {
@@ -126,6 +134,36 @@ healthRouter.get('/health', async (_req, res) => {
     checks.codex = 'error'
   }
 
+  // Cursor Agent CLI — probe via `agent about` only (≤5s). Never use
+  // `agent status` (can hang on login UX while logged out).
+  try {
+    const agentBinary = resolveAgentBinary()
+    if (!agentBinary) {
+      checks.cursor = 'error'
+    } else {
+      await new Promise<void>((resolveCheck, reject) => {
+        execFile(agentBinary, ['about'], { timeout: 5000 }, (err, stdout, stderr) => {
+          if (err) return reject(err)
+          const combined = `${stdout}\n${stderr}`.trim()
+          const versionLine = combined.split('\n').map(line => line.trim()).find(line =>
+            /CLI Version|cursor|agent/i.test(line),
+          )
+          checks.cursor = versionLine ?? combined.split('\n')[0] ?? 'available'
+          resolveCheck()
+        })
+      })
+      await getCursorModelCatalog()
+      cursorAvailable = isCursorProviderReady()
+      if (!cursorAvailable) {
+        checks.cursor = typeof checks.cursor === 'string' && checks.cursor !== 'error'
+          ? `${checks.cursor} (models unresolved)`
+          : 'error'
+      }
+    }
+  } catch {
+    checks.cursor = 'error'
+  }
+
   // Check session cache freshness (COS mode only)
   if (COS_SCRIPTS_DIR) {
     try {
@@ -161,6 +199,7 @@ healthRouter.get('/health', async (_req, res) => {
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
+    cursor: cursorAvailable,
     voice: keyStatus.hasKey || tts_local.ready,
     cos_pipeline: COS_MODE,
     whisper: isWhisperLocalAvailable(),
@@ -204,6 +243,10 @@ healthRouter.get('/health', async (_req, res) => {
   }
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
   const codex_models = getCodexModelCatalogSnapshot()
+  // Unauthenticated /api/health publishes Cursor slot capability only; concrete
+  // agent binary paths stay on the authenticated /api/models surface.
+  const cursorSnapshot = getCursorModelCatalogSnapshot()
+  const { agentBinary: _cursorAgentBinary, ...cursor_models } = cursorSnapshot
   res.json({
     ...checks,
     server_version: managedServerVersion(),
@@ -217,6 +260,7 @@ healthRouter.get('/health', async (_req, res) => {
     openai_whisper_budget,
     tts_local,
     codex_models,
+    cursor_models,
     capabilities: {
       transcription: { ...transcription, hq: transcriptionHq },
       recovery,
@@ -240,16 +284,25 @@ healthRouter.get('/health', async (_req, res) => {
   })
 })
 
-// Stable app slots backed by Codex's live model/list catalog. This route is
-// authenticated by the global /api middleware; ?refresh=1 forces discovery.
+// Stable app slots backed by Codex + Cursor live catalogs. Authenticated by
+// global /api middleware; ?refresh=1 forces discovery.
 healthRouter.get('/models', async (req, res) => {
-  const catalog = await getCodexModelCatalog(req.query.refresh === '1')
+  const forceRefresh = req.query.refresh === '1'
+  const catalog = await getCodexModelCatalog(forceRefresh)
+  const cursorCatalog = await getCursorModelCatalog(forceRefresh)
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
   const transcriptionHq = getHighQualityTranscriptionCapability()
+  const cursorOptions = cursorCatalog.options.filter(option => !!option.id)
   res.json({
     ...catalog,
+    options: [
+      ...(catalog.options ?? []),
+      ...cursorOptions,
+    ],
+    cursor: cursorCatalog,
+    cursorReady: isCursorProviderReady(),
     serverInstanceId: getServerInstanceId(),
     capabilities: {
       durableQueryJobs: {
@@ -263,7 +316,6 @@ healthRouter.get('/models', async (req, res) => {
     },
   })
 })
-
 // GET /api/cli-session — returns current CLI session ID for cross-device resume
 healthRouter.get('/cli-session', (req, res) => {
   const cosSessionId = req.query.sid as string | undefined

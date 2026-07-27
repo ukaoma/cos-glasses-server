@@ -361,6 +361,7 @@ export class QueryJobStore {
             claudeRunId: snapshot.claudeRunId,
             codexRunId: snapshot.codexRunId,
             codexThreadId: snapshot.codexThreadId,
+            cursorRunId: snapshot.cursorRunId,
           })
         } else {
           const result = await this.interrupt(snapshot.jobId, 'server_restarted')
@@ -548,9 +549,11 @@ export class QueryJobStore {
   }
 
   private applyLinkage(snapshot: QueryJobSnapshot, raw: Record<string, unknown>): void {
-    const provider = raw.provider === 'claude' || raw.provider === 'codex' ? raw.provider : undefined
+    const provider = raw.provider === 'claude' || raw.provider === 'codex' || raw.provider === 'cursor'
+      ? raw.provider
+      : undefined
     if (provider) snapshot.provider = provider
-    const fields = ['resolvedModel', 'cliSessionId', 'claudeRunId', 'codexRunId', 'codexThreadId'] as const
+    const fields = ['resolvedModel', 'cliSessionId', 'claudeRunId', 'codexRunId', 'codexThreadId', 'cursorRunId'] as const
     for (const field of fields) {
       const value = safeOptional(raw[field])
       if (value) snapshot[field] = value
@@ -795,6 +798,7 @@ export class QueryJobStore {
         claudeRunId: current.claudeRunId,
         codexRunId: current.codexRunId,
         codexThreadId: current.codexThreadId,
+        cursorRunId: current.cursorRunId,
       })
     }
     const normalized = normalizeQueryJobError(error)
@@ -831,6 +835,7 @@ export class QueryJobStore {
         claudeRunId: current.claudeRunId,
         codexRunId: current.codexRunId,
         codexThreadId: current.codexThreadId,
+        cursorRunId: current.cursorRunId,
       })
     }
     const error: QueryJobError = {
@@ -880,12 +885,15 @@ export class QueryJobStore {
 
   private safeLinkage(linkage: QueryJobProviderLinkage): QueryJobProviderLinkage {
     return {
-      ...(linkage.provider === 'claude' || linkage.provider === 'codex' ? { provider: linkage.provider } : {}),
+      ...(linkage.provider === 'claude' || linkage.provider === 'codex' || linkage.provider === 'cursor'
+        ? { provider: linkage.provider }
+        : {}),
       ...(safeOptional(linkage.resolvedModel, 64) ? { resolvedModel: safeOptional(linkage.resolvedModel, 64) } : {}),
       ...(safeOptional(linkage.cliSessionId) ? { cliSessionId: safeOptional(linkage.cliSessionId) } : {}),
       ...(safeOptional(linkage.claudeRunId) ? { claudeRunId: safeOptional(linkage.claudeRunId) } : {}),
       ...(safeOptional(linkage.codexRunId) ? { codexRunId: safeOptional(linkage.codexRunId) } : {}),
       ...(safeOptional(linkage.codexThreadId) ? { codexThreadId: safeOptional(linkage.codexThreadId) } : {}),
+      ...(safeOptional(linkage.cursorRunId) ? { cursorRunId: safeOptional(linkage.cursorRunId) } : {}),
     }
   }
 

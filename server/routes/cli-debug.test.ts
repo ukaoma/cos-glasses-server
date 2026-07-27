@@ -49,8 +49,10 @@ beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), 'cos-public-cli-debug-'))
   process.env.COS_CLAUDE_RUN_LEDGER_FILE = join(root, 'claude-runs.jsonl')
   process.env.COS_CODEX_RUN_LEDGER_FILE = join(root, 'codex-runs.jsonl')
+  process.env.COS_CURSOR_RUN_LEDGER_FILE = join(root, 'cursor-runs.jsonl')
   process.env.COS_CLAUDE_RUN_CONTENT_PREVIEWS = '1'
   process.env.COS_CODEX_RUN_CONTENT_PREVIEWS = '1'
+  process.env.COS_CURSOR_RUN_CONTENT_PREVIEWS = '1'
 
   const claude = await import('../lib/claude-run-ledger.js')
   const claudeRun = claude.startClaudeRun({
@@ -92,18 +94,40 @@ beforeAll(async () => {
     exitCode: 0,
   })
 
+  const cursor = await import('../lib/cursor-run-ledger.js')
+  const cursorRun = cursor.startCursorRun({
+    cosSessionId: 'private-cursor-session',
+    cursorChatId: 'private-cursor-chat',
+    model: 'cursor-composer',
+    cliModel: 'composer-2.5-fast',
+    cwd: join(root, 'private-workspace'),
+    resumed: true,
+    query: 'private Cursor prompt with a secret',
+  })
+  cursor.finishCursorRun(cursorRun.runId, {
+    status: 'completed',
+    startedAtMs: Date.now() - 600,
+    output: 'private Cursor output with a secret',
+    exitCode: 0,
+  })
+
   privateValues = [
     root,
     claudeRun.runId,
     codexRun.runId,
+    cursorRun.runId,
     'private-claude-session',
     'private-claude-cli-session',
     'private-codex-session',
     'private-codex-thread',
+    'private-cursor-session',
+    'private-cursor-chat',
     'private Claude prompt with a secret',
     'Unauthorized private Claude failure detail',
     'private Codex prompt with a secret',
     'private Codex output with a secret',
+    'private Cursor prompt with a secret',
+    'private Cursor output with a secret',
   ]
 
   const { cliDebugRouter } = await import('./cli-debug.js')
@@ -126,8 +150,10 @@ afterAll(async () => {
   await new Promise<void>(resolve => server.close(() => resolve()))
   delete process.env.COS_CLAUDE_RUN_LEDGER_FILE
   delete process.env.COS_CODEX_RUN_LEDGER_FILE
+  delete process.env.COS_CURSOR_RUN_LEDGER_FILE
   delete process.env.COS_CLAUDE_RUN_CONTENT_PREVIEWS
   delete process.env.COS_CODEX_RUN_CONTENT_PREVIEWS
+  delete process.env.COS_CURSOR_RUN_CONTENT_PREVIEWS
   rmSync(root, { recursive: true, force: true })
   vi.resetModules()
 })
@@ -185,6 +211,17 @@ describe('public CLI debug contract', () => {
             resumed: true,
           }),
         },
+        cursor: {
+          supported: true,
+          persistenceEnabled: true,
+          workspaceConfigured: true,
+          latestRun: expect.objectContaining({
+            status: 'completed',
+            model: 'cursor-composer',
+            concreteModel: 'composer-2.5-fast',
+            resumed: true,
+          }),
+        },
       },
     })
     expectNoForbiddenKeys(body)
@@ -192,7 +229,7 @@ describe('public CLI debug contract', () => {
   })
 
   it('collapses an unrecognized ledger error code to a provider-safe category', async () => {
-    const { safeClaudeLatestRun, safeCodexLatestRun } = await import('../lib/cli-debug-view.js')
+    const { safeClaudeLatestRun, safeCodexLatestRun, safeCursorLatestRun } = await import('../lib/cli-debug-view.js')
     expect(safeClaudeLatestRun({
       status: 'failed',
       model: 'opus',
@@ -203,6 +240,11 @@ describe('public CLI debug contract', () => {
       model: 'codex-frontier',
       errorCode: 'private-ledger-value',
     } as any)?.errorCode).toBe('codex.error')
+    expect(safeCursorLatestRun({
+      status: 'failed',
+      model: 'cursor-composer',
+      errorCode: 'private-ledger-value',
+    } as any)?.errorCode).toBe('cursor.error')
   })
 
   it.each(['/api/cli/runs?limit=50', '/api/codex/runs?limit=50'])(
@@ -226,7 +268,7 @@ describe('public CLI debug contract', () => {
   )
 
   it('normalizes poisoned values even when they occupy allowlisted fields', async () => {
-    const { safeClaudeLatestRun, safeCodexLatestRun } = await import('../lib/cli-debug-view.js')
+    const { safeClaudeLatestRun, safeCodexLatestRun, safeCursorLatestRun } = await import('../lib/cli-debug-view.js')
     const poison = `${root}/secret-command --token private-token`
     const invalidTimestamp = 'not-a-date-private-value'
     const claude = safeClaudeLatestRun({
@@ -249,6 +291,15 @@ describe('public CLI debug contract', () => {
       updatedAt: invalidTimestamp,
       errorCode: poison,
     } as any)
+    const cursor = safeCursorLatestRun({
+      status: poison,
+      model: poison,
+      cliModel: poison,
+      resumed: poison,
+      durationMs: Number.NaN,
+      updatedAt: invalidTimestamp,
+      errorCode: poison,
+    } as any)
     expect(claude).toEqual({
       status: 'failed',
       model: 'unknown',
@@ -263,8 +314,15 @@ describe('public CLI debug contract', () => {
       updatedAt: new Date(0).toISOString(),
       errorCode: 'codex.error',
     })
-    expectNoPrivateValues({ claude, codex })
-    expect(JSON.stringify({ claude, codex })).not.toContain(poison)
-    expect(JSON.stringify({ claude, codex })).not.toContain(invalidTimestamp)
+    expect(cursor).toEqual({
+      status: 'failed',
+      model: 'unknown',
+      resumed: false,
+      updatedAt: new Date(0).toISOString(),
+      errorCode: 'cursor.error',
+    })
+    expectNoPrivateValues({ claude, codex, cursor })
+    expect(JSON.stringify({ claude, codex, cursor })).not.toContain(poison)
+    expect(JSON.stringify({ claude, codex, cursor })).not.toContain(invalidTimestamp)
   })
 })

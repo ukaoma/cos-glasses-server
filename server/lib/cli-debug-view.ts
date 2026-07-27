@@ -1,9 +1,10 @@
 import type { ClaudeRunConfig, ClaudeRunRecord } from './claude-run-ledger.js'
 import type { CodexRunConfig, CodexRunRecord } from './codex-run-ledger.js'
+import type { CursorRunConfig, CursorRunRecord } from './cursor-run-ledger.js'
 
 export const CLI_DEBUG_CAPABILITY = Object.freeze({
   schemaVersion: 1,
-  providers: Object.freeze({ claude: true, codex: true }),
+  providers: Object.freeze({ claude: true, codex: true, cursor: true }),
   metadataOnly: true,
 })
 
@@ -37,6 +38,7 @@ export interface SafeCliDebugResponse {
   providers: {
     claude: SafeCliDebugProvider
     codex: SafeCliDebugProvider
+    cursor: SafeCliDebugProvider
   }
 }
 
@@ -55,12 +57,14 @@ function safeStatus(value: unknown): SafeCliRunStatus {
     : 'failed'
 }
 
-function safeModelLabel(value: unknown, provider: 'claude' | 'codex'): string | undefined {
+function safeModelLabel(value: unknown, provider: 'claude' | 'codex' | 'cursor'): string | undefined {
   const model = optionalString(value)
   if (!model || model.length > 96) return undefined
   const allowed = provider === 'claude'
     ? /^(?:claude-|opus(?:\[1m\])?$|sonnet(?:\[1m\])?$|fable(?:\[1m\])?$|haiku(?:\[1m\])?$)[a-z0-9._\[\]-]*$/i
-    : /^(?:gpt-|codex-)[a-z0-9._\[\]-]*$/i
+    : provider === 'codex'
+      ? /^(?:gpt-|codex-)[a-z0-9._\[\]-]*$/i
+      : /^(?:cursor-|composer-)[a-z0-9._\[\]-]*$/i
   return allowed.test(model) ? model : undefined
 }
 
@@ -77,7 +81,7 @@ function safeTimestamp(value: unknown): string {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(0).toISOString()
 }
 
-function safeErrorCode(provider: 'claude' | 'codex', value: unknown): string | undefined {
+function safeErrorCode(provider: 'claude' | 'codex' | 'cursor', value: unknown): string | undefined {
   const candidate = optionalString(value)
   if (!candidate) return undefined
   const allowed = new Set([
@@ -126,11 +130,28 @@ export function safeCodexLatestRun(run?: CodexRunRecord): SafeCliDebugLatestRun 
   }
 }
 
+export function safeCursorLatestRun(run?: CursorRunRecord): SafeCliDebugLatestRun | null {
+  if (!run) return null
+  const concreteModel = safeModelLabel(run.cliModel, 'cursor')
+  const errorCode = safeErrorCode('cursor', run.errorCode)
+  return {
+    status: safeStatus(run.status),
+    model: safeModelLabel(run.model, 'cursor') ?? 'unknown',
+    ...(concreteModel ? { concreteModel } : {}),
+    resumed: run.resumed === true,
+    ...(optionalFiniteNumber(run.durationMs) !== undefined ? { durationMs: run.durationMs } : {}),
+    updatedAt: safeTimestamp(run.updatedAt),
+    ...(errorCode ? { errorCode } : {}),
+  }
+}
+
 export function safeCliDebugResponse(
   claudeConfig: ClaudeRunConfig,
   claudeRun: ClaudeRunRecord | undefined,
   codexConfig: CodexRunConfig,
   codexRun: CodexRunRecord | undefined,
+  cursorConfig: CursorRunConfig,
+  cursorRun: CursorRunRecord | undefined,
 ): SafeCliDebugResponse {
   return {
     schemaVersion: 1,
@@ -146,6 +167,12 @@ export function safeCliDebugResponse(
         persistenceEnabled: codexConfig.persistenceEnabled === true,
         workspaceConfigured: Boolean(codexConfig.cwd),
         latestRun: safeCodexLatestRun(codexRun),
+      },
+      cursor: {
+        supported: true,
+        persistenceEnabled: cursorConfig.persistenceEnabled === true,
+        workspaceConfigured: Boolean(cursorConfig.cwd),
+        latestRun: safeCursorLatestRun(cursorRun),
       },
     },
   }

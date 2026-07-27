@@ -10,6 +10,7 @@ node_modules/
 server/data/
 server/certs/
 server/models/*.onnx
+!server/models/silero_vad.onnx
 
 # Personal profile — never commit
 .cos-profile.json

@@ -7,6 +7,8 @@ import {
   formatResolvedModelDisplay,
   isClaudeModel,
   isCodexModel,
+  isCursorModel,
+  modelLabel,
   normalizeEffortPreference,
   normalizeModelPreference,
   resolveClaudeCliModelId,
@@ -16,12 +18,19 @@ import {
 } from './model-preference.js'
 
 describe('model preferences', () => {
-  it('keeps the public default while exposing Fable and two stable GPT slots', () => {
+  it('keeps the public default while exposing Fable, GPT, and Cursor slots', () => {
     expect(DEFAULT_MODEL).toBe('sonnet')
-    expect(MODEL_OPTIONS).toEqual(['opus', 'fable', 'sonnet', 'codex-frontier', 'codex-balanced'])
+    expect(MODEL_OPTIONS).toEqual([
+      'opus', 'fable', 'sonnet', 'codex-frontier', 'codex-balanced',
+      'cursor-grok', 'cursor-composer',
+    ])
     expect(isClaudeModel('fable')).toBe(true)
     expect(isCodexModel('codex-frontier')).toBe(true)
     expect(isCodexModel('codex-balanced')).toBe(true)
+    expect(isCursorModel('cursor-grok')).toBe(true)
+    expect(isCursorModel('cursor-composer')).toBe(true)
+    expect(modelLabel('cursor-grok')).toBe('Grok 4.5 Fast')
+    expect(modelLabel('cursor-composer')).toBe('Composer 2.5 Fast')
   })
 
   it('migrates legacy codex-high state to the frontier slot', () => {
