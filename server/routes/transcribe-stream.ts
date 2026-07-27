@@ -46,6 +46,7 @@ import { getServerInstanceId } from '../lib/server-instance-id.js'
 import {
   acquireMaintenanceWork,
   maintenanceAdmissionsOpen,
+  maintenanceLifecycle,
   type MaintenanceWorkLease,
 } from '../lib/maintenance-lifecycle.js'
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
@@ -637,11 +638,15 @@ setInterval(() => {
       }
     }
   } catch {}
-  // Purge stale pending-batch dirs older than 2 hours after move (batch should complete in minutes).
+  // Purge stale pending-batch dirs. HQ large-v3 on long meetings + Control
+  // restart can exceed 2h (2026-07-27: two sessions purged before batch).
+  // Use 12h, and never purge while a meeting_batch_finalization lease is held.
   // Age measured by _batch_pending.marker mtime (set by moveSessionAudioToPending), NOT the first
   // chunk's mtime — chunk files keep their original write-time across the atomic rename, so for
   // meetings > 1 hour, chunk mtimes would always look stale. Fallback: dir mtime for older marker-less dirs.
   try {
+    const batchBusy = ((maintenanceLifecycle.snapshot().activeByKind as Record<string, number>)
+      .meeting_batch_finalization ?? 0) > 0
     for (const dir of readdirSync(PENDING_BATCH_DIR)) {
       const dirPath = resolve(PENDING_BATCH_DIR, dir)
       try {
@@ -656,7 +661,11 @@ setInterval(() => {
           // Fallback for pre-v5.4.3 dirs: use directory ctime (changes on rename)
           ageSource = statSync(dirPath).ctimeMs
         }
-        if (Date.now() - ageSource > 2 * 60 * 60 * 1000) {
+        if (Date.now() - ageSource > 12 * 60 * 60 * 1000) {
+          if (batchBusy) {
+            console.warn(`[cleanup] Retaining stale pending-batch while batch lease held: ${dir}`)
+            continue
+          }
           rmSync(dirPath, { recursive: true, force: true })
           console.log(`[cleanup] Purged stale pending-batch: ${dir}`)
         }

@@ -41,6 +41,13 @@ import {
 } from './transcribe-stream.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { acquireMaintenanceWork, type MaintenanceWorkLease } from '../lib/maintenance-lifecycle.js'
+import { handoffMeetingToOperations } from '../lib/g2-ops-handoff.js'
+
+function cosOpsPipelineConfigured(): boolean {
+  // Read env live (not the module-load COS_SCRIPTS_DIR const) so unit tests that
+  // clear ops env stay standalone, and Control-updated env is visible.
+  return Boolean(process.env.COS_SCRIPTS_DIR?.trim())
+}
 
 interface MeetingSessionSource {
   getTranscript(sessionId: string): string | null
@@ -313,24 +320,48 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           allowDuringDrain: true,
           phase: 'queued',
         })
-        const task = Promise.resolve().then(() => {
+        const task = Promise.resolve().then(async () => {
           batchLease.setPhase('active')
-          return finalizeBatch({
-            audioDir: pendingAudioDir,
-            entries: chunkEntries.map(entry => ({ ...entry, chunk: { ...entry.chunk } })),
-            streamingWordCount: countWords(transcript),
-            meetingPath: saved.filepath,
-            sidecarPath: saved.sidecarPath,
-            runBatch,
-          })
+          try {
+            await finalizeBatch({
+              audioDir: pendingAudioDir,
+              entries: chunkEntries.map(entry => ({ ...entry, chunk: { ...entry.chunk } })),
+              streamingWordCount: countWords(transcript),
+              meetingPath: saved.filepath,
+              sidecarPath: saved.sidecarPath,
+              runBatch,
+            })
+          } catch (error) {
+            // Raw audio deliberately remains for bounded cleanup / retry.
+            console.error(
+              `[meeting/save] Batch finalization failed for ${sessionId}: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+          // Always hand off the durable local scribe (streaming or batch) into
+          // operations/ when COS pipeline is configured — this is what was
+          // missing on managed public server and left today's G2 files unsynced.
+          if (cosOpsPipelineConfigured()) {
+            await handoffMeetingToOperations(saved.filepath)
+          }
         }).catch(error => {
-          // Raw audio deliberately remains for the existing two-hour cleanup.
           console.error(
-            `[meeting/save] Batch finalization failed for ${sessionId}: `
+            `[meeting/save] G2 ops handoff failed for ${sessionId}: `
             + `${error instanceof Error ? error.message : String(error)}`,
           )
         }).finally(() => batchLease.release())
         scheduleBackground(task)
+      } else if (cosOpsPipelineConfigured()) {
+        // No HQ batch (no audio / incomplete writes) — still hand off the
+        // streaming scribe into operations when COS pipeline is configured.
+        scheduleBackground(
+          handoffMeetingToOperations(saved.filepath).catch(error => {
+            console.error(
+              `[meeting/save] G2 ops handoff failed for ${sessionId}: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            )
+          }),
+        )
       }
     } catch (error) {
       if (error instanceof MeetingStoreError) {
@@ -399,7 +430,7 @@ async function finalizeBatch(options: {
   if (canDeletePendingBatchAudio(transcriptApplied, metadataPersisted)) {
     rmSync(options.audioDir, { recursive: true, force: true })
   } else {
-    console.warn('[meeting/save] Pending raw audio retained for bounded two-hour cleanup')
+    console.warn('[meeting/save] Pending raw audio retained for bounded cleanup')
   }
 }
 

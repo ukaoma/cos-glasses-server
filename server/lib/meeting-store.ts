@@ -409,7 +409,16 @@ export class MeetingStore {
       '',
       '## Summary',
       '',
-      '*Standalone recording — canonical transcript shown in meeting detail.*',
+      // When COS ops is configured, use the private-app pipeline markers so
+      // sync_meetings.py --g2-file will enrich (and reclassify domain). Plain
+      // "Standalone recording" summaries are treated as already-final and skipped.
+      ...(process.env.COS_SCRIPTS_DIR || process.env.COS_OPERATIONS_DIR || process.env.COS_MEETINGS_ROOT
+        ? [
+            '<!-- g2-needs-domain-review -->',
+            '',
+            '*G2 recording — summary pending pipeline processing.*',
+          ]
+        : ['*Standalone recording — canonical transcript shown in meeting detail.*']),
       '',
       '## Transcript',
       '',
