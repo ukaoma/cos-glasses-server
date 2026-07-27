@@ -20,6 +20,7 @@ export interface PromptDraftTranscriptRecord {
   actualQuality: 'hq' | 'fast' | 'cloud'
   backend: string
   degraded: boolean
+  degradationReason?: string
   acceptedDegraded?: boolean
 }
 

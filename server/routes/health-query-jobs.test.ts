@@ -64,11 +64,17 @@ describe('public durable-query capability health', () => {
     expect(body.durable_query_jobs).not.toHaveProperty('retainedIdentities')
     expect(body.features.localFirstMeetings).toBe(true)
     expect(body.features.transcriptionPolicy).toBe('local-only')
-    expect(body.capabilities?.transcription).toEqual({
+    expect(body.capabilities?.transcription).toMatchObject({
       mode: 'local-only',
       localRequired: true,
       openaiFallbackConfigured: false,
       openaiFallbackReady: false,
+    })
+    expect(body.capabilities?.transcription?.hq).toEqual({
+      hqAvailable: expect.any(Boolean),
+      model: expect.toSatisfy((value: unknown) => value === null || value === 'large-v3'),
+      backend: expect.toSatisfy((value: unknown) => value === null || value === 'whisper-cli'),
+      reason: expect.toSatisfy((value: unknown) => value === null || typeof value === 'string'),
     })
     expect(body.capabilities?.recovery).toEqual({
       status: false,
@@ -112,11 +118,17 @@ describe('public durable-query capability health', () => {
       pinnedServerIdentity: true,
       asrCompletionStatus: true,
     })
-    expect(body.capabilities?.transcription).toEqual({
+    expect(body.capabilities?.transcription).toMatchObject({
       mode: 'local-only',
       localRequired: true,
       openaiFallbackConfigured: false,
       openaiFallbackReady: false,
+    })
+    expect(body.capabilities?.transcription?.hq).toEqual({
+      hqAvailable: expect.any(Boolean),
+      model: expect.toSatisfy((value: unknown) => value === null || value === 'large-v3'),
+      backend: expect.toSatisfy((value: unknown) => value === null || value === 'whisper-cli'),
+      reason: expect.toSatisfy((value: unknown) => value === null || typeof value === 'string'),
     })
     expect(body.capabilities?.recovery).toEqual({
       status: false,

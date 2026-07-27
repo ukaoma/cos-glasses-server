@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 describe('fast local transcription ownership', () => {
   let transcribeAudioBuffer: typeof import('./transcribe-audio.js').transcribeAudioBuffer
   let transcribeLocal: ReturnType<typeof vi.fn>
+  let transcribeHighQuality: ReturnType<typeof vi.fn>
   let getKeyStatus: ReturnType<typeof vi.fn>
   let fetchSpy: ReturnType<typeof vi.fn>
 
@@ -10,13 +11,14 @@ describe('fast local transcription ownership', () => {
     vi.resetModules()
     delete process.env.COS_OPENAI_WHISPER_FALLBACK
     transcribeLocal = vi.fn(async () => ({ text: 'recovered while speaking', backend: 'mock' }))
+    transcribeHighQuality = vi.fn()
     getKeyStatus = vi.fn(() => ({ hasKey: true, source: 'env' }))
     fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
     vi.doMock('./whisper-local.js', () => ({
       isWhisperLocalAvailable: () => false,
       transcribeLocal,
-      transcribeHighQuality: vi.fn(),
+      transcribeHighQuality,
       getWhisperBackend: () => 'mock',
       applyCorrections: (text: string) => text,
     }))
@@ -56,6 +58,51 @@ describe('fast local transcription ownership', () => {
     expect(transcribeLocal).toHaveBeenCalledTimes(1)
     expect(result.text).toBe('recovered while speaking')
     expect(result.actualQuality).toBe('fast')
+  })
+
+  it('reports Fast when an HQ request actually ran turbo', async () => {
+    transcribeHighQuality.mockResolvedValueOnce({
+      text: 'accurate fallback text',
+      model: 'turbo',
+      backend: 'whisper-cli',
+      actualQuality: 'fast',
+      degradationReason: 'large_v3_model_missing',
+    })
+
+    const result = await transcribeAudioBuffer(Buffer.alloc(3200, 1), {
+      mode: 'hq',
+      policy: 'local-only',
+    })
+
+    expect(result).toMatchObject({
+      requestedMode: 'hq',
+      actualQuality: 'fast',
+      degraded: true,
+      backend: 'fast-cli-turbo',
+      degradationReason: 'large_v3_model_missing',
+    })
+  })
+
+  it('reports HQ only when large-v3 actually ran', async () => {
+    transcribeHighQuality.mockResolvedValueOnce({
+      text: 'large model text',
+      model: 'large-v3',
+      backend: 'whisper-cli',
+      actualQuality: 'hq',
+    })
+
+    const result = await transcribeAudioBuffer(Buffer.alloc(3200, 1), {
+      mode: 'hq',
+      policy: 'local-only',
+    })
+
+    expect(result).toMatchObject({
+      requestedMode: 'hq',
+      actualQuality: 'hq',
+      degraded: false,
+      backend: 'hq-large-v3-light',
+    })
+    expect(result).not.toHaveProperty('degradationReason')
   })
 
   it('never fetches OpenAI when a key exists but fallback is not explicitly enabled', async () => {

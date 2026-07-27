@@ -199,6 +199,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
             actualQuality: warm?.actualQuality ?? (mode === 'hq' ? 'hq' : 'fast'),
             backend: warm?.backend ?? 'shared-inflight',
             degraded: warm?.degraded ?? false,
+            ...(warm?.degradationReason ? { degradationReason: warm.degradationReason } : {}),
           }, 'final')
         }
       }
@@ -221,6 +222,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
       const record: PromptDraftTranscriptRecord = {
         text, hash, requestedMode: result.requestedMode, actualQuality: result.actualQuality,
         backend: result.backend, degraded: result.degraded,
+        ...(result.degradationReason ? { degradationReason: result.degradationReason } : {}),
       }
       await markPromptDraftChunkTranscript(draftId, chunkIndex, record, purpose)
       console.log(`[prompt-draft] chunk ${draftId}/${chunkIndex}: ${result.elapsedMs.toFixed(1)}ms | ${result.backend} | ${purpose}/${mode} | ${text.length} chars`)
@@ -247,6 +249,7 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
   const meta = loadPromptDraftMeta(draftId)
   if (!meta) throw Object.assign(new Error('draft not found'), { status: 404 })
   const texts: string[] = []
+  const transcriptRecords: PromptDraftTranscriptRecord[] = []
   for (const chunk of readPromptDraftChunks(draftId)) {
     try {
       const hash = audioHash(chunk.audioBuffer)
@@ -259,10 +262,27 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
       }
       const current = loadPromptDraftMeta(draftId)
       const cached = current?.finalTranscripts?.[String(chunk.chunkIndex)] ?? current?.warmTranscripts?.[String(chunk.chunkIndex)]
-      const reusable = Boolean(cached && cached.hash === hash && (mode === 'fast' ? cached.actualQuality === 'fast' : cached.actualQuality === 'hq'))
+      // Reuse the exact requested-mode decode even when HQ truthfully degraded
+      // to turbo. Finalize's automatic policy would make the same local choice
+      // again after a successful turbo result, so a second decode adds latency
+      // without improving quality. Legacy records stay excluded because their
+      // decoder provenance was reconstructed during migration.
+      const reusable = Boolean(
+        cached
+        && cached.hash === hash
+        && cached.requestedMode === mode
+        && !cached.backend.startsWith('legacy'),
+      )
       const raw = reusable ? cached!.text : await transcribeChunk(draftId, chunk.chunkIndex, chunk.audioBuffer, mode, 'final')
       const text = sanitizeTranscript(draftId, raw, !reusable)
-      if (text.trim()) texts.push(text.trim())
+      if (text.trim()) {
+        texts.push(text.trim())
+        const latest = loadPromptDraftMeta(draftId)
+        const used = latest?.finalTranscripts?.[String(chunk.chunkIndex)]
+          ?? latest?.warmTranscripts?.[String(chunk.chunkIndex)]
+          ?? cached
+        if (used && used.hash === hash) transcriptRecords.push(used)
+      }
     } catch (err) {
       if (err instanceof NoSpeechDetectedError) continue
       throw err
@@ -275,7 +295,28 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
   }
   const finalText = await cleanOutboundDictation(text, { ...autoClean, signal })
   const finalized = await markPromptDraftFinalized(draftId, finalText)
-  return { draftId, text: finalText, recovered: true, chunkCount: finalized.receivedChunkIndexes.length, missingChunks: getMissingChunkIndexes(finalized), expiresAt: finalized.expiresAt }
+  const qualities = transcriptRecords.map(record => record.actualQuality)
+  const actualQuality: 'hq' | 'fast' | 'cloud' = qualities.includes('cloud')
+    ? 'cloud'
+    : qualities.length > 0 && qualities.every(quality => quality === 'hq')
+      ? 'hq'
+      : 'fast'
+  const degraded = mode === 'hq' && (actualQuality !== 'hq' || transcriptRecords.some(record => record.degraded))
+  const backends = [...new Set(transcriptRecords.map(record => record.backend))]
+  const degradationReason = transcriptRecords.find(record => record.degradationReason)?.degradationReason
+  return {
+    draftId,
+    text: finalText,
+    recovered: true,
+    chunkCount: finalized.receivedChunkIndexes.length,
+    missingChunks: getMissingChunkIndexes(finalized),
+    expiresAt: finalized.expiresAt,
+    requestedMode: mode,
+    actualQuality,
+    degraded,
+    backend: backends.length === 1 ? backends[0] : 'mixed',
+    ...(degradationReason ? { degradationReason } : {}),
+  }
 }
 
 const prunedAtBoot = maintenanceAdmissionsOpen() ? prunePromptDrafts() : 0

@@ -34,6 +34,7 @@ export interface TranscribeAudioResult {
   requestedMode: TranscribeMode
   actualQuality: 'hq' | 'fast' | 'cloud'
   degraded: boolean
+  degradationReason?: string
   elapsedMs: number
   audioBytes: number
 }
@@ -160,6 +161,7 @@ export async function transcribeAudioBuffer(
   let text: string
   let backend: string
   let actualQuality: 'hq' | 'fast' | 'cloud'
+  let degradationReason: string | undefined = effectiveMode !== requestedMode ? 'audio_too_long' : undefined
   const tStart = performance.now()
 
   if (effectiveMode === 'hq') {
@@ -169,10 +171,16 @@ export async function transcribeAudioBuffer(
       const enhanced = await enhanceAudio(audioBuffer, { profile: enhanceProfile })
       const result = await transcribeHighQuality(enhanced)
       text = result.text
-      backend = enhanceProfile === 'light' ? 'hq-large-v3-light' : 'hq-large-v3'
-      actualQuality = 'hq'
+      actualQuality = result.actualQuality
+      if (result.actualQuality === 'hq') {
+        backend = enhanceProfile === 'light' ? 'hq-large-v3-light' : 'hq-large-v3'
+      } else {
+        backend = result.backend === 'whisper-cli' ? 'fast-cli-turbo' : 'fast-local-server'
+        degradationReason = result.degradationReason ?? 'hq_unavailable'
+      }
     } catch (hqErr: any) {
       console.warn(`[transcribe] HQ path failed, falling back to fast: ${hqErr.message}`)
+      degradationReason = 'hq_decode_failed'
       try {
         const result = await transcribeLocal(audioBuffer)
         text = result.text
@@ -268,6 +276,7 @@ export async function transcribeAudioBuffer(
     requestedMode,
     actualQuality,
     degraded: requestedMode === 'hq' && actualQuality !== 'hq',
+    ...(degradationReason ? { degradationReason } : {}),
     elapsedMs,
     audioBytes: audioBuffer.length,
   }

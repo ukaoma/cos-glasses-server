@@ -42,6 +42,49 @@ export interface WhisperSegment {
   words?: WhisperWord[]
 }
 
+export type HighQualityUnavailableReason =
+  | 'hq_disabled'
+  | 'whisper_cli_missing'
+  | 'turbo_model_missing'
+  | 'large_v3_model_missing'
+
+export interface HighQualityTranscriptionCapability {
+  hqAvailable: boolean
+  model: 'large-v3' | null
+  backend: 'whisper-cli' | null
+  reason: HighQualityUnavailableReason | null
+}
+
+export interface HighQualityTranscriptionResult {
+  text: string
+  words?: WhisperWord[]
+  model: 'large-v3' | 'turbo'
+  backend: 'whisper-cli' | 'whisper-server'
+  actualQuality: 'hq' | 'fast'
+  degradationReason?: HighQualityUnavailableReason
+}
+
+export function classifyHighQualityTranscriptionCapability(input: {
+  enabled: boolean
+  cliPresent: boolean
+  turboReady: boolean
+  largeV3Present: boolean
+}): HighQualityTranscriptionCapability {
+  if (!input.enabled) {
+    return { hqAvailable: false, model: null, backend: null, reason: 'hq_disabled' }
+  }
+  if (!input.cliPresent) {
+    return { hqAvailable: false, model: null, backend: null, reason: 'whisper_cli_missing' }
+  }
+  if (!input.turboReady) {
+    return { hqAvailable: false, model: null, backend: null, reason: 'turbo_model_missing' }
+  }
+  if (!input.largeV3Present) {
+    return { hqAvailable: false, model: null, backend: null, reason: 'large_v3_model_missing' }
+  }
+  return { hqAvailable: true, model: 'large-v3', backend: 'whisper-cli', reason: null }
+}
+
 interface WhisperJsonResponse {
   text?: unknown
 }
@@ -554,6 +597,20 @@ export function getWhisperHealth(): {
   }
 }
 
+/** Public, path-free truth about whether an HQ request can actually run the
+ * full large-v3 decoder. Keep this separate from generic Whisper liveness: the
+ * persistent turbo server may be healthy while HQ weights or the CLI are not. */
+export function getHighQualityTranscriptionCapability(): HighQualityTranscriptionCapability {
+  // cliAvailable also proves the turbo model exists. That fallback is part of
+  // the current decoder contract and is initialized once at process startup.
+  return classifyHighQualityTranscriptionCapability({
+    enabled: BATCH_LARGE_V3_ENABLED,
+    cliPresent: existsSync(WHISPER_CLI),
+    turboReady: cliAvailable,
+    largeV3Present: existsSync(BATCH_MODEL_LARGE_V3),
+  })
+}
+
 /**
  * Reconcile a cached unavailable flag with the daemon's live health endpoint.
  * Only successful inference resets the failure count: /health can be responsive
@@ -641,10 +698,18 @@ export async function transcribeHighQuality(
   audioBuffer: Buffer,
   context?: string,
   opts: { priority?: 'interactive' | 'batch' } = {},
-): Promise<{ text: string; words?: WhisperWord[] }> {
+): Promise<HighQualityTranscriptionResult> {
   if (!cliAvailable) {
     // Fall back to server (no beam search available via HTTP API)
-    return transcribeLocal(audioBuffer, context)
+    const fallback = await transcribeLocal(audioBuffer, context)
+    return {
+      text: fallback.text,
+      words: fallback.words,
+      model: 'turbo',
+      backend: fallback.backend === 'server' ? 'whisper-server' : 'whisper-cli',
+      actualQuality: 'fast',
+      degradationReason: existsSync(WHISPER_CLI) ? 'turbo_model_missing' : 'whisper_cli_missing',
+    }
   }
 
   const start = Date.now()
@@ -769,7 +834,17 @@ export async function transcribeHighQuality(
       `${words ? `, ${words.length} words` : ''}): ` +
       `"${corrected.slice(0, 80)}${corrected.length > 80 ? '...' : ''}"`,
     )
-    return words ? { text: corrected, words } : { text: corrected }
+    const metadata = useLargeV3
+      ? { model: 'large-v3' as const, backend: 'whisper-cli' as const, actualQuality: 'hq' as const }
+      : {
+          model: 'turbo' as const,
+          backend: 'whisper-cli' as const,
+          actualQuality: 'fast' as const,
+          degradationReason: BATCH_LARGE_V3_ENABLED
+            ? 'large_v3_model_missing' as const
+            : 'hq_disabled' as const,
+        }
+    return words ? { text: corrected, words, ...metadata } : { text: corrected, ...metadata }
   } finally {
     try { unlinkSync(tmpWav) } catch { /* cleanup */ }
     if (captureBatchWords) {

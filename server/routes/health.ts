@@ -8,7 +8,11 @@ import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
-import { isWhisperLocalAvailable, getWhisperHealth } from '../lib/whisper-local.js'
+import {
+  isWhisperLocalAvailable,
+  getWhisperHealth,
+  getHighQualityTranscriptionCapability,
+} from '../lib/whisper-local.js'
 import { getOpenAIWhisperBudgetState } from '../lib/openai-whisper-budget.js'
 import { getKeyStatus } from '../lib/openai-key.js'
 import {
@@ -150,6 +154,7 @@ healthRouter.get('/health', async (_req, res) => {
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
+  const transcriptionHq = getHighQualityTranscriptionCapability()
   const recovery = managedRuntimeCapability()
   const maintenance = maintenanceLifecycle.snapshot()
   const tts_local = getLocalTtsHealth()
@@ -213,7 +218,7 @@ healthRouter.get('/health', async (_req, res) => {
     tts_local,
     codex_models,
     capabilities: {
-      transcription,
+      transcription: { ...transcription, hq: transcriptionHq },
       recovery,
       maintenance: {
         state: maintenance.state,
@@ -242,6 +247,7 @@ healthRouter.get('/models', async (req, res) => {
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
+  const transcriptionHq = getHighQualityTranscriptionCapability()
   res.json({
     ...catalog,
     serverInstanceId: getServerInstanceId(),
@@ -250,7 +256,7 @@ healthRouter.get('/models', async (req, res) => {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,
       },
-      transcription,
+      transcription: { ...transcription, hq: transcriptionHq },
       cliDebug: CLI_DEBUG_CAPABILITY,
       recovery: managedRuntimeCapability(),
       ...(localFirstMeetings ? { localFirstMeetings } : {}),

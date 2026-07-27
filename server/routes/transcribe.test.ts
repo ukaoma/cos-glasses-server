@@ -40,6 +40,34 @@ afterAll(async () => {
 })
 
 describe('one-shot transcription availability contract', () => {
+  it('returns requested and actual quality without replacing legacy fields', async () => {
+    transcribeAudioBuffer.mockResolvedValueOnce({
+      text: 'fallback transcript',
+      backend: 'fast-cli-turbo',
+      mode: 'hq',
+      requestedMode: 'hq',
+      actualQuality: 'fast',
+      degraded: true,
+      degradationReason: 'large_v3_model_missing',
+      elapsedMs: 10,
+      audioBytes: 3200,
+    })
+    const response = await fetch(`${base}/api/transcribe`, {
+      method: 'POST',
+      body: Buffer.alloc(3200, 1),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      text: 'fallback transcript',
+      backend: 'fast-cli-turbo',
+      mode: 'hq',
+      requestedMode: 'hq',
+      actualQuality: 'fast',
+      degraded: true,
+      degradationReason: 'large_v3_model_missing',
+    })
+  })
+
   it('returns a typed retryable 503 instead of a generic 500', async () => {
     transcribeAudioBuffer.mockRejectedValueOnce(new MockUnavailableError())
     const response = await fetch(`${base}/api/transcribe`, {

@@ -1,8 +1,29 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { parseWhisperCliFullJson } from './whisper-local.js'
+import {
+  classifyHighQualityTranscriptionCapability,
+  parseWhisperCliFullJson,
+} from './whisper-local.js'
 
 describe('batch HQ word restore (CPU whisper-cli -ojf)', () => {
+  it('fails closed with a stable, path-free HQ capability reason', () => {
+    expect(classifyHighQualityTranscriptionCapability({
+      enabled: false, cliPresent: true, turboReady: true, largeV3Present: true,
+    }).reason).toBe('hq_disabled')
+    expect(classifyHighQualityTranscriptionCapability({
+      enabled: true, cliPresent: false, turboReady: false, largeV3Present: false,
+    }).reason).toBe('whisper_cli_missing')
+    expect(classifyHighQualityTranscriptionCapability({
+      enabled: true, cliPresent: true, turboReady: false, largeV3Present: true,
+    }).reason).toBe('turbo_model_missing')
+    expect(classifyHighQualityTranscriptionCapability({
+      enabled: true, cliPresent: true, turboReady: true, largeV3Present: false,
+    }).reason).toBe('large_v3_model_missing')
+    expect(classifyHighQualityTranscriptionCapability({
+      enabled: true, cliPresent: true, turboReady: true, largeV3Present: true,
+    })).toEqual({ hqAvailable: true, model: 'large-v3', backend: 'whisper-cli', reason: null })
+  })
+
   it('parses timed words and drops special tokens', () => {
     const parsed = parseWhisperCliFullJson(JSON.stringify({
       transcription: [{

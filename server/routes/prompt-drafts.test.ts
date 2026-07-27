@@ -150,6 +150,47 @@ describe('public prompt draft recovery contract', () => {
     expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'local-only' })
   })
 
+  it('reports an HQ request that finalized on Fast as degraded', async () => {
+    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string }) => {
+      if (opts?.mode === 'hq') {
+        return {
+          text: 'turbo fallback', backend: 'fast-cli-turbo', mode: 'hq', requestedMode: 'hq',
+          actualQuality: 'fast', degraded: true, degradationReason: 'large_v3_model_missing',
+          elapsedMs: 35, audioBytes: 3200,
+        }
+      }
+      return {
+        text: 'warm text', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
+        actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+      }
+    })
+
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'hq', policy: 'local-only' },
+    ))
+    const callsBeforeFinalize = transcribeAudioBuffer.mock.calls.length
+    const finalized = await httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
+
+    expect(finalized.status).toBe(200)
+    expect(finalized.json).toMatchObject({
+      text: 'turbo fallback',
+      requestedMode: 'hq',
+      actualQuality: 'fast',
+      degraded: true,
+      backend: 'fast-cli-turbo',
+      degradationReason: 'large_v3_model_missing',
+    })
+    expect(transcribeAudioBuffer.mock.calls.length).toBe(callsBeforeFinalize)
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'hq', policy: 'automatic' },
+    )
+  })
+
   it('awaits in-flight HQ warm on finalize instead of double-decoding', async () => {
     let resolveHq!: (value: any) => void
     const hqPromise = new Promise(resolve => { resolveHq = resolve })

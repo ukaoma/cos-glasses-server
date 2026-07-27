@@ -44,7 +44,15 @@ transcribeRouter.post('/transcribe', async (req, res) => {
 
     const result = await transcribeAudioBuffer(audioBuffer, { mode: resolveMode(req) })
     console.log(`[perf] /transcribe: ${result.elapsedMs.toFixed(1)}ms | mode=${result.mode} | ${result.backend} | ${result.audioBytes}b | ${result.text.length} chars`)
-    res.json({ text: result.text, backend: result.backend, mode: result.mode })
+    res.json({
+      text: result.text,
+      backend: result.backend,
+      mode: result.mode,
+      requestedMode: result.requestedMode,
+      actualQuality: result.actualQuality,
+      degraded: result.degraded,
+      ...(result.degradationReason ? { degradationReason: result.degradationReason } : {}),
+    })
   } catch (err: any) {
     if (err instanceof MaintenanceLifecycleError) {
       if (err.retryAfterSeconds != null) res.setHeader('Retry-After', String(err.retryAfterSeconds))

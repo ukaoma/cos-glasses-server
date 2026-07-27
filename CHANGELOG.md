@@ -1,3 +1,21 @@
+## 6.16.0
+
+- **Truthful HQ results.** An HQ request is reported as HQ only when the full
+  local large-v3 decoder actually ran. Turbo, real-time server, long-audio, and
+  decode-error fallbacks now retain the requested mode while returning their
+  actual quality, backend, degradation flag, and bounded reason code.
+- **HQ capability health.** `/api/health` and `/api/models` add a path-free
+  `capabilities.transcription.hq` block with availability, model, backend, and
+  a user-safe missing-prerequisite reason. Generic Whisper liveness no longer
+  implies that large-v3 HQ is installed.
+- **Phone-visible fallback telemetry.** One-shot transcription and prompt-draft
+  finalize responses expose the same additive quality fields. Draft finalize
+  aggregates the records it actually used and reuses a successful degraded
+  warm result instead of paying for an identical second turbo decode.
+- **Default unchanged.** Absent an explicit Fast request, prompt dictation still
+  requests HQ. `COS_HQ_SPECULATIVE_WARM=0` remains the immediate warm-path
+  rollback, and meeting batch beam/isolation behavior is unchanged.
+
 ## 6.15.5
 
 - **Speculative HQ warm (no EHPK).** While a prompt-draft chunk is acknowledged,

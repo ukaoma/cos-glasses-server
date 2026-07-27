@@ -106,6 +106,10 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   Whisper fallback is optional and requires both the exact
   `COS_OPENAI_WHISPER_FALLBACK=1` opt-in and a configured key; a key alone never
   uploads audio.
+- HQ prompt dictation is requested by default; the phone's **Fast mode** switch
+  opts into turbo. Server 6.16.0 reports whether full local large-v3 actually
+  ran, and compatible companions alert once if an HQ request used Fast or
+  Cloud instead of silently claiming HQ.
 - Local-first spoken reply playback through Kokoro on Apple silicon. The first
   use creates a private Python environment and downloads its model without
   blocking the API. Selecting Local fails closed; `local_first` can fall back
@@ -136,6 +140,32 @@ location; default `~/.cos-glasses/data/media`). Your name + transcription vocabu
 Telegram activity export is disabled by default even when a private COS
 pipeline contains `.telegram_config.json`; enable it only with the explicit
 `COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
+
+## HQ dictation
+
+Prompt dictation defaults to HQ. The phone owns the preference: **Fast mode
+OFF** requests HQ, and **Fast mode ON** requests turbo. The Mac performs all
+decoding; the phone does not run Whisper.
+
+The first server start downloads the real-time turbo model. True HQ additionally
+requires the full `ggml-large-v3.bin` model (about 3.1 GB):
+
+```bash
+mkdir -p "$HOME/.local/share/whisper-models"
+curl -fL --progress-bar \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin \
+  -o "$HOME/.local/share/whisper-models/ggml-large-v3.bin.partial"
+mv "$HOME/.local/share/whisper-models/ggml-large-v3.bin.partial" \
+  "$HOME/.local/share/whisper-models/ggml-large-v3.bin"
+```
+
+Restart the server, then confirm
+`capabilities.transcription.hq.hqAvailable: true` at `/api/health`. The response
+does not expose local paths. If the CLI or model is unavailable, dictation stays
+usable on Fast and reports the downgrade truthfully. Set
+`COS_HQ_SPECULATIVE_WARM=0` to disable background HQ warm immediately; set
+`COS_BATCH_LARGE_V3=0` to explicitly use turbo. Interactive HQ uses beam 2 by
+default (`COS_HQ_BEAM_INTERACTIVE`); meeting batch remains beam 5.
 
 ## Run from source
 
