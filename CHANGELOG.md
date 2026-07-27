@@ -1,11 +1,26 @@
-## Unreleased
+## 6.18.0
 
+- **G2 save → operations sync restored on the managed public server.** After
+  `meeting/save` (+ HQ batch when present), the server stages the durable
+  recording into `operations/personal/meetings/` with pipeline markers and runs
+  `sync_meetings.py --g2-only --g2-file` (same enrichment runner as the private
+  app). Without this, Control installs finished HQ locally but never wrote
+  `(G2)` scribes into COS — Jul 27 regression after the 6.17.0 managed cutover.
+  Pending-batch TTL raised to 12h and skips purge while a batch lease is held.
 - **Live Cues (opt-in): live meeting coaching on the lens.** With
   `COS_LIVE_CUES=1` and the companion's Live cues toggle On, a live meeting
-  runs transcript window → Composer planner → Qdrant → LightRAG → Composer
-  insight → a `coaching_nudge` flash on the glasses. Requires the full COS
-  pipeline (`COS_SCRIPTS_DIR`) plus the Cursor Agent CLI; Composer 2.5 is the
-  only supported cue model and anything else fails closed.
+  runs transcript window → Composer planner → Qdrant → Composer insight → a
+  `coaching_nudge` flash on the glasses. Requires the full COS pipeline
+  (`COS_SCRIPTS_DIR`) plus the Cursor Agent CLI; Composer 2.5 is the only
+  supported cue model and anything else fails closed.
+- **The LightRAG graph hop ships OFF, on measured evidence.** Across 5 real
+  `--explore` calls against a 31k-entity / 66k-relationship graph: p50
+  **73.5s**, max 117.2s, min 14.8s — only 1 of 5 finished inside the 40s hop
+  budget. Left on by default it would spend 40s of the 60s pipeline wall plus
+  two calls from the shared 200/day query pool to produce a degraded cue about
+  80% of the time. `COS_LIVE_CUES_GRAPH=1` opts in after you time your own
+  graph. Graph-off is a configured normal, not a degradation, so it renders no
+  mark; cues still get memory grounding from Qdrant in ~1.5s.
 - **Cost containment is structural, not advisory.** Per-meeting cap (8
   pipelines), single-flight, 60s floor, 30s cooldown, a 60s pipeline wall
   (deliberately under COS Control's 90s drain window), a consecutive-failure

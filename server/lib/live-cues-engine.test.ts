@@ -43,7 +43,8 @@ async function buildHarness(): Promise<EngineHarness> {
   vi.doMock('./live-cues-capability.js', () => ({
     liveCuesEnabled: () => process.env.COS_LIVE_CUES === '1',
     liveCuesModelSupported: () => true,
-    liveCuesGraphEnabled: () => process.env.COS_LIVE_CUES_GRAPH !== '0',
+    // Mirrors the real opt-in semantics: the graph hop is OFF unless '1'.
+    liveCuesGraphEnabled: () => process.env.COS_LIVE_CUES_GRAPH === '1',
     liveCuesCapability: () => ({ available: true }),
     registerLiveCuesBudgetProbe: () => {},
   }))
@@ -164,8 +165,22 @@ describe('live-cues engine gates', () => {
     expect(event.data.degraded).toBeUndefined()
   })
 
+  it('graph off (the shipped default) is NOT a degradation — no mark, no hop', async () => {
+    // Measured p50 73.5s made COS_LIVE_CUES_GRAPH=0 the default. If that
+    // configured normal rendered as degraded, every cue would carry '~'
+    // forever and train the wearer to ignore the one honest signal.
+    process.env.COS_LIVE_CUES = '1'
+    const { engine, composerAsk, emitDisplay, lightragExploreHop } = await buildHarness()
+    composerAsk.mockResolvedValueOnce(PLANNER_WITH_ENTITY).mockResolvedValueOnce(INSIGHT_OK)
+    await engine.armLiveCues('meeting_a')
+    await engine.feedLiveCueTranscript('meeting_a', WORDS_40)
+    expect(lightragExploreHop).not.toHaveBeenCalled()
+    expect(emitDisplay.mock.calls[0][0].data.degraded).toBeUndefined()
+  })
+
   it('marks the cue degraded with a reason when the graph hop fails', async () => {
     process.env.COS_LIVE_CUES = '1'
+    process.env.COS_LIVE_CUES_GRAPH = '1'
     const { engine, composerAsk, emitDisplay, lightragExploreHop } = await buildHarness()
     lightragExploreHop.mockResolvedValueOnce({ ok: false, text: null, reason: 'daily_graph_cap', treeClosed: true })
     composerAsk.mockResolvedValueOnce(PLANNER_WITH_ENTITY).mockResolvedValueOnce(INSIGHT_OK)

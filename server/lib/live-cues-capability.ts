@@ -38,8 +38,14 @@ export function liveCuesModelSupported(): boolean {
   return !requested || requested === CURSOR_COMPOSER_MODEL
 }
 
+/** The graph hop is OPT-IN, not opt-out. Measured against a live 31k-entity /
+ *  66k-relationship LightRAG graph (2026-07-27, n=5 real explores): p50 73.5s,
+ *  max 117.2s, and only 1 of 5 finished inside the 40s hop budget. Defaulting
+ *  it ON would burn 40s of the 60s wall plus two calls from the shared 200/day
+ *  pool to produce a DEGRADED cue roughly 80% of the time. Users with a
+ *  smaller/faster graph opt in with COS_LIVE_CUES_GRAPH=1. */
 export function liveCuesGraphEnabled(): boolean {
-  return process.env.COS_LIVE_CUES_GRAPH !== '0'
+  return process.env.COS_LIVE_CUES_GRAPH === '1'
 }
 
 export const LIVE_CUES_MEMORY_SCRIPTS = ['semantic_search.py', 'lightrag_search.py'] as const
