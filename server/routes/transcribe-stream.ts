@@ -48,6 +48,7 @@ import {
   maintenanceAdmissionsOpen,
   type MaintenanceWorkLease,
 } from '../lib/maintenance-lifecycle.js'
+import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
 
 function ensurePrivateDirectory(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -1538,6 +1539,11 @@ async function processStreamChunk(opts: {
   console.log(`[perf] persistSession: ${(performance.now() - tPersist).toFixed(1)}ms (${session.chunks.filter(c => c).length} chunks)`)
 
   emitDisplay({ type: 'transcript_chunk', data: { text: trimmedText, speaker, chunkIndex, elapsed, sessionId } })
+  // Live Cues feed — fire-and-forget, NEVER awaited: transcription must not
+  // block on a cue, and no LLM runs on this path. .catch() is required — a
+  // bare `void` on a rejecting promise is an unhandled rejection, which Node
+  // throws on by default. All gates live inside the feed.
+  void feedLiveCueTranscript(sessionId, trimmedText, Boolean(fallbackReason)).catch(() => {})
 
   console.log(`[perf] TOTAL request: ${(performance.now() - tReq).toFixed(1)}ms | chunk #${chunkIndex} | ${audioBuffer.length}b | rms=${Math.round(rms)} q=${isQuiet ? 1 : 0} | ${asrProvider} | "${trimmedText.slice(0, 50)}"`)
   return canonicalChunkResponse(chunk, sessionId, chunkIndex)

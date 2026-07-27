@@ -13,7 +13,12 @@
     "PORT",
     "HTTPS_PORT",
     "BIND_HOST",
-    "COS_DURABLE_QUERY_JOBS"
+    "COS_DURABLE_QUERY_JOBS",
+    "COS_LIVE_CUES",
+    "COS_LIVE_CUES_MODEL",
+    "COS_LIVE_CUES_GRAPH",
+    "COS_LIVE_CUES_LIGHTRAG_RESERVE",
+    "COS_LIVE_CUES_AUTO"
   ],
   "maintenance": {
     "scope": "cross_boot",

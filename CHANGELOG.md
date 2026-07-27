@@ -1,3 +1,31 @@
+## Unreleased
+
+- **Live Cues (opt-in): live meeting coaching on the lens.** With
+  `COS_LIVE_CUES=1` and the companion's Live cues toggle On, a live meeting
+  runs transcript window → Composer planner → Qdrant → LightRAG → Composer
+  insight → a `coaching_nudge` flash on the glasses. Requires the full COS
+  pipeline (`COS_SCRIPTS_DIR`) plus the Cursor Agent CLI; Composer 2.5 is the
+  only supported cue model and anything else fails closed.
+- **Cost containment is structural, not advisory.** Per-meeting cap (8
+  pipelines), single-flight, 60s floor, 30s cooldown, a 60s pipeline wall
+  (deliberately under COS Control's 90s drain window), a consecutive-failure
+  breaker, a persisted weekly Composer ceiling, and a LightRAG reserve that
+  stops graph hops while fewer than `COS_LIVE_CUES_LIGHTRAG_RESERVE` calls
+  remain in the shared 200/day query pool. Every skipped pipeline logs its
+  reason — a silent cap is treated as a defect.
+- **Zero side effects on existing paths.** Cue asks use a dedicated Composer
+  spawn: no conversation history, no Cursor run-ledger entries, no Telegram
+  notifications, and token audit under its own `live-cues` source so `g2-query`
+  keeps measuring only real user queries. Transcription never awaits the
+  pipeline. Cues degrade honestly: a cue produced without graph grounding
+  carries `degraded` + a reason, and Cursor's exit-0 auth failure output is
+  detected rather than rendered as a cue.
+- **Health truthfulness.** `features.liveCues` plus `capabilities.liveCues`
+  (`{ available, reason }`) publish from one helper on BOTH `/api/health` and
+  `/api/models`, with user-safe reasons only. Config lives in
+  `~/.cos-glasses/.env` — never the LaunchAgent plist, which COS Control
+  rebuilds from its manifest. Kill switch: `COS_LIVE_CUES=0` + restart.
+
 ## 6.17.0
 
 - **Speaker diarization is now a bolt-on any install can enable.** The ~26 MB

@@ -38,6 +38,8 @@ import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
 import { welcomeContextRouter } from './routes/welcome-context.js'
+import { liveCuesRouter } from './routes/live-cues.js'
+import { shutdownLiveCues } from './lib/live-cues-engine.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
@@ -247,6 +249,7 @@ app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
 app.use('/api', bookmarksRouter)
 app.use('/api', welcomeContextRouter)
+app.use('/api', liveCuesRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models
@@ -280,6 +283,15 @@ async function gracefulShutdown(): Promise<void> {
     await shutdownQueryJobRuntime('server_shutdown')
   } catch (error) {
     console.error('[query-jobs] graceful interruption failed:', error)
+  }
+  // Live Cues spawns detached trees (Cursor CLI, python with claude -p
+  // grandchildren) that would survive this process's death — kill them
+  // explicitly inside the 8s force-exit budget. Single-flight guarantees at
+  // most one tree per session, which fits.
+  try {
+    await shutdownLiveCues()
+  } catch (error) {
+    console.error('[live-cues] shutdown termination failed:', error)
   }
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
   stopCodexModelCatalogRefresh()

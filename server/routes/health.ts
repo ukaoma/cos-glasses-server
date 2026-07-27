@@ -36,6 +36,7 @@ import { managedRuntimeCapability, managedServerVersion } from '../lib/managed-r
 import { getServerGenerationId } from '../lib/managed-runtime.js'
 import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
 import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
+import { liveCuesCapability } from '../lib/live-cues-capability.js'
 
 export const healthRouter = Router()
 
@@ -203,6 +204,9 @@ healthRouter.get('/health', async (_req, res) => {
   const recovery = managedRuntimeCapability()
   const maintenance = maintenanceLifecycle.snapshot()
   const tts_local = getLocalTtsHealth()
+  // Computed once per request; the same value feeds features.liveCues and
+  // capabilities.liveCues so the two surfaces can never disagree.
+  const liveCues = liveCuesCapability()
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -219,6 +223,7 @@ healthRouter.get('/health', async (_req, res) => {
     durableQueryJobsProtocol: durableJobs.protocolVersion,
     localFirstMeetings: localFirstMeetings !== null,
     transcriptionPolicy: transcription.mode,
+    liveCues: liveCues.available,
   }
   const voice = {
     available: keyStatus.hasKey || tts_local.ready,
@@ -277,6 +282,7 @@ healthRouter.get('/health', async (_req, res) => {
         carriedAcrossBoot: maintenance.operation?.carriedAcrossBoot ?? false,
       },
       cliDebug: CLI_DEBUG_CAPABILITY,
+      liveCues,
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
     // /api/health is intentionally unauthenticated for setup diagnostics.
@@ -319,6 +325,10 @@ healthRouter.get('/models', async (req, res) => {
       transcription: { ...transcription, hq: transcriptionHq },
       cliDebug: CLI_DEBUG_CAPABILITY,
       recovery: managedRuntimeCapability(),
+      // Same helper as /api/health — the companion's 15s liveness poll reads
+      // THIS surface, so a value present only on /api/health leaves the
+      // live-cues indicator blind.
+      liveCues: liveCuesCapability(),
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
   })

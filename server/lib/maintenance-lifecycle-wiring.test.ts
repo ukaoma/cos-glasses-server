@@ -17,6 +17,12 @@ describe('maintenance admission wiring', () => {
     expect(source('server/routes/meeting.ts')).toContain("acquireMaintenanceWork('meeting_batch_finalization'")
     expect(source('server/routes/prompt-drafts.ts')).toContain("acquireMaintenanceWork('prompt_draft_warm'")
     expect(source('server/routes/prompt-drafts.ts')).toContain("acquireMaintenanceWork('prompt_draft_finalize')")
+    // Live Cues pipelines outlive their triggering HTTP request, so the lease
+    // is taken in the engine (lib), not a route — and the ASR feed hook must
+    // stay fire-and-forget with a rejection sink.
+    expect(source('server/lib/live-cues-engine.ts')).toContain("acquireMaintenanceWork('live_cue_pipeline')")
+    expect(source('server/routes/transcribe-stream.ts')).toContain('void feedLiveCueTranscript(')
+    expect(source('server/routes/transcribe-stream.ts')).toContain('.catch(() => {})')
   })
 
   it('fails closed for secondary mutations and exposes no Whisper restart route', () => {

@@ -47,6 +47,12 @@ export type MaintenanceWorkKind =
   | 'prompt_draft_write'
   | 'prompt_draft_warm'
   | 'prompt_draft_finalize'
+  // Live Cues pipeline (planner + memory hops + insight). Held for the
+  // pipeline's in-flight duration so an Update Server drain cannot unload the
+  // server while a Cursor CLI or python child is live. The pipeline wall
+  // budget must stay under COS Control's 90s drain timeout (main.swift:1853)
+  // or every drain that catches a cue in flight hard-fails to Repair.
+  | 'live_cue_pipeline'
 
 export type MaintenanceWorkPhase = 'queued' | 'active'
 export type MaintenanceOperationScope = 'same_boot' | 'cross_boot'
