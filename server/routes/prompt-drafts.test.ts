@@ -30,7 +30,15 @@ async function startServer(): Promise<void> {
       TranscriptionUnavailableError: MockUnavailableError,
     }
   })
-  vi.doMock('../lib/whisper-local.js', () => ({ applyCorrections: (text: string) => text }))
+  vi.doMock('../lib/whisper-local.js', () => ({
+    applyCorrections: (text: string) => text,
+    getHighQualityTranscriptionCapability: () => ({
+      hqAvailable: true,
+      model: 'large-v3',
+      backend: 'whisper-cli',
+      reason: null,
+    }),
+  }))
   vi.doMock('../lib/dictation-clean.js', () => ({
     AUTOCLEAN_MAX_CHARS: 8000,
     autoCleanDictation: async (text: string) => text,
@@ -150,12 +158,16 @@ describe('public prompt draft recovery contract', () => {
     expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'local-only' })
   })
 
-  it('reports an HQ request that finalized on Fast as degraded', async () => {
-    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string }) => {
+  it('retries finalize when HQ warm degraded but large-v3 is still available', async () => {
+    let hqCalls = 0
+    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string; policy?: string }) => {
       if (opts?.mode === 'hq') {
+        hqCalls += 1
+        // Warm (local-only) degrades; finalize (automatic) still cannot get HQ —
+        // but we must not silently reuse the warm turbo without retrying.
         return {
           text: 'turbo fallback', backend: 'fast-cli-turbo', mode: 'hq', requestedMode: 'hq',
-          actualQuality: 'fast', degraded: true, degradationReason: 'large_v3_model_missing',
+          actualQuality: 'fast', degraded: true, degradationReason: 'hq_decode_failed',
           elapsedMs: 35, audioBytes: 3200,
         }
       }
@@ -172,7 +184,6 @@ describe('public prompt draft recovery contract', () => {
       expect.any(Buffer),
       { mode: 'hq', policy: 'local-only' },
     ))
-    const callsBeforeFinalize = transcribeAudioBuffer.mock.calls.length
     const finalized = await httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
 
     expect(finalized.status).toBe(200)
@@ -182,13 +193,52 @@ describe('public prompt draft recovery contract', () => {
       actualQuality: 'fast',
       degraded: true,
       backend: 'fast-cli-turbo',
-      degradationReason: 'large_v3_model_missing',
     })
-    expect(transcribeAudioBuffer.mock.calls.length).toBe(callsBeforeFinalize)
-    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(
+    expect(hqCalls).toBeGreaterThanOrEqual(2)
+    expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
       { mode: 'hq', policy: 'automatic' },
     )
+  })
+
+  it('keeps HQ warm text when a late Fast warm finishes after HQ', async () => {
+    let resolveFast!: (value: any) => void
+    const fastPromise = new Promise(resolve => { resolveFast = resolve })
+    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string }) => {
+      if (opts?.mode === 'hq') {
+        return {
+          text: 'hq polished text', backend: 'hq-large-v3', mode: 'hq', requestedMode: 'hq',
+          actualQuality: 'hq', degraded: false, elapsedMs: 80, audioBytes: 3200,
+        }
+      }
+      return fastPromise
+    })
+
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'hq', policy: 'local-only' },
+    ))
+
+    // Late Fast warm resolves after HQ is already cached.
+    resolveFast({
+      text: 'turbo live preview', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
+      actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+    })
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+
+    const beforeFinalize = transcribeAudioBuffer.mock.calls.length
+    const finalized = await httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
+    expect(finalized.status).toBe(200)
+    expect(finalized.json).toMatchObject({
+      text: 'hq polished text',
+      requestedMode: 'hq',
+      actualQuality: 'hq',
+      degraded: false,
+    })
+    expect(transcribeAudioBuffer.mock.calls.length).toBe(beforeFinalize)
   })
 
   it('awaits in-flight HQ warm on finalize instead of double-decoding', async () => {

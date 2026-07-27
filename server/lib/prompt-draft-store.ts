@@ -24,6 +24,13 @@ export interface PromptDraftTranscriptRecord {
   acceptedDegraded?: boolean
 }
 
+/** Higher wins. Fast warm must never replace an HQ/cloud decode for the same audio. */
+export function transcriptQualityRank(quality: PromptDraftTranscriptRecord['actualQuality']): number {
+  if (quality === 'hq') return 3
+  if (quality === 'cloud') return 2
+  return 1
+}
+
 export interface PromptDraftMeta {
   v: 2
   draftId: string
@@ -224,10 +231,39 @@ export async function markPromptDraftChunkTranscript(
       ? { text: record, hash: meta.chunkHashes[key] ?? '', requestedMode: 'hq', actualQuality: 'fast', backend: 'legacy', degraded: true }
       : record
     if (meta.chunkHashes[key] && normalized.hash && meta.chunkHashes[key] !== normalized.hash) return meta
-    if (purpose === 'final') meta.finalTranscripts[key] = normalized
-    else meta.warmTranscripts[key] = normalized
+
+    if (purpose === 'final') {
+      const existingFinal = meta.finalTranscripts[key]
+      // Final is authoritative for its mode, but never downgrade a better decode
+      // of the same audio (late Fast warm finishing after HQ finalize).
+      if (
+        existingFinal
+        && existingFinal.hash === normalized.hash
+        && transcriptQualityRank(existingFinal.actualQuality) > transcriptQualityRank(normalized.actualQuality)
+      ) {
+        return meta
+      }
+      meta.finalTranscripts[key] = normalized
+    } else {
+      const existingWarm = meta.warmTranscripts[key]
+      // Speculative HQ and Fast warm share warmTranscripts[chunk]. Whichever
+      // finishes last used to win — a slow Fast warm could clobber HQ and make
+      // the next reader (or a racy finalize) prefer turbo text.
+      if (
+        existingWarm
+        && existingWarm.hash === normalized.hash
+        && transcriptQualityRank(existingWarm.actualQuality) > transcriptQualityRank(normalized.actualQuality)
+      ) {
+        return meta
+      }
+      meta.warmTranscripts[key] = normalized
+    }
+
     if (!meta.chunkTranscripts) meta.chunkTranscripts = {}
-    meta.chunkTranscripts[key] = normalized.text
+    const published = meta.finalTranscripts[key] ?? meta.warmTranscripts[key]
+    if (published && published.hash === (meta.chunkHashes[key] ?? published.hash)) {
+      meta.chunkTranscripts[key] = published.text
+    }
     return writeMeta(touchMeta(meta))
   })
 }

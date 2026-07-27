@@ -13,6 +13,7 @@ import {
   markPromptDraftError,
   getMissingChunkIndexes,
   prunePromptDrafts,
+  transcriptQualityRank,
   type PromptDraftTranscriptRecord,
 } from '../lib/prompt-draft-store.js'
 import {
@@ -22,6 +23,7 @@ import {
   OpenAIWhisperBudgetExhaustedError,
   TranscriptionUnavailableError,
 } from '../lib/transcribe-audio.js'
+import { getHighQualityTranscriptionCapability } from '../lib/whisper-local.js'
 import {
   stripInlineHallucinationsOneShot,
   stripInlineHallucinations,
@@ -191,16 +193,31 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
         const current = loadPromptDraftMeta(draftId)
         const warm = current?.warmTranscripts?.[String(chunkIndex)]
         const cachedFinal = current?.finalTranscripts?.[String(chunkIndex)]
-        if (!cachedFinal || cachedFinal.hash !== hash) {
-          await markPromptDraftChunkTranscript(draftId, chunkIndex, {
-            text,
-            hash,
-            requestedMode: warm?.requestedMode ?? mode,
-            actualQuality: warm?.actualQuality ?? (mode === 'hq' ? 'hq' : 'fast'),
-            backend: warm?.backend ?? 'shared-inflight',
-            degraded: warm?.degraded ?? false,
-            ...(warm?.degradationReason ? { degradationReason: warm.degradationReason } : {}),
-          }, 'final')
+        // Trust the shared job text + mode key. Warm metadata is only used when
+        // it still matches this decode — a late Fast warm must not relabel HQ.
+        const warmMatches = Boolean(
+          warm
+          && warm.hash === hash
+          && warm.requestedMode === mode
+          && warm.text === text,
+        )
+        const record: PromptDraftTranscriptRecord = {
+          text,
+          hash,
+          requestedMode: mode,
+          actualQuality: warmMatches
+            ? warm!.actualQuality
+            : (mode === 'hq' ? 'hq' : 'fast'),
+          backend: warmMatches ? warm!.backend : 'shared-inflight',
+          degraded: warmMatches ? warm!.degraded : false,
+          ...(warmMatches && warm!.degradationReason ? { degradationReason: warm!.degradationReason } : {}),
+        }
+        if (
+          !cachedFinal
+          || cachedFinal.hash !== hash
+          || transcriptQualityRank(cachedFinal.actualQuality) < transcriptQualityRank(record.actualQuality)
+        ) {
+          await markPromptDraftChunkTranscript(draftId, chunkIndex, record, 'final')
         }
       }
       return text
@@ -245,6 +262,22 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
   return job
 }
 
+function isReusableTranscript(
+  cached: PromptDraftTranscriptRecord | undefined,
+  hash: string,
+  mode: 'hq' | 'fast',
+): boolean {
+  if (!cached || cached.hash !== hash || cached.requestedMode !== mode) return false
+  if (cached.backend.startsWith('legacy')) return false
+  if (mode === 'fast') return cached.actualQuality === 'fast' || cached.actualQuality === 'cloud'
+  // mode === 'hq'
+  if (cached.actualQuality === 'hq' || cached.actualQuality === 'cloud') return true
+  // Degraded turbo after an HQ request: retry when large-v3 can still run.
+  // If HQ is unavailable, reuse to avoid a pointless second turbo decode.
+  if (cached.actualQuality === 'fast') return !getHighQualityTranscriptionCapability().hqAvailable
+  return false
+}
+
 async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: AutoCleanRequest, signal?: AbortSignal) {
   const meta = loadPromptDraftMeta(draftId)
   if (!meta) throw Object.assign(new Error('draft not found'), { status: 404 })
@@ -262,17 +295,11 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
       }
       const current = loadPromptDraftMeta(draftId)
       const cached = current?.finalTranscripts?.[String(chunk.chunkIndex)] ?? current?.warmTranscripts?.[String(chunk.chunkIndex)]
-      // Reuse the exact requested-mode decode even when HQ truthfully degraded
-      // to turbo. Finalize's automatic policy would make the same local choice
-      // again after a successful turbo result, so a second decode adds latency
-      // without improving quality. Legacy records stay excluded because their
-      // decoder provenance was reconstructed during migration.
-      const reusable = Boolean(
-        cached
-        && cached.hash === hash
-        && cached.requestedMode === mode
-        && !cached.backend.startsWith('legacy'),
-      )
+      // Reuse only a decode that still matches the requested mode's quality bar.
+      // When Settings HQ is available, never treat a degraded turbo warm as final
+      // — that left finished chats on Fast text while REVIEW looked "HQ ready".
+      // Legacy records stay excluded (reconstructed provenance).
+      const reusable = isReusableTranscript(cached, hash, mode)
       const raw = reusable ? cached!.text : await transcribeChunk(draftId, chunk.chunkIndex, chunk.audioBuffer, mode, 'final')
       const text = sanitizeTranscript(draftId, raw, !reusable)
       if (text.trim()) {

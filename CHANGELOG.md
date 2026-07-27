@@ -1,3 +1,12 @@
+## 6.16.6
+
+- **HQ finalize no longer loses to late Fast warm.** Fast warm and speculative
+  HQ warm share `warmTranscripts[chunk]`; a slow turbo decode could overwrite
+  large-v3 after HQ had already won. Warm/final writes are quality-monotonic
+  (hq > cloud > fast) for the same audio hash. Finalize reuses HQ/cloud only;
+  when Settings HQ is available, a degraded turbo warm is retried with
+  `automatic` instead of becoming the finished-chat question text.
+
 ## 6.16.5
 
 - **Welcome weather restored on managed installs.** Ported authenticated
