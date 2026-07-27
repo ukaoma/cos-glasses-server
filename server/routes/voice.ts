@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, rawCosineSimilarity, getEmbeddingCount } from '../lib/speaker-embeddings.js'
 import { statSync } from 'node:fs'
 import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js'
+import { getOwnerSpeakerLabel } from '../lib/profile.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const AUDIO_SAVE_DIR = resolve(__dirname, '..', 'data', 'training-audio')
@@ -18,7 +19,10 @@ export const voiceRouter = Router()
 // POST /api/voice/enroll — accept WAV audio, extract embedding, store as profile
 voiceRouter.post('/voice/enroll', async (req, res) => {
   try {
-    const name = (req.query.name as string) || 'MU'
+    // Default to the configured wearer label ('Me' unless owner_speaker_label
+    // is set). Hardcoding one user's initials here enrolled every other install
+    // under a stranger's name.
+    const name = (req.query.name as string) || getOwnerSpeakerLabel()
 
     // Collect raw audio body
     const buffers: Buffer[] = []
@@ -38,10 +42,12 @@ voiceRouter.post('/voice/enroll', async (req, res) => {
   }
 })
 
-// GET /api/voice/status — is MU enrolled?
+// GET /api/voice/status — is the wearer enrolled?
 voiceRouter.get('/voice/status', (_req, res) => {
+  const owner = getOwnerSpeakerLabel()
   res.json({
-    enrolled: isEnrolled('MU'),
+    owner,
+    enrolled: isEnrolled(owner),
     speakers: getAllSpeakerNames(),
   })
 })
