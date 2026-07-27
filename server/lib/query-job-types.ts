@@ -61,6 +61,8 @@ export interface QueryJobRequest {
   sessionId: string
   model?: string
   effort?: string
+  /** Cursor ask|agent. Omitted means ask on the server (old clients). */
+  cursorExecutionMode?: string
   messageEra?: string
   globalMsgNum?: number
   reference?: QueryJobPromptReference
@@ -119,6 +121,7 @@ export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   sessionId: string
   requestedModel?: string
   effort?: string
+  cursorExecutionMode?: string
   messageEra?: string
   globalMsgNum?: number
   handoffCode?: string
@@ -239,6 +242,10 @@ export function parseQueryJobRequest(raw: unknown): QueryJobRequest {
 
   const model = optionalString(input.model, 'model', 64)
   const effort = optionalString(input.effort, 'effort', 32)
+  const cursorExecutionModeRaw = optionalString(input.cursorExecutionMode, 'cursor_execution_mode', 16)
+  const cursorExecutionMode = cursorExecutionModeRaw === 'agent' || cursorExecutionModeRaw === 'ask'
+    ? cursorExecutionModeRaw
+    : undefined
   const messageEra = optionalString(input.messageEra, 'message_era', 80)
   const handoffCode = optionalString(input.handoffCode, 'handoff_code', 128)
   const clientQueueItemId = optionalString(input.clientQueueItemId, 'client_queue_item_id', 120)
@@ -277,6 +284,7 @@ export function parseQueryJobRequest(raw: unknown): QueryJobRequest {
     sessionId,
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
+    ...(cursorExecutionMode ? { cursorExecutionMode } : {}),
     ...(messageEra ? { messageEra } : {}),
     ...(globalMsgNum ? { globalMsgNum } : {}),
     ...(reference ? { reference } : {}),

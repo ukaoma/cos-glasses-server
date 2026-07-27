@@ -455,6 +455,7 @@ export class QueryJobStore {
           sessionId: request.sessionId,
           ...(request.model ? { requestedModel: request.model } : {}),
           ...(request.effort ? { effort: request.effort } : {}),
+          ...(request.cursorExecutionMode ? { cursorExecutionMode: request.cursorExecutionMode } : {}),
           ...(request.messageEra ? { messageEra: request.messageEra } : {}),
           ...(request.globalMsgNum ? { globalMsgNum: request.globalMsgNum } : {}),
           ...(request.handoffCode ? { handoffCode: request.handoffCode } : {}),

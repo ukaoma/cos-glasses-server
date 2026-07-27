@@ -37,6 +37,7 @@ import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
+import { welcomeContextRouter } from './routes/welcome-context.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
@@ -245,6 +246,7 @@ app.use('/api', handoffsRouter)
 app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
 app.use('/api', bookmarksRouter)
+app.use('/api', welcomeContextRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models

@@ -1,8 +1,13 @@
-// Standalone meeting archive backed only by the public server's private data
-// directory. No COS operations paths, classifiers, or user-specific stores.
+// Meeting archive: COS operations tree when configured, else standalone recordings.
 
 import { Router } from 'express'
 import { getMeetingStore, MeetingStore, MeetingStoreError } from '../lib/meeting-store.js'
+import {
+  cosOperationsMeetingsConfigured,
+  getCosOperationsMeetingDetail,
+  listCosOperationsMeetings,
+  resolveCosOperationsDir,
+} from '../lib/cos-operations-meetings.js'
 
 export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): Router {
   const router = Router()
@@ -14,7 +19,18 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
       const limit = Number.isFinite(rawLimit) ? rawLimit : 20
       const domain = typeof req.query.domain === 'string' ? req.query.domain : 'all'
       res.set('Cache-Control', 'private, no-store')
-      res.json({ meetings: store.list({ limit, domain }) })
+
+      if (cosOperationsMeetingsConfigured()) {
+        const meetings = listCosOperationsMeetings({ limit, domain })
+        res.json({
+          meetings,
+          source: 'cos_operations',
+          operationsDir: resolveCosOperationsDir(),
+        })
+        return
+      }
+
+      res.json({ meetings: store.list({ limit, domain }), source: 'standalone_recordings' })
     } catch (error) {
       sendMeetingStoreError(res, error)
     }
@@ -32,6 +48,17 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
         return
       }
       res.set('Cache-Control', 'private, no-store')
+
+      if (cosOperationsMeetingsConfigured()) {
+        const detail = getCosOperationsMeetingDetail(domain, month, filename)
+        if (detail) {
+          res.json(detail)
+          return
+        }
+        // Fall through to standalone store for G2-local recordings that share
+        // the same API shape when ops lookup misses.
+      }
+
       res.json(store.detail(domain, month, filename))
     } catch (error) {
       sendMeetingStoreError(res, error)
@@ -43,6 +70,19 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
   router.get('/meetings/:domain/:month/:filename', (req, res) => {
     try {
       res.set('Cache-Control', 'private, no-store')
+
+      if (cosOperationsMeetingsConfigured()) {
+        const detail = getCosOperationsMeetingDetail(
+          req.params.domain,
+          req.params.month,
+          req.params.filename,
+        )
+        if (detail) {
+          res.json(detail)
+          return
+        }
+      }
+
       res.json(store.detail(req.params.domain, req.params.month, req.params.filename))
     } catch (error) {
       sendMeetingStoreError(res, error)

@@ -130,6 +130,12 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
 - Tasks / calendar / people context **if** you run the
   [COS Starter Kit](https://www.gotcos.com) (`COS_SCRIPTS_DIR`); otherwise it is
   glasses + AI only
+- Welcome weather on the glasses home screen via authenticated
+  `GET /api/welcome-context?lat=&lon=`. The phone supplies GPS (Even Hub
+  location permission); this server only proxies Open-Meteo. Without phone
+  coords the route uses last-known process coords, then optional
+  `COS_WEATHER_DEFAULT_*`, otherwise omits weather. Optional `nextEvent`
+  appears when `COS_SCRIPTS_DIR` calendar data is available.
 
 ## Configuration
 
@@ -147,6 +153,8 @@ optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 in the managed CLI working directory),
 `COS_CURSOR_AGENT_BIN` (optional absolute Cursor `agent` binary),
 `COS_CURSOR_PERSIST_SESSIONS=0` (disable Cursor session resume),
+`COS_WEATHER_DEFAULT_LAT` / `COS_WEATHER_DEFAULT_LON` /
+`COS_WEATHER_DEFAULT_CITY` (optional home fallback when phone GPS is denied),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in

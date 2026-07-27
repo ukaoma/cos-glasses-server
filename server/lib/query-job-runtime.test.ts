@@ -196,6 +196,50 @@ describe('public durable query runtime', () => {
       clientJobId,
       generation: 1,
     })
+    expect(mocks.callModelStreaming.mock.calls[0][7]).not.toHaveProperty('cursorExecutionMode')
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
+  it('defaults omitted Cursor mode to agent on durable jobs', async () => {
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const clientJobId = randomUUID()
+    const prepared = await runtime.preparePublicDurableQueryAdmission({
+      clientJobId,
+      generation: 1,
+      query: 'shell health',
+      sessionId: 'runtime-session',
+      model: 'cursor-grok',
+    })
+    const admission = await runtime.queryJobCoordinator.submit(prepared)
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(admission.job.jobId))
+    expect(mocks.callModelStreaming.mock.calls.at(-1)?.[7]).toMatchObject({
+      clientJobId,
+      cursorExecutionMode: 'agent',
+    })
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
+  it('forwards Cursor Agent mode into callModelStreaming options', async () => {
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const clientJobId = randomUUID()
+    const prepared = await runtime.preparePublicDurableQueryAdmission({
+      clientJobId,
+      generation: 1,
+      query: 'use slack bridge',
+      sessionId: 'runtime-session',
+      model: 'cursor-grok',
+      cursorExecutionMode: 'agent',
+    })
+    const admission = await runtime.queryJobCoordinator.submit(prepared)
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(admission.job.jobId))
+    expect(mocks.callModelStreaming.mock.calls.at(-1)?.[7]).toMatchObject({
+      clientJobId,
+      cursorExecutionMode: 'agent',
+    })
+    const execution = await runtime.queryJobStore.getExecution(admission.job.jobId)
+    expect(execution.request.cursorExecutionMode).toBe('agent')
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 

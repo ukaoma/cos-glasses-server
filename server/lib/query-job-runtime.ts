@@ -13,6 +13,7 @@ import {
   isCursorModel,
   normalizeEffortPreference,
   normalizeModelPreference,
+  type CursorExecutionMode,
   type ModelPreference,
 } from '../../shared/model-preference.js'
 import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
@@ -238,6 +239,15 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
     {
       abortSignal: signal,
       effort: validEffort,
+      // Glasses Settings default is Agent. Explicit ask stays ask; omit → agent
+      // for Cursor so legacy clients aren't stuck in Ask when durable is off.
+      ...(validModel && isCursorModel(validModel)
+        ? {
+            cursorExecutionMode: (
+              request.cursorExecutionMode === 'ask' ? 'ask' : 'agent'
+            ) as CursorExecutionMode,
+          }
+        : {}),
       clientJobId: request.clientJobId,
       generation: request.generation,
       sessionLockHeld: true,

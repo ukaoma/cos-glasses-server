@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MeetingStore } from '../lib/meeting-store.js'
 import { initializeServerInstanceId } from '../lib/server-instance-id.js'
 import type { BatchTranscription } from '../lib/batch-transcript-quality.js'
@@ -13,6 +13,24 @@ import { createMeetingsRouter } from './meetings.js'
 const TOKEN = 'meeting-route-token'
 const roots: string[] = []
 const servers: Server[] = []
+const opsEnvKeys = ['COS_OPERATIONS_DIR', 'COS_MEETINGS_ROOT', 'COS_SCRIPTS_DIR'] as const
+const previousOpsEnv: Partial<Record<typeof opsEnvKeys[number], string | undefined>> = {}
+
+beforeEach(() => {
+  // Standalone MeetingStore tests must not inherit a live COS ops tree.
+  for (const key of opsEnvKeys) {
+    previousOpsEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+})
+
+afterEach(() => {
+  for (const key of opsEnvKeys) {
+    const value = previousOpsEnv[key]
+    if (value == null) delete process.env[key]
+    else process.env[key] = value
+  }
+})
 
 interface HarnessOptions {
   batch: BatchTranscription

@@ -1,3 +1,37 @@
+## 6.16.5
+
+- **Welcome weather restored on managed installs.** Ported authenticated
+  `GET /api/welcome-context` (Open-Meteo + reverse-geocode). Phone sends
+  `lat`/`lon` from Even Hub geolocation; Mac never invents a home city.
+  Without coords: last process coords → optional `COS_WEATHER_DEFAULT_*` →
+  omit weather. New coords await reverse-geocode (3s) before first JSON so
+  the city label is not stale. Calendar `nextEvent` stays optional via the
+  COS python bridge with public-safe OOO filtering only.
+
+## 6.16.4
+
+- **Cursor Agent on legacy `/api/query`.** 6.16.3 only forwarded
+  `cursorExecutionMode` on durable jobs. Most installs still run with
+  `durableQueryJobs: false`, so the companion fell back to `/api/query` and
+  Cursor stayed Ask (Shell Rejected). Legacy route now accepts the field;
+  Cursor omit/unknown defaults to **agent** (Settings default). Explicit `ask`
+  still forces read-only. Durable runtime uses the same default.
+
+## 6.16.3
+
+- **Cursor Agent mode on durable jobs.** Glasses Settings → Agent now reaches
+  the CLI (`--force` / no `--mode ask`). Public 6.16.1–6.16.2 accepted Cursor
+  models but dropped `cursorExecutionMode` before query-job execution, so every
+  turn stayed Ask and Shell was Rejected. Parse + forward `agent`|`ask`; omit
+  still defaults to ask for old clients.
+
+## 6.16.2
+
+- **COS operations meetings library.** G2 Review Meetings can list markdown from
+  a configurable COS `operations/` tree via `COS_OPERATIONS_DIR` /
+  `COS_MEETINGS_ROOT`, with fallback to `COS_SCRIPTS_DIR/..`, then standalone
+  recordings. Opt-in per install — no hardcoded COS layout.
+
 ## 6.16.1
 
 - **Cursor Agent models (Composer 2.5 / Grok 4.5).** Managed installs now ship

@@ -244,4 +244,11 @@ exit 1
     expect(publicCursorSource).not.toMatch(/\/Users\//)
     expect(publicCursorSource).not.toMatch(/\b(?:Miles|Ukaoma|MU-Chief-Staff)\b/i)
   })
+
+  it('keeps operator identity and Miles calendar filters out of welcome-context', () => {
+    const welcome = readFileSync(resolve(root, 'server/routes/welcome-context.ts'), 'utf8')
+    expect(welcome).not.toMatch(/\/Users\//)
+    expect(welcome).not.toMatch(/\b(?:Miles|Ukaoma|Leander|MU-Chief-Staff)\b/i)
+    expect(welcome).not.toMatch(/hermit crab|lean-labs|miles\s*&\s*team|sprocket rocket/i)
+  })
 })

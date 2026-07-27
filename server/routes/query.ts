@@ -5,7 +5,11 @@ import { Router } from 'express'
 import { callModelStreaming } from '../lib/model-router.js'
 import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
-import { normalizeEffortPreference, normalizeModelPreference } from '../../shared/model-preference.js'
+import {
+  isCursorModel,
+  normalizeEffortPreference,
+  normalizeModelPreference,
+} from '../../shared/model-preference.js'
 import { QueryAttachmentError, resolveQueryAttachments } from '../lib/query-attachments.js'
 import { getMediaStore } from '../lib/media-store.js'
 import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
@@ -38,6 +42,9 @@ queryRouter.post('/query', async (req, res) => {
   const activityToolMode = req.body.activityToolMode === 'off' || req.body.activityToolMode === 'preview'
     ? req.body.activityToolMode
     : 'status'
+  // Glasses Settings default is Agent. Only an explicit "ask" stays read-only —
+  // omit/unknown must not silently force Ask (6.16.3 durable-only gap).
+  const cursorExecutionMode = req.body.cursorExecutionMode === 'ask' ? 'ask' as const : 'agent' as const
 
   // Resolve durable attachment ids and legacy base64 images through one
   // validation/normalization path before opening SSE.
@@ -170,7 +177,11 @@ queryRouter.post('/query', async (req, res) => {
         ? { query: String(reference.query), response: String(reference.response) }
         : undefined,
       validGlobalMsgNum,
-      { abortSignal: abortController.signal, effort: validEffort },
+      {
+        abortSignal: abortController.signal,
+        effort: validEffort,
+        ...(validModel && isCursorModel(validModel) ? { cursorExecutionMode } : {}),
+      },
     )
   } catch (err: unknown) {
     maintenanceLease.release()
