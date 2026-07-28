@@ -50,6 +50,34 @@ import {
   type MaintenanceWorkLease,
 } from '../lib/maintenance-lifecycle.js'
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
+import { preemptMetalBatchForLive, registerLiveActivityProbe } from '../lib/whisper-metal-gate.js'
+
+/** Preempt hook 2 of 2 (1C): the recording_chunk backstop. Live audio is
+ *  arriving, so any Metal batch must yield the GPU now. This covers recovery,
+ *  reconnect, and restart adoption — paths that reach chunk upload WITHOUT
+ *  going through session creation. Idempotent with the create hook.
+ *
+ *  Every recording_chunk lease goes through here rather than calling
+ *  acquireMaintenanceWork directly, so a future call site cannot silently skip
+ *  the preempt. Preempt runs BEFORE acquire so the GPU frees even if the drain
+ *  gate rejects the lease. */
+function acquireRecordingChunkLease(options: { allowDuringDrain?: boolean }): MaintenanceWorkLease {
+  preemptMetalBatchForLive('recording_chunk')
+  return acquireMaintenanceWork('recording_chunk', options)
+}
+
+/** Live-activity probe for the Metal gate (2B). Reports the most recent
+ *  lastActivityAt across in-memory sessions; the gate applies its own
+ *  180s window so a cold orphan cannot pin batch to CPU. Registered here to
+ *  keep the dependency one-way (stream -> gate), avoiding a circular import. */
+registerLiveActivityProbe(() => {
+  let newest: number | null = null
+  for (const session of sessions.values()) {
+    const at = session.lastActivityAt
+    if (typeof at === 'number' && Number.isFinite(at) && (newest === null || at > newest)) newest = at
+  }
+  return newest
+})
 
 function ensurePrivateDirectory(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -710,6 +738,10 @@ export function getSession(sessionId: string): TranscriptSession {
       emptyCompletions: {},
     }
     sessions.set(sessionId, session)
+    // Preempt hook 1 of 2 (1C). CREATE ONLY — deliberately inside the `!session`
+    // branch, never on an ordinary getSession() touch, or a status read of a
+    // stale session would falsely evict a healthy Metal batch.
+    preemptMetalBatchForLive('session_create')
   }
   if (!session.providerCandidates) session.providerCandidates = {}
   if (!session.receivedIndices) session.receivedIndices = []
@@ -1586,7 +1618,7 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
     // Reject a wrong Mac before consuming or persisting any upload bytes.
     assertPinnedServerIdentity(req.get('X-COS-Server-Instance'), req.query.serverInstanceId)
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
-    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+    maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
     const chunkIndex = parseInt((req.query.chunkIndex as string) || '0', 10)
@@ -1622,7 +1654,7 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (
     const body = req.body ?? {}
     const sessionId = String(body.sessionId ?? '')
     validateSessionId(sessionId)
-    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+    maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
@@ -1648,7 +1680,7 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/chun
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const sessionId = String(req.params.sessionId ?? '')
     validateSessionId(sessionId)
-    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+    maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
@@ -1694,7 +1726,7 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/fina
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const sessionId = String(req.params.sessionId ?? '')
     validateSessionId(sessionId)
-    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+    maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
@@ -1728,7 +1760,7 @@ transcribeStreamRouter.post('/transcribe-stream/candidates', async (req, res) =>
     const sessionId = String(body.sessionId ?? '')
     const chunkIndex = Number(body.chunkIndex)
     validateSessionId(sessionId)
-    maintenanceLease = acquireMaintenanceWork('recording_chunk', {
+    maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
     validateChunkIndex(chunkIndex)

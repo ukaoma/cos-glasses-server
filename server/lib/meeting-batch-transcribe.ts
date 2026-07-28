@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync, utimesSync, writeFileSync } from
 import { join, resolve } from 'node:path'
 import { enhanceAudio } from './audio-enhance.js'
 import { transcribeHighQuality, type WhisperWord } from './whisper-local.js'
+import { isMetalBatchPreempted } from './whisper-metal-gate.js'
 import type { IndexedTranscriptChunk } from '../routes/transcribe-stream.js'
 import {
   evaluateBatchQuality,
@@ -172,7 +173,26 @@ async function transcribeSegments(
       const combined = concatenateWavChunks(audioDir, segment.startChunkIdx, segment.endChunkIdx)
       const enhanced = await enhanceAudio(combined)
       const previousText = results.at(-1)?.text
-      const result = await transcribeHighQuality(enhanced, previousText?.slice(-250), { priority: 'batch' })
+      let result
+      try {
+        result = await transcribeHighQuality(enhanced, previousText?.slice(-250), { priority: 'batch' })
+      } catch (error) {
+        // A live meeting took the GPU mid-segment. The truncated Metal output
+        // was already discarded upstream (BLOCKER contract) — it is never
+        // accepted. Retry this SAME segment once on CPU, which cannot itself be
+        // preempted, so a busy day degrades to slow rather than to a silently
+        // missing stretch of transcript.
+        if (!isMetalBatchPreempted(error)) throw error
+        console.log(
+          `[meeting-batch] Segment ${segment.startChunkIdx}-${segment.endChunkIdx} preempted off Metal; `
+          + 'retrying once on CPU',
+        )
+        refreshPendingLease(audioDir)
+        result = await transcribeHighQuality(enhanced, previousText?.slice(-250), {
+          priority: 'batch',
+          forceCpu: true,
+        })
+      }
       const text = previousText ? stripOverlap(result.text, previousText) : result.text
       const words = result.words ?? []
       results.push({

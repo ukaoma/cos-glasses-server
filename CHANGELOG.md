@@ -1,3 +1,31 @@
+## 6.18.1
+
+- **Post-meeting HQ polish can use the GPU when nothing live needs it — opt-in.**
+  6.14.1 stopped batch polish from fighting a live meeting for Metal by pinning
+  it to CPU forever, which also taxed every idle polish. The device is now
+  chosen per segment: Metal only when `COS_BATCH_HQ_METAL=1` **and** nothing
+  live is contending. **Default is unchanged (always CPU)** until a
+  meeting-to-meeting smoke passes on real hardware; `COS_BATCH_HQ_FORCE_CPU=1`
+  remains the blunt rollback and wins over everything.
+- **Live always wins the GPU, and a preempted segment is never half-saved.**
+  A meeting starting mid-batch preempts the Metal child two ways: on new
+  session creation (create only — an ordinary status read of a stale session
+  must not evict a healthy batch) and on `recording_chunk` lease acquire, which
+  covers recovery/reconnect paths that skip creation. The interrupted output is
+  **discarded unconditionally** — checked before the exit code, because SIGTERM
+  can race to a zero exit with partial stdout — and the same segment is retried
+  once on CPU, which cannot itself be preempted. A truncated transcript is
+  never written into a saved meeting; slow or failed beats silently wrong.
+- **Waiting is distinguished from wedging.** A session counts as live only if
+  it was active within 180s. A cold orphan cannot pin batch to CPU — an
+  `active-sessions` entry sat untouched for 3+ hours on 2026-07-27, and an
+  "any session in the map" rule would have disabled the GPU path permanently
+  and silently. Prompt ASR and one-shot transcription count as contending
+  (same Metal family), and a second Metal batch never starts while one is in
+  flight. A failing liveness probe fails safe to CPU.
+- Every batch segment logs `device`, `reason`, and `metalEnabled`, so "why was
+  polish slow today" is answerable after the fact.
+
 ## 6.18.0
 
 - **G2 save → operations sync restored on the managed public server.** After

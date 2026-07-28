@@ -14,6 +14,13 @@ import { homedir } from 'node:os'
 import crypto from 'node:crypto'
 import { getVocabulary, getOwnerName } from './profile.js'
 import { stripBrandUrls } from './hallucination-filter.js'
+import {
+  batchHqMetalEnabled,
+  chooseBatchDevice,
+  MetalBatchPreemptedError,
+  registerMetalBatchChild,
+  unregisterMetalBatchChild,
+} from './whisper-metal-gate.js'
 
 // Prompt hardening flags (transcription quality, 2026-05-29):
 //   COS_PROMPT_V2 — drop the trailing '.' on the vocab prompt and join prompt+context
@@ -697,7 +704,10 @@ export function parseWhisperCliFullJson(raw: string): { text: string; words: Whi
 export async function transcribeHighQuality(
   audioBuffer: Buffer,
   context?: string,
-  opts: { priority?: 'interactive' | 'batch' } = {},
+  /** forceCpu: the batch pipeline's one CPU retry after a Metal preempt. It
+   *  bypasses the gate entirely so the retry cannot itself be preempted into
+   *  an infinite loop. */
+  opts: { priority?: 'interactive' | 'batch'; forceCpu?: boolean } = {},
 ): Promise<HighQualityTranscriptionResult> {
   if (!cliAvailable) {
     // Fall back to server (no beam search available via HTTP API)
@@ -727,22 +737,33 @@ export async function transcribeHighQuality(
   try {
     writeFileSync(tmpWav, audioBuffer)
 
+    // Interactive HQ keeps Metal unconditionally — a short, user-blocking decode
+    // that is explicitly OUT of batch device policy. Only the long post-meeting
+    // batch is admission-controlled against live ASR.
+    const isBatch = opts.priority === 'batch'
+    const decision: { device: 'metal' | 'cpu'; reason: string; metalEnabled: boolean } = isBatch
+      ? (opts.forceCpu
+          ? { device: 'cpu', reason: 'preempt_retry', metalEnabled: batchHqMetalEnabled() }
+          : chooseBatchDevice())
+      : { device: 'metal', reason: 'interactive', metalEnabled: batchHqMetalEnabled() }
+    const useMetal = decision.device === 'metal'
+
     const text = await new Promise<string>((resolve, reject) => {
-      const isolateBatchFromLiveMetal = opts.priority === 'batch'
       // Interactive HQ: narrower beam (default 2) for latency. Meeting batch keeps 5.
       // Override: COS_HQ_BEAM_INTERACTIVE=N
       const interactiveBeamRaw = Number.parseInt(process.env.COS_HQ_BEAM_INTERACTIVE || '2', 10)
       const interactiveBeam = Number.isFinite(interactiveBeamRaw) && interactiveBeamRaw >= 1
         ? Math.min(interactiveBeamRaw, 5)
         : 2
-      const beam = isolateBatchFromLiveMetal ? 5 : interactiveBeam
+      const beam = isBatch ? 5 : interactiveBeam
       const bestOf = beam
       const args = [
         '-m', modelPath,
         '-f', tmpWav,
-        '-t', isolateBatchFromLiveMetal ? '8' : '16',
+        // CPU batch stays at 8 threads so it cannot starve live work of cores.
+        '-t', (isBatch && !useMetal) ? '8' : '16',
         '-l', 'en',
-        ...(isolateBatchFromLiveMetal ? ['-ng'] : ['-fa']),
+        ...(useMetal ? ['-fa'] : ['-ng']),
         '-bs', String(beam),
         '-bo', String(bestOf),
         '--no-timestamps',
@@ -762,6 +783,16 @@ export async function transcribeHighQuality(
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       ownedHqChildren.add(proc)
+
+      // BLOCKER contract: a preempted Metal child is a HARD FAIL. Its stdout
+      // and its -ojf JSON are truncated mid-decode, and writing that into a
+      // saved meeting is silent transcript corruption — strictly worse than a
+      // slow or failed batch. We record the preempt BEFORE the signal lands so
+      // the close handler can never mistake a truncated run for a clean exit.
+      let preemptedReason: string | null = null
+      if (isBatch && useMetal) {
+        registerMetalBatchChild(proc, reason => { preemptedReason = reason })
+      }
 
       let stdout = ''
       let stderr = ''
@@ -785,8 +816,16 @@ export async function transcribeHighQuality(
 
       proc.on('close', (code) => {
         ownedHqChildren.delete(proc)
+        unregisterMetalBatchChild(proc)
         clearTimeout(timeout)
         if (forceKill) clearTimeout(forceKill)
+        // Preempt is checked FIRST and ignores the exit code: SIGTERM often
+        // yields a non-zero code, but a race could also let the child exit 0
+        // with partial output. Either way the text is discarded.
+        if (preemptedReason) {
+          reject(new MetalBatchPreemptedError(preemptedReason))
+          return
+        }
         if (timedOut) {
           reject(new Error(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${useLargeV3 ? 'large-v3' : 'turbo'})`))
           return
@@ -800,6 +839,7 @@ export async function transcribeHighQuality(
 
       proc.on('error', (err) => {
         ownedHqChildren.delete(proc)
+        unregisterMetalBatchChild(proc)
         clearTimeout(timeout)
         if (forceKill) clearTimeout(forceKill)
         reject(new Error(`whisper-cli HQ spawn error: ${err.message}`))
@@ -831,7 +871,10 @@ export async function transcribeHighQuality(
     console.log(
       `[whisper-hq] Batch transcribed in ${elapsed}ms ` +
       `(${modelTag}${useVad ? '+vad' : ''}${captureBatchWords ? '+words' : ''}` +
-      `${words ? `, ${words.length} words` : ''}): ` +
+      `${words ? `, ${words.length} words` : ''}` +
+      // Device forensics: without these, "why is polish slow today" is
+      // unanswerable after the fact.
+      `${isBatch ? `, device=${decision.device} reason=${decision.reason} metalEnabled=${decision.metalEnabled}` : ''}): ` +
       `"${corrected.slice(0, 80)}${corrected.length > 80 ? '...' : ''}"`,
     )
     const metadata = useLargeV3

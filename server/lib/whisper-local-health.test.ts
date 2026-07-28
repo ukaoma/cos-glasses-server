@@ -164,12 +164,42 @@ describe('whisper-server health reconciliation', () => {
   })
 
   it('keeps meeting-save polish off live Metal', () => {
+    // The 6.14.1 invariant is unchanged: batch polish must never fight live ASR
+    // for the GPU. What changed is HOW it is enforced. 6.14.1 pinned batch to
+    // CPU unconditionally, which taxed every idle polish too; the device is now
+    // chosen per segment by whisper-metal-gate, which still yields CPU whenever
+    // anything live contends AND whenever Metal is not explicitly opted in.
     const source = readFileSync(new URL('./whisper-local.ts', import.meta.url), 'utf8')
-    expect(source).toContain("const isolateBatchFromLiveMetal = opts.priority === 'batch'")
-    expect(source).toContain("...(isolateBatchFromLiveMetal ? ['-ng'] : ['-fa'])")
-    expect(source).toContain("'-t', isolateBatchFromLiveMetal ? '8' : '16'")
+    expect(source).toContain('chooseBatchDevice()')
+    expect(source).toContain("...(useMetal ? ['-fa'] : ['-ng'])")
+    // CPU batch keeps 8 threads so it cannot starve live work of cores.
+    expect(source).toContain("'-t', (isBatch && !useMetal) ? '8' : '16'")
+    // Interactive HQ stays outside batch device policy.
+    expect(source).toContain("{ device: 'metal', reason: 'interactive'")
     expect(source).toContain("const captureBatchWords = opts.priority === 'batch'")
     expect(source).toContain("args.push('-ojf', '-of', outBase)")
+  })
+
+  it('defaults meeting-save polish to CPU until Metal is explicitly opted in', async () => {
+    // Behavioral guard on the same invariant: with COS_BATCH_HQ_METAL unset —
+    // the shipped default — an idle machine must still choose CPU. This keeps
+    // 6.14.1's protection in force until the meeting-to-meeting smoke passes,
+    // and fails loudly if the default is flipped without doing that smoke.
+    const priorMetal = process.env.COS_BATCH_HQ_METAL
+    const priorForce = process.env.COS_BATCH_HQ_FORCE_CPU
+    delete process.env.COS_BATCH_HQ_METAL
+    delete process.env.COS_BATCH_HQ_FORCE_CPU
+    try {
+      const gate = await import('./whisper-metal-gate.js')
+      gate.resetMetalGateForTests()
+      gate.registerLiveActivityProbe(() => null)
+      expect(gate.chooseBatchDevice()).toMatchObject({ device: 'cpu', reason: 'metal_opt_out' })
+    } finally {
+      if (priorMetal === undefined) delete process.env.COS_BATCH_HQ_METAL
+      else process.env.COS_BATCH_HQ_METAL = priorMetal
+      if (priorForce === undefined) delete process.env.COS_BATCH_HQ_FORCE_CPU
+      else process.env.COS_BATCH_HQ_FORCE_CPU = priorForce
+    }
   })
 
   it('serializes concurrent restarts and starts exactly one child', async () => {

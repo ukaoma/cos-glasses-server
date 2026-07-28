@@ -18,7 +18,9 @@
     "COS_LIVE_CUES_MODEL",
     "COS_LIVE_CUES_GRAPH",
     "COS_LIVE_CUES_LIGHTRAG_RESERVE",
-    "COS_LIVE_CUES_AUTO"
+    "COS_LIVE_CUES_AUTO",
+    "COS_BATCH_HQ_METAL",
+    "COS_BATCH_HQ_FORCE_CPU"
   ],
   "maintenance": {
     "scope": "cross_boot",
