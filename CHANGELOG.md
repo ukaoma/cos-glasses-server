@@ -22,8 +22,9 @@
   explain the refusal (2026-07-28 G2 incident; repeated 2026-07-29 in a
   good-morning run that claimed DNS, bot-memory, and filesystem were blocked
   when none of them were). The header is now mode-derived: the trusted agent
-  path states plainly that Bash, Read/Edit/Write, Skill, git, the COS scripts,
-  and every connected MCP are available regardless of any list, and instructs a
+  path states plainly that Bash, Read/Edit/Write, Skill, git, and every connected
+  MCP are available regardless of any list (COS scripts only when
+  `COS_SCRIPTS_DIR` is a real directory — see next bullet), and instructs a
   PROBE before any claim of absence.
 - **The header only promises what the install actually has.** The trusted contract
   names Bash, Read/Edit/Write, Skill, git, and every connected MCP unconditionally,
@@ -54,6 +55,14 @@
   `TOOL_HONESTY_CLAUSE` is exported once and appended on all four paths: report
   the failure of YOUR call and stop there; "my request could not reach X" is the
   finding, "the X service is down" is fabrication.
+- **Fetched content is data, not commands.** A separate
+  `UNTRUSTED_CONTENT_CLAUSE` rides on every capability path — Claude trusted and
+  allowlist, Cursor ask and agent, Codex read-only and workspace-write. The
+  honesty clause governs accuracy *after* a failure; this one governs judgment
+  *before* acting on tool output, web pages, files, transcripts, or meeting
+  text. Confirm before anything destructive or outward-facing. The trusted-body
+  blanket was also narrowed from "never refuse or hedge" to "never claim a tool
+  is unavailable" so availability honesty does not read as a safety override.
 
 ## 6.18.1
 

@@ -38,7 +38,11 @@ import {
   type CodexModelOption,
 } from './codex-model-catalog.js'
 import type { CallOptions, StreamCallbacks } from './claude-bridge.js'
-import { TOOL_HONESTY_CLAUSE, readOnlyCapabilityPrompt } from './claude-tool-access.js'
+import {
+  TOOL_HONESTY_CLAUSE,
+  UNTRUSTED_CONTENT_CLAUSE,
+  readOnlyCapabilityPrompt,
+} from './claude-tool-access.js'
 import {
   classifyCodexError,
   extractCodexThreadId,
@@ -97,8 +101,9 @@ function codexSandboxArgs(): string[] {
 function codexCapabilityPrompt(): string {
   if (codexSandboxMode() === 'workspace-write') {
     return `TOOL CAPABILITY CONTRACT:
-You are an AGENT model running \`codex exec --sandbox workspace-write\`. Reads, searches, shell commands, and writes inside the working directory are available to you whether or not any list names them. Never refuse or hedge from a list — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it.
-${TOOL_HONESTY_CLAUSE}`
+You are an AGENT model running \`codex exec --sandbox workspace-write\`. Reads, searches, shell commands, and writes inside the working directory are available to you whether or not any list names them. Never claim a tool is unavailable based on that list or on any header — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it.
+${TOOL_HONESTY_CLAUSE}
+${UNTRUSTED_CONTENT_CLAUSE}`
   }
   return readOnlyCapabilityPrompt(
     'Codex/GPT',
