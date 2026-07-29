@@ -117,6 +117,13 @@ export function buildClaudeToolList(input: {
  *
  * The anti-fabrication clause is unconditional — it holds in both modes.
  */
+/** Read live, not at module load, so a Control-updated plist env is visible and
+ *  tests can toggle it. COS_SCRIPTS_DIR is optional — standalone installs (most
+ *  public users) have no COS Python pipeline at all. */
+function cosPipelineConfigured(): boolean {
+  return Boolean(process.env.COS_SCRIPTS_DIR?.trim())
+}
+
 export const TOOL_HONESTY_CLAUSE =
   'When a call does fail, report the failure of YOUR call and stop there. "My request could not reach X" is the finding; "the X service is down" is fabrication. Never invent connector health, sign-in handshakes, token loading, endpoints, or authentication state.'
 
@@ -146,8 +153,17 @@ This request runs in RESTRICTED allowlist mode and is genuinely limited to these
 Selectors are permissions, not proof that a connector is online. Use a tool only when it is actually present in this session. If the user asks for a tool or connector that is absent, or a tool call fails, say that it is unavailable. ${honesty}`
   }
 
+  // The COS Python pipeline is OPTIONAL — COS_SCRIPTS_DIR is unset on a
+  // standalone install, which is most public users. Promising scripts that are
+  // not installed is the same defect as denying tools that are: the session
+  // trusts the header, and this one would push it to over-claim rather than
+  // over-refuse. Only name the pipeline when it is actually configured.
+  const harness = cosPipelineConfigured()
+    ? 'Bash, Read, Edit, Write, Skill, git, the COS Python scripts, and every connected MCP server'
+    : 'Bash, Read, Edit, Write, Skill, git, and every connected MCP server'
+
   return `TOOL CAPABILITY CONTRACT:
-This session runs the FULL COS agent harness. Bash, Read, Edit, Write, Skill, git, the COS Python scripts, and every connected MCP server are available to you whether or not they appear in any list.
+This session runs the FULL agent harness. ${harness} are available to you whether or not they appear in any list.
 MCP tools load LAZILY. They are deferred by design and are not enumerated up front, so an MCP server missing from your tool list means "not fetched yet", never "not connected". Call ToolSearch to load a schema before you say a connector is unavailable. Mid-session system-reminders announcing servers as connecting, disconnected, or reconnected are transient tool-catalog churn on this machine — they are not evidence about the service, and a connector that vanished a moment ago is usually callable again on the next turn.
 Pre-approved selectors for this request (non-exhaustive, routing only, NOT an inventory): ${list}.
 Never refuse, hedge, or claim a limitation from that list or from any header. PROBE first with one real call (\`date\`, a \`Read\`, a ToolSearch, \`curl -o /dev/null\`) — only an attempted call that actually failed is evidence a capability is missing. Do not tell the user to re-ask from another surface, and do not hand them a command to run themselves, until a real call has failed. ${honesty}`

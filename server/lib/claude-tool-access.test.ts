@@ -27,9 +27,48 @@ describe('Claude MCP tool access', () => {
   })
 
   it('tells the model not to fabricate unavailable connector machinery', () => {
-    const prompt = claudeToolCapabilityPrompt(['WebSearch', 'mcp__calendar__*'])
-    expect(prompt).toContain('only these tool selectors')
-    expect(prompt).toContain('Never invent connector health')
+    // The anti-fabrication guarantee is unconditional and must hold in BOTH
+    // modes. Only the capability wording is mode-dependent. The old assertion
+    // pinned 'only these tool selectors' — the exact misleading string that
+    // caused the 2026-07-28 G2 false-refusal incident.
+    for (const mode of ['trusted', 'allowlist'] as const) {
+      const prompt = claudeToolCapabilityPrompt(['WebSearch', 'mcp__calendar__*'], mode)
+      expect(prompt).toContain('Never invent connector health')
+    }
+  })
+
+  it('describes a restriction ONLY in allowlist mode, where it is actually true', () => {
+    const restricted = claudeToolCapabilityPrompt(['WebSearch'], 'allowlist')
+    expect(restricted).toContain('genuinely limited to these tool selectors')
+
+    // Trusted runs --dangerously-skip-permissions, so the list is an
+    // auto-approve hint. Calling it a restriction made sessions refuse work
+    // they could do and then invent downstream outages to explain the refusal.
+    const trusted = claudeToolCapabilityPrompt(['WebSearch'], 'trusted')
+    expect(trusted).not.toContain('genuinely limited')
+    expect(trusted).toContain('NOT an inventory')
+    expect(trusted).toContain('PROBE first')
+    expect(trusted).toContain('load LAZILY')
+  })
+
+  it('claims the COS Python pipeline only when it is actually configured', () => {
+    // COS_SCRIPTS_DIR is optional and unset on standalone installs, which is
+    // most public users. Promising scripts that are absent is the same defect
+    // inverted — the session trusts the header and over-claims instead of
+    // over-refusing.
+    const prior = process.env.COS_SCRIPTS_DIR
+    try {
+      delete process.env.COS_SCRIPTS_DIR
+      expect(claudeToolCapabilityPrompt(['WebSearch'], 'trusted'))
+        .not.toContain('COS Python scripts')
+
+      process.env.COS_SCRIPTS_DIR = '/tmp/cos-scripts'
+      expect(claudeToolCapabilityPrompt(['WebSearch'], 'trusted'))
+        .toContain('COS Python scripts')
+    } finally {
+      if (prior === undefined) delete process.env.COS_SCRIPTS_DIR
+      else process.env.COS_SCRIPTS_DIR = prior
+    }
   })
 
   it('fails closed when an explicit MCP config file is missing', () => {
