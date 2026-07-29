@@ -1,5 +1,18 @@
-## 6.18.2
+## 6.18.3
 
+> Ships as 6.18.3. There is no published 6.18.2 — that version number was bumped
+> past mid-development and never released to npm, so everything below reaches
+> users for the first time in 6.18.3.
+
+- **Heads up: Claude-path glasses queries will now actually use shell and file
+  tools.** They always had permission — `--dangerously-skip-permissions` has been
+  the launch flag for a long time — but the misleading header below was talking
+  them out of it. With the header corrected, a voice query on the Claude/Opus
+  path can genuinely run `Bash` and `Edit`/`Write` on your Mac. That is the
+  intended behavior and what makes the glasses useful, but it is a real change in
+  what you will observe. To genuinely restrict it, set
+  `COS_CLAUDE_TRUST_MODE=allowlist`, which denies every undeclared tool without
+  prompting.
 - **The tool-capability header now describes the permission mode the CLI actually
   ran with.** Every model got the same "configured with only these tool selectors"
   string, including the Claude/Opus agent path — which runs
@@ -12,6 +25,16 @@
   path states plainly that Bash, Read/Edit/Write, Skill, git, the COS scripts,
   and every connected MCP are available regardless of any list, and instructs a
   PROBE before any claim of absence.
+- **The header only promises what the install actually has.** The trusted contract
+  names Bash, Read/Edit/Write, Skill, git, and every connected MCP unconditionally,
+  but the COS Python pipeline is named ONLY when `COS_SCRIPTS_DIR` points at a real
+  directory — the variable is optional and unset on a standalone install, which is
+  most users. Promising a pipeline that is not installed is the same defect as
+  denying tools that are: either way the session trusts the header over reality.
+  The same gate applies to the read-only contract, so a Cursor ask-mode session no
+  longer both denies script runs and claims COS scripts are reachable in
+  consecutive sentences. The read-only escalation target no longer names the
+  surface it is running on.
 - **The read-only slots finally say so, and only they do.** Cursor ask-mode
   (grok / composer) previously got no contract at all, and Codex/GPT got none
   either despite running `codex exec --sandbox read-only` by default. Both now

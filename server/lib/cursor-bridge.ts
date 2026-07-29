@@ -285,7 +285,13 @@ export async function callCursorStreaming(
     } else {
       systemPrompt = `${systemPrompt}\n\n${readOnlyCapabilityPrompt(
         'Cursor ask-mode',
-        'Cursor ask-mode does not expose file-write or shell tools, so edits, commits, deploys, and script runs genuinely cannot happen here.',
+        // Documented read-only per `cursor-agent --help` ("ask: Q&A style ... (read-only)"),
+        // but COS also passes `-p`, whose own help says it "has access to all tools,
+        // including write and shell". Which wins is not determinable from the docs and
+        // has NOT been probed — so this says "documented read-only" rather than
+        // asserting an absolute denial from a vendor label, which is the exact
+        // epistemic error this release exists to correct.
+        'Cursor ask-mode is documented read-only and does not surface file-write or shell tools, so treat edits, commits, deploys, and script runs as unavailable here.',
       )}`
     }
     if (outputImagePublisher) {

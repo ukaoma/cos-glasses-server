@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildClaudeToolList,
   claudeMcpConfigArgs,
   claudeToolCapabilityPrompt,
+  readOnlyCapabilityPrompt,
+  TOOL_HONESTY_CLAUSE,
   configuredClaudeExtraTools,
   parseClaudeExtraToolConfiguration,
   reportClaudeExtraToolConfiguration,
@@ -62,9 +64,15 @@ describe('Claude MCP tool access', () => {
       expect(claudeToolCapabilityPrompt(['WebSearch'], 'trusted'))
         .not.toContain('COS Python scripts')
 
-      process.env.COS_SCRIPTS_DIR = '/tmp/cos-scripts'
+      // A real directory — the gate stats the path rather than trusting the
+      // variable, so a stale/typo'd value must not license the claim.
+      process.env.COS_SCRIPTS_DIR = '/tmp'
       expect(claudeToolCapabilityPrompt(['WebSearch'], 'trusted'))
         .toContain('COS Python scripts')
+
+      process.env.COS_SCRIPTS_DIR = '/nonexistent/cos-scripts'
+      expect(claudeToolCapabilityPrompt(['WebSearch'], 'trusted'))
+        .not.toContain('COS Python scripts')
     } finally {
       if (prior === undefined) delete process.env.COS_SCRIPTS_DIR
       else process.env.COS_SCRIPTS_DIR = prior
@@ -105,5 +113,59 @@ describe('Claude MCP tool access', () => {
     reportClaudeExtraToolConfiguration({ COS_EXTRA_TOOLS: 'mcp__calendar__list,mcp__calendar__*' })
     expect(warning).not.toHaveBeenCalled()
     warning.mockRestore()
+  })
+
+  // ── read-only contract (Cursor ask-mode, Codex read-only) ──────────────────
+  // Every defect the 6.18.3 QA pass found lived on these paths, which had ZERO
+  // assertions. One test per invariant they violated.
+  describe('read-only capability contract', () => {
+    const prior = process.env.COS_SCRIPTS_DIR
+    afterEach(() => {
+      if (prior === undefined) delete process.env.COS_SCRIPTS_DIR
+      else process.env.COS_SCRIPTS_DIR = prior
+    })
+
+    it('never denies script runs and promises COS scripts in the same breath', () => {
+      // Cursor ask-mode exposes no shell. The shared body used to claim
+      // "read-only COS scripts are still reachable here" right after the detail
+      // line said script runs cannot happen — two contradictory sentences.
+      delete process.env.COS_SCRIPTS_DIR
+      const prompt = readOnlyCapabilityPrompt(
+        'Cursor ask-mode',
+        'Cursor ask-mode does not expose file-write or shell tools, so edits, commits, deploys, and script runs genuinely cannot happen here.',
+      )
+      expect(prompt).toContain('script runs genuinely cannot happen here')
+      expect(prompt).not.toContain('COS scripts are still reachable')
+      expect(prompt).toContain('Connected MCP servers are still reachable here')
+    })
+
+    it('names the COS pipeline only when COS_SCRIPTS_DIR is a real directory', () => {
+      process.env.COS_SCRIPTS_DIR = '/nonexistent/path/for/test'
+      expect(readOnlyCapabilityPrompt('X', 'detail')).not.toContain('COS scripts')
+      // A stale or typo'd path must not license the claim — the header is
+      // something the session trusts, so env-set is not the same as installed.
+      process.env.COS_SCRIPTS_DIR = '/tmp'
+      expect(readOnlyCapabilityPrompt('X', 'detail')).toContain('read-only COS scripts are still reachable')
+    })
+
+    it('never offers the surface it is running on as the escalation target', () => {
+      // A Codex read-only session used to be told to "re-run on ... Codex/GPT",
+      // i.e. itself — and Codex is read-only BY DEFAULT.
+      const codex = readOnlyCapabilityPrompt(
+        'Codex/GPT',
+        'detail',
+        'Opus (switch the model to Opus and ask again)',
+      )
+      const offer = codex.slice(codex.indexOf('offer to re-run it on'))
+      expect(offer).toContain('Opus')
+      expect(offer.slice(0, offer.indexOf('instead of attempting'))).not.toContain('Codex/GPT')
+    })
+
+    it('carries the unconditional honesty clause and the lazy-MCP clause', () => {
+      const prompt = readOnlyCapabilityPrompt('Cursor ask-mode', 'detail')
+      expect(prompt).toContain(TOOL_HONESTY_CLAUSE)
+      expect(prompt).toContain('not fetched yet')
+      expect(prompt).toContain('READ-ONLY Cursor ask-mode path')
+    })
   })
 })

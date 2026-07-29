@@ -71,10 +71,16 @@ without silently losing completed replies.
 > Existing `COS_CODEX_MODEL` / `COS_CODEX_REASONING_EFFORT` settings remain
 > supported on the migrated Frontier slot; leave them blank for auto-latest.
 > Codex runs **sandboxed read-only** by default (`COS_CODEX_SANDBOX` to adjust).
-> Claude preserves the established trusted-machine mode for compatibility.
+> **Claude is the most permissive provider by default.** It runs with
+> `--dangerously-skip-permissions`, so a glasses query on the Claude/Opus path can
+> run shell commands and read, edit, and write files on this Mac without prompting
+> you. That is what makes the glasses useful for real work, and it has been the
+> behavior for some time — but as of 6.18.3 the model is also correctly *told* it
+> has those tools, so you will see it use them more readily than before.
 > Set `COS_CLAUDE_TRUST_MODE=allowlist` to remove Claude's permission bypass
 > and restrict it to COS's explicit per-query tool allowlist; undeclared tools
-> then fail closed without prompting.
+> then fail closed without prompting. Only the exact value `allowlist` restricts
+> anything — any other value logs a warning and stays trusted.
 
 ## Connect your phone (the one gotcha)
 

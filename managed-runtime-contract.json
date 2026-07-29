@@ -20,7 +20,10 @@
     "COS_LIVE_CUES_LIGHTRAG_RESERVE",
     "COS_LIVE_CUES_AUTO",
     "COS_BATCH_HQ_METAL",
-    "COS_BATCH_HQ_FORCE_CPU"
+    "COS_BATCH_HQ_FORCE_CPU",
+    "COS_CLAUDE_TRUST_MODE",
+    "COS_CODEX_SANDBOX",
+    "COS_SCRIPTS_DIR"
   ],
   "maintenance": {
     "scope": "cross_boot",

@@ -103,6 +103,12 @@ ${TOOL_HONESTY_CLAUSE}`
   return readOnlyCapabilityPrompt(
     'Codex/GPT',
     'This server runs `codex exec --sandbox read-only`, so shell reads and searches work but file writes are denied by the sandbox.',
+    // Must NOT name Codex/GPT — that is THIS surface, and read-only is its
+    // default, so the generic wording had a Codex session telling the user to
+    // re-run on Codex. Opus is the only slot that can write with no config
+    // change. Phrased as the user-visible action, because "agent model" is
+    // jargon to someone who just picked a name off a model list.
+    'Opus (switch the model to Opus and ask again), or enable writes on this path with COS_CODEX_SANDBOX=workspace-write',
   )
 }
 
