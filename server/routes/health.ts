@@ -37,6 +37,7 @@ import { getServerGenerationId } from '../lib/managed-runtime.js'
 import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
 import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
+import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 
 export const healthRouter = Router()
 
@@ -259,6 +260,7 @@ healthRouter.get('/health', async (_req, res) => {
   // agent binary paths stay on the authenticated /api/models surface.
   const cursorSnapshot = getCursorModelCatalogSnapshot()
   const { agentBinary: _cursorAgentBinary, ...cursor_models } = cursorSnapshot
+  const meeting_sync = getMeetingSyncSnapshot()
   res.json({
     ...checks,
     server_version: managedServerVersion(),
@@ -273,6 +275,7 @@ healthRouter.get('/health', async (_req, res) => {
     tts_local,
     codex_models,
     cursor_models,
+    meeting_sync,
     capabilities: {
       transcription: { ...transcription, hq: transcriptionHq },
       recovery,

@@ -3,10 +3,14 @@
 // The candidate is never canonical until batch-transcript-quality accepts it.
 
 import { existsSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { enhanceAudio } from './audio-enhance.js'
 import { transcribeHighQuality, type WhisperWord } from './whisper-local.js'
 import { isMetalBatchPreempted } from './whisper-metal-gate.js'
+import {
+  clearMeetingBatchProgress,
+  writeMeetingBatchProgress,
+} from './meeting-batch-progress.js'
 import type { IndexedTranscriptChunk } from '../routes/transcribe-stream.js'
 import {
   evaluateBatchQuality,
@@ -167,6 +171,13 @@ async function transcribeSegments(
   entries: IndexedTranscriptChunk[],
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = []
+  const meetingId = basename(audioDir)
+  writeMeetingBatchProgress(audioDir, {
+    phase: 'hq_polish',
+    segmentsDone: 0,
+    segmentsTotal: segments.length,
+    meetingId,
+  })
   for (const segment of segments) {
     try {
       refreshPendingLease(audioDir)
@@ -202,11 +213,23 @@ async function transcribeSegments(
         speakerWords: mapWordsToSpeakers(words, segment, entries),
       })
       refreshPendingLease(audioDir)
+      writeMeetingBatchProgress(audioDir, {
+        phase: 'hq_polish',
+        segmentsDone: results.length,
+        segmentsTotal: segments.length,
+        meetingId,
+      })
     } catch (error) {
       console.error(
         `[meeting-batch] Segment ${segment.startChunkIdx}-${segment.endChunkIdx} failed: `
         + `${error instanceof Error ? error.message : String(error)}`,
       )
+      writeMeetingBatchProgress(audioDir, {
+        phase: 'hq_polish',
+        segmentsDone: results.length,
+        segmentsTotal: segments.length,
+        meetingId,
+      })
     }
   }
   return results
@@ -223,13 +246,22 @@ export function runMeetingBatchPipeline(
   // Lease immediately, including time spent behind another HQ decoder. Without
   // this, the two-hour cleanup could delete a queued meeting before it starts.
   refreshPendingLease(audioDir)
+  writeMeetingBatchProgress(audioDir, {
+    phase: 'queued',
+    segmentsDone: 0,
+    segmentsTotal: 0,
+    meetingId: basename(audioDir),
+  })
   const lease = setInterval(() => refreshPendingLease(audioDir), 60_000)
   lease.unref()
   const job = batchQueueTail.then(() => runMeetingBatchPipelineNow(
     audioDir,
     entries,
     streamingWordCount,
-  )).finally(() => clearInterval(lease))
+  )).finally(() => {
+    clearInterval(lease)
+    clearMeetingBatchProgress(audioDir)
+  })
   batchQueueTail = job.then(() => undefined, () => undefined)
   return job
 }
@@ -248,7 +280,19 @@ async function runMeetingBatchPipelineNow(
     const segments = segmentTranscriptChunks(entries)
     if (segments.length === 0) return { transcriptionQuality: 'streaming' }
 
+    writeMeetingBatchProgress(audioDir, {
+      phase: 'hq_polish',
+      segmentsDone: 0,
+      segmentsTotal: segments.length,
+      meetingId: basename(audioDir),
+    })
     const batchSegments = await transcribeSegments(audioDir, segments, entries)
+    writeMeetingBatchProgress(audioDir, {
+      phase: 'quality_check',
+      segmentsDone: segments.length,
+      segmentsTotal: segments.length,
+      meetingId: basename(audioDir),
+    })
     const batchTranscript = batchSegments.map(result => result.text).join(' ')
     const qualityReport = evaluateBatchQuality(batchSegments, streamingWordCount)
     if (!qualityReport.accepted) {

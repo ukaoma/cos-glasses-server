@@ -1,3 +1,11 @@
+## 6.18.4
+
+- **Meeting sync progress on `/api/health`.** Post-meeting HQ polish writes
+  `_batch_progress.json` under `pending-batch/<meetingId>/` and publishes
+  `meeting_sync` on health (`active`, `percent`, `label`, `blocksRestart`,
+  per-meeting rows). COS Control 0.3.0+ shows this as a status row so Update /
+  Restart drain is no longer a black box during long Whisper batch jobs.
+
 ## 6.18.3
 
 > Ships as 6.18.3. There is no published 6.18.2 — that version number was bumped
