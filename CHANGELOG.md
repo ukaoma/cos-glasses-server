@@ -1,3 +1,28 @@
+## 6.18.2
+
+- **The tool-capability header now describes the permission mode the CLI actually
+  ran with.** Every model got the same "configured with only these tool selectors"
+  string, including the Claude/Opus agent path — which runs
+  `--dangerously-skip-permissions --allowedTools <list>`, where that list is an
+  *auto-approve hint*, not a restriction. Sessions read it as a capability
+  inventory, refused work they could do, and invented downstream outages to
+  explain the refusal (2026-07-28 G2 incident; repeated 2026-07-29 in a
+  good-morning run that claimed DNS, bot-memory, and filesystem were blocked
+  when none of them were). The header is now mode-derived: the trusted agent
+  path states plainly that Bash, Read/Edit/Write, Skill, git, the COS scripts,
+  and every connected MCP are available regardless of any list, and instructs a
+  PROBE before any claim of absence.
+- **The read-only slots finally say so, and only they do.** Cursor ask-mode
+  (grok / composer) previously got no contract at all, and Codex/GPT got none
+  either despite running `codex exec --sandbox read-only` by default. Both now
+  carry an honest read-only contract naming what is actually denied and offering
+  to re-run on an agent model. Cursor agent-mode and
+  `COS_CODEX_SANDBOX=workspace-write` get the agent contract instead.
+- **The anti-fabrication clause is now shared and unconditional.**
+  `TOOL_HONESTY_CLAUSE` is exported once and appended on all four paths: report
+  the failure of YOUR call and stop there; "my request could not reach X" is the
+  finding, "the X service is down" is fabrication.
+
 ## 6.18.1
 
 - **Post-meeting HQ polish can use the GPU when nothing live needs it — opt-in.**

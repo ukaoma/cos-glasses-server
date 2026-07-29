@@ -1,5 +1,6 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { getClaudeTrustMode, type ClaudeTrustMode } from './claude-permissions.js'
 
 // COS_EXTRA_TOOLS is intentionally limited to Claude MCP selectors. The
 // server's built-in Web/Read tools remain code-owned, so a remotely reachable
@@ -99,10 +100,55 @@ export function buildClaudeToolList(input: {
   return [...new Set(tools)]
 }
 
-export function claudeToolCapabilityPrompt(tools: string[]): string {
+/**
+ * The capability header MUST describe the permission mode the CLI actually ran
+ * with, because the two modes mean opposite things:
+ *
+ * - trusted (default; the agent models — Claude/Opus, Codex/GPT): the CLI gets
+ *   `--dangerously-skip-permissions --allowedTools <list>`, so the list is an
+ *   AUTO-APPROVE hint. Bash, Read/Edit/Write, Skill, git, the COS scripts and
+ *   every connected MCP remain available. Describing that list as a restriction
+ *   made sessions refuse work they could do and invent downstream outages to
+ *   explain the refusal (2026-07-28 G2 incident).
+ * - allowlist (the read-only path — e.g. the Cursor slots, or a hardened
+ *   install setting COS_CLAUDE_TRUST_MODE=allowlist): `--permission-mode dontAsk
+ *   --tools <list>` genuinely denies everything undeclared, so the strict
+ *   wording is accurate there and only there.
+ *
+ * The anti-fabrication clause is unconditional — it holds in both modes.
+ */
+export const TOOL_HONESTY_CLAUSE =
+  'When a call does fail, report the failure of YOUR call and stop there. "My request could not reach X" is the finding; "the X service is down" is fabrication. Never invent connector health, sign-in handshakes, token loading, endpoints, or authentication state.'
+
+/**
+ * Contract for the genuinely read-only slots (Cursor ask-mode on grok/composer,
+ * `codex exec --sandbox read-only`). Says what is actually denied and why, so
+ * the model neither over-claims write access nor invents a downstream outage to
+ * explain a denial it should have named plainly.
+ */
+export function readOnlyCapabilityPrompt(surface: string, detail: string): string {
   return `TOOL CAPABILITY CONTRACT:
-This request is configured with only these tool selectors: ${tools.join(', ') || '(none)'}.
-Selectors are permissions, not proof that a connector is online. Use a tool only when it is actually present in this session. If the user asks for a tool or connector that is absent, or a tool call fails, say that it is unavailable. Never invent connector health, sign-in handshakes, token loading, endpoints, or authentication state.`
+This request runs on the READ-ONLY ${surface} path. ${detail} Reads, searches, and analysis are available; writes are not. If the user asks for something that needs write access, say so plainly and offer to re-run it on an agent model (Opus or Codex/GPT) instead of attempting it or claiming it succeeded.
+${TOOL_HONESTY_CLAUSE}`
+}
+
+export function claudeToolCapabilityPrompt(
+  tools: string[],
+  mode: ClaudeTrustMode = getClaudeTrustMode(),
+): string {
+  const list = tools.join(', ') || '(none)'
+  const honesty = TOOL_HONESTY_CLAUSE
+
+  if (mode === 'allowlist') {
+    return `TOOL CAPABILITY CONTRACT:
+This request runs in RESTRICTED allowlist mode and is genuinely limited to these tool selectors: ${list}. Undeclared tools are denied without prompting, so a call outside this list will fail.
+Selectors are permissions, not proof that a connector is online. Use a tool only when it is actually present in this session. If the user asks for a tool or connector that is absent, or a tool call fails, say that it is unavailable. ${honesty}`
+  }
+
+  return `TOOL CAPABILITY CONTRACT:
+This session runs the FULL COS agent harness. Bash, Read, Edit, Write, Skill, git, the COS Python scripts, and every connected MCP server are available to you whether or not they appear in any list.
+Auto-approved selectors for this request: ${list}.
+That list is a routing and auto-approve hint, NOT a capability inventory, and it is routinely incomplete. Never refuse, hedge, or claim a limitation from it. PROBE first with one real call (\`date\`, a \`Read\`, \`curl -o /dev/null\`) — only an attempted call that actually failed is evidence a capability is missing. Do not tell the user to re-ask from another surface, and do not hand them a command to run themselves, until a real call has failed. ${honesty}`
 }
 
 /** Optional explicit MCP config for managed launches whose CLI cwd differs

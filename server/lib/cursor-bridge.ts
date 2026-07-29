@@ -36,6 +36,7 @@ import {
   resolveAgentBinary,
   resolveCursorModelOption,
 } from './cursor-model-catalog.js'
+import { TOOL_HONESTY_CLAUSE, readOnlyCapabilityPrompt } from './claude-tool-access.js'
 import type { CallOptions, StreamCallbacks } from './claude-bridge.js'
 import {
   classifyCursorError,
@@ -280,7 +281,12 @@ export async function callCursorStreaming(
       systemPrompt = await buildSystemPrompt(contextPrompt)
     }
     if (executionMode === 'agent') {
-      systemPrompt = `${systemPrompt}\n\nCURSOR AGENT MODE: You run in the user's selected local workspace via Cursor Agent. Prefer surgical edits. File and shell tools are allowed. Announce destructive operations briefly in your reply.`
+      systemPrompt = `${systemPrompt}\n\nCURSOR AGENT MODE: You run in the user's selected local workspace via Cursor Agent. Prefer surgical edits. File and shell tools are allowed. Announce destructive operations briefly in your reply.\n${TOOL_HONESTY_CLAUSE}`
+    } else {
+      systemPrompt = `${systemPrompt}\n\n${readOnlyCapabilityPrompt(
+        'Cursor ask-mode',
+        'Cursor ask-mode does not expose file-write or shell tools, so edits, commits, deploys, and script runs genuinely cannot happen here.',
+      )}`
     }
     if (outputImagePublisher) {
       systemPrompt = `${systemPrompt}\n\n${outputImagePublisher.promptInstructions}`

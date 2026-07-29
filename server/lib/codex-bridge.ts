@@ -38,6 +38,7 @@ import {
   type CodexModelOption,
 } from './codex-model-catalog.js'
 import type { CallOptions, StreamCallbacks } from './claude-bridge.js'
+import { TOOL_HONESTY_CLAUSE, readOnlyCapabilityPrompt } from './claude-tool-access.js'
 import {
   classifyCodexError,
   extractCodexThreadId,
@@ -80,9 +81,29 @@ const PHASE_LABELS: Record<Phase, string> = {
 // on the host. Default: read-only (safe for chat). COS_CODEX_SANDBOX=workspace-write
 // permits writes within the working directory only. Full host access is
 // intentionally not exposed by this server.
+function codexSandboxMode(): 'workspace-write' | 'read-only' {
+  return process.env.COS_CODEX_SANDBOX === 'workspace-write' ? 'workspace-write' : 'read-only'
+}
+
 function codexSandboxArgs(): string[] {
-  const mode = process.env.COS_CODEX_SANDBOX === 'workspace-write' ? 'workspace-write' : 'read-only'
-  return ['--sandbox', mode, '--skip-git-repo-check']
+  return ['--sandbox', codexSandboxMode(), '--skip-git-repo-check']
+}
+
+/**
+ * Tell the Codex/GPT agent what its sandbox actually permits. Without this it
+ * inherits no contract at all and guesses — the same class of error that made
+ * the Claude path refuse work it could do (2026-07-28 G2 incident).
+ */
+function codexCapabilityPrompt(): string {
+  if (codexSandboxMode() === 'workspace-write') {
+    return `TOOL CAPABILITY CONTRACT:
+You are an AGENT model running \`codex exec --sandbox workspace-write\`. Reads, searches, shell commands, and writes inside the working directory are available to you whether or not any list names them. Never refuse or hedge from a list — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it.
+${TOOL_HONESTY_CLAUSE}`
+  }
+  return readOnlyCapabilityPrompt(
+    'Codex/GPT',
+    'This server runs `codex exec --sandbox read-only`, so shell reads and searches work but file writes are denied by the sandbox.',
+  )
 }
 
 let addDirSupported: boolean | undefined
@@ -312,6 +333,7 @@ export async function callCodexStreaming(
     })
     throw err
   }
+  systemPrompt = `${systemPrompt}\n\n${codexCapabilityPrompt()}`
   if (outputImagePublisher) systemPrompt = `${systemPrompt}\n\n${outputImagePublisher.promptInstructions}`
 
   phase = 'thinking'
