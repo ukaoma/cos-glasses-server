@@ -18,6 +18,15 @@
   carry an honest read-only contract naming what is actually denied and offering
   to re-run on an agent model. Cursor agent-mode and
   `COS_CODEX_SANDBOX=workspace-write` get the agent contract instead.
+- **The header now says MCP tools load lazily.** The pre-approved selector list
+  never contains MCP names — they are deferred and fetched on demand — so a
+  session that read the list as an inventory concluded connectors were down. The
+  trusted header now states that an absent MCP name means "not fetched yet", that
+  ToolSearch is the way to check, and that mid-session connecting/disconnected/
+  reconnected reminders are local tool-catalog churn rather than evidence about
+  the service. Observed live 2026-07-29: all 529 MCP tools dropped and returned
+  inside a single turn while every server stayed healthy. The read-only contract
+  carries the same clause, scoped to reads.
 - **The anti-fabrication clause is now shared and unconditional.**
   `TOOL_HONESTY_CLAUSE` is exported once and appended on all four paths: report
   the failure of YOUR call and stop there; "my request could not reach X" is the

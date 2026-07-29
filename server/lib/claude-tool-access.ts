@@ -129,6 +129,7 @@ export const TOOL_HONESTY_CLAUSE =
 export function readOnlyCapabilityPrompt(surface: string, detail: string): string {
   return `TOOL CAPABILITY CONTRACT:
 This request runs on the READ-ONLY ${surface} path. ${detail} Reads, searches, and analysis are available; writes are not. If the user asks for something that needs write access, say so plainly and offer to re-run it on an agent model (Opus or Codex/GPT) instead of attempting it or claiming it succeeded.
+The read-only limit is on WRITES, not on knowledge. Connected MCP servers and read-only COS scripts are still reachable here and load lazily, so an absent tool name means "not fetched yet", not "not connected" — search for it before reporting a connector as unavailable.
 ${TOOL_HONESTY_CLAUSE}`
 }
 
@@ -147,8 +148,9 @@ Selectors are permissions, not proof that a connector is online. Use a tool only
 
   return `TOOL CAPABILITY CONTRACT:
 This session runs the FULL COS agent harness. Bash, Read, Edit, Write, Skill, git, the COS Python scripts, and every connected MCP server are available to you whether or not they appear in any list.
-Auto-approved selectors for this request: ${list}.
-That list is a routing and auto-approve hint, NOT a capability inventory, and it is routinely incomplete. Never refuse, hedge, or claim a limitation from it. PROBE first with one real call (\`date\`, a \`Read\`, \`curl -o /dev/null\`) — only an attempted call that actually failed is evidence a capability is missing. Do not tell the user to re-ask from another surface, and do not hand them a command to run themselves, until a real call has failed. ${honesty}`
+MCP tools load LAZILY. They are deferred by design and are not enumerated up front, so an MCP server missing from your tool list means "not fetched yet", never "not connected". Call ToolSearch to load a schema before you say a connector is unavailable. Mid-session system-reminders announcing servers as connecting, disconnected, or reconnected are transient tool-catalog churn on this machine — they are not evidence about the service, and a connector that vanished a moment ago is usually callable again on the next turn.
+Pre-approved selectors for this request (non-exhaustive, routing only, NOT an inventory): ${list}.
+Never refuse, hedge, or claim a limitation from that list or from any header. PROBE first with one real call (\`date\`, a \`Read\`, a ToolSearch, \`curl -o /dev/null\`) — only an attempted call that actually failed is evidence a capability is missing. Do not tell the user to re-ask from another surface, and do not hand them a command to run themselves, until a real call has failed. ${honesty}`
 }
 
 /** Optional explicit MCP config for managed launches whose CLI cwd differs
