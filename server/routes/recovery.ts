@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { atomicWriteFileSync } from '../lib/atomic-fs.js'
+import { scheduleManagedServerRestart } from '../lib/managed-restart.js'
 import { isManagedRuntime } from '../lib/managed-runtime.js'
 import { acquireMaintenance, getRecoveryActivityStatus } from '../lib/recovery-activity.js'
 import { getWhisperHealth, restartWhisperServer } from '../lib/whisper-local.js'
@@ -65,15 +66,15 @@ recoveryRouter.post('/recovery/server/restart', (_req, res) => {
   res.status(202).json({ accepted: true, oldBootId: serverMetrics.bootId })
   // Schedule independently of the response socket. The phone may change
   // network/close the sheet immediately after receiving 202; that must not
-  // cancel an accepted restart or strand maintenance forever.
-  const timer = setTimeout(() => {
-    if (process.env.COS_DISABLE_SELF_RESTART === '1') { gate.release(); return }
-    try {
-      process.kill(process.pid, 'SIGTERM')
-    } catch (error) {
+  // cancel an accepted restart. Maintenance is in-process only — it dies with us.
+  //
+  // Do NOT SIGTERM→exit(0): Control's LaunchAgent KeepAlive is
+  // SuccessfulExit:false, so a clean exit leaves the service STOPPED and the
+  // phone shows "Restart requested; reconnect is taking longer than expected."
+  scheduleManagedServerRestart({
+    onError: (error) => {
       gate.release()
-      console.error('[recovery] Failed to signal managed server restart:', error)
-    }
-  }, 350)
-  timer.unref?.()
+      console.error('[recovery] Failed to schedule managed server restart:', error)
+    },
+  })
 })

@@ -1,3 +1,11 @@
+## 6.18.7
+
+- **Phone Restart no longer leaves the server Stopped.** Control LaunchAgent
+  KeepAlive is `SuccessfulExit: false`, so the old SIGTERM→exit(0) path never
+  came back — phone showed "Restart requested; reconnect is taking longer than
+  expected" while Control sat at Stopped. Restart now `launchctl kickstart -k`
+  (fallback `exit(1)` so KeepAlive still fires).
+
 ## 6.18.6
 
 - **Phone Restart works on COS Control managed installs.** Recovery status /
