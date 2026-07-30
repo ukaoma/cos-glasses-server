@@ -54,6 +54,9 @@ beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
   root = await mkdtemp(join(tmpdir(), 'cos-public-query-runtime-'))
+  // Isolate from live ~/.cos-glasses/data/message-era.json — otherwise admission
+  // rejects with message_era_mismatch whenever a reset era exists on the machine.
+  process.env.COS_DATA_DIR = root
   process.env.COS_DURABLE_QUERY_JOBS = '1'
   process.env.COS_QUERY_JOB_DIR = root
 
@@ -137,6 +140,7 @@ beforeEach(async () => {
 afterEach(async () => {
   delete process.env.COS_DURABLE_QUERY_JOBS
   delete process.env.COS_QUERY_JOB_DIR
+  delete process.env.COS_DATA_DIR
   await rm(root, { recursive: true, force: true })
   vi.resetModules()
 })

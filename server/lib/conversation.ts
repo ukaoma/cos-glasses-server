@@ -876,6 +876,7 @@ export function getActiveSessions(): SessionToArchive[] {
       contextBreaks: session.contextBreaks,
       createdAt: session.createdAt,
       lastActivity: session.lastActivity,
+      modelPreference: session.modelPreference,
     })
   }
   return result

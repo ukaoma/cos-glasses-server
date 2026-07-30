@@ -46,6 +46,7 @@ export type MaintenanceWorkKind =
   | 'meeting_batch_finalization'
   | 'prompt_draft_write'
   | 'prompt_draft_warm'
+  | 'prompt_draft_peek'
   | 'prompt_draft_finalize'
   // Live Cues pipeline (planner + memory hops + insight). Held for the
   // pipeline's in-flight duration so an Update Server drain cannot unload the

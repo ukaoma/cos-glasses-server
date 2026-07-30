@@ -100,7 +100,7 @@ describe('fast local transcription ownership', () => {
       requestedMode: 'hq',
       actualQuality: 'hq',
       degraded: false,
-      backend: 'hq-large-v3-light',
+      backend: 'hq-large-v3',
     })
     expect(result).not.toHaveProperty('degradationReason')
   })

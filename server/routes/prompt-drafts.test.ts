@@ -327,4 +327,63 @@ describe('public prompt draft recovery contract', () => {
       data: { draftId, chunkIndex: 0, text: 'stale words' },
     })
   })
+
+  it('peek emits provisional text without advancing the recovery ledger', async () => {
+    transcribeAudioBuffer.mockResolvedValue({
+      text: 'peek words',
+      backend: 'fast-local-test',
+      mode: 'fast',
+      requestedMode: 'fast',
+      actualQuality: 'fast',
+      degraded: false,
+      elapsedMs: 10,
+      audioBytes: 1600,
+    })
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    const peek = await httpRequest(
+      'POST',
+      `/api/prompt-drafts/${draftId}/peek?chunkIndex=0&peekGen=1`,
+      Buffer.alloc(1600, 3),
+    )
+    expect(peek.status).toBe(200)
+    expect(peek.json).toMatchObject({ draftId, chunkIndex: 0, peekGen: 1, accepted: true })
+
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId, chunkIndex: 0, text: 'peek words', provisional: true, peekGen: 1 },
+    }))
+    expect(transcribeAudioBuffer).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'fast', policy: 'local-only', affectsCircuit: false },
+    )
+
+    const meta = await httpRequest('GET', `/api/prompt-drafts/${draftId}`)
+    expect(meta.json.receivedChunkIndexes ?? []).toEqual([])
+    expect(meta.json.warmTranscripts ?? {}).toEqual({})
+  })
+
+  it('peek drop-while-busy returns 204 when a peek is already in flight', async () => {
+    let resolvePeek!: (value: any) => void
+    transcribeAudioBuffer.mockReturnValueOnce(new Promise(resolve => { resolvePeek = resolve }))
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    const first = httpRequest(
+      'POST',
+      `/api/prompt-drafts/${draftId}/peek?chunkIndex=0&peekGen=1`,
+      Buffer.alloc(800, 1),
+    )
+    await new Promise(r => setTimeout(r, 20))
+    const busy = await httpRequest(
+      'POST',
+      `/api/prompt-drafts/${draftId}/peek?chunkIndex=0&peekGen=2`,
+      Buffer.alloc(800, 2),
+    )
+    expect(busy.status).toBe(204)
+    resolvePeek({
+      text: 'first peek', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
+      actualQuality: 'fast', degraded: false, elapsedMs: 10, audioBytes: 800,
+    })
+    expect((await first).status).toBe(200)
+  })
 })

@@ -137,6 +137,12 @@ const BATCH_LARGE_V3_ENABLED = process.env.COS_BATCH_LARGE_V3 !== '0'
 const VAD_MODEL_PATH = join(process.env.HOME ?? homedir(), '.local/share/whisper-models/ggml-silero-v5.1.2.bin')
 const VAD_ENABLED = process.env.COS_WHISPER_VAD !== '0'
 
+/** Batch meeting HQ keeps CLI --vad. Interactive/prompt HQ must not — VAD was
+ *  measured dropping leading speech on compose ("device just for your awareness"). */
+export function hqCliVadEnabled(priority?: 'interactive' | 'batch'): boolean {
+  return priority === 'batch' && VAD_ENABLED && existsSync(VAD_MODEL_PATH)
+}
+
 /** Pick the batch model path. Prefer large-v3 when enabled + on disk; fall
  *  back to turbo otherwise. Logged once per process so we know which decoder
  *  actually ran when reviewing a meeting later. */
@@ -732,7 +738,6 @@ export async function transcribeHighQuality(
 
   const modelPath = resolveBatchModel()
   const useLargeV3 = modelPath === BATCH_MODEL_LARGE_V3
-  const useVad = VAD_ENABLED && existsSync(VAD_MODEL_PATH)
 
   try {
     writeFileSync(tmpWav, audioBuffer)
@@ -741,6 +746,9 @@ export async function transcribeHighQuality(
     // that is explicitly OUT of batch device policy. Only the long post-meeting
     // batch is admission-controlled against live ASR.
     const isBatch = opts.priority === 'batch'
+    // A0 (2026-07-30): CLI --vad on interactive/prompt HQ can drop leading speech
+    // (measured: "device just for your awareness"). Keep VAD for meeting batch only.
+    const useVad = hqCliVadEnabled(opts.priority)
     const decision: { device: 'metal' | 'cpu'; reason: string; metalEnabled: boolean } = isBatch
       ? (opts.forceCpu
           ? { device: 'cpu', reason: 'preempt_retry', metalEnabled: batchHqMetalEnabled() }
@@ -774,9 +782,8 @@ export async function transcribeHighQuality(
         args.push('-ojf', '-of', outBase)
       }
       if (useVad) {
-        // Same VAD model the streaming path uses. Strips silence windows
-        // before the decoder sees them — prevents the silence-hallucination
-        // failure mode even with large-v3's more permissive decoder.
+        // Batch-only: strips silence windows before decode. Interactive/prompt HQ
+        // omits this — VAD was measured dropping real leading speech on compose.
         args.push('--vad', '--vad-model', VAD_MODEL_PATH)
       }
       const proc = spawn(WHISPER_CLI, args, {
@@ -1076,8 +1083,14 @@ export function resetDecoderCaches(): void {
  * auto-restart the server process in the background and throw immediately so the
  * caller can use cloud while the server recovers (~20s model load).
  */
-export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQuiet?: boolean): Promise<{ text: string; backend: 'server' | 'cli'; words?: WhisperWord[] }> {
+export async function transcribeLocal(
+  audioBuffer: Buffer,
+  context?: string,
+  isQuiet?: boolean,
+  opts?: { affectsCircuit?: boolean },
+): Promise<{ text: string; backend: 'server' | 'cli'; words?: WhisperWord[] }> {
   const start = Date.now()
+  const affectsCircuit = opts?.affectsCircuit !== false
 
   if (!serverAvailable) {
     await reconcileWhisperServerHealth()
@@ -1094,34 +1107,38 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
       const text = applyCorrections(result.text)
       const words = result.words?.map(w => ({ ...w, word: applyCorrections(w.word) }))
       const elapsed = Date.now() - start
-      // Reset circuit breaker on success
-      if (serverConsecutiveFailures > 0) {
+      // Reset circuit breaker on success (skip for peek / non-circuit callers)
+      if (affectsCircuit && serverConsecutiveFailures > 0) {
         console.log(`[whisper-local] Server recovered after ${serverConsecutiveFailures} consecutive failure(s)`)
         serverConsecutiveFailures = 0
       }
       console.log(`[whisper-local] Server transcribed in ${elapsed}ms (${words?.length ?? 0} words): "${text.slice(0, 80)}${text.length > 80 ? '...' : ''}"`)
       return { text, backend: 'server', words }
     } catch (err: any) {
-      serverConsecutiveFailures++
-      const isTimeout = err.message.includes('timeout') || err.message.includes('aborted')
-      const isDead = err.message.includes('ECONNREFUSED') || err.message.includes('fetch failed')
+      if (affectsCircuit) {
+        serverConsecutiveFailures++
+        const isTimeout = err.message.includes('timeout') || err.message.includes('aborted')
+        const isDead = err.message.includes('ECONNREFUSED') || err.message.includes('fetch failed')
 
-      if (isDead) {
-        serverAvailable = false
-        console.error(`[whisper-local] Server DEAD (ECONNREFUSED) — marked unavailable. Consecutive failures: ${serverConsecutiveFailures}`)
-      } else if (isTimeout) {
-        // Server process exists but is hung — mark unavailable so we stop trying
-        serverAvailable = false
-        console.error(`[whisper-local] Server HUNG (timeout) — marked unavailable. Consecutive failures: ${serverConsecutiveFailures}`)
-      }
+        if (isDead) {
+          serverAvailable = false
+          console.error(`[whisper-local] Server DEAD (ECONNREFUSED) — marked unavailable. Consecutive failures: ${serverConsecutiveFailures}`)
+        } else if (isTimeout) {
+          // Server process exists but is hung — mark unavailable so we stop trying
+          serverAvailable = false
+          console.error(`[whisper-local] Server HUNG (timeout) — marked unavailable. Consecutive failures: ${serverConsecutiveFailures}`)
+        }
 
-      // Circuit breaker: auto-restart after threshold
-      if (serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD && !serverRestarting) {
-        console.error(`[whisper-local] ⚠ CIRCUIT BREAKER OPEN — ${serverConsecutiveFailures} consecutive failures. Auto-restarting server...`)
-        // Non-blocking restart in background
-        void restartWhisperServer()
-      } else if (serverConsecutiveFailures < SERVER_FAILURE_THRESHOLD) {
-        console.warn(`[whisper-local] Server failed (${serverConsecutiveFailures}/${SERVER_FAILURE_THRESHOLD} before restart): ${err.message}`)
+        // Circuit breaker: auto-restart after threshold
+        if (serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD && !serverRestarting) {
+          console.error(`[whisper-local] ⚠ CIRCUIT BREAKER OPEN — ${serverConsecutiveFailures} consecutive failures. Auto-restarting server...`)
+          // Non-blocking restart in background
+          void restartWhisperServer()
+        } else if (serverConsecutiveFailures < SERVER_FAILURE_THRESHOLD) {
+          console.warn(`[whisper-local] Server failed (${serverConsecutiveFailures}/${SERVER_FAILURE_THRESHOLD} before restart): ${err.message}`)
+        }
+      } else {
+        console.warn(`[whisper-local] Peek/non-circuit server failure (breaker untouched): ${err.message}`)
       }
 
       // Throw to let caller fall to OpenAI cloud (1-3s) — much faster than CLI cold-start (11s)
@@ -1132,10 +1149,12 @@ export async function transcribeLocal(audioBuffer: Buffer, context?: string, isQ
   // Server not available — still count toward circuit breaker so auto-restart can fire.
   // Without this, the counter stalls after the first failure marks serverAvailable=false
   // and subsequent calls never increment, so restart never triggers.
-  serverConsecutiveFailures++
-  if (serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD && !serverRestarting) {
-    console.error(`[whisper-local] CIRCUIT BREAKER OPEN — ${serverConsecutiveFailures} consecutive failures (server unavailable). Auto-restarting...`)
-    void restartWhisperServer()
+  if (affectsCircuit) {
+    serverConsecutiveFailures++
+    if (serverConsecutiveFailures >= SERVER_FAILURE_THRESHOLD && !serverRestarting) {
+      console.error(`[whisper-local] CIRCUIT BREAKER OPEN — ${serverConsecutiveFailures} consecutive failures (server unavailable). Auto-restarting...`)
+      void restartWhisperServer()
+    }
   }
 
   // Throw so the caller applies the configured recovery policy. CLI is

@@ -61,6 +61,9 @@ const modeQualityJobs = new Map<string, Promise<string>>()
 const finalizeJobs = new Map<string, Promise<any>>()
 let warmTail: Promise<void> = Promise.resolve()
 let hqWarmTail: Promise<void> = Promise.resolve()
+/** Peek decodes — drop-while-busy; never chained onto warmTail (HOL vs HQ). */
+let peekTail: Promise<void> = Promise.resolve()
+let peekBusy = false
 
 /** Speculative HQ warm while speaking. Set COS_HQ_SPECULATIVE_WARM=0 to restore Fast-only warm. */
 function speculativeHqWarmEnabled(): boolean {
@@ -369,6 +372,80 @@ promptDraftsRouter.post('/prompt-drafts/start', (req, res) => {
     res.status(err.status ?? 500).json({ error: err.message })
   } finally {
     maintenanceLease?.release()
+  }
+})
+
+/**
+ * Provisional Turbo peek — cosmetic lens UX only.
+ * Does NOT save chunks, advance the recovery ledger, or write warm/final transcripts.
+ * Drop-while-busy: overlapping peeks return 204 without queueing behind HQ warm.
+ */
+promptDraftsRouter.post('/prompt-drafts/:draftId/peek', async (req, res) => {
+  try {
+    const meta = loadPromptDraftMeta(req.params.draftId)
+    if (!meta) return void res.status(404).json({ error: 'draft not found' })
+
+    const rawIndex = Array.isArray(req.query.chunkIndex) ? req.query.chunkIndex[0] : req.query.chunkIndex
+    const chunkIndex = Number(rawIndex)
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      return void res.status(400).json({ error: 'chunkIndex required' })
+    }
+    const rawGen = Array.isArray(req.query.peekGen) ? req.query.peekGen[0] : req.query.peekGen
+    const peekGen = Number(rawGen)
+    if (!Number.isInteger(peekGen) || peekGen < 0) {
+      return void res.status(400).json({ error: 'peekGen required' })
+    }
+
+    if (peekBusy) {
+      return void res.status(204).send()
+    }
+
+    const audio = await readRawBody(req)
+    if (!audio.length) return void res.status(400).json({ error: 'empty audio' })
+    if (audio.length > MAX_CHUNK_BYTES) return void res.status(413).json({ error: 'audio chunk too large' })
+
+    const lease = acquireMaintenanceWork('prompt_draft_peek', {
+      allowDuringDrain: true,
+      phase: 'queued',
+    })
+
+    peekBusy = true
+    const draftId = req.params.draftId
+    peekTail = peekTail.then(async () => {
+      lease.setPhase('active')
+      try {
+        const result = await transcribeAudioBuffer(audio, {
+          mode: 'fast',
+          policy: 'local-only',
+          affectsCircuit: false,
+        })
+        const text = sanitizeTranscript(draftId, result.text, false)
+        if (!text) return
+        if (!loadPromptDraftMeta(draftId)) return
+        emitDisplay({
+          type: 'prompt_transcript',
+          data: { draftId, chunkIndex, text, provisional: true, peekGen },
+        })
+      } catch (err: any) {
+        if (!(err instanceof NoSpeechDetectedError)) {
+          console.warn(`[prompt-draft] peek failed ${draftId}/${chunkIndex}: ${err?.message ?? err}`)
+        }
+      } finally {
+        peekBusy = false
+        lease.release()
+      }
+    }).catch(() => {
+      peekBusy = false
+      lease.release()
+    })
+
+    res.json({ draftId, chunkIndex, peekGen, accepted: true })
+  } catch (err: any) {
+    if (err instanceof MaintenanceLifecycleError) {
+      if (err.retryAfterSeconds != null) res.setHeader('Retry-After', String(err.retryAfterSeconds))
+      return void res.status(err.status).json({ ...maintenanceErrorPayload(err), draftPreserved: true })
+    }
+    res.status(err.status ?? (err.message === 'draft not found' ? 404 : 500)).json({ error: err.message })
   }
 })
 

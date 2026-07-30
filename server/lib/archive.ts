@@ -15,6 +15,7 @@ import { secureExistingPrivateFile } from './secure-user-config.js'
 
 import type { Exchange } from './conversation.js'
 import { resolveExchangePairModel } from './conversation.js'
+import type { ModelPreference } from '../../shared/model-preference.js'
 
 import { dataPath } from './data-dir.js'
 const ARCHIVE_DIR = dataPath('archive')
@@ -60,6 +61,8 @@ export interface SessionToArchive {
   contextBreaks: number[]
   createdAt: number
   lastActivity: number
+  /** Optional session-level model fallback for pre-stamp exchange pairs. */
+  modelPreference?: ModelPreference | null
 }
 
 // ── Directory management ────────────────────────────────────

@@ -13,7 +13,6 @@ import {
   estimateAudioSeconds,
   OpenAIWhisperBudgetExhaustedError,
 } from './openai-whisper-budget.js'
-import { enhanceAudio } from './audio-enhance.js'
 import {
   stripInlineHallucinationsOneShot,
   isFullHallucination,
@@ -62,12 +61,6 @@ export class NoSpeechDetectedError extends Error {
 // with audio length and beam-search × best-of amplifies that. 60s is the user-perceived
 // ceiling (anything longer is a dictation, not a query — use meetings instead).
 const HQ_MAX_SECONDS = 60
-
-/** Short interactive clips use light enhance (highpass only). Override via env. */
-function hqEnhanceLightMaxSeconds(): number {
-  const value = Number.parseInt(process.env.COS_HQ_ENHANCE_LIGHT_MAX_SEC || '15', 10)
-  return Number.isFinite(value) && value >= 0 ? value : 15
-}
 
 function unavailableAfterLocalFailure(): TranscriptionUnavailableError | null {
   const fallback = getTranscriptionPolicySnapshot()
@@ -146,10 +139,16 @@ export function resolveTranscribeMode(raw: unknown): TranscribeMode {
 
 export async function transcribeAudioBuffer(
   audioBuffer: Buffer,
-  opts: { mode?: TranscribeMode; policy?: TranscriptionBackendPolicy } = {},
+  opts: {
+    mode?: TranscribeMode
+    policy?: TranscriptionBackendPolicy
+    /** When false, turbo/server failures do not move the shared meeting circuit breaker. */
+    affectsCircuit?: boolean
+  } = {},
 ): Promise<TranscribeAudioResult> {
   const requestedMode = opts.mode ?? 'hq'
   const policy = opts.policy ?? 'automatic'
+  const affectsCircuit = opts.affectsCircuit !== false
   const audioSeconds = estimateAudioSeconds(audioBuffer)
   const effectiveMode: TranscribeMode =
     requestedMode === 'hq' && audioSeconds > HQ_MAX_SECONDS ? 'fast' : requestedMode
@@ -166,14 +165,14 @@ export async function transcribeAudioBuffer(
 
   if (effectiveMode === 'hq') {
     try {
-      const lightMax = hqEnhanceLightMaxSeconds()
-      const enhanceProfile = audioSeconds < lightMax ? 'light' as const : 'full' as const
-      const enhanced = await enhanceAudio(audioBuffer, { profile: enhanceProfile })
-      const result = await transcribeHighQuality(enhanced)
+      // A0 (2026-07-30): ffmpeg enhance light (highpass=f=80) was measured dropping
+      // leading speech on compose ("device just for your awareness"). Meeting batch
+      // still enhances in meeting-batch-transcribe.ts — this path is prompt/interactive only.
+      const result = await transcribeHighQuality(audioBuffer, undefined, { priority: 'interactive' })
       text = result.text
       actualQuality = result.actualQuality
       if (result.actualQuality === 'hq') {
-        backend = enhanceProfile === 'light' ? 'hq-large-v3-light' : 'hq-large-v3'
+        backend = 'hq-large-v3'
       } else {
         backend = result.backend === 'whisper-cli' ? 'fast-cli-turbo' : 'fast-local-server'
         degradationReason = result.degradationReason ?? 'hq_unavailable'
@@ -182,7 +181,7 @@ export async function transcribeAudioBuffer(
       console.warn(`[transcribe] HQ path failed, falling back to fast: ${hqErr.message}`)
       degradationReason = 'hq_decode_failed'
       try {
-        const result = await transcribeLocal(audioBuffer)
+        const result = await transcribeLocal(audioBuffer, undefined, undefined, { affectsCircuit })
         text = result.text
         backend = `fast-local-${result.backend}`
         actualQuality = 'fast'
@@ -202,7 +201,7 @@ export async function transcribeAudioBuffer(
     }
   } else if (effectiveMode === 'fast') {
     try {
-      const result = await transcribeLocal(audioBuffer)
+      const result = await transcribeLocal(audioBuffer, undefined, undefined, { affectsCircuit })
       text = result.text
       backend = `fast-local-${result.backend}`
       actualQuality = 'fast'

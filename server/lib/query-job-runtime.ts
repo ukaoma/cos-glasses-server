@@ -114,7 +114,7 @@ async function projectPublicConversationTerminal(
     request.globalMsgNum,
     request.attachmentRefs,
     request.messageEra,
-    request.model,
+    normalizeModelPreference(request.model),
   )
   reconcileExchangeByJobIdentity(
     request.sessionId,
@@ -124,7 +124,7 @@ async function projectPublicConversationTerminal(
     request.globalMsgNum,
     mergeMediaAttachmentRefs(outputAttachments, existingOutputAttachments),
     request.messageEra,
-    request.model,
+    normalizeModelPreference(request.model),
   )
   flushConversationToDisk()
 }

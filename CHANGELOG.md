@@ -1,3 +1,14 @@
+## 6.18.8
+
+- **Prompt draft peeks for live ASR.** `POST /api/prompt-drafts/:draftId/peek`
+  runs Turbo locally, emits `prompt_transcript` with `provisional: true` +
+  `peekGen`, and does **not** advance the recovery ledger. Drop-on-busy,
+  `learnInline=false`, and `affectsCircuit: false` so peeks cannot trip or
+  success-reset the Whisper breaker.
+- **Interactive HQ keeps short utterance heads.** Compose HQ skips light
+  enhance (highpass was truncating "device, just for…") and omits CLI `--vad`
+  as defense-in-depth. Meeting/batch HQ paths unchanged.
+
 ## 6.18.7
 
 - **Phone Restart no longer leaves the server Stopped.** Control LaunchAgent

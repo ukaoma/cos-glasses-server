@@ -1,5 +1,8 @@
 import express from 'express'
 import type { Server } from 'node:http'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../lib/model-router.js', () => ({
@@ -25,12 +28,16 @@ vi.mock('../lib/model-router.js', () => ({
   }),
 }))
 
-import { queryRouter } from './query.js'
-
 let server: Server
 let base = ''
+let dataDir = ''
+const prevDataDir = process.env.COS_DATA_DIR
 
 beforeAll(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'cos-query-output-attach-'))
+  process.env.COS_DATA_DIR = dataDir
+  vi.resetModules()
+  const { queryRouter } = await import('./query.js')
   const app = express()
   app.use(express.json())
   app.use('/api', queryRouter)
@@ -41,6 +48,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>(resolve => server.close(() => resolve()))
+  if (prevDataDir === undefined) delete process.env.COS_DATA_DIR
+  else process.env.COS_DATA_DIR = prevDataDir
+  if (dataDir) await rm(dataDir, { recursive: true, force: true })
 })
 
 describe('standalone query output attachment contract', () => {
