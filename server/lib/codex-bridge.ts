@@ -83,14 +83,24 @@ const PHASE_LABELS: Record<Phase, string> = {
 // Sandbox policy for `codex exec`. This public server NEVER runs codex
 // unsandboxed — that would let a remote glasses query execute arbitrary commands
 // on the host. Default: read-only (safe for chat). COS_CODEX_SANDBOX=workspace-write
-// permits writes within the working directory only. Full host access is
+// permits writes within the working directory only, and enables outbound network
+// inside that sandbox (Gmail API, HTTPS fetches) via
+// `sandbox_workspace_write.network_access=true`. Full host filesystem access is
 // intentionally not exposed by this server.
 function codexSandboxMode(): 'workspace-write' | 'read-only' {
   return process.env.COS_CODEX_SANDBOX === 'workspace-write' ? 'workspace-write' : 'read-only'
 }
 
 function codexSandboxArgs(): string[] {
-  return ['--sandbox', codexSandboxMode(), '--skip-git-repo-check']
+  const args = ['--sandbox', codexSandboxMode(), '--skip-git-repo-check']
+  // workspace-write keeps the filesystem boundary but leaves network OFF by
+  // default in Codex. Glasses outbound Gmail (and similar HTTPS) needs this
+  // explicit opt-in — without it agents correctly report "cannot reach
+  // gmail.googleapis.com" even when workspace writes work.
+  if (codexSandboxMode() === 'workspace-write') {
+    args.push('-c', 'sandbox_workspace_write.network_access=true')
+  }
+  return args
 }
 
 /**
@@ -101,7 +111,7 @@ function codexSandboxArgs(): string[] {
 function codexCapabilityPrompt(): string {
   if (codexSandboxMode() === 'workspace-write') {
     return `TOOL CAPABILITY CONTRACT:
-You are an AGENT model running \`codex exec --sandbox workspace-write\`. Reads, searches, shell commands, and writes inside the working directory are available to you whether or not any list names them. Never claim a tool is unavailable based on that list or on any header — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it.
+You are an AGENT model running \`codex exec --sandbox workspace-write\` with \`sandbox_workspace_write.network_access=true\`. Reads, searches, shell commands, outbound HTTPS (including Gmail API / cos_python network calls), and writes inside the working directory are available to you whether or not any list names them. Never claim a tool is unavailable based on that list or on any header — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it. Prefer the COS Gmail API script path (\`email_cache\` / \`email_gmail_api\` with confirm=True) over approval-gated Google Workspace connector sends.
 ${TOOL_HONESTY_CLAUSE}
 ${UNTRUSTED_CONTENT_CLAUSE}`
   }

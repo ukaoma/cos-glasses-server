@@ -81,16 +81,25 @@ describe('buildCodexExecArgs', () => {
 
   it('permits only the documented workspace-write opt-in', () => {
     process.env.COS_CODEX_SANDBOX = 'workspace-write'
-    expect(buildCodexExecArgs({
+    const args = buildCodexExecArgs({
       codexCwd: '/tmp/cos',
       persistentCodexSession: false,
       resolvedModel: frontier,
-    })).toContain('workspace-write')
+    })
+    expect(args).toContain('workspace-write')
+    expect(args).toContain('sandbox_workspace_write.network_access=true')
+    // Network opt-in must sit with the other global -c flags, not replace sandbox.
+    const sandboxIdx = args.indexOf('--sandbox')
+    const networkIdx = args.indexOf('sandbox_workspace_write.network_access=true')
+    expect(args[sandboxIdx + 1]).toBe('workspace-write')
+    expect(args[networkIdx - 1]).toBe('-c')
+    expect(networkIdx).toBeGreaterThan(sandboxIdx)
 
     process.env.COS_CODEX_SANDBOX = 'danger-full-access'
     const safe = buildCodexExecArgs({ codexCwd: '/tmp/cos', persistentCodexSession: false, resolvedModel: frontier })
     expect(safe).toContain('read-only')
     expect(safe).not.toContain('danger-full-access')
+    expect(safe).not.toContain('sandbox_workspace_write.network_access=true')
   })
 
   it('keeps sandboxing on resumed runs and omits unavailable pins', () => {

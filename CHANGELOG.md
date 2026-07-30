@@ -1,3 +1,15 @@
+## 6.18.5
+
+- **Codex workspace-write now includes outbound network.** `workspace-write`
+  alone still blocked HTTPS (Gmail API, etc.) because Codex defaults
+  `sandbox_workspace_write.network_access` to off. When
+  `COS_CODEX_SANDBOX=workspace-write`, the managed server now passes
+  `-c sandbox_workspace_write.network_access=true` and the capability header
+  states HTTPS is available. Pair with the same key in `~/.codex/config.toml`
+  for interactive Codex CLI. Still not `danger-full-access` — writes stay
+  inside the workdir. Prefer COS `email_cache` / `email_gmail_api` over
+  approval-gated Google Workspace connector sends from glasses.
+
 ## 6.18.4
 
 - **Meeting sync progress on `/api/health`.** Post-meeting HQ polish writes

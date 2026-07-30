@@ -70,7 +70,10 @@ without silently losing completed replies.
 > omit the execution mode default to Ask.
 > Existing `COS_CODEX_MODEL` / `COS_CODEX_REASONING_EFFORT` settings remain
 > supported on the migrated Frontier slot; leave them blank for auto-latest.
-> Codex runs **sandboxed read-only** by default (`COS_CODEX_SANDBOX` to adjust).
+> Codex runs **sandboxed read-only** by default. Set
+> `COS_CODEX_SANDBOX=workspace-write` for workdir writes + outbound network
+> (`sandbox_workspace_write.network_access=true` is passed by the managed server
+> and should also be set in `~/.codex/config.toml` for interactive Codex).
 > **Claude is the most permissive provider by default.** It runs with
 > `--dangerously-skip-permissions`, so a glasses query on the Claude/Opus path can
 > run shell commands and read, edit, and write files on this Mac without prompting
