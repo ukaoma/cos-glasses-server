@@ -1,3 +1,12 @@
+## 6.18.6
+
+- **Phone Restart works on COS Control managed installs.** Recovery status /
+  `/api/recovery/server/restart` previously required `COS_HARNESS=daemon`, but
+  Control's LaunchAgent sets `COS_MANAGED=1` with `COS_HARNESS=foreground`.
+  Health correctly advertised `managed: true` while the restart route returned
+  409 "Server is not managed by the COS LaunchAgent". Gate now uses
+  `COS_MANAGED=1` (`isManagedRuntime()`), matching capabilities.
+
 ## 6.18.5
 
 - **Codex workspace-write now includes outbound network.** `workspace-write`

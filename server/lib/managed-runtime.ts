@@ -21,9 +21,9 @@ export function managedRuntimeCapability(): ManagedRuntimeCapability {
     // Whisper lifecycle is private to the local controller. It is never
     // exposed as a network-reachable mutation capability.
     restartWhisper: false,
-    // Server restart is performed by the trusted local helper through launchd,
-    // never by an HTTP endpoint. This flag tells clients that managed recovery
-    // exists without widening the network attack surface.
+    // Phone/companion may POST /api/recovery/server/restart when managed.
+    // launchd KeepAlive brings the process back after SIGTERM. Unmanaged
+    // foreground installs reject that route (restart_unmanaged).
     restartServer: managed,
     maintenanceDrain: managed,
     lifecycleProof: managed,

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { atomicWriteFileSync } from '../lib/atomic-fs.js'
+import { isManagedRuntime } from '../lib/managed-runtime.js'
 import { acquireMaintenance, getRecoveryActivityStatus } from '../lib/recovery-activity.js'
 import { getWhisperHealth, restartWhisperServer } from '../lib/whisper-local.js'
 import { serverMetrics } from '../lib/server-metrics.js'
@@ -19,14 +20,16 @@ recoveryRouter.get('/live', (_req, res) => {
   res.json({
     status: 'ok', bootId: serverMetrics.bootId, pid: process.pid,
     uptimeSeconds: Math.round((Date.now() - serverMetrics.startedAt) / 1000),
-    managed: process.env.COS_HARNESS === 'daemon',
+    // COS Control LaunchAgent sets COS_MANAGED=1 with COS_HARNESS=foreground.
+    // Do not require COS_HARNESS=daemon — that false-negative blocked phone Restart.
+    managed: isManagedRuntime(),
   })
 })
 
 recoveryRouter.get('/recovery/status', (_req, res) => {
   res.json({
     bootId: serverMetrics.bootId,
-    managed: process.env.COS_HARNESS === 'daemon',
+    managed: isManagedRuntime(),
     whisper: getWhisperHealth(),
     asr: { hqActive: false, hqQueued: 0, fastRestarting: false }, // public build: no HQ/fast ASR scheduler in this server
     activity: getRecoveryActivityStatus(),
@@ -46,7 +49,7 @@ recoveryRouter.post('/recovery/whisper/restart', async (_req, res) => {
 })
 
 recoveryRouter.post('/recovery/server/restart', (_req, res) => {
-  if (process.env.COS_HARNESS !== 'daemon') {
+  if (!isManagedRuntime()) {
     return res.status(409).json({ error: 'Server is not managed by the COS LaunchAgent', reason: 'restart_unmanaged' })
   }
   const elapsed = Date.now() - lastRestartAt()
