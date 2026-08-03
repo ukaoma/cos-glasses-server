@@ -379,7 +379,7 @@ if (SETUP_TRANSCRIPTION) {
   process.env.COS_WHISPER_PREVIEW_MODEL = previewModel
   process.env.COS_WHISPER_COMMIT_MODEL = commitModel
   const laneSummary = TRANSCRIPTION_TIER === 'max'
-    ? 'Large-v3 preview + commit · Large-v3 HQ'
+    ? 'Turbo preview · Large-v3 commit · Large-v3 HQ'
     : 'Small.en preview · Turbo commit · Large-v3 HQ'
   console.log(green('  ✓') + ` ${TRANSCRIPTION_TIER === 'max' ? 'Max' : 'Balanced'} transcription selected ` + dim(`— ${laneSummary}`))
 }

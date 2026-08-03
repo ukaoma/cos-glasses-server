@@ -39,6 +39,7 @@ export type ContentionReason =
   | 'prompt_draft_warm'
   | 'prompt_draft_finalize'
   | 'metal_batch_in_flight'
+  | 'canonical_in_flight'
 
 export type DeviceReason =
   | 'force_cpu'
@@ -72,6 +73,8 @@ export function batchHqMetalEnabled(): boolean {
 type LiveActivityProbe = () => number | null
 
 let liveActivityProbe: LiveActivityProbe | null = null
+let canonicalMetalRequests = 0
+const previewMetalRequests = new Set<AbortController>()
 
 /** transcribe-stream calls this at module load. Returns the most recent
  *  lastActivityAt across in-memory sessions, or null when there are none. */
@@ -83,6 +86,9 @@ export function registerLiveActivityProbe(probe: LiveActivityProbe): void {
 export function resetMetalGateForTests(): void {
   liveActivityProbe = null
   metalChildren.clear()
+  canonicalMetalRequests = 0
+  for (const controller of previewMetalRequests) controller.abort('test_reset')
+  previewMetalRequests.clear()
 }
 
 function recentSessionActivity(now: number): boolean {
@@ -115,11 +121,58 @@ function activeMetalFamilyWork(): ContentionReason | null {
 
 /** Is something live currently entitled to Metal? */
 export function isLiveMetalContended(now: number = Date.now()): { contended: boolean; reason: ContentionReason | null } {
+  if (canonicalMetalRequests > 0) return { contended: true, reason: 'canonical_in_flight' }
   const work = activeMetalFamilyWork()
   if (work) return { contended: true, reason: work }
   if (recentSessionActivity(now)) return { contended: true, reason: 'session_recent' }
   if (metalChildren.size > 0) return { contended: true, reason: 'metal_batch_in_flight' }
   return { contended: false, reason: null }
+}
+
+export interface MetalPreviewLease {
+  signal: AbortSignal
+  release: () => void
+}
+
+/** Cosmetic preview receives Metal only while canonical work is idle. The
+ * registration is synchronous, so a canonical request that begins afterward
+ * can abort this request before starting its own inference. */
+export function tryAcquireMetalPreview(): MetalPreviewLease | null {
+  // Recent session activity is not itself GPU work. Allow preview between
+  // canonical chunks, but never alongside an active canonical or HQ Metal job.
+  if (canonicalMetalRequests > 0 || metalChildren.size > 0) return null
+  const controller = new AbortController()
+  previewMetalRequests.add(controller)
+  let released = false
+  return {
+    signal: controller.signal,
+    release: () => {
+      if (released) return
+      released = true
+      previewMetalRequests.delete(controller)
+    },
+  }
+}
+
+/** Canonical live transcription always wins. Abort any cosmetic preview first,
+ * then hold a synchronous counter so no new preview can enter until release. */
+export function beginCanonicalMetal(reason: string): () => void {
+  canonicalMetalRequests++
+  for (const controller of previewMetalRequests) controller.abort(reason)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    canonicalMetalRequests = Math.max(0, canonicalMetalRequests - 1)
+  }
+}
+
+export class MetalPreviewContendedError extends Error {
+  readonly contended = true
+  constructor() {
+    super('Whisper preview yielded to canonical transcription')
+    this.name = 'MetalPreviewContendedError'
+  }
 }
 
 /** Device for the NEXT batch segment. Re-evaluated per segment so a meeting

@@ -16,9 +16,12 @@ import { getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js
 import { stripBrandUrls } from './hallucination-filter.js'
 import {
   batchHqMetalEnabled,
+  beginCanonicalMetal,
   chooseBatchDevice,
   MetalBatchPreemptedError,
+  MetalPreviewContendedError,
   registerMetalBatchChild,
+  tryAcquireMetalPreview,
   unregisterMetalBatchChild,
 } from './whisper-metal-gate.js'
 
@@ -1026,6 +1029,7 @@ async function transcribeViaServer(
   context?: string,
   isQuiet?: boolean,
   promptPolicy: 'full-vocabulary' | 'none' = 'full-vocabulary',
+  signal?: AbortSignal,
 ): Promise<{ text: string; words?: WhisperWord[] }> {
   const formData = new FormData()
   // Convert Buffer to Uint8Array to satisfy Blob's BlobPart type constraint
@@ -1043,10 +1047,11 @@ async function transcribeViaServer(
   // legitimate speech from quiet sources (laptop speakers through G2 mic).
   formData.append('suppress_non_speech', 'true')  // Suppress special/non-speech tokens (benign)
 
+  const timeoutSignal = AbortSignal.timeout(10_000)
   const response = await fetch(`${WHISPER_SERVER_URL}/inference`, {
     method: 'POST',
     body: formData,
-    signal: AbortSignal.timeout(10_000),
+    signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
   })
 
   if (!response.ok) {
@@ -1183,6 +1188,7 @@ export async function transcribeLocal(
   opts?: {
     affectsCircuit?: boolean
     promptPolicy?: 'full-vocabulary' | 'none'
+    metalPriority?: 'canonical' | 'preview'
   },
 ): Promise<{ text: string; backend: 'server' | 'cli'; words?: WhisperWord[] }> {
   const start = Date.now()
@@ -1198,8 +1204,21 @@ export async function transcribeLocal(
 
   // Try whisper-server first (fastest: ~50-100ms, includes DTW word timestamps)
   if (serverAvailable) {
+    const previewLease = opts?.metalPriority === 'preview' ? tryAcquireMetalPreview() : null
+    if (opts?.metalPriority === 'preview' && !previewLease) {
+      throw new MetalPreviewContendedError()
+    }
+    const releaseCanonical = opts?.metalPriority === 'preview'
+      ? null
+      : beginCanonicalMetal('whisper_server')
     try {
-      const result = await transcribeViaServer(audioBuffer, context, isQuiet, opts?.promptPolicy)
+      const result = await transcribeViaServer(
+        audioBuffer,
+        context,
+        isQuiet,
+        opts?.promptPolicy,
+        previewLease?.signal,
+      )
       const text = applyCorrections(result.text)
       const words = result.words?.map(w => ({ ...w, word: applyCorrections(w.word) }))
       const elapsed = Date.now() - start
@@ -1211,6 +1230,7 @@ export async function transcribeLocal(
       console.log(`[whisper-local] Server transcribed in ${elapsed}ms (${words?.length ?? 0} words): "${text.slice(0, 80)}${text.length > 80 ? '...' : ''}"`)
       return { text, backend: 'server', words }
     } catch (err: any) {
+      if (previewLease?.signal.aborted) throw new MetalPreviewContendedError()
       if (affectsCircuit) {
         serverConsecutiveFailures++
         const isTimeout = err.message.includes('timeout') || err.message.includes('aborted')
@@ -1239,6 +1259,9 @@ export async function transcribeLocal(
 
       // Throw to let caller fall to OpenAI cloud (1-3s) — much faster than CLI cold-start (11s)
       throw new Error(`whisper-server unavailable: ${err.message}`)
+    } finally {
+      previewLease?.release()
+      releaseCanonical?.()
     }
   }
 

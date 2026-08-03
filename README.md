@@ -257,12 +257,14 @@ update the server remain on Turbo until Guided Setup opts them into Small.en.
 npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier max
 ```
 
-Max reuses the existing Large-v3 worker for preview and authoritative commit;
-saved work still receives Large-v3 HQ polish. It does not start a third model
-process. If Large-v3 is missing, health reports the downgrade and the server
-falls back to Turbo rather than making transcription unavailable. COS Control
-is the supported owner of the machine-wide tier; the per-lane environment
-variables remain advanced overrides.
+Max keeps Turbo resident in the isolated preview sidecar for low-latency
+provisional words, while Large-v3 remains authoritative for live commit and
+saved-work polish. Canonical transcription has strict GPU priority: a cosmetic
+preview is dropped or aborted instead of competing with a committed decode.
+If Large-v3 is missing, health reports the downgrade and the server falls back
+to Turbo rather than making transcription unavailable. COS Control is the
+supported owner of the machine-wide tier; the per-lane environment variables
+remain advanced overrides.
 
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):

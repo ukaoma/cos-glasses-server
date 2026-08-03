@@ -1,3 +1,16 @@
+## 6.21.3
+
+- Route Max-tier provisional dictation preview through the resident Turbo
+  preview sidecar while keeping authoritative live commit and saved-work
+  polish on Large-v3. This corrects the 6.21.0 behavior that made cosmetic
+  preview pay Large-v3 latency.
+- Give canonical transcription strict GPU priority. A cosmetic preview is
+  dropped or aborted when canonical/HQ Metal work begins, and preview failures
+  remain outside the Whisper circuit breaker and all persistence paths.
+- Report the effective Max lanes truthfully as Turbo preview, Large-v3 commit,
+  and Large-v3 polish. Balanced remains Small.en preview, Turbo commit, and
+  Large-v3 polish.
+
 ## 6.21.2
 
 - Cache Python, Claude, Codex, and Cursor process probes for 30 seconds so the

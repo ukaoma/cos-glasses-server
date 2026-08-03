@@ -1,6 +1,6 @@
 // Adaptive provisional transcription:
 //   Balanced -> isolated Small.en cosmetic preview + Turbo live commit
-//   Max      -> resident Large-v3 worker reused for preview + live commit
+//   Max      -> isolated Turbo cosmetic preview + Large-v3 live commit
 //   polish   -> Large-v3 save pass (unchanged)
 
 import { execFile, spawn } from 'node:child_process'
@@ -16,9 +16,11 @@ import {
   type WhisperCommitModel,
   type WhisperTranscriptionTier,
 } from './whisper-local.js'
+import { MetalPreviewContendedError, tryAcquireMetalPreview } from './whisper-metal-gate.js'
 
 export type WhisperPreviewRequest = 'auto' | 'small.en' | 'turbo' | 'off'
 export type WhisperPreviewModel = 'small.en' | WhisperCommitModel | null
+type WhisperPreviewSidecarModel = 'small.en' | 'large-v3-turbo'
 export type WhisperPreviewReason =
   | 'disabled'
   | 'small_model_missing'
@@ -50,6 +52,7 @@ export interface WhisperPreviewCapability {
 
 const MODEL_DIR = join(process.env.HOME ?? homedir(), '.local/share/whisper-models')
 export const WHISPER_SMALL_EN_MODEL_PATH = join(MODEL_DIR, 'ggml-small.en.bin')
+const WHISPER_TURBO_MODEL_PATH = join(MODEL_DIR, 'ggml-large-v3-turbo.bin')
 const VAD_MODEL_PATH = join(MODEL_DIR, 'ggml-silero-v5.1.2.bin')
 const VAD_ENABLED = process.env.COS_WHISPER_VAD !== '0'
 const WHISPER_SERVER = ['/opt/homebrew/bin/whisper-server', '/usr/local/bin/whisper-server']
@@ -63,6 +66,7 @@ let previewProcess: ChildProcess | null = null
 let previewAvailable = false
 let previewStarting = false
 let previewFailure: WhisperPreviewReason = null
+let previewWorkerModel: WhisperPreviewSidecarModel | null = null
 let warnedInvalidChoice = false
 
 interface ProcessEntry {
@@ -103,10 +107,11 @@ function isCosPreviewCommand(command: string): boolean {
   const executablePath = firstToken?.[1] ?? firstToken?.[2] ?? firstToken?.[3] ?? ''
   return basename(executablePath) === 'whisper-server'
     && new RegExp(`(?:^|\\s)--port(?:=|\\s+)${PREVIEW_PORT}(?:\\s|$)`).test(command)
-    && command.includes(WHISPER_SMALL_EN_MODEL_PATH)
+    && [WHISPER_SMALL_EN_MODEL_PATH, WHISPER_TURBO_MODEL_PATH]
+      .some(modelPath => command.includes(modelPath))
 }
 
-/** Reap only a listener proven to be our exact Small.en/8177 command. An
+/** Reap only a listener proven to be our exact COS preview/8177 command. An
  * unrelated local service is never contacted with audio or terminated. */
 async function reclaimPreviewPort(): Promise<'clear' | 'reaped' | 'foreign'> {
   const listeners = await previewListeningPids()
@@ -135,7 +140,7 @@ async function reclaimPreviewPort(): Promise<'clear' | 'reaped' | 'foreign'> {
     if ((await previewListeningPids()).length === 0) return 'reaped'
     await new Promise(resolve => setTimeout(resolve, 100))
   }
-  throw new Error(`verified Small.en worker still owns port ${PREVIEW_PORT}`)
+  throw new Error(`verified COS preview worker still owns port ${PREVIEW_PORT}`)
 }
 
 export function normalizeWhisperPreviewRequest(raw?: string): WhisperPreviewRequest {
@@ -169,9 +174,19 @@ function requestedPreviewModel(): WhisperPreviewRequest {
 function selectedPreviewModel(requested = requestedPreviewModel()): WhisperPreviewModel {
   if (requested === 'off') return null
   const primary = getWhisperCommitCapability().effectiveModel
-  if (requested === 'turbo') return primary
+  if (requested === 'turbo') {
+    return existsSync(WHISPER_TURBO_MODEL_PATH) ? 'large-v3-turbo' : primary
+  }
   if (requested === 'small.en') return existsSync(WHISPER_SMALL_EN_MODEL_PATH) ? 'small.en' : primary
   return existsSync(WHISPER_SMALL_EN_MODEL_PATH) ? 'small.en' : primary
+}
+
+function sidecarModelPath(model: WhisperPreviewSidecarModel): string {
+  return model === 'small.en' ? WHISPER_SMALL_EN_MODEL_PATH : WHISPER_TURBO_MODEL_PATH
+}
+
+function needsPreviewSidecar(model: WhisperPreviewModel): model is WhisperPreviewSidecarModel {
+  return model !== null && model !== getWhisperCommitCapability().effectiveModel
 }
 
 export function getWhisperPreviewCapability(): WhisperPreviewCapability {
@@ -189,12 +204,12 @@ export function getWhisperPreviewCapability(): WhisperPreviewCapability {
     }
   }
 
-  const smallPresent = existsSync(WHISPER_SMALL_EN_MODEL_PATH)
   const selected = selectedPreviewModel(requested)
-  const turboReady = getWhisperHealth().server
-  if (selected === 'small.en' && previewAvailable) {
+  const primaryReady = getWhisperHealth().server
+  const sidecarExpected = needsPreviewSidecar(selected)
+  if (sidecarExpected && previewAvailable && previewWorkerModel === selected) {
     return {
-      requested, effectiveModel: 'small.en', ready: true,
+      requested, effectiveModel: selected, ready: true,
       backend: 'whisper-preview-server', degraded: commit.degraded, reason: commit.reason,
       previewDegraded: false, commitDegraded: commit.degraded, commitReason: commit.reason,
       committedModel: commit.effectiveModel,
@@ -204,20 +219,24 @@ export function getWhisperPreviewCapability(): WhisperPreviewCapability {
     }
   }
 
-  const smallWasExpected = requested === 'small.en' || (requested === 'auto' && smallPresent)
-  const previewDegraded = smallWasExpected
+  const selectedModelMissing = requested === 'small.en' && !existsSync(WHISPER_SMALL_EN_MODEL_PATH)
+    ? 'small_model_missing'
+    : requested === 'turbo' && !existsSync(WHISPER_TURBO_MODEL_PATH)
+      ? 'turbo_model_missing'
+      : null
+  const previewDegraded = sidecarExpected || selectedModelMissing !== null
   const reason: WhisperPreviewReason = commit.reason
     ? commit.reason
-    : requested === 'small.en' && !smallPresent
-    ? 'small_model_missing'
-    : smallWasExpected
+    : selectedModelMissing
+      ? selectedModelMissing
+      : sidecarExpected
       ? (previewFailure ?? (previewStarting ? null : 'preview_sidecar_unavailable'))
-      : turboReady ? null : 'turbo_unavailable'
+      : primaryReady ? null : 'turbo_unavailable'
   return {
     requested,
-    effectiveModel: turboReady ? commit.effectiveModel : selected,
-    ready: turboReady,
-    backend: turboReady ? 'whisper-server' : null,
+    effectiveModel: primaryReady ? commit.effectiveModel : selected,
+    ready: primaryReady,
+    backend: primaryReady ? 'whisper-server' : null,
     degraded: previewDegraded || commit.degraded,
     reason,
     previewDegraded,
@@ -232,16 +251,21 @@ export function getWhisperPreviewCapability(): WhisperPreviewCapability {
 }
 
 async function endpointReady(path: '/health' | '/inference', init?: RequestInit, timeoutMs = 1_000): Promise<Response> {
-  return fetch(`${PREVIEW_URL}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal
+  return fetch(`${PREVIEW_URL}${path}`, { ...init, signal })
 }
 
-/** Start the optional small.en preview worker. Failure is cosmetic: committed
- * Turbo and every recovery/finalization path stay untouched. */
+/** Start the optional isolated preview worker. Balanced uses Small.en; Max
+ * uses Turbo while its canonical live worker remains Large-v3. Failure is
+ * cosmetic: every recovery/finalization path stays untouched. */
 export async function startWhisperPreviewServer(): Promise<void> {
   const requested = requestedPreviewModel()
-  if (selectedPreviewModel(requested) !== 'small.en' || previewProcess || previewAvailable || previewStarting) return
-  if (!existsSync(WHISPER_SMALL_EN_MODEL_PATH)) {
-    previewFailure = 'small_model_missing'
+  const selected = selectedPreviewModel(requested)
+  if (!needsPreviewSidecar(selected) || previewProcess || previewAvailable || previewStarting) return
+  const modelPath = sidecarModelPath(selected)
+  if (!existsSync(modelPath)) {
+    previewFailure = selected === 'small.en' ? 'small_model_missing' : 'turbo_model_missing'
     return
   }
   if (!existsSync(WHISPER_SERVER)) {
@@ -259,7 +283,7 @@ export async function startWhisperPreviewServer(): Promise<void> {
         return
       }
       if (portState === 'reaped') {
-        console.log('[whisper-preview] reaped a stale Small.en worker before restart')
+        console.log('[whisper-preview] reaped a stale COS preview worker before restart')
       }
     } catch (error) {
       previewFailure = 'preview_start_failed'
@@ -268,7 +292,7 @@ export async function startWhisperPreviewServer(): Promise<void> {
     }
 
     const args = [
-      '-m', WHISPER_SMALL_EN_MODEL_PATH,
+      '-m', modelPath,
       '-t', '16',
       '-l', 'en',
       '-fa',
@@ -281,10 +305,12 @@ export async function startWhisperPreviewServer(): Promise<void> {
     }
     const child = spawn(WHISPER_SERVER, args, { stdio: 'ignore', detached: false })
     previewProcess = child
+    previewWorkerModel = selected
     child.once('close', code => {
       if (previewProcess !== child) return
       previewProcess = null
       previewAvailable = false
+      previewWorkerModel = null
       previewFailure = code === 0 ? 'preview_sidecar_unavailable' : 'preview_start_failed'
     })
     child.once('error', () => {
@@ -300,7 +326,8 @@ export async function startWhisperPreviewServer(): Promise<void> {
         if (response.ok) {
           previewAvailable = true
           previewFailure = null
-          console.log('[whisper-preview] small.en ready for provisional text; committed text remains Turbo')
+          const committed = getWhisperCommitCapability().effectiveModel
+          console.log(`[whisper-preview] ${selected} ready for provisional text; committed text remains ${committed}`)
           return
         }
       } catch { /* model still loading */ }
@@ -308,6 +335,7 @@ export async function startWhisperPreviewServer(): Promise<void> {
     }
     try { child.kill('SIGKILL') } catch { /* already exited */ }
     if (previewProcess === child) previewProcess = null
+    previewWorkerModel = null
     previewFailure = 'preview_start_failed'
   } finally {
     previewStarting = false
@@ -336,6 +364,7 @@ export async function stopWhisperPreviewServer(): Promise<void> {
   previewProcess = null
   previewAvailable = false
   previewStarting = false
+  previewWorkerModel = null
   if (child) {
     try { child.kill('SIGTERM') } catch { /* already exited */ }
     if (!await waitForPreviewClose(child, 2_000)) {
@@ -345,40 +374,63 @@ export async function stopWhisperPreviewServer(): Promise<void> {
   }
 }
 
-async function transcribeViaPreviewServer(audioBuffer: Buffer): Promise<string> {
+async function transcribeViaPreviewServer(audioBuffer: Buffer, signal: AbortSignal): Promise<string> {
   const formData = new FormData()
   formData.append('file', new Blob([new Uint8Array(audioBuffer)], { type: 'audio/wav' }), 'recording.wav')
   formData.append('response_format', 'json')
   // Preview text is cosmetic and the same audio is authoritatively decoded by
-  // the commit lane. Small.en is disproportionately suggestible on short
-  // windows, so never bias this provisional decode with profile vocabulary.
+  // the commit lane. Never bias this provisional decode with profile vocabulary.
   formData.append('suppress_non_speech', 'true')
-  const response = await endpointReady('/inference', { method: 'POST', body: formData }, 5_000)
+  const response = await endpointReady('/inference', { method: 'POST', body: formData, signal }, 5_000)
   if (!response.ok) throw new Error(`preview server ${response.status}`)
   const result = await response.json() as { text?: unknown }
   if (typeof result.text !== 'string') throw new Error('preview server returned invalid text')
   return applyCorrections(result.text.trim())
 }
 
-/** Cosmetic preview only. A small-worker failure falls through to the existing
- * non-circuit Turbo decode and can never write committed transcript state. */
+/** Cosmetic preview only. A sidecar failure falls through to the existing
+ * non-circuit canonical decode and can never write committed transcript state. */
 export async function transcribeWhisperPreview(audioBuffer: Buffer): Promise<{
   text: string
   model: 'small.en' | WhisperCommitModel
   backend: 'whisper-preview-server' | 'whisper-server'
-}> {
-  if (previewAvailable) {
+  }> {
+  if (previewAvailable && previewWorkerModel) {
+    const workerModel = previewWorkerModel
+    const previewLease = tryAcquireMetalPreview()
+    if (!previewLease) {
+      return { text: '', model: workerModel, backend: 'whisper-preview-server' }
+    }
     try {
-      return { text: await transcribeViaPreviewServer(audioBuffer), model: 'small.en', backend: 'whisper-preview-server' }
+      return {
+        text: await transcribeViaPreviewServer(audioBuffer, previewLease.signal),
+        model: workerModel,
+        backend: 'whisper-preview-server',
+      }
     } catch (error) {
+      if (previewLease.signal.aborted) {
+        return { text: '', model: workerModel, backend: 'whisper-preview-server' }
+      }
+      const failedModel = previewWorkerModel
       previewAvailable = false
+      previewWorkerModel = null
       previewFailure = 'preview_sidecar_unavailable'
-      console.warn(`[whisper-preview] small.en preview failed; falling back to Turbo: ${error instanceof Error ? error.message : error}`)
+      console.warn(`[whisper-preview] ${failedModel} preview failed; falling back to canonical worker: ${error instanceof Error ? error.message : error}`)
+    } finally {
+      previewLease.release()
     }
   }
-  const result = await transcribeLocal(audioBuffer, undefined, undefined, {
-    affectsCircuit: false,
-    promptPolicy: 'none',
-  })
-  return { text: result.text, model: getWhisperCommitCapability().effectiveModel, backend: 'whisper-server' }
+  try {
+    const result = await transcribeLocal(audioBuffer, undefined, undefined, {
+      affectsCircuit: false,
+      promptPolicy: 'none',
+      metalPriority: 'preview',
+    })
+    return { text: result.text, model: getWhisperCommitCapability().effectiveModel, backend: 'whisper-server' }
+  } catch (error) {
+    if (error instanceof MetalPreviewContendedError) {
+      return { text: '', model: getWhisperCommitCapability().effectiveModel, backend: 'whisper-server' }
+    }
+    throw error
+  }
 }

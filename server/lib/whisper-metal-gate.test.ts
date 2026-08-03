@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import {
   chooseBatchDevice,
+  beginCanonicalMetal,
   isLiveMetalContended,
   isMetalBatchPreempted,
   LIVE_ACTIVITY_WINDOW_MS,
@@ -12,6 +13,7 @@ import {
   registerLiveActivityProbe,
   registerMetalBatchChild,
   resetMetalGateForTests,
+  tryAcquireMetalPreview,
   unregisterMetalBatchChild,
 } from './whisper-metal-gate.js'
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
@@ -69,6 +71,39 @@ describe('device choice (3B — opt-in until smoke)', () => {
 })
 
 describe('contention (2B — recent activity OR lease, never bare map membership)', () => {
+  it('lets cosmetic preview run only while canonical Metal is idle', () => {
+    registerLiveActivityProbe(() => null)
+    const preview = tryAcquireMetalPreview()
+    expect(preview).not.toBeNull()
+    expect(preview?.signal.aborted).toBe(false)
+
+    const releaseCanonical = beginCanonicalMetal('unit_test')
+    expect(preview?.signal.aborted).toBe(true)
+    expect(isLiveMetalContended()).toMatchObject({ contended: true, reason: 'canonical_in_flight' })
+    expect(tryAcquireMetalPreview()).toBeNull()
+
+    preview?.release()
+    releaseCanonical()
+    const nextPreview = tryAcquireMetalPreview()
+    expect(nextPreview).not.toBeNull()
+    nextPreview?.release()
+  })
+
+  it('allows preview between chunks during an active session but not during an HQ Metal child', () => {
+    registerLiveActivityProbe(() => Date.now())
+    const betweenChunks = tryAcquireMetalPreview()
+    expect(betweenChunks).not.toBeNull()
+    betweenChunks?.release()
+
+    const batch = fakeChild()
+    registerMetalBatchChild(batch, () => {})
+    try {
+      expect(tryAcquireMetalPreview()).toBeNull()
+    } finally {
+      unregisterMetalBatchChild(batch)
+    }
+  })
+
   it('a recently active session forces CPU', () => {
     process.env.COS_BATCH_HQ_METAL = '1'
     const now = Date.now()
