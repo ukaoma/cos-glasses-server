@@ -11,7 +11,7 @@
 //   isFullHallucination(text) — returns true if the text IS a hallucination in its
 //     entirety (silence artifacts, caption training, foreign script, filler-only).
 
-import { getNegativeRules, getVocabulary, getOwnerName, loadProfileField } from './profile.js'
+import { getNegativeRules, getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
 
 // ── Whole-chunk silence hallucinations ─────────────────────────────────────
 const KNOWN_HALLUCINATIONS = [
@@ -333,13 +333,10 @@ function getVocabEchoMatcher(): RegExp {
   for (const v of getVocabulary()) if (v && v.trim()) raw.add(v.trim())
   // Include whisper_corrections key/value variants so the echo matches whatever
   // spelling whisper emits ("POS Nation" ↔ "POSNation", "Jewel 360" ↔ "Jewel360").
-  try {
-    const corrRaw = loadProfileField('whisper_corrections', '')
-    if (corrRaw) {
-      const map = JSON.parse(corrRaw) as Record<string, string>
-      for (const [k, val] of Object.entries(map)) { if (k) raw.add(k); if (val) raw.add(val) }
-    }
-  } catch { /* malformed corrections — ignore */ }
+  for (const [key, value] of Object.entries(getWhisperCorrections())) {
+    raw.add(key)
+    raw.add(value)
+  }
   // Only UNAMBIGUOUS terms trigger an echo drop: multi-word phrases ("POS Nation",
   // "IT Retail", "Jeremy Sokolic") and brand-shaped single tokens with an internal
   // capital or digit ("POSNation", "CaratIQ", "Jewel360"). Plain single-word tokens

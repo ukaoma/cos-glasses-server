@@ -13,7 +13,7 @@ import { errMsg } from '../lib/utils.js'
 import {
   getVocabulary,
   getNegativeRules,
-  loadProfileField,
+  getWhisperCorrections,
   updateProfileFields,
 } from '../lib/profile.js'
 import { resetDecoderCaches } from '../lib/whisper-local.js'
@@ -36,16 +36,7 @@ function looksLikeUrlEmailPath(s: string): boolean {
 }
 
 function readCorrections(): Record<string, string> {
-  try {
-    const raw = loadProfileField('whisper_corrections', '')
-    if (!raw) return {}
-    const parsed = JSON.parse(raw)
-    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-      ? parsed as Record<string, string>
-      : {}
-  } catch {
-    return {}
-  }
+  return getWhisperCorrections()
 }
 
 function currentGlossary() {

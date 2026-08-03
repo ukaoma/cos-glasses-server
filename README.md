@@ -174,6 +174,9 @@ in the managed CLI working directory),
 server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
 `~/.cos-glasses/.cos-profile.json` (see `.cos-profile.example.json`).
+Factory example values are ignored; add the real names, companies, acronyms,
+and specialist terms you say often. Guided Setup writes a safe empty profile
+instead of biasing Whisper toward placeholder text.
 Telegram activity export is disabled by default even when a private COS
 pipeline contains `.telegram_config.json`; enable it only with the explicit
 `COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
@@ -232,6 +235,20 @@ profiles.
 Prompt dictation defaults to HQ. The phone owns the preference: **Fast mode
 OFF** requests HQ, and **Fast mode ON** requests turbo. The Mac performs all
 decoding; the phone does not run Whisper.
+
+For the recommended adaptive setup, run:
+
+```bash
+npx --yes @gotcos/glasses-server@latest --setup-transcription
+```
+
+That keeps three jobs separate: Small.en supplies provisional words on the
+lens, Large-v3-Turbo commits the authoritative live transcript, and Large-v3
+polishes saved prompts and meetings. Small.en never writes the recovery ledger.
+If its sidecar is missing or unhealthy, preview falls back to Turbo without
+changing final quality. Set `COS_WHISPER_PREVIEW_MODEL=turbo` to keep one live
+model, or `off` to disable provisional peeks. Existing installs that only
+update the server remain on Turbo until Guided Setup opts them into Small.en.
 
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):

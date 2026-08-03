@@ -34,6 +34,7 @@ import {
   applyNegativeRules,
 } from '../lib/hallucination-filter.js'
 import { applyCorrections } from '../lib/whisper-local.js'
+import { transcribeWhisperPreview } from '../lib/whisper-preview.js'
 import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
 import { getVocabulary } from '../lib/profile.js'
 import { createBreaker } from '../lib/claude-circuit.js'
@@ -414,11 +415,7 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/peek', async (req, res) => {
     peekTail = peekTail.then(async () => {
       lease.setPhase('active')
       try {
-        const result = await transcribeAudioBuffer(audio, {
-          mode: 'fast',
-          policy: 'local-only',
-          affectsCircuit: false,
-        })
+        const result = await transcribeWhisperPreview(audio)
         const text = sanitizeTranscript(draftId, result.text, false)
         if (!text) return
         if (!loadPromptDraftMeta(draftId)) return

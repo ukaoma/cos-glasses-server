@@ -1,3 +1,40 @@
+## 6.20.0
+
+Adaptive transcription makes fast feedback additive instead of a quality
+trade-off. The preview lane can be fast without changing the transcript that is
+saved, searched, or sent.
+
+- **Three explicit local transcription lanes.** Prompt previews can run on a
+  dedicated Small.en sidecar, committed live text remains on
+  Large-v3-Turbo, and HQ polish remains on Large-v3. The existing phone
+  `provisional` contract is unchanged. A late or failed preview cannot replace
+  committed text or advance the recovery ledger.
+- **Safe adaptive fallback.** `COS_WHISPER_PREVIEW_MODEL` accepts `auto`,
+  `small.en`, `turbo`, or `off`. `auto` uses Small.en only when provisioned;
+  otherwise it preserves the prior Turbo behavior. A Small.en failure falls
+  back to the non-circuit Turbo path and cannot trip or success-reset the
+  authoritative Whisper breaker. The early private
+  `COS_WHISPER_REALTIME_MODEL` name remains a migration alias.
+- **No surprise on update.** An unset preview setting keeps the pre-6.20 Turbo
+  behavior. Guided Setup explicitly opts users into Small.en after provisioning
+  its weights.
+- **One setup command.** `--setup-transcription` records the adaptive choice
+  and provisions Small.en preview, Turbo commit, and Large-v3 HQ weights.
+  Pair with `--prepare-only` for COS Control so provisioning exits before the
+  managed LaunchAgent takes ownership.
+- **Truthful health.** `/api/health` and `/api/models` add path-free
+  `capabilities.transcription.live` and `.profile` blocks alongside the
+  existing `.hq` block. COS Control can report the effective preview, commit,
+  and HQ models independently.
+- **Factory vocabulary can no longer reduce accuracy.** The shipped profile is
+  empty and safe. Existing `Your Name`, `NameOne`, `NameTwo`, `YourCompany`,
+  `ProductName`, and `Soundalike -> YourName` examples are ignored everywhere
+  decoder bias or correction data is consumed. Startup warns once, and health
+  reports the ignored count. Real terms are trimmed and deduplicated.
+- **Correction keys are literal.** User correction keys are escaped before
+  regular-expression construction, so punctuation in names cannot alter the
+  matcher.
+
 ## 6.19.0
 
 Meeting audio is evidence. This release stops the server from ever deleting an

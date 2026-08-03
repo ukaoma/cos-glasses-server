@@ -48,6 +48,7 @@ import {
   stopCodexModelCatalogRefresh,
 } from './lib/codex-model-catalog.js'
 import { startWhisperServer, stopWhisperServer } from './lib/whisper-local.js'
+import { startWhisperPreviewServer, stopWhisperPreviewServer } from './lib/whisper-preview.js'
 import { startLocalTtsServer, stopLocalTtsServer } from './lib/tts-local.js'
 import { initSileroVAD } from './lib/vad-silero.js'
 import { initSessionCache } from './lib/session-cache-writer.js'
@@ -58,6 +59,7 @@ import { listenRequiredServers, type RequiredListener } from './lib/listener-sta
 import { serverMetrics } from './lib/server-metrics.js'
 import { initializeServerInstanceId } from './lib/server-instance-id.js'
 import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-user-config.js'
+import { getTranscriptionProfileStatus } from './lib/profile.js'
 import { createQueryJobsRouter } from './routes/query-jobs.js'
 import {
   initQueryJobRuntime,
@@ -296,6 +298,7 @@ async function gracefulShutdown(): Promise<void> {
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
   stopCodexModelCatalogRefresh()
   stopWhisperServer()
+  stopWhisperPreviewServer()
   stopLocalTtsServer()
   clearTimeout(forceExit)
   process.exit(0)
@@ -407,7 +410,19 @@ listenRequiredServers(listeners).then(() => {
     // known-good snapshot if Codex is temporarily unavailable.
     startCodexModelCatalogRefresh()
     // Start local whisper-server (model stays in RAM for ~50ms transcription)
-    startWhisperServer().catch(err => console.error('[startup] Whisper server error:', err))
+    const transcriptionProfile = getTranscriptionProfileStatus()
+    if (transcriptionProfile.ignoredPlaceholderTerms > 0 || transcriptionProfile.ignoredPlaceholderCorrection) {
+      console.warn(
+        '[whisper] .cos-profile.json still contains factory vocabulary. ' +
+        'Placeholder terms are ignored; add real names and terminology in Guided Setup for better accuracy.',
+      )
+    }
+    // Load the authoritative Turbo worker first. Starting both model loads at
+    // once made first boot slower on smaller Macs and could cause Control's
+    // readiness proof to time out even though both models were healthy.
+    startWhisperServer()
+      .then(() => startWhisperPreviewServer())
+      .catch(err => console.error('[startup] Whisper server/preview error:', err))
     startLocalTtsServer().catch(err => console.error('[startup] Local TTS server error:', err))
     // Initialize speaker embeddings (voiceprint-based diarization) — fails soft if model absent
     const embeddingOk = initSpeakerEmbeddings()

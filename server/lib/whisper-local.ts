@@ -12,7 +12,7 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
-import { getVocabulary, getOwnerName } from './profile.js'
+import { getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
 import { stripBrandUrls } from './hallucination-filter.js'
 import {
   batchHqMetalEnabled,
@@ -1022,22 +1022,15 @@ async function transcribeViaCLI(audioBuffer: Buffer, context?: string, isQuiet?:
 // Post-processing correction dictionary — deterministic fixes for names Whisper garbles.
 // Prompt biasing is probabilistic; regex replacement is guaranteed.
 // User-specific corrections loaded from .cos-profile.json "whisper_corrections" field.
-import { loadProfileField } from './profile.js'
-
 function buildCorrections(): Array<[RegExp, string]> {
   const corrections: Array<[RegExp, string]> = []
 
-  // Load user-configured corrections from profile
-  // Format: { "whisper_corrections": { "Soundalike": "YourName", ... } }
-  try {
-    const raw = loadProfileField('whisper_corrections', '')
-    if (raw) {
-      const map = JSON.parse(raw) as Record<string, string>
-      for (const [pattern, replacement] of Object.entries(map)) {
-        corrections.push([new RegExp(`\\b${pattern}\\b`, 'gi'), replacement])
-      }
-    }
-  } catch { /* invalid JSON — skip */ }
+  // Escape correction keys before interpolation. Names such as "A.C.M.E."
+  // are literal vocabulary, never regular-expression programs.
+  for (const [pattern, replacement] of Object.entries(getWhisperCorrections())) {
+    const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    corrections.push([new RegExp(`\\b${escaped}\\b`, 'gi'), replacement])
+  }
 
   return corrections
 }

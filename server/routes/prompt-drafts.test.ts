@@ -9,6 +9,7 @@ let draftDir = ''
 let server: Server | null = null
 let baseUrl = ''
 let transcribeAudioBuffer: ReturnType<typeof vi.fn>
+let transcribeWhisperPreview: ReturnType<typeof vi.fn>
 let emitDisplay: ReturnType<typeof vi.fn>
 
 class MockNoSpeechDetectedError extends Error { readonly rawText = '' }
@@ -39,6 +40,10 @@ async function startServer(): Promise<void> {
       reason: null,
     }),
   }))
+  vi.doMock('../lib/whisper-preview.js', () => {
+    transcribeWhisperPreview = vi.fn()
+    return { transcribeWhisperPreview }
+  })
   vi.doMock('../lib/dictation-clean.js', () => ({
     AUTOCLEAN_MAX_CHARS: 8000,
     autoCleanDictation: async (text: string) => text,
@@ -94,6 +99,7 @@ describe('public prompt draft recovery contract', () => {
     vi.resetModules()
     vi.doUnmock('../lib/transcribe-audio.js')
     vi.doUnmock('../lib/whisper-local.js')
+    vi.doUnmock('../lib/whisper-preview.js')
     vi.doUnmock('../lib/dictation-clean.js')
     vi.doUnmock('../lib/display-bus.js')
     delete process.env.COS_PROMPT_DRAFT_DIR
@@ -329,15 +335,8 @@ describe('public prompt draft recovery contract', () => {
   })
 
   it('peek emits provisional text without advancing the recovery ledger', async () => {
-    transcribeAudioBuffer.mockResolvedValue({
-      text: 'peek words',
-      backend: 'fast-local-test',
-      mode: 'fast',
-      requestedMode: 'fast',
-      actualQuality: 'fast',
-      degraded: false,
-      elapsedMs: 10,
-      audioBytes: 1600,
+    transcribeWhisperPreview.mockResolvedValue({
+      text: 'peek words', backend: 'whisper-preview-server', model: 'small.en',
     })
     const started = await httpRequest('POST', '/api/prompt-drafts/start')
     const draftId = started.json.draftId
@@ -353,10 +352,8 @@ describe('public prompt draft recovery contract', () => {
       type: 'prompt_transcript',
       data: { draftId, chunkIndex: 0, text: 'peek words', provisional: true, peekGen: 1 },
     }))
-    expect(transcribeAudioBuffer).toHaveBeenCalledWith(
-      expect.any(Buffer),
-      { mode: 'fast', policy: 'local-only', affectsCircuit: false },
-    )
+    expect(transcribeWhisperPreview).toHaveBeenCalledWith(expect.any(Buffer))
+    expect(transcribeAudioBuffer).not.toHaveBeenCalled()
 
     const meta = await httpRequest('GET', `/api/prompt-drafts/${draftId}`)
     expect(meta.json.receivedChunkIndexes ?? []).toEqual([])
@@ -365,7 +362,7 @@ describe('public prompt draft recovery contract', () => {
 
   it('peek drop-while-busy returns 204 when a peek is already in flight', async () => {
     let resolvePeek!: (value: any) => void
-    transcribeAudioBuffer.mockReturnValueOnce(new Promise(resolve => { resolvePeek = resolve }))
+    transcribeWhisperPreview.mockReturnValueOnce(new Promise(resolve => { resolvePeek = resolve }))
     const started = await httpRequest('POST', '/api/prompt-drafts/start')
     const draftId = started.json.draftId
     const first = httpRequest(
@@ -380,10 +377,7 @@ describe('public prompt draft recovery contract', () => {
       Buffer.alloc(800, 2),
     )
     expect(busy.status).toBe(204)
-    resolvePeek({
-      text: 'first peek', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
-      actualQuality: 'fast', degraded: false, elapsedMs: 10, audioBytes: 800,
-    })
+    resolvePeek({ text: 'first peek', backend: 'whisper-preview-server', model: 'small.en' })
     expect((await first).status).toBe(200)
   })
 })

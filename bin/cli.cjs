@@ -15,6 +15,8 @@ const {
   unlinkSync,
   renameSync,
   chmodSync,
+  writeFileSync,
+  statfsSync,
 } = require('fs')
 const { delimiter, join, resolve } = require('path')
 const { homedir } = require('os')
@@ -22,6 +24,8 @@ const { homedir } = require('os')
 // bin/cli.cjs -> package root is one level up. The server lives at <root>/server.
 const PKG_ROOT = resolve(__dirname, '..')
 const CONFIG_DIR = join(homedir(), '.cos-glasses')
+const PREPARE_ONLY = process.argv.includes('--prepare-only')
+const SETUP_TRANSCRIPTION = process.argv.includes('--setup-transcription')
 
 // Record where the user ran `npx @gotcos/glasses-server` from. The server spawns
 // with cwd = PKG_ROOT (the npx cache), so without this the user's Starter-Kit COS
@@ -41,6 +45,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('')
   console.log('  Usage:')
   console.log('    npx --yes @gotcos/glasses-server@latest')
+  console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription')
   console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
   console.log('')
   console.log('  Requirements:')
@@ -261,7 +266,7 @@ try {
 // and the packaged runtime without creating COS config, downloading Kokoro
 // models, installing Kokoro packages, changing COS permissions, or starting a
 // listener. An invoked agent CLI may still maintain its own user cache.
-if (process.argv.includes('--prepare-only')) {
+if (PREPARE_ONLY && !SETUP_TRANSCRIPTION) {
   if (process.platform === 'darwin' && process.arch === 'arm64') {
     const python = compatibleKokoroPython()
     if (python) {
@@ -329,6 +334,31 @@ if (existsSync(ENV_FILE)) {
     }
   } catch { /* config is optional */ }
 }
+
+function upsertEnvValue(file, key, value) {
+  const current = existsSync(file) ? readFileSync(file, 'utf8') : ''
+  const lines = current.split(/\r?\n/)
+  const prefix = `${key}=`
+  let replaced = false
+  const next = lines.map((line) => {
+    if (line.trimStart().startsWith('#')) return line
+    if (!line.startsWith(prefix)) return line
+    replaced = true
+    return `${prefix}${value}`
+  })
+  if (!replaced) {
+    if (next.length && next.at(-1) !== '') next.push('')
+    next.push(`${prefix}${value}`)
+  }
+  writeFileSync(file, next.join('\n').replace(/\n*$/, '\n'), { mode: 0o600 })
+  chmodSync(file, 0o600)
+}
+
+if (SETUP_TRANSCRIPTION) {
+  upsertEnvValue(ENV_FILE, 'COS_WHISPER_PREVIEW_MODEL', 'small.en')
+  process.env.COS_WHISPER_PREVIEW_MODEL = 'small.en'
+  console.log(green('  ✓') + ' Adaptive transcription selected ' + dim('— Small.en preview · Turbo commit · Large-v3 HQ'))
+}
 // Persistent profile (identity + transcription vocabulary)
 const PROFILE_FILE = join(CONFIG_DIR, '.cos-profile.json')
 const PROFILE_EXAMPLE = join(PKG_ROOT, '.cos-profile.example.json')
@@ -349,11 +379,23 @@ if (!process.env.COS_PROFILE_PATH) process.env.COS_PROFILE_PATH = PROFILE_FILE
 // Step 5: local Whisper detection + model download. Voice stays local-only by
 // default; cloud fallback requires an explicit flag plus a configured key.
 const WHISPER_KNOWN_PATHS = ['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli']
+const WHISPER_SERVER_KNOWN_PATHS = ['/opt/homebrew/bin/whisper-server', '/usr/local/bin/whisper-server']
 const WHISPER_MODEL_DIR = join(homedir(), '.local/share/whisper-models')
 const WHISPER_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-large-v3-turbo.bin')
 const WHISPER_MODEL_PARTIAL = WHISPER_MODEL_PATH + '.partial'
 const WHISPER_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin'
 const WHISPER_MODEL_MIN_BYTES = 800_000_000
+const WHISPER_SMALL_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-small.en.bin')
+const WHISPER_SMALL_MODEL_PARTIAL = WHISPER_SMALL_MODEL_PATH + '.partial'
+const WHISPER_SMALL_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin'
+const WHISPER_SMALL_MODEL_MIN_BYTES = 400_000_000
+const WHISPER_LARGE_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-large-v3.bin')
+const WHISPER_LARGE_MODEL_PARTIAL = WHISPER_LARGE_MODEL_PATH + '.partial'
+const WHISPER_LARGE_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin'
+const WHISPER_LARGE_MODEL_MIN_BYTES = 2_800_000_000
+const WHISPER_MODEL_EXPECTED_BYTES = 1_620_000_000
+const WHISPER_SMALL_MODEL_EXPECTED_BYTES = 466_000_000
+const WHISPER_LARGE_MODEL_EXPECTED_BYTES = 3_100_000_000
 function findWhisperCli() {
   for (const p of WHISPER_KNOWN_PATHS) { if (existsSync(p)) return p }
   try {
@@ -363,12 +405,58 @@ function findWhisperCli() {
     return null
   }
 }
-function isValidWhisperModel(p) {
+function findWhisperServer() {
+  for (const p of WHISPER_SERVER_KNOWN_PATHS) { if (existsSync(p)) return p }
+  try {
+    const found = execSync('command -v whisper-server 2>/dev/null', { shell: '/bin/sh', stdio: 'pipe', timeout: 2000 }).toString().trim()
+    return found || null
+  } catch {
+    return null
+  }
+}
+function isValidWhisperModel(p, minBytes = WHISPER_MODEL_MIN_BYTES) {
   if (!existsSync(p)) return false
-  try { return statSync(p).size >= WHISPER_MODEL_MIN_BYTES } catch { return false }
+  try { return statSync(p).size >= minBytes } catch { return false }
 }
 const whisperCliPath = findWhisperCli()
+const whisperServerPath = findWhisperServer()
 const hasValidModel = isValidWhisperModel(WHISPER_MODEL_PATH)
+
+if (SETUP_TRANSCRIPTION && (!whisperCliPath || !whisperServerPath)) {
+  console.log('')
+  console.log(red('  ✗ Adaptive transcription needs whisper.cpp'))
+  console.log('    Install it first: ' + bold('brew install whisper-cpp'))
+  console.log('    Then rerun this setup command. No model download was started.')
+  console.log('')
+  process.exit(1)
+}
+
+if (SETUP_TRANSCRIPTION && process.env.SKIP_WHISPER_DOWNLOAD !== '1') {
+  mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
+  const targets = [
+    [WHISPER_MODEL_PATH, WHISPER_MODEL_PARTIAL, WHISPER_MODEL_MIN_BYTES, WHISPER_MODEL_EXPECTED_BYTES],
+    [WHISPER_SMALL_MODEL_PATH, WHISPER_SMALL_MODEL_PARTIAL, WHISPER_SMALL_MODEL_MIN_BYTES, WHISPER_SMALL_MODEL_EXPECTED_BYTES],
+    [WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_PARTIAL, WHISPER_LARGE_MODEL_MIN_BYTES, WHISPER_LARGE_MODEL_EXPECTED_BYTES],
+  ]
+  const missingBytes = targets.reduce((sum, [path, , minimum, expected]) =>
+    sum + (isValidWhisperModel(path, minimum) ? 0 : expected), 0)
+  const reclaimableBytes = targets.reduce((sum, [, partial]) => {
+    try { return sum + statSync(partial).size } catch { return sum }
+  }, 0)
+  const fsStats = statfsSync(WHISPER_MODEL_DIR)
+  const availableBytes = (fsStats.bavail * fsStats.bsize) + reclaimableBytes
+  const safetyMarginBytes = 750_000_000
+  if (missingBytes > 0 && availableBytes < missingBytes + safetyMarginBytes) {
+    const requiredGB = ((missingBytes + safetyMarginBytes) / 1_000_000_000).toFixed(1)
+    const availableGB = (availableBytes / 1_000_000_000).toFixed(1)
+    console.log('')
+    console.log(red('  ✗ Not enough free disk space for adaptive transcription'))
+    console.log(`    Need about ${requiredGB} GB; ${availableGB} GB is available after reusable partial downloads.`)
+    console.log('    Free space, then rerun this setup command. Existing models were not removed.')
+    console.log('')
+    process.exit(1)
+  }
+}
 let localVoiceReady = Boolean(whisperCliPath && hasValidModel)
 if (whisperCliPath && hasValidModel) {
   console.log(green('  ✓') + ' whisper.cpp + model ready ' + dim('— voice = local (FREE)'))
@@ -383,7 +471,7 @@ if (whisperCliPath && hasValidModel) {
   } else {
     try {
       mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
-      execSync(`curl -fL --progress-bar "${WHISPER_MODEL_URL}" -o "${WHISPER_MODEL_PARTIAL}"`, { stdio: 'inherit', timeout: 900000 })
+      execFileSync('curl', ['-fL', '--progress-bar', WHISPER_MODEL_URL, '-o', WHISPER_MODEL_PARTIAL], { stdio: 'inherit', timeout: 900000 })
       const stats = statSync(WHISPER_MODEL_PARTIAL)
       if (stats.size < WHISPER_MODEL_MIN_BYTES) throw new Error(`Downloaded file too small: ${stats.size} bytes`)
       renameSync(WHISPER_MODEL_PARTIAL, WHISPER_MODEL_PATH)
@@ -403,6 +491,70 @@ if (process.env.COS_OPENAI_WHISPER_FALLBACK === '1') {
   console.log(yellow('  ⚠') + ' Explicit OpenAI Whisper fallback requested ' + dim('— activates only if a key resolves; see /api/health'))
 } else {
   console.log(green('  ✓') + ' Transcription policy: local-only ' + dim('— a key alone never uploads audio'))
+}
+
+const previewChoice = (process.env.COS_WHISPER_PREVIEW_MODEL || process.env.COS_WHISPER_REALTIME_MODEL || 'auto').trim().toLowerCase()
+const wantsSmallPreview = ['small', 'small.en', 'ggml-small.en.bin'].includes(previewChoice)
+if (whisperCliPath && wantsSmallPreview) {
+  if (isValidWhisperModel(WHISPER_SMALL_MODEL_PATH, WHISPER_SMALL_MODEL_MIN_BYTES)) {
+    console.log(green('  ✓') + ' Small.en preview model ready ' + dim('— Turbo remains authoritative'))
+  } else {
+    if (existsSync(WHISPER_SMALL_MODEL_PATH)) { try { unlinkSync(WHISPER_SMALL_MODEL_PATH) } catch {} }
+    if (existsSync(WHISPER_SMALL_MODEL_PARTIAL)) { try { unlinkSync(WHISPER_SMALL_MODEL_PARTIAL) } catch {} }
+    console.log(yellow('  ⚠') + ' Adaptive preview model missing')
+    console.log('    ' + dim('Downloading ggml-small.en (~466 MB).'))
+    if (process.env.SKIP_WHISPER_DOWNLOAD === '1') {
+      console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — previews use Turbo until Small.en is provisioned')
+    } else {
+      try {
+        mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
+        execFileSync('curl', ['-fL', '--progress-bar', WHISPER_SMALL_MODEL_URL, '-o', WHISPER_SMALL_MODEL_PARTIAL], { stdio: 'inherit', timeout: 900000 })
+        const stats = statSync(WHISPER_SMALL_MODEL_PARTIAL)
+        if (stats.size < WHISPER_SMALL_MODEL_MIN_BYTES) throw new Error(`Downloaded file too small: ${stats.size} bytes`)
+        renameSync(WHISPER_SMALL_MODEL_PARTIAL, WHISPER_SMALL_MODEL_PATH)
+        console.log(green('  ✓') + ' Small.en preview model downloaded ' + dim('— Turbo commit unchanged'))
+      } catch (err) {
+        try { unlinkSync(WHISPER_SMALL_MODEL_PARTIAL) } catch {}
+        console.log(red('  ✗') + ' Small.en download failed ' + dim('— previews safely fall back to Turbo'))
+        console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
+      }
+    }
+  }
+}
+
+if (whisperCliPath && SETUP_TRANSCRIPTION) {
+  if (isValidWhisperModel(WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_MIN_BYTES)) {
+    console.log(green('  ✓') + ' Large-v3 HQ model ready ' + dim('— saved meetings use full polish'))
+  } else {
+    if (existsSync(WHISPER_LARGE_MODEL_PATH)) { try { unlinkSync(WHISPER_LARGE_MODEL_PATH) } catch {} }
+    if (existsSync(WHISPER_LARGE_MODEL_PARTIAL)) { try { unlinkSync(WHISPER_LARGE_MODEL_PARTIAL) } catch {} }
+    console.log(yellow('  ⚠') + ' HQ polish model missing')
+    console.log('    ' + dim('Downloading ggml-large-v3 (~3.1 GB).'))
+    if (process.env.SKIP_WHISPER_DOWNLOAD === '1') {
+      console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — HQ safely reports unavailable and live Turbo continues')
+    } else {
+      try {
+        mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
+        execFileSync('curl', ['-fL', '--progress-bar', WHISPER_LARGE_MODEL_URL, '-o', WHISPER_LARGE_MODEL_PARTIAL], { stdio: 'inherit', timeout: 1800000 })
+        const stats = statSync(WHISPER_LARGE_MODEL_PARTIAL)
+        if (stats.size < WHISPER_LARGE_MODEL_MIN_BYTES) throw new Error(`Downloaded file too small: ${stats.size} bytes`)
+        renameSync(WHISPER_LARGE_MODEL_PARTIAL, WHISPER_LARGE_MODEL_PATH)
+        console.log(green('  ✓') + ' Large-v3 HQ model downloaded')
+      } catch (err) {
+        try { unlinkSync(WHISPER_LARGE_MODEL_PARTIAL) } catch {}
+        console.log(red('  ✗') + ' Large-v3 download failed ' + dim('— live Turbo remains available'))
+        console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
+      }
+    }
+  }
+}
+
+if (PREPARE_ONLY && SETUP_TRANSCRIPTION) {
+  console.log('')
+  console.log(green('  ✓ Adaptive transcription setup complete'))
+  console.log('    Return to COS Control and Restart, install, or update the managed server.')
+  console.log('')
+  process.exit(0)
 }
 
 // Step 6: image capability — ffmpeg validates, strips metadata, normalizes,

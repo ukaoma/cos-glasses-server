@@ -39,6 +39,8 @@ import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
+import { getWhisperPreviewCapability } from '../lib/whisper-preview.js'
+import { getTranscriptionProfileStatus } from '../lib/profile.js'
 
 export const healthRouter = Router()
 
@@ -203,6 +205,8 @@ healthRouter.get('/health', async (_req, res) => {
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
   const transcriptionHq = getHighQualityTranscriptionCapability()
+  const transcriptionLive = getWhisperPreviewCapability()
+  const transcriptionProfile = getTranscriptionProfileStatus()
   const recovery = managedRuntimeCapability()
   const maintenance = maintenanceLifecycle.snapshot()
   const tts_local = getLocalTtsHealth()
@@ -293,7 +297,12 @@ healthRouter.get('/health', async (_req, res) => {
     meeting_sync,
     unsaved_captures,
     capabilities: {
-      transcription: { ...transcription, hq: transcriptionHq },
+      transcription: {
+        ...transcription,
+        live: transcriptionLive,
+        hq: transcriptionHq,
+        profile: transcriptionProfile,
+      },
       recovery,
       maintenance: {
         state: maintenance.state,
@@ -326,6 +335,8 @@ healthRouter.get('/models', async (req, res) => {
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
   const transcriptionHq = getHighQualityTranscriptionCapability()
+  const transcriptionLive = getWhisperPreviewCapability()
+  const transcriptionProfile = getTranscriptionProfileStatus()
   const cursorOptions = cursorCatalog.options.filter(option => !!option.id)
   res.json({
     ...catalog,
@@ -341,7 +352,12 @@ healthRouter.get('/models', async (req, res) => {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,
       },
-      transcription: { ...transcription, hq: transcriptionHq },
+      transcription: {
+        ...transcription,
+        live: transcriptionLive,
+        hq: transcriptionHq,
+        profile: transcriptionProfile,
+      },
       cliDebug: CLI_DEBUG_CAPABILITY,
       recovery: managedRuntimeCapability(),
       // Same helper as /api/health — the companion's 15s liveness poll reads

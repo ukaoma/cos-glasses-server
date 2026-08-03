@@ -8,6 +8,10 @@ import { atomicWriteFileSync } from './atomic-fs.js'
 
 const APP_ROOT = resolve(import.meta.dirname, '../..')
 
+const PLACEHOLDER_OWNER_NAMES = new Set(['your name', 'user'])
+const PLACEHOLDER_VOCABULARY = new Set(['nameone', 'nametwo', 'yourcompany', 'productname'])
+const PLACEHOLDER_CORRECTIONS = new Set(['soundalike\u0000yourname'])
+
 /** The profile in the data home. Survives updates; the APP_ROOT copy does not. */
 export function homeProfilePath(): string {
   return resolve(homedir(), '.cos-glasses', '.cos-profile.json')
@@ -81,7 +85,8 @@ export function loadProfileField(field: string, fallback: string): string {
 }
 
 export function getOwnerName(): string {
-  return loadProfileField('owner_name', 'User')
+  const value = loadProfileField('owner_name', 'User').trim()
+  return !value || PLACEHOLDER_OWNER_NAMES.has(value.toLowerCase()) ? 'User' : value
 }
 
 /** Short speaker label for the glasses wearer, used by diarization to fast-path
@@ -92,7 +97,81 @@ export function getOwnerSpeakerLabel(): string {
 
 export function getVocabulary(): string[] {
   const profile = loadProfile()
-  return Array.isArray(profile.vocabulary) ? profile.vocabulary as string[] : []
+  if (!Array.isArray(profile.vocabulary)) return []
+  const seen = new Set<string>()
+  return (profile.vocabulary as unknown[]).flatMap(value => {
+    if (typeof value !== 'string') return []
+    const term = value.trim()
+    const key = term.toLowerCase()
+    if (!term || PLACEHOLDER_VOCABULARY.has(key) || seen.has(key)) return []
+    seen.add(key)
+    return [term]
+  })
+}
+
+/** Typed correction map shared by every decoder caller. The legacy profile
+ * stores this field as a JSON string, while hand-authored profiles sometimes
+ * use an object; accept both and ignore the factory example pair. */
+export function getWhisperCorrections(): Record<string, string> {
+  const raw = loadProfile().whisper_corrections
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    try { parsed = JSON.parse(raw) } catch { return {} }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+
+  const corrections: Record<string, string> = {}
+  for (const [sourceRaw, targetRaw] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof targetRaw !== 'string') continue
+    const source = sourceRaw.trim()
+    const target = targetRaw.trim()
+    if (!source || !target) continue
+    if (PLACEHOLDER_CORRECTIONS.has(`${source.toLowerCase()}\u0000${target.toLowerCase()}`)) continue
+    corrections[source] = target
+  }
+  return corrections
+}
+
+export interface TranscriptionProfileStatus {
+  configured: boolean
+  ownerConfigured: boolean
+  vocabularyTerms: number
+  ignoredPlaceholderTerms: number
+  ignoredPlaceholderCorrection: boolean
+}
+
+/** Path-free setup truth for startup warnings, health, and COS Control. */
+export function getTranscriptionProfileStatus(): TranscriptionProfileStatus {
+  const profile = loadProfile()
+  const rawOwner = typeof profile.owner_name === 'string' ? profile.owner_name.trim() : ''
+  const rawVocabulary = Array.isArray(profile.vocabulary)
+    ? (profile.vocabulary as unknown[]).filter((value): value is string => typeof value === 'string')
+    : []
+  const ignoredPlaceholderTerms = rawVocabulary.filter(term => PLACEHOLDER_VOCABULARY.has(term.trim().toLowerCase())).length
+  const rawCorrections = (() => {
+    const value = profile.whisper_corrections
+    if (typeof value === 'string') {
+      try { return JSON.parse(value) as unknown } catch { return null }
+    }
+    return value
+  })()
+  const ignoredPlaceholderCorrection = Boolean(
+    rawCorrections
+      && typeof rawCorrections === 'object'
+      && !Array.isArray(rawCorrections)
+      && Object.entries(rawCorrections as Record<string, unknown>).some(([source, target]) =>
+        typeof target === 'string'
+        && PLACEHOLDER_CORRECTIONS.has(`${source.trim().toLowerCase()}\u0000${target.trim().toLowerCase()}`)),
+  )
+  const ownerConfigured = Boolean(rawOwner) && !PLACEHOLDER_OWNER_NAMES.has(rawOwner.toLowerCase())
+  const vocabularyTerms = getVocabulary().length
+  return {
+    configured: ownerConfigured || vocabularyTerms > 0 || Object.keys(getWhisperCorrections()).length > 0,
+    ownerConfigured,
+    vocabularyTerms,
+    ignoredPlaceholderTerms,
+    ignoredPlaceholderCorrection,
+  }
 }
 
 export function getSystemContext(): string {
