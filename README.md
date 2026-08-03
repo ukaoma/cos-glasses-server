@@ -123,6 +123,12 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   locally through a network interruption. Reconnecting reconciles the exact
   chunks already stored by the Mac, uploads only missing audio, and finalizes
   through an idempotent save receipt without duplicating the meeting.
+- Since 6.19.0, meeting audio whose save never lands is quarantined for 72 hours
+  (`COS_UNSAVED_AUDIO_RETENTION_HOURS`) instead of being cleaned up, surfaces on
+  `/api/health` as `unsaved_captures`, and can be recovered into a durable
+  meeting scribe with one authenticated call
+  (`POST /api/meeting/orphans/:sessionId/recover`; list via
+  `GET /api/meeting/orphans`).
 - Local whisper.cpp transcription (free and local-only by default). OpenAI
   Whisper fallback is optional and requires both the exact
   `COS_OPENAI_WHISPER_FALLBACK=1` opt-in and a configured key; a key alone never

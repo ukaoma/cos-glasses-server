@@ -239,6 +239,16 @@ export async function transcribeSegments(
 
 let batchQueueTail: Promise<void> = Promise.resolve()
 
+/** Chain arbitrary HQ-decoder work onto the same serialization tail the batch
+ *  pipeline uses. Orphan recovery MUST go through this: transcribeSegments has
+ *  no internal queue, so calling it directly would run a second (or third)
+ *  16-thread large-v3 decoder in parallel with a live post-meeting batch. */
+export function enqueueSerializedHqWork<T>(work: () => Promise<T>): Promise<T> {
+  const job = batchQueueTail.then(work)
+  batchQueueTail = job.then(() => undefined, () => undefined)
+  return job
+}
+
 /** Serialize 16-thread HQ decoders across meetings on a public user's Mac. */
 export function runMeetingBatchPipeline(
   audioDir: string,
@@ -282,7 +292,12 @@ async function runMeetingBatchPipelineNow(
       return { transcriptionQuality: 'streaming' }
     }
     const segments = segmentTranscriptChunks(entries)
-    if (segments.length === 0) return { transcriptionQuality: 'streaming' }
+    if (segments.length === 0) {
+      // Terminal too: WAVs exist but nothing is transcribable. Without this,
+      // the dir re-creates the exact phantom-active state W2 removes.
+      writeMeetingBatchTerminal(audioDir, { outcome: 'failed', reason: 'no_segments' })
+      return { transcriptionQuality: 'streaming' }
+    }
 
     writeMeetingBatchProgress(audioDir, {
       phase: 'hq_polish',

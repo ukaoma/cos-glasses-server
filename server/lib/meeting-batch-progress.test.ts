@@ -130,7 +130,7 @@ describe('meeting-batch-progress', () => {
     }
   })
 
-  it('clearMeetingBatchTerminal removes the terminal so the dir can go active again', () => {
+  it('clearMeetingBatchTerminal + queued progress makes the dir active again (retry path)', () => {
     const root = join(tmpdir(), `cos-meeting-sync-clear-${process.pid}-${Date.now()}`)
     const meeting = join(root, 'meeting_clear')
     mkdirSync(meeting, { recursive: true })
@@ -138,11 +138,60 @@ describe('meeting-batch-progress', () => {
       writeFileSync(join(meeting, 'chunk_0000.wav'), 'x')
       writeMeetingBatchTerminal(meeting, { outcome: 'failed', reason: 'boom' })
       expect(getMeetingSyncSnapshot(root).retained).toHaveLength(1)
+      // A real retry does both: clears the terminal AND writes queued progress
+      // (runMeetingBatchPipeline). Progress presence is the live signal.
       clearMeetingBatchTerminal(meeting)
+      writeMeetingBatchProgress(meeting, {
+        phase: 'queued',
+        segmentsDone: 0,
+        segmentsTotal: 0,
+        meetingId: 'meeting_clear',
+      })
       const snap = getMeetingSyncSnapshot(root)
       expect(snap.retained).toHaveLength(0)
-      // Back to the pre-terminal semantics for a stale dir with chunks.
       expect(snap.meetings).toHaveLength(1)
+      expect(snap.active).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('terminal wins over a fresh marker — no 15-minute phantom after the batch settles', () => {
+    const root = join(tmpdir(), `cos-meeting-sync-fresh-${process.pid}-${Date.now()}`)
+    const meeting = join(root, 'meeting_fresh_marker')
+    mkdirSync(meeting, { recursive: true })
+    try {
+      writeFileSync(join(meeting, 'chunk_0000.wav'), 'x')
+      // The lease refreshes the marker every 60s during the run, so it is
+      // always FRESH at the moment the terminal is written.
+      writeFileSync(join(meeting, BATCH_PENDING_MARKER), String(Date.now()))
+      writeMeetingBatchTerminal(meeting, { outcome: 'rejected', reason: 'repetitive-output' })
+      const snap = getMeetingSyncSnapshot(root)
+      expect(snap.active).toBe(false)
+      expect(snap.blocksRestart).toBe(false)
+      expect(snap.retained).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('backfill: a pre-6.19.0 dir (WAVs, stale marker, no progress, no terminal) reads retained, not active', () => {
+    const root = join(tmpdir(), `cos-meeting-sync-backfill-${process.pid}-${Date.now()}`)
+    const meeting = join(root, 'meeting_pre_upgrade')
+    mkdirSync(meeting, { recursive: true })
+    try {
+      writeFileSync(join(meeting, 'chunk_0000.wav'), 'x')
+      writeFileSync(join(meeting, 'chunk_0001.wav'), 'x')
+      const marker = join(meeting, BATCH_PENDING_MARKER)
+      writeFileSync(marker, String(Date.now()))
+      const stale = new Date(Date.now() - 60 * 60_000)
+      utimesSync(marker, stale, stale)
+      const snap = getMeetingSyncSnapshot(root)
+      expect(snap.active).toBe(false)
+      expect(snap.blocksRestart).toBe(false)
+      expect(snap.meetings).toHaveLength(0)
+      expect(snap.retained).toHaveLength(1)
+      expect(snap.retained[0]!.label).toContain('unknown outcome')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

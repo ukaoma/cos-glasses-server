@@ -62,7 +62,12 @@ export function unsavedAudioRoot(): string {
 }
 
 export function unsavedAudioRetentionMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.COS_UNSAVED_AUDIO_RETENTION_HOURS)
+  // An EMPTY value means unset, not zero: Number('') === 0, which would clamp
+  // to the 1h minimum and silently collapse the 72h safety net — on the one
+  // knob whose failure mode is losing the audio this module exists to keep.
+  const rawText = (env.COS_UNSAVED_AUDIO_RETENTION_HOURS ?? '').trim()
+  if (rawText === '') return DEFAULT_RETENTION_HOURS * 60 * 60 * 1000
+  const raw = Number(rawText)
   const hours = Number.isFinite(raw)
     ? Math.min(MAX_RETENTION_HOURS, Math.max(MIN_RETENTION_HOURS, raw))
     : DEFAULT_RETENTION_HOURS

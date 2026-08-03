@@ -181,6 +181,11 @@ export function clearMeetingBatchProgress(audioDir: string): void {
   } catch { /* ignore */ }
 }
 
+/** Public read for surfaces outside this module (orphan recovery progress). */
+export function readMeetingBatchProgress(dir: string): MeetingBatchProgress | null {
+  return readProgressFile(dir)
+}
+
 function readProgressFile(dir: string): MeetingBatchProgress | null {
   const path = join(dir, BATCH_PROGRESS_FILENAME)
   if (!existsSync(path)) return null
@@ -237,11 +242,16 @@ export function getMeetingSyncSnapshot(
     } catch { /* ignore */ }
 
     // A terminal outcome ends the meeting's ACTIVE life. Its WAVs stay for
-    // retry, reported as retained — never as running work. A retry clears the
-    // terminal file first (clearMeetingBatchTerminal in runMeetingBatchPipeline),
-    // and live signals win if both somehow coexist.
+    // retry, reported as retained — never as running work. The gate is
+    // progress==null ONLY: the pending marker is refreshed every segment and
+    // every 60s during the run, so it is always fresh the moment a terminal
+    // is written — gating on marker freshness left the phantom alive for the
+    // first 15 minutes, exactly the post-meeting Update Server window. A
+    // genuine retry clears the terminal first (runMeetingBatchPipeline) and
+    // immediately writes queued progress, so progress presence is the true
+    // live signal.
     const terminal = readTerminalFile(dir)
-    if (terminal && progress == null && !markerFresh(dir)) {
+    if (terminal && progress == null) {
       const reasonSuffix = terminal.reason ? `: ${terminal.reason}` : ''
       retained.push({
         meetingId: terminal.meetingId || name,
@@ -250,6 +260,24 @@ export function getMeetingSyncSnapshot(
         chunkFiles,
         at: terminal.at,
         label: `Retained (${terminal.outcome}${reasonSuffix}) · ${chunkFiles} chunk${chunkFiles === 1 ? '' : 's'}`,
+      })
+      continue
+    }
+
+    // Backfill: a dir with WAVs, no progress, no fresh marker, and NO terminal
+    // file is a batch that ended before 6.19.0 existed (or whose terminal
+    // write failed). Pre-6.19.0 semantics rendered these as phantom active
+    // work with blocksRestart for the rest of the 12h retention — and the
+    // first boot after an upgrade is exactly when the user watches COS
+    // Control. Classify them as retained with an honest unknown outcome.
+    if (progress == null && !markerFresh(dir) && chunkFiles > 0) {
+      retained.push({
+        meetingId: name,
+        outcome: 'failed',
+        reason: 'pre-terminal batch (ended before 6.19.0 or terminal write lost)',
+        chunkFiles,
+        at: new Date(0).toISOString(),
+        label: `Retained (unknown outcome) · ${chunkFiles} chunk${chunkFiles === 1 ? '' : 's'}`,
       })
       continue
     }

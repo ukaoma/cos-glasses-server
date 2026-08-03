@@ -156,6 +156,11 @@ describe('unsaved-audio quarantine (6.19.0 P0)', () => {
 
   it('retention env is clamped to a sane range and defaults to 72h', () => {
     expect(unsavedAudioRetentionMs({} as NodeJS.ProcessEnv)).toBe(72 * 3_600_000)
+    // An EMPTY value must mean unset (72h), never Number('')===0 → 1h clamp.
+    expect(unsavedAudioRetentionMs({ COS_UNSAVED_AUDIO_RETENTION_HOURS: '' } as unknown as NodeJS.ProcessEnv))
+      .toBe(72 * 3_600_000)
+    expect(unsavedAudioRetentionMs({ COS_UNSAVED_AUDIO_RETENTION_HOURS: '   ' } as unknown as NodeJS.ProcessEnv))
+      .toBe(72 * 3_600_000)
     expect(unsavedAudioRetentionMs({ COS_UNSAVED_AUDIO_RETENTION_HOURS: '24' } as unknown as NodeJS.ProcessEnv))
       .toBe(24 * 3_600_000)
     expect(unsavedAudioRetentionMs({ COS_UNSAVED_AUDIO_RETENTION_HOURS: '0' } as unknown as NodeJS.ProcessEnv))

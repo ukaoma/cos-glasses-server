@@ -2,7 +2,7 @@
 // the standalone public meeting store. The live transcript and chunk metadata
 // are durable before the session is closed; batch improvement runs afterward.
 
-import { readdirSync, rmSync, statSync } from 'node:fs'
+import { readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
@@ -18,8 +18,14 @@ import {
   persistBatchDecisionSidecar,
   replaceMeetingTranscriptAtomic,
 } from '../lib/meeting-batch-persistence.js'
-import { writeMeetingBatchTerminal } from '../lib/meeting-batch-progress.js'
 import {
+  BATCH_PENDING_MARKER,
+  clearMeetingBatchProgress,
+  readMeetingBatchProgress,
+  writeMeetingBatchTerminal,
+} from '../lib/meeting-batch-progress.js'
+import {
+  enqueueSerializedHqWork,
   runMeetingBatchPipeline,
   segmentTranscriptChunks,
   transcribeSegments,
@@ -396,9 +402,21 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   router.get('/meeting/orphans', (_req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const items = listUnsavedCaptures()
+    // In-flight recovery progress: transcribeSegments writes its progress file
+    // into the quarantine dir, invisible to meeting_sync (different root) —
+    // surface it here so a long recovery is not a black box.
+    const recoveringProgress: Record<string, { segmentsDone: number; segmentsTotal: number } | null> = {}
+    for (const id of recoveringOrphans) {
+      const dir = findQuarantineDir(id)
+      const progress = dir ? readMeetingBatchProgress(dir) : null
+      recoveringProgress[id] = progress
+        ? { segmentsDone: progress.segmentsDone, segmentsTotal: progress.segmentsTotal }
+        : null
+    }
     res.json({
       count: items.filter(item => !item.recovered).length,
       recovering: [...recoveringOrphans],
+      recoveringProgress,
       items,
     })
   })
@@ -422,6 +440,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // receipt — same contract as POST /meeting/save.
     const alreadySaved = store.findBySessionId(sessionId)
     if (alreadySaved) {
+      // Stamp the quarantine receipt too, or a saved-but-quarantined capture
+      // (e.g. save succeeded but the pending handoff failed, marker expired,
+      // sweep quarantined the leftovers — the meeting IS saved) counts as
+      // "unsaved" on health forever, a false alarm that trains the user to
+      // ignore the one channel built to report real losses.
+      const staleQuarantine = findQuarantineDir(sessionId)
+      if (staleQuarantine) markRecovered(staleQuarantine, alreadySaved.filename)
       res.set('Cache-Control', 'private, no-store')
       res.json({ accepted: false, alreadySaved: true, receipt: publicSaveResponse(alreadySaved, true) })
       return
@@ -442,22 +467,41 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
+    // Acquire BEFORE marking the session as recovering: if a drain gate makes
+    // acquire throw, nothing must linger in recoveringOrphans — a leaked entry
+    // would 409 every retry for the exact capture this route exists to save.
+    let lease: MaintenanceWorkLease
+    try {
+      lease = acquireMaintenanceWork('orphan_recovery', { phase: 'queued' })
+    } catch {
+      res.status(503).json({
+        error: 'Server is draining for maintenance — retry after the update completes',
+        reason: 'maintenance_drain',
+      })
+      return
+    }
     recoveringOrphans.add(sessionId)
-    const lease = acquireMaintenanceWork('orphan_recovery', { phase: 'queued' })
     res.status(202).set('Cache-Control', 'private, no-store').json({
       accepted: true,
       sessionId,
       chunkFiles: entries.length,
-      note: 'Recovery runs in the background. The capture disappears from unsaved_captures when its scribe is durable.',
+      note: 'Recovery runs in the background behind the HQ decoder queue — expect minutes for a long meeting '
+        + '(watch recoveringProgress on GET /api/meeting/orphans). Speakers are labeled Unknown: no live ASR ever '
+        + 'ran for this capture. The capture leaves the unsaved count once its scribe is durable.',
     })
 
     const task = Promise.resolve().then(async () => {
       lease.setPhase('active')
       const startedAt = Date.now()
       const segments = segmentTranscriptChunks(entries)
-      // transcribeSegments carries the batch contract: enhancement, Metal
-      // preemption discard + one CPU retry, per-segment overlap stripping.
-      const results = await transcribeSegments(quarantineDir, segments, entries)
+      // transcribeSegments carries the batch contract (enhancement, Metal
+      // preemption discard + one CPU retry, overlap stripping) but NOT the
+      // decoder serialization — that lives in the queue tail. Chain onto it,
+      // or two back-to-back recoveries plus a live post-meeting batch would
+      // run parallel 16-thread large-v3 decoders on the user's Mac.
+      const results = await enqueueSerializedHqWork(
+        () => transcribeSegments(quarantineDir, segments, entries),
+      )
       const transcript = cleanFinalTranscript(results.map(item => item.text).join(' '))
       if (!transcript.trim()) {
         throw new Error('recovery produced an empty transcript')
@@ -511,6 +555,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         + `${error instanceof Error ? error.message : String(error)}`,
       )
     }).finally(() => {
+      // transcribeSegments wrote progress + a pending marker into the
+      // quarantine dir; the batch pipeline's own finally never runs here, so
+      // clean them up or the dir carries stale work files until retention.
+      try { clearMeetingBatchProgress(quarantineDir) } catch { /* best-effort */ }
+      try { unlinkSync(resolve(quarantineDir, BATCH_PENDING_MARKER)) } catch { /* best-effort */ }
       recoveringOrphans.delete(sessionId)
       lease.release()
     })
