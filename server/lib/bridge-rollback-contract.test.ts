@@ -6,6 +6,8 @@ describe('bridge pending-turn rollback contract', () => {
     it(`${file} removes its exact pending user exchange on terminal failure`, () => {
       const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
       expect(source).toMatch(/const pendingUserExchange = addExchange\(\s*sid,\s*'user'/)
+      expect(source).toContain('const inboundAttachments = imageInputs.length > 0')
+      expect(source).toMatch(/addExchange\(\s*sid,\s*'user',\s*historyQuery,\s*globalMsgNum,\s*inboundAttachments/)
       const failureStart = source.indexOf('function finalizeError')
       const failureEnd = source.indexOf('\n  }', failureStart)
       const failureBody = source.slice(failureStart, failureEnd)

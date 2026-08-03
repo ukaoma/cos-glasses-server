@@ -160,6 +160,7 @@ queryRouter.post('/query', async (req, res) => {
             await getMediaStore().associate(resolvedAttachments.ids, {
               sessionId: sid,
               ...(validGlobalMsgNum ? { globalMsgNum: validGlobalMsgNum } : {}),
+              messageEra: activeMessageEra,
             }).catch((err) => console.error('[query] attachment association failed:', err))
           }
           if (!done) {
@@ -199,6 +200,7 @@ queryRouter.post('/query', async (req, res) => {
       {
         abortSignal: abortController.signal,
         effort: validEffort,
+        messageEra: activeMessageEra,
         ...(validModel && isCursorModel(validModel) ? { cursorExecutionMode } : {}),
       },
     )

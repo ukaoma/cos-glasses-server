@@ -190,6 +190,7 @@ describe('public durable query runtime', () => {
     expect(mocks.associate).toHaveBeenCalledWith([requestRef.id], {
       sessionId: 'runtime-session',
       globalMsgNum: 12,
+      messageEra: 'legacy',
     })
     expect(mocks.emitDisplay).toHaveBeenCalledWith(expect.objectContaining({
       type: 'done',

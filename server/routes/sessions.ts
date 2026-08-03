@@ -8,9 +8,46 @@ import { getArchiveDayMessages } from '../lib/archive.js'
 import { localDay } from '../lib/local-day.js'
 import { clearCodexEngineSession } from '../lib/codex-engine-sessions.js'
 import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
-import { currentMessageEra, exchangeBelongsToEra } from '../lib/message-era.js'
+import { currentMessageEraState, exchangeBelongsToEra, type MessageEraState } from '../lib/message-era.js'
+import { getMediaStore } from '../lib/media-store.js'
 
 export const sessionsRouter = Router()
+let mediaAssociationLookupWarned = false
+
+/** Conversation exchanges are the normal attachment projection. The media
+ * store fallback repairs turns created by the legacy query path, which did
+ * durably associate media to session + message but did not stamp the refs on
+ * the exchange. Both sources contain public refs only and remain capped by the
+ * shared merge validator. */
+function turnAttachments(
+  sessionId: string,
+  globalMsgNum: number | undefined,
+  messageEra: string | undefined,
+  activeEra: MessageEraState,
+  ...sources: unknown[]
+): MediaAttachmentRef[] {
+  let associated: MediaAttachmentRef[] = []
+  if (globalMsgNum != null) {
+    try {
+      associated = getMediaStore().getAssociatedRefs({
+        sessionId,
+        globalMsgNum,
+        messageEra,
+        activeMessageEra: activeEra.era,
+        activeEraStartedAt: activeEra.startedAt,
+      })
+    } catch (error) {
+      // Conversation history remains useful when optional media recovery is
+      // unavailable. Warn once per process instead of turning a text endpoint
+      // into a 500 or flooding logs once per turn.
+      if (!mediaAssociationLookupWarned) {
+        mediaAssociationLookupWarned = true
+        console.warn(`[sessions] media association lookup unavailable; serving text-only history: ${String(error)}`)
+      }
+    }
+  }
+  return mergeMediaAttachmentRefs(...sources, associated)
+}
 
 sessionsRouter.get('/sessions/recent', (_req, res) => {
   const sessions = getRecentSessions(24 * 60 * 60_000)
@@ -62,19 +99,22 @@ sessionsRouter.get('/sessions/:id/messages', (req, res) => {
     attachments?: MediaAttachmentRef[]
   }> = []
   const session = getSessionRaw(req.params.id)
+  const activeEra = currentMessageEraState()
   for (let i = 0; i < exchanges.length; i++) {
     const ex = exchanges[i]
     if (ex.role === 'user') {
       const next = exchanges[i + 1]
       if (next && next.role === 'assistant') {
-        const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
+        const globalMsgNum = ex.globalMsgNum ?? next.globalMsgNum
+        const messageEra = ex.messageEra ?? next.messageEra
+        const attachments = turnAttachments(req.params.id, globalMsgNum, messageEra, activeEra, ex.attachments, next.attachments)
         const modelPreference = resolveExchangePairModel(ex, next, session?.modelPreference)
         messages.push({
           query: ex.content,
           text: next.content,
           timestamp: next.timestamp,
           sessionId: req.params.id,
-          ...((ex.globalMsgNum ?? next.globalMsgNum) != null ? { no: ex.globalMsgNum ?? next.globalMsgNum } : {}),
+          ...(globalMsgNum != null ? { no: globalMsgNum } : {}),
           ...(modelPreference ? { modelPreference } : {}),
           ...(attachments.length > 0 ? { attachments } : {}),
         })
@@ -246,14 +286,23 @@ sessionsRouter.get('/sessions/today/live-chats', (_req, res) => {
 // back to the archived chat's sessionId via getArchiveDayMessages.
 sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
   const todayDate = localDay()
-  const era = currentMessageEra()
+  const activeEra = currentMessageEraState()
+  const era = activeEra.era
 
   const archivedMessages = getArchiveDayMessages(todayDate)
     .filter(m => exchangeBelongsToEra(m, era))
-    .map(m => ({
-      ...m,
-      source: 'archive' as const,
-    }))
+    .map(m => {
+      const globalMsgNum = m.globalMsgNum ?? m.no
+      const attachments = turnAttachments(m.sessionId, globalMsgNum, m.messageEra, activeEra, m.attachments)
+      // Never pass an unvalidated archive attachment array through the object
+      // spread when the merge rejects it.
+      const { attachments: _rawAttachments, ...message } = m
+      return {
+        ...message,
+        source: 'archive' as const,
+        ...(attachments.length > 0 ? { attachments } : {}),
+      }
+    })
 
   const liveMessages: Array<{
     query: string
@@ -278,9 +327,9 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
         if (!exchangeBelongsToEra(ex, era)) continue
         const next = session.exchanges[i + 1]
         if (next && next.role === 'assistant') {
-          const attachments = mergeMediaAttachmentRefs(ex.attachments, next.attachments)
           const globalMsgNum = ex.globalMsgNum ?? next.globalMsgNum
           const messageEra = ex.messageEra ?? next.messageEra
+          const attachments = turnAttachments(session.id, globalMsgNum, messageEra, activeEra, ex.attachments, next.attachments)
           const modelPreference = resolveExchangePairModel(ex, next, session.modelPreference)
           liveMessages.push({
             query: ex.content,

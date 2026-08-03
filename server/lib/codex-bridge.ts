@@ -321,6 +321,7 @@ export async function callCodexStreaming(
         sessionId: sid,
         globalMsgNum,
         runId: run.runId,
+        messageEra: options?.messageEra,
         maxImages: outputImageBudget,
       })
     } catch (err) {
@@ -363,6 +364,7 @@ export async function callCodexStreaming(
   const isFirstQuery = isNewSession(sid)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
   const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
+  const inboundAttachments = imageInputs.length > 0 ? imageInputs.map(input => input.attachment) : undefined
   const exchangeProvenance = {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
@@ -372,7 +374,7 @@ export async function callCodexStreaming(
     'user',
     historyQuery,
     globalMsgNum,
-    undefined,
+    inboundAttachments,
     exchangeProvenance,
     model,
   )

@@ -428,6 +428,7 @@ export async function callClaudeStreaming(
       outputImagePublisher = createRunOutputImagePublisher({
         sessionId: sid,
         globalMsgNum,
+        messageEra: options?.messageEra,
         maxImages: outputImageBudget,
       })
     } catch (err) {
@@ -473,6 +474,7 @@ export async function callClaudeStreaming(
   // Record user message (with [Photo]/[N Photos] prefix for vision queries)
   const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
   const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
+  const inboundAttachments = imageInputs.length > 0 ? imageInputs.map(input => input.attachment) : undefined
   const exchangeProvenance = {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
@@ -482,7 +484,7 @@ export async function callClaudeStreaming(
     'user',
     historyQuery,
     globalMsgNum,
-    undefined,
+    inboundAttachments,
     exchangeProvenance,
     resolvedModel,
   )

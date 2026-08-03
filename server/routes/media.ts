@@ -28,6 +28,7 @@ import {
   getMediaStore,
   MediaStoreError,
 } from '../lib/media-store.js'
+import { currentMessageEra } from '../lib/message-era.js'
 import {
   ImageSafetyError,
   MAX_BATCH_BYTES,
@@ -175,6 +176,9 @@ mediaRouter.post('/media/associate', async (req: Request, res: Response) => {
       sessionId: safeString(req.body?.sessionId, 64),
       runId: safeString(req.body?.runId, 120),
       globalMsgNum,
+      // Association always belongs to the server's active message era. Never
+      // trust a client-supplied era to make media visible in historical turns.
+      messageEra: currentMessageEra(),
     })
     res.json({ ok: true })
   } catch (err) {

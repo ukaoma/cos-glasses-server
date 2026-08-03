@@ -41,6 +41,7 @@ export interface RunOutputImageTarget {
   sessionId: string
   globalMsgNum?: number
   runId?: string
+  messageEra?: string
 }
 
 export interface CreateRunOutputImagePublisherOptions extends RunOutputImageTarget {
@@ -223,7 +224,15 @@ function safeTarget(options: CreateRunOutputImagePublisherOptions): RunOutputIma
   const runId = typeof options.runId === 'string' && options.runId.trim()
     ? options.runId.trim().slice(0, 120)
     : undefined
-  return { sessionId, ...(globalMsgNum ? { globalMsgNum } : {}), ...(runId ? { runId } : {}) }
+  const messageEra = typeof options.messageEra === 'string' && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(options.messageEra)
+    ? options.messageEra
+    : undefined
+  return {
+    sessionId,
+    ...(globalMsgNum ? { globalMsgNum } : {}),
+    ...(runId ? { runId } : {}),
+    ...(messageEra ? { messageEra } : {}),
+  }
 }
 
 function assertTempRoot(rawRoot: string): string {

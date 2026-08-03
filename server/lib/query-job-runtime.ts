@@ -227,6 +227,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
             await getMediaStore().associate(resolvedAttachments.ids, {
               sessionId: request.sessionId,
               ...(request.globalMsgNum ? { globalMsgNum: request.globalMsgNum } : {}),
+              messageEra: request.messageEra,
             }).catch(error => console.error('[query-jobs] attachment association failed:', error))
           }
           const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}

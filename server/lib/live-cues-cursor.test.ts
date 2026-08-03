@@ -40,12 +40,18 @@ describe('composerAsk (dedicated spawn)', () => {
   beforeEach(() => {
     fakeDir = mkdtempSync(join(tmpdir(), 'live-cues-agent-'))
     fakeAgent = join(fakeDir, 'agent')
+    // Imports below pull conversation/profile modules transitively. Keep their
+    // module-load reconciliation out of the user's real COS data home.
+    process.env.COS_DATA_DIR = join(fakeDir, 'data')
+    process.env.COS_PROFILE_PATH = join(fakeDir, 'profile.json')
   })
 
   afterEach(() => {
     rmSync(fakeDir, { recursive: true, force: true })
     vi.doUnmock('./cursor-model-catalog.js')
     vi.doUnmock('./token-audit.js')
+    delete process.env.COS_DATA_DIR
+    delete process.env.COS_PROFILE_PATH
   })
 
   it('returns assistant delta text from stream-json on success', async () => {

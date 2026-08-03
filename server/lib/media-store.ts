@@ -33,6 +33,7 @@ import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import {
   isValidMediaId,
+  mergeMediaAttachmentRefs,
   parseMediaAttachmentRef,
   type MediaAttachmentRef,
   type MediaKind,
@@ -131,6 +132,7 @@ export interface MediaRecord {
   clientQueueItemId?: string
   runId?: string
   globalMsgNum?: number
+  messageEra?: string
   createdAtMs: number
   updatedAtMs: number
   reservedAtMs?: number
@@ -197,6 +199,9 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     ...(typeof r.clientQueueItemId === 'string' ? { clientQueueItemId: r.clientQueueItemId } : {}),
     ...(typeof r.runId === 'string' ? { runId: r.runId } : {}),
     ...(typeof r.globalMsgNum === 'number' ? { globalMsgNum: r.globalMsgNum } : {}),
+    ...(typeof r.messageEra === 'string' && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(r.messageEra)
+      ? { messageEra: r.messageEra }
+      : {}),
     createdAtMs: typeof r.createdAtMs === 'number' ? r.createdAtMs : Date.now(),
     updatedAtMs: typeof r.updatedAtMs === 'number' ? r.updatedAtMs : Date.now(),
     ...(typeof r.reservedAtMs === 'number' ? { reservedAtMs: r.reservedAtMs } : {}),
@@ -464,6 +469,51 @@ export class MediaStore {
     return this.getRecord(id)?.ref ?? null
   }
 
+  /** Recover the public refs associated with one exact conversation turn.
+   *
+   * The media index is already the durable lifecycle authority for uploaded
+   * and generated images. Older/legacy query paths associated the media here
+   * but failed to copy the refs onto the conversation exchange. Readers may
+   * use this exact session + message key to repair that projection without
+   * exposing storage paths or inventing a second attachment database.
+   */
+  getAssociatedRefs(target: {
+    sessionId: string
+    globalMsgNum: number
+    messageEra?: string
+    activeMessageEra: string
+    activeEraStartedAt: number
+  }): MediaAttachmentRef[] {
+    if (!target.sessionId || !Number.isSafeInteger(target.globalMsgNum) || target.globalMsgNum < 1) return []
+    const validEra = (value: unknown): value is string =>
+      typeof value === 'string' && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(value)
+    if (!validEra(target.activeMessageEra) || !Number.isFinite(target.activeEraStartedAt)) return []
+    const targetEra = validEra(target.messageEra) ? target.messageEra : undefined
+    const eraMatches = (rec: MediaRecord): boolean => {
+      if (rec.messageEra) return targetEra != null && rec.messageEra === targetEra
+
+      // Pre-6.21.4 associations did not persist an era. Recover them only for
+      // the active era when both creation and association are on/after its
+      // boundary. Requiring both closes the race where a pre-reset upload was
+      // associated only after the reset. Anything older may belong to legacy
+      // or any prior named era and fails closed.
+      const associatedAt = rec.associatedAtMs ?? rec.createdAtMs
+      if (target.activeMessageEra === 'legacy') return targetEra == null || targetEra === 'legacy'
+      if (targetEra === target.activeMessageEra) {
+        return rec.createdAtMs >= target.activeEraStartedAt && associatedAt >= target.activeEraStartedAt
+      }
+      return false
+    }
+    const matching = [...this.records.values()]
+      .filter(rec => rec.lifecycle === 'associated'
+        && rec.sessionId === target.sessionId
+        && rec.globalMsgNum === target.globalMsgNum
+        && eraMatches(rec))
+      .sort((a, b) => a.createdAtMs - b.createdAtMs)
+      .map(rec => rec.ref)
+    return mergeMediaAttachmentRefs(matching)
+  }
+
   /** Resolve content for serving/model input, honoring lifecycle + TTLs. */
   getContent(id: string, variant: 'phone' | 'thumb' | 'g2' = 'phone'): MediaContentResult {
     const rec = this.getRecord(id)
@@ -667,7 +717,7 @@ export class MediaStore {
 
   /** Bind media to its final run/message. Safe to replay; wins over a
    *  delayed release. */
-  associate(ids: string[], target: { sessionId?: string; runId?: string; globalMsgNum?: number }): Promise<void> {
+  associate(ids: string[], target: { sessionId?: string; runId?: string; globalMsgNum?: number; messageEra?: string }): Promise<void> {
     return this.withLock(() => {
       const now = Date.now()
       let dirty = false
@@ -684,6 +734,8 @@ export class MediaStore {
         if (target.sessionId && rec.sessionId !== target.sessionId) { rec.sessionId = target.sessionId; recDirty = true }
         if (target.runId && rec.runId !== target.runId) { rec.runId = target.runId; recDirty = true }
         if (target.globalMsgNum != null && rec.globalMsgNum !== target.globalMsgNum) { rec.globalMsgNum = target.globalMsgNum; recDirty = true }
+        if (target.messageEra && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(target.messageEra)
+            && rec.messageEra !== target.messageEra) { rec.messageEra = target.messageEra; recDirty = true }
         if (recDirty) {
           rec.updatedAtMs = now
           dirty = true

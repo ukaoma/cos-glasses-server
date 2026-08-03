@@ -127,14 +127,55 @@ describe('MediaStore lifecycle', () => {
     const store = new MediaStore(newRoot())
     const ref = await store.ingestImage({ bytes: jpeg, kind: 'user_photo' })
     await store.reserve([ref.id], { clientQueueItemId: 'q1', sessionId: 's1' })
-    await store.associate([ref.id], { sessionId: 's1', globalMsgNum: 42 })
-    await store.associate([ref.id], { sessionId: 's1', globalMsgNum: 42 }) // replay OK
+    await store.associate([ref.id], { sessionId: 's1', globalMsgNum: 42, messageEra: 'era-current' })
+    await store.associate([ref.id], { sessionId: 's1', globalMsgNum: 42, messageEra: 'era-current' }) // replay OK
     expect(store.getRecord(ref.id)!.lifecycle).toBe('associated')
     expect(store.getRecord(ref.id)!.globalMsgNum).toBe(42)
+    const lookup = { messageEra: 'era-current', activeMessageEra: 'era-current', activeEraStartedAt: 1 }
+    expect(store.getAssociatedRefs({ sessionId: 's1', globalMsgNum: 42, ...lookup }).map(item => item.id)).toEqual([ref.id])
+    expect(store.getAssociatedRefs({ sessionId: 'other', globalMsgNum: 42, ...lookup })).toEqual([])
+    expect(store.getAssociatedRefs({ sessionId: 's1', globalMsgNum: 41, ...lookup })).toEqual([])
     // delayed release after association must be a no-op
     await store.release([ref.id], { clientQueueItemId: 'q1' })
     expect(store.getRecord(ref.id)!.lifecycle).toBe('associated')
     expect(store.getContent(ref.id).status).toBe('ok')
+  })
+
+  it('keeps reused session/message numbers isolated across message eras', async () => {
+    if (!ffmpegAvailable) return
+    const store = new MediaStore(newRoot())
+    const legacyRef = await store.ingestImage({ bytes: jpeg, kind: 'user_photo' })
+    const olderNamedRef = await store.ingestImage({ bytes: jpeg, kind: 'user_photo' })
+    const delayedOldRef = await store.ingestImage({ bytes: jpeg, kind: 'user_photo' })
+    const currentRef = await store.ingestImage({ bytes: jpeg, kind: 'user_photo' })
+    await store.associate([legacyRef.id], { sessionId: 'same-session', globalMsgNum: 1 })
+    await store.associate([olderNamedRef.id], { sessionId: 'same-session', globalMsgNum: 1 })
+    await store.associate([delayedOldRef.id], { sessionId: 'same-session', globalMsgNum: 1 })
+    await store.associate([currentRef.id], { sessionId: 'same-session', globalMsgNum: 1 })
+    store.getRecord(legacyRef.id)!.createdAtMs = 100
+    store.getRecord(legacyRef.id)!.associatedAtMs = 100
+    store.getRecord(olderNamedRef.id)!.createdAtMs = 200
+    store.getRecord(olderNamedRef.id)!.associatedAtMs = 200
+    // This upload began before the reset but associated after it. Timestamping
+    // association alone must never reclassify it into the new era.
+    store.getRecord(delayedOldRef.id)!.createdAtMs = 250
+    store.getRecord(delayedOldRef.id)!.associatedAtMs = 350
+    store.getRecord(currentRef.id)!.createdAtMs = 310
+    store.getRecord(currentRef.id)!.associatedAtMs = 320
+
+    const base = { sessionId: 'same-session', globalMsgNum: 1, activeMessageEra: 'era-current', activeEraStartedAt: 300 }
+    // Legacy exchanges have no era field on the actual route. Once the server
+    // has reset into a named era, every older unversioned association is
+    // ambiguous and must fail closed rather than crossing a privacy boundary.
+    expect(store.getAssociatedRefs({ ...base, messageEra: undefined })).toEqual([])
+    expect(store.getAssociatedRefs({ ...base, messageEra: 'legacy' })).toEqual([])
+    expect(store.getAssociatedRefs({ ...base, messageEra: 'era-current' }).map(item => item.id)).toEqual([currentRef.id])
+    expect(store.getAssociatedRefs({ ...base, messageEra: 'era-older-named' })).toEqual([])
+
+    await store.associate([olderNamedRef.id], { messageEra: 'era-old' })
+    await store.associate([currentRef.id], { messageEra: 'era-current' })
+    expect(store.getAssociatedRefs({ ...base, messageEra: 'era-old' }).map(item => item.id)).toEqual([olderNamedRef.id])
+    expect(store.getAssociatedRefs({ ...base, messageEra: 'era-current' }).map(item => item.id)).toEqual([currentRef.id])
   })
 
   it('release drops staged and own-reserved media, never another queue item\'s', async () => {

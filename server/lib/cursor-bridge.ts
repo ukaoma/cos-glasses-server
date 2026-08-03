@@ -262,6 +262,7 @@ export async function callCursorStreaming(
         sessionId: sid,
         globalMsgNum,
         runId: run.runId,
+        messageEra: options?.messageEra,
         maxImages: outputImageBudget,
       })
     } catch (err) {

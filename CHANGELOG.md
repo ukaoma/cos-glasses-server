@@ -1,3 +1,14 @@
+## 6.21.4
+
+- Preserve validated phone-photo references on Claude and Codex conversation
+  exchanges so Recent Glasses and message-history clients can recover the
+  original visual context instead of receiving a text-only marker.
+- Recover validated refs at read time from the durable media association index,
+  keyed by exact session ID, global message number, and message era. Pre-6.21.4
+  unversioned refs are recovered only for the active era when both creation and
+  association occurred after its boundary; ambiguous historical refs fail
+  closed rather than risking the wrong photo.
+
 ## 6.21.3
 
 - Route Max-tier provisional dictation preview through the resident Turbo

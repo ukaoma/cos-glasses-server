@@ -112,6 +112,10 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   authenticated query that requested it
 - Message History + cross-day "reference message N" — your chats are archived by day
   and every message keeps a permanent number you can recall (`/api/archive`, `/api/message/:num`)
+- Recent/history responses preserve validated photo references. Recovery uses
+  exact session + global-message + message-era identity without exposing storage
+  paths. Ambiguous pre-version historical refs fail closed; unversioned refs are
+  recovered only inside the active era when created and associated after its boundary.
 - Send phone photos with queued prompts, and review assistant-selected generated,
   research, or explicitly used email images in Messages and on the G2 lens
 - Recover long voice prompts after phone, network, or server interruptions. Audio
