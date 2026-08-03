@@ -54,6 +54,10 @@ export type MaintenanceWorkKind =
   // budget must stay under COS Control's 90s drain timeout (main.swift:1853)
   // or every drain that catches a cue in flight hard-fails to Repair.
   | 'live_cue_pipeline'
+  // Miles-triggered recovery of a quarantined unsaved capture (6.19.0):
+  // batch-transcribes retained WAVs into a durable scribe. Held for the whole
+  // background run so an Update Server drain waits for it like any batch.
+  | 'orphan_recovery'
 
 export type MaintenanceWorkPhase = 'queued' | 'active'
 export type MaintenanceOperationScope = 'same_boot' | 'cross_boot'

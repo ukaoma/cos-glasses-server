@@ -2,7 +2,8 @@
 // the standalone public meeting store. The live transcript and chunk metadata
 // are durable before the session is closed; batch improvement runs afterward.
 
-import { rmSync } from 'node:fs'
+import { readdirSync, rmSync, statSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
@@ -17,7 +18,17 @@ import {
   persistBatchDecisionSidecar,
   replaceMeetingTranscriptAtomic,
 } from '../lib/meeting-batch-persistence.js'
-import { runMeetingBatchPipeline } from '../lib/meeting-batch-transcribe.js'
+import { writeMeetingBatchTerminal } from '../lib/meeting-batch-progress.js'
+import {
+  runMeetingBatchPipeline,
+  segmentTranscriptChunks,
+  transcribeSegments,
+} from '../lib/meeting-batch-transcribe.js'
+import {
+  findQuarantineDir,
+  listUnsavedCaptures,
+  markRecovered,
+} from '../lib/unsaved-audio-quarantine.js'
 import {
   selectBatchTranscriptForPersistence,
   type BatchTranscription,
@@ -376,7 +387,192 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
   })
 
+  // ── Unsaved-capture recovery (6.19.0) ─────────────────────────────────
+  // Surface-only by decision (Miles, 2026-08-02): the server NEVER drives
+  // recovery on its own. It lists what the quarantine holds, and one
+  // authenticated POST drives one capture to a durable scribe.
+  const recoveringOrphans = new Set<string>()
+
+  router.get('/meeting/orphans', (_req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const items = listUnsavedCaptures()
+    res.json({
+      count: items.filter(item => !item.recovered).length,
+      recovering: [...recoveringOrphans],
+      items,
+    })
+  })
+
+  router.post('/meeting/orphans/:sessionId/recover', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>
+    if (body.title !== undefined && typeof body.title !== 'string') {
+      res.status(400).json({ error: 'Invalid title', reason: 'invalid_title' })
+      return
+    }
+    if (body.domain !== undefined && typeof body.domain !== 'string') {
+      res.status(400).json({ error: 'Invalid domain', reason: 'invalid_domain' })
+      return
+    }
+    // Idempotent: a capture that already reached a durable save replays its
+    // receipt — same contract as POST /meeting/save.
+    const alreadySaved = store.findBySessionId(sessionId)
+    if (alreadySaved) {
+      res.set('Cache-Control', 'private, no-store')
+      res.json({ accepted: false, alreadySaved: true, receipt: publicSaveResponse(alreadySaved, true) })
+      return
+    }
+    const quarantineDir = findQuarantineDir(sessionId)
+    if (!quarantineDir) {
+      res.status(404).json({ error: 'No quarantined audio for this session', reason: 'orphan_not_found' })
+      return
+    }
+    if (recoveringOrphans.has(sessionId)) {
+      res.status(409).json({ error: 'Recovery already in progress', reason: 'recovery_in_progress' })
+      return
+    }
+    const capture = synthesizeEntriesFromChunkWavs(quarantineDir)
+    const entries = capture.entries
+    if (entries.length === 0) {
+      res.status(422).json({ error: 'Quarantined directory holds no readable chunk audio', reason: 'no_chunk_audio' })
+      return
+    }
+
+    recoveringOrphans.add(sessionId)
+    const lease = acquireMaintenanceWork('orphan_recovery', { phase: 'queued' })
+    res.status(202).set('Cache-Control', 'private, no-store').json({
+      accepted: true,
+      sessionId,
+      chunkFiles: entries.length,
+      note: 'Recovery runs in the background. The capture disappears from unsaved_captures when its scribe is durable.',
+    })
+
+    const task = Promise.resolve().then(async () => {
+      lease.setPhase('active')
+      const startedAt = Date.now()
+      const segments = segmentTranscriptChunks(entries)
+      // transcribeSegments carries the batch contract: enhancement, Metal
+      // preemption discard + one CPU retry, per-segment overlap stripping.
+      const results = await transcribeSegments(quarantineDir, segments, entries)
+      const transcript = cleanFinalTranscript(results.map(item => item.text).join(' '))
+      if (!transcript.trim()) {
+        throw new Error('recovery produced an empty transcript')
+      }
+      const recoveredChunks = results.map(item => ({
+        text: item.text,
+        speaker: 'Unknown',
+        elapsed: item.segment.startElapsed,
+        similarity: 0,
+        words: item.words,
+        canonical: true,
+      }))
+      const saved = store.save({
+        sessionId,
+        title: typeof body.title === 'string' && body.title.trim() ? body.title : undefined,
+        domain: typeof body.domain === 'string' && body.domain.trim() ? body.domain : undefined,
+        transcript,
+        startTime: capture.startTime,
+        durationMs: capture.durationMs,
+        chunks: recoveredChunks,
+        chunkEntries: recoveredChunks.map((chunk, position) => ({
+          chunkIndex: results[position]?.segment.startChunkIdx ?? position,
+          chunk,
+        })),
+        transferIntegrity: null,
+      })
+      markRecovered(quarantineDir, saved.filename)
+      console.log(
+        `[meeting/orphans] Recovered ${sessionId} → ${saved.filename} `
+        + `(${entries.length} chunks, ${Math.round((Date.now() - startedAt) / 1000)}s)`,
+      )
+      try {
+        emit({
+          type: 'recording_stop',
+          data: {
+            sessionId,
+            filename: saved.filename,
+            durationMin: saved.durationMin,
+            domain: saved.domain,
+          },
+        })
+      } catch { /* display is best-effort */ }
+      if (cosOpsPipelineConfigured()) {
+        await handoffMeetingToOperations(saved.filepath)
+      }
+    }).catch(error => {
+      // The quarantined audio is untouched on failure — retry stays possible
+      // until the retention clock clears it.
+      console.error(
+        `[meeting/orphans] Recovery failed for ${sessionId}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      )
+    }).finally(() => {
+      recoveringOrphans.delete(sessionId)
+      lease.release()
+    })
+    scheduleBackground(task)
+  })
+
   return router
+}
+
+const CHUNK_WAV_NAME = /^chunk_(\d{4})\.wav$/
+const WAV_HEADER_BYTES = 44
+const PCM_BYTES_PER_MS = 32 // 16 kHz mono 16-bit
+
+interface RecoveredCapture {
+  entries: IndexedTranscriptChunk[]
+  /** Meeting start ≈ the earliest chunk's write time (chunk files keep their
+   *  original mtimes across renames — the pending-batch cleanup relies on the
+   *  same property). Falls back to now-minus-duration when mtimes are unusable. */
+  startTime: number
+  durationMs: number
+}
+
+/** Rebuild a chunk timeline for a dead session from its WAV files alone:
+ *  index from the filename, duration from PCM byte length, elapsed cumulative.
+ *  Text is empty — recovery exists precisely because no ASR ever ran. */
+function synthesizeEntriesFromChunkWavs(audioDir: string): RecoveredCapture {
+  const rows: Array<{ chunkIndex: number; durationMs: number; mtimeMs: number }> = []
+  try {
+    for (const name of readdirSync(audioDir)) {
+      const match = CHUNK_WAV_NAME.exec(name)
+      if (!match) continue
+      try {
+        const stats = statSync(resolve(audioDir, name))
+        rows.push({
+          chunkIndex: Number(match[1]),
+          durationMs: Math.max(0, Math.round((stats.size - WAV_HEADER_BYTES) / PCM_BYTES_PER_MS)),
+          mtimeMs: stats.mtimeMs,
+        })
+      } catch { /* unreadable chunk — skip */ }
+    }
+  } catch {
+    return { entries: [], startTime: Date.now(), durationMs: 0 }
+  }
+  rows.sort((a, b) => a.chunkIndex - b.chunkIndex)
+  let elapsed = 0
+  const entries = rows.map(row => {
+    const entry: IndexedTranscriptChunk = {
+      chunkIndex: row.chunkIndex,
+      chunk: { text: '', speaker: 'Unknown', elapsed, similarity: 0 },
+    }
+    elapsed += row.durationMs
+    return entry
+  })
+  const durationMs = elapsed
+  const earliestMtime = rows.reduce(
+    (minimum, row) => (Number.isFinite(row.mtimeMs) && row.mtimeMs > 0 ? Math.min(minimum, row.mtimeMs) : minimum),
+    Number.POSITIVE_INFINITY,
+  )
+  const startTime = Number.isFinite(earliestMtime) && earliestMtime !== Number.POSITIVE_INFINITY
+    ? Math.round(earliestMtime)
+    : Date.now() - durationMs
+  return { entries, startTime, durationMs }
 }
 
 async function finalizeBatch(options: {
@@ -431,6 +627,16 @@ async function finalizeBatch(options: {
     rmSync(options.audioDir, { recursive: true, force: true })
   } else {
     console.warn('[meeting/save] Pending raw audio retained for bounded cleanup')
+    // The batch reached a terminal outcome but its WAVs stay behind. Record it
+    // so meeting_sync reports "retained", not perpetual active work. Rejected
+    // and pipeline-failed runs already wrote their terminal inside runBatch;
+    // this covers the accepted-but-not-fully-persisted case.
+    if (result.transcriptionQuality === 'batch') {
+      writeMeetingBatchTerminal(options.audioDir, {
+        outcome: 'accepted',
+        reason: transcriptApplied ? 'metadata_persist_failed' : 'transcript_apply_failed',
+      })
+    }
   }
 }
 

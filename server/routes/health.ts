@@ -38,6 +38,7 @@ import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
 import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
+import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
 
 export const healthRouter = Router()
 
@@ -261,6 +262,20 @@ healthRouter.get('/health', async (_req, res) => {
   const cursorSnapshot = getCursorModelCatalogSnapshot()
   const { agentBinary: _cursorAgentBinary, ...cursor_models } = cursorSnapshot
   const meeting_sync = getMeetingSyncSnapshot()
+  // Quarantined unsaved captures (6.19.0). Compact on this unauthenticated
+  // surface — same exposure level as meeting_sync's meetingIds. Full detail
+  // plus the recover action live on the authenticated /api/meeting/orphans.
+  const unsavedList = listUnsavedCaptures()
+  const unsaved_captures = {
+    count: unsavedList.filter(item => !item.recovered).length,
+    items: unsavedList.slice(0, 10).map(item => ({
+      sessionId: item.sessionId,
+      ageHours: item.ageHours,
+      chunkFiles: item.chunkFiles,
+      expiresAt: item.expiresAt,
+      recovered: item.recovered,
+    })),
+  }
   res.json({
     ...checks,
     server_version: managedServerVersion(),
@@ -276,6 +291,7 @@ healthRouter.get('/health', async (_req, res) => {
     codex_models,
     cursor_models,
     meeting_sync,
+    unsaved_captures,
     capabilities: {
       transcription: { ...transcription, hq: transcriptionHq },
       recovery,

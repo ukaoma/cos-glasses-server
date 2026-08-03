@@ -9,7 +9,9 @@ import { transcribeHighQuality, type WhisperWord } from './whisper-local.js'
 import { isMetalBatchPreempted } from './whisper-metal-gate.js'
 import {
   clearMeetingBatchProgress,
+  clearMeetingBatchTerminal,
   writeMeetingBatchProgress,
+  writeMeetingBatchTerminal,
 } from './meeting-batch-progress.js'
 import type { IndexedTranscriptChunk } from '../routes/transcribe-stream.js'
 import {
@@ -165,7 +167,7 @@ function mapWordsToSpeakers(
   })
 }
 
-async function transcribeSegments(
+export async function transcribeSegments(
   audioDir: string,
   segments: BatchSegment[],
   entries: IndexedTranscriptChunk[],
@@ -246,6 +248,8 @@ export function runMeetingBatchPipeline(
   // Lease immediately, including time spent behind another HQ decoder. Without
   // this, the two-hour cleanup could delete a queued meeting before it starts.
   refreshPendingLease(audioDir)
+  // A retry invalidates any prior terminal outcome — live signals must win.
+  clearMeetingBatchTerminal(audioDir)
   writeMeetingBatchProgress(audioDir, {
     phase: 'queued',
     segmentsDone: 0,
@@ -302,12 +306,20 @@ async function runMeetingBatchPipelineNow(
         + `${qualityReport.streamingWordCount} live words, `
         + `${(qualityReport.duplicateWordRatio * 100).toFixed(1)}% duplicate`,
       )
+      // Terminal: the batch RAN and lost. WAVs stay for retry, but status must
+      // stop reporting active work (pre-6.19.0 this looked like 12h of
+      // "HQ polish · N chunks" with blocksRestart:true after the work ended).
+      writeMeetingBatchTerminal(audioDir, { outcome: 'rejected', reason: qualityReport.reason })
       return { transcriptionQuality: 'streaming', qualityReport }
     }
 
     return { transcriptionQuality: 'batch', batchTranscript, batchSegments, qualityReport }
   } catch (error) {
     console.error(`[meeting-batch] Pipeline failed: ${error instanceof Error ? error.message : String(error)}`)
+    writeMeetingBatchTerminal(audioDir, {
+      outcome: 'failed',
+      reason: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+    })
     return { transcriptionQuality: 'streaming' }
   }
 }

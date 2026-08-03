@@ -1,3 +1,44 @@
+## 6.19.0
+
+Meeting audio is evidence. This release stops the server from ever deleting an
+unsaved capture, and makes batch status stop lying about finished work.
+
+- **Unsaved-capture quarantine (the 2026-08-01 data-loss fix).** The
+  session-audio purge (boot sweep + 60s interval + non-saved session close)
+  DELETED any directory not tracked in memory once the 4h idle retention
+  passed — an offline meeting whose deferred save never landed lost its
+  full-fidelity audio within a minute. Two real meetings were destroyed this
+  way on 2026-08-01; only speaker-enrollment fragments survived. Audio-bearing
+  directories are now MOVED to `data/unsaved-audio/` with a manifest, never
+  deleted in place. Empty directories are still cleaned. A failed quarantine
+  move leaves the source untouched. Quarantine expires on
+  `COS_UNSAVED_AUDIO_RETENTION_HOURS` (default 72, clamped 1–720) — the only
+  place quarantined audio is ever deleted.
+- **Unsaved captures are visible.** `/api/health` gains `unsaved_captures`
+  (count + compact items, same exposure level as `meeting_sync`). The
+  authenticated `GET /api/meeting/orphans` returns full detail.
+- **Miles-triggered recovery, surface-only by decision (2026-08-02).**
+  `POST /api/meeting/orphans/:sessionId/recover` batch-transcribes the
+  quarantined WAVs (same segment/enhance/Metal-preempt contract as HQ polish,
+  under a new `orphan_recovery` maintenance lease), writes a durable scribe,
+  and hands off to operations when the COS pipeline is configured. Idempotent
+  via the save-receipt short-circuit; the server never drives recovery on its
+  own, and audio stays in quarantine until the retention clock — a failed
+  recovery is retryable.
+- **Rejected HQ batches release their status.** A terminal batch outcome
+  (rejected quality, pipeline failure, accepted-but-unpersisted) now writes
+  `_batch_terminal.json` next to the retained WAVs. `meeting_sync` reports
+  those as `retained` — never as active work — so a rejected batch no longer
+  shows "HQ polish · N chunks" with `blocksRestart: true` for the 12h WAV
+  retention after the work already finished (observed on
+  meeting_1785695339502_mvqm0p, reason `repetitive-output`). A retry clears
+  the terminal record; live progress always wins. `meeting_sync.retained` is
+  additive — older consumers ignore it.
+- Deferred by design: the realtime-model fallback port (W3) ships in its own
+  release. The app-side module has diverged ~1,100 lines from this repo's
+  whisper path; transplanting it alongside the data-loss fix would couple the
+  release's safest change to its riskiest. No default flips either way.
+
 ## 6.18.8
 
 - **Prompt draft peeks for live ASR.** `POST /api/prompt-drafts/:draftId/peek`

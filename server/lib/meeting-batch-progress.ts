@@ -8,6 +8,7 @@ import { dataPath } from './data-dir.js'
 
 export const BATCH_PROGRESS_FILENAME = '_batch_progress.json'
 export const BATCH_PENDING_MARKER = '_batch_pending.marker'
+export const BATCH_TERMINAL_FILENAME = '_batch_terminal.json'
 
 export type MeetingBatchPhase =
   | 'queued'
@@ -44,6 +45,75 @@ export interface MeetingSyncSnapshot {
   label: string
   blocksRestart: boolean
   meetings: MeetingSyncMeeting[]
+  /** Batches that reached a terminal outcome but whose WAVs are deliberately
+   *  retained for retry (rejected quality, failed persist). Additive field —
+   *  older consumers ignore it. Never counts toward active/blocksRestart. */
+  retained: MeetingSyncRetainedMeeting[]
+}
+
+export type MeetingBatchOutcome = 'accepted' | 'rejected' | 'failed'
+
+export interface MeetingBatchTerminal {
+  schemaVersion: 1
+  meetingId: string
+  outcome: MeetingBatchOutcome
+  reason?: string
+  at: string
+}
+
+export interface MeetingSyncRetainedMeeting {
+  meetingId: string
+  outcome: MeetingBatchOutcome
+  reason: string | null
+  chunkFiles: number
+  at: string
+  label: string
+}
+
+/** Record the batch's terminal outcome next to its retained WAVs. Before this
+ *  file existed (≤6.18.8), a rejected batch's dir kept rendering as active
+ *  "HQ polish · N chunks" with blocksRestart:true for the full 12h retention —
+ *  the status conflated "work running" with "evidence retained". */
+export function writeMeetingBatchTerminal(
+  audioDir: string,
+  input: { outcome: MeetingBatchOutcome; reason?: string; meetingId?: string },
+): void {
+  const payload: MeetingBatchTerminal = {
+    schemaVersion: 1,
+    meetingId: input.meetingId ?? basename(audioDir),
+    outcome: input.outcome,
+    ...(input.reason ? { reason: input.reason } : {}),
+    at: new Date().toISOString(),
+  }
+  try {
+    writeFileSync(join(audioDir, BATCH_TERMINAL_FILENAME), `${JSON.stringify(payload)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+  } catch {
+    // Status only — never fail the pipeline for a status write.
+  }
+}
+
+/** A retry invalidates the previous terminal state. */
+export function clearMeetingBatchTerminal(audioDir: string): void {
+  const path = join(audioDir, BATCH_TERMINAL_FILENAME)
+  try {
+    if (existsSync(path)) unlinkSync(path)
+  } catch { /* ignore */ }
+}
+
+function readTerminalFile(dir: string): MeetingBatchTerminal | null {
+  const path = join(dir, BATCH_TERMINAL_FILENAME)
+  if (!existsSync(path)) return null
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as MeetingBatchTerminal
+    if (raw?.schemaVersion !== 1) return null
+    if (raw.outcome !== 'accepted' && raw.outcome !== 'rejected' && raw.outcome !== 'failed') return null
+    return raw
+  } catch {
+    return null
+  }
 }
 
 function pendingBatchRoot(): string {
@@ -140,8 +210,9 @@ export function getMeetingSyncSnapshot(
   root: string = pendingBatchRoot(),
 ): MeetingSyncSnapshot {
   const meetings: MeetingSyncMeeting[] = []
+  const retained: MeetingSyncRetainedMeeting[] = []
   if (!existsSync(root)) {
-    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings }
+    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings, retained }
   }
 
   let dirs: string[] = []
@@ -154,7 +225,7 @@ export function getMeetingSyncSnapshot(
       }
     })
   } catch {
-    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings }
+    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings, retained }
   }
 
   for (const name of dirs) {
@@ -164,6 +235,24 @@ export function getMeetingSyncSnapshot(
     try {
       chunkFiles = readdirSync(dir).filter(f => f.endsWith('.wav')).length
     } catch { /* ignore */ }
+
+    // A terminal outcome ends the meeting's ACTIVE life. Its WAVs stay for
+    // retry, reported as retained — never as running work. A retry clears the
+    // terminal file first (clearMeetingBatchTerminal in runMeetingBatchPipeline),
+    // and live signals win if both somehow coexist.
+    const terminal = readTerminalFile(dir)
+    if (terminal && progress == null && !markerFresh(dir)) {
+      const reasonSuffix = terminal.reason ? `: ${terminal.reason}` : ''
+      retained.push({
+        meetingId: terminal.meetingId || name,
+        outcome: terminal.outcome,
+        reason: terminal.reason ?? null,
+        chunkFiles,
+        at: terminal.at,
+        label: `Retained (${terminal.outcome}${reasonSuffix}) · ${chunkFiles} chunk${chunkFiles === 1 ? '' : 's'}`,
+      })
+      continue
+    }
 
     const active = markerFresh(dir) || progress != null
     if (!active && chunkFiles === 0) continue
@@ -199,7 +288,10 @@ export function getMeetingSyncSnapshot(
   }
 
   if (meetings.length === 0) {
-    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings }
+    const label = retained.length > 0
+      ? `Idle · ${retained.length} retained batch${retained.length === 1 ? '' : 'es'}`
+      : 'Idle'
+    return { active: false, percent: null, label, blocksRestart: false, meetings, retained }
   }
 
   const withPercent = meetings.filter(m => m.percent != null)
@@ -217,5 +309,6 @@ export function getMeetingSyncSnapshot(
     label,
     blocksRestart: true,
     meetings,
+    retained,
   }
 }

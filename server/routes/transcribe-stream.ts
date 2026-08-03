@@ -35,6 +35,12 @@ import {
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
 import { dataPath } from '../lib/data-dir.js'
+import {
+  countChunkWavs,
+  purgeExpiredQuarantine,
+  quarantineSessionAudio,
+  sweepOrphanedSessionAudio,
+} from '../lib/unsaved-audio-quarantine.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import {
   LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
@@ -612,16 +618,28 @@ function recoverSessions(): void {
         }
       } catch { /* skip corrupt files */ }
     }
-    // Remove orphaned session-audio dirs with no matching recovered session
+    // Orphaned session-audio dirs with no matching recovered session: audio
+    // evidence is QUARANTINED, never deleted (6.19.0 — two meetings were
+    // destroyed here on 2026-08-01 when their deferred saves never landed).
+    // Only chunk-less dirs are removed.
     try {
       if (existsSync(SESSION_AUDIO_DIR)) {
-        for (const dir of readdirSync(SESSION_AUDIO_DIR)) {
-          if (!recoveredIds.has(dir) && !hasFreshPreservedAudioMarker(resolve(SESSION_AUDIO_DIR, dir))) {
-            rmSync(resolve(SESSION_AUDIO_DIR, dir), { recursive: true, force: true })
-            console.log(`[session-recovery] Cleaned orphaned session-audio: ${dir}`)
+        const actions = sweepOrphanedSessionAudio(SESSION_AUDIO_DIR, {
+          isLive: id => recoveredIds.has(id),
+          hasFreshPreservedMarker: hasFreshPreservedAudioMarker,
+          reason: 'boot_sweep_unsaved',
+        })
+        for (const entry of actions) {
+          if (entry.action === 'quarantined') {
+            console.warn(`[session-recovery] Quarantined unsaved session-audio: ${entry.dir} → ${entry.target}`)
+          } else if (entry.action === 'deleted_empty') {
+            console.log(`[session-recovery] Cleaned empty session-audio: ${entry.dir}`)
+          } else if (entry.action === 'quarantine_failed') {
+            console.error(`[session-recovery] Quarantine move failed, source retained: ${entry.dir}`)
           }
         }
       }
+      purgeExpiredQuarantine()
     } catch {}
   } catch { /* non-critical */ }
 }
@@ -658,13 +676,24 @@ setInterval(() => {
       closeTranscriptSession(id, 'expired')
     }
   }
-  // Purge orphaned session-audio dirs (no matching active session)
+  // Orphaned session-audio dirs (no matching active session): quarantine any
+  // dir still holding chunk audio; delete only chunk-less dirs. Quarantine
+  // itself expires on the unsaved-audio retention clock, the ONLY place
+  // quarantined audio is ever deleted.
   try {
-    for (const dir of readdirSync(SESSION_AUDIO_DIR)) {
-      if (!sessions.has(dir) && !hasFreshPreservedAudioMarker(resolve(SESSION_AUDIO_DIR, dir))) {
-        rmSync(resolve(SESSION_AUDIO_DIR, dir), { recursive: true, force: true })
+    const actions = sweepOrphanedSessionAudio(SESSION_AUDIO_DIR, {
+      isLive: id => sessions.has(id),
+      hasFreshPreservedMarker: hasFreshPreservedAudioMarker,
+      reason: 'idle_expiry_unsaved',
+    })
+    for (const entry of actions) {
+      if (entry.action === 'quarantined') {
+        console.warn(`[cleanup] Quarantined unsaved session-audio: ${entry.dir} → ${entry.target}`)
+      } else if (entry.action === 'quarantine_failed') {
+        console.error(`[cleanup] Quarantine move failed, source retained: ${entry.dir}`)
       }
     }
+    purgeExpiredQuarantine()
   } catch {}
   // Purge stale pending-batch dirs. HQ large-v3 on long meetings + Control
   // restart can exceed 2h (2026-07-27: two sessions purged before batch).
@@ -1022,7 +1051,7 @@ function closeTranscriptSession(
     maxChunkIndex,
     reason,
   })
-  finishClosingTranscriptSession(sessionId, options)
+  finishClosingTranscriptSession(sessionId, { ...options, closeReason: reason })
 }
 
 /** Delete session after save */
@@ -1030,7 +1059,10 @@ export function deleteSession(sessionId: string, options: { preserveAudio?: bool
   closeTranscriptSession(sessionId, 'saved', options)
 }
 
-function finishClosingTranscriptSession(sessionId: string, options: { preserveAudio?: boolean }): void {
+function finishClosingTranscriptSession(
+  sessionId: string,
+  options: { preserveAudio?: boolean; closeReason?: ClosedTranscriptSession['reason'] },
+): void {
   sessions.delete(sessionId)
   sessionAudioBytes.delete(sessionId)
   sessionAudioWrites.delete(sessionId)
@@ -1049,8 +1081,20 @@ function finishClosingTranscriptSession(sessionId: string, options: { preserveAu
       writeFileSync(marker, String(Date.now()), { encoding: 'utf8', mode: 0o600 })
       chmodSync(marker, 0o600)
     } catch {}
-  } else {
+  } else if (options.closeReason === 'saved') {
+    // Saved sessions moved their audio to pending-batch (or explicitly
+    // preserved it above); a leftover dir here is residue, safe to delete.
     try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
+  } else if (existsSync(audioDir)) {
+    // Any non-saved close (expired, error, …) with chunk audio still on disk
+    // is an unsaved capture. Quarantine it — never delete evidence (6.19.0).
+    if (countChunkWavs(audioDir) > 0) {
+      const target = quarantineSessionAudio(audioDir, `close_${options.closeReason ?? 'unknown'}`)
+      if (target) console.warn(`[transcribe-stream] Quarantined unsaved session-audio on close: ${sessionId} → ${target}`)
+      else console.error(`[transcribe-stream] Quarantine move failed on close, source retained: ${sessionId}`)
+    } else {
+      try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
+    }
   }
 }
 
