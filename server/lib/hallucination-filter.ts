@@ -14,8 +14,11 @@
 import { getNegativeRules, getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
 
 // ── Whole-chunk silence hallucinations ─────────────────────────────────────
+const CAPTION_CREDIT_HALLUCINATION = /^\s*(?:closed\s+)?caption(?:ing|s)?\s+(?:is\s+)?provided\s+by\b/i
+
 const KNOWN_HALLUCINATIONS = [
   /^subtitles?\s+by\b/i,
+  CAPTION_CREDIT_HALLUCINATION,
   /\blike\s+and\s+subscribe\b/i,
   /\bthanks?\s+for\s+watching\b/i,
   /\bplease\s+subscribe\b/i,
@@ -26,6 +29,13 @@ const KNOWN_HALLUCINATIONS = [
   /^\s*\[[^\]\n]{1,40}\]\s*$/,
   /^\s*♪+\s*[^♪\n]{0,40}\s*♪+\s*$/,
 ]
+
+/** Narrow stock-caption detector used to retain a valid Fast draft when an HQ
+ * decode leaks a caption credit. It intentionally requires the phrase to begin
+ * the chunk so normal questions about closed captioning remain untouched. */
+export function isCaptionCreditHallucination(text: string): boolean {
+  return CAPTION_CREDIT_HALLUCINATION.test(text)
+}
 
 // ── Inline "Name:" detector (session-aware in streaming, static in one-shot) ──
 const INLINE_HALLUCINATION_THRESHOLD = 3

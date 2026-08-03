@@ -29,6 +29,7 @@ import {
   stripInlineHallucinations,
   stripPromptDictationArtifacts,
   isFullHallucination,
+  isCaptionCreditHallucination,
   isBrandUrlOnly,
   clearSessionHallucinationState,
   applyNegativeRules,
@@ -250,6 +251,35 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
       return text
     } catch (err) {
       if (err instanceof NoSpeechDetectedError) {
+        // Large-v3 can rarely replace a clipped but valid phrase with a stock
+        // caption credit. Keep the already-decoded Fast text for this one
+        // recognized failure shape instead of persisting either the artifact
+        // or an empty gap. Other no-speech results retain existing behavior.
+        if (mode === 'hq' && isCaptionCreditHallucination(err.rawText)) {
+          const fastJob = modeQualityJobs.get(modeQualityKey(draftId, chunkIndex, 'fast', hash))
+          if (fastJob) {
+            try { await fastJob } catch { /* normal no-speech path below */ }
+          }
+          const fast = loadPromptDraftMeta(draftId)?.warmTranscripts?.[String(chunkIndex)]
+          if (
+            fast
+            && fast.hash === hash
+            && fast.requestedMode === 'fast'
+            && fast.actualQuality === 'fast'
+            && fast.text.trim()
+          ) {
+            if (purpose === 'final') {
+              await markPromptDraftChunkTranscript(draftId, chunkIndex, {
+                ...fast,
+                requestedMode: 'hq',
+                degraded: true,
+                degradationReason: 'hq_caption_credit_hallucination',
+              }, 'final')
+            }
+            console.warn(`[prompt-draft] dropped HQ caption-credit hallucination ${draftId}/${chunkIndex}; retained Fast text`)
+            return fast.text
+          }
+        }
         await markPromptDraftChunkTranscript(draftId, chunkIndex, {
           text: '', hash, requestedMode: mode, actualQuality: mode, backend: 'no-speech', degraded: false,
         }, purpose)

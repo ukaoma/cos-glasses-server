@@ -1,3 +1,12 @@
+## 6.21.5
+
+- Drop the narrow Large-v3 stock-caption artifact family beginning with
+  “closed captioning provided by” from prompt dictation.
+- When that exact HQ artifact occurs, retain the already-validated Fast
+  transcript for the same audio and report the result as degraded instead of
+  saving either the caption credit or an empty gap. All other HQ and no-speech
+  paths are unchanged.
+
 ## 6.21.4
 
 - Preserve validated phone-photo references on Claude and Codex conversation

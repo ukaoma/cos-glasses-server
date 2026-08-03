@@ -12,7 +12,9 @@ let transcribeAudioBuffer: ReturnType<typeof vi.fn>
 let transcribeWhisperPreview: ReturnType<typeof vi.fn>
 let emitDisplay: ReturnType<typeof vi.fn>
 
-class MockNoSpeechDetectedError extends Error { readonly rawText = '' }
+class MockNoSpeechDetectedError extends Error {
+  constructor(readonly rawText = '') { super('No speech detected') }
+}
 class MockBudgetError extends Error { readonly spentTodayUsd = 5; readonly capUsd = 5 }
 class MockUnavailableError extends Error {
   readonly status = 503
@@ -205,6 +207,39 @@ describe('public prompt draft recovery contract', () => {
       expect.any(Buffer),
       { mode: 'hq', policy: 'automatic' },
     )
+  })
+
+  it('retains Fast text when Large-v3 emits a caption-credit hallucination', async () => {
+    transcribeAudioBuffer.mockImplementation(async (_buf: Buffer, opts?: { mode?: string }) => {
+      if (opts?.mode === 'hq') {
+        throw new MockNoSpeechDetectedError('CLOSED CAPTIONING PROVIDED BY AEVERINE ZINN DIGITAL MEDIA GROUP')
+      }
+      return {
+        text: 'Likelihood of Grok releasing their model', backend: 'fast-local-test',
+        mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', degraded: false,
+        elapsedMs: 20, audioBytes: 3200,
+      }
+    })
+
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    const draftId = started.json.draftId
+    await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      { mode: 'hq', policy: 'local-only' },
+    ))
+
+    const finalized = await httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
+
+    expect(finalized.status).toBe(200)
+    expect(finalized.json).toMatchObject({
+      text: 'Likelihood of Grok releasing their model',
+      requestedMode: 'hq',
+      actualQuality: 'fast',
+      degraded: true,
+      degradationReason: 'hq_caption_credit_hallucination',
+    })
+    expect(finalized.json.text).not.toMatch(/caption(?:ing|s)?\s+provided\s+by/i)
   })
 
   it('keeps HQ warm text when a late Fast warm finishes after HQ', async () => {
