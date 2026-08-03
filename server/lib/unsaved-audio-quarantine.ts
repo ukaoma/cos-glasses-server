@@ -244,6 +244,10 @@ export function purgeExpiredQuarantine(
 ): string[] {
   const purged: string[] = []
   for (const capture of listUnsavedCaptures(root, retentionMs)) {
+    // Never delete a directory a recovery is actively decoding — a capture
+    // sitting exactly at the retention boundary would otherwise lose its
+    // audio mid-run, in the module whose thesis is "never delete evidence".
+    if (isRecoveryActive(capture.dirName)) continue
     const atMs = capture.quarantinedAt ? Date.parse(capture.quarantinedAt) : NaN
     if (!Number.isFinite(atMs)) continue
     if (Date.now() - atMs > retentionMs) {
@@ -272,6 +276,31 @@ export function findQuarantineDir(
     }
   } catch { /* fall through */ }
   return null
+}
+
+// ── Active recovery registry ─────────────────────────────────────────────
+// In-memory, single-process (matches the sessions map's own scope). Two
+// consumers: purgeExpiredQuarantine skips dirs being recovered (a capture at
+// the retention boundary must not be deleted mid-decode), and meeting_sync
+// renders an active row so COS Control warns BEFORE committing an Update
+// Server drain into a 20-90 minute recovery it cannot see.
+
+const activeRecoveries = new Map<string, { sessionId: string; dirPath: string; startedAt: number }>()
+
+export function registerActiveRecovery(sessionId: string, dirPath: string): void {
+  activeRecoveries.set(basename(dirPath), { sessionId, dirPath, startedAt: Date.now() })
+}
+
+export function clearActiveRecovery(dirPath: string): void {
+  activeRecoveries.delete(basename(dirPath))
+}
+
+export function listActiveRecoveries(): Array<{ sessionId: string; dirPath: string; startedAt: number }> {
+  return [...activeRecoveries.values()]
+}
+
+export function isRecoveryActive(dirName: string): boolean {
+  return activeRecoveries.has(dirName)
 }
 
 export function markRecovered(dirPath: string, savedFilename: string): void {

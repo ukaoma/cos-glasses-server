@@ -1084,7 +1084,15 @@ function finishClosingTranscriptSession(
   } else if (options.closeReason === 'saved') {
     // Saved sessions moved their audio to pending-batch (or explicitly
     // preserved it above); a leftover dir here is residue, safe to delete.
-    try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
+    // UNLESS chunks are still present — hasAudio() returns false on a
+    // transient statSync error, which makes preserveAudio false while the
+    // move never ran. Chunk-bearing evidence goes to quarantine, never rmSync.
+    if (countChunkWavs(audioDir) > 0) {
+      const target = quarantineSessionAudio(audioDir, 'close_saved_residual_chunks')
+      if (target) console.warn(`[transcribe-stream] Saved-close left chunk audio behind; quarantined: ${sessionId} → ${target}`)
+    } else {
+      try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
+    }
   } else if (existsSync(audioDir)) {
     // Any non-saved close (expired, error, …) with chunk audio still on disk
     // is an unsaved capture. Quarantine it — never delete evidence (6.19.0).

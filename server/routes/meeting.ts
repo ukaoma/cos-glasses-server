@@ -31,10 +31,16 @@ import {
   transcribeSegments,
 } from '../lib/meeting-batch-transcribe.js'
 import {
+  clearActiveRecovery,
   findQuarantineDir,
   listUnsavedCaptures,
   markRecovered,
+  registerActiveRecovery,
 } from '../lib/unsaved-audio-quarantine.js'
+import {
+  clearSessionHallucinationState,
+  stripInlineHallucinations,
+} from '../lib/hallucination-filter.js'
 import {
   selectBatchTranscriptForPersistence,
   type BatchTranscription,
@@ -481,6 +487,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
     recoveringOrphans.add(sessionId)
+    // Registry drives two protections: meeting_sync renders this as an active
+    // row (COS Control warns before an Update Server drain walks into a
+    // 20-90 min decode), and purgeExpiredQuarantine will not delete the dir
+    // mid-run even at the retention boundary.
+    registerActiveRecovery(sessionId, quarantineDir)
     res.status(202).set('Cache-Control', 'private, no-store').json({
       accepted: true,
       sessionId,
@@ -502,6 +513,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const results = await enqueueSerializedHqWork(
         () => transcribeSegments(quarantineDir, segments, entries),
       )
+      // Batch whisper over a dead session has no streaming baseline to
+      // compare against (evaluateBatchQuality needs one), but the inline
+      // hallucination filter needs none — run the same two-pass the boot
+      // session-recovery path uses: pass 1 builds the frequency blocklist
+      // across all segments, pass 2 strips with the final blocklist.
+      for (const item of results) {
+        if (item.text) stripInlineHallucinations(item.text, sessionId)
+      }
+      for (const item of results) {
+        if (item.text) item.text = stripInlineHallucinations(item.text, sessionId)
+      }
+      clearSessionHallucinationState(sessionId)
       const transcript = cleanFinalTranscript(results.map(item => item.text).join(' '))
       if (!transcript.trim()) {
         throw new Error('recovery produced an empty transcript')
@@ -560,6 +583,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // clean them up or the dir carries stale work files until retention.
       try { clearMeetingBatchProgress(quarantineDir) } catch { /* best-effort */ }
       try { unlinkSync(resolve(quarantineDir, BATCH_PENDING_MARKER)) } catch { /* best-effort */ }
+      clearActiveRecovery(quarantineDir)
       recoveringOrphans.delete(sessionId)
       lease.release()
     })

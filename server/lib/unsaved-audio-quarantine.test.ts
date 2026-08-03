@@ -5,12 +5,15 @@ import { tmpdir } from 'node:os'
 import {
   QUARANTINE_MANIFEST,
   RECOVERED_RECEIPT,
+  clearActiveRecovery,
   countChunkWavs,
   findQuarantineDir,
+  isRecoveryActive,
   listUnsavedCaptures,
   markRecovered,
   purgeExpiredQuarantine,
   quarantineSessionAudio,
+  registerActiveRecovery,
   sweepOrphanedSessionAudio,
   unsavedAudioRetentionMs,
 } from './unsaved-audio-quarantine.js'
@@ -149,6 +152,34 @@ describe('unsaved-audio quarantine (6.19.0 P0)', () => {
       expect(listUnsavedCaptures(quarantineRoot, 72 * 3_600_000)).toHaveLength(2)
       expect(findQuarantineDir('meeting_dup', quarantineRoot)).not.toBeNull()
     } finally {
+      rmSync(sessionRoot, { recursive: true, force: true })
+      rmSync(quarantineRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('an active recovery shields its dir from the retention purge until cleared', () => {
+    const sessionRoot = scratch('shield-src')
+    const quarantineRoot = scratch('shield-dst')
+    try {
+      const source = makeSessionDir(sessionRoot, 'meeting_shielded', 1)
+      const target = quarantineSessionAudio(source, 'old', quarantineRoot)!
+      // Backdate beyond retention — normally purge-eligible.
+      const manifestPath = join(target, QUARANTINE_MANIFEST)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      manifest.quarantinedAt = new Date(Date.now() - 100 * 3_600_000).toISOString()
+      writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`)
+
+      registerActiveRecovery('meeting_shielded', target)
+      expect(isRecoveryActive('meeting_shielded')).toBe(true)
+      expect(purgeExpiredQuarantine(quarantineRoot, 72 * 3_600_000)).toHaveLength(0)
+      expect(findQuarantineDir('meeting_shielded', quarantineRoot)).not.toBeNull()
+
+      clearActiveRecovery(target)
+      expect(isRecoveryActive('meeting_shielded')).toBe(false)
+      expect(purgeExpiredQuarantine(quarantineRoot, 72 * 3_600_000)).toHaveLength(1)
+      expect(findQuarantineDir('meeting_shielded', quarantineRoot)).toBeNull()
+    } finally {
+      clearActiveRecovery(join(quarantineRoot, 'meeting_shielded'))
       rmSync(sessionRoot, { recursive: true, force: true })
       rmSync(quarantineRoot, { recursive: true, force: true })
     }

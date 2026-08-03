@@ -5,6 +5,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { dataPath } from './data-dir.js'
+import { listActiveRecoveries } from './unsaved-audio-quarantine.js'
 
 export const BATCH_PROGRESS_FILENAME = '_batch_progress.json'
 export const BATCH_PENDING_MARKER = '_batch_pending.marker'
@@ -313,6 +314,31 @@ export function getMeetingSyncSnapshot(
       updatedAt: null,
     }
     meetings.push({ ...row, label: labelFor(row) })
+  }
+
+  // Active orphan recoveries decode in the quarantine root, which this scan
+  // never visits — surface them as active rows or COS Control shows "Idle"
+  // with blocksRestart:false while a 20-90 minute decode holds the
+  // maintenance lease, and an Update Server drain walks blind into its 90s
+  // timeout and hard-fails to Repair. Same contract as meeting_batch_finalization.
+  for (const recovery of listActiveRecoveries()) {
+    const progress = readProgressFile(recovery.dirPath)
+    const percent = progress && progress.segmentsTotal > 0
+      ? clampPercent(progress.segmentsDone, progress.segmentsTotal)
+      : null
+    const row: Omit<MeetingSyncMeeting, 'label'> = {
+      meetingId: recovery.sessionId,
+      phase: progress?.phase ?? 'queued',
+      percent,
+      segmentsDone: progress && progress.segmentsTotal > 0 ? progress.segmentsDone : null,
+      segmentsTotal: progress && progress.segmentsTotal > 0 ? progress.segmentsTotal : null,
+      chunkFiles: progress?.chunkFiles ?? 0,
+      updatedAt: progress?.updatedAt ?? null,
+    }
+    meetings.push({
+      ...row,
+      label: `Recovering unsaved capture${percent != null ? ` ${percent}%` : ''} · do not update/restart`,
+    })
   }
 
   if (meetings.length === 0) {

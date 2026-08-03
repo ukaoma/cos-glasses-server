@@ -9,6 +9,7 @@ import {
   writeMeetingBatchProgress,
   writeMeetingBatchTerminal,
 } from './meeting-batch-progress.js'
+import { clearActiveRecovery, registerActiveRecovery } from './unsaved-audio-quarantine.js'
 
 describe('meeting-batch-progress', () => {
   it('reports idle when pending-batch is empty', () => {
@@ -171,6 +172,34 @@ describe('meeting-batch-progress', () => {
       expect(snap.blocksRestart).toBe(false)
       expect(snap.retained).toHaveLength(1)
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('an active orphan recovery renders as active work with blocksRestart', () => {
+    const root = join(tmpdir(), `cos-meeting-sync-recovery-${process.pid}-${Date.now()}`)
+    const recoveryDir = join(root, 'meeting_recovering')
+    mkdirSync(recoveryDir, { recursive: true })
+    try {
+      writeMeetingBatchProgress(recoveryDir, {
+        phase: 'hq_polish',
+        segmentsDone: 3,
+        segmentsTotal: 10,
+        meetingId: 'meeting_recovering',
+      })
+      registerActiveRecovery('meeting_recovering', recoveryDir)
+      // The snapshot scans an EMPTY pending-batch root — the recovery lives
+      // in the quarantine root, visible only through the registry.
+      const empty = join(root, 'pending-batch-empty')
+      mkdirSync(empty, { recursive: true })
+      const snap = getMeetingSyncSnapshot(empty)
+      expect(snap.active).toBe(true)
+      expect(snap.blocksRestart).toBe(true)
+      expect(snap.meetings).toHaveLength(1)
+      expect(snap.meetings[0]!.label).toContain('Recovering unsaved capture 30%')
+      expect(snap.meetings[0]!.label).toContain('do not update/restart')
+    } finally {
+      clearActiveRecovery(recoveryDir)
       rmSync(root, { recursive: true, force: true })
     }
   })

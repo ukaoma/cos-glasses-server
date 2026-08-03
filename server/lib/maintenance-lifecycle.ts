@@ -57,6 +57,10 @@ export type MaintenanceWorkKind =
   // Miles-triggered recovery of a quarantined unsaved capture (6.19.0):
   // batch-transcribes retained WAVs into a durable scribe. Held for the whole
   // background run so an Update Server drain waits for it like any batch.
+  // Long runs are made visible: the active-recovery registry renders a
+  // meeting_sync row with blocksRestart so COS Control warns BEFORE
+  // committing a drain into a decode that outlives its 90s timeout
+  // (main.swift:1963 waitForRestartProof).
   | 'orphan_recovery'
 
 export type MaintenanceWorkPhase = 'queued' | 'active'
