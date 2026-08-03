@@ -1,3 +1,27 @@
+## 6.21.0
+
+Transcription quality is now a machine-owned, observable two-tier policy.
+
+- **Balanced and Max tiers.** Balanced keeps Small.en as a cosmetic prompt
+  preview, Large-v3-Turbo as the authoritative live commit model, and Large-v3
+  for saved-work polish. Max reuses the resident Large-v3 worker for preview
+  and commit; it never starts a third Whisper process.
+- **Safe Large-v3 fallback.** A requested Max tier degrades visibly to Turbo
+  when the Large-v3 weights are unavailable. Immutable Turbo and Large-v3
+  paths remain independently addressable for fallback and HQ work; health also
+  warns when Max is active but its immutable Turbo recovery weights are absent.
+- **Preview isolation.** Small.en previews no longer receive decoder-bias
+  vocabulary and still cannot write recovery state or replace committed text.
+  Startup reaps only an exact stale Small.en/8177 worker before spawning its
+  owned child; an unrelated listener is never contacted with audio or killed.
+- **Truthful health.** The existing
+  `capabilities.transcription.live` block now reports requested/effective tier,
+  requested/effective commit model, downgrade reason, and preview prompt policy
+  without exposing local file paths.
+- **Guided provisioning.** `--setup-transcription --transcription-tier
+  balanced|max` provisions only the models required by the selected tier plus
+  the immutable Turbo fallback and Large-v3 HQ model.
+
 ## 6.20.1
 
 Adaptive setup now survives the slow or interrupted downloads that exposed the

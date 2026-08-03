@@ -26,6 +26,20 @@ const PKG_ROOT = resolve(__dirname, '..')
 const CONFIG_DIR = join(homedir(), '.cos-glasses')
 const PREPARE_ONLY = process.argv.includes('--prepare-only')
 const SETUP_TRANSCRIPTION = process.argv.includes('--setup-transcription')
+function optionValue(name) {
+  const index = process.argv.indexOf(name)
+  return index >= 0 ? process.argv[index + 1] : undefined
+}
+const TRANSCRIPTION_TIER_RAW = optionValue('--transcription-tier')
+const TRANSCRIPTION_TIER = TRANSCRIPTION_TIER_RAW?.trim().toLowerCase() || 'balanced'
+if (process.argv.includes('--transcription-tier') && !TRANSCRIPTION_TIER_RAW) {
+  console.error('Missing value for --transcription-tier. Use balanced or max.')
+  process.exit(64)
+}
+if (TRANSCRIPTION_TIER_RAW && !['balanced', 'max'].includes(TRANSCRIPTION_TIER)) {
+  console.error(`Invalid --transcription-tier "${TRANSCRIPTION_TIER_RAW}". Use balanced or max.`)
+  process.exit(64)
+}
 
 // Record where the user ran `npx @gotcos/glasses-server` from. The server spawns
 // with cwd = PKG_ROOT (the npx cache), so without this the user's Starter-Kit COS
@@ -46,6 +60,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('  Usage:')
   console.log('    npx --yes @gotcos/glasses-server@latest')
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription')
+  console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier balanced|max')
   console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
   console.log('')
   console.log('  Requirements:')
@@ -355,9 +370,18 @@ function upsertEnvValue(file, key, value) {
 }
 
 if (SETUP_TRANSCRIPTION) {
-  upsertEnvValue(ENV_FILE, 'COS_WHISPER_PREVIEW_MODEL', 'small.en')
-  process.env.COS_WHISPER_PREVIEW_MODEL = 'small.en'
-  console.log(green('  ✓') + ' Adaptive transcription selected ' + dim('— Small.en preview · Turbo commit · Large-v3 HQ'))
+  const previewModel = TRANSCRIPTION_TIER === 'max' ? 'turbo' : 'small.en'
+  const commitModel = TRANSCRIPTION_TIER === 'max' ? 'large-v3' : 'turbo'
+  upsertEnvValue(ENV_FILE, 'COS_WHISPER_TRANSCRIPTION_TIER', TRANSCRIPTION_TIER)
+  upsertEnvValue(ENV_FILE, 'COS_WHISPER_PREVIEW_MODEL', previewModel)
+  upsertEnvValue(ENV_FILE, 'COS_WHISPER_COMMIT_MODEL', commitModel)
+  process.env.COS_WHISPER_TRANSCRIPTION_TIER = TRANSCRIPTION_TIER
+  process.env.COS_WHISPER_PREVIEW_MODEL = previewModel
+  process.env.COS_WHISPER_COMMIT_MODEL = commitModel
+  const laneSummary = TRANSCRIPTION_TIER === 'max'
+    ? 'Large-v3 preview + commit · Large-v3 HQ'
+    : 'Small.en preview · Turbo commit · Large-v3 HQ'
+  console.log(green('  ✓') + ` ${TRANSCRIPTION_TIER === 'max' ? 'Max' : 'Balanced'} transcription selected ` + dim(`— ${laneSummary}`))
 }
 // Persistent profile (identity + transcription vocabulary)
 const PROFILE_FILE = join(CONFIG_DIR, '.cos-profile.json')
@@ -446,7 +470,7 @@ const transcriptionSetupFailures = []
 
 if (SETUP_TRANSCRIPTION && (!whisperCliPath || !whisperServerPath)) {
   console.log('')
-  console.log(red('  ✗ Adaptive transcription needs whisper.cpp'))
+  console.log(red('  ✗ Transcription setup needs whisper.cpp'))
   console.log('    Install it first: ' + bold('brew install whisper-cpp'))
   console.log('    Then rerun this setup command. No model download was started.')
   console.log('')
@@ -457,7 +481,9 @@ if (SETUP_TRANSCRIPTION && process.env.SKIP_WHISPER_DOWNLOAD !== '1') {
   mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
   const targets = [
     [WHISPER_MODEL_PATH, WHISPER_MODEL_PARTIAL, WHISPER_MODEL_MIN_BYTES, WHISPER_MODEL_EXPECTED_BYTES],
-    [WHISPER_SMALL_MODEL_PATH, WHISPER_SMALL_MODEL_PARTIAL, WHISPER_SMALL_MODEL_MIN_BYTES, WHISPER_SMALL_MODEL_EXPECTED_BYTES],
+    ...(TRANSCRIPTION_TIER === 'balanced'
+      ? [[WHISPER_SMALL_MODEL_PATH, WHISPER_SMALL_MODEL_PARTIAL, WHISPER_SMALL_MODEL_MIN_BYTES, WHISPER_SMALL_MODEL_EXPECTED_BYTES]]
+      : []),
     [WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_PARTIAL, WHISPER_LARGE_MODEL_MIN_BYTES, WHISPER_LARGE_MODEL_EXPECTED_BYTES],
   ]
   const missingBytes = targets.reduce((sum, [path, , minimum, expected]) =>
@@ -472,7 +498,7 @@ if (SETUP_TRANSCRIPTION && process.env.SKIP_WHISPER_DOWNLOAD !== '1') {
     const requiredGB = ((missingBytes + safetyMarginBytes) / 1_000_000_000).toFixed(1)
     const availableGB = (availableBytes / 1_000_000_000).toFixed(1)
     console.log('')
-    console.log(red('  ✗ Not enough free disk space for adaptive transcription'))
+    console.log(red('  ✗ Not enough free disk space for transcription setup'))
     console.log(`    Need about ${requiredGB} GB; ${availableGB} GB is available after reusable partial downloads.`)
     console.log('    Free space, then rerun this setup command. Existing models were not removed.')
     console.log('')
@@ -550,10 +576,13 @@ if (whisperCliPath && wantsSmallPreview) {
 
 if (whisperCliPath && SETUP_TRANSCRIPTION) {
   if (isValidWhisperModel(WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_MIN_BYTES)) {
-    console.log(green('  ✓') + ' Large-v3 HQ model ready ' + dim('— saved meetings use full polish'))
+    const largeRole = TRANSCRIPTION_TIER === 'max'
+      ? 'live preview + commit and saved-meeting polish'
+      : 'saved meetings use full polish'
+    console.log(green('  ✓') + ' Large-v3 model ready ' + dim(`— ${largeRole}`))
   } else {
     if (existsSync(WHISPER_LARGE_MODEL_PATH)) { try { unlinkSync(WHISPER_LARGE_MODEL_PATH) } catch {} }
-    console.log(yellow('  ⚠') + ' HQ polish model missing')
+    console.log(yellow('  ⚠') + ' Large-v3 model missing')
     console.log('    ' + dim('Downloading ggml-large-v3 (~3.1 GB).'))
     if (process.env.SKIP_WHISPER_DOWNLOAD === '1') {
       console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — HQ safely reports unavailable and live Turbo continues')
@@ -566,12 +595,12 @@ if (whisperCliPath && SETUP_TRANSCRIPTION) {
           expectedBytes: WHISPER_LARGE_MODEL_EXPECTED_BYTES,
           timeoutMs: 7_200_000,
         })
-        console.log(green('  ✓') + ' Large-v3 HQ model downloaded')
+        console.log(green('  ✓') + ' Large-v3 model downloaded')
       } catch (err) {
         console.log(red('  ✗') + ' Large-v3 download failed ' + dim('— live Turbo remains available'))
         console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
         console.log('    ' + dim('Partial download retained; rerun setup to resume it.'))
-        transcriptionSetupFailures.push('Large-v3 HQ model')
+        transcriptionSetupFailures.push(TRANSCRIPTION_TIER === 'max' ? 'Large-v3 Max/HQ model' : 'Large-v3 HQ model')
       }
     }
   }
@@ -580,13 +609,13 @@ if (whisperCliPath && SETUP_TRANSCRIPTION) {
 if (PREPARE_ONLY && SETUP_TRANSCRIPTION) {
   console.log('')
   if (transcriptionSetupFailures.length > 0) {
-    console.log(red('  ✗ Adaptive transcription setup incomplete'))
+    console.log(red('  ✗ Transcription setup incomplete'))
     console.log('    Missing: ' + transcriptionSetupFailures.join(', '))
     console.log('    Rerun this command; retained downloads resume from the last byte received.')
     console.log('')
     process.exit(1)
   }
-  console.log(green('  ✓ Adaptive transcription setup complete'))
+  console.log(green('  ✓ Transcription setup complete'))
   console.log('    Return to COS Control and Restart, install, or update the managed server.')
   console.log('')
   process.exit(0)

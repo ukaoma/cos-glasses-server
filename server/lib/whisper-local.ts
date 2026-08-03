@@ -107,22 +107,76 @@ function resolveWhisperBin(name: string): string {
 }
 const WHISPER_CLI = resolveWhisperBin('whisper-cli')
 const WHISPER_SERVER = resolveWhisperBin('whisper-server')
-const MODEL_PATH = join(process.env.HOME ?? homedir(), '.local/share/whisper-models/ggml-large-v3-turbo.bin')
+const MODEL_DIR = join(process.env.HOME ?? homedir(), '.local/share/whisper-models')
+export const WHISPER_TURBO_MODEL_PATH = join(MODEL_DIR, 'ggml-large-v3-turbo.bin')
+export const WHISPER_LARGE_V3_MODEL_PATH = join(MODEL_DIR, 'ggml-large-v3.bin')
+
+export type WhisperCommitRequest = 'turbo' | 'large-v3'
+export type WhisperCommitModel = 'large-v3-turbo' | 'large-v3'
+export type WhisperTranscriptionTier = 'balanced' | 'max'
+
+export interface WhisperCommitCapability {
+  requestedTier: WhisperTranscriptionTier
+  effectiveTier: WhisperTranscriptionTier
+  requestedModel: WhisperCommitRequest
+  effectiveModel: WhisperCommitModel
+  ready: boolean
+  configured: boolean
+  degraded: boolean
+  reason: 'large_v3_model_missing' | 'turbo_model_missing' | null
+  promptPolicy: 'full-vocabulary'
+}
+
+export function normalizeWhisperTranscriptionTier(raw?: string): WhisperTranscriptionTier {
+  return raw?.trim().toLowerCase() === 'max' ? 'max' : 'balanced'
+}
+
+export function normalizeWhisperCommitRequest(raw?: string): WhisperCommitRequest {
+  const value = raw?.trim().toLowerCase()
+  if (value === 'large-v3' || value === 'large_v3' || value === 'ggml-large-v3.bin' || value === 'max') {
+    return 'large-v3'
+  }
+  return 'turbo'
+}
+
+function requestedTranscriptionTier(): WhisperTranscriptionTier {
+  return normalizeWhisperTranscriptionTier(process.env.COS_WHISPER_TRANSCRIPTION_TIER)
+}
+
+function requestedCommitModel(): WhisperCommitRequest {
+  const explicit = process.env.COS_WHISPER_COMMIT_MODEL
+  return explicit
+    ? normalizeWhisperCommitRequest(explicit)
+    : requestedTranscriptionTier() === 'max' ? 'large-v3' : 'turbo'
+}
+
+const COMMIT_REQUEST = requestedCommitModel()
+const REQUESTED_TRANSCRIPTION_TIER = requestedTranscriptionTier()
+const COMMIT_MODEL_PATH = COMMIT_REQUEST === 'large-v3' && existsSync(WHISPER_LARGE_V3_MODEL_PATH)
+  ? WHISPER_LARGE_V3_MODEL_PATH
+  : WHISPER_TURBO_MODEL_PATH
+const COMMIT_MODEL: WhisperCommitModel = COMMIT_MODEL_PATH === WHISPER_LARGE_V3_MODEL_PATH
+  ? 'large-v3'
+  : 'large-v3-turbo'
+
+if (COMMIT_REQUEST === 'large-v3' && COMMIT_MODEL !== 'large-v3') {
+  console.warn('[whisper-local] Max requested but Large-v3 weights are missing; committed transcription is using Turbo.')
+}
 
 // Post-meeting batch transcription uses the full 32-layer Whisper large-v3
 // instead of turbo's 4-layer decoder. Bake-off on 2026-04-16 showed the full
 // decoder captures +43% more speech content with zero known-hallucinations on
 // a real 23.6 min G2 recording. See wk16_2026/asr-bakeoff/report.md.
 //
-// Streaming path stays on turbo (whisper-server + VAD) for latency. Only the
-// post-meeting HQ re-transcription uses large-v3 — runs fire-and-forget after
-// meeting save, so the ~4x wall-time cost is invisible to the user.
+// Balanced live commit stays on Turbo. Max may opt the persistent live worker
+// into Large-v3 on measured hardware. Post-meeting HQ remains a separate batch
+// policy and never inherits the live commit selection.
 //
 // DISABLE: set COS_BATCH_LARGE_V3=0 to revert HQ path to turbo. Missing-weights
 // case is defensive: if ggml-large-v3.bin isn't on disk we log a warning and
 // fall back to turbo automatically — no broken batch runs.
-const BATCH_MODEL_LARGE_V3 = join(process.env.HOME ?? homedir(), '.local/share/whisper-models/ggml-large-v3.bin')
-const BATCH_MODEL_TURBO = MODEL_PATH
+const BATCH_MODEL_LARGE_V3 = WHISPER_LARGE_V3_MODEL_PATH
+const BATCH_MODEL_TURBO = WHISPER_TURBO_MODEL_PATH
 const BATCH_LARGE_V3_ENABLED = process.env.COS_BATCH_LARGE_V3 !== '0'
 
 // Silero VAD (ggml) — whisper-server --vad strips silence/noise windows BEFORE the
@@ -286,7 +340,9 @@ function isCosWhisperServerCommand(command: string): boolean {
   const executablePath = firstToken?.[1] ?? firstToken?.[2] ?? firstToken?.[3] ?? ''
   const executable = basename(executablePath) === 'whisper-server'
   const configuredPort = new RegExp(`(?:^|\\s)--port(?:=|\\s+)${WHISPER_SERVER_PORT}(?:\\s|$)`).test(command)
-  return executable && configuredPort && command.includes(MODEL_PATH)
+  const supportedModel = [WHISPER_TURBO_MODEL_PATH, WHISPER_LARGE_V3_MODEL_PATH]
+    .some(modelPath => command.includes(modelPath))
+  return executable && configuredPort && supportedModel
 }
 
 function collectDescendants(processes: ProcessEntry[], roots: Iterable<number>): Set<number> {
@@ -399,7 +455,9 @@ async function proveWhisperPortClear(): Promise<void> {
 
 // Check CLI availability at import time
 try {
-  cliAvailable = existsSync(WHISPER_CLI) && existsSync(MODEL_PATH)
+  // CLI fallback/HQ semantics are always anchored to the immutable Turbo
+  // weights. A Max live selection must never silently rewrite the HQ fallback.
+  cliAvailable = existsSync(WHISPER_CLI) && existsSync(WHISPER_TURBO_MODEL_PATH)
   if (cliAvailable) {
     console.log(`[whisper-local] whisper-cli available at ${WHISPER_CLI}`)
   }
@@ -441,7 +499,7 @@ export async function startWhisperServer(): Promise<void> {
 }
 
 async function startWhisperServerAttempt(preflightCompleted = false): Promise<void> {
-  if (!existsSync(WHISPER_SERVER) || !existsSync(MODEL_PATH)) {
+  if (!existsSync(WHISPER_SERVER) || !existsSync(COMMIT_MODEL_PATH)) {
     serverStartupState = 'unavailable'
     serverLastError = 'whisper-server or model not found'
     console.log('[whisper-local] whisper-server or model not found — using CLI fallback')
@@ -461,8 +519,8 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
   // Assemble startup args. VAD only attaches if the ggml model is actually on
   // disk — missing-file is logged, not fatal (server still boots without VAD).
   const serverArgs = [
-    '-m', MODEL_PATH,
-    '-t', '16',           // M3 Ultra has 24P+8E cores — 16 threads for short audio chunks
+    '-m', COMMIT_MODEL_PATH,
+    '-t', '16',           // Metal runs the encoder; measured 4/8/16-thread results favor keeping 16 across Apple silicon.
     '-l', 'en',
     '-fa',                // Flash attention — faster self-attention on Apple Silicon
     '--no-speech-thold', '0.7',  // Reject silence more aggressively (default 0.6)
@@ -599,7 +657,7 @@ export function getWhisperHealth(): {
 } {
   return {
     server: serverAvailable,
-    serverConfigured: existsSync(WHISPER_SERVER) && existsSync(MODEL_PATH),
+    serverConfigured: existsSync(WHISPER_SERVER) && existsSync(COMMIT_MODEL_PATH),
     cli: cliAvailable,
     consecutiveFailures: serverConsecutiveFailures,
     restarting: serverRestarting || serverStarting,
@@ -607,6 +665,38 @@ export function getWhisperHealth(): {
     startupState: serverStartupState,
     lastAttemptAt: serverLastAttemptAt,
     lastError: serverLastError,
+  }
+}
+
+/** Path-free truth for Control and companion capability rendering. The
+ * requested preset may degrade to Turbo when Large-v3 weights are absent, but
+ * the process never reports Max as effective unless the resident worker is
+ * actually using Large-v3. */
+export function getWhisperCommitCapability(): WhisperCommitCapability {
+  const turboPresent = existsSync(WHISPER_TURBO_MODEL_PATH)
+  const largePresent = existsSync(WHISPER_LARGE_V3_MODEL_PATH)
+  const configured = existsSync(WHISPER_SERVER) && existsSync(COMMIT_MODEL_PATH)
+  const requestedTier: WhisperTranscriptionTier = COMMIT_REQUEST === 'large-v3'
+    ? 'max'
+    : REQUESTED_TRANSCRIPTION_TIER
+  const effectiveTier: WhisperTranscriptionTier = COMMIT_MODEL === 'large-v3' ? 'max' : 'balanced'
+  const reason = COMMIT_REQUEST === 'large-v3' && !largePresent
+    ? 'large_v3_model_missing' as const
+    // Turbo is the immutable recovery model even when Max is active. Missing
+    // fallback weights are therefore degraded health, not a clean Max state.
+    : !turboPresent
+      ? 'turbo_model_missing' as const
+      : null
+  return {
+    requestedTier,
+    effectiveTier,
+    requestedModel: COMMIT_REQUEST,
+    effectiveModel: COMMIT_MODEL,
+    ready: serverAvailable,
+    configured,
+    degraded: requestedTier !== effectiveTier || reason !== null,
+    reason,
+    promptPolicy: 'full-vocabulary',
   }
 }
 
@@ -931,13 +1021,23 @@ function buildPrompt(context?: string, isQuiet?: boolean): string {
  * which can receive a null C string after VAD returns no speech and crash the
  * native server before an HTTP response exists.
  */
-async function transcribeViaServer(audioBuffer: Buffer, context?: string, isQuiet?: boolean): Promise<{ text: string; words?: WhisperWord[] }> {
+async function transcribeViaServer(
+  audioBuffer: Buffer,
+  context?: string,
+  isQuiet?: boolean,
+  promptPolicy: 'full-vocabulary' | 'none' = 'full-vocabulary',
+): Promise<{ text: string; words?: WhisperWord[] }> {
   const formData = new FormData()
   // Convert Buffer to Uint8Array to satisfy Blob's BlobPart type constraint
   const blob = new Blob([new Uint8Array(audioBuffer)], { type: 'audio/wav' })
   formData.append('file', blob, 'recording.wav')
   formData.append('response_format', 'json')
-  formData.append('prompt', buildPrompt(context, isQuiet))
+  // Cosmetic preview decodes must not receive decoder bias. Omitting the field
+  // (instead of sending an empty string) keeps the wire contract unambiguous
+  // and lets diagnostics truthfully report promptPolicy: "none".
+  if (promptPolicy === 'full-vocabulary') {
+    formData.append('prompt', buildPrompt(context, isQuiet))
+  }
   // Anti-hallucination handled by client-side filter + context filtering.
   // Whisper-level entropy/logprob thresholds were too aggressive — silently dropped
   // legitimate speech from quiet sources (laptop speakers through G2 mic).
@@ -972,7 +1072,7 @@ async function transcribeViaCLI(audioBuffer: Buffer, context?: string, isQuiet?:
 
     return await new Promise<string>((resolve, reject) => {
       const proc = spawn(WHISPER_CLI, [
-        '-m', MODEL_PATH,
+        '-m', WHISPER_TURBO_MODEL_PATH,
         '-f', tmpWav,
         '-t', '12',
         '-l', 'en',
@@ -1080,7 +1180,10 @@ export async function transcribeLocal(
   audioBuffer: Buffer,
   context?: string,
   isQuiet?: boolean,
-  opts?: { affectsCircuit?: boolean },
+  opts?: {
+    affectsCircuit?: boolean
+    promptPolicy?: 'full-vocabulary' | 'none'
+  },
 ): Promise<{ text: string; backend: 'server' | 'cli'; words?: WhisperWord[] }> {
   const start = Date.now()
   const affectsCircuit = opts?.affectsCircuit !== false
@@ -1096,7 +1199,7 @@ export async function transcribeLocal(
   // Try whisper-server first (fastest: ~50-100ms, includes DTW word timestamps)
   if (serverAvailable) {
     try {
-      const result = await transcribeViaServer(audioBuffer, context, isQuiet)
+      const result = await transcribeViaServer(audioBuffer, context, isQuiet, opts?.promptPolicy)
       const text = applyCorrections(result.text)
       const words = result.words?.map(w => ({ ...w, word: applyCorrections(w.word) }))
       const elapsed = Date.now() - start

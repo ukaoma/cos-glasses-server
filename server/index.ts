@@ -298,7 +298,7 @@ async function gracefulShutdown(): Promise<void> {
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
   stopCodexModelCatalogRefresh()
   stopWhisperServer()
-  stopWhisperPreviewServer()
+  await stopWhisperPreviewServer()
   stopLocalTtsServer()
   clearTimeout(forceExit)
   process.exit(0)

@@ -236,19 +236,33 @@ Prompt dictation defaults to HQ. The phone owns the preference: **Fast mode
 OFF** requests HQ, and **Fast mode ON** requests turbo. The Mac performs all
 decoding; the phone does not run Whisper.
 
-For the recommended adaptive setup, run:
+For the recommended **Balanced** setup, run:
 
 ```bash
-npx --yes @gotcos/glasses-server@latest --setup-transcription
+npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier balanced
 ```
 
-That keeps three jobs separate: Small.en supplies provisional words on the
-lens, Large-v3-Turbo commits the authoritative live transcript, and Large-v3
-polishes saved prompts and meetings. Small.en never writes the recovery ledger.
+That keeps three jobs separate: Small.en supplies provisional prompt words on
+the lens, Large-v3-Turbo commits the authoritative live transcript, and
+Large-v3 polishes saved prompts and meetings. Small.en never writes the
+recovery ledger and receives no decoder-bias prompt.
 If its sidecar is missing or unhealthy, preview falls back to Turbo without
 changing final quality. Set `COS_WHISPER_PREVIEW_MODEL=turbo` to keep one live
 model, or `off` to disable provisional peeks. Existing installs that only
 update the server remain on Turbo until Guided Setup opts them into Small.en.
+
+**Max** is an opt-in tier for powerful Macs:
+
+```bash
+npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier max
+```
+
+Max reuses the existing Large-v3 worker for preview and authoritative commit;
+saved work still receives Large-v3 HQ polish. It does not start a third model
+process. If Large-v3 is missing, health reports the downgrade and the server
+falls back to Turbo rather than making transcription unavailable. COS Control
+is the supported owner of the machine-wide tier; the per-lane environment
+variables remain advanced overrides.
 
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):

@@ -83,12 +83,33 @@ function installLifecycleMocks(options: LifecycleMocks = {}) {
 
 describe('whisper-server health reconciliation', () => {
   afterEach(() => {
+    delete process.env.COS_WHISPER_TRANSCRIPTION_TIER
+    delete process.env.COS_WHISPER_COMMIT_MODEL
     vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     vi.doUnmock('node:child_process')
     vi.doUnmock('node:fs')
     vi.resetModules()
+  })
+
+  it('starts Max on the canonical Large-v3 path and reports the effective tier', async () => {
+    process.env.COS_WHISPER_TRANSCRIPTION_TIER = 'max'
+    const { spawnMock } = installLifecycleMocks()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+    const { getWhisperCommitCapability, startWhisperServer } = await import('./whisper-local.js')
+
+    await startWhisperServer()
+
+    const args = (spawnMock.mock.calls as unknown as Array<[string, string[]]>)[0]?.[1]
+    expect(args).toEqual(expect.arrayContaining([
+      '-m', `${process.env.HOME}/.local/share/whisper-models/ggml-large-v3.bin`,
+    ]))
+    expect(getWhisperCommitCapability()).toMatchObject({
+      requestedTier: 'max', effectiveTier: 'max',
+      requestedModel: 'large-v3', effectiveModel: 'large-v3',
+      degraded: false, ready: true,
+    })
   })
 
   it('does not count prompt chunks as failures while the model is still loading', async () => {
@@ -153,6 +174,24 @@ describe('whisper-server health reconciliation', () => {
       text: '',
       backend: 'server',
     })
+  })
+
+  it('omits decoder vocabulary from cosmetic preview requests', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
+        const body = init.body as FormData
+        expect(body.get('response_format')).toBe('json')
+        expect(body.get('prompt')).toBeNull()
+        return { ok: true, json: async () => ({ text: 'unbiased preview' }) }
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { transcribeLocal } = await import('./whisper-local.js')
+    await expect(transcribeLocal(Buffer.alloc(3200), undefined, undefined, {
+      affectsCircuit: false,
+      promptPolicy: 'none',
+    })).resolves.toMatchObject({ text: 'unbiased preview', backend: 'server' })
   })
 
   it('rejects malformed compact JSON instead of acknowledging false silence', async () => {
