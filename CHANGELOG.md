@@ -1,3 +1,12 @@
+## 6.21.1
+
+- Make the transactional Claude readiness proof explicitly use Haiku instead
+  of inheriting a user's heavyweight default model. The no-tool proof now has
+  a 45-second bound, while normal COS queries keep their selected models.
+- Preserve timeout and cancellation reasons across the provider-process close
+  race. A timed-out proof now reports `provider proof timed out` instead of the
+  misleading `provider process exited before launch`.
+
 ## 6.21.0
 
 Transcription quality is now a machine-owned, observable two-tier policy.

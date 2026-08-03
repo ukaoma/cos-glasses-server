@@ -17,7 +17,7 @@ const PROOF_PROMPT = `This is an automated local readiness check. Do not use too
 const successCache = new Map<ProofProvider, ProviderProofResult>()
 const inFlight = new Map<ProofProvider, Promise<ProviderProofResult>>()
 
-interface ProcessResult {
+export interface ProcessResult {
   code: number | null
   stdout: string
   stderr: string
@@ -25,7 +25,9 @@ interface ProcessResult {
   aborted: boolean
 }
 
-function runBounded(
+type TerminationReason = 'timeout' | 'abort' | null
+
+export function runBounded(
   command: string,
   args: string[],
   input: string,
@@ -48,6 +50,11 @@ function runBounded(
     let stdout = ''
     let stderr = ''
     let settled = false
+    // The child `close` event normally wins the race against the async
+    // terminateProviderProcess() result. Record WHY termination began before
+    // sending a signal so that close cannot misreport a timeout as
+    // "exited before launch" (Control 0.3.5 field failure, 2026-08-03).
+    let terminationReason: TerminationReason = null
     const cap = (value: string) => value.slice(-256_000)
     child.stdout.on('data', chunk => { stdout = cap(stdout + chunk.toString()) })
     child.stderr.on('data', chunk => { stderr = cap(stderr + chunk.toString()) })
@@ -58,25 +65,55 @@ function runBounded(
       signal?.removeEventListener('abort', abort)
       resolvePromise(result)
     }
+    const terminatedResult = (code: number | null): ProcessResult => ({
+      code,
+      stdout,
+      stderr,
+      timedOut: terminationReason === 'timeout',
+      aborted: terminationReason === 'abort',
+    })
     const timer = setTimeout(() => {
+      if (settled || terminationReason) return
+      terminationReason = 'timeout'
       void terminateProviderProcess(child, { termGraceMs: 50 }).then(result => {
-        if (result.closed) finish({ code: result.code, stdout, stderr, timedOut: true, aborted: false })
+        if (result.closed) finish(terminatedResult(result.code))
         else console.error('[provider-proof] timed-out provider did not close after SIGKILL; retaining request ownership')
       })
     }, timeoutMs)
     timer.unref?.()
     const abort = () => {
+      if (settled || terminationReason) return
+      terminationReason = 'abort'
       void terminateProviderProcess(child).then(result => {
-        if (result.closed) finish({ code: result.code, stdout, stderr, timedOut: false, aborted: true })
+        if (result.closed) finish(terminatedResult(result.code))
         else console.error('[provider-proof] canceled provider did not close after SIGKILL; retaining request ownership')
       })
     }
-    child.once('error', err => finish({ code: null, stdout, stderr: err.message, timedOut: false, aborted: false }))
-    child.once('close', code => finish({ code, stdout, stderr, timedOut: false, aborted: false }))
+    child.once('error', err => {
+      stderr = cap(stderr + err.message)
+      finish(terminatedResult(null))
+    })
+    child.once('close', code => finish(terminatedResult(code)))
     signal?.addEventListener('abort', abort, { once: true })
     child.stdin.on('error', () => { /* close/error is authoritative */ })
     child.stdin.end(input)
   })
+}
+
+export const CLAUDE_PROOF_MODEL = 'haiku'
+export const CLAUDE_PROOF_TIMEOUT_MS = 45_000
+
+export function claudeProofArgs(): string[] {
+  return [
+    '-p',
+    '--model', CLAUDE_PROOF_MODEL,
+    '--output-format', 'json',
+    '--permission-mode', 'dontAsk',
+    '--tools', '',
+    '--allowedTools', '',
+    '--system-prompt', PROOF_PROMPT,
+    PROOF_PROMPT,
+  ]
 }
 
 export function claudeProofText(stdout: string): string {
@@ -120,15 +157,7 @@ function safeProofError(result: ProcessResult): string {
 async function executeProof(provider: ProofProvider, signal?: AbortSignal): Promise<ProviderProofResult> {
   const started = Date.now()
   const result = provider === 'claude'
-    ? await runBounded('claude', [
-      '-p',
-      '--output-format', 'json',
-      '--permission-mode', 'dontAsk',
-      '--tools', '',
-      '--allowedTools', '',
-      '--system-prompt', PROOF_PROMPT,
-      PROOF_PROMPT,
-    ], '', 120_000, signal)
+    ? await runBounded('claude', claudeProofArgs(), '', CLAUDE_PROOF_TIMEOUT_MS, signal)
     : await runBounded('codex', [
       'exec',
       '--sandbox', 'read-only',
