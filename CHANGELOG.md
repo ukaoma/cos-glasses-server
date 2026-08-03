@@ -1,3 +1,17 @@
+## 6.20.1
+
+Adaptive setup now survives the slow or interrupted downloads that exposed the
+first public 6.20.0 install to a false-success state.
+
+- **Resumable model downloads.** Whisper model downloads retain their `.partial`
+  files, resume with HTTP range requests, retry transient network errors eight
+  times, and use one-hour bounds for Small.en/Turbo plus a two-hour bound for
+  Large-v3. A rerun continues from the last byte instead of restarting at zero.
+- **Truthful guided setup.** `--setup-transcription --prepare-only` exits nonzero
+  and names any missing lane instead of printing “setup complete” after a model
+  download failed. Existing Turbo transcription remains the safe runtime
+  fallback while setup is incomplete.
+
 ## 6.20.0
 
 Adaptive transcription makes fast feedback additive instead of a quality

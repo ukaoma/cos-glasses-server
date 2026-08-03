@@ -393,9 +393,9 @@ const WHISPER_LARGE_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-large-v3.bin')
 const WHISPER_LARGE_MODEL_PARTIAL = WHISPER_LARGE_MODEL_PATH + '.partial'
 const WHISPER_LARGE_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin'
 const WHISPER_LARGE_MODEL_MIN_BYTES = 2_800_000_000
-const WHISPER_MODEL_EXPECTED_BYTES = 1_620_000_000
-const WHISPER_SMALL_MODEL_EXPECTED_BYTES = 466_000_000
-const WHISPER_LARGE_MODEL_EXPECTED_BYTES = 3_100_000_000
+const WHISPER_MODEL_EXPECTED_BYTES = 1_624_555_275
+const WHISPER_SMALL_MODEL_EXPECTED_BYTES = 487_614_201
+const WHISPER_LARGE_MODEL_EXPECTED_BYTES = 3_095_033_483
 function findWhisperCli() {
   for (const p of WHISPER_KNOWN_PATHS) { if (existsSync(p)) return p }
   try {
@@ -418,9 +418,31 @@ function isValidWhisperModel(p, minBytes = WHISPER_MODEL_MIN_BYTES) {
   if (!existsSync(p)) return false
   try { return statSync(p).size >= minBytes } catch { return false }
 }
+function downloadWhisperModel({ url, destination, partial, expectedBytes, timeoutMs }) {
+  mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
+  const partialBytes = existsSync(partial) ? statSync(partial).size : 0
+  execFileSync('curl', [
+    '-fL',
+    '--retry', '8',
+    '--retry-all-errors',
+    '--retry-delay', '2',
+    '--connect-timeout', '30',
+    '--continue-at', '-',
+    '--progress-bar',
+    url,
+    '-o', partial,
+  ], { stdio: 'inherit', timeout: timeoutMs })
+  const stats = statSync(partial)
+  if (stats.size !== expectedBytes) {
+    throw new Error(`Downloaded file size mismatch: expected ${expectedBytes}, received ${stats.size} bytes`)
+  }
+  renameSync(partial, destination)
+  return { resumed: partialBytes > 0 }
+}
 const whisperCliPath = findWhisperCli()
 const whisperServerPath = findWhisperServer()
 const hasValidModel = isValidWhisperModel(WHISPER_MODEL_PATH)
+const transcriptionSetupFailures = []
 
 if (SETUP_TRANSCRIPTION && (!whisperCliPath || !whisperServerPath)) {
   console.log('')
@@ -462,7 +484,6 @@ if (whisperCliPath && hasValidModel) {
   console.log(green('  ✓') + ' whisper.cpp + model ready ' + dim('— voice = local (FREE)'))
 } else if (whisperCliPath && !hasValidModel) {
   if (existsSync(WHISPER_MODEL_PATH)) { try { unlinkSync(WHISPER_MODEL_PATH) } catch {} }
-  if (existsSync(WHISPER_MODEL_PARTIAL)) { try { unlinkSync(WHISPER_MODEL_PARTIAL) } catch {} }
   console.log(yellow('  ⚠') + ' whisper.cpp installed but model missing')
   console.log('    ' + dim('Downloading ggml-large-v3-turbo (~1.5 GB).'))
   console.log('    ' + dim('Skip: SKIP_WHISPER_DOWNLOAD=1 npx --yes @gotcos/glasses-server@latest'))
@@ -470,17 +491,20 @@ if (whisperCliPath && hasValidModel) {
     console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — local voice unavailable')
   } else {
     try {
-      mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
-      execFileSync('curl', ['-fL', '--progress-bar', WHISPER_MODEL_URL, '-o', WHISPER_MODEL_PARTIAL], { stdio: 'inherit', timeout: 900000 })
-      const stats = statSync(WHISPER_MODEL_PARTIAL)
-      if (stats.size < WHISPER_MODEL_MIN_BYTES) throw new Error(`Downloaded file too small: ${stats.size} bytes`)
-      renameSync(WHISPER_MODEL_PARTIAL, WHISPER_MODEL_PATH)
+      downloadWhisperModel({
+        url: WHISPER_MODEL_URL,
+        destination: WHISPER_MODEL_PATH,
+        partial: WHISPER_MODEL_PARTIAL,
+        expectedBytes: WHISPER_MODEL_EXPECTED_BYTES,
+        timeoutMs: 3_600_000,
+      })
       localVoiceReady = true
       console.log(green('  ✓') + ' Model downloaded ' + dim('— voice = local (FREE)'))
     } catch (err) {
-      try { unlinkSync(WHISPER_MODEL_PARTIAL) } catch {}
       console.log(red('  ✗') + ' Model download failed ' + dim('— local voice unavailable'))
       console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
+      console.log('    ' + dim('Partial download retained; rerun setup to resume it.'))
+      if (SETUP_TRANSCRIPTION) transcriptionSetupFailures.push('Large-v3-Turbo commit model')
     }
   }
 } else {
@@ -500,23 +524,25 @@ if (whisperCliPath && wantsSmallPreview) {
     console.log(green('  ✓') + ' Small.en preview model ready ' + dim('— Turbo remains authoritative'))
   } else {
     if (existsSync(WHISPER_SMALL_MODEL_PATH)) { try { unlinkSync(WHISPER_SMALL_MODEL_PATH) } catch {} }
-    if (existsSync(WHISPER_SMALL_MODEL_PARTIAL)) { try { unlinkSync(WHISPER_SMALL_MODEL_PARTIAL) } catch {} }
     console.log(yellow('  ⚠') + ' Adaptive preview model missing')
     console.log('    ' + dim('Downloading ggml-small.en (~466 MB).'))
     if (process.env.SKIP_WHISPER_DOWNLOAD === '1') {
       console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — previews use Turbo until Small.en is provisioned')
     } else {
       try {
-        mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
-        execFileSync('curl', ['-fL', '--progress-bar', WHISPER_SMALL_MODEL_URL, '-o', WHISPER_SMALL_MODEL_PARTIAL], { stdio: 'inherit', timeout: 900000 })
-        const stats = statSync(WHISPER_SMALL_MODEL_PARTIAL)
-        if (stats.size < WHISPER_SMALL_MODEL_MIN_BYTES) throw new Error(`Downloaded file too small: ${stats.size} bytes`)
-        renameSync(WHISPER_SMALL_MODEL_PARTIAL, WHISPER_SMALL_MODEL_PATH)
+        downloadWhisperModel({
+          url: WHISPER_SMALL_MODEL_URL,
+          destination: WHISPER_SMALL_MODEL_PATH,
+          partial: WHISPER_SMALL_MODEL_PARTIAL,
+          expectedBytes: WHISPER_SMALL_MODEL_EXPECTED_BYTES,
+          timeoutMs: 3_600_000,
+        })
         console.log(green('  ✓') + ' Small.en preview model downloaded ' + dim('— Turbo commit unchanged'))
       } catch (err) {
-        try { unlinkSync(WHISPER_SMALL_MODEL_PARTIAL) } catch {}
         console.log(red('  ✗') + ' Small.en download failed ' + dim('— previews safely fall back to Turbo'))
         console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
+        console.log('    ' + dim('Partial download retained; rerun setup to resume it.'))
+        transcriptionSetupFailures.push('Small.en preview model')
       }
     }
   }
@@ -527,23 +553,25 @@ if (whisperCliPath && SETUP_TRANSCRIPTION) {
     console.log(green('  ✓') + ' Large-v3 HQ model ready ' + dim('— saved meetings use full polish'))
   } else {
     if (existsSync(WHISPER_LARGE_MODEL_PATH)) { try { unlinkSync(WHISPER_LARGE_MODEL_PATH) } catch {} }
-    if (existsSync(WHISPER_LARGE_MODEL_PARTIAL)) { try { unlinkSync(WHISPER_LARGE_MODEL_PARTIAL) } catch {} }
     console.log(yellow('  ⚠') + ' HQ polish model missing')
     console.log('    ' + dim('Downloading ggml-large-v3 (~3.1 GB).'))
     if (process.env.SKIP_WHISPER_DOWNLOAD === '1') {
       console.log(yellow('  ⚠') + ' SKIP_WHISPER_DOWNLOAD=1 — HQ safely reports unavailable and live Turbo continues')
     } else {
       try {
-        mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
-        execFileSync('curl', ['-fL', '--progress-bar', WHISPER_LARGE_MODEL_URL, '-o', WHISPER_LARGE_MODEL_PARTIAL], { stdio: 'inherit', timeout: 1800000 })
-        const stats = statSync(WHISPER_LARGE_MODEL_PARTIAL)
-        if (stats.size < WHISPER_LARGE_MODEL_MIN_BYTES) throw new Error(`Downloaded file too small: ${stats.size} bytes`)
-        renameSync(WHISPER_LARGE_MODEL_PARTIAL, WHISPER_LARGE_MODEL_PATH)
+        downloadWhisperModel({
+          url: WHISPER_LARGE_MODEL_URL,
+          destination: WHISPER_LARGE_MODEL_PATH,
+          partial: WHISPER_LARGE_MODEL_PARTIAL,
+          expectedBytes: WHISPER_LARGE_MODEL_EXPECTED_BYTES,
+          timeoutMs: 7_200_000,
+        })
         console.log(green('  ✓') + ' Large-v3 HQ model downloaded')
       } catch (err) {
-        try { unlinkSync(WHISPER_LARGE_MODEL_PARTIAL) } catch {}
         console.log(red('  ✗') + ' Large-v3 download failed ' + dim('— live Turbo remains available'))
         console.log('    ' + dim('Error: ' + (err.message || err).toString().slice(0, 120)))
+        console.log('    ' + dim('Partial download retained; rerun setup to resume it.'))
+        transcriptionSetupFailures.push('Large-v3 HQ model')
       }
     }
   }
@@ -551,6 +579,13 @@ if (whisperCliPath && SETUP_TRANSCRIPTION) {
 
 if (PREPARE_ONLY && SETUP_TRANSCRIPTION) {
   console.log('')
+  if (transcriptionSetupFailures.length > 0) {
+    console.log(red('  ✗ Adaptive transcription setup incomplete'))
+    console.log('    Missing: ' + transcriptionSetupFailures.join(', '))
+    console.log('    Rerun this command; retained downloads resume from the last byte received.')
+    console.log('')
+    process.exit(1)
+  }
   console.log(green('  ✓ Adaptive transcription setup complete'))
   console.log('    Return to COS Control and Restart, install, or update the managed server.')
   console.log('')
