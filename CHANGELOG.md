@@ -1,3 +1,13 @@
+## 6.21.2
+
+- Cache Python, Claude, Codex, and Cursor process probes for 30 seconds so the
+  public health endpoint remains cheap under frequent phone diagnostics. Stale
+  static versions are served while one background refresh runs; live recovery,
+  transcription, TTS, maintenance, and request fields remain fresh.
+- Parse Cursor's actual `CLI Version` line instead of reporting the About
+  heading. Authenticated model discovery continues to be the authoritative
+  Cursor readiness signal.
+
 ## 6.21.1
 
 - Make the transactional Claude readiness proof explicitly use Haiku instead

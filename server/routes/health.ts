@@ -1,8 +1,7 @@
 import { Router } from 'express'
-import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { COS_SCRIPTS_DIR, COS_MODE, PYTHON_BIN } from '../lib/python-bridge.js'
+import { COS_SCRIPTS_DIR, COS_MODE } from '../lib/python-bridge.js'
 import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
@@ -24,7 +23,6 @@ import {
   getCursorModelCatalog,
   getCursorModelCatalogSnapshot,
   isCursorProviderReady,
-  resolveAgentBinary,
 } from '../lib/cursor-model-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
 import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
@@ -41,6 +39,7 @@ import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
 import { getWhisperPreviewCapability } from '../lib/whisper-preview.js'
 import { getTranscriptionProfileStatus } from '../lib/profile.js'
+import { getHealthStaticProbes } from '../lib/health-static-probes.js'
 
 export const healthRouter = Router()
 
@@ -74,101 +73,26 @@ function durableQueryJobStatus() {
 }
 
 healthRouter.get('/health', async (_req, res) => {
-  await refreshLocalTtsHealth()
+  const [, staticProbes] = await Promise.all([
+    refreshLocalTtsHealth(),
+    getHealthStaticProbes(),
+  ])
   const checks: Record<string, string | number | boolean> = {
     status: 'ok',
     mode: COS_MODE ? 'cos' : 'standalone',
     server: 'ok',
-    python: 'unknown',
-    claude: 'unknown',
-    codex: 'unknown',
-    cursor: 'unknown',
+    python: staticProbes.python,
+    claude: staticProbes.claude,
+    codex: staticProbes.codex,
+    cursor: staticProbes.cursor,
     uptime_seconds: Math.floor((Date.now() - serverMetrics.startedAt) / 1000),
     request_count: serverMetrics.requestCount,
   }
 
   // Feature detection flags
-  let claudeAvailable = false
-  let codexAvailable = false
-  let cursorAvailable = false
-
-  // Check Python venv (COS mode only)
-  if (PYTHON_BIN) {
-    try {
-      await new Promise<void>((resolve, reject) => {
-        execFile(PYTHON_BIN!, ['--version'], { timeout: 5000 }, (err, stdout) => {
-          if (err) return reject(err)
-          checks.python = stdout.trim()
-          resolve()
-        })
-      })
-    } catch {
-      checks.python = 'error'
-    }
-  } else {
-    checks.python = 'standalone'
-  }
-
-  // Check claude CLI
-  try {
-    await new Promise<void>((resolve, reject) => {
-      execFile('claude', ['--version'], { timeout: 5000 }, (err, stdout) => {
-        if (err) return reject(err)
-        checks.claude = stdout.trim()
-        claudeAvailable = true
-        resolve()
-      })
-    })
-  } catch {
-    checks.claude = 'error'
-  }
-
-  // Check Codex CLI. The desktop CLI can print benign PATH warnings to stderr,
-  // so version extraction uses stdout + stderr and looks for the codex-cli line.
-  try {
-    await new Promise<void>((resolve, reject) => {
-      execFile('codex', ['--version'], { timeout: 5000 }, (err, stdout, stderr) => {
-        if (err) return reject(err)
-        const combined = `${stdout}\n${stderr}`.trim()
-        const versionLine = combined.split('\n').map(line => line.trim()).find(line => /^codex(?:-cli)?\s+/i.test(line))
-        checks.codex = versionLine ?? combined.split('\n')[0] ?? 'available'
-        codexAvailable = true
-        resolve()
-      })
-    })
-  } catch {
-    checks.codex = 'error'
-  }
-
-  // Cursor Agent CLI — probe via `agent about` only (≤5s). Never use
-  // `agent status` (can hang on login UX while logged out).
-  try {
-    const agentBinary = resolveAgentBinary()
-    if (!agentBinary) {
-      checks.cursor = 'error'
-    } else {
-      await new Promise<void>((resolveCheck, reject) => {
-        execFile(agentBinary, ['about'], { timeout: 5000 }, (err, stdout, stderr) => {
-          if (err) return reject(err)
-          const combined = `${stdout}\n${stderr}`.trim()
-          const versionLine = combined.split('\n').map(line => line.trim()).find(line =>
-            /CLI Version|cursor|agent/i.test(line),
-          )
-          checks.cursor = versionLine ?? combined.split('\n')[0] ?? 'available'
-          resolveCheck()
-        })
-      })
-      await getCursorModelCatalog()
-      cursorAvailable = isCursorProviderReady()
-      if (!cursorAvailable) {
-        checks.cursor = typeof checks.cursor === 'string' && checks.cursor !== 'error'
-          ? `${checks.cursor} (models unresolved)`
-          : 'error'
-      }
-    }
-  } catch {
-    checks.cursor = 'error'
-  }
+  const claudeAvailable = staticProbes.claudeAvailable
+  const codexAvailable = staticProbes.codexAvailable
+  const cursorAvailable = staticProbes.cursorAvailable
 
   // Check session cache freshness (COS mode only)
   if (COS_SCRIPTS_DIR) {
