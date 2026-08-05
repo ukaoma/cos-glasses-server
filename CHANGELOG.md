@@ -1,3 +1,14 @@
+## 6.21.6
+
+- Make server-owned durable query jobs the default so accepted replies keep
+  running through phone backgrounding, WebView reloads, and network handoffs.
+- Preserve `COS_DURABLE_QUERY_JOBS=0` as the machine-wide rollback. Existing
+  accepted jobs remain recoverable and cancellable while new prompts use the
+  legacy streaming path.
+- Publish the capability truth through authenticated health/model surfaces so
+  COS Control and the companion can independently enforce machine and device
+  preferences without changing the proven two-step cancel gesture.
+
 ## 6.21.5
 
 - Drop the narrow Large-v3 stock-caption artifact family beginning with

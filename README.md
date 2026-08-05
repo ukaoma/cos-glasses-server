@@ -102,8 +102,8 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
 ## What it does
 
 - Ask anything, get a streamed answer on the lens (`/api/query`, `/v1/chat/completions`)
-- With COS Glasses build 204+, opt into server-owned durable queries with
-  `COS_DURABLE_QUERY_JOBS=1`: accepted work survives phone backgrounding,
+- With COS Glasses build 204+, server-owned durable queries are on by default:
+  accepted work survives phone backgrounding,
   WebView reloads, and network handoffs, then reattaches without duplicate work
   or duplicate replies
 - Choose Opus, Fable, Sonnet, GPT Frontier, GPT Balanced, Composer 2.5 Fast, or
@@ -174,8 +174,8 @@ in the managed CLI working directory),
 `COS_CURSOR_PERSIST_SESSIONS=0` (disable Cursor session resume),
 `COS_WEATHER_DEFAULT_LAT` / `COS_WEATHER_DEFAULT_LON` /
 `COS_WEATHER_DEFAULT_CITY` (optional home fallback when phone GPS is denied),
-`COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=1` (build 204+
-server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
+`COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=0` (optional
+machine-wide rollback for build 204+ server-owned query recovery), and `COS_MEDIA_ROOT` (optional image-store
 location; default `~/.cos-glasses/data/media`). Your name + transcription vocabulary live in
 `~/.cos-glasses/.cos-profile.json` (see `.cos-profile.example.json`).
 Factory example values are ignored; add the real names, companies, acronyms,
@@ -338,10 +338,10 @@ BIND_HOST=0.0.0.0 npm run start:server
   only when OpenAI playback is intentionally configured.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
 - *Prompt recovery unavailable?* — update with `npx --yes @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
-- *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+ and
-  `COS_DURABLE_QUERY_JOBS=1`. Restart once, then confirm `/api/health` reports
+- *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+.
+  Restart once, then confirm `/api/health` reports
   `features.durableQueryJobs: true`, protocol `1`, and state `ready`. To roll
-  back, remove the flag; accepted jobs still drain while new prompts use legacy streaming.
+  back, set `COS_DURABLE_QUERY_JOBS=0`; accepted jobs still drain while new prompts use legacy streaming.
 - *Offline meeting recovery unavailable?* — build 209+ requires server 6.11.0+.
   Restart once, then confirm `/api/health` reports
   `features.localFirstMeetings: true` and

@@ -432,23 +432,22 @@ listenRequiredServers(listeners).then(() => {
     console.log(`[startup] Silero VAD: ${vadOk ? 'active' : 'disabled (model not found)'}`)
   }
 
-  // Durable recovery and state-mutating background work remain closed until an
-  // authenticated controller release. The lifecycle callback is delivered for
-  // both an already-open fresh boot and a later cross-boot release.
+  // Durable recovery starts with the admitted runtime by default. A literal
+  // COS_DURABLE_QUERY_JOBS=0 is the machine-wide rollback.
   let admittedRuntimeStarted = false
   const startAdmittedRuntime = () => {
     if (admittedRuntimeStarted) return
     admittedRuntimeStarted = true
 
     void initQueryJobRuntime().then(health => {
-      if (process.env.COS_DURABLE_QUERY_JOBS === '1') {
+      if (process.env.COS_DURABLE_QUERY_JOBS !== '0') {
         console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
       } else {
-        console.log('[COS API] Durable query jobs: disabled (set COS_DURABLE_QUERY_JOBS=1 to enable)')
+        console.log('[COS API] Durable query jobs: disabled by COS_DURABLE_QUERY_JOBS=0')
       }
     }).catch(error => {
       // The store remains degraded and rejects admission. Legacy /api/query is
-      // still mounted, so disabling the feature flag is an immediate rollback.
+      // still mounted, so the kill switch is an immediate rollback.
       console.error('[COS API] Durable query-job store unavailable:', error)
     })
 
