@@ -1,3 +1,15 @@
+## 6.21.7
+
+- Add a default-off, authenticated meeting-preview endpoint for private canaries.
+  It accepts bounded, server-pinned audio snapshots and returns disposable
+  Large-v3-Turbo text without creating or mutating meeting sessions.
+- Keep canonical Large-v3 transcription, speaker attribution, recovery, save, HQ
+  polish, and indexing unchanged. Preview never falls back to the canonical worker
+  and drops under canonical Metal contention.
+- Reject stale server pins and oversized bodies before inference, recheck
+  maintenance admission after slow uploads, and drop concurrent preview work rather
+  than building a latency queue. `COS_WHISPER_MEETING_PREVIEW=1` is required.
+
 ## 6.21.6
 
 - Make server-owned durable query jobs the default so accepted replies keep

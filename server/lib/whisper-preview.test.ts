@@ -132,7 +132,7 @@ describe('adaptive Whisper preview selection', () => {
     }))
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce({ ok: true })
-      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      .mockImplementation(async (_url: string, init: RequestInit) => {
         expect((init.body as FormData).get('prompt')).toBeNull()
         return { ok: true, json: async () => ({ text: 'Turbo provisional preview' }) }
       }))
@@ -160,11 +160,15 @@ describe('adaptive Whisper preview selection', () => {
     await expect(preview.transcribeWhisperPreview(Buffer.alloc(3200, 1))).resolves.toEqual({
       text: 'Turbo provisional preview', model: 'large-v3-turbo', backend: 'whisper-preview-server',
     })
+    await expect(preview.transcribeWhisperMeetingPreview(Buffer.alloc(3200, 1))).resolves.toEqual({
+      text: 'Turbo provisional preview', model: 'large-v3-turbo', backend: 'whisper-preview-server',
+    })
     const { beginCanonicalMetal } = await import('./whisper-metal-gate.js')
     const releaseCanonical = beginCanonicalMetal('test_commit')
     await expect(preview.transcribeWhisperPreview(Buffer.alloc(3200, 1))).resolves.toEqual({
       text: '', model: 'large-v3-turbo', backend: 'whisper-preview-server',
     })
+    await expect(preview.transcribeWhisperMeetingPreview(Buffer.alloc(3200, 1))).resolves.toBeNull()
     releaseCanonical()
     expect(transcribeLocal).not.toHaveBeenCalled()
   })

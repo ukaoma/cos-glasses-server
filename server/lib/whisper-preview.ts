@@ -434,3 +434,37 @@ export async function transcribeWhisperPreview(audioBuffer: Buffer): Promise<{
     throw error
   }
 }
+
+/**
+ * Meeting-preview canary: use only the isolated Turbo sidecar.
+ *
+ * Unlike prompt preview, this path never falls through to the canonical
+ * Large-v3 worker. A missing, busy, preempted, or failed sidecar is a silent
+ * cosmetic miss; durable meeting transcription continues on its unchanged
+ * canonical path.
+ */
+export async function transcribeWhisperMeetingPreview(audioBuffer: Buffer): Promise<{
+  text: string
+  model: 'large-v3-turbo'
+  backend: 'whisper-preview-server'
+} | null> {
+  if (!previewAvailable || previewWorkerModel !== 'large-v3-turbo') return null
+  const previewLease = tryAcquireMetalPreview()
+  if (!previewLease) return null
+  try {
+    return {
+      text: await transcribeViaPreviewServer(audioBuffer, previewLease.signal),
+      model: 'large-v3-turbo',
+      backend: 'whisper-preview-server',
+    }
+  } catch (error) {
+    if (previewLease.signal.aborted) return null
+    previewAvailable = false
+    previewWorkerModel = null
+    previewFailure = 'preview_sidecar_unavailable'
+    console.warn(`[whisper-preview] meeting Turbo preview failed; canonical meeting ASR was not affected: ${error instanceof Error ? error.message : error}`)
+    return null
+  } finally {
+    previewLease.release()
+  }
+}

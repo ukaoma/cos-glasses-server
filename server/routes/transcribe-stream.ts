@@ -29,11 +29,13 @@ import {
 } from '../lib/openai-whisper-budget.js'
 import {
   stripInlineHallucinations as sharedStripInlineHallucinations,
+  stripInlineHallucinationsOneShot,
   isFullHallucination as sharedIsFullHallucination,
   clearSessionHallucinationState,
   streamSilenceDropReason,
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
+import { transcribeWhisperMeetingPreview } from '../lib/whisper-preview.js'
 import { dataPath } from '../lib/data-dir.js'
 import {
   countChunkWavs,
@@ -101,6 +103,12 @@ function ensurePrivateDirectory(path: string): void {
 // Rollback: COS_WHISPER_STRIP_BRAND_URLS=0 (URL drops), COS_WHISPER_THANKYOU_FILTER=0.
 const STRIP_BRAND_URLS = process.env.COS_WHISPER_STRIP_BRAND_URLS !== '0'
 const THANKYOU_FILTER = process.env.COS_WHISPER_THANKYOU_FILTER !== '0'
+const MEETING_PREVIEW_MAX_BYTES = 512 * 1024
+let meetingPreviewBusy = false
+
+function meetingTurboPreviewEnabled(): boolean {
+  return process.env.COS_WHISPER_MEETING_PREVIEW === '1'
+}
 
 // Audio persistence: save G2-mic chunks for speakers who need more training data
 const AUDIO_SAVE_DIR = dataPath('training-audio')
@@ -1180,6 +1188,21 @@ async function readRawBody(req: AsyncIterable<Buffer | Uint8Array | string>): Pr
   return Buffer.concat(buffers)
 }
 
+async function readBoundedRawBody(
+  req: AsyncIterable<Buffer | Uint8Array | string>,
+  maxBytes: number,
+): Promise<Buffer> {
+  const buffers: Buffer[] = []
+  let total = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += buffer.length
+    if (total > maxBytes) throw makeHttpError(413, 'audio chunk too large', 'chunk_too_large')
+    buffers.push(buffer)
+  }
+  return Buffer.concat(buffers)
+}
+
 async function persistRawSessionAudioChunk(sessionId: string, chunkIndex: number, audioBuffer: Buffer): Promise<void> {
   const sessionDir = resolve(SESSION_AUDIO_DIR, sessionId)
   ensurePrivateDirectory(sessionDir)
@@ -1663,6 +1686,70 @@ function sendStreamError(res: { status: (code: number) => { json: (body: unknown
   const status = typeof (err as any)?.status === 'number' ? (err as any).status : 500
   return res.status(status).json({ error: errMsg(err), reason: (err as any)?.reason })
 }
+
+/**
+ * Default-off meeting preview canary.
+ *
+ * This route deliberately owns no meeting session, recovery ledger, speaker
+ * attribution, or persistence. It accepts a pinned copy of the still-open
+ * phrase and returns provisional Turbo text. Any contention or failure is a
+ * 204 cosmetic miss; the canonical /transcribe-stream upload remains the only
+ * durable and speaker-attributed result.
+ */
+transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
+  try {
+    if (!meetingTurboPreviewEnabled() || !maintenanceAdmissionsOpen()) {
+      return void res.status(204).send()
+    }
+
+    const headerPin = req.get('X-COS-Server-Instance')?.trim() ?? ''
+    const queryPin = typeof req.query.serverInstanceId === 'string'
+      ? req.query.serverInstanceId.trim()
+      : ''
+    if (!headerPin && !queryPin) {
+      throw makeHttpError(400, 'server identity pin required', 'server_identity_pin_required')
+    }
+    const serverInstanceId = assertPinnedServerIdentity(headerPin, queryPin)
+    const sessionId = String(req.query.sessionId ?? '')
+    validateSessionId(sessionId)
+    const chunkIndex = Number(req.query.chunkIndex)
+    validateChunkIndex(chunkIndex)
+    const previewGen = Number(req.query.previewGen)
+    if (!Number.isInteger(previewGen) || previewGen < 0 || previewGen > 1_000_000_000) {
+      throw makeHttpError(400, 'invalid previewGen', 'invalid_preview_generation')
+    }
+
+    const audio = await readBoundedRawBody(req, MEETING_PREVIEW_MAX_BYTES)
+    if (audio.length < 100) throw makeHttpError(400, 'audio too short', 'audio_too_short')
+    if (!maintenanceAdmissionsOpen() || meetingPreviewBusy) {
+      return void res.status(204).send()
+    }
+
+    meetingPreviewBusy = true
+    try {
+      const result = await transcribeWhisperMeetingPreview(audio)
+      if (!result) return void res.status(204).send()
+      const cleaned = stripInlineHallucinationsOneShot(result.text.trim()).trim()
+      if (!cleaned || sharedIsFullHallucination(cleaned)) {
+        return void res.status(204).send()
+      }
+      return void res.json({
+        sessionId,
+        chunkIndex,
+        previewGen,
+        text: cleaned,
+        provisional: true,
+        model: result.model,
+        backend: result.backend,
+        serverInstanceId,
+      })
+    } finally {
+      meetingPreviewBusy = false
+    }
+  } catch (err: unknown) {
+    sendStreamError(res, err)
+  }
+})
 
 transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
   let maintenanceLease: MaintenanceWorkLease | undefined
