@@ -1,3 +1,28 @@
+## 6.21.10
+
+- Make the voice profile store durable. `voice-profiles.json` is written
+  atomically with rotating hourly backups, a corrupt file is quarantined and
+  recovered from the newest usable backup, and a save can no longer replace a
+  populated store with an empty one.
+- Keep embedding provenance aligned. `sources[]` is now added, evicted, and
+  repaired in lockstep with `embeddings[]`, and centroids use the modal
+  dimension so a single wrong-length row cannot reduce a speaker's registered
+  vector to NaN.
+- Read saved speaker audio from the runtime data directory, matching where the
+  transcription pipeline writes it. `train-g2`, `saved-audio`, `ext-audio`, and
+  `enroll-ext` previously resolved a path inside the installed package and
+  reported an empty system on every managed install.
+- Require confirmation before an unscoped `train-g2` or `enroll-ext` rewrites
+  profiles and deletes source audio, cap G2 training at ten diverse samples per
+  speaker so a large backlog cannot evict an existing profile, and retain source
+  audio whenever nothing was enrolled.
+- Add `readiness.speakerId` to health. A voiceprint model that is installed but
+  rejected by the runtime now reports degraded instead of passing as working
+  diarization; an install with no model configured is unaffected.
+- Expire saved training audio after 14 days per file, add a confirm-gated
+  `POST /api/voice/delete-person` that reports per-store removal counts, and add
+  `GET /api/voice/profiles` for review surfaces.
+
 ## 6.21.9
 
 - Prevent an unclosed or abandoned recording from monopolizing progressive HQ.
