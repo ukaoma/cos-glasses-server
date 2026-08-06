@@ -44,6 +44,27 @@ export const THRASH_MEAN_RUN = 8
 /** Below the search-accept threshold a name was never asserted with confidence. */
 export const CONFIDENT_SIMILARITY = 0.65
 
+/**
+ * FLOOR FOR PRESENTING A NAME AT ALL.
+ *
+ * The identifier accepts a match at SEARCH_THRESHOLD = 0.55, so a single segment
+ * scoring 0.55 currently arrives in the panel wearing somebody's full name. On
+ * Miles's 2026-08-06 Ditto meeting that produced Richard Jenkins (1 segment,
+ * 0.60), Luke Henry (1 segment, 0.55), Dylan Jackson (2 segments, 0.58) and
+ * Navaz Sharif (3 segments, 0.58) — and he confirmed none of them were in the
+ * room. Presenting those as names is the defect; the reviewer then has to undo
+ * an assertion the system should never have made.
+ *
+ * Standing rule this enforces: speaker identity is a SUGGESTION, never an
+ * assertion. Below the floor the row is "unidentified" and the label survives
+ * only as a scored candidate.
+ *
+ * A floor cannot catch everything — a wrong match can still score well — so this
+ * removes obvious noise rather than guaranteeing correctness.
+ */
+export const ASSERT_MIN_SIMILARITY = CONFIDENT_SIMILARITY
+export const ASSERT_MIN_SEGMENTS = 3
+
 export type Reliability = 'confident' | 'weak' | 'unreliable' | 'unattributed'
 
 export interface ThrashPair {
@@ -72,6 +93,17 @@ export interface VoiceReview {
   longestRun: number
   isOwner: boolean
   reliability: Reliability
+  /**
+   * Whether `label` may be shown to a human AS A NAME.
+   *
+   * False means the UI must render the row as unidentified and offer `label`
+   * only as a scored candidate. Carried as data rather than left to each client
+   * to re-derive, so the phone, the lens and Control cannot disagree about
+   * whether a name was earned.
+   */
+  nameAsserted: boolean
+  /** Why the name is not asserted — so a UI can explain rather than just hide. */
+  assertionBlockers: string[]
   thrashesWith: ThrashPair[]
   phrases: Phrase[]
 }
@@ -250,6 +282,24 @@ export function reviewMeetingSpeakers(
         ? 'unreliable'
         : (meanSim ?? 0) >= CONFIDENT_SIMILARITY ? 'confident' : 'weak'
 
+    // What stops this label being presented as a name. Collected as reasons
+    // rather than a bare boolean: "2 segments" and "similarity 0.58" are
+    // different problems and a reviewer deserves to see which one applies.
+    const assertionBlockers: string[] = []
+    if (unattributed) {
+      assertionBlockers.push('no name was ever assigned to this voice')
+    } else {
+      if (own.length < ASSERT_MIN_SEGMENTS) {
+        assertionBlockers.push(`only ${own.length} segment${own.length === 1 ? '' : 's'} (needs ${ASSERT_MIN_SEGMENTS})`)
+      }
+      if ((meanSim ?? 0) < ASSERT_MIN_SIMILARITY) {
+        assertionBlockers.push(`similarity ${(meanSim ?? 0).toFixed(2)} below ${ASSERT_MIN_SIMILARITY}`)
+      }
+      if (thrashesWith.length > 0) {
+        assertionBlockers.push(`swaps with ${thrashesWith[0].speaker} every ${Math.round(thrashesWith[0].meanRun)} segments`)
+      }
+    }
+
     return {
       label,
       segments: own.length,
@@ -258,6 +308,8 @@ export function reviewMeetingSpeakers(
       longestRun: runs.length ? Math.max(...runs) : 0,
       isOwner: label === owner,
       reliability,
+      nameAsserted: assertionBlockers.length === 0,
+      assertionBlockers,
       thrashesWith,
       phrases: selectPhrases(chunks, label, limit, durationMs),
     }

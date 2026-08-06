@@ -12,6 +12,8 @@
 // asserted.
 import { describe, expect, it } from 'vitest'
 import {
+  ASSERT_MIN_SEGMENTS,
+  ASSERT_MIN_SIMILARITY,
   CONFIDENT_SIMILARITY,
   THRASH_FLIP_RATE,
   THRASH_MEAN_RUN,
@@ -206,5 +208,101 @@ describe('the whole review', () => {
     expect(reviewMeetingSpeakers([]).voices).toEqual([])
     const junk = reviewMeetingSpeakers([{}, { speaker: 'A' }, { text: 'hi' }] as ReviewChunk[])
     expect(junk.segments).toBe(3)
+  })
+})
+
+describe('a name must be EARNED before it is presented as a name', () => {
+  // Fixtures are the actual rows from Miles's 2026-08-06 Ditto meeting, where
+  // he confirmed the low-confidence voices were not in the room at all. Before
+  // this floor each of them arrived in the panel wearing a full name.
+  function voiceOf(label: string, segments: number, similarity: number, others: string[] = []) {
+    const seq: string[] = []
+    for (let i = 0; i < segments; i++) seq.push(label)
+    // Pad with a long-running speaker so the meeting is realistic and the
+    // target's own run structure is not the thing under test.
+    for (let i = 0; i < 200; i++) seq.push(others[i % Math.max(others.length, 1)] ?? 'MU')
+    const cs: ReviewChunk[] = seq.map((sp, i) => ({
+      speaker: sp,
+      text: `${sp} raised the HubSpot module builder question in segment ${i}`,
+      elapsed: i * 7000,
+      similarity: sp === label ? similarity : 0.82,
+    }))
+    const review = reviewMeetingSpeakers(cs, { owner: 'MU' })
+    return review.voices.find(v => v.label === label)!
+  }
+
+  it('refuses a 1-segment match at 0.60 — Richard Jenkins in the real meeting', () => {
+    const v = voiceOf('Richard Jenkins', 1, 0.60)
+    expect(v.nameAsserted).toBe(false)
+    expect(v.assertionBlockers.join(' ')).toContain('1 segment')
+    expect(v.assertionBlockers.join(' ')).toContain('0.60')
+  })
+
+  it('refuses a 1-segment match at 0.55 — Luke Henry, the split-identity label', () => {
+    expect(voiceOf('Luke Henry', 1, 0.55).nameAsserted).toBe(false)
+  })
+
+  it('refuses a 3-segment match at 0.58 — Navaz Sharif, over the segment floor but under similarity', () => {
+    // Segment count alone is not enough: this row CLEARS the segment floor and
+    // must still be refused on similarity.
+    const v = voiceOf('Navaz Sharif', ASSERT_MIN_SEGMENTS, 0.58)
+    expect(v.segments).toBe(ASSERT_MIN_SEGMENTS)
+    expect(v.nameAsserted).toBe(false)
+    expect(v.assertionBlockers.some(b => b.includes('similarity'))).toBe(true)
+    expect(v.assertionBlockers.some(b => b.includes('segment'))).toBe(false)
+  })
+
+  it('refuses a high-similarity match that is only 2 segments long', () => {
+    // The inverse: strong score, not enough evidence.
+    const v = voiceOf('Ryan Hopkins', 2, 0.91)
+    expect(v.nameAsserted).toBe(false)
+    expect(v.assertionBlockers.some(b => b.includes('segment'))).toBe(true)
+    expect(v.assertionBlockers.some(b => b.includes('similarity'))).toBe(false)
+  })
+
+  it('asserts a name that clears BOTH floors', () => {
+    const v = voiceOf('Cristian Teichner', 32, 0.72)
+    expect(v.nameAsserted).toBe(true)
+    expect(v.assertionBlockers).toEqual([])
+  })
+
+  it('refuses a name that thrashes, however strong its score', () => {
+    // Already surfaced as `unreliable`; the panel says a name here is a guess,
+    // so it must not also be presented AS a name.
+    const seq = turnTaking('Luke H', 'Luke Henry', 60, 2)
+    const review = reviewMeetingSpeakers(chunks(seq), { owner: 'MU' })
+    for (const v of review.voices) {
+      expect(v.reliability).toBe('unreliable')
+      expect(v.nameAsserted).toBe(false)
+      expect(v.assertionBlockers.some(b => b.includes('swaps with'))).toBe(true)
+    }
+  })
+
+  it('never asserts an unattributed row, and says why', () => {
+    const review = reviewMeetingSpeakers(chunks(turnTaking('Ext', 'MU', 40, 30)), { owner: 'MU' })
+    const ext = review.voices.find(v => v.label === 'Ext')!
+    expect(ext.nameAsserted).toBe(false)
+    expect(ext.assertionBlockers).toEqual(['no name was ever assigned to this voice'])
+  })
+
+  it('holds the owner to the same floor', () => {
+    // The owner gets no exemption: an owner row that thrashes or scores badly is
+    // exactly as unearned as anyone else's, and MU read `unreliable` on the real
+    // Ditto meeting.
+    const v = voiceOf('MU', 2, 0.58, ['Bradley Haveman'])
+    expect(v.isOwner).toBe(true)
+    expect(v.nameAsserted).toBe(false)
+  })
+
+  it('keeps the label available as a candidate rather than discarding it', () => {
+    // The reviewer still needs to see WHO the system guessed — that is often the
+    // clue that identifies the voice. The floor governs presentation, not data.
+    const v = voiceOf('Navaz Sharif', 1, 0.58)
+    expect(v.label).toBe('Navaz Sharif')
+    expect(v.meanSimilarity).toBeCloseTo(0.58, 2)
+  })
+
+  it('ties the floor to the confident-similarity threshold rather than a second magic number', () => {
+    expect(ASSERT_MIN_SIMILARITY).toBe(CONFIDENT_SIMILARITY)
   })
 })
