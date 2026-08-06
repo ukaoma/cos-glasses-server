@@ -22,6 +22,7 @@ import {
   reviewMeetingSpeakers,
   selectPhrases,
   speakerRuns,
+  speakerTimeline,
   type ReviewChunk,
 } from './meeting-speaker-review.js'
 
@@ -304,5 +305,81 @@ describe('a name must be EARNED before it is presented as a name', () => {
 
   it('ties the floor to the confident-similarity threshold rather than a second magic number', () => {
     expect(ASSERT_MIN_SIMILARITY).toBe(CONFIDENT_SIMILARITY)
+  })
+})
+
+describe('the timeline that makes a ribbon a timeline', () => {
+  const cs = (rows: Array<[string, number]>): ReviewChunk[] =>
+    rows.map(([speaker, elapsed], i) => ({ speaker, elapsed, text: `segment ${i}`, similarity: 0.8 }))
+
+  it('collapses consecutive segments by the same speaker into one span', () => {
+    const t = speakerTimeline(cs([['MU', 0], ['MU', 6000], ['MU', 12000], ['Chris', 18000]]), 24000)
+    expect(t).toHaveLength(2)
+    expect(t[0]).toEqual({ speaker: 'MU', startMs: 0, endMs: 18000, segments: 3 })
+    expect(t[1]).toEqual({ speaker: 'Chris', startMs: 18000, endMs: 24000, segments: 1 })
+  })
+
+  it('preserves ORDER, including a speaker who returns later', () => {
+    // The property the old ribbon could not express: one voice occupying two
+    // separate stretches of the meeting.
+    const t = speakerTimeline(cs([['MU', 0], ['Chris', 5000], ['MU', 9000]]), 12000)
+    expect(t.map(s => s.speaker)).toEqual(['MU', 'Chris', 'MU'])
+    expect(t[2].startMs).toBe(9000)
+  })
+
+  it('makes every span contiguous with the next, so hover has no dead gaps', () => {
+    const t = speakerTimeline(cs([['A', 0], ['B', 7000], ['C', 15000]]), 20000)
+    for (let i = 0; i < t.length - 1; i++) expect(t[i].endMs).toBe(t[i + 1].startMs)
+    expect(t[t.length - 1].endMs).toBe(20000)
+  })
+
+  it('treats elapsed as a START offset, not an end', () => {
+    // meeting.ts assigns `elapsed` then increments, so the first chunk's elapsed
+    // is where it BEGINS. Reading it as an end shifts the whole ribbon by one
+    // segment and every hover reports the previous speaker.
+    const t = speakerTimeline(cs([['MU', 8044], ['Chris', 15024]]), 30000)
+    expect(t[0].startMs).toBe(8044)
+    expect(t[0].endMs).toBe(15024)
+  })
+
+  it('never produces a negative or inverted span from a backwards elapsed', () => {
+    // Real sidecars can carry non-monotonic values; an inverted span renders as
+    // an invisible or backwards block.
+    const t = speakerTimeline(cs([['A', 10000], ['B', 3000], ['C', 20000]]), 25000)
+    for (const s of t) expect(s.endMs).toBeGreaterThanOrEqual(s.startMs)
+    expect(t.map(s => s.startMs)).toEqual([10000, 10000, 20000])
+  })
+
+  it('carries the cursor forward when elapsed is missing entirely', () => {
+    const rows: ReviewChunk[] = [
+      { speaker: 'A', elapsed: 5000, text: 'x', similarity: 0.8 },
+      { speaker: 'B', text: 'y', similarity: 0.8 },
+      { speaker: 'C', elapsed: 9000, text: 'z', similarity: 0.8 },
+    ]
+    const t = speakerTimeline(rows, 12000)
+    expect(t.map(s => s.startMs)).toEqual([5000, 5000, 9000])
+    for (const s of t) expect(Number.isFinite(s.startMs)).toBe(true)
+  })
+
+  it('handles an empty meeting without inventing a span', () => {
+    expect(speakerTimeline([], 0)).toEqual([])
+  })
+
+  it('never ends the last span before it starts, even with a bad durationMs', () => {
+    const t = speakerTimeline(cs([['A', 30000]]), 1000)   // duration shorter than the chunk
+    expect(t[0].endMs).toBeGreaterThanOrEqual(t[0].startMs)
+  })
+
+  it('is returned by the full review, with segments summing to the chunk count', () => {
+    const review = reviewMeetingSpeakers(chunks(turnTaking('MU', 'Chris Krubeck', 8, 30)), { owner: 'MU' })
+    expect(review.timeline.length).toBe(8)
+    expect(review.timeline.reduce((n, s) => n + s.segments, 0)).toBe(review.segments)
+  })
+
+  it('keeps unattributed stretches in the timeline rather than dropping them', () => {
+    // A gap where nobody was identified is real information — the ribbon must
+    // show it, not close over it.
+    const t = speakerTimeline(cs([['MU', 0], ['Ext', 6000], ['MU', 12000]]), 18000)
+    expect(t.map(s => s.speaker)).toEqual(['MU', 'Ext', 'MU'])
   })
 })

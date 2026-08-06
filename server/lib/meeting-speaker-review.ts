@@ -108,12 +108,65 @@ export interface VoiceReview {
   phrases: Phrase[]
 }
 
+/** One stretch of the meeting held by a single label. */
+export interface TimelineSpan {
+  /** The label as stored. Whether it may be SHOWN as a name is still governed by
+   *  the matching voice row's `nameAsserted` — a span is not a second opinion. */
+  speaker: string
+  /** Milliseconds from meeting start. `elapsed` on a chunk is its START offset:
+   *  meeting.ts assigns `elapsed` and only then does `elapsed += durationMs`. */
+  startMs: number
+  endMs: number
+  segments: number
+}
+
+/**
+ * Collapse the chunk sequence into consecutive same-speaker spans.
+ *
+ * This exists because the ribbon needs a TIME axis. The previous ribbon drew one
+ * rectangle per voice sized by share of segments and labelled itself "who spoke,
+ * in order" — there was no ordering in it at all, so hovering could not report
+ * anything true.
+ *
+ * Non-monotonic or missing `elapsed` values are carried forward rather than
+ * trusted: a span with a negative width would render as an invisible or
+ * inverted block, which is worse than a slightly wrong boundary.
+ */
+export function speakerTimeline(chunks: ReviewChunk[], durationMs: number): TimelineSpan[] {
+  const spans: TimelineSpan[] = []
+  let cursor = 0
+  for (const c of chunks) {
+    const label = c.speaker ?? ''
+    const raw = typeof c.elapsed === 'number' && Number.isFinite(c.elapsed) ? c.elapsed : 0
+    // ONE clamp does all three jobs, because `cursor` is monotonic and never
+    // negative: it recovers a missing value, a negative value, and a value that
+    // goes backwards. Mutation showed the extra Math.max(0, raw) and the
+    // `: cursor` fallback were both unreachable behind it.
+    const startMs = Math.max(cursor, raw)
+    cursor = startMs
+    const last = spans[spans.length - 1]
+    if (last && last.speaker === label) {
+      last.segments++
+    } else {
+      spans.push({ speaker: label, startMs, endMs: startMs, segments: 1 })
+    }
+  }
+  // Each span ends where the next begins; the last ends at the meeting's end.
+  for (let i = 0; i < spans.length; i++) {
+    const next = spans[i + 1]
+    spans[i].endMs = Math.max(spans[i].startMs, next ? next.startMs : durationMs)
+  }
+  return spans
+}
+
 export interface MeetingSpeakerReview {
   segments: number
   /** False when no chunk carries a real speaker — a recovered capture. */
   attributed: boolean
   durationMs: number
   voices: VoiceReview[]
+  /** Chronological spans, so a ribbon can be a timeline instead of a share bar. */
+  timeline: TimelineSpan[]
 }
 
 function mean(xs: number[]): number {
@@ -316,5 +369,11 @@ export function reviewMeetingSpeakers(
   })
 
   voices.sort((a, b) => b.segments - a.segments)
-  return { segments: chunks.length, attributed: named.length > 0, durationMs, voices }
+  return {
+    segments: chunks.length,
+    attributed: named.length > 0,
+    durationMs,
+    voices,
+    timeline: speakerTimeline(chunks, durationMs),
+  }
 }
