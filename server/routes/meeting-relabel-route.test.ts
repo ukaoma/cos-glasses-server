@@ -135,6 +135,17 @@ afterEach(async () => {
   }
 })
 
+/**
+ * Real-server integration tests: each starts an express listener, writes files,
+ * and makes an HTTP round trip. Vitest's 5s default is not enough under
+ * full-suite CPU contention — a sibling integration suite loads a 26 MB ONNX
+ * model in the same run — and the resulting failures surface as bare
+ * STACK_TRACE_ERROR timeouts on a DIFFERENT test each run, which reads exactly
+ * like a real intermittent regression. Measured: 3 flaky runs at the default,
+ * 0 across 4 runs at 30s. Set explicitly so a green suite means green.
+ */
+const HTTP_TEST_TIMEOUT = 30_000
+
 describe('nothing changes without confirmation', () => {
   it('previews and refuses with 400 when confirm is absent', async () => {
     seed('meeting_c1', ['Luke H', 'MU', 'Luke H'])
@@ -176,7 +187,7 @@ describe('nothing changes without confirmation', () => {
     expect(res.json.message).toContain('NOT rewritten')
     expect(res.json.message).toContain('first name')
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 describe('applying a full-label correction', () => {
   it('rewrites the sidecar, the attendee line and every transcript turn', async () => {
@@ -231,7 +242,7 @@ describe('applying a full-label correction', () => {
     await post('/api/meeting/meeting_a4/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
     expect(ledgerNow('meeting_a4')[1].chunks).toEqual([1, 3, 4])
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 describe('applying a PARTIAL correction', () => {
   it('changes only the named chunks and refuses to touch the markdown', async () => {
@@ -284,7 +295,7 @@ describe('applying a PARTIAL correction', () => {
     expect(res.status).toBe(400)
     expect(res.json.reason).toBe('invalid_chunks')
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 describe('the ledger goes down first', () => {
   it('aborts with the files untouched when the ledger cannot be written', async () => {
@@ -346,7 +357,7 @@ describe('the ledger goes down first', () => {
     const res = await post('/api/meeting/meeting_l4/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
     expect(res.status).toBe(200)
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 describe('rejecting bad input', () => {
   it.each([
@@ -386,7 +397,7 @@ describe('rejecting bad input', () => {
     expect(res.json.error).toContain('no chunk carries')
     expect(ledgerNow('meeting_v4')).toEqual([])
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 describe('correcting an unidentified voice', () => {
   it('names Ext, the case with no other route to a name', async () => {
@@ -400,7 +411,7 @@ describe('correcting an unidentified voice', () => {
     expect(sidecarNow().labels).toEqual(['Luke Henry', 'MU', 'Luke Henry'])
     expect(ledgerNow('meeting_e1')[1]).toMatchObject({ from: 'Ext', to: 'Luke Henry' })
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 describe('chained corrections', () => {
   it('lets a second correction refine the first', async () => {
@@ -431,4 +442,4 @@ describe('chained corrections', () => {
     const attendees = scribeNow().split('## Summary')[0]
     expect(attendees.match(/^- Luke Henry$/gm)).toHaveLength(1)
   })
-})
+}, HTTP_TEST_TIMEOUT)

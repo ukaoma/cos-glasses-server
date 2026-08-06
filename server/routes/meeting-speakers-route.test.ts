@@ -93,6 +93,17 @@ afterEach(async () => {
   if (root) rmSync(root, { recursive: true, force: true })
 })
 
+/**
+ * Real-server integration tests: each starts an express listener, writes files,
+ * and makes an HTTP round trip. Vitest's 5s default is not enough under
+ * full-suite CPU contention — a sibling integration suite loads a 26 MB ONNX
+ * model in the same run — and the resulting failures surface as bare
+ * STACK_TRACE_ERROR timeouts on a DIFFERENT test each run, which reads exactly
+ * like a real intermittent regression. Measured: 3 flaky runs at the default,
+ * 0 across 4 runs at 30s. Set explicitly so a green suite means green.
+ */
+const HTTP_TEST_TIMEOUT = 30_000
+
 describe('speaker review over HTTP', () => {
   it('returns voices, phrases, and the owner flag for a real conversation', async () => {
     seedMeeting('meeting_1_abc', turns('MU', 'Chris Krubeck', 8, 30))
@@ -189,7 +200,7 @@ describe('speaker review over HTTP', () => {
     })
     expect(res).toContain('no-store')
   })
-})
+}, HTTP_TEST_TIMEOUT)
 
 // COS-operations mode. This is the path that actually runs on a COS install, and
 // it was missed once already: sessionId was added to MeetingStore.list() while
@@ -259,4 +270,4 @@ describe('COS operations mode', () => {
     await startServer()
     expect((await get('/api/meeting/meeting_absent/speakers')).status).toBe(404)
   })
-})
+}, HTTP_TEST_TIMEOUT)
