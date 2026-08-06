@@ -8,6 +8,7 @@ import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contra
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
 import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
+import { correctionStoreStats } from '../lib/meeting-corrections.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import {
   isWhisperLocalAvailable,
@@ -120,6 +121,9 @@ healthRouter.get('/health', async (_req, res) => {
   // Visible so the correction loop can be seen banking evidence rather than
   // trusted to be. Counts only — no session ids on an unauthenticated surface.
   const chunkEmbeddings = chunkEmbeddingStoreStats()
+  // `pending` is the number that matters here: an intent that never closed means
+  // some meeting's files may be half-rewritten.
+  const speakerCorrections = correctionStoreStats()
 
   // Health is unauthenticated. Publish only availability; the actual CLI
   // session id is a resumable runtime handle and belongs on authenticated
@@ -238,6 +242,7 @@ healthRouter.get('/health', async (_req, res) => {
     meeting_sync,
     unsaved_captures,
     chunk_embeddings: chunkEmbeddings,
+    speaker_corrections: speakerCorrections,
     capabilities: {
       transcription: {
         ...transcription,

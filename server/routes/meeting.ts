@@ -7,6 +7,13 @@ import { resolve } from 'node:path'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
+import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
+import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
+import {
+  invalidLabelReason,
+  relabelMeetingMarkdown,
+  relabelSidecarJson,
+} from '../lib/meeting-relabel.js'
 import {
   getMeetingStore,
   MeetingStore,
@@ -683,6 +690,177 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
     })
+  })
+
+
+  // ── Per-meeting speaker relabel (6.21.16) ─────────────────────────────
+  //
+  // Corrects who a voice was in ONE meeting. Deliberately not a global merge:
+  // Miles, on the design — "changing it doesn't mean that all previous chunks
+  // should also be moved. It should be meeting by meeting, with the goal of
+  // hardening or refining the voice profiles." The identifier mishearing a voice
+  // in one room is not evidence that every past attribution was wrong.
+  //
+  // ORDER IS THE WHOLE DESIGN. The ledger intent is written BEFORE any file is
+  // touched, and a failed intent write aborts without mutating anything. A
+  // process that dies mid-rewrite therefore leaves a visible pending correction
+  // rather than a silently half-relabelled meeting.
+  router.post('/meeting/:sessionId/relabel', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+
+    const from = typeof req.body?.from === 'string' ? req.body.from : ''
+    const to = typeof req.body?.to === 'string' ? req.body.to : ''
+    const chunks = Array.isArray(req.body?.chunks)
+      ? (req.body.chunks as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) >= 0)
+      : []
+    if (Array.isArray(req.body?.chunks) && chunks.length !== req.body.chunks.length) {
+      res.status(400).json({ error: 'chunks must be non-negative integers', reason: 'invalid_chunks' })
+      return
+    }
+    for (const [which, label] of [['from', from], ['to', to]] as const) {
+      const bad = invalidLabelReason(label)
+      if (bad) {
+        res.status(400).json({ error: `${which}: ${bad}`, reason: 'invalid_label' })
+        return
+      }
+    }
+    if (from === to) {
+      res.status(400).json({ error: 'from and to are the same label', reason: 'noop_relabel' })
+      return
+    }
+
+    // Same resolution as GET /speakers — operations tree first when configured,
+    // so the panel and the correction act on the same copy of the meeting.
+    const operations = cosOperationsMeetingsConfigured()
+      ? findCosOperationsMeetingBySessionId(sessionId)
+      : null
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) {
+      res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
+    const meetingPath = operations?.meetingPath ?? saved!.filepath
+    const title = operations?.title ?? saved!.title
+
+    let sidecarRaw: string
+    try {
+      sidecarRaw = readFileSync(sidecarPath, 'utf-8')
+    } catch {
+      res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
+      return
+    }
+
+    const plan = relabelSidecarJson(sidecarRaw, from, to, chunks)
+    if (!plan.ok) {
+      res.status(422).json({ error: plan.error, reason: 'relabel_rejected' })
+      return
+    }
+
+    // The markdown may only be rewritten when EVERY chunk carrying `from` is
+    // covered. Its turn segmentation does not match the sidecar's, so a partial
+    // relabel has no way to know which turns the selected chunks became.
+    let markdownRaw: string | null = null
+    let markdownPlan: ReturnType<typeof relabelMeetingMarkdown> | null = null
+    if (plan.value.coveredAllWithLabel) {
+      try {
+        markdownRaw = readFileSync(meetingPath, 'utf-8')
+        markdownPlan = relabelMeetingMarkdown(markdownRaw, from, to)
+      } catch {
+        markdownRaw = null   // sidecar-only correction; reported in the response
+      }
+    }
+    const md = markdownPlan?.ok ? markdownPlan.value : null
+
+    const surfaces = {
+      sidecar: plan.value.changed.length,
+      attendees: md?.attendees ?? 0,
+      transcript: md?.transcript ?? 0,
+    }
+    const preview = {
+      sessionId,
+      title,
+      from,
+      to,
+      scope: 'meeting' as const,
+      chunks: plan.value.changed,
+      surfaces,
+      partial: !plan.value.coveredAllWithLabel,
+      remainingWithFrom: plan.value.remainingWithFrom,
+      speakersAfter: plan.value.speakers,
+      proseStale: md?.proseStale ?? false,
+      proseHits: md?.proseHits ?? [],
+      markdownSkipped: !plan.value.coveredAllWithLabel
+        ? 'partial relabel: transcript turns cannot be mapped to chunk indices'
+        : markdownRaw === null ? 'meeting markdown unreadable' : null,
+    }
+
+    if (req.body?.dryRun === true || req.body?.confirm !== true) {
+      res.status(req.body?.dryRun === true ? 200 : 400).json({
+        ...(req.body?.dryRun === true ? {} : { error: 'confirmation required', reason: 'confirmation_required' }),
+        message: `Relabelling ${surfaces.sidecar} chunk(s) from "${from}" to "${to}" in this meeting`
+          + (preview.proseStale
+            ? '. The summary and decisions still name the old speaker and are NOT rewritten — '
+              + `prose refers to people by first name (${preview.proseHits.join(', ')}), `
+              + 'so substituting it could rewrite a sentence about someone else.'
+            : '.'),
+        ...preview,
+      })
+      return
+    }
+
+    // A prior correction that never closed means this meeting's files may already
+    // be half-written. Refuse rather than layering a second rewrite on top.
+    const stalled = pendingCorrections(sessionId)
+    if (stalled.length > 0 && req.body?.force !== true) {
+      res.status(409).json({
+        error: 'a previous correction on this meeting never completed',
+        reason: 'correction_pending',
+        pending: stalled.map(r => ({ id: r.id, at: r.at, from: r.from, to: r.to })),
+        message: 'Its files may be partly rewritten. Re-check the meeting, then pass { force: true } to proceed.',
+      })
+      return
+    }
+
+    const id = `${sessionId}:${from}>${to}:${Date.now().toString(36)}`
+    const at = new Date().toISOString()
+    // Intent first. If this cannot be written, nothing is mutated — an
+    // unrecorded rewrite is the exact failure the ledger exists to prevent.
+    if (!appendCorrection(sessionId, { id, phase: 'intent', at, from, to, chunks: plan.value.changed, scope: 'meeting' })) {
+      res.status(500).json({
+        error: 'could not record the correction, so nothing was changed',
+        reason: 'ledger_unwritable',
+      })
+      return
+    }
+
+    try {
+      durableAtomicWriteFileSync(sidecarPath, plan.value.json, { mode: 0o600 })
+      if (md && (md.attendees > 0 || md.transcript > 0)) {
+        durableAtomicWriteFileSync(meetingPath, md.markdown, { mode: 0o600 })
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      appendCorrection(sessionId, {
+        id, phase: 'failed', at: new Date().toISOString(), from, to,
+        chunks: plan.value.changed, scope: 'meeting', error: message,
+      })
+      res.status(500).json({ error: `relabel failed: ${message}`, reason: 'write_failed' })
+      return
+    }
+
+    appendCorrection(sessionId, {
+      id, phase: 'applied', at: new Date().toISOString(), from, to,
+      chunks: plan.value.changed, scope: 'meeting', surfaces,
+      proseStale: preview.proseStale,
+    })
+
+    res.json({ ok: true, correctionId: id, ...preview })
   })
 
   // ── Unsaved-capture recovery (6.19.0) ─────────────────────────────────

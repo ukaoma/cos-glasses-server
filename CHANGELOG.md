@@ -1,3 +1,33 @@
+## 6.21.16
+
+- `POST /api/meeting/:sessionId/relabel` — correct who a voice was in ONE
+  meeting. Body `{ from, to, chunks?, confirm | dryRun, force? }`.
+- Per-meeting by design, not a global merge. Miles: "changing it doesn't mean
+  that all previous chunks should also be moved. It should be meeting by
+  meeting, with the goal of hardening or refining the voice profiles." The
+  identifier mishearing a voice in one room is not evidence that every past
+  attribution was wrong.
+- Fails closed like the other destructive endpoints: no `confirm` returns 400
+  `confirmation required` with a full preview of what would change.
+- THE LEDGER IS WRITTEN FIRST. An intent row lands before any file is touched,
+  and a ledger that cannot be written aborts the correction with the files
+  untouched — an unrecorded mutation is the failure this exists to prevent. A
+  process dying mid-rewrite therefore leaves a visible pending correction, and a
+  later correction on the same meeting refuses with 409 until `force`.
+- A PARTIAL relabel (explicit `chunks`) never touches the meeting markdown.
+  Measured on a real meeting: 135 sidecar chunks collapse to 46 speaker runs
+  while the markdown carries 70 turns, and they disagree on who spoke — the
+  transcript comes from a different segmentation pass, so there is no
+  chunk-index-to-turn mapping. Rewriting by label there would relabel turns the
+  human never selected. The response says why rather than staying silent.
+- Narrative prose is NEVER rewritten — only reported as `proseStale` with the
+  forms found. Verified on a real scribe: 6 of 12 speakers are referred to by
+  bare first name in the summary, and with two Kyles, two Jacobuses and two
+  Chrises in this org a first-name substitution would rewrite sentences about
+  someone else. The confirmation message says this before a human commits.
+- `/api/health` reports `speaker_corrections` (sessions, applied, pending,
+  failed). `pending` is the one to watch.
+
 ## 6.21.15
 
 - Persist the per-chunk voiceprint embedding, so a speaker correction can become
