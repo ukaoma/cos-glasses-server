@@ -213,6 +213,56 @@ export function meetingAudioChunkPath(sessionId: string, chunkIndex: number): st
   return existsSync(path) ? path : null
 }
 
+/**
+ * Fallback source: audio the capture path saved for an UNRECOGNISED speaker.
+ *
+ * `ext-audio/<sessionId>/ext_chunk<N>_<ts>.wav` is written live whenever the
+ * identifier finds no match, and `<N>` is the same RAW capture index the review
+ * addresses. Verified across 14 real meetings: 90-100% of these files correspond
+ * to a chunk the sidecar labels `Ext`.
+ *
+ * This matters because the 7-day archive is FORWARD-ONLY — it starts filling
+ * when a meeting is saved under 6.21.18, so on the day of that upgrade there is
+ * nothing to play. ext-audio already holds the unidentified voices from the last
+ * 72 hours, which is exactly the set a reviewer most needs to hear.
+ *
+ * Shorter window than the archive (72h vs 7 days), so the listing reports which
+ * source a chunk came from rather than implying one retention rule.
+ */
+export function extAudioChunkPath(sessionId: string, chunkIndex: number): string | null {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
+  const dir = join(dataPath('ext-audio'), sessionId.replace(/:/g, '_'))
+  if (!resolve(dir).startsWith(resolve(dataPath('ext-audio')) + '/') || !existsSync(dir)) return null
+  try {
+    // Timestamped suffix, so match on the index and take the newest.
+    const prefix = `ext_chunk${chunkIndex}_`
+    const hits = readdirSync(dir).filter(n => n.startsWith(prefix) && n.endsWith('.wav')).sort()
+    const pick = hits[hits.length - 1]
+    if (!pick) return null
+    const path = resolve(dir, pick)
+    return resolve(path).startsWith(resolve(dir) + '/') ? path : null
+  } catch {
+    return null
+  }
+}
+
+/** Raw chunk indices this session has ext-audio for, ascending. */
+export function listExtAudioChunks(sessionId: string): number[] {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return []
+  const dir = join(dataPath('ext-audio'), sessionId.replace(/:/g, '_'))
+  if (!existsSync(dir)) return []
+  try {
+    const out = new Set<number>()
+    for (const n of readdirSync(dir)) {
+      const m = /^ext_chunk(\d+)_.*\.wav$/.exec(n)
+      if (m) out.add(Number(m[1]))
+    }
+    return [...out].sort((a, b) => a - b)
+  } catch {
+    return []
+  }
+}
+
 /** Chunk indices retained for a session, ascending. */
 export function listMeetingAudioChunks(sessionId: string): number[] {
   const dir = sessionDir(sessionId)

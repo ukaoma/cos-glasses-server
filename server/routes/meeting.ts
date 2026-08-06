@@ -11,6 +11,8 @@ import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
 import {
+  extAudioChunkPath,
+  listExtAudioChunks,
   listMeetingAudioChunks,
   meetingAudioChunkPath,
   meetingAudioRetentionDays,
@@ -1151,9 +1153,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid chunkIndex', reason: 'invalid_chunk_index' })
       return
     }
+    // Archive first, then the live ext-audio the capture path already saved for
+    // unrecognised speakers. The archive is forward-only, so without this
+    // fallback there is nothing to play on any meeting predating 6.21.18 — while
+    // 72 hours of unidentified-voice audio is sitting right there, and an
+    // unidentified voice is exactly what a reviewer needs to hear.
     const path = meetingAudioChunkPath(sessionId, chunkIndex)
+      ?? extAudioChunkPath(sessionId, chunkIndex)
     if (!path) {
-      const retained = listMeetingAudioChunks(sessionId)
+      const retained = [...new Set([
+        ...listMeetingAudioChunks(sessionId),
+        ...listExtAudioChunks(sessionId),
+      ])].sort((a, b) => a - b)
       res.status(404).json({
         error: retained.length === 0
           ? 'No audio retained for this meeting'
@@ -1180,11 +1191,17 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const chunks = listMeetingAudioChunks(sessionId)
+    const archived = listMeetingAudioChunks(sessionId)
+    const ext = listExtAudioChunks(sessionId)
+    const chunks = [...new Set([...archived, ...ext])].sort((a, b) => a - b)
     res.json({
       sessionId,
       retained: chunks.length > 0,
       chunks,
+      // Reported separately: ext-audio runs a 72h window, the archive 7 days, so
+      // one retention number would be wrong for half the list.
+      archivedChunks: archived.length,
+      extAudioChunks: ext.length,
       // Config read, not a filesystem walk: this route used to stat every
       // retained chunk to report one number.
       retentionDays: meetingAudioRetentionDays(),

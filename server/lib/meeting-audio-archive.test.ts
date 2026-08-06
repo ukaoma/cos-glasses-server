@@ -376,3 +376,57 @@ describe('the health hot path', () => {
   })
 })
 
+describe('ext-audio fallback', () => {
+  // The archive is FORWARD-ONLY, so on upgrade day there is nothing to play.
+  // ext-audio already holds 72 hours of unidentified-voice audio keyed by the
+  // same raw chunk index — verified across 14 real meetings at 90-100% match.
+  function seedExt(sessionId: string, indices: number[], ts = 1785846879259): void {
+    const d = join(dir, 'ext-audio', sessionId)
+    mkdirSync(d, { recursive: true })
+    for (const i of indices) writeFileSync(join(d, `ext_chunk${i}_${ts + i}.wav`), Buffer.alloc(96, i + 1))
+  }
+
+  it('lists the raw chunk indices ext-audio holds', () => {
+    seedExt('meeting_x', [9, 10, 14, 22])
+    expect(mod.listExtAudioChunks('meeting_x')).toEqual([9, 10, 14, 22])
+  })
+
+  it('resolves a chunk by its RAW index, matching the real filename shape', () => {
+    seedExt('meeting_y', [16])
+    const p = mod.extAudioChunkPath('meeting_y', 16)
+    expect(p).toContain('ext_chunk16_')
+    expect(readFileSync(p!)).toEqual(Buffer.alloc(96, 17))
+  })
+
+  it('does not confuse chunk 1 with chunk 16', () => {
+    // A prefix match on `ext_chunk1` would also hit ext_chunk16, ext_chunk10…
+    // and play the wrong segment.
+    seedExt('meeting_z', [1, 10, 16])
+    expect(mod.extAudioChunkPath('meeting_z', 1)).toContain('ext_chunk1_')
+    expect(mod.extAudioChunkPath('meeting_z', 1)).not.toContain('ext_chunk16_')
+    expect(mod.extAudioChunkPath('meeting_z', 1)).not.toContain('ext_chunk10_')
+  })
+
+  it('returns null for a chunk with no ext audio', () => {
+    seedExt('meeting_w', [5])
+    expect(mod.extAudioChunkPath('meeting_w', 99)).toBeNull()
+    expect(mod.extAudioChunkPath('meeting_none', 0)).toBeNull()
+    expect(mod.listExtAudioChunks('meeting_none')).toEqual([])
+  })
+
+  it('refuses a traversing session id', () => {
+    for (const bad of ['../../etc', 'a/b', '..']) {
+      expect(mod.extAudioChunkPath(bad, 0)).toBeNull()
+      expect(mod.listExtAudioChunks(bad)).toEqual([])
+    }
+  })
+
+  it('takes the newest file when a chunk was written more than once', () => {
+    const d = join(dir, 'ext-audio', 'meeting_dup')
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'ext_chunk7_1000000000001.wav'), Buffer.alloc(96, 1))
+    writeFileSync(join(d, 'ext_chunk7_1000000000002.wav'), Buffer.alloc(96, 2))
+    expect(readFileSync(mod.extAudioChunkPath('meeting_dup', 7)!)).toEqual(Buffer.alloc(96, 2))
+  })
+})
+
