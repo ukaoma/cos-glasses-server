@@ -69,7 +69,10 @@ export function describeRepairs(r: StoreRepairs): string {
   return parts.join(', ')
 }
 
-const UNKNOWN_SOURCE = 'unknown'
+/** Placeholder provenance for a sample whose source was never recorded.
+ *  Exported so callers and tests reference the same value the store writes;
+ *  3 samples in the live store carry it. */
+export const UNKNOWN_SOURCE = 'unknown'
 
 function isUsableEmbedding(row: unknown): row is number[] {
   return Array.isArray(row) && row.length > 0 && row.every(v => typeof v === 'number' && Number.isFinite(v))
@@ -315,6 +318,38 @@ export function dropOldestEmbedding(profile: VoiceProfile): { droppedSource: str
   const droppedSource = profile.sources.shift() ?? null
   profile.sources.length = profile.embeddings.length
   return { droppedSource }
+}
+
+/**
+ * Drop the sample at `index`, keeping sources[] in lockstep.
+ *
+ * Alignment happens BEFORE the splice: a sources[] shorter than embeddings[]
+ * would otherwise make index N refer to two different samples in the two
+ * arrays, permanently offsetting provenance from the samples it describes —
+ * the same class of bug as the old inline `sources?.shift()`.
+ */
+export function dropEmbeddingAt(profile: VoiceProfile, index: number): { droppedSource: string | null } {
+  if (!Number.isInteger(index) || index < 0 || index >= profile.embeddings.length) {
+    return { droppedSource: null }
+  }
+  if (!Array.isArray(profile.sources)) profile.sources = []
+  while (profile.sources.length < profile.embeddings.length) profile.sources.push(UNKNOWN_SOURCE)
+  profile.embeddings.splice(index, 1)
+  const droppedSource = profile.sources.splice(index, 1)[0] ?? null
+  profile.sources.length = profile.embeddings.length
+  return { droppedSource }
+}
+
+/**
+ * Provenance of each stored sample, index-aligned with embeddings[].
+ *
+ * Holes and a short array both read as undefined, which the eviction policy
+ * classifies as `unknown` — the weakest tier. That is the safe direction: a
+ * sample whose provenance was lost must never inherit the protection given to
+ * one a human supplied.
+ */
+export function alignedSources(profile: VoiceProfile): Array<string | undefined> {
+  return Array.from({ length: profile.embeddings.length }, (_, i) => profile.sources?.[i])
 }
 
 /** Append a sample to both arrays together. */

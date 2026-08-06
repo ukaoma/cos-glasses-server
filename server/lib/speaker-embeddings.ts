@@ -1,4 +1,5 @@
 // Speaker embedding extraction and verification using sherpa-onnx
+import { chooseEviction, tierBreakdown } from './embedding-eviction.js'
 // Wraps ECAPA-TDNN model for voiceprint-based speaker classification.
 // Falls back gracefully if model is missing — amplitude classification continues.
 //
@@ -15,6 +16,8 @@ import {
   mergeProfilesInStore,
   profileSimilarity,
   describeRepairs,
+  alignedSources,
+  dropEmbeddingAt,
   dropOldestEmbedding,
   hasRepairs,
   loadVoiceProfileStore,
@@ -87,7 +90,11 @@ const VERIFY_THRESHOLD = 0.65
 const SEARCH_THRESHOLD = 0.55
 const AUTO_ENROLL_THRESHOLD = 0.88    // High bar — must be very confident before auto-enrolling
 const AUTO_ENROLL_CONSENSUS = 2       // Must match N times in same session before enrolling
-const MAX_EMBEDDINGS_PER_SPEAKER = 20 // FIFO cap — oldest drops when full
+// Raised 20 -> 40 on 2026-08-06. Measured, not guessed: search latency is 1 us
+// at 20, 40 AND 80 samples per speaker (77 speakers, sherpa SpeakerEmbeddingManager),
+// so the old cap defended nothing — while 61 of 77 profiles sat AT it, meaning
+// every correction cost a sample. 20 extra slots per speaker is ~1.2 MB.
+const MAX_EMBEDDINGS_PER_SPEAKER = 40
 const SAMPLE_RATE = 16000
 
 // Module-level state — sherpa-onnx-node is CJS with no TS types (SDK v0.0.7 interop)
@@ -308,8 +315,24 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
     // `sources?.shift()` no-opped whenever sources was undefined or short,
     // permanently offsetting provenance from the samples it described.
     if (profile.embeddings.length >= MAX_EMBEDDINGS_PER_SPEAKER) {
-      console.log(`[speaker] Profile cap reached for "${name}" (${profile.embeddings.length}/${MAX_EMBEDDINGS_PER_SPEAKER}) — dropping oldest`)
-      dropOldestEmbedding(profile)
+      // Weakest PROVENANCE goes, not the oldest sample. Age is the wrong axis:
+      // four profiles at cap would lose their only human-supplied sample to
+      // FIFO while unverified attendee-metadata samples sat untouched.
+      // alignedSources is defence-in-depth here, not load-bearing: loadProfileStore
+      // already pads sources[] to match embeddings[], so a ragged array cannot
+      // reach this line (mutation-verified — swapping it for profile.sources is
+      // unobservable through this path). It is kept for any future caller that
+      // builds a profile without going through the loader, and is unit-tested
+      // directly in voice-profile-store.test.ts.
+      const choice = chooseEviction(alignedSources(profile), source, MAX_EMBEDDINGS_PER_SPEAKER)
+      const { droppedSource } = choice
+        ? dropEmbeddingAt(profile, choice.index)
+        : dropOldestEmbedding(profile)
+      console.log(
+        `[speaker] Profile full for "${name}" (${MAX_EMBEDDINGS_PER_SPEAKER}) — `
+        + `${choice ? choice.reason : 'no provenance available, dropping the oldest'} `
+        + `[dropped ${droppedSource ?? 'unknown'}, incoming ${source}]`,
+      )
       rebuildSpeakerInManager(name, profile.embeddings)
     }
   }
@@ -665,6 +688,35 @@ export function speakerReadiness(
 ): 'ready' | 'unavailable' | 'degraded' {
   if (state === 'error') return 'degraded'
   return state === 'active' ? 'ready' : 'unavailable'
+}
+
+/**
+ * Provenance composition across every stored profile, plus the profiles with no
+ * human-verified sample at all.
+ *
+ * Surfaced because the number that mattered here was invisible: the owner's own
+ * profile — the one driving owner detection — was 10 attendee-metadata samples,
+ * 9 identifier-labelled ones and 1 unlabelled, with nothing a human had ever
+ * confirmed. Nothing in any status output said so.
+ */
+export function profileProvenanceSummary(): {
+  profiles: number
+  atCap: number
+  cap: number
+  tiers: Record<string, number>
+  noHumanSample: string[]
+} {
+  const store = loadProfileStore()
+  const tiers: Record<string, number> = {}
+  const noHumanSample: string[] = []
+  let atCap = 0
+  for (const p of store.profiles) {
+    const breakdown = tierBreakdown(alignedSources(p))
+    for (const [k, v] of Object.entries(breakdown)) tiers[k] = (tiers[k] ?? 0) + v
+    if (p.embeddings.length >= MAX_EMBEDDINGS_PER_SPEAKER) atCap++
+    if (breakdown.human === 0) noHumanSample.push(p.name)
+  }
+  return { profiles: store.profiles.length, atCap, cap: MAX_EMBEDDINGS_PER_SPEAKER, tiers, noHumanSample }
 }
 
 /** Compute actual cosine similarity between two raw embedding vectors */

@@ -1,3 +1,33 @@
+## 6.21.17
+
+- Voice profiles now give up their WEAKEST sample, not their oldest. Eviction is
+  by provenance tier — automatic, then unknown, then attendee-metadata, then
+  identifier-labelled — and human-supplied samples (manual, ext-retroactive,
+  g2-enrollment, correction) are protected.
+- Measured on the live store before changing anything, not assumed:
+  * 61 of 77 profiles were ALREADY at the 20-sample cap, so every correction
+    cost a sample.
+  * The owner profile driving owner detection read: fireflies 10, g2-training 9,
+    unknown 1 — ZERO human-verified samples.
+  * FOUR profiles at cap would have lost a human sample to plain FIFO while
+    weaker samples sat untouched, including one whose only deliberate enrollment
+    was its oldest sample with 17 weaker samples available.
+- Cap raised 20 -> 40. Search latency measured at 1 us for 20, 40 AND 80 samples
+  per speaker across 77 speakers, so the old cap defended nothing measurable.
+  Twenty extra slots each is about 1.2 MB.
+- Corrections are capped at HALF a profile. They come from the acoustically hard
+  tail — the segments the identifier got wrong — so a profile of nothing but
+  corrections has a centroid displaced from how the speaker actually sounds. At
+  quota a new correction replaces the OLDEST CORRECTION, never a typical-voice
+  sample.
+- Every eviction logs which sample went and why; none disappear silently.
+- `/api/health` gains `voice_provenance`: tier totals, profiles at cap, and
+  `noHumanSample` — the profiles trained entirely on labels the system chose for
+  itself. That number was previously invisible.
+- An unrecognised or missing provenance string classifies as `unknown`, the
+  weakest tier, never as trusted. A sample whose provenance was lost must not
+  inherit the protection given to one a human supplied.
+
 ## 6.21.16
 
 - `POST /api/meeting/:sessionId/relabel` — correct who a voice was in ONE

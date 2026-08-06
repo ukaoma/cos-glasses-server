@@ -15,6 +15,9 @@ import {
   backupProfileStore,
   deleteProfileFromStore,
   describeRepairs,
+  alignedSources,
+  dropEmbeddingAt,
+  UNKNOWN_SOURCE,
   dropOldestEmbedding,
   hasRepairs,
   listProfileStoreBackups,
@@ -134,6 +137,95 @@ describe('sources[] stays aligned with embeddings', () => {
   it('describeRepairs names what happened', () => {
     const { repairs } = normalizeProfileStore({ profiles: [profile('A', 3, ['manual', null])] })
     expect(describeRepairs(repairs)).toMatch(/misaligned sources/)
+  })
+})
+
+describe('dropping a sample by index, not by age', () => {
+  const profile = (sources: Array<string | undefined>, n = sources.length) => ({
+    name: 'X',
+    embeddings: Array.from({ length: n }, (_, i) => [i, i, i]),
+    sources: [...sources],
+  }) as any
+
+  it('removes the sample AND its provenance at the same index', () => {
+    const p = profile(['manual', 'auto:m1', 'fireflies', 'g2-training'])
+    expect(dropEmbeddingAt(p, 1).droppedSource).toBe('auto:m1')
+    expect(p.sources).toEqual(['manual', 'fireflies', 'g2-training'])
+    // The embeddings must shift in lockstep: index 1 is now the fireflies row.
+    expect(p.embeddings.map((e: number[]) => e[0])).toEqual([0, 2, 3])
+  })
+
+  it('keeps the two arrays the same length', () => {
+    const p = profile(['a', 'b', 'c'])
+    dropEmbeddingAt(p, 2)
+    expect(p.sources).toHaveLength(p.embeddings.length)
+  })
+
+  it('aligns BEFORE splicing, so a short sources[] cannot offset provenance', () => {
+    // The silent bug: with 4 embeddings and 2 sources, splicing index 2 from a
+    // ragged array removes nothing from sources, and every later sample then
+    // carries a neighbour's provenance forever.
+    const p = profile(['manual', 'fireflies'], 4)
+    const dropped = dropEmbeddingAt(p, 2)
+    expect(p.embeddings).toHaveLength(3)
+    expect(p.sources).toHaveLength(3)
+    expect(p.sources[0]).toBe('manual')
+    expect(p.sources[1]).toBe('fireflies')
+    // Index 2 was an unlabelled sample, so that is what left.
+    expect(dropped.droppedSource).toBe(UNKNOWN_SOURCE)
+    // And no HOLE is left behind. Padding after the splice instead of before
+    // yields the same length and the same first two entries, differing only
+    // here — an undefined tail that later reads as lost provenance.
+    expect(p.sources[2]).toBe(UNKNOWN_SOURCE)
+    expect(p.sources.every((x: unknown) => typeof x === 'string')).toBe(true)
+  })
+
+  it('truncates a sources array that is LONGER than embeddings', () => {
+    // Real stores carry this too (a sample dropped without its source). Left
+    // untrimmed, the stale tail shifts provenance onto the wrong samples the
+    // next time anything reads by index.
+    const p = profile(['a', 'b', 'c', 'd'], 2)
+    expect(dropEmbeddingAt(p, 0).droppedSource).toBe('a')
+    expect(p.embeddings).toHaveLength(1)
+    expect(p.sources).toHaveLength(1)
+    expect(p.sources).toEqual(['b'])
+  })
+
+  it('refuses an out-of-range or non-integer index instead of corrupting the arrays', () => {
+    for (const bad of [-1, 3, 99, 1.5, NaN]) {
+      const p = profile(['a', 'b', 'c'])
+      expect(dropEmbeddingAt(p, bad).droppedSource).toBeNull()
+      expect(p.embeddings).toHaveLength(3)
+      expect(p.sources).toEqual(['a', 'b', 'c'])
+    }
+  })
+
+  it('handles a profile with no sources array at all', () => {
+    const p = { name: 'X', embeddings: [[1], [2], [3]] } as any
+    expect(dropEmbeddingAt(p, 0).droppedSource).toBe(UNKNOWN_SOURCE)
+    expect(p.sources).toHaveLength(2)
+  })
+})
+
+describe('the provenance view the eviction policy reads', () => {
+  it('is exactly as long as embeddings[], padding a short array with holes', () => {
+    // A short array must surface as undefined at the missing indices — the
+    // eviction policy classifies those as `unknown`, its weakest tier. Returning
+    // the raw array instead would hide those samples from the policy entirely,
+    // and it would evict a labelled sample while unlabelled ones survived.
+    const p = { name: 'X', embeddings: [[1], [2], [3], [4]], sources: ['manual', 'fireflies'] } as any
+    expect(alignedSources(p)).toEqual(['manual', 'fireflies', undefined, undefined])
+  })
+
+  it('truncates a sources array longer than embeddings', () => {
+    const p = { name: 'X', embeddings: [[1]], sources: ['manual', 'stale', 'stale'] } as any
+    expect(alignedSources(p)).toEqual(['manual'])
+  })
+
+  it('does not mutate the profile it reads', () => {
+    const p = { name: 'X', embeddings: [[1], [2]], sources: ['manual'] } as any
+    alignedSources(p)
+    expect(p.sources).toEqual(['manual'])
   })
 })
 

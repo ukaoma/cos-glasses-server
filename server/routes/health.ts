@@ -6,7 +6,7 @@ import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
-import { speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
+import { profileProvenanceSummary, speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
 import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
 import { correctionStoreStats } from '../lib/meeting-corrections.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
@@ -124,6 +124,9 @@ healthRouter.get('/health', async (_req, res) => {
   // `pending` is the number that matters here: an intent that never closed means
   // some meeting's files may be half-rewritten.
   const speakerCorrections = correctionStoreStats()
+  // `noHumanSample` is the one to read: a profile with no human-verified sample
+  // is trained entirely on labels the system chose for itself.
+  const voiceProvenance = speakerId.state === 'active' ? profileProvenanceSummary() : null
 
   // Health is unauthenticated. Publish only availability; the actual CLI
   // session id is a resumable runtime handle and belongs on authenticated
@@ -243,6 +246,7 @@ healthRouter.get('/health', async (_req, res) => {
     unsaved_captures,
     chunk_embeddings: chunkEmbeddings,
     speaker_corrections: speakerCorrections,
+    ...(voiceProvenance ? { voice_provenance: voiceProvenance } : {}),
     capabilities: {
       transcription: {
         ...transcription,
