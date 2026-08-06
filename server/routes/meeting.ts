@@ -2,7 +2,7 @@
 // the standalone public meeting store. The live transcript and chunk metadata
 // are durable before the session is closed; batch improvement runs afterward.
 
-import { existsSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
@@ -64,6 +64,8 @@ import {
   type TranscriptGapReport,
 } from './transcribe-stream.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
+import { getOwnerSpeakerLabel } from '../lib/profile.js'
+import { reviewMeetingSpeakers, type ReviewChunk } from '../lib/meeting-speaker-review.js'
 import {
   acquireMaintenanceWork,
   maintenanceAdmissionsOpen,
@@ -611,6 +613,59 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       maintenanceLease?.release()
       if (lockedSessionId) savingSessions.delete(lockedSessionId)
     }
+  })
+
+  // ── Speaker review (6.21.12) ──────────────────────────────────────────
+  // Backs COS Control's naming panel. Read-only: it reports what a saved
+  // meeting's sidecar already contains and never writes. Naming, merging, and
+  // rebuilding are the /api/voice/* routes, each with its own confirmation.
+  //
+  // Keyed on sessionId so it can reuse the store's traversal-hardened readers
+  // (safeDirectoryRealpath / safeReadFile) instead of reassembling a path from
+  // client-supplied domain and filename components.
+  router.get('/meeting/:sessionId/speakers', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const saved = store.findBySessionId(sessionId)
+    if (!saved) {
+      res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+
+    let chunks: unknown
+    try {
+      const raw = JSON.parse(readFileSync(saved.sidecarPath, 'utf-8')) as Record<string, unknown>
+      chunks = Array.isArray(raw) ? raw : raw.chunks
+    } catch {
+      // Defensive: findBySessionId already parsed this sidecar to match the
+      // session, so a corrupt file 404s above and never reaches here. This
+      // covers the narrow race where it becomes unreadable in between. Either
+      // way the answer is never 200-with-no-voices, which would read as
+      // "nobody spoke" and invite naming voices that were never analysed.
+      res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
+      return
+    }
+    if (!Array.isArray(chunks)) {
+      res.status(422).json({ error: 'Chunk sidecar holds no chunk array', reason: 'sidecar_empty' })
+      return
+    }
+
+    const review = reviewMeetingSpeakers(chunks as ReviewChunk[], {
+      owner: getOwnerSpeakerLabel(),
+      phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
+    })
+    res.set('Cache-Control', 'private, no-store')
+    res.json({
+      sessionId,
+      title: saved.title,
+      domain: saved.domain,
+      filename: saved.filename,
+      durationMin: saved.durationMin,
+      ...review,
+    })
   })
 
   // ── Unsaved-capture recovery (6.19.0) ─────────────────────────────────

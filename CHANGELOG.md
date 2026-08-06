@@ -1,3 +1,22 @@
+## 6.21.12
+
+- Add `GET /api/meeting/:sessionId/speakers`, the read surface behind COS
+  Control's speaker-naming panel. Read-only: it reports what a saved meeting's
+  chunk sidecar already holds and never writes. Naming, merging, and rebuilding
+  stay on the `/api/voice/*` routes, each with its own confirmation.
+- Return two to three representative verbatim lines per voice, spread across the
+  meeting and timestamped. These are the primary output: a similarity score
+  cannot tell you who someone is, and a remembered sentence can.
+- Report per-voice reliability from run length rather than similarity alone. Two
+  labels that swap every few segments are the identifier oscillating mid-turn,
+  which means those profiles cannot be told apart and any name applied to either
+  would be a guess. A high similarity score does not override that verdict.
+- Restrict the run-length comparison to each pair of speakers, so a third person
+  interjecting cannot make two others look like they are swapping.
+- Report a recovered meeting as unattributed rather than as a meeting with no
+  speakers, and still return phrases for it — on those meetings the phrases are
+  the only way in.
+
 ## 6.21.11
 
 - Add `POST /api/voice/merge-profiles` for the case where one person holds two
