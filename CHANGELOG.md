@@ -1,3 +1,17 @@
+## 6.21.13
+
+- Carry each meeting's `sessionId` on the meetings list, so a Control row can
+  open the per-meeting speaker review. The review is keyed on the session
+  because that is what lets the store's own hardened lookup find the chunk
+  sidecar again; without this field the two surfaces could not be joined.
+- Read only the head of a sidecar to lift that one field. Sidecars run to
+  megabytes, and reading them whole would make listing cost scale with total
+  transcript size — and silently drop the id on any sidecar above the
+  whole-file size cap.
+- Omit the field rather than invent one when a sidecar is absent, corrupt,
+  symlinked outside its month directory, or carries an implausible id. A
+  meeting with no readable sidecar is still listed.
+
 ## 6.21.12
 
 - Add `GET /api/meeting/:sessionId/speakers`, the read surface behind COS

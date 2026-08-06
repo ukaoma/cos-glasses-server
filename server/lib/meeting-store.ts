@@ -8,6 +8,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   unlinkSync,
@@ -43,6 +44,11 @@ export class MeetingStoreError extends Error {
 
 export interface MeetingMeta {
   filename: string
+  /** From the chunk sidecar, absent on meetings saved without one. Carried so a
+   *  list row can open the per-meeting speaker review, which is keyed on the
+   *  session rather than the filename — the session is what lets the store's
+   *  own hardened lookup find the sidecar again. */
+  sessionId?: string
   title: string
   date: string
   domain: string
@@ -314,7 +320,7 @@ export function boundedMeetingSource(content: string): { sourceContent: string; 
   return { sourceContent: bytes.subarray(0, end).toString('utf8'), sourceTruncated: true }
 }
 
-function toMeta(detail: MeetingDetail): MeetingMeta {
+function toMeta(detail: MeetingDetail, sessionId?: string): MeetingMeta {
   const detailCharEstimate = [
     detail.title,
     detail.date,
@@ -327,6 +333,7 @@ function toMeta(detail: MeetingDetail): MeetingMeta {
   ].join('\n\n').trim().length
   return {
     filename: detail.filename,
+    ...(sessionId ? { sessionId } : {}),
     title: detail.title,
     date: detail.date,
     domain: detail.domain,
@@ -343,6 +350,9 @@ function toMeta(detail: MeetingDetail): MeetingMeta {
     attendeeCount: detail.attendees.length,
   }
 }
+
+/** Enough to clear the sidecar's leading metadata keys whatever their order. */
+const SIDECAR_HEAD_BYTES = 4096
 
 function isContained(parent: string, child: string): boolean {
   return child === parent || child.startsWith(`${parent}${sep}`)
@@ -542,7 +552,7 @@ export class MeetingStore {
           if (content === null) continue
           const detail = parseMeeting(content, filename, month)
           if (domain !== 'all' && detail.domain !== domain) continue
-          meetings.push(toMeta(detail))
+          meetings.push(toMeta(detail, this.sidecarSessionId(monthDir, monthReal, filename)))
         } catch {
           // One unreadable/corrupt entry must not hide the rest of the store.
         }
@@ -599,6 +609,51 @@ export class MeetingStore {
 
   private safeReadMeeting(monthDir: string, monthReal: string, filename: string): string | null {
     return this.safeReadFile(monthDir, monthReal, filename)
+  }
+
+  /** Read only the first `bytes` of a file, with the same symlink,
+   *  containment, and O_NOFOLLOW guards as safeReadFile.
+   *
+   *  Exists so `list()` can lift one field out of a chunk sidecar without
+   *  reading it whole: sidecars run to megabytes (1.3 MB for a 32-minute
+   *  meeting) and would also trip safeReadFile's MAX_MEETING_BYTES cap, which
+   *  is sized for markdown. */
+  private safeReadFileHead(monthDir: string, monthReal: string, filename: string, bytes: number): string | null {
+    const filepath = join(monthDir, filename)
+    let fd: number | null = null
+    try {
+      const linkStat = lstatSync(filepath)
+      if (linkStat.isSymbolicLink() || !linkStat.isFile()) return null
+      const real = realpathSync(filepath)
+      if (!isContained(monthReal, real) || dirname(real) !== monthReal) return null
+      fd = openSync(filepath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      const stat = fstatSync(fd)
+      if (!stat.isFile()) return null
+      const buffer = Buffer.alloc(Math.min(bytes, stat.size))
+      if (buffer.length === 0) return ''
+      const read = readSync(fd, buffer, 0, buffer.length, 0)
+      return buffer.subarray(0, read).toString('utf8')
+    } catch {
+      return null
+    } finally {
+      if (fd !== null) {
+        try { closeSync(fd) } catch { /* already closed */ }
+      }
+    }
+  }
+
+  /** The sessionId recorded in a meeting's chunk sidecar, if it has one.
+   *
+   *  Matched with a regex over the file's head rather than JSON.parse: the goal
+   *  is one small field, and parsing a megabyte of chunks per list row to reach
+   *  it would make listing cost scale with total transcript size. */
+  private sidecarSessionId(monthDir: string, monthReal: string, meetingFilename: string): string | undefined {
+    const sidecarName = meetingFilename.replace(/\.md$/, '.g2-chunks.json')
+    if (sidecarName === meetingFilename) return undefined
+    const head = this.safeReadFileHead(monthDir, monthReal, sidecarName, SIDECAR_HEAD_BYTES)
+    if (!head) return undefined
+    const match = head.match(/"sessionId"\s*:\s*"([A-Za-z0-9:_-]{3,96})"/)
+    return match ? match[1] : undefined
   }
 
   private safeReadFile(monthDir: string, monthReal: string, filename: string): string | null {
