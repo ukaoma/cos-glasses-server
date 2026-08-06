@@ -1,0 +1,282 @@
+// Meeting audio kept long enough for a human to review who was speaking.
+//
+// WHY IT DID NOT EXIST. Chunk WAVs lived in `session-audio` only until a meeting
+// was saved, then moved to `pending-batch` for HQ re-transcription and deleted
+// when that finished. Measured 2026-08-06: `session-audio` held 0 files. So the
+// review panel could show a phrase but never let anyone HEAR it, and its own
+// copy said "naming this needs its audio, which is no longer held."
+//
+// Miles's decision: keep a week, so review can happen on a weekend rather than
+// only within hours of the meeting, and stay under 8 GB.
+//
+// SIZING IS MEASURED, NOT GUESSED. Real recording volume over the 14 days to
+// 2026-08-06 was 3.1 h/day mean, 6.9 h peak. A 7-day window is ~22 hours, which
+// at 16 kHz mono 16-bit (32 KB/s) is ~2.5 GB — comfortably inside 8 GB. So the
+// audio is kept UNCOMPRESSED and stays usable for re-transcription, not just
+// playback. The cap is a runaway backstop: it would take a sustained 10 h/day
+// week to reach it.
+//
+// HARD LINKS, NOT COPIES. Archiving happens at the moment audio moves to
+// `pending-batch`, and links the same inodes rather than duplicating them. A
+// copy would double disk for the whole batch window — 260 MB for a two-hour
+// meeting — and introduce an ordering hazard against the batch purge. With links
+// the pipeline can delete its directory whenever it likes and the bytes survive.
+
+import {
+  copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, rmSync, statSync,
+} from 'node:fs'
+import { join, resolve } from 'node:path'
+import { dataPath } from './data-dir.js'
+
+export const MEETING_AUDIO_DIR = 'meeting-audio'
+
+/** One week, per Miles: review should survive until a weekend. */
+export function meetingAudioTtlMs(): number {
+  const raw = Number(process.env.COS_MEETING_AUDIO_RETENTION_DAYS)
+  const days = Number.isFinite(raw) && raw > 0 ? raw : 7
+  return days * 24 * 60 * 60 * 1000
+}
+
+/** Total budget for retained meeting audio. Miles: stay under 8 GB. */
+export function meetingAudioMaxBytes(): number {
+  const raw = Number(process.env.COS_MEETING_AUDIO_MAX_BYTES)
+  return Number.isFinite(raw) && raw > 0 ? raw : 8 * 1024 * 1024 * 1024
+}
+
+/** Master switch. Default ON — with it off, review has no audio at all. */
+export function meetingAudioEnabled(): boolean {
+  return process.env.COS_MEETING_AUDIO !== '0'
+}
+
+function sessionDir(sessionId: string): string | null {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
+  const root = dataPath(MEETING_AUDIO_DIR)
+  const path = join(root, sessionId.replace(/:/g, '_'))
+  return resolve(path).startsWith(resolve(root) + '/') ? path : null
+}
+
+/** Chunk WAVs as written by the capture path (`chunk_0000.wav`). */
+function isChunkWav(name: string): boolean {
+  return /^chunk_\d+\.wav$/.test(name)
+}
+
+export interface ArchiveResult {
+  linked: number
+  /** Files that had to be copied because the link failed (e.g. cross-device). */
+  copied: number
+  failed: number
+  bytes: number
+}
+
+/**
+ * Bring one session's chunk WAVs into the archive.
+ *
+ * Never throws: this runs on the save path, and losing review audio must never
+ * cost a meeting. Individual failures are counted rather than aborting the rest,
+ * because a partially-archived meeting is still partially reviewable.
+ */
+export function archiveSessionAudio(sessionId: string, sourceDir: string): ArchiveResult {
+  const out: ArchiveResult = { linked: 0, copied: 0, failed: 0, bytes: 0 }
+  if (!meetingAudioEnabled()) return out
+  const dest = sessionDir(sessionId)
+  if (!dest || !existsSync(sourceDir)) return out
+  let names: string[]
+  try {
+    names = readdirSync(sourceDir).filter(isChunkWav)
+  } catch {
+    return out
+  }
+  if (names.length === 0) return out
+  try {
+    mkdirSync(dest, { recursive: true, mode: 0o700 })
+  } catch {
+    return out
+  }
+  for (const name of names) {
+    const from = resolve(sourceDir, name)
+    const to = resolve(dest, name)
+    if (existsSync(to)) continue
+    try {
+      linkSync(from, to)
+      out.linked++
+    } catch {
+      // A link can fail across filesystems or if the source vanished mid-sweep.
+      // Copy rather than skip: the point is that the audio survives.
+      try { copyFileSync(from, to); out.copied++ } catch { out.failed++; continue }
+    }
+    try { out.bytes += statSync(to).size } catch { /* counted as linked regardless */ }
+  }
+  return out
+}
+
+/** Bytes and age for one archived session. */
+function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: number } {
+  let bytes = 0, mtimeMs = 0, files = 0
+  try {
+    for (const name of readdirSync(dir).filter(isChunkWav)) {
+      try {
+        const st = statSync(join(dir, name))
+        bytes += st.size
+        files++
+        mtimeMs = Math.max(mtimeMs, st.mtimeMs)
+      } catch { /* skip unreadable */ }
+    }
+  } catch { /* unreadable dir reports zero */ }
+  return { bytes, mtimeMs, files }
+}
+
+export interface SweepResult {
+  removed: string[]
+  retained: string[]
+  bytesFreed: number
+}
+
+/**
+ * Drop sessions past the retention window.
+ *
+ * A session whose age cannot be read is RETAINED — treating an unreadable stat
+ * as ancient would delete the audio a pending review depends on.
+ */
+export function sweepMeetingAudio(nowMs: number, ttlMs = meetingAudioTtlMs()): SweepResult {
+  const root = dataPath(MEETING_AUDIO_DIR)
+  const out: SweepResult = { removed: [], retained: [], bytesFreed: 0 }
+  if (!existsSync(root)) return out
+  let names: string[]
+  try { names = readdirSync(root) } catch { return out }
+  for (const name of names) {
+    const dir = join(root, name)
+    const { bytes, mtimeMs } = sessionSize(dir)
+    if (mtimeMs <= 0) { out.retained.push(name); continue }
+    if (nowMs - mtimeMs > ttlMs) {
+      try { rmSync(dir, { recursive: true, force: true }); out.removed.push(name); out.bytesFreed += bytes }
+      catch { out.retained.push(name) }
+    } else {
+      out.retained.push(name)
+    }
+  }
+  return out
+}
+
+export interface CapResult {
+  evicted: string[]
+  bytesBefore: number
+  bytesAfter: number
+}
+
+/**
+ * Evict OLDEST SESSIONS FIRST until the archive fits its budget.
+ *
+ * Whole sessions, not individual chunks: half a meeting's audio is a confusing
+ * artefact, and predictable eviction beats squeezing in a few more megabytes.
+ *
+ * Note on accounting: while `pending-batch` still holds the same inodes, these
+ * hard-linked files are counted at full size in BOTH places, so the total reads
+ * high during the batch window. That is deliberately conservative — it can sweep
+ * slightly early, never late.
+ */
+export function enforceMeetingAudioCap(maxBytes = meetingAudioMaxBytes()): CapResult {
+  const root = dataPath(MEETING_AUDIO_DIR)
+  const out: CapResult = { evicted: [], bytesBefore: 0, bytesAfter: 0 }
+  if (!existsSync(root)) return out
+  let names: string[]
+  try { names = readdirSync(root) } catch { return out }
+
+  const entries = names.map(name => ({ name, ...sessionSize(join(root, name)) }))
+  out.bytesBefore = entries.reduce((n, e) => n + e.bytes, 0)
+  out.bytesAfter = out.bytesBefore
+  if (out.bytesAfter <= maxBytes) return out
+
+  // Oldest first. A session with an unreadable mtime sorts LAST so it is evicted
+  // only as a final resort, matching the sweeper's bias toward keeping evidence.
+  entries.sort((a, b) => (a.mtimeMs || Number.MAX_SAFE_INTEGER) - (b.mtimeMs || Number.MAX_SAFE_INTEGER))
+  for (const e of entries) {
+    if (out.bytesAfter <= maxBytes) break
+    try {
+      rmSync(join(root, e.name), { recursive: true, force: true })
+      out.evicted.push(e.name)
+      out.bytesAfter -= e.bytes
+    } catch { /* leave it counted; the next pass will try again */ }
+  }
+  return out
+}
+
+/** Absolute path to one chunk's WAV, or null when it is not retained. */
+export function meetingAudioChunkPath(sessionId: string, chunkIndex: number): string | null {
+  const dir = sessionDir(sessionId)
+  if (!dir) return null
+  // No integer guard: `chunkIndex` is a number, so the interpolation can never
+  // contain a path separator, and a nonsense value simply names a file that does
+  // not exist. Mutation confirmed an explicit check here is unreachable behind
+  // the existence test below.
+  const path = resolve(dir, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`)
+  if (!resolve(path).startsWith(resolve(dir) + '/')) return null
+  return existsSync(path) ? path : null
+}
+
+/** Chunk indices retained for a session, ascending. */
+export function listMeetingAudioChunks(sessionId: string): number[] {
+  const dir = sessionDir(sessionId)
+  if (!dir || !existsSync(dir)) return []
+  try {
+    return readdirSync(dir)
+      .filter(isChunkWav)
+      .map(n => Number(n.slice('chunk_'.length, -'.wav'.length)))
+      .filter(n => Number.isInteger(n))
+      .sort((a, b) => a - b)
+  } catch {
+    return []
+  }
+}
+
+/** Counts for /api/health, so retention can be seen rather than assumed. */
+export function meetingAudioStats(): {
+  enabled: boolean
+  sessions: number
+  bytes: number
+  maxBytes: number
+  retentionDays: number
+  oldestAgeHours: number | null
+} {
+  const root = dataPath(MEETING_AUDIO_DIR)
+  const retentionDays = Math.round((meetingAudioTtlMs() / (24 * 60 * 60 * 1000)) * 10) / 10
+  const base = {
+    enabled: meetingAudioEnabled(),
+    maxBytes: meetingAudioMaxBytes(),
+    retentionDays,
+  }
+  if (!existsSync(root)) return { ...base, sessions: 0, bytes: 0, oldestAgeHours: null }
+  let sessions = 0, bytes = 0, oldest = Number.POSITIVE_INFINITY
+  try {
+    for (const name of readdirSync(root)) {
+      const { bytes: b, mtimeMs, files } = sessionSize(join(root, name))
+      if (files === 0) continue
+      sessions++
+      bytes += b
+      if (mtimeMs > 0) oldest = Math.min(oldest, mtimeMs)
+    }
+  } catch { /* report what we have */ }
+  return {
+    ...base,
+    sessions,
+    bytes,
+    oldestAgeHours: Number.isFinite(oldest) ? Math.round(((Date.now() - oldest) / 3_600_000) * 10) / 10 : null,
+  }
+}
+
+/**
+ * One retention pass: expire first, then enforce the budget.
+ *
+ * ORDER IS LOAD-BEARING and that is why this is a named function rather than two
+ * calls inline in an interval. Enforcing the cap first would let it EVICT audio
+ * that the sweeper was about to expire anyway — counting those bytes against the
+ * budget and so evicting extra sessions that were still inside their window. Run
+ * the other way round, the cap only ever sees audio a human could still want.
+ */
+export function runMeetingAudioRetention(nowMs = Date.now()): {
+  swept: SweepResult
+  capped: CapResult
+} {
+  const swept = sweepMeetingAudio(nowMs)
+  const capped = enforceMeetingAudioCap()
+  return { swept, capped }
+}

@@ -10,6 +10,11 @@ import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
+import {
+  listMeetingAudioChunks,
+  meetingAudioChunkPath,
+  meetingAudioStats,
+} from '../lib/meeting-audio-archive.js'
 import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
 
 /**
@@ -1065,6 +1070,66 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       correctionId: id,
       ...preview,
       training: { ...preview.training, retracted },
+    })
+  })
+
+
+  // ── Review playback (6.21.18) ─────────────────────────────────────────
+  //
+  // Miles: "I can quickly play that, and I'm going to hear the voice and know
+  // immediately who the speaker is. As a final confirmation."
+  //
+  // A phrase in the panel is a weaker signal than three seconds of the actual
+  // voice. Retention is 7 days (see meeting-audio-archive), so this answers with
+  // 404 + a reason once the window has passed rather than pretending the audio
+  // was never there.
+  router.get('/meeting/:sessionId/audio/:chunkIndex', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const chunkIndex = Number(req.params.chunkIndex)
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      res.status(400).json({ error: 'Invalid chunkIndex', reason: 'invalid_chunk_index' })
+      return
+    }
+    const path = meetingAudioChunkPath(sessionId, chunkIndex)
+    if (!path) {
+      const retained = listMeetingAudioChunks(sessionId)
+      res.status(404).json({
+        error: retained.length === 0
+          ? 'No audio retained for this meeting'
+          : `Chunk ${chunkIndex} is not retained`,
+        reason: retained.length === 0 ? 'audio_not_retained' : 'chunk_not_retained',
+        // Which chunks CAN be played, so a UI can offer the nearest instead of
+        // just failing.
+        retainedChunks: retained.length,
+        firstRetained: retained[0] ?? null,
+        lastRetained: retained[retained.length - 1] ?? null,
+      })
+      return
+    }
+    res.type('audio/wav')
+    res.sendFile(path)
+  })
+
+  /** What audio a meeting still has, so the panel can show play buttons only
+   *  where they will work. */
+  router.get('/meeting/:sessionId/audio', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const chunks = listMeetingAudioChunks(sessionId)
+    res.json({
+      sessionId,
+      retained: chunks.length > 0,
+      chunks,
+      retentionDays: meetingAudioStats().retentionDays,
     })
   })
 

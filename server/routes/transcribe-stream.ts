@@ -42,6 +42,7 @@ import {
   appendChunkEmbedding,
   sweepExpiredChunkEmbeddings,
 } from '../lib/chunk-embedding-store.js'
+import { archiveSessionAudio, runMeetingAudioRetention } from '../lib/meeting-audio-archive.js'
 import {
   countChunkWavs,
   purgeExpiredQuarantine,
@@ -754,6 +755,22 @@ setInterval(() => {
     }
   } catch {}
 
+  // Meeting audio for review: 7-day window, then an 8 GB budget as a backstop.
+  // Order matters — sweep expiry FIRST so the cap only ever evicts audio still
+  // inside its window instead of racing the sweeper for the same files.
+  try {
+    const { swept, capped } = runMeetingAudioRetention()
+    if (swept.removed.length > 0) {
+      console.log(`[meeting-audio] Retention swept ${swept.removed.length} session(s), freed ${(swept.bytesFreed / 1e6).toFixed(1)} MB`)
+    }
+    if (capped.evicted.length > 0) {
+      console.warn(
+        `[meeting-audio] Over budget — evicted ${capped.evicted.length} oldest session(s): `
+        + `${(capped.bytesBefore / 1e9).toFixed(2)} GB -> ${(capped.bytesAfter / 1e9).toFixed(2)} GB`,
+      )
+    }
+  } catch { /* non-critical */ }
+
   // Purge training-audio WAVs past the retention window. Per file, not per
   // directory: chunks for one speaker accumulate over weeks, so an
   // all-or-nothing directory check would either keep month-old audio alive
@@ -1068,6 +1085,20 @@ export function moveSessionAudioToPending(sessionId: string): string | null {
         destDir = resolve(PENDING_BATCH_DIR, `${sessionId}_${suffix}`)
       }
     }
+    // Retain a reviewable copy BEFORE the rename. Hard links, so this costs no
+    // extra disk and the audio outlives the batch pipeline's own cleanup — which
+    // is what used to end the audio's life entirely (session-audio held 0 files
+    // on 2026-08-06, so the review panel could never play anything back).
+    try {
+      const archived = archiveSessionAudio(sessionId, srcDir)
+      if (archived.linked + archived.copied > 0) {
+        console.log(
+          `[meeting-audio] Retained ${archived.linked + archived.copied} chunk(s) for review: ${sessionId}`
+          + (archived.copied ? ` (${archived.copied} copied, link unavailable)` : '')
+          + (archived.failed ? ` — ${archived.failed} failed` : ''),
+        )
+      }
+    } catch { /* review audio is never worth failing a save for */ }
     // Rename is atomic on same filesystem
     renameSync(srcDir, destDir)
     try { chmodSync(destDir, 0o700) } catch {}

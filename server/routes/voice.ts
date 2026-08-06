@@ -418,6 +418,84 @@ voiceRouter.post('/voice/enroll-ext', async (req, res) => {
   }
 })
 
+// ── Voice sample playback (6.21.18) ───────────────────────────────────────
+//
+// Miles: hearing three seconds of a voice settles an identity question that a
+// similarity score cannot. These two paths need NO retention change — the audio
+// already exists:
+//
+//   training-audio  what the system thinks a NAMED person sounds like
+//   ext-audio       an UNIDENTIFIED voice, 72-hour window
+//
+// The first is the higher-value one for the review panel: "is this really Navaz?"
+// is answered by playing Navaz's own profile sample, not by playing the segment
+// under review.
+
+/** Newest WAV in a directory — the most representative recent sample. */
+function newestWav(dirPath: string): string | null {
+  try {
+    const wavs = readdirSync(dirPath).filter(f => f.endsWith('.wav'))
+    if (wavs.length === 0) return null
+    let best = wavs[0], bestAt = 0
+    for (const w of wavs) {
+      try {
+        const at = statSync(resolve(dirPath, w)).mtimeMs
+        if (at >= bestAt) { bestAt = at; best = w }
+      } catch { /* skip unreadable */ }
+    }
+    return resolve(dirPath, best)
+  } catch {
+    return null
+  }
+}
+
+// GET /api/voice/profiles/:name/sample — hear what a stored profile sounds like.
+voiceRouter.get('/voice/profiles/:name/sample', (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  const name = String(req.params.name ?? '')
+  const dirPath = speakerDirPath(AUDIO_SAVE_DIR, name)
+  if (!dirPath) {
+    res.status(400).json({ error: 'Invalid speaker name', reason: 'invalid_speaker' })
+    return
+  }
+  const wav = existsSync(dirPath) ? newestWav(dirPath) : null
+  if (!wav) {
+    // A profile can exist with no retained audio: it may have been built from
+    // Fireflies seeds, or its training audio may have aged out. Say which rather
+    // than implying the person is unknown.
+    res.status(404).json({
+      error: `No retained audio for "${name}"`,
+      reason: 'no_sample_audio',
+      enrolled: isEnrolled(name),
+      embeddings: getEmbeddingCount(name),
+    })
+    return
+  }
+  res.type('audio/wav')
+  res.sendFile(wav)
+})
+
+// GET /api/voice/ext-audio/:sessionId/sample — hear an unidentified voice.
+voiceRouter.get('/voice/ext-audio/:sessionId/sample', (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  const sessionId = String(req.params.sessionId ?? '')
+  const dirPath = speakerDirPath(EXT_AUDIO_DIR, sessionId)
+  if (!dirPath) {
+    res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+    return
+  }
+  const wav = existsSync(dirPath) ? newestWav(dirPath) : null
+  if (!wav) {
+    res.status(404).json({
+      error: 'No ext-audio retained for this session',
+      reason: 'no_ext_audio',
+    })
+    return
+  }
+  res.type('audio/wav')
+  res.sendFile(wav)
+})
+
 // GET /api/voice/profiles — enrolled people with sample counts and provenance.
 // The review surfaces need to see the store; until now the only window into it
 // was a per-name count, so a misattributed profile was invisible.
