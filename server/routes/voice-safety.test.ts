@@ -55,7 +55,7 @@ function cosine(a: Float32Array, b: Float32Array): number {
   return d > 0 ? dot / d : 0
 }
 
-async function startServer(opts: { extractionFails?: boolean } = {}): Promise<void> {
+async function startServer(opts: { extractionFails?: boolean; enrollFails?: boolean } = {}): Promise<void> {
   vi.resetModules()
   enrollCalls = []
   removedNames = []
@@ -69,6 +69,7 @@ async function startServer(opts: { extractionFails?: boolean } = {}): Promise<vo
     },
     enrollEmbedding: (name: string, _e: Float32Array, source: string) => {
       enrollCalls.push({ name, source })
+      if (opts.enrollFails) return { success: false, dim: 4, error: 'Too similar to existing embedding (>0.95)' }
       return { success: true, dim: 4 }
     },
     getEmbeddingCount: (name: string) => profiles.find(p => p.name === name)?.embeddings.length ?? 0,
@@ -222,7 +223,22 @@ describe('train-g2 fails closed on the unscoped form', () => {
     await startServer()
     for (const speaker of ['../..', 'a/../../etc', '..']) {
       const res = await httpRequest('POST', '/api/voice/train-g2', { speaker })
-      expect([400, 404]).toContain(res.status)
+      expect(res.status, `"${speaker}" must be rejected as an invalid name`).toBe(400)
+    }
+    expect(enrollCalls).toEqual([])
+  })
+
+  it('rejects a separator even when it resolves INSIDE the root', async () => {
+    // 'a/b' resolves to <root>/a/b, which passes a prefix/boundary check — so
+    // this is the case the name validation itself has to catch. Asserting 400
+    // rather than 404 is what distinguishes "rejected the name" from "looked for
+    // it and found nothing", and is why the two guards are not redundant.
+    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    await startServer()
+    for (const speaker of ['a/b', 'Clem_Ukaoma/nested']) {
+      const res = await httpRequest('POST', '/api/voice/train-g2', { speaker })
+      expect(res.status, `"${speaker}" must be rejected by name validation`).toBe(400)
+      expect(res.json.error).toBe('invalid speaker name')
     }
     expect(enrollCalls).toEqual([])
   })
@@ -264,9 +280,7 @@ describe('train-g2 dry run and the empty-extraction case', () => {
     expect(readdirSync(trainingDir('Clem Ukaoma'))).toHaveLength(5)
   })
 
-  it('RETAINS the audio when nothing could be enrolled', async () => {
-    // Deleting the source after enrolling zero embeddings is pure data loss —
-    // the original code unlinked unconditionally.
+  it('RETAINS the audio when no embedding could be extracted', async () => {
     writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
     await startServer({ extractionFails: true })
 
@@ -274,6 +288,34 @@ describe('train-g2 dry run and the empty-extraction case', () => {
     expect(res.json.trained).toBe(0)
     expect(res.json.speakers[0].audioRetained).toBe(true)
     expect(existsSync(join(trainingDir('Clem Ukaoma'), 'c1.wav'))).toBe(true)
+  })
+
+  it('RETAINS the audio when extraction worked but every enrollment was refused', async () => {
+    // The distinct and more likely case: embeddings extract fine and the >0.95
+    // dedup gate rejects all of them. The original code unlinked and rmdir'd
+    // unconditionally, so the source audio was destroyed having enrolled
+    // nothing — the one outcome from which there is no recovery. The
+    // extraction-failure test above cannot reach this branch: it returns early.
+    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Clem Ukaoma'), 'c2.wav', 2)
+    await startServer({ enrollFails: true })
+
+    const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
+    expect(res.json.trained).toBe(0)
+    expect(enrollCalls.length).toBe(2)              // it really did try
+    expect(res.json.speakers[0].audioRetained).toBe(true)
+    expect(readdirSync(trainingDir('Clem Ukaoma'))).toHaveLength(2)
+  })
+
+  it('deletes the audio only once something was actually enrolled', async () => {
+    // The positive half of the same guard, so "retain always" is not a passing
+    // implementation either.
+    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
+    expect(res.json.trained).toBe(1)
+    expect(res.json.speakers[0].audioRetained).toBeUndefined()
+    expect(existsSync(trainingDir('Clem Ukaoma'))).toBe(false)
   })
 })
 

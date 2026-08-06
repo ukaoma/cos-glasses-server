@@ -539,6 +539,28 @@ export function speakerModelState(): {
   return { state, path, searched: speakerModelCandidates() }
 }
 
+/** Map the model state onto a readiness verdict for /api/health.
+ *
+ *  The distinction this encodes is the whole point of the field, so it is a
+ *  named pure function rather than an inline ternary inside the health handler:
+ *
+ *   - 'error'       → degraded. A model IS installed and the runtime refused it,
+ *                     so diarization has silently collapsed to the amplitude
+ *                     fallback while every other status surface stays green.
+ *                     That is exactly how 78 trained profiles went unnoticed as
+ *                     missing across a managed cutover.
+ *   - 'unavailable' → NOT degraded. The ~26 MB model ships outside the npm
+ *                     tarball, so most installs have never had one and are
+ *                     working as designed. Degrading them would make the field
+ *                     meaningless on every public box and train the operator to
+ *                     ignore the one channel that matters. */
+export function speakerReadiness(
+  state: 'active' | 'unavailable' | 'error',
+): 'ready' | 'unavailable' | 'degraded' {
+  if (state === 'error') return 'degraded'
+  return state === 'active' ? 'ready' : 'unavailable'
+}
+
 /** Compute actual cosine similarity between two raw embedding vectors */
 export function rawCosineSimilarity(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length) return 0

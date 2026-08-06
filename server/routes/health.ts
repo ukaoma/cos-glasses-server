@@ -6,7 +6,7 @@ import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
-import { speakerModelState } from '../lib/speaker-embeddings.js'
+import { speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import {
   isWhisperLocalAvailable,
@@ -177,30 +177,22 @@ healthRouter.get('/health', async (_req, res) => {
       : whisper_health.startupState === 'preflight' || whisper_health.startupState === 'loading'
         ? 'starting'
         : 'degraded'
-  // A CONFIGURED-BUT-BROKEN voiceprint model is a fault, not a preference:
-  // diarization silently collapses to the amplitude fallback (owner vs Ext) and
-  // every status surface stays green, which is exactly how 78 trained profiles
-  // went unnoticed as missing across a managed cutover.
-  //
-  // 'unavailable' deliberately does NOT degrade readiness. The ~26 MB model
-  // ships outside the npm tarball, so most installs have never had one and are
-  // working as designed — degrading them would make the field meaningless on
-  // every public box and train the operator to ignore it.
-  const speakerReadiness = speakerId.state === 'error'
-    ? 'degraded'
-    : speakerId.state === 'active' ? 'ready' : 'unavailable'
+  // A configured-but-broken voiceprint model is a fault, not a preference. The
+  // full reasoning, including why 'unavailable' must NOT degrade, lives with
+  // speakerReadiness() so it is testable rather than an inline ternary here.
+  const speakerReadinessState = speakerReadiness(speakerId.state)
   const readiness = {
     // /api/health remains a liveness endpoint and intentionally returns HTTP
     // 200 while the server can answer. This separate field prevents an HTTP-
     // green response from hiding a configured local subsystem failure.
-    status: whisperReadiness === 'degraded' || speakerReadiness === 'degraded' ? 'degraded' : 'ready',
+    status: whisperReadiness === 'degraded' || speakerReadinessState === 'degraded' ? 'degraded' : 'ready',
     admissions: maintenance.admissionsOpen ? 'open' : 'maintenance',
     whisper: whisperReadiness,
     whisperError: whisper_health.lastError,
     localTts: tts_local.ready ? 'ready' : 'unavailable',
     // Asserted, not merely reported: `speaker_id` above says what the state IS,
     // this says whether that state is acceptable.
-    speakerId: speakerReadiness,
+    speakerId: speakerReadinessState,
   }
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
   const codex_models = getCodexModelCatalogSnapshot()
