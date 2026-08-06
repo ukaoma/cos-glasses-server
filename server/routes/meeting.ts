@@ -9,6 +9,18 @@ import { emitDisplay } from '../lib/display-bus.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
+import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
+import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
+
+/**
+ * What a de-attributed voice becomes.
+ *
+ * `Ext` already means "someone who spoke and was never identified", which is
+ * precisely the truth after a false attribution is removed. It is also in the
+ * UNATTRIBUTED set, so the review panel treats the row as unnamed, and autoEnroll
+ * skips it — a de-attributed stretch cannot re-poison a profile.
+ */
+const DEATTRIBUTED_LABEL = 'Ext'
 import {
   invalidLabelReason,
   relabelMeetingMarkdown,
@@ -76,7 +88,7 @@ import {
   findCosOperationsMeetingBySessionId,
 } from '../lib/cos-operations-meetings.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
-import { reviewMeetingSpeakers, type ReviewChunk } from '../lib/meeting-speaker-review.js'
+import { UNATTRIBUTED, reviewMeetingSpeakers, type ReviewChunk } from '../lib/meeting-speaker-review.js'
 import {
   acquireMaintenanceWork,
   maintenanceAdmissionsOpen,
@@ -861,6 +873,199 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     })
 
     res.json({ ok: true, correctionId: id, ...preview })
+  })
+
+
+  // ── De-attribution (6.21.18) ──────────────────────────────────────────
+  //
+  // The inverse of naming an unknown voice: this voice was NOT that person.
+  //
+  // Miles, on the 2026-08-06 Ditto meeting: none of the eleven attributed
+  // voices were actually in the room, and there was no way to say so. Naming an
+  // unknown was possible; un-naming a wrong guess was not.
+  //
+  // It undoes MORE than a label. When a voice is falsely attributed the
+  // identifier may also have auto-enrolled those segments into that person's
+  // profile, so the wrong voice is now part of what the system thinks they sound
+  // like and will keep matching. Removing only the label fixes the transcript and
+  // leaves the profile poisoned — the exact mechanism that grew the phantom
+  // "Erick Hernandez" from 3 mislabelled seeds to 18 samples.
+  router.post('/meeting/:sessionId/deattribute', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const from = typeof req.body?.from === 'string' ? req.body.from : ''
+    const bad = invalidLabelReason(from)
+    if (bad) {
+      res.status(400).json({ error: `from: ${bad}`, reason: 'invalid_label' })
+      return
+    }
+    if (UNATTRIBUTED.has(from)) {
+      res.status(400).json({ error: `"${from}" is already unattributed`, reason: 'already_unattributed' })
+      return
+    }
+    const chunks = Array.isArray(req.body?.chunks)
+      ? (req.body.chunks as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) >= 0)
+      : []
+    if (Array.isArray(req.body?.chunks) && chunks.length !== req.body.chunks.length) {
+      res.status(400).json({ error: 'chunks must be non-negative integers', reason: 'invalid_chunks' })
+      return
+    }
+    // Retracting the training samples is the part that improves accuracy over
+    // time, so it defaults ON. Opt out to fix a transcript without touching the
+    // profile.
+    const retractTraining = req.body?.retractTraining !== false
+
+    const operations = cosOperationsMeetingsConfigured()
+      ? findCosOperationsMeetingBySessionId(sessionId)
+      : null
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) {
+      res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
+    const meetingPath = operations?.meetingPath ?? saved!.filepath
+    const title = operations?.title ?? saved!.title
+
+    let sidecarRaw: string
+    try {
+      sidecarRaw = readFileSync(sidecarPath, 'utf-8')
+    } catch {
+      res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
+      return
+    }
+
+    // The voice becomes `Ext` — an external speaker who was never identified,
+    // which is exactly what an un-named voice is. autoEnroll skips Ext, so a
+    // de-attributed stretch cannot re-poison anything.
+    const plan = relabelSidecarJson(sidecarRaw, from, DEATTRIBUTED_LABEL, chunks)
+    if (!plan.ok) {
+      res.status(422).json({ error: plan.error, reason: 'deattribute_rejected' })
+      return
+    }
+
+    // What this would remove from the profile, and what it CANNOT reach.
+    // readVoiceProfiles returns a ProfileStore, not an array.
+    const profile = readVoiceProfiles().profiles.find(p => p.name === from)
+    const profileSources: Array<string | undefined> = profile
+      ? Array.from({ length: profile.embeddings.length }, (_, i) => profile.sources?.[i])
+      : []
+    const traceable = profileSources.filter(sourceString => isSampleFromSession(sourceString, sessionId)).length
+    const untraceable = untraceableSampleCount(profileSources)
+
+    let markdownPlan: ReturnType<typeof relabelMeetingMarkdown> | null = null
+    if (plan.value.coveredAllWithLabel) {
+      try {
+        markdownPlan = relabelMeetingMarkdown(readFileSync(meetingPath, 'utf-8'), from, DEATTRIBUTED_LABEL)
+      } catch { markdownPlan = null }
+    }
+    const md = markdownPlan?.ok ? markdownPlan.value : null
+
+    const surfaces = {
+      sidecar: plan.value.changed.length,
+      attendees: md?.attendees ?? 0,
+      transcript: md?.transcript ?? 0,
+    }
+    const preview = {
+      sessionId,
+      title,
+      from,
+      to: DEATTRIBUTED_LABEL,
+      scope: 'meeting' as const,
+      chunks: plan.value.changed,
+      surfaces,
+      partial: !plan.value.coveredAllWithLabel,
+      speakersAfter: plan.value.speakers,
+      training: {
+        retract: retractTraining,
+        wouldRetract: retractTraining ? traceable : 0,
+        profileSamples: profileSources.length,
+        // Honest about reach: samples written before train-g2 started stamping
+        // the session cannot be tied to a meeting and survive this.
+        untraceable,
+      },
+      proseStale: md?.proseStale ?? false,
+      proseHits: md?.proseHits ?? [],
+    }
+
+    if (req.body?.dryRun === true || req.body?.confirm !== true) {
+      const notes: string[] = []
+      if (retractTraining && traceable > 0) {
+        notes.push(`${traceable} training sample(s) from this meeting will be removed from "${from}"`)
+      }
+      if (retractTraining && traceable === 0) {
+        notes.push(`no training sample from this meeting is traceable to "${from}", so the profile is unchanged`)
+      }
+      if (untraceable > 0) {
+        notes.push(`${untraceable} older sample(s) on "${from}" carry no meeting provenance and cannot be retracted`)
+      }
+      res.status(req.body?.dryRun === true ? 200 : 400).json({
+        ...(req.body?.dryRun === true ? {} : { error: 'confirmation required', reason: 'confirmation_required' }),
+        message: `Removing "${from}" from ${surfaces.sidecar} segment(s) of this meeting. ${notes.join('. ')}`.trim(),
+        ...preview,
+      })
+      return
+    }
+
+    const stalled = pendingCorrections(sessionId)
+    if (stalled.length > 0 && req.body?.force !== true) {
+      res.status(409).json({
+        error: 'a previous correction on this meeting never completed',
+        reason: 'correction_pending',
+        pending: stalled.map(r => ({ id: r.id, at: r.at, from: r.from, to: r.to })),
+      })
+      return
+    }
+
+    const id = `${sessionId}:${from}>deattributed:${Date.now().toString(36)}`
+    const at = new Date().toISOString()
+    if (!appendCorrection(sessionId, {
+      id, phase: 'intent', at, from, to: DEATTRIBUTED_LABEL, chunks: plan.value.changed, scope: 'meeting',
+    })) {
+      res.status(500).json({
+        error: 'could not record the de-attribution, so nothing was changed',
+        reason: 'ledger_unwritable',
+      })
+      return
+    }
+
+    let retracted = 0
+    try {
+      durableAtomicWriteFileSync(sidecarPath, plan.value.json, { mode: 0o600 })
+      if (md && (md.attendees > 0 || md.transcript > 0)) {
+        durableAtomicWriteFileSync(meetingPath, md.markdown, { mode: 0o600 })
+      }
+      // Profile retraction happens AFTER the transcript is corrected: if the
+      // write fails, the ledger shows an unclosed intent and the profile has not
+      // yet been touched, which is the recoverable order.
+      if (retractTraining && traceable > 0) {
+        retracted = retractEmbeddingsBySource(from, s => isSampleFromSession(s, sessionId)).removed
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      appendCorrection(sessionId, {
+        id, phase: 'failed', at: new Date().toISOString(), from, to: DEATTRIBUTED_LABEL,
+        chunks: plan.value.changed, scope: 'meeting', error: message,
+      })
+      res.status(500).json({ error: `de-attribution failed: ${message}`, reason: 'write_failed' })
+      return
+    }
+
+    appendCorrection(sessionId, {
+      id, phase: 'applied', at: new Date().toISOString(), from, to: DEATTRIBUTED_LABEL,
+      chunks: plan.value.changed, scope: 'meeting', surfaces, proseStale: preview.proseStale,
+    })
+
+    res.json({
+      ok: true,
+      correctionId: id,
+      ...preview,
+      training: { ...preview.training, retracted },
+    })
   })
 
   // ── Unsaved-capture recovery (6.19.0) ─────────────────────────────────

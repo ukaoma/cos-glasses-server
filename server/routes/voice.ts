@@ -10,6 +10,7 @@ import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import { dataPath } from '../lib/data-dir.js'
 import { purgeSpeakerCalibrationRows, relabelSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
+import { trainingSourceFor } from '../lib/training-audio-provenance.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -192,10 +193,14 @@ voiceRouter.post('/voice/train-g2', async (req, res) => {
 
       // Extract all embeddings, select most diverse
       const embeddings: Float32Array[] = []
+      // Parallel to `embeddings`: the WAV each one came from, so the enrollment
+      // below can stamp WHICH MEETING produced the sample. Without it a later
+      // de-attribution cannot retract this meeting's contribution to the profile.
+      const embeddingFiles: string[] = []
       for (const wav of wavFiles) {
         const buffer = readFileSync(resolve(speakerPath, wav))
         const emb = extractEmbedding(buffer)
-        if (emb) embeddings.push(emb)
+        if (emb) { embeddings.push(emb); embeddingFiles.push(wav) }
       }
 
       if (embeddings.length === 0) {
@@ -220,7 +225,13 @@ voiceRouter.post('/voice/train-g2', async (req, res) => {
       // Enroll the diverse subset (enrollEmbedding handles dedup gate + FIFO cap)
       let enrolled = 0
       for (const emb of selected) {
-        const result = enrollEmbedding(speakerName, emb, 'g2-training')
+        // Reference identity, NOT a re-selection: greedyDiversitySelect returns
+        // the very same Float32Array objects, so indexOf recovers the filename
+        // without changing which samples were chosen. Swapping the selector for
+        // an index-returning one would silently alter that choice.
+        const at = embeddings.indexOf(emb)
+        const source = at >= 0 ? trainingSourceFor(embeddingFiles[at]) : 'g2-training'
+        const result = enrollEmbedding(speakerName, emb, source)
         if (result.success) enrolled++
       }
 
