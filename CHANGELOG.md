@@ -1,3 +1,12 @@
+## 6.21.9
+
+- Prevent an unclosed or abandoned recording from monopolizing progressive HQ.
+  Each live session now receives one sealed window per FIFO turn, and sessions
+  idle for 45 seconds yield only disposable checkpoint compute while preserving
+  raw audio, recovery ledgers, completed checkpoints, and save behavior.
+- Resume a yielded session automatically when a new canonical chunk arrives,
+  and expose `paused_idle` in the progressive health snapshot for diagnosis.
+
 ## 6.21.8
 
 - Decouple durable G2 sync identity from post-meeting HQ so a saved meeting can

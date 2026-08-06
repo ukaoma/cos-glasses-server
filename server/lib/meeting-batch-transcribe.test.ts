@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { BatchResult, BatchSegment } from './batch-transcript-quality.js'
 import {
   __progressiveHqTesting,
@@ -38,6 +38,10 @@ function entries(): IndexedTranscriptChunk[] {
 }
 
 describe('progressive meeting HQ checkpoints', () => {
+  afterEach(() => {
+    __progressiveHqTesting.resetProgressiveSessions()
+  })
+
   it('uses a conservative two-thread ceiling for Balanced on an M1/M2-class CPU', () => {
     expect(__progressiveHqTesting.resolveProgressiveHqPolicy({
       requested: true,
@@ -118,6 +122,47 @@ describe('progressive meeting HQ checkpoints', () => {
     expect(__progressiveHqTesting.segmentRangeIsComplete(segment, [0, 1, 2, 3])).toBe(true)
   })
 
+  it('admits multiple live sessions instead of pinning the first owner forever', () => {
+    const now = 1_000_000
+    __progressiveHqTesting.admitProgressiveSession('meeting_first', '/tmp/meeting_first', entries(), [0, 1, 2, 3], now)
+    __progressiveHqTesting.admitProgressiveSession('meeting_second', '/tmp/meeting_second', entries(), [0, 1, 2, 3], now + 1)
+    expect(__progressiveHqTesting.progressiveSessionIds()).toEqual([
+      'meeting_first',
+      'meeting_second',
+    ])
+  })
+
+  it('yields only stale disposable work and resumes it when new input arrives', () => {
+    const start = 1_000_000
+    const first = __progressiveHqTesting.admitProgressiveSession(
+      'meeting_first', '/tmp/meeting_first', entries(), [0, 1, 2, 3], start,
+    )
+    const firstController = new AbortController()
+    first.active = true
+    first.controller = firstController
+    const second = __progressiveHqTesting.admitProgressiveSession(
+      'meeting_second', '/tmp/meeting_second', entries(), [0, 1, 2, 3], start + 45_000,
+    )
+    const secondController = new AbortController()
+    second.active = true
+    second.controller = secondController
+
+    __progressiveHqTesting.yieldIdleProgressiveSessions('meeting_second', start + 45_000)
+    expect(firstController.signal.aborted).toBe(true)
+    expect(secondController.signal.aborted).toBe(false)
+    expect(__progressiveHqTesting.progressiveSessionIsIdle(first, start + 45_000)).toBe(true)
+
+    const resumedEntries = entries()
+    resumedEntries.push({
+      chunkIndex: 5,
+      chunk: { text: 'new audio', speaker: 'MU', elapsed: 50_000, similarity: 1 },
+    })
+    __progressiveHqTesting.admitProgressiveSession(
+      'meeting_first', '/tmp/meeting_first', resumedEntries, [0, 1, 2, 3, 4, 5], start + 45_001,
+    )
+    expect(__progressiveHqTesting.progressiveSessionIsIdle(first, start + 45_001)).toBe(false)
+  })
+
   it('preserves source speaker confidence instead of upgrading labels', () => {
     const source = entries().slice(0, 2)
     source[0]!.chunk.speaker = 'Client Label'
@@ -151,6 +196,8 @@ describe('progressive meeting HQ checkpoints', () => {
         failedIdentity: failedIdentity!,
         failedAttempts: 3,
         retryAfter: 0,
+        lastInputAt: Date.now(),
+        idleYieldLogged: false,
       }
       expect(__progressiveHqTesting.nextMissingSealedSegment(state)).toBeNull()
       // Unrelated later chunks do not re-enable an unchanged failed segment.

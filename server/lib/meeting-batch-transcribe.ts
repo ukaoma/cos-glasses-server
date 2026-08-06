@@ -345,6 +345,15 @@ export const __progressiveHqTesting = {
   nextMissingSealedSegment,
   progressiveFailureIdentity,
   resolveProgressiveHqPolicy,
+  progressiveSessionIsIdle,
+  yieldIdleProgressiveSessions,
+  admitProgressiveSession,
+  progressiveSessionIds: () => [...progressiveSessions.keys()],
+  resetProgressiveSessions: () => {
+    for (const state of progressiveSessions.values()) state.controller?.abort()
+    progressiveSessions.clear()
+    progressiveActiveSessionId = null
+  },
 }
 
 export async function transcribeSegments(
@@ -459,11 +468,13 @@ interface ProgressiveSessionState {
   failedIdentity?: string
   failedAttempts: number
   retryAfter: number
+  lastInputAt: number
+  idleYieldLogged: boolean
 }
 
 const progressiveSessions = new Map<string, ProgressiveSessionState>()
 let progressiveActiveSessionId: string | null = null
-let progressiveOwnerSessionId: string | null = null
+const PROGRESSIVE_IDLE_YIELD_MS = 45_000
 
 interface ProgressiveHqPolicyInput {
   requested: boolean
@@ -530,6 +541,25 @@ function progressiveThreads(): number {
   return currentProgressiveHqPolicy().threads
 }
 
+function progressiveSessionIsIdle(state: ProgressiveSessionState, now = Date.now()): boolean {
+  return state.lastInputAt > 0 && now - state.lastInputAt >= PROGRESSIVE_IDLE_YIELD_MS
+}
+
+/** A stale recording may still be recoverable, but it must not own the CPU-HQ
+ *  lane forever. Abort only its disposable checkpoint child; raw WAVs, the
+ *  transcript ledger, completed checkpoints, and save/recovery semantics remain
+ *  untouched. A later canonical chunk refreshes lastInputAt and resumes it. */
+function yieldIdleProgressiveSessions(activeSessionId: string, now = Date.now()): void {
+  for (const [sessionId, state] of progressiveSessions) {
+    if (sessionId === activeSessionId || state.closed || !progressiveSessionIsIdle(state, now)) continue
+    if (!state.idleYieldLogged) {
+      console.log(`[meeting-hq-checkpoint] yielding idle session ${sessionId}`)
+      state.idleYieldLogged = true
+    }
+    state.controller?.abort()
+  }
+}
+
 function segmentRangeIsComplete(segment: BatchSegment, completedIndices: number[]): boolean {
   const completed = new Set(completedIndices)
   for (let index = segment.startChunkIdx; index <= segment.endChunkIdx; index++) {
@@ -560,13 +590,13 @@ function nextMissingSealedSegment(
 
 function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState): void {
   if (state.queued || state.active || state.closed || !progressiveMeetingHqEnabled()) return
-  if (progressiveActiveSessionId && progressiveActiveSessionId !== sessionId) return
+  if (progressiveSessionIsIdle(state)) return
   if (!nextMissingSealedSegment(state)) return
   state.queued = true
 
   void enqueueSerializedHqWork(async () => {
     state.queued = false
-    if (state.closed || !progressiveMeetingHqEnabled()) return
+    if (state.closed || progressiveSessionIsIdle(state) || !progressiveMeetingHqEnabled()) return
     const pending = nextMissingSealedSegment(state)
     if (!pending) return
     const sourceHash = segmentSourceHash(state.audioDir, pending.segment)
@@ -638,6 +668,9 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
       state.controller = undefined
       state.activeDecode = undefined
       if (progressiveActiveSessionId === sessionId) progressiveActiveSessionId = null
+      // Each job handles one sealed window, then rejoins the shared FIFO tail.
+      // Multiple live meetings therefore make bounded round-robin progress
+      // while post-save finalization still uses the same single decoder queue.
       if (!state.closed) queueProgressiveWork(sessionId, state)
     }
   }).catch(error => {
@@ -649,16 +682,13 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
   })
 }
 
-/** Coalesced, global-single-flight progressive HQ admission after canonical persistence. */
-export function scheduleProgressiveHqCheckpoint(
+function admitProgressiveSession(
   sessionId: string,
   audioDir: string,
   entries: IndexedTranscriptChunk[],
   asrCompletedIndices: number[],
-): void {
-  if (!progressiveMeetingHqEnabled()) return
-  if (progressiveOwnerSessionId && progressiveOwnerSessionId !== sessionId) return
-  progressiveOwnerSessionId ??= sessionId
+  now = Date.now(),
+): ProgressiveSessionState {
   const existing = progressiveSessions.get(sessionId)
   const state = existing ?? {
     sessionId,
@@ -672,6 +702,8 @@ export function scheduleProgressiveHqCheckpoint(
     inputSignature: '',
     failedAttempts: 0,
     retryAfter: 0,
+    lastInputAt: 0,
+    idleYieldLogged: false,
   }
   state.audioDir = audioDir
   state.entries = entries.map(entry => ({ ...entry, chunk: { ...entry.chunk } }))
@@ -688,8 +720,26 @@ export function scheduleProgressiveHqCheckpoint(
   if (inputSignature !== state.inputSignature) {
     state.inputSignature = inputSignature
     state.inputRevision += 1
+    state.lastInputAt = now
+    state.idleYieldLogged = false
   }
   progressiveSessions.set(sessionId, state)
+  return state
+}
+
+/** Coalesced, globally serialized progressive HQ admission after canonical
+ *  persistence. Every live session may enqueue one window; no session owns the
+ *  lane beyond that bounded unit of work. */
+export function scheduleProgressiveHqCheckpoint(
+  sessionId: string,
+  audioDir: string,
+  entries: IndexedTranscriptChunk[],
+  asrCompletedIndices: number[],
+): void {
+  if (!progressiveMeetingHqEnabled()) return
+  const now = Date.now()
+  const state = admitProgressiveSession(sessionId, audioDir, entries, asrCompletedIndices, now)
+  yieldIdleProgressiveSessions(sessionId, now)
   queueProgressiveWork(sessionId, state)
 }
 
@@ -701,7 +751,6 @@ export async function stopProgressiveHqSession(sessionId: string): Promise<void>
   state.controller?.abort()
   void state.activeDecode?.catch(() => { /* aborted cache work is disposable */ })
   progressiveSessions.delete(sessionId)
-  if (progressiveOwnerSessionId === sessionId) progressiveOwnerSessionId = null
 }
 
 export function getProgressiveHqSnapshot(): {
@@ -733,7 +782,9 @@ export function getProgressiveHqSnapshot(): {
         sessionId,
         sealedDone,
         sealedTotal: sealed.length,
-        state: state.active ? 'active' : state.queued ? 'queued' : 'idle',
+        state: progressiveSessionIsIdle(state)
+          ? 'paused_idle'
+          : state.active ? 'active' : state.queued ? 'queued' : 'idle',
       }
     }),
   }
