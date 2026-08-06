@@ -1,3 +1,44 @@
+## 6.21.18
+
+Everything a human needs to correct who spoke, and to hear the voice before
+deciding. Four changes that landed together after Miles reviewed the 2026-08-06
+Ditto meeting and found eleven attributed voices, most of them wrong.
+
+- A NAME MUST BE EARNED. `identifySpeaker` accepts a match at 0.55, so one
+  segment could arrive in the review panel wearing somebody's full name — Richard
+  Jenkins on 1 segment at 0.60, Luke Henry on 1 at 0.55. Voices now carry
+  `nameAsserted` plus `assertionBlockers`; below the floor a client must render
+  "unidentified" and offer the label only as a scored candidate. Floors:
+  similarity >= 0.65 AND >= 3 segments AND not thrashing. The owner gets no
+  exemption.
+- `timeline` ON THE REVIEW. Consecutive same-speaker spans with start/end, so a
+  ribbon can be an actual timeline. The previous one drew a rectangle per voice
+  sized by share of segments while labelled "who spoke, in order", so a voice
+  that spoke twice appeared once and hover could report nothing true.
+- POST /meeting/:id/deattribute — "this voice was NOT that person". Un-attributes
+  it for ONE meeting and retracts the training samples that meeting contributed
+  to that person's profile, so a false attribution stops reinforcing itself. It
+  reports what it cannot reach: `train-g2` used to stamp a bare `g2-training`,
+  discarding which meeting each sample came from, and now stamps
+  `g2-training:<sessionId>`. Samples written before this are relabellable but not
+  retractable.
+- MEETING AUDIO KEPT 7 DAYS, 8 GB budget (Miles's call: review should survive to
+  a weekend). Chunk WAVs previously died with the batch pipeline —
+  `session-audio` held 0 files. Hard-linked at the single choke point before the
+  rename, so it costs no extra disk and outlives the pipeline's cleanup. Sized on
+  measurement: 3.1 h/day mean and 6.9 h peak make a week ~2.5 GB uncompressed, so
+  the audio stays usable for re-transcription too. Retention sweeps expiry first,
+  then evicts oldest whole sessions; a session whose age cannot be read is kept.
+- Playback: `GET /voice/profiles/:name/sample` (needs no retention change — the
+  training audio already existed, and playing a stored profile is what answers
+  "is this really them"), `GET /voice/ext-audio/:id/sample`, and
+  `GET /meeting/:id/audio/:chunk` which distinguishes "the window passed" from
+  "that chunk is missing" and reports which chunks are playable.
+- `/api/health` gains `review_audio`. `voice_provenance` from 6.21.17 already
+  reports `noHumanSample`; on the live store that is 67 of 77 profiles.
+
+Requires COS Control 0.5.0+ to use the scoped correction and playback surfaces.
+
 ## 6.21.17
 
 - Voice profiles now give up their WEAKEST sample, not their oldest. Eviction is
