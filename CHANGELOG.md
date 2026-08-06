@@ -1,3 +1,19 @@
+## 6.21.19
+
+- Review playback falls back to ext-audio. The 7-day archive introduced in
+  6.21.18 is FORWARD-ONLY — it starts filling when a meeting is saved under that
+  version — so on upgrade day the panel had no play buttons at all, which is what
+  Miles hit. ext-audio already holds 72 hours of unrecognised-speaker audio keyed
+  by the same raw capture index; measured across 14 real meetings, 90-100% of
+  those files correspond to a chunk the sidecar labels `Ext`. That is exactly the
+  set a reviewer most needs to hear.
+- `GET /meeting/:id/audio` merges both sources and reports `archivedChunks` and
+  `extAudioChunks` separately, because the windows differ (7 days vs 72 hours)
+  and a single retention figure would be wrong for half the list.
+- Published under its own version rather than re-cutting 6.21.18: that version is
+  already on npm, and two different artifacts sharing a version number is a
+  defect in its own right.
+
 ## 6.21.18
 
 Everything a human needs to correct who spoke, and to hear the voice before
