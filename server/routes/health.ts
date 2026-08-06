@@ -7,6 +7,7 @@ import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
+import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import {
   isWhisperLocalAvailable,
@@ -115,6 +116,10 @@ healthRouter.get('/health', async (_req, res) => {
   // path is a local filesystem detail and health is unauthenticated.
   const speakerId = speakerModelState()
   checks.speaker_id = speakerId.state
+
+  // Visible so the correction loop can be seen banking evidence rather than
+  // trusted to be. Counts only — no session ids on an unauthenticated surface.
+  const chunkEmbeddings = chunkEmbeddingStoreStats()
 
   // Health is unauthenticated. Publish only availability; the actual CLI
   // session id is a resumable runtime handle and belongs on authenticated
@@ -232,6 +237,7 @@ healthRouter.get('/health', async (_req, res) => {
     cursor_models,
     meeting_sync,
     unsaved_captures,
+    chunk_embeddings: chunkEmbeddings,
     capabilities: {
       transcription: {
         ...transcription,

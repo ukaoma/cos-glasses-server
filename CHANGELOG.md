@@ -1,3 +1,34 @@
+## 6.21.15
+
+- Persist the per-chunk voiceprint embedding, so a speaker correction can become
+  training instead of only a transcript edit. `identifySpeaker` computed a
+  192-dim embedding for every chunk, used it to pick a name, and discarded it —
+  nothing downstream kept it, so a human saying "those six segments were
+  actually me" had no acoustic evidence left to learn from. Embeddings now land
+  in `chunk-embeddings/<sessionId>.jsonl`, keyed by chunk index, which is the
+  join key to the existing chunk sidecar.
+- This only works FORWARD. Meetings recorded before this ships can be relabelled
+  but can never harden a profile, because their embeddings are already gone.
+- `Ext` is deliberately included. An unidentified voice is the one case with no
+  other route to being trained at all.
+- RETENTION IS 14 DAYS, not the 8 hours used for audio snippets
+  (`COS_CHUNK_EMBEDDING_TTL_DAYS` to change it). Two reasons, both worth Miles
+  overriding if he disagrees: 8 hours cannot survive a weekend, so a Friday
+  meeting could never be corrected on Monday; and an embedding is not audio — it
+  is a non-invertible timbre vector that cannot be played back, so the privacy
+  argument behind a short audio window does not carry across unchanged.
+- Master switch `COS_CHUNK_EMBEDDINGS=0`. Default ON, because with it off a
+  correction can never train anything. The write is append-only JSONL, never
+  throws, and is skipped silently on failure: losing an embedding must never
+  cost a chunk of transcript.
+- Reject a wrong-DIMENSION vector on read rather than averaging it into a
+  profile. A 64-dim row decodes perfectly cleanly and nothing downstream would
+  notice, which is precisely why it needs an explicit gate.
+- `/api/health` reports `chunk_embeddings` (sessions, bytes, TTL, oldest age) so
+  the loop can be seen banking evidence rather than assumed to be.
+- Size, measured not estimated: ~1.1 KB per chunk, so a 400-chunk meeting is
+  under 500 KB.
+
 ## 6.21.14
 
 - Carry `sessionId` on the COS operations meetings list as well. 6.21.13 added it

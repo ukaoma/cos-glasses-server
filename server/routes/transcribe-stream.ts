@@ -39,6 +39,10 @@ import { transcribeWhisperMeetingPreview } from '../lib/whisper-preview.js'
 import { dataPath } from '../lib/data-dir.js'
 import { ageHours, partitionExpiredAudio } from '../lib/audio-retention.js'
 import {
+  appendChunkEmbedding,
+  sweepExpiredChunkEmbeddings,
+} from '../lib/chunk-embedding-store.js'
+import {
   countChunkWavs,
   purgeExpiredQuarantine,
   quarantineSessionAudio,
@@ -788,6 +792,16 @@ setInterval(() => {
     }
   } catch {}
 
+  // Sweep expired chunk embeddings. Same shape as the audio sweeps, but a
+  // separate window: these are non-invertible timbre vectors, not speech, and
+  // the correction loop needs them to survive a weekend.
+  try {
+    const swept = sweepExpiredChunkEmbeddings(Date.now())
+    if (swept.removed.length > 0) {
+      console.log(`[chunk-embeddings] Purged ${swept.removed.length} expired session file(s), ${swept.retained.length} retained`)
+    }
+  } catch {}
+
   // Purge ext-audio dirs older than 72 hours
   try {
     if (existsSync(EXT_AUDIO_DIR)) {
@@ -1497,6 +1511,20 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
   const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers)
   console.log(`[perf] identifySpeaker: ${(performance.now() - tEmb).toFixed(1)}ms`)
   if (!embeddingResult) return { speaker: clientSpeaker, similarity: 0 }
+
+  // Bank the embedding before anything else can return. This is the only moment
+  // it exists: identifySpeaker computes it per chunk and nothing else keeps it,
+  // so a correction made later has no acoustic evidence without this write.
+  // Deliberately includes 'Ext' — an unidentified voice is the case with no
+  // other way to be trained.
+  if (embeddingResult.embedding) {
+    appendChunkEmbedding(sessionId, {
+      i: chunkIndex,
+      speaker: embeddingResult.speaker,
+      similarity: embeddingResult.similarity,
+      embedding: embeddingResult.embedding,
+    })
+  }
 
   let speaker = embeddingResult.speaker
   if (speaker !== clientSpeaker) {
