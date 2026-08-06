@@ -4,15 +4,33 @@ import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, rawCosineSimilarity, getEmbeddingCount } from '../lib/speaker-embeddings.js'
+import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, rawCosineSimilarity, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles } from '../lib/speaker-embeddings.js'
 import { statSync } from 'node:fs'
 import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
+import { dataPath } from '../lib/data-dir.js'
+import { purgeSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url))
-const AUDIO_SAVE_DIR = resolve(__dirname, '..', 'data', 'training-audio')
-const EXT_AUDIO_DIR = resolve(__dirname, '..', 'data', 'ext-audio')
+// These MUST match the writer in transcribe-stream.ts, which saves under
+// dataPath(). They previously resolved relative to __dirname — i.e. inside the
+// installed package generation, a directory the writer never touches and that
+// every managed update replaces. Every reader below therefore reported zero
+// speakers and zero sessions while real audio accumulated in the data home.
+const AUDIO_SAVE_DIR = dataPath('training-audio')
+const EXT_AUDIO_DIR = dataPath('ext-audio')
+// Must match speaker-embeddings.ts, which appends every identification decision.
+const CALIBRATION_LOG = dataPath('speaker-calibration.jsonl')
+
+/** A speaker directory name is derived from a label by replacing spaces with
+ *  underscores. Resolve back through basename so a crafted `speaker` value
+ *  cannot escape the audio root. */
+function speakerDirPath(root: string, speakerName: string): string | null {
+  const dirName = speakerName.trim().replace(/\s+/g, '_')
+  if (!dirName || dirName.includes('/') || dirName.includes('\\') || dirName.includes('..')) return null
+  const path = resolve(root, dirName)
+  if (!path.startsWith(resolve(root) + '/')) return null
+  return path
+}
 
 export const voiceRouter = Router()
 
@@ -97,19 +115,73 @@ voiceRouter.get('/voice/training-status', async (_req, res) => {
 })
 
 // POST /api/voice/train-g2 — train from saved G2-mic audio chunks
-// These accumulate during meetings for speakers who need more embeddings
+// These accumulate during meetings for speakers who need more embeddings.
+//
+// Body: { speaker?, confirmAllSpeakers?, dryRun?, maxPerSpeaker? }
+//
+// This endpoint permanently rewrites voice profiles AND deletes the source WAVs,
+// so the unscoped form now requires an explicit confirmation. Two reasons, both
+// load-bearing:
+//
+//  1. Until the reader path above was fixed it saw an empty directory, so a
+//     no-argument call was harmless. It is not harmless any more — it now reaches
+//     every accumulated speaker directory at once.
+//  2. Enrolling N samples into a profile capped at 20 evicts the oldest sample N
+//     times. A 30-WAV directory would therefore discard EVERY pre-existing
+//     embedding for that speaker, replacing months of curated training with one
+//     meeting's audio. Diversity selection bounds the enrollment instead.
+const DEFAULT_MAX_TRAIN_PER_SPEAKER = 10
+
 voiceRouter.post('/voice/train-g2', async (req, res) => {
   try {
     const targetSpeaker = req.body?.speaker as string | undefined
+    const confirmAll = req.body?.confirmAllSpeakers === true
+    const dryRun = req.body?.dryRun === true
+    const maxPerSpeaker = Number.isFinite(req.body?.maxPerSpeaker)
+      ? Math.max(1, Math.min(20, Number(req.body.maxPerSpeaker)))
+      : DEFAULT_MAX_TRAIN_PER_SPEAKER
+
     if (!existsSync(AUDIO_SAVE_DIR)) {
       return res.json({ trained: 0, speakers: [], message: 'No saved G2 audio yet' })
     }
 
-    const speakerDirs = readdirSync(AUDIO_SAVE_DIR, { withFileTypes: true })
+    let speakerDirs = readdirSync(AUDIO_SAVE_DIR, { withFileTypes: true })
       .filter(d => d.isDirectory())
-      .filter(d => !targetSpeaker || d.name === targetSpeaker.replace(/\s+/g, '_'))
 
-    const results: Array<{ speaker: string; chunks: number; enrolled: number }> = []
+    if (targetSpeaker) {
+      const wanted = speakerDirPath(AUDIO_SAVE_DIR, targetSpeaker)
+      if (!wanted) return res.status(400).json({ error: 'invalid speaker name' })
+      speakerDirs = speakerDirs.filter(d => resolve(AUDIO_SAVE_DIR, d.name) === wanted)
+      if (speakerDirs.length === 0) {
+        return res.status(404).json({ error: `No saved G2 audio for "${targetSpeaker}"` })
+      }
+    } else if (!confirmAll && !dryRun) {
+      // Fail closed with the inventory, so the caller can see exactly what a
+      // confirmation would rewrite before granting it.
+      const pending = speakerDirs.map(d => {
+        const name = d.name.replace(/_/g, ' ')
+        let chunks = 0
+        try { chunks = readdirSync(resolve(AUDIO_SAVE_DIR, d.name)).filter(f => f.endsWith('.wav')).length } catch {}
+        return { speaker: name, chunks, currentEmbeddings: getEmbeddingCount(name) }
+      }).filter(s => s.chunks > 0)
+      return res.status(400).json({
+        error: 'confirmation required',
+        message: 'Training every speaker at once rewrites their profiles and deletes the source audio. '
+          + 'Pass { speaker } to scope it, { dryRun: true } to preview, or { confirmAllSpeakers: true } to proceed.',
+        wouldTrain: pending,
+        totalSpeakers: pending.length,
+        totalChunks: pending.reduce((sum, s) => sum + s.chunks, 0),
+      })
+    }
+
+    const results: Array<{
+      speaker: string
+      chunks: number
+      embeddingsExtracted: number
+      selected: number
+      enrolled: number
+      audioRetained?: boolean
+    }> = []
 
     for (const dir of speakerDirs) {
       const speakerName = dir.name.replace(/_/g, ' ')
@@ -127,28 +199,53 @@ voiceRouter.post('/voice/train-g2', async (req, res) => {
       }
 
       if (embeddings.length === 0) {
-        results.push({ speaker: speakerName, chunks: wavFiles.length, enrolled: 0 })
+        results.push({ speaker: speakerName, chunks: wavFiles.length, embeddingsExtracted: 0, selected: 0, enrolled: 0, audioRetained: true })
         continue
       }
 
-      // Enroll diverse embeddings (enrollEmbedding handles diversity gate + FIFO cap)
+      const selected = greedyDiversitySelect(embeddings, maxPerSpeaker)
+
+      if (dryRun) {
+        results.push({
+          speaker: speakerName,
+          chunks: wavFiles.length,
+          embeddingsExtracted: embeddings.length,
+          selected: selected.length,
+          enrolled: 0,
+          audioRetained: true,
+        })
+        continue
+      }
+
+      // Enroll the diverse subset (enrollEmbedding handles dedup gate + FIFO cap)
       let enrolled = 0
-      for (const emb of embeddings) {
+      for (const emb of selected) {
         const result = enrollEmbedding(speakerName, emb, 'g2-training')
         if (result.success) enrolled++
       }
 
-      results.push({ speaker: speakerName, chunks: wavFiles.length, enrolled })
+      results.push({
+        speaker: speakerName,
+        chunks: wavFiles.length,
+        embeddingsExtracted: embeddings.length,
+        selected: selected.length,
+        enrolled,
+      })
 
-      // Clean up processed audio
-      for (const wav of wavFiles) {
-        try { unlinkSync(resolve(speakerPath, wav)) } catch {}
+      // Clean up processed audio. Only when something was actually enrolled —
+      // deleting the source after enrolling nothing is pure data loss.
+      if (enrolled > 0) {
+        for (const wav of wavFiles) {
+          try { unlinkSync(resolve(speakerPath, wav)) } catch {}
+        }
+        try { rmdirSync(speakerPath) } catch {}
+      } else {
+        results[results.length - 1].audioRetained = true
       }
-      try { rmdirSync(speakerPath) } catch {}
     }
 
     const totalEnrolled = results.reduce((sum, r) => sum + r.enrolled, 0)
-    res.json({ trained: totalEnrolled, speakers: results })
+    res.json({ trained: totalEnrolled, dryRun, maxPerSpeaker, speakers: results })
   } catch (err: unknown) {
     res.status(500).json({ error: errMsg(err) })
   }
@@ -236,11 +333,31 @@ voiceRouter.post('/voice/enroll-ext', async (req, res) => {
     // Collect target directories
     const targetDirs: string[] = []
     if (sessionId) {
-      const dirPath = resolve(EXT_AUDIO_DIR, sessionId)
-      if (existsSync(dirPath)) targetDirs.push(dirPath)
+      const dirPath = speakerDirPath(EXT_AUDIO_DIR, String(sessionId))
+      if (dirPath && existsSync(dirPath)) targetDirs.push(dirPath)
       else return res.status(404).json({ error: `Session ${sessionId} not found in ext-audio` })
     } else {
       const sessionDirs = readdirSync(EXT_AUDIO_DIR, { withFileTypes: true }).filter(d => d.isDirectory())
+      // Same reasoning as train-g2: with the reader path fixed, the unscoped
+      // form now attributes EVERY unrecognized session in the retention window
+      // to one person and then recursively deletes them all. Different sessions
+      // are usually different people, so that is a profile-poisoning default.
+      if (req.body?.confirmAllSessions !== true) {
+        const inventory = sessionDirs.map(d => {
+          let chunks = 0
+          try { chunks = readdirSync(resolve(EXT_AUDIO_DIR, d.name)).filter(f => f.endsWith('.wav')).length } catch {}
+          return { sessionId: d.name, chunks }
+        }).filter(s => s.chunks > 0)
+        return res.status(400).json({
+          error: 'confirmation required',
+          message: `Enrolling every ext-audio session as "${name}" assumes one speaker across all of them, `
+            + 'and deletes the audio afterwards. Pass { sessionId } to scope it, '
+            + 'or { confirmAllSessions: true } to proceed.',
+          wouldEnrollFrom: inventory,
+          totalSessions: inventory.length,
+          totalChunks: inventory.reduce((sum, s) => sum + s.chunks, 0),
+        })
+      }
       for (const d of sessionDirs) targetDirs.push(resolve(EXT_AUDIO_DIR, d.name))
     }
 
@@ -284,6 +401,135 @@ voiceRouter.post('/voice/enroll-ext', async (req, res) => {
       embeddingsExtracted: allEmbeddings.length,
       selectedDiverse: selected.length,
       message: `Enrolled ${enrolled} diverse embeddings for ${name} from ${totalChunks} ext audio chunks`,
+    })
+  } catch (err: unknown) {
+    res.status(500).json({ error: errMsg(err) })
+  }
+})
+
+// GET /api/voice/profiles — enrolled people with sample counts and provenance.
+// The review surfaces need to see the store; until now the only window into it
+// was a per-name count, so a misattributed profile was invisible.
+voiceRouter.get('/voice/profiles', (_req, res) => {
+  try {
+    const { profiles } = readVoiceProfiles()
+    const owner = getOwnerSpeakerLabel()
+    res.json({
+      owner,
+      count: profiles.length,
+      totalEmbeddings: profiles.reduce((sum, p) => sum + p.embeddings.length, 0),
+      profiles: profiles
+        .map(p => {
+          const bySource: Record<string, number> = {}
+          for (const source of p.sources ?? []) {
+            // Collapse auto:<sessionId> so one poisoned session is visible
+            // without leaking a session id per row.
+            const key = source.startsWith('auto:') ? 'auto' : source
+            bySource[key] = (bySource[key] ?? 0) + 1
+          }
+          return {
+            name: p.name,
+            embeddings: p.embeddings.length,
+            isOwner: p.name === owner,
+            sources: bySource,
+            // Provenance alignment is now an invariant; surfacing it makes a
+            // future regression visible instead of silent.
+            sourcesAligned: (p.sources?.length ?? 0) === p.embeddings.length,
+          }
+        })
+        .sort((a, b) => b.embeddings - a.embeddings),
+    })
+  } catch (err: unknown) {
+    res.status(500).json({ error: errMsg(err) })
+  }
+})
+
+// POST /api/voice/delete-person — remove one person from every store that
+// carries their name. Body: { name, confirm: true, dryRun? }
+//
+// Built before more data accumulates, and returns a per-store count so the sweep
+// is auditable rather than a bare success. Two stores are deliberately NOT swept:
+// ext-audio and session-audio are keyed by session, not by person, so there is no
+// name to match on — they age out on their own retention instead.
+voiceRouter.post('/voice/delete-person', (req, res) => {
+  try {
+    const name = req.body?.name
+    if (!name || typeof name !== 'string' || name.trim().length < 2) {
+      return res.status(400).json({ error: 'name is required (min 2 chars)' })
+    }
+    const target = name.trim()
+    const dryRun = req.body?.dryRun === true
+
+    if (req.body?.confirm !== true && !dryRun) {
+      const existing = readVoiceProfiles().profiles.find(p => p.name === target)
+      const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
+      let wavs = 0
+      if (audioDir && existsSync(audioDir)) {
+        try { wavs = readdirSync(audioDir).filter(f => f.endsWith('.wav')).length } catch {}
+      }
+      const calibration = purgeSpeakerCalibrationRows(CALIBRATION_LOG, target, { dryRun: true })
+      return res.status(400).json({
+        error: 'confirmation required',
+        message: `Deleting "${target}" is not reversible. Pass { confirm: true } to proceed.`,
+        wouldRemove: {
+          profile: existing ? 1 : 0,
+          embeddings: existing?.embeddings.length ?? 0,
+          trainingAudioFiles: wavs,
+          calibrationRows: calibration.removed,
+        },
+      })
+    }
+
+    if (dryRun) {
+      const existing = readVoiceProfiles().profiles.find(p => p.name === target)
+      const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
+      let wavs = 0
+      if (audioDir && existsSync(audioDir)) {
+        try { wavs = readdirSync(audioDir).filter(f => f.endsWith('.wav')).length } catch {}
+      }
+      const calibration = purgeSpeakerCalibrationRows(CALIBRATION_LOG, target, { dryRun: true })
+      return res.json({
+        name: target,
+        dryRun: true,
+        removed: {
+          profiles: existing ? 1 : 0,
+          embeddings: existing?.embeddings.length ?? 0,
+          trainingAudioFiles: wavs,
+          calibrationRows: calibration.removed,
+        },
+      })
+    }
+
+    // 1. Voice profile + sherpa manager registration.
+    const profileResult = removeSpeakerProfile(target)
+
+    // 2. Saved G2 training audio for this person.
+    let trainingAudioFiles = 0
+    const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
+    if (audioDir && existsSync(audioDir)) {
+      try {
+        const wavs = readdirSync(audioDir).filter(f => f.endsWith('.wav'))
+        trainingAudioFiles = wavs.length
+        rmSync(audioDir, { recursive: true, force: true })
+      } catch { /* reported as 0 rather than claimed */ }
+    }
+
+    // 3. Calibration rows (the name appears in every row).
+    const calibration = purgeSpeakerCalibrationRows(CALIBRATION_LOG, target)
+
+    res.json({
+      name: target,
+      removed: {
+        profiles: profileResult.removedProfiles,
+        embeddings: profileResult.removedEmbeddings,
+        trainingAudioFiles,
+        calibrationRows: calibration.removed,
+      },
+      notAttributable: {
+        extAudio: 'keyed by session, not by person — ages out on its own retention',
+        sessionAudio: 'keyed by session, not by person — ages out on its own retention',
+      },
+      calibrationRetained: calibration.retained,
     })
   } catch (err: unknown) {
     res.status(500).json({ error: errMsg(err) })

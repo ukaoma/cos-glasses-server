@@ -37,6 +37,7 @@ import {
 } from '../lib/hallucination-filter.js'
 import { transcribeWhisperMeetingPreview } from '../lib/whisper-preview.js'
 import { dataPath } from '../lib/data-dir.js'
+import { ageHours, partitionExpiredAudio } from '../lib/audio-retention.js'
 import {
   countChunkWavs,
   purgeExpiredQuarantine,
@@ -118,6 +119,13 @@ function meetingTurboPreviewEnabled(): boolean {
 const AUDIO_SAVE_DIR = dataPath('training-audio')
 ensurePrivateDirectory(AUDIO_SAVE_DIR)
 const MAX_SAVED_CHUNKS_PER_SPEAKER = 30  // ~5 min of audio per speaker, cleaned after training
+// Age bound. The count cap above is NOT a retention policy: a speaker who never
+// gets trained keeps 30 WAVs of their voice indefinitely, and the only cleanup
+// path was a manual /voice/train-g2 call. ext-audio has had a 72h sweep since it
+// was introduced; this closes the same gap for training audio. Deliberately
+// longer than ext-audio's window because these chunks are the raw material for
+// deliberate enrollment, not opportunistic retroactive matching.
+const TRAINING_AUDIO_TTL_MS = 14 * 24 * 60 * 60 * 1000  // 14 days
 
 // Unrecognized speaker audio: save Ext chunks for retroactive enrollment
 const EXT_AUDIO_DIR = dataPath('ext-audio')
@@ -739,6 +747,44 @@ setInterval(() => {
           console.log(`[cleanup] Purged stale pending-batch: ${dir}`)
         }
       } catch {}
+    }
+  } catch {}
+
+  // Purge training-audio WAVs past the retention window. Per file, not per
+  // directory: chunks for one speaker accumulate over weeks, so an
+  // all-or-nothing directory check would either keep month-old audio alive
+  // because one chunk is fresh, or delete today's capture because the directory
+  // is old.
+  try {
+    if (existsSync(AUDIO_SAVE_DIR)) {
+      const now = Date.now()
+      for (const dir of readdirSync(AUDIO_SAVE_DIR)) {
+        const dirPath = resolve(AUDIO_SAVE_DIR, dir)
+        try {
+          if (!statSync(dirPath).isDirectory()) continue
+          const candidates = readdirSync(dirPath)
+            .filter(f => f.endsWith('.wav'))
+            .map(name => {
+              let mtimeMs = 0
+              try { mtimeMs = statSync(resolve(dirPath, name)).mtimeMs } catch {}
+              return { name, mtimeMs }
+            })
+          const { expired, retained } = partitionExpiredAudio(candidates, now, TRAINING_AUDIO_TTL_MS)
+          for (const file of expired) {
+            try { unlinkSync(resolve(dirPath, file.name)) } catch {}
+          }
+          if (expired.length > 0) {
+            const oldest = Math.min(...expired.map(f => f.mtimeMs))
+            console.log(
+              `[training-audio] Purged ${expired.length} expired chunk(s) for ${dir}`,
+              `(oldest ${ageHours(oldest, now)}h, ${retained.length} retained)`,
+            )
+          }
+          if (retained.length === 0 && readdirSync(dirPath).length === 0) {
+            try { rmSync(dirPath, { recursive: true, force: true }) } catch {}
+          }
+        } catch {}
+      }
     }
   } catch {}
 

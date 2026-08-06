@@ -8,7 +8,20 @@
 import { resolve } from 'node:path'
 import { errMsg } from './utils.js'
 import { getOwnerSpeakerLabel } from './profile.js'
-import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import { existsSync, appendFileSync, mkdirSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import {
+  appendEmbedding,
+  deleteProfileFromStore,
+  describeRepairs,
+  dropOldestEmbedding,
+  hasRepairs,
+  loadVoiceProfileStore,
+  modalDimension,
+  removeEmbeddingsBySource,
+  saveVoiceProfileStore,
+  type ProfileStore,
+  type VoiceProfile,
+} from './voice-profile-store.js'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -92,15 +105,10 @@ const autoEnrollSessions = new Map<string, Map<string, number>>()
 // Track which speakers already auto-enrolled this session
 const autoEnrolledThisSession = new Map<string, Set<string>>()
 
-interface VoiceProfile {
-  name: string
-  embeddings: number[][]  // multiple enrollments for robustness
-  sources?: string[]      // provenance: 'manual' | 'fireflies' | 'auto:sessionId'
-}
-
-interface ProfileStore {
-  profiles: VoiceProfile[]
-}
+// Shape, durability, and integrity repair all live in voice-profile-store.ts.
+// Re-exported because the review surfaces (/speakers, delete-person, coherence
+// audit) need the types and were previously blocked on them being file-private.
+export type { ProfileStore, VoiceProfile }
 
 /** Cheap structural screen for a downloaded model.
  *
@@ -293,11 +301,13 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
       }
     }
 
-    // FIFO cap: if at max, drop oldest before adding (always enforced)
+    // FIFO cap: if at max, drop oldest before adding (always enforced).
+    // dropOldestEmbedding keeps sources[] in lockstep — the old inline
+    // `sources?.shift()` no-opped whenever sources was undefined or short,
+    // permanently offsetting provenance from the samples it described.
     if (profile.embeddings.length >= MAX_EMBEDDINGS_PER_SPEAKER) {
       console.log(`[speaker] Profile cap reached for "${name}" (${profile.embeddings.length}/${MAX_EMBEDDINGS_PER_SPEAKER}) — dropping oldest`)
-      profile.embeddings.shift()
-      profile.sources?.shift()
+      dropOldestEmbedding(profile)
       rebuildSpeakerInManager(name, profile.embeddings)
     }
   }
@@ -448,10 +458,44 @@ export function clearSpeakerEmbeddings(name: string): boolean {
     try { manager.remove(name) } catch { /* ignore */ }
   }
 
-  // Persist
-  writeFileSync(PROFILES_PATH, JSON.stringify(store, null, 2))
-  invalidateProfileCache()
-  return true
+  // Persist. A "fresh training" clear legitimately empties one profile but must
+  // never be able to empty the whole store, so allowEmpty stays off here.
+  return writeProfileStore(store)
+}
+
+/** Remove a person entirely: profile, embeddings, and manager registration.
+ *  Returns counts so a caller can report what was actually removed. */
+export function removeSpeakerProfile(name: string): { removedProfiles: number; removedEmbeddings: number } {
+  const store = loadProfileStore()
+  const result = deleteProfileFromStore(store, name)
+  if (result.removedProfiles === 0) return result
+
+  if (manager && manager.contains(name)) {
+    try { manager.remove(name) } catch { /* the on-disk removal is the durable half */ }
+  }
+  // allowEmpty: deleting the only enrolled person is a legitimate reset, and the
+  // caller has already confirmed it explicitly.
+  writeProfileStore(store, { allowEmpty: true })
+  return result
+}
+
+/** Retract samples by provenance — e.g. every `auto:<sessionId>` embedding a
+ *  bad session wrote into the wrong profile. `clearSpeakerEmbeddings` is
+ *  all-or-nothing and would discard the legitimate training alongside it. */
+export function retractEmbeddingsBySource(
+  name: string,
+  matches: (source: string) => boolean,
+): { removed: number; remaining: number } {
+  const store = loadProfileStore()
+  const profile = store.profiles.find(p => p.name === name)
+  if (!profile) return { removed: 0, remaining: 0 }
+
+  const removed = removeEmbeddingsBySource(profile, matches)
+  if (removed === 0) return { removed: 0, remaining: profile.embeddings.length }
+
+  rebuildSpeakerInManager(name, profile.embeddings)
+  writeProfileStore(store, { allowEmpty: true })
+  return { removed, remaining: profile.embeddings.length }
 }
 
 /** Get embedding count for a speaker */
@@ -606,14 +650,66 @@ function logCalibration(speaker: string, similarity: number, matched: boolean, e
   } catch { /* non-critical */ }
 }
 
-/** Load profile store from disk (cached in memory, invalidated on write) */
+/** Load profile store from disk (cached in memory, invalidated on write).
+ *
+ *  Previously a bare `JSON.parse(readFileSync(...))`: a truncated file threw out
+ *  of every caller, including the live enrollment path, and there was no backup
+ *  to fall back to. Corruption and integrity repairs are now both reported —
+ *  silently returning `{profiles: []}` is the one outcome that must never pass
+ *  unremarked, because the next save would commit it over the real store. */
 function loadProfileStore(): ProfileStore {
   if (_cachedProfileStore) return _cachedProfileStore
-  if (existsSync(PROFILES_PATH)) {
-    _cachedProfileStore = JSON.parse(readFileSync(PROFILES_PATH, 'utf-8'))
-    return _cachedProfileStore!
+
+  const load = loadVoiceProfileStore(PROFILES_PATH)
+
+  if (load.status === 'corrupt') {
+    if (load.recoveredFromBackup) {
+      console.error(
+        `[speaker] voice-profiles.json was corrupt (quarantined as ${load.quarantinedAs}) —`,
+        `recovered ${load.store.profiles.length} profile(s) from ${load.recoveredFromBackup}.`,
+      )
+      // Republish the recovered content so the next boot reads a clean file
+      // rather than repeating the recovery. The corrupt original is retained at
+      // the quarantine path for inspection.
+      try {
+        saveVoiceProfileStore(PROFILES_PATH, load.store)
+      } catch (err: unknown) {
+        console.error('[speaker] Failed to republish recovered profiles:', errMsg(err))
+      }
+    } else {
+      console.error(
+        `[speaker] voice-profiles.json was corrupt and NO usable backup exists.`,
+        `The unreadable file is retained at ${load.quarantinedAs}.`,
+        'Diarization is starting with zero profiles; writes will not overwrite a populated store.',
+      )
+    }
   }
-  return { profiles: [] }
+
+  if (hasRepairs(load.repairs)) {
+    console.warn(`[speaker] Repaired voice-profiles.json on load: ${describeRepairs(load.repairs)}`)
+  }
+
+  _cachedProfileStore = load.store
+  return _cachedProfileStore
+}
+
+/** Read-only view of the persisted profiles, for review/audit surfaces.
+ *  Returns a structural copy so a caller cannot mutate the shared cache. */
+export function readVoiceProfiles(): ProfileStore {
+  const store = loadProfileStore()
+  return { profiles: store.profiles.map(p => ({ ...p, embeddings: p.embeddings, sources: [...(p.sources ?? [])] })) }
+}
+
+/** Persist the shared store, reporting a refusal rather than swallowing it. */
+function writeProfileStore(store: ProfileStore, options: { allowEmpty?: boolean } = {}): boolean {
+  const result = saveVoiceProfileStore(PROFILES_PATH, store, options)
+  if (!result.written) {
+    console.error(`[speaker] Profile store write refused: ${result.refusedReason}`)
+    return false
+  }
+  if (result.backup) console.log(`[speaker] Profile store backed up to ${result.backup}`)
+  invalidateProfileCache()
+  return true
 }
 
 /** Invalidate the in-memory profile store cache (call after any write to PROFILES_PATH) */
@@ -631,12 +727,9 @@ function persistProfile(name: string, embedding: Float32Array, source: string = 
       profile = { name, embeddings: [], sources: [] }
       store.profiles.push(profile)
     }
-    if (!profile.sources) profile.sources = []
-    profile.embeddings.push(Array.from(embedding))
-    profile.sources.push(source)
+    appendEmbedding(profile, Array.from(embedding), source)
 
-    writeFileSync(PROFILES_PATH, JSON.stringify(store, null, 2))
-    invalidateProfileCache()
+    writeProfileStore(store)
   } catch (err: unknown) {
     console.error('[speaker] Profile persist error:', errMsg(err))
   }
@@ -645,17 +738,24 @@ function persistProfile(name: string, embedding: Float32Array, source: string = 
 /** Compute centroid (average) of multiple embeddings.
  *  The centroid captures the speaker's average voice across different acoustic
  *  conditions (meetings, mics, energy levels). More robust than any single embedding. */
-function computeCentroid(embeddings: number[][]): Float32Array {
-  const dim = embeddings[0].length
+export function computeCentroid(embeddings: number[][]): Float32Array {
+  // Dimension-safe: one wrong-length row used to read `undefined` past its end
+  // and turn EVERY component of the averaged vector into NaN, which sherpa then
+  // registers as the speaker's only representative vector. Skip mismatches
+  // instead, and take the modal dimension so a corrupt row 0 cannot define it.
+  const dim = modalDimension(embeddings)
   const centroid = new Float32Array(dim)
-  for (const emb of embeddings) {
+  if (dim === 0) return centroid
+  const usable = embeddings.filter(emb => emb.length === dim)
+  if (usable.length === 0) return centroid
+  for (const emb of usable) {
     for (let i = 0; i < dim; i++) {
       centroid[i] += emb[i]
     }
   }
   // Average
   for (let i = 0; i < dim; i++) {
-    centroid[i] /= embeddings.length
+    centroid[i] /= usable.length
   }
   // L2 normalize (important for cosine similarity)
   let norm = 0
@@ -695,8 +795,7 @@ function rebuildSpeakerInManager(name: string, embeddings: number[][]): void {
 
 /** Save full profile store to disk (used by trainer for bulk updates) */
 export function saveProfileStore(store: ProfileStore): void {
-  writeFileSync(PROFILES_PATH, JSON.stringify(store, null, 2))
-  invalidateProfileCache()
+  writeProfileStore(store)
 }
 
 /** Rebuild all profiles in manager from a store (used after bulk training) */
@@ -716,12 +815,17 @@ export function rebuildAllProfiles(store: ProfileStore): void {
   console.log(`[speaker] Rebuilt manager: ${loaded} speakers (centroid mode)`)
 }
 
-/** Load persisted profiles into manager */
+/** Load persisted profiles into manager.
+ *
+ *  Goes through loadProfileStore() rather than re-reading the file: a second
+ *  independent `JSON.parse` here meant boot and the enrollment path could
+ *  disagree about the store's contents, and it bypassed both the corrupt-file
+ *  recovery and the integrity repairs. */
 function loadProfiles(): void {
-  if (!manager || !existsSync(PROFILES_PATH)) return
+  if (!manager) return
 
   try {
-    const store: ProfileStore = JSON.parse(readFileSync(PROFILES_PATH, 'utf-8'))
+    const store = loadProfileStore()
     let loaded = 0
 
     for (const profile of store.profiles) {
