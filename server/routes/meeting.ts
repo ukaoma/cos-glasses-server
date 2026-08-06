@@ -13,19 +13,33 @@ import { isSampleFromSession, untraceableSampleCount } from '../lib/training-aud
 import {
   listMeetingAudioChunks,
   meetingAudioChunkPath,
-  meetingAudioStats,
+  meetingAudioRetentionDays,
 } from '../lib/meeting-audio-archive.js'
 import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
 
 /**
- * What a de-attributed voice becomes.
+ * The label a de-attributed voice takes, numbered within its meeting.
  *
- * `Ext` already means "someone who spoke and was never identified", which is
- * precisely the truth after a false attribution is removed. It is also in the
- * UNATTRIBUTED set, so the review panel treats the row as unnamed, and autoEnroll
- * skips it — a de-attributed stretch cannot re-poison a profile.
+ * NOT a shared `Ext`. De-attributing to one label folded every corrected voice
+ * into a single row — on the 2026-08-06 Ditto meeting Miles named five wrong
+ * attributions, and collapsing them would have destroyed his ability to tell
+ * those five voices apart, which is precisely what he needs playback for next.
+ *
+ * `Unidentified N` is prefix-matched by isUnattributed(), so the review panel
+ * treats the row as unnamed and autoEnroll skips it — a de-attributed stretch
+ * cannot re-poison a profile — while staying separable.
  */
-const DEATTRIBUTED_LABEL = 'Ext'
+function nextDeattributedLabel(existing: string[]): string {
+  const used = new Set(
+    existing
+      .map(s => new RegExp(`^${DEATTRIBUTED_PREFIX} (\\d+)$`).exec(s)?.[1])
+      .filter((n): n is string => Boolean(n))
+      .map(Number),
+  )
+  let n = 1
+  while (used.has(n)) n++
+  return `${DEATTRIBUTED_PREFIX} ${n}`
+}
 import {
   invalidLabelReason,
   relabelMeetingMarkdown,
@@ -93,7 +107,13 @@ import {
   findCosOperationsMeetingBySessionId,
 } from '../lib/cos-operations-meetings.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
-import { UNATTRIBUTED, reviewMeetingSpeakers, type ReviewChunk } from '../lib/meeting-speaker-review.js'
+import {
+  DEATTRIBUTED_PREFIX,
+  attachRawChunkIndices,
+  isUnattributed,
+  reviewMeetingSpeakers,
+  type ReviewChunk,
+} from '../lib/meeting-speaker-review.js'
 import {
   acquireMaintenanceWork,
   maintenanceAdmissionsOpen,
@@ -693,9 +713,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
-    const review = reviewMeetingSpeakers(chunks as ReviewChunk[], {
+    // Raw capture indices, so a phrase can address its own audio. Position in
+    // `chunks` is NOT the WAV number — see attachRawChunkIndices.
+    const sidecar = (JSON.parse(readFileSync(sidecarPath, 'utf-8')) ?? {}) as Record<string, unknown>
+    const withIndices = attachRawChunkIndices(chunks as ReviewChunk[], sidecar.chunkEntries)
+    const review = reviewMeetingSpeakers(withIndices, {
       owner: getOwnerSpeakerLabel(),
       phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
+      // The sidecar's own durationMs is the meeting's true end. Deriving it from
+      // max(elapsed) uses the START of the last chunk, which made the final
+      // timeline span end where it began — a 1.5pt sliver labelled "1s" for what
+      // may be a long closing monologue.
+      durationMs: typeof sidecar.durationMs === 'number' ? sidecar.durationMs : undefined,
     })
     res.set('Cache-Control', 'private, no-store')
     res.json({
@@ -908,7 +937,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: `from: ${bad}`, reason: 'invalid_label' })
       return
     }
-    if (UNATTRIBUTED.has(from)) {
+    if (isUnattributed(from)) {
       res.status(400).json({ error: `"${from}" is already unattributed`, reason: 'already_unattributed' })
       return
     }
@@ -944,9 +973,24 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
-    // The voice becomes `Ext` — an external speaker who was never identified,
-    // which is exactly what an un-named voice is. autoEnroll skips Ext, so a
-    // de-attributed stretch cannot re-poison anything.
+    // A NUMBERED unidentified label, unique within this meeting, so removing
+    // several wrong names does not merge those voices together.
+    let existingSpeakers: string[] = []
+    try {
+      const parsed = JSON.parse(sidecarRaw) as { speakers?: unknown; chunks?: unknown }
+      existingSpeakers = Array.isArray(parsed.speakers)
+        ? parsed.speakers.filter((x): x is string => typeof x === 'string')
+        : []
+      // Also scan the chunks: a previous de-attribution may have left a label
+      // that never made it into `speakers`.
+      if (Array.isArray(parsed.chunks)) {
+        for (const c of parsed.chunks) {
+          const sp = (c as { speaker?: unknown } | null)?.speaker
+          if (typeof sp === 'string' && !existingSpeakers.includes(sp)) existingSpeakers.push(sp)
+        }
+      }
+    } catch { /* the relabel below reports a corrupt sidecar */ }
+    const DEATTRIBUTED_LABEL = nextDeattributedLabel(existingSpeakers)
     const plan = relabelSidecarJson(sidecarRaw, from, DEATTRIBUTED_LABEL, chunks)
     if (!plan.ok) {
       res.status(422).json({ error: plan.error, reason: 'deattribute_rejected' })
@@ -963,10 +1007,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const untraceable = untraceableSampleCount(profileSources)
 
     let markdownPlan: ReturnType<typeof relabelMeetingMarkdown> | null = null
+    let markdownUnreadable = false
     if (plan.value.coveredAllWithLabel) {
       try {
-        markdownPlan = relabelMeetingMarkdown(readFileSync(meetingPath, 'utf-8'), from, DEATTRIBUTED_LABEL)
-      } catch { markdownPlan = null }
+        markdownPlan = relabelMeetingMarkdown(
+          readFileSync(meetingPath, 'utf-8'), from, DEATTRIBUTED_LABEL,
+          // Remove the attendee bullet outright: renaming it would write
+          // `- Unidentified 2` into the list as though it were a person.
+          { removeAttendee: true },
+        )
+      } catch { markdownPlan = null; markdownUnreadable = true }
     }
     const md = markdownPlan?.ok ? markdownPlan.value : null
 
@@ -980,6 +1030,12 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       title,
       from,
       to: DEATTRIBUTED_LABEL,
+      // 39% of operations sidecars have no .md beside them (the document was
+      // archived). Without this the response reports sidecar changes and zero
+      // markdown changes with no hint the document was never touched.
+      markdownSkipped: !plan.value.coveredAllWithLabel
+        ? 'partial de-attribution: transcript turns cannot be mapped to chunk indices'
+        : markdownUnreadable ? 'meeting markdown unreadable' : null,
       scope: 'meeting' as const,
       chunks: plan.value.changed,
       surfaces,
@@ -1129,7 +1185,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       sessionId,
       retained: chunks.length > 0,
       chunks,
-      retentionDays: meetingAudioStats().retentionDays,
+      // Config read, not a filesystem walk: this route used to stat every
+      // retained chunk to report one number.
+      retentionDays: meetingAudioRetentionDays(),
     })
   })
 

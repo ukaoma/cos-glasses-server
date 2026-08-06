@@ -228,8 +228,33 @@ export function listMeetingAudioChunks(sessionId: string): number[] {
   }
 }
 
+/**
+ * Cached stats for /api/health.
+ *
+ * The uncached walk statSyncs EVERY retained chunk: a 7-day window at the
+ * measured rate is roughly 2,000-3,000 files, and COS Control polls health every
+ * 12 seconds — thousands of synchronous stats on the same event loop that ingests
+ * live audio. The sibling chunkEmbeddingStoreStats is one stat per session for
+ * the same reason. A 30s cache keeps the number useful without the cost.
+ */
+let statsCache: { at: number; value: ReturnType<typeof computeMeetingAudioStats> } | null = null
+const STATS_TTL_MS = 30_000
+
+export function meetingAudioStats(): ReturnType<typeof computeMeetingAudioStats> {
+  const now = Date.now()
+  if (statsCache && now - statsCache.at < STATS_TTL_MS) return statsCache.value
+  const value = computeMeetingAudioStats()
+  statsCache = { at: now, value }
+  return value
+}
+
+/** Invalidate after a sweep or eviction so health does not report stale usage. */
+export function invalidateMeetingAudioStats(): void {
+  statsCache = null
+}
+
 /** Counts for /api/health, so retention can be seen rather than assumed. */
-export function meetingAudioStats(): {
+function computeMeetingAudioStats(): {
   enabled: boolean
   sessions: number
   bytes: number
@@ -272,11 +297,18 @@ export function meetingAudioStats(): {
  * budget and so evicting extra sessions that were still inside their window. Run
  * the other way round, the cap only ever sees audio a human could still want.
  */
+/** Retention window in days — a pure config read, no filesystem. */
+export function meetingAudioRetentionDays(): number {
+  return Math.round((meetingAudioTtlMs() / (24 * 60 * 60 * 1000)) * 10) / 10
+}
+
 export function runMeetingAudioRetention(nowMs = Date.now()): {
   swept: SweepResult
   capped: CapResult
 } {
   const swept = sweepMeetingAudio(nowMs)
   const capped = enforceMeetingAudioCap()
+  // Usage just changed; do not let health report the pre-sweep figure.
+  if (swept.removed.length > 0 || capped.evicted.length > 0) invalidateMeetingAudioStats()
   return { swept, capped }
 }

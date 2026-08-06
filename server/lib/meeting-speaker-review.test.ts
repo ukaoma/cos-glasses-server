@@ -13,6 +13,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ASSERT_MIN_SEGMENTS,
+  attachRawChunkIndices,
   ASSERT_MIN_SIMILARITY,
   CONFIDENT_SIMILARITY,
   THRASH_FLIP_RATE,
@@ -139,7 +140,137 @@ describe('phrase selection spreads across the meeting', () => {
     expect(selectPhrases(cs, 'A', 3, 100_000)[0]).toEqual({
       text: 'Stand up the same DQ and lead-activity monitoring view for XBU next week',
       atMs: 42_000, similarity: 0.77,
+      // Null, not absent, and not 0: a chunk with no known raw index must not
+      // look like chunk zero, which would play the opening seconds of the
+      // meeting for every unmapped phrase.
+      chunkIndex: null,
     })
+  })
+
+  it('carries the RAW chunk index when the sidecar supplied one', () => {
+    const cs: ReviewChunk[] = [{ speaker: 'A', elapsed: 42_000, similarity: 0.77, chunkIndex: 137,
+      text: 'Stand up the same DQ and lead-activity monitoring view for XBU next week' }]
+    expect(selectPhrases(cs, 'A', 3, 100_000)[0].chunkIndex).toBe(137)
+  })
+})
+
+describe('addressing a phrase\'s own audio', () => {
+  // The i-th compacted chunk is the i-th TEXT-BEARING chunkEntry. Measured on the
+  // 2026-08-06 Ditto sidecar: 885 compacted chunks against raw indices 0..945
+  // with 36 gaps, so position 884 is really raw chunk 940. Using the position
+  // would play a different speaker minutes earlier.
+  const entry = (chunkIndex: number, text: string) => ({ chunkIndex, chunk: { text } })
+
+  it('maps each compacted chunk to its raw capture index', () => {
+    const chunks: ReviewChunk[] = [{ text: 'one' }, { text: 'two' }, { text: 'three' }]
+    const entries = [
+      entry(0, 'one'),
+      entry(1, ''),          // received but produced no text — no compacted slot
+      entry(2, 'two'),
+      entry(5, ''),          // a gap plus another textless chunk
+      entry(7, 'three'),
+    ]
+    expect(attachRawChunkIndices(chunks, entries).map(c => c.chunkIndex)).toEqual([0, 2, 7])
+  })
+
+  it('reproduces the real drift rather than the array position', () => {
+    // 20 compacted chunks whose raw indices run ahead by a growing amount.
+    const chunks: ReviewChunk[] = Array.from({ length: 20 }, (_, i) => ({ text: `c${i}` }))
+    const entries: Array<{ chunkIndex: number; chunk: { text: string } }> = []
+    let raw = 0
+    for (let i = 0; i < 20; i++) {
+      entries.push({ chunkIndex: raw, chunk: { text: `c${i}` } })
+      raw += 1
+      if (i % 3 === 0) { entries.push({ chunkIndex: raw, chunk: { text: '' } }); raw += 1 }
+    }
+    const mapped = attachRawChunkIndices(chunks, entries)
+    expect(mapped[0].chunkIndex).toBe(0)
+    expect(mapped[19].chunkIndex).toBeGreaterThan(19)   // drift is real
+    expect(mapped.map(c => c.chunkIndex)).not.toEqual(chunks.map((_, i) => i))
+  })
+
+  it('returns the chunks UNCHANGED when the counts disagree', () => {
+    // A partial mapping would silently point playback at a neighbouring speaker.
+    // No index is strictly better than a shifted one on a screen whose whole
+    // purpose is confirming who spoke.
+    const chunks: ReviewChunk[] = [{ text: 'one' }, { text: 'two' }]
+    expect(attachRawChunkIndices(chunks, [entry(0, 'one')]).every(c => c.chunkIndex === undefined)).toBe(true)
+  })
+
+  it('returns the chunks unchanged when chunkEntries is absent or malformed', () => {
+    const chunks: ReviewChunk[] = [{ text: 'one' }]
+    for (const bad of [undefined, null, 'nope', 42, {}]) {
+      expect(attachRawChunkIndices(chunks, bad)[0].chunkIndex).toBeUndefined()
+    }
+  })
+
+  it('ignores a non-integer or negative raw index', () => {
+    const chunks: ReviewChunk[] = [{ text: 'one' }, { text: 'two' }]
+    const entries = [{ chunkIndex: -1, chunk: { text: 'one' } }, { chunkIndex: 1.5, chunk: { text: 'two' } }]
+    expect(attachRawChunkIndices(chunks, entries).map(c => c.chunkIndex)).toEqual([undefined, undefined])
+  })
+
+  it('does not mutate the chunks it was given', () => {
+    const chunks: ReviewChunk[] = [{ text: 'one' }]
+    attachRawChunkIndices(chunks, [entry(9, 'one')])
+    expect(chunks[0].chunkIndex).toBeUndefined()
+  })
+})
+
+describe('the meeting\'s true end', () => {
+  it('uses the sidecar duration so the LAST span is not zero-width', () => {
+    // elapsed is a START offset, so max(elapsed) is where the final chunk began.
+    // Deriving durationMs from it made every meeting's closing turn a 1.5pt
+    // sliver labelled "1s".
+    const cs = chunks(['MU', 'MU', 'Chris'].flatMap(s => [s]))
+    const derived = reviewMeetingSpeakers(cs, { owner: 'MU' })
+    const supplied = reviewMeetingSpeakers(cs, { owner: 'MU', durationMs: 600_000 })
+    const lastDerived = derived.timeline[derived.timeline.length - 1]
+    const lastSupplied = supplied.timeline[supplied.timeline.length - 1]
+    // Non-zero even with NO supplied duration: the tail gets one typical chunk
+    // of width from this meeting's own median gap.
+    expect(lastDerived.endMs).toBeGreaterThan(lastDerived.startMs)
+    expect(lastSupplied.endMs).toBe(600_000)
+  })
+
+  it('ignores a supplied duration that precedes the last chunk', () => {
+    const cs = chunks(['MU', 'Chris'])
+    const r = reviewMeetingSpeakers(cs, { owner: 'MU', durationMs: 1 })
+    const last = r.timeline[r.timeline.length - 1]
+    expect(last.endMs).toBeGreaterThan(last.startMs)
+  })
+
+  it('gives the tail real width when durationMs EQUALS the last span start', () => {
+    // The real case, measured on the 2026-08-06 Ditto sidecar: durationMs and the
+    // final chunk's elapsed are BOTH 5,783,732, so the closing span would end
+    // where it began. Exercised through speakerTimeline directly, because
+    // reviewMeetingSpeakers substitutes its own duration and would mask it.
+    const rows: ReviewChunk[] = [
+      { speaker: 'MU', elapsed: 0, text: 'a' },
+      { speaker: 'MU', elapsed: 7_000, text: 'b' },
+      { speaker: 'Chris', elapsed: 14_000, text: 'c' },
+    ]
+    const zeroWidthWouldBe = speakerTimeline(rows, 14_000)
+    const last = zeroWidthWouldBe[zeroWidthWouldBe.length - 1]
+    expect(last.startMs).toBe(14_000)
+    expect(last.endMs).toBeGreaterThan(14_000)
+    // One typical chunk, from this meeting's own median span gap (14000ms here).
+    expect(last.endMs - last.startMs).toBe(14_000)
+  })
+
+  it('uses a genuinely later durationMs verbatim rather than padding it', () => {
+    const rows: ReviewChunk[] = [
+      { speaker: 'A', elapsed: 0, text: 'a' },
+      { speaker: 'B', elapsed: 7_000, text: 'b' },
+    ]
+    expect(speakerTimeline(rows, 30_000).at(-1)!.endMs).toBe(30_000)
+  })
+
+  it('leaves a single-span meeting at zero width rather than inventing a gap', () => {
+    // Nothing measured to derive a typical chunk from, so no number is honest.
+    const rows: ReviewChunk[] = [{ speaker: 'A', elapsed: 5_000, text: 'a' }]
+    const only = speakerTimeline(rows, 5_000)[0]
+    expect(only.endMs).toBe(only.startMs)
   })
 })
 
@@ -286,13 +417,43 @@ describe('a name must be EARNED before it is presented as a name', () => {
     expect(ext.assertionBlockers).toEqual(['no name was ever assigned to this voice'])
   })
 
-  it('holds the owner to the same floor', () => {
-    // The owner gets no exemption: an owner row that thrashes or scores badly is
-    // exactly as unearned as anyone else's, and MU read `unreliable` on the real
-    // Ditto meeting.
+  it('EXEMPTS the owner — the wearer is identified by wearing the device', () => {
+    // Reversed after measurement. The owner is verified at exactly this floor
+    // (VERIFY_THRESHOLD 0.65), so they sit permanently on the boundary and any
+    // thrash pair flips them: across the real 2026-08-06 corpus the owner row
+    // read "Unidentified voice" in 4 of 9 meetings, once with 285 of their own
+    // segments. Telling Miles he is unidentified in his own recording is a
+    // defect, not rigour.
     const v = voiceOf('MU', 2, 0.58, ['Bradley Haveman'])
     expect(v.isOwner).toBe(true)
+    expect(v.nameAsserted).toBe(true)
+    expect(v.assertionBlockers).toEqual([])
+  })
+
+  it('still surfaces the owner\'s thrash, so the caveat is not hidden', () => {
+    // Exempt from the NAME floor, not from the diagnostics: a mixed owner row
+    // must still show what it is being confused with.
+    const seq = turnTaking('MU', 'Bradley Haveman', 60, 2)
+    const review = reviewMeetingSpeakers(chunks(seq), { owner: 'MU' })
+    const mu = review.voices.find(v => v.label === 'MU')!
+    expect(mu.nameAsserted).toBe(true)
+    expect(mu.thrashesWith.map(t => t.speaker)).toContain('Bradley Haveman')
+    expect(mu.reliability).toBe('unreliable')
+  })
+
+  it('does not exempt a NON-owner that merely resembles the owner label', () => {
+    const v = voiceOf('MU Jr', 2, 0.58)
     expect(v.nameAsserted).toBe(false)
+  })
+
+  it('treats a numbered de-attribution as unnamed', () => {
+    // `Unidentified 3` must read as unnamed even though it is not in the exact
+    // UNATTRIBUTED set — otherwise a de-attributed voice comes back asserting a
+    // name made of the placeholder.
+    const review = reviewMeetingSpeakers(chunks(turnTaking('Unidentified 3', 'MU', 40, 30)), { owner: 'MU' })
+    const row = review.voices.find(v => v.label === 'Unidentified 3')!
+    expect(row.reliability).toBe('unattributed')
+    expect(row.nameAsserted).toBe(false)
   })
 
   it('keeps the label available as a candidate rather than discarding it', () => {

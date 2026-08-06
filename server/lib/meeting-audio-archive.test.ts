@@ -331,3 +331,48 @@ describe('the retention pass run by the interval', () => {
   })
 })
 
+describe('the health hot path', () => {
+  it('reports the window without touching the filesystem', () => {
+    // The /audio route used to statSync every retained chunk to report one
+    // config number.
+    expect(mod.meetingAudioRetentionDays()).toBe(7)
+  })
+
+  it('caches stats, so a 12-second health poll does not re-walk the archive', () => {
+    // Uncached this stats EVERY chunk — 2,000-3,000 files at the measured rate,
+    // synchronously, on the loop that ingests live audio.
+    mod.archiveSessionAudio('m_cache', sourceSession('m_cache', 5))
+    const first = mod.meetingAudioStats()
+    expect(first.sessions).toBe(1)
+
+    // Add a session; the cached answer must not change yet.
+    mod.archiveSessionAudio('m_cache2', sourceSession('m_cache2', 5))
+    expect(mod.meetingAudioStats().sessions).toBe(1)
+
+    mod.invalidateMeetingAudioStats()
+    expect(mod.meetingAudioStats().sessions).toBe(2)
+  })
+
+  it('invalidates the cache when retention actually removes something', () => {
+    // Otherwise health keeps reporting the pre-sweep usage, and an operator
+    // watching the 8 GB budget sees a number that never moves.
+    mod.archiveSessionAudio('m_old', sourceSession('m_old', 5))
+    ageSession('m_old', 20)
+    mod.archiveSessionAudio('m_new', sourceSession('m_new', 5))
+    expect(mod.meetingAudioStats().sessions).toBe(2)   // warms the cache
+
+    const { swept } = mod.runMeetingAudioRetention(Date.now())
+    expect(swept.removed).toEqual(['m_old'])
+    expect(mod.meetingAudioStats().sessions).toBe(1)   // no stale figure
+  })
+
+  it('does not invalidate when retention changed nothing', () => {
+    mod.archiveSessionAudio('m_stable', sourceSession('m_stable', 5))
+    mod.meetingAudioStats()
+    const { swept, capped } = mod.runMeetingAudioRetention(Date.now())
+    expect(swept.removed).toEqual([])
+    expect(capped.evicted).toEqual([])
+    expect(mod.meetingAudioStats().sessions).toBe(1)
+  })
+})
+

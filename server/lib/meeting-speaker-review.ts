@@ -26,6 +26,19 @@
 export interface ReviewChunk {
   text?: string
   speaker?: string
+  /**
+   * RAW capture index — the number in `chunk_NNNN.wav`, NOT this chunk's position
+   * in the array.
+   *
+   * These differ and the gap grows through a meeting. Measured on the 2026-08-06
+   * Ditto sidecar: 885 compacted chunks against raw indices 0..945 with 36 gaps,
+   * so array position 884 is really raw chunk 940 — a 56-chunk error, minutes of
+   * audio. `chunks` is filtered to text-bearing entries (transcribe-stream's
+   * getSessionChunks) while the WAV is written for EVERY received chunk before
+   * ASR, so the position can never address the audio. Populated from the
+   * sidecar's `chunkEntries`, which exists precisely to preserve these.
+   */
+  chunkIndex?: number
   /** MILLISECONDS from meeting start. Confirmed against the writer:
    *  meeting.ts accumulates `elapsed += row.durationMs`. Treating this as
    *  seconds reports a 32-minute meeting as 30,936 minutes. */
@@ -35,6 +48,24 @@ export interface ReviewChunk {
 
 /** Labels that mean "nobody was identified", not a person. */
 export const UNATTRIBUTED = new Set(['Unknown', 'Ext', '', 'Speaker 1', 'Speaker 2', 'Speaker 3'])
+
+/**
+ * Prefix for a voice a human de-attributed, numbered so distinct people stay
+ * distinct.
+ *
+ * De-attributing to a single shared `Ext` folded every corrected voice into one
+ * row: on the 2026-08-06 Ditto meeting Miles named five wrong attributions, and
+ * collapsing them would have destroyed his ability to tell those five voices
+ * apart afterwards — which is exactly what he then needs playback for. Numbering
+ * keeps them separable while asserting no identity.
+ */
+export const DEATTRIBUTED_PREFIX = 'Unidentified'
+
+/** True when a label asserts no identity — the exact set, or a numbered
+ *  de-attribution. Prefix-aware so `Unidentified 3` is treated as unnamed. */
+export function isUnattributed(label: string): boolean {
+  return UNATTRIBUTED.has(label) || new RegExp(`^${DEATTRIBUTED_PREFIX} \\d+$`).test(label)
+}
 
 /** Calibrated from the control pair above. A pair must be BOTH flip-happy and
  *  short-run to be called unreliable — either alone has honest explanations
@@ -79,6 +110,13 @@ export interface Phrase {
   /** Milliseconds from meeting start, matching the sidecar. */
   atMs: number
   similarity: number | null
+  /**
+   * Raw capture index for playback, or null when the sidecar cannot supply one
+   * (pre-`chunkEntries` captures). Null means "do not offer playback" — a
+   * guessed index plays somebody else's voice, which is worse than no button
+   * on a screen whose whole purpose is confirming identity.
+   */
+  chunkIndex: number | null
 }
 
 export interface VoiceReview {
@@ -151,10 +189,34 @@ export function speakerTimeline(chunks: ReviewChunk[], durationMs: number): Time
       spans.push({ speaker: label, startMs, endMs: startMs, segments: 1 })
     }
   }
-  // Each span ends where the next begins; the last ends at the meeting's end.
+  // Each span ends where the next begins. The LAST one is the problem: `elapsed`
+  // is a start offset, and on real sidecars `durationMs` frequently equals the
+  // final chunk's start exactly (measured on 2026-08-06 Ditto: both 5,783,732),
+  // so taking the meeting end verbatim leaves the closing turn zero-width — a
+  // 1.5pt sliver for what may be a long monologue.
+  //
+  // The tail gets ONE TYPICAL CHUNK of width, derived from the median gap between
+  // this meeting's own chunk starts. That is measured from the data rather than
+  // invented, and it is the shortest defensible non-zero answer.
+  const gaps: number[] = []
+  for (let i = 1; i < spans.length; i++) {
+    const d = spans[i].startMs - spans[i - 1].startMs
+    if (d > 0) gaps.push(d)
+  }
+  gaps.sort((a, b) => a - b)
+  const typicalGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0
   for (let i = 0; i < spans.length; i++) {
     const next = spans[i + 1]
-    spans[i].endMs = Math.max(spans[i].startMs, next ? next.startMs : durationMs)
+    if (next) {
+      spans[i].endMs = Math.max(spans[i].startMs, next.startMs)
+    } else if (durationMs > spans[i].startMs) {
+      // A real meeting end, later than this span's start: use it verbatim.
+      spans[i].endMs = durationMs
+    } else {
+      // durationMs is absent, or equals the final chunk's start (the common real
+      // case). Fall back to one typical chunk so the closing turn has width.
+      spans[i].endMs = spans[i].startMs + typicalGap
+    }
   }
   return spans
 }
@@ -171,6 +233,34 @@ export interface MeetingSpeakerReview {
 
 function mean(xs: number[]): number {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0
+}
+
+/**
+ * Attach raw capture indices to a compacted chunk array.
+ *
+ * The i-th compacted chunk is the i-th TEXT-BEARING `chunkEntries` row, whose
+ * `chunkIndex` is the raw WAV number. Verified against every 2026-07/08 sidecar
+ * that carries chunkEntries: the text-bearing count always equals the compacted
+ * count and the text lines up positionally.
+ *
+ * Returns the chunks UNCHANGED when the counts disagree or chunkEntries is
+ * absent. A partial or shifted mapping is worse than none: it would silently
+ * point playback at a neighbouring speaker, and this screen exists to confirm
+ * identity.
+ */
+export function attachRawChunkIndices(chunks: ReviewChunk[], chunkEntries: unknown): ReviewChunk[] {
+  if (!Array.isArray(chunkEntries)) return chunks
+  const textBearing = chunkEntries.filter(e => {
+    const chunk = (e as { chunk?: { text?: unknown } } | null)?.chunk
+    return typeof chunk?.text === 'string' && chunk.text.trim() !== ''
+  })
+  if (textBearing.length !== chunks.length) return chunks
+  return chunks.map((c, i) => {
+    const raw = (textBearing[i] as { chunkIndex?: unknown }).chunkIndex
+    return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0
+      ? { ...c, chunkIndex: raw }
+      : c
+  })
 }
 
 /** Consecutive-run lengths for one speaker across the whole meeting. */
@@ -264,6 +354,7 @@ export function selectPhrases(
       text: (c.text ?? '').trim(),
       atMs: typeof c.elapsed === 'number' ? c.elapsed : 0,
       similarity: typeof c.similarity === 'number' ? c.similarity : null,
+      chunkIndex: typeof c.chunkIndex === 'number' ? c.chunkIndex : null,
       score: phraseScore(c.text ?? ''),
     }))
     .filter(p => p.score > 0)
@@ -288,27 +379,34 @@ export function selectPhrases(
   }
   return picked
     .sort((a, b) => a.atMs - b.atMs)
-    .map(({ text, atMs, similarity }) => ({ text, atMs, similarity }))
+    .map(({ text, atMs, similarity, chunkIndex }) => ({ text, atMs, similarity, chunkIndex }))
 }
 
 /** Build the whole review for one meeting's chunks. */
 export function reviewMeetingSpeakers(
   chunks: ReviewChunk[],
-  options: { owner?: string; phrasesPerVoice?: number } = {},
+  options: { owner?: string; phrasesPerVoice?: number; durationMs?: number } = {},
 ): MeetingSpeakerReview {
   const owner = options.owner ?? 'Me'
   const limit = options.phrasesPerVoice ?? 3
   const sequence = chunks.map(c => c.speaker ?? '')
-  const durationMs = chunks.reduce((max, c) => Math.max(max, typeof c.elapsed === 'number' ? c.elapsed : 0), 0)
+  // The caller's durationMs (the sidecar's own) is the meeting's true end.
+  // Falling back to max(elapsed) uses the START of the last chunk, which makes
+  // the final timeline span zero-width — so prefer the real value and only
+  // derive when it is absent.
+  const lastStart = chunks.reduce((max, c) => Math.max(max, typeof c.elapsed === 'number' ? c.elapsed : 0), 0)
+  const durationMs = typeof options.durationMs === 'number' && options.durationMs > lastStart
+    ? options.durationMs
+    : lastStart
 
   const labels = [...new Set(sequence)].filter(s => s.length > 0)
-  const named = labels.filter(l => !UNATTRIBUTED.has(l))
+  const named = labels.filter(l => !isUnattributed(l))
 
   const voices: VoiceReview[] = labels.map(label => {
     const own = chunks.filter(c => (c.speaker ?? '') === label)
     const sims = own.map(c => c.similarity).filter((s): s is number => typeof s === 'number' && s > 0)
     const runs = speakerRuns(sequence, label)
-    const unattributed = UNATTRIBUTED.has(label)
+    const unattributed = isUnattributed(label)
 
     const thrashesWith: ThrashPair[] = []
     if (!unattributed) {
@@ -341,6 +439,14 @@ export function reviewMeetingSpeakers(
     const assertionBlockers: string[] = []
     if (unattributed) {
       assertionBlockers.push('no name was ever assigned to this voice')
+    } else if (label === owner) {
+      // The wearer is exempt. Their identity is established by wearing the
+      // device, not by cosine — and the owner is verified at exactly this floor
+      // (VERIFY_THRESHOLD 0.65), so they sit permanently on the boundary and any
+      // thrash pair flips them. Measured across the 2026-08-06 corpus: the owner
+      // row read "Unidentified voice" in 4 of 9 meetings, including one with 285
+      // of their own segments. `thrashesWith` still renders, so a mixed row is
+      // still visible — the name is asserted, the caveat is not hidden.
     } else {
       if (own.length < ASSERT_MIN_SEGMENTS) {
         assertionBlockers.push(`only ${own.length} segment${own.length === 1 ? '' : 's'} (needs ${ASSERT_MIN_SEGMENTS})`)

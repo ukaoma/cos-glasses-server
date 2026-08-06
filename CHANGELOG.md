@@ -37,6 +37,41 @@ Ditto meeting and found eleven attributed voices, most of them wrong.
 - `/api/health` gains `review_audio`. `voice_provenance` from 6.21.17 already
   reports `noHumanSample`; on the live store that is 67 of 77 profiles.
 
+FIXES FOUND BY QA BEFORE PUBLISH (nothing above ever shipped):
+
+- PLAYBACK PLAYS THE RIGHT AUDIO. `Phrase` now carries the RAW capture index,
+  resolved from the sidecar's `chunkEntries`. The compacted `chunks` array and
+  the `chunk_NNNN.wav` numbering are different sequences: on the 2026-08-06 Ditto
+  sidecar, 885 compacted chunks against raw indices 0..945 with 36 gaps, so array
+  position 884 is raw chunk 940. Playing by position would have played a
+  different speaker minutes earlier — on the one screen whose job is confirming
+  who spoke. When the counts disagree no index is emitted at all, because a
+  shifted index is worse than no button.
+- THE OWNER IS EXEMPT FROM THE NAME FLOOR. The wearer is verified at exactly the
+  floor (VERIFY_THRESHOLD 0.65), so they sat permanently on the boundary and any
+  thrash pair flipped them: measured across the 2026-08-06 corpus, the owner row
+  read "Unidentified voice" in 4 of 9 meetings, once with 285 of their own
+  segments. `thrashesWith` still renders, so a mixed row is still visible.
+- DE-ATTRIBUTION NUMBERS ITS LABELS. `Unidentified 1`, `Unidentified 2`, … rather
+  than one shared `Ext`. Miles found five wrong attributions in one meeting;
+  collapsing them into a single row would have destroyed his ability to tell
+  those voices apart, which is exactly what playback is for next.
+- DE-ATTRIBUTION DELETES THE ATTENDEE BULLET instead of renaming it. Renaming
+  wrote an unidentified label into the attendee list as though it were a person,
+  and every downstream reader takes that bullet at face value while the pipeline
+  that BUILDS attendees deliberately excludes such labels.
+- The timeline's LAST SPAN had zero width. `durationMs` frequently equals the
+  final chunk's start exactly (both 5,783,732 on the Ditto sidecar), so the
+  closing turn rendered as a sliver. The tail now takes one typical chunk of
+  width from the meeting's own median gap — measured 7,034 ms where it was 0.
+- De-attribute reports `markdownSkipped`, which relabel already did and it
+  silently dropped. 39% of operations sidecars have no `.md` beside them, so the
+  response claimed segment changes with no hint the document was untouched.
+- `/api/health` no longer statSyncs every retained chunk on every poll. COS
+  Control polls every 12s and a 7-day window is 2,000-3,000 files; stats are now
+  cached for 30s and invalidated when retention actually removes something. The
+  `/audio` listing reads the retention window as config rather than walking disk.
+
 Requires COS Control 0.5.0+ to use the scoped correction and playback surfaces.
 
 ## 6.21.17

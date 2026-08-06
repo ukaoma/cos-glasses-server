@@ -168,7 +168,7 @@ describe('de-attribution changes nothing without confirmation', () => {
     const res = await post('/api/meeting/meeting_d1/deattribute', { from: 'Navaz Sharif' })
     expect(res.status).toBe(400)
     expect(res.json.reason).toBe('confirmation_required')
-    expect(res.json.to).toBe('Ext')
+    expect(res.json.to).toBe('Unidentified 1')
     expect(res.json.chunks).toEqual([0, 2])
     // Both session-stamped samples are in scope; manual and bare fireflies are not.
     expect(res.json.training.wouldRetract).toBe(2)
@@ -204,10 +204,18 @@ describe('applying a de-attribution', () => {
 
     const res = await post('/api/meeting/meeting_d3/deattribute', { from: 'Luke H', confirm: true })
     expect(res.status).toBe(200)
-    expect(sidecarNow().labels).toEqual(['Ext', 'MU', 'Ext'])
+    // A NUMBERED label, not a shared `Ext`: de-attributing several wrong names
+    // must not merge those voices into one row.
+    expect(sidecarNow().labels).toEqual(['Unidentified 1', 'MU', 'Unidentified 1'])
     const md = scribeNow()
-    expect(md).toContain('[Ext]: The Jewel360 pipeline')
+    expect(md).toContain('[Unidentified 1]: The Jewel360 pipeline')
     expect(md).not.toContain('[Luke H]:')
+    // The attendee bullet is DELETED, never renamed — writing
+    // `- Unidentified 1` would inject a phantom attendee that every downstream
+    // reader takes at face value.
+    const attendees = md.split('## Summary')[0]
+    expect(attendees).not.toContain('Luke H')
+    expect(attendees).not.toContain('Unidentified')
   })
 
   it('RETRACTS the training samples that meeting contributed', async () => {
@@ -238,7 +246,7 @@ describe('applying a de-attribution', () => {
     expect(res.status).toBe(200)
     expect(res.json.training.retracted).toBe(0)
     expect(profileSources('Navaz Sharif')).toEqual(['auto:meeting_d5', 'manual'])
-    expect(sidecarNow().labels).toEqual(['Ext'])   // transcript still corrected
+    expect(sidecarNow().labels).toEqual(['Unidentified 1'])   // transcript still corrected
   })
 
   it('de-attributes only the named chunks on a partial call', async () => {
@@ -249,7 +257,7 @@ describe('applying a de-attribution', () => {
       from: 'Navaz Sharif', chunks: [0], confirm: true,
     })
     expect(res.status).toBe(200)
-    expect(sidecarNow().labels).toEqual(['Ext', 'MU', 'Navaz Sharif'])
+    expect(sidecarNow().labels).toEqual(['Unidentified 1', 'MU', 'Navaz Sharif'])
     expect(res.json.partial).toBe(true)
   })
 
@@ -260,7 +268,7 @@ describe('applying a de-attribution', () => {
 
     const rows = ledgerNow('meeting_d7')
     expect(rows.map(r => r.phase)).toEqual(['intent', 'applied'])
-    expect(rows[1]).toMatchObject({ from: 'Navaz Sharif', to: 'Ext', scope: 'meeting' })
+    expect(rows[1]).toMatchObject({ from: 'Navaz Sharif', to: 'Unidentified 1', scope: 'meeting' })
   })
 
   it('aborts with the files AND the profile untouched when the ledger fails', async () => {

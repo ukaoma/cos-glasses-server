@@ -185,7 +185,12 @@ function sectionRange(md: string, heading: string): { start: number; end: number
  * by label, not by index, and the markdown's turn segmentation does not match
  * the sidecar's. See the file header.
  */
-export function relabelMeetingMarkdown(md: string, from: string, to: string): RelabelOutcome<MarkdownRelabelResult> {
+export function relabelMeetingMarkdown(
+  md: string,
+  from: string,
+  to: string,
+  options: { removeAttendee?: boolean } = {},
+): RelabelOutcome<MarkdownRelabelResult> {
   if (from === to) return { ok: false, error: 'from and to are the same label' }
   for (const [which, label] of [['from', from], ['to', to]] as const) {
     const bad = invalidLabelReason(label)
@@ -204,7 +209,14 @@ export function relabelMeetingMarkdown(md: string, from: string, to: string): Re
     // run past its own line. Without the end anchor, `- Luke H` matches the
     // PREFIX of `- Luke Henry` and deleting it leaves the fragment `enry`.
     const line = (label: string) => `^-[ \t]+${escapeRegExp(label)}[ \t]*$`
-    const alreadyListed = new RegExp(line(to), 'm').test(body)
+    // A de-attribution must DELETE the attendee bullet, never rename it. Renaming
+    // writes `- Unidentified 2` into the attendee list as though it were a
+    // person, and the COS pipeline that BUILDS attendees deliberately excludes
+    // unidentified labels (sync_meetings.py filters them) while every reader —
+    // parseAttendees, extractAttendees, the Python prep generators — takes the
+    // bullet at face value. So a rename here injects a phantom attendee that
+    // downstream treats as real.
+    const alreadyListed = options.removeAttendee || new RegExp(line(to), 'm').test(body)
     let rewritten: string
     if (alreadyListed) {
       // Both names present: drop the old bullet instead of creating a duplicate
