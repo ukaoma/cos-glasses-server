@@ -25,6 +25,8 @@ let baseUrl = ''
 let enrollCalls: Array<{ name: string; source: string }> = []
 let profiles: Array<{ name: string; embeddings: number[][]; sources: string[] }> = []
 let removedNames: string[] = []
+let mergeCalls: Array<{ into: string; from: string[]; force?: boolean; dryRun?: boolean }> = []
+let mergeSimilarity: Record<string, number> = {}
 
 function trainingDir(speaker: string): string {
   return join(dataDir, 'training-audio', speaker.replace(/\s+/g, '_'))
@@ -59,6 +61,7 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
   vi.resetModules()
   enrollCalls = []
   removedNames = []
+  mergeCalls = []
   vi.doMock('../lib/speaker-embeddings.js', () => ({
     // Distinct embedding per file so greedy diversity selection has something
     // real to work with.
@@ -85,6 +88,32 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
     isEnrolled: () => true,
     getAllSpeakerNames: () => profiles.map(p => p.name),
     identifySpeaker: () => null,
+    MERGE_SIMILARITY_FLOOR: 0.55,
+    mergeSpeakerProfiles: (into: string, from: string[], o: { force?: boolean; dryRun?: boolean } = {}) => {
+      mergeCalls.push({ into, from: [...from], ...o })
+      const target = profiles.find(p => p.name === into)
+      if (!target) return { into, merged: [], missing: [into], similarity: {}, samplesBefore: 0, samplesAfter: 0, droppedToCap: 0 }
+      const merged: string[] = []
+      const missing: string[] = []
+      const similarity: Record<string, number> = {}
+      const refused: Array<{ name: string; similarity: number; floor: number }> = []
+      for (const name of from) {
+        const src = profiles.find(p => p.name === name)
+        if (!src) { missing.push(name); continue }
+        const sim = mergeSimilarity[name] ?? 0.9
+        similarity[name] = sim
+        if (sim < 0.55 && !o.force) { refused.push({ name, similarity: sim, floor: 0.55 }); continue }
+        merged.push(name)
+      }
+      if (!o.dryRun) for (const n of merged) profiles = profiles.filter(p => p.name !== n)
+      return {
+        into, merged, missing, similarity,
+        samplesBefore: target.embeddings.length,
+        samplesAfter: target.embeddings.length + merged.length,
+        droppedToCap: 0,
+        ...(refused.length ? { refused } : {}),
+      }
+    },
   }))
   vi.doMock('../lib/speaker-trainer.js', () => ({
     trainFromFireflies: async () => ({ trained: 0 }),
@@ -130,6 +159,7 @@ function httpRequest(method: string, path: string, body?: unknown): Promise<{ st
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), 'cos-voice-routes-'))
   process.env.COS_DATA_DIR = dataDir
+  mergeSimilarity = {}
   profiles = [
     { name: 'MU', embeddings: Array.from({ length: 20 }, () => [1, 0, 0, 0]), sources: Array(20).fill('manual') },
     { name: 'Clem Ukaoma', embeddings: Array.from({ length: 14 }, () => [0, 1, 0, 0]), sources: Array(14).fill('fireflies') },
@@ -406,6 +436,94 @@ describe('delete-person is confirmed and auditable', () => {
     const res = await httpRequest('POST', '/api/voice/delete-person', { name: 'x', confirm: true })
     expect(res.status).toBe(400)
     expect(removedNames).toEqual([])
+  })
+})
+
+describe('merge-profiles fails closed', () => {
+  it('refuses without confirm and returns a preview, merging nothing', async () => {
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma' })
+    expect(res.status).toBe(400)
+    expect(res.json.error).toBe('confirmation required')
+    expect(res.json.preview.similarity['Clem Ukaoma']).toBeDefined()
+    // The preview must be a DRY RUN — a confirmation gate that already merged
+    // would be decoration.
+    expect(mergeCalls).toEqual([{ into: 'MU', from: ['Clem Ukaoma'], force: false, dryRun: true }])
+    expect(profiles.map(p => p.name)).toContain('Clem Ukaoma')
+  })
+
+  it('merges on confirm and relabels the absorbed calibration history', async () => {
+    writeFileSync(join(dataDir, 'speaker-calibration.jsonl'),
+      [
+        JSON.stringify({ ts: 't1', speaker: 'Clem Ukaoma', similarity: 0.61 }),
+        JSON.stringify({ ts: 't2', speaker: 'MU', similarity: 0.93 }),
+      ].join('\n') + '\n')
+    await startServer()
+
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.merged).toEqual(['Clem Ukaoma'])
+    expect(res.json.calibrationRowsRelabeled).toEqual({ 'Clem Ukaoma': 1 })
+    // Relabeled, NOT deleted: after a merge it is one person's history.
+    const log = readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')
+    expect(log).not.toContain('Clem Ukaoma')
+    expect(log.match(/"speaker":"MU"/g)).toHaveLength(2)
+  })
+
+  it('409s below the similarity floor and leaves both profiles alone', async () => {
+    mergeSimilarity = { 'Clem Ukaoma': 0.41 }
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(409)
+    expect(res.json.error).toBe('similarity below the merge floor')
+    expect(res.json.report.refused[0]).toMatchObject({ name: 'Clem Ukaoma', similarity: 0.41 })
+    expect(profiles.map(p => p.name).sort()).toEqual(['Clem Ukaoma', 'MU'])
+  })
+
+  it('force overrides the floor and records that it was forced', async () => {
+    mergeSimilarity = { 'Clem Ukaoma': 0.41 }
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', confirm: true, force: true })
+    expect(res.status).toBe(200)
+    expect(res.json.forced).toBe(true)
+    expect(res.json.merged).toEqual(['Clem Ukaoma'])
+  })
+
+  it('refuses to ABSORB the owner label', async () => {
+    // The owner profile is checked first on every chunk in the live path;
+    // absorbing it away would silently break identification for the wearer.
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'Clem Ukaoma', from: 'MU', confirm: true })
+    expect(res.status).toBe(400)
+    expect(res.json.error).toMatch(/owner label "MU"/)
+    expect(mergeCalls).toEqual([])
+  })
+
+  it('rejects a self-merge and missing arguments', async () => {
+    await startServer()
+    expect((await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'MU', confirm: true })).status).toBe(400)
+    expect((await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', confirm: true })).status).toBe(400)
+    expect((await httpRequest('POST', '/api/voice/merge-profiles', { from: 'MU', confirm: true })).status).toBe(400)
+    expect(mergeCalls).toEqual([])
+  })
+
+  it('404s when nothing matched', async () => {
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'Ghost', from: 'Nobody', confirm: true })
+    expect(res.status).toBe(404)
+    expect(profiles).toHaveLength(2)
+  })
+
+  it('dryRun does not relabel the calibration log', async () => {
+    const original = JSON.stringify({ ts: 't1', speaker: 'Clem Ukaoma', similarity: 0.61 }) + '\n'
+    writeFileSync(join(dataDir, 'speaker-calibration.jsonl'), original)
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma', dryRun: true })
+    expect(res.status).toBe(200)
+    expect(res.json.calibrationRowsRelabeled).toEqual({})
+    expect(readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')).toBe(original)
   })
 })
 

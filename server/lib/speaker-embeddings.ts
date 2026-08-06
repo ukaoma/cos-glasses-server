@@ -12,6 +12,8 @@ import { existsSync, appendFileSync, mkdirSync, statSync, openSync, readSync, cl
 import {
   appendEmbedding,
   deleteProfileFromStore,
+  mergeProfilesInStore,
+  profileSimilarity,
   describeRepairs,
   dropOldestEmbedding,
   hasRepairs,
@@ -461,6 +463,108 @@ export function clearSpeakerEmbeddings(name: string): boolean {
   // Persist. A "fresh training" clear legitimately empties one profile but must
   // never be able to empty the whole store, so allowEmpty stays off here.
   return writeProfileStore(store)
+}
+
+/** The floor a merge must clear on centroid cosine.
+ *
+ *  Set at the search-accept threshold on purpose: if two profiles are further
+ *  apart than the value at which identification would accept a match between
+ *  them, they are not the same voice and merging them would poison both. */
+export const MERGE_SIMILARITY_FLOOR = SEARCH_THRESHOLD
+
+export interface MergeReport {
+  into: string
+  merged: string[]
+  missing: string[]
+  similarity: Record<string, number>
+  samplesBefore: number
+  samplesAfter: number
+  droppedToCap: number
+  refused?: { name: string; similarity: number; floor: number }[]
+}
+
+/**
+ * Fold profiles together — two names for one person, e.g. "Luke H" and
+ * "Luke Henry" at 0.843.
+ *
+ * Fails closed below MERGE_SIMILARITY_FLOOR unless `force`. That guard is the
+ * whole safety story: a wrong merge destroys BOTH identities at once, and the
+ * only evidence that two names are one person is acoustic, never the names
+ * themselves.
+ */
+export function mergeSpeakerProfiles(
+  into: string,
+  from: string[],
+  options: { force?: boolean; dryRun?: boolean } = {},
+): MergeReport {
+  const store = loadProfileStore()
+  const target = store.profiles.find(p => p.name === into)
+  const report: MergeReport = {
+    into,
+    merged: [],
+    missing: [],
+    similarity: {},
+    samplesBefore: target?.embeddings.length ?? 0,
+    samplesAfter: target?.embeddings.length ?? 0,
+    droppedToCap: 0,
+  }
+  if (!target) {
+    report.missing = [into]
+    return report
+  }
+
+  // Score every candidate first so a dry run and a refusal report the same
+  // numbers the real merge would act on.
+  const eligible: string[] = []
+  const refused: { name: string; similarity: number; floor: number }[] = []
+  for (const name of from) {
+    if (name === into) continue
+    const source = store.profiles.find(p => p.name === name)
+    if (!source) { report.missing.push(name); continue }
+    const similarity = profileSimilarity(target, source)
+    report.similarity[name] = Math.round(similarity * 1000) / 1000
+    if (similarity < MERGE_SIMILARITY_FLOOR && !options.force) {
+      refused.push({ name, similarity: report.similarity[name], floor: MERGE_SIMILARITY_FLOOR })
+      continue
+    }
+    eligible.push(name)
+  }
+  if (refused.length > 0) report.refused = refused
+  if (eligible.length === 0) return report
+
+  if (options.dryRun) {
+    // Report on a throwaway copy so nothing is mutated by a preview.
+    const preview = JSON.parse(JSON.stringify(store)) as ProfileStore
+    const outcome = mergeProfilesInStore(preview, into, eligible, { cap: MAX_EMBEDDINGS_PER_SPEAKER })
+    report.merged = outcome.mergedFrom
+    report.samplesAfter = outcome.samplesAfter
+    report.droppedToCap = outcome.droppedToCap
+    return report
+  }
+
+  const outcome = mergeProfilesInStore(store, into, eligible, { cap: MAX_EMBEDDINGS_PER_SPEAKER })
+  report.merged = outcome.mergedFrom
+  report.samplesAfter = outcome.samplesAfter
+  report.droppedToCap = outcome.droppedToCap
+
+  // Manager first: drop the absorbed names so a stale centroid cannot keep
+  // winning searches after its profile is gone, then re-register the target
+  // from its new combined sample set.
+  //
+  // Routed through rebuildSpeakerInManager rather than an inline
+  // contains()/remove() pair: that helper already removes-then-returns on an
+  // empty sample list, so this is the one manager-mutation path in the file
+  // instead of a second one that could drift. NOTE: the manager is absent in
+  // tests (no 26 MB model), so this side effect has no test seam — the reason
+  // it is expressed as a single reused call rather than bespoke logic.
+  for (const name of outcome.mergedFrom) rebuildSpeakerInManager(name, [])
+  rebuildSpeakerInManager(into, target.embeddings)
+  writeProfileStore(store)
+  console.log(
+    `[speaker] Merged ${outcome.mergedFrom.join(', ')} into "${into}"`,
+    `(${report.samplesBefore} + absorbed → ${report.samplesAfter}, ${report.droppedToCap} dropped to cap)`,
+  )
+  return report
 }
 
 /** Remove a person entirely: profile, embeddings, and manager registration.

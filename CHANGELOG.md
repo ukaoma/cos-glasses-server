@@ -1,3 +1,22 @@
+## 6.21.11
+
+- Add `POST /api/voice/merge-profiles` for the case where one person holds two
+  profiles. The sherpa manager registers one centroid per name, so a split
+  identity has both halves competing on every search and each capped at twenty
+  samples independently — a weaker representation than either half deserves.
+- Refuse a merge whose centroid similarity falls below the search-accept
+  threshold, since two profiles further apart than the value at which
+  identification would match them are not one voice. `force` overrides and is
+  recorded in the response.
+- Preserve provenance through a merge and select the surviving samples for
+  acoustic diversity, so capping the union keeps both profiles represented
+  rather than silently discarding the absorbed one.
+- Relabel the absorbed name's calibration history instead of deleting it: after
+  a merge it is one person's history, and it is the only evidence for whether
+  the merge improved identification.
+- Refuse to absorb the owner label, which the live identification path checks
+  first on every chunk.
+
 ## 6.21.10
 
 - Make the voice profile store durable. `voice-profiles.json` is written

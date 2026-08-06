@@ -4,12 +4,12 @@ import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, rawCosineSimilarity, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles } from '../lib/speaker-embeddings.js'
+import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, rawCosineSimilarity, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles, mergeSpeakerProfiles } from '../lib/speaker-embeddings.js'
 import { statSync } from 'node:fs'
 import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import { dataPath } from '../lib/data-dir.js'
-import { purgeSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
+import { purgeSpeakerCalibrationRows, relabelSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -439,6 +439,85 @@ voiceRouter.get('/voice/profiles', (_req, res) => {
         })
         .sort((a, b) => b.embeddings - a.embeddings),
     })
+  } catch (err: unknown) {
+    res.status(500).json({ error: errMsg(err) })
+  }
+})
+
+// POST /api/voice/merge-profiles — fold two names for one person together.
+// Body: { into, from: string[]|string, confirm: true, dryRun?, force? }
+//
+// Two profiles for one voice is worse than it looks: the sherpa manager holds
+// one centroid per NAME, so both compete on every search and each is capped at
+// 20 samples independently — 40 samples of one person, split, each half a
+// weaker representation of them than the union would be.
+//
+// Fails closed below the search-accept threshold. A wrong merge destroys BOTH
+// identities at once and cannot be undone from the store alone, so the only
+// acceptable evidence is acoustic. `force` exists for the case where Miles
+// knows something the audio does not, and it is logged.
+voiceRouter.post('/voice/merge-profiles', (req, res) => {
+  try {
+    const into = typeof req.body?.into === 'string' ? req.body.into.trim() : ''
+    const rawFrom = req.body?.from
+    const from = (Array.isArray(rawFrom) ? rawFrom : [rawFrom])
+      .filter((n: unknown): n is string => typeof n === 'string' && n.trim().length > 0)
+      .map((n: string) => n.trim())
+
+    if (!into || from.length === 0) {
+      return res.status(400).json({ error: 'into (string) and from (string or string[]) are required' })
+    }
+    if (from.includes(into)) {
+      return res.status(400).json({ error: 'into and from must differ' })
+    }
+
+    const owner = getOwnerSpeakerLabel()
+    if (from.includes(owner)) {
+      // Absorbing the owner label would delete the profile the live
+      // identification path checks FIRST, on every chunk.
+      return res.status(400).json({
+        error: `refusing to absorb the owner label "${owner}" — merge INTO it instead`,
+      })
+    }
+
+    const dryRun = req.body?.dryRun === true
+    const force = req.body?.force === true
+
+    if (req.body?.confirm !== true && !dryRun) {
+      const preview = mergeSpeakerProfiles(into, from, { force, dryRun: true })
+      return res.status(400).json({
+        error: 'confirmation required',
+        message: `Merging is not reversible from the store alone. Review the similarity scores, then pass { confirm: true }.`,
+        preview,
+      })
+    }
+
+    const report = mergeSpeakerProfiles(into, from, { force, dryRun })
+
+    if (report.missing.length > 0 && report.merged.length === 0) {
+      return res.status(404).json({ error: 'no such profile(s)', missing: report.missing, report })
+    }
+    if (report.refused && report.merged.length === 0) {
+      return res.status(409).json({
+        error: 'similarity below the merge floor',
+        message: 'These centroids are further apart than the threshold at which identification would '
+          + 'accept a match between them, so they are probably different people. Pass { force: true } '
+          + 'only if you know they are the same person.',
+        report,
+      })
+    }
+
+    // Relabel rather than drop the absorbed name's calibration history: after a
+    // merge it is one person's history, and it is the only evidence for whether
+    // the merge improved identification.
+    const calibration: Record<string, number> = {}
+    if (!dryRun) {
+      for (const name of report.merged) {
+        calibration[name] = relabelSpeakerCalibrationRows(CALIBRATION_LOG, name, into).relabeled
+      }
+    }
+
+    res.json({ ...report, dryRun, forced: force, calibrationRowsRelabeled: calibration })
   } catch (err: unknown) {
     res.status(500).json({ error: errMsg(err) })
   }

@@ -347,6 +347,148 @@ export function removeEmbeddingsBySource(
   return removed
 }
 
+/** Cosine similarity between two raw rows. Local so this module stays free of
+ *  the sherpa runtime and can be unit-tested without a 26 MB model. */
+export function rowCosine(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0
+  let dot = 0, na = 0, nb = 0
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
+  const denom = Math.sqrt(na) * Math.sqrt(nb)
+  return denom > 0 ? dot / denom : 0
+}
+
+/** L2-normalized mean of the rows that share the modal dimension. */
+export function profileCentroid(embeddings: number[][]): number[] {
+  const dim = modalDimension(embeddings)
+  if (dim === 0) return []
+  const usable = embeddings.filter(row => row.length === dim)
+  if (usable.length === 0) return []
+  const c = new Array<number>(dim).fill(0)
+  for (const row of usable) for (let i = 0; i < dim; i++) c[i] += row[i]
+  for (let i = 0; i < dim; i++) c[i] /= usable.length
+  const norm = Math.sqrt(c.reduce((sum, v) => sum + v * v, 0))
+  return norm > 0 ? c.map(v => v / norm) : c
+}
+
+/** How close two profiles' centroids are. This is the number a merge must be
+ *  justified by: names are not evidence, and `Miles Mallard` / `Manoj Kumar`
+ *  are different humans who would merge happily on a name heuristic. */
+export function profileSimilarity(a: VoiceProfile, b: VoiceProfile): number {
+  return rowCosine(profileCentroid(a.embeddings), profileCentroid(b.embeddings))
+}
+
+/** Pick the N most acoustically diverse samples, carrying provenance along.
+ *
+ *  A merge routinely produces more samples than the per-speaker cap (two
+ *  capped profiles make 40 against a cap of 20), and which 20 survive matters:
+ *  taking the first N would keep one profile's acoustic conditions and discard
+ *  the other's, which is the opposite of what merging is for. Greedy
+ *  max-min-distance keeps the spread.
+ *
+ *  Returns indices so the caller can slice embeddings and sources together. */
+export function selectDiverseIndices(embeddings: number[][], maxN: number): number[] {
+  if (embeddings.length <= maxN) return embeddings.map((_, i) => i)
+
+  // Seed with the two most dissimilar rows.
+  let worstPair = Number.POSITIVE_INFINITY, seedA = 0, seedB = 1
+  for (let i = 0; i < embeddings.length; i++) {
+    for (let j = i + 1; j < embeddings.length; j++) {
+      const sim = rowCosine(embeddings[i], embeddings[j])
+      if (sim < worstPair) { worstPair = sim; seedA = i; seedB = j }
+    }
+  }
+  const chosen = [seedA, seedB]
+  const taken = new Set(chosen)
+  while (chosen.length < maxN) {
+    let best = -1, bestMinDist = -Infinity
+    for (let i = 0; i < embeddings.length; i++) {
+      if (taken.has(i)) continue
+      let minDist = Infinity
+      for (const c of chosen) {
+        const dist = 1 - rowCosine(embeddings[i], embeddings[c])
+        if (dist < minDist) minDist = dist
+      }
+      if (minDist > bestMinDist) { bestMinDist = minDist; best = i }
+    }
+    if (best === -1) break
+    chosen.push(best)
+    taken.add(best)
+  }
+  // Ascending so the surviving order still reflects enrollment order.
+  return chosen.sort((x, y) => x - y)
+}
+
+export interface MergeOutcome {
+  /** Centroid cosine between the target and each source, before merging. */
+  similarity: Record<string, number>
+  samplesBefore: number
+  samplesAfter: number
+  /** Samples discarded by the cap, not by the merge itself. */
+  droppedToCap: number
+  mergedFrom: string[]
+  missing: string[]
+}
+
+/**
+ * Fold one or more profiles into another.
+ *
+ * Provenance is deliberately PRESERVED rather than restamped `merged:*`: the
+ * per-source retraction path is what makes a poisoned `auto:<sessionId>` sample
+ * removable later, and overwriting it to record a bookkeeping event would trade
+ * a useful fact for a useless one.
+ */
+export function mergeProfilesInStore(
+  store: ProfileStore,
+  into: string,
+  from: string[],
+  options: { cap?: number } = {},
+): MergeOutcome {
+  const cap = options.cap ?? 20
+  const target = store.profiles.find(p => p.name === into)
+  const outcome: MergeOutcome = {
+    similarity: {},
+    samplesBefore: target?.embeddings.length ?? 0,
+    samplesAfter: target?.embeddings.length ?? 0,
+    droppedToCap: 0,
+    mergedFrom: [],
+    missing: [],
+  }
+  if (!target) {
+    outcome.missing = [into, ...from]
+    return outcome
+  }
+
+  const embeddings = [...target.embeddings]
+  const sources = [...(target.sources ?? [])]
+  while (sources.length < embeddings.length) sources.push(UNKNOWN_SOURCE)
+
+  for (const name of from) {
+    if (name === into) continue
+    const source = store.profiles.find(p => p.name === name)
+    if (!source) { outcome.missing.push(name); continue }
+    outcome.similarity[name] = profileSimilarity(target, source)
+    const sourceSources = [...(source.sources ?? [])]
+    while (sourceSources.length < source.embeddings.length) sourceSources.push(UNKNOWN_SOURCE)
+    for (let i = 0; i < source.embeddings.length; i++) {
+      embeddings.push(source.embeddings[i])
+      sources.push(sourceSources[i] ?? UNKNOWN_SOURCE)
+    }
+    outcome.mergedFrom.push(name)
+  }
+
+  if (outcome.mergedFrom.length === 0) return outcome
+
+  const keep = selectDiverseIndices(embeddings, cap)
+  outcome.droppedToCap = embeddings.length - keep.length
+  target.embeddings = keep.map(i => embeddings[i])
+  target.sources = keep.map(i => sources[i])
+  outcome.samplesAfter = target.embeddings.length
+
+  const removed = new Set(outcome.mergedFrom)
+  store.profiles = store.profiles.filter(p => !removed.has(p.name))
+  return outcome
+}
+
 /** Delete a person's profile outright. Returns what was removed so the caller
  *  can report a per-store count instead of a bare success. */
 export function deleteProfileFromStore(

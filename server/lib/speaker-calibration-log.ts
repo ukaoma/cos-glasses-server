@@ -62,6 +62,66 @@ export function filterCalibrationRows(
   return { text: kept.length > 0 ? kept.join('\n') + '\n' : '', result }
 }
 
+/**
+ * Rename a speaker across the log, for a profile merge.
+ *
+ * Relabel rather than delete: a merge means the two names were always one
+ * person, so their calibration history is one history. Dropping the absorbed
+ * name's rows would silently discard exactly the evidence needed to tell
+ * whether the merge improved identification.
+ */
+export function relabelCalibrationRows(
+  raw: string,
+  fromName: string,
+  toName: string,
+): { text: string; relabeled: number; retained: number; unparsable: number } {
+  const out: string[] = []
+  let relabeled = 0, retained = 0, unparsable = 0
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue
+    let row: Record<string, unknown>
+    try {
+      row = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      unparsable++; retained++; out.push(line); continue
+    }
+    // `retained` counts every row that survives, relabeled or not, so
+    // `retained === total input rows` is the invariant a caller can assert: a
+    // merge must never lose history. (Contrast filterCalibrationRows, where
+    // removed + retained = total.)
+    retained++
+    if (row.speaker === fromName) {
+      row.speaker = toName
+      relabeled++
+      out.push(JSON.stringify(row))
+    } else {
+      out.push(line)
+    }
+  }
+  return { text: out.length > 0 ? out.join('\n') + '\n' : '', relabeled, retained, unparsable }
+}
+
+/** Apply a merge relabel to the log on disk. */
+export function relabelSpeakerCalibrationRows(
+  logPath: string,
+  fromName: string,
+  toName: string,
+  options: { dryRun?: boolean } = {},
+): { relabeled: number; retained: number; unparsable: number } {
+  if (!existsSync(logPath)) return { relabeled: 0, retained: 0, unparsable: 0 }
+  let raw: string
+  try {
+    raw = readFileSync(logPath, 'utf-8')
+  } catch {
+    return { relabeled: 0, retained: 0, unparsable: 0 }
+  }
+  const { text, relabeled, retained, unparsable } = relabelCalibrationRows(raw, fromName, toName)
+  if (relabeled > 0 && !options.dryRun) {
+    durableAtomicWriteFileSync(logPath, text, { mode: 0o600 })
+  }
+  return { relabeled, retained, unparsable }
+}
+
 /** Rewrite the log without a given speaker's rows. */
 export function purgeSpeakerCalibrationRows(
   logPath: string,
