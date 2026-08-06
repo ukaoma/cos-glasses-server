@@ -105,7 +105,7 @@ describe('batch transcript quality bouncer', () => {
       {
         text: 'First segment has complete timed speaker words for this discussion.',
         speakerWords: Array.from({ length: 9 }, (_value, index) => ({
-          word: `first-${index}`, start: index, end: index + 0.5, speaker: 'Speaker A',
+          word: `first-${index}`, start: index, end: index + 0.5, speaker: 'Speaker A', similarity: 1,
         })),
       },
       {
@@ -124,13 +124,13 @@ describe('batch transcript quality bouncer', () => {
       {
         text: 'Alex confirmed the owner and deadline today.',
         speakerWords: ['Alex', 'confirmed', 'the', 'owner', 'and', 'deadline', 'today'].map((word, index) => ({
-          word, start: index, end: index + 0.5, speaker: 'Speaker A',
+          word, start: index, end: index + 0.5, speaker: 'Speaker A', similarity: 1,
         })),
       },
       {
         text: 'Jordan confirmed the final review milestone.',
         speakerWords: ['Jordan', 'confirmed', 'the', 'final', 'review', 'milestone'].map((word, index) => ({
-          word, start: index, end: index + 0.5, speaker: 'Speaker B',
+          word, start: index, end: index + 0.5, speaker: 'Speaker B', similarity: 1,
         })),
       },
     ]

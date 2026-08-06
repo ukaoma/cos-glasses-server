@@ -1,3 +1,17 @@
+## 6.21.8
+
+- Decouple durable G2 sync identity from post-meeting HQ so a saved meeting can
+  enter Operations immediately and be enriched in place when Large-v3 finishes.
+- Add default-off progressive Large-v3 checkpoints for sealed 30-second meeting
+  windows. Stop reuses only cache entries whose audio, context, model, and session
+  identities still match; provisional text never becomes canonical on its own.
+- Make progressive CPU admission tier-aware. Balanced is capped at two background
+  threads for fanless M1/M2-class Macs; Max defaults to six and remains capped by
+  available CPUs. Both stay global-single-flight, preemptible, and separately
+  kill-switched from Early Sync.
+- Publish requested/effective tier, thread policy, sealed-window progress, early
+  sync outcomes, and durable finalization recovery through health for COS Control.
+
 ## 6.21.7
 
 - Add a default-off, authenticated meeting-preview endpoint for private canaries.

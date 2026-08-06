@@ -8,7 +8,7 @@
 
 import { spawn, execFile } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs'
+import { writeFileSync, unlinkSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
@@ -72,6 +72,37 @@ export interface HighQualityTranscriptionResult {
   backend: 'whisper-cli' | 'whisper-server'
   actualQuality: 'hq' | 'fast'
   degradationReason?: HighQualityUnavailableReason
+}
+
+let highQualityCheckpointFingerprint: string | null = null
+
+/** Stable, path-free cache identity for progressive meeting HQ checkpoints.
+ * Model/configuration is immutable for the lifetime of one server process, so
+ * cache this instead of stat'ing multi-GB model files on every health poll. */
+export function getHighQualityCheckpointFingerprint(): string {
+  if (highQualityCheckpointFingerprint) return highQualityCheckpointFingerprint
+  const identity = (path: string): Record<string, number | boolean> => {
+    try {
+      const stat = statSync(path)
+      return { present: true, size: stat.size, mtimeMs: Math.floor(stat.mtimeMs) }
+    } catch {
+      return { present: false, size: 0, mtimeMs: 0 }
+    }
+  }
+  highQualityCheckpointFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    schema: 2,
+    serverVersion: process.env.COS_SERVER_VERSION?.trim() || 'development',
+    whisperCli: identity(WHISPER_CLI),
+    model: identity(resolveBatchModel()),
+    vad: identity(VAD_MODEL_PATH),
+    beam: 5,
+    bestOf: 5,
+    vadEnabled: hqCliVadEnabled('batch'),
+    enhancement: 'audio-enhance-v1',
+    prompt: buildWhisperPrompt(),
+    corrections: getWhisperCorrections(),
+  })).digest('hex')
+  return highQualityCheckpointFingerprint
 }
 
 export function classifyHighQualityTranscriptionCapability(input: {
@@ -806,7 +837,14 @@ export async function transcribeHighQuality(
   /** forceCpu: the batch pipeline's one CPU retry after a Metal preempt. It
    *  bypasses the gate entirely so the retry cannot itself be preempted into
    *  an infinite loop. */
-  opts: { priority?: 'interactive' | 'batch'; forceCpu?: boolean } = {},
+  opts: {
+    priority?: 'interactive' | 'batch'
+    forceCpu?: boolean
+    forceCpuReason?: string
+    threads?: number
+    backgroundCpu?: boolean
+    signal?: AbortSignal
+  } = {},
 ): Promise<HighQualityTranscriptionResult> {
   if (!cliAvailable) {
     // Fall back to server (no beam search available via HTTP API)
@@ -844,7 +882,7 @@ export async function transcribeHighQuality(
     const useVad = hqCliVadEnabled(opts.priority)
     const decision: { device: 'metal' | 'cpu'; reason: string; metalEnabled: boolean } = isBatch
       ? (opts.forceCpu
-          ? { device: 'cpu', reason: 'preempt_retry', metalEnabled: batchHqMetalEnabled() }
+          ? { device: 'cpu', reason: opts.forceCpuReason || 'preempt_retry', metalEnabled: batchHqMetalEnabled() }
           : chooseBatchDevice())
       : { device: 'metal', reason: 'interactive', metalEnabled: batchHqMetalEnabled() }
     const useMetal = decision.device === 'metal'
@@ -858,11 +896,14 @@ export async function transcribeHighQuality(
         : 2
       const beam = isBatch ? 5 : interactiveBeam
       const bestOf = beam
+      const requestedThreads = Number.isFinite(opts.threads)
+        ? Math.max(1, Math.min(16, Math.floor(opts.threads!)))
+        : 8
       const args = [
         '-m', modelPath,
         '-f', tmpWav,
         // CPU batch stays at 8 threads so it cannot starve live work of cores.
-        '-t', (isBatch && !useMetal) ? '8' : '16',
+        '-t', (isBatch && !useMetal) ? String(requestedThreads) : '16',
         '-l', 'en',
         ...(useMetal ? ['-fa'] : ['-ng']),
         '-bs', String(beam),
@@ -879,9 +920,18 @@ export async function transcribeHighQuality(
         // omits this — VAD was measured dropping real leading speech on compose.
         args.push('--vad', '--vad-model', VAD_MODEL_PATH)
       }
-      const proc = spawn(WHISPER_CLI, args, {
+      const useBackgroundTaskPolicy = Boolean(
+        isBatch && !useMetal && opts.backgroundCpu
+        && process.platform === 'darwin'
+        && existsSync('/usr/sbin/taskpolicy'),
+      )
+      const proc = spawn(
+        useBackgroundTaskPolicy ? '/usr/sbin/taskpolicy' : WHISPER_CLI,
+        useBackgroundTaskPolicy ? ['-b', WHISPER_CLI, ...args] : args,
+        {
         stdio: ['ignore', 'pipe', 'pipe'],
-      })
+        },
+      )
       ownedHqChildren.add(proc)
 
       // BLOCKER contract: a preempted Metal child is a HARD FAIL. Its stdout
@@ -896,6 +946,17 @@ export async function transcribeHighQuality(
 
       let stdout = ''
       let stderr = ''
+      let aborted = false
+      let abortForceKill: ReturnType<typeof setTimeout> | null = null
+      const onAbort = (): void => {
+        aborted = true
+        try { proc.kill('SIGTERM') } catch { /* already exited */ }
+        abortForceKill = setTimeout(() => {
+          try { proc.kill('SIGKILL') } catch { /* already exited */ }
+        }, 2_000)
+      }
+      if (opts.signal?.aborted) onAbort()
+      else opts.signal?.addEventListener('abort', onAbort, { once: true })
       proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
       proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
 
@@ -915,15 +976,23 @@ export async function transcribeHighQuality(
       }, timeoutMs)
 
       proc.on('close', (code) => {
+        opts.signal?.removeEventListener('abort', onAbort)
         ownedHqChildren.delete(proc)
         unregisterMetalBatchChild(proc)
         clearTimeout(timeout)
+        if (abortForceKill) clearTimeout(abortForceKill)
         if (forceKill) clearTimeout(forceKill)
         // Preempt is checked FIRST and ignores the exit code: SIGTERM often
         // yields a non-zero code, but a race could also let the child exit 0
         // with partial output. Either way the text is discarded.
         if (preemptedReason) {
           reject(new MetalBatchPreemptedError(preemptedReason))
+          return
+        }
+        if (aborted) {
+          const error = new Error('Progressive HQ checkpoint aborted')
+          error.name = 'AbortError'
+          reject(error)
           return
         }
         if (timedOut) {
@@ -938,9 +1007,11 @@ export async function transcribeHighQuality(
       })
 
       proc.on('error', (err) => {
+        opts.signal?.removeEventListener('abort', onAbort)
         ownedHqChildren.delete(proc)
         unregisterMetalBatchChild(proc)
         clearTimeout(timeout)
+        if (abortForceKill) clearTimeout(abortForceKill)
         if (forceKill) clearTimeout(forceKill)
         reject(new Error(`whisper-cli HQ spawn error: ${err.message}`))
       })

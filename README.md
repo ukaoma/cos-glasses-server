@@ -270,6 +270,15 @@ to Turbo rather than making transcription unavailable. COS Control is the
 supported owner of the machine-wide tier; the per-lane environment variables
 remain advanced overrides.
 
+Server 6.21.8 adds a default-off meeting-completion canary. With
+`COS_MEETING_PROGRESSIVE_HQ=1`, sealed meeting windows can be polished ahead of
+Stop/save on a CPU-only, single-flight lane; finalization reuses only matching
+audio/model/context checkpoints. Balanced is capped at two background threads
+for fanless M1/M2 MacBook Airs, while Max defaults to six and remains capped by
+available CPUs. `COS_MEETING_EARLY_SYNC=1` separately gives the Operations sync
+pipeline a stable meeting identity before HQ completes. Either switch can be
+disabled without changing canonical live transcription or raw meeting audio.
+
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):
 

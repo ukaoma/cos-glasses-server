@@ -19,7 +19,7 @@ import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
-import { meetingRouter } from './routes/meeting.js'
+import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
@@ -438,6 +438,10 @@ listenRequiredServers(listeners).then(() => {
   const startAdmittedRuntime = () => {
     if (admittedRuntimeStarted) return
     admittedRuntimeStarted = true
+
+    // Resume already-saved meetings whose post-response HQ/operations work
+    // was interrupted by a prior server update or process exit.
+    resumeMeetingFinalizationJobs()
 
     void initQueryJobRuntime().then(health => {
       if (process.env.COS_DURABLE_QUERY_JOBS !== '0') {

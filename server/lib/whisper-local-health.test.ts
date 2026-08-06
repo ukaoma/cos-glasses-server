@@ -212,7 +212,9 @@ describe('whisper-server health reconciliation', () => {
     expect(source).toContain('chooseBatchDevice()')
     expect(source).toContain("...(useMetal ? ['-fa'] : ['-ng'])")
     // CPU batch keeps 8 threads so it cannot starve live work of cores.
-    expect(source).toContain("'-t', (isBatch && !useMetal) ? '8' : '16'")
+    expect(source).toContain("const requestedThreads = Number.isFinite(opts.threads)")
+    expect(source).toContain(': 8')
+    expect(source).toContain("'-t', (isBatch && !useMetal) ? String(requestedThreads) : '16'")
     // Interactive HQ stays outside batch device policy.
     expect(source).toContain("{ device: 'metal', reason: 'interactive'")
     expect(source).toContain("const captureBatchWords = opts.priority === 'batch'")

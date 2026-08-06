@@ -2,10 +2,19 @@
 // larger windows so Whisper gets enough context to improve the live stream.
 // The candidate is never canonical until batch-transcript-quality accepts it.
 
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { availableParallelism } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { enhanceAudio } from './audio-enhance.js'
-import { transcribeHighQuality, type WhisperWord } from './whisper-local.js'
+import {
+  getHighQualityCheckpointFingerprint,
+  getHighQualityTranscriptionCapability,
+  getWhisperCommitCapability,
+  transcribeHighQuality,
+  type WhisperWord,
+} from './whisper-local.js'
+import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { isMetalBatchPreempted } from './whisper-metal-gate.js'
 import {
   clearMeetingBatchProgress,
@@ -79,7 +88,11 @@ export function concatenateWavChunks(audioDir: string, startChunk: number, endCh
 }
 
 /** Group live transcript chunks into roughly 30-second Whisper windows. */
-export function segmentTranscriptChunks(entries: IndexedTranscriptChunk[], targetMs = 30_000): BatchSegment[] {
+export function segmentTranscriptChunks(
+  entries: IndexedTranscriptChunk[],
+  targetMs = 30_000,
+  includeOpenTail = true,
+): BatchSegment[] {
   if (entries.length === 0) return []
   const segments: BatchSegment[] = []
   let segmentStartPosition = 0
@@ -105,7 +118,7 @@ export function segmentTranscriptChunks(entries: IndexedTranscriptChunk[], targe
     }
   }
 
-  if (segmentStartPosition < entries.length) {
+  if (includeOpenTail && segmentStartPosition < entries.length) {
     const window = entries.slice(segmentStartPosition)
     const first = entries[segmentStartPosition]
     const last = entries.at(-1)
@@ -122,7 +135,7 @@ export function segmentTranscriptChunks(entries: IndexedTranscriptChunk[], targe
   return segments
 }
 
-function stripOverlap(newText: string, previousText: string): string {
+export function stripOverlap(newText: string, previousText: string): string {
   const normalize = (value: string): string => value
     .toLowerCase()
     .replace(/[.!?,;:'"()\-\n]/g, '')
@@ -144,14 +157,15 @@ function stripOverlap(newText: string, previousText: string): string {
   return newText.trim().split(/\s+/).slice(overlap).join(' ') || newText
 }
 
-function mapWordsToSpeakers(
+export function mapWordsToSpeakers(
   words: WhisperWord[],
   segment: BatchSegment,
   entries: IndexedTranscriptChunk[],
-): Array<{ word: string; start: number; end: number; speaker: string }> {
+): Array<{ word: string; start: number; end: number; speaker: string; similarity: number }> {
   return words.map(word => {
     const absoluteElapsed = segment.startElapsed + word.start * 1000
     let speaker = segment.speakers[0] || 'Unknown'
+    let similarity = 0
     let bestDistance = Number.POSITIVE_INFINITY
     for (const entry of entries) {
       if (entry.chunkIndex < segment.startChunkIdx || entry.chunkIndex > segment.endChunkIdx) continue
@@ -160,17 +174,184 @@ function mapWordsToSpeakers(
       if (distance < bestDistance) {
         bestDistance = distance
         speaker = chunk.speaker
+        similarity = Number.isFinite(chunk.similarity) ? chunk.similarity : 0
       }
     }
-    if (bestDistance > 3_500) speaker = segment.speakers[0] || 'Unknown'
-    return { word: word.word, start: word.start, end: word.end, speaker }
+    if (bestDistance > 3_500) {
+      speaker = segment.speakers[0] || 'Unknown'
+      similarity = 0
+    }
+    return { word: word.word, start: word.start, end: word.end, speaker, similarity }
   })
+}
+
+const PROGRESSIVE_MANIFEST = '_progressive_hq.json'
+
+interface ProgressiveCheckpoint {
+  key: string
+  sourceHash: string
+  contextHash: string
+  configFingerprint: string
+  completedAt: string
+  wallTimeMs: number
+  result: BatchResult
+}
+
+interface ProgressiveManifest {
+  schemaVersion: 1
+  sessionId: string
+  checkpoints: Record<string, ProgressiveCheckpoint>
+}
+
+function checkpointKey(segment: BatchSegment): string {
+  return `${segment.startChunkIdx}-${segment.endChunkIdx}`
+}
+
+function contextHash(previousText?: string): string {
+  return createHash('sha256').update(previousText?.slice(-250) ?? '').digest('hex')
+}
+
+function segmentSourceHash(audioDir: string, segment: BatchSegment): string | null {
+  const hash = createHash('sha256')
+  for (let index = segment.startChunkIdx; index <= segment.endChunkIdx; index++) {
+    const path = resolve(audioDir, `chunk_${String(index).padStart(4, '0')}.wav`)
+    if (!existsSync(path)) return null
+    const wav = readFileSync(path)
+    if (wav.length <= WAV_HEADER_SIZE || wav.toString('ascii', 0, 4) !== 'RIFF') return null
+    hash.update(String(index)).update('\0').update(wav)
+  }
+  return hash.digest('hex')
+}
+
+function progressiveFailureIdentity(
+  audioDir: string,
+  segment: BatchSegment,
+  previousText?: string,
+): string | null {
+  const sourceHash = segmentSourceHash(audioDir, segment)
+  if (!sourceHash) return null
+  return createHash('sha256').update([
+    checkpointKey(segment), sourceHash, contextHash(previousText), getHighQualityCheckpointFingerprint(),
+  ].join('\0')).digest('hex')
+}
+
+function loadProgressiveManifest(audioDir: string): ProgressiveManifest | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(audioDir, PROGRESSIVE_MANIFEST), 'utf8')) as ProgressiveManifest
+    if (parsed?.schemaVersion !== 1 || typeof parsed.sessionId !== 'string' || !parsed.checkpoints) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function readProgressiveCheckpoint(
+  audioDir: string,
+  segment: BatchSegment,
+  previousText?: string,
+  expectedSessionId?: string,
+): BatchResult | null {
+  const cached = readProgressiveCheckpointMetadata(audioDir, segment, previousText, undefined, expectedSessionId)
+  if (!cached) return null
+  const manifest = loadProgressiveManifest(audioDir)
+  const checkpoint = manifest?.checkpoints?.[checkpointKey(segment)]
+  if (!checkpoint) return null
+  const sourceHash = segmentSourceHash(audioDir, segment)
+  if (!sourceHash || checkpoint.sourceHash !== sourceHash) return null
+  return cached
+}
+
+/** Lightweight cache lookup for admission/status. Raw audio is immutable once
+ * durably written, while final Stop/save reuse still performs the full WAV
+ * hash validation above. This keeps the 12-second Control health poll cheap. */
+function readProgressiveCheckpointMetadata(
+  audioDir: string,
+  segment: BatchSegment,
+  previousText?: string,
+  manifest = loadProgressiveManifest(audioDir),
+  expectedSessionId?: string,
+): BatchResult | null {
+  if (expectedSessionId && manifest?.sessionId !== expectedSessionId) return null
+  const checkpoint = manifest?.checkpoints?.[checkpointKey(segment)]
+  if (
+    !checkpoint
+    || checkpoint.contextHash !== contextHash(previousText)
+    || checkpoint.configFingerprint !== getHighQualityCheckpointFingerprint()
+  ) return null
+  const cached = checkpoint.result
+  const validWord = (word: unknown, speakerRequired: boolean): boolean => {
+    if (!word || typeof word !== 'object') return false
+    const item = word as Record<string, unknown>
+    return typeof item.word === 'string'
+      && typeof item.start === 'number'
+      && Number.isFinite(item.start)
+      && typeof item.end === 'number'
+      && Number.isFinite(item.end)
+      && item.start >= 0
+      && item.end >= item.start
+      && (!speakerRequired || (
+        typeof item.speaker === 'string'
+        && typeof item.similarity === 'number'
+        && Number.isFinite(item.similarity)
+        && item.similarity >= 0
+        && item.similarity <= 1
+      ))
+  }
+  if (
+    cached?.segment?.startChunkIdx !== segment.startChunkIdx
+    || cached.segment.endChunkIdx !== segment.endChunkIdx
+    || cached.segment.startElapsed !== segment.startElapsed
+    || cached.segment.endElapsed !== segment.endElapsed
+    || !Array.isArray(cached.segment.speakers)
+    || cached.segment.speakers.some(speaker => typeof speaker !== 'string')
+    || typeof cached.text !== 'string'
+    || !Array.isArray(cached.words)
+    || cached.words.some(word => !validWord(word, false))
+    || !Array.isArray(cached.speakerWords)
+    || cached.speakerWords.some(word => !validWord(word, true))
+  ) return null
+  return cached
+}
+
+function writeProgressiveCheckpoint(
+  audioDir: string,
+  sessionId: string,
+  checkpoint: ProgressiveCheckpoint,
+): void {
+  const prior = loadProgressiveManifest(audioDir)
+  if (prior && prior.sessionId !== sessionId) {
+    throw new Error(`Progressive HQ manifest session mismatch (${prior.sessionId} != ${sessionId})`)
+  }
+  const next: ProgressiveManifest = {
+    schemaVersion: 1,
+    sessionId,
+    checkpoints: { ...(prior?.checkpoints ?? {}), [checkpoint.key]: checkpoint },
+  }
+  durableAtomicWriteFileSync(
+    join(audioDir, PROGRESSIVE_MANIFEST),
+    JSON.stringify(next, null, 2),
+    { mode: 0o600 },
+  )
+}
+
+export const __progressiveHqTesting = {
+  checkpointKey,
+  segmentSourceHash,
+  readProgressiveCheckpoint,
+  readProgressiveCheckpointMetadata,
+  writeProgressiveCheckpoint,
+  contextHash,
+  segmentRangeIsComplete,
+  nextMissingSealedSegment,
+  progressiveFailureIdentity,
+  resolveProgressiveHqPolicy,
 }
 
 export async function transcribeSegments(
   audioDir: string,
   segments: BatchSegment[],
   entries: IndexedTranscriptChunk[],
+  expectedSessionId?: string,
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = []
   const meetingId = basename(audioDir)
@@ -183,9 +364,22 @@ export async function transcribeSegments(
   for (const segment of segments) {
     try {
       refreshPendingLease(audioDir)
+      const previousText = results.at(-1)?.text
+      const cached = progressiveMeetingHqEnabled()
+        ? readProgressiveCheckpoint(audioDir, segment, previousText, expectedSessionId)
+        : null
+      if (cached) {
+        results.push(cached)
+        writeMeetingBatchProgress(audioDir, {
+          phase: 'hq_polish',
+          segmentsDone: results.length,
+          segmentsTotal: segments.length,
+          meetingId,
+        })
+        continue
+      }
       const combined = concatenateWavChunks(audioDir, segment.startChunkIdx, segment.endChunkIdx)
       const enhanced = await enhanceAudio(combined)
-      const previousText = results.at(-1)?.text
       let result
       try {
         result = await transcribeHighQuality(enhanced, previousText?.slice(-250), { priority: 'batch' })
@@ -204,6 +398,7 @@ export async function transcribeSegments(
         result = await transcribeHighQuality(enhanced, previousText?.slice(-250), {
           priority: 'batch',
           forceCpu: true,
+          forceCpuReason: 'preempt_retry',
         })
       }
       const text = previousText ? stripOverlap(result.text, previousText) : result.text
@@ -249,11 +444,307 @@ export function enqueueSerializedHqWork<T>(work: () => Promise<T>): Promise<T> {
   return job
 }
 
+interface ProgressiveSessionState {
+  sessionId: string
+  audioDir: string
+  entries: IndexedTranscriptChunk[]
+  asrCompletedIndices: number[]
+  queued: boolean
+  active: boolean
+  closed: boolean
+  controller?: AbortController
+  activeDecode?: Promise<void>
+  inputRevision: number
+  inputSignature: string
+  failedIdentity?: string
+  failedAttempts: number
+  retryAfter: number
+}
+
+const progressiveSessions = new Map<string, ProgressiveSessionState>()
+let progressiveActiveSessionId: string | null = null
+let progressiveOwnerSessionId: string | null = null
+
+interface ProgressiveHqPolicyInput {
+  requested: boolean
+  effectiveTier: 'balanced' | 'max'
+  hqAvailable: boolean
+  logicalCpus: number
+  requestedThreads?: number
+}
+
+export interface ProgressiveHqPolicy {
+  requested: boolean
+  enabled: boolean
+  tier: 'balanced' | 'max'
+  mode: 'balanced-conservative' | 'max-performance'
+  threads: number
+  reason: 'disabled_by_flag' | 'hq_unavailable' | null
+}
+
+/** Tier is the user-owned hardware admission signal. Balanced must remain safe
+ *  on the lowest supported fanless M1/M2 Air, so it can never exceed two CPU
+ *  decoder threads. Max may use six by default, while both tiers remain capped
+ *  by the CPUs the OS actually makes available. An env override can lower a
+ *  tier but cannot punch through its safety cap. */
+function resolveProgressiveHqPolicy(input: ProgressiveHqPolicyInput): ProgressiveHqPolicy {
+  const logicalCpus = Number.isFinite(input.logicalCpus)
+    ? Math.max(1, Math.floor(input.logicalCpus))
+    : 1
+  const tierCap = input.effectiveTier === 'max' ? 8 : 2
+  const defaultThreads = input.effectiveTier === 'max'
+    ? Math.min(6, Math.max(1, logicalCpus - 2))
+    : Math.min(2, Math.max(1, Math.floor(logicalCpus / 4)))
+  const requestedThreads = Number.isFinite(input.requestedThreads)
+    ? Math.max(1, Math.floor(input.requestedThreads!))
+    : defaultThreads
+  const threads = Math.min(tierCap, logicalCpus, requestedThreads)
+  return {
+    requested: input.requested,
+    enabled: input.requested && input.hqAvailable,
+    tier: input.effectiveTier,
+    mode: input.effectiveTier === 'max' ? 'max-performance' : 'balanced-conservative',
+    threads,
+    reason: !input.requested ? 'disabled_by_flag' : !input.hqAvailable ? 'hq_unavailable' : null,
+  }
+}
+
+function currentProgressiveHqPolicy(): ProgressiveHqPolicy {
+  const commit = getWhisperCommitCapability()
+  const hq = getHighQualityTranscriptionCapability()
+  const rawThreads = Number.parseInt(process.env.COS_MEETING_PROGRESSIVE_HQ_THREADS || '', 10)
+  return resolveProgressiveHqPolicy({
+    requested: process.env.COS_MEETING_PROGRESSIVE_HQ === '1',
+    effectiveTier: commit.effectiveTier,
+    hqAvailable: hq.hqAvailable,
+    logicalCpus: availableParallelism(),
+    requestedThreads: Number.isFinite(rawThreads) ? rawThreads : undefined,
+  })
+}
+
+export function progressiveMeetingHqEnabled(): boolean {
+  return currentProgressiveHqPolicy().enabled
+}
+
+function progressiveThreads(): number {
+  return currentProgressiveHqPolicy().threads
+}
+
+function segmentRangeIsComplete(segment: BatchSegment, completedIndices: number[]): boolean {
+  const completed = new Set(completedIndices)
+  for (let index = segment.startChunkIdx; index <= segment.endChunkIdx; index++) {
+    if (!completed.has(index)) return false
+  }
+  return true
+}
+
+function nextMissingSealedSegment(
+  state: ProgressiveSessionState,
+): { segment: BatchSegment; previousText?: string } | null {
+  const sealed = segmentTranscriptChunks(state.entries, 30_000, false)
+  const manifest = loadProgressiveManifest(state.audioDir)
+  let previousText: string | undefined
+  for (const segment of sealed) {
+    if (!segmentRangeIsComplete(segment, state.asrCompletedIndices)) return null
+    const cached = readProgressiveCheckpointMetadata(state.audioDir, segment, previousText, manifest, state.sessionId)
+    if (!cached) {
+      const identity = progressiveFailureIdentity(state.audioDir, segment, previousText)
+      if (!identity) return null
+      if (state.failedIdentity === identity && (state.failedAttempts >= 3 || Date.now() < state.retryAfter)) return null
+      return { segment, previousText }
+    }
+    previousText = cached.text
+  }
+  return null
+}
+
+function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState): void {
+  if (state.queued || state.active || state.closed || !progressiveMeetingHqEnabled()) return
+  if (progressiveActiveSessionId && progressiveActiveSessionId !== sessionId) return
+  if (!nextMissingSealedSegment(state)) return
+  state.queued = true
+
+  void enqueueSerializedHqWork(async () => {
+    state.queued = false
+    if (state.closed || !progressiveMeetingHqEnabled()) return
+    const pending = nextMissingSealedSegment(state)
+    if (!pending) return
+    const sourceHash = segmentSourceHash(state.audioDir, pending.segment)
+    if (!sourceHash) return
+
+    state.active = true
+    progressiveActiveSessionId = sessionId
+    const controller = new AbortController()
+    state.controller = controller
+    const started = Date.now()
+    state.activeDecode = (async () => {
+      if (controller.signal.aborted || state.closed) return
+      const combined = concatenateWavChunks(
+        state.audioDir,
+        pending.segment.startChunkIdx,
+        pending.segment.endChunkIdx,
+      )
+      const enhanced = await enhanceAudio(combined)
+      if (controller.signal.aborted || state.closed) return
+      const decoded = await transcribeHighQuality(enhanced, pending.previousText?.slice(-250), {
+        priority: 'batch',
+        forceCpu: true,
+        forceCpuReason: 'progressive_checkpoint',
+        threads: progressiveThreads(),
+        backgroundCpu: true,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || state.closed) return
+      const text = pending.previousText
+        ? stripOverlap(decoded.text, pending.previousText)
+        : decoded.text
+      const words = decoded.words ?? []
+      const result: BatchResult = {
+        segment: pending.segment,
+        text,
+        words,
+        speakerWords: mapWordsToSpeakers(words, pending.segment, state.entries),
+      }
+      writeProgressiveCheckpoint(state.audioDir, sessionId, {
+        key: checkpointKey(pending.segment),
+        sourceHash,
+        contextHash: contextHash(pending.previousText),
+        configFingerprint: getHighQualityCheckpointFingerprint(),
+        completedAt: new Date().toISOString(),
+        wallTimeMs: Date.now() - started,
+        result,
+      })
+      state.failedIdentity = undefined
+      state.failedAttempts = 0
+      state.retryAfter = 0
+    })()
+
+    try {
+      await state.activeDecode
+    } catch (error) {
+      if ((error as Error)?.name !== 'AbortError') {
+        const identity = progressiveFailureIdentity(state.audioDir, pending.segment, pending.previousText)
+        if (!identity) return
+        state.failedAttempts = state.failedIdentity === identity ? state.failedAttempts + 1 : 1
+        state.failedIdentity = identity
+        state.retryAfter = Date.now() + [60_000, 120_000, 300_000][Math.min(2, state.failedAttempts - 1)]
+        console.warn(
+          `[meeting-hq-checkpoint] ${sessionId} ${pending.segment.startChunkIdx}-${pending.segment.endChunkIdx}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    } finally {
+      state.active = false
+      state.controller = undefined
+      state.activeDecode = undefined
+      if (progressiveActiveSessionId === sessionId) progressiveActiveSessionId = null
+      if (!state.closed) queueProgressiveWork(sessionId, state)
+    }
+  }).catch(error => {
+    state.queued = false
+    console.warn(
+      `[meeting-hq-checkpoint] queue failed for ${sessionId}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    )
+  })
+}
+
+/** Coalesced, global-single-flight progressive HQ admission after canonical persistence. */
+export function scheduleProgressiveHqCheckpoint(
+  sessionId: string,
+  audioDir: string,
+  entries: IndexedTranscriptChunk[],
+  asrCompletedIndices: number[],
+): void {
+  if (!progressiveMeetingHqEnabled()) return
+  if (progressiveOwnerSessionId && progressiveOwnerSessionId !== sessionId) return
+  progressiveOwnerSessionId ??= sessionId
+  const existing = progressiveSessions.get(sessionId)
+  const state = existing ?? {
+    sessionId,
+    audioDir,
+    entries: [],
+    asrCompletedIndices: [],
+    queued: false,
+    active: false,
+    closed: false,
+    inputRevision: 0,
+    inputSignature: '',
+    failedAttempts: 0,
+    retryAfter: 0,
+  }
+  state.audioDir = audioDir
+  state.entries = entries.map(entry => ({ ...entry, chunk: { ...entry.chunk } }))
+  state.asrCompletedIndices = [...asrCompletedIndices]
+  const inputSignature = createHash('sha256').update(JSON.stringify({
+    entries: state.entries.map(entry => ({
+      chunkIndex: entry.chunkIndex,
+      text: entry.chunk.text,
+      speaker: entry.chunk.speaker,
+      elapsed: entry.chunk.elapsed,
+    })),
+    asrCompletedIndices: state.asrCompletedIndices,
+  })).digest('hex')
+  if (inputSignature !== state.inputSignature) {
+    state.inputSignature = inputSignature
+    state.inputRevision += 1
+  }
+  progressiveSessions.set(sessionId, state)
+  queueProgressiveWork(sessionId, state)
+}
+
+/** Stop/save barrier: abort at most one prefill child before audio-dir rename. */
+export async function stopProgressiveHqSession(sessionId: string): Promise<void> {
+  const state = progressiveSessions.get(sessionId)
+  if (!state) return
+  state.closed = true
+  state.controller?.abort()
+  void state.activeDecode?.catch(() => { /* aborted cache work is disposable */ })
+  progressiveSessions.delete(sessionId)
+  if (progressiveOwnerSessionId === sessionId) progressiveOwnerSessionId = null
+}
+
+export function getProgressiveHqSnapshot(): {
+  requested: boolean
+  enabled: boolean
+  tier: 'balanced' | 'max'
+  mode: 'balanced-conservative' | 'max-performance'
+  threads: number
+  reason: 'disabled_by_flag' | 'hq_unavailable' | null
+  activeSessionId: string | null
+  sessions: Array<{ sessionId: string; sealedDone: number; sealedTotal: number; state: string }>
+} {
+  const policy = currentProgressiveHqPolicy()
+  return {
+    ...policy,
+    activeSessionId: progressiveActiveSessionId,
+    sessions: [...progressiveSessions.entries()].filter(([, state]) => !state.closed).map(([sessionId, state]) => {
+      const sealed = segmentTranscriptChunks(state.entries, 30_000, false)
+      const manifest = loadProgressiveManifest(state.audioDir)
+      let previousText: string | undefined
+      let sealedDone = 0
+      for (const segment of sealed) {
+        const cached = readProgressiveCheckpointMetadata(state.audioDir, segment, previousText, manifest, state.sessionId)
+        if (!cached) break
+        sealedDone += 1
+        previousText = cached.text
+      }
+      return {
+        sessionId,
+        sealedDone,
+        sealedTotal: sealed.length,
+        state: state.active ? 'active' : state.queued ? 'queued' : 'idle',
+      }
+    }),
+  }
+}
+
 /** Serialize 16-thread HQ decoders across meetings on a public user's Mac. */
 export function runMeetingBatchPipeline(
   audioDir: string,
   entries: IndexedTranscriptChunk[],
   streamingWordCount: number,
+  sessionId?: string,
 ): Promise<BatchTranscription> {
   // Lease immediately, including time spent behind another HQ decoder. Without
   // this, the two-hour cleanup could delete a queued meeting before it starts.
@@ -272,6 +763,7 @@ export function runMeetingBatchPipeline(
     audioDir,
     entries,
     streamingWordCount,
+    sessionId,
   )).finally(() => {
     clearInterval(lease)
     clearMeetingBatchProgress(audioDir)
@@ -284,6 +776,7 @@ async function runMeetingBatchPipelineNow(
   audioDir: string,
   entries: IndexedTranscriptChunk[],
   streamingWordCount: number,
+  sessionId?: string,
 ): Promise<BatchTranscription> {
   try {
     refreshPendingLease(audioDir)
@@ -305,7 +798,7 @@ async function runMeetingBatchPipelineNow(
       segmentsTotal: segments.length,
       meetingId: basename(audioDir),
     })
-    const batchSegments = await transcribeSegments(audioDir, segments, entries)
+    const batchSegments = await transcribeSegments(audioDir, segments, entries, sessionId)
     writeMeetingBatchProgress(audioDir, {
       phase: 'quality_check',
       segmentsDone: segments.length,

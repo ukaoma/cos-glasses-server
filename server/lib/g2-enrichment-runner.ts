@@ -5,7 +5,7 @@ import { isAbsolute } from 'node:path'
 export const G2_RESULT_PREFIX = 'COS_G2_RESULT='
 
 export interface G2EnrichmentOutcome {
-  status: 'enriched' | 'already-enriched' | 'blended'
+  status: 'claimed' | 'retained' | 'enriched' | 'already-enriched' | 'blended'
   path: string
   title: string
 }
@@ -34,6 +34,8 @@ export interface G2EnrichmentOptions {
   timeoutMs?: number
   killGraceMs?: number
   onAttempt?: (message: string) => void
+  claimOnly?: boolean
+  importLocal?: boolean
 }
 
 export interface G2EnrichmentDependencies {
@@ -57,7 +59,7 @@ export function parseG2EnrichmentOutcome(stdout: string): G2EnrichmentOutcome | 
     try {
       const parsed = JSON.parse(line.slice(G2_RESULT_PREFIX.length)) as Partial<G2EnrichmentOutcome>
       if (
-        (parsed.status === 'enriched' || parsed.status === 'already-enriched' || parsed.status === 'blended')
+        (parsed.status === 'claimed' || parsed.status === 'retained' || parsed.status === 'enriched' || parsed.status === 'already-enriched' || parsed.status === 'blended')
         && typeof parsed.path === 'string'
         && parsed.path.length > 0
         && typeof parsed.title === 'string'
@@ -72,8 +74,19 @@ export function parseG2EnrichmentOutcome(stdout: string): G2EnrichmentOutcome | 
   return null
 }
 
-export function buildExactG2SyncArgs(syncScript: string, meetingFile: string): string[] {
-  return [syncScript, '--g2-only', '--g2-file', meetingFile, '--quiet']
+export function buildExactG2SyncArgs(
+  syncScript: string,
+  meetingFile: string,
+  claimOnly = false,
+  importLocal = false,
+): string[] {
+  return [
+    syncScript,
+    '--g2-only',
+    importLocal ? '--g2-import-file' : '--g2-file', meetingFile,
+    ...(claimOnly ? ['--g2-claim-only'] : []),
+    '--quiet',
+  ]
 }
 
 function signalChildTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): boolean {
@@ -91,7 +104,12 @@ export async function spawnG2SyncAttempt(options: G2EnrichmentOptions): Promise<
   return await new Promise(resolve => {
     const child = spawn(
       options.pythonBin,
-      buildExactG2SyncArgs(options.syncScript, options.meetingFile),
+      buildExactG2SyncArgs(
+        options.syncScript,
+        options.meetingFile,
+        options.claimOnly,
+        options.importLocal,
+      ),
       {
         cwd: options.scriptsDir,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -176,4 +194,3 @@ export async function runG2EnrichmentWithRetry(
 
   return { ok: false, attempts: retryDelaysMs.length, error: lastError }
 }
-

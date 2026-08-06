@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MeetingStore } from '../lib/meeting-store.js'
+import { MeetingFinalizationJobStore } from '../lib/meeting-finalization-jobs.js'
 import { initializeServerInstanceId } from '../lib/server-instance-id.js'
 import type { BatchTranscription } from '../lib/batch-transcript-quality.js'
 import { createMeetingRouter } from './meeting.js'
@@ -36,6 +37,7 @@ interface HarnessOptions {
   batch: BatchTranscription
   drainError?: Error
   moveFails?: boolean
+  runBatch?: () => Promise<BatchTranscription>
 }
 
 async function harness(options: HarnessOptions) {
@@ -47,6 +49,7 @@ async function harness(options: HarnessOptions) {
   mkdirSync(pendingAudio, { recursive: true })
   writeFileSync(join(pendingAudio, 'chunk_0000.wav'), Buffer.from('raw recovery evidence'))
   const store = new MeetingStore(recordingsRoot)
+  const finalizationJobs = new MeetingFinalizationJobStore(join(parent, 'data', 'meeting-finalization-jobs'))
   const background: Promise<void>[] = []
   const deleted = vi.fn()
   const chunks = [
@@ -91,9 +94,10 @@ async function harness(options: HarnessOptions) {
   app.use('/api', createMeetingRouter({
     store,
     sessions,
-    runBatch: async () => options.batch,
+    runBatch: options.runBatch ?? (async () => options.batch),
     scheduleBackground: task => { background.push(task) },
     emit: vi.fn(),
+    finalizationJobs,
   }))
   app.use('/api', createMeetingsRouter(store))
 
@@ -111,7 +115,7 @@ async function harness(options: HarnessOptions) {
       ...(init.headers ?? {}),
     },
   })
-  return { api, background, deleted, parent, pendingAudio, recordingsRoot, store, server }
+  return { api, background, deleted, finalizationJobs, parent, pendingAudio, recordingsRoot, store, server }
 }
 
 function acceptedBatch(): BatchTranscription {
@@ -240,6 +244,37 @@ describe('meeting save/list/detail API', () => {
     })
     expect(replay.status).toBe(200)
     expect(await replay.json()).toMatchObject({ replayed: true, filename: saved.filename })
+    expect(readdirSync(join(h.recordingsRoot, '2026-07')).filter(name => name.endsWith('.md'))).toHaveLength(1)
+  })
+
+  it('retains a failed finalization job and resumes it on idempotent save replay', async () => {
+    let attempts = 0
+    const h = await harness({
+      batch: acceptedBatch(),
+      runBatch: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('simulated process interruption')
+        return acceptedBatch()
+      },
+    })
+    const first = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Replay finalization' }),
+    })
+    expect(first.status).toBe(200)
+    await h.background[0]
+    expect(h.finalizationJobs.get('meeting_route_001')).toMatchObject({ phase: 'batch_pending' })
+    expect(existsSync(h.pendingAudio)).toBe(true)
+
+    const replay = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001' }),
+    })
+    expect(await replay.json()).toMatchObject({ replayed: true })
+    await h.background[1]
+    expect(attempts).toBe(2)
+    expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+    expect(existsSync(h.pendingAudio)).toBe(false)
     expect(readdirSync(join(h.recordingsRoot, '2026-07')).filter(name => name.endsWith('.md'))).toHaveLength(1)
   })
 

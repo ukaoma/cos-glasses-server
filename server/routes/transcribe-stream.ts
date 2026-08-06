@@ -59,6 +59,10 @@ import {
 } from '../lib/maintenance-lifecycle.js'
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
 import { preemptMetalBatchForLive, registerLiveActivityProbe } from '../lib/whisper-metal-gate.js'
+import {
+  scheduleProgressiveHqCheckpoint,
+  stopProgressiveHqSession,
+} from '../lib/meeting-batch-transcribe.js'
 
 /** Preempt hook 2 of 2 (1C): the recording_chunk backstop. Live audio is
  *  arriving, so any Metal batch must yield the GPU now. This covers recovery,
@@ -920,11 +924,66 @@ export function getSessionChunkEntries(sessionId: string): IndexedTranscriptChun
   const session = sessions.get(sessionId)
   if (!session) return null
   const entries: IndexedTranscriptChunk[] = []
-  for (let chunkIndex = 0; chunkIndex < session.chunks.length; chunkIndex++) {
+  const maxIndex = Math.max(
+    session.chunks.length - 1,
+    ...Object.keys(session.emptyCompletions ?? {}).map(Number).filter(Number.isInteger),
+  )
+  for (let chunkIndex = 0; chunkIndex <= maxIndex; chunkIndex++) {
     const chunk = session.chunks[chunkIndex]
-    if (chunk?.text) entries.push({ chunkIndex, chunk })
+    if (chunk?.text) {
+      entries.push({ chunkIndex, chunk })
+      continue
+    }
+    const empty = session.emptyCompletions?.[String(chunkIndex)]
+    if (empty) {
+      entries.push({
+        chunkIndex,
+        chunk: {
+          text: '',
+          speaker: empty.speaker || 'Ext',
+          elapsed: empty.elapsed,
+          similarity: 0,
+          backend: empty.backend,
+          asrProvider: empty.asrProvider === 'iphone-whisperkit-beta'
+            ? 'iphone-whisperkit-beta'
+            : empty.asrProvider === 'server-whisper'
+              ? 'server-whisper'
+              : undefined,
+          fallbackReason: empty.fallbackReason,
+        },
+      })
+    }
   }
   return entries
+}
+
+/** Private local path for guarded progressive HQ cache work. */
+export function getSessionAudioDirectory(sessionId: string): string | null {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
+  const path = resolve(SESSION_AUDIO_DIR, sessionId)
+  return existsSync(path) ? path : null
+}
+
+/** Snapshot the durable ASR-completion ledger for progressive HQ admission.
+ * Includes canonical and intentionally empty/silent chunks. */
+export function getSessionAsrCompletedIndices(sessionId: string): number[] {
+  return [...(sessions.get(sessionId)?.asrCompletedIndices ?? [])]
+}
+
+function scheduleSessionProgressiveHq(sessionId: string): void {
+  // Preserve the default-off contract at the route boundary. In addition to
+  // avoiding any cache work, this keeps legacy/local-first transcription
+  // independent of the progressive HQ capability surface when the canary is
+  // disabled (including partial test and recovery environments).
+  if (process.env.COS_MEETING_PROGRESSIVE_HQ !== '1') return
+  const audioDir = getSessionAudioDirectory(sessionId)
+  if (!audioDir) return
+  scheduleProgressiveHqCheckpoint(
+    sessionId,
+    audioDir,
+    getSessionChunkEntries(sessionId) ?? [],
+    getSessionAsrCompletedIndices(sessionId),
+  )
 }
 
 /** Get session start time */
@@ -1044,6 +1103,9 @@ function closeTranscriptSession(
   reason: ClosedTranscriptSession['reason'],
   options: { preserveAudio?: boolean } = {},
 ): void {
+  // Progressive HQ is disposable cache state. Every terminal session path —
+  // save, expiry, quarantine, or abandonment — must release the single owner.
+  void stopProgressiveHqSession(sessionId)
   const session = sessions.get(sessionId)
   const now = Date.now()
   const receivedIndices = [...(session?.receivedIndices ?? [])]
@@ -1610,6 +1672,7 @@ async function processStreamChunk(opts: {
     session.emptyCompletions[String(chunkIndex)] = emptyCompletion
     recordAsrCompleted(session, chunkIndex)
     persistSessionRequired(sessionId)
+    scheduleSessionProgressiveHq(sessionId)
     return emptyChunkResponse(emptyCompletion, sessionId, chunkIndex)
   }
 
@@ -1653,6 +1716,8 @@ async function processStreamChunk(opts: {
   session.lastActivityAt = Date.now()
   persistSessionRequired(sessionId)
   console.log(`[perf] persistSession: ${(performance.now() - tPersist).toFixed(1)}ms (${session.chunks.filter(c => c).length} chunks)`)
+
+  scheduleSessionProgressiveHq(sessionId)
 
   emitDisplay({ type: 'transcript_chunk', data: { text: trimmedText, speaker, chunkIndex, elapsed, sessionId } })
   // Live Cues feed — fire-and-forget, NEVER awaited: transcription must not

@@ -40,6 +40,9 @@ import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
 import { getWhisperPreviewCapability } from '../lib/whisper-preview.js'
 import { getTranscriptionProfileStatus } from '../lib/profile.js'
 import { getHealthStaticProbes } from '../lib/health-static-probes.js'
+import { getEarlyMeetingSyncSnapshot } from '../lib/g2-ops-handoff.js'
+import { getProgressiveHqSnapshot } from '../lib/meeting-batch-transcribe.js'
+import { getMeetingFinalizationSnapshot } from '../lib/meeting-finalization-jobs.js'
 
 export const healthRouter = Router()
 
@@ -190,6 +193,7 @@ healthRouter.get('/health', async (_req, res) => {
   const cursorSnapshot = getCursorModelCatalogSnapshot()
   const { agentBinary: _cursorAgentBinary, ...cursor_models } = cursorSnapshot
   const meeting_sync = getMeetingSyncSnapshot()
+  const progressiveHq = getProgressiveHqSnapshot()
   // Quarantined unsaved captures (6.19.0). Compact on this unauthenticated
   // surface — same exposure level as meeting_sync's meetingIds. Full detail
   // plus the recover action live on the authenticated /api/meeting/orphans.
@@ -235,6 +239,11 @@ healthRouter.get('/health', async (_req, res) => {
       },
       cliDebug: CLI_DEBUG_CAPABILITY,
       liveCues,
+      meetingLifecycle: {
+        earlySyncClaim: getEarlyMeetingSyncSnapshot(),
+        progressiveHq,
+        finalization: getMeetingFinalizationSnapshot(),
+      },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
     // /api/health is intentionally unauthenticated for setup diagnostics.
@@ -261,6 +270,7 @@ healthRouter.get('/models', async (req, res) => {
   const transcriptionHq = getHighQualityTranscriptionCapability()
   const transcriptionLive = getWhisperPreviewCapability()
   const transcriptionProfile = getTranscriptionProfileStatus()
+  const progressiveHq = getProgressiveHqSnapshot()
   const cursorOptions = cursorCatalog.options.filter(option => !!option.id)
   res.json({
     ...catalog,
@@ -281,6 +291,11 @@ healthRouter.get('/models', async (req, res) => {
         live: transcriptionLive,
         hq: transcriptionHq,
         profile: transcriptionProfile,
+      },
+      meetingLifecycle: {
+        earlySyncClaim: getEarlyMeetingSyncSnapshot(),
+        progressiveHq,
+        finalization: getMeetingFinalizationSnapshot(),
       },
       cliDebug: CLI_DEBUG_CAPABILITY,
       recovery: managedRuntimeCapability(),

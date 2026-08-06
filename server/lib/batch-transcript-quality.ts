@@ -12,7 +12,7 @@ export interface BatchResult {
   segment: BatchSegment
   text: string
   words: WhisperWord[]
-  speakerWords: Array<{ word: string; start: number; end: number; speaker: string }>
+  speakerWords: Array<{ word: string; start: number; end: number; speaker: string; similarity: number }>
 }
 
 export interface BatchTranscription {

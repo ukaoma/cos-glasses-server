@@ -2,7 +2,7 @@
 // the standalone public meeting store. The live transcript and chunk metadata
 // are durable before the session is closed; batch improvement runs afterward.
 
-import { readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
@@ -28,6 +28,7 @@ import {
   enqueueSerializedHqWork,
   runMeetingBatchPipeline,
   segmentTranscriptChunks,
+  stopProgressiveHqSession,
   transcribeSegments,
 } from '../lib/meeting-batch-transcribe.js'
 import {
@@ -63,8 +64,23 @@ import {
   type TranscriptGapReport,
 } from './transcribe-stream.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
-import { acquireMaintenanceWork, type MaintenanceWorkLease } from '../lib/maintenance-lifecycle.js'
-import { handoffMeetingToOperations } from '../lib/g2-ops-handoff.js'
+import {
+  acquireMaintenanceWork,
+  maintenanceAdmissionsOpen,
+  type MaintenanceWorkLease,
+} from '../lib/maintenance-lifecycle.js'
+import {
+  claimMeetingInOperations,
+  earlyMeetingSyncEnabled,
+  handoffMeetingToOperations,
+} from '../lib/g2-ops-handoff.js'
+import {
+  canonicalFinalizationIsComplete,
+  MeetingFinalizationJobStore,
+  markCanonicalFinalizationState,
+  readFinalizationChunkEntries,
+  type MeetingFinalizationJob,
+} from '../lib/meeting-finalization-jobs.js'
 
 function cosOpsPipelineConfigured(): boolean {
   // Read env live (not the module-load COS_SCRIPTS_DIR const) so unit tests that
@@ -92,9 +108,195 @@ export interface MeetingRouteDependencies {
     audioDir: string,
     entries: IndexedTranscriptChunk[],
     streamingWordCount: number,
+    sessionId?: string,
   ) => Promise<BatchTranscription>
   scheduleBackground?: (task: Promise<void>) => void
   emit?: typeof emitDisplay
+  finalizationJobs?: MeetingFinalizationJobStore
+}
+
+const activeFinalizationJobs = new Set<string>()
+const finalizationRetryCounts = new Map<string, number>()
+
+interface FinalizationRuntime {
+  finalizationJobs: MeetingFinalizationJobStore
+  runBatch: NonNullable<MeetingRouteDependencies['runBatch']>
+  scheduleBackground: (task: Promise<void>) => void
+  sessions?: MeetingSessionSource
+}
+
+function validReplayEntries(raw: unknown[]): IndexedTranscriptChunk[] | null {
+  const entries: IndexedTranscriptChunk[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+    const candidate = item as { chunkIndex?: unknown; chunk?: unknown }
+    if (!Number.isInteger(candidate.chunkIndex) || (candidate.chunkIndex as number) < 0) return null
+    if (!candidate.chunk || typeof candidate.chunk !== 'object' || Array.isArray(candidate.chunk)) return null
+    const chunk = candidate.chunk as Partial<TranscriptChunk>
+    if (typeof chunk.text !== 'string' || typeof chunk.speaker !== 'string') return null
+    if (typeof chunk.elapsed !== 'number' || !Number.isFinite(chunk.elapsed)) return null
+    if (typeof chunk.similarity !== 'number' || !Number.isFinite(chunk.similarity)) return null
+    entries.push({ chunkIndex: candidate.chunkIndex as number, chunk: chunk as TranscriptChunk })
+  }
+  return entries.length > 0 ? entries : null
+}
+
+function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: FinalizationRuntime): void {
+  const key = `${runtime.finalizationJobs.root}:${job.sessionId}`
+  if (activeFinalizationJobs.has(key)) return
+  activeFinalizationJobs.add(key)
+
+  // Acquire before the foreground save lease can leave scope: there is no
+  // zero-count proof gap between pending-audio handoff and queued finalizer.
+  const lease = acquireMaintenanceWork('meeting_batch_finalization', {
+    allowDuringDrain: true,
+    phase: 'queued',
+  })
+  const task = Promise.resolve().then(async () => {
+    lease.setPhase('active')
+    let current = runtime.finalizationJobs.get(job.sessionId) ?? job
+    if (canonicalFinalizationIsComplete(current)) {
+      runtime.finalizationJobs.remove(current.sessionId)
+      return
+    }
+    if (current.phase === 'capture_pending') {
+      const source = runtime.sessions ?? defaultSessionSource
+      let audioDir = current.audioDir ?? runtime.finalizationJobs.findPendingAudioDir(current.sessionId)
+      if (!audioDir && source.hasAudio(current.sessionId)) {
+        try { await source.drainAudioWrites(current.sessionId) } catch { /* retain surviving evidence */ }
+        audioDir = source.moveAudioToPending(current.sessionId)
+        source.delete(current.sessionId, { preserveAudio: !audioDir })
+      }
+      const rawEntries = readFinalizationChunkEntries(current)
+      current = runtime.finalizationJobs.save({
+        sessionId: current.sessionId,
+        meetingPath: current.meetingPath,
+        sidecarPath: current.sidecarPath,
+        audioDir,
+        streamingWordCount: current.streamingWordCount,
+        phase: audioDir && rawEntries?.length ? 'batch_pending' : 'ops_pending',
+        claimPending: current.claimPending,
+      })
+      markCanonicalFinalizationState(current.sidecarPath, current.phase, current.claimPending)
+    }
+
+    if (current.claimPending) {
+      let claimPending: boolean = current.claimPending
+      if (earlyMeetingSyncEnabled()) {
+        try {
+          await claimMeetingInOperations(current.meetingPath)
+          claimPending = false
+        } catch (error) {
+          // Identity acceleration must never strand canonical HQ/final sync.
+          // Keep the durable bit for replay while the final handoff proceeds.
+          console.warn(
+            `[meeting/save] Early claim deferred for ${current.sessionId}: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+      } else {
+        // Runtime rollback: disabling the canary must release old claim work.
+        claimPending = false
+      }
+      current = runtime.finalizationJobs.save({
+        sessionId: current.sessionId,
+        meetingPath: current.meetingPath,
+        sidecarPath: current.sidecarPath,
+        audioDir: current.audioDir,
+        streamingWordCount: current.streamingWordCount,
+        phase: current.phase,
+        claimPending,
+      })
+      markCanonicalFinalizationState(current.sidecarPath, current.phase, claimPending)
+    }
+
+    if (current.phase === 'batch_pending') {
+      if (current.audioDir && existsSync(current.audioDir)) {
+        const rawEntries = readFinalizationChunkEntries(current)
+        const entries = rawEntries ? validReplayEntries(rawEntries) : null
+        if (!entries) throw new Error('Durable finalization sidecar has no valid chunkEntries')
+        await finalizeBatch({
+          audioDir: current.audioDir,
+          entries,
+          streamingWordCount: current.streamingWordCount,
+          meetingPath: current.meetingPath,
+          sidecarPath: current.sidecarPath,
+          sessionId: current.sessionId,
+          runBatch: runtime.runBatch,
+        })
+      } else {
+        console.warn(`[meeting/save] Pending HQ audio missing for ${current.sessionId}; preserving streaming canonical`)
+      }
+      current = runtime.finalizationJobs.save({
+        sessionId: current.sessionId,
+        meetingPath: current.meetingPath,
+        sidecarPath: current.sidecarPath,
+        audioDir: current.audioDir,
+        streamingWordCount: current.streamingWordCount,
+        phase: 'ops_pending',
+        claimPending: current.claimPending,
+      })
+      markCanonicalFinalizationState(current.sidecarPath, 'ops_pending', current.claimPending)
+    }
+
+    if (cosOpsPipelineConfigured()) {
+      await handoffMeetingToOperations(current.meetingPath)
+    }
+    markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
+    runtime.finalizationJobs.remove(current.sessionId)
+    finalizationRetryCounts.delete(key)
+  }).catch(error => {
+    const current = runtime.finalizationJobs.get(job.sessionId) ?? job
+    try {
+      runtime.finalizationJobs.save({
+        sessionId: current.sessionId,
+        meetingPath: current.meetingPath,
+        sidecarPath: current.sidecarPath,
+        audioDir: current.audioDir,
+        streamingWordCount: current.streamingWordCount,
+        phase: current.phase,
+        claimPending: current.claimPending,
+        lastError: error instanceof Error ? error.message : String(error),
+      })
+    } catch { /* keep the original durable job if error annotation fails */ }
+    console.error(
+      `[meeting/save] Durable finalization retained for retry (${job.sessionId}): `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    )
+    const retryCount = finalizationRetryCounts.get(key) ?? 0
+    if (retryCount < 2) {
+      finalizationRetryCounts.set(key, retryCount + 1)
+      const retryRetained = () => {
+        if (!maintenanceAdmissionsOpen()) {
+          const waitForAdmissions = setTimeout(retryRetained, 30_000)
+          waitForAdmissions.unref()
+          return
+        }
+        const retained = runtime.finalizationJobs.get(job.sessionId)
+        if (retained) scheduleFinalizationJob(retained, runtime)
+      }
+      const retry = setTimeout(retryRetained, 60_000 * (retryCount + 1))
+      retry.unref()
+    }
+  }).finally(() => {
+    activeFinalizationJobs.delete(key)
+    lease.release()
+  })
+  runtime.scheduleBackground(task)
+}
+
+/** Boot hook: replay post-save HQ/operations work whose response already
+ * succeeded before a prior process exited. Safe to call more than once. */
+export function resumeMeetingFinalizationJobs(): void {
+  const finalizationJobs = new MeetingFinalizationJobStore()
+  finalizationJobs.reconcileCanonicalSidecars()
+  for (const job of finalizationJobs.list()) {
+    scheduleFinalizationJob(job, {
+      finalizationJobs,
+      runBatch: runMeetingBatchPipeline,
+      scheduleBackground: task => { void task },
+    })
+  }
 }
 
 const defaultSessionSource: MeetingSessionSource = {
@@ -167,6 +369,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const runBatch = deps.runBatch ?? runMeetingBatchPipeline
   const scheduleBackground = deps.scheduleBackground ?? (task => { void task })
   const emit = deps.emit ?? emitDisplay
+  const finalizationJobs = deps.finalizationJobs ?? new MeetingFinalizationJobStore()
   const router = Router()
   const savingSessions = new Set<string>()
 
@@ -243,6 +446,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // the sidecar by session ID so client retry/restart is idempotent.
       const alreadySaved = store.findBySessionId(sessionId)
       if (alreadySaved) {
+        finalizationJobs.reconcileCanonicalSidecars()
+        const pendingJob = finalizationJobs.get(sessionId)
+        if (pendingJob) scheduleFinalizationJob(pendingJob, {
+          finalizationJobs,
+          runBatch,
+          scheduleBackground,
+          sessions,
+        })
         res.set('Cache-Control', 'private, no-store')
         res.json(publicSaveResponse(alreadySaved, true))
         return
@@ -279,6 +490,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         ? durationFromTimeline
         : Math.max(0, Date.now() - startTime)
       const integrity = sessions.getIntegrity(sessionId)
+      const needsOperations = cosOpsPipelineConfigured()
+      const finalizationRequired = sessions.hasAudio(sessionId) || needsOperations
+      const claimPending = needsOperations && earlyMeetingSyncEnabled()
 
       // Initial canonical text + structured metadata are published before any
       // live state is removed or background work is scheduled.
@@ -293,7 +507,29 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         chunkEntries,
         providerCandidates: sessions.getProviderCandidates(sessionId),
         transferIntegrity: integrity,
+        finalizationRequired,
+        claimPending,
       })
+
+      // Two-phase replay intent: the canonical sidecar above is the recovery
+      // source of truth, and this indexed job is its fast execution ledger.
+      let finalizationJob: MeetingFinalizationJob | null = null
+      if (finalizationRequired) {
+        finalizationJob = finalizationJobs.save({
+          sessionId,
+          meetingPath: saved.filepath,
+          sidecarPath: saved.sidecarPath,
+          audioDir: null,
+          streamingWordCount: countWords(transcript),
+          phase: 'capture_pending',
+          claimPending,
+        })
+      }
+
+      // Progressive HQ is a disposable cache, not a meeting owner. Abort any
+      // in-flight prefill before the session-audio directory is atomically
+      // renamed so no child can publish into a stale path after Stop.
+      await stopProgressiveHqSession(sessionId)
 
       // Wait for every raw-WAV write before rename. If any write failed, retain
       // surviving audio for recovery but do not run an incomplete batch.
@@ -332,59 +568,37 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         console.warn('[meeting/save] Display notification failed after durable save:', error)
       }
 
+      const canBatch = audioWritesReady && pendingAudioDir && chunkEntries.length > 0
+      if (canBatch || needsOperations) {
+        // The replay record is durable before the response. A lost response,
+        // process crash, or macOS update can therefore resume the exact same
+        // meeting without minting a second scribe.
+        finalizationJob = finalizationJobs.save({
+          sessionId,
+          meetingPath: saved.filepath,
+          sidecarPath: saved.sidecarPath,
+          audioDir: canBatch ? pendingAudioDir : null,
+          streamingWordCount: countWords(transcript),
+          phase: canBatch ? 'batch_pending' : 'ops_pending',
+          claimPending,
+        })
+        markCanonicalFinalizationState(saved.sidecarPath, finalizationJob.phase, claimPending)
+      } else if (finalizationJob) {
+        markCanonicalFinalizationState(saved.sidecarPath, 'complete', false)
+        finalizationJobs.remove(sessionId)
+        finalizationJob = null
+      }
+
       res.set('Cache-Control', 'private, no-store')
       res.json(publicSaveResponse(saved))
 
-      if (audioWritesReady && pendingAudioDir && chunkEntries.length > 0) {
-        // Acquire before the foreground save lease can leave scope: there is
-        // no zero-count proof gap between pending-audio handoff and the queued
-        // background finalizer.
-        const batchLease = acquireMaintenanceWork('meeting_batch_finalization', {
-          allowDuringDrain: true,
-          phase: 'queued',
+      if (finalizationJob) {
+        scheduleFinalizationJob(finalizationJob, {
+          finalizationJobs,
+          runBatch,
+          scheduleBackground,
+          sessions,
         })
-        const task = Promise.resolve().then(async () => {
-          batchLease.setPhase('active')
-          try {
-            await finalizeBatch({
-              audioDir: pendingAudioDir,
-              entries: chunkEntries.map(entry => ({ ...entry, chunk: { ...entry.chunk } })),
-              streamingWordCount: countWords(transcript),
-              meetingPath: saved.filepath,
-              sidecarPath: saved.sidecarPath,
-              runBatch,
-            })
-          } catch (error) {
-            // Raw audio deliberately remains for bounded cleanup / retry.
-            console.error(
-              `[meeting/save] Batch finalization failed for ${sessionId}: `
-              + `${error instanceof Error ? error.message : String(error)}`,
-            )
-          }
-          // Always hand off the durable local scribe (streaming or batch) into
-          // operations/ when COS pipeline is configured — this is what was
-          // missing on managed public server and left today's G2 files unsynced.
-          if (cosOpsPipelineConfigured()) {
-            await handoffMeetingToOperations(saved.filepath)
-          }
-        }).catch(error => {
-          console.error(
-            `[meeting/save] G2 ops handoff failed for ${sessionId}: `
-            + `${error instanceof Error ? error.message : String(error)}`,
-          )
-        }).finally(() => batchLease.release())
-        scheduleBackground(task)
-      } else if (cosOpsPipelineConfigured()) {
-        // No HQ batch (no audio / incomplete writes) — still hand off the
-        // streaming scribe into operations when COS pipeline is configured.
-        scheduleBackground(
-          handoffMeetingToOperations(saved.filepath).catch(error => {
-            console.error(
-              `[meeting/save] G2 ops handoff failed for ${sessionId}: `
-              + `${error instanceof Error ? error.message : String(error)}`,
-            )
-          }),
-        )
       }
     } catch (error) {
       if (error instanceof MeetingStoreError) {
@@ -654,12 +868,14 @@ async function finalizeBatch(options: {
   streamingWordCount: number
   meetingPath: string
   sidecarPath: string
+  sessionId?: string
   runBatch: NonNullable<MeetingRouteDependencies['runBatch']>
 }): Promise<void> {
   const result = await options.runBatch(
     options.audioDir,
     options.entries,
     options.streamingWordCount,
+    options.sessionId,
   )
   let transcriptApplied = false
   let metadataPersisted = false

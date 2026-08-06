@@ -89,6 +89,10 @@ export interface SaveMeetingInput {
   chunkEntries?: IndexedTranscriptChunk[]
   providerCandidates?: Record<string, ProviderCandidateRecord>
   transferIntegrity?: TranscriptGapReport | null
+  /** Durable intent used to reconstruct post-save work if the process exits
+   * between the canonical commit and creation of the replay job. */
+  finalizationRequired?: boolean
+  claimPending?: boolean
 }
 
 export interface SavedMeeting {
@@ -444,6 +448,11 @@ export class MeetingStore {
       transcriptionQuality: 'streaming',
       batchApplied: false,
       streamingWordCount: wordCount(transcript),
+      ...(input.finalizationRequired ? {
+        finalizationState: 'capture_pending',
+        claimPending: input.claimPending === true,
+        finalizationUpdatedAt: new Date().toISOString(),
+      } : {}),
     }
 
     // Sidecar first, markdown second: the markdown is the visible commit marker.

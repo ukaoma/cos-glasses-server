@@ -273,8 +273,9 @@ describe('wiring — these hooks are the whole fix; they must not be silently re
   it('retries a preempted segment exactly once, on CPU', () => {
     const batch = src('server/lib/meeting-batch-transcribe.ts')
     expect(batch).toContain('if (!isMetalBatchPreempted(error)) throw error')
-    expect(batch).toContain('forceCpu: true')
-    // One retry only — a second forceCpu call would risk an unbounded loop.
-    expect(batch.split('forceCpu: true').length - 1).toBe(1)
+    expect(batch).toContain("forceCpuReason: 'preempt_retry'")
+    // Exactly one preempt retry. Progressive checkpoint CPU work is a separate,
+    // default-off lane and must not be mistaken for an unbounded retry loop.
+    expect(batch.split("forceCpuReason: 'preempt_retry'").length - 1).toBe(1)
   })
 })

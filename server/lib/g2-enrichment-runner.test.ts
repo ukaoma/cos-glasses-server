@@ -32,6 +32,28 @@ describe('exact G2 enrichment runner', () => {
     ])
   })
 
+  it('adds the deterministic claim-only flag without changing exact-file pinning', () => {
+    expect(buildExactG2SyncArgs(options.syncScript, options.meetingFile, true)).toEqual([
+      options.syncScript,
+      '--g2-only',
+      '--g2-file',
+      options.meetingFile,
+      '--g2-claim-only',
+      '--quiet',
+    ])
+  })
+
+  it('imports a local durable recording inside the locked sync process', () => {
+    expect(buildExactG2SyncArgs(options.syncScript, options.meetingFile, true, true)).toEqual([
+      options.syncScript,
+      '--g2-only',
+      '--g2-import-file',
+      options.meetingFile,
+      '--g2-claim-only',
+      '--quiet',
+    ])
+  })
+
   it('parses only complete verified outcome sentinels', () => {
     const payload = {
       status: 'enriched',
@@ -137,4 +159,3 @@ describe('exact G2 enrichment runner', () => {
     }
   })
 })
-
