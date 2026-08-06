@@ -190,3 +190,73 @@ describe('speaker review over HTTP', () => {
     expect(res).toContain('no-store')
   })
 })
+
+// COS-operations mode. This is the path that actually runs on a COS install, and
+// it was missed once already: sessionId was added to MeetingStore.list() while
+// the live server serves its list from listCosOperationsMeetings(), so the field
+// never appeared and every row was skipped. Same class of miss for the review
+// itself, which resolved the standalone copy and would have shown a different
+// TITLE than the row the user clicked.
+describe('COS operations mode', () => {
+  let ops = ''
+
+  function seedOps(domain: string, stem: string, heading: string, sessionId: string, chunks: unknown[]): void {
+    const dir = join(ops, domain, 'meetings', MONTH)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${stem}.md`), `# ${heading}\n\n| **Date** | 2026-08-05 |\n`)
+    writeFileSync(join(dir, `${stem}.g2-chunks.json`), JSON.stringify({ sessionId, chunks }))
+  }
+
+  beforeEach(() => {
+    ops = mkdtempSync(join(tmpdir(), 'cos-ops-mtg-'))
+    process.env.COS_OPERATIONS_DIR = ops
+  })
+  afterEach(() => {
+    delete process.env.COS_OPERATIONS_DIR
+    if (ops) rmSync(ops, { recursive: true, force: true })
+  })
+
+  it('resolves a review from the operations tree, not the standalone store', async () => {
+    seedOps('personal', '2026-08-05_Family_Dinner_aaa11111', 'Family Dinner And Commonwealth Games',
+      'meeting_ops_1', turns('MU', 'Chris Krubeck', 8, 30))
+    await startServer()
+
+    const res = await get('/api/meeting/meeting_ops_1/speakers')
+    expect(res.status).toBe(200)
+    expect(res.json.source).toBe('cos_operations')
+    // The TITLE is the point: the operations copy carries the good one.
+    expect(res.json.title).toBe('Family Dinner And Commonwealth Games')
+    expect(res.json.domain).toBe('personal')
+    expect(res.json.voices).toHaveLength(2)
+  })
+
+  it('prefers operations even when the standalone store holds the same session', async () => {
+    // Both trees really do hold every G2 save, under different names. Resolving
+    // the store first shows one title on the list row and another in the panel.
+    seedMeeting('meeting_both_1', turns('MU', 'Chris Krubeck', 8, 30))
+    seedOps('personal', '2026-08-05_Titled_Copy_bbb22222', 'The Titled Copy',
+      'meeting_both_1', turns('MU', 'Chris Krubeck', 8, 30))
+    await startServer()
+
+    const res = await get('/api/meeting/meeting_both_1/speakers')
+    expect(res.status).toBe(200)
+    expect(res.json.source).toBe('cos_operations')
+    expect(res.json.title).toBe('The Titled Copy')
+  })
+
+  it('searches every domain, not just personal', async () => {
+    seedOps('quilt', '2026-08-05_Lead_Ops_ccc33333', 'Lead Ops Review',
+      'meeting_quilt_1', turns('MU', 'Graham Hoffman', 8, 30))
+    await startServer()
+    const res = await get('/api/meeting/meeting_quilt_1/speakers')
+    expect(res.status).toBe(200)
+    expect(res.json.domain).toBe('quilt')
+  })
+
+  it('404s a session that is in neither tree', async () => {
+    seedOps('personal', '2026-08-05_Something_ddd44444', 'Something',
+      'meeting_ops_2', turns('MU', 'Chris Krubeck', 8, 30))
+    await startServer()
+    expect((await get('/api/meeting/meeting_absent/speakers')).status).toBe(404)
+  })
+})

@@ -13,7 +13,7 @@
  * (~/.cos-glasses/data/recordings).
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
 import { MEETING_SOURCE_MAX_BYTES } from './meeting-store.js'
@@ -30,6 +30,40 @@ const DOMAIN_ABBR: Record<string, string> = {
 const DETAIL_CHUNK_ESTIMATE_CHARS = 1700
 
 export type CosOperationsMeetingMeta = MeetingMeta & { time?: string }
+
+/** Enough to clear the sidecar's leading metadata keys whatever their order. */
+const SIDECAR_HEAD_BYTES = 4096
+
+/**
+ * The sessionId recorded in a meeting's chunk sidecar, if it has one.
+ *
+ * Carried on the list so a Control row can open the per-meeting speaker review,
+ * which is keyed on the session rather than the filename.
+ *
+ * Reads only the head. A sidecar for a 32-minute meeting is ~1.3 MB, so reading
+ * them whole would make listing cost scale with total transcript size — and this
+ * lister already reads every markdown file it finds.
+ */
+function sidecarSessionId(monthDir: string, meetingFilename: string): string | undefined {
+  const sidecarName = meetingFilename.replace(/\.md$/, '.g2-chunks.json')
+  if (sidecarName === meetingFilename) return undefined
+  const path = join(monthDir, sidecarName)
+  let fd: number | null = null
+  try {
+    const stat = statSync(path)
+    if (!stat.isFile() || stat.size === 0) return undefined
+    fd = openSync(path, 'r')
+    const buffer = Buffer.alloc(Math.min(SIDECAR_HEAD_BYTES, stat.size))
+    const read = readSync(fd, buffer, 0, buffer.length, 0)
+    const match = buffer.subarray(0, read).toString('utf8')
+      .match(/"sessionId"\s*:\s*"([A-Za-z0-9:_-]{3,96})"/)
+    return match ? match[1] : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== null) { try { closeSync(fd) } catch { /* already closed */ } }
+  }
+}
 
 function envPath(name: string): string | null {
   const raw = process.env[name]?.trim()
@@ -258,6 +292,68 @@ function withMeetingListInsights(meta: CosOperationsMeetingMeta, content: string
   }
 }
 
+/**
+ * Locate a meeting in the operations tree by the sessionId in its sidecar.
+ *
+ * Needed because the same session exists in BOTH trees under different names:
+ * the standalone store keeps the raw capture name ("G2 Recording 2026-08-02
+ * 1717") while operations holds the titled copy ("Family Dinner And
+ * Commonwealth Games"). The meetings list reads operations, so anything keyed on
+ * a session has to resolve there too or the same meeting shows two different
+ * titles depending on which surface you are looking at.
+ *
+ * Scans sidecar heads rather than parsing them, so the cost is a 4 KB read per
+ * candidate and not the transcript.
+ */
+export function findCosOperationsMeetingBySessionId(sessionId: string): {
+  sidecarPath: string
+  meetingPath: string
+  filename: string
+  domain: string
+  month: string
+  title: string
+} | null {
+  const operationsDir = resolveCosOperationsDir()
+  if (!operationsDir) return null
+
+  for (const domain of COS_MEETING_DOMAINS) {
+    const meetingsBase = join(operationsDir, domain, 'meetings')
+    let months: string[]
+    try {
+      months = readdirSync(meetingsBase).filter(d => /^\d{4}-\d{2}$/.test(d)).sort().reverse()
+    } catch { continue }
+
+    for (const month of months) {
+      const monthDir = join(meetingsBase, month)
+      let sidecars: string[]
+      try {
+        sidecars = readdirSync(monthDir).filter(f => f.endsWith('.g2-chunks.json')).sort().reverse()
+      } catch { continue }
+
+      for (const sidecarName of sidecars) {
+        const meetingFilename = sidecarName.replace(/\.g2-chunks\.json$/, '.md')
+        if (sidecarSessionId(monthDir, meetingFilename) !== sessionId) continue
+        const meetingPath = join(monthDir, meetingFilename)
+        let title = meetingFilename.replace(/\.md$/, '')
+        try {
+          const head = readFileSync(meetingPath, 'utf-8').slice(0, 4000)
+          const heading = head.match(/^#\s+(.+)$/m)?.[1]?.trim()
+          if (heading) title = heading
+        } catch { /* fall back to the filename stem */ }
+        return {
+          sidecarPath: join(monthDir, sidecarName),
+          meetingPath,
+          filename: meetingFilename,
+          domain,
+          month,
+          title,
+        }
+      }
+    }
+  }
+  return null
+}
+
 export function listCosOperationsMeetings(options: {
   limit?: number
   domain?: string
@@ -298,6 +394,8 @@ export function listCosOperationsMeetings(options: {
               const content = readFileSync(filepath, 'utf-8')
               const meta = withMeetingListInsights(parseMeetingMeta(content.slice(0, 4000), file, domain), content)
               meta.month = month
+              const sessionId = sidecarSessionId(monthDir, file)
+              if (sessionId) meta.sessionId = sessionId
               allMeetings.push(meta)
             } catch { /* skip unreadable files */ }
           }

@@ -64,6 +64,10 @@ import {
   type TranscriptGapReport,
 } from './transcribe-stream.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
+import {
+  cosOperationsMeetingsConfigured,
+  findCosOperationsMeetingBySessionId,
+} from '../lib/cos-operations-meetings.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import { reviewMeetingSpeakers, type ReviewChunk } from '../lib/meeting-speaker-review.js'
 import {
@@ -629,20 +633,32 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const saved = store.findBySessionId(sessionId)
-    if (!saved) {
+    // Prefer the COS operations copy when configured. The same session exists in
+    // both trees under different names — the standalone store keeps the raw
+    // capture name, operations holds the titled copy — and the meetings LIST
+    // reads operations. Resolving the store first would show one title on the row
+    // and a different one in this panel for the same meeting.
+    const operations = cosOperationsMeetingsConfigured()
+      ? findCosOperationsMeetingBySessionId(sessionId)
+      : null
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
       return
     }
+    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
+    const title = operations?.title ?? saved!.title
+    const domain = operations?.domain ?? saved!.domain
+    const filename = operations?.filename ?? saved!.filename
 
     let chunks: unknown
     try {
-      const raw = JSON.parse(readFileSync(saved.sidecarPath, 'utf-8')) as Record<string, unknown>
+      const raw = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
       chunks = Array.isArray(raw) ? raw : raw.chunks
     } catch {
-      // Defensive: findBySessionId already parsed this sidecar to match the
-      // session, so a corrupt file 404s above and never reaches here. This
-      // covers the narrow race where it becomes unreadable in between. Either
+      // Defensive: both lookups above already read this sidecar to match the
+      // session, so a corrupt file 404s and never reaches here. This covers the
+      // narrow race where it becomes unreadable in between. Either
       // way the answer is never 200-with-no-voices, which would read as
       // "nobody spoke" and invite naming voices that were never analysed.
       res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
@@ -660,10 +676,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     res.set('Cache-Control', 'private, no-store')
     res.json({
       sessionId,
-      title: saved.title,
-      domain: saved.domain,
-      filename: saved.filename,
-      durationMin: saved.durationMin,
+      title,
+      domain,
+      filename,
+      source: operations ? 'cos_operations' : 'standalone_recordings',
+      ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
     })
   })

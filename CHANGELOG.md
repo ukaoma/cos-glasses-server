@@ -1,3 +1,17 @@
+## 6.21.14
+
+- Carry `sessionId` on the COS operations meetings list as well. 6.21.13 added it
+  to the standalone store's lister, but a COS install serves its list from the
+  operations tree, so the field never appeared and every row was skipped as
+  unreviewable.
+- Resolve a speaker review from the operations tree first when it is configured.
+  The same session exists in both trees under different names — the standalone
+  store keeps the raw capture name, operations keeps the titled copy — and the
+  list reads operations, so resolving the store first showed one title on the row
+  and a different one in the panel for the same meeting.
+- Report which tree a review came from, and search every domain rather than
+  assuming personal.
+
 ## 6.21.13
 
 - Carry each meeting's `sessionId` on the meetings list, so a Control row can
