@@ -342,6 +342,76 @@ export function getActiveTranscriptionSessionCount(): number {
   return sessions.size
 }
 
+/**
+ * How long a session may go silent before it stops BLOCKING a restart.
+ *
+ * Not a retention policy and not a reap: the session, its chunks and its
+ * recoverability are untouched. This decides one thing — whether it still
+ * counts toward the maintenance drain gate.
+ *
+ * Sized against the reasons a LIVE recording legitimately goes quiet: the phone
+ * backgrounded and buffering to IndexedDB, a network drop, a long pause. Those
+ * run to minutes. It sits deliberately far below
+ * LOCAL_FIRST_MEETING_IDLE_RETENTION_MS (4h), which governs how long chunks stay
+ * recoverable and is far too long to hold a restart on.
+ */
+export const RECORDING_SESSION_STALE_MS = 30 * 60 * 1000
+
+export interface TranscriptionSessionLiveness {
+  /** Sessions still plausibly recording. These block a restart. */
+  live: number
+  /** Sessions silent past the threshold. Surfaced, NOT counted, NOT deleted. */
+  stale: number
+  /** Which ones, least-silent first, so an operator can act on a name. */
+  staleSessions: Array<{ sessionId: string; silentForMs: number; chunks: number }>
+}
+
+/**
+ * Split active sessions into live and stale.
+ *
+ * WHY THIS EXISTS. The maintenance gate counts `sessions.size` and blocks every
+ * restart while it is non-zero. A session that leaks — the phone drops
+ * mid-recording and never sends a close — pins that count at 1 indefinitely, so
+ * Install, Repair, Restart and Update Server all drain, time out and fail with
+ * no user-visible reason. Observed twice on 2026-08-06 (servers 6.21.20 and
+ * 6.21.22); the second phantom had been silent 54 minutes and the only way
+ * through was to finalize it as a real meeting, which it was not.
+ *
+ * THE DISCRIMINATOR IS `lastActivityAt`, NOT `oldestWorkStartedAt`. The obvious
+ * reading — "activeTotal >= 1 with oldestWorkStartedAt null means leaked" — is
+ * WRONG and would strand healthy recordings. `recording_session` reaches the
+ * gate through `extraActiveByKind` (routes/maintenance.ts), and the snapshot's
+ * `oldestStartedAtMs` loop walks only tracked `work` entries, so an extra count
+ * never contributes a timestamp. EVERY recording session therefore reports
+ * `oldestWorkStartedAt: null`, healthy or leaked. Only the session's own
+ * `lastActivityAt` tells them apart.
+ */
+/**
+ * The live session map, for tests only.
+ *
+ * Exposed because the liveness split is pure logic over `lastActivityAt` but
+ * the map is module-private, and a test that cannot seed it can only assert the
+ * empty case. An earlier draft of the liveness test guarded on this symbol
+ * existing and silently no-opped four of its six cases — passing green while
+ * exercising nothing. Never guard a test on its own seam; make the seam real.
+ */
+export const __sessionsForTests = sessions
+
+export function getTranscriptionSessionLiveness(now = Date.now()): TranscriptionSessionLiveness {
+  let live = 0
+  const staleSessions: TranscriptionSessionLiveness['staleSessions'] = []
+  for (const [sessionId, session] of sessions) {
+    const silentForMs = now - session.lastActivityAt
+    if (silentForMs >= RECORDING_SESSION_STALE_MS) {
+      staleSessions.push({ sessionId, silentForMs, chunks: session.chunks.length })
+    } else {
+      live++
+    }
+  }
+  staleSessions.sort((a, b) => a.silentForMs - b.silentForMs)
+  return { live, stale: staleSessions.length, staleSessions }
+}
+
 // Incremental chunk persistence — survive server restarts
 const CHUNK_PERSIST_DIR = dataPath('active-sessions')
 ensurePrivateDirectory(CHUNK_PERSIST_DIR)

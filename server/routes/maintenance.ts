@@ -15,7 +15,7 @@ import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { getWhisperHealth } from '../lib/whisper-local.js'
-import { getActiveTranscriptionSessionCount } from './transcribe-stream.js'
+import { getActiveTranscriptionSessionCount, getTranscriptionSessionLiveness } from './transcribe-stream.js'
 
 export const maintenanceRouter = Router()
 
@@ -71,15 +71,21 @@ function operationCredentials(req: Request): MaintenanceOperationCredentials {
 function statusSnapshot(credentials: MaintenanceOperationCredentials = {}) {
   const jobs = getQueryJobRuntimeHealth()
   const activeTranscriptionSessions = getActiveTranscriptionSessionCount()
+  // Only sessions still plausibly recording may hold the drain gate. A leaked
+  // session — phone dropped mid-recording, no close ever sent — otherwise pins
+  // this at 1 forever and every Install/Repair/Restart/Update drains, times out
+  // and fails with nothing to show the user. The stale ones are reported below
+  // rather than counted, and are never deleted here.
+  const sessionLiveness = getTranscriptionSessionLiveness()
   const managed = managedRuntimeCapability()
   const tracked = maintenanceLifecycle.snapshot(credentials, {
-    recording_session: activeTranscriptionSessions,
+    recording_session: sessionLiveness.live,
   })
   const untrackedDurableRuns = Math.max(0, jobs.activeRuns - (tracked.activeByKind.durable_query ?? 0))
   const lifecycle = untrackedDurableRuns > 0
     ? maintenanceLifecycle.snapshot(credentials, {
       durable_query_runtime: untrackedDurableRuns,
-      recording_session: activeTranscriptionSessions,
+      recording_session: sessionLiveness.live,
     })
     : tracked
   return {
@@ -91,6 +97,13 @@ function statusSnapshot(credentials: MaintenanceOperationCredentials = {}) {
     bootId: serverMetrics.bootId,
     activeJobs: jobs.activeRuns,
     activeTranscriptionSessions,
+    // Split out so a blocked operator can SEE why, and so "0 orphans" can never
+    // again coexist with a held lock: the orphans endpoint reads the quarantine
+    // directory, this reads the in-memory session map, and they are different
+    // stores. A stale session is surfaced here and blocks nothing.
+    liveTranscriptionSessions: sessionLiveness.live,
+    staleTranscriptionSessions: sessionLiveness.stale,
+    staleTranscriptionSessionDetail: sessionLiveness.staleSessions,
     shuttingDown: jobs.shuttingDown,
     durableStoreState: jobs.store.state,
     lifecycle,

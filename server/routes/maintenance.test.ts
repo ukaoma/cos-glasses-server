@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const state = vi.hoisted(() => ({ activeJobs: 0, activeSessions: 0 }))
+const state = vi.hoisted(() => ({ activeJobs: 0, activeSessions: 0, staleSessions: 0 }))
 
 vi.mock('../lib/query-job-runtime.js', () => ({
   getQueryJobRuntimeHealth: () => ({
@@ -36,6 +36,16 @@ vi.mock('../lib/whisper-local.js', () => ({
 }))
 vi.mock('./transcribe-stream.js', () => ({
   getActiveTranscriptionSessionCount: () => state.activeSessions,
+  // The gate counts LIVE sessions only, so a leaked one cannot pin it at 1 and
+  // block every restart. `activeSessions` here means live; `staleSessions` is
+  // surfaced in status but must never contribute to the drain count.
+  getTranscriptionSessionLiveness: () => ({
+    live: state.activeSessions,
+    stale: state.staleSessions,
+    staleSessions: Array.from({ length: state.staleSessions }, (_, i) => ({
+      sessionId: `meeting_stale_${i}`, silentForMs: 60 * 60 * 1000, chunks: 3,
+    })),
+  }),
 }))
 
 let server: Server
@@ -72,6 +82,7 @@ beforeAll(async () => {
 beforeEach(() => {
   state.activeJobs = 0
   state.activeSessions = 0
+  state.staleSessions = 0
 })
 
 function proofHeaders() {
@@ -184,6 +195,36 @@ describe('managed maintenance rev4 contract', () => {
     const body = await response.json() as any
     expect(body.safeToRestart).toBe(false)
     expect(body.lifecycle.activeByKind.recording_session).toBe(1)
+  })
+
+  it('a STALE recording session is surfaced but never blocks a restart', async () => {
+    // 2026-08-06, twice: a leaked session pinned the drain count at 1 and every
+    // Install/Repair/Restart/Update timed out draining it, with no user-visible
+    // reason and /api/meeting/orphans reporting 0 the whole time.
+    state.activeJobs = 0
+    state.activeSessions = 0
+    state.staleSessions = 1
+
+    const response = await fetch(`${base}/api/maintenance/status`, { headers: proofHeaders() })
+    const body = await response.json() as any
+
+    expect(body.lifecycle.activeByKind.recording_session ?? 0).toBe(0)
+    expect(body.lifecycle.idle).toBe(true)
+    // Surfaced, so a blocked operator can see what is holding things up.
+    expect(body.staleTranscriptionSessions).toBe(1)
+    expect(body.staleTranscriptionSessionDetail[0].sessionId).toBe('meeting_stale_0')
+  })
+
+  it('a LIVE session still blocks even when a stale one is present', async () => {
+    state.activeJobs = 0
+    state.activeSessions = 1
+    state.staleSessions = 1
+
+    const response = await fetch(`${base}/api/maintenance/status`, { headers: proofHeaders() })
+    const body = await response.json() as any
+
+    expect(body.lifecycle.activeByKind.recording_session).toBe(1)
+    expect(body.staleTranscriptionSessions).toBe(1)
   })
 
   it('fails typed on incomplete operation acquisition and removes Whisper mutation', async () => {

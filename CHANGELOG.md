@@ -1,3 +1,30 @@
+## 6.21.24
+
+- A leaked recording session can no longer block every restart. The maintenance
+  drain gate counted `sessions.size`, so a session whose phone dropped
+  mid-recording without sending a close pinned that count at 1 indefinitely and
+  Install, Repair, Restart and Update Server each drained it, timed out after
+  60s, and failed — with no user-visible reason. Hit twice on 2026-08-06
+  (6.21.20 and 6.21.22); the second phantom had been silent 54 minutes and the
+  only way through was to finalize it as a real meeting, which it was not.
+
+  The gate now counts only sessions active within the last 30 minutes. A stale
+  one is reported in status as `staleTranscriptionSessions` with its session id,
+  silent duration and chunk count, so a blocked operator can see the cause —
+  and `/api/meeting/orphans` reporting 0 can no longer coexist silently with a
+  held lock, since the two read different stores.
+
+  **Nothing is reaped.** The session, its chunks and its recoverability are
+  untouched; only its claim on the restart gate expires. The 30-minute window
+  sits far above the reasons a live recording legitimately goes quiet (a
+  backgrounded phone buffering to IndexedDB, a network drop) and far below the
+  4h durable-chunk retention.
+
+  Note for anyone reading the health payload: `oldestWorkStartedAt: null` does
+  NOT indicate a leak. `recording_session` reaches the gate through
+  `extraActiveByKind`, which never contributes a timestamp, so every recording
+  session reports null — healthy or not. Only `lastActivityAt` separates them.
+
 ## 6.21.23
 
 - `GET /meeting/:sessionId/embeddings` — why each chunk was labelled the way it
