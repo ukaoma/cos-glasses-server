@@ -13,6 +13,7 @@ import { isSampleFromSession, untraceableSampleCount } from '../lib/training-aud
 import { sendAudioFile } from '../lib/send-audio.js'
 import { chunkDiagnostics } from '../lib/chunk-embedding-diagnostics.js'
 import { errMsg } from '../lib/utils.js'
+import { confirmedLabels } from '../lib/meeting-corrections.js'
 import {
   extAudioChunkPath,
   listExtAudioChunks,
@@ -724,6 +725,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const withIndices = attachRawChunkIndices(chunks as ReviewChunk[], sidecar.chunkEntries)
     const review = reviewMeetingSpeakers(withIndices, {
       owner: getOwnerSpeakerLabel(),
+      // Labels a human already vouched for in this meeting. Without this the
+      // floor re-demotes a confirmed name on every reload, and the reviewer
+      // confirms the same voice forever.
+      confirmed: confirmedLabels(sessionId),
       phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
       // The sidecar's own durationMs is the meeting's true end. Deriving it from
       // max(elapsed) uses the START of the last chunk, which made the final
@@ -929,6 +934,87 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // like and will keep matching. Removing only the label fixes the transcript and
   // leaves the profile poisoned — the exact mechanism that grew the phantom
   // "Erick Hernandez" from 3 mislabelled seeds to 18 samples.
+  /**
+   * Confirm the identifier was RIGHT about a label the display floor demoted.
+   *
+   * Rewrites nothing. The sidecar already carries the label; this records that
+   * a human vouched for it so the review stops presenting it as unearned.
+   *
+   * This exists because "yes, that really is her" was inexpressible. A rename
+   * cannot say it — `relabelSidecarJson` rejects `from === to` — so the panel
+   * demoted the row, instructed the reviewer to name it, and then offered a
+   * candidate list that excluded the very name they wanted. The floor is a
+   * guard against the IDENTIFIER over-claiming; it was never meant to overrule
+   * a person who was in the room.
+   *
+   * Meeting-scoped, like every other correction: vouching for a voice in one
+   * room says nothing about a different room.
+   */
+  router.post('/meeting/:sessionId/confirm', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const label = typeof req.body?.label === 'string' ? req.body.label : ''
+    const bad = invalidLabelReason(label)
+    if (bad) {
+      res.status(400).json({ error: `label: ${bad}`, reason: 'invalid_label' })
+      return
+    }
+
+    // Same resolution as GET /speakers and the relabel route, so the panel and
+    // the confirmation act on the same copy of the meeting.
+    const operations = cosOperationsMeetingsConfigured()
+      ? findCosOperationsMeetingBySessionId(sessionId)
+      : null
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) {
+      res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
+
+    // Refuse to confirm a label the meeting does not actually carry. Otherwise
+    // a typo becomes a permanent confirmation for a speaker who was never here,
+    // and the ledger is append-only.
+    let carried = 0
+    try {
+      const doc = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
+      const rows = Array.isArray(doc.chunks) ? doc.chunks : []
+      carried = rows.filter(r => r && typeof r === 'object'
+        && (r as Record<string, unknown>).speaker === label).length
+    } catch {
+      res.status(500).json({ error: 'Could not read the chunk sidecar', reason: 'sidecar_unreadable' })
+      return
+    }
+    if (carried === 0) {
+      res.status(409).json({
+        error: `No chunk in this meeting is labelled "${label}"`,
+        reason: 'label_not_present',
+      })
+      return
+    }
+
+    const ok = appendCorrection(sessionId, {
+      id: `confirm-${Date.now()}`,
+      phase: 'confirmed',
+      at: new Date().toISOString(),
+      // `from` and `to` are the same by definition — that is what makes this a
+      // confirmation rather than a rename, and why relabel could not express it.
+      from: label,
+      to: label,
+      chunks: [],
+      scope: 'meeting',
+    })
+    if (!ok) {
+      res.status(500).json({ error: 'Could not record the confirmation', reason: 'ledger_write_failed' })
+      return
+    }
+    res.json({ confirmed: true, label, segments: carried })
+  })
+
   router.post('/meeting/:sessionId/deattribute', (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? '')

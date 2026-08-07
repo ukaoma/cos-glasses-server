@@ -130,6 +130,8 @@ export interface VoiceReview {
   meanRun: number
   longestRun: number
   isOwner: boolean
+  /** A human confirmed this label for this meeting; the floor is waived. */
+  confirmedByHuman: boolean
   reliability: Reliability
   /**
    * Whether `label` may be shown to a human AS A NAME.
@@ -385,9 +387,21 @@ export function selectPhrases(
 /** Build the whole review for one meeting's chunks. */
 export function reviewMeetingSpeakers(
   chunks: ReviewChunk[],
-  options: { owner?: string; phrasesPerVoice?: number; durationMs?: number } = {},
+  options: {
+    owner?: string
+    phrasesPerVoice?: number
+    durationMs?: number
+    /**
+     * Labels a human vouched for in THIS meeting. The floor is a guard against
+     * the identifier over-claiming; it was never meant to overrule a person who
+     * was in the room. A confirmed label asserts its name with no rewrite —
+     * the sidecar already carries it.
+     */
+    confirmed?: Set<string>
+  } = {},
 ): MeetingSpeakerReview {
   const owner = options.owner ?? 'Me'
+  const confirmed = options.confirmed ?? new Set<string>()
   const limit = options.phrasesPerVoice ?? 3
   const sequence = chunks.map(c => c.speaker ?? '')
   // The caller's durationMs (the sidecar's own) is the meeting's true end.
@@ -439,6 +453,12 @@ export function reviewMeetingSpeakers(
     const assertionBlockers: string[] = []
     if (unattributed) {
       assertionBlockers.push('no name was ever assigned to this voice')
+    } else if (confirmed.has(label)) {
+      // A human said this is them. Blockers stay OFF the list rather than being
+      // listed-then-overridden, because a reviewer reading "similarity 0.56
+      // below 0.65" under a name they personally confirmed would reasonably
+      // conclude the confirmation had not taken. `thrashesWith` still renders,
+      // so a genuinely mixed row is still visibly mixed.
     } else if (label === owner) {
       // The wearer is exempt. Their identity is established by wearing the
       // device, not by cosine — and the owner is verified at exactly this floor
@@ -466,6 +486,8 @@ export function reviewMeetingSpeakers(
       meanRun: Math.round(mean(runs) * 100) / 100,
       longestRun: runs.length ? Math.max(...runs) : 0,
       isOwner: label === owner,
+      /** True when a human vouched for this label in this meeting. */
+      confirmedByHuman: confirmed.has(label),
       reliability,
       nameAsserted: assertionBlockers.length === 0,
       assertionBlockers,

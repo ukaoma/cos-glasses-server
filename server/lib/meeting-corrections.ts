@@ -35,7 +35,31 @@ export const CORRECTIONS_DIR = 'meeting-corrections'
  * `intent` goes down before any file is touched; `applied` or `failed` closes it.
  * An unclosed intent is an incomplete correction, not a successful one.
  */
-export type CorrectionPhase = 'intent' | 'applied' | 'failed'
+export type CorrectionPhase = 'intent' | 'applied' | 'failed' | 'confirmed'
+/**
+ * A human confirming the identifier was RIGHT about a label the display floor
+ * demoted.
+ *
+ * Distinct from a rename, and it has to be: `relabelSidecarJson` rejects
+ * `from === to`, so "yes, this really is Queen Ukaoma" cannot be expressed as a
+ * correction at all. The floor exists because a 0.56 match is not evidence — but
+ * a person who was in the room IS evidence, and there was no way to record it.
+ * The panel demoted the row, told the reviewer to name it, and then offered a
+ * list that deliberately excluded the one name they wanted.
+ *
+ * A confirmation rewrites NOTHING. The sidecar already carries the label; this
+ * only records that a human vouched for it, so the review stops presenting it
+ * as unearned. Scoped to one meeting like every other correction.
+ */
+export const CONFIRMATION_PHASE = 'confirmed' as const
+
+/** Runtime counterpart of CorrectionPhase. Must stay in step with it. */
+const VALID_PHASES = new Set<string>(['intent', 'applied', 'failed', 'confirmed'])
+
+/** Narrowing guard, so the reader keeps its type safety with one phase list. */
+function isCorrectionPhase(value: unknown): value is CorrectionPhase {
+  return typeof value === 'string' && VALID_PHASES.has(value)
+}
 
 export interface CorrectionSurfaces {
   /** Chunks whose `speaker` changed in the sidecar. */
@@ -123,7 +147,11 @@ export function readCorrections(sessionId: string): CorrectionReadResult {
     try {
       const o = JSON.parse(line) as Record<string, unknown>
       if (typeof o.id !== 'string' || typeof o.from !== 'string' || typeof o.to !== 'string') { unusable++; continue }
-      if (o.phase !== 'intent' && o.phase !== 'applied' && o.phase !== 'failed') { unusable++; continue }
+      // Kept as one list so adding a phase to the TYPE cannot silently make
+      // every such row unusable at read time — which is exactly what happened
+      // when 'confirmed' was added: appendCorrection wrote it, this dropped it,
+      // and the confirmation vanished with no error anywhere.
+      if (!isCorrectionPhase(o.phase)) { unusable++; continue }
       rows.push({
         id: o.id,
         phase: o.phase,
@@ -156,6 +184,22 @@ function isSurfaces(v: unknown): v is CorrectionSurfaces {
  * and a meeting with a pending correction should be treated as possibly
  * half-written rather than clean.
  */
+/**
+ * Labels a human has confirmed for this meeting.
+ *
+ * Read by the speaker review to clear the display floor for exactly those
+ * labels. A confirmation is per-meeting and never global: vouching for a voice
+ * in one room says nothing about a different room, which is the same reasoning
+ * that makes every correction here meeting-scoped.
+ */
+export function confirmedLabels(sessionId: string): Set<string> {
+  const confirmed = new Set<string>()
+  for (const row of readCorrections(sessionId).rows) {
+    if (row.phase === 'confirmed') confirmed.add(row.to)
+  }
+  return confirmed
+}
+
 export function pendingCorrections(sessionId: string): CorrectionRow[] {
   const { rows } = readCorrections(sessionId)
   const closed = new Set(rows.filter(r => r.phase !== 'intent').map(r => r.id))

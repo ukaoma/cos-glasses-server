@@ -1,3 +1,29 @@
+## 6.21.25
+
+- `POST /meeting/:sessionId/confirm` — record that a human vouched for a label
+  the display floor demoted. The floor exists so the identifier cannot assert a
+  name it did not earn, but a person who was in the room is better evidence
+  than a cosine score, and there was no way to say so. A rename could not
+  express it: `relabelSidecarJson` rejects `from === to`. So the panel demoted
+  the row, instructed the reviewer to name it, and offered a candidate list
+  that excluded the very name they wanted.
+
+  A confirmation rewrites nothing — the sidecar already carries the label. It
+  records the vouch, and `reviewMeetingSpeakers` then reports the row as
+  asserted. Meeting-scoped like every other correction: vouching for a voice in
+  one room says nothing about a different room. Refuses with 409 if no chunk in
+  the meeting actually carries that label, so a typo cannot become a permanent
+  confirmation in an append-only ledger.
+
+  A confirmed row still shows its thrash caveat. The name is asserted; the
+  evidence that it swaps with someone else is not hidden.
+
+- Fixed a latent trap found while building it: `readCorrections` validated
+  `phase` against a hardcoded list, so adding a phase to the TYPE made every
+  such row unusable at read time — the write succeeded, the read silently
+  dropped it, and no error surfaced anywhere. Phase validation now derives from
+  a single list with a narrowing guard.
+
 ## 6.21.24
 
 - A leaked recording session can no longer block every restart. The maintenance
