@@ -11,6 +11,8 @@ import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
+import { chunkDiagnostics } from '../lib/chunk-embedding-diagnostics.js'
+import { errMsg } from '../lib/utils.js'
 import {
   extAudioChunkPath,
   listExtAudioChunks,
@@ -1180,6 +1182,57 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
     sendAudioFile(res, path)
+  })
+
+  /**
+   * Why each chunk was labelled the way it was.
+   *
+   * Reads the per-chunk embeddings the pipeline has retained since 6.21.15 and
+   * scores each one against every enrolled profile RIGHT NOW. Until this route
+   * that store had no production reader at all — the data was collected and
+   * never looked at.
+   *
+   * This is what lets a reviewer distinguish "missed by 0.02 against one
+   * profile" from "equidistant between three", which is the difference between
+   * a fixable near-miss and a genuinely ambiguous voice. On a face-mounted
+   * microphone that distinction is most of the signal.
+   *
+   * Read-only. It scores and reports; it changes no profile and no meeting.
+   *
+   *   ?chunks=4,17,23   specific chunks (omit for the whole session)
+   *   ?limit=50         cap, because each chunk is scored against every profile
+   */
+  router.get('/meeting/:sessionId/embeddings', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+
+    const rawChunks = String(req.query.chunks ?? '').trim()
+    const indices: number[] = []
+    if (rawChunks) {
+      for (const part of rawChunks.split(',')) {
+        const value = Number(part.trim())
+        // Reject the whole request rather than silently scoring a subset: a
+        // caller asking about chunk 17 must not get an answer about chunk 4.
+        if (!Number.isInteger(value) || value < 0) {
+          res.status(400).json({ error: `Invalid chunk index "${part.trim()}"`, reason: 'invalid_chunk_index' })
+          return
+        }
+        indices.push(value)
+      }
+    }
+
+    const rawLimit = Number(req.query.limit ?? 50)
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 400) : 50
+
+    try {
+      res.json(chunkDiagnostics(sessionId, indices, limit))
+    } catch (error) {
+      res.status(500).json({ error: errMsg(error), reason: 'diagnostics_failed' })
+    }
   })
 
   /** What audio a meeting still has, so the panel can show play buttons only

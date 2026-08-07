@@ -1,3 +1,23 @@
+## 6.21.23
+
+- `GET /meeting/:sessionId/embeddings` — why each chunk was labelled the way it
+  was. Reads the per-chunk embeddings the pipeline has retained since 6.21.15
+  and scores each one against every enrolled profile now, returning the top
+  matches and the margin between the best two. Until this route that store had
+  **no production reader at all**: the data was collected for weeks and never
+  looked at.
+
+  The margin is the point. It separates "missed by 0.02 against one profile"
+  from "equidistant between three" — a fixable near-miss versus a genuinely
+  ambiguous voice — and the review panel cannot tell those apart today. On a
+  face-mounted microphone that distinction is most of the available signal.
+
+  Read-only, and deliberately does NOT return the raw 192-float vectors: ~1 KB
+  of base64 per chunk that means nothing to a reader. Whole-session reads are
+  capped (default 50, max 400) because each chunk is scored against every
+  profile. A retained-but-absent chunk is reported in `missing` rather than
+  dropped, and `retained:false` stays distinguishable from "scored, no match".
+
 ## 6.21.22
 
 - The meeting Turbo preview is ON by default. `COS_WHISPER_MEETING_PREVIEW` is
