@@ -1,3 +1,22 @@
+## 6.21.26
+
+- `assertedSegments` added to the speaker review: how many segments belong to
+  voices the panel actually shows WITH A NAME. `attributed` is a boolean that
+  only goes false at 100% unidentified, so a meeting where 295 of 299 chunks
+  matched nobody reported `true` and rendered as though normally attributed.
+  Measured unidentified share across 14 retained sessions ran 24% to 100%, all
+  of it collapsing onto that one boolean.
+
+  It counts asserted voices (`nameAsserted`), NOT chunks carrying a
+  person-shaped label. Those diverge sharply: on session 0i1xv3 the label-based
+  count is 287 of 379 segments while only 177 are displayed as names, so a
+  header built on labels would claim three quarters of the meeting identified
+  above a list of rows reading "Unidentified voice".
+
+  Purely additive — the route already spreads the review object and no client
+  decodes this payload strictly. COS Control 0.5.5+ renders it, and omits the
+  line against an older server rather than showing a zero.
+
 ## 6.21.25
 
 - `POST /meeting/:sessionId/confirm` — record that a human vouched for a label

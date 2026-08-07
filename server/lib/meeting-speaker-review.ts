@@ -227,6 +227,23 @@ export interface MeetingSpeakerReview {
   segments: number
   /** False when no chunk carries a real speaker — a recovered capture. */
   attributed: boolean
+  /**
+   * Segments belonging to voices this review asserts a NAME for.
+   *
+   * `attributed` is a boolean that only goes false at 100% unidentified, so a
+   * meeting where 295 of 299 chunks matched nobody still reports `true` and
+   * renders as though it were normally attributed. This is the graded version:
+   * measured Ext share across 14 retained sessions ran from 24% to 100%.
+   *
+   * Counts SEGMENTS OF ASSERTED VOICES, not chunks carrying a person-shaped
+   * label — see the derivation for why those differ. Denominator is `segments`
+   * (every chunk, including unlabelled ones), so `assertedSegments / segments`
+   * is the ratio every client should compute.
+   *
+   * Not named "coverage": `coverageRatio` in batch-transcript-quality.ts is an
+   * unrelated word-overlap measure and the two must not read as siblings.
+   */
+  assertedSegments: number
   durationMs: number
   voices: VoiceReview[]
   /** Chronological spans, so a ribbon can be a timeline instead of a share bar. */
@@ -500,6 +517,14 @@ export function reviewMeetingSpeakers(
   return {
     segments: chunks.length,
     attributed: named.length > 0,
+    // Derived from `nameAsserted`, NOT from `isUnattributed`. Those two answer
+    // different questions and diverge badly: measured on session 0i1xv3, the
+    // label-based count is 287 of 379 segments while only 177 belong to voices
+    // the panel actually shows with a name — a 29-point gap. A header built on
+    // labels would claim three quarters of the meeting was identified above a
+    // list of rows reading "Unidentified voice", which is the confusion this
+    // number exists to remove.
+    assertedSegments: voices.reduce((n, v) => (v.nameAsserted ? n + v.segments : n), 0),
     durationMs,
     voices,
     timeline: speakerTimeline(chunks, durationMs),
