@@ -98,6 +98,17 @@ export const ASSERT_MIN_SEGMENTS = 3
 
 export type Reliability = 'confident' | 'weak' | 'unreliable' | 'unattributed'
 
+/**
+ * Which measurement produced `speakingMs`.
+ *
+ * `words` is real voiced time from the HQ batch pass's word timings — silence is
+ * excluded by construction. `chunks` is wall-clock deltas with each chunk capped
+ * at the capture ceiling, which is coarser and still contains the sub-ceiling
+ * pauses. They are not comparable across meetings, so any UI showing a trend
+ * must not mix them silently.
+ */
+export type SpeakingTimeSource = 'words' | 'chunks'
+
 export interface ThrashPair {
   speaker: string
   flipRate: number
@@ -122,6 +133,9 @@ export interface Phrase {
 export interface VoiceReview {
   label: string
   segments: number
+  /** Voiced milliseconds credited to this voice. See `SpeakingTimeSource` for
+   *  how it was measured — the two methods are not comparable. */
+  speakingMs: number
   meanSimilarity: number | null
   /** Mean consecutive-run length across the WHOLE meeting. Not comparable to
    *  the pair-scoped run in `thrashesWith`: in a 13-voice meeting every
@@ -244,6 +258,29 @@ export interface MeetingSpeakerReview {
    * unrelated word-overlap measure and the two must not read as siblings.
    */
   assertedSegments: number
+  /** How `speakingMs` was measured. */
+  speakingTimeSource: SpeakingTimeSource
+  /** Voiced ms belonging to voices shown WITH A NAME. The headline number. */
+  attributedSpeakingMs: number
+  /** Voiced ms belonging to voices the panel refuses to name. */
+  unattributedSpeakingMs: number
+  /**
+   * Voiced ms in the meeting, crosstalk counted ONCE.
+   *
+   * `attributed + unattributed` does NOT equal this, and must not be presented
+   * as though it does: when two people talk over each other both are credited,
+   * so per-speaker figures legitimately exceed wall clock. Measured on a real
+   * 5.2-minute capture the per-speaker times summed to 6.0 minutes.
+   */
+  voicedMs: number
+  /**
+   * Wall clock that produced no voice at all.
+   *
+   * Reported rather than distributed, because it is frequently large and is not
+   * all silence: a measured 2026-08-06 capture lost 93% of its chunks in
+   * transfer. THE invariant is `voicedMs + notCapturedMs = durationMs`.
+   */
+  notCapturedMs: number
   durationMs: number
   voices: VoiceReview[]
   /** Chronological spans, so a ribbon can be a timeline instead of a share bar. */
@@ -401,6 +438,135 @@ export function selectPhrases(
     .map(({ text, atMs, similarity, chunkIndex }) => ({ text, atMs, similarity, chunkIndex }))
 }
 
+/**
+ * The capture ceiling. A chunk is VAD-flushed with a 2.5s floor and a hard
+ * ceiling here, so no single chunk can carry more voice than this no matter how
+ * long the wall-clock gap before it was.
+ *
+ * Measured on 1,000 retained chunk WAVs: median 6,050ms, max 7,100ms (the
+ * ceiling overshoots because RMS is sampled every ~200ms), and ZERO chunks under
+ * 2s. The ceiling is the normal flush, not an edge case.
+ */
+export const CHUNK_CEILING_MS = 7_100
+
+/**
+ * Voiced milliseconds credited to each chunk, index-aligned to `chunks`.
+ *
+ * WHY A CAP. `elapsed` is a wall-clock offset, so the delta between consecutive
+ * chunks is that chunk's audio PLUS all the dead air before it. Uncapped, that
+ * dead air gets credited to whoever happened to speak last: on the 2026-08-04
+ * "Design Gaps" meeting the deltas sum to 50.2 minutes against 8.1 minutes of
+ * actual speech — a 6.2x inflation, with a 36.6s MEDIAN gap that would sail
+ * under any outlier rule. One chunk elsewhere in the corpus credits 77.5
+ * continuous minutes to a single speaker.
+ *
+ * Capping at the ceiling makes each chunk contribute at most the audio it could
+ * physically hold. Everything the cap removes is real elapsed time that was
+ * never captured, and it is reported as `notCapturedMs` rather than distributed.
+ */
+export function creditedChunkMs(chunks: ReviewChunk[]): number[] {
+  let prev = 0
+  return chunks.map(c => {
+    const at = typeof c.elapsed === 'number' && Number.isFinite(c.elapsed) ? c.elapsed : prev
+    // Monotonic: a sidecar with a backwards or missing elapsed contributes 0
+    // rather than a negative that would silently subtract from someone's total.
+    const delta = Math.max(0, at - prev)
+    prev = Math.max(prev, at)
+    return Math.min(delta, CHUNK_CEILING_MS)
+  })
+}
+
+/** One batch segment's word-level speaker timing, as the sidecar stores it. */
+export interface SpeakerWordSegment {
+  /** Absolute ms offset of this segment; word times are RELATIVE to it. */
+  startElapsed?: number
+  speakerWords?: Array<{ start?: number; end?: number; speaker?: string }>
+}
+
+/** Total length of a set of intervals, counting overlap ONCE. */
+export function unionMs(intervals: Array<[number, number]>): number {
+  if (intervals.length === 0) return 0
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0])
+  let total = 0
+  let [start, end] = sorted[0]
+  for (const [a, b] of sorted.slice(1)) {
+    if (a > end) { total += end - start; start = a; end = b }
+    else if (b > end) { end = b }
+  }
+  return total + (end - start)
+}
+
+/**
+ * Voiced milliseconds per speaker, from the word timings the HQ batch pass
+ * already wrote into the sidecar.
+ *
+ * WHY UNION AND NOT A SUM. Word intervals overlap — both within a segment and
+ * across the overlapping batch windows. Measured over six real meetings, naively
+ * summing word durations totals 1.20x to 1.50x the meeting's own duration, which
+ * is impossible for voiced time. Union counts overlap once and lands at 0.75x to
+ * 0.97x, always under wall clock, which is the shape the answer must have.
+ *
+ * This is real voiced time: silence between words is excluded by construction,
+ * so it needs no ceiling, no gap heuristic, and no retained audio.
+ */
+export function speakerWordIntervals(
+  segments: SpeakerWordSegment[],
+): Map<string, Array<[number, number]>> {
+  const byLabel = new Map<string, Array<[number, number]>>()
+  for (const seg of segments) {
+    const offset = typeof seg.startElapsed === 'number' && Number.isFinite(seg.startElapsed)
+      ? seg.startElapsed
+      : 0
+    for (const w of seg.speakerWords ?? []) {
+      const a = w.start
+      const b = w.end
+      if (typeof a !== 'number' || typeof b !== 'number') continue
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) continue
+      const label = w.speaker ?? ''
+      if (!byLabel.has(label)) byLabel.set(label, [])
+      byLabel.get(label)!.push([offset + a * 1000, offset + b * 1000])
+    }
+  }
+  return byLabel
+}
+
+/** Voiced ms per speaker, overlap within a speaker counted once. */
+export function speakerWordMs(segments: SpeakerWordSegment[]): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const [label, ivs] of speakerWordIntervals(segments)) out.set(label, Math.round(unionMs(ivs)))
+  return out
+}
+
+/**
+ * The meeting-level decomposition.
+ *
+ * `voicedMs + notCapturedMs = durationMs` is the invariant that HOLDS.
+ * attributed + unattributed does NOT sum to voiced, because a named and an
+ * unnamed speaker can talk over each other and both are credited.
+ */
+function speakingBuckets(
+  voices: VoiceReview[],
+  intervalsFor: (label: string) => Array<[number, number]>,
+  durationMs: number,
+): {
+  attributedSpeakingMs: number
+  unattributedSpeakingMs: number
+  voicedMs: number
+  notCapturedMs: number
+} {
+  const gather = (pick: (v: VoiceReview) => boolean) =>
+    Math.round(unionMs(voices.filter(pick).flatMap(v => intervalsFor(v.label))))
+  const voiced = gather(() => true)
+  return {
+    attributedSpeakingMs: gather(v => v.nameAsserted),
+    unattributedSpeakingMs: gather(v => !v.nameAsserted),
+    voicedMs: voiced,
+    // Wall clock that produced no voice at all: silence, dropped chunks, and
+    // time the capture never saw. Reported, never distributed to a speaker.
+    notCapturedMs: Math.max(0, durationMs - voiced),
+  }
+}
+
 /** Build the whole review for one meeting's chunks. */
 export function reviewMeetingSpeakers(
   chunks: ReviewChunk[],
@@ -415,6 +581,12 @@ export function reviewMeetingSpeakers(
      * the sidecar already carries it.
      */
     confirmed?: Set<string>
+    /**
+     * The sidecar's `batchSegments`, when the HQ pass has run. Their word
+     * timings give real voiced time; without them speaking time falls back to
+     * capped chunk deltas.
+     */
+    batchSegments?: SpeakerWordSegment[]
   } = {},
 ): MeetingSpeakerReview {
   const owner = options.owner ?? 'Me'
@@ -432,6 +604,33 @@ export function reviewMeetingSpeakers(
 
   const labels = [...new Set(sequence)].filter(s => s.length > 0)
   const named = labels.filter(l => !isUnattributed(l))
+
+  // Word timings when the HQ batch pass produced them (82 of 92 sidecars
+  // measured), capped chunk deltas otherwise. The two are NOT interchangeable —
+  // words are voiced time, deltas are wall clock with the silence capped off —
+  // so the answer carries which one produced it.
+  const wordIntervals = speakerWordIntervals(options.batchSegments ?? [])
+  const speakingTimeSource: SpeakingTimeSource = wordIntervals.size > 0 ? 'words' : 'chunks'
+
+  // The fallback expresses chunks as intervals too, so both paths decompose
+  // through the same union arithmetic. `elapsed` is the chunk END, so a chunk
+  // covers [end - credited, end] — non-overlapping by construction, because
+  // `credited` is already the capped gap to the previous chunk.
+  const chunkIntervals = new Map<string, Array<[number, number]>>()
+  if (speakingTimeSource === 'chunks') {
+    const credited = creditedChunkMs(chunks)
+    chunks.forEach((c, i) => {
+      if (credited[i] <= 0) return
+      const end = typeof c.elapsed === 'number' && Number.isFinite(c.elapsed) ? c.elapsed : 0
+      const label = c.speaker ?? ''
+      if (!chunkIntervals.has(label)) chunkIntervals.set(label, [])
+      chunkIntervals.get(label)!.push([end - credited[i], end])
+    })
+  }
+
+  const intervalsFor = (label: string): Array<[number, number]> =>
+    (speakingTimeSource === 'words' ? wordIntervals : chunkIntervals).get(label) ?? []
+  const speakingFor = (label: string): number => Math.round(unionMs(intervalsFor(label)))
 
   const voices: VoiceReview[] = labels.map(label => {
     const own = chunks.filter(c => (c.speaker ?? '') === label)
@@ -499,6 +698,7 @@ export function reviewMeetingSpeakers(
     return {
       label,
       segments: own.length,
+      speakingMs: speakingFor(label),
       meanSimilarity: meanSim,
       meanRun: Math.round(mean(runs) * 100) / 100,
       longestRun: runs.length ? Math.max(...runs) : 0,
@@ -525,6 +725,18 @@ export function reviewMeetingSpeakers(
     // list of rows reading "Unidentified voice", which is the confusion this
     // number exists to remove.
     assertedSegments: voices.reduce((n, v) => (v.nameAsserted ? n + v.segments : n), 0),
+    speakingTimeSource,
+    // UNION, not sum. Speakers overlap — crosstalk means two people are each
+    // correctly credited for the same wall-clock second, so per-speaker times
+    // legitimately add up to MORE than the meeting. Verified against a real
+    // 5.2-minute capture where the per-speaker figures summed to 6.0 minutes.
+    // Summing here produced a bucket total larger than the meeting itself.
+    //
+    // Split by nameAsserted PER VOICE, never per segment: a per-segment floor
+    // cannot express ASSERT_MIN_SEGMENTS nor carry the owner and confirmed
+    // waivers, so it contradicts the rows above it (measured on 2026-08-02 "G2
+    // App Fixes": panel names MU for 47.3%, per-segment floor 14.9%).
+    ...speakingBuckets(voices, intervalsFor, durationMs),
     durationMs,
     voices,
     timeline: speakerTimeline(chunks, durationMs),

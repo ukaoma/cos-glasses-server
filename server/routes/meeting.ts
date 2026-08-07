@@ -118,6 +118,7 @@ import {
   attachRawChunkIndices,
   isUnattributed,
   reviewMeetingSpeakers,
+  type SpeakerWordSegment,
   type ReviewChunk,
 } from '../lib/meeting-speaker-review.js'
 import {
@@ -735,6 +736,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // timeline span end where it began — a 1.5pt sliver labelled "1s" for what
       // may be a long closing monologue.
       durationMs: typeof sidecar.durationMs === 'number' ? sidecar.durationMs : undefined,
+      // Word-level speaker timings from the HQ batch pass, present on 82 of 92
+      // measured sidecars. These give REAL voiced time per speaker; without them
+      // speaking time falls back to capped chunk deltas, which still carry the
+      // sub-ceiling pauses. `speakingTimeSource` on the response says which ran.
+      batchSegments: Array.isArray(sidecar.batchSegments)
+        ? (sidecar.batchSegments as SpeakerWordSegment[])
+        : undefined,
     })
     res.set('Cache-Control', 'private, no-store')
     res.json({

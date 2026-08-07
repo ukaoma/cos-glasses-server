@@ -1,3 +1,30 @@
+## 6.21.27
+
+- Per-speaker speaking time on the review. `speakingMs` per voice, plus
+  `voicedMs`, `attributedSpeakingMs`, `unattributedSpeakingMs` and
+  `notCapturedMs` on the meeting.
+
+  It reads the word timings the HQ batch pass ALREADY writes
+  (`batchSegments[].speakerWords`, present on 82 of 92 measured sidecars), so it
+  is real voiced time with silence excluded — no audio, no VAD, no embedding, and
+  it works past the 7-day audio retention. Without them it falls back to chunk
+  deltas capped at the capture ceiling, and `speakingTimeSource` says which ran.
+
+  Three things the arithmetic had to get right, each caught against real data:
+  word intervals OVERLAP, so a naive sum totals 1.2x-1.5x the meeting's own
+  duration — union counts overlap once and lands at 0.75x-0.97x. Speakers also
+  overlap EACH OTHER, so per-speaker figures legitimately exceed wall clock
+  (a real 5.2-minute capture summed to 6.0); the invariant is therefore
+  `voicedMs + notCapturedMs = durationMs`, never attributed + unattributed.
+  And the attributed/unattributed split is by `nameAsserted` PER VOICE, never
+  per segment: a per-segment floor cannot carry the owner or human-confirmed
+  waivers and contradicts the rows above it (measured on 2026-08-02 "G2 App
+  Fixes": the panel names MU for 47.3% of the meeting, a per-segment floor 14.9%).
+
+- Uncapped chunk deltas credit dead air to whoever spoke last. On 2026-08-04
+  "Design Gaps" that turns 8.1 minutes of speech into 50.2, with a 36.6s MEDIAN
+  gap that no outlier rule would catch. Capped at the measured ceiling.
+
 ## 6.21.26
 
 - `assertedSegments` added to the speaker review: how many segments belong to
