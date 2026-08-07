@@ -283,6 +283,23 @@ const WHISPER_SERVER_PORT = 8178
 const WHISPER_SERVER_URL = `http://127.0.0.1:${WHISPER_SERVER_PORT}`
 const PROCESS_PROBE_TIMEOUT_MS = 2_000
 const PROCESS_PROBE_MAX_BUFFER = 1024 * 1024
+// A process probe failing ONCE must not disable local Whisper for the whole
+// server lifetime. On 2026-08-06 the `/bin/ps` probe in the startup preflight
+// failed exactly once, during the 6.21.20 generation changeover while the
+// previous generation's Python child was still shutting down.
+// `startWhisperServer` caught it, set state 'failed', and never tried again:
+// whisper-server never launched, port 8178 refused for ~30 minutes across a
+// live recording, and only a manual restart recovered it. Boot calls
+// `startWhisperServer()` exactly once, and the only other recovery path is a
+// circuit breaker that first needs three failed transcriptions — so nothing
+// retried the thing that had actually failed.
+//
+// Three attempts at 150/300ms covers a transient blip while still failing in
+// well under a second when the probe is genuinely broken. Preflight must keep
+// failing CLOSED after that: it exists to prove no orphaned whisper owns port
+// 8178, and spawning without that proof risks two owners.
+const PROCESS_PROBE_ATTEMPTS = 3
+const PROCESS_PROBE_RETRY_BASE_MS = 150
 const PS_BIN = '/bin/ps'
 const LSOF_BIN = existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof'
 
@@ -338,14 +355,90 @@ function runProcessProbe(file: string, args: string[]): Promise<string> {
   })
 }
 
+/**
+ * Describe a probe failure precisely enough that the NEXT one diagnoses itself.
+ *
+ * The 2026-08-06 failure logged only `Command failed: /bin/ps ...` with empty
+ * stderr, which is what execFile emits for a non-zero exit, a timeout kill, and
+ * a fork failure alike. That single ambiguous string cost an investigation and
+ * still did not settle the mechanism: measured, this probe runs in ~45ms against
+ * a 2s timeout, so "it timed out" was never established. Record the fields that
+ * discriminate — signal and `killed` mean the timeout fired, a numeric `code`
+ * means ps itself exited non-zero, `EAGAIN`/`ENOMEM` means the fork failed —
+ * plus how long it actually took.
+ */
+function describeProbeFailure(error: any, elapsedMs: number, attempt: number): string {
+  const parts = [`attempt ${attempt}`, `${elapsedMs}ms`]
+  if (error?.killed) parts.push('killed=true')
+  if (error?.signal) parts.push(`signal=${error.signal}`)
+  if (error?.code !== undefined && error?.code !== null) parts.push(`code=${error.code}`)
+  const stderr = String(error?.stderr ?? '').trim()
+  if (stderr) parts.push(`stderr=${stderr.slice(0, 80)}`)
+  return parts.join(' ')
+}
+
+/**
+ * Fold per-attempt details into one line that survives `boundedError`'s 240
+ * characters.
+ *
+ * Repeating an identical 48-character "Command failed: /bin/ps …" once per
+ * attempt spent most of the budget and truncated attempt 3 — the most recent
+ * and most diagnostic one. A test caught that. So the message is emitted ONCE
+ * when every attempt failed the same way, and per-attempt only when they
+ * genuinely differ, which is itself a signal worth seeing.
+ */
+function summarizeProbeFailures(attempts: Array<{ message: string; detail: string }>): string {
+  const distinct = [...new Set(attempts.map(a => a.message))]
+  if (distinct.length === 1) {
+    return `${distinct[0]} [${attempts.map(a => a.detail).join('; ')}]`
+  }
+  return attempts.map(a => `${a.message} (${a.detail})`).join(' | ')
+}
+
+/**
+ * Run a process probe, retrying a transient failure.
+ *
+ * `isExpectedFailure` short-circuits retries for a failure that is a normal
+ * result rather than a fault — `lsof` exits 1 to mean "no matches", and
+ * retrying that would triple the cost of the common case.
+ */
+async function runProcessProbeRetrying(
+  bin: string,
+  args: string[],
+  isExpectedFailure: (error: any) => boolean = () => false,
+): Promise<string> {
+  const failures: Array<{ message: string; detail: string }> = []
+  for (let attempt = 1; attempt <= PROCESS_PROBE_ATTEMPTS; attempt++) {
+    const startedAt = Date.now()
+    try {
+      return await runProcessProbe(bin, args)
+    } catch (error: any) {
+      if (isExpectedFailure(error)) throw error
+      const detail = describeProbeFailure(error, Date.now() - startedAt, attempt)
+      failures.push({ message: boundedError(error), detail })
+      if (attempt < PROCESS_PROBE_ATTEMPTS) {
+        console.warn(
+          `[whisper-local] ${bin} probe failed, retrying (${attempt}/${PROCESS_PROBE_ATTEMPTS}): ${detail}`,
+        )
+        await sleep(PROCESS_PROBE_RETRY_BASE_MS * attempt)
+      }
+    }
+  }
+  // Every attempt is reported, not just the last: a probe that fails three
+  // different ways is a different problem from one that fails identically.
+  throw new Error(summarizeProbeFailures(failures))
+}
+
 async function listProcesses(): Promise<ProcessEntry[]> {
   // `command=` includes arguments, which lets us distinguish this COS-owned
   // port/model signature from unrelated whisper-server instances.
   let output: string
   try {
-    output = await runProcessProbe(PS_BIN, ['-axww', '-o', 'pid=,ppid=,command='])
+    output = await runProcessProbeRetrying(PS_BIN, ['-axww', '-o', 'pid=,ppid=,command='])
   } catch (error) {
-    throw new Error(`unable to inspect process table: ${boundedError(error)}`)
+    throw new Error(
+      `unable to inspect process table after ${PROCESS_PROBE_ATTEMPTS} attempts: ${boundedError(error)}`,
+    )
   }
   return output.split('\n').flatMap(line => {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/)
@@ -354,17 +447,25 @@ async function listProcesses(): Promise<ProcessEntry[]> {
   })
 }
 
+/** lsof exits 1 for "no matches" — a normal answer, not a fault. */
+const isLsofNoMatches = (err: any): boolean => err?.code === 1 || err?.status === 1
+
 async function listeningPids(): Promise<number[]> {
   try {
-    const output = await runProcessProbe(
+    // Retries for the same reason as the process-table probe: this also fails
+    // preflight CLOSED, so one transient blip here would equally disable
+    // whisper for the server's whole lifetime. "No matches" is passed through
+    // untouched so the common case still costs exactly one probe.
+    const output = await runProcessProbeRetrying(
       LSOF_BIN,
       ['-nP', `-iTCP:${WHISPER_SERVER_PORT}`, '-sTCP:LISTEN', '-t'],
+      isLsofNoMatches,
     )
     return output.split(/\s+/).map(Number).filter(pid => Number.isInteger(pid) && pid > 0)
   } catch (err: any) {
     // lsof uses exit 1 for "no matches". Anything else means we could not
     // prove the port state, so startup must fail closed.
-    if (err?.code === 1 || err?.status === 1) return []
+    if (isLsofNoMatches(err)) return []
     throw new Error(`unable to inspect whisper-server port ${WHISPER_SERVER_PORT}: ${boundedError(err)}`)
   }
 }

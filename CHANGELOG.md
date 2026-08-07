@@ -1,3 +1,29 @@
+## 6.21.21
+
+- One transient process probe no longer disables local Whisper for the whole
+  server lifetime. On 2026-08-06 the `/bin/ps` probe inside the startup
+  preflight failed exactly once, during a generation changeover while the
+  previous generation's Python child was shutting down. Startup caught it, set
+  state `failed`, and stopped — whisper never launched, port 8178 refused for
+  ~30 minutes across a live recording, and only a manual restart recovered it.
+  Boot calls `startWhisperServer()` once, and the only other recovery path is a
+  circuit breaker that first needs three failed transcriptions, so nothing ever
+  retried the thing that had actually failed.
+
+  Both preflight probes now retry three times with backoff. `lsof` exit 1 means
+  "no matches" and is still passed straight through, so the common path costs
+  exactly one probe. Preflight still fails CLOSED after the retries: it exists
+  to prove no orphaned whisper owns port 8178, and spawning without that proof
+  risks two owners.
+
+- A surviving probe failure now names its own cause. The field failure logged
+  only `Command failed: /bin/ps …` with empty stderr — identical output for a
+  timeout kill, a non-zero exit, and a failed fork — which cost an
+  investigation and still did not settle the mechanism (measured, this probe
+  runs in ~45ms against a 2s timeout, so "it timed out" was never established).
+  Errors now carry per-attempt elapsed time, `killed`, `signal`, `code`, and
+  stderr, deduplicated so all three attempts survive the 240-character bound.
+
 ## 6.21.20
 
 - Audio playback works at all. Every play button in the Control speaker review
