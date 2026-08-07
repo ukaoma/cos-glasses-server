@@ -11,6 +11,7 @@ import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import { dataPath } from '../lib/data-dir.js'
 import { purgeSpeakerCalibrationRows, relabelSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
 import { trainingSourceFor } from '../lib/training-audio-provenance.js'
+import { sendAudioFile } from '../lib/send-audio.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -471,8 +472,7 @@ voiceRouter.get('/voice/profiles/:name/sample', (req, res) => {
     })
     return
   }
-  res.type('audio/wav')
-  res.sendFile(wav)
+  sendAudioFile(res, wav)
 })
 
 // GET /api/voice/ext-audio/:sessionId/sample — hear an unidentified voice.
@@ -492,8 +492,7 @@ voiceRouter.get('/voice/ext-audio/:sessionId/sample', (req, res) => {
     })
     return
   }
-  res.type('audio/wav')
-  res.sendFile(wav)
+  sendAudioFile(res, wav)
 })
 
 // GET /api/voice/profiles — enrolled people with sample counts and provenance.

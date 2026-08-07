@@ -10,6 +10,7 @@ import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
+import { sendAudioFile } from '../lib/send-audio.js'
 import {
   extAudioChunkPath,
   listExtAudioChunks,
@@ -1178,8 +1179,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       })
       return
     }
-    res.type('audio/wav')
-    res.sendFile(path)
+    sendAudioFile(res, path)
   })
 
   /** What audio a meeting still has, so the panel can show play buttons only

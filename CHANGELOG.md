@@ -1,3 +1,22 @@
+## 6.21.20
+
+- Audio playback works at all. Every play button in the Control speaker review
+  returned a 404 and made no sound, on every default install, since playback
+  shipped. `res.sendFile` delegates to `send`, which defaults to
+  `dotfiles: 'ignore'` and — with no `root` set — applies that policy to the
+  WHOLE absolute path rather than to anything the request supplied. The default
+  data home is `~/.cos-glasses/data`, and `.cos-glasses` is a dot component, so
+  the file was found, confirmed to exist, then refused on the way out the door.
+  All three audio routes were affected: meeting chunks, speaker-profile samples,
+  and ext-audio samples.
+
+  The tests could not have caught this. They point `COS_DATA_DIR` at
+  `mktemp -d` — `/var/folders/...` — which cannot contain a dot component, so
+  the suite was structurally incapable of reproducing a default install and
+  stayed green while the feature was dead. The three routes now share
+  `sendAudioFile`, and `send-audio.test.ts` serves from a dot-directory on
+  purpose, over a real listener, asserting on the returned bytes.
+
 ## 6.21.19
 
 - Review playback falls back to ext-audio. The 7-day archive introduced in
