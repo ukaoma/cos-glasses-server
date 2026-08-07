@@ -116,8 +116,14 @@ const THANKYOU_FILTER = process.env.COS_WHISPER_THANKYOU_FILTER !== '0'
 const MEETING_PREVIEW_MAX_BYTES = 512 * 1024
 let meetingPreviewBusy = false
 
+// DEFAULT ON as of 6.21.22 (Miles, 2026-08-06: "I want it to default to being
+// on... it's stable and makes meetings so much better"). Opt-OUT now, matching
+// STRIP_BRAND_URLS / THANKYOU_FILTER above: set COS_WHISPER_MEETING_PREVIEW=0
+// to disable. The committed Large-v3 transcript remains authoritative and
+// atomically replaces the provisional line — this gate only controls whether
+// the low-latency Turbo lane is offered at all.
 function meetingTurboPreviewEnabled(): boolean {
-  return process.env.COS_WHISPER_MEETING_PREVIEW === '1'
+  return process.env.COS_WHISPER_MEETING_PREVIEW !== '0'
 }
 
 // Audio persistence: save G2-mic chunks for speakers who need more training data

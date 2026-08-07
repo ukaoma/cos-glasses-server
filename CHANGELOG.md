@@ -1,3 +1,18 @@
+## 6.21.22
+
+- The meeting Turbo preview is ON by default. `COS_WHISPER_MEETING_PREVIEW` is
+  now opt-OUT (`=0` disables), matching `COS_WHISPER_STRIP_BRAND_URLS` and
+  `COS_WHISPER_THANKYOU_FILTER` in the same file. The committed Large-v3
+  transcript remains authoritative and still atomically replaces the
+  provisional line; this gate only decides whether the low-latency lane is
+  offered at all. The companion carries a second gate, flipped to default-on in
+  app 6.8.312 — both must be on for a provisional line to appear, and an older
+  companion simply never asks.
+
+- Includes 6.21.21, which was superseded before publish and never released to
+  npm. Do not look for it there. Its content — the whisper preflight probe
+  retry — is carried here unchanged.
+
 ## 6.21.21
 
 - One transient process probe no longer disables local Whisper for the whole
