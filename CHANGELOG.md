@@ -1,3 +1,54 @@
+## 6.21.28
+
+- `GET /meeting/:sessionId/content` — the readable meeting plus two ready-made
+  clipboard forms. Operations-first resolution, identical to `/speakers`, so the
+  list row and this view can never describe the same meeting differently. Fails
+  closed with 422 `sidecar_empty` exactly as `/speakers` does.
+
+- **The attendee block is rebuilt from the review, and the output says so.** The
+  scribe's own `## Attendees` applies no confidence floor: 2026-08 alone carries
+  scribes listing 55, 21, 20, 19, 18, 18, 17 and 15 attendees. Only asserted
+  voices are named there.
+
+  But names also appear in the prose and as `[Name]:` transcript labels, and
+  those are NOT redacted — a transcript label is evidence, and rewriting it using
+  the verdict of the identifier that produced it is circular; a name in an action
+  item is frequently a person mentioned rather than one present. So every output
+  carries a provenance allowlist instead: who voice matching confirmed, plus a
+  plain statement that any other name below is unconfirmed capture output. On the
+  IJO meeting a blocklist would have run to 14 names.
+
+- **Shares are suppressed below 60% coverage, matching Control's own gate.**
+  Previously the clipboard printed "100% of named speech" on a meeting that was
+  10.5% identified while the panel showed an orange "shares unreliable" warning.
+  49% of real meetings sit below that floor. The artifact that leaves the machine
+  is now never less careful than the screen it came from.
+
+- **Transcript lookup is a CONTAINS match, longest body wins.** Exact matching
+  reported "(no transcript in this scribe)" while 46,716 characters sat in the
+  file. Measured across 1,930 transcript headings: prefix matching catches 94%,
+  contains catches 100% — the 113 scribes headed `G2 Speaker-Separated
+  Transcript` are the speaker-attributed ones, the most useful to hand a model.
+
+- **Unrecognised sections are carried, not discarded** (116,820 characters
+  corpus-wide, including `Granola Structured Notes (canonical)`), the
+  `<details>` wrapper and generator stamp are stripped (160 and 161 of 227
+  scribes), and the unidentified figure uses the review's UNION rather than a sum
+  of per-voice times, which printed 30m 21s inside a 26-minute meeting.
+
+- `meetingDate()` — `startTime` is epoch MILLISECONDS, not ISO; slicing the
+  stringified number produced "1786123940". Also returns empty for 0 and
+  negatives rather than 1969-12-31.
+
+- The scribe parser is fence-aware, so a `#` inside a fenced code block is code
+  rather than a heading that truncates the section.
+
+- Test isolation: `meeting-speakers-route.test.ts` now isolates `COS_DATA_DIR`.
+  It was restoring 26 PRODUCTION conversation sessions and re-mirroring archive
+  days as a load-time side effect of every run. Suite time for that file went
+  93.7s to 2.4s, and the long-standing `cli-transcription-setup` flake stopped
+  firing.
+
 ## 6.21.27
 
 - Per-speaker speaking time on the review. `speakingMs` per voice, plus

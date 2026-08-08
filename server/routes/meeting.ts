@@ -118,9 +118,16 @@ import {
   attachRawChunkIndices,
   isUnattributed,
   reviewMeetingSpeakers,
-  type SpeakerWordSegment,
   type ReviewChunk,
+  type SpeakerWordSegment,
 } from '../lib/meeting-speaker-review.js'
+import {
+  parseScribe,
+  clipboardSummary,
+  clipboardFull,
+  meetingDate,
+  SHARE_COVERAGE_FLOOR,
+} from '../lib/meeting-scribe-content.js'
 import {
   acquireMaintenanceWork,
   maintenanceAdmissionsOpen,
@@ -769,6 +776,134 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // touched, and a failed intent write aborts without mutating anything. A
   // process that dies mid-rewrite therefore leaves a visible pending correction
   // rather than a silently half-relabelled meeting.
+  /**
+   * The readable meeting, plus two clipboard forms.
+   *
+   * Resolution is operations-first, identical to GET /speakers — the same session
+   * lives in both trees under different names and the list reads operations, so
+   * anything keyed on a session has to resolve there too or the row and this
+   * view disagree about the same meeting.
+   *
+   * The attendee list is REBUILT from the speaker review rather than taken from
+   * the scribe's own `## Attendees`, which applies no confidence floor: the
+   * 2026-08-06 IJO scribe lists 15 attendees for a 26-minute call including a
+   * name already confirmed absent. Copying that verbatim would launder a guess
+   * into a fact in whatever the reviewer pastes it into.
+   */
+  router.get('/meeting/:sessionId/content', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const operations = cosOperationsMeetingsConfigured()
+      ? findCosOperationsMeetingBySessionId(sessionId)
+      : null
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) {
+      res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
+    const title = operations?.title ?? saved!.title
+    const mdPath = operations?.meetingPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
+
+    let sidecar: Record<string, unknown>
+    try {
+      sidecar = (JSON.parse(readFileSync(sidecarPath, 'utf-8')) ?? {}) as Record<string, unknown>
+    } catch {
+      res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
+      return
+    }
+    const rawChunks = Array.isArray(sidecar) ? sidecar : sidecar.chunks
+    if (!Array.isArray(rawChunks)) {
+      // Mirrors GET /speakers exactly. Coercing to [] returned 200 with an empty
+      // floor while still shipping the full verbatim prose and transcript — the
+      // worst pairing, and the two routes would have disagreed about the same
+      // session (panel 422, copy buttons fine).
+      res.status(422).json({ error: 'Chunk sidecar holds no chunk array', reason: 'sidecar_empty' })
+      return
+    }
+    const chunks = rawChunks as ReviewChunk[]
+
+    const review = reviewMeetingSpeakers(attachRawChunkIndices(chunks, sidecar.chunkEntries), {
+      owner: getOwnerSpeakerLabel(),
+      confirmed: confirmedLabels(sessionId),
+      // This route renders no phrases; the default of 3 per voice computed and
+      // discarded 48 transcript excerpts on a 16-voice meeting.
+      phrasesPerVoice: 1,
+      durationMs: typeof sidecar.durationMs === 'number' ? sidecar.durationMs : undefined,
+      batchSegments: Array.isArray(sidecar.batchSegments)
+        ? (sidecar.batchSegments as SpeakerWordSegment[])
+        : undefined,
+    })
+
+    // Share is over NAMED speech and totals 100%, matching the panel. The union
+    // in attributedSpeakingMs counts crosstalk once, so dividing by it would let
+    // the shares exceed 100%.
+    const namedTotal = review.voices.reduce((n, v) => (v.nameAsserted ? n + v.speakingMs : n), 0)
+    const attendees = review.voices.map(v => ({
+      label: v.label,
+      asserted: v.nameAsserted,
+      speakingMs: v.speakingMs,
+      share: v.nameAsserted && namedTotal > 0 ? v.speakingMs / namedTotal : null,
+    }))
+
+    // A missing .md is not fatal — the review and the sidecar still describe the
+    // meeting, and a reviewer would rather have who-spoke than a 404.
+    let markdown = ''
+    try { markdown = readFileSync(mdPath, 'utf-8') } catch { markdown = '' }
+    const scribe = parseScribe(markdown)
+
+    const date = meetingDate(sidecar.startTime)
+    const durationMin = Math.round((review.durationMs || 0) / 60_000)
+    // EXACTLY Control's speakingCoverage: attributed / (attributed + unattributed).
+    // Not attributed/voicedMs — voicedMs is the union of everyone, which would
+    // give a different number and let the clipboard and the panel disagree about
+    // whether a share is trustworthy. Null when there is no voice at all, which
+    // suppresses shares rather than dividing by zero.
+    const coverageDenominator = review.attributedSpeakingMs + review.unattributedSpeakingMs
+    const coverage = coverageDenominator > 0
+      ? review.attributedSpeakingMs / coverageDenominator
+      : null
+    const clip = {
+      title: scribe.title || title,
+      date,
+      durationMin,
+      attendees,
+      scribe,
+      coverage,
+      // The UNION, never the sum of per-voice figures — crosstalk is counted once.
+      unattributedMs: review.unattributedSpeakingMs,
+    }
+
+    res.set('Cache-Control', 'private, no-store')
+    res.json({
+      sessionId,
+      title: scribe.title || title,
+      date,
+      durationMin,
+      scribeAvailable: markdown.length > 0,
+      attendees,
+      speakingTimeSource: review.speakingTimeSource,
+      voicedMs: review.voicedMs,
+      summary: scribe.summary,
+      topics: scribe.topics,
+      decisions: scribe.decisions,
+      actions: scribe.actions,
+      extras: scribe.extras.map(x => ({ heading: x.heading, body: x.body })),
+      transcriptChars: scribe.transcript.length,
+      coverage,
+      sharesReported: coverage !== null && coverage >= SHARE_COVERAGE_FLOOR,
+      clipboardSummary: clipboardSummary(clip),
+      clipboardFull: clipboardFull(clip),
+      // Sizes of the ACTUAL strings, so the button label and the copy
+      // confirmation can never quote two different numbers for one click.
+      summaryChars: clipboardSummary(clip).length,
+      fullChars: clipboardFull(clip).length,
+    })
+  })
+
   router.post('/meeting/:sessionId/relabel', (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? '')
