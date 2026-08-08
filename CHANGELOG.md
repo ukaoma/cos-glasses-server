@@ -11,9 +11,10 @@
   WAVs, missing FFmpeg, timeouts, and invalid output all serve the original raw
   file. `?raw=1` provides an authenticated per-request A/B escape hatch.
 - **A live recording always wins.** Play requests made while any meeting is
-  actively recording bypass cleanup and serve raw, so an optional replay
-  feature cannot put CPU or synchronous profiling on the live transcription
-  path.
+  actively recording bypass cleanup and serve raw. If recording starts after
+  cleanup was admitted, the one global cleanup worker is preempted within
+  100 ms; requests for other chunks while it is busy immediately serve raw.
+  FFmpeg falls back inside eight seconds, ahead of Control's media deadline.
 - **No live or canonical path changed.** Capture, Turbo preview, Large-v3
   canonical transcription, speaker attribution, meeting save, HQ polish, and
   meeting sync do not import or call the cleanup module. Health reports the

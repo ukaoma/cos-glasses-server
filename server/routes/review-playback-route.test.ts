@@ -18,7 +18,10 @@ let root = ''
 let dataDir = ''
 let server: Server | null = null
 let baseUrl = ''
-let adaptivePlaybackMock: ((path: string) => Promise<{ path: string; mode: 'raw' | 'adaptive'; profile: 'hot' | null }>) | null = null
+let adaptivePlaybackMock: ((
+  path: string,
+  options?: { shouldAbort?: () => boolean },
+) => Promise<{ path: string; mode: 'raw' | 'adaptive'; profile: 'hot' | null; reason?: string }>) | null = null
 let liveRecordingCount = 0
 
 const MONTH = '2026-08'
@@ -58,17 +61,13 @@ async function startServer(): Promise<void> {
     getOwnerName: () => 'Miles',
     getTranscriptionProfileStatus: () => ({}),
   }))
-  if (liveRecordingCount > 0) {
-    vi.doMock('./transcribe-stream.js', async () => {
-      const actual = await vi.importActual<typeof import('./transcribe-stream.js')>('./transcribe-stream.js')
-      return {
-        ...actual,
-        getTranscriptionSessionLiveness: () => ({ live: liveRecordingCount, stale: 0, staleSessions: [] }),
-      }
-    })
-  } else {
-    vi.doUnmock('./transcribe-stream.js')
-  }
+  vi.doMock('./transcribe-stream.js', async () => {
+    const actual = await vi.importActual<typeof import('./transcribe-stream.js')>('./transcribe-stream.js')
+    return {
+      ...actual,
+      getTranscriptionSessionLiveness: () => ({ live: liveRecordingCount, stale: 0, staleSessions: [] }),
+    }
+  })
   if (adaptivePlaybackMock) {
     vi.doMock('../lib/adaptive-playback-audio.js', async () => {
       const actual = await vi.importActual<typeof import('../lib/adaptive-playback-audio.js')>('../lib/adaptive-playback-audio.js')
@@ -141,7 +140,7 @@ describe('playing one meeting segment', () => {
     await startServer()
 
     const res = await get('/api/meeting/meeting_p1/audio/2')
-    expect(res.status).toBe(200)
+    expect(res.status, res.body.toString()).toBe(200)
     expect(res.type).toContain('audio/wav')
     // Byte-checked: chunk 2 was filled with 3. Serving a neighbour would still
     // be a 200 with plausible audio, and the reviewer would confirm an identity
@@ -187,6 +186,23 @@ describe('playing one meeting segment', () => {
     expect(res.playback).toBe('raw')
     expect(res.bypass).toBe('live_recording')
     expect(cleanupCalls).toBe(0)
+  })
+
+  it('preempts optional cleanup when recording starts after request admission', async () => {
+    seedMeeting('meeting_live_transition')
+    seedReviewAudio('meeting_live_transition', [0])
+    adaptivePlaybackMock = async (path, options) => {
+      liveRecordingCount = 1
+      expect(options?.shouldAbort?.()).toBe(true)
+      return { path, mode: 'raw', profile: 'hot', reason: 'live_recording' }
+    }
+    await startServer()
+
+    const res = await get('/api/meeting/meeting_live_transition/audio/0')
+    expect(res.status, res.body.toString()).toBe(200)
+    expect(res.body).toEqual(Buffer.alloc(64, 1))
+    expect(res.playback).toBe('raw')
+    expect(res.bypass).toBe('live_recording')
   })
 
   it('404s a chunk that is not retained, and says what IS', async () => {

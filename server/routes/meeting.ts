@@ -1468,10 +1468,22 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // escape hatch; the COS Control toggle is the machine-wide rollback.
     const liveRecording = getTranscriptionSessionLiveness().live > 0
     const playback = archivedPath && req.query.raw !== '1' && !liveRecording
-      ? await adaptivePlaybackAudio(archivedPath)
+      ? await adaptivePlaybackAudio(archivedPath, {
+          // Admission is not enough: if a meeting starts while FFmpeg is
+          // working, the replay job is preempted and this request hears raw.
+          shouldAbort: () => getTranscriptionSessionLiveness().live > 0,
+        })
       : { path, mode: 'raw' as const, profile: null }
     res.set('X-COS-Audio-Playback', playback.mode)
-    if (liveRecording) res.set('X-COS-Audio-Bypass', 'live_recording')
+    const bypassReason = 'reason' in playback ? playback.reason : undefined
+    const bypass = liveRecording
+      ? 'live_recording'
+      : bypassReason === 'live_recording'
+        ? 'live_recording'
+        : bypassReason === 'cleanup_busy'
+          ? 'cleanup_busy'
+          : null
+    if (bypass) res.set('X-COS-Audio-Bypass', bypass)
     if (playback.profile) res.set('X-COS-Audio-Profile', playback.profile)
     sendAudioFile(res, playback.path)
   })

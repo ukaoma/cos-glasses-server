@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -34,14 +34,32 @@ function sine(amplitude: number, frequency: number, seconds = 1): number[] {
 }
 
 let dir = ''
+let originalPath = ''
+
+function installFakeFfmpeg(delayMs: number): void {
+  const bin = join(dir, 'bin')
+  mkdirSync(bin, { recursive: true })
+  const executable = join(bin, 'ffmpeg')
+  writeFileSync(executable, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+const input = args[args.indexOf('-i') + 1]
+const output = args[args.length - 1]
+setTimeout(() => fs.copyFileSync(input, output), ${delayMs})
+`)
+  chmodSync(executable, 0o755)
+  process.env.PATH = `${bin}:${originalPath}`
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'cos-adaptive-playback-'))
+  originalPath = process.env.PATH ?? ''
   delete process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK
 })
 
 afterEach(() => {
   delete process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK
+  process.env.PATH = originalPath
   if (dir) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -97,5 +115,59 @@ describe('canary boundary', () => {
     expect(result.path).toBe(raw)
     expect(result.mode).toBe('raw')
     expect(result.reason).toBe('unsupported_wav')
+  })
+
+  it('generates and reuses one valid cache without changing the raw WAV', async () => {
+    process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK = '1'
+    installFakeFfmpeg(20)
+    const session = join(dir, 'meeting-audio', 'meeting_cache')
+    mkdirSync(session, { recursive: true })
+    const raw = join(session, 'chunk_0000.wav')
+    const original = pcm16Wav(sine(2_000, 440))
+    writeFileSync(raw, original)
+
+    const first = await adaptivePlaybackAudio(raw)
+    const second = await adaptivePlaybackAudio(raw)
+
+    expect(first.mode).toBe('adaptive')
+    expect(second).toEqual(first)
+    expect(first.path).not.toBe(raw)
+    expect(readFileSync(raw)).toEqual(original)
+    expect(readFileSync(first.path)).toEqual(original)
+  })
+
+  it('admits one global worker and serves raw immediately for a different busy chunk', async () => {
+    process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK = '1'
+    installFakeFfmpeg(350)
+    const session = join(dir, 'meeting-audio', 'meeting_busy')
+    mkdirSync(session, { recursive: true })
+    const firstRaw = join(session, 'chunk_0000.wav')
+    const secondRaw = join(session, 'chunk_0001.wav')
+    writeFileSync(firstRaw, pcm16Wav(sine(2_000, 440)))
+    writeFileSync(secondRaw, pcm16Wav(sine(2_000, 660)))
+
+    const first = adaptivePlaybackAudio(firstRaw)
+    await new Promise(resolve => setTimeout(resolve, 40))
+    const second = await adaptivePlaybackAudio(secondRaw)
+
+    expect(second).toMatchObject({ path: secondRaw, mode: 'raw', reason: 'cleanup_busy' })
+    expect((await first).mode).toBe('adaptive')
+  })
+
+  it('preempts an admitted cleanup when live recording starts', async () => {
+    process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK = '1'
+    installFakeFfmpeg(2_000)
+    const session = join(dir, 'meeting-audio', 'meeting_preempt')
+    mkdirSync(session, { recursive: true })
+    const raw = join(session, 'chunk_0000.wav')
+    writeFileSync(raw, pcm16Wav(sine(2_000, 440)))
+    let live = false
+    const started = Date.now()
+    const pending = adaptivePlaybackAudio(raw, { shouldAbort: () => live })
+    setTimeout(() => { live = true }, 120)
+
+    const result = await pending
+    expect(result).toMatchObject({ path: raw, mode: 'raw', reason: 'live_recording' })
+    expect(Date.now() - started).toBeLessThan(1_000)
   })
 })

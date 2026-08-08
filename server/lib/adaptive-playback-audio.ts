@@ -21,7 +21,10 @@ import { randomUUID } from 'node:crypto'
 import { invalidateMeetingAudioStats } from './meeting-audio-archive.js'
 
 const FILTER_VERSION = 1
-const FFMPEG_TIMEOUT_MS = 30_000
+// Control's bounded media request is 12s. Cleanup must fail back to raw before
+// that client deadline, with margin for the response body to transfer.
+const FFMPEG_TIMEOUT_MS = 8_000
+const LIVE_PREEMPT_POLL_MS = 100
 // Capture chunks are seconds long (~200 KB). Four MiB still tolerates a wildly
 // oversized chunk while bounding synchronous profiling on the server event loop.
 const MAX_INPUT_BYTES = 4 * 1024 * 1024
@@ -50,6 +53,11 @@ export interface AdaptivePlaybackResult {
   mode: 'raw' | 'adaptive'
   profile: AdaptivePlaybackProfile | null
   reason?: string
+}
+
+export interface AdaptivePlaybackOptions {
+  /** Fail-safe admission/preemption hook supplied by the meeting route. */
+  shouldAbort?: () => boolean
 }
 
 const FILTERS: Record<AdaptivePlaybackProfile, string> = {
@@ -176,7 +184,18 @@ function cachedOutput(rawPath: string, outputPath: string): boolean {
   }
 }
 
-async function runFfmpeg(inputPath: string, outputPath: string, filter: string): Promise<void> {
+function abortRequested(check?: () => boolean): boolean {
+  if (!check) return false
+  try { return check() }
+  catch { return true }
+}
+
+async function runFfmpeg(
+  inputPath: string,
+  outputPath: string,
+  filter: string,
+  shouldAbort?: () => boolean,
+): Promise<void> {
   await new Promise<void>((resolvePromise, rejectPromise) => {
     const proc = spawn('ffmpeg', [
       '-nostdin',
@@ -193,37 +212,71 @@ async function runFfmpeg(inputPath: string, outputPath: string, filter: string):
     ], { stdio: ['ignore', 'ignore', 'pipe'] })
     let settled = false
     let stderr = ''
+    let terminalError: Error | null = null
+    let killSettle: NodeJS.Timeout | null = null
+    let livePoll: NodeJS.Timeout | null = null
     const finish = (error?: Error) => {
       if (settled) return
       settled = true
       clearTimeout(timeout)
+      if (killSettle) clearTimeout(killSettle)
+      if (livePoll) clearInterval(livePoll)
       error ? rejectPromise(error) : resolvePromise()
+    }
+    const stop = (error: Error) => {
+      if (settled || terminalError) return
+      terminalError = error
+      if (!proc.kill('SIGKILL')) { finish(error); return }
+      // SIGKILL should close the direct ffmpeg child immediately. Keep a bounded
+      // settle fallback so a broken process handle cannot strand the request.
+      killSettle = setTimeout(() => finish(error), 1_000)
+      killSettle.unref()
     }
     proc.stderr?.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-MAX_STDERR_BYTES)
     })
     const timeout = setTimeout(() => {
-      proc.kill('SIGKILL')
-      finish(new Error(`ffmpeg timeout (${FFMPEG_TIMEOUT_MS / 1000}s)`))
+      stop(new Error(`ffmpeg timeout (${FFMPEG_TIMEOUT_MS / 1000}s)`))
     }, FFMPEG_TIMEOUT_MS)
+    timeout.unref()
+    if (shouldAbort) {
+      livePoll = setInterval(() => {
+        if (abortRequested(shouldAbort)) stop(new Error('live_recording_started'))
+      }, LIVE_PREEMPT_POLL_MS)
+      livePoll.unref()
+    }
     proc.on('error', error => finish(error))
     proc.on('close', code => {
-      if (code !== 0) finish(new Error(`ffmpeg exit ${code}: ${stderr.trim().slice(-300)}`))
+      if (terminalError) finish(terminalError)
+      else if (code !== 0) finish(new Error(`ffmpeg exit ${code}: ${stderr.trim().slice(-300)}`))
       else finish()
     })
   })
 }
 
 const inFlight = new Map<string, Promise<AdaptivePlaybackResult>>()
+// One cleanup worker for the whole server. Different retained chunks never fan
+// out into competing ffmpeg children; busy requests immediately hear raw.
+let activeGenerationPath: string | null = null
 const counters = {
   generated: 0,
   cacheHits: 0,
   fallbacks: 0,
+  busyBypasses: 0,
+  liveBypasses: 0,
   profiles: {} as Record<AdaptivePlaybackProfile, number>,
 }
 
-async function prepare(rawPath: string): Promise<AdaptivePlaybackResult> {
+async function prepare(rawPath: string, options: AdaptivePlaybackOptions): Promise<AdaptivePlaybackResult> {
   if (!adaptivePlaybackEnabled()) return { path: rawPath, mode: 'raw', profile: null, reason: 'disabled' }
+  if (abortRequested(options.shouldAbort)) {
+    counters.liveBypasses++
+    return { path: rawPath, mode: 'raw', profile: null, reason: 'live_recording' }
+  }
+  if (activeGenerationPath && activeGenerationPath !== rawPath) {
+    counters.busyBypasses++
+    return { path: rawPath, mode: 'raw', profile: null, reason: 'cleanup_busy' }
+  }
   const outputPath = outputPathFor(rawPath)
   if (!outputPath) {
     counters.fallbacks++
@@ -249,9 +302,22 @@ async function prepare(rawPath: string): Promise<AdaptivePlaybackResult> {
     return { path: outputPath, mode: 'adaptive', profile: signal.profile }
   }
 
+  // Re-check after bounded synchronous profiling. A recording that started
+  // during that work must win before any child process is launched.
+  if (abortRequested(options.shouldAbort)) {
+    counters.liveBypasses++
+    return { path: rawPath, mode: 'raw', profile: signal.profile, reason: 'live_recording' }
+  }
+  if (activeGenerationPath && activeGenerationPath !== rawPath) {
+    counters.busyBypasses++
+    return { path: rawPath, mode: 'raw', profile: signal.profile, reason: 'cleanup_busy' }
+  }
+
   const tempPath = join(dirname(outputPath), `.${basename(outputPath)}.${randomUUID()}.tmp.wav`)
+  activeGenerationPath = rawPath
   try {
-    await runFfmpeg(rawPath, tempPath, FILTERS[signal.profile])
+    await runFfmpeg(rawPath, tempPath, FILTERS[signal.profile], options.shouldAbort)
+    if (abortRequested(options.shouldAbort)) throw new Error('live_recording_started')
     if (!existsSync(tempPath) || !analyzePlaybackWav(readFileSync(tempPath))) {
       throw new Error('ffmpeg produced an invalid PCM WAV')
     }
@@ -262,19 +328,25 @@ async function prepare(rawPath: string): Promise<AdaptivePlaybackResult> {
     return { path: outputPath, mode: 'adaptive', profile: signal.profile }
   } catch (error: unknown) {
     counters.fallbacks++
-    const reason = error instanceof Error ? error.message : String(error)
+    const message = error instanceof Error ? error.message : String(error)
+    const reason = message === 'live_recording_started' ? 'live_recording' : message
+    if (reason === 'live_recording') counters.liveBypasses++
     console.warn(`[adaptive-playback] cleanup failed (${signal.profile}); serving raw: ${reason}`)
     return { path: rawPath, mode: 'raw', profile: signal.profile, reason }
   } finally {
+    if (activeGenerationPath === rawPath) activeGenerationPath = null
     try { unlinkSync(tempPath) } catch { /* already renamed or never created */ }
   }
 }
 
 /** Single-flight per raw chunk so simultaneous Play requests run ffmpeg once. */
-export async function adaptivePlaybackAudio(rawPath: string): Promise<AdaptivePlaybackResult> {
+export async function adaptivePlaybackAudio(
+  rawPath: string,
+  options: AdaptivePlaybackOptions = {},
+): Promise<AdaptivePlaybackResult> {
   const current = inFlight.get(rawPath)
   if (current) return current
-  const pending = prepare(rawPath).finally(() => inFlight.delete(rawPath))
+  const pending = prepare(rawPath, options).finally(() => inFlight.delete(rawPath))
   inFlight.set(rawPath, pending)
   return pending
 }
@@ -288,7 +360,10 @@ export function adaptivePlaybackStatus(): {
   generatedThisBoot: number
   cacheHitsThisBoot: number
   fallbacksThisBoot: number
+  busyBypassesThisBoot: number
+  liveBypassesThisBoot: number
   inFlight: number
+  globalWorkerBusy: boolean
   profilesThisBoot: Partial<Record<AdaptivePlaybackProfile, number>>
 } {
   return {
@@ -300,7 +375,10 @@ export function adaptivePlaybackStatus(): {
     generatedThisBoot: counters.generated,
     cacheHitsThisBoot: counters.cacheHits,
     fallbacksThisBoot: counters.fallbacks,
+    busyBypassesThisBoot: counters.busyBypasses,
+    liveBypassesThisBoot: counters.liveBypasses,
     inFlight: inFlight.size,
+    globalWorkerBusy: activeGenerationPath !== null,
     profilesThisBoot: { ...counters.profiles },
   }
 }

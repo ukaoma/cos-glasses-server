@@ -168,6 +168,17 @@ describe('retention window', () => {
     expect(mod.sweepMeetingAudio(Date.now()).removed).toEqual(['meeting_six'])
   })
 
+  it('removes a derived cache orphan when its raw owner is gone', () => {
+    const orphan = join(dir, 'meeting-audio', 'meeting_derived_only')
+    mkdirSync(orphan, { recursive: true })
+    writeFileSync(join(orphan, 'playback_v1_0000.wav'), Buffer.alloc(2_400, 7))
+
+    const result = mod.sweepMeetingAudio(Date.now())
+    expect(result.removed).toEqual(['meeting_derived_only'])
+    expect(result.bytesFreed).toBe(2_400)
+    expect(existsSync(orphan)).toBe(false)
+  })
+
   it('RETAINS a session whose age cannot be read', () => {
     // An unreadable stat treated as ancient would delete the audio a pending
     // review depends on.

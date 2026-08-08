@@ -288,7 +288,9 @@ Capture, live preview, canonical transcription, speaker attribution, save, HQ,
 and meeting sync are unchanged. Append `?raw=1` to an authenticated playback
 URL for an immediate raw-versus-cleaned A/B check.
 While a meeting is actively recording, playback automatically stays raw so the
-optional cleanup process cannot contend with live transcription.
+optional cleanup process cannot contend with live transcription. Cleanup uses
+one global worker, serves raw while that worker is busy, and preempts within
+100 ms if a meeting starts after a replay request was admitted.
 
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):

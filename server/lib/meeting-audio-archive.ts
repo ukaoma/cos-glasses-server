@@ -115,10 +115,12 @@ export function archiveSessionAudio(sessionId: string, sourceDir: string): Archi
 }
 
 /** Bytes and age for one archived session. */
-function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: number } {
-  let bytes = 0, mtimeMs = 0, files = 0
+function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: number; derivedFiles: number; readable: boolean } {
+  let bytes = 0, mtimeMs = 0, files = 0, derivedFiles = 0, readable = false
   try {
-    for (const name of readdirSync(dir).filter(name => isChunkWav(name) || isDerivedPlaybackWav(name))) {
+    const names = readdirSync(dir)
+    readable = true
+    for (const name of names.filter(name => isChunkWav(name) || isDerivedPlaybackWav(name))) {
       try {
         const st = statSync(join(dir, name))
         bytes += st.size
@@ -127,11 +129,13 @@ function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: numb
         if (isChunkWav(name)) {
           files++
           mtimeMs = Math.max(mtimeMs, st.mtimeMs)
+        } else {
+          derivedFiles++
         }
       } catch { /* skip unreadable */ }
     }
   } catch { /* unreadable dir reports zero */ }
-  return { bytes, mtimeMs, files }
+  return { bytes, mtimeMs, files, derivedFiles, readable }
 }
 
 export interface SweepResult {
@@ -154,7 +158,15 @@ export function sweepMeetingAudio(nowMs: number, ttlMs = meetingAudioTtlMs()): S
   try { names = readdirSync(root) } catch { return out }
   for (const name of names) {
     const dir = join(root, name)
-    const { bytes, mtimeMs } = sessionSize(dir)
+    const { bytes, mtimeMs, files, derivedFiles, readable } = sessionSize(dir)
+    // A readable directory containing only playback derivatives has lost its
+    // raw owner. Remove that cache orphan; unreadable/empty directories remain
+    // fail-safe retained because they may still contain evidence we could not stat.
+    if (readable && files === 0 && derivedFiles > 0) {
+      try { rmSync(dir, { recursive: true, force: true }); out.removed.push(name); out.bytesFreed += bytes }
+      catch { out.retained.push(name) }
+      continue
+    }
     if (mtimeMs <= 0) { out.retained.push(name); continue }
     if (nowMs - mtimeMs > ttlMs) {
       try { rmSync(dir, { recursive: true, force: true }); out.removed.push(name); out.bytesFreed += bytes }
