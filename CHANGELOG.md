@@ -1,21 +1,53 @@
 ## 6.21.31
 
-- **Meeting domains are DISCOVERED, not enumerated.** This module carried
-  `['quilt','sprocket_rocket','hermit_crabs','personal']` — one user's business
-  domains, shipped as a requirement. A second person set up their own COS and the
-  library could never see their meetings, because their tree has none of those
-  four and never will.
+Domains belong to the user. Four places in this codebase hardcoded ONE user's
+business units, a fifth pretended to make them configurable, and two of them
+disagreed with each other. A second person set up their own COS on 2026-08-08 and
+nothing she could name would work.
 
-  Any immediate subdirectory holding a `meetings/` folder is now a domain, whatever
-  it is called. The guard that list doubled as — path-traversal safety — is now
-  explicit and separate, and deliberately permissive about STYLE: a real domain may
-  be `DNP study` with a space, and an alphanumeric-only rule would quietly re-encode
-  one author's snake_case habit as a requirement.
+- **New `lib/domains.ts` — one definition of each of these, replacing five.** What
+  it replaced: `['quilt','sprocket_rocket','hermit_crabs','personal']` in the
+  operations lister (used for listing, sidecar lookup, filtering, AND as the
+  path-traversal guard); a hand-written badge table; `domain.slice(0,2)` in the
+  meeting store, which rendered `sprocket_rocket` as "SP" while the lister said
+  "SR"; and `getDomainKeywords()` in `profile.ts`, exported with **zero call
+  sites** — a whole configuration chain built and never connected, which reads as
+  "domains are configurable" to anyone who greps for it.
 
-  The hand-written abbreviation table is gone too; badges are derived. Derivation
-  reproduces every old entry exactly (quilt Q, personal P, hermit_crabs HC,
-  sprocket_rocket SR), and a test pins that equivalence so it cannot drift and
-  silently relabel an existing user's rows.
+- **Domains are the UNION of your configuration and what is on disk.** The union
+  is load-bearing, not incidental. Configured with no folder yet: still listed, so
+  a new install can be routed before any folder exists. On disk but unconfigured:
+  still listed, so a folder made by hand never becomes invisible — and that is
+  what makes this change safe for an existing install, whose profile configures
+  nothing and whose folders resolve exactly as before. Nothing is written to any
+  existing profile. Neither: the defaults.
+
+- **Defaults are `personal` and `business`, badged P and B.** Two, not four, and
+  only a genuinely fresh COS ever sees them. Set your own in
+  `.cos-profile.json` — a bare list works (`"domains": ["personal","work"]`), or
+  objects with `keywords` and an `abbr` override.
+
+- **A meeting with no domain from the client is now routed by content.** Keyword
+  scoring over title and transcript, counting DISTINCT matched keywords so one
+  word repeated forty times cannot outvote four different signals, word-boundary
+  matched so "car" does not fire inside "carrier". Deliberately not a model call:
+  this runs on every save. Nothing scoring falls back to `personal`, the safe
+  direction — a work meeting misfiled as personal is a nuisance the user fixes,
+  while a personal conversation filed under a business domain can be pasted into
+  a work channel.
+
+- **A domain name is checked for SAFETY, not style.** The old save-path pattern
+  `/^[a-z][a-z0-9_]{0,31}$/` accepted `sprocket_rocket` and rejected `DNP study`,
+  so a user could select that folder and then never save a meeting into it. The
+  store also lowercased the name, which turned `DNP study` into `dnp study` and
+  matched no directory on disk. Spaces and mixed case are now fine; traversal,
+  control characters and hidden names are still refused.
+
+- **A domain must hold the shape the lister reads.** A `meetings/` folder is no
+  longer enough: it must contain at least one `YYYY-MM` month directory. Measured
+  on a real install, `operations/archive/meetings/` holds domain names rather than
+  months, so a bare directory check listed it as a domain with permanently zero
+  meetings. Structural, so no blocklist of names was needed.
 
 ## 6.21.30
 

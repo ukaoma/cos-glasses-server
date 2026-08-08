@@ -15,68 +15,26 @@
 
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
+import { discoveredDomains, domainAbbreviation as deriveAbbr, isSafeDomainName as safeName } from './domains.js'
 import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
 import { MEETING_SOURCE_MAX_BYTES } from './meeting-store.js'
 
 /**
- * The four domains of ONE user's COS. Retained only as the documented example
- * layout and as test material — never as the set this module will accept.
- *
- * Hardcoding these shipped a product that only works for its author: Queen's COS
- * has her own domains, so every folder she chose was rejected, and the Control
- * picker told her to supply a `quilt/` tree she has no reason to own. Domains are
- * DISCOVERED from the directory the user actually chose.
+ * The four domains of ONE user's COS. Retained as the documented example layout
+ * and as test material — never as the set this module will accept.
  */
 export const EXAMPLE_MEETING_DOMAINS = ['quilt', 'sprocket_rocket', 'hermit_crabs', 'personal'] as const
 
 /**
- * Is this directory name safe to join onto the operations root?
- *
- * A safety check, NOT a naming policy. The previous membership test doubled as
- * the path-traversal guard, so discovery has to carry that weight explicitly.
- * Deliberately permissive about STYLE: a real domain may be `DNP study` with a
- * space or carry non-ASCII, and a `[A-Za-z0-9_]` guard would quietly re-encode
- * one user's snake_case habit as a requirement.
+ * Domain resolution, safe-name checks and badges have exactly ONE definition
+ * each, in `domains.ts`, shared with the meeting store and mirrored by the
+ * Control picker. Re-exported because this module's callers import them.
  */
-function isSafeDomainName(name: string): boolean {
-  if (!name || name.length > 128) return false
-  if (name === '.' || name === '..') return false
-  if (name.startsWith('.')) return false
-  if (name.includes('/') || name.includes('\\') || name.includes('\0')) return false
-  return true
-}
+export { domainAbbreviation, isSafeDomainName } from './domains.js'
 
-/**
- * Every immediate subdirectory of `operationsDir` that holds a `meetings/` tree.
- *
- * This IS the domain list. Sorted for stable ordering.
- */
+/** Immediate subdirectories of `operationsDir` holding a `meetings/` tree. */
 export function discoverMeetingDomains(operationsDir: string): string[] {
-  let entries: string[]
-  try {
-    entries = readdirSync(operationsDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name)
-  } catch { return [] }
-  return entries
-    .filter(isSafeDomainName)
-    .filter(name => {
-      try { return statSync(join(operationsDir, name, 'meetings')).isDirectory() } catch { return false }
-    })
-    .sort()
-}
-
-/**
- * Short badge for a domain, derived rather than looked up.
- *
- * Derivation reproduces the old hand-written table exactly — quilt Q,
- * personal P, hermit_crabs HC, sprocket_rocket SR — which is why the table is
- * gone. A test pins that equivalence so this cannot drift silently.
- */
-export function domainAbbreviation(domain: string): string {
-  const words = domain.split(/[^\p{L}\p{N}]+/u).filter(Boolean)
-  if (words.length === 0) return '?'
-  return words.slice(0, 2).map(w => w[0].toUpperCase()).join('')
+  return discoveredDomains(operationsDir)
 }
 
 const DETAIL_CHUNK_ESTIMATE_CHARS = 1700
@@ -249,7 +207,7 @@ function parseMeetingMeta(content: string, filename: string, domain: string): Co
     date,
     ...(time ? { time } : {}),
     domain,
-    domainAbbr: domainAbbreviation(domain),
+    domainAbbr: deriveAbbr(domain),
     source,
     duration,
     durationMinutes,
@@ -469,7 +427,7 @@ export function getCosOperationsMeetingDetail(
 
   // Two separate jobs, and the old single membership test conflated them:
   // traversal safety, then whether this domain actually exists here.
-  if (!isSafeDomainName(domain)) return null
+  if (!safeName(domain)) return null
   if (!discoverMeetingDomains(operationsDir).includes(domain)) return null
   if (!/^\d{4}-\d{2}$/.test(month) || basename(filename) !== filename || !filename.endsWith('.md')) {
     return null

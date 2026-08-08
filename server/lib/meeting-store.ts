@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
+import { FALLBACK_DOMAIN, domainAbbreviation, isSafeDomainName } from './domains.js'
 import type {
   ProviderCandidateRecord,
   IndexedTranscriptChunk,
@@ -128,9 +129,16 @@ function normalizeSessionId(value: string): string {
   return value
 }
 
+/**
+ * Trim, validate, and PRESERVE CASE.
+ *
+ * Lowercasing was silently destructive: a domain folder named `DNP study` became
+ * `dnp study`, which then matched no directory on disk. Existing all-lowercase
+ * domains are unaffected.
+ */
 function normalizeDomain(value?: string): string {
-  const domain = (value || 'personal').trim().toLowerCase()
-  if (!DOMAIN_PATTERN.test(domain)) {
+  const domain = (value || FALLBACK_DOMAIN).trim()
+  if (!isSafeDomainName(domain)) {
     throw new MeetingStoreError('Invalid domain', 400, 'invalid_domain')
   }
   return domain
@@ -272,7 +280,7 @@ function parseDurationMinutes(duration: string): number | undefined {
 function parseMeeting(content: string, filename: string, month: string): MeetingDetail {
   const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
   const date = parseField(content, 'Date') || filename.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || 'unknown'
-  const domain = parseField(content, 'Domain') || 'personal'
+  const domain = parseField(content, 'Domain') || FALLBACK_DOMAIN
   const duration = parseField(content, 'Duration')
   const transcript = extractSection(content, ['Transcript'], true)
   const storedSummary = extractSection(content, ['Summary'])
@@ -293,7 +301,10 @@ function parseMeeting(content: string, filename: string, month: string): Meeting
     title: heading || basename(filename, '.md').split('_').slice(1).join(' ') || 'Untitled Meeting',
     date,
     domain,
-    domainAbbr: domain === 'personal' ? 'P' : domain.slice(0, 2).toUpperCase() || '?',
+    // Shared derivation. This was slice(0,2), which rendered sprocket_rocket as
+    // "SP" while cos-operations-meetings rendered it "SR" — two schemes in one
+    // codebase, disagreeing with each other.
+    domainAbbr: domainAbbreviation(domain),
     source: parseField(content, 'Source'),
     duration,
     ...(parseDurationMinutes(duration) !== undefined ? { durationMinutes: parseDurationMinutes(duration) } : {}),
@@ -535,7 +546,7 @@ export class MeetingStore {
   list(options: { limit?: number; domain?: string } = {}): MeetingMeta[] {
     const limit = Math.max(1, Math.min(50, Math.trunc(options.limit ?? 20)))
     const domain = options.domain ?? 'all'
-    if (domain !== 'all' && !DOMAIN_PATTERN.test(domain)) {
+    if (domain !== 'all' && !isSafeDomainName(domain)) {
       throw new MeetingStoreError('Invalid domain filter', 400, 'invalid_domain')
     }
     const rootReal = this.existingRootRealpath()
@@ -565,7 +576,7 @@ export class MeetingStore {
   }
 
   detail(domain: string, month: string, filename: string): MeetingDetail {
-    if (!DOMAIN_PATTERN.test(domain)) {
+    if (!isSafeDomainName(domain)) {
       throw new MeetingStoreError('Invalid domain', 400, 'invalid_domain')
     }
     if (!MONTH_PATTERN.test(month)) {

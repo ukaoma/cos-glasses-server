@@ -41,6 +41,15 @@ function profilePath(): string {
 
 let profileCache: Record<string, unknown> | null = null
 
+/**
+ * The whole profile object, for callers that need a key this module has no
+ * dedicated accessor for. Read-only by convention — mutate via
+ * updateProfileFields so the atomic write and cache-bust chain still applies.
+ */
+export function loadProfileObject(): Record<string, unknown> {
+  return loadProfile()
+}
+
 function loadProfile(): Record<string, unknown> {
   if (profileCache) return profileCache
   try {

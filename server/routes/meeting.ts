@@ -111,7 +111,9 @@ import { getServerInstanceId } from '../lib/server-instance-id.js'
 import {
   cosOperationsMeetingsConfigured,
   findCosOperationsMeetingBySessionId,
+  resolveCosOperationsDir,
 } from '../lib/cos-operations-meetings.js'
+import { domainForMeeting, resolveDomains } from '../lib/domains.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import {
   DEATTRIBUTED_PREFIX,
@@ -560,10 +562,19 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
       // Initial canonical text + structured metadata are published before any
       // live state is removed or background work is scheduled.
+      // The client's choice wins. When it sends none — the normal case for a G2
+      // save — infer from the content instead of filing everything under one
+      // domain. Keyword scoring, no model call: this runs on every save, and a
+      // per-meeting LLM call would breach the recurring-caller rule.
+      const filedDomain = domainForMeeting(
+        body?.domain as string | undefined,
+        `${(body?.title as string | undefined) ?? ''}\n${transcript}`,
+        resolveCosOperationsDir(),
+      )
       const saved = store.save({
         sessionId,
         title: body?.title as string | undefined,
-        domain: body?.domain as string | undefined,
+        domain: filedDomain,
         transcript: cleanFinalTranscript(transcript),
         startTime,
         durationMs,
@@ -1670,7 +1681,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const saved = store.save({
         sessionId,
         title: typeof body.title === 'string' && body.title.trim() ? body.title : undefined,
-        domain: typeof body.domain === 'string' && body.domain.trim() ? body.domain : undefined,
+        domain: domainForMeeting(
+          typeof body.domain === 'string' && body.domain.trim() ? body.domain : undefined,
+          `${typeof body.title === 'string' ? body.title : ''}\n${transcript}`,
+          resolveCosOperationsDir(),
+        ),
         transcript,
         startTime: capture.startTime,
         durationMs: capture.durationMs,
