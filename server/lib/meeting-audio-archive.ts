@@ -115,12 +115,25 @@ export function archiveSessionAudio(sessionId: string, sourceDir: string): Archi
 }
 
 /** Bytes and age for one archived session. */
-function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: number; derivedFiles: number; readable: boolean } {
-  let bytes = 0, mtimeMs = 0, files = 0, derivedFiles = 0, readable = false
+function sessionSize(dir: string): {
+  bytes: number
+  mtimeMs: number
+  files: number
+  derivedFiles: number
+  otherEntries: number
+  statFailures: number
+  readable: boolean
+} {
+  let bytes = 0, mtimeMs = 0, files = 0, derivedFiles = 0
+  let otherEntries = 0, statFailures = 0, readable = false
   try {
     const names = readdirSync(dir)
     readable = true
-    for (const name of names.filter(name => isChunkWav(name) || isDerivedPlaybackWav(name))) {
+    for (const name of names) {
+      if (!isChunkWav(name) && !isDerivedPlaybackWav(name)) {
+        otherEntries++
+        continue
+      }
       try {
         const st = statSync(join(dir, name))
         bytes += st.size
@@ -132,10 +145,10 @@ function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: numb
         } else {
           derivedFiles++
         }
-      } catch { /* skip unreadable */ }
+      } catch { statFailures++ }
     }
   } catch { /* unreadable dir reports zero */ }
-  return { bytes, mtimeMs, files, derivedFiles, readable }
+  return { bytes, mtimeMs, files, derivedFiles, otherEntries, statFailures, readable }
 }
 
 export interface SweepResult {
@@ -158,11 +171,10 @@ export function sweepMeetingAudio(nowMs: number, ttlMs = meetingAudioTtlMs()): S
   try { names = readdirSync(root) } catch { return out }
   for (const name of names) {
     const dir = join(root, name)
-    const { bytes, mtimeMs, files, derivedFiles, readable } = sessionSize(dir)
-    // A readable directory containing only playback derivatives has lost its
-    // raw owner. Remove that cache orphan; unreadable/empty directories remain
-    // fail-safe retained because they may still contain evidence we could not stat.
-    if (readable && files === 0 && derivedFiles > 0) {
+    const { bytes, mtimeMs, files, derivedFiles, otherEntries, statFailures, readable } = sessionSize(dir)
+    // Delete only a provably cache-only directory. Any unknown entry or failed
+    // stat may be retained evidence, so ambiguity fails closed to preservation.
+    if (readable && files === 0 && derivedFiles > 0 && otherEntries === 0 && statFailures === 0) {
       try { rmSync(dir, { recursive: true, force: true }); out.removed.push(name); out.bytesFreed += bytes }
       catch { out.retained.push(name) }
       continue

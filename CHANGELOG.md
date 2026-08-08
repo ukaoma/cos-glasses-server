@@ -9,7 +9,9 @@
   beside retained raw chunks under a versioned name, count against the existing
   8 GB archive cap, and cannot extend the seven-day retention clock. Unsupported
   WAVs, missing FFmpeg, timeouts, and invalid output all serve the original raw
-  file. `?raw=1` provides an authenticated per-request A/B escape hatch.
+  file. Cache-orphan cleanup deletes only directories proven to contain derived
+  playback files alone; unknown entries or failed stats retain the directory.
+  `?raw=1` provides an authenticated per-request A/B escape hatch.
 - **A live recording always wins.** Play requests made while any meeting is
   actively recording bypass cleanup and serve raw. If recording starts after
   cleanup was admitted, the one global cleanup worker is preempted within

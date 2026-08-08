@@ -179,6 +179,18 @@ describe('retention window', () => {
     expect(existsSync(orphan)).toBe(false)
   })
 
+  it('retains an ambiguous derived directory when any unknown evidence is present', () => {
+    const ambiguous = join(dir, 'meeting-audio', 'meeting_derived_with_evidence')
+    mkdirSync(ambiguous, { recursive: true })
+    writeFileSync(join(ambiguous, 'playback_v1_0000.wav'), Buffer.alloc(2_400, 7))
+    writeFileSync(join(ambiguous, 'recovery-evidence.json'), '{"retained":true}')
+
+    const result = mod.sweepMeetingAudio(Date.now())
+    expect(result.removed).toEqual([])
+    expect(result.retained).toEqual(['meeting_derived_with_evidence'])
+    expect(existsSync(ambiguous)).toBe(true)
+  })
+
   it('RETAINS a session whose age cannot be read', () => {
     // An unreadable stat treated as ancient would delete the audio a pending
     // review depends on.
