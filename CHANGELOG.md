@@ -1,53 +1,82 @@
+## 6.21.29
+
+Everything below was found by two rounds of adversarial review of 6.21.28 against
+the real corpus. **Published 6.21.28 contains the route and none of these fixes**
+— its `meeting-scribe-content.ts` is 192 lines with no `renderProvenance`, no
+`cleanBody`, and no coverage floor (verified by extracting the tarball, not by
+reading the changelog). If you are on 6.21.28, per-voice shares are printed
+without the floor.
+
+- **The compact form no longer ships a transcript.** `contains('transcript')`
+  kept only the longest match and the loser fell through to `extras`, which went
+  into BOTH forms — so the "no transcript" summary carried a second full
+  transcript on 112 of 2,090 real scribes, worst case 78,652 characters, printed
+  directly above its own "Transcript omitted" line. All transcript-shaped
+  sections are now consumed; extras beyond 2,000 characters are omitted from the
+  compact form only. The size ceiling matters because a heading cannot be
+  trusted: one real scribe hides a full transcript under `G2 Glasses Enrichment`.
+
+- **"Voice matching confirmed" was false for two of the three ways a name is
+  asserted.** `nameAsserted` is one boolean over three different warrants — the
+  cosine floor, a human typing the name, and the wearer exemption (identity comes
+  from holding the device, not from a score). The route carried `isOwner` and
+  `confirmedByHuman` and discarded both. The output now names the warrant per
+  person: `"MU" by wearing the device; "Gina Obert" by voice match; "Luke Henry"
+  because a human named that voice`. Labels are quoted, so a typed "Smith, John"
+  cannot read as two people, and the caveat now covers different SPELLINGS of a
+  confirmed name (labels are `MU` while the prose says "Miles").
+
+- **A lone named voice no longer gets a share.** "100% of identified speech" is
+  always true with one name and reads as "he did all the talking" — on 23 real
+  meetings, including one where 6m 29s was unidentified.
+
+- **Rows that overlap say so.** Each per-voice figure is that voice's own union,
+  but two people talking over each other is counted once EACH, so the rows add to
+  more than the meeting on 34 of 323 real meetings (71m of rows inside 66
+  minutes). The figures are right; adding them is what misleads, so the block now
+  explains the overlap instead of shrinking anyone.
+
+- **"(no transcript in this scribe)" was a lie on 140 of 399 sidecars.** Those
+  meetings have no write-up yet while the recording holds the speech — one case
+  today had 27,442 characters in the sidecar this route had just parsed. It now
+  distinguishes "not written up yet" from "nobody spoke".
+
+- **The payload says which business it is.** 98 of 251 real meetings are
+  `personal` and 25 of 251 summaries carry compensation, termination, or legal
+  content, while the buttons are framed for Slack and email. `/speakers` has
+  always carried `domain`; this route dropped it. Personal meetings also get an
+  explicit line before the content.
+
+- **A derived note is never relabelled as the transcript.** With no real
+  transcript, a `Transcript Enrichment (from raw recording)` note won by default
+  and was printed under `## Transcript` with its real heading destroyed. The
+  section's own heading is now used, and an `## Attendees (from transcript)`
+  variant can no longer win the slot at all — nor slip into `extras`, where it
+  printed the unfloored name list this module exists to replace.
+
+- **The generator stamp is stripped by POSITION, not wording.** Measured across
+  1,227 real stamps, four generator names appear ("Meeting Intelligence System",
+  "COS Split Pipeline", "COS Meeting Intelligence", "Manual Granola Paste"), so a
+  name-anchored regex leaks some — I shipped one that leaked 7. Being the last
+  line is the invariant, which also means a mid-body italic line a human wrote
+  now survives. `<!-- g2-needs-domain-review -->` and `<details open>` are
+  stripped too; the internal marker reached 129 of 362 real clipboards.
+
+- Also: `mmss` no longer renders `NaNm NaNs`; `meetingDate(1)` no longer returns
+  1969-12-31; a date-only ISO string no longer reports the previous day; each
+  clipboard form is rendered once instead of twice per request.
+
 ## 6.21.28
+
+**Published. Contains the route only — see 6.21.29 for what it is missing.**
 
 - `GET /meeting/:sessionId/content` — the readable meeting plus two ready-made
   clipboard forms. Operations-first resolution, identical to `/speakers`, so the
-  list row and this view can never describe the same meeting differently. Fails
-  closed with 422 `sidecar_empty` exactly as `/speakers` does.
+  list row and this view can never describe the same meeting differently.
 
-- **The attendee block is rebuilt from the review, and the output says so.** The
-  scribe's own `## Attendees` applies no confidence floor: 2026-08 alone carries
-  scribes listing 55, 21, 20, 19, 18, 18, 17 and 15 attendees. Only asserted
-  voices are named there.
-
-  But names also appear in the prose and as `[Name]:` transcript labels, and
-  those are NOT redacted — a transcript label is evidence, and rewriting it using
-  the verdict of the identifier that produced it is circular; a name in an action
-  item is frequently a person mentioned rather than one present. So every output
-  carries a provenance allowlist instead: who voice matching confirmed, plus a
-  plain statement that any other name below is unconfirmed capture output. On the
-  IJO meeting a blocklist would have run to 14 names.
-
-- **Shares are suppressed below 60% coverage, matching Control's own gate.**
-  Previously the clipboard printed "100% of named speech" on a meeting that was
-  10.5% identified while the panel showed an orange "shares unreliable" warning.
-  49% of real meetings sit below that floor. The artifact that leaves the machine
-  is now never less careful than the screen it came from.
-
-- **Transcript lookup is a CONTAINS match, longest body wins.** Exact matching
-  reported "(no transcript in this scribe)" while 46,716 characters sat in the
-  file. Measured across 1,930 transcript headings: prefix matching catches 94%,
-  contains catches 100% — the 113 scribes headed `G2 Speaker-Separated
-  Transcript` are the speaker-attributed ones, the most useful to hand a model.
-
-- **Unrecognised sections are carried, not discarded** (116,820 characters
-  corpus-wide, including `Granola Structured Notes (canonical)`), the
-  `<details>` wrapper and generator stamp are stripped (160 and 161 of 227
-  scribes), and the unidentified figure uses the review's UNION rather than a sum
-  of per-voice times, which printed 30m 21s inside a 26-minute meeting.
-
-- `meetingDate()` — `startTime` is epoch MILLISECONDS, not ISO; slicing the
-  stringified number produced "1786123940". Also returns empty for 0 and
-  negatives rather than 1969-12-31.
-
-- The scribe parser is fence-aware, so a `#` inside a fenced code block is code
-  rather than a heading that truncates the section.
-
-- Test isolation: `meeting-speakers-route.test.ts` now isolates `COS_DATA_DIR`.
-  It was restoring 26 PRODUCTION conversation sessions and re-mirroring archive
-  days as a load-time side effect of every run. Suite time for that file went
-  93.7s to 2.4s, and the long-standing `cli-transcription-setup` flake stopped
-  firing.
+- The attendee block is rebuilt from the review rather than reusing the scribe's
+  own `## Attendees`, which applies no confidence floor: 2026-08 alone carries
+  scribes listing 55, 21, 20, 19, 18, 18, 17 and 15 attendees.
 
 ## 6.21.27
 

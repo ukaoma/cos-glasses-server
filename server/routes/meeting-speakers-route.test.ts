@@ -387,7 +387,9 @@ describe('meeting content over HTTP', () => {
     expect(r.json.clipboardFull).toContain('Navaz Sharif')
     // So the correction has to travel with it.
     expect(r.json.clipboardFull).toContain('was NOT confirmed')
-    expect(r.json.clipboardFull).toContain('Voice matching confirmed')
+    // The allowlist now names the WARRANT per person rather than crediting
+    // "voice matching" for the wearer exemption and for human-typed names.
+    expect(r.json.clipboardFull).toContain('Names established here:')
   })
 
   it('reports both clipboard sizes from the real strings', async () => {

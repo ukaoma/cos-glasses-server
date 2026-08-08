@@ -142,15 +142,15 @@ describe('cleanBody', () => {
 })
 
 const VOICES: AttendeeLine[] = [
-  { label: 'MU', asserted: true, speakingMs: 600_000, share: 0.6 },
-  { label: 'Gina Obert', asserted: true, speakingMs: 400_000, share: 0.4 },
-  { label: 'Richard Jenkins', asserted: false, speakingMs: 30_000, share: null },
-  { label: 'Ext', asserted: false, speakingMs: 120_000, share: null },
+  { label: 'MU', asserted: true, speakingMs: 600_000, share: 0.6, isOwner: false, confirmedByHuman: false },
+  { label: 'Gina Obert', asserted: true, speakingMs: 400_000, share: 0.4, isOwner: false, confirmedByHuman: false },
+  { label: 'Richard Jenkins', asserted: false, speakingMs: 30_000, share: null, isOwner: false, confirmedByHuman: false },
+  { label: 'Ext', asserted: false, speakingMs: 120_000, share: null, isOwner: false, confirmedByHuman: false },
 ]
 /** The review's UNION for the unnamed voices — deliberately LESS than 30+120. */
 const UNION_MS = 100_000
-const HIGH = { coverage: 0.9, unattributedMs: UNION_MS }
-const LOW = { coverage: 0.105, unattributedMs: UNION_MS }
+const HIGH = { coverage: 0.9, unattributedMs: UNION_MS, voicedMs: 0 }
+const LOW = { coverage: 0.105, unattributedMs: UNION_MS, voicedMs: 0 }
 
 describe('renderAttendees', () => {
   it('names only asserted voices, with time and share', () => {
@@ -180,7 +180,7 @@ describe('renderAttendees', () => {
   })
 
   it('suppresses shares when coverage is unknown, failing closed', () => {
-    expect(renderAttendees(VOICES, { coverage: null, unattributedMs: UNION_MS })).not.toContain('%')
+    expect(renderAttendees(VOICES, { coverage: null, unattributedMs: UNION_MS, voicedMs: 0 })).not.toContain('%')
   })
 
   it('emits no em dash or arrow, per the standing rule for generated copy', () => {
@@ -194,15 +194,22 @@ describe('renderAttendees', () => {
   })
 
   it('formats a whole minute without a bare 0s', () => {
-    const one: AttendeeLine[] = [{ label: 'A', asserted: true, speakingMs: 60_000, share: 1 }]
-    expect(renderAttendees(one, HIGH)).toContain('- A: 1m ·')
+    const one: AttendeeLine[] = [{ label: 'A', asserted: true, speakingMs: 60_000, share: 1, isOwner: false, confirmedByHuman: false }]
+    const out = renderAttendees(one, HIGH)
+    expect(out).toContain('- A: 1m')
+    expect(out.includes('1m 0s'), 'bare 0s seconds').toBe(false)
+    // And a lone named voice gets no share: "100% of identified speech" is
+    // always true and reads as "he did all the talking".
+    expect(out.includes('%'), 'share printed for a single named voice').toBe(false)
   })
 })
 
 describe('renderProvenance', () => {
   it('names the confirmed set as an allowlist', () => {
     const out = renderProvenance(VOICES, 0.9)
-    expect(out).toContain('Voice matching confirmed: MU, Gina Obert.')
+    expect(out).toContain('Names established here:')
+    expect(out).toMatch(/"MU"/)
+    expect(out).toMatch(/"Gina Obert"/)
   })
 
   it('warns that any other name is unconfirmed, and may be merely mentioned', () => {
@@ -217,7 +224,7 @@ describe('renderProvenance', () => {
 
   it('is explicit when nobody was confirmed', () => {
     const none = VOICES.filter(v => !v.asserted)
-    expect(renderProvenance(none, 0.05)).toContain('confirmed nobody')
+    expect(renderProvenance(none, 0.05)).toContain('No name in this meeting was established')
   })
 })
 
@@ -229,6 +236,9 @@ const INPUT = {
   scribe: parseScribe(SCRIBE),
   coverage: 0.105,
   unattributedMs: UNION_MS,
+  voicedMs: 0,
+  domain: 'quilt',
+  capturedChars: 0,
 }
 
 describe('clipboard forms', () => {
@@ -243,7 +253,7 @@ describe('clipboard forms', () => {
   // label, prose mention) — so the output MUST carry the correction with it.
   it('carries the provenance warning wherever an unasserted name can appear', () => {
     for (const out of [clipboardSummary(INPUT), clipboardFull(INPUT)]) {
-      expect(out).toContain('Voice matching confirmed: MU, Gina Obert.')
+      expect(out).toContain('Names established here:')
       expect(out).toContain('was NOT confirmed')
     }
   })
@@ -311,5 +321,168 @@ describe('meetingDate', () => {
     for (const x of [undefined, null, '', 'not a date', {}, NaN, 0, -1]) {
       expect(meetingDate(x)).toBe('')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Second /qa round. Each of these fails if its guard is removed — verified by
+// mutation, not by the suite going green.
+// ---------------------------------------------------------------------------
+
+const BASE = {
+  title: 'T', date: '2026-08-07', durationMin: 30,
+  attendees: [] as AttendeeLine[], scribe: parseScribe('# T'),
+  coverage: 0.9, unattributedMs: 0, voicedMs: 0, domain: '', capturedChars: 0,
+}
+
+const A = (label: string, o: Partial<AttendeeLine> = {}): AttendeeLine => ({
+  label, asserted: true, speakingMs: 60_000, share: 0.5,
+  isOwner: false, confirmedByHuman: false, ...o,
+})
+
+describe('provenance names the WARRANT, not "voice matching" for all three', () => {
+  it('credits the wearer exemption as wearing the device', () => {
+    const out = renderProvenance([A('MU', { isOwner: true })], 0.9)
+    expect(out).toMatch(/"MU" by wearing the device/)
+    expect(out).not.toMatch(/"MU" by voice match/)
+  })
+
+  it('credits a human-typed name to the human', () => {
+    const out = renderProvenance([A('Luke Henry', { confirmedByHuman: true })], 0.9)
+    expect(out).toMatch(/"Luke Henry" because a human named that voice/)
+    expect(out).not.toMatch(/"Luke Henry" by voice match/)
+  })
+
+  it('credits only a real cosine match to voice matching', () => {
+    const out = renderProvenance([A('Niala Samnarine')], 0.9)
+    expect(out).toMatch(/"Niala Samnarine" by voice match/)
+  })
+
+  it('separates all three warrants in one meeting', () => {
+    const out = renderProvenance([
+      A('MU', { isOwner: true }),
+      A('Niala Samnarine'),
+      A('Luke Henry', { confirmedByHuman: true }),
+    ], 0.9)
+    expect(out).toMatch(/"MU" by wearing the device; "Niala Samnarine" by voice match; "Luke Henry" because a human named that voice/)
+  })
+
+  it('quotes labels so a comma inside one cannot read as two people', () => {
+    expect(renderProvenance([A('Smith, John')], 0.9)).toMatch(/"Smith, John"/)
+  })
+
+  it('warns that a different SPELLING of a confirmed name is still unconfirmed', () => {
+    // Labels are `MU` while the prose says "Miles"; the correction chain is
+    // documented as Ext -> Luke H -> Luke Henry. A reader applying a
+    // names-only rule literally would mis-read both.
+    expect(renderProvenance([A('MU', { isOwner: true })], 0.9))
+      .toMatch(/any different spelling of the ones just listed/)
+  })
+})
+
+describe('the compact form stays compact', () => {
+  const twoTranscripts = [
+    '# Two Transcripts',
+    '## Summary', 'short summary',
+    '## Transcript', 'A'.repeat(4000),
+    '## G2 Speaker-Separated Transcript', 'B'.repeat(3000),
+  ].join('\n')
+
+  it('never ships a transcript in clipboardSummary when a scribe has two', () => {
+    const scribe = parseScribe(twoTranscripts)
+    const sum = clipboardSummary({ ...BASE, scribe })
+    expect(sum.includes('A'.repeat(200)), 'winning transcript leaked into the summary').toBe(false)
+    expect(sum.includes('B'.repeat(200)), 'losing transcript leaked into the summary').toBe(false)
+  })
+
+  // The two-transcript test above passes even with the consume-all guard
+  // REVERTED, because both fixtures also exceed the size gate — two guards
+  // overlapping, so neither is isolated. A SMALL second transcript separates
+  // them: it slips under the size gate and only the consume-all guard stops it.
+  it('omits a SMALL second transcript from the summary (isolates consume-all)', () => {
+    const scribe = parseScribe([
+      '# Small Loser', '## Summary', 'short',
+      '## Transcript', 'A'.repeat(4000),
+      '## G2 Speaker-Separated Transcript', '[MU]: a short but real transcript turn',
+    ].join('\n'))
+    expect(scribe.otherTranscripts.length).toBe(1)
+    const sum = clipboardSummary({ ...BASE, scribe })
+    expect(sum.includes('a short but real transcript turn'),
+      'a small second transcript reached the no-transcript form').toBe(false)
+    expect(clipboardFull({ ...BASE, scribe }).includes('a short but real transcript turn')).toBe(true)
+  })
+
+  it('keeps the loser in the FULL form so nothing is lost', () => {
+    const scribe = parseScribe(twoTranscripts)
+    const full = clipboardFull({ ...BASE, scribe })
+    expect(full.includes('A'.repeat(200))).toBe(true)
+    expect(full.includes('B'.repeat(200)), 'second transcript was dropped').toBe(true)
+  })
+
+  it('size-gates a large extra even under an innocent heading', () => {
+    // One real scribe hides a full transcript under `G2 Glasses Enrichment`.
+    // A keyword list cannot catch that; a size ceiling can.
+    const scribe = parseScribe([
+      '# Innocent', '## Summary', 'brief',
+      '## G2 Glasses Enrichment (Combined)', 'C'.repeat(9000),
+    ].join('\n'))
+    const sum = clipboardSummary({ ...BASE, scribe })
+    expect(sum.includes('C'.repeat(200))).toBe(false)
+    expect(sum).toMatch(/Omitted from the summary \(9000 characters\)/)
+    expect(clipboardFull({ ...BASE, scribe }).includes('C'.repeat(200))).toBe(true)
+  })
+
+  it('keeps a small extra in BOTH forms', () => {
+    const scribe = parseScribe(['# S', '## Summary', 'brief', '## Granola Notes', 'a real note'].join('\n'))
+    expect(clipboardSummary({ ...BASE, scribe })).toMatch(/a real note/)
+  })
+})
+
+describe('a derived note is never relabelled as the transcript', () => {
+  it('prints the section\'s own heading', () => {
+    const scribe = parseScribe([
+      '# Pete Silas 1-1', '## Summary', 's',
+      '## Transcript Enrichment (from raw recording)', 'derived analysis, not speech',
+    ].join('\n'))
+    const full = clipboardFull({ ...BASE, scribe })
+    expect(full).toMatch(/## Transcript Enrichment \(from raw recording\)/)
+    expect(/\n## Transcript\n/.test(full), 'derived analysis was presented as the transcript').toBe(false)
+  })
+
+  it('never lets an attendee heading become the transcript', () => {
+    const scribe = parseScribe(['# A', '## Attendees (from transcript)', '- Someone Unverified'].join('\n'))
+    expect(scribe.transcript).toBe('')
+    expect(clipboardFull({ ...BASE, scribe }).includes('Someone Unverified')).toBe(false)
+  })
+})
+
+describe('cleanBody strips scaffolding without eating content', () => {
+  it('removes internal pipeline markers', () => {
+    expect(cleanBody('real content\n<!-- g2-needs-domain-review -->')).toBe('real content')
+  })
+  it('removes <details> with attributes', () => {
+    expect(cleanBody('<details open>\nbody\n</details>')).toBe('body')
+  })
+  it('keeps a mid-body italic line that merely starts like our stamp', () => {
+    // The old unanchored filter deleted this wherever it appeared. Position is
+    // the real invariant: a footer is trailing, a sentence is not.
+    const out = cleanBody('*Generated by the design team*\nand then real content')
+    expect(out).toMatch(/design team/)
+    expect(out).toMatch(/real content/)
+  })
+  it('still removes our own stamp', () => {
+    expect(cleanBody('body\n*Generated by COS Meeting Intelligence System*')).toBe('body')
+  })
+})
+
+describe('time and date edges', () => {
+  it('renders a non-finite duration as 0s rather than NaN', () => {
+    expect(renderAttendees([A('X', { speakingMs: NaN })], { coverage: 0.9, unattributedMs: 0, voicedMs: 0 })).toMatch(/X: 0s/)
+  })
+  it('rejects an implausibly small epoch instead of printing 1969', () => {
+    expect(meetingDate(1)).toBe('')
+  })
+  it('reads a date-only string as that local date', () => {
+    expect(meetingDate('2026-08-06')).toBe('2026-08-06')
   })
 })

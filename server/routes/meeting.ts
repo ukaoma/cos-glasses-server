@@ -847,6 +847,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       asserted: v.nameAsserted,
       speakingMs: v.speakingMs,
       share: v.nameAsserted && namedTotal > 0 ? v.speakingMs / namedTotal : null,
+      // WHY the name is asserted, not just that it is. The review has always
+      // carried these and this route dropped them, so the clipboard credited
+      // "voice matching" for the wearer exemption and for names a human typed.
+      isOwner: v.isOwner,
+      confirmedByHuman: v.confirmedByHuman,
     }))
 
     // A missing .md is not fatal — the review and the sidecar still describe the
@@ -875,7 +880,25 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       coverage,
       // The UNION, never the sum of per-voice figures — crosstalk is counted once.
       unattributedMs: review.unattributedSpeakingMs,
+      // Union of ALL voiced time. Only used to notice that the per-voice rows add
+      // to more than the meeting, which happens whenever people talk over
+      // each other — 34 of 323 real meetings.
+      voicedMs: review.voicedMs,
+      // Which business this is. The sibling /speakers route has always carried
+      // this and this one dropped it, so a personal 1:1 about someone's
+      // compensation was byte-identical to a marketing sync.
+      domain: operations?.domain ?? saved?.domain ?? '',
+      // Transcript actually captured, whether or not a write-up exists yet. 140
+      // of 399 real sidecars have no .md, and the fallback text claimed there was
+      // no transcript while holding one.
+      capturedChars: chunks.reduce(
+        (t, c) => t + (typeof c?.text === 'string' ? c.text.length : 0), 0),
     }
+
+    // Rendered ONCE. Calling each builder twice to measure its own length meant
+    // two extra full renders per request, transcript included.
+    const summaryText = clipboardSummary(clip)
+    const fullText = clipboardFull(clip)
 
     res.set('Cache-Control', 'private, no-store')
     res.json({
@@ -893,14 +916,19 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       actions: scribe.actions,
       extras: scribe.extras.map(x => ({ heading: x.heading, body: x.body })),
       transcriptChars: scribe.transcript.length,
+      // Captured vs written-up are different facts and the panel needs both:
+      // transcriptChars is 0 for a meeting with 27,442 characters of speech and
+      // no write-up yet.
+      capturedChars: clip.capturedChars,
+      domain: clip.domain,
       coverage,
       sharesReported: coverage !== null && coverage >= SHARE_COVERAGE_FLOOR,
-      clipboardSummary: clipboardSummary(clip),
-      clipboardFull: clipboardFull(clip),
+      clipboardSummary: summaryText,
+      clipboardFull: fullText,
       // Sizes of the ACTUAL strings, so the button label and the copy
       // confirmation can never quote two different numbers for one click.
-      summaryChars: clipboardSummary(clip).length,
-      fullChars: clipboardFull(clip).length,
+      summaryChars: summaryText.length,
+      fullChars: fullText.length,
     })
   })
 
