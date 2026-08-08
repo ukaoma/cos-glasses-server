@@ -10,6 +10,7 @@ import { profileProvenanceSummary, speakerModelState, speakerReadiness } from '.
 import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
 import { correctionStoreStats } from '../lib/meeting-corrections.js'
 import { meetingAudioStats } from '../lib/meeting-audio-archive.js'
+import { adaptivePlaybackStatus } from '../lib/adaptive-playback-audio.js'
 import { getAvailableCliSessionId } from '../lib/claude-bridge.js'
 import {
   isWhisperLocalAvailable,
@@ -125,7 +126,10 @@ healthRouter.get('/health', async (_req, res) => {
   // `pending` is the number that matters here: an intent that never closed means
   // some meeting's files may be half-rewritten.
   const speakerCorrections = correctionStoreStats()
-  const reviewAudio = meetingAudioStats()
+  const reviewAudio = {
+    ...meetingAudioStats(),
+    adaptivePlayback: adaptivePlaybackStatus(),
+  }
   // `noHumanSample` is the one to read: a profile with no human-verified sample
   // is trained entirely on labels the system chose for itself.
   const voiceProvenance = speakerId.state === 'active' ? profileProvenanceSummary() : null

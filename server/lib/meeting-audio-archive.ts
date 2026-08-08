@@ -60,6 +60,11 @@ function isChunkWav(name: string): boolean {
   return /^chunk_\d+\.wav$/.test(name)
 }
 
+/** Derived playback copies count against the cap but never define retention age. */
+function isDerivedPlaybackWav(name: string): boolean {
+  return /^playback_v\d+_\d+\.wav$/.test(name)
+}
+
 export interface ArchiveResult {
   linked: number
   /** Files that had to be copied because the link failed (e.g. cross-device). */
@@ -113,12 +118,16 @@ export function archiveSessionAudio(sessionId: string, sourceDir: string): Archi
 function sessionSize(dir: string): { bytes: number; mtimeMs: number; files: number } {
   let bytes = 0, mtimeMs = 0, files = 0
   try {
-    for (const name of readdirSync(dir).filter(isChunkWav)) {
+    for (const name of readdirSync(dir).filter(name => isChunkWav(name) || isDerivedPlaybackWav(name))) {
       try {
         const st = statSync(join(dir, name))
         bytes += st.size
-        files++
-        mtimeMs = Math.max(mtimeMs, st.mtimeMs)
+        // A replay created six days after capture must not buy the raw evidence
+        // another seven days. Only immutable raw chunks determine session age.
+        if (isChunkWav(name)) {
+          files++
+          mtimeMs = Math.max(mtimeMs, st.mtimeMs)
+        }
       } catch { /* skip unreadable */ }
     }
   } catch { /* unreadable dir reports zero */ }

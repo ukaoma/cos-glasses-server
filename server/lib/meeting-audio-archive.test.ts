@@ -85,6 +85,24 @@ describe('archiving a session', () => {
     expect(readFileSync(path)).toEqual(Buffer.alloc(3200, 3))   // byte-identical
   })
 
+  it('counts derived playback bytes without extending the raw retention age', () => {
+    const src = sourceSession('meeting_playback_budget', 1, 3_200)
+    mod.archiveSessionAudio('meeting_playback_budget', src)
+    const retained = join(dir, 'meeting-audio', 'meeting_playback_budget')
+    const raw = join(retained, 'chunk_0000.wav')
+    const playback = join(retained, 'playback_v1_0000.wav')
+    writeFileSync(playback, Buffer.alloc(2_400, 7))
+    const old = (Date.now() - 6 * DAY) / 1_000
+    utimesSync(raw, old, old)
+    // A fresh replay cannot renew the session. One day later the raw evidence
+    // crosses the seven-day window and the whole session must expire.
+    const stats = mod.meetingAudioStats()
+    expect(stats.bytes).toBe(5_600)
+    const swept = mod.sweepMeetingAudio(Date.now() + DAY + 1_000)
+    expect(swept.removed).toContain('meeting_playback_budget')
+    expect(swept.bytesFreed).toBe(5_600)
+  })
+
   it('is idempotent — re-archiving does not duplicate or fail', () => {
     const src = sourceSession('meeting_d', 3)
     expect(mod.archiveSessionAudio('meeting_d', src).linked).toBe(3)
@@ -429,4 +447,3 @@ describe('ext-audio fallback', () => {
     expect(readFileSync(mod.extAudioChunkPath('meeting_dup', 7)!)).toEqual(Buffer.alloc(96, 2))
   })
 })
-

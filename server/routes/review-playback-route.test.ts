@@ -18,6 +18,8 @@ let root = ''
 let dataDir = ''
 let server: Server | null = null
 let baseUrl = ''
+let adaptivePlaybackMock: ((path: string) => Promise<{ path: string; mode: 'raw' | 'adaptive'; profile: 'hot' | null }>) | null = null
+let liveRecordingCount = 0
 
 const MONTH = '2026-08'
 const STEM = '2026-08-05_Lead_Ops_Review_abc12345'
@@ -56,6 +58,25 @@ async function startServer(): Promise<void> {
     getOwnerName: () => 'Miles',
     getTranscriptionProfileStatus: () => ({}),
   }))
+  if (liveRecordingCount > 0) {
+    vi.doMock('./transcribe-stream.js', async () => {
+      const actual = await vi.importActual<typeof import('./transcribe-stream.js')>('./transcribe-stream.js')
+      return {
+        ...actual,
+        getTranscriptionSessionLiveness: () => ({ live: liveRecordingCount, stale: 0, staleSessions: [] }),
+      }
+    })
+  } else {
+    vi.doUnmock('./transcribe-stream.js')
+  }
+  if (adaptivePlaybackMock) {
+    vi.doMock('../lib/adaptive-playback-audio.js', async () => {
+      const actual = await vi.importActual<typeof import('../lib/adaptive-playback-audio.js')>('../lib/adaptive-playback-audio.js')
+      return { ...actual, adaptivePlaybackAudio: adaptivePlaybackMock }
+    })
+  } else {
+    vi.doUnmock('../lib/adaptive-playback-audio.js')
+  }
   const { MeetingStore } = await import('../lib/meeting-store.js')
   const { createMeetingRouter } = await import('./meeting.js')
   const { voiceRouter } = await import('./voice.js')
@@ -73,7 +94,7 @@ async function startServer(): Promise<void> {
   })
 }
 
-function get(path: string): Promise<{ status: number; type: string; body: Buffer }> {
+function get(path: string): Promise<{ status: number; type: string; body: Buffer; playback: string; profile: string; bypass: string }> {
   return new Promise((resolve, reject) => {
     const req = request(`${baseUrl}${path}`, { method: 'GET' }, res => {
       const parts: Buffer[] = []
@@ -82,6 +103,9 @@ function get(path: string): Promise<{ status: number; type: string; body: Buffer
         status: res.statusCode ?? 0,
         type: String(res.headers['content-type'] ?? ''),
         body: Buffer.concat(parts),
+        playback: String(res.headers['x-cos-audio-playback'] ?? ''),
+        profile: String(res.headers['x-cos-audio-profile'] ?? ''),
+        bypass: String(res.headers['x-cos-audio-bypass'] ?? ''),
       }))
     })
     req.on('error', reject)
@@ -94,12 +118,16 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'cos-play-'))
   dataDir = mkdtempSync(join(tmpdir(), 'cos-play-data-'))
   process.env.COS_DATA_DIR = dataDir
+  adaptivePlaybackMock = null
+  liveRecordingCount = 0
 })
 afterEach(async () => {
   await new Promise<void>(r => server ? server.close(() => r()) : r())
   server = null
   vi.resetModules()
   vi.doUnmock('../lib/profile.js')
+  vi.doUnmock('../lib/adaptive-playback-audio.js')
+  vi.doUnmock('./transcribe-stream.js')
   delete process.env.COS_DATA_DIR
   for (const d of [root, dataDir]) if (d) rmSync(d, { recursive: true, force: true })
 })
@@ -119,6 +147,46 @@ describe('playing one meeting segment', () => {
     // be a 200 with plausible audio, and the reviewer would confirm an identity
     // against the wrong voice.
     expect(res.body).toEqual(Buffer.alloc(64, 3))
+    expect(res.playback).toBe('raw')
+  })
+
+  it('serves the derived adaptive copy, while raw=1 remains byte-exact', async () => {
+    seedMeeting('meeting_clean')
+    seedReviewAudio('meeting_clean', [2])
+    const clean = join(dataDir, 'meeting-audio', 'meeting_clean', 'playback_v1_0002.wav')
+    writeFileSync(clean, Buffer.alloc(64, 99))
+    adaptivePlaybackMock = async () => ({ path: clean, mode: 'adaptive', profile: 'hot' })
+    await startServer()
+
+    const adaptive = await get('/api/meeting/meeting_clean/audio/2')
+    expect(adaptive.status).toBe(200)
+    expect(adaptive.body).toEqual(Buffer.alloc(64, 99))
+    expect(adaptive.playback).toBe('adaptive')
+    expect(adaptive.profile).toBe('hot')
+
+    const raw = await get('/api/meeting/meeting_clean/audio/2?raw=1')
+    expect(raw.status).toBe(200)
+    expect(raw.body).toEqual(Buffer.alloc(64, 3))
+    expect(raw.playback).toBe('raw')
+  })
+
+  it('bypasses optional cleanup while a meeting is live', async () => {
+    seedMeeting('meeting_live_guard')
+    seedReviewAudio('meeting_live_guard', [0])
+    let cleanupCalls = 0
+    adaptivePlaybackMock = async path => {
+      cleanupCalls++
+      return { path, mode: 'adaptive', profile: 'hot' }
+    }
+    liveRecordingCount = 1
+    await startServer()
+
+    const res = await get('/api/meeting/meeting_live_guard/audio/0')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual(Buffer.alloc(64, 1))
+    expect(res.playback).toBe('raw')
+    expect(res.bypass).toBe('live_recording')
+    expect(cleanupCalls).toBe(0)
   })
 
   it('404s a chunk that is not retained, and says what IS', async () => {

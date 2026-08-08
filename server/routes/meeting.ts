@@ -11,6 +11,7 @@ import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, appliedCorrections, pendingCorrections } from '../lib/meeting-corrections.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
+import { adaptivePlaybackAudio } from '../lib/adaptive-playback-audio.js'
 import { chunkDiagnostics } from '../lib/chunk-embedding-diagnostics.js'
 import { errMsg } from '../lib/utils.js'
 import { confirmedLabels } from '../lib/meeting-corrections.js'
@@ -100,6 +101,7 @@ import {
   getSessionStartTime,
   getSessionTranscript,
   getMeetingSessionStatus,
+  getTranscriptionSessionLiveness,
   hasSessionAudio,
   moveSessionAudioToPending,
   type IndexedTranscriptChunk,
@@ -1423,7 +1425,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // voice. Retention is 7 days (see meeting-audio-archive), so this answers with
   // 404 + a reason once the window has passed rather than pretending the audio
   // was never there.
-  router.get('/meeting/:sessionId/audio/:chunkIndex', (req, res) => {
+  router.get('/meeting/:sessionId/audio/:chunkIndex', async (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
@@ -1440,8 +1442,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // fallback there is nothing to play on any meeting predating 6.21.18 — while
     // 72 hours of unidentified-voice audio is sitting right there, and an
     // unidentified voice is exactly what a reviewer needs to hear.
-    const path = meetingAudioChunkPath(sessionId, chunkIndex)
-      ?? extAudioChunkPath(sessionId, chunkIndex)
+    const archivedPath = meetingAudioChunkPath(sessionId, chunkIndex)
+    const path = archivedPath ?? extAudioChunkPath(sessionId, chunkIndex)
     if (!path) {
       const retained = [...new Set([
         ...listMeetingAudioChunks(sessionId),
@@ -1460,7 +1462,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       })
       return
     }
-    sendAudioFile(res, path)
+    // Canary scope is intentionally narrow: only the week-retained immutable
+    // archive gets a derived playback copy. Legacy ext-audio remains byte-for-
+    // byte raw. `?raw=1` is the authenticated A/B and emergency per-request
+    // escape hatch; the COS Control toggle is the machine-wide rollback.
+    const liveRecording = getTranscriptionSessionLiveness().live > 0
+    const playback = archivedPath && req.query.raw !== '1' && !liveRecording
+      ? await adaptivePlaybackAudio(archivedPath)
+      : { path, mode: 'raw' as const, profile: null }
+    res.set('X-COS-Audio-Playback', playback.mode)
+    if (liveRecording) res.set('X-COS-Audio-Bypass', 'live_recording')
+    if (playback.profile) res.set('X-COS-Audio-Profile', playback.profile)
+    sendAudioFile(res, playback.path)
   })
 
   /**

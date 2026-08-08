@@ -279,6 +279,17 @@ available CPUs. `COS_MEETING_EARLY_SYNC=1` separately gives the Operations sync
 pipeline a stable meeting identity before HQ completes. Either switch can be
 disabled without changing canonical live transcription or raw meeting audio.
 
+Server 6.21.32 adds a separate default-off cleanup canary for retained review
+audio. Set `COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK=1` (or use COS Control 0.5.11+)
+to profile a retained PCM chunk and create a cached playback-only copy when a
+reviewer presses Play. The raw WAV remains byte-identical, still owns the
+seven-day retention clock, and is served on every analyzer/FFmpeg failure.
+Capture, live preview, canonical transcription, speaker attribution, save, HQ,
+and meeting sync are unchanged. Append `?raw=1` to an authenticated playback
+URL for an immediate raw-versus-cleaned A/B check.
+While a meeting is actively recording, playback automatically stays raw so the
+optional cleanup process cannot contend with live transcription.
+
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):
 

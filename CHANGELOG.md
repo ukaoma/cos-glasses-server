@@ -1,3 +1,25 @@
+## 6.21.32
+
+- **Adaptive meeting-audio cleanup is a default-off, replay-only canary.** When
+  `COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK=1`, the authenticated retained-audio
+  playback route profiles each PCM chunk as hot/clipped, hot, quiet,
+  wind/noisy, or clean indoor, then generates a bounded cleaned WAV on first
+  play. Later plays use the cached copy.
+- **Raw evidence is immutable and remains the fallback.** Derived files live
+  beside retained raw chunks under a versioned name, count against the existing
+  8 GB archive cap, and cannot extend the seven-day retention clock. Unsupported
+  WAVs, missing FFmpeg, timeouts, and invalid output all serve the original raw
+  file. `?raw=1` provides an authenticated per-request A/B escape hatch.
+- **A live recording always wins.** Play requests made while any meeting is
+  actively recording bypass cleanup and serve raw, so an optional replay
+  feature cannot put CPU or synchronous profiling on the live transcription
+  path.
+- **No live or canonical path changed.** Capture, Turbo preview, Large-v3
+  canonical transcription, speaker attribution, meeting save, HQ polish, and
+  meeting sync do not import or call the cleanup module. Health reports the
+  active policy, generated/cache/fallback counters, and raw-preservation
+  contract for COS Control and field diagnostics.
+
 ## 6.21.31
 
 Domains belong to the user. Four places in this codebase hardcoded ONE user's
