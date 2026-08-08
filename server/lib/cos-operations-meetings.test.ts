@@ -3,6 +3,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  EXAMPLE_MEETING_DOMAINS,
+  discoverMeetingDomains,
+  domainAbbreviation,
   listCosOperationsMeetings,
   resolveCosOperationsDir,
 } from './cos-operations-meetings.js'
@@ -47,5 +50,93 @@ describe('cos operations meetings path resolution', () => {
     delete process.env.COS_SCRIPTS_DIR
     expect(resolveCosOperationsDir()).toBeNull()
     expect(listCosOperationsMeetings()).toEqual([])
+  })
+})
+
+/**
+ * Domains are DISCOVERED, not enumerated.
+ *
+ * Queen set up her own COS on 2026-08-08 and every folder she picked was
+ * rejected, because both the Control validator and this module carried
+ * `['quilt','sprocket_rocket','hermit_crabs','personal']` — one user's business
+ * domains, shipped as a requirement. Her tree has none of them.
+ */
+describe('meeting domains are discovered from the chosen directory', () => {
+  const withTree = (build: (root: string) => void, run: (root: string) => void) => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-ops-discover-'))
+    try { build(root); process.env.COS_OPERATIONS_DIR = root; run(root) }
+    finally { rmSync(root, { recursive: true, force: true }) }
+  }
+  const scribe = (root: string, domain: string, name: string) => {
+    mkdirSync(join(root, domain, 'meetings', '2026-08'), { recursive: true })
+    writeFileSync(join(root, domain, 'meetings', '2026-08', name),
+      '# A Meeting\n\n**Date** | 2026-08-08 10:00 |\n\n## Summary\nBody\n')
+  }
+
+  it('finds a domain that is nobody\'s business unit, with a space in the name', () => {
+    withTree(root => scribe(root, 'DNP study', '2026-08-08_Cohort_Review.md'), root => {
+      expect(discoverMeetingDomains(root)).toEqual(['DNP study'])
+      const meetings = listCosOperationsMeetings({ limit: 5 })
+      expect(meetings).toHaveLength(1)
+      expect(meetings[0].domain).toBe('DNP study')
+    })
+  })
+
+  it('does not require any of one user\'s four domains to be present', () => {
+    withTree(root => { scribe(root, 'ascension', 'a.md'); scribe(root, 'clinicals', 'b.md') }, root => {
+      const found = discoverMeetingDomains(root)
+      expect(found).toEqual(['ascension', 'clinicals'])
+      for (const mine of EXAMPLE_MEETING_DOMAINS) expect(found).not.toContain(mine)
+      expect(listCosOperationsMeetings({ limit: 5 })).toHaveLength(2)
+    })
+  })
+
+  it('filters by a discovered domain, and rejects one that is not there', () => {
+    withTree(root => { scribe(root, 'ascension', 'a.md'); scribe(root, 'clinicals', 'b.md') }, () => {
+      expect(listCosOperationsMeetings({ domain: 'ascension' })).toHaveLength(1)
+      expect(listCosOperationsMeetings({ domain: 'quilt' })).toHaveLength(0)
+    })
+  })
+
+  it('ignores a subdirectory with no meetings/ tree', () => {
+    withTree(root => {
+      scribe(root, 'personal', 'p.md')
+      mkdirSync(join(root, 'scripts'), { recursive: true })
+      mkdirSync(join(root, 'intelligence', 'timeseries'), { recursive: true })
+    }, root => expect(discoverMeetingDomains(root)).toEqual(['personal']))
+  })
+
+  it('ignores hidden directories', () => {
+    withTree(root => {
+      scribe(root, 'personal', 'p.md')
+      mkdirSync(join(root, '.meeting_archive', 'meetings'), { recursive: true })
+    }, root => expect(discoverMeetingDomains(root)).toEqual(['personal']))
+  })
+
+  it('returns nothing for a directory that does not exist', () => {
+    expect(discoverMeetingDomains('/nope/not/here')).toEqual([])
+  })
+})
+
+describe('domainAbbreviation replaces the hand-written table exactly', () => {
+  it('reproduces every entry the old DOMAIN_ABBR map had', () => {
+    // The table is deleted; this equivalence is why that was safe. If a future
+    // edit changes derivation, this fails rather than silently relabelling
+    // every existing user's rows.
+    expect(domainAbbreviation('quilt')).toBe('Q')
+    expect(domainAbbreviation('personal')).toBe('P')
+    expect(domainAbbreviation('hermit_crabs')).toBe('HC')
+    expect(domainAbbreviation('sprocket_rocket')).toBe('SR')
+  })
+
+  it('derives something sensible for a domain nobody predicted', () => {
+    expect(domainAbbreviation('DNP study')).toBe('DS')
+    expect(domainAbbreviation('ascension')).toBe('A')
+    expect(domainAbbreviation('research-lab notes')).toBe('RL')
+  })
+
+  it('never returns an empty badge', () => {
+    expect(domainAbbreviation('___')).toBe('?')
+    expect(domainAbbreviation('')).toBe('?')
   })
 })

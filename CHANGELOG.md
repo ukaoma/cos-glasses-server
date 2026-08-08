@@ -1,3 +1,22 @@
+## 6.21.31
+
+- **Meeting domains are DISCOVERED, not enumerated.** This module carried
+  `['quilt','sprocket_rocket','hermit_crabs','personal']` — one user's business
+  domains, shipped as a requirement. A second person set up their own COS and the
+  library could never see their meetings, because their tree has none of those
+  four and never will.
+
+  Any immediate subdirectory holding a `meetings/` folder is now a domain, whatever
+  it is called. The guard that list doubled as — path-traversal safety — is now
+  explicit and separate, and deliberately permissive about STYLE: a real domain may
+  be `DNP study` with a space, and an alphanumeric-only rule would quietly re-encode
+  one author's snake_case habit as a requirement.
+
+  The hand-written abbreviation table is gone too; badges are derived. Derivation
+  reproduces every old entry exactly (quilt Q, personal P, hermit_crabs HC,
+  sprocket_rocket SR), and a test pins that equivalence so it cannot drift and
+  silently relabel an existing user's rows.
+
 ## 6.21.30
 
 - **A name you removed by hand is now stated, and the stale write-up is called
