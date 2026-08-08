@@ -8,7 +8,7 @@ import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
-import { appendCorrection, pendingCorrections } from '../lib/meeting-corrections.js'
+import { appendCorrection, appliedCorrections, pendingCorrections } from '../lib/meeting-corrections.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
 import { chunkDiagnostics } from '../lib/chunk-embedding-diagnostics.js'
@@ -880,10 +880,19 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       coverage,
       // The UNION, never the sum of per-voice figures — crosstalk is counted once.
       unattributedMs: review.unattributedSpeakingMs,
-      // Union of ALL voiced time. Only used to notice that the per-voice rows add
-      // to more than the meeting, which happens whenever people talk over
-      // each other — 34 of 323 real meetings.
       voicedMs: review.voicedMs,
+      // The overlap note is gated on how long the meeting RAN. Gating on voiced
+      // time tripped on 16 of 23 real meetings.
+      durationMs: review.durationMs || 0,
+      // Names this human explicitly de-attributed. The ledger has recorded
+      // `proseStale` on every applied de-attribution since the feature shipped and
+      // NOTHING has ever read it: on 2026-08-07 Miles removed "Clem Ukaoma" from a
+      // call that was only him and Queen, all 8 label sites were rewritten, and the
+      // summary still opened "Miles, Queen, and Clem talk through..." with no
+      // indication anywhere in the payload.
+      removed: appliedCorrections(sessionId)
+        .filter(r => isUnattributed(r.to))
+        .map(r => ({ label: r.from, proseStale: r.proseStale === true })),
       // Which business this is. The sibling /speakers route has always carried
       // this and this one dropped it, so a personal 1:1 about someone's
       // compensation was byte-identical to a marketing sync.
@@ -921,6 +930,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // no write-up yet.
       capturedChars: clip.capturedChars,
       domain: clip.domain,
+      // So the panel can warn above the write-up, not just the clipboard.
+      removedNames: clip.removed,
       coverage,
       sharesReported: coverage !== null && coverage >= SHARE_COVERAGE_FLOOR,
       clipboardSummary: summaryText,

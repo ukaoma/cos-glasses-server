@@ -314,10 +314,19 @@ export interface AttendeeRenderOptions {
    */
   unattributedMs: number
   /**
-   * UNION of all voiced time. Used only to detect that the rows overlap — see
-   * the crosstalk note in `renderAttendees`. 0 disables the check.
+   * UNION of all voiced time. Only used to phrase the crosstalk note.
    */
   voicedMs: number
+  /**
+   * How long the meeting RAN. This is what the overlap note is gated on.
+   *
+   * Gating on `voicedMs` instead tripped on 16 of 23 real meetings, because any
+   * overlap at all exceeds the union of voiced time — at 70% the line stops being
+   * a signal and becomes boilerplate on something Miles pastes into Slack. Rows
+   * adding to more than the meeting LENGTH is the genuinely confusing case (71m
+   * of rows inside a 66-minute meeting), and that is ~10% of meetings.
+   */
+  durationMs: number
 }
 
 /** The attendee block, floor-applied. */
@@ -348,9 +357,9 @@ export function renderAttendees(voices: AttendeeLine[], o: AttendeeRenderOptions
   // right; adding them is what misleads, so say so rather than shrink anyone.
   const rowTotal = named.reduce((t, v) => t + (Number.isFinite(v.speakingMs) ? v.speakingMs : 0), 0) +
     (rest.length > 0 && Number.isFinite(o.unattributedMs) ? o.unattributedMs : 0)
-  if (o.voicedMs > 0 && rowTotal > o.voicedMs * 1.02) {
-    out.push(`- (these overlap: people talked over each other, so the rows add to ` +
-             `more than the ${mmss(o.voicedMs)} of talking)`)
+  if (o.durationMs > 0 && rowTotal > o.durationMs * 1.02) {
+    out.push(`- (these overlap: people talked over each other, so the rows add up to ` +
+             `more than the ${mmss(o.durationMs)} the meeting ran)`)
   }
   return out.length > 0 ? out.join('\n') : '- (no voices identified)'
 }
@@ -363,7 +372,32 @@ export function renderAttendees(voices: AttendeeLine[], o: AttendeeRenderOptions
  * into a model has no other way to tell which. Naming the confirmed set is short
  * and complete.
  */
-export function renderProvenance(voices: AttendeeLine[], coverage: number | null): string {
+/**
+ * Names a human explicitly REMOVED from this meeting, still present in the prose.
+ *
+ * De-attribution rewrites the sidecar, the attendee list and the transcript
+ * labels, but deliberately leaves narrative prose alone — substituting into a
+ * written sentence mangles grammar and can hit the wrong person. So the applied
+ * correction row records `proseStale: true` and, until now, NOTHING read it.
+ *
+ * Real case, 2026-08-07: Miles removed "Clem Ukaoma" from a personal call that
+ * was only him and Queen (his father's voice matched a similar profile). All 8
+ * label sites were rewritten correctly; the LLM summary still opened "Miles,
+ * Queen, and Clem talk through..." and the payload said nothing. An allowlist
+ * ("this name was not confirmed") is far too weak here — he did not fail to
+ * confirm this person, he explicitly said they were not in the room.
+ */
+export interface RemovedName {
+  label: string
+  /** True when narrative prose still carries the name. */
+  proseStale: boolean
+}
+
+export function renderProvenance(
+  voices: AttendeeLine[],
+  coverage: number | null,
+  removed: RemovedName[] = [],
+): string {
   const named = voices.filter(v => v.asserted)
   // Quoted because a label may legitimately contain a comma — `invalidLabelReason`
   // rejects brackets and newlines but not commas, and a typed "Smith, John" would
@@ -384,6 +418,20 @@ export function renderProvenance(voices: AttendeeLine[], coverage: number | null
     'comes from the raw capture or the write-up and was NOT confirmed. Some may be ' +
     'people mentioned rather than people present.',
   ]
+  // Before the coverage caveat: an explicit human removal outranks every other
+  // statement in this block, and it must not read as one more hedge.
+  const stale = removed.filter(r => r.proseStale).map(r => `"${r.label}"`)
+  const quiet = removed.filter(r => !r.proseStale).map(r => `"${r.label}"`)
+  if (stale.length > 0) {
+    lines.push(
+      `You removed ${stale.join(', ')} from this meeting. The write-up below was ` +
+      'written before that and still uses the name: treat every mention of it as a ' +
+      'capture error, not a participant.',
+    )
+  }
+  if (quiet.length > 0) {
+    lines.push(`You also removed ${quiet.join(', ')} from this meeting.`)
+  }
   if (coverage !== null && coverage < SHARE_COVERAGE_FLOOR) {
     lines.push(
       `Only ${Math.round(coverage * 100)}% of the voice in this meeting was ` +
@@ -411,6 +459,10 @@ export interface ClipboardInput {
   capturedChars: number
   /** UNION of voiced time, for the crosstalk-overflow note. */
   voicedMs: number
+  /** How long the meeting ran. Gates the crosstalk-overflow note. */
+  durationMs: number
+  /** Names a human explicitly de-attributed from this meeting. */
+  removed: RemovedName[]
   title: string
   date: string
   durationMin: number
@@ -445,9 +497,10 @@ function header(i: ClipboardInput, compact: boolean): string[] {
   parts.push(
     '', '## Who spoke',
     renderAttendees(i.attendees, {
-      coverage: i.coverage, unattributedMs: i.unattributedMs, voicedMs: i.voicedMs,
+      coverage: i.coverage, unattributedMs: i.unattributedMs,
+      voicedMs: i.voicedMs, durationMs: i.durationMs,
     }),
-    '', renderProvenance(i.attendees, i.coverage),
+    '', renderProvenance(i.attendees, i.coverage, i.removed),
   )
   for (const [heading, body] of [
     ['Summary', i.scribe.summary],

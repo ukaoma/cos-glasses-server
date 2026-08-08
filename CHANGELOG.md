@@ -1,3 +1,37 @@
+## 6.21.30
+
+- **A name you removed by hand is now stated, and the stale write-up is called
+  out.** De-attribution rewrites the sidecar, the attendee list and the transcript
+  labels, but deliberately leaves narrative prose alone, because substituting into
+  a written sentence mangles grammar and can hit the wrong person. The applied
+  correction row has recorded `proseStale: true` for exactly this since the feature
+  shipped — and NOTHING read it.
+
+  Real case, 2026-08-07: Miles removed "Clem Ukaoma" from a personal call that was
+  only him and Queen (his father's voice matched a similar profile). All 8 label
+  sites were rewritten correctly. The LLM summary still opened "Miles, Queen, and
+  Clem talk through..." and the payload said nothing at all. The allowlist covered
+  it only as "not confirmed", which is far too weak: he did not fail to confirm
+  that person, he explicitly said they were not in the room.
+
+  The payload now carries `removedNames` and states it above the write-up: *"You
+  removed "Clem Ukaoma" from this meeting. The write-up below was written before
+  that and still uses the name: treat every mention of it as a capture error, not
+  a participant."* The prose is left intact — the record stays, the correction
+  travels beside it.
+
+- **The overlap note is gated on how long the meeting RAN, not on voiced time.**
+  Gating on voiced time tripped it on 16 of 23 real meetings, because any overlap
+  at all exceeds the union of voiced speech. At 70% it stopped being a signal and
+  became boilerplate on something pasted into Slack. Rows adding to more than the
+  meeting length is the genuinely confusing case — 71m of rows inside a 66-minute
+  meeting — and that is roughly a tenth of meetings.
+
+  Worth recording for the next person who tests this: only the WORD-TIMING path
+  can overflow. Measured, the chunk-estimate path credits a contested second to
+  one speaker (two speakers at identical timestamps gave MU 273s and Gina 0s), so
+  a chunk-sourced meeting can never trip the note.
+
 ## 6.21.29
 
 Everything below was found by two rounds of adversarial review of 6.21.28 against

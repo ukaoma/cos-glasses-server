@@ -19,13 +19,21 @@ let baseUrl = ''
 const MONTH = '2026-08'
 const STEM = '2026-08-05_Lead_Ops_Review_abc12345'
 
-function seedMeeting(sessionId: string, chunks: unknown, options: { badSidecar?: boolean; scribe?: string } = {}): void {
+function seedMeeting(
+  sessionId: string,
+  chunks: unknown,
+  options: { badSidecar?: boolean; scribe?: string; batchSegments?: unknown[] } = {},
+): void {
   const dir = join(root, MONTH)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, `${STEM}.md`), options.scribe ?? RICH_SCRIBE)
   writeFileSync(
     join(dir, `${STEM}.g2-chunks.json`),
-    options.badSidecar ? '{"sessionId":"' + sessionId + '","chunks":[{' : JSON.stringify({ sessionId, chunks }),
+    options.badSidecar
+      ? '{"sessionId":"' + sessionId + '","chunks":[{'
+      : JSON.stringify(options.batchSegments
+        ? { sessionId, chunks, batchSegments: options.batchSegments }
+        : { sessionId, chunks }),
   )
 }
 
@@ -399,6 +407,86 @@ describe('meeting content over HTTP', () => {
     expect(r.json.summaryChars).toBe(r.json.clipboardSummary.length)
     expect(r.json.fullChars).toBe(r.json.clipboardFull.length)
     expect(r.json.fullChars).toBeGreaterThan(r.json.summaryChars)
+  })
+
+  // THE DEFECT, over HTTP. The de-attribution ledger has recorded `proseStale`
+  // on every applied removal since the feature shipped, and this route never read
+  // it: on 2026-08-07 Miles removed "Clem Ukaoma" from a call that was only him
+  // and Queen, all 8 label sites were rewritten, and the summary still opened
+  // "Miles, Queen, and Clem talk through..." with nothing anywhere in the payload.
+  // Mutating the ledger read to `[]` passed every test before this one existed.
+  it('reports a name the human removed, and says the prose is stale', async () => {
+    seedMeeting('meeting_content_rm', turns('MU', 'Queen Ukaoma', 6, 12), {
+      scribe: ['# Generational Trauma And Parenting Fears (G2)', '',
+               '## Summary', 'Miles, Queen, and Clem talk through the fallout.', '',
+               '## Transcript', '[Unidentified 1]: reclose that is how you close it'].join('\n'),
+    })
+    mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
+    writeFileSync(join(dataDir, 'meeting-corrections', 'meeting_content_rm.jsonl'),
+      JSON.stringify({
+        id: 'meeting_content_rm:Clem Ukaoma>deattributed:x', phase: 'applied',
+        at: '2026-08-08T02:26:47.268Z', from: 'Clem Ukaoma', to: 'Unidentified 1',
+        chunks: [79, 81], scope: 'meeting', proseStale: true,
+      }) + '\n')
+    await startServer()
+    const r = await get('/api/meeting/meeting_content_rm/content')
+    expect(r.status).toBe(200)
+    expect(r.json.removedNames).toEqual([{ label: 'Clem Ukaoma', proseStale: true }])
+    for (const form of [r.json.clipboardSummary, r.json.clipboardFull]) {
+      expect(form).toContain('You removed "Clem Ukaoma" from this meeting')
+    }
+    // The prose is preserved, not rewritten. Substituting into a written sentence
+    // mangles grammar and can hit the wrong person.
+    expect(r.json.clipboardSummary).toContain('Miles, Queen, and Clem talk through')
+  })
+
+  it('says nothing about removals when the ledger is empty', async () => {
+    seedMeeting('meeting_content_rm2', turns('MU', 'Gina Obert', 6, 12))
+    await startServer()
+    const r = await get('/api/meeting/meeting_content_rm2/content')
+    expect(r.json.removedNames).toEqual([])
+    expect(r.json.clipboardSummary).not.toContain('You removed')
+  })
+
+  // The overlap note is gated on the meeting's real duration, which only reaches
+  // the formatter through the route. Asserting the note is ABSENT could not test
+  // this — durationMs of 0 also produces no note, so mutating it to 0 passed. Two
+  // speakers at IDENTICAL timestamps genuinely overlap, so the rows must exceed
+  // the meeting and the note must APPEAR.
+  it('carries the meeting duration through to the overlap gate', async () => {
+    // Overlap must be expressed in WORD TIMINGS. Measured: the chunk-estimate
+    // path credits a contested wall-clock second to ONE speaker (identical
+    // timestamps gave MU 273s and Gina 0s), so it can never overflow. The real
+    // 71m-in-66m meeting was `speakingTimeSource: words`, and only that path
+    // credits both people for the same second — which is the whole point.
+    // Word timings arrive on the sidecar's `batchSegments`, not on the chunks —
+    // measured, not assumed: putting speakerWords on chunks left the review on
+    // `speakingTimeSource: chunks`, and that path credits a contested second to
+    // ONE speaker (identical timestamps gave MU 273s and Gina 0s), so it can never
+    // overflow. The real 71m-in-66m meeting was word-sourced.
+    const segs: unknown[] = []
+    for (let i = 0; i < 40; i++) {
+      segs.push({
+        startElapsed: i * 7000,
+        speakerWords: [
+          { speaker: 'MU', start: 0, end: 6.5 },
+          { speaker: 'Gina Obert', start: 0, end: 6.5 },
+        ],
+      })
+    }
+    seedMeeting('meeting_content_dur', turns('MU', 'Gina Obert', 20, 2), { batchSegments: segs })
+    await startServer()
+    const r = await get('/api/meeting/meeting_content_dur/content')
+    expect(r.json.durationMin).toBeGreaterThan(0)
+    expect(r.json.clipboardSummary).toContain('these overlap')
+    expect(r.json.clipboardSummary).toMatch(/more than the .* the meeting ran/)
+  })
+
+  it('leaves an ordinary sequential meeting quiet', async () => {
+    seedMeeting('meeting_content_seq', turns('MU', 'Gina Obert', 6, 12))
+    await startServer()
+    const r = await get('/api/meeting/meeting_content_seq/content')
+    expect(r.json.clipboardSummary).not.toContain('these overlap')
   })
 
   it('serves a meeting whose scribe is missing without failing', async () => {

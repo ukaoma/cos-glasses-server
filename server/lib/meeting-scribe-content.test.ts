@@ -149,8 +149,8 @@ const VOICES: AttendeeLine[] = [
 ]
 /** The review's UNION for the unnamed voices — deliberately LESS than 30+120. */
 const UNION_MS = 100_000
-const HIGH = { coverage: 0.9, unattributedMs: UNION_MS, voicedMs: 0 }
-const LOW = { coverage: 0.105, unattributedMs: UNION_MS, voicedMs: 0 }
+const HIGH = { coverage: 0.9, unattributedMs: UNION_MS, voicedMs: 0, durationMs: 0 }
+const LOW = { coverage: 0.105, unattributedMs: UNION_MS, voicedMs: 0, durationMs: 0 }
 
 describe('renderAttendees', () => {
   it('names only asserted voices, with time and share', () => {
@@ -180,7 +180,7 @@ describe('renderAttendees', () => {
   })
 
   it('suppresses shares when coverage is unknown, failing closed', () => {
-    expect(renderAttendees(VOICES, { coverage: null, unattributedMs: UNION_MS, voicedMs: 0 })).not.toContain('%')
+    expect(renderAttendees(VOICES, { coverage: null, unattributedMs: UNION_MS, voicedMs: 0, durationMs: 0 })).not.toContain('%')
   })
 
   it('emits no em dash or arrow, per the standing rule for generated copy', () => {
@@ -236,9 +236,10 @@ const INPUT = {
   scribe: parseScribe(SCRIBE),
   coverage: 0.105,
   unattributedMs: UNION_MS,
-  voicedMs: 0,
+  voicedMs: 0, durationMs: 0,
   domain: 'quilt',
   capturedChars: 0,
+  removed: [],
 }
 
 describe('clipboard forms', () => {
@@ -332,7 +333,7 @@ describe('meetingDate', () => {
 const BASE = {
   title: 'T', date: '2026-08-07', durationMin: 30,
   attendees: [] as AttendeeLine[], scribe: parseScribe('# T'),
-  coverage: 0.9, unattributedMs: 0, voicedMs: 0, domain: '', capturedChars: 0,
+  coverage: 0.9, unattributedMs: 0, voicedMs: 0, durationMs: 0, domain: '', capturedChars: 0, removed: [],
 }
 
 const A = (label: string, o: Partial<AttendeeLine> = {}): AttendeeLine => ({
@@ -477,12 +478,97 @@ describe('cleanBody strips scaffolding without eating content', () => {
 
 describe('time and date edges', () => {
   it('renders a non-finite duration as 0s rather than NaN', () => {
-    expect(renderAttendees([A('X', { speakingMs: NaN })], { coverage: 0.9, unattributedMs: 0, voicedMs: 0 })).toMatch(/X: 0s/)
+    expect(renderAttendees([A('X', { speakingMs: NaN })], { coverage: 0.9, unattributedMs: 0, voicedMs: 0, durationMs: 0 })).toMatch(/X: 0s/)
   })
   it('rejects an implausibly small epoch instead of printing 1969', () => {
     expect(meetingDate(1)).toBe('')
   })
   it('reads a date-only string as that local date', () => {
     expect(meetingDate('2026-08-06')).toBe('2026-08-06')
+  })
+})
+
+describe('a name the human explicitly removed', () => {
+  // 2026-08-07: Miles removed "Clem Ukaoma" from a call that was only him and
+  // Queen. All 8 label sites were rewritten; the summary still opened
+  // "Miles, Queen, and Clem talk through..." and the payload said nothing.
+  const scribe = parseScribe([
+    '# Generational Trauma And Parenting Fears (G2)',
+    '## Summary', 'Miles, Queen, and Clem talk through the fallout.',
+    '## Transcript', '[Unidentified 1]: reclose that is how you close it',
+  ].join('\n'))
+  const removed = [{ label: 'Clem Ukaoma', proseStale: true }]
+
+  it('states the removal, in both forms', () => {
+    for (const out of [
+      clipboardSummary({ ...BASE, scribe, removed }),
+      clipboardFull({ ...BASE, scribe, removed }),
+    ]) {
+      expect(out).toMatch(/You removed "Clem Ukaoma" from this meeting/)
+      expect(out).toMatch(/treat every mention of it as a capture error/)
+    }
+  })
+
+  it('does NOT rewrite the prose', () => {
+    // Substituting into a written sentence mangles grammar and can hit the wrong
+    // person. The record stays; the correction travels beside it.
+    expect(clipboardSummary({ ...BASE, scribe, removed })).toMatch(/Miles, Queen, and Clem talk through/)
+  })
+
+  it('is quieter when the prose does not carry the name', () => {
+    const out = clipboardSummary({
+      ...BASE, scribe, removed: [{ label: 'Clem Ukaoma', proseStale: false }],
+    })
+    expect(out).toMatch(/You also removed "Clem Ukaoma"/)
+    expect(out).not.toMatch(/still uses the name/)
+  })
+
+  it('says nothing at all when nobody was removed', () => {
+    expect(clipboardSummary({ ...BASE, scribe })).not.toMatch(/You removed/)
+  })
+})
+
+describe('the overlap note is gated on meeting LENGTH, not voiced time', () => {
+  const two = (a: number, b: number): AttendeeLine[] => [
+    { label: 'MU', asserted: true, speakingMs: a, share: 0.6, isOwner: true, confirmedByHuman: false },
+    { label: 'Queen Ukaoma', asserted: true, speakingMs: b, share: 0.4, isOwner: false, confirmedByHuman: false },
+  ]
+
+  it('stays QUIET on ordinary overlap inside the meeting length', () => {
+    // 21m + 10m of speech in a 55-minute meeting: they overlap (the voiced union
+    // is smaller than the sum) but the rows do not exceed the meeting, so there
+    // is nothing confusing to explain. Gating on voicedMs fired here, on 16 of
+    // 23 real meetings — boilerplate, not signal.
+    const out = renderAttendees(two(21 * 60_000, 10 * 60_000), {
+      coverage: 0.9, unattributedMs: 0, voicedMs: 28 * 60_000, durationMs: 55 * 60_000,
+    })
+    expect(out.includes('these overlap'), 'fired inside the meeting length').toBe(false)
+  })
+
+  it('SPEAKS when the rows add past the meeting length', () => {
+    // The real 66-minute meeting whose displayed rows totalled 71m9s:
+    // 23m29 + 18m6 + 15m29 + 5m2 named = 62m6, plus 9m3 unidentified.
+    const real: AttendeeLine[] = [
+      ['Jeremy Sokolic', 23 * 60_000 + 29_000], ['Graham Hoffman', 18 * 60_000 + 6_000],
+      ['MU', 15 * 60_000 + 29_000], ['Silas Larson', 5 * 60_000 + 2_000],
+    ].map(([label, ms]) => ({
+      label: label as string, asserted: true, speakingMs: ms as number,
+      share: 0.25, isOwner: label === 'MU', confirmedByHuman: false,
+    }))
+    real.push({ label: 'Unidentified 1', asserted: false, speakingMs: 0, share: null,
+                isOwner: false, confirmedByHuman: false })
+    const out = renderAttendees(real, {
+      coverage: 0.9, unattributedMs: 9 * 60_000 + 3_000,
+      voicedMs: 40 * 60_000, durationMs: 66 * 60_000,
+    })
+    expect(out).toMatch(/these overlap/)
+    expect(out).toMatch(/more than the 66m the meeting ran/)
+  })
+
+  it('stays quiet when the duration is unknown rather than guessing', () => {
+    const out = renderAttendees(two(99 * 60_000, 99 * 60_000), {
+      coverage: 0.9, unattributedMs: 0, voicedMs: 1000, durationMs: 0,
+    })
+    expect(out.includes('these overlap')).toBe(false)
   })
 })
