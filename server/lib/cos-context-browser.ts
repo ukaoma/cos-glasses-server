@@ -1,4 +1,8 @@
-export const MEMORY_ID_PATTERN = /^mem_[A-Za-z0-9_:-]{1,120}$/
+// `mem_` addresses the vector store, `file_` addresses a note on disk. Two stores,
+// one id space, disjoint prefixes — so a reference is never ambiguous about which
+// one it means. `.` is permitted because a file id carries its extension; it
+// cannot traverse, since `/` is excluded and a bare `..` cannot match the prefix.
+export const MEMORY_ID_PATTERN = /^(?:mem|file)_[A-Za-z0-9._:-]{1,120}$/
 export const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
@@ -352,6 +356,13 @@ export interface ContextBrowserStatus {
   available: boolean
   protocol: number
   state?: string
+  /**
+   * WHICH tier answered: 'bridge' is a Python/vector pipeline, 'files' is plain
+   * markdown on disk. Present so a client can say what it is showing instead of
+   * implying a vector store that may not exist. Absent means the field was not
+   * supplied, which is every response from a server older than 6.22.0.
+   */
+  source?: 'bridge' | 'files'
   memory: { available: boolean; total: number; state: string; reason?: string }
   threads: { available: boolean; total: number; active: number; stale: number; resolved: number; state: string; reason?: string }
 }
@@ -385,6 +396,11 @@ export function normalizeContextBrowserStatus(value: unknown): ContextBrowserSta
     ...(!protocolCompatible
       ? { state: 'bridge_outdated' }
       : source.state ? { state: cleanState(source.state, 'unavailable') } : {}),
+    // Allowlisted, not passed through: an unrecognised value would let a future
+    // or hostile payload put arbitrary text on a surface a client renders.
+    ...(protocolCompatible && (source.source === 'bridge' || source.source === 'files')
+      ? { source: source.source }
+      : {}),
     memory: {
       available: memoryAvailable,
       total: memoryAvailable ? finiteInteger(memory.total) : 0,

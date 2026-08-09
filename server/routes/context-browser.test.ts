@@ -6,15 +6,25 @@ vi.mock('../lib/python-bridge.js', () => ({
   callPython: vi.fn(),
   pythonBridgeAvailable: vi.fn(() => true),
   pythonBridgeState: vi.fn(() => 'ready'),
+  // The routes gate on THIS, not on pythonBridgeAvailable. A module mock replaces
+  // every export, so omitting it makes the gate `undefined()` and every route
+  // throws — which is exactly what happened when it was first added.
+  contextSourceAvailable: vi.fn(() => 'bridge'),
 }))
 
-import { callPython, pythonBridgeAvailable, pythonBridgeState } from '../lib/python-bridge.js'
+import {
+  callPython,
+  contextSourceAvailable,
+  pythonBridgeAvailable,
+  pythonBridgeState,
+} from '../lib/python-bridge.js'
 import { memoryRouter } from './memory.js'
 import { threadsRouter } from './threads.js'
 
 const callBridge = vi.mocked(callPython)
 const bridgeAvailable = vi.mocked(pythonBridgeAvailable)
 const bridgeState = vi.mocked(pythonBridgeState)
+const contextSource = vi.mocked(contextSourceAvailable)
 const closers: Array<() => Promise<void>> = []
 
 async function startTestServer(): Promise<string> {
@@ -33,6 +43,7 @@ afterEach(async () => {
   callBridge.mockReset()
   bridgeAvailable.mockReturnValue(true)
   bridgeState.mockReturnValue('ready')
+  contextSource.mockReturnValue('bridge')
   await Promise.all(closers.splice(0).map(close => close()))
 })
 
@@ -84,6 +95,10 @@ describe('memory and thread API routes', () => {
   })
 
   it('reports missing pipeline distinctly from a valid empty store', async () => {
+    // "Missing pipeline" now means no source AT ALL — no bridge and no files. A
+    // bridge-less install that has notes on disk is a working configuration, not
+    // a missing pipeline; that case is covered in the file-tier block below.
+    contextSource.mockReturnValue(null)
     bridgeAvailable.mockReturnValue(false)
     bridgeState.mockReturnValue('pipeline_missing')
     const base = await startTestServer()
@@ -116,5 +131,64 @@ describe('memory and thread API routes', () => {
     const base = await startTestServer()
     expect((await fetch(`${base}/api/threads?limit=999`)).status).toBe(200)
     expect(callBridge).toHaveBeenCalledWith(['threads', '--limit', '50'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The file tier must be REACHABLE. Every one of these routes used to return 503
+// before callPython was called, so a fallback inside the bridge changed nothing
+// a user could see. These tests pin the gate itself.
+// ---------------------------------------------------------------------------
+describe('a file-backed install reaches the same routes', () => {
+  it('serves memory, threads and status when the only source is files', async () => {
+    contextSource.mockReturnValue('files')
+    bridgeAvailable.mockReturnValue(false)
+    bridgeState.mockReturnValue('pipeline_missing')
+    callBridge
+      .mockResolvedValueOnce([{ id: 'file_memory_note.md', type: 'note', content: 'From a file' }])
+      .mockResolvedValueOnce({ threads: [{ id: 'file_threads_t.md', name: 'From a file' }] })
+      .mockResolvedValueOnce({
+        available: true, protocol: 1, state: 'ready', source: 'files',
+        memory: { available: true, total: 3, state: 'ready' },
+        threads: { available: true, total: 1, active: 1, stale: 0, resolved: 0, state: 'ready' },
+      })
+    const base = await startTestServer()
+
+    const memory = await fetch(`${base}/api/memory`)
+    expect(memory.status).toBe(200)
+    // A `file_` id must survive normalization. MEMORY_ID_PATTERN previously
+    // required `mem_`, so every file-backed row was silently dropped from the
+    // list — a 200 response containing nothing.
+    expect(await memory.json()).toEqual([expect.objectContaining({ id: 'file_memory_note.md' })])
+
+    const threads = await fetch(`${base}/api/threads`)
+    expect(threads.status).toBe(200)
+    expect((await threads.json()).threads).toEqual([expect.objectContaining({ name: 'From a file' })])
+
+    const status = await fetch(`${base}/api/context/status`)
+    const body = await status.json()
+    expect(body.available).toBe(true)
+    // Says WHICH tier answered, so a client never implies a vector store that is
+    // not there.
+    expect(body.source).toBe('files')
+    expect(body.memory.total).toBe(3)
+  })
+
+  it('still reports unavailable when there is no source at all', async () => {
+    contextSource.mockReturnValue(null)
+    bridgeAvailable.mockReturnValue(false)
+    bridgeState.mockReturnValue('pipeline_missing')
+    const base = await startTestServer()
+
+    for (const path of ['/api/memory', '/api/memory/mem_x', '/api/threads', '/api/memory/overview']) {
+      expect((await fetch(`${base}${path}`)).status, path).toBe(503)
+    }
+    // Status answers 200 with available:false by design — the companion reads it
+    // to decide what to offer, so it must not have to distinguish a 503 from a
+    // network error.
+    const status = await fetch(`${base}/api/context/status`)
+    expect(status.status).toBe(200)
+    expect((await status.json()).available).toBe(false)
+    expect(callBridge).not.toHaveBeenCalled()
   })
 })

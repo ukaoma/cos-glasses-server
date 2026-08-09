@@ -1,3 +1,40 @@
+## 6.22.0
+
+Memory and Threads now work without a Python bridge, a venv, or a vector
+database. Point COS Data at a folder holding `memory/` or `threads/` markdown and
+they are browsable immediately.
+
+This is the move that made Meetings adoptable, applied to context: the
+requirement collapses to markdown files in folders. Any nesting, any filename,
+front matter optional. `type` comes from front matter, else the containing folder
+name, else `note`; ordering from a front-matter date, else a date in the filename,
+else mtime.
+
+- **Backwards compatible by construction, not by promise.** The file tier is
+  reachable only from the branch `callPython` takes when the bridge is ABSENT. An
+  install with a working venv and `cos_api_bridge.py` never executes a line of it,
+  so its behaviour cannot change. There is no merged resolver to get wrong, no
+  migration, no reindex, and no profile edit. A test reads `python-bridge.ts` and
+  fails if the bridge path ever references the file tier.
+- **The routes were the real gate.** `/api/memory`, `/api/memory/:id`,
+  `/api/memory/overview`, `/api/threads` and `/api/threads/:id` returned 503
+  before `callPython` was ever called, so a fallback inside the bridge would have
+  changed nothing observable. They now gate on whether ANY source can answer.
+- **`/api/context/status` reports a file store as available**, with
+  `source: "bridge" | "files"` so a client can say which tier it is showing
+  instead of implying a vector store that is not there. Absent on older servers.
+  `stale` is 0 for file threads because nothing computed staleness — that is the
+  truth, not a default.
+- **File ids are namespaced `file_`,** disjoint from `mem_`, so a reference is
+  never ambiguous about which store it addresses. `MEMORY_ID_PATTERN` accepts
+  both; it previously required `mem_`, which silently dropped every file-backed
+  row from the list and returned a 200 containing nothing.
+- **`COS_CONTEXT_DIR`** points the tier anywhere and is exclusive when set.
+  Otherwise `COS_OPERATIONS_DIR`, `COS_MEETINGS_ROOT` and its parent, the parent
+  of `COS_SCRIPTS_DIR`, then `~/.cos-glasses` — so `mkdir ~/.cos-glasses/memory`
+  is a complete setup.
+- Amendments are NOT in this release. Reads only.
+
 ## 6.21.36
 
 Security and accuracy fixes for the 6.21.35 context browser. Two claims in that

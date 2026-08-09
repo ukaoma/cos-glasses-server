@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { callPython, pythonBridgeAvailable, pythonBridgeState } from '../lib/python-bridge.js'
+import { callPython, contextSourceAvailable, pythonBridgeState } from '../lib/python-bridge.js'
 import { THREAD_ID_PATTERN, normalizeThreadDetail, normalizeThreads } from '../lib/cos-context-browser.js'
 
 export const threadsRouter = Router()
@@ -9,7 +9,7 @@ threadsRouter.get('/threads/:id', async (req, res) => {
     res.status(400).json({ error: 'invalid_thread_id' })
     return
   }
-  if (!pythonBridgeAvailable()) {
+  if (contextSourceAvailable() === null) {
     res.status(503).json({ error: pythonBridgeState() })
     return
   }
@@ -33,7 +33,7 @@ threadsRouter.get('/threads/:id', async (req, res) => {
 threadsRouter.get('/threads', async (req, res) => {
   const parsed = Number(req.query.limit)
   const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(50, Math.trunc(parsed))) : 30
-  if (!pythonBridgeAvailable()) {
+  if (contextSourceAvailable() === null) {
     res.status(503).json({
       error: pythonBridgeState(), available: false,
       generated_at: '', active_count: 0, stale_count: 0, resolved_count: 0, threads: [],

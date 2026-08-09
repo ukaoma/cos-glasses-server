@@ -1,5 +1,17 @@
 import { Router } from 'express'
-import { callPython, pythonBridgeAvailable, pythonBridgeState } from '../lib/python-bridge.js'
+import { callPython, contextSourceAvailable, pythonBridgeState } from '../lib/python-bridge.js'
+
+/**
+ * Is there anything to serve — a Python bridge OR plain files on disk?
+ *
+ * These routes used to gate on `pythonBridgeAvailable()`, which returned 503
+ * before `callPython` was ever reached. That is why "I selected COS Memory and
+ * the G2 says Unavailable" was the experience for anyone without a venv and a
+ * vector database: the answer was decided two layers above the data.
+ */
+function contextConfigured(): boolean {
+  return contextSourceAvailable() !== null
+}
 import {
   MEMORY_ID_PATTERN,
   normalizeMemoryDetail,
@@ -12,7 +24,7 @@ export const memoryRouter = Router()
 let overviewCache: { expiresAt: number; value: ReturnType<typeof normalizeMemoryOverview> } | null = null
 
 memoryRouter.get('/context/status', async (_req, res) => {
-  if (!pythonBridgeAvailable()) {
+  if (!contextConfigured()) {
     const state = pythonBridgeState()
     res.json(normalizeContextBrowserStatus({
       available: false, protocol: 1, state,
@@ -40,7 +52,7 @@ function boundedInteger(value: unknown, fallback: number, min: number, max: numb
 }
 
 memoryRouter.get('/memory/overview', async (_req, res) => {
-  if (!pythonBridgeAvailable()) {
+  if (!contextConfigured()) {
     res.status(503).json(normalizeMemoryOverview({
       available: false, reason: pythonBridgeState(), total: 0, by_type: {},
     }))
@@ -71,7 +83,7 @@ memoryRouter.get('/memory/:id', async (req, res) => {
     res.status(400).json({ error: 'invalid_memory_id' })
     return
   }
-  if (!pythonBridgeAvailable()) {
+  if (!contextConfigured()) {
     res.status(503).json({ error: pythonBridgeState() })
     return
   }
@@ -95,7 +107,7 @@ memoryRouter.get('/memory/:id', async (req, res) => {
 memoryRouter.get('/memory', async (req, res) => {
   const days = boundedInteger(req.query.days, 30, 1, 3650)
   const limit = boundedInteger(req.query.limit, 20, 1, 50)
-  if (!pythonBridgeAvailable()) {
+  if (!contextConfigured()) {
     res.status(503).json({ error: pythonBridgeState() })
     return
   }

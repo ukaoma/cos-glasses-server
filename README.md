@@ -307,8 +307,58 @@ complete Bot Memory count/type split, bounded recent summaries, exact logical
 memory IDs, and existing tracked/manual threads. Exact detail requests are
 resolved by stable ID so a spoken follow-up can carry the selected snapshot as
 context. Embeddings, vector-store point IDs, cache files, secrets, and local
-paths never cross the API boundary. Standalone installs report the feature as
-unavailable without affecting messages, meetings, transcription, or agents.
+paths never cross the API boundary.
+
+### Memory and Threads from plain markdown (6.22.0)
+
+You do not need a Python bridge, a virtual environment, or a vector database.
+Make a folder with a `memory/` or `threads/` subfolder, put markdown files in it,
+and point COS Data at it (or set `COS_CONTEXT_DIR`):
+
+```
+notes/
+  memory/                      any nesting, any filenames
+    2026-08-09-hiring-call.md
+    decisions/pricing.md       folder name becomes the type
+  threads/
+    website-rebuild.md
+```
+
+Front matter is optional and every field degrades rather than rejecting:
+
+```markdown
+---
+type: decision          # else the containing folder name, else "note"
+date: 2026-08-09        # else a YYYY-MM-DD in the filename, else file mtime
+status: resolved        # threads only
+---
+# Held Rain POS for v25
+
+Body text. The first heading becomes the summary.
+```
+
+Two tiers, and the bridge always wins when it is present:
+
+| Tier | Requires | Provides |
+| --- | --- | --- |
+| Files | a folder of markdown | Browse, read, and reference memories and threads |
+| Bridge | + venv, `cos_api_bridge.py`, vector store | Adds semantic recall, dedup, type statistics, retention |
+
+`/api/context/status` reports `source: "bridge"` or `source: "files"` so a client
+can say which tier it is showing. Fields a file-backed record cannot have are
+empty rather than invented: a file thread has `velocity: ""`, `meeting_count: 0`
+and `stale: 0` because nothing computed them.
+
+Root resolution, first match wins: `COS_CONTEXT_DIR` (exclusive when set), then
+`COS_OPERATIONS_DIR`, `COS_MEETINGS_ROOT` and its parent, the parent of
+`COS_SCRIPTS_DIR`, then `~/.cos-glasses` — so `mkdir ~/.cos-glasses/memory` is a
+complete setup. The file tier is read from the code path taken only when no
+bridge is configured, so adding it cannot change the behaviour of an install that
+already has one.
+
+The API is read-only in both tiers. Standalone installs with neither a bridge nor
+a notes folder report the feature as unavailable without affecting messages,
+meetings, transcription, or agents.
 
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):
