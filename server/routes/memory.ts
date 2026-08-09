@@ -1,13 +1,37 @@
 import { Router } from 'express'
-import { callPython } from '../lib/python-bridge.js'
+import { callPython, pythonBridgeAvailable, pythonBridgeState } from '../lib/python-bridge.js'
 import {
   MEMORY_ID_PATTERN,
   normalizeMemoryDetail,
   normalizeMemoryList,
   normalizeMemoryOverview,
+  normalizeContextBrowserStatus,
 } from '../lib/cos-context-browser.js'
 
 export const memoryRouter = Router()
+let overviewCache: { expiresAt: number; value: ReturnType<typeof normalizeMemoryOverview> } | null = null
+
+memoryRouter.get('/context/status', async (_req, res) => {
+  if (!pythonBridgeAvailable()) {
+    const state = pythonBridgeState()
+    res.json(normalizeContextBrowserStatus({
+      available: false, protocol: 1, state,
+      memory: { available: false, total: 0, state },
+      threads: { available: false, total: 0, active: 0, stale: 0, resolved: 0, state },
+    }))
+    return
+  }
+  try {
+    const data = await callPython(['context-status'], 8_000)
+    res.json(normalizeContextBrowserStatus(data))
+  } catch {
+    res.json(normalizeContextBrowserStatus({
+      available: false, protocol: 1, state: 'bridge_error',
+      memory: { available: false, total: 0, state: 'bridge_error', reason: 'bridge_error' },
+      threads: { available: false, total: 0, active: 0, stale: 0, resolved: 0, state: 'bridge_error', reason: 'bridge_error' },
+    }))
+  }
+})
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value)
@@ -16,9 +40,21 @@ function boundedInteger(value: unknown, fallback: number, min: number, max: numb
 }
 
 memoryRouter.get('/memory/overview', async (_req, res) => {
+  if (!pythonBridgeAvailable()) {
+    res.status(503).json(normalizeMemoryOverview({
+      available: false, reason: pythonBridgeState(), total: 0, by_type: {},
+    }))
+    return
+  }
+  if (overviewCache && overviewCache.expiresAt > Date.now()) {
+    res.json(overviewCache.value)
+    return
+  }
   try {
     const data = await callPython(['memory-overview'])
-    res.json(normalizeMemoryOverview(data))
+    const value = normalizeMemoryOverview(data)
+    overviewCache = { expiresAt: Date.now() + 30_000, value }
+    res.json(value)
   } catch (error) {
     res.status(503).json({
       available: false,
@@ -33,6 +69,10 @@ memoryRouter.get('/memory/overview', async (_req, res) => {
 memoryRouter.get('/memory/:id', async (req, res) => {
   if (!MEMORY_ID_PATTERN.test(req.params.id)) {
     res.status(400).json({ error: 'invalid_memory_id' })
+    return
+  }
+  if (!pythonBridgeAvailable()) {
+    res.status(503).json({ error: pythonBridgeState() })
     return
   }
   try {
@@ -55,11 +95,15 @@ memoryRouter.get('/memory/:id', async (req, res) => {
 memoryRouter.get('/memory', async (req, res) => {
   const days = boundedInteger(req.query.days, 30, 1, 3650)
   const limit = boundedInteger(req.query.limit, 20, 1, 50)
+  if (!pythonBridgeAvailable()) {
+    res.status(503).json({ error: pythonBridgeState() })
+    return
+  }
   try {
     const data = await callPython(['memory', '--days', String(days), '--limit', String(limit)])
     // Preserve the legacy top-level array used by released companions.
     res.json(normalizeMemoryList(data, limit))
   } catch {
-    res.json([])
+    res.status(503).json({ error: 'memory_unavailable' })
   }
 })

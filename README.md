@@ -301,7 +301,7 @@ direct library and an operations root are both configured, the server merges
 them with standalone G2 recordings and prefers the enriched writable record
 for the same session.
 
-Server 6.21.34 adds authenticated, read-only Memory and Threads browsing for
+Server 6.21.35 adds authenticated, read-only Memory and Threads browsing for
 full COS installs. With `COS_SCRIPTS_DIR` configured, the companion can show the
 complete Bot Memory count/type split, bounded recent summaries, exact logical
 memory IDs, and existing tracked/manual threads. Exact detail requests are

@@ -4,6 +4,7 @@ import {
   normalizeMemoryDetail,
   normalizeMemoryList,
   normalizeMemoryOverview,
+  normalizeContextBrowserStatus,
   normalizeThreadDetail,
   normalizeThreads,
 } from './cos-context-browser.js'
@@ -81,12 +82,80 @@ describe('COS memory and thread projections', () => {
     expect(detail?.manual_updates[0].content).toContain('[local path hidden]')
   })
 
+  it('preserves the real manual-thread schema without exposing raw structures', () => {
+    const detail = normalizeThreadDetail({
+      id: 'mth_20260205_120344', name: 'JCK Next Gen Jeweler 2026', is_manual: true,
+      linked_meetings: ['2026-01-05_Jewel360_Commercial_Pitch', '884ca049a19d'],
+      meeting_count: 2,
+      milestones: [{ event: 'Mitchell confirmed for speaking slot', date: '2026-02-05' }],
+      sources: [{ content: 'Customer interview', reference: 'Nick Slack 9:35 AM' }],
+    })
+    expect(detail?.meetings).toEqual([
+      { name: '2026-01-05_Jewel360_Commercial_Pitch', date: '' },
+      { name: '884ca049a19d', date: '' },
+    ])
+    expect(detail?.milestones).toEqual(['Mitchell confirmed for speaking slot (2026-02-05)'])
+    expect(detail?.sources).toEqual(['Customer interview (Nick Slack 9:35 AM)'])
+  })
+
+  it('rejects incompatible context protocols without leaking bridge internals', () => {
+    expect(normalizeContextBrowserStatus({
+      available: true, protocol: 999, scripts_dir: '/private/path',
+      memory: { available: true, total: 4875, state: 'ready' },
+      threads: { available: true, total: 30, active: 20, stale: 4, resolved: 6, state: 'ready' },
+    })).toEqual({
+      available: false, protocol: 999, state: 'bridge_outdated',
+      memory: { available: false, total: 0, state: 'bridge_outdated', reason: 'bridge_outdated' },
+      threads: { available: false, total: 0, active: 0, stale: 0, resolved: 0, state: 'bridge_outdated', reason: 'bridge_outdated' },
+    })
+  })
+
+  it('preserves protocol 1 context readiness without leaking bridge internals', () => {
+    expect(normalizeContextBrowserStatus({
+      available: true, protocol: 1, scripts_dir: '/private/path',
+      memory: { available: true, total: 4875, state: 'ready' },
+      threads: { available: true, total: 30, active: 20, stale: 4, resolved: 6, state: 'ready' },
+    })).toEqual({
+      available: true, protocol: 1,
+      memory: { available: true, total: 4875, state: 'ready' },
+      threads: { available: true, total: 30, active: 20, stale: 4, resolved: 6, state: 'ready' },
+    })
+  })
+
   it('removes control characters', () => {
     expect(cleanContextText('hello\u0000world\u007f', 100)).toBe('helloworld')
   })
 
+  it('bounds sanitizer work for oversized plain text', () => {
+    const started = performance.now()
+    expect(cleanContextText('z'.repeat(1_000_000), 32_000)).toHaveLength(32_000)
+    expect(performance.now() - started).toBeLessThan(100)
+  })
+
   it('replaces arbitrary local absolute paths without corrupting web URLs', () => {
-    const cleaned = cleanContextText('See /opt/private/data/file.txt and https://gotcos.com/docs', 200)
-    expect(cleaned).toBe('See [local path hidden] and https://gotcos.com/docs')
+    const cleaned = cleanContextText('See /opt/private/data/file.txt, path:/Users/me/a.md, file:///Users/me/b.md and https://gotcos.com/docs', 240)
+    expect(cleaned).toBe('See [local path hidden] path: [local path hidden], [local path hidden] and https://gotcos.com/docs')
+  })
+
+  it('redacts common secret families and Windows paths from raw memory text', () => {
+    const source = [
+      'Bearer abcdefghijklmnopqrstuvwxyz',
+      'eyJabcdefghijk.abcdefghijkl.abcdefghijkl',
+      'ghp_abcdefghijklmnopqrstuvwxyz123456',
+      'DATABASE_URL=postgres://user:pass@host/db',
+      'https://user:pass@example.com/path?access_token=abcdef1234567890',
+      'C:\\Users\\Queen\\private.txt',
+      '-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----',
+    ].join('\n')
+    const cleaned = cleanContextText(source, 4000)
+    expect(cleaned).not.toMatch(/abcdefghijklmnopqrstuvwxyz|user:pass|C:\\Users|PRIVATE KEY/)
+    expect(cleaned.match(/\[secret hidden\]/g)?.length).toBeGreaterThanOrEqual(5)
+    expect(cleaned).toContain('[local path hidden]')
+  })
+
+  it('redacts a private key even when bridge truncation removes its END marker', () => {
+    const cleaned = cleanContextText('prefix\n-----BEGIN PRIVATE KEY-----\nSUPERSECRETKEYMATERIAL', 500)
+    expect(cleaned).toBe('prefix\n[secret hidden]')
+    expect(cleaned).not.toContain('SUPERSECRET')
   })
 })

@@ -16,6 +16,7 @@ import { normalizeModelPreference, type ModelPreference } from '../../shared/mod
 import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 import { secureExistingPrivateFile } from './secure-user-config.js'
 import { currentMessageEra } from './message-era.js'
+import { formatReferencedSourceData } from './prompt-reference-boundary.js'
 
 export type { ModelPreference }
 
@@ -724,7 +725,7 @@ export function formatHistoryForPrompt(
   }
 
   if (reference) {
-    parts.push(`REFERENCED MESSAGE:\nUser asked: ${reference.query}\nCOS responded: ${reference.response}`)
+    parts.push(formatReferencedSourceData(reference))
   }
 
   return parts.length > 0 ? '\n\n' + parts.join('\n\n') : ''

@@ -1,3 +1,20 @@
+## 6.21.35
+
+- Adds authenticated `/api/context/status` proof so Control and the companion
+  distinguish a healthy empty store from missing, outdated, or degraded COS data.
+- Preserves manual-thread meetings, milestones, sources, and initial notes across
+  the Python bridge while bounding list/detail payloads.
+- Fixes recent-memory ordering for stores larger than 2,000 points by paging the
+  full filtered collection before selecting the newest results.
+- Broadens phone-safe redaction for credentials, tokens, private keys, Windows and
+  file-URI paths, and keeps browser-only memory reads retention-neutral.
+- Caches the full memory type overview briefly to avoid repeatedly scanning a
+  large store while users browse.
+- Rejects future or malformed COS Data bridge protocols instead of relabeling
+  them as protocol 1, so Control and the companion fail closed on incompatibility.
+- Quotes referenced Meeting, Memory, and Thread bodies as untrusted source data:
+  they remain factual evidence but can never become a prompt-instruction channel.
+
 ## 6.21.34
 
 - **Memory and Threads are now real production surfaces.** Authenticated

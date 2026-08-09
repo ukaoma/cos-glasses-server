@@ -4,6 +4,16 @@ export const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
 const ABSOLUTE_PATH = /(^|[\s("'`])(?:~\/|\/(?!\/)(?:[^/\s)"'`]+\/)+[^/\s)"'`]+\/?)/g
 const SECRET_TOKEN = /\b(?:sk-[A-Za-z0-9_-]{12,}|(?:bearer|token|api[_ -]?key)\s*[:=]\s*[A-Za-z0-9._-]{12,})\b/gi
+const WINDOWS_PATH = /\b[A-Za-z]:\\(?:[^\\\r\n]+\\)*[^\\\r\n]*/g
+const PEM_BLOCK = /-----BEGIN [^-\r\n]+(?:PRIVATE KEY|KEY)[^-\r\n]*-----[\s\S]*?(?:-----END [^-\r\n]+-----|$)/g
+const JWT_TOKEN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
+const PREFIXED_SECRET = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/g
+const URL_CREDENTIALS = /(\b[a-z][a-z0-9+.-]{0,20}:\/\/)[^\s/@:]+:[^\s/@]+@/gi
+const QUERY_SECRET = /([?&](?:access_token|api_key|apikey|token|secret|password|key)=)[^&#\s]+/gi
+const ENV_SECRET = /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*\s*=)\s*[^\s]+/gi
+const BEARER_SECRET = /\b(Bearer\s+)[A-Za-z0-9._~+\/-]{12,}/gi
+const FILE_URI = /\bfile:\/\/(?:localhost)?\/(?:[^\s)"'`]+\/?)+/gi
+const LABELED_PATH = /\b(path|file|folder|directory)\s*[:=]\s*(?:~\/|\/(?!\/)[^\s,;)}\]"'`]+)/gi
 
 export interface MemoryRefGroups {
   people?: string[]
@@ -51,7 +61,18 @@ export interface ThreadListItem {
 
 export function cleanContextText(value: unknown, limit: number): string {
   let text = typeof value === 'string' ? value : value == null ? '' : String(value)
+  text = text.slice(0, Math.max(limit, Math.min(64_000, limit * 2)))
   text = text.replace(CONTROL_CHARS, '')
+  text = text.replace(PEM_BLOCK, '[secret hidden]')
+  text = text.replace(JWT_TOKEN, '[secret hidden]')
+  text = text.replace(PREFIXED_SECRET, '[secret hidden]')
+  text = text.replace(URL_CREDENTIALS, '$1[credentials hidden]@')
+  text = text.replace(QUERY_SECRET, '$1[secret hidden]')
+  text = text.replace(ENV_SECRET, '$1[secret hidden]')
+  text = text.replace(BEARER_SECRET, '$1[secret hidden]')
+  text = text.replace(FILE_URI, '[local path hidden]')
+  text = text.replace(LABELED_PATH, '$1: [local path hidden]')
+  text = text.replace(WINDOWS_PATH, '[local path hidden]')
   text = text.replace(ABSOLUTE_PATH, (_match, prefix: string) => `${prefix}[local path hidden]`)
   text = text.replace(SECRET_TOKEN, '[secret hidden]')
   return text.trim().slice(0, limit)
@@ -68,7 +89,11 @@ function stringList(value: unknown, itemLimit: number, textLimit: number): strin
   return value.slice(0, itemLimit).map(item => {
     if (item && typeof item === 'object' && !Array.isArray(item)) {
       const record = item as Record<string, unknown>
-      const label = record.title ?? record.name ?? record.summary ?? record.content ?? record.path ?? record.url
+      const primary = record.title ?? record.name ?? record.summary ?? record.event ?? record.content
+        ?? record.reference ?? record.path ?? record.url
+      const label = record.reference && record.content && record.reference !== record.content
+        ? `${record.content} (${record.reference})`
+        : record.date && record.event ? `${record.event} (${record.date})` : primary
       return cleanContextText(label ?? '', textLimit)
     }
     return cleanContextText(item, textLimit)
@@ -128,13 +153,20 @@ function normalizeThread(value: unknown, detail: boolean): ThreadListItem | null
   const source = value as Record<string, unknown>
   const id = cleanContextText(source.id, 128)
   if (!THREAD_ID_PATTERN.test(id)) return null
-  const meetings = Array.isArray(source.meetings)
-    ? source.meetings.slice(0, detail ? 50 : 12).flatMap(item => {
+  const rawMeetings = Array.isArray(source.meetings) && source.meetings.length
+    ? source.meetings
+    : Array.isArray(source.linked_meetings) ? source.linked_meetings : []
+  const meetings = rawMeetings
+    .slice(0, detail ? 50 : 12).flatMap(item => {
+        if (typeof item === 'string') {
+          const name = cleanContextText(item, 240)
+          return name ? [{ name, date: '' }] : []
+        }
         if (!item || typeof item !== 'object' || Array.isArray(item)) return []
         const meeting = item as Record<string, unknown>
-        return [{ name: cleanContextText(meeting.name, 240), date: cleanContextText(meeting.date, 32) }]
+        const name = cleanContextText(meeting.name ?? meeting.title ?? meeting.id, 240)
+        return name ? [{ name, date: cleanContextText(meeting.date, 32) }] : []
       })
-    : []
   const manualUpdates = Array.isArray(source.manual_updates)
     ? source.manual_updates.slice(0, detail ? 20 : 8).flatMap(item => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return []
@@ -227,4 +259,55 @@ export function normalizeMemoryOverview(value: unknown): {
   const reason = cleanContextText(source.reason, 120)
   if (reason) result.reason = reason
   return result
+}
+
+export interface ContextBrowserStatus {
+  available: boolean
+  protocol: number
+  state?: string
+  memory: { available: boolean; total: number; state: string; reason?: string }
+  threads: { available: boolean; total: number; active: number; stale: number; resolved: number; state: string; reason?: string }
+}
+
+export function normalizeContextBrowserStatus(value: unknown): ContextBrowserStatus {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : {}
+  const memory = source.memory && typeof source.memory === 'object' && !Array.isArray(source.memory)
+    ? source.memory as Record<string, unknown> : {}
+  const threads = source.threads && typeof source.threads === 'object' && !Array.isArray(source.threads)
+    ? source.threads as Record<string, unknown> : {}
+  const cleanState = (candidate: unknown, fallback: string) => cleanContextText(candidate, 64) || fallback
+  const protocol = finiteInteger(source.protocol)
+  const protocolCompatible = protocol === 1
+  const memoryAvailable = protocolCompatible && memory.available === true
+  const threadsAvailable = protocolCompatible && threads.available === true
+  const incompatibleState = protocolCompatible ? '' : 'bridge_outdated'
+  const memoryState = incompatibleState || cleanState(memory.state, memoryAvailable ? 'ready' : 'unavailable')
+  const threadState = incompatibleState || cleanState(threads.state, threadsAvailable ? 'ready' : 'unavailable')
+  return {
+    available: protocolCompatible && source.available === true,
+    protocol,
+    ...(!protocolCompatible
+      ? { state: 'bridge_outdated' }
+      : source.state ? { state: cleanState(source.state, 'unavailable') } : {}),
+    memory: {
+      available: memoryAvailable,
+      total: memoryAvailable ? finiteInteger(memory.total) : 0,
+      state: memoryState,
+      ...(!protocolCompatible
+        ? { reason: 'bridge_outdated' }
+        : memory.reason ? { reason: cleanState(memory.reason, memoryState) } : {}),
+    },
+    threads: {
+      available: threadsAvailable,
+      total: threadsAvailable ? finiteInteger(threads.total) : 0,
+      active: threadsAvailable ? finiteInteger(threads.active) : 0,
+      stale: threadsAvailable ? finiteInteger(threads.stale) : 0,
+      resolved: threadsAvailable ? finiteInteger(threads.resolved) : 0,
+      state: threadState,
+      ...(!protocolCompatible
+        ? { reason: 'bridge_outdated' }
+        : threads.reason ? { reason: cleanState(threads.reason, threadState) } : {}),
+    },
+  }
 }

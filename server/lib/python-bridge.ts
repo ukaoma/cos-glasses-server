@@ -35,6 +35,11 @@ export function pythonBridgeAvailable(): boolean {
   return pythonAvailable
 }
 
+export function pythonBridgeState(): 'ready' | 'pipeline_missing' | 'bridge_missing' {
+  if (pythonAvailable) return 'ready'
+  return COS_SCRIPTS_DIR ? 'bridge_missing' : 'pipeline_missing'
+}
+
 if (pythonAvailable) {
   console.log('[python-bridge] COS pipeline detected — sourcing live context')
 } else if (COS_SCRIPTS_DIR) {
@@ -60,6 +65,16 @@ function standaloneNoop(args: string[]): unknown {
     case 'tasks': return {}
     case 'threads': return { threads: [], active_count: 0, stale_count: 0, resolved_count: 0 }
     case 'thread-detail': return { error: 'cos_pipeline_not_configured' }
+    case 'context-status': {
+      const state = pythonBridgeState()
+      return {
+        available: false,
+        protocol: 1,
+        state,
+        memory: { available: false, total: 0, state },
+        threads: { available: false, total: 0, active: 0, stale: 0, resolved: 0, state },
+      }
+    }
     case 'memory': return []
     case 'memory-overview': return {
       available: false,
