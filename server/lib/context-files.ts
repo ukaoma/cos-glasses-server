@@ -19,7 +19,7 @@
 // vector store. The files were always the substrate — which is exactly why an
 // amendment must write only here and never to the derived store.
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 
@@ -85,26 +85,72 @@ function findDir(root: string, names: readonly string[]): string | null {
   return null
 }
 
+/** Extensions the readers treat as notes. */
+const NOTE_EXTENSIONS = ['.md', '.markdown', '.txt']
+
 /**
- * Every markdown file under `dir`, recursively, bounded.
+ * Every markdown file under `dir`, recursively, bounded, FOLLOWING SYMLINKS.
  *
  * Any nesting is accepted on purpose — a user's notes may be organised by year, by
  * project, or not at all, and rejecting a shape is what made COS Data unusable for
  * anyone but its author.
+ *
+ * SYMLINKS ARE FIRST-CLASS, and that is a correction. A `Dirent` reports a symlink
+ * as `isSymbolicLink()`, NOT as `isDirectory()` or `isFile()`, so the first version
+ * of this walk silently skipped every linked file and linked subfolder. Queen hit
+ * exactly that on 2026-08-09: she wired `operations/memory` at her real note store
+ * with a symlink, which worked only because `findDir` uses `statSync` and follows
+ * links — anything linked one level deeper would have vanished with no error.
+ *
+ * Attaching notes that live somewhere else is a PRIMARY use case, not an edge case,
+ * so a link has to behave like the thing it points at.
+ *
+ * Cycles are the cost of following them: `a -> ../a` recurses forever. Every
+ * directory is recorded by its resolved real path and visited once, which also
+ * stops the same store being counted twice when two links reach it.
+ *
+ * There is deliberately NO depth limit. An earlier draft capped nesting at 16 as
+ * "bounding a pathological tree", but real-path identity already makes cycles
+ * terminate and MAX_FILES_SCANNED already bounds the work — so the cap's only real
+ * effect was to silently hide notes nested deeper than that. That is the same
+ * invisible-skip defect this function was just fixed for, moved further out, and a
+ * mutation removing the cap changed no test, which is how it got noticed.
  */
-function walkMarkdown(dir: string, budget = { left: MAX_FILES_SCANNED }): string[] {
+function walkMarkdown(
+  dir: string,
+  budget = { left: MAX_FILES_SCANNED },
+  seen: Set<string> = new Set(),
+): string[] {
   const out: string[] = []
+  // Identity by real path, so a link and its target are the same directory.
+  let real: string
+  try { real = realpathSync(dir) } catch { return out }
+  if (seen.has(real)) return out
+  seen.add(real)
+
   let entries: import('node:fs').Dirent[]
   try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return out }
   for (const entry of entries) {
     if (budget.left <= 0) break
     if (entry.name.startsWith('.')) continue
     const full = join(dir, entry.name)
+    const isNote = NOTE_EXTENSIONS.includes(extname(entry.name).toLowerCase())
     if (entry.isDirectory()) {
-      out.push(...walkMarkdown(full, budget))
-    } else if (entry.isFile() && ['.md', '.markdown', '.txt'].includes(extname(entry.name).toLowerCase())) {
+      out.push(...walkMarkdown(full, budget, seen))
+    } else if (entry.isFile()) {
+      if (!isNote) continue
       budget.left -= 1
       out.push(full)
+    } else if (entry.isSymbolicLink()) {
+      // Resolve to decide: a linked folder is walked, a linked note is read.
+      let target: import('node:fs').Stats
+      try { target = statSync(full) } catch { continue }   // broken link, skip quietly
+      if (target.isDirectory()) {
+        out.push(...walkMarkdown(full, budget, seen))
+      } else if (target.isFile() && isNote) {
+        budget.left -= 1
+        out.push(full)
+      }
     }
   }
   return out

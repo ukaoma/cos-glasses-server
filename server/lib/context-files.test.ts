@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -228,6 +228,92 @@ describe('tier state distinguishes healthy-empty from absent', () => {
   it('absent for a null or nonexistent root', () => {
     expect(fileTierState(null)).toBe('absent')
     expect(fileTierState(join(root, 'nope'))).toBe('absent')
+  })
+})
+
+describe('notes attached from elsewhere by symlink', () => {
+  // Queen wired `operations/memory` at her real store on 2026-08-09. It worked, but
+  // only by luck: findDir uses statSync (follows links) while the WALK used
+  // Dirent.isDirectory(), which is FALSE for a symlink. Anything linked a level
+  // deeper vanished with no error. Attaching an existing store is a primary use
+  // case, so a link has to behave like the thing it points at.
+  function elsewhere(rel: string, body: string): string {
+    const outside = join(root, '__outside', rel)
+    mkdirSync(join(outside, '..'), { recursive: true })
+    writeFileSync(outside, body)
+    return outside
+  }
+
+  it('reads notes through a symlinked memory/ folder', () => {
+    const real = join(root, '__outside', 'store')
+    mkdirSync(real, { recursive: true })
+    writeFileSync(join(real, 'a.md'), 'linked note')
+    symlinkSync(real, join(root, 'memory'))
+    expect(hasFileMemory(root)).toBe(true)
+    expect(readFileMemories(root).map(m => m.content)).toEqual(['linked note'])
+  })
+
+  it('follows a symlinked SUBFOLDER, the case that silently vanished', () => {
+    note('memory/top.md', 'top level')
+    const real = join(root, '__outside', 'archive', '2026-08')
+    mkdirSync(real, { recursive: true })
+    writeFileSync(join(real, 'nested.md'), 'nested via symlink')
+    symlinkSync(join(root, '__outside', 'archive'), join(root, 'memory', 'linked'))
+    expect(readFileMemories(root).map(m => m.content).sort())
+      .toEqual(['nested via symlink', 'top level'])
+  })
+
+  it('reads a symlinked FILE', () => {
+    const target = elsewhere('single.md', 'a linked file')
+    mkdirSync(join(root, 'memory'), { recursive: true })
+    symlinkSync(target, join(root, 'memory', 'link.md'))
+    expect(readFileMemories(root).map(m => m.content)).toEqual(['a linked file'])
+  })
+
+  it('survives a symlink CYCLE instead of recursing forever', () => {
+    // Following links makes `a -> ..` fatal without identity tracking. This test
+    // hanging IS the failure mode.
+    note('memory/real.md', 'still found')
+    symlinkSync(join(root, 'memory'), join(root, 'memory', 'loop'))
+    expect(readFileMemories(root).map(m => m.content)).toEqual(['still found'])
+  })
+
+  it('counts a store reached by two links exactly once', () => {
+    const real = join(root, '__outside', 'shared')
+    mkdirSync(real, { recursive: true })
+    writeFileSync(join(real, 'one.md'), 'shared note')
+    mkdirSync(join(root, 'memory'), { recursive: true })
+    symlinkSync(real, join(root, 'memory', 'first'))
+    symlinkSync(real, join(root, 'memory', 'second'))
+    expect(readFileMemories(root)).toHaveLength(1)
+    expect(fileTierStatus(root).memory.total).toBe(1)
+  })
+
+  it('ignores a broken link rather than failing the whole read', () => {
+    note('memory/good.md', 'good')
+    symlinkSync(join(root, 'does-not-exist'), join(root, 'memory', 'dangling'))
+    symlinkSync(join(root, 'nope.md'), join(root, 'memory', 'dangling.md'))
+    expect(readFileMemories(root).map(m => m.content)).toEqual(['good'])
+  })
+
+  it('finds notes nested far deeper than any fixed cap', () => {
+    // An earlier draft stopped at 16 levels, which would have hidden these with no
+    // error. Cycles terminate on real-path identity, not on a depth limit.
+    const deep = Array.from({ length: 24 }, (_, i) => `lvl${i}`).join('/')
+    note(`memory/${deep}/buried.md`, 'buried 24 deep')
+    expect(readFileMemories(root).map(m => m.content)).toEqual(['buried 24 deep'])
+  })
+
+  it('counts symlinked notes in the status totals too', () => {
+    // The status path counts by walking, so it has to agree with the reader or the
+    // header says 1 and the list shows 2.
+    note('memory/top.md', 'top')
+    const real = join(root, '__outside', 'more')
+    mkdirSync(real, { recursive: true })
+    writeFileSync(join(real, 'b.md'), 'linked')
+    symlinkSync(real, join(root, 'memory', 'deep'))
+    expect(fileTierStatus(root).memory.total).toBe(readFileMemories(root).length)
+    expect(fileTierStatus(root).memory.total).toBe(2)
   })
 })
 

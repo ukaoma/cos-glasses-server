@@ -1,3 +1,25 @@
+## 6.22.1
+
+Notes attached from somewhere else by a symlink are now read properly. Found by
+Queen within hours of 6.22.0, on the very first real setup.
+
+- **A symlinked subfolder or file was silently skipped.** `readdirSync` reports a
+  symlink as `isSymbolicLink()`, never as `isDirectory()` or `isFile()`, so the walk
+  ignored every link it met. A top-level `memory -> /elsewhere` link worked only by
+  accident, because the folder LOOKUP uses `statSync` and follows links while the
+  walk did not. Anything linked one level deeper vanished with no error at all.
+- Attaching an existing store is a primary way to adopt this feature, not an edge
+  case, so a link now behaves like whatever it points at: a linked folder is walked,
+  a linked note is read, and a broken link is skipped without failing the read.
+- **Cycles terminate.** Following links makes `memory/loop -> memory` fatal, so every
+  directory is now visited once by resolved real path. The same identity check stops
+  a store reached through two different links being counted twice.
+- **No depth limit.** An earlier draft of this fix capped nesting at 16 levels; that
+  guarded nothing real (cycles terminate on identity, and the file cap already bounds
+  the work) while silently hiding notes nested deeper. Removed.
+- The status counter and the reader walk the same way, so the header count and the
+  list can no longer disagree.
+
 ## 6.22.0
 
 Memory and Threads now work without a Python bridge, a venv, or a vector
