@@ -1,3 +1,19 @@
+## 6.21.34
+
+- **Memory and Threads are now real production surfaces.** Authenticated
+  `/api/memory` and `/api/threads` list/detail routes expose bounded read-only
+  projections from the configured COS pipeline instead of returning 404.
+- **Stable references, not storage internals.** Memory uses its logical
+  `mem_...` ID and Threads use their existing stable ID. Responses never expose
+  embeddings, Qdrant point IDs, raw cache files, secrets, or local paths.
+- **Memory overview is complete.** The store total and type split scan the full
+  collection instead of silently stopping after the first 1,000 records.
+- **Manual threads remain visible immediately.** The bridge merges the computed
+  thread cache with the durable manual-thread store without mutating either.
+- **Standalone installs fail honestly.** Systems without a COS scripts pipeline
+  return empty/unavailable shapes while the rest of the glasses server remains
+  usable.
+
 ## 6.21.33
 
 - **Existing meeting libraries can be selected directly.** `COS_MEETINGS_ROOT`

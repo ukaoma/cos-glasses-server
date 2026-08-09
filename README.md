@@ -301,6 +301,15 @@ direct library and an operations root are both configured, the server merges
 them with standalone G2 recordings and prefers the enriched writable record
 for the same session.
 
+Server 6.21.34 adds authenticated, read-only Memory and Threads browsing for
+full COS installs. With `COS_SCRIPTS_DIR` configured, the companion can show the
+complete Bot Memory count/type split, bounded recent summaries, exact logical
+memory IDs, and existing tracked/manual threads. Exact detail requests are
+resolved by stable ID so a spoken follow-up can carry the selected snapshot as
+context. Embeddings, vector-store point IDs, cache files, secrets, and local
+paths never cross the API boundary. Standalone installs report the feature as
+unavailable without affecting messages, meetings, transcription, or agents.
+
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):
 

@@ -31,6 +31,10 @@ const BRIDGE_SCRIPT: string | null = COS_SCRIPTS_DIR ? resolve(COS_SCRIPTS_DIR, 
 // have these, so callPython() degrades to a no-op.
 const pythonAvailable = !!(COS_SCRIPTS_DIR && existsSync(PYTHON_BIN!) && existsSync(BRIDGE_SCRIPT!))
 
+export function pythonBridgeAvailable(): boolean {
+  return pythonAvailable
+}
+
 if (pythonAvailable) {
   console.log('[python-bridge] COS pipeline detected — sourcing live context')
 } else if (COS_SCRIPTS_DIR) {
@@ -54,8 +58,17 @@ function standaloneNoop(args: string[]): unknown {
   switch (args[0]) {
     case 'calendar': return { events: [] }
     case 'tasks': return {}
-    case 'threads': return []
+    case 'threads': return { threads: [], active_count: 0, stale_count: 0, resolved_count: 0 }
+    case 'thread-detail': return { error: 'cos_pipeline_not_configured' }
     case 'memory': return []
+    case 'memory-overview': return {
+      available: false,
+      collection: 'cos_memory',
+      total: 0,
+      by_type: {},
+      reason: 'cos_pipeline_not_configured',
+    }
+    case 'memory-detail': return { error: 'cos_pipeline_not_configured' }
     case 'badges': return {}
     default: return {}
   }
