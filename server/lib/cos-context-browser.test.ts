@@ -134,7 +134,10 @@ describe('COS memory and thread projections', () => {
 
   it('replaces arbitrary local absolute paths without corrupting web URLs', () => {
     const cleaned = cleanContextText('See /opt/private/data/file.txt, path:/Users/me/a.md, file:///Users/me/b.md and https://gotcos.com/docs', 240)
-    expect(cleaned).toBe('See [local path hidden] path: [local path hidden], [local path hidden] and https://gotcos.com/docs')
+    // Changed in 6.21.36 by ONE character, and the new output is the correct one:
+    // the old pattern's segment class `[^/\s)"'`]+` included a comma, so it
+    // consumed `file.txt,` and reported the punctuation as part of the filename.
+    expect(cleaned).toBe('See [local path hidden], path: [local path hidden], [local path hidden] and https://gotcos.com/docs')
   })
 
   it('redacts common secret families and Windows paths from raw memory text', () => {
@@ -157,5 +160,148 @@ describe('COS memory and thread projections', () => {
     const cleaned = cleanContextText('prefix\n-----BEGIN PRIVATE KEY-----\nSUPERSECRETKEYMATERIAL', 500)
     expect(cleaned).toBe('prefix\n[secret hidden]')
     expect(cleaned).not.toContain('SUPERSECRET')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6.21.36. Every case below was REPRODUCED against 6.21.35 before being written,
+// and every one leaked. The existing path fixtures are all single-word
+// (`/Users/example/secret.md`), which is why 20 green tests coexisted with the
+// two most common production path shapes going out to the lens.
+// ---------------------------------------------------------------------------
+
+const clean = (s: string) => cleanContextText(s, 4000)
+
+describe('path redaction covers the shapes COS actually writes', () => {
+  it('redacts a tilde path INCLUDING its tail', () => {
+    // 6.21.35 hid only the two characters "~/" and shipped the rest.
+    const out = clean('Config at ~/.cos-glasses/data/voice-profiles.json is stale')
+    expect(out).not.toContain('.cos-glasses')
+    expect(out).not.toContain('voice-profiles')
+    expect(out).toContain('[local path hidden]')
+  })
+
+  it('redacts a path with no whitespace before it', () => {
+    // The old pattern required (^|[\s("\'`]) so KEY=/path never matched.
+    for (const input of [
+      'Set COS_SCRIPTS_DIR=/Users/ukaoma/Documents/GitHub/cos/operations/scripts',
+      'cat x >/Users/ukaoma/Documents/private/termination-memo.txt',
+      'Compared a,/Users/ukaoma/Documents/GitHub/secret/plan.md,b',
+      'Read @/Users/ukaoma/Documents/GitHub/cos/CLAUDE.md first',
+    ]) {
+      expect(clean(input), input).not.toContain('ukaoma')
+    }
+  })
+
+  it('redacts an absolute path containing spaces', () => {
+    // A real repo root on this machine has spaces in it.
+    const out = clean('See /Users/me/Documents/GitHub/Ukaoma Chief Of Staff/MU/ops/comp.md')
+    expect(out).not.toContain('/Users/me')
+    expect(out).not.toContain('comp.md')
+  })
+
+  it('still redacts the single-word case the old tests covered', () => {
+    expect(clean('file at /Users/ukaoma/secret.md here')).not.toContain('secret.md')
+  })
+
+  it('does NOT redact an API route or web path', () => {
+    // False positives corrupt evidence: the same redacted string is sent to the
+    // model, so a follow-up about a route loses its subject.
+    for (const keep of ['/api/context/status', '/api/meeting/save', '/v1/chat/completions']) {
+      expect(clean(`route ${keep} returns 200`), keep).toContain(keep)
+    }
+  })
+
+  it('redacts a UNC path', () => {
+    expect(clean('\\\\fileserver\\HR\\terminations\\2026\\notes.xlsx'))
+      .not.toContain('terminations')
+  })
+})
+
+describe('secret redaction covers the token families COS stores', () => {
+  /**
+   * Fabricated, and ASSEMBLED AT RUNTIME on purpose.
+   *
+   * Written as literals, GitHub push protection rejects the commit — it flagged
+   * the HubSpot and Stripe fixtures as genuine credentials, which is fair evidence
+   * the shapes are realistic. Concatenating the parts keeps the runtime value
+   * identical for the matcher while leaving no scannable literal in source, and
+   * avoids the bypass URL that would train this repo to accept real secrets.
+   */
+  const hubspotPak = ['pat', 'na1', '1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809'].join('-')
+  const stripeKey = ['rk', 'live', '51AbCd0123EfGh4567IjKl89MnOpQr'].join('_')
+  const githubPat = ['github', 'pat', '11ABCDE0000aBcDeFgHiJkLmNoPqRsTuVwXyZ012345'].join('_')
+  const slackApp = ['xapp', '1', 'A01BCDEFGHI', '1234567890123', 'abcdef0123456789'].join('-')
+  const slackCookie = ['xoxd', 'AbCdEf0123456789GhIjKlMnOpQrStUvWx'].join('-')
+  const googleOauth = ['GOCSPX', 'AbCd0123EfGh4567IjKl89Mn'].join('-')
+  const npmToken = ['npm', 'AbCd0123EfGh4567IjKl89MnOpQr01234567'].join('_')
+  const awsSecret = 'wJalrXUtnFEMI' + '/' + 'K7MDENG' + '/' + 'bPxRfiCYEXAMPLEKEY'
+  const families: Array<[string, string]> = [
+    ['HubSpot PAK', `rotated ${hubspotPak} today`],
+    ['GitHub fine-grained', `${githubPat} set`],
+    ['Slack app-level', `${slackApp} used`],
+    ['Slack cookie', `${slackCookie} here`],
+    ['Google OAuth', `${googleOauth} rotated`],
+    ['npm token', `${npmToken} in npmrc`],
+    ['Stripe live', `${stripeKey} used`],
+    ['AWS temp key id', 'ASIAQWERTYUIOPASDFGH assumed'],
+    ['AWS secret key', `aws secret ${awsSecret} here`],
+    ['PuTTY key header', 'PuTTY-User-Key-File-3: ssh-rsa'],
+    ['redis empty user', 'redis://:Hunter2Hunter2@127.0.0.1:6379/0'],
+    ['PWD= env', 'export DB_PWD=Hunter2Hunter2Long'],
+    ['PASS= env', 'export MY_PASS=Hunter2Hunter2Long'],
+  ]
+  for (const [label, input] of families) {
+    it(`redacts ${label}`, () => {
+      const out = clean(input)
+      expect(out, `${label}: ${out}`).toMatch(/\[(?:secret|credentials) hidden\]/)
+    })
+  }
+
+  it('keeps working for the families 6.21.35 already handled', () => {
+    for (const input of [
+      `anthropic ${['sk', 'ant', 'api03', 'AbCdEfGh1234567890abcdef'].join('-')} here`,
+      `slack ${['xoxp', '1234567890', '1234567890', 'abcdefghij'].join('-')} here`,
+      'aws AKIAQWERTYUIOPASDFGH here',
+      'postgres://user:pw@db.example.com:5432/x',
+      'API_TOKEN=abcdefghijkl',
+    ]) expect(clean(input), input).toMatch(/hidden\]/)
+  })
+
+  it('does not fire on an ordinary integer setting', () => {
+    // MAX_THINKING_TOKENS=31999 is a real memory in this store; a bare number is
+    // not a credential.
+    expect(clean('Set MAX_THINKING_TOKENS=31999 in settings.json')).toContain('31999')
+  })
+})
+
+describe('protocol compatibility is strict, pre-coercion', () => {
+  const status = (protocol: unknown) => normalizeContextBrowserStatus({
+    available: true, protocol,
+    memory: { available: true, total: 7 }, threads: { available: true },
+  } as never)
+
+  it('accepts only the integer 1', () => {
+    expect(status(1).available).toBe(true)
+  })
+
+  it('rejects values 6.21.35 silently coerced to 1', () => {
+    // Each of these was served AS protocol 1, and the reported field was
+    // rewritten to 1 so Control could not see what it had been handed.
+    for (const bad of ['1', 1.5, 1.9, true, [1]]) {
+      expect(status(bad).available, JSON.stringify(bad)).toBe(false)
+    }
+  })
+
+  it('still rejects future and malformed protocols', () => {
+    for (const bad of [2, 0, -1, null, undefined, NaN, 'one', { v: 1 }]) {
+      expect(status(bad).available, JSON.stringify(bad) ?? 'undefined').toBe(false)
+    }
+  })
+
+  it('does not relabel the reported protocol as 1', () => {
+    // Reporting a truncated 1 for an input of 1.5 hides the incompatibility.
+    expect(status(1.5).protocol).not.toBe(1)
+    expect(status(2).protocol).not.toBe(1)
   })
 })

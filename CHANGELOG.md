@@ -1,3 +1,51 @@
+## 6.21.36
+
+Security and accuracy fixes for the 6.21.35 context browser. Two claims in that
+release's notes were false; both are corrected here and the claims restated
+honestly.
+
+- **Local filesystem paths were reaching the lens.** 6.21.35 said "no filesystem
+  paths are exposed." Three shapes leaked, each reproduced against the live store:
+  a tilde path lost only its `~/` and shipped the rest
+  (`~/.cos-glasses/data/voice-profiles.json`); a path with no whitespace before it
+  never matched at all (`KEY=/Users/...`, `>/Users/...`, `,/Users/...`); and a path
+  containing spaces stopped at the first space. The pattern is now anchored to real
+  filesystem roots, which also stops it corrupting API routes — `/api/health` and
+  `/v1/chat/completions` were being replaced with `[local path hidden]`, and that
+  same redacted string is sent to the model as evidence, so a follow-up about a
+  route lost its subject. UNC paths are covered too.
+
+- **Eleven credential families were passing through**, each demonstrated with a
+  correctly-shaped value: HubSpot `pat-`, GitHub `github_pat_`, Slack `xapp-` and
+  `xoxd-`, Google `GOCSPX-`, `npm_`, Stripe `(sk|rk|pk)_live_`, AWS `ASIA` key ids
+  and unprefixed 40-char secret keys, GitLab `glpat-`, SSH2/PuTTY key headers, and
+  `redis://:password@host` where the username is empty. `PWD=` and `PASS=` are now
+  treated as credential names.
+
+  Conversely `MAX_THINKING_TOKENS=31999` was being redacted as a secret — a bare
+  integer is not a credential, and redacting a real setting corrupts evidence
+  without protecting anything.
+
+- **Malformed bridge protocols were relabeled as protocol 1** — precisely what
+  6.21.35's notes said it prevented. `finiteInteger` ran `Math.trunc(Number(v))`
+  before the comparison, so `'1'`, `1.5`, `1.9`, `true` and `[1]` all became `1`
+  and were served as compatible, with the reported field rewritten to `1` so
+  Control could not see what it had been handed. The check is now strict and
+  pre-coercion, and an incompatible protocol is reported as its raw integer or 0,
+  never a truncated 1.
+
+- **Three browse routes could CREATE the Qdrant collection.** `/api/memory`,
+  `/api/memory/:id` and `/api/memory/overview` called `ensure_collection()`, so a
+  read-only G2 browse against a machine with no collection wrote a new empty one
+  and made a broken setup look healthy. They now pass `ensure=False`.
+  `get_summary_stats` already documented this exact reasoning and deliberately
+  omitted the call; the browse paths did not follow it.
+
+Tests were written to fail first: 21 new assertions reproduced real leaks against
+6.21.35 before any pattern changed. One pre-existing assertion changed by a single
+character — the old pattern's segment class included a comma and reported
+`file.txt,` as the filename.
+
 ## 6.21.35
 
 - Adds authenticated `/api/context/status` proof so Control and the companion
