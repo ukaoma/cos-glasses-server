@@ -1,3 +1,18 @@
+## 6.21.33
+
+- **Existing meeting libraries can be selected directly.** `COS_MEETINGS_ROOT`
+  now accepts `meetings/YYYY-MM/*.md` as a read-only library, while
+  `COS_OPERATIONS_DIR` continues to own multi-domain enrichment and writes.
+- **Mixed libraries stay coherent.** Review Meetings merges direct, enriched
+  operations, and standalone G2 records, dedupes by session identity, and
+  prefers the writable enriched copy when one exists.
+- **Upgrades remain compatible.** A legacy multi-domain
+  `COS_MEETINGS_ROOT` keeps its prior operations-root meaning. Invalid explicit
+  roots report a degraded state instead of silently switching libraries.
+- **Read-only means read-only.** Direct-library speaker mutations return a
+  typed conflict, paths and symlinks are contained, scans are bounded, and
+  public health never exposes the selected filesystem path.
+
 ## 6.21.32
 
 - **Adaptive meeting-audio cleanup is a default-off, replay-only canary.** When

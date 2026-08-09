@@ -292,6 +292,15 @@ optional cleanup process cannot contend with live transcription. Cleanup uses
 one global worker, serves raw while that worker is busy, and preempts within
 100 ms if a meeting starts after a replay request was admitted.
 
+Server 6.21.33 lets Review Meetings browse an existing single-library tree such
+as `meetings/YYYY-MM/*.md`. Set `COS_MEETINGS_ROOT` to the folder that directly
+contains the month folders. It is intentionally read-only. For the full COS
+sync and enrichment pipeline, keep using `COS_OPERATIONS_DIR` with
+`<domain>/meetings/YYYY-MM/*.md`; arbitrary domain names are supported. When a
+direct library and an operations root are both configured, the server merges
+them with standalone G2 recordings and prefers the enriched writable record
+for the same session.
+
 The first server start downloads the real-time turbo model. True HQ additionally
 requires the full `ggml-large-v3.bin` model (about 3.1 GB):
 

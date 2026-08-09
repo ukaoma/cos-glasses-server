@@ -1,6 +1,6 @@
 import express from 'express'
 import type { Server } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -13,12 +13,17 @@ let root = ''
 let server: Server
 let base = ''
 let shutdown: (() => Promise<void>) | undefined
+let meetingLibrary = ''
 
 beforeAll(async () => {
   vi.resetModules()
   root = await mkdtemp(join(tmpdir(), 'cos-public-query-health-'))
   process.env.COS_DURABLE_QUERY_JOBS = '1'
   process.env.COS_QUERY_JOB_DIR = root
+  meetingLibrary = join(root, 'private-user-library')
+  await mkdir(join(meetingLibrary, '2026-08'), { recursive: true })
+  await writeFile(join(meetingLibrary, '2026-08', 'private.md'), '# Private meeting\n')
+  process.env.COS_MEETINGS_ROOT = meetingLibrary
 
   const runtime = await import('../lib/query-job-runtime.js')
   await runtime.initQueryJobRuntime()
@@ -40,6 +45,7 @@ afterAll(async () => {
   await shutdown?.()
   delete process.env.COS_DURABLE_QUERY_JOBS
   delete process.env.COS_QUERY_JOB_DIR
+  delete process.env.COS_MEETINGS_ROOT
   await rm(root, { recursive: true, force: true })
   vi.resetModules()
 })
@@ -69,6 +75,8 @@ describe('public durable-query capability health', () => {
       state: 'ready',
     })
     expect(JSON.stringify(body)).not.toContain(root)
+    expect(body.meeting_library).toEqual({ layout: 'direct', ready: true, warningCount: 0 })
+    expect(JSON.stringify(body)).not.toContain(meetingLibrary)
     expect(body.durable_query_jobs).not.toHaveProperty('store')
     expect(body.durable_query_jobs).not.toHaveProperty('retainedIdentities')
     expect(body.features.localFirstMeetings).toBe(true)

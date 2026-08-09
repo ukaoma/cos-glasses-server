@@ -126,6 +126,25 @@ function get(path: string): Promise<{ status: number; json: any }> {
   })
 }
 
+function post(path: string, body: unknown): Promise<{ status: number; json: any }> {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify(body))
+    const req = request(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': String(payload.length) },
+    }, res => {
+      const chunks: Buffer[] = []
+      res.on('data', c => chunks.push(Buffer.from(c)))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString()
+        resolve({ status: res.statusCode ?? 0, json: text ? JSON.parse(text) : null })
+      })
+    })
+    req.on('error', reject)
+    req.end(payload)
+  })
+}
+
 let dataDir = ''
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'cos-mtg-speakers-'))
@@ -321,6 +340,54 @@ describe('COS operations mode', () => {
       'meeting_ops_2', turns('MU', 'Chris Krubeck', 8, 30))
     await startServer()
     expect((await get('/api/meeting/meeting_absent/speakers')).status).toBe(404)
+  })
+}, HTTP_TEST_TIMEOUT)
+
+describe('direct read-only meeting library', () => {
+  let direct = ''
+  const sessionId = 'meeting_direct_1'
+  const filename = '2026-08-05_Existing_Meeting.md'
+
+  beforeEach(() => {
+    direct = mkdtempSync(join(tmpdir(), 'cos-direct-mtg-'))
+    const month = join(direct, MONTH)
+    mkdirSync(month, { recursive: true })
+    writeFileSync(join(month, filename), RICH_SCRIBE)
+    writeFileSync(join(month, filename.replace(/\.md$/, '.g2-chunks.json')),
+      JSON.stringify({ sessionId, chunks: turns('MU', 'Chris Krubeck', 8, 30) }))
+    process.env.COS_MEETINGS_ROOT = direct
+  })
+  afterEach(() => {
+    delete process.env.COS_MEETINGS_ROOT
+    if (direct) rmSync(direct, { recursive: true, force: true })
+  })
+
+  it('reads the selected record and rejects every speaker mutation without changing a byte', async () => {
+    await startServer()
+    const path = join(direct, MONTH, filename)
+    const sidecar = path.replace(/\.md$/, '.g2-chunks.json')
+    const beforeMarkdown = await import('node:fs').then(fs => fs.readFileSync(path))
+    const beforeSidecar = await import('node:fs').then(fs => fs.readFileSync(sidecar))
+
+    const review = await get(`/api/meeting/${sessionId}/speakers`)
+    expect(review.status).toBe(200)
+    expect(review.json.source).toBe('direct_library')
+    expect(review.json.mutable).toBe(false)
+    expect(review.json.recordId).toBe(`direct:${MONTH}:${filename}`)
+
+    const recordId = review.json.recordId
+    const attempts = [
+      post(`/api/meeting/${sessionId}/relabel`, { from: 'Chris Krubeck', to: 'Chris', recordId }),
+      post(`/api/meeting/${sessionId}/confirm`, { label: 'Chris Krubeck', recordId }),
+      post(`/api/meeting/${sessionId}/deattribute`, { from: 'Chris Krubeck', recordId }),
+    ]
+    for (const result of await Promise.all(attempts)) {
+      expect(result.status).toBe(409)
+      expect(result.json.reason).toBe('direct_library_read_only')
+    }
+    const fs = await import('node:fs')
+    expect(fs.readFileSync(path).equals(beforeMarkdown)).toBe(true)
+    expect(fs.readFileSync(sidecar).equals(beforeSidecar)).toBe(true)
   })
 }, HTTP_TEST_TIMEOUT)
 

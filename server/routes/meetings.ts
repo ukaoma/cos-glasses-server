@@ -4,10 +4,44 @@ import { Router } from 'express'
 import { getMeetingStore, MeetingStore, MeetingStoreError } from '../lib/meeting-store.js'
 import {
   cosOperationsMeetingsConfigured,
+  getDirectLibraryMeetingDetail,
   getCosOperationsMeetingDetail,
+  listDirectLibraryMeetings,
   listCosOperationsMeetings,
-  resolveCosOperationsDir,
+  resolveMeetingLibrary,
 } from '../lib/cos-operations-meetings.js'
+import type { MeetingMeta } from '../lib/meeting-store.js'
+
+function withStandaloneIdentity(meeting: MeetingMeta): MeetingMeta {
+  return {
+    ...meeting,
+    librarySource: 'standalone_recordings',
+    recordId: `standalone:${meeting.sessionId || `${meeting.domain}:${meeting.month}:${meeting.filename}`}`,
+    mutable: true,
+  }
+}
+
+function mergeMeetingSources(groups: MeetingMeta[][], limit: number): MeetingMeta[] {
+  const seenSessions = new Set<string>()
+  const seenExact = new Set<string>()
+  const merged: MeetingMeta[] = []
+  for (const group of groups) {
+    for (const meeting of group) {
+      if (meeting.sessionId) {
+        if (seenSessions.has(meeting.sessionId)) continue
+        seenSessions.add(meeting.sessionId)
+      } else {
+        const exact = `${meeting.librarySource || ''}:${meeting.domain}:${meeting.month}:${meeting.filename}`
+        if (seenExact.has(exact)) continue
+        seenExact.add(exact)
+      }
+      merged.push(meeting)
+    }
+  }
+  merged.sort((a, b) => `${b.date}T${b.time || '00:00'}`.localeCompare(`${a.date}T${a.time || '00:00'}`)
+    || b.filename.localeCompare(a.filename))
+  return merged.slice(0, Math.min(Math.max(limit, 1), 50))
+}
 
 export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): Router {
   const router = Router()
@@ -20,17 +54,54 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
       const domain = typeof req.query.domain === 'string' ? req.query.domain : 'all'
       res.set('Cache-Control', 'private, no-store')
 
-      if (cosOperationsMeetingsConfigured()) {
-        const meetings = listCosOperationsMeetings({ limit, domain })
-        res.json({
-          meetings,
-          source: 'cos_operations',
-          operationsDir: resolveCosOperationsDir(),
+      const library = resolveMeetingLibrary()
+      if (library.layout === 'invalid_explicit_root') {
+        res.status(409).json({
+          error: 'Configured meetings library is unavailable or malformed',
+          reason: 'invalid_explicit_root',
+          layout: library.layout,
+          warnings: library.warnings,
         })
         return
       }
 
-      res.json({ meetings: store.list({ limit, domain }), source: 'standalone_recordings' })
+      if (library.layout === 'direct') {
+        const operations = cosOperationsMeetingsConfigured()
+          ? listCosOperationsMeetings({ limit: 50, domain })
+          : []
+        const direct = domain === 'all' || domain === 'library'
+          ? listDirectLibraryMeetings({ limit: 50 })
+          : []
+        const standalone = store.list({ limit: 50, domain }).map(withStandaloneIdentity)
+        const meetings = mergeMeetingSources([operations, direct, standalone], limit)
+        res.json({
+          meetings,
+          source: operations.length > 0 ? 'mixed_library' : 'direct_library',
+          layout: 'direct',
+          root: library.root,
+          rootFingerprint: library.rootFingerprint,
+          meetingCount: meetings.length,
+          warnings: library.warnings,
+        })
+        return
+      }
+
+      if (library.layout === 'multi_domain') {
+        const meetings = listCosOperationsMeetings({ limit, domain })
+        res.json({
+          meetings,
+          source: 'cos_operations',
+          layout: 'multi_domain',
+          root: library.root,
+          rootFingerprint: library.rootFingerprint,
+          meetingCount: meetings.length,
+          warnings: library.warnings,
+        })
+        return
+      }
+
+      const meetings = store.list({ limit, domain }).map(withStandaloneIdentity)
+      res.json({ meetings, source: 'standalone_recordings', layout: 'standalone', meetingCount: meetings.length })
     } catch (error) {
       sendMeetingStoreError(res, error)
     }
@@ -48,6 +119,14 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
         return
       }
       res.set('Cache-Control', 'private, no-store')
+
+      if (domain === 'library') {
+        const detail = getDirectLibraryMeetingDetail(month, filename)
+        if (detail) {
+          res.json(detail)
+          return
+        }
+      }
 
       if (cosOperationsMeetingsConfigured()) {
         const detail = getCosOperationsMeetingDetail(domain, month, filename)
@@ -70,6 +149,14 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
   router.get('/meetings/:domain/:month/:filename', (req, res) => {
     try {
       res.set('Cache-Control', 'private, no-store')
+
+      if (req.params.domain === 'library') {
+        const detail = getDirectLibraryMeetingDetail(req.params.month, req.params.filename)
+        if (detail) {
+          res.json(detail)
+          return
+        }
+      }
 
       if (cosOperationsMeetingsConfigured()) {
         const detail = getCosOperationsMeetingDetail(

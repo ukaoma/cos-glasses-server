@@ -52,6 +52,7 @@ export interface MeetingMeta {
   sessionId?: string
   title: string
   date: string
+  time?: string
   domain: string
   domainAbbr: string
   source: string
@@ -64,6 +65,12 @@ export interface MeetingMeta {
   decisionCount?: number
   actionCount?: number
   attendeeCount?: number
+  /** Additive archive identity. Older companions ignore these fields. */
+  librarySource?: 'direct_library' | 'cos_operations' | 'standalone_recordings'
+  recordId?: string
+  mutable?: boolean
+  /** Present only when the server can state a truthful local record. */
+  canonicalRecord?: string
 }
 
 export interface MeetingActionItem {
@@ -437,7 +444,7 @@ export class MeetingStore {
       // When COS ops is configured, use the private-app pipeline markers so
       // sync_meetings.py --g2-file will enrich (and reclassify domain). Plain
       // "Standalone recording" summaries are treated as already-final and skipped.
-      ...(process.env.COS_SCRIPTS_DIR || process.env.COS_OPERATIONS_DIR || process.env.COS_MEETINGS_ROOT
+      ...(process.env.COS_SCRIPTS_DIR
         ? [
             '<!-- g2-needs-domain-review -->',
             '',

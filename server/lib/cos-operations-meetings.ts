@@ -4,17 +4,17 @@
  * When configured, G2 "Review Meetings" reads markdown from a COS-style tree:
  *   {operationsDir}/{domain}/meetings/YYYY-MM/*.md
  *
- * Resolution order:
- *   1. COS_OPERATIONS_DIR  — explicit operations/ root (preferred)
- *   2. COS_MEETINGS_ROOT   — alias for the same path
- *   3. COS_SCRIPTS_DIR/..  — classic Starter Kit layout (operations/scripts → operations)
+ * Read resolution accepts COS_MEETINGS_ROOT as a direct YYYY-MM library.
+ * Write/enrichment resolution remains COS_OPERATIONS_DIR, a legacy
+ * multi-domain COS_MEETINGS_ROOT, then COS_SCRIPTS_DIR/...
  *
  * Standalone installs leave all of these unset and keep using MeetingStore
  * (~/.cos-glasses/data/recordings).
  */
 
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
-import { basename, join, resolve } from 'node:path'
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { basename, dirname, join, resolve } from 'node:path'
 import { discoveredDomains, domainAbbreviation as deriveAbbr, isSafeDomainName as safeName } from './domains.js'
 import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
 import { MEETING_SOURCE_MAX_BYTES } from './meeting-store.js'
@@ -41,6 +41,103 @@ const DETAIL_CHUNK_ESTIMATE_CHARS = 1700
 
 export type CosOperationsMeetingMeta = MeetingMeta & { time?: string }
 
+export type MeetingLibraryLayout = 'direct' | 'multi_domain' | 'standalone' | 'invalid_explicit_root'
+
+export interface MeetingLibraryInspection {
+  layout: MeetingLibraryLayout
+  root: string | null
+  rootFingerprint: string | null
+  meetingCount: number
+  warnings: string[]
+  domains: string[]
+}
+
+const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/
+const MAX_LIST_CANDIDATES = 2_000
+const MAX_LIST_FILE_BYTES = 100_000
+const MAX_DETAIL_FILE_BYTES = 10 * 1024 * 1024
+
+function rootFingerprint(root: string): string {
+  return createHash('sha256').update(root).digest('hex').slice(0, 16)
+}
+
+function safeRoot(path: string): string | null {
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return null
+    return realpathSync(path)
+  } catch { return null }
+}
+
+function safeChildDirectory(parentReal: string, path: string): string | null {
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return null
+    const real = realpathSync(path)
+    return dirname(real) === parentReal ? real : null
+  } catch { return null }
+}
+
+function safeRegularFile(parentReal: string, path: string, maxBytes = MAX_LIST_FILE_BYTES): string | null {
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > maxBytes) return null
+    const real = realpathSync(path)
+    if (dirname(real) !== parentReal) return null
+    return readFileSync(real, 'utf8')
+  } catch { return null }
+}
+
+function safeBoundedRegularFile(parentReal: string, path: string, maxReadBytes: number): { content: string; truncated: boolean } | null {
+  let fd: number | null = null
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_DETAIL_FILE_BYTES) return null
+    const real = realpathSync(path)
+    if (dirname(real) !== parentReal) return null
+    fd = openSync(real, 'r')
+    const buffer = Buffer.alloc(Math.min(maxReadBytes, stat.size))
+    const read = readSync(fd, buffer, 0, buffer.length, 0)
+    return { content: buffer.subarray(0, read).toString('utf8'), truncated: stat.size > read }
+  } catch { return null }
+  finally {
+    if (fd !== null) { try { closeSync(fd) } catch { /* already closed */ } }
+  }
+}
+
+export function inspectMeetingLibraryPath(path: string): MeetingLibraryInspection {
+  const requested = resolve(path)
+  const root = safeRoot(requested)
+  if (!root) {
+    return { layout: 'invalid_explicit_root', root: null, rootFingerprint: null, meetingCount: 0, warnings: ['folder is missing, unreadable, or unsafe'], domains: [] }
+  }
+  const entries = (() => { try { return readdirSync(root) } catch { return [] } })()
+  const directMonths = entries.filter(name => MONTH_PATTERN.test(name) && safeChildDirectory(root, join(root, name))).sort()
+  const domains = entries.filter(safeName).filter(name => {
+    const domainReal = safeChildDirectory(root, join(root, name))
+    if (!domainReal) return false
+    return safeChildDirectory(domainReal, join(domainReal, 'meetings')) != null
+  }).sort()
+  const warnings: string[] = []
+  if (directMonths.length > 0 && domains.length > 0) {
+    return { layout: 'invalid_explicit_root', root, rootFingerprint: rootFingerprint(root), meetingCount: 0, warnings: ['folder mixes direct months and domain/meetings trees'], domains }
+  }
+  const layout: MeetingLibraryLayout = directMonths.length > 0 ? 'direct' : domains.length > 0 ? 'multi_domain' : 'invalid_explicit_root'
+  if (layout === 'invalid_explicit_root') {
+    const nearMisses = entries.filter(safeName).filter(name => {
+      const child = safeChildDirectory(root, join(root, name))
+      if (!child) return false
+      try {
+        return readdirSync(child).some(entry => MONTH_PATTERN.test(entry) && safeChildDirectory(child, join(child, entry)))
+      } catch { return false }
+    })
+    warnings.push(nearMisses.length > 0
+      ? `missing meetings/ inside: ${nearMisses.slice(0, 6).join(', ')}`
+      : 'expected YYYY-MM folders or <domain>/meetings/YYYY-MM')
+  }
+  return { layout, root, rootFingerprint: rootFingerprint(root), meetingCount: 0, warnings, domains }
+}
+
 /** Enough to clear the sidecar's leading metadata keys whatever their order. */
 const SIDECAR_HEAD_BYTES = 4096
 
@@ -60,8 +157,11 @@ function sidecarSessionId(monthDir: string, meetingFilename: string): string | u
   const path = join(monthDir, sidecarName)
   let fd: number | null = null
   try {
-    const stat = statSync(path)
-    if (!stat.isFile() || stat.size === 0) return undefined
+    const linkStat = lstatSync(path)
+    if (linkStat.isSymbolicLink() || !linkStat.isFile() || linkStat.size === 0) return undefined
+    const real = realpathSync(path)
+    if (dirname(real) !== realpathSync(monthDir)) return undefined
+    const stat = statSync(real)
     fd = openSync(path, 'r')
     const buffer = Buffer.alloc(Math.min(SIDECAR_HEAD_BYTES, stat.size))
     const read = readSync(fd, buffer, 0, buffer.length, 0)
@@ -84,18 +184,36 @@ function envPath(name: string): string | null {
 /** Resolve the COS operations directory, or null in standalone mode.
  * Reads process.env on each call so tests and Control env updates stay live. */
 export function resolveCosOperationsDir(): string | null {
-  const explicit = envPath('COS_OPERATIONS_DIR') || envPath('COS_MEETINGS_ROOT')
-  if (explicit && existsSync(explicit)) return explicit
+  const operations = envPath('COS_OPERATIONS_DIR')
+  if (operations && inspectMeetingLibraryPath(operations).layout === 'multi_domain') return safeRoot(operations)
+  // Backward compatibility: before 6.21.33 COS_MEETINGS_ROOT was documented as
+  // an alias for COS_OPERATIONS_DIR. Preserve that meaning only for a real
+  // multi-domain tree; a direct library is never a write destination.
+  const legacy = envPath('COS_MEETINGS_ROOT')
+  if (legacy && inspectMeetingLibraryPath(legacy).layout === 'multi_domain') return safeRoot(legacy)
   const scriptsDir = envPath('COS_SCRIPTS_DIR')
   if (scriptsDir) {
     const inferred = resolve(scriptsDir, '..')
-    if (existsSync(inferred)) return inferred
+    if (inspectMeetingLibraryPath(inferred).layout === 'multi_domain') return safeRoot(inferred)
   }
   return null
 }
 
 export function cosOperationsMeetingsConfigured(): boolean {
   return resolveCosOperationsDir() != null
+}
+
+export function resolveMeetingLibrary(): MeetingLibraryInspection {
+  const explicit = envPath('COS_MEETINGS_ROOT')
+  if (explicit) return inspectMeetingLibraryPath(explicit)
+  const operations = resolveCosOperationsDir()
+  if (operations) return inspectMeetingLibraryPath(operations)
+  return { layout: 'standalone', root: null, rootFingerprint: null, meetingCount: 0, warnings: [], domains: [] }
+}
+
+export function meetingLibraryConfigured(): boolean {
+  const layout = resolveMeetingLibrary().layout
+  return layout === 'direct' || layout === 'multi_domain'
 }
 
 function boundedMeetingSource(content: string): { sourceContent: string; sourceTruncated: boolean } {
@@ -364,6 +482,41 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
   return null
 }
 
+export type MeetingLibraryRecord = NonNullable<ReturnType<typeof findCosOperationsMeetingBySessionId>> & {
+  recordId?: string
+  librarySource?: 'direct_library' | 'cos_operations'
+  mutable?: boolean
+}
+
+/** Read resolver for direct libraries. Mutations must require recordId and
+ * mutable=true; the legacy operations resolver above remains writable. */
+export function findDirectLibraryMeetingBySessionId(sessionId: string): MeetingLibraryRecord | null {
+  const inspection = resolveMeetingLibrary()
+  if (inspection.layout !== 'direct' || !inspection.root) return null
+  const root = inspection.root
+  const months = readdirSync(root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()
+  for (const month of months) {
+    const monthDir = safeChildDirectory(root, join(root, month))
+    if (!monthDir) continue
+    for (const sidecarName of readdirSync(monthDir).filter(name => name.endsWith('.g2-chunks.json')).sort().reverse()) {
+      const filename = sidecarName.replace(/\.g2-chunks\.json$/, '.md')
+      if (sidecarSessionId(monthDir, filename) !== sessionId) continue
+      const meetingPath = join(monthDir, filename)
+      const bounded = safeBoundedRegularFile(monthDir, meetingPath, MEETING_SOURCE_MAX_BYTES)
+      if (bounded == null) continue
+      const title = bounded.content.match(/^#\s+(.+)$/m)?.[1]?.trim() || filename.replace(/\.md$/, '')
+      return {
+        sidecarPath: join(monthDir, sidecarName), meetingPath, filename,
+        domain: 'library', month, title,
+        recordId: `direct:${month}:${filename}`,
+        librarySource: 'direct_library',
+        mutable: false,
+      }
+    }
+  }
+  return null
+}
+
 export function listCosOperationsMeetings(options: {
   limit?: number
   domain?: string
@@ -387,7 +540,6 @@ export function listCosOperationsMeetings(options: {
         .filter(d => /^\d{4}-\d{2}$/.test(d))
         .sort()
         .reverse()
-        .slice(0, 3)
 
       for (const month of months) {
         const monthDir = join(meetingsBase, month)
@@ -403,6 +555,10 @@ export function listCosOperationsMeetings(options: {
               const content = readFileSync(filepath, 'utf-8')
               const meta = withMeetingListInsights(parseMeetingMeta(content.slice(0, 4000), file, domain), content)
               meta.month = month
+              meta.librarySource = 'cos_operations'
+              meta.recordId = `ops:${domain}:${month}:${file}`
+              meta.mutable = true
+              meta.canonicalRecord = `operations/${domain}/meetings/${month}/${file}`
               const sessionId = sidecarSessionId(monthDir, file)
               if (sessionId) meta.sessionId = sessionId
               allMeetings.push(meta)
@@ -415,6 +571,35 @@ export function listCosOperationsMeetings(options: {
 
   allMeetings.sort(compareMeetingsNewestFirst)
   return allMeetings.slice(0, limit)
+}
+
+export function listDirectLibraryMeetings(options: { limit?: number } = {}): CosOperationsMeetingMeta[] {
+  const inspection = resolveMeetingLibrary()
+  if (inspection.layout !== 'direct' || !inspection.root) return []
+  const limit = Math.min(Math.max(options.limit ?? 20, 1), 50)
+  const all: CosOperationsMeetingMeta[] = []
+  let candidates = 0
+  for (const month of readdirSync(inspection.root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()) {
+    const monthDir = safeChildDirectory(inspection.root, join(inspection.root, month))
+    if (!monthDir) continue
+    for (const file of readdirSync(monthDir).filter(name => name.endsWith('.md')).sort().reverse()) {
+      if (++candidates > MAX_LIST_CANDIDATES) break
+      const bounded = safeBoundedRegularFile(monthDir, join(monthDir, file), MAX_LIST_FILE_BYTES)
+      if (bounded == null) continue
+      const content = bounded.content
+      const meta = withMeetingListInsights(parseMeetingMeta(content.slice(0, 4000), file, 'library'), content)
+      meta.month = month
+      meta.librarySource = 'direct_library'
+      meta.recordId = `direct:${month}:${file}`
+      meta.mutable = false
+      const sessionId = sidecarSessionId(monthDir, file)
+      if (sessionId) meta.sessionId = sessionId
+      all.push(meta)
+    }
+    if (candidates > MAX_LIST_CANDIDATES) break
+  }
+  all.sort(compareMeetingsNewestFirst)
+  return all.slice(0, limit)
 }
 
 export function getCosOperationsMeetingDetail(
@@ -471,5 +656,38 @@ export function getCosOperationsMeetingDetail(
     attendees: extractAttendees(content),
     transcript: content,
     ...source,
+  }
+}
+
+export function getDirectLibraryMeetingDetail(month: string, filename: string): MeetingDetail | null {
+  const inspection = resolveMeetingLibrary()
+  if (inspection.layout !== 'direct' || !inspection.root) return null
+  if (!MONTH_PATTERN.test(month) || basename(filename) !== filename || !filename.endsWith('.md')) return null
+  const monthDir = safeChildDirectory(inspection.root, join(inspection.root, month))
+  if (!monthDir) return null
+  let resolvedFilename = filename
+  let bounded = safeBoundedRegularFile(monthDir, join(monthDir, resolvedFilename), MEETING_SOURCE_MAX_BYTES)
+  if (bounded == null) {
+    const candidates = readdirSync(monthDir).filter(name => name.endsWith('.md')).slice(0, MAX_LIST_CANDIDATES)
+      .map(name => ({ filename: name, content: safeRegularFile(monthDir, join(monthDir, name), 4_000) ?? '' }))
+    const renamed = matchRenamedMeetingFilename(filename, candidates)
+    if (!renamed) return null
+    resolvedFilename = renamed
+    bounded = safeBoundedRegularFile(monthDir, join(monthDir, resolvedFilename), MEETING_SOURCE_MAX_BYTES)
+    if (bounded == null) return null
+  }
+  const content = bounded.content
+  const meta = parseMeetingMeta(content, resolvedFilename, 'library')
+  meta.month = month
+  meta.librarySource = 'direct_library'
+  meta.recordId = `direct:${month}:${resolvedFilename}`
+  meta.mutable = false
+  const sessionId = sidecarSessionId(monthDir, resolvedFilename)
+  if (sessionId) meta.sessionId = sessionId
+  const source = { sourceContent: content, sourceTruncated: bounded.truncated }
+  return {
+    ...meta,
+    summary: extractSummary(content), topics: extractTopics(content), decisions: extractDecisions(content),
+    actionItems: extractActionItems(content), attendees: extractAttendees(content), transcript: content, ...source,
   }
 }

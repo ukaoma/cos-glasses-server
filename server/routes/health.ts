@@ -47,6 +47,7 @@ import { getHealthStaticProbes } from '../lib/health-static-probes.js'
 import { getEarlyMeetingSyncSnapshot } from '../lib/g2-ops-handoff.js'
 import { getProgressiveHqSnapshot } from '../lib/meeting-batch-transcribe.js'
 import { getMeetingFinalizationSnapshot } from '../lib/meeting-finalization-jobs.js'
+import { resolveMeetingLibrary } from '../lib/cos-operations-meetings.js'
 
 export const healthRouter = Router()
 
@@ -234,6 +235,7 @@ healthRouter.get('/health', async (_req, res) => {
       recovered: item.recovered,
     })),
   }
+  const meetingLibrary = resolveMeetingLibrary()
   res.json({
     ...checks,
     server_version: managedServerVersion(),
@@ -249,6 +251,11 @@ healthRouter.get('/health', async (_req, res) => {
     codex_models,
     cursor_models,
     meeting_sync,
+    meeting_library: {
+      layout: meetingLibrary.layout,
+      ready: meetingLibrary.layout !== 'invalid_explicit_root',
+      warningCount: meetingLibrary.warnings.length,
+    },
     unsaved_captures,
     chunk_embeddings: chunkEmbeddings,
     speaker_corrections: speakerCorrections,

@@ -112,6 +112,7 @@ import {
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import {
   cosOperationsMeetingsConfigured,
+  findDirectLibraryMeetingBySessionId,
   findCosOperationsMeetingBySessionId,
   resolveCosOperationsDir,
 } from '../lib/cos-operations-meetings.js'
@@ -154,6 +155,10 @@ function cosOpsPipelineConfigured(): boolean {
   // Read env live (not the module-load COS_SCRIPTS_DIR const) so unit tests that
   // clear ops env stay standalone, and Control-updated env is visible.
   return Boolean(process.env.COS_SCRIPTS_DIR?.trim())
+}
+
+function requestedRecordMatches(requested: unknown, expected: string): boolean {
+  return requested == null || requested === '' || requested === expected
 }
 
 interface MeetingSessionSource {
@@ -712,15 +717,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const operations = cosOperationsMeetingsConfigured()
       ? findCosOperationsMeetingBySessionId(sessionId)
       : null
-    const saved = operations ? null : store.findBySessionId(sessionId)
-    if (!operations && !saved) {
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    const saved = operations || direct ? null : store.findBySessionId(sessionId)
+    if (!operations && !direct && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
       return
     }
-    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
-    const title = operations?.title ?? saved!.title
-    const domain = operations?.domain ?? saved!.domain
-    const filename = operations?.filename ?? saved!.filename
+    const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
+    const title = operations?.title ?? direct?.title ?? saved!.title
+    const domain = operations?.domain ?? direct?.domain ?? saved!.domain
+    const filename = operations?.filename ?? direct?.filename ?? saved!.filename
 
     let chunks: unknown
     try {
@@ -770,7 +776,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       title,
       domain,
       filename,
-      source: operations ? 'cos_operations' : 'standalone_recordings',
+      source: operations ? 'cos_operations' : direct ? 'direct_library' : 'standalone_recordings',
+      recordId: operations
+        ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
+        : direct?.recordId ?? `standalone:${sessionId}`,
+      mutable: direct == null,
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
     })
@@ -812,14 +822,15 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const operations = cosOperationsMeetingsConfigured()
       ? findCosOperationsMeetingBySessionId(sessionId)
       : null
-    const saved = operations ? null : store.findBySessionId(sessionId)
-    if (!operations && !saved) {
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    const saved = operations || direct ? null : store.findBySessionId(sessionId)
+    if (!operations && !direct && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
       return
     }
-    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
-    const title = operations?.title ?? saved!.title
-    const mdPath = operations?.meetingPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
+    const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
+    const title = operations?.title ?? direct?.title ?? saved!.title
+    const mdPath = operations?.meetingPath ?? direct?.meetingPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
 
     let sidecar: Record<string, unknown>
     try {
@@ -909,7 +920,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // Which business this is. The sibling /speakers route has always carried
       // this and this one dropped it, so a personal 1:1 about someone's
       // compensation was byte-identical to a marketing sync.
-      domain: operations?.domain ?? saved?.domain ?? '',
+      domain: operations?.domain ?? direct?.domain ?? saved?.domain ?? '',
       // Transcript actually captured, whether or not a write-up exists yet. 140
       // of 399 real sidecars have no .md, and the fallback text claimed there was
       // no transcript while holding one.
@@ -943,6 +954,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // no write-up yet.
       capturedChars: clip.capturedChars,
       domain: clip.domain,
+      source: operations ? 'cos_operations' : direct ? 'direct_library' : 'standalone_recordings',
+      recordId: operations
+        ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
+        : direct?.recordId ?? `standalone:${sessionId}`,
+      mutable: direct == null,
       // So the panel can warn above the write-up, not just the clipboard.
       removedNames: clip.removed,
       coverage,
@@ -990,9 +1006,30 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const operations = cosOperationsMeetingsConfigured()
       ? findCosOperationsMeetingBySessionId(sessionId)
       : null
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    if (direct) {
+      if (!requestedRecordMatches(req.body?.recordId, direct.recordId || '')) {
+        res.status(409).json({ error: 'Meeting source changed; reopen the meeting', reason: 'record_source_mismatch' })
+        return
+      }
+      res.status(409).json({
+        error: 'This meeting comes from a read-only library',
+        reason: 'direct_library_read_only',
+        recordId: direct.recordId,
+        mutable: false,
+      })
+      return
+    }
     const saved = operations ? null : store.findBySessionId(sessionId)
     if (!operations && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const selectedRecordId = operations
+      ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
+      : `standalone:${sessionId}`
+    if (!requestedRecordMatches(req.body?.recordId, selectedRecordId)) {
+      res.status(409).json({ error: 'Meeting source changed; reopen the meeting', reason: 'record_source_mismatch' })
       return
     }
     const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
@@ -1164,9 +1201,30 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const operations = cosOperationsMeetingsConfigured()
       ? findCosOperationsMeetingBySessionId(sessionId)
       : null
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    if (direct) {
+      if (!requestedRecordMatches(req.body?.recordId, direct.recordId || '')) {
+        res.status(409).json({ error: 'Meeting source changed; reopen the meeting', reason: 'record_source_mismatch' })
+        return
+      }
+      res.status(409).json({
+        error: 'This meeting comes from a read-only library',
+        reason: 'direct_library_read_only',
+        recordId: direct.recordId,
+        mutable: false,
+      })
+      return
+    }
     const saved = operations ? null : store.findBySessionId(sessionId)
     if (!operations && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const selectedRecordId = operations
+      ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
+      : `standalone:${sessionId}`
+    if (!requestedRecordMatches(req.body?.recordId, selectedRecordId)) {
+      res.status(409).json({ error: 'Meeting source changed; reopen the meeting', reason: 'record_source_mismatch' })
       return
     }
     const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
@@ -1242,9 +1300,30 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const operations = cosOperationsMeetingsConfigured()
       ? findCosOperationsMeetingBySessionId(sessionId)
       : null
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    if (direct) {
+      if (!requestedRecordMatches(req.body?.recordId, direct.recordId || '')) {
+        res.status(409).json({ error: 'Meeting source changed; reopen the meeting', reason: 'record_source_mismatch' })
+        return
+      }
+      res.status(409).json({
+        error: 'This meeting comes from a read-only library',
+        reason: 'direct_library_read_only',
+        recordId: direct.recordId,
+        mutable: false,
+      })
+      return
+    }
     const saved = operations ? null : store.findBySessionId(sessionId)
     if (!operations && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const selectedRecordId = operations
+      ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
+      : `standalone:${sessionId}`
+    if (!requestedRecordMatches(req.body?.recordId, selectedRecordId)) {
+      res.status(409).json({ error: 'Meeting source changed; reopen the meeting', reason: 'record_source_mismatch' })
       return
     }
     const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath

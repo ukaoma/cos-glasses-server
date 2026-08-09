@@ -1,5 +1,5 @@
 import express from 'express'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -245,6 +245,46 @@ describe('meeting save/list/detail API', () => {
     expect(replay.status).toBe(200)
     expect(await replay.json()).toMatchObject({ replayed: true, filename: saved.filename })
     expect(readdirSync(join(h.recordingsRoot, '2026-07')).filter(name => name.endsWith('.md'))).toHaveLength(1)
+  })
+
+  it('merges a direct library with new standalone G2 saves without hiding or duplicating either', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    const direct = join(h.parent, 'existing-meetings')
+    const month = join(direct, '2026-03')
+    mkdirSync(month, { recursive: true })
+    writeFileSync(join(month, '2026-03-10_Existing_Review.md'), [
+      '# Existing Review', '', '**Date:** 2026-03-10', '', '## Summary', 'Existing library record.',
+    ].join('\n'))
+    process.env.COS_MEETINGS_ROOT = direct
+
+    const savedRes = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'New G2 meeting', domain: 'personal' }),
+    })
+    expect(savedRes.status).toBe(200)
+    const saved = await savedRes.json() as any
+
+    const listRes = await h.api('/api/meetings?limit=20&domain=all')
+    expect(listRes.status).toBe(200)
+    const list = await listRes.json() as any
+    expect(list.layout).toBe('direct')
+    expect(list.root).toBe(realpathSync(direct))
+    expect(list.meetings.map((meeting: any) => meeting.title)).toEqual(
+      expect.arrayContaining(['Existing Review', 'New G2 meeting']),
+    )
+    expect(list.meetings.filter((meeting: any) => meeting.filename === saved.filename)).toHaveLength(1)
+    const existing = list.meetings.find((meeting: any) => meeting.title === 'Existing Review')
+    expect(existing).toMatchObject({ librarySource: 'direct_library', mutable: false })
+    expect(existing).not.toHaveProperty('canonicalRecord')
+    expect(list.meetings.find((meeting: any) => meeting.filename === saved.filename)).toMatchObject({
+      librarySource: 'standalone_recordings', mutable: true,
+    })
+
+    const directDetail = await h.api('/api/meetings/library/2026-03/2026-03-10_Existing_Review.md')
+    expect(directDetail.status).toBe(200)
+    expect(await directDetail.json()).toMatchObject({
+      title: 'Existing Review', librarySource: 'direct_library', mutable: false,
+    })
   })
 
   it('retains a failed finalization job and resumes it on idempotent save replay', async () => {

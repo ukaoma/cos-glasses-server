@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   EXAMPLE_MEETING_DOMAINS,
   discoverMeetingDomains,
   domainAbbreviation,
+  getDirectLibraryMeetingDetail,
+  inspectMeetingLibraryPath,
+  listDirectLibraryMeetings,
   listCosOperationsMeetings,
+  resolveMeetingLibrary,
   resolveCosOperationsDir,
 } from './cos-operations-meetings.js'
 
@@ -34,7 +38,7 @@ describe('cos operations meetings path resolution', () => {
       )
       process.env.COS_OPERATIONS_DIR = root
       process.env.COS_SCRIPTS_DIR = '/tmp/does-not-matter/scripts'
-      expect(resolveCosOperationsDir()).toBe(root)
+      expect(resolveCosOperationsDir()).toBe(realpathSync(root))
       const meetings = listCosOperationsMeetings({ limit: 5 })
       expect(meetings).toHaveLength(1)
       expect(meetings[0].title).toBe('Planning')
@@ -50,6 +54,45 @@ describe('cos operations meetings path resolution', () => {
     delete process.env.COS_SCRIPTS_DIR
     expect(resolveCosOperationsDir()).toBeNull()
     expect(listCosOperationsMeetings()).toEqual([])
+  })
+
+  it('keeps a legacy multi-domain COS_MEETINGS_ROOT as the operations root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-legacy-meetings-'))
+    try {
+      mkdirSync(join(root, 'clinical', 'meetings', '2026-08'), { recursive: true })
+      delete process.env.COS_OPERATIONS_DIR
+      process.env.COS_MEETINGS_ROOT = root
+      expect(resolveCosOperationsDir()).toBe(realpathSync(root))
+      expect(resolveMeetingLibrary().layout).toBe('multi_domain')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('accepts an existing direct YYYY-MM library without making it a write root', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-direct-meetings-'))
+    try {
+      mkdirSync(join(root, '2026-03'), { recursive: true })
+      mkdirSync(join(root, '2026-08'), { recursive: true })
+      writeFileSync(join(root, '2026-03', '2026-03-01_Older.md'), '# Older\n\n**Date** | 2026-03-01 |\n')
+      writeFileSync(join(root, '2026-08', '2026-08-08_Queen.md'), '# Queen Meeting\n\n**Date** | 2026-08-08 18:00 |\n\n## Summary\nVisible\n')
+      delete process.env.COS_OPERATIONS_DIR
+      delete process.env.COS_SCRIPTS_DIR
+      process.env.COS_MEETINGS_ROOT = root
+      expect(inspectMeetingLibraryPath(root).layout).toBe('direct')
+      expect(resolveCosOperationsDir()).toBeNull()
+      expect(resolveMeetingLibrary().layout).toBe('direct')
+      const rows = listDirectLibraryMeetings({ limit: 10 })
+      expect(rows.map(row => row.title)).toEqual(['Queen Meeting', 'Older'])
+      expect(rows.every(row => row.mutable === false && row.librarySource === 'direct_library')).toBe(true)
+      expect(rows.every(row => row.canonicalRecord == null)).toBe(true)
+      expect(getDirectLibraryMeetingDetail('2026-08', '2026-08-08_Queen.md')?.summary).toBe('Visible')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('does not silently fall back when an explicit direct root disappears', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-missing-meetings-'))
+    process.env.COS_MEETINGS_ROOT = root
+    rmSync(root, { recursive: true, force: true })
+    expect(resolveMeetingLibrary().layout).toBe('invalid_explicit_root')
   })
 })
 
