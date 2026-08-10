@@ -1,3 +1,38 @@
+## 6.24.3
+
+Auto-recovery of quarantined audio has never run in production. Miles saw the symptom
+for three turns: "1 recoverable" that opening the phone app could not clear.
+
+- **My call sat inside a bare `catch {}`.** `autoRecoverOneQuarantinedCapture()` was one
+  line after `purgeExpiredQuarantine()` inside the orphan-audio sweep's
+  `try { ... } catch {}`, so any throw in that sweep meant auto-recovery silently never
+  executed — on 6.23.1, 6.24.0, 6.24.1 and 6.24.2. Zero `[quarantine]` lines in a 48 MB
+  log across every one of those releases. It now has its own try, because recovering
+  quarantined audio has nothing to do with sweeping orphaned session-audio dirs and must
+  not depend on that succeeding.
+- **That bare catch is why it took three turns to find.** Three minutes of watching a
+  live server produced no recovery, no log, and nothing to reason about, because the
+  error was discarded. Both catches now report. I chased three wrong causes first — a
+  closed admissions gate (`admissionsOpen` was `true`), a stale npm cache (real, but a
+  different bug), and a broken picker (it selects the item correctly against live data).
+- **A one-chunk capture is no longer advertised as recoverable.**
+  `meeting_1786393815060_tp693w` held ONE 5.6-second chunk that transcribed to silence.
+  Recovering it would have produced an empty meeting titled "Recovered capture (audio
+  only)"; advertising it produced a badge with instructions that cannot work, since a
+  server-side quarantine has no deferred phone save to land. `MIN_RECOVERABLE_CHUNKS`
+  is 2, and `isWorthRecovering` is the SINGLE definition used by the picker AND by both
+  warning counts — two definitions would let the badge claim something the sweeper has
+  already decided to skip.
+- No audio is deleted by any of this. Quarantine retention still owns expiry.
+
+Coverage: 8 mutations, all caught. The placement mutations were first measured against a
+RED baseline and re-run once green, because a mutation against a failing tree proves
+nothing. Three of those red iterations were my own test windowing, never the fix: a
+file-wide ban that hit a second legitimate bare catch, a fixed-width slice that ran past
+the fix, and an `indexOf` that matched the function definition instead of the call site.
+
+Full suite 1505 serially, tsc clean, gate after the bump.
+
 ## 6.24.2
 
 The empty-recording restart lock, split out of 6.24.1.

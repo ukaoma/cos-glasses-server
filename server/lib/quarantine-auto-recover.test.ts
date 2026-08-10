@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   AUTO_RECOVER_TITLE,
+  MIN_RECOVERABLE_CHUNKS,
+  isWorthRecovering,
   requestQuarantineRecovery,
   MAX_AUTO_RECOVER_ATTEMPTS,
   autoRecoverExhausted,
@@ -185,5 +188,85 @@ describe('asking the recover route to do the work', () => {
     const dead = (async () => { throw new Error('ECONNREFUSED') }) as unknown as typeof fetch
     expect(await requestQuarantineRecovery('s1', { port: 3141, token: 't', fetchImpl: dead }))
       .toMatchObject({ ok: false, status: 0, reason: 'request_failed' })
+  })
+})
+
+describe('a capture too small to be a meeting is left alone', () => {
+  it('skips a single-chunk capture', () => {
+    // meeting_1786393815060_tp693w: ONE 5.6s chunk that transcribed to silence.
+    // Recovering it produces an empty meeting; advertising it produces a badge the
+    // user cannot clear from the phone.
+    expect(isWorthRecovering(capture({ chunkFiles: 1 }))).toBe(false)
+    expect(pickQuarantineToRecover([capture({ chunkFiles: 1 })], state())).toBeNull()
+  })
+
+  it('acts at the threshold and above', () => {
+    expect(isWorthRecovering(capture({ chunkFiles: MIN_RECOVERABLE_CHUNKS }))).toBe(true)
+    expect(isWorthRecovering(capture({ chunkFiles: 139 }))).toBe(true)
+    expect(pickQuarantineToRecover([capture({ chunkFiles: MIN_RECOVERABLE_CHUNKS })], state())).not.toBeNull()
+  })
+
+  it('still skips chunk-less residue and anything already recovered', () => {
+    expect(isWorthRecovering(capture({ chunkFiles: 0 }))).toBe(false)
+    expect(isWorthRecovering(capture({ recovered: true, chunkFiles: 139 }))).toBe(false)
+  })
+
+  it('does not pick a small one even when it is the only candidate', () => {
+    expect(pickQuarantineToRecover([
+      capture({ sessionId: 'tiny', chunkFiles: 1, ageHours: 70 }),
+    ], state())).toBeNull()
+  })
+
+  it('prefers a substantial older capture over a small newer one', () => {
+    const picked = pickQuarantineToRecover([
+      capture({ sessionId: 'tiny-new', chunkFiles: 1, ageHours: 1 }),
+      capture({ sessionId: 'real-old', chunkFiles: 40, ageHours: 60 }),
+    ], state())
+    expect(picked?.sessionId).toBe('real-old')
+  })
+
+  it('is the SAME rule the warning counts use', () => {
+    // Two definitions would let the badge claim something is recoverable that the
+    // sweeper has already decided to leave alone — which is the contradiction that
+    // made this badge unclearable.
+    for (const rel of ['../routes/health.ts', '../routes/meeting.ts']) {
+      const src = readFileSync(new URL(rel, import.meta.url).pathname, 'utf8')
+      expect(src, rel).toMatch(/count: \w+\.filter\(isWorthRecovering\)\.length/)
+      expect(src, rel).toMatch(/isWorthRecovering.*from '\.\.\/lib\/quarantine-auto-recover\.js'/)
+    }
+  })
+
+  it('is wired into its OWN try, not the silent orphan-sweep catch', () => {
+    // The production failure: autoRecoverOneQuarantinedCapture sat one line after
+    // purgeExpiredQuarantine inside `try { ... } catch {}`, so any throw in that sweep
+    // meant it silently never ran on 6.23.1 through 6.24.2.
+    const route = readFileSync(new URL('../routes/transcribe-stream.ts', import.meta.url).pathname, 'utf8')
+    // Scoped to the 60s sweep. A file-wide ban failed: there is a SECOND, pre-existing
+    // `purgeExpiredQuarantine()` + bare `catch {}` on another code path, which is not
+    // this fix's business to change. Narrow the invariant to what was actually broken.
+    // Anchor INSIDE the 60s interval. There are TWO sweepOrphanedSessionAudio call
+    // sites; the first is on another code path that legitimately keeps a bare catch, so
+    // a plain indexOf windowed the wrong block and failed on correct code. Third
+    // iteration on this one assertion — each failure was the window, never the fix.
+    const intervalAt = route.indexOf('Auto-cleanup sessions idle for the advertised retention horizon')
+    expect(intervalAt, 'the 60s sweep comment anchor is gone').toBeGreaterThan(-1)
+    const sweepAt = route.indexOf('sweepOrphanedSessionAudio(SESSION_AUDIO_DIR', intervalAt)
+    expect(sweepAt).toBeGreaterThan(intervalAt)
+    // Window ENDS at the auto-recover call. A fixed 1400-char slice ran past the fix
+    // into the pending-batch block below, which has its own bare catch, so the
+    // assertion failed on correct code — the same over-wide-window mistake as the
+    // file-wide version above it.
+    const sweep = route.slice(sweepAt, route.indexOf('autoRecoverOneQuarantinedCapture()', sweepAt))
+    expect(sweep, 'the sweep catch must report, not swallow')
+      .not.toMatch(/\}\s*catch\s*\{\s*\}/)
+    expect(sweep, 'the sweep catch must log what failed').toMatch(/\[cleanup\] Orphan-audio sweep failed/)
+    // Search FROM the sweep. A bare indexOf matched the function DEFINITION
+    // (`autoRecoverOneQuarantinedCapture(): void`, whose text contains `Capture()`),
+    // which sits above the interval — so `before` was the wrong slice and the
+    // assertion failed on correct code.
+    const call = route.indexOf('autoRecoverOneQuarantinedCapture()', sweepAt)
+    expect(call).toBeGreaterThan(sweepAt)
+    const before = route.slice(Math.max(0, call - 300), call)
+    expect(before, 'the call must sit in its own try').toMatch(/try \{\s*$/)
   })
 })

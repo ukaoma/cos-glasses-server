@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { COS_SCRIPTS_DIR, COS_MODE } from '../lib/python-bridge.js'
@@ -227,7 +228,7 @@ healthRouter.get('/health', async (_req, res) => {
   // plus the recover action live on the authenticated /api/meeting/orphans.
   const unsavedList = listUnsavedCaptures()
   const unsaved_captures = {
-    count: unsavedList.filter(item => !item.recovered).length,
+    count: unsavedList.filter(isWorthRecovering).length,
     items: unsavedList.slice(0, 10).map(item => ({
       sessionId: item.sessionId,
       ageHours: item.ageHours,

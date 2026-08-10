@@ -27,6 +27,34 @@
 
 import type { UnsavedCapture } from './unsaved-audio-quarantine.js'
 
+/**
+ * Chunks below which a capture is not worth turning into a meeting.
+ *
+ * A chunk covers roughly 5 to 10 seconds, so one chunk is a recording that started and
+ * stopped almost immediately. Observed 2026-08-10: `meeting_1786393815060_tp693w` held
+ * ONE 5.6-second chunk that transcribed to silence, and the panel advertised it as
+ * "1 recoverable" with instructions to open the phone app — which cannot clear a
+ * server-side quarantine, so the badge simply persisted.
+ *
+ * Recovering it would run a full batch transcription and produce an empty meeting
+ * titled "Recovered capture (audio only)". That is noise, not rescue. The audio is NOT
+ * deleted here — quarantine retention still owns that decision and expires it on its
+ * own clock. This only decides what is worth acting on and worth warning about.
+ */
+export const MIN_RECOVERABLE_CHUNKS = 2
+
+/**
+ * Is this capture substantial enough to act on?
+ *
+ * One definition, used by the auto-recover picker AND by the counts that drive the
+ * "unsaved captures" warning, so the badge cannot claim something is recoverable that
+ * the sweeper has already decided to leave alone.
+ */
+export function isWorthRecovering(item: { recovered: boolean; chunkFiles: number }): boolean {
+  if (item.recovered) return false
+  return item.chunkFiles >= MIN_RECOVERABLE_CHUNKS
+}
+
 /** Attempts per capture before the sweep stops trying on its own. */
 export const MAX_AUTO_RECOVER_ATTEMPTS = 3
 
@@ -58,10 +86,8 @@ export function pickQuarantineToRecover(
   state: AutoRecoverState,
 ): UnsavedCapture | null {
   const eligible = items.filter(item => {
-    // Already a meeting. Recovering again would duplicate it.
-    if (item.recovered) return false
-    // Nothing to transcribe: a chunk-less dir is residue, not evidence.
-    if (item.chunkFiles <= 0) return false
+    // Already a meeting, chunk-less residue, or too small to be a meeting at all.
+    if (!isWorthRecovering(item)) return false
     // Another recovery owns this one.
     if (state.inFlight.has(item.sessionId)) return false
     return (state.attempts.get(item.sessionId) ?? 0) < MAX_AUTO_RECOVER_ATTEMPTS

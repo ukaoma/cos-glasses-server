@@ -3,6 +3,7 @@
 // are durable before the session is closed; batch improvement runs afterward.
 
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { resolve } from 'node:path'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
@@ -1672,7 +1673,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // route answered count: 0.
     const stranded = getStrandedCaptures()
     res.json({
-      count: items.filter(item => !item.recovered).length,
+      count: items.filter(isWorthRecovering).length,
       strandedCount: stranded.length,
       stranded,
       recovering: [...recoveringOrphans],

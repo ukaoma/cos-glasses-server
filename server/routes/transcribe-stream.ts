@@ -1015,8 +1015,22 @@ setInterval(() => {
       }
     }
     purgeExpiredQuarantine()
+  } catch (error) {
+    // Was a bare `catch {}`. That is what made the auto-recover failure below
+    // undiagnosable: three minutes of watching a live server produced no recovery, no
+    // log, and nothing to reason about, because any throw in this block vanished.
+    console.error(`[cleanup] Orphan-audio sweep failed: ${error instanceof Error ? error.message : error}`)
+  }
+  // DELIBERATELY ITS OWN TRY. This used to sit inside the block above, one line after
+  // purgeExpiredQuarantine, so a throw anywhere in that sweep meant auto-recovery
+  // silently never ran — which is exactly what happened in production on 6.23.1
+  // through 6.24.2. Recovering quarantined audio has nothing to do with sweeping
+  // orphaned session-audio dirs and must not depend on it succeeding.
+  try {
     autoRecoverOneQuarantinedCapture()
-  } catch {}
+  } catch (error) {
+    console.error(`[quarantine] Auto-recover pass failed: ${error instanceof Error ? error.message : error}`)
+  }
   // Purge stale pending-batch dirs. HQ large-v3 on long meetings + Control
   // restart can exceed 2h (2026-07-27: two sessions purged before batch).
   // Use 12h, and never purge while a meeting_batch_finalization lease is held.
