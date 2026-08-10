@@ -1,3 +1,65 @@
+## 6.24.0
+
+The Sessions tab stops 404ing, and a read-only presence view of Claude Code
+sessions on this Mac arrives behind a flag.
+
+- **`/api/session-index` was never ported into the published package.** The route
+  lives in the private app repo and is mounted there; the companion has been calling
+  it and getting an Express HTML 404 since the managed-runtime cutover. Same class as
+  the stranded voice profiles, the npmignore-excluded speaker model and the stranded
+  `.cos-profile.json`.
+- **Ported rather than retired, against the original recommendation.**
+  `/api/sessions/recent` looked like a duplicate and is not: it reads an IN-MEMORY map
+  on a 24-hour window, carries no `domain` and no `device_id`, gives `lastQuery` where
+  the companion wants `first_prompt`, dies on restart, and has no counterpart at all
+  for the detail view's `tools_used`, `files_touched`, `git_branch` and token counts.
+  `lib/session-cache-writer.ts` already writes the disk cache, so only the reader was
+  missing.
+- **Four defects fixed in the port, all measured on the real 37,700-entry cache.**
+  An unset `COS_SCRIPTS_DIR` returned `[]` — a 200 that reads as "you have no
+  sessions" on every standalone install — now 503 with `reason: pythonBridgeState()`.
+  `err.message` leaked filesystem paths; now a generic reason, detail to the log.
+  31.7 MB was parsed synchronously per request, the detail endpoint included, on a
+  process that also streams live audio; now async and cached against file identity
+  (161ms cold, 15ms warm). And the filename filter matched iCloud sync-conflict
+  duplicates: `.session_index_cache_Ukaoma-Mac-Studio 3.json` shared 543 of its 602
+  rows with the canonical file, so the merged list served 543 duplicates. Verified on
+  real data: 37,700 naive becomes 37,157 served, exactly 543 removed. Filtering ` N`
+  filenames would have been wrong in the other direction, since ` 2.json` holds 245
+  rows appearing nowhere else, so dedupe is by session_id with newest winning.
+- **New `GET /api/claude-sessions`, off unless `COS_CLAUDE_SESSIONS_ENABLED=1`.**
+  It projects another product's 0700 state directory over a socket bound to 0.0.0.0
+  behind a private-network allowlist, so in a published package that has to be opt-in.
+  Named `claude-sessions` rather than `peers` because COS already overloads "session"
+  three ways and the glasses, phone and server are all arguably peers.
+- **Redaction is decided by `nameSource`, and only `derived` passes.** `auto` means an
+  LLM wrote the label FROM THE WORK, and `/rename` clears the field entirely, so a
+  missing `nameSource` is a renamed session rather than a derived one. Anything but an
+  exact `derived` is replaced with the recomputed folder name and flagged
+  `nameRedacted`. Echoing `name` while redacting `cwd` would not have been redaction.
+- **Reachability is a conjunction: alive AND a declared socket path AND that file
+  present.** Each alone is a false positive. Verified live: the 2.1.222 row reports
+  `reachable: false` for having no socket path, and `/tmp/cc-socks` holds an orphaned
+  `.sock` whose pid is dead and whose registry file is already gone, because sockets
+  are not reaped. Liveness is a signal 0, never inferred from mtime, and EPERM
+  resolves to false rather than true.
+- Fields are named explicitly, never spread. The writer can also emit `logPath` (a
+  full path), `agent`, `jobId`, `bridgeSessionId` and `parkedJobId`. Verified against
+  the live registry: no `/Users/`, no `cc-socks`, no `logPath`, no `cwd` on the wire.
+- Registry reads honor `CLAUDE_CONFIG_DIR`, match `<pid>.json` strictly rather than
+  `*.json`, `lstat` to refuse symlinks, and treat an ENOENT mid-read as normal because
+  the reaper is actively unlinking.
+
+**Sending messages from the glasses stays closed, not parked.** COS launches Claude
+with `--dangerously-skip-permissions` in BOTH branches of `claude-permissions.ts:44`,
+so there is no configuration in which an inbound message reaches a receiver that
+would prompt. Combined with the 0.0.0.0 bind, that is a LAN-token-to-RCE path.
+
+Coverage: 75 tests across the two routes, 20 mutations all caught. One was an invalid
+experiment first time round — the 500 responder is identical in both handlers, so
+mutating them together looked covered; mutated one at a time the list site was caught
+and the DETAIL site SURVIVED, which found a genuinely untested leak path.
+
 ## 6.23.1
 
 Closes the hole 6.23.0 left open, plus a lockfile version that 6.23.0 shipped out of

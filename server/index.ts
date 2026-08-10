@@ -17,6 +17,8 @@ import { diagRouter } from './routes/diag.js'
 import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
+import { sessionIndexRouter } from './routes/session-index.js'
+import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
@@ -231,6 +233,12 @@ app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
 app.use('/api', queryRouter)
 app.use('/api', providerProofRouter)
 app.use('/api', transcribeRouter)
+// Ported from cos-glasses-app in 6.24.0. The companion's Sessions tab has been
+// calling this and getting a 404 since the managed-runtime cutover.
+app.use('/api', sessionIndexRouter)
+// Presence view of Claude Code sessions on this Mac. Dark unless
+// COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
+app.use('/api', claudeSessionsRouter)
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)
 app.use('/api', meetingRouter)
