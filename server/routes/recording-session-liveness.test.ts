@@ -114,3 +114,65 @@ describe('recording session liveness', () => {
     expect(mod.getTranscriptionSessionLiveness(now).stale).toBe(1)
   })
 })
+
+describe('an EMPTY session must not hold the restart lock for 30 minutes', () => {
+  // Observed 2026-08-10 on 6.24.0: meeting_1786393815060_tp693w started, received ONE
+  // 5.6s chunk that transcribed to empty, stopped 6.2 seconds later, and then blocked
+  // Update Server. Correct per the old rule — 13 minutes idle is inside the 30-minute
+  // grace — but the grace exists to protect a transcript, and there was none.
+
+  it('is stale once idle past the empty window, with no canonical text', async () => {
+    const mod: any = await import('./transcribe-stream.js')
+    const now = Date.now()
+    await seedSession('empty-aborted', now - mod.EMPTY_SESSION_STALE_MS - 1_000, 0)
+    const result = mod.getTranscriptionSessionLiveness(now)
+    expect(result.live).toBe(0)
+    expect(result.stale).toBe(1)
+    expect(result.staleSessions[0]).toMatchObject({ sessionId: 'empty-aborted', chunks: 0 })
+  })
+
+  it('still protects an empty session that only just went quiet', async () => {
+    // A recording genuinely starting has no chunk for its first interval. Reaping at
+    // once would kill it before its first chunk lands.
+    const mod: any = await import('./transcribe-stream.js')
+    const now = Date.now()
+    await seedSession('just-started', now - 20_000, 0)
+    expect(mod.getTranscriptionSessionLiveness(now).live).toBe(1)
+  })
+
+  it('NEVER reaps a session that has real text, however short the idle', async () => {
+    const mod: any = await import('./transcribe-stream.js')
+    const now = Date.now()
+    await seedSession('has-text', now - mod.EMPTY_SESSION_STALE_MS - 60_000, 3)
+    // Idle well past the empty window, but it has a transcript, so only the 30-minute
+    // rule may touch it.
+    expect(mod.getTranscriptionSessionLiveness(now).live).toBe(1)
+  })
+
+  it('the empty window is far shorter than the full one, and both still apply', async () => {
+    const mod: any = await import('./transcribe-stream.js')
+    expect(mod.EMPTY_SESSION_STALE_MS).toBeLessThan(mod.RECORDING_SESSION_STALE_MS)
+    expect(mod.EMPTY_SESSION_STALE_MS).toBe(2 * 60_000)
+    const now = Date.now()
+    // A session WITH text is still reaped by the 30-minute rule.
+    await seedSession('old-with-text', now - mod.RECORDING_SESSION_STALE_MS - 1_000, 4)
+    expect(mod.getTranscriptionSessionLiveness(now).stale).toBe(1)
+  })
+
+  it('counts canonical text, not sparse array length', async () => {
+    // A silent chunk carries no text and lands in emptyCompletions. Counting
+    // chunks.length would read an aborted session as having content.
+    const mod: any = await import('./transcribe-stream.js')
+    const map: Map<string, any> = mod.__sessionsForTests
+    const now = Date.now()
+    const sparse: any[] = []
+    sparse[4] = { index: 4, text: '' }   // arrived, transcribed to silence
+    map.set('sparse-silent', {
+      chunks: sparse, startTime: now - 600_000, title: 'x',
+      lastActivityAt: now - mod.EMPTY_SESSION_STALE_MS - 1_000,
+    })
+    const result = mod.getTranscriptionSessionLiveness(now)
+    expect(result.stale).toBe(1)
+    expect(result.staleSessions[0].chunks).toBe(0)
+  })
+})

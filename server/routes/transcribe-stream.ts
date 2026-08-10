@@ -387,6 +387,26 @@ export function getActiveTranscriptionSessionCount(): number {
  */
 export const RECORDING_SESSION_STALE_MS = STRANDED_STALE_MS
 
+/**
+ * How long an EMPTY session may hold the restart lock.
+ *
+ * The 30-minute grace above protects a real recording that has gone briefly quiet — a
+ * backgrounded phone buffering to IndexedDB, a network drop, a long pause. A session
+ * that has produced NO canonical text has nothing to protect, so it must not lock
+ * Install, Repair, Restart and Update Server for half an hour.
+ *
+ * Observed 2026-08-10: meeting_1786393815060_tp693w started, took ONE 5.6s chunk that
+ * transcribed to empty, stopped 6.2s later, then blocked every restart for 30 minutes.
+ *
+ * WHY THIS CANNOT REAP A LIVE RECORDING. `lastActivityAt` is bumped on chunk ARRIVAL
+ * in processStreamChunk, before any text filtering, so a live recording in a silent
+ * room keeps arriving every ~10s and never goes idle — its silent chunks land in
+ * `emptyCompletions`, not `chunks`. Gating on emptiness ALONE would kill exactly that
+ * session; gating on emptiness AND idleness cannot. Two minutes is comfortably more
+ * than one chunk interval, so a recording that has just started is safe.
+ */
+export const EMPTY_SESSION_STALE_MS = 2 * 60_000
+
 export interface TranscriptionSessionLiveness {
   /** Sessions still plausibly recording. These block a restart. */
   live: number
@@ -479,8 +499,12 @@ export function getTranscriptionSessionLiveness(now = Date.now()): Transcription
   const staleSessions: TranscriptionSessionLiveness['staleSessions'] = []
   for (const [sessionId, session] of sessions) {
     const silentForMs = now - session.lastActivityAt
-    if (silentForMs >= RECORDING_SESSION_STALE_MS) {
-      staleSessions.push({ sessionId, silentForMs, chunks: session.chunks.length })
+    // Canonical text, not array length: the array is sparse and silent chunks carry no
+    // text, which is exactly the shape an aborted recording leaves behind.
+    const canonicalChunks = session.chunks.filter(chunk => chunk && chunk.text).length
+    const emptyAndIdle = canonicalChunks === 0 && silentForMs >= EMPTY_SESSION_STALE_MS
+    if (silentForMs >= RECORDING_SESSION_STALE_MS || emptyAndIdle) {
+      staleSessions.push({ sessionId, silentForMs, chunks: canonicalChunks })
     } else {
       live++
     }

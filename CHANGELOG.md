@@ -3,6 +3,22 @@
 Surfaces `project` on session rows, so the list can group the way Claude Code's own
 sidebar does.
 
+- **A 6-second aborted recording no longer locks the restart for 30 minutes.**
+  `getTranscriptionSessionLiveness` gated purely on elapsed time. The 30-minute grace
+  exists to protect a real recording that has gone briefly quiet — a backgrounded phone
+  buffering to IndexedDB — but a session with NO canonical text has nothing to protect.
+  Observed 2026-08-10: `meeting_1786393815060_tp693w` started, received one 5.6s chunk
+  that transcribed to empty, stopped 6.2 seconds later, and then blocked Update Server.
+  A session idle past `EMPTY_SESSION_STALE_MS` (2 minutes) with zero canonical chunks
+  now stops blocking a restart.
+- **Why that cannot reap a live recording.** `lastActivityAt` is bumped on chunk
+  ARRIVAL, before any text filtering, so a live recording in a silent room keeps
+  arriving every ~10s and never goes idle at all; its silent chunks land in
+  `emptyCompletions`, not `chunks`. Gating on emptiness ALONE would kill exactly that
+  session, which is why the rule requires emptiness AND idleness. Counted on canonical
+  text rather than array length, because the array is sparse and a silent chunk carries
+  no text — the precise shape an aborted recording leaves behind.
+
 - The indexer was scanning ONE project directory. `PROJECTS_DIR` was hardcoded to
   MU-Chief-Staff, so 17 of 18 project dirs — `cos-glasses-app`, `cos-glasses-server`,
   the 119 projects, the COS examples — were never indexed at all. That is why the
