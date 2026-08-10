@@ -219,6 +219,71 @@ describe('filters, ordering and bounds', () => {
   })
 })
 
+describe('labels good enough to browse, and machine sessions hidden on request', () => {
+  it('prefers custom_title, then the derived label, then the id', async () => {
+    writeCache('.session_index_cache_Studio.json', [
+      entry({ session_id: 'titled', custom_title: 'COS-glasses Server work (meetings)', display_label: 'COS-glasses Server work (meetings)' }),
+      entry({ session_id: 'derived', custom_title: '', display_label: "Alright, let's try this again." }),
+    ])
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/session-index`)).json() as any
+    const byId = Object.fromEntries(body.sessions.map((x: any) => [x.session_id, x]))
+    expect(byId.titled.display_label).toBe('COS-glasses Server work (meetings)')
+    expect(byId.derived.display_label).toBe("Alright, let's try this again.")
+  })
+
+  it('falls back for rows written BEFORE these fields existed', async () => {
+    // 37,157 cached rows predate this release. Emitting an empty label for all of
+    // them would be worse than the random slug it replaces.
+    const { display_label, custom_title, ...legacy } = entry({ session_id: 'old_row' }) as any
+    writeCache('.session_index_cache_Studio.json', [legacy])
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/session-index`)).json() as any
+    expect(body.sessions[0].display_label).toBe('How are we starting August?')
+    expect(body.sessions[0].custom_title).toBe('')
+    expect(body.sessions[0].machine_spawned).toBe(false)
+  })
+
+  it('hides harness-opened sessions only when asked', async () => {
+    writeCache('.session_index_cache_Studio.json', [
+      entry({ session_id: 'human', machine_spawned: false }),
+      entry({ session_id: 'proxy', machine_spawned: true }),
+    ])
+    const base = await startTestServer()
+    const all = await (await fetch(`${base}/api/session-index`)).json() as any
+    expect(all.total).toBe(2)
+    const human = await (await fetch(`${base}/api/session-index?human=1`)).json() as any
+    expect(human.sessions.map((x: any) => x.session_id)).toEqual(['human'])
+  })
+
+  it('only a real boolean true hides a session, so a bad value fails OPEN', async () => {
+    // Strict === true rather than Boolean(). A truthy non-boolean from a future
+    // writer, or a stringified "true" in a legacy row, must not silently hide a real
+    // session — losing a row the user had is worse than showing a machine one.
+    writeCache('.session_index_cache_Studio.json', [
+      entry({ session_id: 'stringy', machine_spawned: 'true' }),
+      entry({ session_id: 'numeric', machine_spawned: 1 }),
+      entry({ session_id: 'real', machine_spawned: true }),
+    ])
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/session-index`)).json() as any
+    const byId = Object.fromEntries(body.sessions.map((x: any) => [x.session_id, x]))
+    expect(byId.stringy.machine_spawned).toBe(false)
+    expect(byId.numeric.machine_spawned).toBe(false)
+    expect(byId.real.machine_spawned).toBe(true)
+    const human = await (await fetch(`${base}/api/session-index?human=1`)).json() as any
+    expect(human.sessions.map((x: any) => x.session_id).sort()).toEqual(['numeric', 'stringy'])
+  })
+
+  it('treats a missing machine_spawned as human, not hidden', async () => {
+    const { machine_spawned, ...legacy } = entry({ session_id: 'old_row' }) as any
+    writeCache('.session_index_cache_Studio.json', [legacy])
+    const base = await startTestServer()
+    const human = await (await fetch(`${base}/api/session-index?human=1`)).json() as any
+    expect(human.total).toBe(1)
+  })
+})
+
 describe('detail lookup', () => {
   beforeEach(() => writeCache('.session_index_cache_Studio.json', [entry()]))
 
@@ -237,6 +302,34 @@ describe('detail lookup', () => {
       domain: 'personal',
       device_id: 'Ukaoma-Mac-Studio',
     })
+  })
+
+  it('carries the new label fields, with the SAME strictness as the list', async () => {
+    // The detail handler has its own copy of these three fields. Mutated separately,
+    // the list site was caught and this one SURVIVED — the exact split that hid an
+    // untested path leak earlier in this release.
+    writeCache('.session_index_cache_Studio.json', [entry({
+      session_id: 'sess_a',
+      custom_title: 'COS-glasses Server work (meetings)',
+      display_label: 'COS-glasses Server work (meetings)',
+      machine_spawned: 'true',
+    })])
+    __resetSessionIndexCache()
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/session-index/sess_a`)).json() as any
+    expect(body.custom_title).toBe('COS-glasses Server work (meetings)')
+    expect(body.display_label).toBe('COS-glasses Server work (meetings)')
+    expect(body.machine_spawned).toBe(false)
+  })
+
+  it('falls back on the detail route for a pre-release row', async () => {
+    const { display_label, custom_title, machine_spawned, ...legacy } = entry() as any
+    writeCache('.session_index_cache_Studio.json', [legacy])
+    __resetSessionIndexCache()
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/session-index/sess_a`)).json() as any
+    expect(body.display_label).toBe('How are we starting August?')
+    expect(body.machine_spawned).toBe(false)
   })
 
   it('resolves by glasses UUID and by prefix', async () => {

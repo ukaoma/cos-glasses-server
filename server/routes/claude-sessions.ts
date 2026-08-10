@@ -40,6 +40,23 @@ export function claudeSessionsEnabled(): boolean {
 }
 
 /**
+ * Show real session names instead of the recomputed folder name?
+ *
+ * Default OFF, so the published package is safe for anyone: a `user` or `auto` name
+ * describes the WORK ("Kevin/Miles grievance analysis"), and this socket binds
+ * 0.0.0.0 behind a private-network allowlist, so anyone on the LAN holding the token
+ * would read it off the wire.
+ *
+ * On an owner's own machine that redaction deletes the entire value of the view —
+ * the names are how you tell one session from another — so it is a deliberate opt-in
+ * rather than a hardcoded policy. Separate from the ENABLED flag: turning the feature
+ * on should not silently also turn off redaction.
+ */
+export function claudeSessionNamesVisible(): boolean {
+  return process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES === '1'
+}
+
+/**
  * Where the registry lives.
  *
  * `COS_CLAUDE_SESSIONS_DIR` first because it is both the override for a non-standard
@@ -73,6 +90,7 @@ const realProbes: PeerProbes = {
 export async function readClaudePeers(
   dir: string,
   probes: PeerProbes = realProbes,
+  showNames = claudeSessionNamesVisible(),
 ): Promise<ClaudePeer[]> {
   let names: string[]
   try {
@@ -95,7 +113,7 @@ export async function readClaudePeers(
       // mtime is the fallback for lastActiveAt only, never for liveness.
       let mtimeMs: number | null = null
       try { mtimeMs = (await stat(full)).mtimeMs } catch { /* raced the reaper */ }
-      const peer = toPeer(raw, probes, mtimeMs)
+      const peer = toPeer(raw, probes, mtimeMs, showNames)
       if (peer) peers.push(peer)
     } catch {
       // ENOENT between readdir and read is NORMAL here — the reaper is actively

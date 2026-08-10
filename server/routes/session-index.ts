@@ -48,6 +48,12 @@ const MAX_ENTRIES = 250_000
 
 export interface SessionEntry {
   session_id: string
+  /** Claude Code's own sidebar title when the user set one, else ''. */
+  custom_title: string
+  /** custom_title, else the first real user message, else the short id. */
+  display_label: string
+  /** True when the harness opened this session rather than a person. */
+  machine_spawned: boolean
   glasses_session_id: string
   slug: string
   created: string
@@ -167,6 +173,10 @@ sessionIndexRouter.get('/session-index', async (req, res) => {
     const domainFilter = str(req.query.domain, 'all') || 'all'
     const deviceFilter = str(req.query.device, 'all') || 'all'
     const sidFilter = str(req.query.sid)
+    // 1,045 of 1,210 local sessions are proxy calls, readiness probes and hook
+    // spawns. A list of all of them is unbrowsable, which is why Claude Code's own
+    // sidebar shows roughly the 165 that a person actually opened.
+    const humanOnly = str(req.query.human) === '1'
 
     const all = await readAllSessionCaches(COS_SCRIPTS_DIR)
     const sessions: SessionEntry[] = []
@@ -179,6 +189,7 @@ sessionIndexRouter.get('/session-index', async (req, res) => {
       if (domainFilter !== 'all' && domain !== domainFilter) continue
       if (deviceFilter !== 'all' && deviceId !== deviceFilter) continue
       if (sidFilter && !glassesId.startsWith(sidFilter)) continue
+      if (humanOnly && entry.machine_spawned === true) continue
 
       // Collected from the FILTERED set on purpose, so the device picker offers only
       // devices that can actually produce rows under the current filters.
@@ -193,6 +204,12 @@ sessionIndexRouter.get('/session-index', async (req, res) => {
         duration_minutes: num(entry.duration_minutes),
         message_count: num(entry.message_count),
         first_prompt: str(entry.first_prompt),
+        custom_title: str(entry.custom_title),
+        // Older cache rows predate these fields, so fall back rather than emitting
+        // an empty label for every session written before this release.
+        display_label: str(entry.display_label) || str(entry.custom_title)
+          || str(entry.first_prompt) || str(entry.slug) || entry.session_id.slice(0, 8),
+        machine_spawned: entry.machine_spawned === true,
         domain,
         device_id: deviceId,
       })
@@ -239,6 +256,10 @@ sessionIndexRouter.get('/session-index/:session_id', async (req, res) => {
       assistant_message_count: num(entry.assistant_message_count),
       message_count: num(entry.message_count),
       first_prompt: str(entry.first_prompt),
+      custom_title: str(entry.custom_title),
+      display_label: str(entry.display_label) || str(entry.custom_title)
+        || str(entry.first_prompt) || str(entry.slug) || entry.session_id.slice(0, 8),
+      machine_spawned: entry.machine_spawned === true,
       tools_used: (entry.tools_used && typeof entry.tools_used === 'object') ? entry.tools_used : {},
       files_touched: Array.isArray(entry.files_touched) ? entry.files_touched : [],
       domain: str(entry.domain, 'unknown') || 'unknown',

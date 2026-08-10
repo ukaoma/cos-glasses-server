@@ -50,6 +50,29 @@ sessions on this Mac arrives behind a flag.
   `*.json`, `lstat` to refuse symlinks, and treat an ENOENT mid-read as normal because
   the reaper is actively unlinking.
 
+- **Session labels you can actually read, and machine sessions you can hide.** The
+  list is only useful if the rows have names. Measured 2026-08-10: `first_prompt` took
+  the first user message unconditionally, so a slash-command session was labelled
+  `<command-message>cos-glasses</command-message>`, a proxy session was labelled "You
+  are the COS Slack Bridge proxy", and everything else fell back to a random slug
+  (`crispy-coalescing-salamander`) or the bare UUID. Fixed in the Python indexer with a
+  filter, not an LLM: wrappers are stripped, a slash command keeps its name, injected
+  persona prompts are rejected. `custom_title` now carries Claude Code's own sidebar
+  title where the user set one — `3dc7e253` correctly reads "COS-glasses Server work
+  (meetings)". New `display_label` resolves title, then derived label, then short id,
+  and falls back for the 37,157 rows written before these fields existed.
+- **`?human=1` hides harness-opened sessions.** 1,045 of 1,210 local sessions are proxy
+  calls, readiness probes and hook spawns; roughly 165 were opened by a person, which is
+  the order of magnitude Claude Code's own sidebar shows. `machine_spawned` is strict
+  `=== true`, so a bad value fails OPEN — losing a session the user had is worse than
+  showing a machine one.
+- **`COS_CLAUDE_SESSIONS_SHOW_NAMES=1` opts into real session names.** Redaction stays
+  the default so the published package is safe for anyone, but on an owner's own machine
+  it deleted the whole value of the view, since the names are how you tell one session
+  from another. Deliberately a SEPARATE switch from the enable flag: turning the feature
+  on must not silently turn redaction off. Opting in still never exposes a path or an
+  unlisted field.
+
 **Sending messages from the glasses stays closed, not parked.** COS launches Claude
 with `--dangerously-skip-permissions` in BOTH branches of `claude-permissions.ts:44`,
 so there is no configuration in which an inbound message reaches a receiver that

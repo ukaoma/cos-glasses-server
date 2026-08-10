@@ -121,6 +121,8 @@ export function toPeer(
   raw: RawClaudeSession,
   probes: PeerProbes,
   fallbackMtimeMs: number | null = null,
+  /** Owner opt-in. Default false keeps the published package safe by default. */
+  showNames = false,
 ): ClaudePeer | null {
   const pid = Number(raw.pid)
   if (!Number.isInteger(pid) || pid <= 0) return null
@@ -135,7 +137,8 @@ export function toPeer(
   // its process because nothing reaps /tmp/cc-socks.
   const reachable = alive && socketPath !== null && probes.socketExists(socketPath)
 
-  const safe = nameIsSafe(raw.nameSource)
+  // An explicit owner opt-in makes ANY name showable; otherwise only `derived`.
+  const safe = showNames || nameIsSafe(raw.nameSource)
   const rawName = str(raw.name)
   return {
     id: sessionId.slice(0, 8),

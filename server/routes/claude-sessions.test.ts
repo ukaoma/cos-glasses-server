@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  claudeSessionNamesVisible,
   claudeSessionsDir,
   claudeSessionsEnabled,
   claudeSessionsRouter,
@@ -82,6 +83,49 @@ describe('redaction is decided by nameSource, and only "derived" passes', () => 
       expect(nameIsSafe(value), String(value)).toBe(false)
     }
     expect(nameIsSafe('derived')).toBe(true)
+  })
+})
+
+describe('the owner opt-in for real names', () => {
+  it('still redacts by default, so the published package is safe', () => {
+    const peer = toPeer(raw({ nameSource: 'auto', name: 'Kevin/Miles grievance analysis' }), probes())!
+    expect(peer.name).toBe('cos-glasses-server')
+    expect(peer.nameRedacted).toBe(true)
+  })
+
+  it('shows any name once the owner opts in', () => {
+    // The names ARE the value of this view. Redaction protects a LAN-exposed socket,
+    // not the owner from himself.
+    const peer = toPeer(raw({ nameSource: 'auto', name: 'Kevin/Miles grievance analysis' }), probes(), null, true)!
+    expect(peer.name).toBe('Kevin/Miles grievance analysis')
+    expect(peer.nameRedacted).toBe(false)
+  })
+
+  it('opting in never resurrects a path or an unlisted field', () => {
+    const peer = toPeer(raw({ nameSource: 'user', logPath: '/Users/ukaoma/.claude/x.log' }), probes(), null, true)!
+    const wire = JSON.stringify(peer)
+    expect(wire).not.toContain('/Users/')
+    expect(wire).not.toContain('logPath')
+    expect(wire).not.toContain('cc-socks')
+  })
+
+  it('is a SEPARATE switch from the enable flag', () => {
+    const prev = { e: process.env.COS_CLAUDE_SESSIONS_ENABLED, n: process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES }
+    try {
+      process.env.COS_CLAUDE_SESSIONS_ENABLED = '1'
+      delete process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES
+      // Turning the feature on must not silently also turn redaction off.
+      expect(claudeSessionNamesVisible()).toBe(false)
+      process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES = '1'
+      expect(claudeSessionNamesVisible()).toBe(true)
+      for (const v of ['0', 'true', '']) {
+        process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES = v
+        expect(claudeSessionNamesVisible(), v).toBe(false)
+      }
+    } finally {
+      if (prev.e === undefined) delete process.env.COS_CLAUDE_SESSIONS_ENABLED; else process.env.COS_CLAUDE_SESSIONS_ENABLED = prev.e
+      if (prev.n === undefined) delete process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES; else process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES = prev.n
+    }
   })
 })
 
