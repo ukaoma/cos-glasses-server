@@ -1,7 +1,12 @@
-## 6.24.1
+## 6.24.2
 
-Surfaces `project` on session rows, so the list can group the way Claude Code's own
-sidebar does.
+The empty-recording restart lock, split out of 6.24.1.
+
+**Correction to 6.24.1's own entry.** These bullets were written under 6.24.1 while it
+was still unpublished, but it had already gone to the registry by then, so that heading
+described a published artifact that does not contain this code. Verified by downloading
+the published tarball: 6.24.1 carries the `project` field and has no
+`EMPTY_SESSION_STALE_MS`. Moved here rather than left standing.
 
 - **A 6-second aborted recording no longer locks the restart for 30 minutes.**
   `getTranscriptionSessionLiveness` gated purely on elapsed time. The 30-minute grace
@@ -18,6 +23,11 @@ sidebar does.
   session, which is why the rule requires emptiness AND idleness. Counted on canonical
   text rather than array length, because the array is sparse and a silent chunk carries
   no text — the precise shape an aborted recording leaves behind.
+
+## 6.24.1
+
+Surfaces `project` on session rows, so the list can group the way Claude Code's own
+sidebar does.
 
 - The indexer was scanning ONE project directory. `PROJECTS_DIR` was hardcoded to
   MU-Chief-Staff, so 17 of 18 project dirs — `cos-glasses-app`, `cos-glasses-server`,
