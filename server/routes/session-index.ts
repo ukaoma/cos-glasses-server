@@ -54,6 +54,8 @@ export interface SessionEntry {
   display_label: string
   /** True when the harness opened this session rather than a person. */
   machine_spawned: boolean
+  /** Project name, matching the group heading in Claude Code's own sidebar. */
+  project: string
   glasses_session_id: string
   slug: string
   created: string
@@ -210,6 +212,7 @@ sessionIndexRouter.get('/session-index', async (req, res) => {
         display_label: str(entry.display_label) || str(entry.custom_title)
           || str(entry.first_prompt) || str(entry.slug) || entry.session_id.slice(0, 8),
         machine_spawned: entry.machine_spawned === true,
+        project: str(entry.project),
         domain,
         device_id: deviceId,
       })
@@ -260,6 +263,7 @@ sessionIndexRouter.get('/session-index/:session_id', async (req, res) => {
       display_label: str(entry.display_label) || str(entry.custom_title)
         || str(entry.first_prompt) || str(entry.slug) || entry.session_id.slice(0, 8),
       machine_spawned: entry.machine_spawned === true,
+      project: str(entry.project),
       tools_used: (entry.tools_used && typeof entry.tools_used === 'object') ? entry.tools_used : {},
       files_touched: Array.isArray(entry.files_touched) ? entry.files_touched : [],
       domain: str(entry.domain, 'unknown') || 'unknown',

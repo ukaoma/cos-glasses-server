@@ -1,3 +1,20 @@
+## 6.24.1
+
+Surfaces `project` on session rows, so the list can group the way Claude Code's own
+sidebar does.
+
+- The indexer was scanning ONE project directory. `PROJECTS_DIR` was hardcoded to
+  MU-Chief-Staff, so 17 of 18 project dirs — `cos-glasses-app`, `cos-glasses-server`,
+  the 119 projects, the COS examples — were never indexed at all. That is why the
+  Sessions list could never match the sidebar: entire projects were absent, not just
+  mislabelled. Fixed in session_indexer.py (COS repo); 1,212 sessions now carry a
+  project where 1,000 were visible before.
+- `project` comes from the `cwd` on the session records, not from decoding the
+  directory name. Claude Code replaces path separators with dashes and a real dash is
+  indistinguishable from a separator afterwards, so
+  `-Users-ukaoma-Documents-GitHub-Ukaoma-Chief-Of-Staff-MU-Chief-Staff` decoded to
+  "Ukaoma-Chief-Of-Staff-MU-Chief-Staff" where the sidebar says "MU-Chief-Staff".
+
 ## 6.24.0
 
 The Sessions tab stops 404ing, and a read-only presence view of Claude Code
