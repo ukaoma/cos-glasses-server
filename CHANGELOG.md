@@ -1,3 +1,40 @@
+## 6.23.1
+
+Closes the hole 6.23.0 left open, plus a lockfile version that 6.23.0 shipped out of
+sync with package.json.
+
+- **A restart used to re-open the bug.** 6.23.0 saves a stranded capture at the
+  4-hour cutoff, but only while the server stays up. `recoverSessions()` refuses to
+  load any session already past that cutoff at boot — it tombstones it — so a
+  restart, a COS Control update, or a crash at the wrong moment meant the sweeper
+  never saw the session and its audio landed in quarantine with no meeting. Not
+  hypothetical: `meeting_1786237535593` (139 chunks, 31 MB, `idle_expiry_unsaved`)
+  arrived there that way.
+- **Quarantined audio now recovers itself.** The same 60-second tick picks ONE
+  unrecovered capture with chunks and asks the real
+  `POST /api/meeting/orphans/:id/recover` to turn it into a meeting. One at a time
+  because that route runs a full batch transcription — real GPU work, minutes for a
+  long capture — and a parallel backlog would starve a live recording. Oldest first,
+  since it is closest to the 72-hour purge.
+- **It gives up rather than looping.** Three attempts per capture, then it stops and
+  says so. A capture with unreadable chunks would otherwise be retried every 60
+  seconds for three days. The audio stays quarantined and recoverable by hand, which
+  beats a retry loop that never converges. A 409 from a manual recovery does not burn
+  the budget.
+- Recovered captures are titled "Recovered capture (audio only)", distinct from a
+  promoted session's "Auto-saved capture", because a quarantine recovery has no live
+  ASR and every speaker comes back Unknown. The library should say which is which
+  without opening the file.
+- **`package-lock.json` was still on 6.22.1 while package.json said 6.23.0.** Caught
+  by the repo's own `launcher-contract` test, which I did not re-run after bumping the
+  version. The published 6.23.0 code is unaffected; the lockfile is now aligned and
+  the suite runs after the bump, not before it.
+
+Verified live before this release: a backdated synthetic session was recovered at
+boot, drafted by the sweeper within 60s, and promoted to a meeting at the cutoff
+about 40s later, with the draft cleared and the domain inferred rather than
+hardcoded. 14 new tests here, full suite 1425 serially.
+
 ## 6.23.0
 
 A recording whose phone goes away now becomes a meeting on its own. Miles: "we end

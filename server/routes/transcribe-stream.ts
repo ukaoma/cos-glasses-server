@@ -23,6 +23,14 @@ import {
   writeStrandedDraft,
 } from '../lib/stranded-session-actions.js'
 import { getSessionHeartbeat } from '../lib/session-heartbeats.js'
+import {
+  MAX_AUTO_RECOVER_ATTEMPTS,
+  autoRecoverExhausted,
+  clearRecoverAttempts,
+  noteRecoverAttempt,
+  pickQuarantineToRecover,
+  requestQuarantineRecovery,
+} from '../lib/quarantine-auto-recover.js'
 import { TranscriptionUnavailableError } from '../lib/transcribe-audio.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -56,6 +64,7 @@ import {
 import { archiveSessionAudio, runMeetingAudioRetention } from '../lib/meeting-audio-archive.js'
 import {
   countChunkWavs,
+  listUnsavedCaptures,
   purgeExpiredQuarantine,
   quarantineSessionAudio,
   sweepOrphanedSessionAudio,
@@ -836,6 +845,57 @@ if (maintenanceAdmissionsOpen()) {
   recoverSessions()
 }
 
+/**
+ * Quarantined audio has no live session, so it needs its own pass.
+ *
+ * This closes the hole 6.23.0 left open: `recoverSessions()` tombstones any session
+ * already past the 4-hour cutoff at boot, so a restart while a capture is stranded
+ * means the promote above never runs and the audio lands here instead — preserved
+ * for 72 hours, but not a meeting, and only recoverable by hand. One per tick.
+ */
+const autoRecoverState = {
+  attempts: new Map<string, number>(),
+  inFlight: new Set<string>(),
+}
+
+function autoRecoverOneQuarantinedCapture(): void {
+  const token = process.env.COS_API_TOKEN ?? ''
+  if (!token) return
+  const picked = pickQuarantineToRecover(listUnsavedCaptures(), autoRecoverState)
+  if (!picked) return
+  const sessionId = picked.sessionId
+  autoRecoverState.inFlight.add(sessionId)
+  noteRecoverAttempt(autoRecoverState, sessionId)
+  void requestQuarantineRecovery(sessionId, {
+    port: parseInt(process.env.PORT ?? '3141', 10),
+    token,
+  })
+    .then(result => {
+      if (result.ok) {
+        console.warn(
+          `[quarantine] Auto-recovered ${sessionId} \u2192 ${result.filename ?? 'saved'} `
+          + `(${picked.chunkFiles} chunks, speakers unlabeled — no live ASR ran on it)`,
+        )
+        clearRecoverAttempts(autoRecoverState, sessionId)
+        return
+      }
+      // 409 means a manual recovery already owns it, which is not a failure and
+      // should not burn the budget.
+      if (result.status === 409) {
+        clearRecoverAttempts(autoRecoverState, sessionId)
+        return
+      }
+      const attempts = autoRecoverState.attempts.get(sessionId) ?? 0
+      console.error(
+        `[quarantine] Auto-recovery failed for ${sessionId} `
+        + `(${result.status} ${result.reason ?? ''}), attempt ${attempts}/${MAX_AUTO_RECOVER_ATTEMPTS}`
+        + `${autoRecoverExhausted(autoRecoverState, sessionId)
+          ? ' — giving up, audio stays quarantined and recoverable by hand' : ''}`,
+      )
+    })
+    .finally(() => autoRecoverState.inFlight.delete(sessionId))
+}
+
 /** Sessions with an auto-save in flight, so a later tick cannot start a second. */
 const promotingStranded = new Set<string>()
 
@@ -931,6 +991,7 @@ setInterval(() => {
       }
     }
     purgeExpiredQuarantine()
+    autoRecoverOneQuarantinedCapture()
   } catch {}
   // Purge stale pending-batch dirs. HQ large-v3 on long meetings + Control
   // restart can exceed 2h (2026-07-27: two sessions purged before batch).
