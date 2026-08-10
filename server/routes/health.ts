@@ -41,6 +41,7 @@ import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
+import { getStrandedCaptures } from './transcribe-stream.js'
 import { getWhisperPreviewCapability } from '../lib/whisper-preview.js'
 import { getTranscriptionProfileStatus } from '../lib/profile.js'
 import { getHealthStaticProbes } from '../lib/health-static-probes.js'
@@ -235,6 +236,23 @@ healthRouter.get('/health', async (_req, res) => {
       recovered: item.recovered,
     })),
   }
+  // Captures that stopped receiving audio but are NOT yet quarantined, so they do
+  // not appear in unsaved_captures for up to four hours. This is the state COS
+  // Control could not see on 2026-08-09: its panel read "2 recording(s) active.
+  // Restart is locked." while both had been silent for 184 and 24 minutes. Compact
+  // here; full detail on the authenticated orphans route.
+  const strandedList = getStrandedCaptures()
+  const stranded_captures = {
+    count: strandedList.length,
+    items: strandedList.slice(0, 10).map(item => ({
+      sessionId: item.sessionId,
+      idleMinutes: item.idleMinutes,
+      capturedMinutes: item.capturedMinutes,
+      chunks: item.chunks,
+      promotesAt: item.promotesAt,
+      hasDraft: item.draftPath != null,
+    })),
+  }
   const meetingLibrary = resolveMeetingLibrary()
   res.json({
     ...checks,
@@ -257,6 +275,7 @@ healthRouter.get('/health', async (_req, res) => {
       warningCount: meetingLibrary.warnings.length,
     },
     unsaved_captures,
+    stranded_captures,
     chunk_embeddings: chunkEmbeddings,
     speaker_corrections: speakerCorrections,
     review_audio: reviewAudio,

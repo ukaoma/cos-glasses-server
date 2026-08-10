@@ -12,6 +12,17 @@ import { fileURLToPath } from 'node:url'
 import { getVocabulary, getOwnerName } from '../lib/profile.js'
 import { getOpenAIKey } from '../lib/openai-key.js'
 import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from '../lib/transcription-policy.js'
+import { STRANDED_STALE_MS } from '../lib/stranded-sessions.js'
+import {
+  clearStrandedDraft,
+  listStrandedDrafts,
+  releaseStrandedState,
+  shouldCloseAfterFailedPromote,
+  sweepStrandedSessions,
+  promoteStrandedSession,
+  writeStrandedDraft,
+} from '../lib/stranded-session-actions.js'
+import { getSessionHeartbeat } from '../lib/session-heartbeats.js'
 import { TranscriptionUnavailableError } from '../lib/transcribe-audio.js'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -168,6 +179,9 @@ const _unused_hallucination_constants_placeholder = 0 as const
 const SESSION_AUDIO_DIR = dataPath('session-audio')
 ensurePrivateDirectory(SESSION_AUDIO_DIR)
 const PENDING_BATCH_DIR = dataPath('pending-batch')
+// Readable text for a capture that stopped receiving audio. A sidecar, never a
+// meeting — see lib/stranded-session-actions.ts for why it stays out of the store.
+const STRANDED_DRAFT_DIR = dataPath('stranded-drafts')
 ensurePrivateDirectory(PENDING_BATCH_DIR)
 const MAX_SESSION_AUDIO_BYTES = 500 * 1024 * 1024  // 500MB cap per session (~2hr meeting ≈ 260MB)
 const PRESERVED_SESSION_AUDIO_MARKER = '_meeting_save_preserved.marker'
@@ -354,8 +368,15 @@ export function getActiveTranscriptionSessionCount(): number {
  * run to minutes. It sits deliberately far below
  * LOCAL_FIRST_MEETING_IDLE_RETENTION_MS (4h), which governs how long chunks stay
  * recoverable and is far too long to hold a restart on.
+ *
+ * DERIVED, never a second literal. `STRANDED_STALE_MS` is the one definition of
+ * "this recording has gone quiet", and the stranded sweeper, the drain gate and
+ * the batch-abort check must all mean the same thing by it. Two independent
+ * numbers here is exactly the defect this release fixes: on 2026-08-09 the
+ * session counter reported two active recordings while /api/meeting/orphans
+ * reported none, because two subsystems disagreed on what a live recording is.
  */
-export const RECORDING_SESSION_STALE_MS = 30 * 60 * 1000
+export const RECORDING_SESSION_STALE_MS = STRANDED_STALE_MS
 
 export interface TranscriptionSessionLiveness {
   /** Sessions still plausibly recording. These block a restart. */
@@ -396,6 +417,53 @@ export interface TranscriptionSessionLiveness {
  * exercising nothing. Never guard a test on its own seam; make the seam real.
  */
 export const __sessionsForTests = sessions
+
+export interface StrandedCapture {
+  sessionId: string
+  /** Minutes since the last ACK'd chunk. */
+  idleMinutes: number
+  /** Minutes of audio actually captured before it went quiet. */
+  capturedMinutes: number
+  chunks: number
+  /** When the sweeper will save this on the user's behalf. */
+  promotesAt: string
+  /** Readable draft on disk, once the capture has been stale long enough. */
+  draftPath: string | null
+  draftBytes: number | null
+}
+
+/**
+ * Captures that stopped receiving audio but have NOT been saved yet.
+ *
+ * This is the row that was missing. `/api/meeting/orphans` listed only
+ * QUARANTINED directories, and a stranded session is not quarantined until the
+ * 4-hour cutoff — so on 2026-08-09 it answered `count: 0` while two sessions sat
+ * stranded for 184 and 24 minutes holding the restart lock. Nothing is wrong with
+ * the quarantine list; it was simply blind to the state that matters most, the one
+ * where the audio is still live and still rescuable.
+ *
+ * Reuses `getTranscriptionSessionLiveness().staleSessions` rather than re-deriving
+ * staleness, so this view and the maintenance drain gate can never disagree.
+ */
+export function getStrandedCaptures(now = Date.now()): StrandedCapture[] {
+  const drafts = new Map(listStrandedDrafts(STRANDED_DRAFT_DIR).map(d => [d.sessionId, d]))
+  return getTranscriptionSessionLiveness(now).staleSessions.map(stale => {
+    const session = sessions.get(stale.sessionId)
+    const lastActivityAt = session?.lastActivityAt ?? now - stale.silentForMs
+    const draft = drafts.get(stale.sessionId) ?? null
+    return {
+      sessionId: stale.sessionId,
+      idleMinutes: Math.round(stale.silentForMs / 60_000),
+      capturedMinutes: Math.round(
+        Math.max(0, lastActivityAt - (session?.startTime ?? lastActivityAt)) / 60_000,
+      ),
+      chunks: stale.chunks,
+      promotesAt: new Date(lastActivityAt + LOCAL_FIRST_MEETING_IDLE_RETENTION_MS).toISOString(),
+      draftPath: draft?.path ?? null,
+      draftBytes: draft?.bytes ?? null,
+    }
+  })
+}
 
 export function getTranscriptionSessionLiveness(now = Date.now()): TranscriptionSessionLiveness {
   let live = 0
@@ -768,15 +836,83 @@ if (maintenanceAdmissionsOpen()) {
   recoverSessions()
 }
 
+/** Sessions with an auto-save in flight, so a later tick cannot start a second. */
+const promotingStranded = new Set<string>()
+
+/**
+ * Hard backstop for a capture whose save keeps failing.
+ *
+ * Without it a session that the save route refuses transiently, forever, would
+ * live in memory forever. At twice the cutoff it takes the historical disposition
+ * — close and quarantine — so the audio is at least preserved on the unsaved-audio
+ * clock rather than held hostage by a retry loop.
+ */
+const STRANDED_PROMOTE_GIVE_UP_MS = 2 * LOCAL_FIRST_MEETING_IDLE_RETENTION_MS
+
+/**
+ * Turn an unattended capture into a meeting, and fall back to the old behavior if
+ * that proves impossible.
+ *
+ * Fire-and-forget on purpose: the sweep tick must not await an HQ finalization
+ * that can run for minutes. `promotingStranded` is what keeps the next tick from
+ * starting a duplicate.
+ */
+function promoteStrandedCapture(sessionId: string, lastActivityAt: number): void {
+  if (promotingStranded.has(sessionId)) return
+  promotingStranded.add(sessionId)
+  void promoteStrandedSession(sessionId, {
+    port: parseInt(process.env.PORT ?? '3141', 10),
+    token: process.env.COS_API_TOKEN ?? '',
+  })
+    .then(result => {
+      if (result.ok) {
+        console.warn(
+          `[stranded] Auto-saved unattended capture ${sessionId} \u2192 ${result.filename ?? 'saved'}`,
+        )
+        clearStrandedDraft(STRANDED_DRAFT_DIR, sessionId)
+        return
+      }
+      // Delegated, not restated: closing means the capture becomes quarantined
+      // audio instead of a meeting, which is the outcome this release exists to
+      // prevent, so the rule lives in a module a test can reach.
+      const idleForMs = Date.now() - lastActivityAt
+      if (!shouldCloseAfterFailedPromote(result, idleForMs, STRANDED_PROMOTE_GIVE_UP_MS)) {
+        console.warn(
+          `[stranded] Auto-save deferred for ${sessionId} `
+          + `(${result.status} ${result.reason ?? ''}); retrying next sweep`,
+        )
+        return
+      }
+      console.error(
+        `[stranded] Auto-save failed for ${sessionId} (${result.status} ${result.reason ?? ''}); `
+        + 'closing as expired so the audio reaches quarantine',
+      )
+      if (sessions.has(sessionId)) closeTranscriptSession(sessionId, 'expired')
+    })
+    .finally(() => promotingStranded.delete(sessionId))
+}
+
 // Auto-cleanup sessions idle for the advertised retention horizon.
 setInterval(() => {
   if (!maintenanceAdmissionsOpen()) return
-  const cutoff = Date.now() - LOCAL_FIRST_MEETING_IDLE_RETENTION_MS
-  for (const [id, session] of sessions) {
-    if (session.lastActivityAt < cutoff) {
-      closeTranscriptSession(id, 'expired')
-    }
-  }
+  // A capture whose phone went away must still become a meeting. This loop used
+  // to close every idle session as 'expired', which quarantined its audio and
+  // produced NO meeting — recoverable for 72h, but only by whoever thought to
+  // look. See lib/stranded-sessions.ts for why staleness may not close a session
+  // early and why the cutoff is unchanged.
+  sweepStrandedSessions({
+    now: Date.now(),
+    token: process.env.COS_API_TOKEN ?? '',
+    draftDir: STRANDED_DRAFT_DIR,
+    sessions: [...sessions].map(([id, session]) => [id, {
+      lastActivityAt: session.lastActivityAt,
+      startTime: session.startTime,
+      chunkCount: session.chunks.filter(Boolean).length,
+    }] as const),
+    getHeartbeat: getSessionHeartbeat,
+    getTranscript: id => getSessionTranscript(id),
+    onPromote: promoteStrandedCapture,
+  })
   // Orphaned session-audio dirs (no matching active session): quarantine any
   // dir still holding chunk audio; delete only chunk-less dirs. Quarantine
   // itself expires on the unsaved-audio retention clock, the ONLY place
@@ -1307,6 +1443,10 @@ function finishClosingTranscriptSession(
   clearSessionHallucinationState(sessionId)
   // Track as deleted so orphan heartbeats get 410 Gone (prevents zombie client spam)
   rememberDeletedSession(sessionId)
+  // A session that reached ANY terminal state keeps neither a liveness veto nor a
+  // draft. Leaving the draft would advertise an unsaved capture that is now saved,
+  // which is the false-alarm that trains the user to ignore the channel.
+  releaseStrandedState(STRANDED_DRAFT_DIR, sessionId)
   persistClosedSessions()
   // Clean up persisted file
   try { unlinkSync(resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)) } catch {}

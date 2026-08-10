@@ -101,6 +101,7 @@ import {
   getSessionStartTime,
   getSessionTranscript,
   getMeetingSessionStatus,
+  getStrandedCaptures,
   getTranscriptionSessionLiveness,
   hasSessionAudio,
   moveSessionAudioToPending,
@@ -1664,8 +1665,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         ? { segmentsDone: progress.segmentsDone, segmentsTotal: progress.segmentsTotal }
         : null
     }
+    // `stranded` is the state this endpoint used to be blind to: a capture whose
+    // phone went away, still live in memory, audio intact, NOT yet quarantined and
+    // therefore absent from `items` for a full four hours. That blindness is why
+    // two stranded sessions could hold the restart lock on 2026-08-09 while this
+    // route answered count: 0.
+    const stranded = getStrandedCaptures()
     res.json({
       count: items.filter(item => !item.recovered).length,
+      strandedCount: stranded.length,
+      stranded,
       recovering: [...recoveringOrphans],
       recoveringProgress,
       items,

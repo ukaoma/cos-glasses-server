@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 import { dataPath } from '../lib/data-dir.js'
+import { recordSessionHeartbeat } from '../lib/session-heartbeats.js'
 const DIAG_DIR = dataPath()
 const DIAG_FILE = resolve(DIAG_DIR, 'client-diagnostics.jsonl')
 const MAX_FILE_BYTES = 10 * 1024 * 1024  // 10 MB cap
@@ -75,6 +76,19 @@ diagRouter.post('/diag/client', async (req, res) => {
         return res.status(410).json({ error: 'session_deleted', sessionId })
       }
     } catch { /* import failure: fall through to normal logging */ }
+    // Positive liveness for the stranded-session sweeper. A phone can be capturing
+    // while its uploads are blocked, so chunk silence alone must not mark a
+    // session stale — this is the only signal that can say "still recording".
+    // Lossy by nature (fire-and-forget, 3s abort, silent catch), which is why it
+    // may only VETO a stale verdict and never cause one.
+    const heartbeatData = data as Record<string, unknown>
+    recordSessionHeartbeat(sessionId, {
+      at: ts,
+      audioState: typeof heartbeatData.audioState === 'string' ? heartbeatData.audioState : null,
+      visibilityState: typeof heartbeatData.visibilityState === 'string'
+        ? heartbeatData.visibilityState
+        : null,
+    })
   }
 
   // Rate limit per sessionId (or remote address as fallback)

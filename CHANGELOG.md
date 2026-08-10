@@ -1,3 +1,57 @@
+## 6.23.0
+
+A recording whose phone goes away now becomes a meeting on its own. Miles: "we end
+up with a meeting that is orphaned that we have no ability to keep."
+
+Found live while writing this: two sessions stranded for 184 and 24 minutes, holding
+the restart lock, while `GET /api/meeting/orphans` answered `count: 0`. Both saved at
+100% transfer integrity (529/529 and 23/23 chunks). Nothing had been lost — but
+nothing was going to turn them into meetings either.
+
+- **The audio was never the problem.** A stranded capture stays live in memory for 4
+  hours, then closes as `expired` and its chunks move to quarantine for 72 more. A
+  76-hour window in which the audio exists and NOTHING converts it into a meeting
+  unless a human notices. Expiry produced preserved evidence, not a meeting.
+- **The 60-second sweeper already existed and already detected these.** It called
+  `closeTranscriptSession(id, 'expired')`. The change is the disposition at the
+  cutoff, not new scheduling: it now finalizes through `POST /api/meeting/save`,
+  which keeps the live ASR transcript and its speaker labels. The quarantine recover
+  route was the wrong tool here — its output labels every speaker Unknown, because no
+  live ASR ever ran on it.
+- **Staleness never closes a session early, and it must not.** The companion buffers
+  to IndexedDB while iOS suspends the WebView and drains on foreground, and it
+  restores `restoredSessionId` across a relaunch — so a phone silent for 30 minutes
+  can still deliver its tail into the same session id. Close it and `isSessionDeleted`
+  answers 410 Gone: a truncated meeting AND a second orphan. At the stale threshold a
+  readable draft is written and the session stays open.
+- **`/api/meeting/orphans` and `/api/health` were blind to the state that matters.**
+  Both listed only QUARANTINED directories, and a stranded session is not quarantined
+  for four hours. New `stranded` / `stranded_captures` report idle minutes, captured
+  minutes, chunk count, when the sweeper will save it, and whether a draft exists.
+- **Quiet is not failure.** A heartbeat carrying `audioState` is now kept per session
+  and can VETO a stale verdict — a phone that says it is recording is alive even with
+  no chunk arriving, because its uploads may merely be blocked. A BACKGROUNDED phone
+  counts as capturing; requiring `visibilityState: visible` would reap exactly the
+  sessions the drain path exists to rescue. Absence proves nothing in the other
+  direction: `clientLog` is fire-and-forget and lossy, so a missing heartbeat can
+  never itself mark a session dead. Chunk arrival decides.
+- **One definition of stale.** `RECORDING_SESSION_STALE_MS` is now derived from
+  `STRANDED_STALE_MS` rather than being a second literal. Two subsystems disagreeing
+  about what a live recording is, is precisely how the panel could read "2
+  recording(s) active" while the orphan endpoint reported none.
+- A failed auto-save does not throw away a savable capture: `no_token` and 5xx and
+  transport failures retry on the next sweep, 409 yields to the save that already owns
+  the session, and only a terminal 4xx (or an 8-hour backstop) falls back to the old
+  close-and-quarantine.
+
+Coverage: 59 tests over the new modules, 23 mutations all caught. Three of those
+initially SURVIVED — the whole stale branch deleted, the token gate deleted, and the
+terminal draft cleanup deleted — because the loop lived inside a `setInterval` in a
+module no test can import without executing boot recovery, a timer, and writes to the
+real data home. It was extracted with injected dependencies rather than covered by
+source-shape assertions. Full suite green serially (1411 tests); two unrelated files
+flake under file parallelism, which is a pre-existing isolation bug.
+
 ## 6.22.1
 
 Notes attached from somewhere else by a symlink are now read properly. Found by
