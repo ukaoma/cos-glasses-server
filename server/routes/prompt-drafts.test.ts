@@ -11,6 +11,7 @@ let baseUrl = ''
 let transcribeAudioBuffer: ReturnType<typeof vi.fn>
 let transcribeWhisperPreview: ReturnType<typeof vi.fn>
 let emitDisplay: ReturnType<typeof vi.fn>
+let autoCleanDictation: ReturnType<typeof vi.fn>
 
 class MockNoSpeechDetectedError extends Error {
   constructor(readonly rawText = '') { super('No speech detected') }
@@ -48,7 +49,7 @@ async function startServer(): Promise<void> {
   })
   vi.doMock('../lib/dictation-clean.js', () => ({
     AUTOCLEAN_MAX_CHARS: 8000,
-    autoCleanDictation: async (text: string) => text,
+    autoCleanDictation: (autoCleanDictation = vi.fn(async (text: string) => text)),
   }))
   vi.doMock('../lib/display-bus.js', () => {
     emitDisplay = vi.fn((event) => event)
@@ -56,6 +57,7 @@ async function startServer(): Promise<void> {
   })
   const { promptDraftsRouter } = await import('./prompt-drafts.js')
   const app = express()
+  app.use(express.json({ limit: '20kb' }))
   app.use('/api', promptDraftsRouter)
   await new Promise<void>(resolve => {
     server = app.listen(0, '127.0.0.1', () => {
@@ -72,7 +74,10 @@ function httpRequest(method: string, path: string, body?: Buffer | string): Prom
   return new Promise((resolve, reject) => {
     const req = request(`${baseUrl}${path}`, {
       method,
-      headers: payload ? { 'Content-Length': String(payload.length), 'Content-Type': 'application/octet-stream' } : {},
+      headers: payload ? {
+        'Content-Length': String(payload.length),
+        'Content-Type': typeof body === 'string' ? 'application/json' : 'application/octet-stream',
+      } : {},
     }, res => {
       const chunks: Buffer[] = []
       res.on('data', chunk => chunks.push(Buffer.from(chunk)))
@@ -150,6 +155,54 @@ describe('public prompt draft recovery contract', () => {
       type: 'prompt_transcript',
       data: { draftId: started.json.draftId, chunkIndex: 0, text: 'hq polished text' },
     })
+  })
+
+  it('finalizes phone-local Message and Meeting text through the existing polish engine', async () => {
+    autoCleanDictation.mockImplementation(async (text: string, _vocabulary: unknown, opts: { model?: string }) => {
+      return `${text.replace('Silus', 'Silas')} [${opts.model}]`
+    })
+
+    const message = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+      text: 'Ask Silus about the plan',
+      surface: 'message',
+      autocleanModel: 'haiku',
+    }))
+    const meeting = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+      text: 'The forecast is ready',
+      surface: 'meeting',
+      autocleanModel: 'sonnet',
+    }))
+
+    expect(message.status).toBe(200)
+    expect(message.json).toEqual({
+      text: 'Ask Silas about the plan [haiku]',
+      surface: 'message',
+      polished: true,
+    })
+    expect(meeting.status).toBe(200)
+    expect(meeting.json).toEqual({
+      text: 'The forecast is ready [sonnet]',
+      surface: 'meeting',
+      polished: true,
+    })
+    expect(autoCleanDictation).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects invalid or oversized phone-local finalizer payloads', async () => {
+    const invalidSurface = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+      text: 'hello',
+      surface: 'other',
+    }))
+    const oversized = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+      text: 'x'.repeat(8001),
+      surface: 'message',
+    }))
+
+    expect(invalidSurface.status).toBe(400)
+    expect(invalidSurface.json.error).toBe('invalid_surface')
+    expect(oversized.status).toBe(413)
+    expect(oversized.json).toMatchObject({ error: 'text_too_large', maxChars: 8000 })
+    expect(autoCleanDictation).not.toHaveBeenCalled()
   })
 
   it('does not speculative-HQ-warm when mode=fast', async () => {

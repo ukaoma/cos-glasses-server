@@ -124,6 +124,34 @@ async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { s
   }
 }
 
+/** Finalize already-transcribed phone text through the same glossary + optional
+ * AI cleanup used by server-owned prompt drafts. This route accepts text only:
+ * Moonshine audio and rolling preview audio never leave the phone. */
+promptDraftsRouter.post('/dictation/finalize', async (req, res) => {
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : ''
+  const surface = req.body?.surface
+  const model = req.body?.autocleanModel
+  if (!text) return res.status(400).json({ error: 'text_required' })
+  if (text.length > AUTOCLEAN_MAX_CHARS) {
+    return res.status(413).json({ error: 'text_too_large', maxChars: AUTOCLEAN_MAX_CHARS })
+  }
+  if (surface !== 'message' && surface !== 'meeting') {
+    return res.status(400).json({ error: 'invalid_surface' })
+  }
+  if (model !== undefined && model !== 'haiku' && model !== 'sonnet') {
+    return res.status(400).json({ error: 'invalid_autoclean_model' })
+  }
+
+  const abort = new AbortController()
+  res.on('close', () => { if (!res.writableEnded) abort.abort() })
+  const finalText = await cleanOutboundDictation(text, {
+    enabled: true,
+    model,
+    signal: abort.signal,
+  })
+  res.json({ text: finalText, surface, polished: finalText !== text })
+})
+
 async function readRawBody(req: AsyncIterable<Buffer | Uint8Array | string>): Promise<Buffer> {
   const chunks: Buffer[] = []
   let total = 0

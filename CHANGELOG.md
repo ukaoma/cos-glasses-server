@@ -1,3 +1,18 @@
+## 6.27.2
+
+### One finalizer for phone and Mac dictation
+
+- Added authenticated `POST /api/dictation/finalize` for already-transcribed
+  Moonshine text. It reuses the exact glossary, negative rules, Haiku/Sonnet
+  polish, circuit breaker, token audit, and daily cap already used by recovered
+  server prompt drafts.
+- The route accepts bounded text only. Phone-local audio and rolling preview
+  audio do not leave the iPhone, and a finalizer failure falls back to the
+  deterministic glossary result instead of losing the transcription.
+- Both Message commits and sealed Meeting preview phrases can use the same
+  final quality pass while canonical Large-v3 meeting transcription remains
+  unchanged.
+
 ## 6.27.1
 
 ### The 16-frame video from 6.27.0 now actually works end to end
