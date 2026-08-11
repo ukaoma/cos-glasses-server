@@ -5,9 +5,20 @@
 // server media index. Anything that persists or transmits an attachment
 // persists THIS shape (or just the id) and nothing else.
 
-export type MediaKind = 'user_photo' | 'traffic_frame' | 'generated_visual'
+export type MediaKind = 'user_photo' | 'user_document' | 'user_video' | 'traffic_frame' | 'generated_visual'
 
-export type MediaMime = 'image/jpeg' | 'image/png'
+export type MediaCategory = 'image' | 'document' | 'video'
+
+export type MediaMime =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'text/plain'
+  | 'text/markdown'
+  | 'text/csv'
+  | 'application/json'
+  | 'application/pdf'
+  | 'video/mp4'
+  | 'video/quicktime'
 
 export interface MediaAttachmentRef {
   id: string
@@ -16,6 +27,14 @@ export interface MediaAttachmentRef {
   width: number
   height: number
   createdAt: string
+  /** Additive discriminator. Legacy image refs deliberately omit it so
+   * durable request fingerprints remain byte-compatible. */
+  category?: MediaCategory
+  bytes?: number
+  durationMs?: number
+  frameCount?: number
+  textChars?: number
+  truncated?: boolean
   label?: string
   capturedAt?: string
   expiresAt?: string
@@ -36,8 +55,15 @@ export function isValidMediaId(id: unknown): id is string {
   return typeof id === 'string' && MEDIA_ID_RE.test(id)
 }
 
-const VALID_KINDS: ReadonlySet<string> = new Set(['user_photo', 'traffic_frame', 'generated_visual'])
-const VALID_MIMES: ReadonlySet<string> = new Set(['image/jpeg', 'image/png'])
+const VALID_KINDS: ReadonlySet<string> = new Set([
+  'user_photo', 'user_document', 'user_video', 'traffic_frame', 'generated_visual',
+])
+const IMAGE_MIMES: ReadonlySet<string> = new Set(['image/jpeg', 'image/png'])
+const DOCUMENT_MIMES: ReadonlySet<string> = new Set([
+  'text/plain', 'text/markdown', 'text/csv', 'application/json', 'application/pdf',
+])
+const VIDEO_MIMES: ReadonlySet<string> = new Set(['video/mp4', 'video/quicktime'])
+const VALID_MIMES: ReadonlySet<string> = new Set([...IMAGE_MIMES, ...DOCUMENT_MIMES, ...VIDEO_MIMES])
 const MAX_LABEL_LEN = 120
 // ISO-8601 subset — what `new Date().toISOString()` emits.
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
@@ -62,6 +88,15 @@ export function parseMediaAttachmentRef(raw: unknown): MediaAttachmentRef | null
   if (typeof r.mime !== 'string' || !VALID_MIMES.has(r.mime)) return null
   if (!isDimension(r.width) || !isDimension(r.height)) return null
   if (!isIsoTimestamp(r.createdAt)) return null
+  const inferredCategory = r.kind === 'user_document'
+    ? 'document'
+    : r.kind === 'user_video'
+      ? 'video'
+      : 'image'
+  if ((inferredCategory === 'image' && !IMAGE_MIMES.has(r.mime))
+    || (inferredCategory === 'document' && !DOCUMENT_MIMES.has(r.mime))
+    || (inferredCategory === 'video' && !VIDEO_MIMES.has(r.mime))) return null
+  if (r.category !== undefined && r.category !== inferredCategory) return null
   const ref: MediaAttachmentRef = {
     id: r.id,
     kind: r.kind as MediaKind,
@@ -70,12 +105,57 @@ export function parseMediaAttachmentRef(raw: unknown): MediaAttachmentRef | null
     height: r.height,
     createdAt: r.createdAt,
   }
+  // Do not add category to legacy image refs that never carried it. Their
+  // canonical JSON is part of persisted durable-query fingerprints.
+  if (r.category === inferredCategory) ref.category = inferredCategory
+  if (typeof r.bytes === 'number' && Number.isSafeInteger(r.bytes) && r.bytes >= 0 && r.bytes <= 64 * 1024 * 1024) {
+    ref.bytes = r.bytes
+  }
+  if (typeof r.durationMs === 'number' && Number.isSafeInteger(r.durationMs) && r.durationMs >= 0 && r.durationMs <= 60 * 60_000) {
+    ref.durationMs = r.durationMs
+  }
+  if (typeof r.frameCount === 'number' && Number.isSafeInteger(r.frameCount) && r.frameCount >= 0 && r.frameCount <= 8) {
+    ref.frameCount = r.frameCount
+  }
+  if (typeof r.textChars === 'number' && Number.isSafeInteger(r.textChars) && r.textChars >= 0 && r.textChars <= 100_000) {
+    ref.textChars = r.textChars
+  }
+  if (r.truncated === true) ref.truncated = true
   if (typeof r.label === 'string' && r.label.length > 0) {
     ref.label = r.label.slice(0, MAX_LABEL_LEN)
   }
   if (isIsoTimestamp(r.capturedAt)) ref.capturedAt = r.capturedAt
   if (isIsoTimestamp(r.expiresAt)) ref.expiresAt = r.expiresAt
   return ref
+}
+
+export function mediaCategoryOf(ref: Pick<MediaAttachmentRef, 'kind' | 'category'>): MediaCategory {
+  if (ref.category) return ref.category
+  if (ref.kind === 'user_document') return 'document'
+  if (ref.kind === 'user_video') return 'video'
+  return 'image'
+}
+
+export function isImageAttachmentRef(ref: MediaAttachmentRef): boolean {
+  return mediaCategoryOf(ref) === 'image'
+}
+
+export function attachmentHistoryPrefix(refs: readonly MediaAttachmentRef[]): string {
+  if (refs.length === 0) return ''
+  if (refs.length > 1) return `[${refs.length} Attachments]`
+  const category = mediaCategoryOf(refs[0])
+  return category === 'image' ? '[Photo]' : category === 'video' ? '[Video]' : '[File]'
+}
+
+export function defaultAttachmentRequest(refs: readonly MediaAttachmentRef[]): string {
+  if (refs.length === 0) return ''
+  const categories = new Set(refs.map(mediaCategoryOf))
+  if (categories.size > 1 || refs.length > 1) return 'Review these attachments.'
+  return categories.has('document')
+    ? 'Summarize this file.'
+    : categories.has('video')
+      ? 'Review this video.'
+      : 'What do you see?'
 }
 
 /** Validate an untrusted array of refs, dropping only the invalid entries

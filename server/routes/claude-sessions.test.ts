@@ -354,7 +354,10 @@ describe('the route', () => {
     expect(body.enabled).toBe(true)
     expect(body.peers).toHaveLength(1)
     expect(body.peers[0]).toMatchObject({ id: 'd2382619', workspace: 'cos-glasses-server' })
-    expect(body.counts.alive).toBe(1)
+    // This route deliberately probes the real OS process table. The fixture PID
+    // may be alive or stale on a developer machine, but it must still project
+    // exactly one safe row rather than making test success depend on PID reuse.
+    expect(body.counts.alive + body.counts.stale).toBe(1)
     expect(typeof body.generatedAt).toBe('number')
   })
 

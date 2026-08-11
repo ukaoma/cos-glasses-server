@@ -18,6 +18,7 @@ import {
   type ModelPreference,
 } from '../../shared/model-preference.js'
 import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
+import { attachmentHistoryPrefix, defaultAttachmentRequest } from '../../shared/media-attachment.js'
 import {
   findExchangesByJobIdentity,
   flushConversationToDisk,
@@ -99,9 +100,11 @@ async function projectPublicConversationTerminal(
 
   const existing = findExchangesByJobIdentity(request.sessionId, identity)
   const existingAssistant = existing.find(exchange => exchange.role === 'assistant')
-  const imageCount = request.attachmentRefs.length
-  const photoPrefix = imageCount === 1 ? '[Photo]' : imageCount > 1 ? `[${imageCount} Photos]` : ''
-  const userContent = photoPrefix ? `${photoPrefix} ${request.query || 'What do you see?'}` : request.query
+  const attachmentPrefix = attachmentHistoryPrefix(request.attachmentRefs)
+  const defaultRequest = defaultAttachmentRequest(request.attachmentRefs)
+  const userContent = attachmentPrefix
+    ? `${attachmentPrefix} ${request.query || defaultRequest}`
+    : request.query
   const requestIds = new Set(request.attachmentRefs.map(ref => ref.id))
   const outputAttachments = job.attachments.filter(ref => !requestIds.has(ref.id))
   const existingOutputAttachments = existingAssistant?.attachments?.filter(ref => !requestIds.has(ref.id))
@@ -281,6 +284,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
         : {}),
       clientJobId: request.clientJobId,
       generation: request.generation,
+      requestAttachments: resolvedAttachments.refs,
+      attachmentPromptBlock: resolvedAttachments.promptBlock,
       sessionLockHeld: true,
     },
   )

@@ -30,6 +30,7 @@ import {
   isCursorProviderReady,
 } from '../lib/cursor-model-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
+import { getRichMediaProcessingCapabilities } from '../lib/rich-media-safety.js'
 import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
@@ -162,6 +163,7 @@ healthRouter.get('/health', async (_req, res) => {
   // Computed once per request; the same value feeds features.liveCues and
   // capabilities.liveCues so the two surfaces can never disagree.
   const liveCues = liveCuesCapability()
+  const richMedia = await getRichMediaProcessingCapabilities()
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -173,6 +175,8 @@ healthRouter.get('/health', async (_req, res) => {
     meetingFinalization: true,
     iphoneAsrCandidates: process.env.COS_IOS_ASR_CANDIDATES === '1',
     mediaProcessingReady: await isMediaProcessingReady(),
+    pdfProcessingReady: richMedia.pdf,
+    videoProcessingReady: richMedia.video,
     g2LensVariant: G2_LENS_VARIANT_CAPABILITY,
     durableQueryJobs: durableJobs.enabled,
     durableQueryJobsProtocol: durableJobs.protocolVersion,
@@ -296,6 +300,15 @@ healthRouter.get('/health', async (_req, res) => {
       },
       cliDebug: CLI_DEBUG_CAPABILITY,
       liveCues,
+      richMedia: {
+        text: true,
+        pdf: richMedia.pdf,
+        video: richMedia.video,
+        maxAttachments: 5,
+        maxBytesPerAttachment: 64 * 1024 * 1024,
+        maxVideoMinutes: 20,
+        maxStillFrames: 8,
+      },
       meetingLifecycle: {
         earlySyncClaim: getEarlyMeetingSyncSnapshot(),
         progressiveHq,

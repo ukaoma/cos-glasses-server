@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  attachmentHistoryPrefix,
+  defaultAttachmentRequest,
   MAX_ATTACHMENTS_PER_PROMPT,
   isValidMediaId,
+  mediaCategoryOf,
   mergeMediaAttachmentRefs,
   parseMediaAttachmentRef,
   parseMediaAttachmentRefs,
@@ -79,6 +82,38 @@ describe('parseMediaAttachmentRef (untrusted-boundary validation)', () => {
     const ref = parseMediaAttachmentRef(goodRef({ capturedAt: 'not-a-date' }))
     expect(ref).not.toBeNull()
     expect(ref!.capturedAt).toBeUndefined()
+  })
+
+  it('validates document/video category against kind and MIME without changing legacy image refs', () => {
+    const document = parseMediaAttachmentRef(goodRef({
+      kind: 'user_document', category: 'document', mime: 'application/pdf', width: 1, height: 1,
+      bytes: 42, textChars: 20, frameCount: 1, truncated: true,
+    }))
+    expect(document).toMatchObject({ kind: 'user_document', category: 'document', mime: 'application/pdf', bytes: 42 })
+    expect(parseMediaAttachmentRef(goodRef({ kind: 'user_document', category: 'image', mime: 'application/pdf' }))).toBeNull()
+    expect(parseMediaAttachmentRef(goodRef({ kind: 'user_video', category: 'video', mime: 'application/pdf' }))).toBeNull()
+    expect(parseMediaAttachmentRef(goodRef())!.category).toBeUndefined()
+  })
+})
+
+describe('attachment presentation helpers', () => {
+  const document = parseMediaAttachmentRef(goodRef({
+    kind: 'user_document', category: 'document', mime: 'text/plain', width: 1, height: 1,
+  }))!
+  const video = parseMediaAttachmentRef(goodRef({
+    kind: 'user_video', category: 'video', mime: 'video/mp4', width: 320, height: 180,
+  }))!
+  const photo = parseMediaAttachmentRef(goodRef())!
+
+  it('uses category-aware history labels and attachment-only defaults', () => {
+    expect(mediaCategoryOf(photo)).toBe('image')
+    expect(attachmentHistoryPrefix([photo])).toBe('[Photo]')
+    expect(attachmentHistoryPrefix([document])).toBe('[File]')
+    expect(attachmentHistoryPrefix([video])).toBe('[Video]')
+    expect(attachmentHistoryPrefix([photo, document])).toBe('[2 Attachments]')
+    expect(defaultAttachmentRequest([document])).toBe('Summarize this file.')
+    expect(defaultAttachmentRequest([video])).toBe('Review this video.')
+    expect(defaultAttachmentRequest([photo, video])).toBe('Review these attachments.')
   })
 })
 

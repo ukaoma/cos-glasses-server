@@ -44,7 +44,10 @@ import {
   type RunOutputImageCollectionStats,
 } from './run-output-images.js'
 import {
+  attachmentHistoryPrefix,
+  defaultAttachmentRequest,
   MAX_ATTACHMENTS_PER_PROMPT,
+  mediaCategoryOf,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import {
@@ -374,6 +377,10 @@ export interface CallOptions {
   surface?: 'query' | 'openai_compat' | 'unknown'
   messageEra?: string
   globalMsgNum?: number
+  requestAttachments?: MediaAttachmentRef[]
+  /** Provider-neutral quoted document data, rebuilt from private derivatives
+   * for this execution only. Never persisted in history or job records. */
+  attachmentPromptBlock?: string
   /** Optional prompt block prepended for handoff-style context. */
   handoffContext?: { promptBlock?: string }
   /** Cursor ask vs full agent. Omitted → ask. */
@@ -472,9 +479,11 @@ export async function callClaudeStreaming(
   const isFirstQuery = isNewSession(sid)
 
   // Record user message (with [Photo]/[N Photos] prefix for vision queries)
-  const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
-  const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
-  const inboundAttachments = imageInputs.length > 0 ? imageInputs.map(input => input.attachment) : undefined
+  const requestRefs = options?.requestAttachments ?? imageInputs.map(input => input.attachment)
+  const historyPrefix = attachmentHistoryPrefix(requestRefs)
+  const defaultRequest = defaultAttachmentRequest(requestRefs) || 'What do you see?'
+  const historyQuery = historyPrefix ? `${historyPrefix} ${query || defaultRequest}` : query
+  const inboundAttachments = requestRefs.length > 0 ? requestRefs : undefined
   const exchangeProvenance = {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
@@ -493,15 +502,20 @@ export async function callClaudeStreaming(
   const tools = allowedToolList.join(',')
 
   // Prepend image instruction when photos are attached
+  const hasNonImageAttachment = requestRefs.some(ref => mediaCategoryOf(ref) !== 'image')
   let fullQuery: string
-  if (imagePaths.length === 1) {
+  if (imagePaths.length > 0 && hasNonImageAttachment) {
+    const fileList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n')
+    fullQuery = `The user shared attachments represented by ${imagePaths.length} image or video/PDF still frame${imagePaths.length === 1 ? '' : 's'}. Read each file:\n${fileList}\nThen respond to their request: ${query || defaultRequest}`
+  } else if (imagePaths.length === 1) {
     fullQuery = `The user has shared a photo from their phone camera. First, read the image file at ${imagePaths[0]} to see it. Then respond to their request: ${query || 'Describe what you see in this image concisely.'}`
   } else if (imagePaths.length > 1) {
     const fileList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n')
     fullQuery = `The user has shared ${imagePaths.length} photos. Read each image file:\n${fileList}\nThen respond to their request: ${query || 'Describe what you see in these images concisely.'}`
   } else {
-    fullQuery = query
+    fullQuery = query || defaultRequest
   }
+  if (options?.attachmentPromptBlock) fullQuery = `${fullQuery}\n\n${options.attachmentPromptBlock}`
 
   // Check if we have a prior CLI session for this COS session.
   // If not, use the pre-warmed session (eliminates 2-15s cold start on first query).

@@ -57,6 +57,8 @@ import {
   type RunOutputImageCollectionStats,
 } from './run-output-images.js'
 import {
+  attachmentHistoryPrefix,
+  defaultAttachmentRequest,
   MAX_ATTACHMENTS_PER_PROMPT,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
@@ -318,12 +320,14 @@ export async function callCursorStreaming(
   callbacks.onToolStatus?.('Reasoning...')
 
   const isFirstQuery = isNewSession(sid)
-  const photoPrefix = imagePaths.length === 1 ? '[Photo]' : imagePaths.length > 1 ? `[${imagePaths.length} Photos]` : ''
-  const historyQuery = photoPrefix ? `${photoPrefix} ${query || 'What do you see?'}` : query
+  const requestRefs = options?.requestAttachments ?? imageInputs.map(input => input.attachment)
+  const historyPrefix = attachmentHistoryPrefix(requestRefs)
+  const defaultRequest = defaultAttachmentRequest(requestRefs) || 'What do you see?'
+  const historyQuery = historyPrefix ? `${historyPrefix} ${query || defaultRequest}` : query
   const jobGeneration = options?.jobGeneration ?? options?.generation
   const durableIdentity = options?.clientJobId && Number.isSafeInteger(jobGeneration) && jobGeneration! > 0
     ? { clientJobId: options.clientJobId, generation: jobGeneration! } : undefined
-  const inboundAttachments = imageInputs.length > 0 ? imageInputs.map(i => i.attachment) : undefined
+  const inboundAttachments = requestRefs.length > 0 ? requestRefs : undefined
   const pendingUserExchange = durableIdentity
     ? reconcileExchangeByJobIdentity(
       sid, durableIdentity, 'user', historyQuery, globalMsgNum, inboundAttachments,
@@ -333,10 +337,11 @@ export async function callCursorStreaming(
       sid, 'user', historyQuery, globalMsgNum, inboundAttachments, durableIdentity, model,
     )
 
-  let fullQuery = query
+  let fullQuery = query || defaultRequest
   if (imagePaths.length > 0) {
     fullQuery = `${query || 'Describe what you see.'}\n\n(Note: glasses photo attachments are not wired for Cursor ask-mode yet.)`
   }
+  if (options?.attachmentPromptBlock) fullQuery = `${fullQuery}\n\n${options.attachmentPromptBlock}`
 
   const prompt = buildCursorPrompt(systemPrompt, fullQuery)
   const args = buildCursorAgentArgs({

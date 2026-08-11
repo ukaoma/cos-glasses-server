@@ -28,15 +28,17 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import {
   isValidMediaId,
+  mediaCategoryOf,
   mergeMediaAttachmentRefs,
   parseMediaAttachmentRef,
   type MediaAttachmentRef,
   type MediaKind,
+  type MediaMime,
 } from '../../shared/media-attachment.js'
 import {
   G2_VARIANT_H,
@@ -49,6 +51,7 @@ import {
   sniffImageType,
   validateSourceImage,
 } from './image-safety.js'
+import { prepareRichMedia, type PreparedRichMedia } from './rich-media-safety.js'
 
 // Standalone state belongs under the same durable data root as conversations,
 // archives, and run ledgers. COS_MEDIA_ROOT remains an explicit escape hatch
@@ -122,6 +125,9 @@ export interface MediaRecord {
   /** Relative to the media root. Never exposed through the API. */
   storagePath: string
   thumbPath: string
+  /** Bounded model-only derivatives. Never exposed in the public ref. */
+  textPath?: string
+  derivativePaths?: string[]
   bytes: number
   sha256: string
   lifecycle: MediaLifecycle
@@ -169,8 +175,16 @@ export interface IngestInput {
   sessionId?: string
 }
 
+export interface IngestRichMediaInput {
+  bytes: Buffer
+  label?: string
+  declaredMime?: string
+  capturedAt?: string
+  sessionId?: string
+}
+
 export type MediaContentResult =
-  | { status: 'ok'; path: string; mime: MediaAttachmentRef['mime']; bytes: number }
+  | { status: 'ok'; path: string; mime: MediaMime; bytes: number }
   | { status: 'not_found' }
   | { status: 'expired' }
   | { status: 'unavailable' }
@@ -186,11 +200,20 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
       lifecycle !== 'expired' && lifecycle !== 'deleted') return null
   // Paths are derived from the strictly validated id — reject drift.
   const expectedDir = join('assets', ref.id)
-  if (!r.storagePath.startsWith(expectedDir) || !r.thumbPath.startsWith(expectedDir)) return null
+  const expectedAbsolute = resolve(sep, expectedDir)
+  const isOwnedPath = (value: unknown): value is string => typeof value === 'string'
+    && resolve(sep, value).startsWith(`${expectedAbsolute}${sep}`)
+  if (!isOwnedPath(r.storagePath) || !isOwnedPath(r.thumbPath)) return null
+  const textPath = isOwnedPath(r.textPath) ? r.textPath : undefined
+  const derivativePaths = Array.isArray(r.derivativePaths)
+    ? r.derivativePaths.filter(isOwnedPath).slice(0, 8)
+    : undefined
   return {
     ref,
     storagePath: r.storagePath,
     thumbPath: r.thumbPath,
+    ...(textPath ? { textPath } : {}),
+    ...(derivativePaths?.length ? { derivativePaths } : {}),
     bytes: typeof r.bytes === 'number' && r.bytes >= 0 ? r.bytes : 0,
     sha256: typeof r.sha256 === 'string' ? r.sha256 : '',
     lifecycle,
@@ -394,6 +417,90 @@ export class MediaStore {
     return this.publishNormalizedImage(input, normalized)
   }
 
+  /** Authenticated user document/video ingress. Validation and derivative
+   * generation happen before the serialized index publication. */
+  async ingestRichMedia(input: IngestRichMediaInput): Promise<MediaAttachmentRef> {
+    const prepared = await prepareRichMedia(input.bytes, {
+      label: input.label,
+      declaredMime: input.declaredMime,
+    })
+    return this.publishPreparedRichMedia(input, prepared)
+  }
+
+  private async publishPreparedRichMedia(
+    input: IngestRichMediaInput,
+    prepared: PreparedRichMedia,
+  ): Promise<MediaAttachmentRef> {
+    const id = `m_${randomBytes(12).toString('hex')}`
+    const now = Date.now()
+    const nowIso = new Date(now).toISOString()
+    const extension = prepared.category === 'video'
+      ? prepared.mime === 'video/quicktime' ? 'mov' : 'mp4'
+      : prepared.mime === 'application/pdf' ? 'pdf'
+        : prepared.mime === 'text/markdown' ? 'md'
+          : prepared.mime === 'text/csv' ? 'csv'
+            : prepared.mime === 'application/json' ? 'json' : 'txt'
+    const derivatives = prepared.category === 'video' ? prepared.frames : prepared.pageImages
+    const ref: MediaAttachmentRef = {
+      id,
+      kind: prepared.category === 'video' ? 'user_video' : 'user_document',
+      category: prepared.category,
+      mime: prepared.mime,
+      width: prepared.category === 'video' ? prepared.width : 1,
+      height: prepared.category === 'video' ? prepared.height : 1,
+      createdAt: nowIso,
+      bytes: prepared.original.length,
+      ...(prepared.category === 'video'
+        ? { durationMs: prepared.durationMs, frameCount: prepared.frames.length }
+        : {
+            textChars: prepared.extractedText.length,
+            frameCount: prepared.pageImages.length,
+            ...(prepared.textTruncated ? { truncated: true } : {}),
+          }),
+      ...(input.label ? { label: input.label.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) } : {}),
+      ...(input.capturedAt ? { capturedAt: input.capturedAt } : {}),
+    }
+    const stageDir = join(this.root, 'tmp', id)
+    mkdirSync(stageDir, { recursive: true, mode: 0o700 })
+    const originalName = `original.${extension}`
+    const derivativeNames: string[] = []
+    try {
+      writeFileSync(join(stageDir, originalName), prepared.original, { mode: 0o600 })
+      if (prepared.category === 'document') {
+        writeFileSync(join(stageDir, 'content.txt'), prepared.extractedText, { mode: 0o600 })
+      }
+      for (let i = 0; i < derivatives.length; i++) {
+        const name = `frame-${String(i + 1).padStart(2, '0')}.jpg`
+        writeFileSync(join(stageDir, name), derivatives[i], { mode: 0o600 })
+        derivativeNames.push(name)
+      }
+      await renameWithTransientRetry(stageDir, join(this.root, 'assets', id))
+    } catch (error) {
+      try { rmSync(stageDir, { recursive: true, force: true }) } catch { /* private stage cleanup */ }
+      throw error
+    }
+    const storagePath = join('assets', id, originalName)
+    const derivativePaths = derivativeNames.map(name => join('assets', id, name))
+    const record: MediaRecord = {
+      ref,
+      storagePath,
+      thumbPath: derivativePaths[0] ?? storagePath,
+      ...(prepared.category === 'document' ? { textPath: join('assets', id, 'content.txt') } : {}),
+      ...(derivativePaths.length ? { derivativePaths } : {}),
+      bytes: prepared.original.length,
+      sha256: createHash('sha256').update(prepared.original).digest('hex'),
+      lifecycle: 'staged',
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      createdAtMs: now,
+      updatedAtMs: now,
+    }
+    await this.withLock(() => {
+      this.records.set(id, record)
+      this.saveIndex()
+    })
+    return ref
+  }
+
   /** Trusted-local agent artifact ingress. Unlike the public upload path,
    * this accepts a bounded larger JPEG/PNG/WebP/HEIC/AVIF and immediately
    * converts it into the same normalized JPEG contract before publication. */
@@ -525,7 +632,9 @@ export class MediaStore {
       return { status: 'expired' }
     }
     if (rec.contentRemoved) return { status: 'unavailable' }
+    const category = mediaCategoryOf(rec.ref)
     if (variant === 'g2') {
+      if (category !== 'image') return { status: 'unavailable' }
       // Lens variant is generated lazily by getG2Content (async); this sync
       // path only reports an already-cached file.
       const g2Path = this.absPath(join('assets', rec.ref.id, 'g2-288.png'))
@@ -537,10 +646,14 @@ export class MediaStore {
       }
       return { status: 'ok', path: g2Path, mime: 'image/png' as MediaAttachmentRef['mime'], bytes: 0 }
     }
+    if (variant === 'thumb' && category === 'document' && !(rec.derivativePaths?.length)) {
+      return { status: 'unavailable' }
+    }
     const rel = variant === 'thumb' ? rec.thumbPath : rec.storagePath
     const path = this.absPath(rel)
     if (!existsSync(path)) return { status: 'unavailable' }
-    return { status: 'ok', path, mime: rec.ref.mime, bytes: variant === 'thumb' ? 0 : rec.bytes }
+    const mime: MediaMime = variant === 'thumb' && category !== 'image' ? 'image/jpeg' : rec.ref.mime
+    return { status: 'ok', path, mime, bytes: variant === 'thumb' ? 0 : rec.bytes }
   }
 
   /** Release B — resolve the on-lens variant, generating and caching it on
@@ -550,6 +663,7 @@ export class MediaStore {
   async getG2Content(id: string): Promise<MediaContentResult> {
     const rec = this.getRecord(id)
     if (!rec || rec.lifecycle === 'deleted') return { status: 'not_found' }
+    if (mediaCategoryOf(rec.ref) !== 'image') return { status: 'unavailable' }
     if (rec.lifecycle === 'expired' || this.isContentExpired(rec)) return { status: 'expired' }
     if (rec.contentRemoved) {
       return rec.ref.kind === 'traffic_frame' || rec.ref.kind === 'generated_visual'
@@ -673,6 +787,27 @@ export class MediaStore {
       throw new MediaStoreError('media_unavailable', `attachment ${id} content unavailable`)
     }
     return { record: rec, path: content.path }
+  }
+
+  /** Resolve private model derivatives after lifecycle/ownership validation. */
+  resolveModelDerivatives(
+    id: string,
+    clientQueueItemId?: string,
+  ): { record: MediaRecord; originalPath: string; text?: string; imagePaths: string[] } {
+    const { record, path } = this.resolveUsable(id, clientQueueItemId)
+    let text: string | undefined
+    if (record.textPath) {
+      const abs = this.absPath(record.textPath)
+      if (!existsSync(abs)) throw new MediaStoreError('media_unavailable', `attachment ${id} text unavailable`)
+      text = readFileSync(abs, 'utf8')
+    }
+    const imagePaths = (record.derivativePaths ?? [])
+      .map(rel => this.absPath(rel))
+      .filter(candidate => existsSync(candidate))
+    if (mediaCategoryOf(record.ref) === 'video' && imagePaths.length === 0) {
+      throw new MediaStoreError('media_unavailable', `attachment ${id} frames unavailable`)
+    }
+    return { record, originalPath: path, ...(text !== undefined ? { text } : {}), imagePaths }
   }
 
   // ── Lifecycle transitions (idempotent, serialized) ────────────────────────

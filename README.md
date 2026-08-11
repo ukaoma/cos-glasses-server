@@ -50,10 +50,11 @@ without silently losing completed replies.
   Claude or Codex.
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - `brew install whisper-cpp` for free local voice (the launcher can download the model)
-- _Optional:_ `brew install python@3.12 ffmpeg espeak-ng` for local Kokoro
+- _Optional:_ `brew install python@3.12 ffmpeg poppler espeak-ng` for local Kokoro
   spoken replies on Apple silicon (Python 3.11-3.12 is supported). `ffmpeg`
-  also enables phone/output image attachments; text chat remains available
-  without these optional dependencies.
+  also enables photo/video attachments; `poppler` enables PDF text and page
+  previews. TXT, Markdown, CSV, and JSON attachments need no extra tool. Text
+  chat remains available without these optional dependencies.
 - _Optional:_ **Tailscale** so your phone reaches your Mac from anywhere
 
 > No provider API key is needed for chat when using signed-in CLIs. Usage is
@@ -427,6 +428,12 @@ BIND_HOST=0.0.0.0 npm run start:server
   Selecting Local never falls back to cloud; set `COS_TTS_ENGINE=openai_primary`
   only when OpenAI playback is intentionally configured.
 - *Photos unavailable?* — install `ffmpeg`, restart the server, and confirm `/api/health` reports `features.mediaProcessingReady: true`.
+- *Video or PDF attachments unavailable?* — install `ffmpeg poppler`, restart
+  the server, and confirm `/api/health` reports
+  `features.videoProcessingReady: true` and `features.pdfProcessingReady: true`.
+  Uploads are limited to five items, 64 MiB each; videos are represented by up
+  to eight bounded still frames and PDF/text contents are quoted as untrusted
+  reference data rather than executable instructions.
 - *Prompt recovery unavailable?* — update with `npx --yes @gotcos/glasses-server@latest`, then confirm `/api/health` reports `features.promptRecovery: true`.
 - *Durable query recovery unavailable?* — build 204+ requires server 6.10.0+.
   Restart once, then confirm `/api/health` reports

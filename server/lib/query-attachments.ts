@@ -15,19 +15,27 @@
 import {
   MAX_ATTACHMENTS_PER_PROMPT,
   isValidMediaId,
+  mediaCategoryOf,
   parseMediaIdList,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import { getMediaStore, MediaStoreError } from './media-store.js'
 import { strictBase64Decode, ImageSafetyError } from './image-safety.js'
 import type { ModelImageInput } from './model-image-input.js'
+import { formatAttachmentSourceData, type AttachmentSourceData } from './prompt-reference-boundary.js'
 
 export interface ResolvedQueryAttachments {
   inputs: ModelImageInput[]
   refs: MediaAttachmentRef[]
   /** Ids to associate with the final message when the run completes. */
   ids: string[]
+  /** Provider-neutral quoted document data. Rebuilt at execution time; never
+   * persisted in a durable job or public attachment ref. */
+  promptBlock?: string
 }
+
+const MAX_MODEL_IMAGE_INPUTS = 12
+const MAX_ATTACHMENT_PROMPT_CHARS = 60_000
 
 export class QueryAttachmentError extends Error {
   readonly status: number
@@ -89,6 +97,11 @@ export async function resolveQueryAttachments(body: QueryImageBody): Promise<Res
       : undefined
 
     const inputs: ModelImageInput[] = []
+    const refs: MediaAttachmentRef[] = []
+    const resolvedIds: string[] = []
+    const sourceData: AttachmentSourceData[] = []
+    const optionalDocumentImages: Array<{ path: string; attachment: MediaAttachmentRef }> = []
+    let promptChars = 0
 
     // Reject over-limit requests BEFORE the shared parser caps them. Silent
     // truncation would run a successful vision query while dropping a user's
@@ -107,8 +120,39 @@ export async function resolveQueryAttachments(body: QueryImageBody): Promise<Res
     // 1. Durable attachment ids.
     const ids = parseMediaIdList(body.attachmentIds)
     for (const id of ids) {
-      const { record, path } = store.resolveUsable(id, clientQueueItemId)
-      inputs.push({ path, attachment: record.ref, deleteAfterRun: false })
+      const resolved = store.resolveModelDerivatives(id, clientQueueItemId)
+      const category = mediaCategoryOf(resolved.record.ref)
+      refs.push(resolved.record.ref)
+      resolvedIds.push(id)
+      if (category === 'image') {
+        inputs.push({ path: resolved.originalPath, attachment: resolved.record.ref, deleteAfterRun: false })
+      } else if (category === 'video') {
+        for (const path of resolved.imagePaths) {
+          inputs.push({ path, attachment: resolved.record.ref, deleteAfterRun: false })
+        }
+      } else {
+        // PDF page images are an optional layout aid. Text remains canonical;
+        // use only the remaining image budget instead of dropping user photos
+        // or making a text-readable PDF fail because it has many pages.
+        for (const path of resolved.imagePaths) optionalDocumentImages.push({ path, attachment: resolved.record.ref })
+        if (resolved.text !== undefined) {
+          const room = Math.max(0, MAX_ATTACHMENT_PROMPT_CHARS - promptChars)
+          const content = resolved.text.slice(0, room)
+          const truncated = content.length < resolved.text.length || resolved.record.ref.truncated === true
+          sourceData.push({
+            id,
+            label: resolved.record.ref.label ?? 'Attached document',
+            mime: resolved.record.ref.mime,
+            content,
+            ...(truncated ? { truncated: true } : {}),
+          })
+          promptChars += content.length
+        }
+      }
+    }
+    const requiredVisualCount = inputs.filter(input => mediaCategoryOf(input.attachment) !== 'document').length
+    if (requiredVisualCount > MAX_MODEL_IMAGE_INPUTS) {
+      throw new QueryAttachmentError(400, 'too_many_attachment_frames', `max ${MAX_MODEL_IMAGE_INPUTS} image/video frames per prompt`)
     }
 
     // 2. Legacy base64 — ingested through the SAME store (no bypass).
@@ -118,12 +162,26 @@ export async function resolveQueryAttachments(body: QueryImageBody): Promise<Res
       const ref = await store.ingestImage({ bytes, kind: 'user_photo', sessionId })
       const { path } = store.resolveUsable(ref.id)
       inputs.push({ path, attachment: ref, deleteAfterRun: false })
+      refs.push(ref)
+      resolvedIds.push(ref.id)
+    }
+
+    // PDF page renders are optional aids. Add them only after all required
+    // photo and video inputs so a PDF can never evict a user's visual source.
+    const remaining = Math.max(0, MAX_MODEL_IMAGE_INPUTS - inputs.length)
+    for (const item of optionalDocumentImages.slice(0, remaining)) {
+      inputs.push({ path: item.path, attachment: item.attachment, deleteAfterRun: false })
+    }
+
+    if (inputs.length > MAX_MODEL_IMAGE_INPUTS) {
+      throw new QueryAttachmentError(400, 'too_many_attachment_frames', `max ${MAX_MODEL_IMAGE_INPUTS} image/video frames per prompt`)
     }
 
     return {
       inputs,
-      refs: inputs.map((i) => i.attachment),
-      ids: inputs.map((i) => i.attachment.id),
+      refs,
+      ids: resolvedIds,
+      ...(sourceData.length > 0 ? { promptBlock: formatAttachmentSourceData(sourceData) } : {}),
     }
   } catch (err) {
     if (err instanceof QueryAttachmentError) throw err

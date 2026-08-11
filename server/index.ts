@@ -28,7 +28,7 @@ import { openaiKeyRouter } from './routes/openai-key.js'
 import { messageRefRouter } from './routes/message-ref.js'
 import { archiveRouter } from './routes/archive.js'
 import { sessionsRouter } from './routes/sessions.js'
-import { mediaRouter, mediaBodyParser } from './routes/media.js'
+import { mediaRouter, mediaBodyParser, mediaBinaryBodyParser } from './routes/media.js'
 import { promptDraftsRouter } from './routes/prompt-drafts.js'
 import { cliDebugRouter } from './routes/cli-debug.js'
 import { maintenanceRouter } from './routes/maintenance.js'
@@ -215,6 +215,7 @@ app.use('/api', (req, res, next) => {
 
 // Authenticate before parsing large upload bodies. The 16 MB allowance stays
 // scoped to /api/media; every other route retains the 10 MB ceiling.
+app.use('/api/media/file', mediaBinaryBodyParser)
 app.use('/api/media', mediaBodyParser)
 app.use(express.json({ limit: '10mb' }))
 

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Server } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mediaBodyParser, mediaRouter } from './media.js'
+import { mediaBinaryBodyParser, mediaBodyParser, mediaRouter } from './media.js'
 import { MediaStore, _setMediaStoreForTests } from '../lib/media-store.js'
 import { isMediaProcessingReady, MAX_BATCH_BYTES } from '../lib/image-safety.js'
 
@@ -24,9 +24,8 @@ let bigJpegB64 = ''
 
 function buildApp() {
   const app = express()
-  // EXACT order from server/index.ts
-  app.use('/api/media', mediaBodyParser)
-  app.use(express.json({ limit: '10mb' }))
+  // EXACT security order from server/index.ts: authenticate before parsing
+  // a large user-controlled upload body.
   app.use('/api', (req, res, next) => {
     if (req.headers['x-cos-token'] !== TOKEN) {
       res.status(401).json({ error: 'unauthorized' })
@@ -34,6 +33,9 @@ function buildApp() {
     }
     next()
   })
+  app.use('/api/media/file', mediaBinaryBodyParser)
+  app.use('/api/media', mediaBodyParser)
+  app.use(express.json({ limit: '10mb' }))
   app.use('/api', mediaRouter)
   return app
 }
@@ -116,6 +118,34 @@ describe('media API (real middleware order)', () => {
       expect(bytes[0]).toBe(0xff) // JPEG magic
       expect(bytes.length).toBe(Number(content.headers.get('content-length')))
     }
+  })
+
+  it('uploads a text file as binary, rejects it without auth, and never returns private paths', async () => {
+    const bytes = Buffer.from('Quarterly brief\nRevenue: 42\n')
+    const unauthenticated = await api('/api/media/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain', 'X-COS-Filename': 'brief.txt' },
+      body: bytes,
+    }, false)
+    expect(unauthenticated.status).toBe(401)
+
+    const uploaded = await api('/api/media/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain', 'X-COS-Filename': 'brief.txt' },
+      body: bytes,
+    })
+    expect(uploaded.status).toBe(200)
+    const body = await uploaded.json() as { attachment: { id: string; category: string; mime: string } }
+    expect(body.attachment).toMatchObject({ category: 'document', mime: 'text/plain' })
+    expect(JSON.stringify(body)).not.toContain(root)
+
+    const meta = await api(`/api/media/${body.attachment.id}`)
+    expect(meta.status).toBe(200)
+    expect(JSON.stringify(await meta.json())).not.toContain(root)
+    const content = await api(`/api/media/${body.attachment.id}/content`)
+    expect(content.status).toBe(200)
+    expect(content.headers.get('content-type')).toBe('text/plain')
+    expect(Buffer.from(await content.arrayBuffer())).toEqual(bytes)
   })
 
   it('accepts a maximum valid batch through the real parser stack (>10MB encoded)', async () => {

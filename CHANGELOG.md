@@ -1,3 +1,26 @@
+## 6.24.4
+
+Rich-media attachments extend the established authenticated photo pipeline without
+changing meeting capture, transcription, recovery, or G2 image transport.
+
+- `POST /api/media/file` accepts bounded raw uploads for TXT, Markdown, CSV, JSON,
+  PDF, MP4, and MOV. It rejects URLs, caller-supplied paths, unsupported formats,
+  malformed bytes, files over 64 MiB, and videos over 20 minutes.
+- Text is decoded strictly; PDFs become bounded extracted text plus page stills;
+  videos become at most eight JPEG stills. Originals, extracted text, and frames
+  stay in the private media store. The public attachment reference contains only
+  typed metadata and a stable opaque ID.
+- Claude Code and Codex receive quoted document text and/or local derivative images.
+  Stored attachment content is explicitly untrusted reference data, never
+  instructions. Durable jobs persist only attachment IDs and regenerate their
+  bounded prompt inputs when the run starts.
+- Health now reports coarse PDF/video processor readiness without leaking paths.
+  Missing `ffmpeg`/`ffprobe` or Poppler tools fail with typed, actionable errors.
+- Media index containment is component-exact. Invalid records quarantine the index
+  and preserve owned bytes instead of enabling orphan cleanup.
+
+Proof: 460 suites / 1,515 tests, isolated runtime directory, plus clean TypeScript.
+
 ## 6.24.3
 
 Auto-recovery of quarantined audio has never run in production. Miles saw the symptom

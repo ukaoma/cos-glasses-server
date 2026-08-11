@@ -15,7 +15,7 @@
 // (8 MiB decoded ≈ 10.7 MiB base64) doesn't trip the global 10 MB limit;
 // the allowance stays scoped to /api/media.
 
-import { Router, json, type Request, type Response } from 'express'
+import { Router, json, raw, type Request, type Response } from 'express'
 import { readFileSync } from 'node:fs'
 import {
   MAX_ATTACHMENTS_PER_PROMPT,
@@ -35,11 +35,18 @@ import {
   isMediaProcessingReady,
   strictBase64Decode,
 } from '../lib/image-safety.js'
+import {
+  MAX_RICH_MEDIA_BYTES,
+  RichMediaSafetyError,
+} from '../lib/rich-media-safety.js'
 
 // Route-scoped parser: 16 MB covers the max valid batch after base64 + JSON
 // overhead. Mounted only for /api/media in server/index.ts — the global
 // server limit is unchanged.
 export const mediaBodyParser = json({ limit: '16mb' })
+/** Binary parser is mounted only on /api/media/file before global JSON. It
+ * avoids base64 amplification while retaining a hard route-local cap. */
+export const mediaBinaryBodyParser = raw({ type: () => true, limit: MAX_RICH_MEDIA_BYTES })
 
 export const mediaRouter = Router()
 
@@ -58,6 +65,12 @@ const SAFETY_ERROR_STATUS: Record<string, number> = {
   corrupt_image: 400,
   media_processing_unavailable: 503,
   normalization_failed: 500,
+  unsupported_attachment_format: 400,
+  attachment_too_large: 413,
+  corrupt_attachment: 400,
+  attachment_processing_unavailable: 503,
+  attachment_processing_failed: 500,
+  video_too_long: 400,
 }
 
 function sendMediaError(res: Response, err: unknown): void {
@@ -71,6 +84,10 @@ function sendMediaError(res: Response, err: unknown): void {
       error: err.code,
       ...(err.code === 'media_processing_unavailable' ? { mediaProcessingReady: false } : {}),
     })
+    return
+  }
+  if (err instanceof RichMediaSafetyError) {
+    res.status(SAFETY_ERROR_STATUS[err.code] ?? 500).json({ error: err.code, detail: err.message })
     return
   }
   console.error('[media] unexpected error:', err)
@@ -138,6 +155,34 @@ mediaRouter.post('/media', async (req: Request, res: Response) => {
       }))
     }
     res.json({ attachments })
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
+
+/** One document or video per binary request. The client may issue several
+ * bounded requests, but composer admission still owns the shared five-item
+ * prompt cap. Filename and MIME are hints only; prepareRichMedia sniffs and
+ * validates the actual bytes. */
+mediaRouter.post('/media/file', async (req: Request, res: Response) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'attachment_bytes_required' })
+      return
+    }
+    const rawLabel = safeString(req.header('x-cos-filename'), 360)
+    let label: string | undefined
+    if (rawLabel) {
+      try { label = decodeURIComponent(rawLabel).slice(0, 120) } catch { label = rawLabel.slice(0, 120) }
+    }
+    const attachment = await getMediaStore().ingestRichMedia({
+      bytes: req.body,
+      label,
+      declaredMime: safeString(req.header('content-type'), 120),
+      capturedAt: safeString(req.header('x-cos-captured-at'), 40),
+      sessionId: safeString(req.header('x-cos-session-id'), 64),
+    })
+    res.json({ attachment })
   } catch (err) {
     sendMediaError(res, err)
   }

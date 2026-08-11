@@ -83,10 +83,10 @@ queryRouter.post('/query', async (req, res) => {
 
   const resolvedQuery = typeof query === 'string' ? query : ''
 
-  // Vision queries can have an empty query (default to "describe what you see")
-  if ((!resolvedQuery || typeof resolvedQuery !== 'string') && !imageInputs) {
+  // Attachment-only queries use a category-aware provider default.
+  if ((!resolvedQuery || typeof resolvedQuery !== 'string') && attachmentRefs.length === 0) {
     maintenanceLease.release()
-    return res.status(400).json({ error: 'query string or image required' })
+    return res.status(400).json({ error: 'query string or attachment required' })
   }
 
   // Validate model if provided
@@ -201,6 +201,8 @@ queryRouter.post('/query', async (req, res) => {
         abortSignal: abortController.signal,
         effort: validEffort,
         messageEra: activeMessageEra,
+        requestAttachments: attachmentRefs,
+        attachmentPromptBlock: resolvedAttachments.promptBlock,
         ...(validModel && isCursorModel(validModel) ? { cursorExecutionMode } : {}),
       },
     )
