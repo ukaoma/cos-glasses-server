@@ -14,6 +14,7 @@ import {
   readSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -44,6 +45,76 @@ export const MEDIA_SNIFF_BYTES = 12
 export const MAX_DOCUMENT_TEXT_CHARS = 100_000
 export const MAX_VIDEO_DURATION_MS = 20 * 60_000
 export const MAX_DERIVATIVE_IMAGES = 8
+
+// ── Video summary frames ────────────────────────────────────────────────────────
+// DELIBERATELY SEPARATE from MAX_DERIVATIVE_IMAGES, which the PDF path also uses
+// (pdftoppm -l): raising that shared constant would silently give every PDF 16 pages.
+//
+// What was here: min(8, max(1, ceil(durationMs / 15_000))) — one frame per 15 seconds,
+// capped at 8. Measured against real assets that produced:
+//   11.7s 4K clip     ->  1 frame
+//   43.6s fridge sweep ->  3 frames   (Msg 796: "I only got 3 samples")
+//   20 min (the cap)  ->  8 frames, one per 2.5 MINUTES
+// A 12-second video summarised by a single still is not a summary, and 3 frames missed
+// the entire contents of a refrigerator the user was asking about.
+export const VIDEO_SUMMARY_FRAMES_MIN = 8
+export const VIDEO_SUMMARY_FRAMES_MAX = 16
+/** One frame per ~6s of footage, between the floor and the ceiling. */
+const VIDEO_SUMMARY_SECONDS_PER_FRAME = 6
+/** Candidates sampled per window; the sharpest one is kept. More candidates cost
+ *  only temp I/O, but the search is pointless beyond a handful per window. */
+export const VIDEO_SUMMARY_CANDIDATES_PER_FRAME = 5
+
+/**
+ * How many stills represent a video.
+ *
+ * Uniform intervals, not random: random sampling clusters and leaves gaps, while a
+ * uniform grid provably covers start to finish and is reproducible across runs — which
+ * matters when the same video is asked about twice.
+ *
+ * 12 frames is the target for a typical clip: roughly one per 8% of the runtime, about
+ * 15K tokens at 1280px wide, leaving room for a transcript and the question in one turn.
+ * Below the floor of 8 whole segments go unseen; above the ceiling of 16 the marginal
+ * still adds little to a SUMMARY and that budget is better spent on a targeted
+ * native-resolution pass over a named time window.
+ */
+export function videoSummaryFrameCount(durationMs: number): number {
+  const seconds = Number.isFinite(durationMs) ? Math.max(0, durationMs) / 1000 : 0
+  const scaled = Math.round(seconds / VIDEO_SUMMARY_SECONDS_PER_FRAME)
+  return Math.min(VIDEO_SUMMARY_FRAMES_MAX, Math.max(VIDEO_SUMMARY_FRAMES_MIN, scaled))
+}
+
+/**
+ * Pick the sharpest candidate in each window, by encoded JPEG size.
+ *
+ * At a FIXED quality setting, a sharper frame carries more high-frequency detail and
+ * therefore encodes larger; a motion-blurred one compresses down. Measured on the real
+ * 480x360 fridge sweep: within one second the spread was 1.45x (27,311 vs 18,852 bytes),
+ * and inspecting both ends confirmed it — the largest frame reads "Mootopia WHOLE / 13g /
+ * LACTOSE FREE" and the smallest is unreadable smear. Those are the exact labels that
+ * previously required a manual frame-by-frame pass to recover.
+ *
+ * This is a proxy, not a Laplacian: it needs no image library, no new dependency, and one
+ * ffmpeg pass. It can be fooled by a window where the sharp frames are also the emptiest,
+ * which costs a slightly worse still rather than a wrong answer.
+ */
+export function pickSharpestPerWindow(
+  candidates: readonly { name: string; bytes: number }[],
+  windows: number,
+): string[] {
+  if (candidates.length === 0 || windows <= 0) return []
+  const ordered = [...candidates].sort((a, b) => a.name.localeCompare(b.name))
+  const perWindow = Math.max(1, Math.floor(ordered.length / windows))
+  const picked: string[] = []
+  for (let w = 0; w < windows; w++) {
+    const start = w * perWindow
+    // The final window absorbs any remainder, so no candidate is silently dropped.
+    const slice = w === windows - 1 ? ordered.slice(start) : ordered.slice(start, start + perWindow)
+    if (slice.length === 0) continue
+    picked.push(slice.reduce((best, c) => (c.bytes > best.bytes ? c : best), slice[0]).name)
+  }
+  return picked
+}
 const PROCESS_STDERR_MAX = 8_192
 const PROCESS_TIMEOUT_MS = 30_000
 
@@ -364,15 +435,25 @@ async function processVideo(
     if (durationMs > MAX_VIDEO_DURATION_MS) {
       throw new RichMediaSafetyError('video_too_long', `video exceeds ${MAX_VIDEO_DURATION_MS / 60_000} minute limit`)
     }
-    const frameCount = Math.min(MAX_DERIVATIVE_IMAGES, Math.max(1, Math.ceil(durationMs / 15_000)))
-    const fps = Math.max(0.001, frameCount / (durationMs / 1000))
+    // Uniform windows across the whole runtime, then the SHARPEST candidate in each.
+    // Sampling candidates at a duration-derived rate keeps the total constant no matter
+    // how long the video is: a 20-minute recording costs the same temp I/O as a 12-second
+    // one, in ONE ffmpeg pass.
+    const frameCount = videoSummaryFrameCount(durationMs)
+    const candidateCount = frameCount * VIDEO_SUMMARY_CANDIDATES_PER_FRAME
+    const fps = Math.max(0.001, candidateCount / (durationMs / 1000))
     await runProcess('ffmpeg', [
       '-nostdin', '-v', 'error', '-i', input,
-      '-vf', `fps=${fps.toFixed(6)},scale=1280:-2:force_original_aspect_ratio=decrease`,
-      '-frames:v', String(frameCount), '-q:v', '3', join(work, 'frame-%02d.jpg'),
+      // min(1280,iw) rather than a bare 1280: the old filter UPSCALED a 480x360 source to
+      // 1280x960, paying ~7x the image tokens for detail that was never captured. It only
+      // ever downscales now.
+      '-vf', `fps=${fps.toFixed(6)},scale='min(1280,iw)':-2`,
+      '-frames:v', String(candidateCount), '-q:v', '3', join(work, 'cand-%04d.jpg'),
     ])
-    const frames = readdirSync(work)
-      .filter(name => /^frame-\d+\.jpg$/i.test(name)).sort().slice(0, MAX_DERIVATIVE_IMAGES)
+    const candidates = readdirSync(work)
+      .filter(name => /^cand-\d+\.jpg$/i.test(name))
+      .map(name => ({ name, bytes: statSync(join(work, name)).size }))
+    const frames = pickSharpestPerWindow(candidates, frameCount)
       .map(name => readFileSync(join(work, name)))
     if (frames.length === 0) throw new RichMediaSafetyError('corrupt_attachment', 'video produced no review frames')
     const mime: PreparedVideoFile['mime'] = declaredMime === 'video/quicktime' || ext === '.mov'

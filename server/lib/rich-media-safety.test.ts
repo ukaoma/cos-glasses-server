@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { prepareRichMedia } from './rich-media-safety.js'
+import { VIDEO_SUMMARY_FRAMES_MIN, prepareRichMedia } from './rich-media-safety.js'
 
 const roots: string[] = []
 
@@ -80,8 +80,17 @@ describe('prepareRichMedia', () => {
     if (prepared.category !== 'video') return
     expect(prepared.mime).toBe('video/mp4')
     expect(prepared.durationMs).toBeGreaterThan(1_500)
-    expect(prepared.frames).toHaveLength(1)
-    expect(prepared.frames[0].subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]))
+    // This asserted toHaveLength(1) until 6.27.0, pinning the old one-still-per-15s
+    // rule. A 2s clip getting a single frame is the defect, not the contract, so the
+    // count is now the floor and every frame must be a real JPEG.
+    expect(prepared.frames.length).toBe(VIDEO_SUMMARY_FRAMES_MIN)
+    for (const [i, frame] of prepared.frames.entries()) {
+      expect(frame.subarray(0, 2), `frame ${i} SOI`).toEqual(Buffer.from([0xff, 0xd8]))
+      expect(frame.length, `frame ${i} not empty`).toBeGreaterThan(1_000)
+    }
+    // Distinct moments, not one frame repeated: a duplicated pick would defeat the
+    // entire point of sampling across the clip.
+    expect(new Set(prepared.frames.map(f => f.length)).size).toBeGreaterThan(1)
 
     const fake = Buffer.alloc(32)
     fake.write('ftyp', 4, 'ascii')

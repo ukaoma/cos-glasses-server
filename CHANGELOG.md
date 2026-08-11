@@ -1,3 +1,26 @@
+## 6.27.0
+
+### Video review frames: 8-16 stills instead of 1-3
+
+A video attachment is summarized from stills. The old rule was one still per 15
+seconds, floored at 1 and capped at 8, which gave a 12 second clip **one** frame
+and a 44 second clip **three** - not enough to tell what a video contains. Miles,
+on a fridge sweep: "it only selects three chunks from the video."
+
+- Frame count is now `clamp(round(seconds / 6), 8, 16)`. A 12s clip and a 44s
+  clip both get 8; a 72s clip gets 12; anything past 96s gets 16.
+- Each frame is the **sharpest** of 5 candidates sampled around its position,
+  ranked by encoded JPEG size at fixed quality. Measured on real footage the
+  spread within one second was 1.45x, and the large frame read product label
+  text that the small one rendered as smear.
+- Candidate count is `frames * 5`, so a 20 minute recording costs the same temp
+  I/O as a 12 second one - the sampling rate adapts, the work does not grow.
+- Fixed an upscale: `scale=1280:-2` was enlarging a 480x360 source to 1280x960,
+  paying roughly 7x the image tokens for detail that was never captured. Now
+  `scale='min(1280,iw)':-2`, so small sources pass through at native size.
+- `MAX_DERIVATIVE_IMAGES` (8) is untouched, so PDF page extraction is unchanged.
+  Video no longer shares that constant.
+
 ## 6.26.0
 
 Chunked, resumable upload: video is no longer limited by what fits in one request.
