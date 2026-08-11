@@ -33,6 +33,8 @@ function httpRequest(method: string, path: string, body?: unknown): Promise<{ st
   })
 }
 
+let resetDecoderCachesSpy: ReturnType<typeof vi.fn>
+
 describe('glossary route', () => {
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'cos-glossary-'))
@@ -45,7 +47,8 @@ describe('glossary route', () => {
     }))
     process.env.COS_PROFILE_PATH = profilePath
     vi.resetModules()
-    vi.doMock('../lib/whisper-local.js', () => ({ resetDecoderCaches: vi.fn() }))
+    resetDecoderCachesSpy = vi.fn()
+    vi.doMock('../lib/whisper-local.js', () => ({ resetDecoderCaches: resetDecoderCachesSpy }))
     const { glossaryRouter } = await import('./glossary.js')
     const app = express()
     app.use(express.json())
@@ -89,6 +92,14 @@ describe('glossary route', () => {
     const onDisk = JSON.parse(readFileSync(profilePath, 'utf-8'))
     expect(onDisk.domain_keywords).toEqual({ work: ['company'] }) // untouched key preserved
     expect(onDisk.owner_name).toBe('Miles')
+
+    // The "busts the cache" half of this test's name, now actually asserted. The mock
+    // was created inline as vi.fn(), so the spy was unreachable and deleting
+    // resetDecoderCaches() from glossary.ts:137 left this file fully green — a
+    // surviving mutation on a hit target. Stale decoder snapshots after a glossary
+    // edit is exactly the bug that call prevents.
+    expect(resetDecoderCachesSpy, 'a glossary edit must clear the decoder snapshots')
+      .toHaveBeenCalled()
   })
 
   it('stores corrections as a JSON string', async () => {

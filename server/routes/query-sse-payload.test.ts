@@ -133,8 +133,13 @@ describe('/api/query SSE payload (refs only, never bytes/paths)', () => {
     expect(vi.isMockFunction(router.callModelStreaming)).toBe(true)
   })
 
-  it('done event carries attachment refs and zero storage internals', async () => {
-    if (!ffmpegAvailable) return
+  it('done event carries attachment refs and zero storage internals', async (ctx) => {
+    // Was a bare `return`, which PASSED while asserting nothing — and this is the
+    // anti-leak contract the whole file exists for (no base64, no storagePath, no temp
+    // root, no /assets/). isMediaProcessingReady is a spawn probe with a 5s timeout that
+    // resolves FALSE on timeout, so under a loaded single-worker run this was reachable:
+    // flaky-silent, not merely environment-dependent. ctx.skip() shows in the reporter.
+    if (!ffmpegAvailable) ctx.skip()
     const res = await fetch(`${base}/api/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -222,8 +227,8 @@ describe('/api/query SSE payload (refs only, never bytes/paths)', () => {
     warn.mockRestore()
   })
 
-  it('preserves request refs first and appends distinct output refs', async () => {
-    if (!ffmpegAvailable) return
+  it('preserves request refs first and appends distinct output refs', async (ctx) => {
+    if (!ffmpegAvailable) ctx.skip()
     const res = await fetch(`${base}/api/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
