@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLAUDE_SAFE_MODE_ENV,
   CLAUDE_PROOF_MODEL,
   CLAUDE_PROOF_TIMEOUT_MS,
   claudeProofArgs,
@@ -28,6 +29,17 @@ describe('transactional provider proof parsing', () => {
     expect(CLAUDE_PROOF_TIMEOUT_MS).toBe(45_000)
     expect(claudeProofArgs()).toContain('--model')
     expect(claudeProofArgs()[claudeProofArgs().indexOf('--model') + 1]).toBe('haiku')
+  })
+
+  it('isolates readiness from oversized project configuration', async () => {
+    const result = await runBounded(
+      process.execPath,
+      ['-e', `process.stdout.write(process.env.${CLAUDE_SAFE_MODE_ENV} ?? '')`],
+      '',
+      2_000,
+    )
+    expect(result.code).toBe(0)
+    expect(result.stdout).toBe('1')
   })
 
   it('preserves timeout classification when child close wins termination race', async () => {

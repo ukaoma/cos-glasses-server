@@ -25,6 +25,12 @@ export interface ProcessResult {
   aborted: boolean
 }
 
+// A readiness proof must validate the installed/authenticated provider, not load
+// the selected workspace's CLAUDE.md, skills, plugins, MCP servers, and other
+// project customizations. Large COS workspaces can otherwise overflow Claude's
+// context window before the tiny proof prompt is evaluated.
+export const CLAUDE_SAFE_MODE_ENV = 'CLAUDE_CODE_SAFE_MODE'
+
 type TerminationReason = 'timeout' | 'abort' | null
 
 export function runBounded(
@@ -41,6 +47,7 @@ export function runBounded(
     }
     const env = { ...process.env }
     delete env.CLAUDECODE
+    env[CLAUDE_SAFE_MODE_ENV] = '1'
     const child = spawn(command, args, {
       cwd: cosBrainDir() ?? process.cwd(),
       env,

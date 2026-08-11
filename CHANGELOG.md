@@ -1,3 +1,15 @@
+## 6.24.5
+
+COS Control provider proofs now isolate themselves from project customizations.
+
+- Claude Code 2.1.227 began rejecting the automated readiness check in large COS
+  workspaces because it loaded project instructions, skills, plugins, and attachment
+  context before evaluating the tiny proof prompt. The request exceeded 200k tokens
+  and exited 1 even though Claude authentication and normal commands were healthy.
+- The no-tool readiness subprocess now uses Claude Safe Mode. It still proves the
+  installed CLI, authentication, model access, process lifecycle, and exact response,
+  while avoiding unrelated workspace context. Normal glasses queries are unchanged.
+
 ## 6.24.4
 
 Rich-media attachments extend the established authenticated photo pipeline without
