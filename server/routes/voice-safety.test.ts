@@ -27,6 +27,7 @@ let profiles: Array<{ name: string; embeddings: number[][]; sources: string[] }>
 let removedNames: string[] = []
 let mergeCalls: Array<{ into: string; from: string[]; force?: boolean; dryRun?: boolean }> = []
 let mergeSimilarity: Record<string, number> = {}
+let directoryForceCalls: boolean[] = []
 
 function trainingDir(speaker: string): string {
   return join(dataDir, 'training-audio', speaker.replace(/\s+/g, '_'))
@@ -62,6 +63,7 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
   enrollCalls = []
   removedNames = []
   mergeCalls = []
+  directoryForceCalls = []
   vi.doMock('../lib/speaker-embeddings.js', () => ({
     // Distinct embedding per file so greedy diversity selection has something
     // real to work with.
@@ -120,6 +122,42 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
     getTrainingStatus: async () => ({ speakers: [] }),
   }))
   vi.doMock('../lib/profile.js', () => ({ getOwnerSpeakerLabel: () => 'MU' }))
+  vi.doMock('../lib/voice-directory.js', () => ({
+    invalidateVoiceDirectory: vi.fn(),
+    getVoiceDirectorySnapshot: async (force: boolean) => {
+      directoryForceCalls.push(force)
+      return {
+        schemaVersion: 1,
+        generatedAt: '2026-08-11T12:00:00.000Z',
+        owner: 'MU',
+        profileCount: 2,
+        totalEmbeddings: 34,
+        meetingsScanned: 12,
+        sidecarsSkipped: 1,
+        truncated: false,
+        unresolvedMeetings: 3,
+        unresolvedSegments: 18,
+        profiles: [
+          {
+            name: 'MU', isOwner: true, embeddings: 20, sources: { manual: 20 }, sourcesAligned: true,
+            assertedSegments: 44, candidateSegments: 0, assertedSpeakingMs: 88_000, candidateSpeakingMs: 0,
+            speakingTimeSources: { words: 88_000, chunks: 0 }, meetingCount: 4, reviewMeetingCount: 0,
+            observedMatch: 0.72, observedMatchSegments: 44,
+            reliabilityCounts: { confident: 44, weak: 0, unreliable: 0, unattributed: 0 },
+            firstSeen: '2026-08-01', lastSeen: '2026-08-11', appearances: [],
+          },
+          {
+            name: 'Clem Ukaoma', isOwner: false, embeddings: 14, sources: { fireflies: 14 }, sourcesAligned: true,
+            assertedSegments: 12, candidateSegments: 3, assertedSpeakingMs: 22_000, candidateSpeakingMs: 5_000,
+            speakingTimeSources: { words: 27_000, chunks: 0 }, meetingCount: 2, reviewMeetingCount: 1,
+            observedMatch: 0.68, observedMatchSegments: 15,
+            reliabilityCounts: { confident: 12, weak: 3, unreliable: 0, unattributed: 0 },
+            firstSeen: '2026-08-02', lastSeen: '2026-08-10', appearances: [],
+          },
+        ],
+      }
+    },
+  }))
 
   const { voiceRouter } = await import('./voice.js')
   const app = express()
@@ -173,6 +211,7 @@ afterEach(async () => {
   vi.doUnmock('../lib/speaker-embeddings.js')
   vi.doUnmock('../lib/speaker-trainer.js')
   vi.doUnmock('../lib/profile.js')
+  vi.doUnmock('../lib/voice-directory.js')
   delete process.env.COS_DATA_DIR
   if (dataDir) rmSync(dataDir, { recursive: true, force: true })
 })
@@ -550,5 +589,44 @@ describe('/voice/profiles exposes the store for review', () => {
     await startServer()
     const res = await httpRequest('GET', '/api/voice/profiles')
     expect(res.json.profiles.find((p: any) => p.name === 'Clem Ukaoma').sourcesAligned).toBe(false)
+  })
+})
+
+describe('/voice/directory exposes honest bounded cross-meeting evidence', () => {
+  it('keeps training coverage, observed match, and unresolved voices distinct', async () => {
+    await startServer()
+    const res = await httpRequest('GET', '/api/voice/directory?limit=1&offset=1&refresh=1')
+    expect(res.status).toBe(200)
+    expect(res.json).toMatchObject({
+      profileCount: 2,
+      totalEmbeddings: 34,
+      unresolvedMeetings: 3,
+      unresolvedSegments: 18,
+      offset: 1,
+      limit: 1,
+      hasMore: false,
+    })
+    expect(directoryForceCalls).toEqual([true])
+    expect(res.json.profiles).toHaveLength(1)
+    expect(res.json.profiles[0]).toMatchObject({
+      name: 'Clem Ukaoma',
+      embeddings: 14,
+      assertedSegments: 12,
+      candidateSegments: 3,
+      meetingCount: 2,
+      reviewMeetingCount: 1,
+      observedMatch: 0.68,
+      observedMatchSegments: 15,
+    })
+    expect(res.json.profiles[0]).not.toHaveProperty('confidence')
+  })
+
+  it('clamps pagination rather than allowing an unbounded response', async () => {
+    await startServer()
+    const res = await httpRequest('GET', '/api/voice/directory?limit=999&offset=-8')
+    expect(res.status).toBe(200)
+    expect(res.json.limit).toBe(100)
+    expect(res.json.offset).toBe(0)
+    expect(res.json.profiles).toHaveLength(2)
   })
 })

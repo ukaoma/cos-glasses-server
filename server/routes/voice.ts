@@ -12,6 +12,7 @@ import { dataPath } from '../lib/data-dir.js'
 import { purgeSpeakerCalibrationRows, relabelSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
 import { trainingSourceFor } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
+import { getVoiceDirectorySnapshot, invalidateVoiceDirectory } from '../lib/voice-directory.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -56,6 +57,7 @@ voiceRouter.post('/voice/enroll', async (req, res) => {
     }
 
     const result = enrollSpeaker(name, audioBuffer)
+    invalidateVoiceDirectory()
     res.json(result)
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: errMsg(err) })
@@ -532,6 +534,35 @@ voiceRouter.get('/voice/profiles', (_req, res) => {
   }
 })
 
+// GET /api/voice/directory — enrolled identities plus bounded cross-meeting
+// evidence. Confidence belongs to an observed match, not to a person, so the
+// contract deliberately calls the aggregate `observedMatch` and includes its
+// segment basis. Ext/Unidentified clusters stay in corpus totals rather than
+// being promoted into fictional global people.
+voiceRouter.get('/voice/directory', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  try {
+    const requestedLimit = Number.parseInt(String(req.query.limit ?? '100'), 10)
+    const requestedOffset = Number.parseInt(String(req.query.offset ?? '0'), 10)
+    const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 100, 1), 100)
+    const offset = Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0)
+    const snapshot = await getVoiceDirectorySnapshot(req.query.refresh === '1')
+    res.json({
+      ...snapshot,
+      profiles: snapshot.profiles.slice(offset, offset + limit),
+      offset,
+      limit,
+      hasMore: offset + limit < snapshot.profiles.length,
+    })
+  } catch (err: unknown) {
+    res.status(503).json({
+      error: 'Voice directory is temporarily unavailable',
+      reason: 'voice_directory_unavailable',
+      detail: errMsg(err).slice(0, 240),
+    })
+  }
+})
+
 // POST /api/voice/merge-profiles — fold two names for one person together.
 // Body: { into, from: string[]|string, confirm: true, dryRun?, force? }
 //
@@ -605,6 +636,7 @@ voiceRouter.post('/voice/merge-profiles', (req, res) => {
       }
     }
 
+    if (!dryRun) invalidateVoiceDirectory()
     res.json({ ...report, dryRun, forced: force, calibrationRowsRelabeled: calibration })
   } catch (err: unknown) {
     res.status(500).json({ error: errMsg(err) })
@@ -683,6 +715,7 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
 
     // 3. Calibration rows (the name appears in every row).
     const calibration = purgeSpeakerCalibrationRows(CALIBRATION_LOG, target)
+    invalidateVoiceDirectory()
 
     res.json({
       name: target,
