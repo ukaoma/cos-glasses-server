@@ -1,3 +1,31 @@
+## 6.26.0
+
+Chunked, resumable upload: video is no longer limited by what fits in one request.
+
+- A video can now be uploaded in pieces, so length is bounded by storage rather than by a
+  single request. A 3-minute 4K clip is roughly 570 MB and could never fit a one-shot
+  limit; it now transfers as a sequence of 8 MiB chunks, losslessly, and is compressed
+  afterwards for storage.
+- Interrupted uploads resume. The phone asks the server what it actually received and
+  continues from there rather than trusting its own count, because a chunk whose
+  acknowledgement was lost makes the client's number wrong. Resume covers network drops,
+  which is the common case; a server restart clears in-flight uploads and the phone starts
+  over cleanly rather than resuming onto nothing.
+- Cancelling or giving up releases the server's slot and staging disk immediately instead
+  of holding them for four hours. Without this, a handful of give-ups on a poor connection
+  could make new uploads unavailable until the sessions expired.
+- Assembly is verified before anything is published: the reassembled size must match what
+  the phone declared, a chunk that arrives out of order is refused rather than appended,
+  and a partial write is rejected rather than producing a correctly-sized file with a hole
+  in it.
+- Finalizing a chunked upload runs the same validation, size cap, atomic publish and
+  background compression as a single-shot upload — one path, so the safety rules cannot
+  drift between them. Only video is allowed the larger chunked ceiling; documents and
+  images keep the existing limit, because reading a multi-gigabyte text file into memory
+  would fail in a far worse way than refusing it.
+- `GET /api/health` advertises chunked availability and the chunk size, so the phone
+  decides from what this server actually supports rather than from a built-in assumption.
+
 ## 6.25.0
 
 Large video uploads: a 100 MiB cap, streamed to disk, compressed in the background.
