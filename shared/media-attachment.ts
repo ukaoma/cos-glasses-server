@@ -44,6 +44,33 @@ export interface MediaAttachmentRef {
  *  query resolution, and the phone composer. */
 export const MAX_ATTACHMENTS_PER_PROMPT = 5
 
+/**
+ * Sanity bounds for the PARSER, not policy.
+ *
+ * `parseMediaAttachmentRef` is a whitelist that drops any field failing its
+ * bound, and every field here is optional — so a value the writer sets correctly
+ * and the parser rejects vanishes with no error anywhere. That is not theoretical:
+ * both of these were live defects found 2026-08-11.
+ *
+ *   - `bytes` was hardcoded `64 * 1024 * 1024` while the server had already moved
+ *     the video ceiling to 100 MiB and chunked uploads to 2 GiB, so every video
+ *     over 64 MiB silently lost its byte count.
+ *   - `frameCount` was hardcoded `8` while VIDEO_SUMMARY_FRAMES_MAX went to 16, so
+ *     every video over ~90 seconds silently lost its frame count.
+ *
+ * These are deliberately GENEROUS: their job is to reject garbage from outside,
+ * while the real limits are enforced at ingest (rich-media-safety.ts) and
+ * advertised on /api/health. A parser bound that doubles as policy is how the
+ * policy ends up in two places and drifts.
+ *
+ * `shared/` must not import from `server/`, so these mirror the server ceilings
+ * and are pinned to them by media-attachment-bounds.test.ts — the same pattern as
+ * ADVERTISED_VIDEO_COMPRESSION_LABEL. Change one, the test fails.
+ */
+export const MAX_PLAUSIBLE_MEDIA_BYTES = 2 * 1024 * 1024 * 1024  // mirrors MAX_CHUNKED_MEDIA_BYTES
+export const MAX_PARSED_VIDEO_FRAMES = 16                        // mirrors VIDEO_SUMMARY_FRAMES_MAX
+export const MAX_PARSED_DURATION_MS = 24 * 60 * 60_000           // a day; ingest enforces the real cap
+
 // ── Media IDs ────────────────────────────────────────────────────────────────
 // One strict generated format, one strict validator. The id builds filesystem
 // paths on the server, so the validator rejects anything that isn't exactly
@@ -108,13 +135,13 @@ export function parseMediaAttachmentRef(raw: unknown): MediaAttachmentRef | null
   // Do not add category to legacy image refs that never carried it. Their
   // canonical JSON is part of persisted durable-query fingerprints.
   if (r.category === inferredCategory) ref.category = inferredCategory
-  if (typeof r.bytes === 'number' && Number.isSafeInteger(r.bytes) && r.bytes >= 0 && r.bytes <= 64 * 1024 * 1024) {
+  if (typeof r.bytes === 'number' && Number.isSafeInteger(r.bytes) && r.bytes >= 0 && r.bytes <= MAX_PLAUSIBLE_MEDIA_BYTES) {
     ref.bytes = r.bytes
   }
-  if (typeof r.durationMs === 'number' && Number.isSafeInteger(r.durationMs) && r.durationMs >= 0 && r.durationMs <= 60 * 60_000) {
+  if (typeof r.durationMs === 'number' && Number.isSafeInteger(r.durationMs) && r.durationMs >= 0 && r.durationMs <= MAX_PARSED_DURATION_MS) {
     ref.durationMs = r.durationMs
   }
-  if (typeof r.frameCount === 'number' && Number.isSafeInteger(r.frameCount) && r.frameCount >= 0 && r.frameCount <= 8) {
+  if (typeof r.frameCount === 'number' && Number.isSafeInteger(r.frameCount) && r.frameCount >= 0 && r.frameCount <= MAX_PARSED_VIDEO_FRAMES) {
     ref.frameCount = r.frameCount
   }
   if (typeof r.textChars === 'number' && Number.isSafeInteger(r.textChars) && r.textChars >= 0 && r.textChars <= 100_000) {

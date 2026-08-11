@@ -20,6 +20,7 @@ import {
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import { getMediaStore, MediaStoreError } from './media-store.js'
+import { VIDEO_SUMMARY_FRAMES_MAX } from './rich-media-safety.js'
 import { strictBase64Decode, ImageSafetyError } from './image-safety.js'
 import type { ModelImageInput } from './model-image-input.js'
 import { formatAttachmentSourceData, type AttachmentSourceData } from './prompt-reference-boundary.js'
@@ -34,7 +35,22 @@ export interface ResolvedQueryAttachments {
   promptBlock?: string
 }
 
-const MAX_MODEL_IMAGE_INPUTS = 12
+/**
+ * Image inputs one prompt may carry.
+ *
+ * This MUST be at least VIDEO_SUMMARY_FRAMES_MAX, because a video contributes one
+ * input per extracted frame with no clamp (see the video branch below) and exceeding
+ * this throws a hard 400. It sat at 12 while frames went to 16 in 6.27.0, so every
+ * video of 75 seconds or longer uploaded successfully, stored its frames, and then
+ * failed the instant the user asked a question about it:
+ *
+ *   Math.round(75 / 6) = 13 frames > 12  ->  400 too_many_attachment_frames
+ *
+ * Frames are a video's ONLY visual representation, unlike PDF page images which are
+ * an optional aid over canonical text — so this ceiling cannot be treated as a
+ * budget to trim silently. It has to fit a whole video.
+ */
+const MAX_MODEL_IMAGE_INPUTS = VIDEO_SUMMARY_FRAMES_MAX
 const MAX_ATTACHMENT_PROMPT_CHARS = 60_000
 
 export class QueryAttachmentError extends Error {

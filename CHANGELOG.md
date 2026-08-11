@@ -1,3 +1,47 @@
+## 6.27.1
+
+### The 16-frame video from 6.27.0 now actually works end to end
+
+6.27.0 raised video stills from 1-3 to 8-16 entirely inside the extractor. Four
+consumers were never checked, and each one silently rejected what the extractor
+had started writing. Every failure was invisible: three dropped an optional field
+with no error, and the fourth threw only when the user asked a question.
+
+- **A video of 75 seconds or longer 400'd when you asked about it.**
+  `query-attachments.ts` capped model image inputs at 12 and threw a hard
+  `too_many_attachment_frames` rather than trimming, while `round(75/6) = 13`
+  frames. The video uploaded, stored its frames, and failed at ask time. The
+  ceiling is now `VIDEO_SUMMARY_FRAMES_MAX`, expressed as the symbol so the two
+  cannot drift again, and a test walks every duration to 30 minutes. Nothing in
+  the suite had ever asserted `too_many_attachment_frames`.
+- **A 16-frame video became an 8-frame video after any restart.**
+  `sanitizeRecord` ran `derivativePaths.slice(0, 8)` on index load, so the record
+  kept 16 frames in memory and 8 on reload - and Update Server restarts the
+  server. The other 8 files stayed on disk orphaned: unreferenced, never served,
+  never swept. PDFs are unaffected; their producer caps itself at 8.
+- **`frameCount` above 8 was dropped by the parser.** `parseMediaAttachmentRef`
+  is a whitelist and the field is optional, so the count vanished with no error
+  for every video past ~90 seconds.
+- **`bytes` above 64 MiB was dropped by the parser** - so the 100 MiB and chunked
+  2 GiB videos shipped in 6.26.0 lost their byte count too. Raised to the chunked
+  ceiling and pinned to it.
+- `durationMs` above 1 hour was likewise dropped. Unreachable today behind the
+  20-minute ingest cap, fixed now because it is the same one-line class and would
+  have been the next invisible ceiling.
+
+The parser bounds are now named constants documented as sanity bounds rather than
+policy, mirrored from the server ceilings and pinned by test - `shared/` cannot
+import `server/`, and an unpinned copy is what allowed all of this to drift.
+
+Known limitation, unchanged: attaching three or more videos to one prompt still
+returns 400, because 3 x the 8-frame floor exceeds the 16-input ceiling. Frames
+are a video's only visual representation, so refusing is honest where silently
+dropping half of one would not be.
+
+New tests: 8 parser round-trip, 4 restart round-trip, 5 frame-budget. Every one
+round-trips through the real reader - asserting on the writer is what missed all
+four defects, since the writer was correct in every case. 8 mutations, all caught.
+
 ## 6.27.0
 
 ### Video review frames: 8-16 stills instead of 1-3

@@ -54,6 +54,7 @@ import {
   validateSourceImage,
 } from './image-safety.js'
 import {
+  VIDEO_SUMMARY_FRAMES_MAX,
   prepareRichMediaFromFile,
   type MediaTransferMode,
   type PreparedRichMediaFile,
@@ -278,8 +279,16 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     && resolve(sep, value).startsWith(`${expectedAbsolute}${sep}`)
   if (!isOwnedPath(r.storagePath) || !isOwnedPath(r.thumbPath)) return null
   const textPath = isOwnedPath(r.textPath) ? r.textPath : undefined
+  // Was slice(0, 8). sanitizeRecord runs on INDEX LOAD, so a 16-frame video kept all
+  // 16 frames in memory and dropped to 8 after any restart — and COS Control's Update
+  // Server restarts the server. The other 8 files stayed on disk orphaned:
+  // unreferenced, never served, never swept. The model therefore saw the whole video
+  // before a restart and the first half after one, which is invisible in every status
+  // surface. This is a sanity bound on untrusted index data, so it tracks the largest
+  // count any producer can emit; PDFs are unaffected, their producer caps itself at
+  // MAX_DERIVATIVE_IMAGES.
   const derivativePaths = Array.isArray(r.derivativePaths)
-    ? r.derivativePaths.filter(isOwnedPath).slice(0, 8)
+    ? r.derivativePaths.filter(isOwnedPath).slice(0, VIDEO_SUMMARY_FRAMES_MAX)
     : undefined
   const videoCompression = sanitizeVideoCompression(r.videoCompression)
   return {
