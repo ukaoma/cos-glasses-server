@@ -1,3 +1,31 @@
+## 6.25.0
+
+Large video uploads: a 100 MiB cap, streamed to disk, compressed in the background.
+
+- Video attachments may now be up to 100 MiB. Images and documents stay at 64 MiB, and
+  the kind is decided from the file's magic bytes rather than its declared Content-Type,
+  so a declared video type cannot buy the larger ceiling.
+- Uploads no longer buffer in memory. The body streams into the existing staging
+  directory and moves into place through the hardened atomic rename, with the byte
+  ceiling enforced during the stream so an oversized body is refused about one chunk
+  past the limit instead of after landing in full. `GET /api/media/:id/content` is
+  streamed for the same reason — raising the cap had otherwise taken that route's peak
+  allocation from 64 MiB to 100 MiB per concurrent download.
+- `requestTimeout` is now explicit at 900s on both listeners. Node's 300s default was
+  invisible at 64 MiB but would have destroyed a 100 MiB upload's socket roughly 140
+  seconds before the client's own deadline, breaking exactly the size band this enables.
+  900s is the client's own ceiling, so the client always gives up first and can report a
+  real diagnostic instead of an opaque network error.
+- Stored videos are compressed in the background with `libx265 -crf 30`, measured at
+  2.7x smaller and SSIM 0.969 on a real 4K 30fps upload. Resolution and frame rate are
+  never reduced, because that is what later frame-by-frame review depends on and
+  upscaling cannot recover it. An encode that is not smaller, or that fails, or that
+  changes the geometry, leaves the original in place — there is no path where the only
+  copy is lost. Requires ffmpeg and ffprobe; without them the original is simply kept.
+- `GET /api/health` publishes `mediaLimits`, so the phone no longer hardcodes a byte cap
+  that can drift from what this server will actually accept. Chunked upload is
+  advertised as unavailable because its endpoints are not mounted yet.
+
 ## 6.24.5
 
 COS Control provider proofs now isolate themselves from project customizations.
