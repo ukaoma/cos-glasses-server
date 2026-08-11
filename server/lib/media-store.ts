@@ -55,6 +55,7 @@ import {
 } from './image-safety.js'
 import {
   prepareRichMediaFromFile,
+  type MediaTransferMode,
   type PreparedRichMediaFile,
 } from './rich-media-safety.js'
 import { VIDEO_COMPRESSION_LABEL, compressVideoFile } from './video-compression.js'
@@ -230,6 +231,10 @@ export interface IngestRichMediaFileInput {
   declaredMime?: string
   capturedAt?: string
   sessionId?: string
+  /** How the bytes arrived. Omitted means single_shot, so /api/media/file keeps its
+   *  existing ceiling; chunked finalize passes 'chunked' so a multi-hundred-MB video
+   *  is judged against the chunked cap instead of being refused AFTER transfer. */
+  transfer?: MediaTransferMode
 }
 
 /** Handle for a streaming upload's staging file. `dispose()` is idempotent and
@@ -520,6 +525,10 @@ export class MediaStore {
       label: input.label,
       declaredMime: input.declaredMime,
       byteLength: input.byteLength,
+      // Chunked finalize must be judged against the chunked ceiling, not the
+      // single-shot one it used to inherit. Defaults to single_shot, so
+      // /api/media/file is unchanged.
+      transfer: input.transfer,
     })
     return this.publishPreparedRichMedia(input, prepared)
   }

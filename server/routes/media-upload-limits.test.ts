@@ -58,6 +58,7 @@ import {
   type CompressionResult,
 } from '../lib/media-store.js'
 import { VIDEO_COMPRESSION_LABEL } from '../lib/video-compression.js'
+import { getUploadSessions } from '../lib/upload-session.js'
 import {
   ADVERTISED_VIDEO_COMPRESSION_LABEL,
   MAX_CHUNKED_MEDIA_BYTES,
@@ -306,15 +307,32 @@ describe('advertised media limits', () => {
     }
   }, 60_000)
 
-  it('advertises chunked upload as unavailable while its endpoints do not exist', async () => {
-    // Honesty gate: the flag lives beside the routes, so it can only report
-    // true once PUT /api/media/upload/:id/:index is actually mounted.
-    const probe = await fetch(`${capsBase}/api/media/upload/abc`, {
-      method: 'GET',
-      headers: { 'x-cos-token': TOKEN },
+  it('only advertises chunked upload when its endpoints actually answer', async () => {
+    // Honesty gate stated as an IMPLICATION rather than as the flag's current
+    // value: whichever way the flag points, the endpoints must agree with it.
+    // The previous version asserted `toBe(false)` plus a 404 probe, and had to be
+    // rewritten the moment the routes landed — exactly when the assertion needed
+    // to still mean something. A GET of an unknown id cannot carry this on its
+    // own either: a mounted route ALSO answers 404 there, so the discriminator is
+    // whether init works and whether the 404 body is typed.
+    const opened = await fetch(`${capsBase}/api/media/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-cos-token': TOKEN },
+      body: JSON.stringify({ totalBytes: 1024, mime: 'video/mp4' }),
     })
-    expect(probe.status).toBe(404)
-    expect(MEDIA_CHUNKED_UPLOAD_ENABLED).toBe(false)
+    if (!MEDIA_CHUNKED_UPLOAD_ENABLED) {
+      // Unmounted: Express's own untyped 404, never a route's JSON error.
+      expect(opened.status).toBe(404)
+      expect(((await opened.json().catch(() => ({}))) as { error?: string }).error).toBeUndefined()
+      return
+    }
+    expect(opened.status).toBe(200)
+    const session = await opened.json() as { uploadId: string; chunkBytes: number; receivedBytes: number }
+    expect(session.chunkBytes).toBe(MEDIA_CHUNK_BYTES)
+    expect(session.receivedBytes).toBe(0)
+    // Release the staging file this opened: the afterEach tmp/ invariant is a
+    // standing guard over every path in this file, including this one.
+    expect(getUploadSessions().drop(session.uploadId)).toBe(true)
   })
 })
 

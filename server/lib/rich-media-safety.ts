@@ -390,16 +390,47 @@ async function processVideo(
 /** Production entry point: validate an already-staged upload file in place.
  *  The returned `originalPath` is the caller's own staged file — this module
  *  never moves, renames, or deletes it. */
+/**
+ * How the bytes arrived. This decides the ceiling, and it has to be threaded in
+ * rather than assumed.
+ *
+ * THE DEFECT THIS FIXES. finalize for a chunked upload calls this same function —
+ * deliberately, so validation, the cap, the atomic rename and compression are not
+ * forked. But it inherited the SINGLE-SHOT cap, so a 200 MB video transferred all
+ * 25 chunks and was then refused at finalize with a raw 413. That is worse than the
+ * feature not existing: before it, the same file was refused in milliseconds with a
+ * readable message. Two independent reviewers found this, and the suite already
+ * contained the proof (prepareRichMediaFromFile rejects above the cap) without ever
+ * wiring it to the chunked route.
+ */
+export type MediaTransferMode = 'single_shot' | 'chunked'
+
+/**
+ * The applicable ceiling. Per-kind on purpose, and NOT a flat chunked number.
+ *
+ * Only VIDEO gets the chunked ceiling. Documents and images stay at the single-shot
+ * cap even when chunked, because the text path does
+ * `capText(decodeStrictUtf8(readFileSync(sourcePath)))` — a whole-file Buffer plus a
+ * whole-file JS string. A 2 GiB .txt would allocate 2 GiB and then throw
+ * ERR_STRING_TOO_LONG at V8's ~512 MB string limit, inside the request, in the
+ * process that also owns the G2 bridge and whisper. Streaming the upload only to
+ * blow up reading it back would defeat the entire point of the rewrite.
+ */
+export function mediaCeilingBytes(isVideo: boolean, transfer: MediaTransferMode = 'single_shot'): number {
+  if (!isVideo) return MAX_OTHER_MEDIA_BYTES
+  return transfer === 'chunked' ? MAX_CHUNKED_MEDIA_BYTES : MAX_VIDEO_MEDIA_BYTES
+}
+
 export async function prepareRichMediaFromFile(
   sourcePath: string,
-  options: { label?: string; declaredMime?: string; byteLength: number },
+  options: { label?: string; declaredMime?: string; byteLength: number; transfer?: MediaTransferMode },
 ): Promise<PreparedRichMediaFile> {
   if (options.byteLength === 0) throw new RichMediaSafetyError('corrupt_attachment', 'attachment is empty')
   const head = readHead(sourcePath)
   // Two caps now, so the cap check has to know WHAT it is looking at. The
   // classification is byte-authoritative for exactly that reason.
   const isVideo = isVideoUploadHead(head)
-  const cap = isVideo ? MAX_VIDEO_MEDIA_BYTES : MAX_OTHER_MEDIA_BYTES
+  const cap = mediaCeilingBytes(isVideo, options.transfer)
   if (options.byteLength > cap) {
     throw new RichMediaSafetyError('attachment_too_large', `attachment exceeds ${cap} byte limit`)
   }

@@ -89,6 +89,10 @@ GET  /api/media/upload/:uploadId          // resume probe, safe to poll
   200      { "uploadId", "totalBytes", "receivedBytes", "nextIndex", "expiresAt" }
   404      { "error": "upload_not_found" }
 
+DELETE /api/media/upload/:uploadId        // abandon, release slot + disk NOW
+  200      { "ok": true, "dropped": boolean }   // IDEMPOTENT: unknown/expired is 200
+  400      { "error": "invalid_upload_id" }     // a malformed id is a client bug
+
 POST /api/media/upload/:uploadId/finalize
   200      { "attachment": MediaAttachmentRef }   // identical shape to /api/media/file
   400      { "error": "incomplete_upload", "receivedBytes", "totalBytes" }
@@ -99,7 +103,19 @@ POST /api/media/upload/:uploadId/finalize
 place for the safety rules to rot.
 
 Abandoned uploads expire on the existing quarantine/retention clock. An expired or
-unknown `uploadId` is a 404, never a partial success.
+unknown `uploadId` is a 404 on init/PUT/GET/finalize, never a partial success.
+
+`DELETE` is the exception and is deliberately IDEMPOTENT: an unknown, already-cancelled
+or expired id answers 200, not 404. The client calls it best-effort while it is already
+failing or cancelling, so a 404 would invite a retry loop over a request whose only job
+is to free resources. `dropped` reports whether this call was the one that released it,
+for logs only — never as something the client must act on. A malformed id is still 400,
+because that is a client bug rather than a resource to release.
+
+Without DELETE, one abandoned session held 1 of 8 concurrency slots plus up to
+`chunkedMaxBytes` of staging disk for the full 4-hour TTL. The client's recovery ladder
+fires on a flaky link BY DESIGN, so give-ups are expected traffic: eight in one bad
+session made `init` answer 503 for hours with no way to clear it.
 
 ## 3. Compression module signature
 
@@ -180,3 +196,55 @@ The real fix is to hold the lease around the INGEST (validate + index write, fas
 rather than the whole request. That edits a fail-closed middleware guarding every
 mutation, so it belongs in its own change with its own tests. Until then: avoid
 running Update Server while a large upload is in flight.
+
+## 6. Chunked upload, v1 decisions (frozen 2026-08-11 for the build)
+
+§2 defines the wire shape. These are the implementation decisions that go with it, so
+the two lanes do not have to invent them independently.
+
+**Reuse, do not rebuild.** The foundation already exists from the streaming work:
+`MediaStore.createStagingFile()` returns a durable `tmp/` PATH (not a stream bound to one
+request), and `ingestRichMediaFromFile({ sourcePath, byteLength, ... })` already takes a
+path. So a chunked upload is: append to one staging file across requests, then hand that
+path to the EXISTING ingest. `finalize` must NOT fork validation, the cap check, the
+atomic rename, or the compression scheduling — a second ingest path is a second place
+for the safety rules to rot.
+
+**Resume is within a boot, not across one.** `MediaStore.reconcile()` does
+`rmSync(tmp, { recursive: true })` on every boot, so a restart — including a COS Control
+Update Server — wipes an in-flight upload. Accepted for v1: resume exists to survive
+network drops, which is the common case. Do NOT move chunk staging outside `tmp/` to fix
+this; that introduces a new directory the retention sweeper knows nothing about, i.e. a
+new way to leak disk. A wiped upload must surface as `upload_not_found` (404) so the
+client starts over cleanly, never as a partial success.
+
+**Sequential and in-order.** One chunk in flight at a time. Parallel chunks buy almost
+nothing over a phone link and make resume much harder to reason about. A re-sent chunk at
+`nextIndex` is idempotent; anything else is 409 with `expectedIndex`.
+
+**Enforce the ceiling as bytes accumulate**, not just at init. `totalBytes` at init is a
+client claim: check it against `chunkedMaxBytes`, but also fail the upload the moment
+accumulated bytes exceed what was declared or the ceiling, whichever is lower. Then
+re-verify the assembled size at finalize before ingest.
+
+**Expiry.** An abandoned upload must not hold disk indefinitely. Give the session an
+`expiresAt` and drop both the record and the staging file when it passes.
+
+**Flip the flag in the SAME change that mounts the routes.**
+`MEDIA_CHUNKED_UPLOAD_ENABLED` in `server/routes/media.ts` currently publishes
+`chunkedUploadEnabled: false`, and there is a test pinning the flag to the 404 probe.
+Mounting the routes without flipping it advertises nothing; flipping it without mounting
+them sends clients to 404s.
+
+**Side effect worth keeping.** Many short requests each taking the `api_mutation` lease
+is strictly better than one 7-minute lease, so chunking partially mitigates the §5 drain
+hazard. Do not "optimise" it back into one long-held lease.
+
+### Ownership for this wave
+
+| Lane | Repo | Owns (exclusive write) |
+| --- | --- | --- |
+| S: chunked server | cos-glasses-server | `server/routes/media.ts`, `server/lib/media-store.ts`, NEW `server/lib/upload-session.ts` + tests |
+| K: chunked client | cos-glasses-app | `src/lib/api-client.ts`, `shared/media-attachment.ts` + tests |
+
+One owner per repo, so there is no file two lanes can both write.
