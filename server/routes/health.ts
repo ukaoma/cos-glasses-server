@@ -30,8 +30,16 @@ import {
   isCursorProviderReady,
 } from '../lib/cursor-model-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
-import { getRichMediaProcessingCapabilities } from '../lib/rich-media-safety.js'
+import {
+  MAX_OTHER_MEDIA_BYTES,
+  MAX_VIDEO_MEDIA_BYTES,
+  getMediaLimits,
+  getRichMediaProcessingCapabilities,
+} from '../lib/rich-media-safety.js'
 import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
+// The flag lives beside the endpoints it describes, so it cannot drift from
+// whether they are actually registered.
+import { MEDIA_CHUNKED_UPLOAD_ENABLED } from './media.js'
 import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { getTranscriptionPolicySnapshot } from '../lib/transcription-policy.js'
@@ -164,6 +172,11 @@ healthRouter.get('/health', async (_req, res) => {
   // capabilities.liveCues so the two surfaces can never disagree.
   const liveCues = liveCuesCapability()
   const richMedia = await getRichMediaProcessingCapabilities()
+  // Upload limits are published so the client never carries its own byte caps:
+  // cos-glasses-app and cos-glasses-server are separate repos that have already
+  // diverged, so a constant in both is guaranteed to drift. Absent means an
+  // older server, and the client falls back to single-shot.
+  const mediaLimits = await getMediaLimits({ chunkedUploadEnabled: MEDIA_CHUNKED_UPLOAD_ENABLED })
   const features = {
     claude: claudeAvailable,
     codex: codexAvailable,
@@ -265,6 +278,7 @@ healthRouter.get('/health', async (_req, res) => {
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),
+    mediaLimits,
     features,
     voice,
     readiness,
@@ -305,7 +319,11 @@ healthRouter.get('/health', async (_req, res) => {
         pdf: richMedia.pdf,
         video: richMedia.video,
         maxAttachments: 5,
-        maxBytesPerAttachment: 64 * 1024 * 1024,
+        // Sourced from the constants rather than restated here: video now has a
+        // HIGHER cap than everything else, so a single hardcoded number on this
+        // surface would tell a client to refuse a video the server accepts.
+        maxBytesPerAttachment: MAX_OTHER_MEDIA_BYTES,
+        maxVideoBytesPerAttachment: MAX_VIDEO_MEDIA_BYTES,
         maxVideoMinutes: 20,
         maxStillFrames: 8,
       },

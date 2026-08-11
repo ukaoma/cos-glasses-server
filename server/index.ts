@@ -192,6 +192,20 @@ app.use('/api', (req, res, next) => {
     })
 
   try {
+    // KNOWN HAZARD, deliberately not fixed here (2026-08-11). This lease is held for
+    // the WHOLE request, including the body transfer. Every other mutation is
+    // sub-second, but POST /api/media/file now accepts up to 100 MiB, which the
+    // client itself budgets ~7.3 minutes for — far past COS Control's 90s drain
+    // timeout (main.swift waitForRestartProof). A drain that catches a large upload
+    // in flight will therefore hard-fail to Repair.
+    //
+    // Why no fix in this change: there is no per-kind budget map to declare a longer
+    // allowance against, and blocksRestart belongs to the meeting-sync surface rather
+    // than a generic active-work registry, so a new 'media_upload' kind would be a
+    // label with no behaviour — a false signal that the case is handled. The correct
+    // fix is to scope this lease to the INGEST (fast: validate + index write) instead
+    // of the network transfer, which means changing a fail-closed middleware that
+    // guards every mutation. That needs its own pass and its own tests.
     const lease = acquireMaintenanceWork('api_mutation', {
       allowDuringDrain: controllerProof,
     })
@@ -333,20 +347,48 @@ process.on('unhandledRejection', (reason: any) => {
 // Start HTTPS alongside HTTP — Even Hub WebView prefers HTTPS (iOS ATS).
 // Optional: drop cert.pem + key.pem in server/certs/ (e.g. via mkcert) to enable.
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+/**
+ * Let a slow large upload finish instead of killing its socket mid-body.
+ *
+ * Node's default `requestTimeout` is 300s. That was invisible while the cap was
+ * 64 MiB, which needs ~262s at the throughput the CLIENT itself budgets for
+ * (UPLOAD_FLOOR_BYTES_PER_SEC = 250 KiB/s, cos-glasses-app shared/media-attachment.ts).
+ * Raising the video cap to 100 MiB pushes the worst case to ~7.3 minutes, so the default
+ * would have destroyed the socket roughly 140 seconds BEFORE the client's own deadline
+ * expired — breaking exactly the size band the raise exists to enable, and surfacing as
+ * an opaque network error instead of a timeout that states its budget.
+ *
+ * 900_000 is deliberately the client's UPLOAD_TIMEOUT_CEILING_MS, so the two repos agree
+ * by construction: the client always gives up first and gets to report the diagnostic.
+ *
+ * Wrapped at each createServer call rather than looped over `listeners`, because
+ * RequiredListener types `server` as the base net.Server, which has no requestTimeout.
+ * The generic constraint makes a server that cannot carry the timeout a compile error
+ * instead of a silent no-op or a cast that hides the HTTP-specific dependency.
+ *
+ * headersTimeout stays at its default — headers arrive immediately even on a slow body,
+ * so shortening their window is the wrong lever.
+ */
+const MAX_REQUEST_MS = 900_000
+function withRequestTimeout<T extends { requestTimeout: number }>(server: T): T {
+  server.requestTimeout = MAX_REQUEST_MS
+  return server
+}
+
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT ?? '3143', 10)
 const certDir = path.join(__dirname, 'certs')
 const listeners: RequiredListener[] = []
 if (existsSync(path.join(certDir, 'cert.pem'))) {
-  const httpsServer = createHttpsServer({
+  const httpsServer = withRequestTimeout(createHttpsServer({
     cert: readFileSync(path.join(certDir, 'cert.pem')),
     key: readFileSync(path.join(certDir, 'key.pem')),
-  }, app)
+  }, app))
   listeners.push({ server: httpsServer, port: HTTPS_PORT, host: BIND_HOST, label: 'HTTPS' })
 } else {
   console.log('[COS API] No certs found — HTTPS disabled (drop cert.pem/key.pem in server/certs to enable)')
 }
 
-const httpServer = createHttpServer(app)
+const httpServer = withRequestTimeout(createHttpServer(app))
 listeners.push({ server: httpServer, port: PORT, host: BIND_HOST, label: 'HTTP' })
 
 listenRequiredServers(listeners).then(() => {

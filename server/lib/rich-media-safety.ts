@@ -1,11 +1,17 @@
 // Strict document/video validation and derivative generation for user uploads.
-// Paths and filenames never enter the public attachment contract. Inputs are
-// bounded bytes from the authenticated binary route; no URL/path ingestion.
+// Paths and filenames never enter the public attachment contract. The upload
+// body arrives as a STAGED FILE, not a Buffer: at the 100 MB video cap an
+// in-memory body would be a 100 MB allocation per concurrent upload, and both
+// ffprobe and pdftotext want a path anyway. No URL ingestion; the only paths
+// accepted are ones this server staged itself.
 
 import { spawn } from 'node:child_process'
 import {
+  closeSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -14,7 +20,27 @@ import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
 import type { MediaMime } from '../../shared/media-attachment.js'
 
-export const MAX_RICH_MEDIA_BYTES = 64 * 1024 * 1024
+/** Images and documents — the contract's `otherMaxBytes`. Unchanged. */
+export const MAX_OTHER_MEDIA_BYTES = 64 * 1024 * 1024          // 67108864
+/** Video — the contract's `videoMaxBytes`. Measured: a real phone upload runs
+ *  3840x2160/30fps at 25.5 Mbps, so 64 MiB buys ~21s and 100 MB buys ~31s.
+ *  This does NOT unlock long video (a 3-minute 4K original is ~570 MB — only
+ *  chunked upload unlocks length); it stops an ordinary clip being refused. */
+export const MAX_VIDEO_MEDIA_BYTES = 100 * 1024 * 1024         // 104857600
+/** Hard ceiling for any single-shot body, applied before its kind is known. */
+export const MAX_SINGLE_SHOT_MEDIA_BYTES = Math.max(MAX_OTHER_MEDIA_BYTES, MAX_VIDEO_MEDIA_BYTES)
+/** Advertised chunked-upload geometry (contract §1). Published on health so the
+ *  client never hardcodes a cap; the two repos have already diverged once. */
+export const MEDIA_CHUNK_BYTES = 8 * 1024 * 1024               // 8388608
+export const MAX_CHUNKED_MEDIA_BYTES = 2 * 1024 * 1024 * 1024  // 2147483648
+/** Mirrors VIDEO_COMPRESSION_LABEL in server/lib/video-compression.ts. It has
+ *  to be a copy: that module imports getRichMediaProcessingCapabilities from
+ *  THIS file, so importing its label back would be a circular import. The two
+ *  are pinned together by a test instead of by the compiler. */
+export const ADVERTISED_VIDEO_COMPRESSION_LABEL = 'x265-crf30'
+/** Bytes needed to classify an upload from its magic numbers. ISO-BMFF needs
+ *  12 ('ftyp' at offset 4); every other sniff here needs fewer. */
+export const MEDIA_SNIFF_BYTES = 12
 export const MAX_DOCUMENT_TEXT_CHARS = 100_000
 export const MAX_VIDEO_DURATION_MS = 20 * 60_000
 export const MAX_DERIVATIVE_IMAGES = 8
@@ -38,26 +64,62 @@ export class RichMediaSafetyError extends Error {
   }
 }
 
-export interface PreparedDocument {
+/** The original stays on disk. `originalPath` is the staged file the caller
+ *  handed in — the caller still owns it and MOVES it into place on publish. */
+interface PreparedOriginalFile {
+  originalPath: string
+  originalBytes: number
+}
+
+export type PreparedDocumentFile = PreparedOriginalFile & {
   category: 'document'
   mime: Extract<MediaMime, 'text/plain' | 'text/markdown' | 'text/csv' | 'application/json' | 'application/pdf'>
-  original: Buffer
   extractedText: string
   textTruncated: boolean
   pageImages: Buffer[]
 }
 
-export interface PreparedVideo {
+export type PreparedVideoFile = PreparedOriginalFile & {
   category: 'video'
   mime: Extract<MediaMime, 'video/mp4' | 'video/quicktime'>
-  original: Buffer
   width: number
   height: number
   durationMs: number
   frames: Buffer[]
 }
 
+export type PreparedRichMediaFile = PreparedDocumentFile | PreparedVideoFile
+
+export type PreparedDocument = Omit<PreparedDocumentFile, keyof PreparedOriginalFile> & { original: Buffer }
+export type PreparedVideo = Omit<PreparedVideoFile, keyof PreparedOriginalFile> & { original: Buffer }
 export type PreparedRichMedia = PreparedDocument | PreparedVideo
+
+export interface MediaLimits {
+  videoMaxBytes: number
+  otherMaxBytes: number
+  chunkedUploadEnabled: boolean
+  chunkBytes: number
+  chunkedMaxBytes: number
+  videoCompression: string | null
+}
+
+/** The limits block published on GET /api/health. The server is the single
+ *  authority: the client must read these rather than carry its own constants.
+ *  `videoCompression` is null — not false — when ffmpeg/ffprobe are missing,
+ *  because the field's value is the encode label the client displays. */
+export async function getMediaLimits(
+  options: { chunkedUploadEnabled: boolean },
+): Promise<MediaLimits> {
+  const capabilities = await getRichMediaProcessingCapabilities()
+  return {
+    videoMaxBytes: MAX_VIDEO_MEDIA_BYTES,
+    otherMaxBytes: MAX_OTHER_MEDIA_BYTES,
+    chunkedUploadEnabled: options.chunkedUploadEnabled,
+    chunkBytes: MEDIA_CHUNK_BYTES,
+    chunkedMaxBytes: MAX_CHUNKED_MEDIA_BYTES,
+    videoCompression: capabilities.video ? ADVERTISED_VIDEO_COMPRESSION_LABEL : null,
+  }
+}
 
 async function executableReady(command: string, args: string[]): Promise<boolean> {
   return new Promise(resolve => {
@@ -115,8 +177,30 @@ function isPdf(bytes: Buffer): boolean {
   return bytes.length >= 5 && bytes.subarray(0, 5).toString('ascii') === '%PDF-'
 }
 
-function isIsoBmff(bytes: Buffer): boolean {
-  return bytes.length >= 12 && bytes.subarray(4, 8).toString('ascii') === 'ftyp'
+/** True when the leading bytes are ISO-BMFF (MP4/MOV). Decided from the magic
+ *  numbers and never from the declared Content-Type, because this predicate
+ *  also picks the byte cap: a text file claiming video/mp4 must not buy the
+ *  100 MB ceiling. */
+export function isVideoUploadHead(head: Buffer): boolean {
+  return head.length >= 12 && head.subarray(4, 8).toString('ascii') === 'ftyp'
+}
+
+/** Read only the leading bytes of a staged upload. Classification must not
+ *  require loading a 100 MB body. */
+function readHead(path: string, length = MEDIA_SNIFF_BYTES): Buffer {
+  const buffer = Buffer.alloc(length)
+  let fd: number | null = null
+  try {
+    fd = openSync(path, 'r')
+    const read = readSync(fd, buffer, 0, length, 0)
+    return buffer.subarray(0, read)
+  } catch {
+    throw new RichMediaSafetyError('corrupt_attachment', 'staged attachment could not be read')
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd) } catch { /* fd already gone */ }
+    }
+  }
 }
 
 function decodeStrictUtf8(bytes: Buffer): string {
@@ -178,21 +262,22 @@ async function runProcess(command: string, args: string[], timeoutMs = PROCESS_T
   })
 }
 
-async function processPdf(bytes: Buffer): Promise<PreparedDocument> {
-  const root = mkdtempSync(join(tmpdir(), 'cos-pdf-'))
-  const input = join(root, 'input.pdf')
-  const output = join(root, 'content.txt')
-  const pagesPrefix = join(root, 'page')
+async function processPdf(sourcePath: string, byteLength: number): Promise<PreparedDocumentFile> {
+  // Derivatives go to a PRIVATE work dir, never beside the source: the staging
+  // directory holds other concurrent uploads, and the page-image scan below is
+  // a directory listing.
+  const work = mkdtempSync(join(tmpdir(), 'cos-pdf-'))
+  const output = join(work, 'content.txt')
+  const pagesPrefix = join(work, 'page')
   try {
-    writeFileSync(input, bytes, { mode: 0o600 })
-    await runProcess('pdftotext', ['-layout', '-enc', 'UTF-8', input, output])
+    await runProcess('pdftotext', ['-layout', '-enc', 'UTF-8', sourcePath, output])
     const rawText = readFileSync(output, 'utf8')
     const capped = capText(rawText)
     const pageImages: Buffer[] = []
     try {
-      await runProcess('pdftoppm', ['-jpeg', '-r', '120', '-f', '1', '-l', String(MAX_DERIVATIVE_IMAGES), input, pagesPrefix])
-      for (const name of readdirSync(root).filter(name => /^page-\d+\.jpg$/i.test(name)).sort().slice(0, MAX_DERIVATIVE_IMAGES)) {
-        pageImages.push(readFileSync(join(root, name)))
+      await runProcess('pdftoppm', ['-jpeg', '-r', '120', '-f', '1', '-l', String(MAX_DERIVATIVE_IMAGES), sourcePath, pagesPrefix])
+      for (const name of readdirSync(work).filter(name => /^page-\d+\.jpg$/i.test(name)).sort().slice(0, MAX_DERIVATIVE_IMAGES)) {
+        pageImages.push(readFileSync(join(work, name)))
       }
     } catch (error) {
       if (capped.text.length === 0) throw error
@@ -201,11 +286,12 @@ async function processPdf(bytes: Buffer): Promise<PreparedDocument> {
       throw new RichMediaSafetyError('corrupt_attachment', 'PDF contains no extractable text or pages')
     }
     return {
-      category: 'document', mime: 'application/pdf', original: bytes,
+      category: 'document', mime: 'application/pdf',
+      originalPath: sourcePath, originalBytes: byteLength,
       extractedText: capped.text, textTruncated: capped.truncated, pageImages,
     }
   } finally {
-    try { rmSync(root, { recursive: true, force: true }) } catch { /* private tmp cleanup */ }
+    try { rmSync(work, { recursive: true, force: true }) } catch { /* private tmp cleanup */ }
   }
 }
 
@@ -214,13 +300,20 @@ interface ProbePayload {
   streams?: Array<{ codec_type?: string; width?: number; height?: number }>
 }
 
-async function processVideo(bytes: Buffer, label: string | undefined, declaredMime: string | undefined): Promise<PreparedVideo> {
-  const root = mkdtempSync(join(tmpdir(), 'cos-video-'))
+async function processVideo(
+  sourcePath: string,
+  byteLength: number,
+  label: string | undefined,
+  declaredMime: string | undefined,
+): Promise<PreparedVideoFile> {
+  // Frames go to a private work dir; the source is read in place. ffprobe and
+  // ffmpeg both identify ISO-BMFF by probing content, so the staged file needs
+  // no .mp4/.mov extension — only the reported MIME depends on the label.
+  const work = mkdtempSync(join(tmpdir(), 'cos-video-'))
   const ext = fileExtension(label) === '.mov' ? '.mov' : '.mp4'
-  const input = join(root, `input${ext}`)
-  const probePath = join(root, 'probe.json')
+  const input = sourcePath
+  const probePath = join(work, 'probe.json')
   try {
-    writeFileSync(input, bytes, { mode: 0o600 })
     await new Promise<void>((resolve, reject) => {
       let settled = false
       let stdout = ''
@@ -276,37 +369,46 @@ async function processVideo(bytes: Buffer, label: string | undefined, declaredMi
     await runProcess('ffmpeg', [
       '-nostdin', '-v', 'error', '-i', input,
       '-vf', `fps=${fps.toFixed(6)},scale=1280:-2:force_original_aspect_ratio=decrease`,
-      '-frames:v', String(frameCount), '-q:v', '3', join(root, 'frame-%02d.jpg'),
+      '-frames:v', String(frameCount), '-q:v', '3', join(work, 'frame-%02d.jpg'),
     ])
-    const frames = readdirSync(root)
+    const frames = readdirSync(work)
       .filter(name => /^frame-\d+\.jpg$/i.test(name)).sort().slice(0, MAX_DERIVATIVE_IMAGES)
-      .map(name => readFileSync(join(root, name)))
+      .map(name => readFileSync(join(work, name)))
     if (frames.length === 0) throw new RichMediaSafetyError('corrupt_attachment', 'video produced no review frames')
-    const mime: PreparedVideo['mime'] = declaredMime === 'video/quicktime' || ext === '.mov'
+    const mime: PreparedVideoFile['mime'] = declaredMime === 'video/quicktime' || ext === '.mov'
       ? 'video/quicktime' : 'video/mp4'
     return {
-      category: 'video', mime, original: bytes,
+      category: 'video', mime,
+      originalPath: sourcePath, originalBytes: byteLength,
       width: Math.floor(stream.width!), height: Math.floor(stream.height!), durationMs, frames,
     }
   } finally {
-    try { rmSync(root, { recursive: true, force: true }) } catch { /* private tmp cleanup */ }
+    try { rmSync(work, { recursive: true, force: true }) } catch { /* private tmp cleanup */ }
   }
 }
 
-export async function prepareRichMedia(
-  bytes: Buffer,
-  options: { label?: string; declaredMime?: string },
-): Promise<PreparedRichMedia> {
-  if (bytes.length === 0) throw new RichMediaSafetyError('corrupt_attachment', 'attachment is empty')
-  if (bytes.length > MAX_RICH_MEDIA_BYTES) {
-    throw new RichMediaSafetyError('attachment_too_large', `attachment exceeds ${MAX_RICH_MEDIA_BYTES} byte limit`)
+/** Production entry point: validate an already-staged upload file in place.
+ *  The returned `originalPath` is the caller's own staged file — this module
+ *  never moves, renames, or deletes it. */
+export async function prepareRichMediaFromFile(
+  sourcePath: string,
+  options: { label?: string; declaredMime?: string; byteLength: number },
+): Promise<PreparedRichMediaFile> {
+  if (options.byteLength === 0) throw new RichMediaSafetyError('corrupt_attachment', 'attachment is empty')
+  const head = readHead(sourcePath)
+  // Two caps now, so the cap check has to know WHAT it is looking at. The
+  // classification is byte-authoritative for exactly that reason.
+  const isVideo = isVideoUploadHead(head)
+  const cap = isVideo ? MAX_VIDEO_MEDIA_BYTES : MAX_OTHER_MEDIA_BYTES
+  if (options.byteLength > cap) {
+    throw new RichMediaSafetyError('attachment_too_large', `attachment exceeds ${cap} byte limit`)
   }
-  if (isPdf(bytes)) return processPdf(bytes)
-  if (isIsoBmff(bytes)) return processVideo(bytes, options.label, options.declaredMime)
+  if (isPdf(head)) return processPdf(sourcePath, options.byteLength)
+  if (isVideo) return processVideo(sourcePath, options.byteLength, options.label, options.declaredMime)
 
   const ext = fileExtension(options.label)
   const declared = (options.declaredMime ?? '').toLowerCase().split(';', 1)[0]
-  const textMime: PreparedDocument['mime'] | null = ext === '.md' || ext === '.markdown' || declared === 'text/markdown'
+  const textMime: PreparedDocumentFile['mime'] | null = ext === '.md' || ext === '.markdown' || declared === 'text/markdown'
     ? 'text/markdown'
     : ext === '.csv' || declared === 'text/csv'
       ? 'text/csv'
@@ -316,9 +418,38 @@ export async function prepareRichMedia(
           ? 'text/plain'
           : null
   if (!textMime) throw new RichMediaSafetyError('unsupported_attachment_format', 'supported files: TXT, MD, CSV, JSON, PDF, MP4, MOV')
-  const capped = capText(decodeStrictUtf8(bytes))
+  // Text has to be decoded to be validated at all, and it is bounded by the
+  // 64 MiB `otherMaxBytes` cap enforced above.
+  const capped = capText(decodeStrictUtf8(readFileSync(sourcePath)))
   return {
-    category: 'document', mime: textMime, original: bytes,
+    category: 'document', mime: textMime,
+    originalPath: sourcePath, originalBytes: options.byteLength,
     extractedText: capped.text, textTruncated: capped.truncated, pageImages: [],
+  }
+}
+
+/** In-memory entry point for callers that already hold the bytes. Stages them
+ *  to a private temp file and delegates, so there is exactly ONE validation
+ *  path — a second one is a second place for the safety rules to rot. */
+export async function prepareRichMedia(
+  bytes: Buffer,
+  options: { label?: string; declaredMime?: string },
+): Promise<PreparedRichMedia> {
+  if (bytes.length === 0) throw new RichMediaSafetyError('corrupt_attachment', 'attachment is empty')
+  const work = mkdtempSync(join(tmpdir(), 'cos-attachment-'))
+  const sourcePath = join(work, 'source.bin')
+  try {
+    writeFileSync(sourcePath, bytes, { mode: 0o600 })
+    const prepared = await prepareRichMediaFromFile(sourcePath, {
+      label: options.label,
+      declaredMime: options.declaredMime,
+      byteLength: bytes.length,
+    })
+    // The caller's Buffer IS the original — swap it in rather than reading the
+    // staged copy back off disk.
+    const { originalPath: _path, originalBytes: _bytes, ...rest } = prepared
+    return { ...rest, original: bytes } as PreparedRichMedia
+  } finally {
+    try { rmSync(work, { recursive: true, force: true }) } catch { /* private tmp cleanup */ }
   }
 }

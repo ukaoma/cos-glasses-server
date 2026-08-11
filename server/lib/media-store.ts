@@ -20,12 +20,14 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import {
+  createReadStream,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
@@ -51,7 +53,11 @@ import {
   sniffImageType,
   validateSourceImage,
 } from './image-safety.js'
-import { prepareRichMedia, type PreparedRichMedia } from './rich-media-safety.js'
+import {
+  prepareRichMediaFromFile,
+  type PreparedRichMediaFile,
+} from './rich-media-safety.js'
+import { VIDEO_COMPRESSION_LABEL, compressVideoFile } from './video-compression.js'
 
 // Standalone state belongs under the same durable data root as conversations,
 // archives, and run ledgers. COS_MEDIA_ROOT remains an explicit escape hatch
@@ -108,6 +114,24 @@ async function renameWithTransientRetry(
   }
 }
 
+/** The compressor's contract is enforced by the compiler, not mirrored here:
+ *  this alias is what the constructor's test seam has to satisfy. */
+export type CompressVideoFile = typeof compressVideoFile
+export type { CompressionResult, CompressionStatus } from './video-compression.js'
+
+/** Hash without holding the file in memory — a 100 MB video would otherwise
+ *  reintroduce exactly the allocation the streaming upload path removed. */
+async function sha256OfFile(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  await new Promise<void>((resolveHash, rejectHash) => {
+    const stream = createReadStream(path)
+    stream.on('data', chunk => hash.update(chunk))
+    stream.once('error', rejectHash)
+    stream.once('end', () => resolveHash())
+  })
+  return hash.digest('hex')
+}
+
 /** Test seam for the File Provider rename recovery contract. */
 export async function _renameWithTransientRetryForTests(
   source: string,
@@ -120,6 +144,17 @@ export async function _renameWithTransientRetryForTests(
 
 export type MediaLifecycle = 'staged' | 'reserved' | 'associated' | 'expired' | 'deleted'
 
+export interface VideoCompressionRecord {
+  label: string
+  /** Byte count as uploaded, before the encode. */
+  originalBytes: number
+  /** Byte count now stored. Always smaller — the module returns
+   *  `skipped_not_smaller` otherwise, and two measured settings really did
+   *  produce files LARGER than the source. */
+  bytes: number
+  atMs: number
+}
+
 export interface MediaRecord {
   ref: MediaAttachmentRef
   /** Relative to the media root. Never exposed through the API. */
@@ -131,6 +166,9 @@ export interface MediaRecord {
   bytes: number
   sha256: string
   lifecycle: MediaLifecycle
+  /** Set once the background x265 pass replaced the stored original with a
+   *  smaller file. Kept so the size drop is explainable and never retried. */
+  videoCompression?: VideoCompressionRecord
   /** True once asset bytes were removed (content TTL or GC) while the
    *  metadata record remains (e.g. expired traffic frames). */
   contentRemoved?: boolean
@@ -183,11 +221,41 @@ export interface IngestRichMediaInput {
   sessionId?: string
 }
 
+/** A streamed upload that already landed in tmp/. Ingest MOVES this file into
+ *  the asset directory, so the bytes are written exactly once. */
+export interface IngestRichMediaFileInput {
+  sourcePath: string
+  byteLength: number
+  label?: string
+  declaredMime?: string
+  capturedAt?: string
+  sessionId?: string
+}
+
+/** Handle for a streaming upload's staging file. `dispose()` is idempotent and
+ *  becomes a no-op once ingest has moved the file out. */
+export interface MediaStagingFile {
+  path: string
+  dispose: () => void
+}
+
 export type MediaContentResult =
   | { status: 'ok'; path: string; mime: MediaMime; bytes: number }
   | { status: 'not_found' }
   | { status: 'expired' }
   | { status: 'unavailable' }
+
+/** Provenance only. A malformed value is dropped rather than invalidating the
+ *  whole record — losing the note is survivable, losing the asset is not. */
+function sanitizeVideoCompression(raw: unknown): VideoCompressionRecord | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const positiveInt = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+  if (typeof r.label !== 'string' || r.label.length === 0 || r.label.length > 64) return null
+  if (!positiveInt(r.originalBytes) || !positiveInt(r.bytes) || !positiveInt(r.atMs)) return null
+  return { label: r.label.slice(0, 64), originalBytes: r.originalBytes, bytes: r.bytes, atMs: r.atMs }
+}
 
 function sanitizeRecord(raw: unknown): MediaRecord | null {
   if (!raw || typeof raw !== 'object') return null
@@ -208,6 +276,7 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
   const derivativePaths = Array.isArray(r.derivativePaths)
     ? r.derivativePaths.filter(isOwnedPath).slice(0, 8)
     : undefined
+  const videoCompression = sanitizeVideoCompression(r.videoCompression)
   return {
     ref,
     storagePath: r.storagePath,
@@ -217,6 +286,7 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     bytes: typeof r.bytes === 'number' && r.bytes >= 0 ? r.bytes : 0,
     sha256: typeof r.sha256 === 'string' ? r.sha256 : '',
     lifecycle,
+    ...(videoCompression ? { videoCompression } : {}),
     contentRemoved: r.contentRemoved === true,
     ...(typeof r.sessionId === 'string' ? { sessionId: r.sessionId } : {}),
     ...(typeof r.clientQueueItemId === 'string' ? { clientQueueItemId: r.clientQueueItemId } : {}),
@@ -236,8 +306,11 @@ export class MediaStore {
   private readonly root: string
   private readonly records = new Map<string, MediaRecord>()
   private readonly renderLensVariant: typeof renderG2Variant
+  private readonly compressVideo: CompressVideoFile
   /** One cold-cache render per media id. Callers share the same promise. */
   private readonly g2InFlight = new Map<string, Promise<MediaContentResult>>()
+  /** Background x265 passes, keyed by media id. Never awaited by a request. */
+  private readonly compressionJobs = new Map<string, Promise<void>>()
   /** A corrupt/unreadable index makes the asset directory authoritative only
    *  for recovery. Never classify its entries as disposable orphans that boot. */
   private allowOrphanCleanup = true
@@ -247,10 +320,16 @@ export class MediaStore {
 
   constructor(
     root: string = DEFAULT_MEDIA_ROOT,
-    dependencies: { renderG2Variant?: typeof renderG2Variant } = {},
+    dependencies: {
+      renderG2Variant?: typeof renderG2Variant
+      /** Injected in tests so each compression outcome can be driven without
+       *  running a real x265 encode. */
+      compressVideoFile?: CompressVideoFile
+    } = {},
   ) {
     this.root = root
     this.renderLensVariant = dependencies.renderG2Variant ?? renderG2Variant
+    this.compressVideo = dependencies.compressVideoFile ?? compressVideoFile
     this.ensureDirs()
     this.loadIndex()
     this.reconcile()
@@ -417,19 +496,57 @@ export class MediaStore {
     return this.publishNormalizedImage(input, normalized)
   }
 
-  /** Authenticated user document/video ingress. Validation and derivative
-   * generation happen before the serialized index publication. */
-  async ingestRichMedia(input: IngestRichMediaInput): Promise<MediaAttachmentRef> {
-    const prepared = await prepareRichMedia(input.bytes, {
+  /** Reserve a private staging file for a streaming upload. Uploads have always
+   *  staged in tmp/ before the atomic move into assets/; a streamed body uses
+   *  the same convention rather than inventing a second one. */
+  createStagingFile(): MediaStagingFile {
+    // tmp/ is emptied by boot reconcile, so recreate defensively rather than
+    // trusting a directory that existed at construction time.
+    this.ensureDirs()
+    const path = join(this.root, 'tmp', `upload-${randomBytes(12).toString('hex')}.bin`)
+    return {
+      path,
+      dispose: () => {
+        try { rmSync(path, { force: true }) } catch { /* already moved or gone */ }
+      },
+    }
+  }
+
+  /** Authenticated user document/video ingress from a streamed staging file.
+   *  Validation and derivative generation happen before the serialized index
+   *  publication; the staged file is MOVED into the asset dir, never copied. */
+  async ingestRichMediaFromFile(input: IngestRichMediaFileInput): Promise<MediaAttachmentRef> {
+    const prepared = await prepareRichMediaFromFile(input.sourcePath, {
       label: input.label,
       declaredMime: input.declaredMime,
+      byteLength: input.byteLength,
     })
     return this.publishPreparedRichMedia(input, prepared)
   }
 
+  /** In-memory ingress for callers that already hold the bytes. Stages them in
+   *  tmp/ and joins the single file-based path above — a second publish path
+   *  would be a second place for the invariants to rot. */
+  async ingestRichMedia(input: IngestRichMediaInput): Promise<MediaAttachmentRef> {
+    const staged = this.createStagingFile()
+    try {
+      writeFileSync(staged.path, input.bytes, { mode: 0o600 })
+      return await this.ingestRichMediaFromFile({
+        sourcePath: staged.path,
+        byteLength: input.bytes.length,
+        label: input.label,
+        declaredMime: input.declaredMime,
+        capturedAt: input.capturedAt,
+        sessionId: input.sessionId,
+      })
+    } finally {
+      staged.dispose()
+    }
+  }
+
   private async publishPreparedRichMedia(
-    input: IngestRichMediaInput,
-    prepared: PreparedRichMedia,
+    input: { label?: string; capturedAt?: string; sessionId?: string },
+    prepared: PreparedRichMediaFile,
   ): Promise<MediaAttachmentRef> {
     const id = `m_${randomBytes(12).toString('hex')}`
     const now = Date.now()
@@ -449,7 +566,7 @@ export class MediaStore {
       width: prepared.category === 'video' ? prepared.width : 1,
       height: prepared.category === 'video' ? prepared.height : 1,
       createdAt: nowIso,
-      bytes: prepared.original.length,
+      bytes: prepared.originalBytes,
       ...(prepared.category === 'video'
         ? { durationMs: prepared.durationMs, frameCount: prepared.frames.length }
         : {
@@ -464,8 +581,13 @@ export class MediaStore {
     mkdirSync(stageDir, { recursive: true, mode: 0o700 })
     const originalName = `original.${extension}`
     const derivativeNames: string[] = []
+    let sha256: string
     try {
-      writeFileSync(join(stageDir, originalName), prepared.original, { mode: 0o600 })
+      // Hash by streaming, then MOVE the staged upload in. Both live under
+      // tmp/, so this is a same-volume rename — the alternative is a second
+      // full write of a body that can be 100 MB.
+      sha256 = await sha256OfFile(prepared.originalPath)
+      await renameWithTransientRetry(prepared.originalPath, join(stageDir, originalName))
       if (prepared.category === 'document') {
         writeFileSync(join(stageDir, 'content.txt'), prepared.extractedText, { mode: 0o600 })
       }
@@ -487,8 +609,8 @@ export class MediaStore {
       thumbPath: derivativePaths[0] ?? storagePath,
       ...(prepared.category === 'document' ? { textPath: join('assets', id, 'content.txt') } : {}),
       ...(derivativePaths.length ? { derivativePaths } : {}),
-      bytes: prepared.original.length,
-      sha256: createHash('sha256').update(prepared.original).digest('hex'),
+      bytes: prepared.originalBytes,
+      sha256,
       lifecycle: 'staged',
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       createdAtMs: now,
@@ -498,7 +620,105 @@ export class MediaStore {
       this.records.set(id, record)
       this.saveIndex()
     })
+    // AFTER publication and outside the lock: x265 encodes at roughly real
+    // time, so awaiting it here would hold the upload response open for the
+    // length of the video.
+    if (prepared.category === 'video') this.scheduleVideoCompression(id)
     return ref
+  }
+
+  // ── Background video compression ───────────────────────────────────────────
+
+  private scheduleVideoCompression(id: string): void {
+    const job = (async () => {
+      try {
+        await this.compressVideoAsset(id)
+      } catch (err) {
+        // A failed encode is a non-event: the original is still the asset.
+        console.error(`[media-store] video compression failed for ${id}:`, err)
+      }
+    })()
+    this.compressionJobs.set(id, job)
+    void job.then(() => {
+      if (this.compressionJobs.get(id) === job) this.compressionJobs.delete(id)
+    })
+  }
+
+  /** Encode a published video smaller in place. Every exit other than a
+   *  validated smaller output leaves the original untouched, and the swap is a
+   *  rename, so there is no window in which the only copy is missing. */
+  private async compressVideoAsset(id: string): Promise<void> {
+    const before = this.getRecord(id)
+    if (!before || before.videoCompression) return
+    if (mediaCategoryOf(before.ref) !== 'video') return
+    if (before.lifecycle === 'deleted' || before.lifecycle === 'expired' || before.contentRemoved) return
+    const compress = this.compressVideo
+    const inputPath = this.absPath(before.storagePath)
+    if (!existsSync(inputPath)) return
+
+    // workDir sits under the media root so the output rename into assets/ is a
+    // same-volume atomic replace; a cross-device rename fails EXDEV.
+    const workDir = join(this.root, 'tmp', `compress-${id}-${randomBytes(6).toString('hex')}`)
+    mkdirSync(workDir, { recursive: true, mode: 0o700 })
+    try {
+      const result = await compress(inputPath, workDir)
+      if (result.status !== 'compressed' || !result.outputPath) {
+        console.log(
+          `[media-store] video compression ${result.status} for ${id}` +
+          `${result.reason ? ` (${result.reason})` : ''}`,
+        )
+        return
+      }
+      if (!existsSync(result.outputPath)) {
+        console.error(`[media-store] video compression reported 'compressed' for ${id} with no output file`)
+        return
+      }
+      const compressedBytes = statSync(result.outputPath).size
+      // Trust-but-verify the module's own contract. An encode that is not
+      // smaller is a failure, not a result — two measured settings inflated
+      // the file — and swapping one in would cost storage for nothing.
+      if (compressedBytes <= 0 || compressedBytes >= before.bytes) {
+        console.warn(
+          `[media-store] discarding compression output for ${id}: ` +
+          `${compressedBytes} bytes vs original ${before.bytes}`,
+        )
+        return
+      }
+      const sha256 = await sha256OfFile(result.outputPath)
+      const outputPath = result.outputPath
+      await this.withLock(async () => {
+        // Compression is asynchronous, so a delete/release/GC may have landed
+        // while it ran. Re-check before publishing so removed bytes are never
+        // resurrected.
+        const rec = this.records.get(id)
+        if (!rec || rec.lifecycle === 'deleted' || rec.lifecycle === 'expired' || rec.contentRemoved) return
+        if (rec.storagePath !== before.storagePath || !existsSync(inputPath)) return
+        await renameWithTransientRetry(outputPath, inputPath)
+        rec.videoCompression = {
+          label: VIDEO_COMPRESSION_LABEL,
+          originalBytes: rec.bytes,
+          bytes: compressedBytes,
+          atMs: Date.now(),
+        }
+        rec.bytes = compressedBytes
+        rec.sha256 = sha256
+        // Keep the public size honest about what is actually stored.
+        rec.ref = { ...rec.ref, bytes: compressedBytes }
+        rec.updatedAtMs = Date.now()
+        this.saveIndex()
+      })
+    } finally {
+      try { rmSync(workDir, { recursive: true, force: true }) } catch { /* best effort */ }
+    }
+  }
+
+  /** Test seam: background compression is deliberately not awaited by ingest,
+   *  so tests need a handle to settle it. */
+  async _awaitVideoCompressionForTests(id?: string): Promise<void> {
+    const jobs = id
+      ? [this.compressionJobs.get(id)].filter((job): job is Promise<void> => job != null)
+      : [...this.compressionJobs.values()]
+    await Promise.all(jobs)
   }
 
   /** Trusted-local agent artifact ingress. Unlike the public upload path,
