@@ -57,6 +57,16 @@ import {
   isValidUploadId,
   type UploadSessionErrorCode,
 } from '../lib/upload-session.js'
+import {
+  VIDEO_UPLOAD_V2_CHUNK_BYTES,
+  VIDEO_UPLOAD_V2_MAX_FRAME_BYTES,
+  VideoUploadError,
+  getVideoUploadRegistry,
+  isValidVideoUploadId,
+  type VideoUploadErrorCode,
+} from '../lib/video-upload-v2.js'
+import { getServerInstanceId } from '../lib/server-instance-id.js'
+import { maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
 
 // Route-scoped parser: 16 MB covers the max valid batch after base64 + JSON
 // overhead. Mounted only for /api/media in server/index.ts — the global
@@ -301,6 +311,9 @@ export function createMediaChunkBodyParser(options: MediaChunkParserOptions = {}
 
 /** Chunk parser at the advertised chunk size. */
 export const mediaChunkBodyParser = createMediaChunkBodyParser()
+export const videoUploadChunkBodyParser = createMediaChunkBodyParser({
+  maxChunkBytes: Math.max(VIDEO_UPLOAD_V2_CHUNK_BYTES, VIDEO_UPLOAD_V2_MAX_FRAME_BYTES),
+})
 
 function takeChunkBody(req: Request): Buffer | undefined {
   const bytes = chunkBodies.get(req)
@@ -347,11 +360,32 @@ const UPLOAD_ERROR_STATUS: Record<UploadSessionErrorCode, number> = {
   upload_staging_failed: 500,
 }
 
+const VIDEO_UPLOAD_ERROR_STATUS: Record<VideoUploadErrorCode, number> = {
+  video_upload_disabled: 503,
+  video_upload_not_found: 404,
+  video_upload_conflict: 409,
+  video_upload_busy: 409,
+  video_upload_incomplete: 409,
+  video_upload_invalid: 400,
+  video_upload_quota: 507,
+  video_upload_cancelled: 410,
+  video_upload_failed: 500,
+  server_identity_mismatch: 409,
+}
+
 function sendMediaError(res: Response, err: unknown): void {
   // Chunked-upload failures go through the SAME funnel as every other media
   // error, so there is one place that decides the error body's shape.
   if (err instanceof UploadSessionError) {
     res.status(UPLOAD_ERROR_STATUS[err.code] ?? 500).json({ error: err.code, ...err.detail })
+    return
+  }
+  if (err instanceof VideoUploadError) {
+    res.status(VIDEO_UPLOAD_ERROR_STATUS[err.code] ?? 500).json({
+      error: err.code,
+      detail: err.message,
+      ...err.detail,
+    })
     return
   }
   if (err instanceof MediaStoreError) {
@@ -372,6 +406,26 @@ function sendMediaError(res: Response, err: unknown): void {
   }
   console.error('[media] unexpected error:', err)
   res.status(500).json({ error: 'media_internal_error' })
+}
+
+function videoUploadServerIdentity(req: Request): string | undefined {
+  return safeString(req.header('x-cos-server-instance'), 160)
+    ?? safeString(req.header('x-cos-server-instance-id'), 160)
+}
+
+function requireVideoUploadAdmission(res: Response): boolean {
+  if (maintenanceAdmissionsOpen()) return true
+  res.status(503).json({ error: 'server_maintenance', retryable: true })
+  return false
+}
+
+function requireCurrentServerIdentity(req: Request): string {
+  const presented = videoUploadServerIdentity(req)
+  const current = getServerInstanceId()
+  if (!presented || presented !== current) {
+    throw new VideoUploadError('server_identity_mismatch', 'request targets a different COS server')
+  }
+  return presented
 }
 
 function safeString(v: unknown, max: number): string | undefined {
@@ -488,6 +542,124 @@ function uploadLabelFrom(req: Request): string | undefined {
   if (!rawLabel) return undefined
   try { return decodeURIComponent(rawLabel).slice(0, 120) } catch { return rawLabel.slice(0, 120) }
 }
+
+// ── Resumable video upload V2 (private canary) ───────────────────────────────
+
+mediaRouter.post('/media/video-upload/init', (req: Request, res: Response) => {
+  try {
+    const serverInstanceId = requireCurrentServerIdentity(req)
+    const body = req.body ?? {}
+    const progress = getVideoUploadRegistry().init({
+      clientRequestId: body.clientRequestId,
+      serverInstanceId,
+      totalBytes: body.totalBytes,
+      mime: body.mime,
+      label: uploadLabelFrom(req),
+      capturedAt: safeString(req.header('x-cos-captured-at'), 40),
+      sessionId: safeString(req.header('x-cos-session-id'), 64),
+    })
+    res.json(progress)
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
+
+mediaRouter.get('/media/video-upload/:uploadId', (req: Request, res: Response) => {
+  try {
+    const serverInstanceId = requireCurrentServerIdentity(req)
+    if (!isValidVideoUploadId(req.params.uploadId)) {
+      throw new VideoUploadError('video_upload_not_found', 'unknown or expired video upload')
+    }
+    res.json(getVideoUploadRegistry().get(req.params.uploadId, serverInstanceId))
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
+
+mediaRouter.put(
+  '/media/video-upload/:uploadId/original/:index',
+  videoUploadChunkBodyParser,
+  async (req: Request, res: Response) => {
+    const bytes = takeChunkBody(req)
+    try {
+      if (!requireVideoUploadAdmission(res)) return
+      const serverInstanceId = requireCurrentServerIdentity(req)
+      if (!isValidVideoUploadId(req.params.uploadId) || bytes === undefined) {
+        throw new VideoUploadError('video_upload_invalid', 'valid upload id and raw chunk bytes are required')
+      }
+      res.json(await getVideoUploadRegistry().putOriginal(
+        req.params.uploadId,
+        req.params.index,
+        bytes,
+        serverInstanceId,
+      ))
+    } catch (err) {
+      sendMediaError(res, err)
+    }
+  },
+)
+
+mediaRouter.put(
+  '/media/video-upload/:uploadId/frame/:index',
+  videoUploadChunkBodyParser,
+  async (req: Request, res: Response) => {
+    const bytes = takeChunkBody(req)
+    try {
+      if (!requireVideoUploadAdmission(res)) return
+      const serverInstanceId = requireCurrentServerIdentity(req)
+      if (!isValidVideoUploadId(req.params.uploadId) || bytes === undefined) {
+        throw new VideoUploadError('video_upload_invalid', 'valid upload id and raw frame bytes are required')
+      }
+      res.json(await getVideoUploadRegistry().putFrame(
+        req.params.uploadId,
+        req.params.index,
+        bytes,
+        serverInstanceId,
+      ))
+    } catch (err) {
+      sendMediaError(res, err)
+    }
+  },
+)
+
+mediaRouter.post('/media/video-upload/:uploadId/finalize', async (req: Request, res: Response) => {
+  try {
+    if (!requireVideoUploadAdmission(res)) return
+    const serverInstanceId = requireCurrentServerIdentity(req)
+    if (!isValidVideoUploadId(req.params.uploadId)) {
+      throw new VideoUploadError('video_upload_not_found', 'unknown or expired video upload')
+    }
+    res.json(await getVideoUploadRegistry().finalize(req.params.uploadId, serverInstanceId))
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
+
+mediaRouter.post('/media/video-upload/:uploadId/ack', async (req: Request, res: Response) => {
+  try {
+    const serverInstanceId = requireCurrentServerIdentity(req)
+    if (!isValidVideoUploadId(req.params.uploadId)) {
+      throw new VideoUploadError('video_upload_not_found', 'unknown or expired video upload')
+    }
+    res.json(await getVideoUploadRegistry().acknowledge(req.params.uploadId, serverInstanceId))
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
+
+mediaRouter.delete('/media/video-upload/:uploadId', async (req: Request, res: Response) => {
+  try {
+    const serverInstanceId = requireCurrentServerIdentity(req)
+    if (!isValidVideoUploadId(req.params.uploadId)) {
+      res.json({ ok: true, dropped: false })
+      return
+    }
+    const progress = await getVideoUploadRegistry().cancel(req.params.uploadId, serverInstanceId)
+    res.json({ ok: true, dropped: progress !== null, ...(progress ? { upload: progress } : {}) })
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
 
 mediaRouter.post('/media/upload/init', (req: Request, res: Response) => {
   try {

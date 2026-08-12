@@ -50,7 +50,7 @@ export interface ResolvedQueryAttachments {
  * an optional aid over canonical text — so this ceiling cannot be treated as a
  * budget to trim silently. It has to fit a whole video.
  */
-const MAX_MODEL_IMAGE_INPUTS = VIDEO_SUMMARY_FRAMES_MAX
+export const MAX_MODEL_IMAGE_INPUTS = VIDEO_SUMMARY_FRAMES_MAX
 const MAX_ATTACHMENT_PROMPT_CHARS = 60_000
 
 export class QueryAttachmentError extends Error {

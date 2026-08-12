@@ -1,3 +1,20 @@
+## 6.27.3
+
+### Durable, resumable video transport (private canary)
+
+- Replaces fragile single-request phone video uploads with a generation-pinned,
+  resumable 256 KiB protocol whose accepted chunks survive server restarts.
+- Adds idempotent init/finalize receipts, explicit acknowledgement and cancel,
+  bounded draft retention, and maintenance status so updates cannot erase a
+  video draft that is still being transferred or whose receipt is not stored.
+- Keeps the published media record byte-compatible with 6.27.2: the original
+  MP4/MOV remains required and the existing validated ffprobe/ffmpeg path stays
+  the fallback. Phone frame extraction is separately gated until its physical
+  iPhone decoder/canvas acceptance test executes.
+- New V2 admission is disabled by default (`COS_VIDEO_UPLOAD_V2=0`). Existing
+  V2 drafts remain observable, cancellable, and finalizable after the flag is
+  turned off so rollback never strands accepted bytes.
+
 ## 6.27.2
 
 ### One finalizer for phone and Mac dictation

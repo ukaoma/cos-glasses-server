@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
+import { atomicWriteFileSync, durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import {
   isValidMediaId,
@@ -183,6 +183,10 @@ export interface MediaRecord {
   updatedAtMs: number
   reservedAtMs?: number
   associatedAtMs?: number
+  /** Durable provenance for resumable video uploads. It is never exposed in
+   * the public attachment ref; it lets a lost finalize response or server
+   * restart rediscover the one record that upload already published. */
+  videoUploadId?: string
 }
 
 interface MediaIndexFile {
@@ -236,6 +240,10 @@ export interface IngestRichMediaFileInput {
    *  existing ceiling; chunked finalize passes 'chunked' so a multi-hundred-MB video
    *  is judged against the chunked cap instead of being refused AFTER transfer. */
   transfer?: MediaTransferMode
+  /** Preallocated by the durable video-upload manifest before publication. */
+  mediaId?: string
+  /** Private idempotency link used only by video-upload receipt recovery. */
+  videoUploadId?: string
 }
 
 /** Handle for a streaming upload's staging file. `dispose()` is idempotent and
@@ -313,6 +321,9 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     updatedAtMs: typeof r.updatedAtMs === 'number' ? r.updatedAtMs : Date.now(),
     ...(typeof r.reservedAtMs === 'number' ? { reservedAtMs: r.reservedAtMs } : {}),
     ...(typeof r.associatedAtMs === 'number' ? { associatedAtMs: r.associatedAtMs } : {}),
+    ...(typeof r.videoUploadId === 'string' && /^vu_[0-9a-f]{24}$/.test(r.videoUploadId)
+      ? { videoUploadId: r.videoUploadId }
+      : {}),
   }
 }
 
@@ -468,15 +479,35 @@ export class MediaStore {
       rmSync(join(this.root, 'tmp'), { recursive: true, force: true })
       mkdirSync(join(this.root, 'tmp'), { recursive: true, mode: 0o700 })
     } catch { /* best effort */ }
+    let dirty = false
     if (this.allowOrphanCleanup) {
       try {
         for (const entry of readdirSync(join(this.root, 'assets'))) {
           try {
             if (!this.records.has(entry)) {
-              // Unpublished orphan — the upload died between rename and index
-              // publish. Remove; the client never received this id.
-              rmSync(join(this.root, 'assets', entry), { recursive: true, force: true })
-              console.warn(`[media-store] removed unpublished orphan asset ${entry}`)
+              const intentPath = join(this.root, 'assets', entry, 'publication-intent.json')
+              let recovered = false
+              if (existsSync(intentPath)) {
+                try {
+                  const candidate = sanitizeRecord(JSON.parse(readFileSync(intentPath, 'utf8')))
+                  if (candidate && candidate.ref.id === entry && candidate.videoUploadId
+                      && existsSync(this.absPath(candidate.storagePath))) {
+                    this.records.set(entry, candidate)
+                    dirty = true
+                    recovered = true
+                    console.warn(`[media-store] recovered resumable video publication ${entry}`)
+                  }
+                } catch {
+                  // An unreadable/inconsistent intent grants no publication.
+                  // The client can safely repeat finalize from its durable draft.
+                }
+              }
+              if (!recovered) {
+                // Unpublished orphan — the upload died between rename and index
+                // publish and supplied no valid durable publication intent.
+                rmSync(join(this.root, 'assets', entry), { recursive: true, force: true })
+                console.warn(`[media-store] removed unpublished orphan asset ${entry}`)
+              }
             }
           } catch { /* skip this asset */ }
         }
@@ -484,7 +515,6 @@ export class MediaStore {
     } else {
       console.warn('[media-store] preserving unindexed asset dirs for recovery this boot')
     }
-    let dirty = false
     for (const rec of this.records.values()) {
       try {
         if (!rec.contentRemoved && rec.lifecycle !== 'deleted' && rec.lifecycle !== 'expired' &&
@@ -497,7 +527,13 @@ export class MediaStore {
       } catch { /* skip */ }
     }
     if (dirty) {
-      try { this.saveIndex() } catch (err) { console.error('[media-store] reconcile save failed:', err) }
+      try {
+        this.saveIndex()
+        for (const rec of this.records.values()) {
+          if (!rec.videoUploadId) continue
+          try { rmSync(join(this.root, 'assets', rec.ref.id, 'publication-intent.json'), { force: true }) } catch { /* next boot */ }
+        }
+      } catch (err) { console.error('[media-store] reconcile save failed:', err) }
     }
   }
 
@@ -563,10 +599,23 @@ export class MediaStore {
   }
 
   private async publishPreparedRichMedia(
-    input: { label?: string; capturedAt?: string; sessionId?: string },
+    input: {
+      label?: string
+      capturedAt?: string
+      sessionId?: string
+      mediaId?: string
+      videoUploadId?: string
+    },
     prepared: PreparedRichMediaFile,
   ): Promise<MediaAttachmentRef> {
-    const id = `m_${randomBytes(12).toString('hex')}`
+    const id = input.mediaId && isValidMediaId(input.mediaId)
+      ? input.mediaId
+      : `m_${randomBytes(12).toString('hex')}`
+    const existing = this.getRecord(id)
+    if (existing) {
+      if (input.videoUploadId && existing.videoUploadId === input.videoUploadId) return existing.ref
+      throw new MediaStoreError('media_conflict', `attachment ${id} already exists`)
+    }
     const now = Date.now()
     const nowIso = new Date(now).toISOString()
     const extension = prepared.category === 'video'
@@ -631,13 +680,24 @@ export class MediaStore {
       sha256,
       lifecycle: 'staged',
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.videoUploadId ? { videoUploadId: input.videoUploadId } : {}),
       createdAtMs: now,
       updatedAtMs: now,
     }
+    // A crash can land after assets/<id> is renamed but before index.json is
+    // committed. Keep a private complete record beside the asset so boot
+    // reconciliation can finish that exact publication rather than deleting a
+    // valid video as an orphan. The public ref never exposes this file.
+    durableAtomicWriteFileSync(
+      join(this.root, 'assets', id, 'publication-intent.json'),
+      JSON.stringify(record),
+      { mode: 0o600 },
+    )
     await this.withLock(() => {
       this.records.set(id, record)
       this.saveIndex()
     })
+    try { rmSync(join(this.root, 'assets', id, 'publication-intent.json'), { force: true }) } catch { /* boot can clean it */ }
     // AFTER publication and outside the lock: x265 encodes at roughly real
     // time, so awaiting it here would hold the upload response open for the
     // length of the video.
@@ -812,6 +872,16 @@ export class MediaStore {
 
   getRef(id: string): MediaAttachmentRef | null {
     return this.getRecord(id)?.ref ?? null
+  }
+
+  /** Private receipt-recovery lookup. Upload ids are not capabilities and are
+   * never returned by ordinary media metadata routes. */
+  findByVideoUploadId(uploadId: string): MediaRecord | null {
+    if (!/^vu_[0-9a-f]{24}$/.test(uploadId)) return null
+    for (const record of this.records.values()) {
+      if (record.videoUploadId === uploadId) return record
+    }
+    return null
   }
 
   /** Recover the public refs associated with one exact conversation turn.
@@ -1157,6 +1227,27 @@ export class MediaStore {
       this.saveIndex()
       return true
     })
+  }
+
+  /** Resumable-upload cancel may release a just-published result, but it must
+   * never delete a reservation that a queued Ask already owns. */
+  deleteExactlyStaged(id: string): Promise<'deleted' | 'retained' | 'missing'> {
+    return this.withLock(() => {
+      const rec = this.records.get(id)
+      if (!rec || rec.lifecycle === 'deleted') return 'missing'
+      if (rec.lifecycle !== 'staged') return 'retained'
+      this.removeAssetFiles(rec)
+      rec.lifecycle = 'deleted'
+      rec.contentRemoved = true
+      rec.updatedAtMs = Date.now()
+      this.saveIndex()
+      return 'deleted'
+    })
+  }
+
+  /** Durable upload manifests live beside, not inside, the legacy tmp tree. */
+  rootDirectory(): string {
+    return this.root
   }
 
   private removeAssetFiles(rec: MediaRecord): void {

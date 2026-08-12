@@ -59,6 +59,8 @@ import { getEarlyMeetingSyncSnapshot } from '../lib/g2-ops-handoff.js'
 import { getProgressiveHqSnapshot } from '../lib/meeting-batch-transcribe.js'
 import { getMeetingFinalizationSnapshot } from '../lib/meeting-finalization-jobs.js'
 import { resolveMeetingLibrary } from '../lib/cos-operations-meetings.js'
+import { videoUploadV2Capability } from '../lib/video-upload-v2.js'
+import { MAX_MODEL_IMAGE_INPUTS } from '../lib/query-attachments.js'
 
 export const healthRouter = Router()
 
@@ -172,6 +174,7 @@ healthRouter.get('/health', async (_req, res) => {
   // capabilities.liveCues so the two surfaces can never disagree.
   const liveCues = liveCuesCapability()
   const richMedia = await getRichMediaProcessingCapabilities()
+  const videoUploadV2 = videoUploadV2Capability(richMedia.video)
   // Upload limits are published so the client never carries its own byte caps:
   // cos-glasses-app and cos-glasses-server are separate repos that have already
   // diverged, so a constant in both is guaranteed to drift. Absent means an
@@ -326,6 +329,11 @@ healthRouter.get('/health', async (_req, res) => {
         maxVideoBytesPerAttachment: MAX_VIDEO_MEDIA_BYTES,
         maxVideoMinutes: 20,
         maxStillFrames: 8,
+        videoUploadV2: {
+          available: videoUploadV2.available,
+          protocol: videoUploadV2.protocol,
+          reason: videoUploadV2.reason,
+        },
       },
       meetingLifecycle: {
         earlySyncClaim: getEarlyMeetingSyncSnapshot(),
@@ -359,6 +367,8 @@ healthRouter.get('/models', async (req, res) => {
   const transcriptionLive = getWhisperPreviewCapability()
   const transcriptionProfile = getTranscriptionProfileStatus()
   const progressiveHq = getProgressiveHqSnapshot()
+  const richMedia = await getRichMediaProcessingCapabilities()
+  const videoUploadV2 = videoUploadV2Capability(richMedia.video)
   const cursorOptions = cursorCatalog.options.filter(option => !!option.id)
   res.json({
     ...catalog,
@@ -391,6 +401,20 @@ healthRouter.get('/models', async (req, res) => {
       // THIS surface, so a value present only on /api/health leaves the
       // live-cues indicator blind.
       liveCues: liveCuesCapability(),
+      richMedia: {
+        video: richMedia.video,
+        maxPromptVisuals: MAX_MODEL_IMAGE_INPUTS,
+        videoUploadV2: {
+          ...videoUploadV2,
+          // The first private train deliberately admits only one video and no
+          // other visual attachment. This keeps a server fallback at its
+          // proven 16-frame policy inside the provider-wide 16-image ceiling.
+          promptAdmission: {
+            maxVideos: 1,
+            maxOtherVisualsWithVideo: 0,
+          },
+        },
+      },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
     },
   })

@@ -162,6 +162,20 @@ app.use('/api', requireApiToken(API_TOKEN))
 // through their true terminal boundary.
 app.use('/api', (req, res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+  // V2 video chunks are bounded to 256 KiB and commit through the upload
+  // registry's own generation lock. Holding the global mutation lease while
+  // the phone transfers the body recreated the exact 90-second drain failure
+  // this protocol exists to remove. Admission is checked by the route before
+  // bytes are committed; in-flight bounded bodies finish or are discarded.
+  const videoUploadBody = req.method === 'PUT'
+    && /^\/media\/video-upload\/vu_[0-9a-f]{24}\/(?:original|frame)\/\d+$/.test(req.path)
+  // Finalize may run ffmpeg for a long clip. Its durable registry state is the
+  // restart/rollback gate, so holding the global request lease as well would
+  // recreate Control's 90-second drain timeout. The route performs its own
+  // fail-closed admission immediately before claiming `finalizing`.
+  const videoUploadFinalize = req.method === 'POST'
+    && /^\/media\/video-upload\/vu_[0-9a-f]{24}\/finalize$/.test(req.path)
+  if (videoUploadBody || videoUploadFinalize) return next()
   const lifecycleOwned = (req.path === '/query-jobs' && req.method === 'POST')
     || req.path === '/query'
     || req.path === '/diagnostics/provider-proof'
@@ -190,6 +204,14 @@ app.use('/api', (req, res, next) => {
       nonce: typeof req.headers['x-cos-maintenance-nonce'] === 'string'
         ? req.headers['x-cos-maintenance-nonce'] : undefined,
     })
+  // Cleanup and receipt acknowledgement only reduce rollback blockers. They
+  // remain available during a drain so Control is never forced to wait for a
+  // four-hour upload TTL after the phone already cancelled or persisted the
+  // terminal receipt.
+  const videoUploadCleanup = /^\/media\/video-upload\/vu_[0-9a-f]{24}$/.test(req.path)
+    && req.method === 'DELETE'
+    || /^\/media\/video-upload\/vu_[0-9a-f]{24}\/ack$/.test(req.path)
+      && req.method === 'POST'
 
   try {
     // KNOWN HAZARD, deliberately not fixed here (2026-08-11). This lease is held for
@@ -207,7 +229,7 @@ app.use('/api', (req, res, next) => {
     // of the network transfer, which means changing a fail-closed middleware that
     // guards every mutation. That needs its own pass and its own tests.
     const lease = acquireMaintenanceWork('api_mutation', {
-      allowDuringDrain: controllerProof,
+      allowDuringDrain: controllerProof || videoUploadCleanup,
     })
     let released = false
     const release = () => {

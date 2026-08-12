@@ -16,6 +16,7 @@ import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { getWhisperHealth } from '../lib/whisper-local.js'
 import { getActiveTranscriptionSessionCount, getTranscriptionSessionLiveness } from './transcribe-stream.js'
+import { getVideoUploadRegistry } from '../lib/video-upload-v2.js'
 
 export const maintenanceRouter = Router()
 
@@ -78,6 +79,21 @@ function statusSnapshot(credentials: MaintenanceOperationCredentials = {}) {
   // rather than counted, and are never deleted here.
   const sessionLiveness = getTranscriptionSessionLiveness()
   const managed = managedRuntimeCapability()
+  let videoUploads
+  try {
+    videoUploads = getVideoUploadRegistry().status()
+  } catch {
+    videoUploads = {
+      protocol: 1 as const,
+      enabled: false,
+      receiving: 0,
+      finalizing: 0,
+      unacknowledgedPublished: 0,
+      failed: 0,
+      blocksRestart: false,
+      blocksRollback: false,
+    }
+  }
   const tracked = maintenanceLifecycle.snapshot(credentials, {
     recording_session: sessionLiveness.live,
   })
@@ -107,7 +123,10 @@ function statusSnapshot(credentials: MaintenanceOperationCredentials = {}) {
     shuttingDown: jobs.shuttingDown,
     durableStoreState: jobs.store.state,
     lifecycle,
-    safeToRestart: lifecycle.safeToRestart && !jobs.shuttingDown,
+    videoUploads,
+    // Published receipts intentionally survive an ordinary restart. They only
+    // block a binary downgrade, where an old server could erase V2 evidence.
+    safeToRestart: lifecycle.safeToRestart && !jobs.shuttingDown && !videoUploads.blocksRestart,
     whisper: getWhisperHealth(),
   }
 }
