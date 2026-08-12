@@ -196,4 +196,23 @@ describe('durable video upload V2', () => {
     await registry.putOriginal(uploadId, 2, Buffer.alloc(17, 7), SERVER_ID)
     expect(registry.get(uploadId, SERVER_ID).missingOriginalChunks).toEqual([])
   })
+
+  it('accepts two overlapping original PUTs and keeps both indexes', async () => {
+    const registry = createRegistry()
+    const bytes = Buffer.alloc(VIDEO_UPLOAD_V2_CHUNK_BYTES * 2, 3)
+    const first = registry.init({
+      clientRequestId: 'phone:7777777777777777:overlap',
+      serverInstanceId: SERVER_ID,
+      totalBytes: bytes.length,
+      mime: 'video/mp4',
+      label: 'overlap.mp4',
+    })
+    const [firstAck, secondAck] = await Promise.all([
+      registry.putOriginal(first.uploadId, 0, bytes.subarray(0, first.chunkBytes), SERVER_ID),
+      registry.putOriginal(first.uploadId, 1, bytes.subarray(first.chunkBytes), SERVER_ID),
+    ])
+    const received = [...new Set([...firstAck.receivedOriginalChunks, ...secondAck.receivedOriginalChunks])].sort((a, b) => a - b)
+    expect(received).toEqual([0, 1])
+    expect(registry.get(first.uploadId, SERVER_ID).missingOriginalChunks).toEqual([])
+  })
 })
