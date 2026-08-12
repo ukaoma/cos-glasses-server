@@ -35,6 +35,8 @@ import {
   applyNegativeRules,
 } from '../lib/hallucination-filter.js'
 import { applyCorrections } from '../lib/whisper-local.js'
+import { applyFuzzyCorrections } from '../lib/fuzzy-correct.js'
+import { getAllSpeakerNames } from '../lib/speaker-embeddings.js'
 import { transcribeWhisperPreview } from '../lib/whisper-preview.js'
 import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
 import { getVocabulary } from '../lib/profile.js'
@@ -104,6 +106,27 @@ function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
 
 async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { signal?: AbortSignal }): Promise<string> {
   let cleaned = applyNegativeRules(applyCorrections(text)).replace(/\s+/g, ' ').trim() || text
+  // applyCorrections above is an EXACT string map, so it only fixes misspellings someone
+  // already hand-authored. A novel miss ("Miyala" for Niala, "Yukoma" for Ukaoma) sails
+  // through it. The Levenshtein pass is what catches those, and until now it had exactly
+  // ONE call site — transcribe-audio.ts:252, the server-transcription route — so phone
+  // Moonshine dictation, which arrives here as text, never got it. Same construction and
+  // same non-fatal posture as that site, deliberately: targets are speaker names plus
+  // vocabulary, and a throw must never cost the user their transcript.
+  //
+  // Runs BEFORE the autoclean LLM so the model sees corrected proper nouns rather than
+  // being asked to guess at them, and it still helps on every path where autoclean is
+  // off, over the char cap, or breaker-open.
+  try {
+    const fuzzyTargets = [...getAllSpeakerNames(), ...getVocabulary()]
+    const { text: corrected, replacements } = applyFuzzyCorrections(cleaned, fuzzyTargets)
+    if (replacements > 0) {
+      console.log(`[prompt-draft] Fuzzy corrected ${replacements} word(s)`)
+      cleaned = corrected
+    }
+  } catch (fuzzyErr: any) {
+    console.warn(`[prompt-draft] Fuzzy correction failed (non-fatal): ${fuzzyErr?.message ?? fuzzyErr}`)
+  }
   if (!(opts.enabled ?? autoCleanDefaultEnabled())) return cleaned
   if (cleaned.length > AUTOCLEAN_MAX_CHARS || autoCleanBreaker.isOpen() || autoCleanCountToday() >= autoCleanDailyCap()) return cleaned
   const startedAt = Date.now()
