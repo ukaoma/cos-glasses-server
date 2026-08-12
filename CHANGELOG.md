@@ -1,3 +1,32 @@
+## 6.27.4
+
+### Fuzzy name corrections reach phone dictation
+
+- `applyFuzzyCorrections` is now called inside `cleanOutboundDictation`, so text
+  arriving at `POST /dictation/finalize` gets the same Levenshtein pass the
+  server-transcription route has always had. It previously had exactly ONE call site
+  (`transcribe-audio.ts:252`), which meant phone Moonshine dictation — which sends
+  text, never audio — never received it. Verified by call-site enumeration, not by
+  reading a single file.
+- Runs BEFORE the autoclean LLM, so the model sees corrected proper nouns instead of
+  being asked to guess at them, and it still helps on every path where autoclean is
+  off, over the character cap, or breaker-open.
+- Same target construction (`getAllSpeakerNames()` + `getVocabulary()`) and the same
+  non-fatal posture as the existing call site: a correction pass is quality
+  enhancement, never a durability dependency.
+
+**Measured reach, so callers do not assume more than it delivers.** The distance
+budget is 1 edit for 5-8 character words, so it catches single-edit misses
+(`Austen` → Austin, `Nyala` → Niala) but NOT `Miyala` → Niala (2 edits) or
+`Yukoma` → Ukaoma (3). Wiring it does **not** remove the need for explicit
+`whisper_corrections` entries on multi-edit misses; the new test asserts both
+directions so that is not re-derived later.
+
+`Austin` deliberately untouched — `correctAustinJustin()` already owns that pair.
+
+Pairs with app 6.8.346, which breadcrumbs the finalize call so a missing correction
+can be told apart from a finalize step that never ran.
+
 ## 6.27.3
 
 ### Durable, resumable video transport (private canary)
