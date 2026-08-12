@@ -166,7 +166,7 @@ describe('resumable video upload V2 HTTP contract', () => {
       const chunk = await json(await fetch(`${base}/api/media/video-upload/${uploadId}/original/0`, {
         method: 'PUT',
         headers: headers({ 'content-type': 'application/octet-stream' }),
-        body: new Uint8Array(Buffer.from('abc')),
+        body: new Uint8Array(Buffer.from('abcdef')),
       }))
       expect(chunk.status).toBe(200)
       // Give the response 'close' listener a turn to fire if it is going to.
@@ -189,10 +189,18 @@ describe('resumable video upload V2 HTTP contract', () => {
     expect(reopened.status).toBe(200)
     expect(reopened.body.uploadId).toBe(uploadId)
 
-    const chunk = await json(await fetch(`${base}/api/media/video-upload/${uploadId}/original/0`, {
+    const tooShort = await json(await fetch(`${base}/api/media/video-upload/${uploadId}/original/0`, {
       method: 'PUT',
       headers: headers({ 'content-type': 'application/octet-stream' }),
       body: new Uint8Array(Buffer.from('abc')),
+    }))
+    expect(tooShort.status).toBe(400)
+    expect(tooShort.body.error).toBe('video_upload_invalid')
+
+    const chunk = await json(await fetch(`${base}/api/media/video-upload/${uploadId}/original/0`, {
+      method: 'PUT',
+      headers: headers({ 'content-type': 'application/octet-stream' }),
+      body: new Uint8Array(Buffer.from('abcdef')),
     }))
     expect(chunk.status).toBe(200)
     expect(chunk.body.receivedOriginalChunks).toEqual([0])
@@ -203,15 +211,17 @@ describe('resumable video upload V2 HTTP contract', () => {
     expect(probe.status).toBe(200)
     expect(probe.body.missingOriginalChunks).toEqual([])
 
-    // The declared six-byte video has one 256 KiB chunk. A three-byte body is
-    // accepted durably, then finalize rejects the size mismatch without
-    // publishing a media record or losing the draft.
+    // Six declared bytes in one part, matching the session remainder. Finalize
+    // then refuses to publish this as video — it is not a real MP4/MOV — without
+    // losing the draft. A short PUT is rejected above, at the part, rather than
+    // being stored and failing only at assembly.
     const finalize = await json(await fetch(`${base}/api/media/video-upload/${uploadId}/finalize`, {
       method: 'POST',
       headers: headers({ 'content-type': 'application/json' }),
     }))
-    expect(finalize.status).toBe(500)
-    expect(finalize.body.error).toBe('video_upload_failed')
+    expect(finalize.status).toBe(400)
+    expect(finalize.body.error).toBe('unsupported_attachment_format')
+    expect(finalize.body.attachment).toBeUndefined()
 
     const cancelled = await json(await fetch(`${base}/api/media/video-upload/${uploadId}`, {
       method: 'DELETE',

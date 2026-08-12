@@ -1,3 +1,17 @@
+## 6.27.6
+- **V2 original chunks are 1 MiB.** Same sequential one-in-flight loop, same
+  ArrayBuffer bodies, same GET-progress resume. A 244 MB clip goes from 953
+  round trips to ~239. That is the leftover ~10% against legacy 8 MiB, paid as
+  per-chunk RTT, without opening a second fetch — two concurrent ArrayBuffer
+  PUTs from this WebView are still an untested shape.
+- **In-flight 256 KiB drafts keep their size.** `putOriginal` checks the
+  session's own `chunkBytes`, not the live constant, so a draft that started
+  before this upgrade still accepts 256 KiB parts and rejects a 1 MiB PUT into
+  that slot. New inits advertise 1 MiB. Do not raise this above 1 MiB until the
+  phone parser cap is raised first — above that, V2 capability parse returns
+  null and the transport silently falls back to legacy.
+- Frame parts stay 256 KiB. Protocol stays 1.
+
 ## 6.27.5
 - **Chunk uploads now leave a server-side trace.** On 2026-08-12 a phone upload
   stalled on both media transports and the server was a complete blind spot: nothing

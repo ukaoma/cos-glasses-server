@@ -180,7 +180,8 @@ machine-wide rollback for build 204+ server-owned query recovery),
 `COS_MEDIA_ROOT` (optional image/video store location; default
 `~/.cos-glasses/data/media`), and `COS_VIDEO_UPLOAD_V2=1` (private 6.27.3+
 resumable-video canary, managed by COS Control 0.5.20). The V2 canary retains
-accepted 256 KiB chunks and finalize receipts across restarts; keep it off when
+accepted original chunks (1 MiB on new sessions; leftover 256 KiB drafts keep
+that size) and finalize receipts across restarts; keep it off when
 using an older companion. Your name + transcription vocabulary live in
 `~/.cos-glasses/.cos-profile.json` (see `.cos-profile.example.json`).
 Factory example values are ignored; add the real names, companies, acronyms,

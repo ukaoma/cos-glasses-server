@@ -162,7 +162,8 @@ app.use('/api', requireApiToken(API_TOKEN))
 // through their true terminal boundary.
 app.use('/api', (req, res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
-  // V2 video chunks are bounded to 256 KiB and commit through the upload
+  // V2 video original chunks are bounded to the advertised session size (1 MiB
+  // on new sessions, 256 KiB on leftover drafts) and commit through the upload
   // registry's own generation lock. Holding the global mutation lease while
   // the phone transfers the body recreated the exact 90-second drain failure
   // this protocol exists to remove. Admission is checked by the route before

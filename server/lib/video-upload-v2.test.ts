@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -141,5 +142,58 @@ describe('durable video upload V2', () => {
     })
     expect(() => registry.get(progress.uploadId, 'srv_other_server_12345'))
       .toThrowError(VideoUploadError)
+  })
+
+  it('advertises 1 MiB for new sessions', () => {
+    const registry = createRegistry()
+    const progress = registry.init({
+      clientRequestId: 'phone:7777777777777777:size', serverInstanceId: SERVER_ID,
+      totalBytes: 10, mime: 'video/mp4',
+    })
+    expect(VIDEO_UPLOAD_V2_CHUNK_BYTES).toBe(1024 * 1024)
+    expect(progress.chunkBytes).toBe(1024 * 1024)
+    expect(progress.chunkCount).toBe(1)
+  })
+
+  it('resumes a 256 KiB draft after the advertised chunk size rises to 1 MiB', async () => {
+    const oldChunk = 256 * 1024
+    const totalBytes = oldChunk * 2 + 17
+    const uploadId = 'vu_aaaaaaaaaaaaaaaaaaaaaaaa'
+    const chunk0 = Buffer.alloc(oldChunk, 9)
+    const dir = join(uploads, uploadId)
+    mkdirSync(join(dir, 'original'), { recursive: true, mode: 0o700 })
+    mkdirSync(join(dir, 'frames'), { recursive: true, mode: 0o700 })
+    writeFileSync(join(dir, 'original', '0.bin'), chunk0)
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({
+      v: 1,
+      uploadId,
+      clientRequestId: 'phone:6666666666666666:legacy-chunk',
+      serverInstanceId: SERVER_ID,
+      state: 'receiving',
+      generation: 1,
+      totalBytes,
+      chunkBytes: oldChunk,
+      chunkCount: 3,
+      mime: 'video/mp4',
+      original: { '0': { bytes: oldChunk, sha256: createHash('sha256').update(chunk0).digest('hex') } },
+      frames: {},
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+    }))
+    const registry = createRegistry()
+    expect(registry.get(uploadId, SERVER_ID)).toMatchObject({
+      chunkBytes: oldChunk,
+      receivedOriginalChunks: [0],
+      missingOriginalChunks: [1, 2],
+    })
+    await expect(registry.putOriginal(uploadId, 0, chunk0, SERVER_ID)).resolves.toMatchObject({
+      receivedOriginalChunks: [0],
+    })
+    await registry.putOriginal(uploadId, 1, Buffer.alloc(oldChunk, 8), SERVER_ID)
+    await expect(registry.putOriginal(uploadId, 2, Buffer.alloc(VIDEO_UPLOAD_V2_CHUNK_BYTES, 1), SERVER_ID))
+      .rejects.toMatchObject({ code: 'video_upload_invalid' })
+    await registry.putOriginal(uploadId, 2, Buffer.alloc(17, 7), SERVER_ID)
+    expect(registry.get(uploadId, SERVER_ID).missingOriginalChunks).toEqual([])
   })
 })

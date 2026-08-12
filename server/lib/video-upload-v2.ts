@@ -27,7 +27,12 @@ import { getMediaStore } from './media-store.js'
 import { MAX_CHUNKED_MEDIA_BYTES, MAX_VIDEO_DURATION_MS } from './rich-media-safety.js'
 
 export const VIDEO_UPLOAD_V2_PROTOCOL = 1
-export const VIDEO_UPLOAD_V2_CHUNK_BYTES = 256 * 1024
+/** New sessions only. In-flight drafts keep the chunkBytes baked into their
+ *  manifest — a 256 KiB upload that survives this upgrade must not be rewritten
+ *  to 1 MiB mid-transfer. The phone parser currently rejects advertised sizes
+ *  above 1 MiB and disables V2 entirely, so do not raise this without raising
+ *  that cap first. */
+export const VIDEO_UPLOAD_V2_CHUNK_BYTES = 1024 * 1024
 export const VIDEO_UPLOAD_V2_MAX_FRAME_BYTES = 256 * 1024
 export const VIDEO_UPLOAD_V2_MAX_FRAME_PACK_BYTES = 2 * 1024 * 1024
 export const VIDEO_UPLOAD_PHONE_FRAMES_MIN = 8
@@ -175,6 +180,17 @@ function positiveSafeInteger(value: unknown): value is number {
 function parseIndex(value: unknown): number | null {
   const raw = typeof value === 'string' && /^\d{1,9}$/.test(value) ? Number(value) : value
   return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : null
+}
+
+/** Exact byte length this session expects for original index `index`.
+ *  Non-final parts are the session's own chunkBytes (which may be 256 KiB on a
+ *  draft that started before the 1 MiB advertisement). The last part is the
+ *  remainder. Using the live constant here would accept a 1 MiB PUT into a
+ *  256 KiB slot and fail assembly, or reject a legitimate leftover last chunk. */
+function expectedOriginalPartBytes(manifest: VideoUploadManifest, index: number): number {
+  if (index < 0 || index >= manifest.chunkCount) return 0
+  if (index === manifest.chunkCount - 1) return manifest.totalBytes - index * manifest.chunkBytes
+  return manifest.chunkBytes
 }
 
 function sameInit(manifest: VideoUploadManifest, input: Required<Pick<VideoUploadManifest,
@@ -442,8 +458,8 @@ export class VideoUploadRegistry {
   ): Promise<VideoUploadProgress> {
     const index = parseIndex(indexValue)
     if (index === null || bytes.length === 0) throw new VideoUploadError('video_upload_invalid', 'valid non-empty part required')
-    const max = kind === 'original' ? VIDEO_UPLOAD_V2_CHUNK_BYTES : VIDEO_UPLOAD_V2_MAX_FRAME_BYTES
-    if (bytes.length > max) throw new VideoUploadError('video_upload_invalid', 'part exceeds its byte ceiling', { maxBytes: max })
+    const advertisedMax = kind === 'original' ? VIDEO_UPLOAD_V2_CHUNK_BYTES : VIDEO_UPLOAD_V2_MAX_FRAME_BYTES
+    if (bytes.length > advertisedMax) throw new VideoUploadError('video_upload_invalid', 'part exceeds its byte ceiling', { maxBytes: advertisedMax })
     this.activeWriters.set(uploadId, (this.activeWriters.get(uploadId) ?? 0) + 1)
     try {
       return await this.withLock(uploadId, () => {
@@ -451,6 +467,14 @@ export class VideoUploadRegistry {
         if (manifest.state !== 'receiving') throw new VideoUploadError('video_upload_busy', `upload is ${manifest.state}`)
         if (kind === 'original' && index >= manifest.chunkCount) throw new VideoUploadError('video_upload_invalid', 'chunk index exceeds declared upload')
         if (kind === 'frames' && index >= VIDEO_UPLOAD_PHONE_FRAMES_MAX) throw new VideoUploadError('video_upload_invalid', 'frame index exceeds pack limit')
+        if (kind === 'original') {
+          const expected = expectedOriginalPartBytes(manifest, index)
+          if (bytes.length !== expected) {
+            throw new VideoUploadError('video_upload_invalid', 'part does not match the session chunk size', {
+              expectedBytes: expected, receivedBytes: bytes.length, chunkBytes: manifest.chunkBytes,
+            })
+          }
+        }
         const collection = manifest[kind]
         const key = String(index)
         const digest = sha256(bytes)
