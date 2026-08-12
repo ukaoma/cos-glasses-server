@@ -255,7 +255,42 @@ export function createMediaChunkBodyParser(options: MediaChunkParserOptions = {}
       return
     }
 
+    // Chunk-upload lifecycle trace.
+    //
+    // WHY. On 2026-08-12 a phone upload stalled on BOTH transports and the server side
+    // was a complete blind spot: nothing recorded that a chunk request had even
+    // arrived, so "the client never got the ack" could not be separated from "the
+    // server never sent one" without reading a staging file's mtime and running
+    // netstat by hand.
+    //
+    // SAMPLED like the client's breadcrumbs, and for the same reason. One line per
+    // REQUEST is still 2 rows x 248 chunks per video (~500), and at the advertised
+    // 2 GB ceiling ~16,400 rows and ~1.5 MB of log for ONE upload, into a LaunchAgent
+    // stdout with no rotation. Routine progress is sampled; the DIAGNOSTIC events —
+    // abandoned, closed-unanswered, too-large, and any non-2xx — are never sampled
+    // away, because those are the rows an investigation actually needs.
+    //
+    // Declared ABOVE the early refusals below: those used to return before this
+    // existed, so a chunk the server actively refused logged nothing at all — the
+    // same silence as a request that never arrived.
+    const openedAt = Date.now()
+    // `?? ''` is load-bearing: a request with neither field (the direct-parser test
+    // harness, and any non-Express caller) made `path.slice` throw and took the whole
+    // parser down. A tracer must never be able to break the thing it observes.
+    const path = req.originalUrl?.split('?')[0] ?? req.url ?? ''
+    const traceTarget = `${req.method} ${path}`
+    // Trailing segment is the chunk index on both routes
+    // (`/media/upload/:id/:index` and `/media/video-upload/:id/original/:index`).
+    const chunkIndex = Number(path.slice(path.lastIndexOf('/') + 1))
+    const sampled = !Number.isFinite(chunkIndex) || chunkIndex === 0 || chunkIndex % 32 === 0
+    let received = 0
+    const logLifecycle = (event: string, extra = '', always = false): void => {
+      if (!always && !sampled) return
+      console.log(`[media-chunk] ${event} ${traceTarget} bytes=${received} +${Date.now() - openedAt}ms${extra}`)
+    }
+
     const refuse = (status: number, body: Record<string, unknown>): void => {
+      logLifecycle('refused', ` status=${status} error=${String(body.error ?? '')}`, true)
       res.status(status).json(body)
       res.once('finish', () => req.destroy())
     }
@@ -279,7 +314,6 @@ export function createMediaChunkBodyParser(options: MediaChunkParserOptions = {}
     }
 
     const parts: Buffer[] = []
-    let received = 0
     let settled = false
 
     req.on('data', (chunk: Buffer) => {
@@ -288,6 +322,7 @@ export function createMediaChunkBodyParser(options: MediaChunkParserOptions = {}
       if (received > maxChunkBytes) {
         settled = true
         parts.length = 0
+        logLifecycle('too-large', ` max=${maxChunkBytes}`)
         refuse(413, { error: 'attachment_too_large', maxBytes: maxChunkBytes })
         return
       }
@@ -297,12 +332,33 @@ export function createMediaChunkBodyParser(options: MediaChunkParserOptions = {}
       if (settled) return
       settled = true
       parts.length = 0
+      // The client went away mid-body. Distinguishes a phone that stopped sending
+      // from a server that stopped answering — opposite diagnoses, same silence.
+      logLifecycle('abandoned')
     }
     req.once('aborted', abandon)
     req.once('error', abandon)
+    // Fires when the response is fully flushed to the socket. Paired with 'body-read'
+    // this is the proof that the server answered, and how fast.
+    res.once('finish', () => {
+      logLifecycle('responded', ` status=${res.statusCode}`)
+    })
+    // `res` 'close', NOT `req` 'close'. Since Node 16 `IncomingMessage` emits 'close'
+    // when the REQUEST completes, not when the socket does — so on any async handler
+    // it fires while `res.writableEnded` is still false. `putOriginal`/`putFrame` are
+    // both async, so gating on `req` made this false-fire on EVERY successful V2
+    // chunk: 237 bogus rows per upload, on the single line the changelog calls "the
+    // only case where blaming the server is correct". A watcher that cries wolf on the
+    // happy path is worse than no watcher. `res` 'close' fires after the response is
+    // finished or genuinely aborted, so the guard means what it says.
+    res.once('close', () => {
+      if (res.writableEnded) return
+      logLifecycle('closed-unanswered', '', true)
+    })
     req.once('end', () => {
       if (settled) return
       settled = true
+      logLifecycle('body-read')
       chunkBodies.set(req, Buffer.concat(parts))
       next()
     })

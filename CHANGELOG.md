@@ -1,3 +1,28 @@
+## 6.27.5
+- **Chunk uploads now leave a server-side trace.** On 2026-08-12 a phone upload
+  stalled on both media transports and the server was a complete blind spot: nothing
+  recorded that a chunk request had arrived, so "the client never got the ack" could
+  not be separated from "the server never sent one" without reading a staging file's
+  mtime and running `netstat` by hand.
+- `[media-chunk]` now logs one line per REQUEST (never per data event - a 237-chunk
+  upload logging per `data` would bury the log): `body-read` when the body finishes
+  arriving, `responded` with status when the response is fully flushed to the socket,
+  `abandoned` when the client goes away mid-body, and `closed-unanswered` when the
+  socket closes with no response written. Each carries bytes received and elapsed ms.
+- `closed-unanswered` is the only case where blaming the server is correct, and it is
+  now stated explicitly rather than inferred from absence of evidence. It gates on
+  **`res` 'close', not `req` 'close'**: since Node 16 `IncomingMessage` emits 'close'
+  when the REQUEST completes rather than when the socket does, so on an async handler
+  (`putOriginal` and `putFrame` both are) it lands while `res.writableEnded` is still
+  false. Gated on `req` it false-fired on EVERY successful V2 chunk — 237 bogus alarms
+  per upload on the single most diagnostic line in the file. Caught by adversarial QA
+  before release and pinned by a test that fails if the gate moves back.
+- The two early refusals (`chunk_bytes_required` 400 and declared-Content-Length 413)
+  returned BEFORE the tracer existed, so a chunk the server actively rejected logged
+  nothing — the same silence as a request that never arrived. The tracer is now
+  declared above them and every refusal logs.
+- Diagnosis only. No behaviour change to any upload path.
+
 ## 6.27.4
 
 ### Fuzzy name corrections reach phone dictation

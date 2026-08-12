@@ -148,6 +148,37 @@ describe('resumable video upload V2 HTTP contract', () => {
     expect(res.body.error).toBe('server_identity_mismatch')
   })
 
+  // 6.27.5 lifecycle trace. `closed-unanswered` is the ONE row that means the server
+  // failed to answer, so it must never fire on the happy path. It was originally gated
+  // on `req` 'close', which since Node 16 fires when the REQUEST completes rather than
+  // when the socket does — on an async handler (putOriginal/putFrame both are) that
+  // lands while res.writableEnded is still false, so every successful V2 chunk logged
+  // a false alarm. 237 bogus rows per upload on the single most diagnostic line.
+  it('logs body-read and responded for a successful chunk, and never closed-unanswered', async () => {
+    const rows: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      const line = args.map(String).join(' ')
+      if (line.includes('[media-chunk]')) rows.push(line)
+    })
+    try {
+      const opened = await init()
+      const uploadId = opened.body.uploadId as string
+      const chunk = await json(await fetch(`${base}/api/media/video-upload/${uploadId}/original/0`, {
+        method: 'PUT',
+        headers: headers({ 'content-type': 'application/octet-stream' }),
+        body: new Uint8Array(Buffer.from('abc')),
+      }))
+      expect(chunk.status).toBe(200)
+      // Give the response 'close' listener a turn to fire if it is going to.
+      await new Promise(resolve => setTimeout(resolve, 25))
+    } finally {
+      spy.mockRestore()
+    }
+    expect(rows.some(r => r.includes('body-read'))).toBe(true)
+    expect(rows.some(r => r.includes('responded') && r.includes('status=200'))).toBe(true)
+    expect(rows.filter(r => r.includes('closed-unanswered'))).toEqual([])
+  })
+
   it('resumes the same request, accepts raw chunks, and exposes typed terminal controls', async () => {
     const opened = await init()
     expect(opened.status).toBe(200)
