@@ -1,4 +1,9 @@
 ## Unreleased
+- **Session discussion gist.** Agent-session list and detail include
+  `discussion_summary`: first real user turn plus the latest assistant prose
+  from a cheap transcript peek. No LLM. Glasses use it on the session row and
+  detail; older clients ignore the field. `first_prompt` on the list is the
+  first user turn, not a copy of the sidebar title.
 - **Sessions lookup.** `GET /api/agent-sessions/search?q=` runs keyword over
   sidebar names, `/rename` titles, first prompts, and the first ~8k of user
   transcript — including chats older than the 7-day list window. Meaning search

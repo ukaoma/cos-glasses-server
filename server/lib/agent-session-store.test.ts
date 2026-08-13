@@ -6,8 +6,10 @@ import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import {
   agentSessionRoots,
+  composeDiscussionSummary,
   isKeepWarmSessionTitle,
   isScratchCursorProject,
+  latestAssistantFromWindow,
   listAgentSessions,
   listClaudeSessions,
   listCodexSessions,
@@ -254,5 +256,48 @@ describe('keep-warm Claude sessions stay out of the list', () => {
 
     const listed = await listClaudeSessions(join(home, '.claude', 'projects'), now, new Set())
     expect(listed.map(row => row.display_label)).toEqual(['Fireflies meeting sync'])
+  })
+})
+
+describe('discussion gist', () => {
+  it('joins first user turn and latest assistant without repeating the sidebar title', () => {
+    expect(composeDiscussionSummary({
+      title: 'POS complexity and competitive challenges',
+      firstPrompt: 'Are there any calls and attention around this?',
+      latestAssistant: 'We can do this or that depending on EWIC month-out.',
+    })).toBe('Are there any calls and attention around this? · We can do this or that depending on EWIC month-out.')
+    expect(composeDiscussionSummary({
+      title: 'POS complexity and competitive challenges',
+      firstPrompt: 'POS complexity and competitive challenges',
+      latestAssistant: 'We can do this or that.',
+    })).toBe('We can do this or that.')
+  })
+
+  it('reads the last assistant prose from a Claude window', () => {
+    const window = [
+      '{"type":"user","message":{"role":"user","content":"Are there any calls and attention around this?"}}',
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"We can do this or that?"}]}}',
+    ].join('\n')
+    expect(latestAssistantFromWindow(window)).toBe('We can do this or that?')
+  })
+
+  it('lists a discussion gist next to the sidebar title', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cos-agent-gist-'))
+    const proj = join(home, '.claude', 'projects', 'MU-Chief-Staff')
+    mkdirSync(proj, { recursive: true })
+    const now = new Date('2026-08-13T19:20:00Z')
+    const file = join(proj, 'dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl')
+    writeFileSync(file, [
+      '{"type":"custom-title","customTitle":"POS complexity and competitive challenges"}',
+      '{"type":"user","message":{"role":"user","content":"Are there any calls and attention around this?"}}',
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"We can do this or that depending on EWIC."}]}}',
+    ].join('\n') + '\n')
+    touch(file, now)
+    const listed = await listClaudeSessions(join(home, '.claude', 'projects'), now, new Set())
+    expect(listed).toHaveLength(1)
+    expect(listed[0].display_label).toBe('POS complexity and competitive challenges')
+    expect(listed[0].first_prompt).toBe('Are there any calls and attention around this?')
+    expect(listed[0].discussion_summary).toContain('Are there any calls and attention around this?')
+    expect(listed[0].discussion_summary).toContain('We can do this or that depending on EWIC.')
   })
 })

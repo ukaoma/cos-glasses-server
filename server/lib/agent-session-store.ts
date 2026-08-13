@@ -37,6 +37,8 @@ export interface AgentSessionRow {
   alive: boolean
   state: 'running' | 'recent'
   pinned: boolean
+  first_prompt?: string
+  discussion_summary?: string
 }
 
 export interface AgentSessionRoots {
@@ -118,6 +120,74 @@ export function firstLineTitle(text: string): string {
   body = body.replace(/<[^>]+>/g, ' ')
   const line = body.split('\n').map(s => s.trim()).find(s => s.length > 0) ?? ''
   return line.slice(0, 80)
+}
+
+export function proseSnippet(text: string, max = 160): string {
+  let body = text.replace(/```[\s\S]*?```/g, ' ')
+  body = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!body || isWrapperPrompt(body)) return ''
+  return body.slice(0, max)
+}
+
+export function composeDiscussionSummary(input: {
+  title?: string
+  firstPrompt?: string
+  latestAssistant?: string
+  max?: number
+}): string {
+  const max = input.max ?? 180
+  const title = (input.title ?? '').replace(/\s+/g, ' ').trim()
+  const first = firstLineTitle(input.firstPrompt ?? '')
+  const latest = (input.latestAssistant ?? '').replace(/\s+/g, ' ').trim()
+  const opening = first && first !== title ? first : ''
+  const parts: string[] = []
+  if (opening) parts.push(opening)
+  if (latest && latest !== title && latest !== opening) parts.push(latest)
+  const joined = parts.join(' · ')
+  if (!joined) return ''
+  return joined.length <= max ? joined : `${joined.slice(0, max - 1)}…`
+}
+
+export function assistantProseFromRecord(obj: Record<string, unknown>): string | null {
+  if (obj.type === 'assistant') {
+    const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null
+    const text = message ? payloadText(message) : null
+    return text ? proseSnippet(text) || null : null
+  }
+  if (obj.type === 'response_item' && obj.payload && typeof obj.payload === 'object') {
+    const payload = obj.payload as Record<string, unknown>
+    if (payload.role === 'assistant' && (payload.type === 'message' || !payload.type)) {
+      const text = payloadText(payload)
+      return text ? proseSnippet(text) || null : null
+    }
+  }
+  if (obj.role === 'assistant') {
+    const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null
+    const text = message ? payloadText(message) : null
+    return text ? proseSnippet(text) || null : null
+  }
+  return null
+}
+
+export function latestAssistantFromWindow(text: string): string {
+  let latest = ''
+  for (const line of text.split('\n')) {
+    const obj = parseJsonLine(line)
+    if (!obj) continue
+    const prose = assistantProseFromRecord(obj)
+    if (prose) latest = prose
+  }
+  return latest
+}
+
+function discussionFields(title: string, firstPrompt: string, latestAssistant: string): {
+  first_prompt: string
+  discussion_summary: string
+} {
+  return {
+    first_prompt: firstPrompt,
+    discussion_summary: composeDiscussionSummary({ title, firstPrompt, latestAssistant }),
+  }
 }
 
 function cursorUserTitle(body: string, requireQuery: boolean): string | null {
@@ -230,6 +300,21 @@ export async function lastCustomTitle(path: string): Promise<string | null> {
     if (title) found = title.slice(0, 120)
   }
   return found
+}
+
+export async function peekClaudeDiscussion(path: string): Promise<{ customTitle: string | null; latestAssistant: string }> {
+  const text = await readWindow(path, true)
+  let customTitle: string | null = null
+  for (const line of text.split('\n')) {
+    if (line.includes('custom-title')) {
+      const obj = parseJsonLine(line)
+      if (obj?.type === 'custom-title') {
+        const title = String(obj.customTitle ?? '').trim()
+        if (title) customTitle = title.slice(0, 120)
+      }
+    }
+  }
+  return { customTitle, latestAssistant: latestAssistantFromWindow(text) }
 }
 
 export async function firstClaudeUserTitle(path: string): Promise<string | null> {
@@ -442,9 +527,9 @@ export async function peekCodexMeta(path: string): Promise<{ id: string; cwd: st
   return { id, cwd, title, subagent, created }
 }
 
-async function lastCursorUserTitle(path: string): Promise<string | null> {
+async function peekCursorDiscussion(path: string): Promise<{ lastUser: string | null; latestAssistant: string }> {
   const text = await readWindow(path, true)
-  let found: string | null = null
+  let lastUser: string | null = null
   for (const line of text.split('\n')) {
     const obj = parseJsonLine(line)
     if (!obj || obj.role !== 'user') continue
@@ -452,9 +537,9 @@ async function lastCursorUserTitle(path: string): Promise<string | null> {
     const body = message ? payloadText(message) : null
     if (!body) continue
     const title = cursorUserTitle(body, true)
-    if (title) found = title
+    if (title) lastUser = title
   }
-  return found
+  return { lastUser, latestAssistant: latestAssistantFromWindow(text) }
 }
 
 async function firstCursorUserTitle(path: string): Promise<string | null> {
@@ -559,8 +644,13 @@ export async function listClaudeSessions(
       if (rows.length >= Math.max(0, limit)) break
       let title = ''
       let project = candidate.project
+      let firstPrompt = ''
+      let latestAssistant = ''
       if (candidate.file) {
-        title = await lastCustomTitle(candidate.file) ?? await firstClaudeUserTitle(candidate.file) ?? ''
+        const peek = await peekClaudeDiscussion(candidate.file)
+        firstPrompt = await firstClaudeUserTitle(candidate.file) ?? ''
+        title = peek.customTitle ?? firstPrompt
+        latestAssistant = peek.latestAssistant
       }
       if ((!title || !project) && (candidate.desktop || desktopSessionsRoot)) {
         const desktop = candidate.desktop || await findClaudeDesktopFile(desktopSessionsRoot, candidate.native)
@@ -581,6 +671,7 @@ export async function listClaudeSessions(
         created: isoFromMtime(candidate.birthtimeMs),
         alive: false,
         pinned: starredIds.has(candidate.native.toLowerCase()),
+        ...discussionFields(title, firstPrompt, latestAssistant),
       }))
     }
     return rows
@@ -626,6 +717,7 @@ export async function listCodexSessions(
       const title = names.get(native) || meta.title || 'Codex session'
       if (isKeepWarmSessionTitle(title)) continue
       const created = meta.created || createdFromCodexFilename(candidate.name) || isoFromMtime(candidate.birthtimeMs)
+      const latestAssistant = latestAssistantFromWindow(await readWindow(candidate.file, true))
       rows.push(row({
         session_id: native,
         provider: 'codex',
@@ -635,6 +727,7 @@ export async function listCodexSessions(
         created,
         alive: false,
         pinned: pinnedIds.has(native.toLowerCase()),
+        ...discussionFields(title, meta.title, latestAssistant),
       }))
     }
     return rows
@@ -687,9 +780,11 @@ export async function listCursorSessions(
     const rows: AgentSessionRow[] = []
     for (const candidate of candidates) {
       if (rows.length >= Math.max(0, limit)) break
+      const peek = await peekCursorDiscussion(candidate.file)
+      const firstPrompt = await firstCursorUserTitle(candidate.file) ?? peek.lastUser ?? ''
       const title = composerNames.get(candidate.sessionDir)
-        ?? await lastCursorUserTitle(candidate.file)
-        ?? await firstCursorUserTitle(candidate.file)
+        ?? peek.lastUser
+        ?? firstPrompt
         ?? 'Cursor session'
       if (isKeepWarmSessionTitle(title)) continue
       const alive = now.getTime() - candidate.mtimeMs < 180_000
@@ -703,6 +798,7 @@ export async function listCursorSessions(
         alive,
         state: alive ? 'running' : 'recent',
         pinned: pinnedIds.has(candidate.sessionDir.toLowerCase()),
+        ...discussionFields(title, firstPrompt, peek.latestAssistant),
       }))
     }
     return rows
@@ -718,12 +814,15 @@ async function enrichLiveClaude(row: AgentSessionRow, roots: AgentSessionRoots):
   if (row.provider !== 'claude') return row
   const found = await findAgentSessionFile('claude', row.session_id, roots)
   if (!found) return row
-  const title = await lastCustomTitle(found) ?? await firstClaudeUserTitle(found)
+  const peek = await peekClaudeDiscussion(found)
+  const firstPrompt = await firstClaudeUserTitle(found)
+  const title = peek.customTitle ?? firstPrompt ?? row.display_label
   const fullId = found.split('/').pop()?.replace(/\.jsonl$/i, '') || row.session_id
   return {
     ...row,
     session_id: fullId,
     display_label: title || row.display_label || 'Claude session',
+    ...discussionFields(title || row.display_label, firstPrompt || '', peek.latestAssistant),
   }
 }
 
@@ -842,6 +941,7 @@ export interface AgentSessionDetail {
   project: string
   git_branch: string
   first_prompt: string
+  discussion_summary: string
   user_message_count: number
   assistant_message_count: number
   omitted_tools: number
@@ -855,6 +955,7 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
   let gitBranch = ''
   let sessionId = path.split('/').pop()?.replace(/\.jsonl$/, '') || ''
   let firstPrompt = ''
+  let latestAssistant = ''
   let userCount = 0
   let assistantCount = 0
   let omittedTools = 0
@@ -884,7 +985,11 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
         userCount += 1
         if (!firstPrompt) firstPrompt = firstLineTitle(text)
         if (!title) title = firstLineTitle(text)
-      } else assistantCount += 1
+      } else {
+        assistantCount += 1
+        const snippet = proseSnippet(text)
+        if (snippet) latestAssistant = snippet
+      }
     } else if (provider === 'codex') {
       if (obj.type === 'session_meta' && obj.payload && typeof obj.payload === 'object') {
         const payload = obj.payload as Record<string, unknown>
@@ -904,8 +1009,11 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
       if (kind !== 'message' || payload.role === 'developer') continue
       const text = payloadText(payload)
       if (!text || isWrapperPrompt(text)) continue
-      if (payload.role === 'assistant') assistantCount += 1
-      else {
+      if (payload.role === 'assistant') {
+        assistantCount += 1
+        const snippet = proseSnippet(text)
+        if (snippet) latestAssistant = snippet
+      } else {
         userCount += 1
         if (!firstPrompt) firstPrompt = firstLineTitle(text)
         if (!title) title = firstLineTitle(text)
@@ -925,7 +1033,11 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
           title = query
           if (!firstPrompt) firstPrompt = query
         }
-      } else assistantCount += 1
+      } else {
+        assistantCount += 1
+        const snippet = proseSnippet(text)
+        if (snippet) latestAssistant = snippet
+      }
     }
   }
 
@@ -935,13 +1047,19 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
     project = workspaceLabel(encoded)
   }
 
+  const display = title || (provider === 'codex' ? 'Codex session' : provider === 'cursor' ? 'Cursor session' : 'Claude session')
   return {
     session_id: sessionId,
     provider,
-    display_label: title || (provider === 'codex' ? 'Codex session' : provider === 'cursor' ? 'Cursor session' : 'Claude session'),
+    display_label: display,
     project,
     git_branch: gitBranch,
     first_prompt: firstPrompt || title,
+    discussion_summary: composeDiscussionSummary({
+      title: display,
+      firstPrompt: firstPrompt || title,
+      latestAssistant,
+    }),
     user_message_count: userCount,
     assistant_message_count: assistantCount,
     omitted_tools: omittedTools,

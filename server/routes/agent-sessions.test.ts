@@ -133,6 +133,13 @@ describe('agent session listing', () => {
     const listed = await listCodexSessions(roots.codexSessions, listingNow)
     expect(listed.some(row => row.session_id === 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')).toBe(true)
   })
+
+  it('exposes discussion_summary on list entries', () => {
+    const source = readFileSync(new URL('./agent-sessions.ts', import.meta.url), 'utf8')
+    expect(source).toMatch('discussion_summary: row.discussion_summary')
+    expect(source).toMatch('first_prompt: row.first_prompt || row.display_label')
+    expect(source).toMatch('discussion_summary: parsed.discussion_summary')
+  })
 })
 
 const closers: Array<() => Promise<void>> = []
