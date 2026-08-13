@@ -1,4 +1,11 @@
 ## Unreleased
+- **Memory and Threads lookup.** `GET /api/memory/search?q=` and
+  `GET /api/threads/search?q=` run keyword over local notes (first ~8k of each
+  file, ~2k file budget) then, for memories only, one embedding against the
+  existing `cos_memory` index via `bot_memory.py`. Threads have no embedding
+  index — `semanticAvailable` is false and keyword still works. Literal paths,
+  registered before `/:id`. Does not search meeting Qdrant. Additive; list and
+  detail are unchanged.
 - **Meeting library calendar filters.** `GET /api/meetings` accepts `month=YYYY-MM`
   and `day=YYYY-MM-DD`, raises the cap to 200 when either is set, and returns
   `months` plus per-day counts for that month. Unfiltered G2 lists stay at the

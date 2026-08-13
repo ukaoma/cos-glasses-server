@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { callPython, contextSourceAvailable, pythonBridgeState } from '../lib/python-bridge.js'
+import { searchMemories } from '../lib/context-library-search.js'
 
 /**
  * Is there anything to serve — a Python bridge OR plain files on disk?
@@ -75,6 +76,25 @@ memoryRouter.get('/memory/overview', async (_req, res) => {
       by_type: {},
       reason: 'memory_bridge_unavailable',
     })
+  }
+})
+
+memoryRouter.get('/memory/search', async (req, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+  if (query.length < 2) {
+    res.status(400).json({ error: 'q must be at least 2 characters', reason: 'invalid_query' })
+    return
+  }
+  const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 20
+  res.set('Cache-Control', 'private, no-store')
+  try {
+    const result = await searchMemories({
+      query,
+      limit: Number.isFinite(rawLimit) ? rawLimit : 20,
+    })
+    res.json(result)
+  } catch {
+    res.status(503).json({ error: 'memory_search_unavailable', reason: 'memory_search_unavailable' })
   }
 })
 

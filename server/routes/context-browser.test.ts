@@ -10,6 +10,25 @@ vi.mock('../lib/python-bridge.js', () => ({
   // every export, so omitting it makes the gate `undefined()` and every route
   // throws — which is exactly what happened when it was first added.
   contextSourceAvailable: vi.fn(() => 'bridge'),
+  COS_SCRIPTS_DIR: null,
+  PYTHON_BIN: null,
+}))
+
+vi.mock('../lib/context-library-search.js', () => ({
+  searchMemories: vi.fn(async () => ({
+    hits: [{ id: 'mem_search_hit', title: 'Toast', snippet: 'counter toast', kind: 'memory', keywordScore: 0.8, semanticScore: 0, match: 'keyword' }],
+    keywordCount: 1,
+    semanticCount: 0,
+    semanticAvailable: false,
+    semanticReason: 'no_memory_embeddings',
+  })),
+  searchThreads: vi.fn(async () => ({
+    hits: [{ id: '7ce8073d', title: 'Hubspot Theme Settings', snippet: 'theme', kind: 'thread', keywordScore: 0.7, semanticScore: 0, match: 'keyword' }],
+    keywordCount: 1,
+    semanticCount: 0,
+    semanticAvailable: false,
+    semanticReason: 'no_thread_embeddings',
+  })),
 }))
 
 import {
@@ -189,6 +208,26 @@ describe('a file-backed install reaches the same routes', () => {
     const status = await fetch(`${base}/api/context/status`)
     expect(status.status).toBe(200)
     expect((await status.json()).available).toBe(false)
+    expect(callBridge).not.toHaveBeenCalled()
+  })
+
+  it('registers memory and thread search before /:id so q is not parsed as an id', async () => {
+    const base = await startTestServer()
+    const tooShort = await fetch(`${base}/api/memory/search?q=T`)
+    expect(tooShort.status).toBe(400)
+    const memory = await fetch(`${base}/api/memory/search?q=Toast`)
+    expect(memory.status).toBe(200)
+    expect(await memory.json()).toEqual(expect.objectContaining({
+      semanticAvailable: false,
+      hits: [expect.objectContaining({ id: 'mem_search_hit', match: 'keyword' })],
+    }))
+    const threads = await fetch(`${base}/api/threads/search?q=theme`)
+    expect(threads.status).toBe(200)
+    expect(await threads.json()).toEqual(expect.objectContaining({
+      semanticAvailable: false,
+      semanticReason: 'no_thread_embeddings',
+      hits: [expect.objectContaining({ id: '7ce8073d' })],
+    }))
     expect(callBridge).not.toHaveBeenCalled()
   })
 })
