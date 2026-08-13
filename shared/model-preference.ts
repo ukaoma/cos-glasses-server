@@ -195,7 +195,7 @@ export function modelLabel(model: ModelPreference): string {
     case 'haiku': return 'Haiku'
     case 'codex-frontier': return runtimeCodexLabels[model] ?? 'GPT Frontier'
     case 'codex-balanced': return runtimeCodexLabels[model] ?? 'GPT Balanced'
-    case 'cursor-grok': return runtimeCursorLabels[model] ?? 'Grok 4.5 Fast'
+    case 'cursor-grok': return runtimeCursorLabels[model] ?? 'Grok Fast'
     case 'cursor-composer': return runtimeCursorLabels[model] ?? 'Composer 2.5 Fast'
     case 'opus':
     default:

@@ -75,7 +75,7 @@ exit 1
       })
       expect(result.status).toBe(0)
       expect(result.stdout).toContain('Cursor Agent Cursor Agent CLI Version 2026.07')
-      expect(result.stdout).toContain('(Composer 2.5 / Grok 4.5)')
+      expect(result.stdout).toContain('(Composer 2.5 / newest Grok high-fast)')
       expect(result.stdout).toContain('Non-mutating readiness check complete')
     } finally {
       rmSync(temp, { recursive: true, force: true })

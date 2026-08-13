@@ -1,3 +1,29 @@
+## Unreleased
+- **Meeting library calendar filters.** `GET /api/meetings` accepts `month=YYYY-MM`
+  and `day=YYYY-MM-DD`, raises the cap to 200 when either is set, and returns
+  `months` plus per-day counts for that month. Unfiltered G2 lists stay at the
+  existing 50-row cap. Additive — extra fields are ignored by older clients.
+- **Meeting lookup.** `GET /api/meetings/search?q=` runs keyword over title,
+  summary, and filename, then meaning search against the existing Qdrant
+  meeting index (one query embedding, no LLM). Keyword still returns if Qdrant
+  is down. Literal path, registered before `/meetings/:domain/:month/:filename`.
+- **Reset live message count.** `POST /api/message-era/reset` with `{ confirm: true }`
+  snapshots live sessions into the day archive, then starts short-numbering at
+  #1. History is not deleted — ARCHIVE / Message History still resolve old
+  stamps. Refuses without confirm, while a query is in flight, or if archive
+  fails. Disk mtime is enough; no server restart. CLI
+  `reset-message-era.ts --confirm` uses the same path.
+- **Grok slot tracks newest high-fast.** `cursor-grok` now resolves to the
+  newest `cursor-grok-<ver>-high-fast` from `agent models` (today 4.6). Low,
+  medium, xhigh, and non-fast ids are ignored. Composer stays pinned to
+  `composer-2.5-fast`. No EHPK change: the phone still sends the stable slot.
+- **Clear stranded video uploads.** Sideload, crash, or a killed composer can
+  leave a `receiving` draft for 4 hours. That draft holds `blocksRestart`, so
+  Repair and Update stall on it instead of clearing it. `POST /api/media/video-upload/clear-stranded`
+  cancels receiving drafts with no active writer and no bytes for 60 seconds.
+  Finalizing and published receipts are left alone. Live on the next published
+  server; COS Control 0.5.22 can already DELETE the same drafts against 6.27.6.
+
 ## 6.27.6
 - **V2 original chunks are 1 MiB.** Same sequential one-in-flight loop, same
   ArrayBuffer bodies, same GET-progress resume. A 244 MB clip goes from 953

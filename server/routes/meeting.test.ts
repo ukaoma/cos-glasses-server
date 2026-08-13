@@ -287,6 +287,78 @@ describe('meeting save/list/detail API', () => {
     })
   })
 
+  it('filters the meeting library by month and day without changing the unfiltered G2 cap', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    const savedRes = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'July meeting', domain: 'personal' }),
+    })
+    expect(savedRes.status).toBe(200)
+    const saved = await savedRes.json() as any
+    mkdirSync(join(h.recordingsRoot, '2026-08'), { recursive: true })
+    writeFileSync(join(h.recordingsRoot, '2026-08', '2026-08-12_August_Review.md'), [
+      '# August Review', '', '**Date:** 2026-08-12', '**Domain:** personal', '**Duration:** 12 minutes',
+      '', '## Summary', 'Later month record.', '', '## Transcript', 'August transcript.',
+    ].join('\n'))
+
+    const unfiltered = await (await h.api('/api/meetings?limit=20&domain=all')).json() as any
+    expect(unfiltered.meetings).toHaveLength(2)
+    expect(unfiltered.meetings.length).toBeLessThanOrEqual(50)
+    expect(unfiltered.months).toEqual(['2026-08', '2026-07'])
+    expect(unfiltered.days).toEqual([])
+
+    const july = await (await h.api('/api/meetings?limit=200&domain=all&month=2026-07')).json() as any
+    expect(july.meetings.map((meeting: any) => meeting.filename)).toEqual([saved.filename])
+    expect(july.days).toEqual([{ date: '2026-07-15', count: 1 }])
+    expect(july.months).toEqual(['2026-08', '2026-07'])
+
+    const august = await (await h.api('/api/meetings?month=2026-08')).json() as any
+    expect(august.meetings.map((meeting: any) => meeting.title)).toEqual(['August Review'])
+    expect(august.days).toEqual([{ date: '2026-08-12', count: 1 }])
+
+    const day = await (await h.api('/api/meetings?day=2026-08-12')).json() as any
+    expect(day.meetings).toHaveLength(1)
+    expect(day.meetings[0].title).toBe('August Review')
+
+    const emptyDay = await (await h.api('/api/meetings?month=2026-08&day=2026-08-01')).json() as any
+    expect(emptyDay.meetings).toEqual([])
+    expect(emptyDay.days).toEqual([{ date: '2026-08-12', count: 1 }])
+
+    const badMonth = await h.api('/api/meetings?month=2026-13')
+    expect(badMonth.status).toBe(400)
+    expect(await badMonth.json()).toMatchObject({ reason: 'invalid_month' })
+    const mismatch = await h.api('/api/meetings?month=2026-07&day=2026-08-12')
+    expect(mismatch.status).toBe(400)
+    expect(await mismatch.json()).toMatchObject({ reason: 'month_day_mismatch' })
+  })
+
+  it('looks up meetings by keyword across months and rejects a short query', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'July meeting', domain: 'personal' }),
+    })
+    mkdirSync(join(h.recordingsRoot, '2026-08'), { recursive: true })
+    writeFileSync(join(h.recordingsRoot, '2026-08', '2026-08-12_August_Review.md'), [
+      '# August Review', '', '**Date:** 2026-08-12', '**Domain:** personal', '**Duration:** 12 minutes',
+      '', '## Summary', 'Later month record about Toast in grocery.', '', '## Transcript', 'August transcript.',
+    ].join('\n'))
+
+    const tooShort = await h.api('/api/meetings/search?q=T')
+    expect(tooShort.status).toBe(400)
+    expect(await tooShort.json()).toMatchObject({ reason: 'invalid_query' })
+
+    const found = await (await h.api('/api/meetings/search?q=Toast%20grocery')).json() as any
+    expect(found.hits.some((hit: any) => hit.title === 'August Review')).toBe(true)
+    const august = found.hits.find((hit: any) => hit.title === 'August Review')
+    expect(august).toMatchObject({
+      month: '2026-08',
+      filename: '2026-08-12_August_Review.md',
+      match: 'keyword',
+    })
+    expect(found.keywordCount).toBeGreaterThan(0)
+  })
+
   it('retains a failed finalization job and resumes it on idempotent save replay', async () => {
     let attempts = 0
     const h = await harness({

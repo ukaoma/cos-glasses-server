@@ -3,6 +3,8 @@ import {
   buildCursorModelCatalog,
   CURSOR_SLOT_MODEL_IDS,
   parseAgentModelsText,
+  parseCursorGrokHighFastVersion,
+  selectNewestCursorGrokHighFast,
 } from './cursor-model-catalog.js'
 
 const PHASE0_FIXTURE = `Available models
@@ -58,5 +60,31 @@ describe('buildCursorModelCatalog', () => {
       'cli',
     )
     expect(catalog.options.every(option => option.id === '')).toBe(true)
+  })
+
+  it('selects the newest cursor-grok-*-high-fast and ignores xhigh/low/medium', () => {
+    const models = parseAgentModelsText(`
+cursor-grok-4.5-high-fast - Cursor Grok 4.5 Fast
+cursor-grok-4.6-high-fast - Cursor Grok 4.6 Fast
+cursor-grok-4.6-xhigh-fast - Cursor Grok 4.6 Extra High Fast
+cursor-grok-4.6-medium-fast - Cursor Grok 4.6 Medium Fast
+cursor-grok-4.6-high - Cursor Grok 4.6
+composer-2.5-fast - Composer 2.5 Fast
+`)
+    expect(parseCursorGrokHighFastVersion('cursor-grok-4.6-xhigh-fast')).toBeNull()
+    expect(selectNewestCursorGrokHighFast(models)?.id).toBe('cursor-grok-4.6-high-fast')
+    const catalog = buildCursorModelCatalog(models, 'cli')
+    expect(catalog.options).toEqual([
+      {
+        preference: 'cursor-grok',
+        id: 'cursor-grok-4.6-high-fast',
+        displayName: 'Cursor Grok 4.6 Fast',
+      },
+      {
+        preference: 'cursor-composer',
+        id: 'composer-2.5-fast',
+        displayName: 'Composer 2.5 Fast',
+      },
+    ])
   })
 })

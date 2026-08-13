@@ -179,11 +179,11 @@ function cursorCliState() {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 7000,
     })
-    const required = ['composer-2.5-fast', 'cursor-grok-4.5-high-fast']
+    const grokHighFast = /cursor-grok-\d+(?:\.\d+)*-high-fast/.test(models)
     return {
       binary,
       version,
-      auth: required.every((model) => models.includes(model)) ? 'ready' : 'models-unresolved',
+      auth: models.includes('composer-2.5-fast') && grokHighFast ? 'ready' : 'models-unresolved',
     }
   } catch (err) {
     const output = `${err.stdout?.toString() || ''}\n${err.stderr?.toString() || ''}`
@@ -230,13 +230,13 @@ if (codexVersion) {
 }
 if (cursor.binary) {
   if (cursor.auth === 'ready') {
-    console.log(green('  ✓') + ` Cursor Agent ${cursor.version} ` + dim('(Composer 2.5 / Grok 4.5)'))
+    console.log(green('  ✓') + ` Cursor Agent ${cursor.version} ` + dim('(Composer 2.5 / newest Grok high-fast)'))
   } else if (cursor.auth === 'signed-out') {
     console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — sign-in required`)
     console.log('    Run: ' + bold('agent login'))
   } else if (cursor.auth === 'models-unresolved') {
     console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — required models unresolved`)
-    console.log('    Verify: ' + bold('agent models') + ' includes Composer 2.5 Fast and Grok 4.5 Fast')
+    console.log('    Verify: ' + bold('agent models') + ' includes Composer 2.5 Fast and a cursor-grok-*-high-fast id')
   } else {
     console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — readiness unavailable`)
     console.log('    Verify: ' + bold('agent models'))

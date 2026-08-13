@@ -9,6 +9,7 @@ import {
   VideoUploadError,
   VideoUploadRegistry,
   VIDEO_UPLOAD_V2_CHUNK_BYTES,
+  isStrandedReceivingVideoUpload,
 } from './video-upload-v2.js'
 
 const SERVER_ID = 'srv_video_upload_test_1234'
@@ -214,5 +215,49 @@ describe('durable video upload V2', () => {
     const received = [...new Set([...firstAck.receivedOriginalChunks, ...secondAck.receivedOriginalChunks])].sort((a, b) => a - b)
     expect(received).toEqual([0, 1])
     expect(registry.get(first.uploadId, SERVER_ID).missingOriginalChunks).toEqual([])
+  })
+
+  it('names only idle receiving drafts as stranded', () => {
+    const now = 1_000_000
+    expect(isStrandedReceivingVideoUpload({
+      state: 'receiving', updatedAtMs: now - 60_000, nowMs: now,
+    })).toBe(true)
+    expect(isStrandedReceivingVideoUpload({
+      state: 'receiving', updatedAtMs: now - 59_999, nowMs: now,
+    })).toBe(false)
+    expect(isStrandedReceivingVideoUpload({
+      state: 'receiving', updatedAtMs: now - 120_000, nowMs: now, activeWriters: 1,
+    })).toBe(false)
+    expect(isStrandedReceivingVideoUpload({
+      state: 'finalizing', updatedAtMs: now - 120_000, nowMs: now,
+    })).toBe(false)
+    expect(isStrandedReceivingVideoUpload({
+      state: 'published', updatedAtMs: now - 120_000, nowMs: now,
+    })).toBe(false)
+  })
+
+  it('clears idle receiving drafts and leaves a live PUT alone', async () => {
+    let now = 1_700_000_000_000
+    const registry = createRegistry(() => now)
+    const idle = registry.init({
+      clientRequestId: 'phone:8888888888888888:stranded',
+      serverInstanceId: SERVER_ID,
+      totalBytes: 10,
+      mime: 'video/mp4',
+    })
+    now += 1_000
+    const live = registry.init({
+      clientRequestId: 'phone:9999999999999999:live',
+      serverInstanceId: SERVER_ID,
+      totalBytes: VIDEO_UPLOAD_V2_CHUNK_BYTES + 10,
+      mime: 'video/mp4',
+    })
+    now += 61_000
+    await registry.putOriginal(live.uploadId, 0, Buffer.alloc(VIDEO_UPLOAD_V2_CHUNK_BYTES, 4), SERVER_ID)
+    const result = await registry.clearStrandedReceiving(SERVER_ID)
+    expect(result.cancelled).toEqual([idle.uploadId])
+    expect(result.skipped).toEqual([{ uploadId: live.uploadId, reason: 'recently_updated' }])
+    expect(registry.get(live.uploadId, SERVER_ID).state).toBe('receiving')
+    expect(registry.status()).toMatchObject({ receiving: 1, blocksRestart: true })
   })
 })

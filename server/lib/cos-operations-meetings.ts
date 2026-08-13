@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { discoveredDomains, domainAbbreviation as deriveAbbr, isSafeDomainName as safeName } from './domains.js'
 import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
-import { MEETING_SOURCE_MAX_BYTES } from './meeting-store.js'
+import { MEETING_SOURCE_MAX_BYTES, meetingDayCountsFromNames, meetingListLimit } from './meeting-store.js'
 
 /**
  * The four domains of ONE user's COS. Retained as the documented example layout
@@ -151,7 +151,7 @@ const SIDECAR_HEAD_BYTES = 4096
  * them whole would make listing cost scale with total transcript size — and this
  * lister already reads every markdown file it finds.
  */
-function sidecarSessionId(monthDir: string, meetingFilename: string): string | undefined {
+export function sidecarSessionId(monthDir: string, meetingFilename: string): string | undefined {
   const sidecarName = meetingFilename.replace(/\.md$/, '.g2-chunks.json')
   if (sidecarName === meetingFilename) return undefined
   const path = join(monthDir, sidecarName)
@@ -520,11 +520,14 @@ export function findDirectLibraryMeetingBySessionId(sessionId: string): MeetingL
 export function listCosOperationsMeetings(options: {
   limit?: number
   domain?: string
+  month?: string
+  day?: string
 } = {}): CosOperationsMeetingMeta[] {
   const operationsDir = resolveCosOperationsDir()
   if (!operationsDir) return []
 
-  const limit = Math.min(Math.max(options.limit ?? 20, 1), 50)
+  const scoped = Boolean(options.month || options.day)
+  const limit = meetingListLimit(options.limit, scoped)
   const domainFilter = options.domain || 'all'
   const discovered = discoverMeetingDomains(operationsDir)
   const domains = domainFilter === 'all'
@@ -537,11 +540,12 @@ export function listCosOperationsMeetings(options: {
     const meetingsBase = join(operationsDir, domain, 'meetings')
     try {
       const months = readdirSync(meetingsBase)
-        .filter(d => /^\d{4}-\d{2}$/.test(d))
+        .filter(d => MONTH_PATTERN.test(d))
         .sort()
         .reverse()
 
       for (const month of months) {
+        if (options.month && month !== options.month) continue
         const monthDir = join(meetingsBase, month)
         try {
           const files = readdirSync(monthDir)
@@ -561,6 +565,7 @@ export function listCosOperationsMeetings(options: {
               meta.canonicalRecord = `operations/${domain}/meetings/${month}/${file}`
               const sessionId = sidecarSessionId(monthDir, file)
               if (sessionId) meta.sessionId = sessionId
+              if (options.day && meta.date !== options.day) continue
               allMeetings.push(meta)
             } catch { /* skip unreadable files */ }
           }
@@ -573,13 +578,57 @@ export function listCosOperationsMeetings(options: {
   return allMeetings.slice(0, limit)
 }
 
-export function listDirectLibraryMeetings(options: { limit?: number } = {}): CosOperationsMeetingMeta[] {
+/** Folder names only. Used by the Control calendar pager. */
+export function listCosOperationsMeetingMonths(domainFilter = 'all'): string[] {
+  const operationsDir = resolveCosOperationsDir()
+  if (!operationsDir) return []
+  const discovered = discoverMeetingDomains(operationsDir)
+  const domains = domainFilter === 'all'
+    ? discovered
+    : discovered.includes(domainFilter) ? [domainFilter] : []
+  const months = new Set<string>()
+  for (const domain of domains) {
+    const meetingsBase = join(operationsDir, domain, 'meetings')
+    try {
+      for (const month of readdirSync(meetingsBase).filter(name => MONTH_PATTERN.test(name))) {
+        months.add(month)
+      }
+    } catch { /* domain has no meetings dir */ }
+  }
+  return [...months].sort().reverse()
+}
+
+export function listCosOperationsMeetingDays(month: string, domainFilter = 'all'): Array<{ date: string; count: number }> {
+  if (!MONTH_PATTERN.test(month)) return []
+  const operationsDir = resolveCosOperationsDir()
+  if (!operationsDir) return []
+  const discovered = discoverMeetingDomains(operationsDir)
+  const domains = domainFilter === 'all'
+    ? discovered
+    : discovered.includes(domainFilter) ? [domainFilter] : []
+  const names: string[] = []
+  for (const domain of domains) {
+    const monthDir = join(operationsDir, domain, 'meetings', month)
+    try {
+      names.push(...readdirSync(monthDir).filter(name => name.endsWith('.md')))
+    } catch { /* missing month */ }
+  }
+  return meetingDayCountsFromNames(names)
+}
+
+export function listDirectLibraryMeetings(options: {
+  limit?: number
+  month?: string
+  day?: string
+} = {}): CosOperationsMeetingMeta[] {
   const inspection = resolveMeetingLibrary()
   if (inspection.layout !== 'direct' || !inspection.root) return []
-  const limit = Math.min(Math.max(options.limit ?? 20, 1), 50)
+  const scoped = Boolean(options.month || options.day)
+  const limit = meetingListLimit(options.limit, scoped)
   const all: CosOperationsMeetingMeta[] = []
   let candidates = 0
   for (const month of readdirSync(inspection.root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()) {
+    if (options.month && month !== options.month) continue
     const monthDir = safeChildDirectory(inspection.root, join(inspection.root, month))
     if (!monthDir) continue
     for (const file of readdirSync(monthDir).filter(name => name.endsWith('.md')).sort().reverse()) {
@@ -594,12 +643,31 @@ export function listDirectLibraryMeetings(options: { limit?: number } = {}): Cos
       meta.mutable = false
       const sessionId = sidecarSessionId(monthDir, file)
       if (sessionId) meta.sessionId = sessionId
+      if (options.day && meta.date !== options.day) continue
       all.push(meta)
     }
     if (candidates > MAX_LIST_CANDIDATES) break
   }
   all.sort(compareMeetingsNewestFirst)
   return all.slice(0, limit)
+}
+
+export function listDirectLibraryMeetingMonths(): string[] {
+  const inspection = resolveMeetingLibrary()
+  if (inspection.layout !== 'direct' || !inspection.root) return []
+  return readdirSync(inspection.root)
+    .filter(name => MONTH_PATTERN.test(name) && safeChildDirectory(inspection.root, join(inspection.root, name)))
+    .sort()
+    .reverse()
+}
+
+export function listDirectLibraryMeetingDays(month: string): Array<{ date: string; count: number }> {
+  if (!MONTH_PATTERN.test(month)) return []
+  const inspection = resolveMeetingLibrary()
+  if (inspection.layout !== 'direct' || !inspection.root) return []
+  const monthDir = safeChildDirectory(inspection.root, join(inspection.root, month))
+  if (!monthDir) return []
+  return meetingDayCountsFromNames(readdirSync(monthDir).filter(name => name.endsWith('.md')))
 }
 
 export function getCosOperationsMeetingDetail(

@@ -230,4 +230,40 @@ describe('resumable video upload V2 HTTP contract', () => {
     expect(cancelled.status).toBe(200)
     expect(cancelled.body).toMatchObject({ ok: true, dropped: true })
   })
+
+  it('clears an idle receiving draft and leaves a fresh one', async () => {
+    let now = Date.now()
+    registry = new VideoUploadRegistry({
+      root: join(root, 'video-route-drafts'),
+      now: () => now,
+    })
+    _setVideoUploadRegistryForTests(registry)
+
+    const idle = await init('route-clear-stranded-idle-0001')
+    expect(idle.status).toBe(200)
+    now += 1_000
+    const live = await init('route-clear-stranded-live-0001')
+    expect(live.status).toBe(200)
+    now += 61_000
+    const touched = await json(await fetch(
+      `${base}/api/media/video-upload/${live.body.uploadId}/original/0`,
+      {
+        method: 'PUT',
+        headers: headers({ 'content-type': 'application/octet-stream' }),
+        body: new Uint8Array(Buffer.from('abcdef')),
+      },
+    ))
+    expect(touched.status).toBe(200)
+
+    const cleared = await json(await fetch(`${base}/api/media/video-upload/clear-stranded`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+    }))
+    expect(cleared.status).toBe(200)
+    expect(cleared.body.ok).toBe(true)
+    expect(cleared.body.cancelled).toEqual([idle.body.uploadId])
+    expect(cleared.body.skipped).toEqual([
+      { uploadId: live.body.uploadId, reason: 'recently_updated' },
+    ])
+  })
 })

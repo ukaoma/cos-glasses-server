@@ -43,10 +43,10 @@ without silently losing completed replies.
   `npm install -g @anthropic-ai/claude-code` (**never with `sudo`**), then run
   `claude` and finish the browser sign-in
   _or_ **Codex CLI** (GPT Frontier/Balanced) — https://developers.openai.com/codex/, then `codex login`
-- _Optional:_ **Cursor Agent CLI** for Composer 2.5 Fast and Grok 4.5 Fast.
+- _Optional:_ **Cursor Agent CLI** for Composer 2.5 Fast and the newest Grok high-fast.
   Ensure `agent` is on `PATH`, run `agent login`, and verify `agent models`
-  lists `composer-2.5-fast` and `cursor-grok-4.5-high-fast`. COS exposes the
-  Cursor slots only after both models resolve; it never silently substitutes
+  lists `composer-2.5-fast` and a `cursor-grok-*-high-fast` id. COS maps
+  `cursor-grok` to the newest high-fast it finds; it never silently substitutes
   Claude or Codex.
 - **Even G2 glasses** + the **COS Glasses** app from the Even Hub
 - `brew install whisper-cpp` for free local voice (the launcher can download the model)
@@ -108,7 +108,7 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   WebView reloads, and network handoffs, then reattaches without duplicate work
   or duplicate replies
 - Choose Opus, Fable, Sonnet, GPT Frontier, GPT Balanced, Composer 2.5 Fast, or
-  Grok 4.5 Fast. Cursor slots fail closed when the local CLI or concrete model
+  the newest Grok high-fast. Cursor slots fail closed when the local CLI or concrete model
   is unavailable; optional redacted tool activity streams only to the
   authenticated query that requested it
 - Message History + cross-day "reference message N" — your chats are archived by day

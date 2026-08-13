@@ -45,6 +45,9 @@ export const VIDEO_UPLOAD_V2_MAX_CONCURRENT = 8
 export const VIDEO_UPLOAD_V2_TOTAL_RESERVED_BYTES = 4 * 1024 * 1024 * 1024
 export const VIDEO_UPLOAD_V2_FREE_DISK_RESERVE_BYTES = 512 * 1024 * 1024
 export const VIDEO_UPLOAD_V2_ACCEPTED_MIMES = ['video/mp4', 'video/quicktime'] as const
+/** Idle receiving drafts older than this are stranded. Live PUTs refresh
+ *  updatedAtMs; a 1 MiB chunk on a clean link is seconds, not a minute. */
+export const VIDEO_UPLOAD_V2_STRANDED_IDLE_MS = 60_000
 
 const UPLOAD_ID_RE = /^vu_[0-9a-f]{24}$/
 const CLIENT_REQUEST_RE = /^[A-Za-z0-9._:-]{16,160}$/
@@ -60,6 +63,22 @@ export function phoneVideoFramesEnabled(): boolean {
 
 export function isValidVideoUploadId(value: unknown): value is string {
   return typeof value === 'string' && UPLOAD_ID_RE.test(value)
+}
+
+/** Sideload/kill leftover: receiving, no writer, no bytes for idleMs.
+ *  Never true for finalizing or published — those are live work or receipts. */
+export function isStrandedReceivingVideoUpload(input: {
+  state: string
+  updatedAtMs: number
+  nowMs: number
+  activeWriters?: number
+  idleMs?: number
+}): boolean {
+  const idleMs = input.idleMs ?? VIDEO_UPLOAD_V2_STRANDED_IDLE_MS
+  if (input.state !== 'receiving') return false
+  if ((input.activeWriters ?? 0) > 0) return false
+  if (!Number.isFinite(input.updatedAtMs) || !Number.isFinite(input.nowMs) || idleMs < 0) return false
+  return input.nowMs - input.updatedAtMs >= idleMs
 }
 
 export type VideoUploadState = 'receiving' | 'finalizing' | 'published' | 'cancelled' | 'failed'
@@ -405,6 +424,46 @@ export class VideoUploadRegistry {
       this.removeBodies(manifest)
       return this.progress(manifest)
     })
+  }
+
+  async clearStrandedReceiving(serverInstanceId?: string): Promise<{
+    cancelled: string[]
+    skipped: Array<{ uploadId: string; reason: string }>
+  }> {
+    const nowMs = this.now()
+    const cancelled: string[] = []
+    const skipped: Array<{ uploadId: string; reason: string }> = []
+    for (const manifest of [...this.manifests.values()]) {
+      if (manifest.state === 'finalizing') {
+        skipped.push({ uploadId: manifest.uploadId, reason: 'finalizing' })
+        continue
+      }
+      if (manifest.state !== 'receiving') continue
+      const activeWriters = this.activeWriters.get(manifest.uploadId) ?? 0
+      if (!isStrandedReceivingVideoUpload({
+        state: manifest.state,
+        updatedAtMs: manifest.updatedAtMs,
+        nowMs,
+        activeWriters,
+      })) {
+        skipped.push({
+          uploadId: manifest.uploadId,
+          reason: activeWriters > 0 ? 'active_writer' : 'recently_updated',
+        })
+        continue
+      }
+      try {
+        const progress = await this.cancel(manifest.uploadId, serverInstanceId)
+        if (progress) cancelled.push(manifest.uploadId)
+      } catch (error) {
+        if (error instanceof VideoUploadError && error.code === 'server_identity_mismatch') {
+          skipped.push({ uploadId: manifest.uploadId, reason: 'identity_mismatch' })
+          continue
+        }
+        throw error
+      }
+    }
+    return { cancelled, skipped }
   }
 
   status(): VideoUploadStatus {

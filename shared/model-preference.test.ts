@@ -29,7 +29,7 @@ describe('model preferences', () => {
     expect(isCodexModel('codex-balanced')).toBe(true)
     expect(isCursorModel('cursor-grok')).toBe(true)
     expect(isCursorModel('cursor-composer')).toBe(true)
-    expect(modelLabel('cursor-grok')).toBe('Grok 4.5 Fast')
+    expect(modelLabel('cursor-grok')).toBe('Grok Fast')
     expect(modelLabel('cursor-composer')).toBe('Composer 2.5 Fast')
   })
 

@@ -19,8 +19,10 @@ const DEFAULT_REFRESH_TIMEOUT_MS = 7_000
 
 /**
  * Stable slot → CLI model id mapping.
- * Prefer high reasoning + fast variants so Grok/Composer are latency-comparable.
- * Composer has no separate "high" id — only base vs `-fast`.
+ * Composer stays pinned (no versioned high-fast family). Grok high-fast is
+ * chosen at catalog build: newest `cursor-grok-<ver>-high-fast` in `agent
+ * models`. This grok id is only the fallback when the live list has none.
+ * `xhigh-fast` is a different SKU and is never selected here.
  */
 export const CURSOR_SLOT_MODEL_IDS = {
   'cursor-grok': 'cursor-grok-4.5-high-fast',
@@ -28,9 +30,42 @@ export const CURSOR_SLOT_MODEL_IDS = {
 } as const satisfies Record<CursorModelPreference, string>
 
 const SLOT_DISPLAY_FALLBACK = {
-  'cursor-grok': 'Grok 4.5 Fast',
+  'cursor-grok': 'Grok Fast',
   'cursor-composer': 'Composer 2.5 Fast',
 } as const satisfies Record<CursorModelPreference, string>
+
+const GROK_HIGH_FAST_RE = /^cursor-grok-(\d+(?:\.\d+)*)-high-fast$/i
+
+export function parseCursorGrokHighFastVersion(id: string): number[] | null {
+  const match = GROK_HIGH_FAST_RE.exec(id.trim())
+  if (!match) return null
+  return match[1].split('.').map(part => Number(part))
+}
+
+export function compareVersionTuples(a: number[], b: number[]): number {
+  const length = Math.max(a.length, b.length)
+  for (let index = 0; index < length; index++) {
+    const left = a[index] ?? 0
+    const right = b[index] ?? 0
+    if (left !== right) return left - right
+  }
+  return 0
+}
+
+/** Newest `cursor-grok-*-high-fast`. Ignores low/medium/xhigh and non-fast. */
+export function selectNewestCursorGrokHighFast(
+  models: CursorCatalogModel[],
+): CursorCatalogModel | undefined {
+  let best: { model: CursorCatalogModel; version: number[] } | undefined
+  for (const model of models) {
+    const version = parseCursorGrokHighFastVersion(model.id)
+    if (!version) continue
+    if (!best || compareVersionTuples(version, best.version) > 0) {
+      best = { model, version }
+    }
+  }
+  return best?.model
+}
 
 export type CursorCatalogSource = 'cli' | 'disk-cache' | 'unavailable'
 
@@ -100,20 +135,25 @@ export function buildCursorModelCatalog(
   refreshError?: string,
 ): CursorModelCatalog {
   const byId = new Map(models.map(model => [model.id, model]))
-  const slots: CursorModelPreference[] = [CURSOR_GROK_MODEL, CURSOR_COMPOSER_MODEL]
-  const options = slots.map((preference): CursorModelOption => {
-    const expectedId = CURSOR_SLOT_MODEL_IDS[preference]
-    const found = byId.get(expectedId)
-    return {
-      preference,
-      id: found?.id ?? '',
-      displayName: found?.displayName ?? SLOT_DISPLAY_FALLBACK[preference],
-    }
-  })
+  const grok = selectNewestCursorGrokHighFast(models)
+    ?? byId.get(CURSOR_SLOT_MODEL_IDS[CURSOR_GROK_MODEL])
+  const composer = byId.get(CURSOR_SLOT_MODEL_IDS[CURSOR_COMPOSER_MODEL])
+  const options: CursorModelOption[] = [
+    {
+      preference: CURSOR_GROK_MODEL,
+      id: grok?.id ?? '',
+      displayName: grok?.displayName ?? SLOT_DISPLAY_FALLBACK[CURSOR_GROK_MODEL],
+    },
+    {
+      preference: CURSOR_COMPOSER_MODEL,
+      id: composer?.id ?? '',
+      displayName: composer?.displayName ?? SLOT_DISPLAY_FALLBACK[CURSOR_COMPOSER_MODEL],
+    },
+  ]
 
   setRuntimeCursorModelLabels(options.filter(option => option.id).map(option => ({
     preference: option.preference,
-    displayName: option.preference === CURSOR_GROK_MODEL ? 'Grok 4.5 Fast' : 'Composer 2.5 Fast',
+    displayName: option.displayName,
   })))
 
   return {
@@ -242,6 +282,7 @@ export function resolveCursorModelOption(preference: CursorModelPreference): Cur
 export function resolveCursorPreferenceForModelId(modelId: string): CursorModelPreference | undefined {
   const normalized = modelId.trim().toLowerCase()
   if (!normalized) return undefined
+  if (parseCursorGrokHighFastVersion(normalized)) return CURSOR_GROK_MODEL
   for (const [preference, id] of Object.entries(CURSOR_SLOT_MODEL_IDS) as [CursorModelPreference, string][]) {
     if (id.toLowerCase() === normalized) return preference
   }

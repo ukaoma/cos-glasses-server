@@ -620,6 +620,16 @@ mediaRouter.post('/media/video-upload/init', (req: Request, res: Response) => {
   }
 })
 
+mediaRouter.post('/media/video-upload/clear-stranded', async (req: Request, res: Response) => {
+  try {
+    const serverInstanceId = requireCurrentServerIdentity(req)
+    const result = await getVideoUploadRegistry().clearStrandedReceiving(serverInstanceId)
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    sendMediaError(res, err)
+  }
+})
+
 mediaRouter.get('/media/video-upload/:uploadId', (req: Request, res: Response) => {
   try {
     const serverInstanceId = requireCurrentServerIdentity(req)

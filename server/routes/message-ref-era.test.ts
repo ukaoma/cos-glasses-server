@@ -53,4 +53,32 @@ describe('message-ref era scoping', () => {
     }))
     expect(ref.maxGlobalMsgNumInDir(join(dir, 'archive'), next.era)).toBe(1)
   })
+
+  it('POST /message-era/reset refuses without confirm', async () => {
+    const express = (await import('express')).default
+    const { messageRefRouter } = await import('./message-ref.js')
+    const app = express()
+    app.use(express.json())
+    app.use('/api', messageRefRouter)
+    const res = await new Promise<{ status: number; body: { code?: string } }>((resolve, reject) => {
+      const http = app.listen(0, '127.0.0.1', async () => {
+        try {
+          const addr = http.address()
+          const port = typeof addr === 'object' && addr ? addr.port : 0
+          const response = await fetch(`http://127.0.0.1:${port}/api/message-era/reset`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          })
+          resolve({ status: response.status, body: await response.json() as { code?: string } })
+        } catch (err) {
+          reject(err)
+        } finally {
+          http.close()
+        }
+      })
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.code).toBe('confirmation_required')
+  })
 })

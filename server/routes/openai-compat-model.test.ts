@@ -22,6 +22,7 @@ describe('OpenAI-compatible Cursor model selection', () => {
   it("accepts Grok's stable slot and concrete CLI model id", () => {
     expect(resolveModel('cursor-grok')).toBe('cursor-grok')
     expect(resolveModel('cursor-grok-4.5-high-fast')).toBe('cursor-grok')
+    expect(resolveModel('cursor-grok-4.6-high-fast')).toBe('cursor-grok')
   })
 
   it('retains the public server default when no Cursor override is present', () => {

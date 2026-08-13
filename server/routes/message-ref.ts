@@ -7,6 +7,7 @@
 //
 //   GET /api/message/:num     → { globalMsgNum, date, query, response }  (404 when unknown)
 //   GET /api/message-counter  → { max, era }
+//   POST /api/message-era/reset { confirm: true } → archive live sessions, start at #1
 //
 // Resolution order (per the prompt-queue/archive plan): live in-memory
 // sessions first (covers the mirror's 15-minute lag), then day archives
@@ -24,6 +25,7 @@ import {
   currentMessageEra,
   exchangeBelongsToEra,
 } from '../lib/message-era.js'
+import { MessageEraResetError, resetLiveMessageEra } from '../lib/message-era-reset.js'
 
 // v6.3.0 — read archives from the SAME persistent location the archive-mirror
 // writes to (~/.cos-glasses/data/archive via dataPath), not a package-relative
@@ -202,6 +204,20 @@ function resolveFromLiveSessions(
 }
 
 export const messageRefRouter = Router()
+
+messageRefRouter.post('/message-era/reset', async (req, res) => {
+  try {
+    const result = await resetLiveMessageEra({ confirm: req.body?.confirm === true })
+    res.json(result)
+  } catch (err) {
+    if (err instanceof MessageEraResetError) {
+      res.status(err.status).json({ error: err.message, code: err.code })
+      return
+    }
+    console.error('[message-era] reset failed:', err)
+    res.status(500).json({ error: 'Archive failed; message count was not reset.', code: 'archive_failed' })
+  }
+})
 
 messageRefRouter.get('/message/:num', (req, res) => {
   const num = Number.parseInt(req.params.num, 10)

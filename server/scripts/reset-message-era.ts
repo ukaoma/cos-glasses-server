@@ -1,10 +1,11 @@
 #!/usr/bin/env tsx
-// Creates a fresh short-number namespace without touching sessions or archives.
-// Restart the server afterward so every new exchange is stamped into the era.
+// Archives live sessions, then creates a fresh short-number namespace.
+// History stays in day archives. Disk mtime is enough — no server restart.
 //
 //   npx tsx server/scripts/reset-message-era.ts --confirm
 
-import { createMessageEra, currentMessageEraState } from '../lib/message-era.js'
+import { currentMessageEraState } from '../lib/message-era.js'
+import { resetLiveMessageEra } from '../lib/message-era-reset.js'
 
 if (!process.argv.includes('--confirm')) {
   const current = currentMessageEraState()
@@ -13,16 +14,15 @@ if (!process.argv.includes('--confirm')) {
   process.exit(2)
 }
 
-const next = createMessageEra()
+const next = await resetLiveMessageEra({ confirm: true })
 console.log(JSON.stringify({
   status: 'created',
   ...next,
   history: 'retained',
-  restartRequired: true,
-  verify: 'GET /api/message-counter should return { max: 0 or small, era: "<era above>" } after server restart',
+  restartRequired: false,
+  verify: 'GET /api/message-counter should return { max: 0, era: "<era above>" }',
   nextSteps: [
-    'Restart LaunchAgent / Control Update Server generation',
-    'Phone reconnect so syncMessageEra clears the live list',
-    'Send a test message — expect #1 (or low single digits)',
+    'Phone: tap RESET # or reopen the companion so the live list clears',
+    'Send a test message — expect #1',
   ],
 }, null, 2))

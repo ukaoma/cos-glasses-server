@@ -26,6 +26,29 @@ import type {
 } from '../routes/transcribe-stream.js'
 
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/
+const DAY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
+const DAY_FILE_PREFIX = /^(\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]))_/
+const LIST_CAP = 50
+const LIST_CAP_SCOPED = 200
+
+export function meetingListLimit(limit: number | undefined, scoped: boolean): number {
+  const raw = typeof limit === 'number' && Number.isFinite(limit) ? Math.trunc(limit) : 20
+  return Math.max(1, Math.min(scoped ? LIST_CAP_SCOPED : LIST_CAP, raw))
+}
+
+/** Calendar dots from filenames. Does not open the markdown. */
+export function meetingDayCountsFromNames(names: string[]): Array<{ date: string; count: number }> {
+  const counts = new Map<string, number>()
+  for (const name of names) {
+    const match = name.match(DAY_FILE_PREFIX)
+    if (!match) continue
+    counts.set(match[1], (counts.get(match[1]) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, count]) => ({ date, count }))
+}
+
 const SAFE_FILENAME_PATTERN = /^\d{4}-\d{2}-\d{2}_[A-Za-z0-9][A-Za-z0-9_-]{0,95}\.md$/
 const DOMAIN_PATTERN = /^[a-z][a-z0-9_]{0,31}$/
 const MAX_MEETING_BYTES = 10 * 1024 * 1024
@@ -550,17 +573,25 @@ export class MeetingStore {
     return null
   }
 
-  list(options: { limit?: number; domain?: string } = {}): MeetingMeta[] {
-    const limit = Math.max(1, Math.min(50, Math.trunc(options.limit ?? 20)))
+  list(options: { limit?: number; domain?: string; month?: string; day?: string } = {}): MeetingMeta[] {
+    const scoped = Boolean(options.month || options.day)
+    const limit = meetingListLimit(options.limit, scoped)
     const domain = options.domain ?? 'all'
     if (domain !== 'all' && !isSafeDomainName(domain)) {
       throw new MeetingStoreError('Invalid domain filter', 400, 'invalid_domain')
+    }
+    if (options.month && !MONTH_PATTERN.test(options.month)) {
+      throw new MeetingStoreError('Invalid month filter', 400, 'invalid_month')
+    }
+    if (options.day && !DAY_PATTERN.test(options.day)) {
+      throw new MeetingStoreError('Invalid day filter', 400, 'invalid_day')
     }
     const rootReal = this.existingRootRealpath()
     if (!rootReal) return []
     const meetings: MeetingMeta[] = []
 
     for (const month of readdirSync(this.root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()) {
+      if (options.month && month !== options.month) continue
       const monthDir = join(this.root, month)
       const monthReal = this.safeDirectoryRealpath(monthDir, rootReal)
       if (!monthReal) continue
@@ -570,6 +601,7 @@ export class MeetingStore {
           if (content === null) continue
           const detail = parseMeeting(content, filename, month)
           if (domain !== 'all' && detail.domain !== domain) continue
+          if (options.day && detail.date !== options.day) continue
           meetings.push(toMeta(detail, this.sidecarSessionId(monthDir, monthReal, filename)))
         } catch {
           // One unreadable/corrupt entry must not hide the rest of the store.
@@ -580,6 +612,28 @@ export class MeetingStore {
       right.date.localeCompare(left.date) || right.filename.localeCompare(left.filename)
     ))
     return meetings.slice(0, limit)
+  }
+
+  /** Folder names only. Used by the Control calendar pager. */
+  listMonths(): string[] {
+    const rootReal = this.existingRootRealpath()
+    if (!rootReal) return []
+    return readdirSync(this.root)
+      .filter(name => MONTH_PATTERN.test(name) && this.safeDirectoryRealpath(join(this.root, name), rootReal))
+      .sort()
+      .reverse()
+  }
+
+  listDayCounts(month: string): Array<{ date: string; count: number }> {
+    if (!MONTH_PATTERN.test(month)) return []
+    const rootReal = this.existingRootRealpath()
+    if (!rootReal) return []
+    const monthDir = join(this.root, month)
+    const monthReal = this.safeDirectoryRealpath(monthDir, rootReal)
+    if (!monthReal) return []
+    return meetingDayCountsFromNames(
+      readdirSync(monthDir).filter(name => SAFE_FILENAME_PATTERN.test(name) || name.endsWith('.md')),
+    )
   }
 
   detail(domain: string, month: string, filename: string): MeetingDetail {
