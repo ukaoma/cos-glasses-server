@@ -654,9 +654,10 @@ export function listDirectLibraryMeetings(options: {
 
 export function listDirectLibraryMeetingMonths(): string[] {
   const inspection = resolveMeetingLibrary()
-  if (inspection.layout !== 'direct' || !inspection.root) return []
-  return readdirSync(inspection.root)
-    .filter(name => MONTH_PATTERN.test(name) && safeChildDirectory(inspection.root, join(inspection.root, name)))
+  const root = inspection.root
+  if (inspection.layout !== 'direct' || !root) return []
+  return readdirSync(root)
+    .filter(name => MONTH_PATTERN.test(name) && safeChildDirectory(root, join(root, name)))
     .sort()
     .reverse()
 }

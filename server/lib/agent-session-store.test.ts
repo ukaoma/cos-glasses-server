@@ -86,6 +86,32 @@ describe('Codex pins survive a May folder', () => {
     expect(updated.some(row => row.display_label === 'Markt POS 2.0 build')).toBe(true)
     expect(updated.some(row => row.display_label === 'Jewelry 2.0 Build' && row.pinned)).toBe(true)
 
+    const firefliesId = '019f1111-2222-3333-4444-555555555555'
+    const firefliesDay = join(home, '.codex', 'sessions', '2026', '08', '13')
+    mkdirSync(firefliesDay, { recursive: true })
+    const firefliesFile = join(firefliesDay, `rollout-2026-08-13T16-38-12-${firefliesId}.jsonl`)
+    writeFileSync(firefliesFile, `${JSON.stringify({
+      type: 'session_meta',
+      payload: { id: firefliesId, cwd: '/repo', timestamp: '2026-08-13T16:38:12Z' },
+    })}\n${JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Sync Fireflies' }] },
+    })}\n`)
+    touch(firefliesFile, new Date(listingNow.getTime() + 60_000))
+    writeFileSync(
+      join(home, '.codex', 'session_index.jsonl'),
+      [
+        JSON.stringify({ id, thread_name: 'Markt POS 2.0 build' }),
+        JSON.stringify({ id: jewelryId, thread_name: 'Jewelry 2.0 Build' }),
+        JSON.stringify({ id: firefliesId, thread_name: 'Fireflies meeting sync' }),
+      ].join('\n') + '\n',
+    )
+    const merged = await listAgentSessions(agentSessionRoots(home), listingNow, [], 20, 'updated')
+    expect(merged[0].display_label).toBe('Fireflies meeting sync')
+    expect(merged[0].pinned).toBe(false)
+    expect(merged.findIndex(row => row.display_label === 'Markt POS 2.0 build'))
+      .toBeLessThan(merged.findIndex(row => row.display_label === 'Jewelry 2.0 Build'))
+
     const opened = await listAgentSessions(
       agentSessionRoots(home),
       listingNow,

@@ -882,17 +882,14 @@ export async function listAgentSessions(
       const created = Date.parse(entry.created)
       return Number.isFinite(created) && now.getTime() - created <= AGENT_SESSION_MAX_AGE_MS
     })
-    rows.sort((a, b) => {
-      if (a.alive !== b.alive) return a.alive ? -1 : 1
-      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
-      return (b.created || '').localeCompare(a.created || '')
-    })
+    // Control Activity → Opened: created desc. Pins stay in the payload
+    // when they were opened in-window; they do not cluster at the top.
+    rows.sort((a, b) => (b.created || '').localeCompare(a.created || ''))
   } else {
-    rows.sort((a, b) => {
-      if (a.alive !== b.alive) return a.alive ? -1 : 1
-      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
-      return (b.modified || '').localeCompare(a.modified || '')
-    })
+    // Control Activity → Updated: newest write first. Stale pins still
+    // appear (any age) but sink by mtime. Glasses has no Pinned clock, so
+    // pin-boosting here made the lens show July stars instead of today.
+    rows.sort((a, b) => (b.modified || '').localeCompare(a.modified || ''))
   }
   return rows.slice(0, limit)
 }

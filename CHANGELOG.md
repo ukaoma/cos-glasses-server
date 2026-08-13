@@ -1,4 +1,12 @@
 ## Unreleased
+
+## 6.27.7
+- **`GET /api/agent-sessions` ships in the public package.** Claude Code, Codex,
+  and Cursor transcripts from this Mac, last 7 days of writes. Glasses 6.8.360
+  uses this instead of the Claude-only COS cache. Stock 6.27.6 404s that route.
+- **Sessions list matches Control Updated.** Newest write first. Stale pins stay
+  in the payload (any age) but do not cluster at the top — that is Control's
+  Pinned clock, which glasses does not have.
 - **Session discussion gist.** Agent-session list and detail include
   `discussion_summary`: first real user turn plus the latest assistant prose
   from a cheap transcript peek. No LLM. Glasses use it on the session row and
@@ -50,8 +58,7 @@
   leave a `receiving` draft for 4 hours. That draft holds `blocksRestart`, so
   Repair and Update stall on it instead of clearing it. `POST /api/media/video-upload/clear-stranded`
   cancels receiving drafts with no active writer and no bytes for 60 seconds.
-  Finalizing and published receipts are left alone. Live on the next published
-  server; COS Control 0.5.22 can already DELETE the same drafts against 6.27.6.
+  Finalizing and published receipts are left alone.
 
 ## 6.27.6
 - **V2 original chunks are 1 MiB.** Same sequential one-in-flight loop, same

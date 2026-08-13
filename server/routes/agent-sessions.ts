@@ -6,6 +6,8 @@
 // Claude jsonl, Codex rollouts, Cursor agent-transcripts.
 // Default list is last 7 days of writes (mtime), including pinned Codex
 // threads whose jsonl still lives in the original day folder.
+// `?sort=updated` matches Control's Updated clock: newest mtime first.
+// Stale pins stay in the payload but do not cluster at the top.
 // `?sort=opened` keeps the same window on session start instead.
 // Search scans titles, sidebar names, first prompts, and transcript heads
 // without the 7-day list window. Literal /search is registered first.
