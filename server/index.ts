@@ -18,6 +18,7 @@ import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
+import { agentSessionsRouter } from './routes/agent-sessions.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
@@ -274,6 +275,8 @@ app.use('/api', transcribeRouter)
 // Ported from cos-glasses-app in 6.24.0. The companion's Sessions tab has been
 // calling this and getting a 404 since the managed-runtime cutover.
 app.use('/api', sessionIndexRouter)
+// Claude + Codex + Cursor transcripts from this Mac. Same 7-day window as Control.
+app.use('/api', agentSessionsRouter)
 // Presence view of Claude Code sessions on this Mac. Dark unless
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)

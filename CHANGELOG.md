@@ -1,4 +1,21 @@
 ## Unreleased
+- **Sessions lookup.** `GET /api/agent-sessions/search?q=` runs keyword over
+  sidebar names, `/rename` titles, first prompts, and the first ~8k of user
+  transcript — including chats older than the 7-day list window. Meaning search
+  embeds the query once against those same texts (OpenAI key, no LLM). Keyword
+  still returns if embeddings are down. Literal path, registered before
+  `/agent-sessions/:provider/:sessionId`.
+- **Sessions Pinned includes Claude Desktop stars and Cursor
+  `pinnedComposers`.** Same rule as ChatGPT `pinned-thread-ids`: starred
+  Claude sessions (including Desktop-only blobs with no `~/.claude` jsonl)
+  and Cursor sidebar pins stay in the list at any age. Keep-warm `ready`
+  rows still stay out.
+- **Sessions hide CLI keep-warm `ready` rows** and Control provider-proof
+  prompts so real chats fill the list.
+- **Sessions keep ChatGPT pins and Cursor sidebar names.** Codex
+  `pinned-thread-ids` stay in the list even when the jsonl is weeks old.
+  Cursor rows use `composerHeaders.name` (the sidebar title) and skip the
+  `empty-window` duplicate of the same chat.
 - **Memory and Threads lookup.** `GET /api/memory/search?q=` and
   `GET /api/threads/search?q=` run keyword over local notes (first ~8k of each
   file, ~2k file budget) then, for memories only, one embedding against the
