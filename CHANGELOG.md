@@ -1,5 +1,29 @@
 ## Unreleased
 
+## 6.27.10
+- **Naming an unidentified voice now creates a real profile.** `POST /api/meeting/:id/relabel`
+  was TEXT ONLY: it rewrote `speaker` strings in the sidecar and never touched the
+  voice store. Saving "Kirstyn Blum" over 109 segments labelled that one meeting and
+  taught the system nothing — she never appeared in `/api/voice/profiles`, the review
+  panel still offered her as `new name` inside the SAME meeting, no later meeting
+  could match her, and there was no profile to add further chunks against.
+  Verified on the live store: 77 profiles, no Kirstyn Blum, while both sidecars
+  carried her name.
+- The server already had `/api/voice/enroll-ext` for exactly this and the naming flow
+  never called it. Relabel now enrols the embeddings of the chunks it actually
+  changed, tagged `source: meeting-relabel` so a bad batch can be retracted wholesale.
+- **Scoped deliberately.** Enrolment runs ONLY when a placeholder (`Ext`,
+  `Unidentified N`, `Speaker N`, `Unknown`) becomes a real name. Correcting one real
+  name to another is left alone: moving a voice between existing people is
+  `merge-profiles`, which is explicit and confirmation-gated. A cross-roster sweep of
+  this store put two DISTINCT people at 0.85 similarity, so implicit re-pointing would
+  poison profiles.
+- Enrolment happens after the sidecar and ledger are durable, and a throwing voice
+  store cannot undo the rename the user asked for. `enrolledEmbeddings` is returned so
+  the panel can confirm a profile was created.
+- Four tests, both directions mutation-checked: reverting to text-only fails the
+  enrolment test; dropping the placeholder guard fails both safety tests.
+
 ## 6.27.9
 - **Large sessions open instead of 413ing.** `GET /api/agent-sessions/:provider/:id`
   answered `413 Session too large to open` for any transcript over 32 MiB, so the

@@ -77,6 +77,9 @@ function ledgerNow(sessionId: string): Array<Record<string, unknown>> {
   } catch { return [] }
 }
 
+const enrolCalls: Array<{ name: string; source: string }> = []
+const embeddingIndexRequests: Array<{ sessionId: string; indices: number[] }> = []
+
 async function startServer(): Promise<void> {
   vi.resetModules()
   vi.doMock('../lib/profile.js', () => ({
@@ -85,6 +88,27 @@ async function startServer(): Promise<void> {
     getOwnerName: () => 'Miles',
     getTranscriptionProfileStatus: () => ({}),
   }))
+  // Naming a placeholder is a FIRST TRAINING RUN, so the route must reach the voice
+  // store. Real embeddings need ONNX, which the suite does not have — these seams
+  // record the calls so enrolment is observable without it.
+  enrolCalls.length = 0
+  embeddingIndexRequests.length = 0
+  vi.doMock('../lib/chunk-embedding-store.js', () => ({
+    chunkEmbeddingsForIndices: (sessionId: string, indices: number[]) => {
+      embeddingIndexRequests.push({ sessionId, indices: [...indices] })
+      return indices.map(i => ({ index: i, embedding: new Float32Array([i, 1, 2]) }))
+    },
+  }))
+  vi.doMock('../lib/speaker-embeddings.js', async () => {
+    const actual = await vi.importActual<Record<string, unknown>>('../lib/speaker-embeddings.js')
+    return {
+      ...actual,
+      enrollEmbedding: (name: string, _e: Float32Array, source: string) => {
+        enrolCalls.push({ name, source })
+        return { success: true, dim: 3 }
+      },
+    }
+  })
   const { MeetingStore } = await import('../lib/meeting-store.js')
   const { createMeetingRouter } = await import('./meeting.js')
   const app = express()
@@ -129,6 +153,8 @@ afterEach(async () => {
   server = null
   vi.resetModules()
   vi.doUnmock('../lib/profile.js')
+  vi.doUnmock('../lib/chunk-embedding-store.js')
+  vi.doUnmock('../lib/speaker-embeddings.js')
   delete process.env.COS_DATA_DIR
   for (const d of [root, dataDir]) {
     if (d) { try { chmodSync(join(d, 'meeting-corrections'), 0o700) } catch { /* not present */ } rmSync(d, { recursive: true, force: true }) }
@@ -410,6 +436,65 @@ describe('correcting an unidentified voice', () => {
     expect(res.status).toBe(200)
     expect(sidecarNow().labels).toEqual(['Luke Henry', 'MU', 'Luke Henry'])
     expect(ledgerNow('meeting_e1')[1]).toMatchObject({ from: 'Ext', to: 'Luke Henry' })
+  })
+
+  // Naming a placeholder is a FIRST TRAINING RUN for a new person, not a text edit.
+  //
+  // Before this, relabel was text-only: it rewrote the sidecar and never touched the
+  // voice store. Saving "Kirstyn Blum" over 109 segments labelled that one meeting
+  // and taught the system nothing — she never appeared in /api/voice/profiles, the
+  // review panel still offered her as `new name` inside the SAME meeting, and no
+  // later meeting could match her. Every one of the 24 tests here passed throughout.
+  it('enrols the named voice as a profile, from the chunks that were relabelled', async () => {
+    seed('meeting_enrol', ['Ext', 'MU', 'Ext'], {
+      scribe: SCRIBE.replace(/Luke H/g, 'Ext'),
+    })
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_enrol/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolledEmbeddings).toBeGreaterThan(0)
+    expect(enrolCalls.length).toBeGreaterThan(0)
+    expect(enrolCalls.every(c => c.name === 'Kirstyn Blum')).toBe(true)
+    // Provenance, so a bad batch can be retracted by source later.
+    expect(enrolCalls.every(c => c.source === 'meeting-relabel')).toBe(true)
+    // Enrolled from the chunks that ACTUALLY changed — not the whole meeting.
+    expect(embeddingIndexRequests[0]).toMatchObject({ sessionId: 'meeting_enrol', indices: [0, 2] })
+  })
+
+  it('does NOT enrol when correcting one real name to another', async () => {
+    // Moving a voice between existing people is merge-profiles: explicit and
+    // confirmation-gated. Doing it implicitly here would poison profiles — a sweep of
+    // this store found two distinct people at 0.85 similarity.
+    seed('meeting_noenrol', ['Luke Henry', 'MU', 'Luke Henry'])
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_noenrol/relabel',
+      { from: 'Luke Henry', to: 'Chris Krubeck', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolledEmbeddings).toBe(0)
+    expect(enrolCalls).toEqual([])
+  })
+
+  it('does not enrol a placeholder onto a placeholder', async () => {
+    seed('meeting_pp', ['Ext', 'MU', 'Ext'])
+    await startServer()
+    const res = await post('/api/meeting/meeting_pp/relabel',
+      { from: 'Ext', to: 'Unidentified 2', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls).toEqual([])
+  })
+
+  it('still completes the rename when the voice store throws', async () => {
+    // Enrolment is a bonus on top of the relabel. A refusing voice store must not
+    // undo the rename the user actually asked for.
+    seed('meeting_throws', ['Ext', 'MU', 'Ext'])
+    await startServer()
+    const res = await post('/api/meeting/meeting_throws/relabel',
+      { from: 'Ext', to: 'New Person', confirm: true })
+    expect(res.status).toBe(200)
+    expect(sidecarNow().labels).toEqual(['New Person', 'MU', 'New Person'])
   })
 }, HTTP_TEST_TIMEOUT)
 
