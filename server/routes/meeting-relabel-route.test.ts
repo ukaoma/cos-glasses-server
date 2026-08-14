@@ -445,7 +445,7 @@ describe('correcting an unidentified voice', () => {
   // and taught the system nothing — she never appeared in /api/voice/profiles, the
   // review panel still offered her as `new name` inside the SAME meeting, and no
   // later meeting could match her. Every one of the 24 tests here passed throughout.
-  it('enrols the named voice as a profile, from the chunks that were relabelled', async () => {
+  it('does NOT enrol while enrolment is disabled (6.27.11 safety revert)', async () => {
     seed('meeting_enrol', ['Ext', 'MU', 'Ext'], {
       scribe: SCRIBE.replace(/Luke H/g, 'Ext'),
     })
@@ -454,13 +454,17 @@ describe('correcting an unidentified voice', () => {
     const res = await post('/api/meeting/meeting_enrol/relabel',
       { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
     expect(res.status).toBe(200)
-    expect(res.json.enrolledEmbeddings).toBeGreaterThan(0)
-    expect(enrolCalls.length).toBeGreaterThan(0)
-    expect(enrolCalls.every(c => c.name === 'Kirstyn Blum')).toBe(true)
-    // Provenance, so a bad batch can be retracted by source later.
-    expect(enrolCalls.every(c => c.source === 'meeting-relabel')).toBe(true)
-    // Enrolled from the chunks that ACTUALLY changed — not the whole meeting.
-    expect(embeddingIndexRequests[0]).toMatchObject({ sessionId: 'meeting_enrol', indices: [0, 2] })
+    // DISABLED in 6.27.11. 6.27.10 enrolled here and was WRONG: it joined compacted
+    // sidecar positions against raw capture indices, so on a live session 73 of 103
+    // rows belonged to other people, 22 of them the owner. This assertion is
+    // deliberately inverted rather than deleted, so re-enabling without the
+    // attachRawChunkIndices mapping fails loudly instead of silently poisoning.
+    //
+    // NOTE the old assertion `indices: [0, 2]` passed only because this 3-chunk seed
+    // has no gaps, so position happened to equal raw index. It pinned the bug as the
+    // contract. Any re-enable needs a GAPPED fixture.
+    expect(res.json.enrolledEmbeddings).toBe(0)
+    expect(enrolCalls).toEqual([])
   })
 
   it('does NOT enrol when correcting one real name to another', async () => {
@@ -486,7 +490,10 @@ describe('correcting an unidentified voice', () => {
     expect(enrolCalls).toEqual([])
   })
 
-  it('still completes the rename when the voice store throws', async () => {
+  // KNOWN VACUOUS: both mocks are pure and cannot throw, so the catch block has no
+  // coverage. Kept as a rename-still-works check; re-enabling enrolment needs a mock
+  // that actually throws.
+  it('completes the rename (catch path NOT covered — see comment)', async () => {
     // Enrolment is a bonus on top of the relabel. A refusing voice store must not
     // undo the rename the user actually asked for.
     seed('meeting_throws', ['Ext', 'MU', 'Ext'])

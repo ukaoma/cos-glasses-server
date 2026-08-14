@@ -1195,7 +1195,24 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // user asked for, and a voice store that refuses must not undo it. Reported so
     // the panel can say a profile was created rather than leaving the user to
     // discover, in another meeting, that it was not.
-    const enrolled = enrolNamedVoice(sessionId, from, to, plan.value.changed)
+    // DISABLED in 6.27.11. 6.27.10 shipped this joining the WRONG INDEX SPACE:
+    // `plan.value.changed` are positions in the COMPACTED sidecar array
+    // (meeting-relabel.ts:119, over rows already filtered to those with text) while
+    // the embedding store is keyed on the RAW capture index
+    // (transcribe-stream.ts:1868). They diverge at the first text-less chunk.
+    //
+    // Measured on a live session: naming one voice enrolled 73 of 103 rows belonging
+    // to OTHER people, including 22 chunks of the owner. It reported success because
+    // rows do come back — just the wrong ones. 73 of 74 live sessions have gaps, so
+    // this was the normal case.
+    //
+    // `attachRawChunkIndices` is the conversion for this and is imported at line 126,
+    // used correctly by the review path at 755 and 856. Re-enable only WITH that
+    // mapping, a refusal when the mapping is unavailable, a coherence gate (an `Ext`
+    // bucket is many voices — 98% of its pairwise cosines fall below the identifier's
+    // own 0.55 accept threshold), and a `correction:<sessionId>` source tag so the
+    // samples are human-tier, quota-protected and retractable.
+    const enrolled = 0
     res.json({ ok: true, correctionId: id, enrolledEmbeddings: enrolled, ...preview })
   })
 

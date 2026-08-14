@@ -1,5 +1,35 @@
 ## Unreleased
 
+## 6.27.11
+- **SAFETY REVERT: the 6.27.10 relabel enrolment is disabled.** It joined two
+  different index spaces. `plan.value.changed` are positions in the COMPACTED sidecar
+  array (`meeting-relabel.ts:119`, over rows already filtered to those carrying text)
+  while the chunk-embedding store is keyed on the RAW capture index
+  (`transcribe-stream.ts:1868`). They diverge at the first text-less chunk.
+- Measured on a live session: naming ONE voice enrolled **73 of 103 rows belonging to
+  other people**, including **22 chunks of the owner**, plus five colleagues. It
+  reported success because rows do come back — the wrong ones. 73 of 74 live sessions
+  with embeddings have gaps, so this was the normal case, not an edge case.
+- `attachRawChunkIndices` is the conversion for exactly this. It was already imported
+  in the file, used correctly by the review path, and carries a comment three hundred
+  lines above the change reading "`chunks` is NOT the WAV number".
+- **Anyone on 6.27.10 should update.** Naming a voice in the review panel could write
+  other people — including the owner — into that person's profile, permanently and
+  across every future meeting. The relabel itself was always correct; only the
+  enrolment side effect was wrong.
+
+  Re-enabling requires all of: the `attachRawChunkIndices` mapping with a refusal when
+  it is unavailable; a coherence gate (an `Ext` bucket is many voices — 98% of its
+  pairwise cosines fall below the identifier's own 0.55 accept threshold); a
+  `correction:<sessionId>` source tag so samples are human-tier, quota-protected and
+  retractable by the existing de-attribute path (a bare `meeting-relabel` tag matches
+  none of the three prefixes `isSampleFromSession` accepts, so "Not in this meeting"
+  silently retracts nothing); `greedyDiversitySelect` to bound the loop (~41ms per
+  cycle against a 7.9 MB store x 109 chunks blocks the event loop past the helper's
+  30s timeout); and honest reporting so a zero enrolment is distinguishable from
+  success. The COS Control scope-picker copy also still reads "Corrects this meeting
+  only. Other meetings are left alone."
+
 ## 6.27.10
 - **Naming an unidentified voice now creates a real profile.** `POST /api/meeting/:id/relabel`
   was TEXT ONLY: it rewrote `speaker` strings in the sidecar and never touched the
