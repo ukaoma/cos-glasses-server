@@ -19,6 +19,7 @@ import {
   loadClaudeStarredIds,
   loadCursorComposerNames,
   loadCursorPinnedIds,
+  parseAgentSession,
 } from './agent-session-store.js'
 
 function touch(path: string, at: Date): void {
@@ -391,5 +392,61 @@ describe('deep discussion digest (session body, not the row)', () => {
 
   it('returns empty when there is nothing to say', () => {
     expect(composeDiscussionDigest({ userTurns: [], latestAssistant: '' })).toBe('')
+  })
+})
+
+describe('oversized transcripts are read in part, not refused', () => {
+  it('parses a file over the ceiling via head+tail and says it is truncated', async () => {
+    // The route used to answer 413 above 32 MiB, so the biggest sessions were
+    // unopenable. Build a transcript past a small ceiling and prove both ends survive.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-big-session-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl')
+    const rec = (role: string, text: string): string =>
+      JSON.stringify({ type: role, message: { role, content: [{ type: 'text', text }] } })
+    const lines = [rec('user', 'OPENING ASK marker-head')]
+    // Filler large enough to push past the ceiling used below.
+    for (let i = 0; i < 4000; i++) lines.push(rec('user', `filler turn ${i} ${'x'.repeat(200)}`))
+    lines.push(rec('user', 'FINAL ASK marker-tail'))
+    lines.push(rec('assistant', 'Wrapped it up.'))
+    writeFileSync(file, lines.join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file, {
+      maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
+    })
+    expect(parsed.truncated).toBe(true)
+    // Both ends are present — that is the whole point of head+tail.
+    expect(parsed.discussion_digest).toContain('marker-head')
+    expect(parsed.discussion_digest).toContain('marker-tail')
+    // And it does NOT print a turn count it cannot know.
+    expect(parsed.discussion_digest).toContain('middle of a large session not read')
+    expect(parsed.discussion_digest).not.toMatch(/… \d+ earlier turns …/)
+    expect(parsed.discussion_digest.length).toBeLessThanOrEqual(DISCUSSION_DIGEST_MAX)
+    // PROOF that only two windows were read, not the whole file. Without this the
+    // suite passed even with windowing removed entirely — the flag and the markers
+    // are both true of a whole-file read, so they discriminate nothing. 4002 user
+    // turns were written; a head+tail read must see a small fraction of them.
+    expect(parsed.user_message_count).toBeGreaterThan(0)
+    expect(parsed.user_message_count).toBeLessThan(1000)
+  })
+
+  it('reads a small file whole and reports truncated false', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-small-session-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-ffffffffffff.jsonl')
+    const rec = (role: string, text: string): string =>
+      JSON.stringify({ type: role, message: { role, content: [{ type: 'text', text }] } })
+    writeFileSync(file, [rec('user', 'just one ask'), rec('assistant', 'done')].join('\n') + '\n')
+    const parsed = await parseAgentSession('claude', file, { maxBytes: 32 * 1024 * 1024 })
+    expect(parsed.truncated).toBe(false)
+    expect(parsed.user_message_count).toBe(1)
+  })
+
+  it('keeps slash-command scaffolding out of the digest', () => {
+    // <command-message> wrappers landed in the two most valuable slots before this.
+    const body = composeDiscussionDigest({
+      userTurns: ['Are we on the latest server?'],
+      latestAssistant: 'Yes.',
+    })
+    expect(body).toContain('Are we on the latest server?')
+    expect(body).not.toContain('<command-message>')
   })
 })

@@ -1,5 +1,28 @@
 ## Unreleased
 
+## 6.27.9
+- **Large sessions open instead of 413ing.** `GET /api/agent-sessions/:provider/:id`
+  answered `413 Session too large to open` for any transcript over 32 MiB, so the
+  biggest sessions — the ones most worth reviewing before a follow-up — returned
+  nothing at all. A 67 MB transcript is not exotic; this repo's own 2026-08-13 session
+  is 70 MB. Oversized files are now read as a bounded **head (256 KiB) + tail
+  (768 KiB)**. That 70 MB session parses in **7 ms** and yields a 1,286-char digest
+  with both the opening ask and the most recent turns.
+- Slicing at an arbitrary byte offset is safe because `parseJsonLine` returns null for
+  the fragmentary first line of the tail window and the loop skips it.
+- **`truncated` is reported, and the counts stop pretending.** On a partial read the
+  message counts are counts of what was READ. The digest therefore prints
+  `… middle of a large session not read …` instead of a turn number it cannot know —
+  a confidently wrong "… 12 earlier turns …" on a 4,000-turn session is the same
+  dishonesty as a silent cap.
+- **Slash-command scaffolding no longer eats the two best slots.** `collectTurn` now
+  applies the existing `isWrapperPrompt` filter and `<user_query>` stripping, so a
+  digest opens with the real ask rather than `<command-message>…`.
+- Window sizes are injectable. With production defaults any quick-to-build fixture is
+  smaller than head+tail combined, so a test would read the whole file and pass
+  identically with windowing REMOVED — it did, until a mutation caught it. The test
+  now pins the read count and fails when windowing is dropped.
+
 ## 6.27.8
 - **Session bodies get a real digest.** `GET /api/agent-sessions/:provider/:id` adds
   `discussion_digest`: up to **2000 chars** of what actually happened — the opening

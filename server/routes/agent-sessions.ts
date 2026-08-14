@@ -19,7 +19,6 @@ import { stat } from 'node:fs/promises'
 import {
   AGENT_SESSION_LIST_LIMIT,
   AGENT_SESSION_LIST_MAX,
-  AGENT_SESSION_MAX_FILE_BYTES,
   AGENT_SESSION_WINDOW_HOURS,
   agentSessionRoots,
   findAgentSessionFile,
@@ -156,10 +155,17 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       return
     }
     const st = await stat(found)
-    if (st.size > AGENT_SESSION_MAX_FILE_BYTES) {
-      res.status(413).json({ error: 'Session too large to open', reason: 'session_too_large' })
-      return
-    }
+    // Oversized transcripts are READ IN PART, not refused.
+    //
+    // This used to answer 413 "Session too large to open" above 32 MiB, which made the
+    // biggest sessions — the ones most worth reviewing before a follow-up — completely
+    // unopenable on the glasses. A 67 MB transcript is not exotic; this repo's own
+    // 2026-08-13 session is one. The detail page needs the opening turns, the recent
+    // turns, and stats, and a bounded head+tail carries all three.
+    //
+    // `parsed.truncated` says so out loud, and the counts are then counts of what was
+    // READ. Presenting a partial count as the session total would be the same
+    // dishonesty as a silent cap, so the digest omits the number entirely instead.
     const parsed = await parseAgentSession(provider, found)
     if (provider === 'cursor') {
       const names = await loadCursorComposerNames(agentSessionRoots().cursorComposerDb)
@@ -179,6 +185,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       // summary — Miles: "it should be in the body not the title, the row should
       // be no more than the 180 characters."
       discussion_digest: parsed.discussion_digest || '',
+      truncated: parsed.truncated,
       project: parsed.project,
       created: modified,
       modified,

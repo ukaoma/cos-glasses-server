@@ -192,6 +192,9 @@ export function composeDiscussionDigest(input: {
    *  memory, and without this the elision line would report only the turns it can see
    *  and quietly under-count the rest — a silent cap wearing an honest label. */
   totalTurns?: number
+  /** The transcript was read as head+tail, so the middle was never seen and the true
+   *  turn count is unknown. Print elision WITHOUT a number rather than a wrong one. */
+  truncated?: boolean
 }): string {
   const max = input.max ?? DISCUSSION_DIGEST_MAX
   const clean = (s: string): string => s.replace(/\s+/g, ' ').trim()
@@ -233,7 +236,8 @@ export function composeDiscussionDigest(input: {
   const dropped = total - headKept.length - kept.length
   const lines: string[] = []
   for (const t of headKept) lines.push(`• ${t}`)
-  if (dropped > 0) lines.push(`… ${dropped} earlier turn${dropped === 1 ? '' : 's'} …`)
+  if (input.truncated) lines.push('… middle of a large session not read …')
+  else if (dropped > 0) lines.push(`… ${dropped} earlier turn${dropped === 1 ? '' : 's'} …`)
   for (const t of kept) lines.push(`• ${t}`)
 
   const body = lines.join('\n') + tail
@@ -1023,6 +1027,54 @@ export async function findAgentSessionFile(
   return best?.file ?? null
 }
 
+/** Bytes read from the START of an oversized transcript — enough for the opening ask
+ *  and the session_meta record that carries cwd/branch. */
+export const PARTIAL_HEAD_BYTES = 256 * 1024
+/** Bytes read from the END. Larger than the head because the recent turns are what a
+ *  follow-up continues from. */
+export const PARTIAL_TAIL_BYTES = 768 * 1024
+
+/**
+ * Lines of a transcript, reading the WHOLE file when it fits and head+tail when it
+ * does not.
+ *
+ * WHY. `GET /api/agent-sessions/:provider/:id` used to answer 413 "Session too large
+ * to open" for anything over 32 MiB, so the biggest sessions — the ones most worth
+ * summarizing before a follow-up — returned nothing at all. A 67 MB transcript is
+ * real; today's own session is one. Refusing was never necessary: the detail page
+ * needs the opening turns, the recent turns, and the counts, and two bounded windows
+ * carry all three without loading 67 MB into memory.
+ *
+ * The first line of the tail window is almost always a fragment of a JSON record.
+ * `parseJsonLine` returns null for it and the caller's loop skips it, which is why
+ * this can slice at an arbitrary byte offset and stay correct.
+ */
+export async function* agentSessionLines(
+  path: string,
+  size: number,
+  maxBytes: number,
+  // Window sizes are injectable so a test can prove ELISION without writing a
+  // multi-megabyte fixture. With the production 256 KiB + 768 KiB defaults, any
+  // fixture small enough to build quickly is fully covered by the two windows — so
+  // the test would read the whole file, see every turn, and pass identically with
+  // windowing removed. It did exactly that until a mutation caught it.
+  headBytes = PARTIAL_HEAD_BYTES,
+  tailBytes = PARTIAL_TAIL_BYTES,
+): AsyncGenerator<string> {
+  if (size <= maxBytes) {
+    yield* createInterface({ input: createReadStream(path), crlfDelay: Infinity })
+    return
+  }
+  yield* createInterface({
+    input: createReadStream(path, { start: 0, end: headBytes - 1 }),
+    crlfDelay: Infinity,
+  })
+  yield* createInterface({
+    input: createReadStream(path, { start: Math.max(headBytes, size - tailBytes) }),
+    crlfDelay: Infinity,
+  })
+}
+
 export interface AgentSessionDetail {
   session_id: string
   provider: AgentProvider
@@ -1038,10 +1090,20 @@ export interface AgentSessionDetail {
   assistant_message_count: number
   omitted_tools: number
   file_size_bytes: number
+  /** True when the transcript exceeded the read ceiling and only head+tail were
+   *  parsed. The message counts are then counts of what was READ, not of the
+   *  session — the client must not present them as exact. */
+  truncated: boolean
 }
 
-export async function parseAgentSession(provider: AgentProvider, path: string): Promise<AgentSessionDetail> {
+export async function parseAgentSession(
+  provider: AgentProvider,
+  path: string,
+  opts: { maxBytes?: number; headBytes?: number; tailBytes?: number } = {},
+): Promise<AgentSessionDetail> {
   const st = await stat(path)
+  const maxBytes = opts.maxBytes ?? AGENT_SESSION_MAX_FILE_BYTES
+  const truncated = st.size > maxBytes
   let title = ''
   let project = ''
   let gitBranch = ''
@@ -1057,7 +1119,21 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
   const digestHead: string[] = []
   const digestRecent: string[] = []
   const collectTurn = (text: string): void => {
-    const line = (text ?? '').replace(/\s+/g, ' ').trim()
+    // Reuse the wrapper filter the rest of this module already trusts. Without it the
+    // opening turns of a slash-command session render as
+    // "<command-message>cos-glasses</command-message>…" — scaffolding, not the ask,
+    // and it lands in the two most valuable slots in the digest.
+    const raw = (text ?? '').trim()
+    if (!raw || isWrapperPrompt(raw)) return
+    // Same tag-stripping firstLineTitle does, so an inline <user_query> wrapper does
+    // not leak angle brackets into the body.
+    const unwrapped = (() => {
+      const start = raw.indexOf('<user_query>')
+      const end = raw.indexOf('</user_query>')
+      const inner = start >= 0 && end > start ? raw.slice(start + '<user_query>'.length, end) : raw
+      return inner.replace(/<[^>]+>/g, ' ')
+    })()
+    const line = unwrapped.replace(/\s+/g, ' ').trim()
     if (!line) return
     if (digestHead.length < DIGEST_HEAD_TURNS) { digestHead.push(line.slice(0, DIGEST_TURN_MAX)); return }
     digestRecent.push(line.slice(0, DIGEST_TURN_MAX))
@@ -1066,8 +1142,7 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
   let assistantCount = 0
   let omittedTools = 0
 
-  const rl = createInterface({ input: createReadStream(path), crlfDelay: Infinity })
-  for await (const line of rl) {
+  for await (const line of agentSessionLines(path, st.size, maxBytes, opts.headBytes, opts.tailBytes)) {
     const obj = parseJsonLine(line)
     if (!obj) continue
     if (provider === 'claude') {
@@ -1172,11 +1247,16 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
     discussion_digest: composeDiscussionDigest({
       userTurns: [...digestHead, ...digestRecent],
       latestAssistant,
-      totalTurns: userCount,
+      // On a truncated read `userCount` counts only the sampled windows, so passing
+      // it as the total would print a confidently WRONG "… 12 earlier turns …" for a
+      // session with hundreds. The digest drops the number instead of inventing one.
+      totalTurns: truncated ? undefined : userCount,
+      truncated,
     }),
     user_message_count: userCount,
     assistant_message_count: assistantCount,
     omitted_tools: omittedTools,
     file_size_bytes: st.size,
+    truncated,
   }
 }
