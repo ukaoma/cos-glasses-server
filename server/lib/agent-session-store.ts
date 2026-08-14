@@ -148,6 +148,98 @@ export function composeDiscussionSummary(input: {
   return joined.length <= max ? joined : `${joined.slice(0, max - 1)}…`
 }
 
+/** Deep digest budget. The glasses detail page paginates at 200 chars, so 2000 is
+ *  ~10 swipes — long by G2 standards, and deliberately so: this exists to be READ
+ *  before deciding whether to follow up on a session, the one moment depth beats
+ *  brevity. The LIST row keeps the short `discussion_summary`; a 2000-char gist
+ *  appended to a single row would destroy it. Two fields, two jobs. */
+export const DISCUSSION_DIGEST_MAX = 2000
+
+/** Per-turn cap, so one enormous paste cannot eat the whole budget. */
+const DIGEST_TURN_MAX = 220
+
+/** Turns kept from the START. The opening ask frames everything after it. */
+const DIGEST_HEAD_TURNS = 2
+
+/** Recent turns retained while streaming. Comfortably more than 2000 chars can
+ *  render (~20-25 at typical length), so the budget and not the buffer decides
+ *  what appears. */
+const DIGEST_RECENT_WINDOW = 60
+
+/**
+ * A readable account of what actually happened in a session.
+ *
+ * `composeDiscussionSummary` is the opening prompt plus the last assistant snippet at
+ * 180 chars — it says where a session started and where it stopped, and nothing about
+ * the turns between, which is exactly what you need to decide whether to reopen it.
+ *
+ * Shape: the opening ask, then the MOST RECENT user turns in chronological order, then
+ * where the assistant left off. Recency is weighted because a follow-up continues from
+ * the end, not the beginning.
+ *
+ * NO LLM, by design — assembled from turns `parseAgentSession` already streams, so a
+ * digest costs no tokens and no extra file reads.
+ *
+ * Elision is STATED, never silent: dropping 40 turns and rendering the rest as clean
+ * prose reads like the whole story. `… N earlier turns …` says otherwise.
+ */
+export function composeDiscussionDigest(input: {
+  userTurns: string[]
+  latestAssistant?: string
+  max?: number
+  /** True number of user turns in the session, when `userTurns` is a bounded sample.
+   *  The caller keeps only head + a recent window so a 900-turn session cannot balloon
+   *  memory, and without this the elision line would report only the turns it can see
+   *  and quietly under-count the rest — a silent cap wearing an honest label. */
+  totalTurns?: number
+}): string {
+  const max = input.max ?? DISCUSSION_DIGEST_MAX
+  const clean = (s: string): string => s.replace(/\s+/g, ' ').trim()
+  const cap = (s: string): string => (s.length <= DIGEST_TURN_MAX ? s : `${s.slice(0, DIGEST_TURN_MAX - 1)}…`)
+
+  const turns = input.userTurns.map(clean).filter(Boolean).map(cap)
+  const latest = clean(input.latestAssistant ?? '')
+  if (turns.length === 0 && !latest) return ''
+  const total = Math.max(input.totalTurns ?? turns.length, turns.length)
+
+  // Reserve room for the closing state before spending budget on asks.
+  const tail = latest ? `\n\nLatest: ${cap(latest)}` : ''
+  let budget = max - tail.length
+
+  const head = turns.slice(0, DIGEST_HEAD_TURNS)
+  const rest = turns.slice(DIGEST_HEAD_TURNS)
+
+  // HEAD FIRST. Claiming the opening ask "frames everything after it" and then
+  // spending the budget from the end left no room for it — a 40-turn session rendered
+  // as "… 22 earlier turns …" with the original request nowhere on the page. Reserve
+  // the framing, then spend what is left on recency. Caught by its own test.
+  const headKept: string[] = []
+  for (const turn of head) {
+    const cost = turn.length + 3
+    if (cost > budget) break
+    headKept.push(turn)
+    budget -= cost
+  }
+
+  // Then fill from the END backwards — the turns nearest a follow-up.
+  const kept: string[] = []
+  for (let i = rest.length - 1; i >= 0; i--) {
+    const cost = rest[i].length + 3
+    if (cost > budget) break
+    kept.unshift(rest[i])
+    budget -= cost
+  }
+
+  const dropped = total - headKept.length - kept.length
+  const lines: string[] = []
+  for (const t of headKept) lines.push(`• ${t}`)
+  if (dropped > 0) lines.push(`… ${dropped} earlier turn${dropped === 1 ? '' : 's'} …`)
+  for (const t of kept) lines.push(`• ${t}`)
+
+  const body = lines.join('\n') + tail
+  return body.length <= max ? body : `${body.slice(0, max - 1)}…`
+}
+
 export function assistantProseFromRecord(obj: Record<string, unknown>): string | null {
   if (obj.type === 'assistant') {
     const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null
@@ -939,6 +1031,9 @@ export interface AgentSessionDetail {
   git_branch: string
   first_prompt: string
   discussion_summary: string
+  /** Deep, paginated body text for the detail page — up to 2000 chars. The list row
+   *  keeps `discussion_summary` at 180. Older clients ignore this field. */
+  discussion_digest: string
   user_message_count: number
   assistant_message_count: number
   omitted_tools: number
@@ -954,6 +1049,20 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
   let firstPrompt = ''
   let latestAssistant = ''
   let userCount = 0
+  // Bounded sample for the deep digest: the opening turns plus a recent window.
+  // The composer only ever renders head + as many recent as fit 2000 chars, so
+  // retaining the whole conversation would be memory held for nothing — a 900-turn
+  // session is real. `userCount` still carries the TRUE total so the elision line
+  // reports what was actually dropped rather than what this buffer happens to hold.
+  const digestHead: string[] = []
+  const digestRecent: string[] = []
+  const collectTurn = (text: string): void => {
+    const line = (text ?? '').replace(/\s+/g, ' ').trim()
+    if (!line) return
+    if (digestHead.length < DIGEST_HEAD_TURNS) { digestHead.push(line.slice(0, DIGEST_TURN_MAX)); return }
+    digestRecent.push(line.slice(0, DIGEST_TURN_MAX))
+    if (digestRecent.length > DIGEST_RECENT_WINDOW) digestRecent.shift()
+  }
   let assistantCount = 0
   let omittedTools = 0
 
@@ -980,6 +1089,7 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
       }
       if (obj.type === 'user') {
         userCount += 1
+        collectTurn(text)
         if (!firstPrompt) firstPrompt = firstLineTitle(text)
         if (!title) title = firstLineTitle(text)
       } else {
@@ -1012,6 +1122,7 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
         if (snippet) latestAssistant = snippet
       } else {
         userCount += 1
+        collectTurn(text)
         if (!firstPrompt) firstPrompt = firstLineTitle(text)
         if (!title) title = firstLineTitle(text)
       }
@@ -1026,6 +1137,7 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
       if (obj.role === 'user') {
         userCount += 1
         const query = cursorUserTitle(text, true) ?? cursorUserTitle(text, false)
+        collectTurn(query ?? text)
         if (query) {
           title = query
           if (!firstPrompt) firstPrompt = query
@@ -1056,6 +1168,11 @@ export async function parseAgentSession(provider: AgentProvider, path: string): 
       title: display,
       firstPrompt: firstPrompt || title,
       latestAssistant,
+    }),
+    discussion_digest: composeDiscussionDigest({
+      userTurns: [...digestHead, ...digestRecent],
+      latestAssistant,
+      totalTurns: userCount,
     }),
     user_message_count: userCount,
     assistant_message_count: assistantCount,

@@ -175,6 +175,10 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       display_label: parsed.display_label,
       first_prompt: parsed.first_prompt,
       discussion_summary: parsed.discussion_summary || '',
+      // Detail only. The list row (line 73) deliberately stays on the 180-char
+      // summary — Miles: "it should be in the body not the title, the row should
+      // be no more than the 180 characters."
+      discussion_digest: parsed.discussion_digest || '',
       project: parsed.project,
       created: modified,
       modified,

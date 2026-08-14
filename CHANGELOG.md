@@ -1,5 +1,26 @@
 ## Unreleased
 
+## 6.27.8
+- **Session bodies get a real digest.** `GET /api/agent-sessions/:provider/:id` adds
+  `discussion_digest`: up to **2000 chars** of what actually happened — the opening
+  ask, the most recent user turns in order, and where the assistant left off.
+- **The list row is untouched at 180.** Miles: "it should be in the body not the
+  title, the row should be no more than the 180 characters." `discussion_summary`
+  keeps its 180-char budget for the single-line row; the digest is a separate field
+  the detail page reads. One shared field could not serve both — a 2000-char gist
+  appended to a row destroys it.
+- **No LLM, no extra reads.** `parseAgentSession` already streams every line of the
+  transcript to count turns; it was discarding the middle. The digest is assembled
+  from turns it is already parsing, so it costs no tokens and no additional I/O.
+- **Elision is stated, never silent.** The store keeps the opening turns plus a
+  60-turn recent window so a 900-turn session cannot balloon memory, and passes the
+  TRUE turn count so the `… N earlier turns …` line reports what was really dropped
+  rather than what the buffer happened to hold.
+- Opening turns are reserved BEFORE recency. Filling from the end first starved the
+  original ask out of a 40-turn session entirely — caught by its own test.
+- Older clients ignore the field; older servers omit it and the glasses fall back to
+  the 180-char summary.
+
 ## 6.27.7
 - **`GET /api/agent-sessions` ships in the public package.** Claude Code, Codex,
   and Cursor transcripts from this Mac, last 7 days of writes. Glasses 6.8.360

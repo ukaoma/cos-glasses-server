@@ -6,7 +6,9 @@ import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import {
   agentSessionRoots,
+  composeDiscussionDigest,
   composeDiscussionSummary,
+  DISCUSSION_DIGEST_MAX,
   isKeepWarmSessionTitle,
   isScratchCursorProject,
   latestAssistantFromWindow,
@@ -325,5 +327,69 @@ describe('discussion gist', () => {
     expect(listed[0].first_prompt).toBe('Are there any calls and attention around this?')
     expect(listed[0].discussion_summary).toContain('Are there any calls and attention around this?')
     expect(listed[0].discussion_summary).toContain('We can do this or that depending on EWIC.')
+  })
+})
+
+describe('deep discussion digest (session body, not the row)', () => {
+  const turns = (n: number): string[] =>
+    Array.from({ length: n }, (_, i) => `Turn ${i + 1}: do the thing number ${i + 1}`)
+
+  it('keeps the LIST row at 180 chars while the body goes deep', () => {
+    // Miles: "It should be in the body not the title. the row should be no more than
+    // the 180 characters." Two fields, two budgets — pinned so a later change that
+    // widens the summary cannot quietly wreck the single-line row.
+    const row = composeDiscussionSummary({
+      title: 'T', firstPrompt: 'x'.repeat(500), latestAssistant: 'y'.repeat(500),
+    })
+    expect(row.length).toBeLessThanOrEqual(180)
+
+    const body = composeDiscussionDigest({ userTurns: turns(40), latestAssistant: 'Shipped it.' })
+    expect(body.length).toBeGreaterThan(180)
+    expect(body.length).toBeLessThanOrEqual(DISCUSSION_DIGEST_MAX)
+  })
+
+  it('states elision instead of silently dropping turns', () => {
+    const body = composeDiscussionDigest({ userTurns: turns(80), latestAssistant: 'Done.' })
+    expect(body).toMatch(/… \d+ earlier turns …/)
+  })
+
+  it('reports the TRUE dropped count when the caller passes a bounded sample', () => {
+    // The store keeps head + a 60-turn window; without totalTurns the elision line
+    // would count only what the buffer held and under-report the rest.
+    const sample = [...turns(2), ...turns(60)]
+    const body = composeDiscussionDigest({
+      userTurns: sample, latestAssistant: 'Done.', totalTurns: 900,
+    })
+    const m = /… (\d+) earlier turns …/.exec(body)
+    expect(m).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThan(800)
+  })
+
+  it('reserves the opening ask, then weights recency', () => {
+    // Realistic turn length (~150 chars), not the toy 30-char kind: at 2000 chars a
+    // toy fixture holds 50+ turns and nothing gets dropped, so the test would prove
+    // nothing about elision. Real prompts are paragraphs.
+    const real = (n: number): string[] =>
+      Array.from({ length: n }, (_, i) => `Turn ${i + 1}: ${'detail '.repeat(20)}marker${i + 1}`)
+    const body = composeDiscussionDigest({ userTurns: real(60), latestAssistant: 'Done.' })
+    // The framing survives — this is the regression that shipped first: filling from
+    // the end left no budget for the opening ask.
+    expect(body).toContain('Turn 1:')
+    // The most recent turn survives, because a follow-up continues from there.
+    expect(body).toContain('marker60')
+    // The middle is dropped, and says so.
+    expect(body).not.toContain('marker30')
+    expect(body).toMatch(/… \d+ earlier turns …/)
+    expect(body.length).toBeLessThanOrEqual(DISCUSSION_DIGEST_MAX)
+  })
+
+  it('caps a single enormous paste so one turn cannot eat the budget', () => {
+    const body = composeDiscussionDigest({ userTurns: ['z'.repeat(9000)], latestAssistant: '' })
+    expect(body.length).toBeLessThanOrEqual(DISCUSSION_DIGEST_MAX)
+    expect(body).toContain('…')
+  })
+
+  it('returns empty when there is nothing to say', () => {
+    expect(composeDiscussionDigest({ userTurns: [], latestAssistant: '' })).toBe('')
   })
 })
