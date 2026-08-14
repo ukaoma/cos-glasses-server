@@ -954,3 +954,72 @@ describe('chained corrections', () => {
     expect(attendees.match(/^- Luke Henry$/gm)).toHaveLength(1)
   })
 }, HTTP_TEST_TIMEOUT)
+
+describe('backfilling enrolment from a recorded correction', () => {
+  // The retroactive path. A voice named BEFORE enrolment shipped has a correct
+  // transcript and no profile, and re-running the rename cannot help — she is already
+  // a real name, so the placeholder guard declines. Kirstyn Blum is the live case:
+  // 60 + 109 chunks across two meetings, absent from a 77-profile store.
+  //
+  // It must run IN-PROCESS: the voice store is owned by the running server and
+  // rewritten wholesale, so an external enrol is silently clobbered. An attempt on
+  // 2026-08-13 validated cleanly, selected 20 samples, and left the store at its
+  // Aug 7 mtime.
+
+  it('previews without writing, then enrols only on confirm', async () => {
+    seed('meeting_bf1', ['Ext', 'MU', 'Ext'])
+    await startServer()
+    await post('/api/meeting/meeting_bf1/relabel', { from: 'Ext', to: 'Rae Lin', confirm: true })
+    enrolCalls.length = 0
+
+    const preview = await post('/api/meeting/meeting_bf1/backfill-enrolment', { speaker: 'Rae Lin' })
+    expect(preview.status).toBe(200)
+    expect(preview.json.confirmed).toBe(false)
+    expect(enrolCalls).toEqual([])
+
+    const applied = await post('/api/meeting/meeting_bf1/backfill-enrolment',
+      { speaker: 'Rae Lin', confirm: true })
+    expect(applied.status).toBe(200)
+    expect(applied.json.confirmed).toBe(true)
+  })
+
+  it('SKIPS corrections whose source was a named person', async () => {
+    // The Kirstyn case exactly: Ext -> Kirstyn is training data, but
+    // Allison Wheeler -> Kirstyn is a mis-attribution fix. Training on the second
+    // would put Allison's voice into Kirstyn's profile.
+    seed('meeting_bf2', ['Ext', 'Allison Wheeler', 'Ext'])
+    await startServer()
+    await post('/api/meeting/meeting_bf2/relabel', { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    await post('/api/meeting/meeting_bf2/relabel',
+      { from: 'Allison Wheeler', to: 'Kirstyn Blum', confirm: true })
+    enrolCalls.length = 0
+
+    const res = await post('/api/meeting/meeting_bf2/backfill-enrolment',
+      { speaker: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    const froms = (res.json.corrections as Array<Record<string, unknown>>).map(c => c.from)
+    expect(froms).toContain('Ext')
+    expect(froms).toContain('Allison Wheeler')
+    // Both rows are REPORTED, but only the placeholder one attempted anything.
+    const named = (res.json.corrections as Array<Record<string, unknown>>)
+      .find(c => c.from === 'Allison Wheeler')
+    expect((named!.report as Record<string, unknown>).attempted).toBe(0)
+    expect(res.json.totals.skippedNamedSource).toBe(1)
+  })
+
+  it('404s for a speaker with no applied correction here', async () => {
+    seed('meeting_bf3', ['Ext', 'MU'])
+    await startServer()
+    const res = await post('/api/meeting/meeting_bf3/backfill-enrolment', { speaker: 'Nobody At All' })
+    expect(res.status).toBe(404)
+    expect(res.json.reason).toBe('no_correction')
+  })
+
+  it('requires a speaker', async () => {
+    seed('meeting_bf4', ['Ext', 'MU'])
+    await startServer()
+    const res = await post('/api/meeting/meeting_bf4/backfill-enrolment', {})
+    expect(res.status).toBe(400)
+    expect(res.json.reason).toBe('invalid_label')
+  })
+}, HTTP_TEST_TIMEOUT)

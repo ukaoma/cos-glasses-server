@@ -1,5 +1,32 @@
 ## Unreleased
 
+## 6.27.13
+- **`POST /api/meeting/:sessionId/backfill-enrolment`** — train a profile from a voice
+  that was named BEFORE enrolment shipped. Those meetings have a correct transcript and
+  no profile, and re-running the rename cannot help: the voice is already a real name
+  there, so the placeholder guard correctly declines. The live case is Kirstyn Blum —
+  60 and 109 chunks across two meetings, 182 sidecar mentions, absent from a 77-profile
+  store.
+- The correction LEDGER already holds what enrolment needs: the original `from`, the
+  `to`, and the exact chunk indices written at apply time. This replays those rows
+  through the SAME `enrolNamedVoice` — raw-index mapping, refusal when unmappable,
+  coherence, the diversity cap and the `correction:<sessionId>` tag all apply
+  identically. No second implementation to drift.
+- **Named-source corrections are excluded, by the existing rule rather than a new one.**
+  `Ext -> Kirstyn` is training data; `Allison Wheeler -> Kirstyn` is a mis-attribution
+  fix, and training on it would put Allison's voice into Kirstyn's profile. Both rows
+  are reported; only the placeholder one attempts anything. Mutation-verified: dropping
+  the placeholder guard fails that test.
+- **Runs in-process, which is the point.** The voice store is owned by the running
+  server and rewritten wholesale, so an external process that enrols directly has its
+  work silently clobbered. Not hypothetical — an attempt on 2026-08-13 validated
+  cleanly, selected 20 samples, and left the store untouched at its Aug 7 mtime.
+- **Fails closed.** Without `confirm: true` it reports what it would enrol and writes
+  nothing. The preview runs every gate — a preview that skipped them would be a guess
+  about what the real call does — so `enrolNamedVoice` gained a `dryRun` flag. The
+  projection can land HIGHER than reality, because only `enrollEmbedding` can judge
+  near-duplicates against the live profile; that is documented on the flag.
+
 ## 6.27.12
 - **Naming an unidentified voice creates a real speaker profile — correctly this time.**
   Re-enables what 6.27.10 shipped broken and 6.27.11 disabled.

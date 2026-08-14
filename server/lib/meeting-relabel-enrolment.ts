@@ -169,6 +169,11 @@ export interface EnrolNamedVoiceInput {
   changed: number[]
   /** The parsed sidecar, for `chunks` + `chunkEntries` + `startTime`. */
   sidecar: Record<string, unknown>
+  /** Run every gate but write nothing. `enrolled` then counts what WOULD be enrolled;
+   *  the real call can land LOWER, because `enrollEmbedding`'s dedup gate rejects
+   *  near-duplicates and only it can judge that against the live profile. A preview
+   *  that skipped the gates would be a guess about what the real call does. */
+  dryRun?: boolean
 }
 
 /**
@@ -238,7 +243,11 @@ export function enrolNamedVoice(input: EnrolNamedVoiceInput): EnrolmentReport {
   const source = `correction:${sessionId}`
   let enrolled = 0
   try {
-    for (const embedding of selected) {
+    if (input.dryRun) {
+      // Projection, not a promise — see the dryRun docblock. Every gate above has
+      // already run, so this is what the real call will attempt.
+      enrolled = selected.length
+    } else for (const embedding of selected) {
       if (enrollEmbedding(to, embedding, source).success) enrolled += 1
     }
   } catch {

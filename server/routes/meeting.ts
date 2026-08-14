@@ -975,6 +975,96 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     })
   })
 
+  /**
+   * Replay a recorded correction's enrolment — the retroactive path.
+   *
+   * WHY. Enrolment fires inside `POST /relabel`, so a voice named BEFORE that shipped
+   * has a correct transcript and no profile. Kirstyn Blum is the live case: named
+   * across two meetings (60 and 109 chunks), 182 mentions in the sidecars, absent from
+   * a 77-profile store. Re-running the rename cannot help — she is already a real
+   * name there, so the placeholder guard correctly declines.
+   *
+   * The correction LEDGER already holds exactly what enrolment needs: the original
+   * `from`, the `to`, and the precise chunk indices, written at apply time.
+   *
+   * This runs IN-PROCESS on purpose. The voice store is owned by the running server,
+   * which holds it in memory and rewrites it wholesale; an external process that
+   * enrols directly has its work silently clobbered on the next persist. That is not
+   * hypothetical — an attempt on 2026-08-13 validated cleanly, selected 20 samples,
+   * and left the store untouched at its Aug 7 mtime.
+   *
+   * SAME GATES, no exceptions. It calls `enrolNamedVoice`, so raw-index mapping,
+   * refusal when unmappable, voice coherence, the diversity cap and the
+   * `correction:<sessionId>` tag all apply identically. Rows whose `from` is a real
+   * person are skipped by that function's own placeholder rule, which is what keeps a
+   * mis-attribution correction (Allison Wheeler -> Kirstyn) out of the training set.
+   *
+   * FAILS CLOSED. Without `confirm: true` it reports what it would enrol and writes
+   * nothing.
+   */
+  router.post('/meeting/:sessionId/backfill-enrolment', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const speaker = typeof req.body?.speaker === 'string' ? req.body.speaker.trim() : ''
+    if (!speaker) {
+      res.status(400).json({ error: 'speaker is required', reason: 'invalid_label' })
+      return
+    }
+
+    const operations = cosOperationsMeetingsConfigured()
+      ? findCosOperationsMeetingBySessionId(sessionId)
+      : null
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) {
+      res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const sidecarPath = operations?.sidecarPath ?? saved!.sidecarPath
+    let parsedSidecar: Record<string, unknown> | null = null
+    try {
+      const doc = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as unknown
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) parsedSidecar = doc as Record<string, unknown>
+    } catch {
+      res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
+      return
+    }
+
+    // Only rows that ACTUALLY landed, and only those that named this speaker.
+    const rows = appliedCorrections(sessionId).filter(r => r.to === speaker && r.chunks.length > 0)
+    if (rows.length === 0) {
+      res.status(404).json({ error: `No applied correction named "${speaker}" in this meeting`, reason: 'no_correction' })
+      return
+    }
+
+    const confirm = req.body?.confirm === true
+    const reports = rows.map(row => ({
+      correctionId: row.id,
+      from: row.from,
+      chunks: row.chunks.length,
+      // Dry run still evaluates every gate — a preview that skips them would be a
+      // guess about what the real call is going to do.
+      report: enrolNamedVoice({
+        sessionId, from: row.from, to: speaker, changed: row.chunks, sidecar: parsedSidecar!, dryRun: !confirm,
+      }),
+    }))
+
+    res.json({
+      ok: true,
+      speaker,
+      confirmed: confirm,
+      corrections: reports,
+      totals: {
+        eligible: reports.filter(r => r.report.attempted > 0).length,
+        skippedNamedSource: reports.filter(r => r.report.attempted === 0 && !r.report.skipped).length,
+        enrolled: reports.reduce((n, r) => n + r.report.enrolled, 0),
+      },
+    })
+  })
+
   router.post('/meeting/:sessionId/relabel', (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? '')
