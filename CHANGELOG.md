@@ -1,5 +1,42 @@
 ## Unreleased
 
+## 6.27.12
+- **Naming an unidentified voice creates a real speaker profile — correctly this time.**
+  Re-enables what 6.27.10 shipped broken and 6.27.11 disabled.
+- **The index join is fixed.** 6.27.10 fed COMPACTED sidecar positions to a store keyed
+  on RAW capture indices; on a live session that enrolled 73 of 103 rows belonging to
+  other people, 22 of them the owner. Enrolment now runs through
+  `attachRawChunkIndices` and **refuses outright** when the mapping is not established —
+  detected by reference identity, which is how that function signals "cannot map" —
+  reporting `skipped: 'no_index_mapping'`. There is no fallback to positions anywhere.
+- **`Ext` is a bucket, not a person, so coherence is checked.** Only the dominant
+  MUTUALLY coherent cluster is enrolled and `clusterSkipped` reports the rest. Mutual
+  rather than medoid-star on purpose: a seed sitting between two voices merges them
+  otherwise. The floor is aliased from the exported `MERGE_SIMILARITY_FLOOR` so it
+  cannot drift from the identifier's own accept threshold.
+- **Samples are stamped `correction:<sessionId>`.** A bare tag matched none of the three
+  prefixes `isSampleFromSession` accepts, so "Not in this meeting" — the app's only undo
+  — would have retracted nothing, the samples would have counted as untraceable, and
+  they would have landed in the weakest eviction tier with no correction quota.
+- **Bounded.** `greedyDiversitySelect` caps at 20 before enrolling. Unbounded, ~41ms per
+  cycle against a 7.9 MB store x 109 chunks blocked the event loop past the helper's 30s
+  timeout, showing "Server stopped" for a correction that applied.
+- **Reports honestly.** `enrolment: { enrolled, attempted, created, clusterSkipped,
+  skipped }`. A zero is now legible instead of indistinguishable from success.
+  `created: false` when appending to an existing profile, so nothing claims a profile
+  was made when samples were added. `enrolledEmbeddings` retained for existing clients.
+- **Tests, 28 -> 42, plus 14 on the selection lib.** The chunk-embedding mock is GONE:
+  fixtures write real JSONL through the real encoder and the route reads it through the
+  real decoder and index filter. That double mock is why 6.27.10 shipped — the join was
+  never exercised, and a gapless 3-chunk fixture pinned the bug as the contract.
+- Nine mutations, all landed in-target and confirmed present before each run. M1
+  (bypass the mapping) fails four tests including "enrols the RAW-index embeddings,
+  never the sidecar positions". M2 initially SURVIVED — the branch was unreached — so
+  the test was fixed rather than the code.
+- Known: `skipDedupCheck` stays at its default `false`, so near-duplicate samples are
+  rejected and `enrolled` can fall below the 20 selected. Conservative and honestly
+  reported; `/api/voice/enroll-ext` passes `true`.
+
 ## 6.27.11
 - **SAFETY REVERT: the 6.27.10 relabel enrolment is disabled.** It joined two
   different index spaces. `plan.value.changed` are positions in the COMPACTED sidecar

@@ -23,8 +23,8 @@ import {
   meetingAudioChunkPath,
   meetingAudioRetentionDays,
 } from '../lib/meeting-audio-archive.js'
-import { enrollEmbedding, readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
-import { chunkEmbeddingsForIndices } from '../lib/chunk-embedding-store.js'
+import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
+import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
 
 /**
  * The label a de-attributed voice takes, numbered within its meeting.
@@ -975,46 +975,6 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     })
   })
 
-  /** Labels the diariser invents when it does not know who is speaking. Naming one
-   *  of these is a FIRST TRAINING RUN for a new person, not a correction. */
-  const PLACEHOLDER_LABEL = /^(ext|unknown|unidentified(\s+\d+)?|speaker\s*\d+)$/i
-  const isPlaceholderLabel = (label: string): boolean => PLACEHOLDER_LABEL.test(label.trim())
-
-  /**
-   * Turn a named placeholder into a real voice profile.
-   *
-   * WHY THIS EXISTS. Relabelling was TEXT ONLY: it rewrote `speaker` strings in the
-   * meeting sidecar and never touched the voice store. So naming an unidentified
-   * voice "Kirstyn Blum" labelled that one meeting and taught the system nothing —
-   * she never appeared in `/api/voice/profiles`, the review panel still offered her
-   * as `new name` inside the SAME meeting, no later meeting could match her, and
-   * there was no profile to accumulate further chunks against. The server already
-   * had `/api/voice/enroll-ext` for exactly this and the naming flow never called it.
-   *
-   * Enrolment is ADDITIVE and scoped: it runs only when a placeholder becomes a real
-   * name. Correcting one real name to another is left alone deliberately — moving a
-   * voice between existing people is `merge-profiles`, which is explicit and
-   * confirmation-gated, and doing it implicitly here would poison profiles.
-   *
-   * `enrollEmbedding` owns the diversity gate and the FIFO cap, so feeding it the
-   * relabelled chunks cannot bloat a profile.
-   */
-  const enrolNamedVoice = (sessionId: string, from: string, to: string, changed: number[]): number => {
-    if (!isPlaceholderLabel(from) || isPlaceholderLabel(to) || changed.length === 0) return 0
-    let enrolled = 0
-    try {
-      for (const row of chunkEmbeddingsForIndices(sessionId, changed)) {
-        if (!row.embedding) continue
-        if (enrollEmbedding(to, row.embedding, 'meeting-relabel').success) enrolled += 1
-      }
-    } catch {
-      // Enrolment is a bonus on top of the relabel. A voice store that refuses must
-      // not fail the rename the user actually asked for.
-      return enrolled
-    }
-    return enrolled
-  }
-
   router.post('/meeting/:sessionId/relabel', (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? '')
@@ -1192,28 +1152,34 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     })
 
     // Enrol AFTER the sidecar and ledger are durable: the rename is the thing the
-    // user asked for, and a voice store that refuses must not undo it. Reported so
-    // the panel can say a profile was created rather than leaving the user to
-    // discover, in another meeting, that it was not.
-    // DISABLED in 6.27.11. 6.27.10 shipped this joining the WRONG INDEX SPACE:
-    // `plan.value.changed` are positions in the COMPACTED sidecar array
-    // (meeting-relabel.ts:119, over rows already filtered to those with text) while
-    // the embedding store is keyed on the RAW capture index
-    // (transcribe-stream.ts:1868). They diverge at the first text-less chunk.
+    // user asked for, and a voice store that refuses must not undo it.
     //
-    // Measured on a live session: naming one voice enrolled 73 of 103 rows belonging
-    // to OTHER people, including 22 chunks of the owner. It reported success because
-    // rows do come back — just the wrong ones. 73 of 74 live sessions have gaps, so
-    // this was the normal case.
+    // `plan.value.changed` are COMPACTED SIDECAR POSITIONS. They are handed to
+    // enrolNamedVoice together with the PARSED SIDECAR precisely so it can convert
+    // them to raw capture indices via attachRawChunkIndices — the join 6.27.10 got
+    // wrong, enrolling 73 of 103 rows belonging to other people including the
+    // device owner. Never pass these positions to anything keyed on raw indices.
     //
-    // `attachRawChunkIndices` is the conversion for this and is imported at line 126,
-    // used correctly by the review path at 755 and 856. Re-enable only WITH that
-    // mapping, a refusal when the mapping is unavailable, a coherence gate (an `Ext`
-    // bucket is many voices — 98% of its pairwise cosines fall below the identifier's
-    // own 0.55 accept threshold), and a `correction:<sessionId>` source tag so the
-    // samples are human-tier, quota-protected and retractable.
-    const enrolled = 0
-    res.json({ ok: true, correctionId: id, enrolledEmbeddings: enrolled, ...preview })
+    // `sidecarRaw` parses by construction: relabelSidecarJson already parsed it
+    // above and returned ok. The catch is for a caller that reorders those steps.
+    let parsedSidecar: Record<string, unknown> = {}
+    try {
+      const doc = JSON.parse(sidecarRaw) as unknown
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) parsedSidecar = doc as Record<string, unknown>
+    } catch { /* enrolment refuses on an unusable sidecar; the rename already landed */ }
+
+    const enrolment = enrolNamedVoice({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedSidecar })
+    res.json({
+      ok: true,
+      correctionId: id,
+      // Retained for COS Control builds that read the 6.27.10 field name. The
+      // `enrolment` block is the honest report: a bare count cannot say whether a
+      // profile was created, whether chunks were rejected as a different voice, or
+      // whether the whole thing was skipped for a nameable reason.
+      enrolledEmbeddings: enrolment.enrolled,
+      enrolment,
+      ...preview,
+    })
   })
 
 

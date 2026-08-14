@@ -15,6 +15,9 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+// The REAL encoder, so the fixture below is a byte-accurate chunk-embedding file
+// rather than a shape this suite invented. Pure — no data-dir dependency.
+import { encodeEmbedding } from '../lib/chunk-embedding-store.js'
 
 let root = ''
 let dataDir = ''
@@ -46,22 +49,125 @@ Luke H walked the pipeline while MU pushed on timing. Luke owns the follow-up.
 [Luke H]: Agreed on the follow-up.
 `
 
-function seed(sessionId: string, labels: string[], opts: { scribe?: string } = {}): void {
+interface SeedOptions {
+  scribe?: string
+  /**
+   * RAW capture index for each compacted chunk, which is what makes a fixture
+   * able to catch the 6.27.10 bug at all.
+   *
+   * A real sidecar's `chunks` array is COMPACTED — transcribe-stream's
+   * getSessionChunks filters to entries carrying text — while the audio and the
+   * embedding store are keyed on the raw capture index, written for every chunk
+   * with 2s+ of audio before ASR is known. `chunkEntries` is the bridge, and it
+   * is emitted here with text-less rows filling the gaps exactly as a live
+   * capture produces them. 73 of 74 live sessions have gaps.
+   *
+   * Omitted = no `chunkEntries` at all, i.e. a pre-2026-07 capture. That is a
+   * meaningful case in its own right: enrolment must REFUSE, not guess.
+   */
+  rawIndices?: number[]
+  /**
+   * Stamp `chunkIndex` onto the CHUNK ROWS while emitting NO `chunkEntries`.
+   *
+   * A sidecar that asserts its own raw indices without the array that
+   * establishes them. Nothing in the pipeline writes this today, which is the
+   * point: it is the one shape where the per-element `chunkIndex` check cannot
+   * catch a missing mapping, so it is what makes the reference-identity refusal
+   * reachable and therefore testable.
+   */
+  selfClaimedChunkIndices?: number[]
+  /** Meeting start, epoch ms. Relative to now in enrolment fixtures, because the
+   *  14-day embedding TTL is read against it and a hardcoded date would make
+   *  those tests change verdict on a calendar boundary. */
+  startTime?: number
+}
+
+function seed(sessionId: string, labels: string[], opts: SeedOptions = {}): void {
   const dir = join(root, MONTH)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, `${STEM}.md`), opts.scribe ?? SCRIBE)
+  const chunks = labels.map((speaker, i) => ({
+    text: `segment ${i} about the Jewel360 pipeline at thirty six percent`,
+    speaker, elapsed: i * 7000, similarity: 0.82,
+    words: [{ word: ' segment', start: 0, end: 0.4, probability: 0.9 }],
+    ...(opts.selfClaimedChunkIndices ? { chunkIndex: opts.selfClaimedChunkIndices[i] } : {}),
+  }))
+
+  let chunkEntries: unknown[] | undefined
+  if (opts.rawIndices) {
+    if (opts.rawIndices.length !== labels.length) throw new Error('rawIndices must be one per chunk')
+    const byRaw = new Map(opts.rawIndices.map((raw, position) => [raw, position]))
+    chunkEntries = []
+    for (let raw = 0; raw <= Math.max(...opts.rawIndices); raw++) {
+      const position = byRaw.get(raw)
+      chunkEntries.push(position === undefined
+        // A received chunk that produced no text: it has a WAV and an embedding,
+        // and it is why position stops equalling raw index.
+        ? { chunkIndex: raw, chunk: { text: '', speaker: 'Ext', elapsed: raw * 2000, similarity: 0 } }
+        : { chunkIndex: raw, chunk: chunks[position] })
+    }
+  }
+
   writeFileSync(join(dir, `${STEM}.g2-chunks.json`), JSON.stringify({
     schemaVersion: 2,
     sessionId,
-    startTime: 1786027607017,
+    startTime: opts.startTime ?? 1786027607017,
     durationMs: 807222,
     speakers: [...new Set(labels)],
-    chunks: labels.map((speaker, i) => ({
-      text: `segment ${i} about the Jewel360 pipeline at thirty six percent`,
-      speaker, elapsed: i * 7000, similarity: 0.82,
-      words: [{ word: ' segment', start: 0, end: 0.4, probability: 0.9 }],
-    })),
+    chunks,
+    ...(chunkEntries ? { chunkEntries } : {}),
   }, null, 2))
+}
+
+const EMBEDDING_DIM = 192   // EXPECTED_EMBEDDING_DIM — the store rejects any other length
+
+/**
+ * A 192-float voiceprint on one of two orthogonal subspaces, carrying its raw
+ * chunk index in the last component.
+ *
+ * The marker is how every assertion below identifies WHICH chunk's audio was
+ * enrolled, which is the one thing the 6.27.10 tests could not see. Same-axis
+ * vectors sit at cosine ~1.0 (one voice), cross-axis at ~0.0 (two people).
+ */
+function voiceprint(marker: number, axis: 'a' | 'b' = 'a'): Float32Array {
+  const v = new Float32Array(EMBEDDING_DIM)
+  const start = axis === 'a' ? 0 : 96
+  for (let k = start; k < start + 95; k++) v[k] = 100
+  v[EMBEDDING_DIM - 1] = marker
+  return v
+}
+
+/** Write a real chunk-embedding JSONL for the REAL store to read back. Only one
+ *  seam in the enrolment join is faked (enrollEmbedding, to observe writes); the
+ *  index side is genuine, because faking both is how the bug shipped. */
+function writeChunkEmbeddings(
+  sessionId: string,
+  rows: Array<{ i: number; speaker?: string; axis?: 'a' | 'b' }>,
+): void {
+  const dir = join(dataDir, 'chunk-embeddings')
+  mkdirSync(dir, { recursive: true })
+  const lines = rows.map(r => {
+    const embedding = voiceprint(r.i, r.axis ?? 'a')
+    return JSON.stringify({
+      i: r.i,
+      speaker: r.speaker ?? 'Ext',
+      similarity: 0.41,
+      dim: embedding.length,
+      v: encodeEmbedding(embedding),
+    })
+  })
+  writeFileSync(join(dir, `${sessionId}.jsonl`), lines.join('\n') + '\n')
+}
+
+/** Seed voice-profiles.json so a name already exists. */
+function seedVoiceProfile(name: string): void {
+  writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({
+    profiles: [{
+      name,
+      embeddings: [Array.from(voiceprint(900))],
+      sources: ['fireflies'],
+    }],
+  }))
 }
 
 function sidecarNow(): { speakers: string[]; labels: string[]; raw: string } {
@@ -77,8 +183,13 @@ function ledgerNow(sessionId: string): Array<Record<string, unknown>> {
   } catch { return [] }
 }
 
-const enrolCalls: Array<{ name: string; source: string }> = []
-const embeddingIndexRequests: Array<{ sessionId: string; indices: number[] }> = []
+/** Every enrolment write, with the RAW CHUNK INDEX recovered from the vector's
+ *  marker component — the assertion the 6.27.10 suite structurally could not make. */
+const enrolCalls: Array<{ name: string; source: string; marker: number }> = []
+/** 1-based call number on which the voice store should throw. 0 = never. */
+let enrolThrowsOnCall = 0
+/** Stands in for `extractor && manager`, i.e. is the 26 MB ONNX model loaded. */
+let embeddingRuntimeAvailable = true
 
 async function startServer(): Promise<void> {
   vi.resetModules()
@@ -88,24 +199,33 @@ async function startServer(): Promise<void> {
     getOwnerName: () => 'Miles',
     getTranscriptionProfileStatus: () => ({}),
   }))
-  // Naming a placeholder is a FIRST TRAINING RUN, so the route must reach the voice
-  // store. Real embeddings need ONNX, which the suite does not have — these seams
-  // record the calls so enrolment is observable without it.
+  // ONE seam, not two.
+  //
+  // 6.27.10 mocked BOTH `chunk-embedding-store` AND `speaker-embeddings`, so the
+  // JOIN between them — compacted sidecar position against raw capture index —
+  // was never executed by any test, and the fixture's 3 gapless chunks made
+  // position equal raw index anyway. The suite stayed green while the route
+  // enrolled 73 of 103 rows belonging to other people.
+  //
+  // So the chunk-embedding store is now REAL: the tests write a genuine JSONL
+  // under COS_DATA_DIR and the route reads it back through the real decoder and
+  // the real index filter. Only `enrollEmbedding` is replaced, because a real one
+  // needs the ONNX runtime this suite does not have — and it is replaced by a
+  // RECORDER that captures which vector arrived, so a wrong join is visible.
   enrolCalls.length = 0
-  embeddingIndexRequests.length = 0
-  vi.doMock('../lib/chunk-embedding-store.js', () => ({
-    chunkEmbeddingsForIndices: (sessionId: string, indices: number[]) => {
-      embeddingIndexRequests.push({ sessionId, indices: [...indices] })
-      return indices.map(i => ({ index: i, embedding: new Float32Array([i, 1, 2]) }))
-    },
-  }))
+  enrolThrowsOnCall = 0
+  embeddingRuntimeAvailable = true
   vi.doMock('../lib/speaker-embeddings.js', async () => {
     const actual = await vi.importActual<Record<string, unknown>>('../lib/speaker-embeddings.js')
     return {
       ...actual,
-      enrollEmbedding: (name: string, _e: Float32Array, source: string) => {
-        enrolCalls.push({ name, source })
-        return { success: true, dim: 3 }
+      isEmbeddingAvailable: () => embeddingRuntimeAvailable,
+      enrollEmbedding: (name: string, e: Float32Array, source: string) => {
+        enrolCalls.push({ name, source, marker: e[e.length - 1] })
+        if (enrolThrowsOnCall > 0 && enrolCalls.length === enrolThrowsOnCall) {
+          throw new Error('voice profile store refused the write')
+        }
+        return { success: true, dim: e.length }
       },
     }
   })
@@ -153,7 +273,6 @@ afterEach(async () => {
   server = null
   vi.resetModules()
   vi.doUnmock('../lib/profile.js')
-  vi.doUnmock('../lib/chunk-embedding-store.js')
   vi.doUnmock('../lib/speaker-embeddings.js')
   delete process.env.COS_DATA_DIR
   for (const d of [root, dataDir]) {
@@ -438,40 +557,12 @@ describe('correcting an unidentified voice', () => {
     expect(ledgerNow('meeting_e1')[1]).toMatchObject({ from: 'Ext', to: 'Luke Henry' })
   })
 
-  // Naming a placeholder is a FIRST TRAINING RUN for a new person, not a text edit.
-  //
-  // Before this, relabel was text-only: it rewrote the sidecar and never touched the
-  // voice store. Saving "Kirstyn Blum" over 109 segments labelled that one meeting
-  // and taught the system nothing — she never appeared in /api/voice/profiles, the
-  // review panel still offered her as `new name` inside the SAME meeting, and no
-  // later meeting could match her. Every one of the 24 tests here passed throughout.
-  it('does NOT enrol while enrolment is disabled (6.27.11 safety revert)', async () => {
-    seed('meeting_enrol', ['Ext', 'MU', 'Ext'], {
-      scribe: SCRIBE.replace(/Luke H/g, 'Ext'),
-    })
-    await startServer()
-
-    const res = await post('/api/meeting/meeting_enrol/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
-    expect(res.status).toBe(200)
-    // DISABLED in 6.27.11. 6.27.10 enrolled here and was WRONG: it joined compacted
-    // sidecar positions against raw capture indices, so on a live session 73 of 103
-    // rows belonged to other people, 22 of them the owner. This assertion is
-    // deliberately inverted rather than deleted, so re-enabling without the
-    // attachRawChunkIndices mapping fails loudly instead of silently poisoning.
-    //
-    // NOTE the old assertion `indices: [0, 2]` passed only because this 3-chunk seed
-    // has no gaps, so position happened to equal raw index. It pinned the bug as the
-    // contract. Any re-enable needs a GAPPED fixture.
-    expect(res.json.enrolledEmbeddings).toBe(0)
-    expect(enrolCalls).toEqual([])
-  })
-
   it('does NOT enrol when correcting one real name to another', async () => {
     // Moving a voice between existing people is merge-profiles: explicit and
     // confirmation-gated. Doing it implicitly here would poison profiles — a sweep of
     // this store found two distinct people at 0.85 similarity.
-    seed('meeting_noenrol', ['Luke Henry', 'MU', 'Luke Henry'])
+    seed('meeting_noenrol', ['Luke Henry', 'MU', 'Luke Henry'], { rawIndices: [0, 1, 2] })
+    writeChunkEmbeddings('meeting_noenrol', [{ i: 0 }, { i: 1 }, { i: 2 }])
     await startServer()
 
     const res = await post('/api/meeting/meeting_noenrol/relabel',
@@ -479,29 +570,357 @@ describe('correcting an unidentified voice', () => {
     expect(res.status).toBe(200)
     expect(res.json.enrolledEmbeddings).toBe(0)
     expect(enrolCalls).toEqual([])
+    // attempted 0 is what separates "this was never an enrolment" from
+    // "enrolment ran and found nothing".
+    expect(res.json.enrolment).toEqual({
+      enrolled: 0, attempted: 0, created: false, clusterSkipped: 0, skipped: null,
+    })
   })
 
   it('does not enrol a placeholder onto a placeholder', async () => {
-    seed('meeting_pp', ['Ext', 'MU', 'Ext'])
+    seed('meeting_pp', ['Ext', 'MU', 'Ext'], { rawIndices: [0, 1, 2] })
+    writeChunkEmbeddings('meeting_pp', [{ i: 0 }, { i: 1 }, { i: 2 }])
     await startServer()
     const res = await post('/api/meeting/meeting_pp/relabel',
       { from: 'Ext', to: 'Unidentified 2', confirm: true })
     expect(res.status).toBe(200)
     expect(enrolCalls).toEqual([])
+    expect(res.json.enrolment.attempted).toBe(0)
+  })
+}, HTTP_TEST_TIMEOUT)
+
+// ── Enrolment: naming a placeholder is a FIRST TRAINING RUN ────────────────
+//
+// Relabel used to be text-only. Saving "Kirstyn Blum" over 109 segments labelled
+// one meeting and taught the system nothing — she never appeared in
+// /api/voice/profiles, the panel still offered her as `new name` inside the SAME
+// meeting, and no later meeting could match her. Verified live 2026-08-13: 70 and
+// 112 occurrences across two sidecars against 77 profiles and no Kirstyn.
+//
+// 6.27.10 fixed that and was reverted the same night for joining COMPACTED
+// SIDECAR POSITIONS against RAW CAPTURE INDICES. Every fixture in this block is
+// therefore GAPPED — positions 0-4 mapping to raw indices 3, 5, 8, 13, 21 — and
+// every assertion recovers the raw index from the enrolled vector itself. A
+// position-based join returns rows too; only the marker says whose they were.
+describe('enrolling a named voice', () => {
+  /** Positions 0..4 -> raw capture indices. Chosen DISJOINT from the positions
+   *  they sit at, so a position-based join cannot coincidentally look right. */
+  const RAW = [3, 5, 8, 13, 21]
+  const ONE_HOUR_AGO = (): number => Date.now() - 3_600_000
+
+  /** Ext at positions 0, 2, 4 -> raw 3, 8, 21. MU holds 1 and 3. */
+  const EXT_MU = ['Ext', 'MU', 'Ext', 'MU', 'Ext']
+
+  /** Embeddings for every raw index a correct OR an incorrect join could reach.
+   *  Includes 0, 2 and 4 — the POSITIONS — so the buggy path finds real rows and
+   *  the test fails on WHOSE they are, not on their absence. Raw 2 is deliberately
+   *  the owner: the incident wrote 22 chunks of MU into a stranger's profile. */
+  const ALL_ROWS = [
+    { i: 0, speaker: 'Vikas' }, { i: 1, speaker: 'Vishnu' }, { i: 2, speaker: 'MU' },
+    { i: 3, speaker: 'Ext' }, { i: 4, speaker: 'Niranjan' }, { i: 5, speaker: 'MU' },
+    { i: 8, speaker: 'Ext' }, { i: 13, speaker: 'MU' }, { i: 21, speaker: 'Ext' },
+  ]
+
+  it('enrols the RAW-index embeddings, never the sidecar positions', async () => {
+    seed('meeting_gap', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_gap', ALL_ROWS)
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_gap/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+
+    // THE ASSERTION THIS WHOLE FILE EXISTS FOR. Changed positions are [0, 2, 4];
+    // the embeddings that must be enrolled are raw [3, 8, 21]. Reverting the
+    // mapping to positions yields [0, 2, 4] here and fails.
+    expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
+    expect(enrolCalls.map(c => c.marker)).not.toContain(2)   // the device owner
+    expect(enrolCalls.every(c => c.name === 'Kirstyn Blum')).toBe(true)
+
+    expect(res.json.enrolment).toEqual({
+      enrolled: 3, attempted: 3, created: true, clusterSkipped: 0, skipped: null,
+    })
+    expect(res.json.enrolledEmbeddings).toBe(3)
+    expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
   })
 
-  // KNOWN VACUOUS: both mocks are pure and cannot throw, so the catch block has no
-  // coverage. Kept as a rename-still-works check; re-enabling enrolment needs a mock
-  // that actually throws.
-  it('completes the rename (catch path NOT covered — see comment)', async () => {
-    // Enrolment is a bonus on top of the relabel. A refusing voice store must not
-    // undo the rename the user actually asked for.
-    seed('meeting_throws', ['Ext', 'MU', 'Ext'])
+  it('stamps correction:<sessionId>, which is what makes the samples retractable', async () => {
+    // A bare tag breaks four things at once: isSampleFromSession accepts only
+    // auto:/correction:/g2-training:, so "Not in this meeting" retracts NOTHING;
+    // untraceableSampleCount counts it untraceable; provenanceTier drops to
+    // 'unknown', below Fireflies metadata for eviction; and isCorrection() is a
+    // startsWith('correction') test, so the quota never protects it.
+    seed('meeting_src', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_src', ALL_ROWS)
     await startServer()
+
+    await post('/api/meeting/meeting_src/relabel', { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(enrolCalls.length).toBeGreaterThan(0)
+    expect(new Set(enrolCalls.map(c => c.source))).toEqual(new Set(['correction:meeting_src']))
+
+    const { isSampleFromSession } = await import('../lib/training-audio-provenance.js')
+    const { provenanceTier, isCorrection } = await import('../lib/embedding-eviction.js')
+    for (const call of enrolCalls) {
+      expect(isSampleFromSession(call.source, 'meeting_src')).toBe(true)
+      expect(provenanceTier(call.source)).toBe('human')
+      expect(isCorrection(call.source)).toBe(true)
+    }
+  })
+
+  it('REFUSES rather than guessing when the sidecar carries no chunkEntries', async () => {
+    // A pre-2026-07 capture. attachRawChunkIndices signals this by returning the
+    // chunks unchanged, which is precisely the case 6.27.10 treated as success.
+    // Falling back to positions here is the bug, so refusal is the contract.
+    seed('meeting_nomap', EXT_MU, { startTime: ONE_HOUR_AGO() })       // no rawIndices
+    writeChunkEmbeddings('meeting_nomap', ALL_ROWS)
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_nomap/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls).toEqual([])
+    expect(res.json.enrolment).toEqual({
+      enrolled: 0, attempted: 0, created: false, clusterSkipped: 0, skipped: 'no_index_mapping',
+    })
+    // The rename the user asked for still landed. Refusing to TRAIN is not
+    // refusing to RELABEL.
+    expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
+  })
+
+  it('REFUSES a chunkIndex the chunk claims for itself, with no chunkEntries to back it', async () => {
+    // The ONLY shape in which the reference-identity refusal is load-bearing, and
+    // it was added after a mutation run: deleting `if (withRaw === chunks) return
+    // null` SURVIVED every other test here, because when chunkEntries is absent
+    // the chunks carry no chunkIndex and the per-element check refuses anyway.
+    // That made the identity check look like dead code. It is not — it is the
+    // only thing standing between "a mapping was ESTABLISHED from chunkEntries"
+    // and "a sidecar asserted some numbers about itself".
+    //
+    // attachRawChunkIndices returns the array UNCHANGED here, meaning no mapping
+    // was established. Trusting the numbers anyway is the 6.27.10 class of error
+    // one layer down, so this fails closed.
+    seed('meeting_selfclaim', EXT_MU, { selfClaimedChunkIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_selfclaim', ALL_ROWS)
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_selfclaim/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment.skipped).toBe('no_index_mapping')
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[0]).toBe('Kirstyn Blum')
+  })
+
+  it('REFUSES when chunkEntries disagrees with the compacted count', async () => {
+    // The other half of attachRawChunkIndices' bail: a shifted mapping is worse
+    // than none, because it points at a neighbouring speaker and looks fine.
+    seed('meeting_skew', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    const path = join(root, MONTH, `${STEM}.g2-chunks.json`)
+    const doc = JSON.parse(readFileSync(path, 'utf-8'))
+    doc.chunkEntries = doc.chunkEntries.slice(0, -1)   // drop the last text-bearing row
+    writeFileSync(path, JSON.stringify(doc, null, 2))
+    writeChunkEmbeddings('meeting_skew', ALL_ROWS)
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_skew/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.json.enrolment.skipped).toBe('no_index_mapping')
+    expect(enrolCalls).toEqual([])
+  })
+
+  it('reports no_embeddings when the store holds nothing for this meeting', async () => {
+    // Meeting predates the embedding store. The rename must still apply, and the
+    // reason must be NAMED — a bare `enrolled: 0` is indistinguishable from a
+    // missing ONNX model or a disabled feature.
+    seed('meeting_none', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    await startServer()                                  // no embedding file at all
+
+    const res = await post('/api/meeting/meeting_none/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment).toEqual({
+      enrolled: 0, attempted: 0, created: false, clusterSkipped: 0, skipped: 'no_embeddings',
+    })
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[0]).toBe('Kirstyn Blum')
+  })
+
+  it('reports no_embeddings when rows exist but none cover the relabelled chunks', async () => {
+    // Present-but-irrelevant, which the `missing` flag cannot express.
+    seed('meeting_other', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_other', [{ i: 1 }, { i: 5 }, { i: 13 }])   // MU's chunks only
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_other/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.json.enrolment.skipped).toBe('no_embeddings')
+    expect(enrolCalls).toEqual([])
+  })
+
+  it('distinguishes an EXPIRED meeting from one that never had embeddings', async () => {
+    // 14-day TTL. "You corrected this too late" and "this could never train" are
+    // different answers, and the sweep leaves no trace to tell them apart — the
+    // meeting's own start time is the only evidence.
+    seed('meeting_old', EXT_MU, { rawIndices: RAW, startTime: Date.now() - 30 * 86_400_000 })
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_old/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.json.enrolment.skipped).toBe('expired')
+  })
+
+  it('reports disabled when COS_CHUNK_EMBEDDINGS=0', async () => {
+    seed('meeting_off', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_off', ALL_ROWS)
+    process.env.COS_CHUNK_EMBEDDINGS = '0'
+    try {
+      await startServer()
+      const res = await post('/api/meeting/meeting_off/relabel',
+        { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      expect(res.json.enrolment.skipped).toBe('disabled')
+      expect(enrolCalls).toEqual([])
+    } finally {
+      delete process.env.COS_CHUNK_EMBEDDINGS
+    }
+  })
+
+  it('reports store_unavailable when the voiceprint model is not loaded', async () => {
+    // The ~26 MB 3dspeaker model is .npmignore'd and a managed cutover has
+    // stranded it before. Without it every enrollEmbedding returns success:false,
+    // so looping twenty times to report a bare zero would hide the real cause.
+    seed('meeting_nomodel', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_nomodel', ALL_ROWS)
+    await startServer()
+    embeddingRuntimeAvailable = false
+
+    const res = await post('/api/meeting/meeting_nomodel/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.json.enrolment.skipped).toBe('store_unavailable')
+    expect(enrolCalls).toEqual([])
+  })
+
+  it('keeps the rename and the partial count when the voice store THROWS', async () => {
+    // Genuinely throwing, not a pure mock returning success:false. The 6.27.10
+    // suite could not throw at all, so its catch block had zero coverage while
+    // the changelog claimed both directions were mutation-checked.
+    seed('meeting_throws', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_throws', ALL_ROWS)
+    await startServer()
+    enrolThrowsOnCall = 2                        // one lands, then the store refuses
+
     const res = await post('/api/meeting/meeting_throws/relabel',
       { from: 'Ext', to: 'New Person', confirm: true })
     expect(res.status).toBe(200)
-    expect(sidecarNow().labels).toEqual(['New Person', 'MU', 'New Person'])
+    expect(res.json.ok).toBe(true)
+    // Enrolment is a bonus on top of a rename already durable on disk.
+    expect(sidecarNow().labels).toEqual(['New Person', 'MU', 'New Person', 'MU', 'New Person'])
+    expect(res.json.enrolment).toMatchObject({
+      enrolled: 1, attempted: 3, clusterSkipped: 0, skipped: 'store_unavailable',
+    })
+    expect(ledgerNow('meeting_throws').map(r => r.phase)).toEqual(['intent', 'applied'])
+  })
+
+  it('enrols only the dominant voice when the Ext bucket holds two people', async () => {
+    // `Ext` is not a person: identifySpeaker returns it for EVERY voice below
+    // threshold, so five unrecognised people share one label. Measured on
+    // meeting_1786628481833_eagkaz: 115 Ext embeddings, median pairwise cosine
+    // 0.170, 98% below the identifier's own 0.55 accept threshold.
+    seed('meeting_two', ['Ext', 'MU', 'Ext', 'Ext', 'Ext'], {
+      rawIndices: RAW, startTime: ONE_HOUR_AGO(),
+    })
+    // Positions 0,2,3,4 carry Ext -> raw 3, 8, 13, 21. Three are one voice; raw 13
+    // is somebody else entirely.
+    writeChunkEmbeddings('meeting_two', [
+      { i: 3, axis: 'a' }, { i: 8, axis: 'a' }, { i: 21, axis: 'a' },
+      { i: 13, axis: 'b' },
+    ])
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_two/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
+    expect(res.json.enrolment).toEqual({
+      enrolled: 3, attempted: 4, created: true, clusterSkipped: 1, skipped: null,
+    })
+  })
+
+  it('enrols NOTHING when the bucket has no dominant voice at all', async () => {
+    seed('meeting_crowd', ['Ext', 'MU', 'Ext', 'Ext', 'MU'], {
+      rawIndices: RAW, startTime: ONE_HOUR_AGO(),
+    })
+    // Positions 0, 2, 3 -> raw 3, 8, 13. Three mutually orthogonal strangers.
+    const dir = join(dataDir, 'chunk-embeddings')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'meeting_crowd.jsonl'), [3, 8, 13].map((i, n) => {
+      const v = new Float32Array(EMBEDDING_DIM)
+      v[n * 50] = 100
+      v[EMBEDDING_DIM - 1] = i
+      return JSON.stringify({ i, speaker: 'Ext', similarity: 0.2, dim: v.length, v: encodeEmbedding(v) })
+    }).join('\n') + '\n')
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_crowd/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(enrolCalls).toEqual([])
+    // clusterSkipped === attempted is the panel's cue: "0 enrolled, 3 chunks
+    // looked like different voices." No profile is invented from a crowd.
+    expect(res.json.enrolment).toEqual({
+      enrolled: 0, attempted: 3, created: false, clusterSkipped: 3, skipped: null,
+    })
+  })
+
+  it('APPENDS to an existing name and reports created: false', async () => {
+    // No confirmation prompt — this is the same person being named again in a
+    // second meeting, which is exactly how a profile is supposed to harden. But
+    // claiming a profile was created when it already existed is a lie the panel
+    // would repeat to the user.
+    seed('meeting_append', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_append', ALL_ROWS)
+    seedVoiceProfile('Kirstyn Blum')
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_append/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.json.enrolment).toEqual({
+      enrolled: 3, attempted: 3, created: false, clusterSkipped: 0, skipped: null,
+    })
+    expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
+  })
+
+  it('never claims creation when nothing was actually written', async () => {
+    seed('meeting_nowrite', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_nowrite', ALL_ROWS)
+    await startServer()
+    enrolThrowsOnCall = 1                        // refuses on the very first sample
+
+    const res = await post('/api/meeting/meeting_nowrite/relabel',
+      { from: 'Ext', to: 'Ghost Person', confirm: true })
+    expect(res.json.enrolment.enrolled).toBe(0)
+    expect(res.json.enrolment.created).toBe(false)
+  })
+
+  it('bounds a large correction to 20 writes', async () => {
+    // 109 chunks against a live 7.9 MB store is ~41 ms per enrollEmbedding cycle
+    // — loadProfileStore, persistProfile, invalidateProfileCache, then the next
+    // iteration re-reads the whole file. That blocks the event loop past COS
+    // Control's 30 s helper timeout, so the user is told "Server stopped" for a
+    // correction that actually applied.
+    const labels = Array.from({ length: 40 }, () => 'Ext')
+    const rawIndices = labels.map((_, i) => i * 3)          // gapped throughout
+    seed('meeting_big', labels, { rawIndices, startTime: ONE_HOUR_AGO() })
+    writeChunkEmbeddings('meeting_big', rawIndices.map(i => ({ i })))
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_big/relabel',
+      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.json.enrolment.attempted).toBe(40)
+    expect(res.json.enrolment.enrolled).toBe(20)
+    expect(enrolCalls).toHaveLength(20)
+    // Still raw indices, at scale: every marker is a multiple of 3, and none is
+    // a bare sidecar position that is not also a raw index.
+    expect(enrolCalls.every(c => c.marker % 3 === 0)).toBe(true)
+    expect(new Set(enrolCalls.map(c => c.marker)).size).toBe(20)
   })
 }, HTTP_TEST_TIMEOUT)
 

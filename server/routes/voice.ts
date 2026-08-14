@@ -4,7 +4,7 @@ import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, rawCosineSimilarity, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles, mergeSpeakerProfiles } from '../lib/speaker-embeddings.js'
+import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles, mergeSpeakerProfiles } from '../lib/speaker-embeddings.js'
 import { statSync } from 'node:fs'
 import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
@@ -13,6 +13,7 @@ import { purgeSpeakerCalibrationRows, relabelSpeakerCalibrationRows } from '../l
 import { trainingSourceFor } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
 import { getVoiceDirectorySnapshot, invalidateVoiceDirectory } from '../lib/voice-directory.js'
+import { greedyDiversitySelect } from '../lib/voice-enrolment-selection.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -736,34 +737,7 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
   }
 })
 
-/** Greedy diversity selection — pick N most acoustically diverse embeddings */
-function greedyDiversitySelect(embeddings: Float32Array[], maxN: number): Float32Array[] {
-  if (embeddings.length <= maxN) return embeddings
-
-  // Find the most dissimilar pair as seeds
-  let maxDist = -1, seedA = 0, seedB = 1
-  for (let i = 0; i < embeddings.length; i++) {
-    for (let j = i + 1; j < embeddings.length; j++) {
-      const dist = 1 - rawCosineSimilarity(embeddings[i], embeddings[j])
-      if (dist > maxDist) { maxDist = dist; seedA = i; seedB = j }
-    }
-  }
-
-  const selected = new Set([seedA, seedB])
-  while (selected.size < maxN) {
-    let bestIdx = -1, bestMinDist = -1
-    for (let i = 0; i < embeddings.length; i++) {
-      if (selected.has(i)) continue
-      let minDist = Infinity
-      for (const s of selected) {
-        const dist = 1 - rawCosineSimilarity(embeddings[i], embeddings[s])
-        if (dist < minDist) minDist = dist
-      }
-      if (minDist > bestMinDist) { bestMinDist = minDist; bestIdx = i }
-    }
-    if (bestIdx === -1) break
-    selected.add(bestIdx)
-  }
-
-  return [...selected].map(i => embeddings[i])
-}
+// `greedyDiversitySelect` moved VERBATIM to lib/voice-enrolment-selection.ts and
+// is imported at the top of this file. The meeting-relabel enrolment path needs
+// the same bound and the same selection, and a second copy of a greedy
+// max-min-distance search is how two callers of "pick the diverse ones" drift.
