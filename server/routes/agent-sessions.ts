@@ -32,6 +32,9 @@ import {
 import { searchAgentSessions, type AgentSessionSearchHit } from '../lib/agent-session-search.js'
 import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeers } from './claude-sessions.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
+import { occupiedThreads, noOccupancyKnown, type OccupiedScan, type OccupiedThread } from '../lib/occupied-threads.js'
+import { realOccupancyDirs, realOccupancyProbes } from '../lib/occupancy-probes.js'
+import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 
 export const agentSessionsRouter = Router()
 
@@ -58,6 +61,60 @@ function toSearchHit(row: AgentSessionSearchHit) {
     semanticScore: row.semanticScore,
     match: row.match,
     score: Math.max(row.keywordScore, row.semanticScore),
+  }
+}
+
+/**
+ * Which of these sessions a desktop process is holding right now.
+ *
+ * ONE scan for the whole page. Calling `threadOccupancy` per row would re-read the
+ * registry and shell out to `ps` per entry, which at 53 sessions is hundreds of
+ * process spawns on a single list request.
+ *
+ * THIS IS A DISPLAY HINT AND MUST NEVER GATE A WRITE. The attach and turn routes
+ * keep probing at the moment of the write, unchanged, because a list is rendered
+ * seconds or minutes before the user acts and a desktop session opened in that gap
+ * is exactly the race the per-write probe exists to catch.
+ */
+function runningThreads(rows: readonly AgentSessionRow[]): OccupiedScan {
+  try {
+    const dirs = realOccupancyDirs()
+    // The spawn ledger is what lets a turn COS itself queued read as ours rather
+    // than as a foreign desktop window holding the thread.
+    const probes = realOccupancyProbes(cosSpawnedPids)
+    const byProvider = new Map<string, string[]>()
+    for (const row of rows) {
+      if (row.provider !== 'claude' && row.provider !== 'codex') continue
+      const list = byProvider.get(row.provider) ?? []
+      list.push(row.session_id)
+      byProvider.set(row.provider, list)
+    }
+    const merged = new Map<string, OccupiedThread>()
+    let degraded = false
+    for (const [provider, ids] of byProvider) {
+      const scan = occupiedThreads(provider, ids, probes, dirs)
+      for (const [id, occ] of scan.occupied) merged.set(id, occ)
+      if (scan.degraded) degraded = true
+    }
+    return { occupied: merged, degraded }
+  } catch (error) {
+    // The list is the point; occupancy is decoration. A probe failure must never
+    // cost the user their sessions.
+    console.error(`[agent-sessions] occupancy scan failed: ${error instanceof Error ? error.message : error}`)
+    return noOccupancyKnown()
+  }
+}
+
+/** Stamp the running hint onto a projected row. */
+function withRunning<T extends { session_id: string }>(entry: T, scan: OccupiedScan) {
+  const occ = scan.occupied.get(entry.session_id)
+  return {
+    ...entry,
+    // An agent is working in this thread right now, whoever started it.
+    running: occ !== undefined,
+    // Held by something that is not COS, so a Continue would be refused. The
+    // badge reads `running`; the Continue affordance reads this.
+    running_foreign: (occ?.foreignOwners ?? 0) > 0,
   }
 }
 
@@ -107,12 +164,16 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     const sort = asSort(req.query.sort)
     const live = await liveClaudeRows()
     const sessions = await listAgentSessions(agentSessionRoots(), new Date(), live, limit, sort)
+    const running = runningThreads(sessions)
     res.json({
-      sessions: sessions.map(toEntry),
+      sessions: sessions.map(row => withRunning(toEntry(row), running)),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
       enabled: true,
+      // True when a probe could not see clearly. The client must render "unknown"
+      // rather than treating a quiet scan as "nothing is running".
+      runningDegraded: running.degraded,
     })
   } catch (error) {
     console.error(`[agent-sessions] list failed: ${error instanceof Error ? error.message : error}`)
