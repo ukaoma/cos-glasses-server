@@ -391,8 +391,17 @@ export const REASON_COPY: Record<OccupancyReason, string> = {
   // supported permanent configuration, not a degraded one (plan 4.9).
   attach_disabled:
     'Continuing a thread on your Mac is turned off. COS is read-only here. Fork it instead.',
+  // Held open by another app AND COS has no clock on the thread, so it cannot
+  // tell working from idle. Since 6.32.0 an idle holder is continuable, which
+  // makes this the "could not measure" case rather than the "someone else is
+  // here" case, and the copy says which.
   live_desktop_process:
-    'Open on your Mac. COS will not write into a thread another app is holding. Fork it instead.',
+    'Open on your Mac, and COS cannot tell whether it is still working. It will not write into it. Fork it instead.',
+  // Measured, and the answer was yes. Deliberately a different instruction from
+  // the line above: this clears on its own within seconds, so the useful advice
+  // is to wait, with fork as the fallback rather than the recommendation.
+  native_thread_working:
+    'Your Mac is writing to this thread right now. Wait a few seconds and try again, or fork it.',
   unsupported_provider:
     'This assistant cannot be continued from COS yet. Fork it instead.',
   invalid_thread_id:
@@ -672,14 +681,26 @@ export interface AttachabilityBody {
  * permissive way if simply forwarded: attachable with a reason, attachable with an
  * owner that is not provably ours, and a non-array owners field. Any of them is a
  * defect upstream, and a defect must not resolve to permissive.
+ *
+ * THE ONE EXEMPTION, added with the idle-holder relaxation in 6.32.0: a foreign
+ * owner is allowed on an attachable verdict when the verdict itself carries
+ * `idleHolder === true`. The check is not weakened by this, it is made explicit —
+ * before, "attachable" and "no foreign owner" were the same claim, so a detector
+ * that flipped `attachable` by mistake was caught here. It still is. What can no
+ * longer be caught here is a detector that ALSO sets `idleHolder`, which takes a
+ * deliberate edit in `thread-occupancy.ts` rather than an accident, and which the
+ * mutation tests over that file cover.
  */
 export function projectAttachability(verdict: Occupancy): AttachabilityBody {
   const owners = Array.isArray(verdict?.owners) ? verdict.owners : null
+  // Strictly `=== true`. An idleHolder of 1, 'yes', or {} is a malformed verdict,
+  // and a malformed verdict must not buy an exemption.
+  const foreignOwnerDeclared = verdict?.idleHolder === true
   const sound =
     verdict?.attachable === true &&
     verdict.reason === null &&
     owners !== null &&
-    owners.every(owner => owner?.selfOwned === true)
+    owners.every(owner => owner?.selfOwned === true || foreignOwnerDeclared)
   const reason: OccupancyReason | null = sound ? null : ((verdict?.reason ?? 'probe_failed') as OccupancyReason)
   return {
     attachable: sound,

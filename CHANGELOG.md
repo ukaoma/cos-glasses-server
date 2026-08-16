@@ -2219,6 +2219,41 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.32.0] - 2026-08-16
+
+### Continue now blocks on WORKING, not on merely open
+
+Continuing a Claude Code thread from COS used to be refused whenever any foreign
+process held it. That came from `~/.claude/sessions/<pid>.json`, which records an
+OPEN WINDOW, not an agent generating: a session that finished ten minutes ago
+with the window still up looked identical to one mid-turn. Anyone who leaves
+Claude Code windows open was therefore refused on exactly the threads they work
+in, and allowed only on the ones they had abandoned.
+
+- A foreign holder is now terminal only while it is **demonstrably writing**. A
+  holder measured idle (registry record alive, transcript stale past the same
+  30s window `running_active` uses) is continuable.
+- New refusal reason **`native_thread_working`**, distinct from
+  `live_desktop_process`, because the two ask for different things. Working
+  clears itself in seconds and the copy says to wait; `live_desktop_process` now
+  means COS could not measure the thread at all and says so rather than implying
+  the thread is busy.
+- Off by default behind **`COS_THREAD_ATTACH_IDLE_HOLDER=1`**. Unset, no
+  transcript clock is wired, every foreign holder reads unknown, and the gate
+  behaves exactly as it did in 6.31.0. Composes with `COS_THREAD_ATTACH_ENABLED`.
+
+Verified against a real interactive `claude` 2.1.229 held open and idle before
+the gate was touched. Writing into it delivers normally and never corrupts:
+across six injections and six desktop turns, including three writers landing
+within 45ms of each other, every transcript prefix stayed byte-identical, with
+no unparseable lines and no dangling parent references. What it DOES do is fork
+the conversation: the holder's in-memory view is stale, so its next turn branches
+off the pre-injection tail and the two writers stop seeing each other. Nothing is
+lost, and the divergence is caught one layer up by the head watermark, which
+changes on a desktop write and refuses the next COS turn with
+`native_thread_changed`. The full canary, including what it does NOT license, is
+recorded in `server/lib/thread-occupancy.ts` under THE IDLE-HOLDER RELAXATION.
+
 ## [6.31.0] - 2026-08-16
 
 ### "Running" meant an open window, not a working agent

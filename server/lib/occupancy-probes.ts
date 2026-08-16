@@ -49,6 +49,7 @@ import {
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { NATIVE_THREAD_ID_RE } from './native-thread-id.js'
+import { transcriptPathFor, type NativeHeadDeps } from './native-head.js'
 import { parseProcStartUtcMs, type OccupancyDirs, type OccupancyProbes } from './thread-occupancy.js'
 
 // Re-exported rather than reimplemented. `claudeSessionsDir` already encodes the
@@ -440,5 +441,61 @@ export function realOccupancyProbes(ledger: SpawnLedgerAccessor): OccupancyProbe
     readFile,
     lockHolders,
     cosSpawnedPids: () => sanitizeLedger(ledger()),
+    // transcriptMtimeMs is DELIBERATELY absent here. See `withTranscriptClock`.
+  }
+}
+
+/**
+ * Is the idle-holder relaxation switched on for this install?
+ *
+ * ONE READER, exported so every other module imports it rather than re-reading
+ * `process.env` — the same anti-drift rule `threadAttachEnabled` follows, and for
+ * the same reason: a second copy is how a surface comes to advertise a write path
+ * the gate will refuse.
+ *
+ * `=== '1'` opt-IN, not `!== '0'` opt-out. This decides whether COS may write
+ * into a conversation a human still has open, so anything ambiguous — unset,
+ * empty, 'true', 'yes' — reads as OFF. It composes with
+ * `COS_THREAD_ATTACH_ENABLED`: with attach itself off, this flag does nothing at
+ * all, because there is no write path to relax.
+ */
+export function idleHolderContinueEnabled(): boolean {
+  return process.env.COS_THREAD_ATTACH_IDLE_HOLDER === '1'
+}
+
+/**
+ * Add a transcript clock to a probe set, so an idle foreign holder can be told
+ * apart from a working one.
+ *
+ * WHY THIS IS A SEPARATE WRAPPER rather than a member of `realOccupancyProbes`:
+ * the strict gate has to be what you get by DEFAULT. A probe set built the
+ * ordinary way has no clock, every foreign holder reads `unknown`, and
+ * `threadOccupancy` refuses exactly as it did before 6.32.0. Turning the
+ * relaxation on is then one visible call at one wiring site, and turning it off
+ * is deleting that call — no rollback, no second code path to keep in step.
+ *
+ * Null on every failure: an unresolvable id, a missing file, a stat that threw.
+ * `holderActivity` reads null as `unknown`, which refuses. There is deliberately
+ * no path from "could not read the transcript" to "the holder is idle".
+ *
+ * `statSync` and not `stat`: `OccupancyProbes` is synchronous throughout, and the
+ * adapter's pre-spawn preflight REFUSES a thenable rather than awaiting one —
+ * awaiting there would reopen the very race the check exists to close.
+ */
+export function withTranscriptClock(
+  probes: OccupancyProbes,
+  headDeps: NativeHeadDeps,
+): OccupancyProbes {
+  return {
+    ...probes,
+    transcriptMtimeMs: (provider, threadId) => {
+      try {
+        const path = transcriptPathFor(provider, threadId, headDeps)
+        if (path === null) return null
+        return statSync(path).mtimeMs
+      } catch {
+        return null
+      }
+    },
   }
 }

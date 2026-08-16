@@ -96,6 +96,26 @@ function probes(over: Partial<OccupancyProbes> = {}): OccupancyProbes {
   }
 }
 
+/**
+ * The same live foreign holder as `probes()`, plus a transcript clock.
+ *
+ * `workingProbes` reports a transcript written this instant, so the holder is
+ * measured WORKING and the gate refuses with `native_thread_working`.
+ * `idleHolderProbes` reports one written ten minutes ago: held open, demonstrably
+ * not writing, which is the case the 6.32.0 relaxation exists for.
+ *
+ * Bare `probes()` deliberately has NO clock and therefore still produces
+ * `live_desktop_process`. That is the pre-relaxation behaviour every other case
+ * in this file asserts, and it has to keep working untouched.
+ */
+function workingProbes(over: Partial<OccupancyProbes> = {}): OccupancyProbes {
+  return probes({ transcriptMtimeMs: () => Date.now(), ...over })
+}
+
+function idleHolderProbes(over: Partial<OccupancyProbes> = {}): OccupancyProbes {
+  return probes({ transcriptMtimeMs: () => Date.now() - 10 * 60_000, ...over })
+}
+
 /** Probes that throw on contact. Anything that still returns a verdict never probed. */
 function hostileProbes(): OccupancyProbes {
   const boom = (): never => { throw new Error('probe must not run') }
@@ -617,6 +637,8 @@ describe('the feature gate (plan 4.9): OFF is the pre-existing behavior', () => 
 describe('every doubt the detector can raise reaches the wire as a refusal', () => {
   const cases: Array<{ reason: OccupancyReason; d: () => AgentSessionBindingsDeps; provider?: string; id?: string }> = [
     { reason: 'live_desktop_process', d: () => deps() },
+    // Same live holder, but with a transcript clock that says it is mid-write.
+    { reason: 'native_thread_working', d: () => deps({ probes: workingProbes() }) },
     // Hostile probes prove the disabled path never reaches the filesystem: if the
     // short-circuit were removed, these probes throw and the reason becomes
     // probe_failed instead.
@@ -707,6 +729,41 @@ describe('the route refuses a verdict that contradicts itself', () => {
       contradiction({ attachable: true, owners: [], reason: 'live_desktop_process' }),
     )
     expect(body).toMatchObject({ attachable: false, reason: 'live_desktop_process' })
+  })
+
+  /**
+   * The 6.32.0 exemption, and its exact boundary. `idleHolder` is the ONLY way a
+   * foreign owner may ride an attachable verdict, and it must be the literal
+   * `true` -- a truthy-looking value is a malformed verdict, and a malformed
+   * verdict buys nothing.
+   */
+  it('forwards a foreign owner only when the verdict declares idleHolder', async () => {
+    const declared = await attachability(
+      contradiction({ attachable: true, owners: [foreign], reason: null, idleHolder: true }),
+    )
+    expect(declared.body).toMatchObject({ attachable: true, reason: null, ownerCount: 1 })
+
+    for (const forged of [1, 'true', 'yes', {}, [true]]) {
+      const { body } = await attachability(contradiction({
+        attachable: true, owners: [foreign], reason: null,
+        idleHolder: forged as unknown as true,
+      }))
+      expect(body.attachable).toBe(false)
+    }
+  })
+
+  it('does not let idleHolder excuse any other contradiction', async () => {
+    // It exempts a foreign OWNER and nothing else. A reason present alongside
+    // attachable, or a non-array owners field, is still a defect.
+    const withReason = await attachability(contradiction({
+      attachable: true, owners: [foreign], reason: 'live_desktop_process', idleHolder: true,
+    }))
+    expect(withReason.body).toMatchObject({ attachable: false, reason: 'live_desktop_process' })
+
+    const badOwners = await attachability(contradiction({
+      attachable: true, owners: 'none' as unknown as ThreadOwner[], reason: null, idleHolder: true,
+    }))
+    expect(badOwners.body).toMatchObject({ attachable: false, ownerCount: 0 })
   })
 
   it('will not attach when the owner list is not a list', async () => {
@@ -936,6 +993,7 @@ describe('attach is gated on the occupancy verdict, not advised by it', () => {
   // let the turn route run against a thread attach just declined.
   const refusals: Array<{ reason: OccupancyReason; d: () => AgentSessionBindingsDeps; provider?: string; id?: string }> = [
     { reason: 'live_desktop_process', d: () => writeDeps({ probes: probes() }) },
+    { reason: 'native_thread_working', d: () => writeDeps({ probes: workingProbes() }) },
     { reason: 'unsupported_provider', d: () => writeDeps({ probes: hostileProbes() }), provider: 'cursor' },
     { reason: 'invalid_thread_id', d: () => writeDeps({ probes: hostileProbes() }), id: 'not-a-uuid' },
     { reason: 'detector_unavailable', d: () => writeDeps({ probes: freeProbes({ dirExists: () => false }) }) },
@@ -2051,6 +2109,7 @@ describe('every way a write can be refused reaches the wire with words', () => {
     // The occupancy half, driven through attach so the shared copy is proved on
     // the write surface too and not only on the read-only probe.
     { reason: 'live_desktop_process', run: () => attach(writeDeps({ probes: probes() })) },
+    { reason: 'native_thread_working', run: () => attach(writeDeps({ probes: workingProbes() })) },
     { reason: 'unsupported_provider', run: () => attach(writeDeps({ probes: hostileProbes() }), { cosSessionId: 'c' }, 'cursor') },
     { reason: 'invalid_thread_id', run: () => attach(writeDeps({ probes: hostileProbes() }), { cosSessionId: 'c' }, 'claude', 'nope') },
     { reason: 'detector_unavailable', run: () => attach(writeDeps({ probes: freeProbes({ dirExists: () => false }) })) },

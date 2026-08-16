@@ -8,6 +8,9 @@ import {
   parseProcStartUtcMs,
   processStartMatches,
   threadOccupancy,
+  ACTIVE_RECENTLY_WINDOW_MS,
+  holderActivity,
+  isActiveRecently,
   type OccupancyProbes,
   type OccupancyReason,
 } from './thread-occupancy'
@@ -304,5 +307,131 @@ describe('scan-level results carry doubt separately from owners', () => {
     const r = codexOwners(CODEX_THREAD, probes({ lockHolders: () => [-1] }), CODEX_DIR)
     expect(r.owners).toHaveLength(0)
     expect(r.doubt).toBe('registry_unreadable')
+  })
+})
+
+// ===========================================================================
+// THE IDLE-HOLDER RELAXATION (6.32.0)
+// ===========================================================================
+//
+// These execute the real `threadOccupancy`. They are not source-shape checks:
+// every one of them drives a verdict out of the function, so a mutation to the
+// branch fails here rather than passing on a grep.
+
+describe('holderActivity separates measured-idle from unmeasurable', () => {
+  const NOW = ACTUAL_START_MS
+
+  it('calls a transcript written inside the window WORKING', () => {
+    expect(holderActivity(NOW, NOW)).toBe('working')
+    expect(holderActivity(NOW - (ACTIVE_RECENTLY_WINDOW_MS - 1), NOW)).toBe('working')
+  })
+
+  it('calls a transcript written outside the window IDLE', () => {
+    expect(holderActivity(NOW - (ACTIVE_RECENTLY_WINDOW_MS + 1), NOW)).toBe('idle')
+    expect(holderActivity(NOW - 10 * 60_000, NOW)).toBe('idle')
+  })
+
+  /**
+   * THE ONE THAT MATTERS. `isActiveRecently` answers false for every one of
+   * these, and false is the permissive answer at a gate. If `holderActivity`
+   * ever collapses to that boolean, an unreadable transcript becomes a licence
+   * to write into someone's open conversation.
+   */
+  it('calls an unmeasurable reading UNKNOWN, never idle', () => {
+    for (const bad of [null, undefined, NaN, Infinity, -Infinity]) {
+      expect(holderActivity(bad as number | null | undefined, NOW)).toBe('unknown')
+      expect(isActiveRecently(bad as number | null | undefined, NOW)).toBe(false)
+    }
+    expect(holderActivity(NOW, NaN)).toBe('unknown')
+  })
+
+  it('refuses a far-future transcript rather than reading it as idle', () => {
+    // A clock this server cannot reason about must not hand out the permissive
+    // answer forever. Ordinary skew still lands inside the window as working.
+    expect(holderActivity(NOW + 5_000, NOW)).toBe('working')
+    expect(holderActivity(NOW + 7 * 24 * 3_600_000, NOW)).toBe('unknown')
+  })
+})
+
+describe('a foreign holder blocks on WORKING, not on merely held', () => {
+  const idleClock = (): Partial<OccupancyProbes> => ({
+    transcriptMtimeMs: () => Date.now() - 10 * 60_000,
+  })
+  const workingClock = (): Partial<OccupancyProbes> => ({ transcriptMtimeMs: () => Date.now() })
+
+  it('attaches to a live foreign holder measured idle, and says so', () => {
+    const o = threadOccupancy('claude', SID, probes(idleClock()), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: true, reason: null })
+    // The owner is still REPORTED. Relaxing the gate must not make COS claim the
+    // thread is unowned; ownerCount is what stops a client being more confident
+    // than the server.
+    expect(o.owners).toHaveLength(1)
+    expect(o.owners[0]).toMatchObject({ pid: 7872, selfOwned: false })
+    // And the permissive outcome is DECLARED, which is what projectAttachability
+    // requires before it will forward an attachable verdict carrying a foreigner.
+    expect(o.idleHolder).toBe(true)
+  })
+
+  it('still refuses a holder that is writing right now', () => {
+    const o = threadOccupancy('claude', SID, probes(workingClock()), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason })
+      .toEqual({ attachable: false, reason: 'native_thread_working' })
+    expect(o.idleHolder).toBeUndefined()
+  })
+
+  it('refuses with the original reason when no clock is wired at all', () => {
+    // The default probe set has no `transcriptMtimeMs`. This is the pre-6.32.0
+    // gate, and it is what an install gets by doing nothing.
+    const o = threadOccupancy('claude', SID, probes(), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason })
+      .toEqual({ attachable: false, reason: 'live_desktop_process' })
+    expect(o.idleHolder).toBeUndefined()
+  })
+
+  it('refuses when the clock cannot read the transcript', () => {
+    for (const clock of [() => null, () => NaN, () => { throw new Error('EACCES') }]) {
+      const o = threadOccupancy('claude', SID, probes({ transcriptMtimeMs: clock as () => number }), DIRS)
+      expect({ attachable: o.attachable, reason: o.reason })
+        .toEqual({ attachable: false, reason: 'live_desktop_process' })
+    }
+  })
+
+  /**
+   * The relaxation must not swallow the doubt reasons. "The scan could not see"
+   * and "the holder is idle" are different findings, and only the second one is
+   * permissive. A registry it cannot read is not an idle holder.
+   */
+  it('does not let an idle clock override a scan that could not see', () => {
+    const o = threadOccupancy('claude', SID, probes({
+      ...idleClock(),
+      // A NUMERIC name, because `CLAUDE_REGISTRY_FILENAME` is `^\d+\.json$` and
+      // a non-matching entry is skipped silently -- the first version of this
+      // fixture used 'garbage.json' and therefore raised no doubt at all.
+      readDir: () => ['7872.json', '9999.json'],
+      readFile: (p: string) => p.endsWith('9999.json') ? null : JSON.stringify(record()),
+    }), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason })
+      .toEqual({ attachable: false, reason: 'registry_unreadable' })
+  })
+
+  it('applies to codex holders too, not just claude', () => {
+    const held = (over: Partial<OccupancyProbes>) => probes({ lockHolders: () => [4224], ...over })
+    expect(threadOccupancy('codex', CODEX_THREAD, held(workingClock()), DIRS).reason)
+      .toBe('native_thread_working')
+    const idle = threadOccupancy('codex', CODEX_THREAD, held(idleClock()), DIRS)
+    expect({ attachable: idle.attachable, idleHolder: idle.idleHolder })
+      .toEqual({ attachable: true, idleHolder: true })
+  })
+
+  it('never marks idleHolder on a verdict with no foreign owner', () => {
+    // A thread COS owns, or one with no owner at all, is attachable on the
+    // ordinary path. Marking it would hand projectAttachability's contradiction
+    // check a blanket exemption it must never have.
+    const ours = probes({ ...idleClock(), cosSpawnedPids: () => new Map([[7872, ACTUAL_START_MS]]) })
+    expect(threadOccupancy('claude', SID, ours, DIRS).idleHolder).toBeUndefined()
+    const empty = probes({ ...idleClock(), readDir: () => [] })
+    const free = threadOccupancy('claude', SID, empty, DIRS)
+    expect({ attachable: free.attachable, idleHolder: free.idleHolder })
+      .toEqual({ attachable: true, idleHolder: undefined })
   })
 })

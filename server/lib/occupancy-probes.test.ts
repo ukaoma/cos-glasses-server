@@ -24,7 +24,9 @@ import {
   mkdtempSync,
   openSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
@@ -44,10 +46,18 @@ import {
   processStartMs,
   readDir,
   readFile,
+  idleHolderContinueEnabled,
   realOccupancyDirs,
   realOccupancyProbes,
+  withTranscriptClock,
 } from './occupancy-probes.js'
-import { processStartMatches, threadOccupancy, type OccupancyDirs } from './thread-occupancy.js'
+import { realNativeHeadDeps, type NativeHeadDeps } from './native-head.js'
+import {
+  holderActivity,
+  processStartMatches,
+  threadOccupancy,
+  type OccupancyDirs,
+} from './thread-occupancy.js'
 
 const THREAD_A = '096fc233-689b-4a88-aa97-9353813c7e7d'
 const THREAD_B = '019fc80a-cc79-7921-8541-298e71695afd'
@@ -707,5 +717,104 @@ describe('threadOccupancy on a real filesystem (codex)', () => {
     const result = threadOccupancy('codex', THREAD_B, probesWith(emptyLedger), fx.dirs)
     expect(result.attachable).toBe(false)
     expect(result.reason).toBe('probe_failed')
+  })
+})
+
+// ===========================================================================
+// The transcript clock that powers the idle-holder relaxation (6.32.0)
+// ===========================================================================
+
+describe('idleHolderContinueEnabled', () => {
+  it('is opt-in on the exact string 1, and off for everything else', () => {
+    const prior = process.env.COS_THREAD_ATTACH_IDLE_HOLDER
+    restoreEnv.push(['COS_THREAD_ATTACH_IDLE_HOLDER', prior])
+    // Anything ambiguous reads OFF. This flag decides whether COS may write into
+    // a conversation a human still has open, so 'true' must NOT enable it.
+    for (const v of ['true', 'yes', 'on', '0', '2', '', ' 1']) {
+      process.env.COS_THREAD_ATTACH_IDLE_HOLDER = v
+      expect(idleHolderContinueEnabled()).toBe(false)
+    }
+    process.env.COS_THREAD_ATTACH_IDLE_HOLDER = '1'
+    expect(idleHolderContinueEnabled()).toBe(true)
+    delete process.env.COS_THREAD_ATTACH_IDLE_HOLDER
+    expect(idleHolderContinueEnabled()).toBe(false)
+  })
+})
+
+describe('withTranscriptClock on a real filesystem', () => {
+  const THREAD = THREAD_A
+
+  /** Real projects layout, dot component and all, like the production root. */
+  function headDeps(): NativeHeadDeps {
+    const projects = join(fx.root, '.claude', 'projects')
+    return {
+      ...realNativeHeadDeps({ claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') }),
+      dirs: { claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') },
+    }
+  }
+
+  function writeTranscript(): string {
+    const dir = join(fx.root, '.claude', 'projects', '-Users-someone-repo')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${THREAD}.jsonl`)
+    writeFileSync(file, '{"type":"user"}\n')
+    return file
+  }
+
+  it('reads the real mtime of the real transcript', () => {
+    const file = writeTranscript()
+    const clocked = withTranscriptClock(realOccupancyProbes(emptyLedger), headDeps())
+    const got = clocked.transcriptMtimeMs?.('claude', THREAD)
+    expect(got).toBe(statSync(file).mtimeMs)
+    // And that reading is fresh enough to read as WORKING, which is what makes
+    // this wiring able to block a live writer at all.
+    expect(holderActivity(got, Date.now())).toBe('working')
+  })
+
+  it('answers null when there is no transcript, which the gate reads as unknown', () => {
+    const clocked = withTranscriptClock(realOccupancyProbes(emptyLedger), headDeps())
+    expect(clocked.transcriptMtimeMs?.('claude', THREAD)).toBeNull()
+    expect(holderActivity(null, Date.now())).toBe('unknown')
+  })
+
+  it('answers null for an invalid id rather than reaching the filesystem with it', () => {
+    const clocked = withTranscriptClock(realOccupancyProbes(emptyLedger), headDeps())
+    for (const bad of ['nope', '../../etc/passwd', '']) {
+      expect(clocked.transcriptMtimeMs?.('claude', bad)).toBeNull()
+    }
+  })
+
+  it('leaves the wrapped probes otherwise untouched', () => {
+    const base = realOccupancyProbes(emptyLedger)
+    const clocked = withTranscriptClock(base, headDeps())
+    expect(base.transcriptMtimeMs).toBeUndefined()
+    for (const k of ['isAlive', 'processStartMs', 'fileExists', 'dirExists', 'readDir', 'readFile', 'lockHolders'] as const) {
+      expect(clocked[k]).toBe(base[k])
+    }
+  })
+
+  it('is what turns a real live foreign holder from refused into attachable', () => {
+    // End to end on a real filesystem: a real registry record for THIS process
+    // (so it is genuinely alive), an empty spawn ledger (so it is foreign), and a
+    // real transcript. The only difference between the two verdicts is the clock.
+    writeRecord({ sessionId: THREAD })
+    const file = writeTranscript()
+
+    const strict = threadOccupancy('claude', THREAD, realOccupancyProbes(emptyLedger), fx.dirs)
+    expect({ attachable: strict.attachable, reason: strict.reason })
+      .toEqual({ attachable: false, reason: 'live_desktop_process' })
+
+    const clocked = withTranscriptClock(realOccupancyProbes(emptyLedger), headDeps())
+    const working = threadOccupancy('claude', THREAD, clocked, fx.dirs)
+    expect({ attachable: working.attachable, reason: working.reason })
+      .toEqual({ attachable: false, reason: 'native_thread_working' })
+
+    // Age the transcript past the window. Same registry, same live process, and
+    // now the gate lets it through.
+    const old = Date.now() - 10 * 60_000
+    utimesSync(file, new Date(old), new Date(old))
+    const idle = threadOccupancy('claude', THREAD, clocked, fx.dirs)
+    expect({ attachable: idle.attachable, reason: idle.reason, idleHolder: idle.idleHolder })
+      .toEqual({ attachable: true, reason: null, idleHolder: true })
   })
 })

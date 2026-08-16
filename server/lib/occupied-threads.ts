@@ -32,6 +32,7 @@ import {
   claudeOwners,
   codexLockPath,
   codexOwners,
+  isActiveRecently,
   type OccupancyDirs,
   type OccupancyProbes,
   type ThreadOwner,
@@ -210,49 +211,19 @@ export function noOccupancyKnown(): OccupiedScan {
 }
 
 /**
- * How recently the transcript must have been written for a held thread to read
- * as WORKING rather than merely OPEN.
+ * The freshness window and the raw reading now live in `thread-occupancy.ts`.
  *
- * WHY A SECOND SIGNAL EXISTS AT ALL. `owners` answers "a process holds this
- * thread", which is not the question the user is asking when he looks at the
- * lens. He watched a session finish on his Mac while the glasses still showed it
- * active, because the window was still open and the registry record therefore
- * still existed. Occupancy has no clock in it; the transcript does.
+ * MOVED, not duplicated (6.32.0). The write gate needs the same window this
+ * hint uses, and it is the lower module, so keeping a second copy here would be
+ * two definitions of "recently" that could drift. Re-exported so every existing
+ * importer of these two names is unaffected.
  *
- * MEASURED, not assumed: while a session generates, its jsonl mtime tracks the
- * wall clock to within a second, and when generation stops the mtime goes stale
- * while the registry record stays exactly where it was. That divergence is the
- * whole signal.
- *
- * 30 seconds is deliberately far wider than the observed sub-second write
- * cadence. The gap this has to survive is a long tool call or a slow first token
- * between writes, and a window sized to the cadence would flap a working session
- * to OPEN and back every time the model paused to think. The cost of the wide
- * window is bounded and known: a session that stops is reported working for up
- * to 30 more seconds, which is a late correction rather than a permanent lie.
+ * Note the polarity difference before reusing `isActiveRecently` anywhere new:
+ * for a HINT, its `false` safely means "render OPEN". For a GATE, that same
+ * `false` would mean "allow the write", and unmeasurable must not mean allowed.
+ * `holderActivity` in `thread-occupancy.ts` is the gate-side reading.
  */
-export const ACTIVE_RECENTLY_WINDOW_MS = 30_000
-
-/**
- * Was this transcript written inside the window?
- *
- * NULL IS NOT "RECENT". An unresolvable path, an unreadable file, a stat that
- * threw — every one of them arrives here as null and answers false, so the row
- * falls back to OPEN. That is not a fail-open: OPEN is still a true statement
- * about a thread with a live owner. It is the STRONGER claim, "an agent is
- * working in here", that has to be earned by an actual observation.
- *
- * A timestamp far in the FUTURE is refused for the same reason rather than
- * treated as maximally fresh. Skew of a few seconds is normal and lands inside
- * the window; a file dated next week is a clock this server cannot reason about,
- * and letting it manufacture a permanent "working" badge would rebuild the bug
- * from the other direction.
- */
-export function isActiveRecently(mtimeMs: number | null | undefined, nowMs: number): boolean {
-  if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return false
-  if (!Number.isFinite(nowMs)) return false
-  return Math.abs(nowMs - mtimeMs) <= ACTIVE_RECENTLY_WINDOW_MS
-}
+export { ACTIVE_RECENTLY_WINDOW_MS, isActiveRecently } from './thread-occupancy.js'
 
 /**
  * Fill in `activeRecently` for a scan, from transcript write times.

@@ -56,6 +56,12 @@ export interface ThreadOwner {
 
 export type OccupancyReason =
   | 'live_desktop_process'
+  // A foreign holder that is DEMONSTRABLY generating right now, as opposed to
+  // merely holding the thread open. Separate from `live_desktop_process` because
+  // the two ask the user for different things: this one clears by itself in
+  // seconds and is worth waiting out, the other needs a window closed. Only
+  // reachable when a transcript clock is wired — see THE IDLE-HOLDER RELAXATION below.
+  | 'native_thread_working'
   | 'unsupported_provider'
   | 'invalid_thread_id'
   | 'detector_unavailable'
@@ -73,13 +79,30 @@ export interface Occupancy {
   owners: ThreadOwner[]
   /** Null only when attachable. Drives the Control/lens footer copy. */
   reason: OccupancyReason | null
+  /**
+   * This verdict is attachable DESPITE a foreign owner, because that owner was
+   * measured idle. See THE IDLE-HOLDER RELAXATION below.
+   *
+   * It exists so the permissive outcome has to be DECLARED rather than inferred
+   * from `attachable` alone. `projectAttachability` treats a foreign owner on an
+   * attachable verdict as a contradiction and forces it back to refused; without
+   * a positive marker, relaxing the gate would mean deleting that check, and the
+   * check is what catches a future detector that flips `attachable` by accident.
+   * With the marker, the only way to reach the permissive path is to say so.
+   *
+   * Absent (not false) on every other verdict, so `=== true` is the only test.
+   */
+  idleHolder?: true
 }
 
 /**
  * What a scan could not establish. Any non-null value forbids attaching, even
  * with zero owners — that is the whole point of the type.
  */
-type Doubt = Exclude<OccupancyReason, 'live_desktop_process' | 'unsupported_provider' | 'invalid_thread_id'> | null
+type Doubt = Exclude<
+  OccupancyReason,
+  'live_desktop_process' | 'native_thread_working' | 'unsupported_provider' | 'invalid_thread_id'
+> | null
 
 interface ScanResult {
   owners: ThreadOwner[]
@@ -111,6 +134,127 @@ export interface OccupancyProbes {
    * membership — the start time is what makes the claim checkable.
    */
   cosSpawnedPids: () => ReadonlyMap<number, number>
+  /**
+   * Transcript write time for this thread, epoch ms, or null when it cannot be
+   * read. OPTIONAL, and its ABSENCE is the default.
+   *
+   * Absent means this install has no clock on the thread, which means every
+   * foreign holder stays `live_desktop_process` — byte-for-byte the behaviour
+   * that shipped before the idle-holder relaxation existed. That is why it is
+   * optional rather than required: the strict gate is what you get by doing
+   * nothing, and the relaxation has to be wired on purpose (see `server/index.ts`,
+   * where the wiring is itself behind `COS_THREAD_ATTACH_IDLE_HOLDER`).
+   *
+   * Null is NOT idle. See `holderActivity` for why that distinction is the whole
+   * safety property here.
+   */
+  transcriptMtimeMs?: (provider: OccupancyProvider, threadId: string) => number | null
+}
+
+/**
+ * How recently the transcript must have been written for a held thread to read
+ * as WORKING rather than merely OPEN.
+ *
+ * WHY A SECOND SIGNAL EXISTS AT ALL. `owners` answers "a process holds this
+ * thread", which is not the question the user is asking. He watched a session
+ * finish on his Mac while the glasses still showed it active, because the window
+ * was still open and the registry record therefore still existed. Occupancy has
+ * no clock in it; the transcript does.
+ *
+ * MEASURED, not assumed: while a session generates, its jsonl mtime tracks the
+ * wall clock to within a second, and when generation stops the mtime goes stale
+ * while the registry record stays exactly where it was. That divergence is the
+ * whole signal.
+ *
+ * 30 seconds is deliberately far wider than the observed sub-second write
+ * cadence. The gap this has to survive is a long tool call or a slow first token
+ * between writes, and a window sized to the cadence would flap a working session
+ * to OPEN and back every time the model paused to think. The cost of the wide
+ * window is bounded and known: a session that stops is reported working for up
+ * to 30 more seconds, which is a late correction rather than a permanent lie.
+ *
+ * LIVES HERE, not in `occupied-threads.ts`, since 6.32.0. The display hint and
+ * the write gate must agree on what "recently" means, and the gate is the lower
+ * module of the two. `occupied-threads.ts` re-exports it, so every existing
+ * importer is unaffected.
+ */
+export const ACTIVE_RECENTLY_WINDOW_MS = 30_000
+
+/**
+ * Was this transcript written inside the window?
+ *
+ * NULL IS NOT "RECENT". An unresolvable path, an unreadable file, a stat that
+ * threw — every one of them arrives here as null and answers false, so the row
+ * falls back to OPEN. That is not a fail-open FOR A DISPLAY HINT: OPEN is still
+ * a true statement about a thread with a live owner. It is the STRONGER claim,
+ * "an agent is working in here", that has to be earned by an actual observation.
+ *
+ * A timestamp far in the FUTURE is refused for the same reason rather than
+ * treated as maximally fresh. Skew of a few seconds is normal and lands inside
+ * the window; a file dated next week is a clock this server cannot reason about,
+ * and letting it manufacture a permanent "working" badge would rebuild the bug
+ * from the other direction.
+ *
+ * DO NOT CALL THIS FROM A WRITE GATE. Its false has two meanings — "measured,
+ * and stale" and "could not measure" — and a gate that treats the second as the
+ * first is fail-open. `holderActivity` is the gate-side reading.
+ */
+export function isActiveRecently(mtimeMs: number | null | undefined, nowMs: number): boolean {
+  if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return false
+  if (!Number.isFinite(nowMs)) return false
+  return Math.abs(nowMs - mtimeMs) <= ACTIVE_RECENTLY_WINDOW_MS
+}
+
+/**
+ * What a foreign holder is doing, for a caller that must DECIDE rather than
+ * render.
+ *
+ * THREE VALUES, AND THE THIRD IS THE POINT. `isActiveRecently` collapses "I
+ * measured a stale file" and "I could not measure anything" into the same
+ * `false`, which is correct for a badge — the weaker claim, OPEN, is true either
+ * way — and catastrophic for a gate, where that same `false` would mean ALLOW
+ * THE WRITE. Same reading, opposite polarity, so the gate gets its own function
+ * instead of reusing the hint's boolean.
+ *
+ * Only `idle` is a positive observation of an idle holder: a real number, not in
+ * the future, measured outside the window. Everything else is `unknown` and
+ * refuses. This is the same "no owner found is not no owner" rule the rest of
+ * this module runs on, applied to the clock instead of the registry.
+ *
+ * The window itself is NOT redefined here — `isActiveRecently` decides what
+ * recent means, so the badge and the gate can never drift apart on it.
+ */
+export type HolderActivity = 'working' | 'idle' | 'unknown'
+
+export function holderActivity(mtimeMs: number | null | undefined, nowMs: number): HolderActivity {
+  if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return 'unknown'
+  if (!Number.isFinite(nowMs)) return 'unknown'
+  // A future-dated transcript is a clock this server cannot reason about. The
+  // hint may treat a few seconds of skew as freshness; the gate may not treat
+  // ANY amount of it as idleness, because "stale" is the permissive answer here
+  // and a wrong clock would hand it out forever.
+  if (mtimeMs > nowMs + ACTIVE_RECENTLY_WINDOW_MS) return 'unknown'
+  return isActiveRecently(mtimeMs, nowMs) ? 'working' : 'idle'
+}
+
+/**
+ * Read the transcript clock for a thread, refusing to guess.
+ *
+ * A probe that is absent, throws, or answers null all land on `unknown`, which
+ * refuses. There is no path from a failed reading to a permissive verdict.
+ */
+function readHolderActivity(
+  provider: OccupancyProvider,
+  threadId: string,
+  probes: OccupancyProbes,
+  nowMs: number,
+): HolderActivity {
+  if (typeof probes.transcriptMtimeMs !== 'function') return 'unknown'
+  try {
+    return holderActivity(probes.transcriptMtimeMs(provider, threadId), nowMs)
+  } catch {
+    return 'unknown'
+  }
 }
 
 /** A Claude registry filename is exactly `<pid>.json`. Not `*.json`. */
@@ -321,14 +465,81 @@ export interface OccupancyDirs {
   codexLocksDir: string
 }
 
+// ===========================================================================
+// THE IDLE-HOLDER RELAXATION (6.32.0)
+// ===========================================================================
+//
+// This loosens a guard that was deliberate. Read this before touching it, and
+// do not widen it further without repeating the experiment.
+//
+// WHAT CHANGED. A foreign owner used to be terminal on its own. It is now
+// terminal only while that owner is DEMONSTRABLY WRITING. A holder measured
+// idle — registry record alive, transcript stale — is continuable.
+//
+// WHY THE OLD RULE WAS WRONG. The registry records an OPEN WINDOW, not active
+// generation. `~/.claude/sessions/<pid>.json` for a session that finished ten
+// minutes ago is byte-identical to one mid-turn. Miles keeps Claude Code
+// windows open, so Continue was refused for exactly the threads he cares about
+// and allowed only for the ones he had abandoned. The gate was measuring the
+// wrong thing, not measuring it too strictly.
+//
+// THE CANARY, run 2026-08-16 against a real interactive `claude` 2.1.229 held
+// open in tmux (pid 48446, `kind: interactive`, `entrypoint: claude-desktop`,
+// indistinguishable from a desktop window) in a scratch workspace. Turns were
+// injected with the EXACT argv this server spawns. Raw findings:
+//
+//   1. DELIVERY WORKS. `claude -p --resume <id>` into an idle-held thread
+//      exits 0 in ~5s and returns its result. Same session id, same file.
+//   2. NO CORRUPTION. Across 6 injections and 6 desktop turns, including
+//      three SDK writers landing within 45ms of each other on the same node,
+//      the transcript stayed append-only: every prefix byte-identical before
+//      and after (`cmp`), zero unparseable lines, zero dangling parentUuid.
+//      Claude Code appends whole rows, so byte interleaving does not occur.
+//   3. THE HOLDER IGNORES THE INJECTED TURN — this is the real finding. Its
+//      in-memory view is stale and stays stale. Asked afterwards to list every
+//      word it had been told to reply with, it answered "ALPHA": the injected
+//      "BRAVO" was invisible to it.
+//   4. NOTHING IS CLOBBERED, BUT THE THREAD FORKS. The holder's next turn
+//      parented to the PRE-INJECTION tail, making the transcript a tree. Both
+//      turns survive in full; they are on different branches, and from then on
+//      each writer sees only its own. A later `--resume` read back
+//      "ALPHA, BRAVO" and never saw the desktop's "CHARLIE".
+//   5. THE WORKING CASE IS DIFFERENT AND STAYS BLOCKED. With the holder
+//      generating, the transcript mtime was 6.2s old and `holderActivity`
+//      returned `working`, so this relaxation does not fire there at all.
+//
+// SO THE ANSWER IS: no clobbering, no corruption, no data loss — but the two
+// views diverge silently after the write, and neither side is told by THIS
+// module. What makes that acceptable is the guard one layer up: `nativeHead`
+// digests the transcript tail, and a desktop write CHANGES it (measured:
+// nh1:faba1b35... -> nh1:ace93a1f...), so the next COS turn on that binding is
+// refused with `native_thread_changed` and the user is offered refresh, continue
+// anyway, or fork. Divergence is caught by the CONTENT watermark, which is the
+// signal that can actually see it. Occupancy never could.
+//
+// WHAT THIS IS NOT A LICENCE FOR. Do not extend the same reasoning to the
+// `doubt` reasons below: those mean the scan could not SEE, and an unreadable
+// registry is not an idle holder. Do not relax the `working` branch on the
+// grounds that "nothing got corrupted in the canary either" — case 5 was never
+// run to completion precisely because it stays blocked. And do not reach for
+// `isActiveRecently` here; its `false` means "stale OR unmeasurable", and only
+// `holderActivity` separates those.
+//
+// TURNING IT OFF. Unwire `probes.transcriptMtimeMs` (in practice: unset
+// `COS_THREAD_ATTACH_IDLE_HOLDER`). Every foreign holder then reads `unknown`
+// and refuses, which is the pre-6.32.0 gate exactly. No rollback needed.
+
 /**
  * The Phase 0 attach precondition.
  *
  * Returns attachable ONLY when a supported provider proved its detector exists,
- * read every candidate record, and found no foreign owner. Every other outcome
- * names why. The whole function is wrapped: a throwing probe — including the
- * spawn ledger, which is the most safety-critical of them — is `probe_failed`,
+ * read every candidate record, and found no owner it must respect. Every other
+ * outcome names why. The whole function is wrapped: a throwing probe — including
+ * the spawn ledger, which is the most safety-critical of them — is `probe_failed`,
  * never an exception escaping into a route.
+ *
+ * A foreign owner measured IDLE is the one exception, and it is marked
+ * `idleHolder` on the way out. See THE IDLE-HOLDER RELAXATION above.
  */
 export function threadOccupancy(
   provider: string,
@@ -358,10 +569,23 @@ export function threadOccupancy(
 
   const foreign = result.owners.filter(o => !o.selfOwned)
   if (foreign.length > 0) {
-    return { attachable: false, owners: result.owners, reason: 'live_desktop_process' }
+    const activity = readHolderActivity(provider, threadId, probes, Date.now())
+    if (activity !== 'idle') {
+      return {
+        attachable: false,
+        owners: result.owners,
+        reason: activity === 'working' ? 'native_thread_working' : 'live_desktop_process',
+      }
+    }
+    // FALL THROUGH, deliberately. See THE IDLE-HOLDER RELAXATION below for why this is
+    // safe and what it is NOT. Everything after this point still applies: a scan
+    // that could not establish something still refuses on the next line.
   }
   if (result.doubt !== null) {
     return { attachable: false, owners: result.owners, reason: result.doubt }
+  }
+  if (foreign.length > 0) {
+    return { attachable: true, owners: result.owners, reason: null, idleHolder: true }
   }
   return { attachable: true, owners: result.owners, reason: null }
 }
