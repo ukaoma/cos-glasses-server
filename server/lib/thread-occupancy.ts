@@ -63,6 +63,10 @@ export type OccupancyReason =
   | 'unverifiable_process_start'
   | 'unverifiable_liveness_socket'
   | 'probe_failed'
+  // Not an occupancy finding: the write feature is switched off (plan 4.9). Set
+  // before any probe runs, so a disabled install does no filesystem work and can
+  // never report a thread free that it has no way to write to.
+  | 'attach_disabled'
 
 export interface Occupancy {
   attachable: boolean
