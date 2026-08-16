@@ -20,6 +20,10 @@ import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
 import { agentSessionsRouter } from './routes/agent-sessions.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
+import { createAgentSessionBindingsRouter } from './routes/agent-session-bindings.js'
+import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
+import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
+import { realOccupancyDirs, realOccupancyProbes } from './lib/occupancy-probes.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
@@ -263,6 +267,10 @@ app.use((_req, _res, next) => {
   next()
 })
 
+// Hydrated once at boot, before any route can read it. Never throws; a corrupt
+// or unreadable store yields a degraded registry rather than a silent empty one.
+const agentSessionBindingRegistry = AgentSessionBindingRegistry.open()
+
 // API routes
 app.use('/api', healthRouter)
 app.use('/api', diagRouter)
@@ -280,6 +288,23 @@ app.use('/api', agentSessionsRouter)
 // Presence view of Claude Code sessions on this Mac. Dark unless
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)
+// Phase 0 of Continue Original Agent Thread: can COS write into a desktop thread
+// without colliding with a live writer? Read-only — it answers, it never attaches.
+// Registered AFTER agentSessionsRouter deliberately: its paths are 2 and 4 segments
+// (`/agent-sessions/bindings`, `/agent-sessions/:provider/:threadId/attachability`)
+// and cannot shadow that router's `/agent-sessions/:provider/:id` transcript route.
+app.use('/api', createAgentSessionBindingsRouter({
+  probes: realOccupancyProbes(cosSpawnedPids),
+  dirs: realOccupancyDirs(),
+  now: () => Date.now(),
+  // One instance per process. The epoch high-water mark is only monotonic if a
+  // single reader owns the durable store, so this must never be constructed twice.
+  // `open()` never throws: an unreadable store yields a DEGRADED registry whose
+  // `available()` is false, which the route renders as a refusal rather than as an
+  // empty list — "nothing is bound" and "the store could not be read" must not
+  // look the same.
+  bindings: agentSessionBindingRegistry,
+}))
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)
 app.use('/api', meetingRouter)
