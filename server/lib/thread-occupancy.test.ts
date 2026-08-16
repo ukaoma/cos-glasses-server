@@ -4,22 +4,27 @@ import {
   claudeOwners,
   codexLockPath,
   codexOwners,
+  isSelfOwned,
   parseProcStartUtcMs,
   processStartMatches,
   threadOccupancy,
   type OccupancyProbes,
+  type OccupancyReason,
 } from './thread-occupancy'
 
-// Values below are the REAL ones observed on this machine 2026-08-15, not
-// invented shapes. Fixture realism is the point: a fixture that cannot express
-// the production value cannot catch the production bug. The UTC/local pair in
-// particular is the exact pair that produced a false PID-reuse verdict.
+// Values below are the REAL ones observed on this machine 2026-08-15. Fixture
+// realism is the point: a fixture that cannot express the production value
+// cannot catch the production bug. The UTC/local pair is the exact pair that
+// produced a false PID-reuse verdict, and the Codex id is the full UUID that
+// actually names a lock file on disk.
 const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
 const OTHER_SID = '80927570-0000-4000-8000-000000000000'
+const CODEX_THREAD = '019fc80a-cc79-7921-8541-298e71695afd'
 const PROC_START_UTC = 'Sun Aug 16 02:03:05 2026'
-const ACTUAL_START_MS = Date.UTC(2026, 7, 16, 2, 3, 5) // same instant, 21:03:05 CDT
+const ACTUAL_START_MS = Date.UTC(2026, 7, 16, 2, 3, 5) // 21:03:05 CDT, same instant
 const CLAUDE_DIR = '/home/.claude/sessions'
 const CODEX_DIR = '/home/.codex/thread-writer-locks'
+const DIRS = { claudeSessionsDir: CLAUDE_DIR, codexLocksDir: CODEX_DIR }
 
 function record(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -27,11 +32,10 @@ function record(over: Record<string, unknown> = {}): Record<string, unknown> {
     sessionId: SID,
     procStart: PROC_START_UTC,
     messagingSocketPath: '/tmp/cc-socks/7872.sock',
-    // Fields observed alongside, deliberately present so a test cannot pass by
-    // reading one that must never be trusted for identity (see note 3).
+    // Present so a test cannot pass by reading a field that must never be
+    // trusted for identity: a CLI `claude -p` reports these identically.
     kind: 'interactive',
     entrypoint: 'claude-desktop',
-    cwd: '/Users/ukaoma/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff',
     ...over,
   }
 }
@@ -41,12 +45,24 @@ function probes(over: Partial<OccupancyProbes> = {}): OccupancyProbes {
     isAlive: () => true,
     processStartMs: () => ACTUAL_START_MS,
     fileExists: () => true,
+    dirExists: () => true,
     readDir: () => ['7872.json'],
     readFile: () => JSON.stringify(record()),
     lockHolders: () => [],
-    cosSpawnedPids: () => new Set<number>(),
+    cosSpawnedPids: () => new Map<number, number>(),
     ...over,
   }
+}
+
+/**
+ * The assertion that matters. An earlier suite checked `owners.length === 0` and
+ * called that "not treated as free" — but empty owners with no doubt IS the free
+ * verdict, so those tests asserted the input to the bug and named it the
+ * absence of the bug. Every occupancy case goes through the real verdict.
+ */
+function expectOccupied(p: OccupancyProbes, reason: OccupancyReason, provider = 'claude', id = SID) {
+  const o = threadOccupancy(provider, id, p, DIRS)
+  expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: false, reason })
 }
 
 describe('procStart is UTC while ps is local', () => {
@@ -55,8 +71,6 @@ describe('procStart is UTC while ps is local', () => {
   })
 
   it('matches the live process despite the five-hour display difference', () => {
-    // The regression this exists for: comparing the strings, or parsing the
-    // recorded value as local time, marks a healthy session as PID-reused.
     expect(processStartMatches(PROC_START_UTC, ACTUAL_START_MS)).toBe(true)
   })
 
@@ -73,177 +87,222 @@ describe('procStart is UTC while ps is local', () => {
   })
 })
 
-describe('claude occupancy', () => {
-  it('finds the live owner of the thread', () => {
-    const r = claudeOwners(SID, probes(), CLAUDE_DIR)!
-    expect(r.owners).toHaveLength(1)
-    expect(r.owners[0]).toMatchObject({ pid: 7872, provider: 'claude', selfOwned: false })
+describe('no path returns attachable while a live owner exists', () => {
+  it('finds the live owner and refuses to attach', () => {
+    const o = threadOccupancy('claude', SID, probes(), DIRS)
+    expect(o.attachable).toBe(false)
+    expect(o.reason).toBe('live_desktop_process')
+    expect(o.owners[0]).toMatchObject({ pid: 7872, provider: 'claude', selfOwned: false })
   })
 
-  it('does not match a DIFFERENT session in the same directory', () => {
-    // Two desktop tabs were open during the probe; the registry distinguished
-    // them. If this ever matches, occupancy has become "is any Claude running",
-    // which is the useless form the whole design rejected.
-    const r = claudeOwners(OTHER_SID, probes(), CLAUDE_DIR)!
-    expect(r.owners).toHaveLength(0)
+  // Each case below has a live owner (pid 7872) present in the registry. All of
+  // them returned attachable:true in the first implementation.
+  it('refuses a truncated 8-char display id instead of finding nothing', () => {
+    expectOccupied(probes(), 'invalid_thread_id', 'claude', SID.slice(0, 8))
   })
 
-  it('never matches on a truncated id', () => {
-    // ClaudePeer.id is sessionId.slice(0, 8) for display. Occupancy is a safety
-    // decision and must require the full id.
-    const r = claudeOwners(SID.slice(0, 8), probes(), CLAUDE_DIR)!
-    expect(r.owners).toHaveLength(0)
+  it('refuses a path-traversal id before it can reach a filesystem path', () => {
+    expectOccupied(probes(), 'invalid_thread_id', 'claude', '../../etc/passwd')
+    expectOccupied(probes(), 'invalid_thread_id', 'codex', '../../etc/passwd')
+  })
+
+  it('refuses ids that SAFE_ID_RE would permit', () => {
+    for (const bad of ['native:something', 'abc@host', 'a.b.c', 'x'.repeat(128), SID.toUpperCase()]) {
+      expectOccupied(probes(), 'invalid_thread_id', 'claude', bad)
+    }
+  })
+
+  it('treats corrupt JSON as doubt, not absence', () => {
+    expectOccupied(probes({ readFile: () => '{ not json' }), 'registry_unreadable')
+  })
+
+  it('treats an unreadable record (null) as doubt, not absence', () => {
+    // The documented "unreadable" signal. It previously failed OPEN while the
+    // undocumented throw path failed closed — the two were inverted.
+    expectOccupied(probes({ readFile: () => null }), 'registry_unreadable')
+  })
+
+  it('treats a non-object JSON body as doubt', () => {
+    expectOccupied(probes({ readFile: () => '"7872"' }), 'registry_unreadable')
+    expectOccupied(probes({ readFile: () => '[]' }), 'registry_unreadable')
+  })
+
+  it('treats a malformed pid on a matching record as doubt', () => {
+    // The record already claims THIS thread, so discarding it is not "no owner".
+    for (const pid of ['7872a', undefined, -1, 0, 1.5, true, '0x1ec0', ['7872']]) {
+      expectOccupied(probes({ readFile: () => JSON.stringify(record({ pid })) }), 'registry_unreadable')
+    }
+  })
+
+  it('treats an absent registry directory as detector_unavailable, not free', () => {
+    // Claude Code only writes this registry from 2.1.224. On an older build the
+    // directory is missing while attachable-looking threads exist.
+    expectOccupied(probes({ dirExists: () => false }), 'detector_unavailable')
+  })
+
+  it('refuses when the directory cannot be read', () => {
+    expectOccupied(probes({ readDir: () => { throw new Error('EACCES') } }), 'probe_failed')
+  })
+
+  it('refuses when the spawn ledger throws', () => {
+    // The single most safety-critical probe, and the one previously unwrapped.
+    expectOccupied(probes({ cosSpawnedPids: () => { throw new Error('ledger down') } }), 'probe_failed')
+  })
+
+  it('refuses an implausibly large registry rather than scanning it', () => {
+    const many = Array.from({ length: 501 }, (_, i) => `${i + 1}.json`)
+    expectOccupied(probes({ readDir: () => many }), 'registry_unreadable')
+  })
+})
+
+describe('attachable requires positive proof of an empty registry', () => {
+  it('attaches when the directory exists and holds no matching record', () => {
+    const o = threadOccupancy('claude', SID, probes({ readDir: () => [] }), DIRS)
+    expect(o).toEqual({ attachable: true, owners: [], reason: null })
+  })
+
+  it('attaches when the only records belong to other sessions', () => {
+    const o = threadOccupancy('claude', OTHER_SID, probes(), DIRS)
+    expect(o.attachable).toBe(true)
   })
 
   it('ignores a stale record whose PID is dead', () => {
-    // Observed live: 64256.json persisted for a process dead since Aug 14,
-    // because reaping happens on clean exit and a crash skips it.
-    const r = claudeOwners(SID, probes({ isAlive: () => false }), CLAUDE_DIR)!
-    expect(r.owners).toHaveLength(0)
-    expect(r.unverifiable).toBe(false)
+    // 64256.json persisted for a process dead since Aug 14: reaping happens on
+    // clean exit and a crash skips it. Genuinely dead is genuinely no owner.
+    const o = threadOccupancy('claude', SID, probes({ isAlive: () => false }), DIRS)
+    expect(o.attachable).toBe(true)
   })
 
-  it('refuses a recycled PID rather than trusting the stale record', () => {
-    const r = claudeOwners(
-      SID,
-      probes({ processStartMs: () => ACTUAL_START_MS + 86_400_000 }),
-      CLAUDE_DIR,
-    )!
-    expect(r.owners).toHaveLength(0)
-    expect(r.unverifiable).toBe(true)
-  })
-
-  it('does not accept an alive PID whose socket is missing', () => {
-    const r = claudeOwners(SID, probes({ fileExists: () => false }), CLAUDE_DIR)!
-    expect(r.owners).toHaveLength(0)
-    expect(r.unverifiable).toBe(true)
-  })
-
-  it('only reads <pid>.json, not every json in the directory', () => {
-    const r = claudeOwners(
-      SID,
-      probes({ readDir: () => ['config.json', 'notes.json', '.DS_Store'] }),
-      CLAUDE_DIR,
-    )!
-    expect(r.owners).toHaveLength(0)
+  it('only reads <pid>.json', () => {
+    // The live directory really does hold <pid>.<sha256>.key files alongside.
+    const o = threadOccupancy('claude', SID, probes({
+      readDir: () => ['7872.088e9148.key', 'config.json', '.DS_Store'],
+    }), DIRS)
+    expect(o.attachable).toBe(true)
     expect(CLAUDE_REGISTRY_FILENAME.test('7872.json')).toBe(true)
+    expect(CLAUDE_REGISTRY_FILENAME.test('7872.088e9148.key')).toBe(false)
     expect(CLAUDE_REGISTRY_FILENAME.test('config.json')).toBe(false)
   })
-
-  it('returns null (not empty) when the directory cannot be read', () => {
-    const r = claudeOwners(SID, probes({ readDir: () => { throw new Error('EACCES') } }), CLAUDE_DIR)
-    expect(r).toBeNull()
-  })
-
-  it('survives a corrupt registry file without treating the thread as free', () => {
-    const r = claudeOwners(SID, probes({ readFile: () => '{ not json' }), CLAUDE_DIR)!
-    expect(r.owners).toHaveLength(0)
-  })
 })
 
-describe('codex occupancy', () => {
-  it('a held lock is an owner', () => {
-    const r = codexOwners('019fc80a', probes({ lockHolders: () => [4224] }), CODEX_DIR)!
-    expect(r.owners).toHaveLength(1)
-    expect(r.owners[0]).toMatchObject({ pid: 4224, source: 'codex-writer-lock' })
-  })
-
-  it('a lock FILE with no holder is not occupancy', () => {
-    // Observed live twice: the thread lock file outlived its `codex exec`, and
-    // .coordination.lock exists permanently held by nobody. Existence proves
-    // nothing; only an open descriptor does.
-    const r = codexOwners('019fc80a', probes({ lockHolders: () => [] }), CODEX_DIR)!
-    expect(r.owners).toHaveLength(0)
-  })
-
-  it('an absent lock file means nobody', () => {
-    const r = codexOwners('019fc80a', probes({ fileExists: () => false }), CODEX_DIR)!
-    expect(r.owners).toHaveLength(0)
-  })
-
-  it('builds the path from the thread id', () => {
-    expect(codexLockPath('019fc80a', CODEX_DIR)).toBe(`${CODEX_DIR}/019fc80a.lock`)
-  })
-
-  it('returns null when the holder probe fails', () => {
-    const r = codexOwners(
-      '019fc80a',
-      probes({ lockHolders: () => { throw new Error('lsof missing') } }),
-      CODEX_DIR,
+describe('PID reuse cannot forge identity in either direction', () => {
+  it('refuses a recycled PID in the registry', () => {
+    expectOccupied(
+      probes({ processStartMs: () => ACTUAL_START_MS + 86_400_000 }),
+      'unverifiable_process_start',
     )
-    expect(r).toBeNull()
-  })
-})
-
-describe('the attach precondition', () => {
-  const dirs = { claudeSessionsDir: CLAUDE_DIR, codexLocksDir: CODEX_DIR }
-
-  it('is NOT attachable while a desktop process owns the thread', () => {
-    const o = threadOccupancy('claude', SID, probes(), dirs)
-    expect(o.attachable).toBe(false)
-    expect(o.reason).toBe('live_desktop_process')
   })
 
-  it('is attachable when the owner is a process COS spawned itself', () => {
-    // Self-recursion (4.4): our own driver is not a foreign writer. This must be
-    // decided by the spawn ledger, never by entrypoint/kind, which a CLI run
-    // reports identically to a desktop window.
-    const o = threadOccupancy(
-      'claude',
-      SID,
-      probes({ cosSpawnedPids: () => new Set([7872]) }),
-      dirs,
-    )
+  it('names a missing socket distinctly from a process-start failure', () => {
+    expectOccupied(probes({ fileExists: () => false }), 'unverifiable_liveness_socket')
+  })
+
+  it('refuses a recycled PID in the SPAWN LEDGER', () => {
+    // The only path that turns a live owner into attachable. A bare pid Set
+    // could not express this: the ledger entry must also match the start time.
+    const stale = new Map([[7872, ACTUAL_START_MS - 86_400_000]])
+    expectOccupied(probes({ cosSpawnedPids: () => stale }), 'live_desktop_process')
+  })
+
+  it('accepts a genuine self-owned process', () => {
+    const ours = new Map([[7872, ACTUAL_START_MS]])
+    const o = threadOccupancy('claude', SID, probes({ cosSpawnedPids: () => ours }), DIRS)
     expect(o.attachable).toBe(true)
     expect(o.owners[0]!.selfOwned).toBe(true)
   })
 
+  it('isSelfOwned requires both membership and a matching start', () => {
+    const ledger = new Map([[7872, ACTUAL_START_MS]])
+    expect(isSelfOwned(7872, ACTUAL_START_MS, ledger)).toBe(true)
+    expect(isSelfOwned(7872, ACTUAL_START_MS + 900, ledger)).toBe(true) // tolerance
+    expect(isSelfOwned(7872, ACTUAL_START_MS + 60_000, ledger)).toBe(false)
+    expect(isSelfOwned(7872, null, ledger)).toBe(false)
+    expect(isSelfOwned(9999, ACTUAL_START_MS, ledger)).toBe(false)
+  })
+
   it('does not let entrypoint or kind decide self-ownership', () => {
-    // Same record, same desktop-looking fields, empty ledger -> still foreign.
-    const o = threadOccupancy(
-      'claude',
-      SID,
+    // Same record with CLI-looking fields, empty ledger -> still foreign.
+    expectOccupied(
       probes({ readFile: () => JSON.stringify(record({ entrypoint: 'cli', kind: 'print' })) }),
-      dirs,
+      'live_desktop_process',
     )
+  })
+})
+
+describe('codex occupancy', () => {
+  const codexProbes = (over: Partial<OccupancyProbes> = {}) => probes({ readDir: () => [], ...over })
+
+  it('a held lock is an owner', () => {
+    const o = threadOccupancy('codex', CODEX_THREAD, codexProbes({ lockHolders: () => [4224] }), DIRS)
     expect(o.attachable).toBe(false)
+    expect(o.reason).toBe('live_desktop_process')
+    expect(o.owners[0]).toMatchObject({ pid: 4224, source: 'codex-writer-lock' })
   })
 
-  it('is attachable when nobody holds the thread', () => {
-    const o = threadOccupancy('claude', SID, probes({ readDir: () => [] }), dirs)
+  it('a lock FILE with no holder is not occupancy', () => {
+    // Observed twice: a thread lock file outlived its `codex exec`, and
+    // .coordination.lock exists permanently held by nobody.
+    const o = threadOccupancy('codex', CODEX_THREAD, codexProbes({ lockHolders: () => [] }), DIRS)
     expect(o.attachable).toBe(true)
-    expect(o.reason).toBeNull()
   })
 
-  it('fails CLOSED when a probe throws', () => {
-    const o = threadOccupancy(
-      'claude',
-      SID,
-      probes({ readDir: () => { throw new Error('EACCES') } }),
-      dirs,
+  it('an absent locks DIRECTORY is detector_unavailable, not free', () => {
+    expectOccupied(codexProbes({ dirExists: () => false }), 'detector_unavailable', 'codex', CODEX_THREAD)
+  })
+
+  it('rejects malformed holder pids as doubt', () => {
+    expectOccupied(
+      codexProbes({ lockHolders: () => [0, -1, Number.NaN] as number[] }),
+      'registry_unreadable', 'codex', CODEX_THREAD,
     )
-    expect(o.attachable).toBe(false)
-    expect(o.reason).toBe('probe_failed')
   })
 
-  it('fails CLOSED on an unverifiable process rather than reporting free', () => {
-    const o = threadOccupancy('claude', SID, probes({ fileExists: () => false }), dirs)
-    expect(o.attachable).toBe(false)
-    expect(o.reason).toBe('unverifiable_process_start')
+  it('a recycled PID cannot forge self-ownership on the lock either', () => {
+    const stale = new Map([[4224, ACTUAL_START_MS - 86_400_000]])
+    expectOccupied(
+      codexProbes({ lockHolders: () => [4224], cosSpawnedPids: () => stale }),
+      'live_desktop_process', 'codex', CODEX_THREAD,
+    )
   })
 
-  it('reports cursor and unknown providers as unsupported, not free', () => {
+  it('refuses when the holder probe fails', () => {
+    expectOccupied(
+      codexProbes({ lockHolders: () => { throw new Error('lsof missing') } }),
+      'probe_failed', 'codex', CODEX_THREAD,
+    )
+  })
+
+  it('builds the path from the full thread id', () => {
+    // The real filename on disk is the full UUID, not the display form.
+    expect(codexLockPath(CODEX_THREAD, CODEX_DIR)).toBe(`${CODEX_DIR}/${CODEX_THREAD}.lock`)
+  })
+})
+
+describe('unsupported providers', () => {
+  it('reports cursor and unknowns as unsupported, never free', () => {
     for (const p of ['cursor', 'gemini', '']) {
-      const o = threadOccupancy(p, SID, probes(), dirs)
-      expect(o.attachable).toBe(false)
-      expect(o.reason).toBe('unsupported_provider')
+      expectOccupied(probes(), 'unsupported_provider', p)
     }
   })
 
-  it('routes codex through the writer lock', () => {
-    const busy = threadOccupancy('codex', '019fc80a', probes({ lockHolders: () => [4224] }), dirs)
-    expect(busy.attachable).toBe(false)
-    const free = threadOccupancy('codex', '019fc80a', probes({ lockHolders: () => [] }), dirs)
-    expect(free.attachable).toBe(true)
+  it('checks the provider before the thread id', () => {
+    // An unrecognised provider is a capability gap; reporting invalid_thread_id
+    // for it would send the user chasing the wrong problem.
+    const o = threadOccupancy('cursor', 'nonsense', probes(), DIRS)
+    expect(o.reason).toBe('unsupported_provider')
+  })
+})
+
+describe('scan-level results carry doubt separately from owners', () => {
+  it('claudeOwners reports doubt with zero owners', () => {
+    const r = claudeOwners(SID, probes({ readFile: () => null }), CLAUDE_DIR)
+    expect(r.owners).toHaveLength(0)
+    expect(r.doubt).toBe('registry_unreadable')
+  })
+
+  it('codexOwners can report doubt too', () => {
+    const r = codexOwners(CODEX_THREAD, probes({ lockHolders: () => [-1] }), CODEX_DIR)
+    expect(r.owners).toHaveLength(0)
+    expect(r.doubt).toBe('registry_unreadable')
   })
 })
