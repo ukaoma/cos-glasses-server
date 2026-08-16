@@ -454,6 +454,13 @@ export interface AttachedTurnDeps {
    * process group on the developer's machine.
    */
   terminate: (child: AttachedChildProcess, signal: NodeJS.Signals) => void
+  /**
+   * Argv builder. Optional, defaults to the real one.
+   *
+   * Exists ONLY so a test can hand back an argv carrying a banned permission flag
+   * and prove the turn is refused with zero spawns. Production never sets it.
+   */
+  buildArgs?: (provider: AttachedProvider, nativeThreadId: string, cwd: string) => string[]
 }
 
 export interface AttachedTurnRequest {
@@ -574,10 +581,47 @@ export function buildCodexAttachedArgs(nativeThreadId: string, cwd: string): str
   ]
 }
 
+/**
+ * Is this argv free of every flag plan 4.7 bans?
+ *
+ * Substring, not equality: a banned token can arrive attached to its value
+ * (`--permission-mode=bypassPermissions`, `--sandbox danger-full-access`), and an
+ * equality check would wave those through while looking correct.
+ */
+export function findBannedPermissionArg(args: readonly string[]): string | null {
+  for (const arg of args) {
+    const value = String(arg)
+    for (const banned of BANNED_PERMISSION_ARGS) {
+      if (value.includes(banned)) return banned
+    }
+  }
+  return null
+}
+
+/**
+ * Build the argv, and REFUSE to hand back one carrying a banned flag.
+ *
+ * `BANNED_PERMISSION_ARGS` existed, was exported, was asserted in a test — and
+ * had no runtime consumer at all, so a test was the only thing standing between
+ * plan 4.7 and an always-approve flag reaching a provider that is about to write
+ * into a real human's conversation. A test protects the argv this build happens
+ * to produce; it cannot protect the argv a future edit produces.
+ *
+ * Enforced HERE because it is the one point both providers pass through, so a new
+ * provider inherits the check rather than needing to remember it. Throws rather
+ * than returning a sentinel: there is no safe degraded argv, and the caller's
+ * outer catch already maps a throw to a terminal refusal before any spawn.
+ */
 function buildArgs(provider: AttachedProvider, nativeThreadId: string, cwd: string): string[] {
-  return provider === 'claude'
+  const args = provider === 'claude'
     ? buildClaudeAttachedArgs(nativeThreadId)
     : buildCodexAttachedArgs(nativeThreadId, cwd)
+  const banned = findBannedPermissionArg(args)
+  if (banned !== null) {
+    // The flag name only. Never the argv, which carries the thread id and cwd.
+    throw new Error(`attached argv carries a banned permission flag: ${banned}`)
+  }
+  return args
 }
 
 export function buildAttachedEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -820,7 +864,24 @@ async function run(
   }
 
   // --- 4. Spawn ---------------------------------------------------------------
-  const args = buildArgs(provider, nativeThreadId, cwd)
+  // Built through an injectable seam so the banned-flag check below is reachable
+  // by a test. Without the seam no test could make the builders emit a banned
+  // flag, the check was unreachable, and a mutation deleting it passed — which is
+  // how `BANNED_PERMISSION_ARGS` came to be exported, asserted, and enforced
+  // nowhere.
+  let args: string[]
+  try {
+    args = (deps.buildArgs ?? buildArgs)(provider, nativeThreadId, cwd)
+  } catch {
+    return fail('unsupported_policy', 'not_attempted', { ...base, detail: 'argv_build_failed', durationMs: duration() })
+  }
+  // Plan 4.7, enforced against the argv that is about to be spawned rather than
+  // against the source that builds it. No safe degraded argv exists, so this is a
+  // terminal refusal before any process is created.
+  const bannedArg = findBannedPermissionArg(args)
+  if (bannedArg !== null) {
+    return fail('unsupported_policy', 'not_attempted', { ...base, detail: `banned_arg:${bannedArg}`, durationMs: duration() })
+  }
   let child: AttachedChildProcess
   try {
     child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv() })

@@ -32,6 +32,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   BANNED_PERMISSION_ARGS,
+  findBannedPermissionArg,
+  buildClaudeAttachedArgs,
+  buildCodexAttachedArgs,
   DEFAULT_ATTACHED_TIMEOUT_MS,
   KILL_GRACE_MS,
   FORCE_SETTLE_MS,
@@ -1060,5 +1063,73 @@ describe('resolveProviderBinary', () => {
     // an unusable prefixes argument must still exclude the known shim.
     expect(isKnownStaleShimPath('/Applications/Codex.app/x', 1 as any)).toBe(true)
     expect(spec.name).toBe('codex')
+  })
+})
+
+describe('plan 4.7 is enforced at runtime, not only asserted in a test', () => {
+  it('REFUSES the turn and never spawns when the argv carries a banned flag', async () => {
+    // The behavioural test the guard was missing. Before the injectable builder
+    // existed, no test could make the argv banned, the check was unreachable, and
+    // a mutation deleting it passed — which is exactly how BANNED_PERMISSION_ARGS
+    // ended up exported, asserted, and enforced nowhere.
+    const ctx = harness()
+    const result = expectFailure(await deliver(ctx, {
+      deps: { ...ctx.deps, buildArgs: () => ['--resume', TARGET, '--dangerously-skip-permissions'] },
+    }))
+    expect(result.reason).toBe('unsupported_policy')
+    expect(result.delivery).toBe('not_attempted')
+    expect(ctx.calls).not.toContain('spawn')
+    expect(ctx.spawns).toHaveLength(0)
+  })
+
+  it('refuses a banned token ATTACHED to its value, not just standing alone', async () => {
+    const ctx = harness()
+    const result = expectFailure(await deliver(ctx, {
+      deps: { ...ctx.deps, buildArgs: () => ['--permission-mode=bypassPermissions'] },
+    }))
+    expect(result.reason).toBe('unsupported_policy')
+    expect(ctx.spawns).toHaveLength(0)
+  })
+
+  it('refuses when the argv builder itself throws', async () => {
+    const ctx = harness()
+    const result = expectFailure(await deliver(ctx, {
+      deps: { ...ctx.deps, buildArgs: () => { throw new Error('boom') } },
+    }))
+    expect(result.delivery).toBe('not_attempted')
+    expect(ctx.spawns).toHaveLength(0)
+  })
+
+  it('still spawns for a clean injected argv, so the guard is not refusing everything', async () => {
+    // Paired with the refusal cases above: without this, making the guard reject
+    // EVERY argv would leave all of them green.
+    const ctx = harness({ script: succeedWith(TARGET) })
+    await deliver(ctx, { deps: { ...ctx.deps, buildArgs: () => ['--resume', TARGET, '-p'] } })
+    expect(ctx.spawns).toHaveLength(1)
+  })
+
+  it('catches a banned flag standing alone', () => {
+    for (const banned of BANNED_PERMISSION_ARGS) {
+      expect(findBannedPermissionArg(['--resume', 'x', banned])).toBe(banned)
+    }
+  })
+
+  it('catches a banned token ATTACHED to its value', () => {
+    // The case an equality check waves through while looking correct.
+    expect(findBannedPermissionArg(['--permission-mode=bypassPermissions'])).toBe('bypassPermissions')
+    expect(findBannedPermissionArg(['--sandbox=danger-full-access'])).toBe('danger-full-access')
+  })
+
+  it('passes a clean argv', () => {
+    expect(findBannedPermissionArg(['--resume', 'abc', '-p', '--permission-mode', 'plan'])).toBeNull()
+    expect(findBannedPermissionArg([])).toBeNull()
+  })
+
+  it('the argv this build actually produces is clean, for BOTH providers', () => {
+    // The regression this pairs with: the check above is only useful if the real
+    // builders keep passing it.
+    const id = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
+    expect(findBannedPermissionArg(buildClaudeAttachedArgs(id))).toBeNull()
+    expect(findBannedPermissionArg(buildCodexAttachedArgs(id, '/tmp'))).toBeNull()
   })
 })
