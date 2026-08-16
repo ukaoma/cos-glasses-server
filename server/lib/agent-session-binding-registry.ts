@@ -126,6 +126,18 @@ export const DEFAULT_TERMINAL_RETENTION_MS = 24 * 60 * 60 * 1000
  * Must stay far above the provider deadline (21 min default) so a slow but live
  * job is never mistaken for a dead one.
  */
+/**
+ * Completed turns remembered per binding.
+ *
+ * Bounded because a binding is long-lived and the ledger is rewritten on every
+ * commit. Oldest are dropped first, so the newest turn - the one a client is most
+ * likely to retry - is the last to age out.
+ */
+export const MAX_TURNS_PER_BINDING = 64
+
+/** A client turn id must be safe to use as a map key and to log. */
+export const TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/
+
 export const DEFAULT_STALE_PIN_MS = 24 * 60 * 60 * 1000
 
 /**
@@ -360,6 +372,33 @@ interface LoadedState {
   records: Map<string, BindingRecord>
   targets: Map<string, string>
   floors: Map<string, number>
+  /** bindingId -> completed turns, oldest first. See TURN LEDGER below. */
+  turns: Map<string, TurnRecord[]>
+}
+
+/**
+ * A turn that already reached a terminal state, remembered so a repeat of the same
+ * client turn id replays the answer instead of delivering the prompt again.
+ *
+ * THE TURN LEDGER, and why it is durable. Measured on 2026-08-16: two byte-identical
+ * POSTs both returned `completed`, and the user's real transcript ended up with TWO
+ * copies of the turn. The client cannot tell "delivered, but the 200 was lost" from
+ * "never arrived" — a dropped connection, a backgrounded phone, a proxy timeout all
+ * look the same — so retrying is CORRECT client behavior, and the server is the only
+ * side that can make it safe.
+ *
+ * It lives in the binding store rather than in memory because the same review found
+ * the process-local fence re-opened on restart and delivered a second copy. Binding
+ * records, epoch floors and pins were all durable; the one piece of state whose loss
+ * writes twice into a human's conversation was not.
+ */
+export interface TurnRecord {
+  /** Client-supplied idempotency key. */
+  turnId: string
+  /** The exact terminal response body, replayed verbatim on a repeat. */
+  result: unknown
+  /** Epoch ms, for bounded retention. */
+  at: number
 }
 
 export class AgentSessionBindingRegistry {
@@ -369,6 +408,7 @@ export class AgentSessionBindingRegistry {
   private records: Map<string, BindingRecord>
   private targets: Map<string, string>
   private floors: Map<string, number>
+  private turns: Map<string, TurnRecord[]>
 
   private readonly warn: (message: string, detail?: unknown) => void
   private readonly terminalRetentionMs: number
@@ -384,6 +424,7 @@ export class AgentSessionBindingRegistry {
     this.records = state.records
     this.targets = state.targets
     this.floors = state.floors
+    this.turns = state.turns
     this.warn = options.onWarn ?? ((message, detail) => console.warn(`[binding-registry] ${message}`, detail ?? ''))
     this.terminalRetentionMs = nonNegativeMsOption(options.terminalRetentionMs, DEFAULT_TERMINAL_RETENTION_MS)
     this.stalePinMs = nonNegativeMsOption(options.stalePinMs, DEFAULT_STALE_PIN_MS)
@@ -399,7 +440,7 @@ export class AgentSessionBindingRegistry {
       console.warn(`[binding-registry] ${message}`, detail ?? ''))
     const now = Number.isFinite(options.now) ? (options.now as number) : Date.now()
 
-    const empty = (): LoadedState => ({ records: new Map(), targets: new Map(), floors: new Map() })
+    const empty = (): LoadedState => ({ records: new Map(), targets: new Map(), floors: new Map(), turns: new Map() })
     const degraded = (reason: DegradedReason): AgentSessionBindingRegistry => {
       warn(
         `REFUSING ALL BINDINGS — durable store at ${path} is unusable (${reason}). ` +
@@ -485,6 +526,27 @@ export class AgentSessionBindingRegistry {
 
     const records = new Map<string, BindingRecord>()
     const targets = new Map<string, string>()
+    // Optional by design: a store written before the ledger existed hydrates with
+    // no turns and simply has no idempotency history yet, which is correct rather
+    // than degraded. Every row is validated; a malformed one is DROPPED rather
+    // than trusted, because a bad `result` would be replayed to a client verbatim.
+    const turns = new Map<string, TurnRecord[]>()
+    const rawTurns = (root as Record<string, unknown>).turns
+    if (rawTurns && typeof rawTurns === 'object' && !Array.isArray(rawTurns)) {
+      for (const [bindingId, rows] of Object.entries(rawTurns as Record<string, unknown>)) {
+        if (!Array.isArray(rows)) continue
+        const kept: TurnRecord[] = []
+        for (const row of rows) {
+          if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+          const r = row as Record<string, unknown>
+          if (typeof r.turnId !== 'string' || !TURN_ID_RE.test(r.turnId)) continue
+          if (typeof r.at !== 'number' || !Number.isFinite(r.at)) continue
+          if (r.result === undefined) continue
+          kept.push({ turnId: r.turnId, result: r.result, at: r.at })
+        }
+        if (kept.length > 0) turns.set(bindingId, kept.slice(-MAX_TURNS_PER_BINDING))
+      }
+    }
     let dropped = 0
 
     for (const entry of rawRecords as unknown[]) {
@@ -553,7 +615,7 @@ export class AgentSessionBindingRegistry {
         droppedRecords: dropped,
         epochTargets: floors.size,
       },
-      { records, targets, floors },
+      { records, targets, floors, turns },
       options,
     )
   }
@@ -725,7 +787,7 @@ export class AgentSessionBindingRegistry {
       // Monotonic by construction: `epoch` is floor + 1.
       floors.set(key, Math.max(floor, binding.epoch))
 
-      const failure = this.persist({ records, targets, floors })
+      const failure = this.persist({ records, targets, floors, turns: new Map(this.turns) })
       return failure ? reject(failure) : { binding, reason: null }
     })
   }
@@ -845,6 +907,50 @@ export class AgentSessionBindingRegistry {
    * NOT force-detach the binding, because a sibling pin may still be live, and
    * killing a lease under a running job is a worse failure than a late reap.
    */
+  /**
+   * Has this exact client turn already reached a terminal state on this binding?
+   *
+   * A hit means the prompt was ALREADY handed to the provider, so the caller must
+   * replay this result instead of delivering again. Two byte-identical POSTs put
+   * two copies of the turn into a real transcript before this existed.
+   */
+  findTurn(bindingId: unknown, turnId: unknown): TurnRecord | null {
+    if (typeof bindingId !== 'string' || typeof turnId !== 'string') return null
+    if (!TURN_ID_RE.test(turnId)) return null
+    const rows = this.turns.get(bindingId)
+    if (!rows) return null
+    return rows.find(row => row.turnId === turnId) ?? null
+  }
+
+  /**
+   * Remember a completed turn so a repeat replays rather than re-delivers.
+   *
+   * Records the FIRST result for a turn id and never overwrites it: a repeat must
+   * see what the original turn actually did, not a later attempt's answer.
+   */
+  recordTurn(bindingId: unknown, turnId: unknown, result: unknown, now: number): RegistryResult {
+    if (typeof bindingId !== 'string' || !this.records.has(bindingId)) return reject('unknown_binding')
+    if (typeof turnId !== 'string' || !TURN_ID_RE.test(turnId)) return reject('invalid_job_id')
+    if (result === undefined || !Number.isFinite(now)) return reject('invalid_job_id')
+
+    return this.runMutation(() => {
+      const binding = this.records.get(bindingId)!.binding
+      const existing = this.turns.get(bindingId) ?? []
+      // FIRST result wins, never overwritten: a repeat must see what the original
+      // turn actually did, not a later attempt's answer.
+      if (existing.some(row => row.turnId === turnId)) return { binding, reason: null }
+      const turns = new Map(this.turns)
+      turns.set(bindingId, [...existing, { turnId, result, at: now }].slice(-MAX_TURNS_PER_BINDING))
+      const failure = this.persist({
+        records: new Map(this.records),
+        targets: new Map(this.targets),
+        floors: new Map(this.floors),
+        turns,
+      })
+      return failure ? reject(failure) : { binding, reason: null }
+    })
+  }
+
   reap(now: number): ReapReport {
     if (!this.available()) return { removed: [], pinsDropped: 0, retained: 0 }
     if (this.mutating) return { removed: [], pinsDropped: 0, retained: this.records.size }
@@ -903,7 +1009,11 @@ export class AgentSessionBindingRegistry {
 
       // Floors are carried forward untouched. Reaping a binding must never lower
       // the epoch its target has already reached — that is the replay window.
-      const failure = this.persist({ records, targets, floors: new Map(this.floors) })
+      // Turns are carried forward with their bindings; a reaped binding's turns
+      // are dropped with it, since a replay of a turn on a removed binding could
+      // never be answered anyway.
+      const keptTurns = new Map([...this.turns].filter(([id]) => records.has(id)))
+      const failure = this.persist({ records, targets, floors: new Map(this.floors), turns: keptTurns })
       if (failure) return { removed: [], pinsDropped: 0, retained: this.records.size }
       return { removed, pinsDropped, retained: records.size }
     } finally {
@@ -978,7 +1088,7 @@ export class AgentSessionBindingRegistry {
     if (blocksTarget(binding, now)) targets.set(binding.targetKey, binding.bindingId)
     else if (targets.get(binding.targetKey) === binding.bindingId) targets.delete(binding.targetKey)
 
-    const failure = this.persist({ records, targets, floors: new Map(this.floors) })
+    const failure = this.persist({ records, targets, floors: new Map(this.floors), turns: new Map(this.turns) })
     return failure ? reject(failure) : { binding, reason: null }
   }
 
@@ -996,6 +1106,9 @@ export class AgentSessionBindingRegistry {
       json = JSON.stringify({
         version: BINDING_STORE_VERSION,
         epochHighWater: Object.fromEntries([...next.floors.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))),
+        // Additive at version 1: an older build ignores this key, a newer build
+        // reads its absence as "no history yet". Neither direction corrupts.
+        turns: Object.fromEntries([...next.turns.entries()].filter(([, rows]) => rows.length > 0)),
         records: [...next.records.values()].map(record => ({
           binding: record.binding,
           createdAt: record.createdAt,
@@ -1021,6 +1134,7 @@ export class AgentSessionBindingRegistry {
     this.records = next.records
     this.targets = next.targets
     this.floors = next.floors
+    this.turns = next.turns
     return null
   }
 

@@ -183,6 +183,10 @@ function wire(r: AgentSessionBindingRegistry, over: Partial<BindingRegistry> = {
     checkQueuedPrompt: (claim, now) => r.checkQueuedPrompt(claim, now),
     pin: (id, job, now) => r.pin(id, job, now),
     unpin: (id, job, now) => r.unpin(id, job, now),
+    // Forwarded, or the replay short-circuit is silently absent and every
+    // idempotency test would exercise the un-guarded path while looking correct.
+    findTurn: (id, turnId) => r.findTurn(id, turnId),
+    recordTurn: (id, turnId, result, now) => r.recordTurn(id, turnId, result, now),
     ...over,
   }
 }
@@ -1082,7 +1086,21 @@ function fakeBinding(over: Partial<NativeBinding> = {}): NativeBinding {
   return binding({ nativeHeadAtAttach: opaqueRevision('native-head-1'), ...over })
 }
 
-const fakeClaim = { prompt: PROMPT, epoch: 3, targetKey: targetKey('claude', SID) }
+let claimSeq = 0
+/**
+ * A turn claim with a FRESH idempotency key each call.
+ *
+ * Shared was wrong once the turn ledger existed: every test posting the same key
+ * meant a later test replayed an earlier one's recorded result, which showed up as
+ * a single test passing alone and failing in the suite. The ledger doing exactly
+ * its job, on the fixture.
+ */
+const fakeClaim = () => ({
+  prompt: PROMPT,
+  epoch: 3,
+  targetKey: targetKey('claude', SID),
+  clientTurnId: `ct-seq-${String(++claimSeq).padStart(6, '0')}`,
+})
 
 describe('a turn delivers only after the thread is re-proved free', () => {
   it('sends the prompt and the exact native id, and reports a delivered turn', async () => {
@@ -1095,7 +1113,7 @@ describe('a turn delivers only after the thread is re-proved free', () => {
     }))
     const a = await attached(base)
     const res = await post(base, turnsPath(a.bindingId), {
-      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+      prompt: PROMPT, clientTurnId: 'ct-ml-0001', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
     })
 
     expect(res.status).toBe(200)
@@ -1127,7 +1145,7 @@ describe('a turn delivers only after the thread is re-proved free', () => {
     expect(a.res.status).toBe(201)
 
     free = false
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0001' })
 
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({
@@ -1147,7 +1165,7 @@ describe('a turn delivers only after the thread is re-proved free', () => {
     }))
     const a = await attached(base)
     ready = false
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0002' })
 
     expect(res.body.reason).toBe('detector_unavailable')
     expect(calls).toHaveLength(0)
@@ -1170,10 +1188,10 @@ describe('the native head watermark, and the second turn that must not be refuse
       },
     }))
     const a = await attached(base)
-    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
+    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0003' }
 
-    const first = await post(base, turnsPath(a.bindingId), body)
-    const second = await post(base, turnsPath(a.bindingId), body)
+    const first = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0001' })
+    const second = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0002' })
 
     expect(first.body.outcome).toBe('completed')
     expect(second.body.outcome).toBe('completed')
@@ -1193,10 +1211,10 @@ describe('the native head watermark, and the second turn that must not be refuse
       },
     }))
     const a = await attached(base)
-    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
+    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0004' }
 
-    expect((await post(base, turnsPath(a.bindingId), body)).body.outcome).toBe('completed')
-    expect((await post(base, turnsPath(a.bindingId), body)).body.outcome).toBe('completed')
+    expect((await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0003' })).body.outcome).toBe('completed')
+    expect((await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0004' })).body.outcome).toBe('completed')
     expect(calls).toHaveLength(2)
   })
 
@@ -1210,7 +1228,7 @@ describe('the native head watermark, and the second turn that must not be refuse
     const a = await attached(base)
     head.value = 'the user typed something on their mac'
 
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0005' })
 
     expect(res.status).toBe(409)
     expect(res.body).toMatchObject({
@@ -1234,9 +1252,9 @@ describe('the native head watermark, and the second turn that must not be refuse
     }))
     const a = await attached(base)
     head.value = 'h2'
-    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
+    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0006' }
 
-    const refused = await post(base, turnsPath(a.bindingId), body)
+    const refused = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0005' })
     const accepted = await post(base, turnsPath(a.bindingId), { ...body, acknowledgedRevision: refused.body.revision })
 
     expect(refused.body.reason).toBe('native_thread_changed')
@@ -1255,12 +1273,12 @@ describe('the native head watermark, and the second turn that must not be refuse
     const a = await attached(base)
     head.value = 'h2'
     const stale = (await post(base, turnsPath(a.bindingId), {
-      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey,
+      prompt: PROMPT, clientTurnId: 'ct-ml-0002', epoch: a.epoch, targetKey: a.targetKey,
     })).body.revision
 
     head.value = 'h3'
     const res = await post(base, turnsPath(a.bindingId), {
-      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, acknowledgedRevision: stale,
+      prompt: PROMPT, clientTurnId: 'ct-ml-0003', epoch: a.epoch, targetKey: a.targetKey, acknowledgedRevision: stale,
     })
 
     expect(res.body).toMatchObject({ reason: 'native_thread_changed', revision: opaqueRevision('h3') })
@@ -1277,7 +1295,7 @@ describe('the native head watermark, and the second turn that must not be refuse
     const a = await attached(base)
     head.value = null
 
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0007' })
     expect(res.body.reason).toBe('native_head_unavailable')
     expect(calls).toHaveLength(0)
   })
@@ -1329,7 +1347,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
     }))
 
     const a = await attached(base)
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0008' })
 
     expect(res.body.outcome).toBe('completed')
     expect(spawnAccepted).toBe(true)
@@ -1355,7 +1373,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
       },
     }))
     const a = await attached(base)
-    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0009' })
     expect(ledger.snapshot().has(CHILD_PID)).toBe(false)
   })
 
@@ -1375,7 +1393,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
       },
     }))
     const a = await attached(base)
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0010' })
 
     expect(spawnAccepted).toBe(false)
     expect(res.body).toMatchObject({ reason: 'provider_never_opened', deliveryState: 'not_delivered' })
@@ -1399,7 +1417,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
       },
     }))
     const a = await attached(base)
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0011' })
 
     expect(spawnAccepted).toBe(false)
     expect(res.body.reason).toBe('provider_never_opened')
@@ -1415,7 +1433,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
       },
     }))
     const a = await attached(base)
-    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0012' })
     expect(spawnAccepted).toBe(false)
     expect(res.body.reason).toBe('provider_never_opened')
   })
@@ -1442,13 +1460,13 @@ describe('one COS turn per native target at a time', () => {
     const held = heldDelivery()
     const base = await start(writeDeps({ deliverAttachedTurn: held.deliver }))
     const a = await attached(base)
-    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
+    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0013' }
 
-    const inFlight = post(base, turnsPath(a.bindingId), body)
+    const inFlight = post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0006' })
     // Let the first request reach the adapter before the second is admitted.
     while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
 
-    const second = await post(base, turnsPath(a.bindingId), body)
+    const second = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0007' })
     expect(second.status).toBe(409)
     expect(second.body).toMatchObject({ reason: 'native_turn_in_progress', deliveryState: 'not_delivered' })
     expect(held.calls).toHaveLength(1)
@@ -1457,7 +1475,7 @@ describe('one COS turn per native target at a time', () => {
     expect((await inFlight).body.outcome).toBe('completed')
 
     // The claim is released on the way out, so the thread is usable again.
-    const third = await post(base, turnsPath(a.bindingId), body)
+    const third = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0008' })
     expect(third.body.outcome).toBe('completed')
     expect(held.calls).toHaveLength(2)
   })
@@ -1475,7 +1493,7 @@ describe('one COS turn per native target at a time', () => {
       },
     }))
     const a = await attached(base)
-    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0014' })
 
     expect(pinnedDuring).toHaveLength(1)
     expect(r.get(a.bindingId)?.pinnedJobs).toEqual([])
@@ -1488,7 +1506,7 @@ describe('one COS turn per native target at a time', () => {
       deliverAttachedTurn: async () => { throw new Error('provider died') },
     }))
     const a = await attached(base)
-    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0015' })
     expect(r.get(a.bindingId)?.pinnedJobs).toEqual([])
   })
 
@@ -1500,7 +1518,7 @@ describe('one COS turn per native target at a time', () => {
         deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
       })),
       turnsPath('bnd-2026-08-15-01'),
-      fakeClaim,
+      fakeClaim(),
     )
     expect(res.body.reason).toBe('pin_failed')
     expect(calls).toHaveLength(0)
@@ -1520,8 +1538,8 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
     it(`reports unknown delivery and refuses a retry when ${c.name}`, async () => {
       const base = await start(writeDeps({ deliverAttachedTurn: c.deliver }))
       const a = await attached(base)
-      const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
-      const first = await post(base, turnsPath(a.bindingId), body)
+      const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0016' }
+      const first = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0009' })
 
       expect(first.body).toMatchObject({
         outcome: 'ambiguous',
@@ -1534,7 +1552,7 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
       // Plan 4.6: the reservation is HELD. A second turn — the shape of the
       // client Retry button, which mints a fresh identity that clears every other
       // fence — must not deliver a second copy into a real conversation.
-      const second = await post(base, turnsPath(a.bindingId), body)
+      const second = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0010' })
       expect(second.body).toMatchObject({
         reason: 'native_target_fenced',
         retryable: false,
@@ -1565,7 +1583,7 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
     it(`reads ${JSON.stringify(c.result)} as ${c.outcome}`, async () => {
       const base = await start(writeDeps({ deliverAttachedTurn: async () => c.result }))
       const a = await attached(base)
-      const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+      const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0017' })
       expect(res.body.outcome).toBe(c.outcome)
       expect(res.body.deliveryState).toBe(c.deliveryState)
     })
@@ -1578,7 +1596,7 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
       deliverAttachedTurn: async () => { throw new Error('socket closed') },
     }))
     const a = await attached(base)
-    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0018' })
 
     // Even with the old lease gone, the thread stays shut.
     r.forceDetach(a.bindingId, NOW)
@@ -1600,16 +1618,16 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
       },
     }))
     const a = await attached(base)
-    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
+    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0019' }
 
-    const aborted = await post(base, turnsPath(a.bindingId), body)
+    const aborted = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0011' })
     expect(aborted.body).toMatchObject({
       reason: 'provider_never_opened',
       deliveryState: 'not_delivered',
       retryable: true,
     })
 
-    const retried = await post(base, turnsPath(a.bindingId), body)
+    const retried = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0012' })
     expect(retried.body.outcome).toBe('completed')
   })
 
@@ -1618,7 +1636,7 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
     const beforeDelivery = await post(
       await start(writeDeps({ bindings: fakeReg(fakeBinding(), { get: () => { throw new Error('EIO') } }) })),
       turnsPath('bnd-2026-08-15-01'),
-      fakeClaim,
+      fakeClaim(),
     )
     expect(beforeDelivery.body).toMatchObject({
       reason: 'turn_failed',
@@ -1635,7 +1653,7 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
         }),
       }))
       const a = await attached(base)
-      return post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+      return post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0020' })
     })()
     expect(aroundDelivery.body).toMatchObject({ deliveryState: 'unknown', retryable: false })
   })
@@ -1643,15 +1661,15 @@ describe('a turn whose delivery cannot be accounted for shuts the target', () =>
 
 describe('a turn must prove which lease and which target it belongs to', () => {
   const claimCases: Array<{ name: string; reason: WriteRefusal; body: (a: { epoch: number; targetKey: string; boundTo: string }) => unknown }> = [
-    { name: 'a prompt written against an earlier attach', reason: 'stale_epoch', body: a => ({ prompt: PROMPT, epoch: a.epoch + 1, targetKey: a.targetKey }) },
-    { name: 'a claim naming another thread', reason: 'target_mismatch', body: a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: targetKey('claude', OTHER_SID) }) },
-    { name: 'a boundTo marker that does not match', reason: 'target_mismatch', body: a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, boundTo: 'f'.repeat(32) }) },
+    { name: 'a prompt written against an earlier attach', reason: 'stale_epoch', body: a => ({ prompt: PROMPT, epoch: a.epoch + 1, targetKey: a.targetKey , clientTurnId: 'ct-auto-0021' }) },
+    { name: 'a claim naming another thread', reason: 'target_mismatch', body: a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: targetKey('claude', OTHER_SID) , clientTurnId: 'ct-auto-0022' }) },
+    { name: 'a boundTo marker that does not match', reason: 'target_mismatch', body: a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, boundTo: 'f'.repeat(32) , clientTurnId: 'ct-auto-0023' }) },
     { name: 'no prompt', reason: 'invalid_request', body: a => ({ epoch: a.epoch, targetKey: a.targetKey }) },
     { name: 'an empty prompt', reason: 'invalid_request', body: a => ({ prompt: '   ', epoch: a.epoch, targetKey: a.targetKey }) },
     { name: 'no epoch', reason: 'invalid_request', body: a => ({ prompt: PROMPT, targetKey: a.targetKey }) },
-    { name: 'an epoch that is not an integer', reason: 'invalid_request', body: a => ({ prompt: PROMPT, epoch: 1.5, targetKey: a.targetKey }) },
+    { name: 'an epoch that is not an integer', reason: 'invalid_request', body: a => ({ prompt: PROMPT, epoch: 1.5, targetKey: a.targetKey , clientTurnId: 'ct-auto-0024' }) },
     { name: 'no target key', reason: 'invalid_request', body: a => ({ prompt: PROMPT, epoch: a.epoch }) },
-    { name: 'an acknowledgement that is not a revision', reason: 'invalid_request', body: a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, acknowledgedRevision: 'yes' }) },
+    { name: 'an acknowledgement that is not a revision', reason: 'invalid_request', body: a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, acknowledgedRevision: 'yes' , clientTurnId: 'ct-auto-0025' }) },
   ]
 
   for (const c of claimCases) {
@@ -1687,7 +1705,7 @@ describe('a turn must prove which lease and which target it belongs to', () => {
       writeDeps({ deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } } }),
       { parseJson: false },
     )
-    const res = await post(base, turnsPath('bnd-anything'), { prompt: PROMPT, epoch: 1, targetKey: 'k' })
+    const res = await post(base, turnsPath('bnd-anything'), { prompt: PROMPT, epoch: 1, targetKey: 'k' , clientTurnId: 'ct-auto-0026' })
     expect(res.body.reason).toBe('invalid_request')
     expect(calls).toHaveLength(0)
   })
@@ -1723,7 +1741,7 @@ describe('a turn must prove which lease and which target it belongs to', () => {
         deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
       })),
       turnsPath('bnd-2026-08-15-01'),
-      { ...fakeClaim, epoch: 99 },
+      { ...fakeClaim(), epoch: 99 },
     )
     expect(res.body.reason).toBe('stale_epoch')
     expect(calls).toHaveLength(0)
@@ -1737,7 +1755,7 @@ describe('a turn must prove which lease and which target it belongs to', () => {
         deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
       })),
       turnsPath('bnd-2026-08-15-01'),
-      { ...fakeClaim, targetKey: targetKey('claude', OTHER_SID) },
+      { ...fakeClaim(), targetKey: targetKey('claude', OTHER_SID) },
     )
     expect(res.body.reason).toBe('target_mismatch')
     expect(calls).toHaveLength(0)
@@ -1752,7 +1770,7 @@ describe('a turn must prove which lease and which target it belongs to', () => {
           deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
         })),
         turnsPath('bnd-2026-08-15-01'),
-        fakeClaim,
+        fakeClaim(),
       )
       expect(res.body.reason).toBe(c.reason)
       expect(calls).toHaveLength(0)
@@ -1801,7 +1819,7 @@ describe('a turn cannot run on a build that is not equipped to run one', () => {
 
   for (const c of gaps) {
     it(`refuses with ${c.reason} when there is ${c.name}`, async () => {
-      const res = await post(await start(writeDeps(c.over)), turnsPath('bnd-2026-08-15-01'), fakeClaim)
+      const res = await post(await start(writeDeps(c.over)), turnsPath('bnd-2026-08-15-01'), fakeClaim())
       expect(res.body.reason).toBe(c.reason)
       expect(res.status).toBe(c.status)
       expect(res.body.deliveryState).toBe('not_delivered')
@@ -1814,7 +1832,7 @@ describe('the turn response says nothing about the conversation it moved', () =>
     const base = await start(writeDeps())
     const a = await attached(base)
     const res = await post(base, turnsPath(a.bindingId), {
-      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+      prompt: PROMPT, clientTurnId: 'ct-ml-0004', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
     })
     expect(res.status).toBe(200)
     expect(res.text).not.toContain(PROMPT)
@@ -1835,7 +1853,7 @@ describe('the turn response says nothing about the conversation it moved', () =>
     const res = await fetch(`${base}${turnsPath(a.bindingId)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }),
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0027' }),
     })
     expect(res.headers.get('cache-control')).toContain('no-store')
   })
@@ -1848,7 +1866,7 @@ describe('every way a write can be refused reaches the wire with words', () => {
   }) => unknown): Promise<PostResult> => {
     const base = await start(writeDeps(over))
     const a = await attached(base)
-    return post(base, turnsPath(a.bindingId), body ? body(a) : { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey })
+    return post(base, turnsPath(a.bindingId), body ? body(a) : { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0028' })
   }
 
   const cases: Array<{ reason: WriteRefusal; run: () => Promise<PostResult> }> = [
@@ -1910,10 +1928,10 @@ describe('every way a write can be refused reaches the wire with words', () => {
         const held = heldDelivery()
         const base = await start(writeDeps({ deliverAttachedTurn: held.deliver }))
         const a = await attached(base)
-        const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
-        const inFlight = post(base, turnsPath(a.bindingId), body)
+        const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0029' }
+        const inFlight = post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0013' })
         while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
-        const second = await post(base, turnsPath(a.bindingId), body)
+        const second = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0014' })
         held.open()
         await inFlight
         return second
@@ -1924,15 +1942,15 @@ describe('every way a write can be refused reaches the wire with words', () => {
       run: async () => {
         const base = await start(writeDeps({ deliverAttachedTurn: async () => { throw new Error('lost') } }))
         const a = await attached(base)
-        const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey }
-        await post(base, turnsPath(a.bindingId), body)
-        return post(base, turnsPath(a.bindingId), body)
+        const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey , clientTurnId: 'ct-auto-0030' }
+        await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0015' })
+        return post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-multi-0016' })
       },
     },
     {
       reason: 'unknown_binding',
       run: async () => post(await start(writeDeps()), turnsPath('bnd-never-issued'), {
-        prompt: PROMPT, epoch: 1, targetKey: targetKey('claude', SID),
+        prompt: PROMPT, epoch: 1, targetKey: targetKey('claude', SID), clientTurnId: 'ct-unknown-bind',
       }),
     },
     { reason: 'binding_not_active', run: () => turnOnFake(fakeReg(fakeBinding({ state: 'staging' }))) },
@@ -1942,10 +1960,10 @@ describe('every way a write can be refused reaches the wire with words', () => {
       reason: 'binding_unusable',
       run: () => turnOnFake(fakeReg(fakeBinding(), { checkQueuedPrompt: () => ({ ok: false, reason: 'terminal_state' }) })),
     },
-    { reason: 'stale_epoch', run: () => oneTurn({}, a => ({ prompt: PROMPT, epoch: a.epoch + 7, targetKey: a.targetKey })) },
+    { reason: 'stale_epoch', run: () => oneTurn({}, a => ({ prompt: PROMPT, epoch: a.epoch + 7, targetKey: a.targetKey , clientTurnId: 'ct-auto-0031' })) },
     {
       reason: 'target_mismatch',
-      run: () => oneTurn({}, a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: targetKey('claude', OTHER_SID) })),
+      run: () => oneTurn({}, a => ({ prompt: PROMPT, epoch: a.epoch, targetKey: targetKey('claude', OTHER_SID) , clientTurnId: 'ct-auto-0032' })),
     },
     {
       reason: 'pin_failed',
@@ -1961,7 +1979,7 @@ describe('every way a write can be refused reaches the wire with words', () => {
   ]
 
   async function turnOnFake(bindings: BindingRegistry): Promise<PostResult> {
-    return post(await start(writeDeps({ bindings })), turnsPath('bnd-2026-08-15-01'), fakeClaim)
+    return post(await start(writeDeps({ bindings })), turnsPath('bnd-2026-08-15-01'), fakeClaim())
   }
 
   it('covers the whole refusal vocabulary, so a new one cannot ship untested', () => {
@@ -2000,3 +2018,102 @@ describe('every way a write can be refused reaches the wire with words', () => {
   }
 })
 
+
+describe('a repeated POST replays instead of delivering twice', () => {
+  // COST: measured on a disposable thread 2026-08-16. Two byte-identical POSTs both
+  // returned `completed` and the user's REAL transcript ended up with two copies of
+  // the turn. The client cannot tell "delivered but the 200 was lost" from "never
+  // arrived", so retrying is correct behaviour and only the server can make it safe.
+  const claim = (key: string) => ({
+    prompt: PROMPT, epoch: 1, targetKey: targetKey('claude', SID), clientTurnId: key,
+  })
+
+  it('delivers ONCE for two identical POSTs', async () => {
+    const calls: AttachedTurnRequest[] = []
+    const bindings = wire(openRegistry())
+    const base = await start(writeDeps({
+      bindings,
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
+    }))
+    const a = (await post(base, attachPath(), { cosSessionId: 'cos-1' })).body
+
+    const first = await post(base, turnsPath(a.bindingId), claim('ct-repeat-0001'))
+    const second = await post(base, turnsPath(a.bindingId), claim('ct-repeat-0001'))
+
+    expect(calls).toHaveLength(1)
+    expect(first.body.outcome).toBe('completed')
+    expect(second.body.outcome).toBe('completed')
+    expect(second.body.replayed).toBe(true)
+    expect(first.body.replayed).toBeUndefined()
+  })
+
+  it('delivers TWICE for two genuinely different turns', async () => {
+    // The paired assertion: a guard that replayed everything would pass the test
+    // above and break the feature.
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      bindings: wire(openRegistry()),
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
+    }))
+    const a = (await post(base, attachPath(), { cosSessionId: 'cos-1' })).body
+    await post(base, turnsPath(a.bindingId), claim('ct-distinct-0001'))
+    await post(base, turnsPath(a.bindingId), claim('ct-distinct-0002'))
+    expect(calls).toHaveLength(2)
+  })
+
+  it('REFUSES a turn with no idempotency key', async () => {
+    // A turn without one cannot be made safe, so it is rejected rather than
+    // delivered on a best-effort basis.
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      bindings: wire(openRegistry()),
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
+    }))
+    const a = (await post(base, attachPath(), { cosSessionId: 'cos-1' })).body
+    for (const bad of [undefined, '', 'short', 'has space', 'x'.repeat(200)]) {
+      const res = await post(base, turnsPath(a.bindingId), {
+        prompt: PROMPT, epoch: 1, targetKey: targetKey('claude', SID),
+        ...(bad === undefined ? {} : { clientTurnId: bad }),
+      })
+      expect(res.body.reason).toBe('invalid_request')
+    }
+    expect(calls).toHaveLength(0)
+  })
+
+  it('replays an AMBIGUOUS outcome too, which is the one a client most wants to retry', async () => {
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      bindings: wire(openRegistry()),
+      deliverAttachedTurn: async req => {
+        calls.push(req)
+        return { ok: false, delivery: 'ambiguous', reason: 'provider_exit_nonzero' }
+      },
+    }))
+    const a = (await post(base, attachPath(), { cosSessionId: 'cos-1' })).body
+    const first = await post(base, turnsPath(a.bindingId), claim('ct-ambig-0001'))
+    const second = await post(base, turnsPath(a.bindingId), claim('ct-ambig-0001'))
+    expect(first.body.outcome).toBe('ambiguous')
+    expect(second.body.outcome).toBe('ambiguous')
+    expect(second.body.replayed).toBe(true)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('does NOT replay a pre-delivery refusal, which must stay re-evaluatable', async () => {
+    // A stale epoch or a busy target may be fine by the time the client retries.
+    // Replaying a stale "no" would be its own bug.
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      bindings: wire(openRegistry()),
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed' } },
+    }))
+    const a = (await post(base, attachPath(), { cosSessionId: 'cos-1' })).body
+    const stale = { ...claim('ct-stale-0001'), epoch: 99 }
+    const first = await post(base, turnsPath(a.bindingId), stale)
+    expect(first.body.outcome).toBe('refused')
+    // Same key, now with a valid epoch: it must be evaluated, not replayed.
+    const retry = await post(base, turnsPath(a.bindingId), claim('ct-stale-0001'))
+    expect(retry.body.outcome).toBe('completed')
+    expect(retry.body.replayed).toBeUndefined()
+    expect(calls).toHaveLength(1)
+  })
+})

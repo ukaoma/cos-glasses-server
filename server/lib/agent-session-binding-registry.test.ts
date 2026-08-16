@@ -25,6 +25,7 @@ import {
   parseTargetKey,
   type BindingRegistryOptions,
   type CreateBindingRequest,
+  MAX_TURNS_PER_BINDING,
 } from './agent-session-binding-registry.js'
 import { targetKey } from './agent-session-binding-store.js'
 
@@ -802,5 +803,119 @@ describe('markers and lookups delegate to the pure gate rather than re-deciding'
     expect(reg.getByThread('claude', THREAD, T0)?.bindingId).toBe('bind-1')
     expect(reg.getByThread('claude', 'a4b2b4dd', T0)).toBeNull()
     expect(reg.getByThread('cursor', THREAD, T0)).toBeNull()
+  })
+})
+
+describe('the turn ledger makes a repeated POST safe', () => {
+  // COST: measured 2026-08-16 on a disposable thread. Two byte-identical POSTs both
+  // returned `completed` and the user's REAL transcript ended up with two copies of
+  // the turn. The client cannot distinguish "delivered but the 200 was lost" from
+  // "never arrived" - a dropped connection, a backgrounded phone and a proxy timeout
+  // all look identical - so retrying is correct client behaviour and the server is
+  // the only side that can make it safe.
+  const TURN = 'turn-0001-aaaa-bbbb'
+
+  it('replays the first result instead of reporting nothing', () => {
+    const reg = open()
+    const b = attachLive(reg)
+    expect(reg.findTurn(b.bindingId, TURN)).toBeNull()
+    reg.recordTurn(b.bindingId, TURN, { outcome: 'completed', turnId: TURN }, T0)
+    expect(reg.findTurn(b.bindingId, TURN)?.result).toEqual({ outcome: 'completed', turnId: TURN })
+  })
+
+  it('SURVIVES A RESTART, which the process-local fence did not', () => {
+    // The binding record, epoch floor and pins were all durable; the one piece of
+    // state whose loss writes twice into a conversation was the one that was not.
+    const first = open()
+    const b = attachLive(first)
+    first.recordTurn(b.bindingId, TURN, { outcome: 'completed' }, T0)
+
+    const reopened = open()
+    expect(reopened.findTurn(b.bindingId, TURN)?.result).toEqual({ outcome: 'completed' })
+  })
+
+  it('keeps the FIRST result and never overwrites it', () => {
+    // A repeat must see what the original turn actually did, not a later answer.
+    const reg = open()
+    const b = attachLive(reg)
+    reg.recordTurn(b.bindingId, TURN, { outcome: 'completed' }, T0)
+    reg.recordTurn(b.bindingId, TURN, { outcome: 'ambiguous' }, T0 + 1000)
+    expect(reg.findTurn(b.bindingId, TURN)?.result).toEqual({ outcome: 'completed' })
+  })
+
+  it('keeps turns separate per binding and per turn id', () => {
+    const reg = open()
+    const a = attachLive(reg)
+    const c = attachLive(reg, { bindingId: 'bind-2', nativeThreadId: OTHER })
+    reg.recordTurn(a.bindingId, TURN, { which: 'a' }, T0)
+    expect(reg.findTurn(c.bindingId, TURN)).toBeNull()
+    expect(reg.findTurn(a.bindingId, 'turn-9999-cccc-dddd')).toBeNull()
+  })
+
+  it('refuses an unknown binding and a malformed turn id', () => {
+    const reg = open()
+    const b = attachLive(reg)
+    expect(reg.recordTurn('no-such-binding', TURN, { x: 1 }, T0).reason).toBe('unknown_binding')
+    for (const bad of ['', 'short', '../../etc', 'has space', 'x'.repeat(200)]) {
+      expect(reg.recordTurn(b.bindingId, bad, { x: 1 }, T0).binding).toBeNull()
+      expect(reg.findTurn(b.bindingId, bad)).toBeNull()
+    }
+  })
+
+  it('bounds retention per binding, dropping oldest first', () => {
+    // The newest turn is the one a client is most likely to retry, so it must be
+    // the last to age out.
+    const reg = open()
+    const b = attachLive(reg)
+    for (let i = 0; i < MAX_TURNS_PER_BINDING + 5; i++) {
+      reg.recordTurn(b.bindingId, `turn-${String(i).padStart(4, '0')}-pad-pad`, { i }, T0 + i)
+    }
+    expect(reg.findTurn(b.bindingId, 'turn-0000-pad-pad')).toBeNull()
+    const newest = `turn-${String(MAX_TURNS_PER_BINDING + 4).padStart(4, '0')}-pad-pad`
+    expect(reg.findTurn(b.bindingId, newest)).not.toBeNull()
+  })
+
+  it('hydrates a store written BEFORE the ledger existed', () => {
+    // Backwards compatibility in the direction that matters: an older store simply
+    // has no idempotency history yet, which is correct rather than degraded.
+    const seed = open()
+    const b = attachLive(seed)
+    const raw = readStore()
+    delete raw.turns
+    writeStore(raw)
+
+    const reopened = open()
+    expect(reopened.hydration.status).not.toBe('degraded')
+    expect(reopened.get(b.bindingId)).not.toBeNull()
+    expect(reopened.findTurn(b.bindingId, TURN)).toBeNull()
+  })
+
+  it('DROPS a malformed turn row rather than replaying it', () => {
+    // A bad `result` would be handed back to a client verbatim as though it were a
+    // real terminal answer.
+    const seed = open()
+    const b = attachLive(seed)
+    seed.recordTurn(b.bindingId, TURN, { outcome: 'completed' }, T0)
+    const raw = readStore()
+    ;(raw.turns as Record<string, unknown>)[b.bindingId] = [
+      { turnId: TURN, at: T0 },                      // no result
+      { turnId: 'bad id here', result: {}, at: T0 }, // unusable id
+      { turnId: 'turn-0002-aaaa-bbbb', result: { ok: true }, at: 'soon' }, // bad clock
+      { turnId: 'turn-0003-aaaa-bbbb', result: { ok: true }, at: T0 },     // the good one
+    ]
+    writeStore(raw)
+
+    const reopened = open()
+    expect(reopened.findTurn(b.bindingId, TURN)).toBeNull()
+    expect(reopened.findTurn(b.bindingId, 'turn-0002-aaaa-bbbb')).toBeNull()
+    expect(reopened.findTurn(b.bindingId, 'turn-0003-aaaa-bbbb')?.result).toEqual({ ok: true })
+  })
+
+  it('drops a reaped binding’s turns with it', () => {
+    const reg = open()
+    const b = attachLive(reg)
+    reg.recordTurn(b.bindingId, TURN, { outcome: 'completed' }, T0)
+    reg.reap(T0 + 400 * 86_400_000)
+    expect(reg.findTurn(b.bindingId, TURN)).toBeNull()
   })
 })

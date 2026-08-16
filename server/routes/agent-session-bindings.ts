@@ -132,6 +132,13 @@ export interface BindingRegistry {
   /** Every binding the server knows, terminal ones included. Filtering is this route's job. */
   list: () => readonly NativeBinding[]
   /**
+   * Idempotency. Optional so a caller can wire a registry without them, but a
+   * turns route built on such a registry cannot make a repeated POST safe - the
+   * route requires a client key and simply records nothing if these are absent.
+   */
+  findTurn?: (bindingId: string, turnId: string) => { result: unknown } | null
+  recordTurn?: (bindingId: string, turnId: string, result: unknown, now: number) => unknown
+  /**
    * Is the durable store behind `list` usable at all?
    *
    * REQUIRED, not optional, and this is the reason: `AgentSessionBindingRegistry`
@@ -883,6 +890,9 @@ export const TURN_SENT_COPY = 'Sent to the original thread.'
  * reads as OFF - a feature that writes into a human's conversation should be hard
  * to turn on by accident.
  */
+/** Client-supplied idempotency key. Long enough that a collision is deliberate. */
+export const CLIENT_TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/
+
 export function threadAttachEnabled(): boolean {
   return process.env.COS_THREAD_ATTACH_ENABLED === '1'
 }
@@ -1225,9 +1235,30 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
      * a throw; everything before it is provably undelivered.
      */
     let deliveryAttempted = false
+    /** Client idempotency key and its binding. Null until the body is validated. */
+    let clientTurnId: string | null = null
+    let ledgerBindingId: string | null = null
 
     const respond = (status: number, payload: Record<string, unknown>): void => {
       if (!res.headersSent) res.status(status).json(payload)
+      // Remembered ONLY when the prompt may have reached the provider. A
+      // pre-delivery refusal (stale epoch, malformed body, busy target) must stay
+      // re-evaluatable: the binding may be fine by the time the client retries, and
+      // replaying a stale "no" would be its own bug.
+      //
+      // `completed` and `ambiguous` are the two that must never run twice. Measured
+      // 2026-08-16: two byte-identical POSTs both returned completed and the user's
+      // real transcript ended up with two copies of the turn.
+      const outcome = payload.outcome
+      if (clientTurnId !== null && ledgerBindingId !== null && (outcome === 'completed' || outcome === 'ambiguous')) {
+        try {
+          deps.bindings.recordTurn?.(ledgerBindingId, clientTurnId, { ...payload, status }, readNow() ?? requestNow)
+        } catch (error) {
+          // A ledger failure must not turn a delivered turn into an error response.
+          // The cost is a lost idempotency record, never a lost turn.
+          console.error(`[agent-session-bindings] turn ledger write failed: ${error instanceof Error ? error.message : error}`)
+        }
+      }
     }
     const refuseTurn = (reason: WriteRefusal, extra: Record<string, unknown> = {}): void => {
       respond(refusalStatus(reason), {
@@ -1313,6 +1344,29 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
       const boundTo = body.boundTo
       if (boundTo !== undefined && boundTo !== null && !isOpaque(boundTo)) return refuseTurn('invalid_request')
+
+      // REQUIRED, not optional. A turn with no idempotency key cannot be made safe:
+      // the client cannot tell "delivered but the 200 was lost" from "never
+      // arrived", so it will retry, and without a key the server cannot tell that
+      // retry from a new turn. Required rather than defaulted because there are no
+      // existing callers to break - the feature ships dark.
+      const submitted = body.clientTurnId
+      if (typeof submitted !== 'string' || !CLIENT_TURN_ID_RE.test(submitted)) {
+        return refuseTurn('invalid_request')
+      }
+      clientTurnId = submitted
+      ledgerBindingId = bindingId
+
+      // REPLAY, before any occupancy check, head read, or spawn: if this exact turn
+      // already reached a terminal state, hand back what it actually did.
+      const already = deps.bindings.findTurn?.(bindingId, clientTurnId) ?? null
+      if (already !== null && already.result && typeof already.result === 'object') {
+        const { status, ...rest } = already.result as Record<string, unknown>
+        if (!res.headersSent) {
+          res.status(typeof status === 'number' ? status : 200).json({ ...rest, replayed: true })
+        }
+        return
+      }
 
       // The client-queued-prompt gate, used rather than reimplemented: it is the
       // one place that orders state before epoch before target, and a second
