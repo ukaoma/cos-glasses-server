@@ -2219,6 +2219,36 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.29.0] - 2026-08-16
+
+### Continue is queued instead of holding the phone
+
+- An attached turn is admitted with **202** and delivered in the background. A
+  provider turn runs up to 21 minutes and iOS suspends the WebView the moment the
+  phone is pocketed, so a synchronous turn was lost exactly when the user did the
+  natural thing.
+- Every safety gate stays synchronous: body, replay, queued-prompt, lease, target,
+  epoch, fence, claim, occupancy, head baseline, pin. A refusal still reaches the
+  user immediately and precisely. Only the spawn moved.
+- **New:** `GET /api/agent-sessions/bindings/:bindingId/turns/:clientTurnId`
+  serves the same durable ledger record the replay path serves, so a poll and a
+  retry can never disagree about what a turn did. Reports `unknown` rather than
+  `failed` for a key it has never seen.
+- Fixed: a post-202 refusal recorded nothing, so the status route would have
+  answered `pending` forever. Pre-202 refusals keep the old semantics and stay
+  re-evaluatable.
+
+### Fork, ungated
+
+- `POST /api/agent-sessions/:provider/:threadId/fork` is registered whether or not
+  `COS_THREAD_ATTACH_ENABLED` is set. Fork appends to nothing: the original is left
+  byte-identical. It is what every refusal tells the user to do instead, and a
+  refusal pointing at a route that 404s is a dead end.
+
+**Required by COS Glasses 6.8.363.** Continue still needs
+`COS_THREAD_ATTACH_ENABLED=1`; with it unset the write routes are not registered
+and behavior is unchanged.
+
 ## 6.12.7
 
 Pairs the public server with COS Glasses build 227+ meeting follow-ups while
