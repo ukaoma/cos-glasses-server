@@ -454,6 +454,12 @@ function codexRolloutPath(threadId: string, deps: NativeHeadDeps): string | null
           if (++scanned > MAX_CODEX_FILES_SCANNED) return null
           if (!name.startsWith('rollout-')) continue
           if (idFromCodexFilename(name) !== threadId) continue
+          // The Claude path has had this filter all along; the Codex path selected
+          // on FILENAME alone, so a `rollout-*-<id>.jsonl` FIFO or directory was a
+          // valid candidate. The open flags now make that safe, but two sibling
+          // resolvers disagreeing about what counts as a transcript is the drift
+          // that produced the hazard in the first place.
+          if (!deps.fileExists(join(dayDir, name))) continue
           if (found !== null) return null
           found = join(dayDir, name)
         }
