@@ -2219,6 +2219,53 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.31.0] - 2026-08-16
+
+### "Running" meant an open window, not a working agent
+
+- `GET /api/agent-sessions` adds **`running_active`**: the thread's transcript was
+  written in the last 30 seconds, so an agent is generating in it right now.
+- This exists because `running` could not answer that question and was being read
+  as though it could. It comes from a process registry, and a Claude Code record
+  describes an open WINDOW (`kind: interactive`, `entrypoint: claude-desktop`) —
+  so a session that finished an hour ago, with the window still up, stayed
+  `running: true` forever. A finished session reported itself active on the
+  glasses and never cleared.
+- The transcript is the only part of a session with a clock in it. While a
+  session generates, its jsonl mtime tracks the wall clock to within a second;
+  when it stops, the mtime goes stale while the registry record does not. That
+  divergence is the whole signal.
+- The window is 30 seconds, deliberately much wider than the observed write
+  cadence, so a long tool call between writes does not flap a working session to
+  idle and back.
+- **Costs one stat per HELD thread, not per listed thread.** Freshness is layered
+  on after the occupancy scan and only over what it found, so a list with nothing
+  running does no extra filesystem work at all.
+- Anything unmeasurable — no transcript, unreadable file, a timestamp from the
+  future — reads as NOT active. The row then falls back to "open", which is still
+  true of a thread with a live owner. The stronger claim has to be earned by an
+  actual observation.
+- **Still a display hint and still never a write gate.** `attachability` and
+  `attach` keep probing at the moment of the write, unchanged.
+
+### The session detail describes its own liveness
+
+- `GET /api/agent-sessions/:provider/:sessionId` now carries the same three
+  `running_*` fields plus `running_stamped: true` and `runningDegraded`.
+- Until now only the LIST stamped occupancy, so the detail page had to borrow the
+  flags from whichever row the user tapped. Those flags froze at the moment of the
+  tap, which is the other half of why a finished session never cleared: the page
+  had no way to ask again. A polling client needs a payload that carries its own
+  liveness.
+- `running_stamped` exists so a client can tell an old server's silence from a new
+  server's `false`. They demand opposite behaviour: keep the borrowed hint, or drop
+  it as stale.
+- Nearly free: the handler already resolves and stats the transcript, so only the
+  single-thread occupancy scan is new, and that is the same scan `attachability`
+  runs on every menu open.
+
+**Required by the COS Glasses build that ships the honest activity line.**
+
 ## [6.30.0] - 2026-08-16
 
 ### Sessions know which threads are live

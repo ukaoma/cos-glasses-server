@@ -32,7 +32,13 @@ import {
 import { searchAgentSessions, type AgentSessionSearchHit } from '../lib/agent-session-search.js'
 import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeers } from './claude-sessions.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
-import { occupiedThreads, noOccupancyKnown, type OccupiedScan, type OccupiedThread } from '../lib/occupied-threads.js'
+import {
+  occupiedThreads,
+  noOccupancyKnown,
+  withActiveRecently,
+  type OccupiedScan,
+  type OccupiedThread,
+} from '../lib/occupied-threads.js'
 import { realOccupancyDirs, realOccupancyProbes } from '../lib/occupancy-probes.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 
@@ -105,16 +111,115 @@ function runningThreads(rows: readonly AgentSessionRow[]): OccupiedScan {
   }
 }
 
-/** Stamp the running hint onto a projected row. */
-function withRunning<T extends { session_id: string }>(entry: T, scan: OccupiedScan) {
+/**
+ * When each HELD thread's transcript was last written.
+ *
+ * ONLY the threads the scan already found occupied. That is the entire cost
+ * argument: the occupied set is typically one or two rows out of sixty, so this
+ * is one or two path resolutions and stats per request, not sixty. An empty scan
+ * does no filesystem work at all.
+ *
+ * WHY NOT REUSE `row.modified`, WHICH IS ALREADY AN MTIME. Because for the rows
+ * that matter it is not one. A live Claude row comes from `liveClaudeRows`,
+ * whose `modified` is the registry's `lastActiveAt` (or, absent that, literally
+ * `new Date()`), and `enrichLiveClaude` does not replace it with the file's
+ * mtime. Reading freshness off that field would report an open window as a fresh
+ * write on every single request, which is precisely the bug being fixed.
+ *
+ * Every failure lands on null, and null is doubt rather than "recent" — see
+ * `isActiveRecently`. A row that cannot be measured reads OPEN, which is still
+ * true of a thread with a live owner.
+ */
+async function transcriptMtimes(
+  scan: OccupiedScan,
+  rows: readonly AgentSessionRow[],
+): Promise<Map<string, number | null>> {
+  const mtimes = new Map<string, number | null>()
+  if (scan.occupied.size === 0) return mtimes
+
+  const providerById = new Map<string, AgentProvider>()
+  for (const row of rows) providerById.set(row.session_id, row.provider)
+  const roots = agentSessionRoots()
+
+  await Promise.all([...scan.occupied.keys()].map(async threadId => {
+    try {
+      const provider = providerById.get(threadId)
+      // An occupied id with no row cannot happen today (the scan is built FROM
+      // the rows), but guessing a provider to go looking for a file is how a
+      // caller-supplied id reaches the filesystem. Unknown stays unmeasured.
+      if (!provider) {
+        mtimes.set(threadId, null)
+        return
+      }
+      const file = await findAgentSessionFile(provider, threadId, roots)
+      mtimes.set(threadId, file ? (await stat(file)).mtimeMs : null)
+    } catch {
+      mtimes.set(threadId, null)
+    }
+  }))
+  return mtimes
+}
+
+/**
+ * Stamp the running hint onto a projected row.
+ *
+ * EXPORTED so the WIRE KEYS are covered by a behaviour test rather than by
+ * reading this file. The client reads `running_active` by exact name
+ * (`session-running.ts` accepts only a literal `true` on a known key), so a
+ * rename here is silent on this side and renders every session as merely open on
+ * the lens. Pure: it takes the scan, it does no I/O.
+ */
+export function withRunning<T extends { session_id: string }>(entry: T, scan: OccupiedScan) {
   const occ = scan.occupied.get(entry.session_id)
   return {
     ...entry,
-    // An agent is working in this thread right now, whoever started it.
+    // A process HOLDS this thread open, whoever started it. Not "is generating":
+    // a Claude record for an open window outlives the work by however long the
+    // window stays up, which is why `running_active` exists below.
     running: occ !== undefined,
     // Held by something that is not COS, so a Continue would be refused. The
     // badge reads `running`; the Continue affordance reads this.
     running_foreign: (occ?.foreignOwners ?? 0) > 0,
+    // The transcript was WRITTEN in the last few seconds: an agent is generating
+    // here, not just holding the file. This is the only one of the three that
+    // clears on its own when the work stops. Still a display hint, never a gate.
+    running_active: occ?.activeRecently === true,
+  }
+}
+
+/**
+ * Occupancy plus freshness for ONE thread, for the detail route.
+ *
+ * WHY THE DETAIL ROUTE STAMPS THIS AT ALL. It did not, and the lens had to borrow
+ * the hint from whichever list row the user tapped. That worked exactly once: the
+ * detail page was a single fetch, so the borrowed flags were frozen at the moment
+ * it opened and could never clear, which is half of why a finished session stayed
+ * "active" on the glasses until Miles navigated away. A page that polls needs a
+ * payload that carries its own liveness.
+ *
+ * NEARLY FREE HERE. The handler has already resolved the transcript path and
+ * stat'ed it, so freshness costs nothing extra and only the single-thread
+ * occupancy scan is new — the same scan `attachability` already runs on every
+ * menu open. Contrast the list, where the same work would be sixty scans.
+ *
+ * STILL A DISPLAY HINT. Nothing about being on the detail payload makes it a
+ * gate; `attach` re-probes at the write, unchanged.
+ */
+function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: number): OccupiedScan {
+  if (provider !== 'claude' && provider !== 'codex') return { occupied: new Map(), degraded: false }
+  try {
+    const scan = occupiedThreads(
+      provider,
+      [threadId],
+      realOccupancyProbes(cosSpawnedPids),
+      realOccupancyDirs(),
+    )
+    return withActiveRecently(scan, new Map([[threadId, mtimeMs]]), Date.now())
+  } catch (error) {
+    // The transcript is the point; occupancy is decoration. A probe failure must
+    // never cost the user their session.
+    console.error(`[agent-sessions] detail occupancy failed: ${error instanceof Error ? error.message : error}`)
+    return noOccupancyKnown()
   }
 }
 
@@ -164,7 +269,11 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     const sort = asSort(req.query.sort)
     const live = await liveClaudeRows()
     const sessions = await listAgentSessions(agentSessionRoots(), new Date(), live, limit, sort)
-    const running = runningThreads(sessions)
+    const scan = runningThreads(sessions)
+    // Freshness is layered on AFTER occupancy, and only over what occupancy
+    // found. `Date.now()` is read once so every row in a payload is judged
+    // against the same instant.
+    const running = withActiveRecently(scan, await transcriptMtimes(scan, sessions), Date.now())
     res.json({
       sessions: sessions.map(row => withRunning(toEntry(row), running)),
       total: sessions.length,
@@ -234,8 +343,19 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       if (named) parsed.display_label = named
     }
     const modified = st.mtime.toISOString()
+    const running = runningForThread(provider, parsed.session_id, st.mtimeMs)
     res.json({
-      session_id: parsed.session_id,
+      ...withRunning({ session_id: parsed.session_id }, running),
+      // The client must be able to tell "this server stamped nothing" from "this
+      // server stamped false", because the two demand opposite behaviour: an old
+      // server's silence means keep using the hint borrowed from the list row, and
+      // a new server's `false` means the thread genuinely went quiet and the
+      // borrowed hint is the stale thing. Without this marker the poll could never
+      // clear the flag it exists to clear.
+      running_stamped: true,
+      // Same meaning as on the list: a probe could not see clearly, so render
+      // unknown rather than treating a quiet scan as "nothing is running".
+      runningDegraded: running.degraded,
       provider: parsed.provider,
       slug: parsed.session_id,
       custom_title: parsed.display_label,

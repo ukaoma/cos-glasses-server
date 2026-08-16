@@ -41,10 +41,15 @@ import { isValidNativeThreadId } from './native-thread-id.js'
 export interface OccupiedThread {
   threadId: string
   /**
-   * Every process working in this thread, COS's own children included.
+   * Every process holding this thread open, COS's own children included.
    *
-   * This is the DISPLAY question — "is an agent working in here right now" — and
-   * a turn COS queued is just as much a running agent as a desktop window is.
+   * WHAT THIS ACTUALLY MEASURES, stated plainly because the first version of the
+   * feature got it wrong in user-facing copy: a registry record means A PROCESS
+   * HOLDS THIS THREAD OPEN. It does NOT mean an agent is generating. A Claude
+   * Code record reads `kind: interactive, entrypoint: claude-desktop` for an open
+   * WINDOW, so a session that finished ten minutes ago with the window still up
+   * has an owner forever. The lens said "ACTIVE NOW" off this number and was
+   * lying; it now says the thread is OPEN, which is all this count can support.
    */
   owners: number
   /**
@@ -55,6 +60,16 @@ export interface OccupiedThread {
    * window does.
    */
   foreignOwners: number
+  /**
+   * The transcript was WRITTEN inside the freshness window: an agent is
+   * generating here, not merely holding the file open.
+   *
+   * This is the signal `owners` cannot give. Set only from a positive
+   * observation of a recent write — see `withActiveRecently`, which is where it
+   * is filled in. `occupiedThreads` itself has no path to a transcript and
+   * always leaves it false.
+   */
+  activeRecently: boolean
 }
 
 export interface OccupiedScan {
@@ -178,7 +193,11 @@ export function occupiedThreads(
     // hide COS's own queued turn from the very screen the user opens to watch it.
     const foreign = owners.filter(o => !o.selfOwned).length
     if (owners.length > 0) {
-      occupied.set(threadId, { threadId, owners: owners.length, foreignOwners: foreign })
+      // `activeRecently` is FALSE here and can only be raised by
+      // `withActiveRecently`. This function reads a process registry; a registry
+      // record cannot tell generating from idling, and inferring one from the
+      // other is the exact defect this field exists to fix.
+      occupied.set(threadId, { threadId, owners: owners.length, foreignOwners: foreign, activeRecently: false })
     }
   }
 
@@ -188,4 +207,79 @@ export function occupiedThreads(
 /** The safe answer when the caller cannot scan at all. */
 export function noOccupancyKnown(): OccupiedScan {
   return { occupied: new Map(EMPTY.occupied), degraded: true }
+}
+
+/**
+ * How recently the transcript must have been written for a held thread to read
+ * as WORKING rather than merely OPEN.
+ *
+ * WHY A SECOND SIGNAL EXISTS AT ALL. `owners` answers "a process holds this
+ * thread", which is not the question the user is asking when he looks at the
+ * lens. He watched a session finish on his Mac while the glasses still showed it
+ * active, because the window was still open and the registry record therefore
+ * still existed. Occupancy has no clock in it; the transcript does.
+ *
+ * MEASURED, not assumed: while a session generates, its jsonl mtime tracks the
+ * wall clock to within a second, and when generation stops the mtime goes stale
+ * while the registry record stays exactly where it was. That divergence is the
+ * whole signal.
+ *
+ * 30 seconds is deliberately far wider than the observed sub-second write
+ * cadence. The gap this has to survive is a long tool call or a slow first token
+ * between writes, and a window sized to the cadence would flap a working session
+ * to OPEN and back every time the model paused to think. The cost of the wide
+ * window is bounded and known: a session that stops is reported working for up
+ * to 30 more seconds, which is a late correction rather than a permanent lie.
+ */
+export const ACTIVE_RECENTLY_WINDOW_MS = 30_000
+
+/**
+ * Was this transcript written inside the window?
+ *
+ * NULL IS NOT "RECENT". An unresolvable path, an unreadable file, a stat that
+ * threw — every one of them arrives here as null and answers false, so the row
+ * falls back to OPEN. That is not a fail-open: OPEN is still a true statement
+ * about a thread with a live owner. It is the STRONGER claim, "an agent is
+ * working in here", that has to be earned by an actual observation.
+ *
+ * A timestamp far in the FUTURE is refused for the same reason rather than
+ * treated as maximally fresh. Skew of a few seconds is normal and lands inside
+ * the window; a file dated next week is a clock this server cannot reason about,
+ * and letting it manufacture a permanent "working" badge would rebuild the bug
+ * from the other direction.
+ */
+export function isActiveRecently(mtimeMs: number | null | undefined, nowMs: number): boolean {
+  if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return false
+  if (!Number.isFinite(nowMs)) return false
+  return Math.abs(nowMs - mtimeMs) <= ACTIVE_RECENTLY_WINDOW_MS
+}
+
+/**
+ * Fill in `activeRecently` for a scan, from transcript write times.
+ *
+ * PURE, and separate from `occupiedThreads` on purpose. Resolving a thread id to
+ * a transcript path is the session STORE's job (it owns the projects/rollouts
+ * layout), and this module owns process occupancy; wiring the store in here
+ * would make an occupancy scan depend on a filesystem it does not otherwise know
+ * about. The caller stats — for HELD THREADS ONLY, which is what keeps this
+ * cheap, since it is one stat per already-occupied row and never one per listed
+ * row — and hands the readings in.
+ *
+ * A thread with no entry in the map is not an error and not "recent": it reads
+ * exactly like an unreadable one, because from here the two are the same
+ * absence of evidence.
+ */
+export function withActiveRecently(
+  scan: OccupiedScan,
+  transcriptMtimes: ReadonlyMap<string, number | null>,
+  nowMs: number,
+): OccupiedScan {
+  const occupied = new Map<string, OccupiedThread>()
+  for (const [threadId, record] of scan.occupied) {
+    occupied.set(threadId, {
+      ...record,
+      activeRecently: isActiveRecently(transcriptMtimes.get(threadId), nowMs),
+    })
+  }
+  return { occupied, degraded: scan.degraded }
 }

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { occupiedThreads } from './occupied-threads.js'
+import {
+  ACTIVE_RECENTLY_WINDOW_MS,
+  isActiveRecently,
+  occupiedThreads,
+  withActiveRecently,
+} from './occupied-threads.js'
 import type { OccupancyDirs, OccupancyProbes } from './thread-occupancy.js'
 
 const A = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
@@ -198,5 +203,134 @@ describe('cost, which is the whole reason this module exists', () => {
     }), DIRS)
     expect(touched).toBe(0)
     expect(scan.degraded).toBe(false)
+  })
+})
+
+// WORKING is not OPEN, and the difference is the whole point.
+//
+// Occupancy alone reported a finished session as active forever: the Claude
+// registry record describes an open WINDOW (`kind: interactive`,
+// `entrypoint: claude-desktop`), so it survives the work by however long the
+// user leaves the window up. The transcript is the only thing with a clock in
+// it, so freshness is measured from the file and layered on afterwards.
+describe('a held thread is not necessarily a working one', () => {
+  const NOW = Date.UTC(2026, 7, 16, 12, 0, 0)
+
+  function heldScan() {
+    return occupiedThreads('claude', [A, B], probes(registryWith({
+      '101.json': rec(101, A),
+      '102.json': rec(102, B),
+    })), DIRS)
+  }
+
+  it('leaves activeRecently false on a raw occupancy scan', () => {
+    // The scan reads a PROCESS registry. It has no transcript and therefore no
+    // basis for the stronger claim, so it must not make it.
+    const scan = heldScan()
+    expect(scan.occupied.get(A)?.owners).toBe(1)
+    expect(scan.occupied.get(A)?.activeRecently).toBe(false)
+  })
+
+  it('raises activeRecently for a transcript written inside the window', () => {
+    const out = withActiveRecently(heldScan(), new Map([[A, NOW - 5_000]]), NOW)
+    expect(out.occupied.get(A)?.activeRecently).toBe(true)
+  })
+
+  it('is the ONLY field freshness touches: owners and foreign are carried through', () => {
+    const out = withActiveRecently(heldScan(), new Map([[A, NOW]]), NOW)
+    expect(out.occupied.get(A)?.owners).toBe(1)
+    expect(out.occupied.get(A)?.foreignOwners).toBe(1)
+    expect(out.occupied.get(A)?.threadId).toBe(A)
+  })
+
+  it('leaves a thread whose transcript went stale as held-but-not-working', () => {
+    // The window is still open — owners is 1 — but nothing has been written for
+    // ten minutes. This is Miles's session on his Mac after it finished.
+    const out = withActiveRecently(heldScan(), new Map([[A, NOW - 600_000]]), NOW)
+    expect(out.occupied.get(A)?.owners).toBe(1)
+    expect(out.occupied.get(A)?.activeRecently).toBe(false)
+  })
+
+  it('judges each held thread separately', () => {
+    const out = withActiveRecently(heldScan(), new Map([[A, NOW - 1_000], [B, NOW - 600_000]]), NOW)
+    expect(out.occupied.get(A)?.activeRecently).toBe(true)
+    expect(out.occupied.get(B)?.activeRecently).toBe(false)
+  })
+
+  it('carries the degraded flag through untouched', () => {
+    const scan = { occupied: new Map(), degraded: true }
+    expect(withActiveRecently(scan, new Map(), NOW).degraded).toBe(true)
+  })
+
+  it('does not mutate the scan it was given', () => {
+    const scan = heldScan()
+    withActiveRecently(scan, new Map([[A, NOW]]), NOW)
+    expect(scan.occupied.get(A)?.activeRecently).toBe(false)
+  })
+})
+
+// Absence of evidence is not evidence of work. Every unmeasurable reading has to
+// land on false, because false renders as OPEN — which is still TRUE of a thread
+// with a live owner. It is the stronger claim that has to be earned.
+describe('isActiveRecently refuses to guess', () => {
+  const NOW = 1_000_000_000_000
+
+  it('accepts a write inside the window', () => {
+    expect(isActiveRecently(NOW - ACTIVE_RECENTLY_WINDOW_MS + 1, NOW)).toBe(true)
+  })
+
+  it('accepts a write at the exact boundary', () => {
+    expect(isActiveRecently(NOW - ACTIVE_RECENTLY_WINDOW_MS, NOW)).toBe(true)
+  })
+
+  it('rejects a write one millisecond past the window', () => {
+    expect(isActiveRecently(NOW - ACTIVE_RECENTLY_WINDOW_MS - 1, NOW)).toBe(false)
+  })
+
+  it('treats an unreadable transcript (null) as NOT working', () => {
+    expect(isActiveRecently(null, NOW)).toBe(false)
+  })
+
+  it('treats an unresolvable path (undefined) as NOT working', () => {
+    expect(isActiveRecently(undefined, NOW)).toBe(false)
+  })
+
+  it('refuses NaN and Infinity rather than letting them decide', () => {
+    expect(isActiveRecently(Number.NaN, NOW)).toBe(false)
+    expect(isActiveRecently(Number.POSITIVE_INFINITY, NOW)).toBe(false)
+    expect(isActiveRecently(NOW, Number.NaN)).toBe(false)
+  })
+
+  it('tolerates small clock skew forward, because that IS a fresh write', () => {
+    expect(isActiveRecently(NOW + 2_000, NOW)).toBe(true)
+  })
+
+  it('refuses a far-future timestamp instead of treating it as maximally fresh', () => {
+    // A file dated next week would otherwise pin the badge to "working" forever,
+    // rebuilding the never-clears bug from the opposite direction.
+    expect(isActiveRecently(NOW + 7 * 24 * 3_600_000, NOW)).toBe(false)
+  })
+
+  // THESE TWO REACH THE TYPE GUARDS, and nothing else does.
+  //
+  // Deleting either guard passes every other test in this file, because null,
+  // undefined, NaN and Infinity all coerce or propagate to a false answer
+  // anyway. A numeric STRING is the one input where coercion disagrees:
+  // `Math.abs(now - "1786915370562")` is a small number and would report
+  // WORKING from a value the function never actually understood. This module
+  // ships compiled and exported in `@gotcos/glasses-server`, so an untyped JS
+  // consumer reaches it and TypeScript is not the guard here.
+  it('refuses a numeric STRING mtime instead of coercing it into a work claim', () => {
+    expect(isActiveRecently(String(NOW - 1_000) as unknown as number, NOW)).toBe(false)
+  })
+
+  it('refuses a numeric STRING clock for the same reason', () => {
+    expect(isActiveRecently(NOW - 1_000, String(NOW) as unknown as number)).toBe(false)
+  })
+
+  it('is wide enough to survive a long pause between writes', () => {
+    // The failure this width prevents is flapping: a model thinking for fifteen
+    // seconds between tokens must not read as finished.
+    expect(ACTIVE_RECENTLY_WINDOW_MS).toBeGreaterThanOrEqual(15_000)
   })
 })

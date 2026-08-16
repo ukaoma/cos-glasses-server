@@ -5,7 +5,8 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { agentSessionsRouter } from './agent-sessions.js'
+import { agentSessionsRouter, withRunning } from './agent-sessions.js'
+import type { OccupiedScan } from '../lib/occupied-threads.js'
 import {
   createdFromCodexFilename,
   idFromCodexFilename,
@@ -185,5 +186,51 @@ describe('agent session search route', () => {
       if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
       else process.env.COS_AGENT_SESSIONS_HOME = previous
     }
+  })
+})
+
+// The three wire keys the lens reads by exact name. A rename on this side is
+// completely silent here and shows up on the glasses as a session that is
+// forever merely "open", so the names are pinned by a test rather than by
+// whoever last read the route.
+describe('the running stamp the lens reads', () => {
+  const ID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
+  const scanWith = (over: Partial<{ owners: number; foreignOwners: number; activeRecently: boolean }>): OccupiedScan => ({
+    occupied: new Map([[ID, { threadId: ID, owners: 1, foreignOwners: 0, activeRecently: false, ...over }]]),
+    degraded: false,
+  })
+
+  it('reports a thread nobody holds as running:false and NOT active', () => {
+    const out = withRunning({ session_id: ID }, { occupied: new Map(), degraded: false })
+    expect(out.running).toBe(false)
+    expect(out.running_foreign).toBe(false)
+    expect(out.running_active).toBe(false)
+  })
+
+  it('separates HELD from WORKING: an open window is running but not active', () => {
+    // This is the exact case that made the lens lie. A finished session with the
+    // Mac window still up keeps its registry record, so running stays true; only
+    // running_active clears, and only because the transcript stopped growing.
+    const out = withRunning({ session_id: ID }, scanWith({ activeRecently: false }))
+    expect(out.running).toBe(true)
+    expect(out.running_active).toBe(false)
+  })
+
+  it('raises running_active when the transcript is being written', () => {
+    const out = withRunning({ session_id: ID }, scanWith({ activeRecently: true }))
+    expect(out.running).toBe(true)
+    expect(out.running_active).toBe(true)
+  })
+
+  it('keeps foreign orthogonal to active: a desktop agent can be working', () => {
+    const out = withRunning({ session_id: ID }, scanWith({ foreignOwners: 1, activeRecently: true }))
+    expect(out.running_foreign).toBe(true)
+    expect(out.running_active).toBe(true)
+  })
+
+  it('carries the original row fields through untouched', () => {
+    const out = withRunning({ session_id: ID, display_label: 'keep me' }, scanWith({}))
+    expect(out.display_label).toBe('keep me')
+    expect(out.session_id).toBe(ID)
   })
 })
