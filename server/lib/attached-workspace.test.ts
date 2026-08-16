@@ -1,5 +1,10 @@
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
+  realAttachedWorkspaceDeps,
   cwdFromTranscript,
   fingerprint,
   resolveAttachedWorkspace,
@@ -124,5 +129,54 @@ describe('resolveAttachedWorkspace refuses rather than guessing', () => {
     expect(r.workspaceFingerprint).not.toContain('/')
     expect(r.workspaceFingerprint).not.toContain('Ukaoma')
     expect(r.sourceFingerprint).not.toContain('/')
+  })
+})
+
+describe('realAttachedWorkspaceDeps touches the real filesystem safely', () => {
+  // This factory had ZERO coverage: neutering its return to null left all 250
+  // relevant tests green, so the guards in the function whose own header says
+  // "one planted path would wedge the whole server" were entirely unexercised.
+  // That asymmetry is exactly why the identical bug shipped in native-head.
+  const root = () => mkdtempSync(join(tmpdir(), 'aw-real-'))
+
+  it('reads the HEAD of a real transcript, not the tail', () => {
+    // The cwd is in the EARLY rows; a tail read of a 13 GB rollout would miss it.
+    const dir = root()
+    const file = join(dir, 'x.jsonl')
+    const cwd = join(dir, 'work space')
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(file, `${JSON.stringify({ type: 'user', cwd })}\n${'{"pad":1}\n'.repeat(500)}`)
+    expect(realAttachedWorkspaceDeps().readHead(file, 512 * 1024)).toContain(cwd)
+  })
+
+  it('returns null for a FIFO instead of blocking forever', () => {
+    // O_NONBLOCK. A regression HANGS the suite, which is the production symptom.
+    const dir = root()
+    const fifo = join(dir, 'fifo.jsonl')
+    execFileSync('/usr/bin/mkfifo', [fifo])
+    const started = Date.now()
+    expect(realAttachedWorkspaceDeps().readHead(fifo, 1024)).toBeNull()
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
+
+  it('refuses to follow a symlinked transcript', () => {
+    // O_NOFOLLOW. A symlinked <id>.jsonl could point at any file on disk and be
+    // parsed for a cwd we would then spawn in.
+    const dir = root()
+    const real = join(dir, 'real.jsonl')
+    writeFileSync(real, JSON.stringify({ type: 'user', cwd: '/tmp' }))
+    const link = join(dir, 'link.jsonl')
+    symlinkSync(real, link)
+    expect(realAttachedWorkspaceDeps().readHead(link, 1024)).toBeNull()
+  })
+
+  it('dirExists distinguishes absent from unreadable', () => {
+    const dir = root()
+    expect(realAttachedWorkspaceDeps().dirExists(dir)).toBe(true)
+    expect(realAttachedWorkspaceDeps().dirExists(join(dir, 'nope'))).toBe(false)
+    // A FILE is not a directory - the resolver must not spawn into one.
+    const file = join(dir, 'f.txt')
+    writeFileSync(file, 'x')
+    expect(realAttachedWorkspaceDeps().dirExists(file)).toBe(false)
   })
 })

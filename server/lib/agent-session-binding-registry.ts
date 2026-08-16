@@ -68,7 +68,7 @@
 // inside a mutation (`onWarn`) and for any future refactor that introduces an await.
 // Returned bindings are frozen, so a caller cannot mutate one and hope it sticks.
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
@@ -415,7 +415,23 @@ export class AgentSessionBindingRegistry {
       )
     }
 
-    if (!existsSync(path)) {
+    // `existsSync` collapses "definitely absent" with "cannot see it" — EACCES,
+    // ELOOP, EIO, a dangling symlink. `fresh` is the ONLY permissive outcome, and
+    // this file's header justifies it as "positive evidence nothing was ever
+    // written"; existsSync is not that evidence. Measured: a dangling symlink at
+    // the store path hydrated `fresh` with epochFloor 0 while the real floor on
+    // disk was 9, and the next attach minted epoch 1 — so a prompt queued on the
+    // phone from the earlier epoch-1 attach matches by value again. Only ENOENT
+    // may mean fresh.
+    let storeAbsent: boolean
+    try {
+      lstatSync(path)
+      storeAbsent = false
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') return degraded('store_unreadable')
+      storeAbsent = true
+    }
+    if (storeAbsent) {
       return new AgentSessionBindingRegistry(
         path,
         { status: 'fresh', degradedReason: null, path, loadedBindings: 0, droppedRecords: 0, epochTargets: 0 },

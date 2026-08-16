@@ -118,7 +118,7 @@
 // capability gap and the two precedences should be reconciled repo-wide.
 
 import { createHash } from 'node:crypto'
-import { closeSync, fstatSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { agentSessionRoots, idFromCodexFilename } from './agent-session-store.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
@@ -595,7 +595,20 @@ function fileExists(path: string): boolean {
 function readTail(path: string, maxBytes: number): TailRead | null {
   let fd = -1
   try {
-    fd = openSync(path, 'r')
+    // THE THIRD INSTANCE OF THIS BUG, and the one reachable from both write
+    // routes. `openSync` on a FIFO with no writer never returns, and it is a
+    // synchronous syscall on Node's single thread, so a planted
+    // `rollout-*-<id>.jsonl` FIFO wedges the ENTIRE server — health, meeting save,
+    // transcribe-stream — not merely this request. Measured: blocked >34s in state
+    // SN and had to be SIGKILLed. The `isFile()` check below runs AFTER the open
+    // and cannot prevent it.
+    //
+    // occupancy-probes.readFile and attached-workspace.readHead already carry
+    // these flags; this copy was missed. O_NOFOLLOW additionally refuses a
+    // symlinked transcript that could point anywhere on disk.
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0
+    const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0
+    fd = openSync(path, fsConstants.O_RDONLY | noFollow | nonBlock)
     const stat = fstatSync(fd)
     if (!stat.isFile()) return null
 

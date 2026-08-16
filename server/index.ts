@@ -27,7 +27,6 @@ import { realOccupancyDirs, realOccupancyProbes } from './lib/occupancy-probes.j
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
-import { recordCosSpawn } from './lib/agent-session-ownership-store.js'
 import { threadOccupancy } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
@@ -275,6 +274,29 @@ app.use((_req, _res, next) => {
 // Hydrated once at boot, before any route can read it. Never throws; a corrupt
 // or unreadable store yields a degraded registry rather than a silent empty one.
 const agentSessionBindingRegistry = AgentSessionBindingRegistry.open()
+// Boot reap, and it is load-bearing rather than housekeeping. A turn pins its
+// binding and unpins in a `finally` that never runs if the process dies during the
+// provider run — a window of up to the 21-minute attached timeout, and exactly what
+// a crash, a force-quit, or a COS Control "Update Server" does. A pinned binding
+// never expires by design, and `blocksTarget` refuses any pinned target, so the
+// thread becomes permanently unattachable: measured at +1m, +31m, +2d, +40d and
+// +400d, all `native_target_busy`. The refusal copy tells the user to detach the
+// other chat, and this router registers no detach route, so the only recovery was
+// hand-editing the store. `reap()` already fixes it and simply had no caller.
+try {
+  const reaped = agentSessionBindingRegistry.reap(Date.now())
+  if (reaped.pinsDropped > 0 || reaped.removed.length > 0) {
+    console.log(`[binding-registry] boot reap: ${reaped.pinsDropped} stale pin(s) dropped, ${reaped.removed.length} binding(s) removed`)
+  }
+} catch (error) {
+  console.warn('[binding-registry] boot reap failed', error)
+}
+// And periodically, so a strand created mid-run clears without waiting for the next
+// restart. Unref'd so it never holds the process open during shutdown.
+const bindingReapTimer = setInterval(() => {
+  try { agentSessionBindingRegistry.reap(Date.now()) } catch { /* next tick retries */ }
+}, 10 * 60_000)
+bindingReapTimer.unref()
 
 // Built once. Each of these reads the disk, so sharing them keeps an attach from
 // re-deriving roots per request.
@@ -291,13 +313,22 @@ const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
  * Reconciling them is the composition root's job — putting it in either module
  * would make one of them know about the other's shape.
  *
- * OWNERSHIP IS RECORDED EXACTLY ONCE, and the ordering is the safety property.
- * `recordCosSpawn` is authoritative because the adapter calls it with a MEASURED
- * kernel start on a documented no-await chain. The route's `onSpawn` veto is then
- * consulted AFTER the ledger entry exists, so a refusal can never leave a live
- * child that COS does not recognise as its own. Any return other than the exact
- * string 'recorded' makes the adapter SIGKILL the child and release before a
- * single prompt byte is written.
+ * OWNERSHIP IS RECORDED EXACTLY ONCE, BY THE ROUTE.
+ *
+ * An earlier version of this comment claimed "exactly once" while the code did it
+ * twice: it called `recordCosSpawn` here and then `request.onSpawn(pid)`, and the
+ * route's `onSpawn` is not a veto — it re-probes the process start and records the
+ * claim itself (agent-session-bindings.ts:1395-1422). Measured, one turn produced
+ * `recorded +2 / released +1`. Not a leak, since both writes hit one Map key and a
+ * single release clears it, but it pinned `stats().recorded : released` at a
+ * permanent 2:1 — and that ratio is exactly what an operator reads to detect the
+ * leak this ledger exists to prevent, so the diagnostic was poisoned by the code
+ * meant to feed it.
+ *
+ * The route is the right owner: it holds the `recordedPids` list its own `finally`
+ * releases from. So this delegates rather than duplicating. Any return other than
+ * the exact string 'recorded' makes the adapter SIGKILL the child and release
+ * before a single prompt byte is written, which is the veto the route wants.
  */
 const deliverAttachedTurnForRoute = async (request: {
   provider: 'claude' | 'codex'
@@ -336,11 +367,11 @@ const deliverAttachedTurnForRoute = async (request: {
     policy: 'read_only',
     deps: {
       ...base,
-      recordSpawn: (pid: number, startMs: number) => {
-        const outcome = recordCosSpawn(pid, startMs)
-        if (outcome !== 'recorded') return outcome
-        return request.onSpawn(pid) ? 'recorded' : 'route_refused_ownership'
-      },
+      // `startMs` is deliberately unused: the adapter already probed it as a GATE
+      // (a null there aborts before this is reached), and the route probes again
+      // as the recorder. One record, one authority.
+      recordSpawn: (pid: number, _startMs: number) =>
+        request.onSpawn(pid) ? 'recorded' : 'route_refused_ownership',
     },
   })
 }

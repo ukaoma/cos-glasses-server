@@ -174,8 +174,15 @@ export function isSelfOwned(
   actualStartMs: number | null,
   ledger: ReadonlyMap<number, number>,
 ): boolean {
+  // A duck-typed `{ get: () => Date.now() }` satisfies the TYPE and was verified to
+  // grant ownership over a fully live foreign owner. Production is saved one layer
+  // up by occupancy-probes.sanitizeLedger, but `probes` is an INJECTED dependency,
+  // so any other wiring loses that guard while this function's own doc promises a
+  // recycled pid cannot forge membership. Self-ownership is the only path that
+  // turns a live owner into attachable, so it validates its own input.
+  if (!(ledger instanceof Map)) return false
   const spawnedAt = ledger.get(pid)
-  if (spawnedAt === undefined) return false
+  if (typeof spawnedAt !== 'number') return false
   return sameProcessStart(spawnedAt, actualStartMs)
 }
 

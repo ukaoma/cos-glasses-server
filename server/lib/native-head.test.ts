@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 // Behavioral tests for the native-head watermark, against a real filesystem.
 //
 // WHY DOT-DIRECTORY FIXTURES. Both production roots are dot directories
@@ -912,5 +913,32 @@ describe('realNativeHeadDirs / realNativeHeadDeps', () => {
 
     expect(head).toMatch(NATIVE_HEAD_TOKEN_RE)
     expect(head).toBe(nativeHead('claude', THREAD, deps))
+  })
+})
+
+describe('readTail cannot wedge the server', () => {
+  it('returns null for a FIFO named like a codex rollout instead of blocking', () => {
+    // The THIRD instance of this bug and the one reachable from both write routes.
+    // `openSync` on a writer-less FIFO never returns, and it is synchronous on
+    // Node's single thread, so this wedged health, meeting save and
+    // transcribe-stream too. Measured before the fix: blocked >34s, SIGKILL.
+    // codexRolloutPath selects candidates by FILENAME, so a FIFO named like a
+    // rollout is chosen; only the open flags stop it.
+    //
+    // A regression here HANGS the suite rather than failing it, which is the
+    // honest signal: a hang is exactly the production symptom.
+    const root = mkdtempSync(join(tmpdir(), 'nh-fifo-'))
+    const day = join(root, '.codex', 'sessions', '2026', '08', '16')
+    mkdirSync(day, { recursive: true })
+    const thread = '4baee514-1111-4222-8333-444455556666'
+    execFileSync('/usr/bin/mkfifo', [join(day, `rollout-2026-08-16T00-00-00-${thread}.jsonl`)])
+
+    const started = Date.now()
+    const deps = realNativeHeadDeps({
+      claudeProjectsDir: join(root, '.claude', 'projects'),
+      codexSessionsDir: join(root, '.codex', 'sessions'),
+    })
+    expect(nativeHead('codex', thread, deps)).toBeNull()
+    expect(Date.now() - started).toBeLessThan(2_000)
   })
 })
