@@ -919,3 +919,37 @@ describe('the turn ledger makes a repeated POST safe', () => {
     expect(reg.findTurn(b.bindingId, TURN)).toBeNull()
   })
 })
+
+describe('the epoch floor is monotonic against ANY writer', () => {
+  it('never writes a floor below one already on disk', () => {
+    // Reproduced in review with two registries over one store: the second reissued
+    // epoch 1 and its commit left the on-disk floor BELOW an epoch already handed
+    // out, which re-opens the replay window the epoch exists to close. A second
+    // SERVER cannot happen (the instance lock is per-uid and global), but tooling
+    // opening the store directly can.
+    const reg = open()
+    attachLive(reg)
+
+    // Something else raises the floor behind our back.
+    const raw = readStore()
+    ;(raw.epochHighWater as Record<string, number>)[KEY] = 9
+    writeStore(raw)
+
+    // Any commit from our stale in-memory view must not lower it.
+    attachLive(reg, { bindingId: 'bind-2', nativeThreadId: OTHER })
+    expect((readStore().epochHighWater as Record<string, number>)[KEY]).toBe(9)
+  })
+
+  it('a new attach after an external raise continues ABOVE it', () => {
+    const reg = open()
+    const first = attachLive(reg)
+    const raw = readStore()
+    ;(raw.epochHighWater as Record<string, number>)[KEY] = 12
+    writeStore(raw)
+
+    const reopened = open()
+    reopened.forceDetach(first.bindingId, T0)
+    const next = reopened.create(attachRequest({ bindingId: 'bind-3', now: T0 + 1000 }))
+    expect(next.binding?.epoch).toBe(13)
+  })
+})

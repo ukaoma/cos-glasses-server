@@ -1101,6 +1101,37 @@ export class AgentSessionBindingRegistry {
    * be a silently vanished lease, or worse, a lost epoch bump.
    */
   private persist(next: LoadedState): RegistryRejection | null {
+    // MERGE the on-disk epoch floor upward before writing.
+    //
+    // The floor is the anti-replay backstop and this file's header states it never
+    // decreases. In-process that holds. It does NOT hold if anything else ever
+    // writes this store: a second reader hydrates a snapshot, issues its own
+    // epochs, and its next commit rewrites the whole file from a stale view —
+    // measured in review, where a concurrent registry reissued epoch 1 and left the
+    // on-disk floor BELOW an epoch already handed out.
+    //
+    // A second SERVER cannot happen: the instance lock is per-uid and global
+    // (/tmp/cos-glasses-server-<uid>.lock), so bootstrap refuses one. But tooling
+    // opening the store directly can, and did during review. This makes the floor
+    // monotonic against any writer without introducing a lock, because max() of two
+    // views is never lower than either.
+    try {
+      const onDisk = readFileSync(this.path, 'utf-8')
+      const parsed: unknown = JSON.parse(onDisk)
+      const ledger = (parsed as Record<string, unknown> | null)?.epochHighWater
+      if (ledger && typeof ledger === 'object' && !Array.isArray(ledger)) {
+        for (const [key, value] of Object.entries(ledger as Record<string, unknown>)) {
+          if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) continue
+          const held = next.floors.get(key) ?? 0
+          if (value > held) next.floors.set(key, value)
+        }
+      }
+    } catch {
+      // No store yet, or unreadable. Writing our own view is correct for the first
+      // case, and for the second the alternative is refusing to persist at all,
+      // which would strand a live binding over a stale file we cannot read anyway.
+    }
+
     let json: string
     try {
       json = JSON.stringify({

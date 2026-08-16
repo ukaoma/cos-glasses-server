@@ -1,3 +1,4 @@
+import { carriesBoundTo } from './agent-session-binding-store.js'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { acquireModelSessionRunLock, callModelStreaming } from './model-router.js'
@@ -53,6 +54,29 @@ export class QueryJobAdmissionPreparationError extends Error {
 export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<unknown> {
   if (!raw || typeof raw !== 'object') return raw
   const input = raw as Record<string, unknown>
+
+  // Plan 4.2: an attached turn must NEVER silently degrade into an ordinary COS
+  // turn. The binding lives in the route path rather than the body, so a
+  // re-admission through this generic route would otherwise carry no attachment
+  // fields at all and there would be nothing here to reject — the turn would just
+  // quietly run against COS's own conversation instead of the user's desktop
+  // thread, and look like it worked.
+  //
+  // `carriesBoundTo` is the marker that makes such a request recognisable. It has
+  // existed, tested, with no caller since it was written.
+  //
+  // Defensive today: attached turns are not journal-backed until Phase 2, so
+  // nothing currently produces a request carrying this marker. It is wired now
+  // because the moment Phase 2 does, the absence of this check becomes a silent
+  // downgrade rather than a loud refusal.
+  if (carriesBoundTo(input)) {
+    throw new QueryJobAdmissionPreparationError(
+      409,
+      'attached_turn_on_generic_route',
+      'That turn belongs to a thread on your Mac and cannot run as an ordinary COS turn.',
+    )
+  }
+
   const activeEra = currentMessageEra()
   if (activeEra !== LEGACY_MESSAGE_ERA && input.messageEra !== activeEra) {
     throw new QueryJobAdmissionPreparationError(
