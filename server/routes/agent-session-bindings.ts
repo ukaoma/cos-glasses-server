@@ -1064,6 +1064,26 @@ export const ATTACHED_COPY = 'Attached. COS is driving the original thread.'
 export const TURN_SENT_COPY = 'Sent to the original thread.'
 
 /**
+ * The 202 copy. Says QUEUED and not sent, because at this instant the provider has
+ * not been spawned — claiming otherwise would be the same silent-success lie the
+ * ambiguous path exists to avoid.
+ */
+export const TURN_QUEUED_COPY = 'Queued to the original thread. It keeps running if you put your phone away.'
+
+/** Status of a turn that is admitted and still running. */
+export const TURN_PENDING_COPY = 'Still working on your Mac.'
+
+/**
+ * Status of a turn this binding has never heard of.
+ *
+ * Deliberately NOT phrased as "it failed": an unknown key is far more likely to be
+ * a client asking about a turn that never got admitted than a lost one, and
+ * telling the user a turn failed is how a retry puts a second copy into a real
+ * conversation.
+ */
+export const TURN_UNKNOWN_COPY = 'COS has no record of that turn. Nothing was sent.'
+
+/**
  * Is writing into a native desktop thread turned on?
  *
  * OFF BY DEFAULT, permanently and by design (plan 4.9). A user who never sets this
@@ -1594,6 +1614,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     /** Client idempotency key and its binding. Null until the body is validated. */
     let clientTurnId: string | null = null
     let ledgerBindingId: string | null = null
+    /**
+     * Has the 202 already gone out, leaving the ledger as the ONLY way to report
+     * what happened?
+     *
+     * A provider turn runs for minutes — up to a 21 minute default — and the phone
+     * cannot hold a request open across that: iOS suspends the WebView the moment
+     * it is backgrounded. So every gate below runs synchronously, and delivery
+     * alone is backgrounded once the last gate passes.
+     */
+    let queued = false
 
     const respond = (status: number, payload: Record<string, unknown>): void => {
       if (!res.headersSent) res.status(status).json(payload)
@@ -1605,8 +1635,15 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // `completed` and `ambiguous` are the two that must never run twice. Measured
       // 2026-08-16: two byte-identical POSTs both returned completed and the user's
       // real transcript ended up with two copies of the turn.
+      // Once queued, the ledger is the ONLY reporting channel — the 202 is long
+      // gone. A post-202 refusal that recorded nothing would leave the status route
+      // answering `pending` forever, which reads to the user as a turn still
+      // running when it was actually refused minutes ago. Pre-202 refusals keep the
+      // old semantics deliberately: they stay re-evaluatable, because the binding
+      // may well be fine by the time the client retries.
       const outcome = payload.outcome
-      if (clientTurnId !== null && ledgerBindingId !== null && (outcome === 'completed' || outcome === 'ambiguous')) {
+      const terminal = outcome === 'completed' || outcome === 'ambiguous' || (queued && outcome === 'refused')
+      if (clientTurnId !== null && ledgerBindingId !== null && terminal) {
         try {
           deps.bindings.recordTurn?.(ledgerBindingId, clientTurnId, { ...payload, status }, readNow() ?? requestNow)
         } catch (error) {
@@ -1789,6 +1826,28 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (!pinned?.binding) return refuseTurn(registryRefusal(pinned?.reason))
       pinnedBindingId = bindingId
 
+      // THE QUEUE POINT. Every gate is now behind us — body, replay, queued-prompt,
+      // lease, target, epoch, fence, claim, occupancy, head baseline, pin — so a
+      // refusal still reaches the user immediately and precisely. Only the spawn is
+      // backgrounded, because only the spawn takes minutes.
+      //
+      // Nothing below changes. `respond` already writes to the response only when
+      // headers have not been sent, and to the ledger regardless, so each terminal
+      // outcome now lands in the ledger and the status route serves it.
+      queued = true
+      res.status(202).json({
+        turnId,
+        outcome: 'queued',
+        clientTurnId,
+        bindingId,
+        deliveryState: 'pending',
+        retryable: false,
+        changed: false,
+        revision: null,
+        reason: null,
+        reasonCopy: TURN_QUEUED_COPY,
+      })
+
       let delivery: Delivery
       deliveryAttempted = true
       try {
@@ -1900,6 +1959,65 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
       if (claimedKey !== null) guard.release(claimedKey, turnId)
     }
+  })
+
+  /**
+   * What happened to a queued turn.
+   *
+   * Reads the durable turn ledger, which is the same record the replay path serves,
+   * so a poll and a retry can never disagree about what a turn did.
+   *
+   * Gated with the write routes: this reports on attached turns, and an install
+   * that cannot make them has nothing to report on.
+   */
+  if (attachEnabled) router.get('/agent-sessions/bindings/:bindingId/turns/:clientTurnId', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+
+    const bindingId = String(req.params.bindingId ?? '')
+    const clientTurnId = String(req.params.clientTurnId ?? '')
+    if (!BINDING_ID_RE.test(bindingId) || !CLIENT_TURN_ID_RE.test(clientTurnId)) {
+      res.status(400).json({ outcome: 'invalid_request', reasonCopy: TURN_UNKNOWN_COPY })
+      return
+    }
+
+    let entry: { result?: unknown } | null = null
+    try {
+      entry = deps.bindings.findTurn?.(bindingId, clientTurnId) ?? null
+    } catch (error) {
+      console.error(`[agent-session-bindings] turn status read failed: ${error instanceof Error ? error.message : error}`)
+      // A ledger read that THREW is not a turn that did not happen. Reporting
+      // `unknown` here would invite the retry that double-posts.
+      res.status(503).json({ outcome: 'unavailable', reasonCopy: TURN_PENDING_COPY })
+      return
+    }
+
+    if (entry === null) {
+      // Genuinely absent. Admitted-and-running is indistinguishable from
+      // never-admitted in the ledger alone, so this stays 404 and the copy avoids
+      // asserting either.
+      res.status(404).json({ outcome: 'unknown', reasonCopy: TURN_UNKNOWN_COPY })
+      return
+    }
+
+    const stored = entry.result && typeof entry.result === 'object'
+      ? entry.result as Record<string, unknown>
+      : null
+    if (stored === null) {
+      res.status(200).json({ outcome: 'pending', reasonCopy: TURN_PENDING_COPY })
+      return
+    }
+    // `status` is the ledger's record of the ORIGINAL response code and must not
+    // become this poll's status — a refused turn reported correctly is a successful
+    // read.
+    // Surfaced under its own name rather than dropped: the code the turn actually
+    // produced is exactly what a caller that missed the 202's eventual outcome
+    // needs in order to react the way it would have to the original response.
+    const { status: recorded, ...rest } = stored
+    res.status(200).json({
+      ...rest,
+      recordedStatus: typeof recorded === 'number' ? recorded : null,
+      polled: true,
+    })
   })
 
   return router

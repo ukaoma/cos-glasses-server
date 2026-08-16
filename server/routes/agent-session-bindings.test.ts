@@ -238,12 +238,91 @@ async function post(base: string, path: string, body?: unknown): Promise<PostRes
       : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   })
   const text = await res.text()
-  return { status: res.status, body: text.length > 0 ? JSON.parse(text) : null, text }
+  const result = { status: res.status, body: text.length > 0 ? JSON.parse(text) : null, text }
+
+  // A turn is admitted with 202 and delivered in the background, so the outcome a
+  // caller cares about arrives in the durable ledger rather than in this response.
+  // Settle it here and hand back what the turn ACTUALLY produced — the ledger's own
+  // recorded status and terminal body — so a test reads the real result of the real
+  // queued path instead of a fabricated one.
+  //
+  // Deliberately not a synchronous test mode: a sync fixture could not reproduce
+  // the properties that are new here (the 202, the ledger as the only reporting
+  // channel, the status route), which is precisely the class of substitution that
+  // leaves a suite green while the shipped path is dead.
+  if (result.status === 202 && result.body?.outcome === 'queued') {
+    const clientTurnId = result.body?.clientTurnId
+    const bindingId = result.body?.bindingId
+    if (typeof clientTurnId === 'string' && typeof bindingId === 'string') {
+      const final = await settled(base, bindingId, clientTurnId)
+      const { recordedStatus, polled: _polled, ...body } = final as Record<string, unknown>
+      return {
+        status: typeof recordedStatus === 'number' ? recordedStatus : 200,
+        body,
+        text: JSON.stringify(body),
+      }
+    }
+  }
+  return result
 }
 
 const attachPath = (provider = 'claude', threadId = SID) =>
   `/api/agent-sessions/${provider}/${threadId}/attach`
 const turnsPath = (bindingId: string) => `/api/agent-sessions/bindings/${bindingId}/turns`
+
+/**
+ * Wait for a QUEUED turn to reach a terminal outcome, and return it.
+ *
+ * A turn is admitted with 202 and delivered in the background, because a provider
+ * turn runs for minutes and a phone cannot hold a request open across it. So the
+ * outcome these tests care about arrives in the durable turn ledger, not in the
+ * POST response.
+ *
+ * Polls the REAL status route rather than reaching into the route's internals.
+ * There is deliberately no test-only hook to await the background promise: a
+ * backdoor would let the shipped polling path rot while the suite stayed green,
+ * and the poll IS what the client does.
+ */
+async function settled(
+  base: string,
+  bindingId: string,
+  clientTurnId: string,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 4_000
+  let last: PostResult | null = null
+  while (Date.now() < deadline) {
+    const res = await fetch(`${base}${turnsPath(bindingId)}/${clientTurnId}`)
+    const text = await res.text()
+    last = { status: res.status, body: text.length > 0 ? JSON.parse(text) : null, text }
+    const outcome = last.body?.outcome
+    // 404 `unknown` is a legitimate waiting state here as well as a terminal
+    // answer: the ledger only records a turn once it settles.
+    if (outcome !== 'pending' && outcome !== 'unknown' && outcome !== 'unavailable') {
+      return last.body as Record<string, unknown>
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`turn ${clientTurnId} never settled; last=${last?.text ?? 'none'}`)
+}
+
+/**
+ * Run a turn to its terminal outcome and return that outcome.
+ *
+ * Asserts the 202 admission internally, so a test reading the terminal result is
+ * still proving the turn was queued rather than run inline. A synchronous refusal
+ * (every gate before the queue point) is returned as-is: those never reach the
+ * ledger by design, because a pre-delivery "no" must stay re-evaluatable.
+ */
+async function turnOutcome(
+  base: string,
+  a: { bindingId: string },
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const res = await post(base, turnsPath(a.bindingId), body)
+  if (res.status !== 202) return res.body as Record<string, unknown>
+  expect(res.body).toMatchObject({ outcome: 'queued', deliveryState: 'pending' })
+  return settled(base, a.bindingId, String(body.clientTurnId))
+}
 
 async function attach(
   d: AgentSessionBindingsDeps,
@@ -1133,12 +1212,11 @@ describe('a turn delivers only after the thread is re-proved free', () => {
       },
     }))
     const a = await attached(base)
-    const res = await post(base, turnsPath(a.bindingId), {
+    const out = await turnOutcome(base, a, {
       prompt: PROMPT, clientTurnId: 'ct-ml-0001', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
     })
 
-    expect(res.status).toBe(200)
-    expect(res.body).toMatchObject({ outcome: 'completed', deliveryState: 'delivered', retryable: false })
+    expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered', retryable: false })
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({
       provider: 'claude',
