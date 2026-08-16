@@ -27,7 +27,9 @@
 // makes attach REFUSE. A wrong cwd is worse than no attach.
 
 import { createHash } from 'node:crypto'
+import { closeSync, constants as fsConstants, openSync, readSync, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
+import { realNativeHeadDeps, transcriptPathFor, type NativeHeadDeps } from './native-head.js'
 
 export type AttachedWorkspaceProvider = 'claude' | 'codex'
 
@@ -143,5 +145,53 @@ export function resolveAttachedWorkspace(
     path: cwd,
     workspaceFingerprint: fingerprint(cwd),
     sourceFingerprint: fingerprint(path),
+  }
+}
+
+/**
+ * Real filesystem wiring.
+ *
+ * `readHead`, not a tail read: the cwd lives in the EARLY rows (Claude's first
+ * message row, Codex's session meta row), and the tail of a 13 GB rollout does not
+ * contain it.
+ *
+ * O_NONBLOCK for the same reason `occupancy-probes.readFile` needs it — `openSync`
+ * on a writer-less FIFO never returns, and it is a synchronous syscall on Node's
+ * single thread, so one planted path would wedge the whole server rather than this
+ * request. The `isFile` check runs after the open and cannot prevent that alone.
+ */
+export function realAttachedWorkspaceDeps(
+  headDeps: NativeHeadDeps = realNativeHeadDeps(),
+): AttachedWorkspaceDeps {
+  return {
+    transcriptPath: (provider, threadId) => transcriptPathFor(provider, threadId, headDeps),
+
+    readHead: (path, maxBytes) => {
+      let fd: number | null = null
+      try {
+        const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0
+        const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0
+        fd = openSync(path, fsConstants.O_RDONLY | noFollow | nonBlock)
+        const stat = statSync(path, { throwIfNoEntry: false })
+        if (stat === undefined || !stat.isFile()) return null
+        const size = Math.min(maxBytes, stat.size)
+        if (size <= 0) return null
+        const buffer = Buffer.allocUnsafe(size)
+        const read = readSync(fd, buffer, 0, size, 0)
+        return buffer.subarray(0, read).toString('utf8')
+      } catch {
+        return null
+      } finally {
+        if (fd !== null) { try { closeSync(fd) } catch { /* already gone */ } }
+      }
+    },
+
+    // ENOENT is absent; every other errno is "cannot tell" and throws, which the
+    // resolver turns into a refusal. A bare catch here would let an unreadable
+    // workspace look like a deleted one.
+    dirExists: (path) => {
+      const stat = statSync(path, { throwIfNoEntry: false })
+      return stat !== undefined && stat.isDirectory()
+    },
   }
 }

@@ -375,6 +375,28 @@ function messageRowIdentities(provider: NativeHeadProvider, tail: TailRead): str
  * workspace can produce — is an ambiguity, and an ambiguity is an unknown. The
  * store's prefix-match-first-wins would have picked one at random.
  */
+/**
+ * Locate the one transcript for a thread, or null when it is not exactly one.
+ *
+ * Exported so the workspace resolver reuses this scan instead of reimplementing
+ * the ambiguity rule. Two modules disagreeing about which file IS the thread is
+ * the same class of drift that let a truncated id through the occupancy detector.
+ */
+export function transcriptPathFor(
+  provider: string,
+  threadId: string,
+  deps: NativeHeadDeps,
+): string | null {
+  try {
+    if (!isValidNativeThreadId(threadId)) return null
+    if (provider === 'claude') return claudeTranscriptPath(threadId, deps)
+    if (provider === 'codex') return codexRolloutPath(threadId, deps)
+    return null
+  } catch {
+    return null
+  }
+}
+
 function claudeTranscriptPath(threadId: string, deps: NativeHeadDeps): string | null {
   const root = deps.dirs.claudeProjectsDir
   if (!deps.dirExists(root)) return null

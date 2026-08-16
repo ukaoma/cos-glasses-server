@@ -24,6 +24,11 @@ import { createAgentSessionBindingsRouter } from './routes/agent-session-binding
 import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
 import { realOccupancyDirs, realOccupancyProbes } from './lib/occupancy-probes.js'
+import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
+import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
+import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
+import { recordCosSpawn } from './lib/agent-session-ownership-store.js'
+import { threadOccupancy } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
@@ -271,6 +276,75 @@ app.use((_req, _res, next) => {
 // or unreadable store yields a degraded registry rather than a silent empty one.
 const agentSessionBindingRegistry = AgentSessionBindingRegistry.open()
 
+// Built once. Each of these reads the disk, so sharing them keeps an attach from
+// re-deriving roots per request.
+const occupancyProbes = realOccupancyProbes(cosSpawnedPids)
+const occupancyDirs = realOccupancyDirs()
+const nativeHeadDeps = realNativeHeadDeps()
+const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
+
+/**
+ * The shim between the route's request shape and the adapter's.
+ *
+ * The route was written against a contract that carries fingerprints and a veto
+ * hook; the adapter needs a real cwd, a permission policy, and its dependencies.
+ * Reconciling them is the composition root's job — putting it in either module
+ * would make one of them know about the other's shape.
+ *
+ * OWNERSHIP IS RECORDED EXACTLY ONCE, and the ordering is the safety property.
+ * `recordCosSpawn` is authoritative because the adapter calls it with a MEASURED
+ * kernel start on a documented no-await chain. The route's `onSpawn` veto is then
+ * consulted AFTER the ledger entry exists, so a refusal can never leave a live
+ * child that COS does not recognise as its own. Any return other than the exact
+ * string 'recorded' makes the adapter SIGKILL the child and release before a
+ * single prompt byte is written.
+ */
+const deliverAttachedTurnForRoute = async (request: {
+  provider: 'claude' | 'codex'
+  nativeThreadId: string
+  prompt: string
+  onSpawn: (pid: number) => boolean
+}): Promise<unknown> => {
+  // Resolved here, not stored on the binding: the cwd is read from the transcript,
+  // which records it verbatim. Decoding the project slug is lossy — this Mac's own
+  // workspace path contains both a space and hyphens.
+  const workspace = resolveAttachedWorkspace(
+    request.provider, request.nativeThreadId, attachedWorkspaceDeps,
+  )
+  // No cwd means no attach. Never fall back to the server's own working directory,
+  // which is wherever the LaunchAgent happened to start.
+  if (workspace === null) {
+    return { ok: false, delivery: 'not_attempted', reason: 'target_unresolvable' }
+  }
+
+  const base = realAttachedTurnDeps(() => {
+    // The final occupancy re-check, synchronous and immediately before spawn
+    // (plan 4.3 step 6). A newly appeared owner is terminal, not a warning.
+    const verdict = threadOccupancy(
+      request.provider, request.nativeThreadId, occupancyProbes, occupancyDirs,
+    )
+    return { attachable: verdict.attachable, reason: verdict.reason }
+  })
+
+  return deliverAttachedTurn({
+    provider: request.provider,
+    nativeThreadId: request.nativeThreadId,
+    prompt: request.prompt,
+    cwd: workspace.path,
+    // The only policy this build accepts. The adapter refuses anything else and
+    // asserts no bypass/always-approve flag reaches the argv (plan 4.7).
+    policy: 'read_only',
+    deps: {
+      ...base,
+      recordSpawn: (pid: number, startMs: number) => {
+        const outcome = recordCosSpawn(pid, startMs)
+        if (outcome !== 'recorded') return outcome
+        return request.onSpawn(pid) ? 'recorded' : 'route_refused_ownership'
+      },
+    },
+  })
+}
+
 // API routes
 app.use('/api', healthRouter)
 app.use('/api', diagRouter)
@@ -294,9 +368,20 @@ app.use('/api', claudeSessionsRouter)
 // (`/agent-sessions/bindings`, `/agent-sessions/:provider/:threadId/attachability`)
 // and cannot shadow that router's `/agent-sessions/:provider/:id` transcript route.
 app.use('/api', createAgentSessionBindingsRouter({
-  probes: realOccupancyProbes(cosSpawnedPids),
-  dirs: realOccupancyDirs(),
+  probes: occupancyProbes,
+  dirs: occupancyDirs,
   now: () => Date.now(),
+  resolveTarget: (provider, threadId) => {
+    const workspace = resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)
+    // Only the fingerprints cross this boundary. The route persists what it is
+    // given, and plan 3.3 keeps a filesystem path off anything client-visible.
+    return workspace === null ? null : {
+      workspaceFingerprint: workspace.workspaceFingerprint,
+      sourceFingerprint: workspace.sourceFingerprint,
+    }
+  },
+  nativeHead: (provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps),
+  deliverAttachedTurn: deliverAttachedTurnForRoute as never,
   // One instance per process. The epoch high-water mark is only monotonic if a
   // single reader owns the durable store, so this must never be constructed twice.
   // `open()` never throws: an unreadable store yields a DEGRADED registry whose
