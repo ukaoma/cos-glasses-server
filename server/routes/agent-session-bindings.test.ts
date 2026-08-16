@@ -470,6 +470,7 @@ describe('the feature gate (plan 4.9): OFF is the pre-existing behavior', () => 
     for (const path of [
       `/api/agent-sessions/claude/${SID}/attach`,
       '/api/agent-sessions/bindings/bind-1/turns',
+      // Fork is deliberately NOT in this list — see the fork test below.
     ]) {
       const res = await fetch(`${base}${path}`, {
         method: 'POST',
@@ -478,6 +479,26 @@ describe('the feature gate (plan 4.9): OFF is the pre-existing behavior', () => 
       })
       expect(res.status).toBe(404)
     }
+  })
+
+  it('DOES route FORK even when the gate is off', async () => {
+    // The correction. With fork behind the same flag, the shipping default was
+    // incoherent: seventeen refusal strings say "Fork it instead", the lens draws
+    // an enabled Fork row, and the tap got a bare Express 404 with no reason.
+    //
+    // The counter-argument is real and worth stating: fork does spawn a provider
+    // CLI in the user's workspace, so it is not free. But the flag exists to gate
+    // WRITING INTO AN EXISTING CONVERSATION, which fork does not do — the source
+    // stays byte-identical, measured — and Miles specified the off-state as
+    // "read-only sessions with the fork-only functionality". Fork available while
+    // off is the requirement, not an accident.
+    const base = await start(deps({ attachEnabled: false }))
+    const res = await fetch(`${base}/api/agent-sessions/claude/${SID}/fork`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello' }),
+    })
+    expect(res.status).not.toBe(404)
   })
 
   it('DOES route them when enabled, so 404 cannot become the answer in both states', async () => {
@@ -1455,6 +1476,85 @@ function heldDelivery() {
   }
 }
 
+// ---------------------------------------------------------------------- fork
+//
+// `FORKED_SID` is the real id `claude --fork-session` produced from a live source
+// thread on this machine on 2026-08-16. The route's own contract is that it never
+// puts a value like this on the wire, so the redaction tests below are only
+// meaningful with a real one in the fixture.
+
+const FORKED_SID = 'd92ad220-34b4-4f67-b2d8-1d1dd00a2dce'
+const FORK_BODY = { cosSessionId: 'cos/chat:42', prompt: PROMPT }
+
+const forkPath = (provider = 'claude', threadId = SID) =>
+  `/api/agent-sessions/${provider}/${threadId}/fork`
+
+/** The shape `server/lib/fork-thread.ts` really returns on a clean fork. */
+const FORK_SUCCESS = {
+  ok: true,
+  provider: 'claude',
+  sourceNativeThreadId: SID,
+  newNativeThreadId: FORKED_SID,
+  forkState: 'created',
+  sourceIntegrity: 'verified_unchanged',
+  reason: null,
+  exitCode: 0,
+  durationMs: 812,
+} as const
+
+/** Provably nothing was created: the binary was never found. */
+const FORK_CLEAN_FAILURE = {
+  ok: false,
+  provider: 'claude',
+  sourceNativeThreadId: SID,
+  newNativeThreadId: null,
+  forkState: 'none',
+  sourceIntegrity: 'unverified',
+  reason: 'binary_not_found',
+  detail: 'claude:not_found',
+  exitCode: null,
+  stderrClass: 'none',
+  durationMs: 4,
+} as const
+
+/** The worst outcome the feature has: the ORIGINAL moved while we copied it. */
+const FORK_MUTATED = {
+  ok: false,
+  provider: 'claude',
+  sourceNativeThreadId: SID,
+  newNativeThreadId: FORKED_SID,
+  forkState: 'created',
+  sourceIntegrity: 'mutated',
+  reason: 'source_thread_mutated',
+  detail: 'after:ok',
+  exitCode: 0,
+  stderrClass: 'none',
+  durationMs: 903,
+} as const
+
+function forkDeps(over: Partial<AgentSessionBindingsDeps> = {}): AgentSessionBindingsDeps {
+  return writeDeps({
+    forkThread: () => FORK_SUCCESS,
+    // Server-side, absolute. The client never sends this.
+    resolveForkWorkspace: () => CWD,
+    ...over,
+  })
+}
+
+function heldFork() {
+  let open!: () => void
+  const gate = new Promise<void>(resolve => { open = resolve })
+  const seen = { n: 0 }
+  return {
+    get calls() { return seen.n },
+    open,
+    // Only the FIRST call is held. Gating every call deadlocks any test that needs
+    // a second fork to COMPLETE while the first is still in flight, which is
+    // exactly the concurrency this helper exists to set up.
+    fork: async () => { if (++seen.n === 1) await gate; return FORK_SUCCESS },
+  }
+}
+
 describe('one COS turn per native target at a time', () => {
   it('refuses a second turn while the first is still in flight, then allows one after', async () => {
     const held = heldDelivery()
@@ -1976,10 +2076,41 @@ describe('every way a write can be refused reaches the wire with words', () => {
       reason: 'turn_failed',
       run: () => turnOnFake(fakeReg(fakeBinding(), { get: () => { throw new Error('EIO') } })),
     },
+    // ------------------------------------------------------------------ fork
+    { reason: 'fork_unwired', run: () => forkOnce({ forkThread: undefined }) },
+    { reason: 'fork_unsupported_provider', run: () => forkOnce({}, 'cursor') },
+    { reason: 'fork_invalid_thread_id', run: () => forkOnce({}, 'claude', '6d12ff82') },
+    { reason: 'fork_workspace_unresolvable', run: () => forkOnce({ resolveForkWorkspace: () => null }) },
+    {
+      reason: 'fork_in_progress',
+      run: async () => {
+        // Bounded concurrency matters on this route specifically: it spawns a
+        // provider CLI, so an unclaimed retry loop is one child per request.
+        const held = heldFork()
+        const base = await start(forkDeps({ forkThread: held.fork }))
+        const inFlight = post(base, forkPath(), FORK_BODY)
+        while (held.calls === 0) await new Promise(r => setTimeout(r, 2))
+        const second = await post(base, forkPath(), FORK_BODY)
+        held.open()
+        await inFlight
+        return second
+      },
+    },
+    { reason: 'fork_failed', run: () => forkOnce({ forkThread: () => FORK_CLEAN_FAILURE }) },
+    { reason: 'fork_source_mutated', run: () => forkOnce({ forkThread: () => FORK_MUTATED }) },
+    { reason: 'fork_orphan_possible', run: () => forkOnce({ forkThread: () => ({ ok: false, forkState: 'possible' }) }) },
   ]
 
   async function turnOnFake(bindings: BindingRegistry): Promise<PostResult> {
     return post(await start(writeDeps({ bindings })), turnsPath('bnd-2026-08-15-01'), fakeClaim())
+  }
+
+  function forkOnce(
+    over: Partial<AgentSessionBindingsDeps> = {},
+    provider = 'claude',
+    threadId = SID,
+  ): Promise<PostResult> {
+    return start(forkDeps(over)).then(base => post(base, forkPath(provider, threadId), FORK_BODY))
   }
 
   it('covers the whole refusal vocabulary, so a new one cannot ship untested', () => {
@@ -2115,5 +2246,289 @@ describe('a repeated POST replays instead of delivering twice', () => {
     expect(retry.body.outcome).toBe('completed')
     expect(retry.body.replayed).toBeUndefined()
     expect(calls).toHaveLength(1)
+  })
+})
+
+// =============================================================================
+// Fork
+//
+// The action seventeen refusal strings already recommend. Everything below drives
+// the real HTTP route; the only fake is the fork module itself, because spawning a
+// real provider CLI in a unit test is forbidden here.
+
+describe('fork does not ask whether the thread is busy', () => {
+  it('forks a thread that a live desktop process is holding', async () => {
+    // THE WHOLE POINT OF THE ROUTE. `probes()` describes a thread owned by a live
+    // desktop Claude — the exact condition that makes attach refuse. Fork appends
+    // to nothing, so it must proceed. A gate added here would refuse precisely
+    // when fork is the only path the user has left.
+    const d = forkDeps({ probes: probes() })
+    const { status, body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(status).toBe(201)
+    expect(body.forked).toBe(true)
+  })
+
+  it('refuses to ATTACH to that same thread, so the contrast is real', async () => {
+    // Without this the test above could be passing because the fixture is free
+    // rather than because fork ignores occupancy.
+    const { status, body } = await attach(writeDeps({ probes: probes() }))
+    expect(status).not.toBe(201)
+    expect(body.reason).toBe('live_desktop_process')
+  })
+
+  it('forks without touching a single probe', async () => {
+    // `hostileProbes()` throws on contact. A 201 is only reachable if no occupancy
+    // work happened at all — stronger than asserting a particular verdict.
+    const d = forkDeps({ probes: hostileProbes() })
+    const { status } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(status).toBe(201)
+  })
+
+  it('forks a thread that is already attached to a COS chat', async () => {
+    // `native_target_busy` guards a WRITE into the target. A copy is not a write.
+    const base = await start(forkDeps())
+    await attached(base)
+    const { status, body } = await post(base, forkPath(), FORK_BODY)
+    expect(status).toBe(201)
+    expect(body.forked).toBe(true)
+  })
+
+  it('forks a thread whose target has been fenced by an ambiguous turn', async () => {
+    // A fence means a COS turn may or may not have landed, and the user is told to
+    // go and look. Copying it is safe and is very often the next thing they want,
+    // so the fence must not reach this route.
+    const base = await start(forkDeps({ deliverAttachedTurn: async () => { throw new Error('lost') } }))
+    const a = await attached(base)
+    const fenced = await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-fence-fork-1',
+    })
+    expect(fenced.body.outcome).toBe('ambiguous')
+
+    const { status, body } = await post(base, forkPath(), FORK_BODY)
+    expect(status).toBe(201)
+    expect(body.forked).toBe(true)
+  })
+})
+
+describe('what the fork route puts on the wire', () => {
+  it('answers 201 with an opaque reference and a named integrity verdict', async () => {
+    const { status, body } = await post(await start(forkDeps()), forkPath(), FORK_BODY)
+    expect(status).toBe(201)
+    expect(body.forked).toBe(true)
+    expect(body.reason).toBeNull()
+    expect(typeof body.reasonCopy).toBe('string')
+    expect(body.reasonCopy.length).toBeGreaterThan(0)
+    expect(body.forkRef).toMatch(/^[0-9a-f]{32}$/)
+    expect(body.sourceIntegrity).toBe('verified_unchanged')
+    expect(body.orphanPossible).toBe(false)
+  })
+
+  it('never puts the forked thread id, the source id, the prompt or a path on the wire', async () => {
+    // Same redaction contract as every other route here: a fresh fork's id is
+    // exactly as identifying as an existing thread's.
+    const { text } = await post(await start(forkDeps()), forkPath(), FORK_BODY)
+    expect(text).not.toContain(FORKED_SID)
+    expect(text).not.toContain(SID)
+    expect(text).not.toContain(PROMPT)
+    expect(text).not.toContain('/')
+  })
+
+  it('reports unverified integrity as unverified, never as confirmed', async () => {
+    // "COS could not read the original at both ends" must not be rendered as
+    // "the original is confirmed untouched".
+    const d = forkDeps({ forkThread: () => ({ ...FORK_SUCCESS, sourceIntegrity: 'unverified' }) })
+    const { status, body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(status).toBe(201)
+    expect(body.sourceIntegrity).toBe('unverified')
+  })
+
+  it('hands back the same reference for the same forked thread', async () => {
+    // Deterministic, so a client can recognise it across requests. It is a digest
+    // of values the caller already holds, not a secret.
+    const base = await start(forkDeps())
+    const first = await post(base, forkPath(), FORK_BODY)
+    const second = await post(base, forkPath(), FORK_BODY)
+    expect(first.body.forkRef).toBe(second.body.forkRef)
+  })
+
+  it('sets no-store, because a fork reference names a thread that did not exist before', async () => {
+    const base = await start(forkDeps())
+    const res = await fetch(`${base}${forkPath()}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(FORK_BODY),
+    })
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
+  })
+})
+
+describe('the fork route resolves its own execution fields', () => {
+  it('spawns in the workspace the SERVER resolved, ignoring one the client sent', async () => {
+    // Plan 4.2: the client may not send a path, an executable, a model or a
+    // permission mode. A body carrying `cwd` must change nothing.
+    const seen: any[] = []
+    const d = forkDeps({
+      forkThread: req => { seen.push(req); return FORK_SUCCESS },
+      resolveForkWorkspace: () => CWD,
+    })
+    await post(await start(d), forkPath(), { ...FORK_BODY, cwd: '/tmp/attacker', policy: 'agent' })
+    expect(seen[0].cwd).toBe(CWD)
+    expect(seen[0].policy).toBe('read_only')
+  })
+
+  it('passes the path provider and thread id straight through', async () => {
+    const seen: any[] = []
+    const d = forkDeps({ forkThread: req => { seen.push(req); return FORK_SUCCESS } })
+    await post(await start(d), forkPath('claude', SID), FORK_BODY)
+    expect(seen[0].provider).toBe('claude')
+    expect(seen[0].nativeThreadId).toBe(SID)
+    expect(seen[0].prompt).toBe(PROMPT)
+  })
+
+  it('refuses a relative workspace rather than spawning against the server cwd', async () => {
+    // A relative path resolves against the SERVER's working directory, so the copy
+    // would land in the wrong project while every response looked correct.
+    let called = 0
+    const d = forkDeps({
+      resolveForkWorkspace: () => 'server/lib',
+      forkThread: () => { called++; return FORK_SUCCESS },
+    })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.reason).toBe('fork_workspace_unresolvable')
+    expect(called).toBe(0)
+  })
+
+  it('refuses when the workspace resolver throws', async () => {
+    const d = forkDeps({ resolveForkWorkspace: () => { throw new Error('EACCES') } })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.reason).toBe('fork_workspace_unresolvable')
+  })
+
+  const badBodies: [string, unknown][] = [
+    ['no body at all', undefined],
+    ['a missing prompt', { cosSessionId: 'cos-1' }],
+    ['a blank prompt', { cosSessionId: 'cos-1', prompt: '   ' }],
+    ['a non-string prompt', { cosSessionId: 'cos-1', prompt: 42 }],
+    ['a missing cosSessionId', { prompt: 'hello' }],
+    ['a malformed cosSessionId', { cosSessionId: 'has spaces', prompt: 'hello' }],
+  ]
+  for (const [label, body] of badBodies) {
+    it(`refuses ${label} without calling the fork module`, async () => {
+      let called = 0
+      const d = forkDeps({ forkThread: () => { called++; return FORK_SUCCESS } })
+      const res = await post(await start(d), forkPath(), body)
+      expect(res.body.reason).toBe('invalid_request')
+      expect(called).toBe(0)
+    })
+  }
+})
+
+describe('the fork route believes nothing the module did not say', () => {
+  it('refuses a success whose new id is the SOURCE id', async () => {
+    // The router does not import `fork-thread.ts`, so a structurally-matching
+    // object would otherwise be taken at its word — and the value at stake is
+    // whether COS hands the user their own LIVE thread back, labelled as a copy.
+    const d = forkDeps({ forkThread: () => ({ ...FORK_SUCCESS, newNativeThreadId: SID }) })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.forked).toBe(false)
+    expect(body.reason).toBe('fork_source_mutated')
+  })
+
+  it('refuses a success whose new id is not a valid thread id', async () => {
+    const d = forkDeps({ forkThread: () => ({ ...FORK_SUCCESS, newNativeThreadId: 'd92ad220' }) })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.forked).toBe(false)
+    expect(body.orphanPossible).toBe(true)
+  })
+
+  it('refuses a success carrying an integrity verdict this build does not know', async () => {
+    const d = forkDeps({ forkThread: () => ({ ...FORK_SUCCESS, sourceIntegrity: 'probably_fine' }) })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.forked).toBe(false)
+    expect(body.orphanPossible).toBe(true)
+  })
+
+  it('treats an unrecognised result as possibly-orphaned, not as a clean failure', async () => {
+    // "I do not recognise this" is not "nothing happened". Only an explicit
+    // forkState of `none` earns the clean failure.
+    for (const result of [null, undefined, [], 'done', { status: 'ok' }, { ok: false }]) {
+      const d = forkDeps({ forkThread: () => result })
+      const { body } = await post(await start(d), forkPath(), FORK_BODY)
+      expect(body.forked).toBe(false)
+      expect(body.orphanPossible).toBe(true)
+    }
+  })
+
+  it('reports a clean failure as retryable with no orphan', async () => {
+    const { body } = await post(await start(forkDeps({ forkThread: () => FORK_CLEAN_FAILURE })), forkPath(), FORK_BODY)
+    expect(body.reason).toBe('fork_failed')
+    expect(body.orphanPossible).toBe(false)
+    expect(body.retryable).toBe(true)
+  })
+
+  it('does not offer a retry after the original was mutated', async () => {
+    // The user needs to look at their own thread before anything else touches it.
+    const { body } = await post(await start(forkDeps({ forkThread: () => FORK_MUTATED })), forkPath(), FORK_BODY)
+    expect(body.reason).toBe('fork_source_mutated')
+    expect(body.retryable).toBe(false)
+  })
+
+  it('reports a possible orphan when the module throws', async () => {
+    const d = forkDeps({ forkThread: () => { throw new Error('spawn exploded') } })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.reason).toBe('fork_orphan_possible')
+    expect(body.orphanPossible).toBe(true)
+  })
+
+  it('reports a possible orphan when the module rejects', async () => {
+    const d = forkDeps({ forkThread: async () => { throw new Error('async explosion') } })
+    const { body } = await post(await start(d), forkPath(), FORK_BODY)
+    expect(body.orphanPossible).toBe(true)
+  })
+
+  it('releases the per-source claim so a later fork is not blocked forever', async () => {
+    // A claim leaked on the failure path locks the source out of forking for the
+    // life of the process, which is the one way this route could become worse than
+    // not existing.
+    const base = await start(forkDeps({ forkThread: () => FORK_CLEAN_FAILURE }))
+    await post(base, forkPath(), FORK_BODY)
+    const second = await post(base, forkPath(), FORK_BODY)
+    expect(second.body.reason).toBe('fork_failed')
+    expect(second.body.reason).not.toBe('fork_in_progress')
+  })
+
+  it('releases the claim after the module throws', async () => {
+    const base = await start(forkDeps({ forkThread: () => { throw new Error('boom') } }))
+    await post(base, forkPath(), FORK_BODY)
+    const second = await post(base, forkPath(), FORK_BODY)
+    expect(second.body.reason).not.toBe('fork_in_progress')
+  })
+
+  it('lets a different thread fork while one is in flight', async () => {
+    // The claim is per SOURCE, not global. A single serialising lock would make
+    // fork useless the moment two chats used it at once.
+    const held = heldFork()
+    const base = await start(forkDeps({ forkThread: held.fork }))
+    const inFlight = post(base, forkPath('claude', SID), FORK_BODY)
+    while (held.calls === 0) await new Promise(r => setTimeout(r, 2))
+    const other = await post(base, forkPath('claude', OTHER_SID), FORK_BODY)
+    held.open()
+    await inFlight
+    expect(other.status).toBe(201)
+  })
+
+  it('does not let a fork claim block a continuation on the same thread', async () => {
+    // Distinct key namespaces. A fork and a turn on one thread are independent.
+    const held = heldFork()
+    const base = await start(forkDeps({ forkThread: held.fork }))
+    const a = await attached(base)
+    const inFlight = post(base, forkPath('claude', SID), FORK_BODY)
+    while (held.calls === 0) await new Promise(r => setTimeout(r, 2))
+    const turn = await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-fork-parallel-1',
+    })
+    held.open()
+    await inFlight
+    expect(turn.body.outcome).toBe('completed')
   })
 })

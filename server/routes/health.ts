@@ -61,6 +61,14 @@ import { getMeetingFinalizationSnapshot } from '../lib/meeting-finalization-jobs
 import { resolveMeetingLibrary } from '../lib/cos-operations-meetings.js'
 import { videoUploadV2Capability } from '../lib/video-upload-v2.js'
 import { MAX_MODEL_IMAGE_INPUTS } from '../lib/query-attachments.js'
+// Continue-vs-Fork is decided before a thread is named, so it cannot be
+// discovered from the per-thread attachability probe. ABSENT MEANS DISABLED on
+// all three fields: an older server omits them and every client must read that as
+// off. The rule, and the only sanctioned reader of it, live in the module.
+import {
+  threadAttachCapability,
+  threadAttachHealthFields,
+} from '../lib/thread-attach-capability.js'
 
 export const healthRouter = Router()
 
@@ -275,9 +283,19 @@ healthRouter.get('/health', async (_req, res) => {
     })),
   }
   const meetingLibrary = resolveMeetingLibrary()
+  // Read per request. In production this is the same answer the bindings router
+  // resolved at boot — server/bootstrap.js populates process.env before either
+  // module is imported — so the two cannot disagree.
+  //
+  // NAMED GAP: route registration IS resolved once, at wiring time. Something
+  // mutating process.env after boot would make this field lead the routes. The
+  // blast radius is a Continue button that 404s, never a write: the attach route
+  // is its own gate and an unregistered route cannot be talked into running.
+  const threadAttach = threadAttachCapability()
   res.json({
     ...checks,
     server_version: managedServerVersion(),
+    ...threadAttachHealthFields(threadAttach),
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),
@@ -370,8 +388,14 @@ healthRouter.get('/models', async (req, res) => {
   const richMedia = await getRichMediaProcessingCapabilities()
   const videoUploadV2 = videoUploadV2Capability(richMedia.video)
   const cursorOptions = cursorCatalog.options.filter(option => !!option.id)
+  // Same helper and the same three key names as /api/health, for the reason
+  // liveCues carries three lines below: the companion's 15s liveness poll reads
+  // THIS surface and Main.ts states outright that /api/health alone is not used,
+  // so a capability published only there is invisible to the phone.
+  const threadAttach = threadAttachCapability()
   res.json({
     ...catalog,
+    ...threadAttachHealthFields(threadAttach),
     options: [
       ...(catalog.options ?? []),
       ...cursorOptions,

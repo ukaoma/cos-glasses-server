@@ -26,6 +26,7 @@ import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
 import { realOccupancyDirs, realOccupancyProbes } from './lib/occupancy-probes.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
+import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
@@ -376,6 +377,43 @@ const deliverAttachedTurnForRoute = async (request: {
   })
 }
 
+/**
+ * The shim for FORK — the action seventeen refusal strings in this feature already
+ * recommend, and which until 6.29 existed nowhere in the server or the app.
+ *
+ * Deliberately much thinner than the attached shim above, and every difference is
+ * load-bearing:
+ *
+ *  - NO PREFLIGHT. `realAttachedTurnDeps` takes an occupancy re-check because it is
+ *    about to APPEND to a thread someone may have open on their desktop. A fork
+ *    appends to nothing: verified byte-for-byte on both providers on 2026-08-16,
+ *    source sha256 unchanged across the run. A live desktop owner must therefore
+ *    NOT block a fork — gating it here would refuse at exactly the moment fork is
+ *    the only path the user has left.
+ *  - NO `onSpawn` HAND-BACK. The turns route owns its own ledger record because it
+ *    holds the `recordedPids` list that its `finally` releases from. The fork route
+ *    holds no such list, so `fork-thread.ts` records and releases the child itself,
+ *    exactly once, on every exit path — which keeps the recorded:released ratio the
+ *    operator reads for leak detection at 1:1.
+ *  - A WATERMARK IS SUPPLIED, and it is the point. `nativeHead` of the SOURCE, read
+ *    once before the spawn and once after the child settles, is what turns "a fork
+ *    does not touch the original" from a promise into a checked property. It is
+ *    SYNCHRONOUS (native-head.ts:491), which is what lets the module read the
+ *    baseline at the spawn boundary without an await. Unwired, the module can only
+ *    ever report `unverified`, and it would report that honestly rather than
+ *    claiming a verification it never performed.
+ */
+const forkThreadForRoute = (request: {
+  provider: 'claude' | 'codex'
+  nativeThreadId: string
+  prompt: string
+  cwd: string
+  policy: 'read_only'
+}): Promise<unknown> => forkThread({
+  ...request,
+  deps: realForkDeps((provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps)),
+})
+
 // API routes
 app.use('/api', healthRouter)
 app.use('/api', diagRouter)
@@ -413,6 +451,13 @@ app.use('/api', createAgentSessionBindingsRouter({
   },
   nativeHead: (provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps),
   deliverAttachedTurn: deliverAttachedTurnForRoute as never,
+  forkThread: forkThreadForRoute,
+  // The fork's real spawn directory. Separate from `resolveTarget` above, which
+  // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path
+  // off anything client-visible. Null refuses: never fall back to the server's own
+  // working directory, which is wherever the LaunchAgent happened to start.
+  resolveForkWorkspace: (provider, threadId) =>
+    resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)?.path ?? null,
   // One instance per process. The epoch high-water mark is only monotonic if a
   // single reader owns the durable store, so this must never be constructed twice.
   // `open()` never throws: an unreadable store yields a DEGRADED registry whose

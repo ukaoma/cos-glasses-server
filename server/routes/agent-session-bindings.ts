@@ -331,6 +331,39 @@ export interface AgentSessionBindingsDeps {
     release: (pid: number) => boolean
   }
 
+  // --------------------------------------------------------------- fork side
+
+  /**
+   * `forkThread` from `server/lib/fork-thread.ts`.
+   *
+   * Wire it as `req => forkThread({ ...req, deps: realForkDeps(watermark) })`.
+   * Unwired means the fork route refuses; it never falls back to the attached
+   * adapter, which would append to the very thread fork exists to leave alone.
+   */
+  forkThread?: (request: ForkRouteRequest) => Promise<unknown> | unknown
+
+  /**
+   * Absolute directory the forked provider run happens in, or null.
+   *
+   * SEPARATE from `resolveTarget` on purpose: that one deliberately returns only
+   * fingerprints, because plan 3.3 keeps a filesystem path off anything
+   * client-visible, and a fork needs a real path to spawn in. Wire it as
+   * `(p, id) => resolveAttachedWorkspace(p, id, deps)?.path ?? null`. Null is a
+   * refusal — `attached-workspace.ts` records that a wrong cwd makes the provider
+   * write a NEW session rather than the one asked for, which for a fork means the
+   * copy silently lands in the wrong project.
+   */
+  resolveForkWorkspace?: (provider: BindableProvider, nativeThreadId: string) => string | null
+
+  /**
+   * Where an opaque fork reference is exchanged for the thread it names.
+   *
+   * Defaults to a per-router instance. Injectable so the follow-on work — teaching
+   * attach to accept a `forkRef` instead of a native id in the path — can share
+   * one store between the two routes rather than inventing a second.
+   */
+  forkRefs?: ForkRefStore
+
   /** Lease TTL for a new binding. */
   attachTtlMs?: number
   /** Upper bound on one prompt. A prompt is not a payload. */
@@ -425,6 +458,23 @@ export type WriteRefusal =
   | 'provider_never_opened'
   | 'delivery_ambiguous'
   | 'turn_failed'
+  // ------------------------------------------------------------------- fork
+  //
+  // Fork gets its OWN members rather than reusing the ones above, and the reason
+  // is entirely in the copy. Every continuation refusal ends with the words "Fork
+  // it instead", because fork is the fallback. Reusing one of them on the fork
+  // route tells a user whose fork just failed to go and fork it — which reads as
+  // a bug, and leaves them with no next step at all. So `unsupported_provider`
+  // and `fork_unsupported_provider` are the same condition with different
+  // endings, deliberately, and neither route may borrow the other's.
+  | 'fork_unwired'
+  | 'fork_unsupported_provider'
+  | 'fork_invalid_thread_id'
+  | 'fork_workspace_unresolvable'
+  | 'fork_in_progress'
+  | 'fork_failed'
+  | 'fork_source_mutated'
+  | 'fork_orphan_possible'
 
 /**
  * Footer copy for the refusals that are not occupancy reasons.
@@ -482,6 +532,28 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'COS lost track of this turn after sending it. Open the thread on your Mac and check before sending again.',
   turn_failed:
     'COS could not run this turn. Nothing was sent. You can try again.',
+
+  // Fork copy. No sentence here may end with "Fork it instead" — this IS the fork,
+  // and pointing a failed fork back at itself is a dead end rather than an action.
+  fork_unwired:
+    'This build cannot copy a thread into a new one. Open it on your Mac instead.',
+  fork_unsupported_provider:
+    'This assistant cannot be copied into a new thread from COS yet.',
+  fork_invalid_thread_id:
+    'That thread reference is not a valid id, so there is nothing to copy.',
+  fork_workspace_unresolvable:
+    'COS could not work out where this thread lives, so it will not copy it. Open it on your Mac instead.',
+  fork_in_progress:
+    'A copy of this thread is already being made. Wait for it to finish.',
+  fork_failed:
+    'COS could not copy this thread. Your original is untouched. You can try again.',
+  // The one outcome this whole feature exists to prevent, reported plainly. No
+  // retry offered: the user needs to look at the original before anything else
+  // touches it.
+  fork_source_mutated:
+    'The original thread changed while COS was copying it. Open the original on your Mac and check it before doing anything else.',
+  fork_orphan_possible:
+    'COS lost track of the copy it was making. Your original is untouched, but a partial copy may exist on your Mac.',
 }
 
 export function writeReasonCopy(reason: WriteRefusal): string {
@@ -508,6 +580,7 @@ const CAPABILITY_REFUSALS: ReadonlySet<WriteRefusal> = new Set<WriteRefusal>([
   'binding_registry_degraded',
   'binding_registry_unavailable',
   'adapter_unwired',
+  'fork_unwired',
 ])
 
 export function refusalStatus(reason: WriteRefusal): number {
@@ -851,6 +924,118 @@ export function isOpaque(value: unknown): value is string {
   return typeof value === 'string' && OPAQUE_RE.test(value)
 }
 
+// ------------------------------------------------------------------------ fork
+
+/** What the route hands `forkThread`. The client supplies none of these but the prompt. */
+export interface ForkRouteRequest {
+  provider: BindableProvider
+  nativeThreadId: string
+  prompt: string
+  /** Resolved server-side. Plan 4.2: the client never sends a path. */
+  cwd: string
+  policy: 'read_only'
+}
+
+export const FORK_REF_TTL_MS = 30 * 60_000
+export const MAX_TRACKED_FORK_REFS = 256
+
+/**
+ * Opaque handles for freshly forked threads.
+ *
+ * The fork route must tell the client WHICH thread it created, and it may not put
+ * a native thread id on the wire — the redaction contract at the top of this file
+ * is absolute about that, and a fork id is exactly as identifying as any other.
+ * So the client gets a digest and the server keeps the mapping.
+ *
+ * NOT A CAPABILITY TOKEN, for the same reason `opaqueRevision` is not: the digest
+ * is derived from values, not from a secret, so holding one proves recognisability
+ * and nothing else. Authorization remains `requireApiToken` at the app level.
+ *
+ * Bounded and TTL'd because it is unbounded client-triggered state otherwise.
+ * Eviction is safe in the direction that matters: a lost handle means the client
+ * must find the thread on the desktop, never that something binds to the wrong one.
+ */
+export class ForkRefStore {
+  private readonly refs = new Map<string, { provider: BindableProvider; nativeThreadId: string; at: number }>()
+
+  remember(provider: BindableProvider, nativeThreadId: string, now: number): string {
+    const ref = opaqueRevision(targetKey(provider, nativeThreadId))
+    this.refs.delete(ref)
+    this.refs.set(ref, { provider, nativeThreadId, at: now })
+    while (this.refs.size > MAX_TRACKED_FORK_REFS) {
+      const oldest = this.refs.keys().next()
+      if (oldest.done) break
+      this.refs.delete(oldest.value)
+    }
+    return ref
+  }
+
+  lookup(ref: unknown, now: number): { provider: BindableProvider; nativeThreadId: string } | null {
+    if (!isOpaque(ref)) return null
+    const row = this.refs.get(ref)
+    if (!row) return null
+    if (!Number.isFinite(now) || now - row.at > FORK_REF_TTL_MS) {
+      this.refs.delete(ref)
+      return null
+    }
+    return { provider: row.provider, nativeThreadId: row.nativeThreadId }
+  }
+}
+
+/**
+ * What a fork attempt actually achieved.
+ *
+ *   created         a new thread exists and is named
+ *   mutated         the ORIGINAL changed — terminal, and the loudest outcome here
+ *   orphan_possible something may have been created that nobody can name
+ *   failed          provably nothing was created
+ */
+export type ForkOutcome =
+  | { kind: 'created'; newNativeThreadId: string; integrity: 'verified_unchanged' | 'unverified' }
+  | { kind: 'mutated' }
+  | { kind: 'orphan_possible' }
+  | { kind: 'failed' }
+
+/**
+ * Read a fork result without believing anything it did not say.
+ *
+ * Recognised STRUCTURALLY rather than by importing `fork-thread.ts`, matching how
+ * this router already reads the attached adapter: a change over there cannot break
+ * this build, it can only stop matching — and the default for "stopped matching"
+ * is `orphan_possible`, the cautious side. `failed` is claimed ONLY for a result
+ * that positively says no child was ever created, because "I do not recognise this"
+ * is not "nothing happened".
+ */
+export function classifyFork(result: unknown, sourceNativeThreadId: string): ForkOutcome {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return { kind: 'orphan_possible' }
+  const { ok, newNativeThreadId, sourceIntegrity, forkState, reason } = result as Record<string, unknown>
+
+  if (ok === true) {
+    // The single invariant this route re-checks itself rather than inheriting.
+    // `fork-thread.ts` guarantees the returned id differs from the source, but
+    // this router does not import it, so a structurally-matching object from
+    // anywhere would otherwise be taken at its word — and the value at stake is
+    // whether COS is about to hand the user's LIVE thread back to them labelled
+    // as a fresh copy.
+    if (!isValidNativeThreadId(newNativeThreadId)) return { kind: 'orphan_possible' }
+    if (newNativeThreadId === sourceNativeThreadId) return { kind: 'mutated' }
+    if (sourceIntegrity === 'mutated') return { kind: 'mutated' }
+    if (sourceIntegrity !== 'verified_unchanged' && sourceIntegrity !== 'unverified') {
+      return { kind: 'orphan_possible' }
+    }
+    return { kind: 'created', newNativeThreadId, integrity: sourceIntegrity }
+  }
+
+  if (ok === false) {
+    if (reason === 'source_thread_mutated' || sourceIntegrity === 'mutated') return { kind: 'mutated' }
+    // Only an explicit "no child was created" earns the clean failure.
+    if (forkState === 'none') return { kind: 'failed' }
+  }
+  return { kind: 'orphan_possible' }
+}
+
+export const FORKED_COPY = 'Copied into a new thread. Your original is untouched.'
+
 /**
  * Both fingerprints present, bounded, and strings.
  *
@@ -911,6 +1096,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   const detect = deps?.occupancy ?? threadOccupancy
   const guard = new TargetGuard()
   const ownership = deps?.ownership ?? { record: recordCosSpawn, release: releaseCosSpawn }
+  // One per router. Injectable so the follow-on (attach accepting a `forkRef`)
+  // shares this instance rather than standing up a second, disconnected one.
+  const forkRefs = deps?.forkRefs instanceof ForkRefStore ? deps.forkRefs : new ForkRefStore()
   const attachTtlMs =
     Number.isFinite(deps?.attachTtlMs) && (deps.attachTtlMs as number) > 0
       ? (deps.attachTtlMs as number)
@@ -1216,6 +1404,174 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     } catch (error) {
       console.error(`[agent-session-bindings] attach failed: ${error instanceof Error ? error.message : error}`)
       if (!res.headersSent) refuseAttach(res, 'attach_failed')
+    }
+  })
+
+  // ------------------------------------------------------------------ fork
+  //
+  // The action seventeen refusal strings in this feature already recommend, and
+  // which until now did not exist anywhere in the server or the app.
+  //
+  // THERE IS NO OCCUPANCY CHECK IN THIS HANDLER, AND THAT IS THE POINT. Attach and
+  // turns both refuse when a live desktop process holds the thread, because they
+  // are about to APPEND to it. A fork appends to nothing: it reads the source and
+  // writes a NEW thread, verified byte-for-byte on both providers on 2026-08-16. A
+  // live owner is therefore not a hazard here — it is the ordinary case, and the
+  // reason the user was sent to this route in the first place. Gating fork on
+  // occupancy would refuse precisely when it is needed and leave the user with no
+  // path at all. Nothing in this handler may grow such a gate.
+  //
+  // FOR THE SAME REASON it ignores the fence, the binding registry, and
+  // `native_target_busy`. A fenced thread is one that may hold an undelivered COS
+  // turn, and the fence copy tells the user to go and look at it — forking it is
+  // safe and is very often the next thing they want.
+  //
+  // IT IS STILL GATED ON `COS_THREAD_ATTACH_ENABLED`. Fork does not write into an
+  // existing conversation, but it does spawn a provider CLI against the user's
+  // workspace on their behalf, which is the same class of authority the flag
+  // exists to hold. A disabled server holds no reachable fork code either.
+  // UNGATED, deliberately, and this is a correction rather than an oversight.
+  //
+  // With fork behind the same flag, the SHIPPING DEFAULT was incoherent: seventeen
+  // refusal strings say "Fork it instead", the lens drew an enabled Fork row, and
+  // the tap got an Express HTML 404 with no reason and no copy. Reproduced.
+  //
+  // The flag exists to gate WRITING INTO AN EXISTING CONVERSATION. Fork does not do
+  // that: it creates a NEW thread and leaves the source byte-identical, measured on
+  // a disposable thread (original 75194 bytes before and after, a new transcript
+  // carrying the history). So the thing the flag protects is not the thing fork
+  // does, and gating it only removed the alternative that every refusal recommends.
+  //
+  // It is also what "read-only with Fork-only" means as a permanent supported
+  // state: browse, and branch off rather than write in.
+  router.post('/agent-sessions/:provider/:threadId/fork', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+
+    /** The per-source serialisation claim, released in the finally. */
+    let claimedForkKey: string | null = null
+
+    const refuseFork = (reason: WriteRefusal, extra: Record<string, unknown> = {}): void => {
+      if (res.headersSent) return
+      res.status(refusalStatus(reason)).json({
+        forked: false,
+        forkRef: null,
+        sourceIntegrity: null,
+        // Default false because every refusal that reaches it directly is
+        // pre-spawn. The paths that cannot say it override it explicitly.
+        orphanPossible: false,
+        retryable: true,
+        reason,
+        reasonCopy: writeReasonCopy(reason),
+        ...extra,
+      })
+    }
+
+    try {
+      const fork = deps.forkThread
+      if (typeof fork !== 'function') return refuseFork('fork_unwired')
+
+      const body = plainBody(req)
+      // Covers the case where no JSON parser ran at all: an unparsed body is not an
+      // empty one.
+      if (body === null) return refuseFork('invalid_request')
+
+      const cosSessionId = body.cosSessionId
+      if (typeof cosSessionId !== 'string' || !COS_SESSION_ID_RE.test(cosSessionId)) {
+        return refuseFork('invalid_request')
+      }
+      const prompt = body.prompt
+      if (typeof prompt !== 'string' || prompt.trim().length === 0 || prompt.length > maxPromptChars) {
+        return refuseFork('invalid_request')
+      }
+
+      const providerParam = String(req.params.provider ?? '')
+      const threadIdParam = String(req.params.threadId ?? '')
+      // Validated HERE rather than inherited from an occupancy verdict, because
+      // this route deliberately never asks for one. The id becomes a spawn
+      // argument and a lock key, so `isValidNativeThreadId` is the whole guard.
+      if (!isBindableProvider(providerParam)) return refuseFork('fork_unsupported_provider')
+      if (!isValidNativeThreadId(threadIdParam)) return refuseFork('fork_invalid_thread_id')
+
+      const now = readNow()
+      if (now === null) return refuseFork('fork_failed')
+
+      const resolveWorkspace = deps.resolveForkWorkspace
+      if (typeof resolveWorkspace !== 'function') return refuseFork('fork_workspace_unresolvable')
+      let cwd: string | null = null
+      try {
+        cwd = resolveWorkspace(providerParam, threadIdParam)
+      } catch (error) {
+        console.error(`[agent-session-bindings] fork workspace resolve threw: ${error instanceof Error ? error.message : error}`)
+        cwd = null
+      }
+      // Absolute, checked here as well as in the module. A relative path resolves
+      // against the SERVER's cwd, so the copy would land in the wrong project while
+      // every response looked correct.
+      if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/') || cwd.includes('\0')) {
+        return refuseFork('fork_workspace_unresolvable')
+      }
+
+      // LAST SYNCHRONOUS STATEMENT BEFORE THE FIRST AWAIT. One fork per source
+      // thread at a time: this route spawns a provider CLI, and without a claim a
+      // client retry loop spawns one child per request with nothing bounding it.
+      // A DISTINCT key namespace from the turn claim, so a fork can never block a
+      // continuation or be blocked by one — `targetKey` is length-prefixed and
+      // therefore unambiguous, and this prefix cannot collide with one.
+      const forkKey = `fork:${targetKey(providerParam, threadIdParam)}`
+      if (!guard.tryClaim(forkKey, forkKey)) return refuseFork('fork_in_progress')
+      claimedForkKey = forkKey
+
+      let raw: unknown
+      try {
+        raw = await fork({
+          provider: providerParam,
+          nativeThreadId: threadIdParam,
+          prompt,
+          cwd,
+          // Text-only, same as the attached path. A fork runs a real model turn
+          // against a workspace the user did not hand us explicitly.
+          policy: 'read_only',
+        })
+      } catch (error) {
+        console.error(`[agent-session-bindings] fork threw: ${error instanceof Error ? error.message : error}`)
+        // A throw from an unknown point cannot prove no child ran.
+        return refuseFork('fork_orphan_possible', { orphanPossible: true })
+      }
+
+      const outcome = classifyFork(raw, threadIdParam)
+
+      if (outcome.kind === 'mutated') {
+        // The original moved. Loudest outcome in the feature, and not retryable:
+        // the user needs to look at their own thread before anything else touches it.
+        return refuseFork('fork_source_mutated', { orphanPossible: true, retryable: false })
+      }
+      if (outcome.kind === 'orphan_possible') {
+        return refuseFork('fork_orphan_possible', { orphanPossible: true })
+      }
+      if (outcome.kind === 'failed') return refuseFork('fork_failed')
+
+      // Digest, not the id. The native thread id never crosses this boundary, for
+      // a fresh fork exactly as for an existing thread.
+      const forkRef = forkRefs.remember(providerParam, outcome.newNativeThreadId, now)
+
+      res.status(201).json({
+        forked: true,
+        reason: null,
+        reasonCopy: FORKED_COPY,
+        forkRef,
+        // Reported, never assumed. `unverified` means COS could not read the
+        // original at both ends — which is not the same as, and must never be
+        // rendered as, "confirmed untouched".
+        sourceIntegrity: outcome.integrity,
+        orphanPossible: false,
+      })
+    } catch (error) {
+      console.error(`[agent-session-bindings] fork route failed: ${error instanceof Error ? error.message : error}`)
+      // A bug in this handler cannot prove whether a child ran, so it reports the
+      // cautious outcome rather than a clean failure.
+      refuseFork('fork_orphan_possible', { orphanPossible: true })
+    } finally {
+      if (claimedForkKey !== null) guard.release(claimedForkKey, claimedForkKey)
     }
   })
 

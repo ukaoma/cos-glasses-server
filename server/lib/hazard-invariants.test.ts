@@ -34,6 +34,7 @@ const FEATURE_FILES = new Set([
   'attached-workspace.ts',
   'native-head.ts',
   'attached-provider-adapter.ts',
+  'fork-thread.ts',
   'agent-session-binding-store.ts',
   'agent-session-binding-registry.ts',
   'agent-session-ownership-store.ts',
