@@ -1,5 +1,34 @@
 ## Unreleased
 
+## 6.28.0
+- **Continue Original Agent Thread — attach to a live desktop thread and append a turn
+  to it.** From the glasses you can now continue a Claude Code or Codex conversation that
+  already exists on your Mac: the turn is written into the REAL transcript, not a copy.
+  Verified end to end on disposable threads for both providers.
+
+  **OFF BY DEFAULT and permanently supported that way.** Set `COS_THREAD_ATTACH_ENABLED=1`
+  to turn it on. With it unset you get exactly the behaviour that existed before: read-only
+  session browsing and Fork-only everywhere. The two write routes are not registered at all
+  when it is off, so a disabled server holds no reachable write code, and the attachability
+  endpoint answers `attach_disabled` without touching the filesystem.
+
+- **A thread that someone has open on the desktop is never written to.** COS resolves, from
+  a first-party per-session registry, whether a live process owns the thread, and refuses
+  with "Open on your Mac. Fork it instead." Ownership of COS's own spawned child is
+  established from a measured kernel process start, because a bare pid can be recycled.
+
+- **A repeated POST replays instead of delivering twice.** Turns carry a required client
+  idempotency key and completed or ambiguous outcomes are remembered durably, so a retry
+  after a lost response returns what the first turn did rather than posting a second copy
+  into the conversation. A pre-delivery refusal stays re-evaluatable.
+
+- **A turn whose fate is unknown is never reported as a clean failure.** If the provider
+  fails after the prompt was delivered, the outcome is `ambiguous` with `retryable: false`
+  and copy telling you to check the thread, because a retry there would double-post.
+
+- No always-approve, bypass-permissions or sandbox-escape flag can reach a provider running
+  an attached turn; the argv is checked before any process is created.
+
 ## 6.27.13
 - **`POST /api/meeting/:sessionId/backfill-enrolment`** — train a profile from a voice
   that was named BEFORE enrolment shipped. Those meetings have a correct transcript and
