@@ -2219,6 +2219,28 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.30.0] - 2026-08-16
+
+### Sessions know which threads are live
+
+- `GET /api/agent-sessions` now stamps each row with `running` (an agent is
+  working in this thread right now) and `running_foreign` (it is held by
+  something that is not COS, so a Continue would be refused), plus a
+  `runningDegraded` flag on the payload when a probe could not see clearly.
+- `running` counts COS's own queued turn too. Two different questions: whether an
+  agent is working (the badge) and whether a write would be refused (the
+  affordance). Counting only foreign owners would hide your own turn from the
+  screen you open to watch it.
+- **This is a display hint and never a write gate.** Attach and turn keep probing
+  at the moment of the write, unchanged, so a desktop session opened between the
+  list render and the tap is still caught.
+- Fails the opposite way to the gate: doubt reports `degraded` rather than
+  painting every session busy.
+- One scan for the whole page, measured at 7ms for 45 real sessions (was 792ms
+  before a scan-scoped memo and skipping lsof when no Codex writer lock exists).
+
+**Required by COS Glasses 6.8.364.**
+
 ## [6.29.0] - 2026-08-16
 
 ### Continue is queued instead of holding the phone
