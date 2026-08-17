@@ -899,7 +899,26 @@ export async function listCodexSessions(
       if (rows.length >= Math.max(0, limit)) break
       const meta = await peekCodexMeta(candidate.file)
       if (!meta || meta.subagent) continue
-      const native = meta.id || candidate.name.slice(0, -6)
+      // THE FILENAME WINS WHEN THEY DISAGREE.
+      //
+      // A rollout's `session_meta.id` is normally its own id, and normally the filename
+      // agrees. A CLONED conversation breaks that: the clone copies the parent's
+      // `session_meta` record wholesale, so the new rollout carries the PARENT's id
+      // while its filename carries its own.
+      //
+      // Miles forked "Markt POS 2.0 build" into "POS Nation 3.0 build" and the fork
+      // never appeared in the session list. It had not failed to index -- it was indexed
+      // AS its parent, so the list showed one `Markt POS 2.0 build` row whose modified
+      // time was the fork's activity. Two conversations, one identity, and the newer one
+      // invisible.
+      //
+      // The filename is unique per rollout by construction; the meta record is content
+      // and can be a copy. So when they disagree, trust the filename.
+      const fileId = idFromCodexFilename(candidate.name)
+      const metaId = (meta.id || '').trim().toLowerCase()
+      const native = fileId && metaId && fileId !== metaId
+        ? fileId
+        : (meta.id || candidate.name.slice(0, -6))
       const title = names.get(native) || meta.title || 'Codex session'
       if (isKeepWarmSessionTitle(title)) continue
       const created = meta.created || createdFromCodexFilename(candidate.name) || isoFromMtime(candidate.birthtimeMs)

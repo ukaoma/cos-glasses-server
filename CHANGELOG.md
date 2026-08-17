@@ -2219,6 +2219,34 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.36.4] - 2026-08-17
+
+### A cloned Codex conversation gets its own identity
+
+Miles forked "Markt POS 2.0 build" into "POS Nation 3.0 build" and the fork never
+appeared in the sessions list. It had not failed to index -- it was indexed AS ITS
+PARENT. The list showed one `Markt POS 2.0 build` row whose modified time was the
+fork's activity: two conversations, one identity, and the newer one invisible.
+
+Cloning copies the parent's `session_meta` record wholesale, so the new rollout carries
+the PARENT's id under its own filename. `listCodexSessions` keyed on `meta.id` and
+folded them together.
+
+The filename is unique per rollout by construction; the meta record is content and can
+be a copy. **When they disagree, the filename now wins.** An ordinary session, where
+they agree, is untouched.
+
+Verified against the real machine before and after: the fork's `session_meta.id` reads
+`019e0943…` (the parent) while its filename reads `01a0119c…`.
+
+### Also worth recording, not fixed here
+
+That fork's rollout is **771,177,205 bytes** -- 735 MB, against other rollouts small
+enough not to register. The clone duplicated the entire parent transcript and Codex
+rewrites the whole file, which is past Node's 512 MB string limit; COS survives only
+because it reads bounded windows. Giving the fork its own identity does not shrink it,
+and a clone of a clone doubles again.
+
 ## [6.36.3] - 2026-08-17
 
 ### The seeded query was being crowded out by the steps
