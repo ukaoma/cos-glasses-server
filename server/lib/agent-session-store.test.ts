@@ -11,7 +11,12 @@ import {
   DISCUSSION_DIGEST_MAX,
   isKeepWarmSessionTitle,
   isScratchCursorProject,
+  lastRecordStart,
   latestAssistantFromWindow,
+  latestAssistantReply,
+  LATEST_REPLY_MAX,
+  proseSnippet,
+  tailWindowStart,
   listAgentSessions,
   listClaudeSessions,
   listCodexSessions,
@@ -448,5 +453,258 @@ describe('oversized transcripts are read in part, not refused', () => {
     })
     expect(body).toContain('Are we on the latest server?')
     expect(body).not.toContain('<command-message>')
+  })
+})
+
+/**
+ * Realistic assistant prose of an EXACT length, ending in a findable marker.
+ *
+ * A short string cannot reproduce a truncation bug, and `'x'.repeat(n)` cannot show
+ * WHERE a cut landed — every prefix looks like every other. Real sentences plus a
+ * terminal marker let a test prove the LAST words crossed the wire, which is the
+ * whole complaint: Miles's reply arrived cut off mid-sentence.
+ *
+ * Deliberately free of double spaces, leading/trailing whitespace, fences and angle
+ * brackets, so prose cleaning is a no-op and the length assertions measure the CAP
+ * rather than the cleaner.
+ */
+function replyOfLength(total: number, marker = 'FINAL-WORDS-MARKER'): string {
+  const unit = 'The three caps sit in series so raising one alone only moves the ceiling. '
+  let body = ''
+  while (body.length < total) body += unit
+  body = body.slice(0, total - marker.length).replace(/\s+$/, '')
+  return body.padEnd(total - marker.length, 'z') + marker
+}
+
+const rec = (role: string, text: string): string =>
+  JSON.stringify({ type: role, message: { role, content: [{ type: 'text', text }] } })
+
+describe('the newest assistant reply crosses the wire whole', () => {
+  it('carries an 1821-char reply intact while the summary and digest keep their caps', async () => {
+    // 1821 is the length of the reply that surfaced this: it reached the glasses as
+    // 160 characters, cut mid-word, with nothing on screen to say so.
+    const reply = replyOfLength(1821)
+    expect(reply).toHaveLength(1821)
+    const dir = mkdtempSync(join(tmpdir(), 'cos-latest-reply-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-111111111111.jsonl')
+    writeFileSync(file, [rec('user', 'Why did my reply get cut off?'), rec('assistant', reply)].join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file)
+
+    // THE FIX: whole, byte for byte, ending included.
+    expect(parsed.latest_reply).toBe(reply)
+    expect(parsed.latest_reply).toHaveLength(1821)
+    expect(parsed.latest_reply.endsWith('FINAL-WORDS-MARKER')).toBe(true)
+
+    // AND the two existing fields are untouched, which is the no-regression half.
+    // The digest still carries only the 160-char snippet, so it must NOT contain the
+    // ending — if it did, the digest budget had been raised behind our back.
+    expect(parsed.discussion_summary.length).toBeLessThanOrEqual(180)
+    expect(parsed.discussion_digest.length).toBeLessThanOrEqual(DISCUSSION_DIGEST_MAX)
+    expect(parsed.discussion_digest).not.toContain('FINAL-WORDS-MARKER')
+    expect(parsed.discussion_digest).toContain('Latest:')
+  })
+
+  it('marks a cut with an ellipsis instead of stopping mid-word', () => {
+    const long = replyOfLength(LATEST_REPLY_MAX + 500)
+    const cut = latestAssistantReply(long)
+    expect(cut).toHaveLength(LATEST_REPLY_MAX)
+    // Visibly truncated. `proseSnippet` ends in a bare slice, which is exactly how a
+    // cut reply reached the lens looking like a complete one.
+    expect(cut.endsWith('…')).toBe(true)
+    expect(cut).not.toContain('FINAL-WORDS-MARKER')
+  })
+
+  it('leaves a reply exactly at the cap alone', () => {
+    const exact = replyOfLength(LATEST_REPLY_MAX)
+    const kept = latestAssistantReply(exact)
+    expect(kept).toBe(exact)
+    expect(kept).not.toContain('…')
+  })
+
+  it('keeps proseSnippet on its old 160-char hard slice', () => {
+    // The shared `proseBody` refactor must not have changed the summary path. 160,
+    // no ellipsis, and the cut lands mid-word exactly as before.
+    const long = replyOfLength(1821)
+    expect(proseSnippet(long)).toHaveLength(160)
+    expect(proseSnippet(long)).toBe(long.slice(0, 160))
+    expect(proseSnippet(long)).not.toContain('…')
+  })
+
+  it('strips fences and wrappers the same way both fields always did', () => {
+    expect(latestAssistantReply('before ```code fence dropped``` after')).toBe('before after')
+    expect(latestAssistantReply('<user_query>tagged</user_query>')).toBe('tagged')
+    expect(latestAssistantReply('SYSTEM INSTRUCTIONS do not surface this')).toBe('')
+    expect(latestAssistantReply('')).toBe('')
+  })
+})
+
+describe('"Latest" can never be a line from the session opening', () => {
+  /** A transcript whose HEAD holds assistant prose and whose TAIL holds none — the
+   *  shape that made a head record get published under the label "Latest:". */
+  function headAssistantTailSilent(dir: string): string {
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-222222222222.jsonl')
+    const lines = [
+      rec('user', 'OPENING ASK marker-head'),
+      rec('assistant', 'HEAD-ASSISTANT-FROM-THE-OPENING and then some prose after it.'),
+    ]
+    // A tail of nothing but tool traffic and user turns. Realistic: a long agentic
+    // run ends in giant tool results, and assistant records carrying only tool_use
+    // blocks yield no prose at all.
+    for (let i = 0; i < 4000; i++) {
+      lines.push(rec('user', `filler turn ${i} ${'x'.repeat(200)}`))
+      if (i % 50 === 0) {
+        lines.push(JSON.stringify({
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: {} }] },
+        }))
+      }
+    }
+    lines.push(rec('user', 'FINAL ASK marker-tail'))
+    writeFileSync(file, lines.join('\n') + '\n')
+    return file
+  }
+
+  it('publishes nothing rather than the wrong turn when the tail has no assistant prose', async () => {
+    const file = headAssistantTailSilent(mkdtempSync(join(tmpdir(), 'cos-latest-head-')))
+    const parsed = await parseAgentSession('claude', file, {
+      maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
+    })
+    expect(parsed.truncated).toBe(true)
+    // Proof the head really was read, so this is a tail rule and not an empty parse.
+    expect(parsed.discussion_digest).toContain('marker-head')
+    expect(parsed.discussion_digest).toContain('marker-tail')
+
+    // The opening assistant line must not appear anywhere as current state.
+    expect(parsed.latest_reply).toBe('')
+    expect(parsed.discussion_digest).not.toContain('HEAD-ASSISTANT-FROM-THE-OPENING')
+    expect(parsed.discussion_summary).not.toContain('HEAD-ASSISTANT-FROM-THE-OPENING')
+    expect(parsed.discussion_digest).not.toContain('Latest:')
+  })
+
+  it('still takes the latest from the tail when the tail does have prose', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-latest-tail-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-333333333333.jsonl')
+    const lines = [
+      rec('user', 'OPENING ASK marker-head'),
+      rec('assistant', 'HEAD-ASSISTANT-FROM-THE-OPENING and then some prose after it.'),
+    ]
+    for (let i = 0; i < 4000; i++) lines.push(rec('user', `filler turn ${i} ${'x'.repeat(200)}`))
+    lines.push(rec('assistant', `TAIL-ASSISTANT-THE-REAL-LATEST ${replyOfLength(900)}`))
+    writeFileSync(file, lines.join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file, {
+      maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
+    })
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.latest_reply.startsWith('TAIL-ASSISTANT-THE-REAL-LATEST')).toBe(true)
+    expect(parsed.latest_reply).toContain('FINAL-WORDS-MARKER')
+    expect(parsed.latest_reply).not.toContain('HEAD-ASSISTANT-FROM-THE-OPENING')
+  })
+
+  it('reads a whole file as last-write-wins, unchanged', async () => {
+    // A non-truncated read is ALL tail by definition, so the new rule must not have
+    // quietly turned every small session's latest reply into nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-latest-whole-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-444444444444.jsonl')
+    writeFileSync(file, [
+      rec('user', 'first'),
+      rec('assistant', 'EARLIER-REPLY'),
+      rec('user', 'second'),
+      rec('assistant', 'NEWEST-REPLY wins'),
+    ].join('\n') + '\n')
+    const parsed = await parseAgentSession('claude', file)
+    expect(parsed.truncated).toBe(false)
+    expect(parsed.latest_reply).toBe('NEWEST-REPLY wins')
+  })
+})
+
+describe('a record bigger than the tail window does not empty the tail', () => {
+  it('finds the last record start, ignoring a terminating newline', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-record-start-'))
+    const withNewline = join(dir, 'a.jsonl')
+    writeFileSync(withNewline, 'AA\nBB\nCC\n')
+    // 'CC' begins at 6. The trailing newline closes a record, it does not open one.
+    expect(await lastRecordStart(withNewline, 9, 1024)).toBe(6)
+
+    const withoutNewline = join(dir, 'b.jsonl')
+    writeFileSync(withoutNewline, 'AA\nBB\nCC')
+    expect(await lastRecordStart(withoutNewline, 8, 1024)).toBe(6)
+
+    // One record, no boundary anywhere: the file starts it.
+    const single = join(dir, 'c.jsonl')
+    writeFileSync(single, 'ONLYONE')
+    expect(await lastRecordStart(single, 7, 1024)).toBe(0)
+
+    // Out of reach within the budget: say so rather than guessing.
+    expect(await lastRecordStart(withNewline, 9, 2)).toBe(-1)
+  })
+
+  it('opens the tail at the record boundary when the final record straddles it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-tail-start-'))
+    const file = join(dir, 'd.jsonl')
+    // 100 bytes of small records, then one 60-byte final record. A 40-byte tail
+    // window would open at 120, inside that final record, and see no complete record
+    // at all. The boundary at 100 is what must be chosen instead.
+    writeFileSync(file, 'x'.repeat(99) + '\n' + 'y'.repeat(59) + '\n')
+    const size = 160
+    expect(await tailWindowStart(file, size, 10, 40, 1024)).toBe(100)
+    // A roomy window already contains complete records; nothing to recover, so the
+    // cheaper ordinary start stands.
+    expect(await tailWindowStart(file, size, 10, 120, 1024)).toBe(40)
+  })
+
+  it('still reads the newest reply when it is larger than the whole tail window', async () => {
+    // The measured cliff: 14 records over 768 KiB exist in a 60-transcript sample on
+    // this Mac, the largest 1,239,045 bytes — 1.58x the production window. When such
+    // a record is the FINAL one, the window opens inside it, the fragment fails to
+    // parse, and the tail contributes nothing: no recent turns, no latest reply.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-giant-record-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-555555555555.jsonl')
+    const lines = [rec('user', 'OPENING ASK marker-head')]
+    for (let i = 0; i < 2000; i++) lines.push(rec('user', `filler turn ${i} ${'x'.repeat(200)}`))
+    // Final record ~40 KiB against a 16 KiB tail window: 2.5x, the same shape as
+    // 1.18 MiB against 768 KiB.
+    const giant = `GIANT-FINAL-REPLY ${replyOfLength(40 * 1024)}`
+    lines.push(rec('assistant', giant))
+    writeFileSync(file, lines.join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file, {
+      maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
+    })
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.latest_reply.startsWith('GIANT-FINAL-REPLY')).toBe(true)
+    // Capped on the way out, and honestly marked as cut.
+    expect(parsed.latest_reply).toHaveLength(LATEST_REPLY_MAX)
+    expect(parsed.latest_reply.endsWith('…')).toBe(true)
+  })
+
+  it('recovers a final record that begins inside the head window, without double counting', async () => {
+    // The awkward shape a mutation exposed: the final record starts BEFORE the head
+    // window ends, so the tail has to open behind `headBytes` to reach it.
+    //
+    // That is safe, and the reason is worth stating because it is not obvious.
+    // `lastRecordStart` returns the start of the LAST record, and the last record
+    // always runs to EOF — past `maxBytes`, therefore past `headBytes`. So the head
+    // pass can only ever see a PREFIX of it, which arrives as a trailing partial line
+    // and is dropped by `parseJsonLine`. Every record that the head reads whole ends
+    // before the last record begins. Nothing is read twice, and the counts below are
+    // what prove it rather than the argument.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-head-straddle-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-666666666666.jsonl')
+    writeFileSync(file, [
+      rec('user', 'OPENING ASK marker-head'),
+      rec('assistant', `STRADDLING-FINAL-REPLY ${replyOfLength(80 * 1024)}`),
+    ].join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file, {
+      maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
+    })
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.latest_reply.startsWith('STRADDLING-FINAL-REPLY')).toBe(true)
+    // Exactly one of each, counted once. A tail that reached back over complete
+    // records would show two.
+    expect(parsed.user_message_count).toBe(1)
+    expect(parsed.assistant_message_count).toBe(1)
   })
 })

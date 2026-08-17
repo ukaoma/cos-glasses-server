@@ -122,11 +122,53 @@ export function firstLineTitle(text: string): string {
   return line.slice(0, 80)
 }
 
+/** Fenced code, tags and runs of whitespace out; one line of prose left. Shared so
+ *  `proseSnippet` and `latestAssistantReply` can never disagree about what the prose
+ *  of a record IS — only about how much of it they keep. */
+function proseBody(text: string): string {
+  const body = text.replace(/```[\s\S]*?```/g, ' ')
+  return body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 export function proseSnippet(text: string, max = 160): string {
-  let body = text.replace(/```[\s\S]*?```/g, ' ')
-  body = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  const body = proseBody(text)
   if (!body || isWrapperPrompt(body)) return ''
   return body.slice(0, max)
+}
+
+/**
+ * How much of the newest assistant reply crosses the wire, whole.
+ *
+ * MEASURED, not guessed. Across 8,387 assistant replies in the 60 most recent
+ * transcripts on this Mac: p50 153, p75 291, p90 1,627, p95 2,412, p99 3,405,
+ * max 21,757. The 160-char snippet that used to be the ONLY assistant text on the
+ * detail payload delivered 52.7% of replies whole — it cut nearly half of them, and
+ * cut them mid-word with no ellipsis. 4,000 delivers 99.58% whole (35 of 8,387 cut).
+ *
+ * WHY NOT HIGHER. 6,000 buys 0.26 of a percentage point for 50% more bytes on every
+ * detail fetch, and the ceiling is what a pathological reply costs, not what a
+ * typical one costs. The reader paginates at ~200 chars, so 4,000 is at most 20
+ * swipes of deliberate reading; 21,757 would be 109. Bounded on purpose: this
+ * crosses a phone radio and renders on a 576x288 HUD.
+ *
+ * WHY NOT LOWER. 2,000 would still cut 7.5% of replies, and Miles's 1,821-char reply
+ * — the one that started this — sits inside the band that a 2,000 cap leaves with no
+ * headroom at all.
+ */
+export const LATEST_REPLY_MAX = 4000
+
+/**
+ * The newest assistant reply, whole.
+ *
+ * Same cleaning as `proseSnippet`, a far larger budget, and — when it does have to
+ * cut — an ellipsis, so a truncated reply is VISIBLY truncated. `proseSnippet` ends
+ * in a bare `slice`, which is how 1,821 characters became 160 with nothing on screen
+ * to say so.
+ */
+export function latestAssistantReply(text: string, max = LATEST_REPLY_MAX): string {
+  const body = proseBody(text)
+  if (!body || isWrapperPrompt(body)) return ''
+  return body.length <= max ? body : `${body.slice(0, max - 1)}…`
 }
 
 export function composeDiscussionSummary(input: {
@@ -1035,6 +1077,92 @@ export const PARTIAL_HEAD_BYTES = 256 * 1024
 export const PARTIAL_TAIL_BYTES = 768 * 1024
 
 /**
+ * Extra bytes the tail window may reach BACKWARDS to open at a record boundary.
+ *
+ * A single JSONL record can be larger than the whole tail window. Measured on this
+ * Mac: 14 records over 768 KiB in a 60-transcript sample, the largest 1,239,045
+ * bytes — 1.58x the window. When the record that straddles the window start is the
+ * FINAL record, the window holds no complete record at all: `parseJsonLine` rejects
+ * the one fragment it gets and the tail contributes NOTHING. No recent turns, and no
+ * latest reply, at exactly the moment the user opened the session to see what just
+ * happened. Reaching back one more MiB recovers the record instead.
+ *
+ * BOUNDED, because the point is to survive a big record and not to be dragged into an
+ * unbounded read by a pathological one. Past this the tail keeps its ordinary start
+ * and the loss stays honest rather than becoming a wrong "Latest".
+ */
+export const PARTIAL_TAIL_MAX_EXTRA_BYTES = 1024 * 1024
+
+async function readRange(path: string, start: number, end: number): Promise<Buffer> {
+  if (end < start) return Buffer.alloc(0)
+  const chunks: Buffer[] = []
+  for await (const chunk of createReadStream(path, { start, end })) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
+ * Where the LAST record in the file begins, found by walking back from EOF to the
+ * newline that closed the record before it.
+ *
+ * Cheap in the ordinary case: the last record is small, so the first 64 KiB chunk
+ * contains the boundary and the walk stops immediately. Returns -1 when no boundary
+ * turns up within `limit` bytes, which is the signal to stop reaching.
+ */
+export async function lastRecordStart(path: string, size: number, limit: number): Promise<number> {
+  if (size <= 0) return -1
+  const CHUNK = 64 * 1024
+  // A terminating newline CLOSES the last record; it does not open one. Counting it
+  // would report the last record as starting at EOF and find every window empty.
+  const tailByte = await readRange(path, size - 1, size - 1)
+  const searchEnd = tailByte.length === 1 && tailByte[0] === 0x0a ? size - 1 : size
+  if (searchEnd <= 0) return -1
+  const floor = Math.max(0, size - limit)
+  let pos = searchEnd
+  while (pos > floor) {
+    const start = Math.max(floor, pos - CHUNK)
+    const buf = await readRange(path, start, pos - 1)
+    const idx = buf.lastIndexOf(0x0a)
+    if (idx >= 0) return start + idx + 1
+    pos = start
+  }
+  // Reached the front of the file without a newline: the whole file is one record.
+  return floor === 0 ? 0 : -1
+}
+
+/**
+ * The byte offset the tail window opens at.
+ *
+ * Normally `size - tailBytes`, mid-record, and the leading fragment is discarded by
+ * design. The exception this exists for is a final record BIGGER than the window,
+ * where discarding the fragment discards the entire tail.
+ */
+export async function tailWindowStart(
+  path: string,
+  size: number,
+  headBytes: number,
+  tailBytes: number,
+  extraBytes: number,
+): Promise<number> {
+  const preferred = Math.max(headBytes, size - tailBytes)
+  const boundary = await lastRecordStart(path, size, tailBytes + extraBytes)
+  // A boundary at or after the ordinary start means at least one complete record
+  // already falls inside the window. Nothing to recover; keep the cheaper read.
+  if (boundary < 0 || boundary >= preferred) return preferred
+  // Reaching back BEHIND `headBytes` is allowed, and the instinct to clamp it here is
+  // wrong — an earlier draft did clamp, which silently threw away the very record
+  // this function exists to recover whenever the final record began inside the head
+  // window. It cannot double-count: `boundary` is the start of the LAST record, and
+  // the last record always runs to EOF, which is past `maxBytes` and therefore past
+  // `headBytes`. The head pass can only ever see a prefix of it, arriving as a
+  // trailing partial line that `parseJsonLine` rejects. Every record the head reads
+  // WHOLE ends before `boundary`, so the tail never re-yields one. The read stays
+  // bounded because `lastRecordStart` only looks back `tailBytes + extraBytes`.
+  return boundary
+}
+
+/**
  * Lines of a transcript, reading the WHOLE file when it fits and head+tail when it
  * does not.
  *
@@ -1049,6 +1177,19 @@ export const PARTIAL_TAIL_BYTES = 768 * 1024
  * `parseJsonLine` returns null for it and the caller's loop skips it, which is why
  * this can slice at an arbitrary byte offset and stay correct.
  */
+/**
+ * One transcript line, tagged with the window it came from.
+ *
+ * `tail` means "this line is in the window that ends at EOF". A whole-file read is
+ * all tail, which is what makes the consumer's rule uniform: anything claiming to be
+ * the LATEST state of a session must come from a tail line, no `truncated` special
+ * case at the call site.
+ */
+export interface AgentSessionLine {
+  text: string
+  tail: boolean
+}
+
 export async function* agentSessionLines(
   path: string,
   size: number,
@@ -1060,19 +1201,27 @@ export async function* agentSessionLines(
   // windowing removed. It did exactly that until a mutation caught it.
   headBytes = PARTIAL_HEAD_BYTES,
   tailBytes = PARTIAL_TAIL_BYTES,
-): AsyncGenerator<string> {
+  extraBytes = PARTIAL_TAIL_MAX_EXTRA_BYTES,
+): AsyncGenerator<AgentSessionLine> {
   if (size <= maxBytes) {
-    yield* createInterface({ input: createReadStream(path), crlfDelay: Infinity })
+    for await (const text of createInterface({ input: createReadStream(path), crlfDelay: Infinity })) {
+      yield { text, tail: true }
+    }
     return
   }
-  yield* createInterface({
+  for await (const text of createInterface({
     input: createReadStream(path, { start: 0, end: headBytes - 1 }),
     crlfDelay: Infinity,
-  })
-  yield* createInterface({
-    input: createReadStream(path, { start: Math.max(headBytes, size - tailBytes) }),
+  })) {
+    yield { text, tail: false }
+  }
+  const start = await tailWindowStart(path, size, headBytes, tailBytes, extraBytes)
+  for await (const text of createInterface({
+    input: createReadStream(path, { start }),
     crlfDelay: Infinity,
-  })
+  })) {
+    yield { text, tail: true }
+  }
 }
 
 export interface AgentSessionDetail {
@@ -1086,6 +1235,12 @@ export interface AgentSessionDetail {
   /** Deep, paginated body text for the detail page — up to 2000 chars. The list row
    *  keeps `discussion_summary` at 180. Older clients ignore this field. */
   discussion_digest: string
+  /** The newest assistant reply, whole, up to `LATEST_REPLY_MAX`. Its own field
+   *  rather than a bigger slice of the digest: the digest's job is to summarize a
+   *  whole session inside 2000 chars, and a long reply competing for that budget
+   *  starves the user turns — `composeDiscussionDigest` reserves the Latest block
+   *  FIRST. Two fields, two jobs. Older clients ignore this one. */
+  latest_reply: string
   user_message_count: number
   assistant_message_count: number
   omitted_tools: number
@@ -1110,6 +1265,7 @@ export async function parseAgentSession(
   let sessionId = path.split('/').pop()?.replace(/\.jsonl$/, '') || ''
   let firstPrompt = ''
   let latestAssistant = ''
+  let latestReply = ''
   let userCount = 0
   // Bounded sample for the deep digest: the opening turns plus a recent window.
   // The composer only ever renders head + as many recent as fit 2000 chars, so
@@ -1142,7 +1298,33 @@ export async function parseAgentSession(
   let assistantCount = 0
   let omittedTools = 0
 
-  for await (const line of agentSessionLines(path, st.size, maxBytes, opts.headBytes, opts.tailBytes)) {
+  /**
+   * Where the assistant left off — taken ONLY from the window that ends at EOF.
+   *
+   * An oversized transcript is read head-then-tail into one loop, and this used to be
+   * plain last-write-wins across both. So a session whose tail window happens to hold
+   * no assistant prose — entirely possible when the last 768 KiB are giant tool
+   * results — kept whichever assistant row the HEAD saw and published it under the
+   * label "Latest:". A line from the session's opening, presented as its current
+   * state. Silently wrong, and worse than truncation: truncation is visible.
+   *
+   * With nothing in the tail the honest answer is nothing, and the digest drops its
+   * Latest block rather than filling it with the wrong turn.
+   *
+   * The two fields move together, gated on the same snippet, so the summary line and
+   * the full reply can never come from different records.
+   */
+  const rememberAssistant = (text: string, fromTail: boolean): void => {
+    if (!fromTail) return
+    const snippet = proseSnippet(text)
+    if (!snippet) return
+    latestAssistant = snippet
+    latestReply = latestAssistantReply(text)
+  }
+
+  for await (const { text: line, tail } of agentSessionLines(
+    path, st.size, maxBytes, opts.headBytes, opts.tailBytes,
+  )) {
     const obj = parseJsonLine(line)
     if (!obj) continue
     if (provider === 'claude') {
@@ -1169,8 +1351,7 @@ export async function parseAgentSession(
         if (!title) title = firstLineTitle(text)
       } else {
         assistantCount += 1
-        const snippet = proseSnippet(text)
-        if (snippet) latestAssistant = snippet
+        rememberAssistant(text, tail)
       }
     } else if (provider === 'codex') {
       if (obj.type === 'session_meta' && obj.payload && typeof obj.payload === 'object') {
@@ -1193,8 +1374,7 @@ export async function parseAgentSession(
       if (!text || isWrapperPrompt(text)) continue
       if (payload.role === 'assistant') {
         assistantCount += 1
-        const snippet = proseSnippet(text)
-        if (snippet) latestAssistant = snippet
+        rememberAssistant(text, tail)
       } else {
         userCount += 1
         collectTurn(text)
@@ -1219,8 +1399,7 @@ export async function parseAgentSession(
         }
       } else {
         assistantCount += 1
-        const snippet = proseSnippet(text)
-        if (snippet) latestAssistant = snippet
+        rememberAssistant(text, tail)
       }
     }
   }
@@ -1253,6 +1432,7 @@ export async function parseAgentSession(
       totalTurns: truncated ? undefined : userCount,
       truncated,
     }),
+    latest_reply: latestReply,
     user_message_count: userCount,
     assistant_message_count: assistantCount,
     omitted_tools: omittedTools,

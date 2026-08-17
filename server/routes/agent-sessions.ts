@@ -366,6 +366,12 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       // summary — Miles: "it should be in the body not the title, the row should
       // be no more than the 180 characters."
       discussion_digest: parsed.discussion_digest || '',
+      // The newest assistant reply, whole. ADDITIVE: the digest above still carries
+      // its own 160-char `Latest:` line, so a client that never learns this field
+      // renders exactly what it rendered before. Measured at 4000 chars — see
+      // LATEST_REPLY_MAX. Before this existed the detail payload had NO full-text
+      // field at all, and an 1821-char reply left the Mac as 160 characters.
+      latest_reply: parsed.latest_reply || '',
       truncated: parsed.truncated,
       project: parsed.project,
       created: modified,

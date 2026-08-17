@@ -2219,6 +2219,75 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.35.0] - 2026-08-16
+
+### The newest assistant reply arrives whole instead of at 160 characters
+
+- **The defect.** Miles opened a session on the glasses and the newest reply was cut
+  off mid-sentence. The session detail payload had NO full-text field: it carried
+  `discussion_summary` (180 chars) and `discussion_digest` (2000), and the newest
+  reply appeared only as the `Latest:` line inside the digest, produced by
+  `proseSnippet` at **160 characters** with a bare `slice` that stops mid-word and
+  prints nothing to say it stopped. An 1821-character reply reached the wire as 160
+  characters. The other 1661 never left the Mac. Polling was never the suspect: no
+  poll can deliver bytes the server did not send.
+- **New field `latest_reply` on `GET /api/agent-sessions/:provider/:sessionId`,
+  bounded at 4000 characters.** The number is measured, not guessed. Across 8,387
+  assistant replies in the 60 most recent transcripts on this Mac: p50 153, p75 291,
+  p90 1,627, p95 2,412, p99 3,405, max 21,757. The old 160-char cap delivered only
+  **52.7%** of replies whole. 4000 delivers **99.58%** (35 of 8,387 cut). 6000 would
+  buy 0.26 of a point for 50% more bytes on every fetch, and the reader paginates at
+  roughly 200 chars, so 4000 is at most 20 swipes of deliberate reading.
+- **A dedicated field, not a bigger slice of the digest.** Three caps sit in series
+  here (`proseSnippet` 160, `DIGEST_TURN_MAX` 220, `DISCUSSION_DIGEST_MAX` 2000) and
+  the digest reserves its `Latest:` block FIRST, so a longer reply inside that budget
+  starves the user turns it is supposed to sit beside. Two fields, two jobs.
+- **Truncation is now visible.** `latest_reply` ends in an ellipsis when it does have
+  to cut. `proseSnippet` keeps its old bare 160-char slice, pinned by a test.
+- **ADDITIVE. An older app keeps working.** Nothing was removed or renamed:
+  `discussion_summary` and `discussion_digest` still carry exactly what they carried,
+  the digest still holds its own 160-char `Latest:` line, and a client that never
+  learns the new key renders what it rendered before. Proven over real HTTP rather
+  than by reading the route source.
+
+### Two latent hazards in the same path, both closed
+
+- **"Latest" can no longer be a line from the session's opening.** An oversized
+  transcript is read head-then-tail into one loop, and the newest reply was plain
+  last-write-wins across both windows. A session whose tail window happened to hold
+  no assistant prose, which is ordinary when the last 768 KiB are giant tool results,
+  kept whichever assistant row the HEAD saw and published it labelled `Latest:`. A
+  line from the start of the session, presented as its current state. Silently wrong,
+  and worse than truncation because truncation is at least visible. Lines are now
+  tagged with the window they came from and only the window ending at EOF can claim
+  to be latest; with nothing there the honest answer is nothing, and the digest drops
+  its `Latest:` block rather than filling it with the wrong turn. A whole-file read
+  is all tail, so small sessions are unchanged.
+- **A record larger than the tail window no longer empties the tail.** The tail opens
+  at `size - 768 KiB`, mid-record, and the leading fragment is discarded by design.
+  When the FINAL record is bigger than the window, that fragment is the only thing in
+  it: nothing parses, and the tail contributes no recent turns and no reply at all.
+  Not hypothetical: 14 records over 768 KiB exist in a 60-transcript sample on this
+  Mac, the largest 1,239,045 bytes, 1.58x the window. The tail now reaches back up to
+  one further MiB to open at a real record boundary, and stops reaching past that so
+  a pathological record cannot pull an unbounded read into memory.
+- **Measured, not asserted:** both hazards are LATENT today. Every transcript
+  currently over the 32 MiB read ceiling has 8 to 19 assistant rows in its tail, so
+  neither is firing right now. They are mechanisms, closed before they fire.
+
+### Notes
+
+- One behaviour change beyond the additive field, and it is the point of the fix: on
+  a truncated read whose tail holds no assistant prose, `discussion_summary` and the
+  digest's `Latest:` block are now EMPTY where they used to carry a line from the
+  session's opening. That removes wrong content, not content.
+- A mutation that survived is recorded rather than buried. An early draft clamped the
+  tail start at `headBytes` to avoid double counting, and no test reached it. It was
+  both untested and wrong: `lastRecordStart` returns the LAST record's start and that
+  record always runs to EOF, so the head can only ever see a prefix it discards, and
+  the clamp only threw away the record the reach exists to recover. The clamp is
+  gone, a test now covers the case, and re-adding it fails.
+
 ## [6.34.0] - 2026-08-16
 
 ### A continued turn now runs with the session's own permissions

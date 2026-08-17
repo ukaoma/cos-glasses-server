@@ -143,6 +143,66 @@ describe('agent session listing', () => {
   })
 })
 
+/**
+ * The detail payload, fetched over HTTP rather than read as source text.
+ *
+ * The sibling test above asserts on the file's CHARACTERS, which cannot tell whether
+ * a field survives JSON serialization or whether the handler reaches it at all. The
+ * bug being fixed here was precisely a field that did not exist on the wire, so the
+ * proof has to be the wire.
+ */
+describe('the newest assistant reply on the detail payload', () => {
+  const detailId = 'aaaaaaaa-bbbb-cccc-dddd-777777777777'
+
+  /** Realistic prose of an exact length: a short string cannot reproduce a
+   *  truncation bug, and a repeated character cannot show where a cut landed. */
+  function replyOfLength(total: number, marker = 'FINAL-WORDS-MARKER'): string {
+    const unit = 'The three caps sit in series so raising one alone only moves the ceiling. '
+    let body = ''
+    while (body.length < total) body += unit
+    body = body.slice(0, total - marker.length).replace(/\s+$/, '')
+    return body.padEnd(total - marker.length, 'z') + marker
+  }
+
+  it('serves an 1821-char reply whole, without disturbing the older fields', async () => {
+    const { home, roots } = fixtureHome()
+    const reply = replyOfLength(1821)
+    writeJsonl(join(roots.claudeProjects, '-repo', `${detailId}.jsonl`), [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Why did my reply get cut off?' }] } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: reply }] } }),
+    ])
+
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    try {
+      const base = await startSearchServer()
+      const res = await fetch(`${base}/api/agent-sessions/claude/${detailId}`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as {
+        latest_reply: string
+        discussion_summary: string
+        discussion_digest: string
+      }
+
+      // Whole, ending included. 160 characters is what used to arrive.
+      expect(body.latest_reply).toBe(reply)
+      expect(body.latest_reply).toHaveLength(1821)
+      expect(body.latest_reply.endsWith('FINAL-WORDS-MARKER')).toBe(true)
+
+      // ADDITIVE. A client that has never heard of `latest_reply` reads these two
+      // exactly as it did before, so an older app keeps working against this server.
+      expect(body.discussion_summary.length).toBeGreaterThan(0)
+      expect(body.discussion_summary.length).toBeLessThanOrEqual(180)
+      expect(body.discussion_digest).toContain('Latest:')
+      expect(body.discussion_digest).not.toContain('FINAL-WORDS-MARKER')
+      expect(body.discussion_digest.length).toBeLessThanOrEqual(2000)
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+    }
+  })
+})
+
 const closers: Array<() => Promise<void>> = []
 
 async function startSearchServer(): Promise<string> {
