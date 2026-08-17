@@ -264,7 +264,21 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
       // Status drafts are dropped from the seed: they describe the state at some past
       // moment and the opening status above is the CURRENT one. Replaying an old
       // `done` after it would tell the client the live session had finished.
-      const steps = drafts.filter(d => d.kind === 'tool' || d.kind === 'prose' || d.kind === 'prompt')
+      // THE QUERY IS SEEDED SEPARATELY, AND ALWAYS.
+      //
+      // Taking "the last 7 events" and hoping the prompt is among them does not work,
+      // and a live probe against a real session proved it: 8 seeded events, 6 tools and
+      // one prose, and NO prompt -- because in a busy run the user's question is twenty
+      // or thirty steps back and gets pushed out of the window by the very activity you
+      // opened the page to watch. That is the exact case the query exists for.
+      //
+      // So the newest prompt in the whole read window is emitted FIRST, unconditionally,
+      // and the step budget is spent entirely on steps. The client pins it rather than
+      // listing it, so it costs nothing in the scrolling window.
+      const lastPrompt = [...drafts].reverse().find(d => d.kind === 'prompt')
+      if (lastPrompt) write({ ...lastPrompt, at: Date.now() })
+
+      const steps = drafts.filter(d => d.kind === 'tool' || d.kind === 'prose')
       for (const draft of steps.slice(-SEED_EVENTS)) {
         // NOT tagged as seeded. A replayed step is a step that really happened, and a
         // second rendering style for it would be a distinction without a use. The one

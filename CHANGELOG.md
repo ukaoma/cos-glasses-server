@@ -2219,6 +2219,23 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.36.3] - 2026-08-17
+
+### The seeded query was being crowded out by the steps
+
+Caught by probing the live stream after shipping 6.36.2, before Miles tested it: a
+real session seeded 8 events -- 6 tool calls, one prose, one status -- and **no
+prompt**. The seed took "the last 7 events of any kind", and in a busy run the
+user's question is twenty or thirty steps back, so the activity you opened the page
+to watch is exactly what pushed the query off it. The one case the feature exists
+for was the one case it failed.
+
+The newest prompt in the read window is now emitted FIRST and unconditionally,
+outside the step budget. Measured on this Mac's largest transcript (87.2 MB): the
+last 256 KiB holds 133 records including 3 user turns, so the window reaches a query
+comfortably. The client pins rather than lists it, so it costs nothing in the
+scrolling window.
+
 ## [6.36.2] - 2026-08-17
 
 ### The live view stops being a blank slate
