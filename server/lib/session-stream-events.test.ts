@@ -80,10 +80,33 @@ describe('targets are one glanceable line', () => {
       .toBe('npx vitest run')
   })
 
-  it('flattens a multi-line command to one line', () => {
+  it('flattens a multi-line command to one line AND drops the cd preamble', () => {
+    // CHANGED DELIBERATELY in 6.36.2, not a regression. Every command in this repo
+    // opens with the same `cd`, so it spent columns on the one part of the line that
+    // is identical every time. Miles, from hardware: `bash ses...` -- two useful
+    // characters out of forty.
     const target = targetForTool('Bash', { command: 'cd /tmp &&\n  ls -la\n  echo done' })
     expect(target).not.toContain('\n')
-    expect(target).toBe('cd /tmp && ls -la echo done')
+    expect(target).toBe('ls -la echo done')
+  })
+
+  it('keeps the command when it is ONLY a cd, rather than rendering an empty line', () => {
+    expect(targetForTool('Bash', { command: 'cd /tmp' })).toBe('cd /tmp')
+  })
+
+  it('replaces a heredoc BODY with its marker', () => {
+    // A python heredoc is often hundreds of lines and none of them is the command.
+    const target = targetForTool('Bash', {
+      command: "cd /repo && python3 - <<'PY'\nimport io\nprint(1)\nPY",
+    })
+    expect(target).toBe('python3 - <<PY')
+  })
+
+  it('drops output plumbing, which is how you read a command not what it does', () => {
+    const target = targetForTool('Bash', {
+      command: 'cd /repo && npx vitest run 2>&1 | sed \'s/x//\' | head -5',
+    })
+    expect(target).toBe('npx vitest run')
   })
 
   it('caps a long target with ASCII periods, never a glyph the G2 may not have', () => {

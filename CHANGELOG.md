@@ -2219,6 +2219,40 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.36.2] - 2026-08-17
+
+### The live view stops being a blank slate
+
+Three changes, all from Miles watching a real session on hardware.
+
+- **The user's query is now an event.** A `user` record used to be dropped whole,
+  on the reasoning that "the prompt came from this device" -- true of a Continue
+  turn and false of the case that matters most, a session running in a Mac window
+  where that record is the question Miles typed there and the glasses have never
+  seen it. Dropping it is why the lens said WORKING and gave no clue what it was
+  working ON. Tool results stay dropped; harness wrappers
+  (`<system-reminder>`, `<cos-alarms>`, the memory and bulletin blocks) are
+  stripped, because on the lens they would read as the user's own words.
+  New `prompt` kind: additive to a closed set, and safe by construction since the
+  client validates `kind` against its own table and ignores what it does not know.
+
+- **A shell command is summarised instead of sent raw.** `bash ses...` and
+  `bash s...` on the lens were a command reduced to two characters. Two causes
+  compounding, and this is one of them: the leading `cd <path>` (identical on
+  every command in a repo), heredoc BODIES, and output plumbing (`2>&1`, pipes
+  into `head`/`sed`) are now dropped, keeping the verb and its arguments -- what
+  you would look for reading over someone's shoulder.
+
+- **The stream seeds from history on connect.** The tail starts at the file's
+  current size, so opening a session that was already working showed an EMPTY page
+  that filled one line at a time. It now reads backward a bounded 256 KiB, drops
+  the leading fragment (an arbitrary offset lands mid-record), and replays the last
+  7 steps -- exactly the client's live window, so the seed fills the screen once
+  without pushing live events out of the view it exists to prime. Never fatal: a
+  session whose history cannot be read still streams, it just starts empty.
+
+Needs COS Glasses 6.8.374 to render any of it.
+
 ## [6.36.1] - 2026-08-17
 
 ### A reply keeps its line structure

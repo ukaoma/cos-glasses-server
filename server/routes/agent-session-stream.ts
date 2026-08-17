@@ -65,7 +65,12 @@ import {
   subscribeSessionStream,
   type PublishedSessionEvent,
 } from '../lib/session-stream-bus.js'
-import { acquireTranscriptWatcher, transcriptWatcherDegraded } from '../lib/session-transcript-watcher.js'
+import {
+  acquireTranscriptWatcher,
+  transcriptWatcherDegraded,
+  readTranscriptSeedLines,
+} from '../lib/session-transcript-watcher.js'
+import { draftsFromLine } from '../lib/session-stream-events.js'
 import type { SessionStreamState } from '../lib/session-stream-events.js'
 
 export const agentSessionStreamRouter = Router()
@@ -107,6 +112,15 @@ export async function openingState(
     return 'idle'
   }
 }
+
+/**
+ * Seeded events written on connect.
+ *
+ * EXACTLY THE LIVE WINDOW. `SESSION_TRAIL_LIVE_LINES` on the client is 7, measured
+ * against the 220px body; seeding more would scroll the newest events out of the view
+ * the seed exists to fill, and seeding fewer would leave the screen half empty.
+ */
+export const SEED_EVENTS = 7
 
 agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
@@ -228,6 +242,42 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // The contract's "emit a status immediately" -- written before any queued event so
   // the client's first frame is always a state, never a bare tool line.
   write({ kind: 'status', state, at: Date.now() })
+  // THE SEED. The last few steps of what already happened, before anything live.
+  //
+  // Without it, opening a session that is already working shows an empty page that
+  // fills one line at a time, which is what Miles reported from hardware. The screen
+  // should look like a monitor you just walked up to, not one that was switched on.
+  //
+  // BOUNDED TO WHAT THE LENS CAN SHOW. `SEED_EVENTS` is the live window, so the seed
+  // fills the screen once and no more: a hundred replayed events would push the live
+  // ones off the top of the very view they are meant to prime.
+  //
+  // ORDERED BEFORE `deliver = write`, so a live record landing during the read is
+  // queued in `pending` and written AFTER the seed rather than being overtaken by it.
+  //
+  // NEVER FATAL. A session whose history cannot be read still streams; it just starts
+  // empty, exactly as it did before this existed.
+  if (path !== null && startOffset > 0) {
+    try {
+      const lines = await readTranscriptSeedLines(path, startOffset)
+      const drafts = lines.flatMap(line => draftsFromLine(provider, line))
+      // Status drafts are dropped from the seed: they describe the state at some past
+      // moment and the opening status above is the CURRENT one. Replaying an old
+      // `done` after it would tell the client the live session had finished.
+      const steps = drafts.filter(d => d.kind === 'tool' || d.kind === 'prose' || d.kind === 'prompt')
+      for (const draft of steps.slice(-SEED_EVENTS)) {
+        // NOT tagged as seeded. A replayed step is a step that really happened, and a
+        // second rendering style for it would be a distinction without a use. The one
+        // consequence is that the client's "N ago" clock starts at open rather than at
+        // the record's real time; it self-corrects on the first live event.
+        write({ ...draft, at: Date.now() })
+      }
+    } catch {
+      /* a seed is a nicety; the live tail is the contract */
+    }
+  }
+  if (closed) return
+
   // Then anything published while the headers were being prepared, in order, before
   // the listener starts writing straight through. All three steps are synchronous, so
   // no event can interleave and arrive out of order.

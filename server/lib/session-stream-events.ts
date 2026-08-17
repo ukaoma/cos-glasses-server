@@ -25,6 +25,14 @@ export type SessionStreamState = 'working' | 'idle' | 'done'
 
 export type SessionStreamDraft =
   | { kind: 'tool'; verb: SessionStreamVerb; target: string; detail: string }
+  // The user's own words for the turn being worked on. Miles: "we should see the query
+  // that the user has versus it just being a blank slate where it says working. That
+  // way, the user at least knows what the agent is actively working on."
+  //
+  // ADDITIVE TO A CLOSED SET, AND SAFE BY CONSTRUCTION: the client validates `kind`
+  // against its own table and ignores anything it does not know, so a build that
+  // predates this renders exactly as it did before rather than breaking.
+  | { kind: 'prompt'; text: string }
   | { kind: 'prose'; text: string }
   | { kind: 'status'; state: SessionStreamState }
   | { kind: 'heartbeat' }
@@ -51,6 +59,16 @@ export const TARGET_MAX_CHARS = 80
 
 /** `+14 -2`, `120 lines`. Anything longer is not a detail. */
 export const DETAIL_MAX_CHARS = 40
+
+/**
+ * The user's query, in characters.
+ *
+ * 160 rather than the 80 a target gets: this is the one line that says WHAT IS BEING
+ * WORKED ON, so it earns more than a tool name does. The client clips it to the two
+ * lens lines it can spare, which at 62 columns is ~120 visible; the extra 40 is
+ * headroom so the client rather than the server decides where to cut.
+ */
+export const PROMPT_MAX_CHARS = 160
 
 /**
  * Marker appended when a value was cut.
@@ -125,6 +143,53 @@ function countLines(value: unknown): number {
 }
 
 /**
+ * The part of a shell command worth 40 columns.
+ *
+ * WHAT WENT WRONG ON HARDWARE. Miles's 9:20 screenshot showed `bash ses...` and
+ * `bash s...` -- a shell command reduced to two characters. Two causes compounding:
+ * the raw command was sent whole, and the CLIENT then treated it as a PATH and kept
+ * only the text after the last `/`. So `cd /Users/.../cos-glasses-app && grep -n x
+ * src/lib/session-stream-trail.ts` arrived, got split on its final slash, and rendered
+ * as the tail of a filename. The client fix is necessary; this is the other half.
+ *
+ * WHAT IT DROPS, in order of how much noise it removes:
+ *  - a leading `cd <path>` and its separator. Every command in this repo starts with
+ *    one and it is the same directory every time: pure cost, zero information.
+ *  - heredoc BODIES. A `<<'PY' ... PY` block is often hundreds of lines, and none of
+ *    them is the command; the marker is kept so it is clear a script ran inline.
+ *  - `2>&1`, pipes into output plumbing (`head`, `tail`, `sed`, `tr`, `cut`) and
+ *    redirections, which are how you read a command rather than what it does.
+ *
+ * WHAT IT KEEPS: the first real verb and its arguments, which is what you would look
+ * for on a monitor over someone's shoulder.
+ */
+export function commandSummary(command: string): string {
+  let text = command.replace(/\r/g, '')
+
+  // Heredoc body out, marker kept: `python3 - <<'PY' ...body... PY` -> `python3 - <<PY`
+  text = text.replace(/<<-?\s*'?"?([A-Za-z_][A-Za-z0-9_]*)'?"?[\s\S]*?^\1\s*$/gm, '<<$1')
+  text = text.replace(/<<-?\s*'?"?([A-Za-z_][A-Za-z0-9_]*)'?"?[\s\S]*$/m, '<<$1')
+
+  text = text.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
+
+  // Leading `cd <path>` plus its separator, however the command chained it. Repeated
+  // because a command can open with more than one.
+  for (let i = 0; i < 3; i++) {
+    const next = text.replace(/^cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;|\|\||\n)?\s*/, '')
+    if (next === text) break
+    text = next
+  }
+
+  // Output plumbing off the end. The command is what ran, not how it was read.
+  text = text.replace(/\s*2>&1\s*/g, ' ')
+  text = text.replace(/\s*\|\s*(?:head|tail|sed|tr|cut|wc|sort|uniq|grep -o|cat)\b[^|]*/g, '')
+  text = text.replace(/\s*>\s*\/dev\/null(?:\s*2>&1)?/g, '')
+
+  const flat = text.replace(/\s{2,}/g, ' ').trim()
+  return flat.length > 0 ? flat : command.trim()
+}
+
+/**
  * What this tool acted ON.
  *
  * A basename for file tools, the command for a shell, the pattern for a search, the
@@ -142,7 +207,9 @@ export function targetForTool(name: unknown, input: unknown): string {
 
   if (lower === 'bash' || lower === 'shell' || lower === 'exec' || lower === 'exec_command') {
     const command = args.command ?? args.cmd
-    if (typeof command === 'string' && command.length > 0) return oneLine(command, TARGET_MAX_CHARS)
+    if (typeof command === 'string' && command.length > 0) {
+      return oneLine(commandSummary(command), TARGET_MAX_CHARS)
+    }
   }
 
   for (const key of ['pattern', 'query', 'skill', 'description', 'subject', 'prompt']) {
@@ -233,6 +300,41 @@ function draftsFromContentBlocks(message: Record<string, unknown>): SessionStrea
   return out
 }
 
+/**
+ * The user's query out of a user record, or nothing.
+ *
+ * WHAT IS DELIBERATELY NOT A PROMPT:
+ *  - a `tool_result` block. The call was announced when it was made.
+ *  - a harness-injected wrapper. `<system-reminder>`, `<local-command-stdout>`,
+ *    `<command-name>` and the memory/bulletin blocks arrive as user turns and are not
+ *    anything a person asked. Showing one on the lens would be worse than showing
+ *    nothing, because it reads as the user's own words.
+ *  - an empty string after cleaning.
+ */
+export function promptDrafts(message: Record<string, unknown>): SessionStreamDraft[] {
+  const content = message.content
+  const blocks = Array.isArray(content)
+    ? content
+    : typeof content === 'string' ? [{ type: 'text', text: content }] : []
+
+  const parts: string[] = []
+  for (const raw of blocks) {
+    const block = asRecord(raw)
+    if (!block) continue
+    if (block.type === 'tool_result') return []
+    if (block.type !== 'text' && block.type !== undefined) continue
+    if (typeof block.text === 'string') parts.push(block.text)
+  }
+
+  let text = parts.join(' ')
+  // Wrapper blocks out, whole. A partial strip would leave the tag names on the lens.
+  text = text.replace(/<(system-reminder|relevant-memories|cache-health|daily-bulletin|cos-alarms|device-handoff|now|memory-stored|local-command-stdout|local-command-stderr|command-name|command-message|command-args)>[\s\S]*?<\/\1>/g, ' ')
+  const flat = oneLine(text, PROMPT_MAX_CHARS)
+  // A record whose ONLY content was a wrapper leaves nothing worth a line.
+  if (!flat || /^</.test(flat)) return []
+  return [{ kind: 'prompt', text: flat }]
+}
+
 function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamDraft[] {
   const type = typeof record.type === 'string' ? record.type : ''
 
@@ -241,9 +343,19 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
   if (type === 'system' && record.subtype === 'init') return [{ kind: 'status', state: 'working' }]
   if (type === 'result') return [{ kind: 'status', state: 'done' }]
 
-  // A user row is a tool RESULT or the prompt we just sent. Neither is news: the tool
-  // call was already announced, and the prompt came from this device.
-  if (type === 'user') return []
+  // A user row is EITHER a tool result or the query being worked on.
+  //
+  // This used to drop both, on the reasoning that "the prompt came from this device".
+  // That is true of a Continue turn and FALSE of the case that matters most: a session
+  // running in a Mac window, where the user row is the question Miles typed there and
+  // the glasses have never seen it. Dropping it is what made the live view a blank
+  // slate that said WORKING and nothing else.
+  //
+  // Tool results stay dropped -- the call was already announced.
+  if (type === 'user') {
+    const message = asRecord(record.message)
+    return message ? promptDrafts(message) : []
+  }
 
   const role = typeof record.role === 'string' ? record.role : ''
   if (type !== 'assistant' && role !== 'assistant') return []

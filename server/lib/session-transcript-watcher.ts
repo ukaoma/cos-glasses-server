@@ -172,6 +172,60 @@ async function readRangeAt(path: string, offset: number, length: number): Promis
   }
 }
 
+/**
+ * The last complete records before a byte offset, for the OPEN-time seed.
+ *
+ * WHY THIS EXISTS. The tail starts at the file's current size, so opening a session
+ * that is already working showed an EMPTY page that filled one line at a time. Miles,
+ * on hardware: "the live session pulling is a little lackluster." You walk up to the
+ * desk and the monitor is blank. The history is right there in the file; the tailer was
+ * simply choosing not to read it.
+ *
+ * READS BACKWARD, BOUNDED. `maxBytes` off the end, never the whole file -- the whole
+ * point of the forward-cursor design is that an 81 MB transcript is never re-read.
+ *
+ * DROPS THE FIRST FRAGMENT. A read from an arbitrary offset lands MID-RECORD, so the
+ * bytes before the first newline are the tail of a record whose start we never saw.
+ * Emitting that fragment would put a half-parsed line on the lens; it is discarded,
+ * which is why this returns "the last COMPLETE records".
+ *
+ * Returns [] on any read failure. A seed is a nicety; a session must still stream when
+ * its history cannot be read.
+ */
+export async function readTranscriptSeedLines(
+  path: string,
+  endOffset: number,
+  maxBytes = SEED_MAX_BYTES,
+): Promise<string[]> {
+  const end = Math.max(0, endOffset)
+  if (end === 0) return []
+  const length = Math.min(end, Math.max(0, maxBytes))
+  const start = end - length
+  const chunk = await readRangeAt(path, start, length)
+  if (chunk === null || chunk.length === 0) return []
+
+  let buf = chunk
+  if (start > 0) {
+    // Mid-record start: everything up to and including the first newline belongs to a
+    // record we did not see the beginning of.
+    const first = buf.indexOf(0x0a)
+    if (first < 0) return []
+    buf = buf.subarray(first + 1)
+  }
+  const last = buf.lastIndexOf(0x0a)
+  if (last < 0) return []
+  return buf.subarray(0, last).toString('utf8').split('\n').filter(line => line.length > 0)
+}
+
+/**
+ * Bytes read backward for a seed.
+ *
+ * 256 KiB against a measured p90 record of 1,627 bytes is on the order of a hundred
+ * records -- far more than the seven the lens can show, and small enough that the read
+ * is one syscall on a page open rather than anything the user waits for.
+ */
+export const SEED_MAX_BYTES = 256 * 1024
+
 export function createTranscriptTailer(options: TranscriptTailerOptions): TranscriptTailer {
   const now = options.now ?? (() => Date.now())
   const publish = options.publish ?? ((key, draft) => { publishSessionStream(key, draft) })
