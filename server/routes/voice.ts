@@ -14,6 +14,8 @@ import { trainingSourceFor } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
 import { getVoiceDirectorySnapshot, invalidateVoiceDirectory } from '../lib/voice-directory.js'
 import { greedyDiversitySelect } from '../lib/voice-enrolment-selection.js'
+import { fanOutSpeakerRename, type SpeakerRenameFanOut } from '../lib/speaker-rename-fanout.js'
+import { resolveCosOperationsDir } from '../lib/cos-operations-meetings.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -572,6 +574,57 @@ voiceRouter.get('/voice/directory', async (req, res) => {
 // 20 samples independently — 40 samples of one person, split, each half a
 // weaker representation of them than the union would be.
 //
+/**
+ * Carry a merge out to the meetings that already carry the absorbed name.
+ *
+ * WHY THE ROUTE DOES THIS AT ALL. A merge folds two voice profiles together and
+ * relabels the calibration log, and that is where it stopped. Meetings keep the
+ * strings written at transcription time and the review panel re-reads them from disk,
+ * so every meeting recorded before the merge kept rendering two people forever. The
+ * merge fixed identification going FORWARD and nothing behind it.
+ *
+ * PURE STRING REWRITE, no enrolment. The per-meeting relabel route also calls
+ * `enrolNamedVoice`, which is right when a human names a voice and wrong here: the
+ * merge has ALREADY absorbed those embeddings, so re-enrolling the same audio across
+ * every affected meeting would double-count it and drag the centroid. That matters
+ * concretely -- the Luke merge moved a neighbouring speaker from 0.818 to 0.842, close
+ * enough to the identification threshold to start producing wrong attributions.
+ *
+ * NEVER THROWS. A merge that succeeded in the store must not report failure because a
+ * meeting file was unreadable; the failure is reported in the payload instead.
+ */
+function fanOutMergeToMeetings(
+  merged: readonly string[],
+  into: string,
+  apply: boolean,
+): { operationsDir: string | null; runs: SpeakerRenameFanOut[]; error?: string } {
+  const operationsDir = resolveCosOperationsDir()
+  // Not an error. A server with no COS library is a supported install; it simply has
+  // no meetings to carry the rename to.
+  if (!operationsDir || merged.length === 0) return { operationsDir, runs: [] }
+  try {
+    return { operationsDir, runs: merged.map(name => fanOutSpeakerRename(operationsDir, name, into, { apply })) }
+  } catch (err: unknown) {
+    return { operationsDir, runs: [], error: errMsg(err) }
+  }
+}
+
+/** The one number a human needs before approving: how many files this touches. */
+function fanOutTotals(runs: readonly SpeakerRenameFanOut[]): {
+  files: number; labels: number; unhandled: number
+} {
+  let files = 0, labels = 0, unhandled = 0
+  for (const run of runs) {
+    for (const f of [...run.sidecars, ...run.markdown]) {
+      files += 1
+      labels += f.labels
+      if (f.note && /unhandled/.test(f.note)) unhandled += 1
+    }
+    unhandled += run.skipped.filter(s => /unhandled/.test(s.reason)).length
+  }
+  return { files, labels, unhandled }
+}
+
 // Fails closed below the search-accept threshold. A wrong merge destroys BOTH
 // identities at once and cannot be undone from the store alone, so the only
 // acceptable evidence is acoustic. `force` exists for the case where Miles
@@ -605,10 +658,18 @@ voiceRouter.post('/voice/merge-profiles', (req, res) => {
 
     if (req.body?.confirm !== true && !dryRun) {
       const preview = mergeSpeakerProfiles(into, from, { force, dryRun: true })
+      // BLAST RADIUS IN THE PREVIEW, not after the fact. The confirm gate exists so a
+      // human sees what a merge does before it happens, and rewriting production
+      // meeting records is the largest thing it does. Scoped to the names that would
+      // ACTUALLY merge, so a refused pair does not advertise a rewrite that will not
+      // run. This walks the meeting library, which is why it happens here -- once, on a
+      // deliberate human action -- and not on any hot path.
+      const fan = fanOutMergeToMeetings(preview.merged, into, false)
       return res.status(400).json({
         error: 'confirmation required',
         message: `Merging is not reversible from the store alone. Review the similarity scores, then pass { confirm: true }.`,
         preview,
+        meetingRewrite: { ...fanOutTotals(fan.runs), dryRun: true, error: fan.error },
       })
     }
 
@@ -638,7 +699,27 @@ voiceRouter.post('/voice/merge-profiles', (req, res) => {
     }
 
     if (!dryRun) invalidateVoiceDirectory()
-    res.json({ ...report, dryRun, forced: force, calibrationRowsRelabeled: calibration })
+
+    // The fan-out honours `dryRun` for the same reason the merge does: a dry run must
+    // stay a dry run all the way down, or `dryRun: true` becomes the most dangerous
+    // parameter in the API.
+    const fan = fanOutMergeToMeetings(report.merged, into, !dryRun)
+    res.json({
+      ...report,
+      dryRun,
+      forced: force,
+      calibrationRowsRelabeled: calibration,
+      meetingRewrite: {
+        ...fanOutTotals(fan.runs),
+        dryRun,
+        error: fan.error,
+        // Paths, not just counts: this rewrote production records and the operator
+        // should be able to see exactly which, and diff them.
+        sidecars: fan.runs.flatMap(r => r.sidecars),
+        markdown: fan.runs.flatMap(r => r.markdown),
+        skipped: fan.runs.flatMap(r => r.skipped),
+      },
+    })
   } catch (err: unknown) {
     res.status(500).json({ error: errMsg(err) })
   }

@@ -14,7 +14,7 @@
 //     samples into a cap-20 profile evicts every pre-existing embedding.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -28,6 +28,10 @@ let removedNames: string[] = []
 let mergeCalls: Array<{ into: string; from: string[]; force?: boolean; dryRun?: boolean }> = []
 let mergeSimilarity: Record<string, number> = {}
 let directoryForceCalls: boolean[] = []
+let opsDir = ''
+let savedOperationsDir: string | undefined
+let savedMeetingsRoot: string | undefined
+let savedScriptsDir: string | undefined
 
 function trainingDir(speaker: string): string {
   return join(dataDir, 'training-audio', speaker.replace(/\s+/g, '_'))
@@ -197,6 +201,18 @@ function httpRequest(method: string, path: string, body?: unknown): Promise<{ st
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), 'cos-voice-routes-'))
   process.env.COS_DATA_DIR = dataDir
+  // PINNED, not merely absent. merge-profiles now rewrites meeting records under
+  // COS_OPERATIONS_DIR, and that variable is exported in every real glasses-server
+  // environment -- so a developer running this suite on their own machine would have
+  // had route tests rewriting their production meeting library. Relying on the
+  // ambient env being unset is luck, not isolation.
+  savedOperationsDir = process.env.COS_OPERATIONS_DIR
+  savedMeetingsRoot = process.env.COS_MEETINGS_ROOT
+  savedScriptsDir = process.env.COS_SCRIPTS_DIR
+  opsDir = mkdtempSync(join(tmpdir(), 'cos-voice-ops-'))
+  process.env.COS_OPERATIONS_DIR = opsDir
+  delete process.env.COS_MEETINGS_ROOT
+  delete process.env.COS_SCRIPTS_DIR
   mergeSimilarity = {}
   profiles = [
     { name: 'MU', embeddings: Array.from({ length: 20 }, () => [1, 0, 0, 0]), sources: Array(20).fill('manual') },
@@ -213,7 +229,14 @@ afterEach(async () => {
   vi.doUnmock('../lib/profile.js')
   vi.doUnmock('../lib/voice-directory.js')
   delete process.env.COS_DATA_DIR
+  const restore = (k: string, v: string | undefined): void => {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v
+  }
+  restore('COS_OPERATIONS_DIR', savedOperationsDir)
+  restore('COS_MEETINGS_ROOT', savedMeetingsRoot)
+  restore('COS_SCRIPTS_DIR', savedScriptsDir)
   if (dataDir) rmSync(dataDir, { recursive: true, force: true })
+  if (opsDir) rmSync(opsDir, { recursive: true, force: true })
 })
 
 describe('the reader path reaches the data home, where the writer actually saves', () => {
@@ -628,5 +651,175 @@ describe('/voice/directory exposes honest bounded cross-meeting evidence', () =>
     expect(res.json.limit).toBe(100)
     expect(res.json.offset).toBe(0)
     expect(res.json.profiles).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A merge must reach the MEETINGS, not just the store.
+//
+// The gap this closes, measured on the real library: the Luke H / Luke Henry split
+// had been live since 2026-03-25, the merge fixed identification going forward, and
+// 42 meeting records kept rendering two Lukes forever because nothing ever rewrote
+// them. The review panel re-reads those strings from disk on every request.
+// ---------------------------------------------------------------------------
+describe('a merge carries the rename out to the meeting library', () => {
+  /** A meeting in the shape the production library actually uses. */
+  function meeting(domain: string, month: string, base: string, speaker: string): {
+    md: string; sidecar: string
+  } {
+    const dir = join(opsDir, domain, 'meetings', month)
+    mkdirSync(dir, { recursive: true })
+    const md = join(dir, `${base}.md`)
+    writeFileSync(md, [
+      '# Sync', '', '## Attendees', '', `- ${speaker}`, '- MU', '',
+      '## Transcript', '', `[${speaker}]:`, 'A thing was said.', '', '[MU]:', 'Agreed.', '',
+    ].join('\n'))
+    const sidecar = join(dir, `${base}.g2-chunks.json`)
+    writeFileSync(sidecar, JSON.stringify({
+      chunks: [{ speaker, text: 'A thing was said.' }, { speaker: 'MU', text: 'Agreed.' }],
+    }))
+    return { md, sidecar }
+  }
+
+  it('shows the blast radius in the confirm preview, and rewrites NOTHING yet', async () => {
+    // The confirm gate exists so a human sees what a merge does before it happens.
+    // Rewriting production meeting records is the largest thing it does, so a preview
+    // that omitted it would be hiding the part that matters.
+    const { md, sidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    await startServer()
+
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma' })
+    expect(res.status).toBe(400)
+    expect(res.json.error).toBe('confirmation required')
+    expect(res.json.meetingRewrite.files).toBe(2)
+    expect(res.json.meetingRewrite.labels).toBeGreaterThan(0)
+    expect(res.json.meetingRewrite.dryRun).toBe(true)
+
+    expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
+    expect(readFileSync(sidecar, 'utf-8')).toContain('Clem Ukaoma')
+  })
+
+  it('rewrites both the transcript and the sidecar on confirm, and names the files', async () => {
+    const { md, sidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    await startServer()
+
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(200)
+
+    const after = readFileSync(md, 'utf-8')
+    expect(after).toContain('[MU]:')
+    expect(after).not.toContain('[Clem Ukaoma]:')
+    expect(after).not.toContain('- Clem Ukaoma')
+    expect(JSON.parse(readFileSync(sidecar, 'utf-8')).chunks.map((c: {speaker: string}) => c.speaker))
+      .toEqual(['MU', 'MU'])
+
+    // Counts alone would not let an operator audit or diff what was touched.
+    // realpathSync because the resolver canonicalises, and on macOS the tmpdir is a
+    // symlink (/var -> /private/var). Comparing the raw fixture path fails on a
+    // difference that has nothing to do with the behaviour under test.
+    expect(res.json.meetingRewrite.markdown[0].path).toBe(realpathSync(md))
+    expect(res.json.meetingRewrite.sidecars[0].path).toBe(realpathSync(sidecar))
+  })
+
+  it('leaves the library untouched on dryRun, all the way down', async () => {
+    // Otherwise `dryRun: true` becomes the most dangerous parameter in the API.
+    const { md } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', dryRun: true })
+    expect(res.status).toBe(200)
+    expect(res.json.meetingRewrite.dryRun).toBe(true)
+    expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
+  })
+
+  it('rewrites NOTHING when the merge itself was refused below the floor', async () => {
+    // The rename is only correct BECAUSE the merge concluded they are one person.
+    // A 409 means we concluded the opposite.
+    mergeSimilarity = { 'Clem Ukaoma': 0.41 }
+    const { md } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(409)
+    expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
+  })
+
+  it('sweeps every domain and month, and skips iCloud conflict copies', async () => {
+    // Desktop-and-Documents sync creates `2026-08 2/` and `sync 2.md`. Rewriting one
+    // of those edits a file nothing reads while leaving the real one stale.
+    meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    meeting('personal', '2026-07', 'other', 'Clem Ukaoma')
+    const conflictMonth = meeting('quilt', '2026-08 2', 'sync', 'Clem Ukaoma')
+    const conflictFile = meeting('quilt', '2026-08', 'sync 2', 'Clem Ukaoma')
+    await startServer()
+
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.meetingRewrite.files).toBe(4)   // two real meetings x (md + sidecar)
+    expect(readFileSync(conflictMonth.md, 'utf-8')).toContain('[Clem Ukaoma]:')
+    expect(readFileSync(conflictFile.md, 'utf-8')).toContain('[Clem Ukaoma]:')
+  })
+
+  it('still merges when no COS library is configured', async () => {
+    // A standalone server with no operations tree is a supported install, not an error.
+    delete process.env.COS_OPERATIONS_DIR
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.merged).toEqual(['Clem Ukaoma'])
+    expect(res.json.meetingRewrite.files).toBe(0)
+    expect(res.json.meetingRewrite.error).toBeUndefined()
+  })
+
+  it('renames ONLY the names that actually merged, never the ones that did not', async () => {
+    // THE DATA-CORRUPTION PATH. `from` is what was REQUESTED; `report.merged` is what
+    // the store actually absorbed. A name that does not exist as a profile is reported
+    // in `missing` and merged into nothing -- but it can still be a real person's
+    // speaker label in the meeting library. Fanning out the requested list instead of
+    // the merged list would rewrite that person's name to someone else's in every
+    // meeting they appear in, off the back of a typo.
+    //
+    // Found by mutation: swapping `report.merged` for `from` passed all 51 tests.
+    const dir = join(opsDir, 'quilt', 'meetings', '2026-08')
+    mkdirSync(dir, { recursive: true })
+    const other = join(dir, 'other.md')
+    writeFileSync(other, ['## Attendees', '', '- Niala Boodhoo', '',
+      '## Transcript', '', '[Niala Boodhoo]:', 'Unrelated.', ''].join('\n'))
+
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: ['Clem Ukaoma', 'Niala Boodhoo'], confirm: true })
+
+    expect(res.status).toBe(200)
+    expect(res.json.merged).toEqual(['Clem Ukaoma'])
+    expect(res.json.missing).toEqual(['Niala Boodhoo'])
+    // Her name survives untouched. She was never merged into anything.
+    expect(readFileSync(other, 'utf-8')).toContain('[Niala Boodhoo]:')
+  })
+
+  it('counts sidecar labels from the relabelled CHUNKS, not from a truthy result', async () => {
+    // `SidecarRelabelResult.changed` is an ARRAY of chunk indices. A first cut read it
+    // as a number, which would have reported 0 labels for every sidecar -- a fan-out
+    // announcing success while rewriting nothing. Mutation-proven: hardcoding the
+    // count to 1 passed the whole suite before this existed.
+    const dir = join(opsDir, 'quilt', 'meetings', '2026-08')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'many.g2-chunks.json'), JSON.stringify({
+      chunks: [
+        { speaker: 'Clem Ukaoma', text: 'one' },
+        { speaker: 'MU', text: 'two' },
+        { speaker: 'Clem Ukaoma', text: 'three' },
+        { speaker: 'Clem Ukaoma', text: 'four' },
+      ],
+    }))
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles',
+      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.meetingRewrite.sidecars[0].labels).toBe(3)
+    expect(res.json.meetingRewrite.labels).toBe(3)
   })
 })

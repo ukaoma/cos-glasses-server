@@ -1,5 +1,30 @@
 ## Unreleased
 
+## 6.36.5
+- **A speaker merge now reaches the meetings, not just the voice store.**
+  `merge-profiles` folded two profiles together and relabelled the calibration log,
+  and stopped there. Meetings keep the speaker strings written at transcription time
+  and the review panel re-reads them from disk, so every meeting recorded before a
+  merge kept rendering two people forever — the merge fixed identification going
+  forward and nothing behind it. Measured on the live library for one real merge:
+  24 sidecars (111 labels) and 18 transcripts (70 labels) were stranded.
+- The fan-out is a **pure string rewrite** — the same `relabelSidecarJson` and
+  `relabelMeetingMarkdown` primitives the per-meeting relabel route uses, minus its
+  `enrolNamedVoice` step. Re-enrolling would double-count audio the merge has already
+  absorbed and drag the centroid, which matters at the margin: one recent merge moved
+  a neighbouring speaker from 0.818 to 0.842.
+- **The confirm gate now shows the blast radius before you approve it**, scoped to the
+  names that would actually merge. Dry run is the default, writes are atomic, and the
+  response names every file touched so the rewrite can be audited and diffed.
+- Renames only what the store actually absorbed. A requested name that matched no
+  profile is reported as missing and left alone everywhere — fanning out the requested
+  list instead would have renamed a real person off the back of a typo.
+- Reports what it cannot fix rather than passing over it: transcripts in the older
+  `**Name**` label form are counted and surfaced, not silently skipped. On the live
+  library that is 12 files carrying 58 labels a rename leaves behind.
+- iCloud conflict copies are skipped by construction, including the compound-extension
+  form (`sync 2.g2-chunks.json`) an earlier pass let through.
+
 ## 6.28.0
 - **Continue Original Agent Thread — attach to a live desktop thread and append a turn
   to it.** From the glasses you can now continue a Claude Code or Codex conversation that
