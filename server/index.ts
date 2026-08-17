@@ -19,6 +19,8 @@ import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
 import { agentSessionsRouter } from './routes/agent-sessions.js'
+import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
+import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import {
   createAgentSessionBindingsRouter,
@@ -384,23 +386,45 @@ const deliverAttachedTurnForRoute = async (request: {
     return { attachable: verdict.attachable, reason: verdict.reason }
   })
 
-  return deliverAttachedTurn({
+  // PHASE 1 OF SESSION STREAMING. The child already writes `--output-format
+  // stream-json`; this is the only place that stream reaches anything other than the
+  // adapter's id scanner. Opened before the spawn so a subscriber that connects mid
+  // turn sees `working` rather than silence, and closed in a `finally` because the
+  // duplicate-suppression gate it holds must be released on EVERY exit path -- a stuck
+  // gate would silence Phase 2 for that session permanently.
+  const live = createAttachedTurnStream({
     provider: request.provider,
-    nativeThreadId: request.nativeThreadId,
-    prompt: request.prompt,
-    cwd: workspace.path,
-    // The only policy this build accepts. The adapter refuses anything else and
-    // asserts no bypass/always-approve flag reaches the argv (plan 4.7).
-    policy: 'read_only',
-    deps: {
-      ...base,
-      // `startMs` is deliberately unused: the adapter already probed it as a GATE
-      // (a null there aborts before this is reached), and the route probes again
-      // as the recorder. One record, one authority.
-      recordSpawn: (pid: number, _startMs: number) =>
-        request.onSpawn(pid) ? 'recorded' : 'route_refused_ownership',
-    },
+    sessionId: request.nativeThreadId,
   })
+
+  try {
+    const result = await deliverAttachedTurn({
+      provider: request.provider,
+      nativeThreadId: request.nativeThreadId,
+      prompt: request.prompt,
+      cwd: workspace.path,
+      // The only policy this build accepts. The adapter refuses anything else and
+      // asserts no bypass/always-approve flag reaches the argv (plan 4.7).
+      policy: 'read_only',
+      deps: {
+        ...base,
+        // `startMs` is deliberately unused: the adapter already probed it as a GATE
+        // (a null there aborts before this is reached), and the route probes again
+        // as the recorder. One record, one authority.
+        recordSpawn: (pid: number, _startMs: number) =>
+          request.onSpawn(pid) ? 'recorded' : 'route_refused_ownership',
+        observeStdout: chunk => live.observeStdout(chunk),
+      },
+    })
+    // `done` only for a turn the adapter proved landed. Anything else is `idle`: the
+    // session stopped working, and claiming a completion we could not verify is the
+    // kind of invention the rest of this feature refuses to make.
+    live.finish(result && typeof result === 'object' && (result as { ok?: unknown }).ok === true ? 'done' : 'idle')
+    return result
+  } catch (error) {
+    live.finish('idle')
+    throw error
+  }
 }
 
 /**
@@ -454,6 +478,11 @@ app.use('/api', transcribeRouter)
 app.use('/api', sessionIndexRouter)
 // Claude + Codex + Cursor transcripts from this Mac. Same 7-day window as Control.
 app.use('/api', agentSessionsRouter)
+// The live view of one of those sessions. Four segments ending in a literal `stream`,
+// so it cannot shadow the three-segment transcript route above or the bindings
+// router's `/attachability` below. READ-ONLY, and deliberately NOT behind
+// COS_THREAD_ATTACH_ENABLED -- see the header of the route for why.
+app.use('/api', agentSessionStreamRouter)
 // Presence view of Claude Code sessions on this Mac. Dark unless
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)

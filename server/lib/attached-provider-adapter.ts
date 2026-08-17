@@ -462,6 +462,25 @@ export interface AttachedTurnDeps {
    * and prove the turn is refused with zero spawns. Production never sets it.
    */
   buildArgs?: (provider: AttachedProvider, nativeThreadId: string, cwd: string) => string[]
+  /**
+   * A PASSIVE reader of the child's stdout. Optional; omitted changes nothing.
+   *
+   * The turn already spawns with `--output-format stream-json --verbose`, and this
+   * module reads that stream for exactly one thing: proving the returned session id
+   * matches the target. Everything else is discarded. This hook is how the live view
+   * gets a copy without that scan being touched.
+   *
+   * IT IS AN OBSERVER AND IS TREATED AS ONE. Registered as a SECOND `data` listener,
+   * AFTER the scanner, so the scanner runs first on every chunk. It shares no state
+   * with the scanner, it cannot influence any outcome, and a throw from it is caught
+   * and dropped rather than reaching `emit()` where it would starve the listener that
+   * matters. When absent, no second listener is registered at all, which is byte for
+   * byte the behaviour every existing caller and test already has.
+   *
+   * DELIBERATELY NOT A TRANSFORM. It returns nothing, so there is no shape in which a
+   * future edit can let it modify what the scan sees.
+   */
+  observeStdout?: (chunk: string) => void
 }
 
 export interface AttachedTurnRequest {
@@ -1142,6 +1161,26 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     } catch {
       safeTerminate(deps, child, 'SIGKILL')
       return settleFailure('adapter_internal_error', { detail: 'wire_failed' })
+    }
+
+    // --- the passive tee, wired LAST and in its own try ------------------------
+    // Its own try/catch, outside the block above, is the point: a stdout that refuses
+    // a second listener must cost the OBSERVER, not the turn. Inside that block the
+    // same throw would hit `wire_failed` and refuse a delivery for the sake of a view.
+    try {
+      const observe = deps.observeStdout
+      if (typeof observe === 'function' && child.stdout) {
+        child.stdout.on('data', (chunk: any) => {
+          try {
+            observe(typeof chunk === 'string' ? chunk : String(chunk))
+          } catch {
+            // Never rethrown. A throw here propagates out of `emit()` and would stop
+            // every later listener on this stream.
+          }
+        })
+      }
+    } catch {
+      /* the turn proceeds unobserved, which is the correct direction */
     }
 
     // --- bounded budget ------------------------------------------------------
