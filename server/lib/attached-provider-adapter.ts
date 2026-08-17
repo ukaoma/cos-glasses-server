@@ -93,6 +93,7 @@ import { isValidNativeThreadId } from './native-thread-id.js'
 import { isBindableProvider, type BindableProvider } from './agent-session-binding-store.js'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
 import { processStartMs as realProcessStartMs } from './occupancy-probes.js'
+import { getCodexTrustMode } from './codex-run-ledger.js'
 
 /** Providers with a certified attached path. Cursor is Fork-only (plan 2.5). */
 export type AttachedProvider = BindableProvider
@@ -529,17 +530,35 @@ const STRIPPED_ENV_KEYS: readonly string[] = ['CLAUDECODE', 'COS_API_TOKEN']
 // ---------------------------------------------------------------------------
 
 /**
- * Claude: `claude -p --resume <id>`, read-only, prompt on stdin.
+ * Claude: `claude -p --resume <id>`, prompt on stdin.
  *
  * The prompt is NOT an argv element. argv is world-readable through `ps`, and
  * the prompt is the user's private text; stdin also matches what both ordinary
  * bridges already do.
  *
- * Two independent read-only layers, because either alone is one assumption
- * deep: `--permission-mode plan` means the model cannot mutate regardless of
- * its tool list, and the empty `--tools`/`--allowedTools` pair is the exact
- * text-only posture `claude-permissions.ts` already ships for untrusted mode.
- * If an older CLI rejects `plan`, it exits non-zero and we fail closed.
+ * THE TURN INHERITS THE SESSION'S OWN PERMISSIONS (Miles, 2026-08-16, explicit).
+ *
+ * This used to force two independent read-only layers: `--permission-mode plan`
+ * plus an empty `--tools`/`--allowedTools` pair. The result was a Continue that
+ * could talk into a thread and do nothing in it -- his first real continued turn
+ * came back reporting that every tool was disabled, which is not "like being at
+ * the desk". Both layers are gone; a resumed turn now runs as that session
+ * ordinarily would.
+ *
+ * What that means plainly: a prompt spoken into a pair of glasses can run tools
+ * on this Mac with nobody at the keyboard. That is the intent, not an oversight.
+ * The protections that remain, and that must not be quietly removed with it:
+ *
+ *   1. `COS_THREAD_ATTACH_ENABLED` still gates the whole surface, and off means
+ *      the write routes are never registered.
+ *   2. `findBannedPermissionArg` still runs at the spawn boundary and still
+ *      rejects the actual bypasses -- `--dangerously-skip-permissions`, `--yolo`,
+ *      `danger-full-access` and the rest. Dropping a lockdown is not the same as
+ *      adding a bypass, and the bypass ban is unchanged.
+ *   3. The menu cursor rests on a row that cannot act, so a false-positive ring
+ *      tap cannot reach Continue (`defaultSessionThreadActionIndex`).
+ *   4. Delivery is still gated on a fresh occupancy probe, the epoch floor, the
+ *      per-target claim and the head watermark.
  */
 export function buildClaudeAttachedArgs(nativeThreadId: string): string[] {
   return [
@@ -549,9 +568,6 @@ export function buildClaudeAttachedArgs(nativeThreadId: string): string[] {
     // never observe the session id we are required to verify.
     '--verbose',
     '--resume', nativeThreadId,
-    '--permission-mode', 'plan',
-    '--tools', '',
-    '--allowedTools', '',
   ]
 }
 
@@ -571,7 +587,10 @@ export function buildClaudeAttachedArgs(nativeThreadId: string): string[] {
 export function buildCodexAttachedArgs(nativeThreadId: string, cwd: string): string[] {
   return [
     'exec',
-    '--sandbox', 'read-only',
+    // The posture ordinary Codex runs use on this host, not a stricter one
+    // invented here. `COS_CODEX_SANDBOX=workspace-write` opts in; absent stays
+    // read-only, so this is never MORE permissive than the rest of the server.
+    '--sandbox', getCodexTrustMode(),
     '--cd', cwd,
     'resume',
     '--json',

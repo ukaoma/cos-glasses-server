@@ -2219,6 +2219,27 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.34.0] - 2026-08-16
+
+### A continued turn now runs with the session's own permissions
+
+- **This widens what Continue can do.** A prompt spoken into the glasses can run
+  tools on the Mac with nobody at the keyboard. Authorized explicitly by Miles
+  after his first real continued turn came back reporting that every tool was
+  disabled, which is not the point of the feature.
+- Claude drops `--permission-mode plan` and the empty `--tools`/`--allowedTools`
+  pair. Codex now uses `getCodexTrustMode()`, the same posture ordinary Codex runs
+  use on the host, rather than a stricter one invented at this call site. Absent
+  `COS_CODEX_SANDBOX=workspace-write` that is still read-only, so this is never
+  more permissive than the rest of the server.
+- **Unchanged, and load-bearing:** `COS_THREAD_ATTACH_ENABLED` still gates the
+  surface and off still leaves the routes unregistered; `findBannedPermissionArg`
+  still rejects every real bypass at the spawn boundary; delivery is still gated
+  on a fresh occupancy probe, the epoch floor, the per-target claim and the head
+  watermark. Dropping a lockdown is not adding a bypass.
+- The old read-only posture had NO test asserting it was present, so it could have
+  been deleted silently. The new posture is pinned, and so is the bypass ban.
+
 ## [6.33.0] - 2026-08-16
 
 ### One switch turns Continue on

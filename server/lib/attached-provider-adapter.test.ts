@@ -1133,3 +1133,46 @@ describe('plan 4.7 is enforced at runtime, not only asserted in a test', () => {
     expect(findBannedPermissionArg(buildCodexAttachedArgs(id, '/tmp'))).toBeNull()
   })
 })
+
+describe('a continued turn inherits the session posture, and the bypass ban survives it', () => {
+  // COST OF NOT HAVING THIS: the previous read-only posture (--permission-mode
+  // plan plus an empty --tools/--allowedTools pair) was documented at length as a
+  // safety property and had NO test asserting it was present. The only assertion
+  // touching this argv checked the bypass ban. It could have been deleted silently
+  // at any point, and when it was deliberately removed nothing went red.
+  it('resumes without forcing a stricter posture than the session has', () => {
+    // Miles, 2026-08-16, explicit: a continued turn should run with the normal
+    // permissions of the session. A forced read-only turn could talk into a thread
+    // and do nothing in it.
+    const args = buildClaudeAttachedArgs('a4b2b4dd-e40c-4b08-8a11-c89a018c197d')
+    expect(args).toContain('--resume')
+    expect(args).not.toContain('--permission-mode')
+    expect(args).not.toContain('--allowedTools')
+    expect(args).not.toContain('--tools')
+  })
+
+  it('still refuses every real bypass, which is a different thing', () => {
+    // Dropping a lockdown is not adding a bypass. This guard is what keeps that
+    // true, and it runs at the spawn boundary.
+    for (const bypass of [
+      '--dangerously-skip-permissions',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--yolo',
+      '--full-auto',
+      'danger-full-access',
+      'bypassPermissions',
+    ]) {
+      expect(findBannedPermissionArg(['-p', bypass]), bypass).not.toBeNull()
+    }
+  })
+
+  it('keeps the prompt out of argv, which ps exposes to every local user', () => {
+    const args = buildClaudeAttachedArgs('a4b2b4dd-e40c-4b08-8a11-c89a018c197d')
+    expect(args.join(' ')).not.toContain('stdin')
+    expect(args.some(a => a.length > 100)).toBe(false)
+  })
+
+  it('the clean argv passes its own ban check', () => {
+    expect(findBannedPermissionArg(buildClaudeAttachedArgs('a4b2b4dd-e40c-4b08-8a11-c89a018c197d'))).toBeNull()
+  })
+})
