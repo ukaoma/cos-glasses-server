@@ -65,7 +65,7 @@ import {
   subscribeSessionStream,
   type PublishedSessionEvent,
 } from '../lib/session-stream-bus.js'
-import { acquireTranscriptWatcher } from '../lib/session-transcript-watcher.js'
+import { acquireTranscriptWatcher, transcriptWatcherDegraded } from '../lib/session-transcript-watcher.js'
 import type { SessionStreamState } from '../lib/session-stream-events.js'
 
 export const agentSessionStreamRouter = Router()
@@ -212,7 +212,17 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
     }
   }
 
-  heartbeat = setInterval(() => { write({ kind: 'heartbeat', at: Date.now() }) }, HEARTBEAT_INTERVAL_MS)
+  heartbeat = setInterval(() => {
+    // The tail gave up on a record too large to stream (see session-transcript-watcher).
+    // END the response rather than heartbeat over a dead tail: the client's fallback to
+    // its own poll is already written and tested, and a socket that stays "live" while
+    // producing nothing is worse than no socket at all.
+    if (transcriptWatcherDegraded(key)) {
+      teardown()
+      return
+    }
+    write({ kind: 'heartbeat', at: Date.now() })
+  }, HEARTBEAT_INTERVAL_MS)
   if (typeof (heartbeat as any).unref === 'function') (heartbeat as any).unref()
 
   // The contract's "emit a status immediately" -- written before any queued event so

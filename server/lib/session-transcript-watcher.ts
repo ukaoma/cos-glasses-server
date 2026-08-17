@@ -41,10 +41,17 @@
 // change, the thing the plan forbids, never happens: the cursor only ever reads the
 // bytes appended since the last tick.
 //
-// The pathological case is explicit rather than silent. A record LARGER than
-// `MAX_READ_BYTES` cannot be assembled without unbounded memory, so the cursor enters
-// a skip state, discards until the next newline, and resumes. `MAX_READ_BYTES` is 4
-// MiB, 3.2x the largest record measured on this machine.
+// The pathological case is explicit rather than silent, and it does NOT try to be clever.
+// A record LARGER than `MAX_READ_BYTES` cannot be assembled without unbounded memory, so
+// the tailer emits a terminal `done` and DEGRADES TO THE POLL, which has no such bound.
+// `MAX_READ_BYTES` is 4 MiB, 3.2x the largest record measured on this machine, so this is
+// a safety valve rather than an expected path.
+//
+// Skipping the record instead was tried first and was wrong twice over. It wedged: after
+// discarding the oversized bytes the leftover in the same chunk still looked capped, so
+// the GOOD record behind it was skipped too, on every tick, forever -- zero events, not
+// even a status. And even working it would have silently dropped a reply the user was
+// waiting to read. Arriving 5 seconds later through the poll beats never arriving.
 
 import { constants as fsConstants } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
@@ -67,15 +74,19 @@ export const POLL_INTERVAL_MS = 1_000
  */
 export const IDLE_AFTER_MS = 45_000
 
-/** Cursor position in the file, plus whether we are inside an oversized record. */
+/** Cursor position in the file. Forward-only; see the header. */
 export interface TranscriptCursor {
   offset: number
-  skipping: boolean
 }
 
 export interface ConsumeResult {
   cursor: TranscriptCursor
   lines: string[]
+  /**
+   * One record exceeded a whole tick's budget, so this stream cannot carry it.
+   * The caller must stop and let the poll take over. See the header.
+   */
+  tooLarge?: boolean
 }
 
 /**
@@ -93,33 +104,19 @@ export function consumeTranscriptChunk(
   chunk: Buffer,
   capped: boolean,
 ): ConsumeResult {
-  let offset = cursor.offset
-  let buf = chunk
+  const last = chunk.lastIndexOf(0x0a)
 
-  if (cursor.skipping) {
-    const idx = buf.indexOf(0x0a)
-    if (idx < 0) {
-      // Still inside the oversized record. Consume and stay skipping.
-      return { cursor: { offset: offset + buf.length, skipping: true }, lines: [] }
-    }
-    offset += idx + 1
-    buf = buf.subarray(idx + 1)
-  }
-
-  const last = buf.lastIndexOf(0x0a)
   if (last < 0) {
-    if (capped) {
-      // No newline in a FULL read: the record at the cursor is larger than a whole
-      // tick's budget. Skip it deliberately rather than buffering it without bound.
-      return { cursor: { offset: offset + buf.length, skipping: true }, lines: [] }
-    }
-    // An incomplete record, still being appended. Leave the cursor where it is and
-    // re-read it next tick; that is what makes a 587 KB record arrive whole.
-    return { cursor: { offset, skipping: false }, lines: [] }
+    // Nothing completed in this chunk. Leave the cursor where it is so the partial
+    // record is re-read next tick; that is what makes a 587 KB record arrive whole.
+    // If the read was FULL, though, re-reading it will never terminate: hand it off.
+    return capped
+      ? { cursor, lines: [], tooLarge: true }
+      : { cursor, lines: [] }
   }
 
-  const lines = buf.subarray(0, last).toString('utf8').split('\n').filter(line => line.length > 0)
-  return { cursor: { offset: offset + last + 1, skipping: false }, lines }
+  const lines = chunk.subarray(0, last).toString('utf8').split('\n').filter(line => line.length > 0)
+  return { cursor: { offset: cursor.offset + last + 1 }, lines }
 }
 
 export interface TranscriptTailerOptions {
@@ -141,7 +138,9 @@ export interface TranscriptTailer {
   tick(): Promise<void>
   cursor(): TranscriptCursor
   /** Last state this tailer published, or null if it has published none. */
-  state(): 'working' | 'idle' | null
+  state(): 'working' | 'idle' | 'done' | null
+  /** True once this tailer has handed off to the poll. Terminal; never clears. */
+  degraded(): boolean
 }
 
 /**
@@ -180,9 +179,10 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
   const maxRead = options.maxReadBytes ?? MAX_READ_BYTES
   const idleAfter = options.idleAfterMs ?? IDLE_AFTER_MS
 
-  let cursor: TranscriptCursor = { offset: Math.max(0, options.offset), skipping: false }
-  let state: 'working' | 'idle' | null = null
+  let cursor: TranscriptCursor = { offset: Math.max(0, options.offset) }
+  let state: 'working' | 'idle' | 'done' | null = null
   let lastActivity = now()
+  let degraded = false
 
   const emit = (draft: SessionStreamDraft) => {
     try {
@@ -195,7 +195,11 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
   return {
     cursor: () => ({ ...cursor }),
     state: () => state,
+    degraded: () => degraded,
     async tick(): Promise<void> {
+      // Terminal. Once the poll owns this session, continuing to stat and re-read a 4 MiB
+      // range every second would burn syscalls to produce nothing, forever.
+      if (degraded) return
       try {
         let size: number
         try {
@@ -210,7 +214,7 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
           // Truncated or replaced. Re-reading an 81 MB file from zero is the one thing
           // this design exists to avoid, so we rejoin at the new end and let the poll
           // fallback carry whatever the rotation took with it.
-          cursor = { offset: size, skipping: false }
+          cursor = { offset: size }
           return
         }
 
@@ -221,6 +225,19 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
           if (chunk !== null && chunk.length > 0) {
             const result = consumeTranscriptChunk(cursor, chunk, chunk.length >= maxRead)
             cursor = result.cursor
+            if (result.tooLarge) {
+              // HAND OFF, do not skip. `done` is the same terminal status a finished turn
+              // sends, so the client already knows to close the stream and resume its
+              // 5s/15s/60s poll -- no new client vocabulary, no frozen screen.
+              //
+              // Self-healing: the watcher is torn down when the last subscriber releases,
+              // and a fresh one starts at the file's CURRENT size, which is already past
+              // this record. A reconnect therefore streams normally again.
+              degraded = true
+              state = 'done'
+              emit({ kind: 'status', state: 'done' })
+              return
+            }
             if (result.lines.length > 0) {
               lastActivity = now()
               // SUPPRESSED, NOT SKIPPED. A COS-spawned turn is already streaming these
@@ -259,6 +276,7 @@ interface WatcherEntry {
   refs: number
   timer: ReturnType<typeof setInterval>
   ticking: boolean
+  tailer: TranscriptTailer
 }
 
 const watchers = new Map<string, WatcherEntry>()
@@ -300,7 +318,7 @@ export function acquireTranscriptWatcher(options: AcquireWatcherOptions): () => 
   // Never hold the process open. A tail is a view, not work.
   if (typeof (timer as any).unref === 'function') (timer as any).unref()
 
-  watchers.set(options.key, { refs: 1, timer, ticking: false })
+  watchers.set(options.key, { refs: 1, timer, ticking: false, tailer })
   return releaseOnce(options.key)
 }
 
@@ -320,6 +338,22 @@ function releaseOnce(key: string): () => void {
 
 export function watchedTranscriptCount(): number {
   return watchers.size
+}
+
+/**
+ * Has this session's tail handed off to the poll?
+ *
+ * The SSE route asks this so it can END the response instead of holding a socket that
+ * heartbeats forever and will never carry another record. Without that, the client's
+ * liveness check keeps reading `live` off the heartbeats and the footer keeps saying
+ * `stream` while the poll is quietly doing all the work -- which is precisely the
+ * "absence of a signal read as health" failure this repo keeps paying for.
+ *
+ * False for a session with no watcher, which includes every COS-spawned turn: those
+ * stream from a pipe and never degrade this way.
+ */
+export function transcriptWatcherDegraded(key: string): boolean {
+  return watchers.get(key)?.tailer.degraded() ?? false
 }
 
 export function __resetTranscriptWatchersForTests(): void {

@@ -2219,6 +2219,49 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.36.0] - 2026-08-17
+
+### Sessions push instead of being polled
+
+A new SSE route streams what an agent session is doing, so the glasses stop
+re-asking every five seconds. Two cases, and the difference between them is real
+rather than something the UI papers over.
+
+- **`GET /api/agent-sessions/:provider/:sessionId/stream`** — one event per step
+  (`tool` / `prose` / `status` / `heartbeat`), a monotonic `seq` so a client can
+  see loss, and a heartbeat at least every 20s so silence is evidence rather than
+  ambiguity. Authenticated like every other route; `COS_SESSION_STREAM_ENABLED=0`
+  turns it off.
+- **A turn COS started streams from the pipe.** The child already ran with
+  `--output-format stream-json --verbose`; its stdout was read only to confirm a
+  session id and then discarded. It is now teed to the bus as well, and the id
+  scan is untouched.
+- **A session in a desktop window gets row-level push.** COS never spawned that
+  process and has no pipe to it, so the transcript file is the only observable.
+  It is tailed forward from a byte offset, one `stat` per second per OPEN view,
+  and each new record is emitted through the same grammar and envelope. Claude
+  writes a complete record per message, so a long reply lands all at once when it
+  finishes. **That asymmetry cannot be engineered away from a file** and the
+  contract does not claim otherwise.
+- **`fs.watch` was rejected deliberately.** On macOS it coalesces bursts and, on
+  an atomic replace, keeps watching the old inode and simply stops firing — a
+  watcher that goes silent is indistinguishable from a session that went quiet,
+  which is the failure class this repo keeps paying for. A `stat` poll cannot
+  miss a write because it does not observe writes; it observes size, and size is
+  cumulative.
+- **A record too large to stream hands the session back to the poll.** One record
+  in a real transcript on this machine is 1,239,046 bytes. The tail reads up to 4
+  MiB per TICK, so any record up to that arrives intact; a bigger one ends the
+  response with a terminal `done` instead of stalling. Skipping it was tried
+  first and was wrong twice: it wedged (the good record behind the oversized one
+  was skipped too, on every tick, forever — zero events, not even a status) and,
+  even working, it would have silently dropped a reply the user was waiting for.
+- **One watcher per session, ref-counted.** Two glasses on one session is not two
+  pollers on an 81 MB file, and a double release does not tear down a tail
+  another subscriber still holds.
+
+Needs COS Glasses 6.8.372 to be visible. An older app never calls the route.
+
 ## [6.35.0] - 2026-08-16
 
 ### The newest assistant reply arrives whole instead of at 160 characters

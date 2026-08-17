@@ -21,6 +21,7 @@ import {
   consumeTranscriptChunk,
   createTranscriptTailer,
   watchedTranscriptCount,
+  transcriptWatcherDegraded,
 } from './session-transcript-watcher'
 import { __resetSessionStreamBusForTests, beginAttachedTurn, sessionStreamKey } from './session-stream-bus'
 import type { SessionStreamDraft } from './session-stream-events'
@@ -71,37 +72,35 @@ afterEach(() => {
 
 describe('cursor arithmetic', () => {
   it('yields complete lines and stops at the last newline', () => {
-    const result = consumeTranscriptChunk({ offset: 100, skipping: false }, Buffer.from('a\nb\npartial'), false)
+    const result = consumeTranscriptChunk({ offset: 100 }, Buffer.from('a\nb\npartial'), false)
     expect(result.lines).toEqual(['a', 'b'])
     // 100 + len('a\nb\n'), so `partial` is re-read next tick rather than consumed.
-    expect(result.cursor).toEqual({ offset: 104, skipping: false })
+    expect(result.cursor).toEqual({ offset: 104 })
   })
 
   it('leaves the cursor untouched when no record has completed', () => {
-    const result = consumeTranscriptChunk({ offset: 40, skipping: false }, Buffer.from('{"type":"assis'), false)
+    const result = consumeTranscriptChunk({ offset: 40 }, Buffer.from('{"type":"assis'), false)
     expect(result.lines).toEqual([])
-    expect(result.cursor).toEqual({ offset: 40, skipping: false })
+    expect(result.cursor).toEqual({ offset: 40 })
   })
 
-  it('enters skip mode only when a FULL read contains no newline', () => {
-    const capped = consumeTranscriptChunk({ offset: 0, skipping: false }, Buffer.from('x'.repeat(64)), true)
-    expect(capped.cursor).toEqual({ offset: 64, skipping: true })
+  it('reports tooLarge only when a FULL read contains no newline, and never advances past it', () => {
+    const capped = consumeTranscriptChunk({ offset: 0 }, Buffer.from('x'.repeat(64)), true)
+    expect(capped.tooLarge).toBe(true)
+    // The cursor does NOT move. Skipping the record was the original design and it both
+    // wedged the tailer and silently dropped a reply; the poll re-reads from here instead.
+    expect(capped.cursor).toEqual({ offset: 0 })
+    expect(capped.lines).toEqual([])
 
-    const notCapped = consumeTranscriptChunk({ offset: 0, skipping: false }, Buffer.from('x'.repeat(64)), false)
-    expect(notCapped.cursor).toEqual({ offset: 0, skipping: false })
-  })
-
-  it('stays skipping across chunks until a newline appears, then resumes', () => {
-    const first = consumeTranscriptChunk({ offset: 0, skipping: true }, Buffer.from('xxxx'), true)
-    expect(first).toEqual({ cursor: { offset: 4, skipping: true }, lines: [] })
-
-    const second = consumeTranscriptChunk(first.cursor, Buffer.from('xx\nreal\n'), false)
-    expect(second.lines).toEqual(['real'])
-    expect(second.cursor).toEqual({ offset: 12, skipping: false })
+    // An identical chunk that merely did not fill the budget is a record still being
+    // written, which is the common case and must not be mistaken for the pathological one.
+    const notCapped = consumeTranscriptChunk({ offset: 0 }, Buffer.from('x'.repeat(64)), false)
+    expect(notCapped.tooLarge).toBeUndefined()
+    expect(notCapped.cursor).toEqual({ offset: 0 })
   })
 
   it('drops empty lines rather than passing blanks to the grammar', () => {
-    expect(consumeTranscriptChunk({ offset: 0, skipping: false }, Buffer.from('a\n\n\nb\n'), false).lines)
+    expect(consumeTranscriptChunk({ offset: 0 }, Buffer.from('a\n\n\nb\n'), false).lines)
       .toEqual(['a', 'b'])
   })
 
@@ -197,7 +196,7 @@ describe('tailing a real transcript', () => {
     expect(drafts.filter(d => d.kind === 'prose')).toHaveLength(3)
   })
 
-  it('skips a record larger than a whole tick budget instead of stalling forever', async () => {
+  it('degrades to the poll on a record larger than a tick budget, rather than stalling or skipping', async () => {
     const dir = tmpRoot()
     const path = join(dir, 'session.jsonl')
     writeFileSync(path, '')
@@ -209,10 +208,34 @@ describe('tailing a real transcript', () => {
 
     for (let i = 0; i < 40; i++) await tailer.tick()
 
-    // The pathological record is gone; the one behind it still arrives.
-    const prose = drafts.filter(d => d.kind === 'prose') as { text: string }[]
-    expect(prose).toHaveLength(1)
-    expect(prose[0]!.text).toBe('after')
+    // ONE terminal status, and nothing invented after it. `done` is what a finished turn
+    // sends, so the client closes the stream and resumes its poll on a path it already has.
+    expect(drafts).toEqual([{ kind: 'status', state: 'done' }])
+    expect(tailer.degraded()).toBe(true)
+
+    // The record is NOT consumed. Whatever the poll reads next still contains it, so the
+    // reply the user is waiting on arrives late rather than never.
+    expect(tailer.cursor().offset).toBe(0)
+  })
+
+  it('stops doing work once degraded, instead of re-reading the same range every second', async () => {
+    const dir = tmpRoot()
+    const path = join(dir, 'session.jsonl')
+    writeFileSync(path, '')
+    const { drafts, publish } = collector()
+    const tailer = createTranscriptTailer({
+      key: KEY, path, provider: 'claude', publish, offset: 0, maxReadBytes: 128,
+    })
+    appendFileSync(path, assistantLine('q'.repeat(2_000)))
+    await tailer.tick()
+    expect(tailer.degraded()).toBe(true)
+
+    // A normal record appended afterwards must NOT resurrect the stream: the client has
+    // already been told the stream is over and is polling. Emitting again would interleave
+    // a dead stream with the poll and double every line.
+    appendFileSync(path, assistantLine('later'))
+    for (let i = 0; i < 5; i++) await tailer.tick()
+    expect(drafts).toHaveLength(1)
   })
 
   it('rejoins at the new end when the file is truncated, never re-reading from zero', async () => {
@@ -390,5 +413,35 @@ describe('one watcher per session, ref-counted', () => {
     appendFileSync(path, assistantLine('after release'))
     await new Promise(resolve => setTimeout(resolve, 120))
     expect(seen).toHaveLength(during)
+  })
+})
+
+describe('the route-facing degrade flag', () => {
+  it('is false for a session with no watcher, so a COS-spawned turn is never affected', () => {
+    expect(transcriptWatcherDegraded('claude:nothing-here')).toBe(false)
+  })
+
+  it('flips true once the live watcher hands off, which is what ends the SSE response', async () => {
+    const dir = tmpRoot()
+    const path = join(dir, 'session.jsonl')
+    // Bigger than the 4 MiB tick budget, so the real production constant degrades. Using
+    // the real bound rather than a test-only budget is the point: a fixture that cannot
+    // reproduce the production value proves nothing about production.
+    writeFileSync(path, '')
+    const release = acquireTranscriptWatcher({
+      key: 'claude:huge', path, provider: 'claude', offset: 0, intervalMs: 5,
+    })
+    try {
+      expect(transcriptWatcherDegraded('claude:huge')).toBe(false)
+      appendFileSync(path, assistantLine('z'.repeat(5 * 1024 * 1024)))
+      // The interval is unref'd and real; poll the flag rather than assuming one tick.
+      const deadline = Date.now() + 4_000
+      while (Date.now() < deadline && !transcriptWatcherDegraded('claude:huge')) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(transcriptWatcherDegraded('claude:huge')).toBe(true)
+    } finally {
+      release()
+    }
   })
 })
