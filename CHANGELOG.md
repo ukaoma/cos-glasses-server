@@ -1,5 +1,31 @@
 ## Unreleased
 
+## 6.36.6
+- **The session digest follows the thread instead of its opening.** Miles, from the
+  lens: "It's currently showing a legacy session that I had over a day ago... The
+  discussion should show the questions that we're asking and a summary of those most
+  recent things, not something that's the 'first' message." The whole budget now goes
+  to recency. `DIGEST_HEAD_TURNS` drops from 2 to 0 — a deliberate reversal of the
+  earlier rule that reserved the opening ask because it "frames everything after it".
+  The opening is not lost: `first_prompt` still carries it in full.
+- **Harness-injected rows no longer render as things you asked.** A slash-command body
+  and a compaction preamble are both written as USER rows, so both appeared in the
+  DISCUSSION list. Filtered on the STRUCTURAL flags Claude already sets — `isMeta` and
+  `isCompactSummary` — not on a markdown heuristic that could misfire on a real paste.
+  The compaction preamble is also filtered by text as a fallback for providers that
+  emit no flag, and that filter reaches titles and the search index too: the preamble
+  is byte-identical across every compacted session, so as a title or a search hit it
+  distinguishes nothing.
+- **On a truncated read the head window no longer feeds the recency list.** The head
+  window IS the session opening, and on a large session the 60-turn window never fills,
+  so those turns survived at the top of the digest indefinitely. Measured on a real
+  94 MiB session: both leading bullets were head-window turns from the previous day.
+  A whole-file read is untouched — it yields `tail: true` for every line.
+- Verified by parsing real transcripts, not fixtures: the 94 MiB session now leads with
+  the two most recent asks, and an ordinary 2.7 MiB session renders nine recent turns
+  in reading order.
+
+
 ## 6.36.5
 - **A speaker merge now reaches the meetings, not just the voice store.**
   `merge-profiles` folded two profiles together and relabelled the calibration log,

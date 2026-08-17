@@ -103,6 +103,22 @@ export function isKeepWarmSessionTitle(title: string): boolean {
   return t.startsWith('this is an automated local readiness check')
 }
 
+/**
+ * The compaction preamble, which the harness writes as a USER turn.
+ *
+ * Miles's 2026-08-17 screenshot had this sitting in the DISCUSSION list as though he
+ * had asked it: "This session is being continued from a previous conversation… Summary:
+ * ## 1. Primary Request and Intent". It is scaffolding, and it lands in the digest at
+ * full length because it IS recent -- compaction happens mid-session -- so recency
+ * ordering alone does not remove it.
+ *
+ * Measured across the 25 most recently written transcripts on this machine: 29
+ * occurrences, exactly ONE distinct opening. Anchored to that opening rather than to a
+ * loose "continued from" match, so a human sentence about continuing a conversation is
+ * not mistaken for it.
+ */
+const COMPACTION_PREAMBLE = /^this session is being continued from a previous conversation/i
+
 export function isWrapperPrompt(text: string): boolean {
   const trimmed = text.trim()
   return trimmed.startsWith('<')
@@ -110,6 +126,10 @@ export function isWrapperPrompt(text: string): boolean {
     || trimmed.startsWith('You are an agent')
     || trimmed.startsWith('You are QA Agent')
     || trimmed.startsWith('Message Type:')
+    // Filtered HERE rather than only in the digest, so it also stops titling a session
+    // and stops being indexed for search. It is byte-identical across every compacted
+    // session, so as a title or a search hit it distinguishes nothing.
+    || COMPACTION_PREAMBLE.test(trimmed)
 }
 
 export function firstLineTitle(text: string): string {
@@ -249,7 +269,27 @@ export const DISCUSSION_DIGEST_MAX = 2000
 const DIGEST_TURN_MAX = 220
 
 /** Turns kept from the START. The opening ask frames everything after it. */
-const DIGEST_HEAD_TURNS = 2
+/**
+ * User turns reserved from the START of the session before recency gets the budget.
+ *
+ * ZERO, AND THAT IS A REVERSAL. This was 2, on the reasoning that the opening ask
+ * "frames everything after it" -- see the head-first block in composeDiscussionDigest,
+ * which was itself a fix for a digest that spent everything on the tail.
+ *
+ * Miles overruled it from hardware, 2026-08-17, looking at a digest whose first two
+ * bullets were a question from the previous day and a compaction preamble: "It needs to
+ * refresh to the most recent response inside of the thread. The discussion should show
+ * the questions that we're asking and a summary of those most recent things, not
+ * something that's the 'first' message."
+ *
+ * The opening ask is NOT lost -- it is still carried, in full, in `first_prompt`, which
+ * the digest and the row label both fall back to. What changes is that it stops
+ * occupying the two most valuable slots in a list about what is happening NOW.
+ *
+ * Left as a constant rather than deleting the head path: this is a judgement call about
+ * emphasis, and one number is the whole reversal if Miles wants some framing back.
+ */
+const DIGEST_HEAD_TURNS = 0
 
 /** Recent turns retained while streaming. Comfortably more than 2000 chars can
  *  render (~20-25 at typical length), so the budget and not the buffer decides
@@ -1341,7 +1381,32 @@ export async function parseAgentSession(
   // reports what was actually dropped rather than what this buffer happens to hold.
   const digestHead: string[] = []
   const digestRecent: string[] = []
-  const collectTurn = (text: string): void => {
+  /**
+   * Add a user turn to the recency digest -- or decline to.
+   *
+   * TWO DECLINES, both found by parsing Miles's own 94 MiB session rather than by
+   * reasoning about the code.
+   *
+   * `injected`: STRUCTURAL, not a heuristic. Claude marks a slash-command body with
+   * `isMeta: true` and a compaction preamble with `isCompactSummary: true`. Both are
+   * written as USER rows, so both rendered in the digest as things Miles had asked --
+   * his screenshot led with "This session is being continued from a previous
+   * conversation… Summary: ## 1. Primary Request and Intent". Neither is an ask, and
+   * both are recent, so recency ordering alone leaves them exactly where they were.
+   *
+   * `fromTail` on a TRUNCATED read: the head window IS the session opening. Feeding it
+   * into a recency list is the very thing Miles objected to -- "not something that's
+   * the 'first' message" -- and on a large session the 60-turn window never fills, so
+   * those opening turns survive to the top of the digest forever. Measured on his
+   * session: the two leading bullets were both head-window turns from the previous day.
+   * The head is still read and still published, as `first_prompt`.
+   *
+   * A whole-file read yields `tail: true` for every line, so a normal session is
+   * unaffected -- this narrows only the partial read.
+   */
+  const collectTurn = (text: string, fromTail = true, injected = false): void => {
+    if (injected) return
+    if (truncated && !fromTail) return
     // Reuse the wrapper filter the rest of this module already trusts. Without it the
     // opening turns of a slash-command session render as
     // "<command-message>cos-glasses</command-message>…" — scaffolding, not the ask,
@@ -1413,7 +1478,7 @@ export async function parseAgentSession(
       }
       if (obj.type === 'user') {
         userCount += 1
-        collectTurn(text)
+        collectTurn(text, tail, obj.isMeta === true || obj.isCompactSummary === true)
         if (!firstPrompt) firstPrompt = firstLineTitle(text)
         if (!title) title = firstLineTitle(text)
       } else {
@@ -1459,7 +1524,7 @@ export async function parseAgentSession(
       if (obj.role === 'user') {
         userCount += 1
         const query = cursorUserTitle(text, true) ?? cursorUserTitle(text, false)
-        collectTurn(query ?? text)
+        collectTurn(query ?? text, tail)
         if (query) {
           title = query
           if (!firstPrompt) firstPrompt = query

@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import {
   agentSessionRoots,
   composeDiscussionDigest,
+  isWrapperPrompt,
   composeDiscussionSummary,
   DISCUSSION_DIGEST_MAX,
   isKeepWarmSessionTitle,
@@ -371,22 +372,51 @@ describe('deep discussion digest (session body, not the row)', () => {
     expect(Number(m![1])).toBeGreaterThan(800)
   })
 
-  it('reserves the opening ask, then weights recency', () => {
+  it('spends the whole budget on RECENCY, not on the opening ask', () => {
+    // REVERSED ON PURPOSE. This previously asserted the opposite -- that the opening
+    // ask is reserved because it "frames everything after it" -- and Miles overruled it
+    // from hardware, 2026-08-17, looking at a digest led by a question from the
+    // previous day: "The discussion should show the questions that we're asking and a
+    // summary of those most recent things, not something that's the 'first' message."
+    //
+    // The opening is not lost, it moved: `first_prompt` still carries it in full, which
+    // is asserted in the head+tail tests below.
+    //
     // Realistic turn length (~150 chars), not the toy 30-char kind: at 2000 chars a
     // toy fixture holds 50+ turns and nothing gets dropped, so the test would prove
     // nothing about elision. Real prompts are paragraphs.
     const real = (n: number): string[] =>
       Array.from({ length: n }, (_, i) => `Turn ${i + 1}: ${'detail '.repeat(20)}marker${i + 1}`)
     const body = composeDiscussionDigest({ userTurns: real(60), latestAssistant: 'Done.' })
-    // The framing survives — this is the regression that shipped first: filling from
-    // the end left no budget for the opening ask.
-    expect(body).toContain('Turn 1:')
-    // The most recent turn survives, because a follow-up continues from there.
+    expect(body).not.toContain('marker1 ')
+    expect(body).not.toContain('Turn 1:')
+    // The newest turns are what a follow-up continues from, so they are what survives.
     expect(body).toContain('marker60')
-    // The middle is dropped, and says so.
-    expect(body).not.toContain('marker30')
+    expect(body).toContain('marker59')
+    // The turns it could not fit are still declared rather than silently dropped.
     expect(body).toMatch(/… \d+ earlier turns …/)
     expect(body.length).toBeLessThanOrEqual(DISCUSSION_DIGEST_MAX)
+  })
+
+  it('orders the surviving turns oldest to newest, so it reads forwards', () => {
+    const real = (n: number): string[] =>
+      Array.from({ length: n }, (_, i) => `Turn ${i + 1}: ${'detail '.repeat(20)}marker${i + 1}`)
+    const body = composeDiscussionDigest({ userTurns: real(60), latestAssistant: 'Done.' })
+    expect(body.indexOf('marker59')).toBeLessThan(body.indexOf('marker60'))
+    // And the elision sits above them, because what it elides is older still.
+    expect(body.indexOf('earlier turns')).toBeLessThan(body.indexOf('marker60'))
+  })
+
+  it('drops the compaction preamble instead of listing it as something Miles asked', () => {
+    // From the 2026-08-17 screenshot. It is written as a USER turn by the harness and
+    // it is RECENT -- compaction happens mid-session -- so recency ordering alone does
+    // not remove it. Measured: 29 occurrences across the 25 most recent transcripts on
+    // this machine, exactly one distinct opening.
+    const preamble = 'This session is being continued from a previous conversation that ran out '
+      + 'of context. The summary below covers the earlier portion of the conversation.'
+    expect(isWrapperPrompt(preamble)).toBe(true)
+    // A human sentence that merely mentions continuing is NOT the preamble.
+    expect(isWrapperPrompt('Can we continue from a previous conversation about pricing?')).toBe(false)
   })
 
   it('caps a single enormous paste so one turn cannot eat the budget', () => {
@@ -419,8 +449,11 @@ describe('oversized transcripts are read in part, not refused', () => {
       maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
     })
     expect(parsed.truncated).toBe(true)
-    // Both ends are present — that is the whole point of head+tail.
-    expect(parsed.discussion_digest).toContain('marker-head')
+    // Both ends are present — that is the whole point of head+tail. The HEAD proof
+    // moved to `first_prompt` when the digest became recency-only: the digest no longer
+    // reserves the opening, but the opening is still parsed and still published, which
+    // is what this test actually needs to establish.
+    expect(parsed.first_prompt).toContain('marker-head')
     expect(parsed.discussion_digest).toContain('marker-tail')
     // And it does NOT print a turn count it cannot know.
     expect(parsed.discussion_digest).toContain('middle of a large session not read')
@@ -539,6 +572,99 @@ describe('the newest assistant reply crosses the wire whole', () => {
   })
 })
 
+describe('the digest lists what is happening NOW, not the session opening', () => {
+  // Every rule here was found by parsing Miles's own 94 MiB session, not by reading the
+  // code. His screenshot led with a question from the previous day and a compaction
+  // preamble, both presented as things he had asked.
+  const rec = (role: string, text: string, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ type: role, ...extra, message: { role, content: [{ type: 'text', text }] } })
+
+  it('drops rows the harness injected, using the flags rather than a guess', async () => {
+    // MEASURED on the real transcript: a slash-command body carries `isMeta: true` and
+    // a compaction preamble carries `isCompactSummary: true`. Both are written as USER
+    // rows. Structural flags, so no markdown heuristic can misfire on a real paste.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-injected-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-333333333333.jsonl')
+    writeFileSync(file, [
+      rec('user', '# COS Glasses Server Management\n\nStart and verify the stack.', { isMeta: true }),
+      rec('user', 'This session is being continued from a previous conversation. Summary: things.',
+        { isCompactSummary: true }),
+      rec('user', 'REAL-ASK build the discussion recency fix now'),
+      rec('assistant', 'On it.'),
+    ].join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file)
+    expect(parsed.discussion_digest).toContain('REAL-ASK')
+    expect(parsed.discussion_digest).not.toContain('COS Glasses Server Management')
+    expect(parsed.discussion_digest).not.toContain('being continued from a previous')
+  })
+
+  it('trusts the isCompactSummary FLAG even when the wording is not the one we know', async () => {
+    // The flag and the text pattern are belt-and-braces, and a mutation proved the
+    // earlier test could not tell them apart: deleting the flag check still passed,
+    // because the preamble REGEX caught the same row. The regex is a fallback for
+    // providers that emit no flag; the flag has to stand on its own, or a compaction
+    // whose wording changes by one word walks straight back into the digest.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-compactflag-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-666666666666.jsonl')
+    writeFileSync(file, [
+      rec('user', 'Recap of the earlier discussion follows, with the key decisions.',
+        { isCompactSummary: true }),
+      rec('user', 'REAL-ASK ship it'),
+      rec('assistant', 'Shipped.'),
+    ].join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file)
+    expect(parsed.discussion_digest).toContain('REAL-ASK')
+    expect(parsed.discussion_digest).not.toContain('Recap of the earlier discussion')
+  })
+
+  it('keeps the HEAD window out of the recency list on a truncated read', async () => {
+    // The head window IS the session opening. On a large session the 60-turn window
+    // never fills, so those turns survive to the top of the digest forever -- which is
+    // exactly what Miles was looking at. The opening is still published as
+    // `first_prompt`; it just stops occupying a list about what is happening now.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-headwin-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-444444444444.jsonl')
+    const lines = [rec('user', 'OPENING-ASK are we on the latest server?')]
+    for (let i = 0; i < 4000; i++) lines.push(rec('assistant', `filler ${i} ${'x'.repeat(200)}`))
+    lines.push(rec('user', 'RECENT-ASK build the recency fix'))
+    lines.push(rec('assistant', 'Done.'))
+    writeFileSync(file, lines.join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file, {
+      maxBytes: 64 * 1024, headBytes: 16 * 1024, tailBytes: 16 * 1024,
+    })
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.discussion_digest).toContain('RECENT-ASK')
+    expect(parsed.discussion_digest).not.toContain('OPENING-ASK')
+    // Still parsed, still published — moved, not lost.
+    expect(parsed.first_prompt).toContain('OPENING-ASK')
+  })
+
+  it('does NOT thin a normal whole-file session, which is the common case', async () => {
+    // A whole-file read yields tail:true for every line, so the head-window rule must
+    // not touch it. Without this, narrowing the partial read could silently gut every
+    // ordinary session — the digest would keep only whatever the last window held.
+    const dir = mkdtempSync(join(tmpdir(), 'cos-wholefile-'))
+    const file = join(dir, 'aaaaaaaa-bbbb-cccc-dddd-555555555555.jsonl')
+    writeFileSync(file, [
+      rec('user', 'FIRST-ASK how does the parser work'),
+      rec('assistant', 'Like so.'),
+      rec('user', 'SECOND-ASK and the digest'),
+      rec('assistant', 'Like this.'),
+    ].join('\n') + '\n')
+
+    const parsed = await parseAgentSession('claude', file)
+    expect(parsed.truncated).toBe(false)
+    expect(parsed.discussion_digest).toContain('FIRST-ASK')
+    expect(parsed.discussion_digest).toContain('SECOND-ASK')
+    // And in reading order.
+    expect(parsed.discussion_digest.indexOf('FIRST-ASK'))
+      .toBeLessThan(parsed.discussion_digest.indexOf('SECOND-ASK'))
+  })
+})
+
 describe('"Latest" can never be a line from the session opening', () => {
   /** A transcript whose HEAD holds assistant prose and whose TAIL holds none — the
    *  shape that made a head record get published under the label "Latest:". */
@@ -572,7 +698,9 @@ describe('"Latest" can never be a line from the session opening', () => {
     })
     expect(parsed.truncated).toBe(true)
     // Proof the head really was read, so this is a tail rule and not an empty parse.
-    expect(parsed.discussion_digest).toContain('marker-head')
+    // Read from `first_prompt` rather than the digest, which is recency-only as of
+    // 6.36.6 — the head is still parsed, it just no longer occupies the digest.
+    expect(parsed.first_prompt).toContain('marker-head')
     expect(parsed.discussion_digest).toContain('marker-tail')
 
     // The opening assistant line must not appear anywhere as current state.
