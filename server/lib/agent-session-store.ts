@@ -122,12 +122,57 @@ export function firstLineTitle(text: string): string {
   return line.slice(0, 80)
 }
 
-/** Fenced code, tags and runs of whitespace out; one line of prose left. Shared so
- *  `proseSnippet` and `latestAssistantReply` can never disagree about what the prose
- *  of a record IS — only about how much of it they keep. */
-function proseBody(text: string): string {
-  const body = text.replace(/```[\s\S]*?```/g, ' ')
-  return body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+/**
+ * Tags worth deleting, as opposed to any pair of angle brackets.
+ *
+ * WHY A LIST AND NOT `/<[^>]+>/`. That pattern deleted PROSE. `read <file>` in an
+ * assistant reply rendered on the lens as `read ,` because `<file>` looks exactly like
+ * a tag; `<path>`, `<PORT>`, `<name>` and every other placeholder a technical answer
+ * uses died the same way, silently, mid-sentence.
+ *
+ * These are the names actually present in transcripts on this machine (measured over
+ * 3,001 records: HTML from rendered output, plus the COS wrapper blocks the harness
+ * injects). Anything not named here is treated as the prose it almost always is.
+ * A name that shows up later and should be stripped is a one-line addition; a
+ * placeholder eaten out of a sentence is invisible and unreportable.
+ */
+const STRIPPABLE_TAGS = [
+  // HTML that reaches a transcript through rendered or pasted output
+  'div', 'p', 'span', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'hr',
+  'code', 'pre', 'blockquote', 'table', 'thead', 'tbody', 'tr', 'td', 'th',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'img', 'summary', 'details',
+  // COS / harness wrapper blocks
+  'now', 'relevant-memories', 'cache-health', 'daily-bulletin', 'cos-alarms',
+  'device-handoff', 'system-reminder', 'memory-stored', 'user_query',
+  'task-notification', 'task-id', 'tool-use-id', 'output-file', 'status',
+  'result', 'usage', 'subagent_tokens', 'tool_uses', 'duration_ms',
+  'example', 'commentary', 'string', 'functions', 'function', 'command-name',
+  'local-command-stdout', 'local-command-stderr', 'thinking',
+]
+
+const STRIPPABLE_TAG_RE = new RegExp(`</?(?:${STRIPPABLE_TAGS.join('|')})(?:\\s[^>]*)?/?>`, 'gi')
+
+/**
+ * Fenced code and known tags out. Shared so `proseSnippet` and `latestAssistantReply`
+ * can never disagree about what the prose of a record IS.
+ *
+ * `keepLines` is the whole difference between them, and it was the bug. A LIST ROW is
+ * one line and must collapse; a BODY is what the reader paginates and its line
+ * structure IS the formatting. Collapsing both through one path turned every heading,
+ * bullet and paragraph break in a reply into a space, and delivered a wall of prose to
+ * a 576x288 lens with no structure left for the client to lay out.
+ */
+function proseBody(text: string, keepLines = false): string {
+  const body = text.replace(/```[\s\S]*?```/g, ' ').replace(STRIPPABLE_TAG_RE, ' ')
+  if (!keepLines) return body.replace(/\s+/g, ' ').trim()
+  return body
+    // Spaces and tabs collapse; newlines do not.
+    .replace(/[^\S\n]+/g, ' ')
+    // Trailing space before a break would render as a hanging indent on the lens.
+    .replace(/ *\n/g, '\n')
+    // Three or more breaks is never meaningful and costs a reader page.
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 export function proseSnippet(text: string, max = 160): string {
@@ -166,7 +211,10 @@ export const LATEST_REPLY_MAX = 4000
  * to say so.
  */
 export function latestAssistantReply(text: string, max = LATEST_REPLY_MAX): string {
-  const body = proseBody(text)
+  // LINE STRUCTURE PRESERVED. This is the field the reader renders, so its headings,
+  // bullets and paragraph breaks have to survive the trip; the client cannot restore
+  // structure the server already flattened.
+  const body = proseBody(text, true)
   if (!body || isWrapperPrompt(body)) return ''
   return body.length <= max ? body : `${body.slice(0, max - 1)}…`
 }

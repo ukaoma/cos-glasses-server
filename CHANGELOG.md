@@ -2219,6 +2219,31 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.36.1] - 2026-08-17
+
+### A reply keeps its line structure
+
+Miles, from a G2 screenshot: a session reply arrived on the lens as one unbroken
+paragraph carrying three headings and six bullets, none of them visible.
+
+`proseBody` collapsed ALL whitespace, and both the one-line list gist and the
+`latest_reply` BODY went through it. Collapsing is right for a row and destroys a
+body: the client cannot restore structure the server already flattened. Two
+fields, two jobs, and now two paths — `latestAssistantReply` preserves newlines
+while `proseSnippet` still returns exactly one line.
+
+### The tag strip ate prose
+
+`/<[^>]+>/` deleted anything between angle brackets, so `read <file>` reached the
+lens as `read ,`. Every `<path>`, `<PORT>` and `<name>` a technical reply uses
+died the same way, mid-sentence and unreportably. Replaced with an allowlist built
+from the tags actually present in transcripts on this machine (measured over 3,001
+records: HTML from rendered output, plus the COS wrapper blocks). A name not on
+the list is treated as the prose it almost always is; adding one later is a
+one-line change, whereas a placeholder eaten out of a sentence is invisible.
+
+9 execution tests on the shared prose path.
+
 ## [6.36.0] - 2026-08-17
 
 ### Sessions push instead of being polled
