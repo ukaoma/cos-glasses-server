@@ -1,5 +1,7 @@
 import express from 'express'
+import { readFileSync, readdirSync } from 'node:fs'
 import type { Server } from 'node:http'
+import { join, resolve } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import {
@@ -284,4 +286,64 @@ describe('the live /api/health and /api/models surfaces', () => {
     expect(typeof body.cli_session_available).toBe('boolean')
     expect(body).not.toHaveProperty('cli_session_id')
   }, 30_000)
+})
+
+// ---------------------------------------------------------------------------
+// The composition root feeds the same answer to the detector (6.33.0)
+// ---------------------------------------------------------------------------
+//
+// THESE TWO ARE SHAPE ASSERTIONS, AND THEY SAY SO. `server/index.ts` cannot be
+// imported by a test — it binds ports, spawns whisper and starts timers — so
+// what they can pin is the wiring text, not its execution. The behaviour of
+// `buildOccupancyProbes` is executed for real in occupancy-probes.test.ts; this
+// closes the one seam those tests cannot reach, which is whether the root hands
+// it the right answer.
+//
+// The seam is worth pinning because it is exactly what failed in the field:
+// `enabled` came back true off `COS_THREAD_ATTACH_ENABLED` while the detector's
+// transcript clock hung off a second key nobody had set, so this capability
+// surface advertised a Continue the gate then refused on every thread. One flag
+// now decides both halves, and re-splitting them would have to edit this line.
+
+describe('the detector reads the same gate the routes do', () => {
+  const serverRoot = resolve(process.cwd(), 'server')
+
+  /**
+   * The retired second key, assembled rather than written out.
+   *
+   * The scan below reads every server source file, and this file is one of
+   * them, so a literal here would match itself and the test could never pass.
+   * Joining the parts keeps the scan whole-tree with no path exemption, which
+   * matters: an exemption is where a re-added key would eventually hide.
+   */
+  const RETIRED_KEY = ['COS', 'THREAD', 'ATTACH', 'IDLE', 'HOLDER'].join('_')
+
+  function sourceFiles(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'data') continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) sourceFiles(full, out)
+      else if (entry.name.endsWith('.ts') || entry.name.endsWith('.cjs')) out.push(full)
+    }
+    return out
+  }
+
+  it('builds the occupancy probes from threadAttachEnabled()', () => {
+    const index = readFileSync(join(serverRoot, 'index.ts'), 'utf8')
+    expect(index).toContain(
+      'buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())',
+    )
+  })
+
+  it('leaves no second gate key anywhere in the server', () => {
+    // Removed, not deprecated-but-honoured, so there is exactly one answer to
+    // "is Continue on". An install that still exports the old key in its plist
+    // is simply ignored.
+    const scanned = sourceFiles(serverRoot)
+    // Guard against the scan silently covering nothing, which would make this
+    // pass for the wrong reason.
+    expect(scanned.length).toBeGreaterThan(100)
+    const offenders = scanned.filter(file => readFileSync(file, 'utf8').includes(RETIRED_KEY))
+    expect(offenders).toEqual([])
+  })
 })

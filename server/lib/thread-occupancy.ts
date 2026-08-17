@@ -142,8 +142,9 @@ export interface OccupancyProbes {
    * foreign holder stays `live_desktop_process` — byte-for-byte the behaviour
    * that shipped before the idle-holder relaxation existed. That is why it is
    * optional rather than required: the strict gate is what you get by doing
-   * nothing, and the relaxation has to be wired on purpose (see `server/index.ts`,
-   * where the wiring is itself behind `COS_THREAD_ATTACH_IDLE_HOLDER`).
+   * nothing, and the relaxation is wired on purpose by `buildOccupancyProbes`
+   * in `occupancy-probes.ts`, which attaches the clock only when thread attach
+   * itself is on.
    *
    * Null is NOT idle. See `holderActivity` for why that distinction is the whole
    * safety property here.
@@ -525,9 +526,12 @@ export interface OccupancyDirs {
 // `isActiveRecently` here; its `false` means "stale OR unmeasurable", and only
 // `holderActivity` separates those.
 //
-// TURNING IT OFF. Unwire `probes.transcriptMtimeMs` (in practice: unset
-// `COS_THREAD_ATTACH_IDLE_HOLDER`). Every foreign holder then reads `unknown`
-// and refuses, which is the pre-6.32.0 gate exactly. No rollback needed.
+// TURNING IT OFF. Unwire `probes.transcriptMtimeMs`. Since 6.33.0 that happens
+// by unsetting `COS_THREAD_ATTACH_ENABLED`, the one switch that also unregisters
+// the write routes: the relaxation is what makes a silent fork possible, so it
+// is the same decision as Continue itself and no longer has a flag of its own.
+// Every foreign holder then reads `unknown` and refuses, which is the pre-6.32.0
+// gate exactly, and with attach off there is no write route to reach anyway.
 
 /**
  * The Phase 0 attach precondition.

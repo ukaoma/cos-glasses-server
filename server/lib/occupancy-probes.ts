@@ -446,21 +446,39 @@ export function realOccupancyProbes(ledger: SpawnLedgerAccessor): OccupancyProbe
 }
 
 /**
- * Is the idle-holder relaxation switched on for this install?
+ * The probe set this install should run, clock and all.
  *
- * ONE READER, exported so every other module imports it rather than re-reading
- * `process.env` — the same anti-drift rule `threadAttachEnabled` follows, and for
- * the same reason: a second copy is how a surface comes to advertise a write path
- * the gate will refuse.
+ * ONE DECISION, IN ONE PLACE (6.33.0). `attachEnabled` is the SAME answer that
+ * decides whether the two write routes get registered — `threadAttachEnabled()`,
+ * passed in by the composition root rather than re-read here. There is exactly
+ * one reader of `COS_THREAD_ATTACH_ENABLED` in the server, and a second copy is
+ * how a surface comes to advertise a write path the gate will refuse.
  *
- * `=== '1'` opt-IN, not `!== '0'` opt-out. This decides whether COS may write
- * into a conversation a human still has open, so anything ambiguous — unset,
- * empty, 'true', 'yes' — reads as OFF. It composes with
- * `COS_THREAD_ATTACH_ENABLED`: with attach itself off, this flag does nothing at
- * all, because there is no write path to relax.
+ * WHY THE CLOCK RIDES THE SAME SWITCH. In 6.32.0 the relaxation had a second
+ * env key of its own (named in the 6.33.0 changelog entry; it is now ignored),
+ * and the two were never independently useful: without the clock, Continue is
+ * refused on every thread with an editor window open, which for a working
+ * developer is all of them. The pair also cost a real testing cycle, because
+ * COS Control's checkbox knew only the first key and reported the feature ON
+ * while the gate still refused every session. And the honest reading is that
+ * they were always ONE decision: the relaxation is what makes a silent fork
+ * possible, so "Continue is on" and "fork is possible" are the same choice, and
+ * one switch says so.
+ *
+ * Attach off is still byte-for-byte the pre-6.28 posture: no clock, so every
+ * foreign holder reads `unknown` and refuses, and the write routes do not exist
+ * to be reached anyway.
  */
-export function idleHolderContinueEnabled(): boolean {
-  return process.env.COS_THREAD_ATTACH_IDLE_HOLDER === '1'
+export function buildOccupancyProbes(
+  ledger: SpawnLedgerAccessor,
+  headDeps: NativeHeadDeps,
+  attachEnabled: boolean,
+): OccupancyProbes {
+  const base = realOccupancyProbes(ledger)
+  // Strictly `=== true`. A caller that hands over a truthy non-boolean has not
+  // answered the question, and the permissive branch is the one that must be
+  // earned by a real yes.
+  return attachEnabled === true ? withTranscriptClock(base, headDeps) : base
 }
 
 /**

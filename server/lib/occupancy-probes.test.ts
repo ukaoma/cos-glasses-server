@@ -46,7 +46,7 @@ import {
   processStartMs,
   readDir,
   readFile,
-  idleHolderContinueEnabled,
+  buildOccupancyProbes,
   realOccupancyDirs,
   realOccupancyProbes,
   withTranscriptClock,
@@ -724,23 +724,6 @@ describe('threadOccupancy on a real filesystem (codex)', () => {
 // The transcript clock that powers the idle-holder relaxation (6.32.0)
 // ===========================================================================
 
-describe('idleHolderContinueEnabled', () => {
-  it('is opt-in on the exact string 1, and off for everything else', () => {
-    const prior = process.env.COS_THREAD_ATTACH_IDLE_HOLDER
-    restoreEnv.push(['COS_THREAD_ATTACH_IDLE_HOLDER', prior])
-    // Anything ambiguous reads OFF. This flag decides whether COS may write into
-    // a conversation a human still has open, so 'true' must NOT enable it.
-    for (const v of ['true', 'yes', 'on', '0', '2', '', ' 1']) {
-      process.env.COS_THREAD_ATTACH_IDLE_HOLDER = v
-      expect(idleHolderContinueEnabled()).toBe(false)
-    }
-    process.env.COS_THREAD_ATTACH_IDLE_HOLDER = '1'
-    expect(idleHolderContinueEnabled()).toBe(true)
-    delete process.env.COS_THREAD_ATTACH_IDLE_HOLDER
-    expect(idleHolderContinueEnabled()).toBe(false)
-  })
-})
-
 describe('withTranscriptClock on a real filesystem', () => {
   const THREAD = THREAD_A
 
@@ -816,5 +799,82 @@ describe('withTranscriptClock on a real filesystem', () => {
     const idle = threadOccupancy('claude', THREAD, clocked, fx.dirs)
     expect({ attachable: idle.attachable, reason: idle.reason, idleHolder: idle.idleHolder })
       .toEqual({ attachable: true, reason: null, idleHolder: true })
+  })
+})
+
+// ===========================================================================
+// One flag decides both halves of Continue (6.33.0)
+// ===========================================================================
+//
+// These run the composition itself rather than reading a source file, because
+// the thing that broke in the field was a wiring answer, not a parse: COS
+// Control set `COS_THREAD_ATTACH_ENABLED`, health reported the feature ON, and
+// every Continue was still refused because a second key was needed to wire the
+// clock. The strict `=== '1'` reading of that key stays covered where the key
+// itself lives, in routes/agent-session-bindings.test.ts.
+
+describe('buildOccupancyProbes', () => {
+  const THREAD = THREAD_A
+
+  function headDeps(): NativeHeadDeps {
+    const projects = join(fx.root, '.claude', 'projects')
+    return {
+      ...realNativeHeadDeps({ claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') }),
+      dirs: { claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') },
+    }
+  }
+
+  function writeIdleTranscript(): void {
+    const dir = join(fx.root, '.claude', 'projects', '-Users-someone-repo')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${THREAD}.jsonl`)
+    writeFileSync(file, '{"type":"user"}\n')
+    const old = Date.now() - 10 * 60_000
+    utimesSync(file, new Date(old), new Date(old))
+  }
+
+  it('wires the clock when attach is on, so an idle Mac window is continuable', () => {
+    // The whole point of the collapse: turning Continue on is sufficient. A real
+    // registry record for a live process (foreign, since the ledger is empty)
+    // plus a stale transcript is exactly Miles's case — window open, nothing
+    // running in it.
+    writeRecord({ sessionId: THREAD })
+    writeIdleTranscript()
+    const probes = buildOccupancyProbes(emptyLedger, headDeps(), true)
+    const verdict = threadOccupancy('claude', THREAD, probes, fx.dirs)
+    expect({ attachable: verdict.attachable, reason: verdict.reason, idleHolder: verdict.idleHolder })
+      .toEqual({ attachable: true, reason: null, idleHolder: true })
+  })
+
+  it('blocks a WORKING holder even with attach on', () => {
+    // The relaxation is not a bypass. Same wiring, fresh transcript.
+    writeRecord({ sessionId: THREAD })
+    const dir = join(fx.root, '.claude', 'projects', '-Users-someone-repo')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${THREAD}.jsonl`), '{"type":"user"}\n')
+    const probes = buildOccupancyProbes(emptyLedger, headDeps(), true)
+    const verdict = threadOccupancy('claude', THREAD, probes, fx.dirs)
+    expect({ attachable: verdict.attachable, reason: verdict.reason })
+      .toEqual({ attachable: false, reason: 'native_thread_working' })
+  })
+
+  it('leaves the clock off when attach is off, so every foreign holder refuses', () => {
+    // Attach off is the pre-6.28 gate byte for byte: no clock at all, so even a
+    // provably idle holder reads unknown and is refused.
+    writeRecord({ sessionId: THREAD })
+    writeIdleTranscript()
+    const probes = buildOccupancyProbes(emptyLedger, headDeps(), false)
+    expect(probes.transcriptMtimeMs).toBeUndefined()
+    const verdict = threadOccupancy('claude', THREAD, probes, fx.dirs)
+    expect({ attachable: verdict.attachable, reason: verdict.reason })
+      .toEqual({ attachable: false, reason: 'live_desktop_process' })
+  })
+
+  it('treats a non-boolean answer as off rather than as a yes', () => {
+    // A caller that hands over something truthy has not answered the question,
+    // and the permissive branch must be earned by a real `true`.
+    for (const notTrue of [1, 'true', {}] as unknown as boolean[]) {
+      expect(buildOccupancyProbes(emptyLedger, headDeps(), notTrue).transcriptMtimeMs).toBeUndefined()
+    }
   })
 })

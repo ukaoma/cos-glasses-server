@@ -20,15 +20,13 @@ import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
 import { agentSessionsRouter } from './routes/agent-sessions.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
-import { createAgentSessionBindingsRouter } from './routes/agent-session-bindings.js'
+import {
+  createAgentSessionBindingsRouter,
+  threadAttachEnabled,
+} from './routes/agent-session-bindings.js'
 import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
-import {
-  idleHolderContinueEnabled,
-  realOccupancyDirs,
-  realOccupancyProbes,
-  withTranscriptClock,
-} from './lib/occupancy-probes.js'
+import { buildOccupancyProbes, realOccupancyDirs } from './lib/occupancy-probes.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
@@ -310,12 +308,19 @@ const occupancyDirs = realOccupancyDirs()
 const nativeHeadDeps = realNativeHeadDeps()
 const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
 /**
- * THE ONE PLACE the idle-holder relaxation is switched on (6.32.0).
+ * THE ONE PLACE the idle-holder relaxation is switched on, on the ONE flag
+ * that also registers the write routes (6.33.0).
  *
  * Without the clock, a foreign holder is terminal and Continue is refused for
  * any thread with a Claude Code window open on it — including the ones Miles
  * actually works in, because he leaves those windows open. With it, a holder
  * measured idle is continuable and only a holder measured WRITING is refused.
+ *
+ * `threadAttachEnabled()` is the same call `createAgentSessionBindingsRouter`
+ * makes below to decide whether the two POST routes exist at all. Reading it
+ * here rather than a second env key is what makes "Continue is on" a single
+ * answer: the pair of flags this replaced could disagree, and did, reporting
+ * the feature enabled while every attempt was refused.
  *
  * Both gates read this same object — the route's detector via `probes` below,
  * and the adapter's pre-spawn preflight via `occupancyProbes` at the closure
@@ -325,9 +330,7 @@ const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
  * Read the canary evidence in `thread-occupancy.ts` under THE IDLE-HOLDER
  * RELAXATION before changing this line.
  */
-const occupancyProbes = idleHolderContinueEnabled()
-  ? withTranscriptClock(realOccupancyProbes(cosSpawnedPids), nativeHeadDeps)
-  : realOccupancyProbes(cosSpawnedPids)
+const occupancyProbes = buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())
 
 /**
  * The shim between the route's request shape and the adapter's.

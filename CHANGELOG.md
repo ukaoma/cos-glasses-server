@@ -2219,6 +2219,40 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 # Changelog
 
+## [6.33.0] - 2026-08-16
+
+### One switch turns Continue on
+
+Continue was gated by two environment variables, and the second one was
+invisible. `COS_THREAD_ATTACH_ENABLED=1` registered the write routes;
+`COS_THREAD_ATTACH_IDLE_HOLDER=1` was additionally needed before COS would write
+into a thread whose Mac window is open but idle. COS Control's "Continue agent
+threads" checkbox sets only the first, so health reported the feature ON while
+every single attempt was refused, because a developer's editor windows stay
+open and that is precisely the case the second flag covered.
+
+- **`COS_THREAD_ATTACH_ENABLED=1` is now the whole answer.** It registers the two
+  write routes and wires the transcript clock that tells an idle holder from a
+  working one. Nothing else to set.
+- **`COS_THREAD_ATTACH_IDLE_HOLDER` is REMOVED, not deprecated.** If you set it
+  by hand, it is now ignored and can be deleted from your LaunchAgent plist or
+  shell profile. Leaving it in place changes nothing either way.
+- **COS Control needs no update for this.** Its existing checkbox already writes
+  the surviving key, so the toggle that reported ON while refusing now reports
+  ON and works.
+
+The two switches were never independently useful, and folding them is the honest
+description of the decision rather than a convenience. The relaxation is what
+makes a silent fork possible, so "Continue is on" and "a fork may happen" are one
+choice, and one switch states it.
+
+Every safety behaviour is unchanged. A holder measured WRITING is still refused
+with `native_thread_working`; a holder COS cannot measure is still refused with
+`live_desktop_process`, because only a positive idle observation relaxes the gate
+and an unreadable transcript is not one. Off still means the write routes are not
+registered at all, so a disabled server answers 404 rather than 403 and holds no
+reachable write code.
+
 ## [6.32.0] - 2026-08-16
 
 ### Continue now blocks on WORKING, not on merely open
