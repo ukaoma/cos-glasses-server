@@ -1,5 +1,21 @@
 ## Unreleased
 
+## 6.36.8
+- **The queue now covers the refusal that actually fires.** Device diagnostics, once the
+  path was finally instrumented, recorded `native_target_busy` on every Continue that
+  reached the server — never `native_thread_working`, which is what 6.36.7 was built
+  around. Selecting Continue SUCCEEDS and mints a binding; if the dictation is not
+  completed the binding lingers to its TTL, and every Continue inside that window
+  refuses. Twelve such bindings had stacked up on one thread over an evening.
+- `native_target_busy` and `native_turn_in_progress` are now queueable. Both are
+  transient by construction — a clock clears them — and both are COS's OWN bookkeeping
+  rather than a foreign process holding the thread. Delivery still re-runs the full
+  gate, so nothing about the safety model changes.
+- `native_target_fenced` is deliberately NOT queueable: "may or may not have been
+  delivered" cannot be resolved by waiting, and queueing it risks a duplicate turn in a
+  real conversation.
+
+
 ## 6.36.7
 - **A turn spoken at a busy thread is now queued instead of refused.** Miles: "if
   there's a session that's still running, that would just put it into the queue the same

@@ -120,6 +120,19 @@ export const MAX_DELIVERY_ATTEMPTS = 5
  */
 const QUEUEABLE_REFUSALS: ReadonlySet<string> = new Set([
   'native_thread_working',
+  // COS'S OWN LEFTOVER BINDING, and the reason this feature did not work for a day.
+  // Proven from device diagnostics 2026-08-17: every Continue that reached the server
+  // was refused `native_target_busy` ("already attached to another COS chat"), never
+  // `native_thread_working`. Selecting Continue SUCCEEDS and mints a binding; if the
+  // dictation is not completed the binding lingers to its TTL, and every Continue in
+  // that window refuses. Twelve such bindings had stacked up on one thread.
+  //
+  // It belongs here because it is transient BY CONSTRUCTION -- the binding expires on
+  // a clock -- and because it is COS's own bookkeeping, not a foreign process holding
+  // the thread. Queueing waits it out, and delivery re-runs the whole gate as always.
+  'native_target_busy',
+  // Same shape: a COS turn is mid-flight on this thread and will finish.
+  'native_turn_in_progress',
   'live_desktop_process',
   'thread_busy',
   'binding_conflict',

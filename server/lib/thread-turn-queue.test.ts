@@ -97,6 +97,20 @@ describe('what may be queued at all', () => {
     }
   })
 
+  it("parks COS's OWN leftover binding — the reason this feature was dead for a day", () => {
+    // Device diagnostics, 2026-08-17: every Continue that reached the server refused
+    // `native_target_busy`, never `native_thread_working`. I built the queue for a
+    // foreign holder and never considered COS's own binding lingering to its TTL.
+    expect(queueableRefusal('native_target_busy')).toBe(true)
+    expect(queueableRefusal('native_turn_in_progress')).toBe(true)
+  })
+
+  it('does NOT park a fenced target, which needs a human to look', () => {
+    // "may or may not have been delivered" — waiting cannot resolve that, and queueing
+    // it risks a duplicate turn in a real conversation.
+    expect(queueableRefusal('native_target_fenced')).toBe(false)
+  })
+
   it('refuses the structural ones outright, because they never clear', () => {
     // Telling someone their turn is queued when it can never run is worse than
     // refusing it.
