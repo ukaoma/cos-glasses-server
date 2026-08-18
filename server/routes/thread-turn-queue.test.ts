@@ -235,3 +235,83 @@ describe('the drainer', () => {
     expect(readQueue('claude', threadId, clock).find(t => t.clientTurnId === 'ct-2')!.status).toBe('waiting')
   })
 })
+
+describe('a gate refusal does not spend the delivery ceiling', () => {
+  // THE SCENARIO NOTHING EXERCISED. Occupancy says attachable, the drainer attempts,
+  // and the attach ROUTE refuses on checks occupancy does not run. Measured in the
+  // field: three of Miles's turns retired with attempts=5 / attach_409 in ~2 minutes,
+  // never delivered, while the 6h TTL never got to matter.
+  const park = async (id: string) =>
+    http('POST', POST, { clientTurnId: id, cosSessionId: 'cos-1', prompt: `p-${id}` })
+
+  const drainWith = async (result: { ok: boolean; reason?: string; serverRetryable?: boolean }) => {
+    gate = { attachable: true, reason: null }; ended = true
+    deliverResult = result
+    await drainThread('claude', threadId, deps())
+    return readQueue('claude', threadId, clock)[0]
+  }
+
+  it('REFUNDS the attempt for a queueable reason and stays waiting', async () => {
+    await start(); await park('ct-1')
+    const row = await drainWith({ ok: false, reason: 'native_target_busy' })
+    expect(row.status).toBe('waiting')
+    expect(row.attempts).toBe(0)
+    expect(row.reason).toBe('native_target_busy')
+  })
+
+  it('SPENDS the attempt for a refusal that can never clear', async () => {
+    // `native_target_fenced` means an earlier turn may or may not have landed. Waiting
+    // cannot resolve that, and retrying it risks a second copy in a real conversation.
+    await start(); await park('ct-1')
+    const row = await drainWith({ ok: false, reason: 'native_target_fenced' })
+    expect(row.status).toBe('waiting')
+    expect(row.attempts).toBe(1)
+  })
+
+  it("obeys the turn route's own retryable verdict over our inference", async () => {
+    await start(); await park('ct-1')
+    // Queueable by reason, but the server says no. The server wins.
+    const row = await drainWith({ ok: false, reason: 'native_target_busy', serverRetryable: false })
+    expect(row.attempts).toBe(1)
+  })
+
+  it('FAILS CLOSED on an unrecognised reason', async () => {
+    // A refusal added upstream must be bounded by default, never retried forever.
+    await start(); await park('ct-1')
+    expect((await drainWith({ ok: false, reason: 'brand_new_refusal' })).attempts).toBe(1)
+  })
+
+  it('FAILS CLOSED when there is no reason at all', async () => {
+    // Split from the case above: my first version parked a SECOND turn into the same
+    // queue and then read row [0], which had already been drained once — so it read 2
+    // and looked like a defect in the code rather than in the fixture.
+    await start(); await park('ct-1')
+    expect((await drainWith({ ok: false })).attempts).toBe(1)
+  })
+
+  it('never survives forever: the ceiling still retires a genuinely failing turn', async () => {
+    await start(); await park('ct-1')
+    gate = { attachable: true, reason: null }; ended = true
+    deliverResult = { ok: false, reason: 'attach_failed' }
+    for (let i = 0; i < 8; i++) await drainThread('claude', threadId, deps())
+    const row = readQueue('claude', threadId, clock)[0]
+    expect(row.status).toBe('refused')
+    expect(row.attempts).toBeLessThanOrEqual(5)
+  })
+
+  it('keeps the crash-safety property: the attempt is on disk BEFORE the call', async () => {
+    // The refund happens after the outcome is known; a crash mid-delivery therefore
+    // still leaves the attempt counted, which is what bounds an unbounded retry.
+    await start(); await park('ct-1')
+    gate = { attachable: true, reason: null }; ended = true
+    let onDisk = -1
+    await drainThread('claude', threadId, {
+      ...deps(),
+      deliver: async () => {
+        onDisk = readQueue('claude', threadId, clock)[0].attempts
+        throw new Error('process died')
+      },
+    })
+    expect(onDisk).toBe(1)
+  })
+})

@@ -1,5 +1,32 @@
 ## Unreleased
 
+## 6.36.9
+- **The queue gate can now see COS's own bindings, which closes a 30-minute lockout.**
+  `threadOccupancy` sees FOREIGN holders only — `OccupancyReason` has no
+  `native_target_busy`, because that refusal comes from the binding registry. So when a
+  live COS binding held a thread, Continue refused `native_target_busy`, the client
+  armed the queue, and this gate answered `409 thread_free` ("Pick Continue again"),
+  which refused identically. A closed loop for the whole binding TTL, while the refusal
+  copy said "detach that one first" — an action with no endpoint.
+- The same gap burnt the delivery ceiling: the drainer saw `attachable`, ATTEMPTED, and
+  the attach route refused. Five of those retired a turn in about two minutes. With the
+  binding visible, `drainDecision` returns `hold` and spends nothing — one change closes
+  both the loop and the burn.
+- **A gate refusal no longer spends an attempt.** Classified by REASON, never by status:
+  every refusal that is not `invalid_request` (400) or a capability gap (503) comes back
+  409, so a status rule would have retried `native_target_fenced` — "an earlier turn may
+  or may not have been delivered" — up to 1,080 times. Reuses `queueableRefusal`, and
+  fails CLOSED on an unrecognised reason.
+- The attempt is still written and fsynced BEFORE the call, then REFUNDED once the
+  outcome is known. Deferring the increment would have reopened the crash-safety hole
+  the comment there describes, and a test reads `attempts` off disk mid-delivery to
+  prove it.
+- **The refusal reason is no longer discarded.** `deliver` read `body.error`; the attach
+  route emits `reason` and has never emitted `error`, so every stored reason in the
+  field was the literal `attach_409` and the whole feature was reason-blind. Also
+  carries the turn route's own `retryable` verdict, which outranks our inference.
+
+
 ## 6.36.8
 - **The queue now covers the refusal that actually fires.** Device diagnostics, once the
   path was finally instrumented, recorded `native_target_busy` on every Continue that

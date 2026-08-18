@@ -517,10 +517,33 @@ app.use('/api', claudeSessionsRouter)
 // buys the guarantee that the queue CANNOT weaken the gate even by accident.
 if (threadAttachEnabled()) {
   const queueDeps = {
+    // TWO GATES, ONE ANSWER. `threadOccupancy` sees FOREIGN holders -- another app on
+    // the Mac writing the transcript. It does not, and cannot, see COS's OWN bindings:
+    // `OccupancyReason` has no `native_target_busy` member, because that refusal is
+    // produced only by the binding registry inside `bindings.create`.
+    //
+    // That gap is what trapped Miles on 2026-08-18. Continue refused
+    // `native_target_busy` (a live COS binding held the thread), the client armed the
+    // queue, he dictated -- and this gate, asking occupancy alone, answered
+    // `attachable: true`, so the route replied `409 thread_free` ("Pick Continue again
+    // to send it"). Continue refused identically. A closed loop for the 30-minute
+    // binding TTL, with the refusal copy telling him to "detach that one first" -- an
+    // action with no endpoint.
+    //
+    // It also burnt the delivery ceiling: the drainer saw `attachable` and ATTEMPTED,
+    // the attach route refused, and five of those retired the turn in ~2 minutes. With
+    // the binding visible here, `drainDecision` returns 'hold' instead and no attempt
+    // is spent -- so this single change closes the loop AND the attempt burn.
     occupancy: (provider: string, threadId: string) => {
       try {
         const v = threadOccupancy(provider, threadId, occupancyProbes, occupancyDirs)
-        return { attachable: v.attachable === true, reason: v.reason ?? null }
+        if (v.attachable !== true) return { attachable: false, reason: v.reason ?? null }
+        // Occupancy is happy; ask the registry the question it cannot answer.
+        // `getByThread` returns the binding ONLY when it actually blocks the target
+        // (`blocksTarget`), so an expired or terminal one correctly reads as free.
+        const holder = agentSessionBindingRegistry.getByThread(provider, threadId, Date.now())
+        if (holder !== null) return { attachable: false, reason: 'native_target_busy' }
+        return { attachable: true, reason: null }
       } catch {
         // A throwing probe is not an open door.
         return { attachable: false, reason: 'probe_failed' }

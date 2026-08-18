@@ -75,7 +75,7 @@ export async function deliverQueuedTurnOverLoopback(
   turn: QueuedThreadTurn,
   port: number,
   token: string,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; serverRetryable?: boolean }> {
   try {
     const attach = await post(
       port, token,
@@ -83,8 +83,17 @@ export async function deliverQueuedTurnOverLoopback(
       { cosSessionId: turn.cosSessionId },
     )
     if (attach.status !== 200 && attach.status !== 201) {
-      // The gate said no at drain time. Not an error -- the queue holds and tries again.
-      return { ok: false, reason: String(attach.body.error ?? `attach_${attach.status}`) }
+      // THE KEY IS `reason`, NOT `error`. `refuseAttach` emits
+      // `{ attached: false, reason, reasonCopy }` and has never emitted an `error`
+      // key, so reading `body.error` always fell through to the status fallback and
+      // every stored reason in the field was the literal string `attach_409`.
+      //
+      // That made the whole feature reason-blind: 409 is the DEFAULT status for every
+      // refusal that is not `invalid_request` (400) or a capability gap (503), so
+      // `attach_409` covered transient `native_target_busy` and permanent
+      // `native_target_fenced` alike. Any retry policy keyed on the status would have
+      // treated "an earlier turn may or may not have been delivered" as retryable.
+      return { ok: false, reason: String(attach.body.reason ?? attach.body.error ?? `attach_${attach.status}`) }
     }
     const bindingId = typeof attach.body.bindingId === 'string' ? attach.body.bindingId : ''
     if (!bindingId) return { ok: false, reason: 'attach_no_binding' }
@@ -99,7 +108,14 @@ export async function deliverQueuedTurnOverLoopback(
     )
     // 202 is the success shape: admitted, delivered in the background, poll the ledger.
     if (sent.status === 202 || sent.status === 200) return { ok: true }
-    return { ok: false, reason: String(sent.body.error ?? `turn_${sent.status}`) }
+    // Same defect on the turn leg: `refuseTurn` emits `reason`/`reasonCopy`/`retryable`
+    // and no `error`. `retryable` is the server's OWN judgement about this refusal --
+    // carried through rather than re-derived, so the two layers cannot disagree.
+    return {
+      ok: false,
+      reason: String(sent.body.reason ?? sent.body.error ?? `turn_${sent.status}`),
+      serverRetryable: typeof sent.body.retryable === 'boolean' ? sent.body.retryable : undefined,
+    }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : 'deliver_failed' }
   }

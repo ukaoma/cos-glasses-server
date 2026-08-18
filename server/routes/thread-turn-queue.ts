@@ -36,7 +36,12 @@ export interface ThreadTurnQueueDeps {
    * ambiguous must resolve `ok: false` with a reason: an unknown delivery that is
    * retried puts the same sentence into a real conversation twice.
    */
-  deliver: (turn: QueuedThreadTurn) => Promise<{ ok: boolean; reason?: string }>
+  deliver: (turn: QueuedThreadTurn) => Promise<{
+    ok: boolean
+    reason?: string
+    /** The turn route's OWN `retryable` judgement, when it sent one. Authoritative. */
+    serverRetryable?: boolean
+  }>
   now: () => number
 }
 
@@ -52,6 +57,31 @@ function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unk
     ...(turn.reason ? { reason: turn.reason } : {}),
     ...(turn.settledAt ? { settledAt: turn.settledAt } : {}),
   }
+}
+
+/**
+ * Is this failed delivery a "not yet" rather than a "no"?
+ *
+ * CLASSIFIED BY REASON, NEVER BY STATUS. Every attach refusal that is not
+ * `invalid_request` (400) or a capability gap (503) comes back 409 -- transient
+ * `native_target_busy` and permanent `native_target_fenced` alike -- so a status-based
+ * rule would retry a turn whose copy reads "an earlier turn on this thread may or may
+ * not have been delivered" up to 1,080 times inside the TTL. That is the one refusal
+ * that needs a human.
+ *
+ * `queueableRefusal` is reused rather than a second list being written: it already
+ * encodes "can this condition ever pass", it is tested, and a turn should be retried
+ * for exactly the reasons it was allowed to queue for.
+ *
+ * FAILS CLOSED. An unrecognised reason, an absent reason, or a thrown deliver all
+ * return false and spend an attempt. A new refusal added upstream is therefore bounded
+ * by default rather than silently retried forever.
+ */
+function isRetryableDelivery(outcome: { reason?: string; serverRetryable?: boolean }): boolean {
+  // The turn route publishes its own verdict; it outranks our inference either way.
+  if (outcome.serverRetryable === false) return false
+  if (outcome.serverRetryable === true) return true
+  return queueableRefusal(outcome.reason)
 }
 
 /**
@@ -103,7 +133,7 @@ export async function drainThread(
     writeQueue(provider, threadId, queue)
     dirty = true
 
-    let outcome: { ok: boolean; reason?: string }
+    let outcome: { ok: boolean; reason?: string; serverRetryable?: boolean }
     try {
       outcome = await deps.deliver(turn)
     } catch (error) {
@@ -114,6 +144,20 @@ export async function drainThread(
       turn.status = 'delivered'
       turn.settledAt = deps.now()
       delivered += 1
+    } else if (isRetryableDelivery(outcome)) {
+      // A GATE REFUSAL IS NOT A FAILED DELIVERY, so it must not spend the ceiling --
+      // measured cost of getting this wrong: three of Miles's turns retired in about
+      // two minutes each, never delivered, while the 6h TTL never got to matter.
+      //
+      // REFUNDED, not deferred. The increment and its fsync stay BEFORE the call
+      // (routes:101-103) because that is what survives a crash mid-delivery -- the
+      // ceiling only bounds anything if it outlives the crash it is bounding, and a
+      // test reads `attempts` off disk from inside the deliver callback to prove it.
+      // So the attempt is spent first and given back here, where the outcome is known.
+      turn.attempts = Math.max(0, turn.attempts - 1)
+      turn.status = 'waiting'
+      turn.reason = outcome.reason
+      held += 1
     } else if (turn.attempts >= MAX_DELIVERY_ATTEMPTS) {
       turn.status = 'refused'
       turn.reason = outcome.reason ?? 'delivery_failed'
