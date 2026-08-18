@@ -1,5 +1,37 @@
 ## Unreleased
 
+## 6.36.7
+- **A turn spoken at a busy thread is now queued instead of refused.** Miles: "if
+  there's a session that's still running, that would just put it into the queue the same
+  way that the user has the ability to do so." The thread was never stuck — measured at
+  the moment he asked, its transcript mtime was 3s old against a 30s window, so the gate
+  correctly read `working`. That is the trap: while you are talking to an agent in a
+  thread, it is CONTINUOUSLY working, so Continue was unreachable for exactly the thread
+  you most want to continue and Fork was the only door.
+- **This does not weaken the attach gate, which is the whole design.** The queue defers
+  to the gate rather than bypassing it: delivery re-runs the full occupancy check and
+  can still refuse. Several tests exist only to prove that negative.
+- Only occupancy reasons are queueable. A structural refusal — unsupported provider,
+  malformed id, attach switched off — still refuses immediately, because telling someone
+  their turn is queued when it can never run is worse than refusing it.
+- **Delivery re-enters through the front door**, over loopback to this server's own
+  attach and turn routes. Those carry the gate, the target fence, the per-target claim,
+  the watermark, the idempotency ledger and the child-pid accounting; a second copy in a
+  background worker would be a second place for the gate to drift.
+- **The watermark exemption, approved explicitly by Miles.** A queued turn drains after
+  the thread has moved on — that is what it waited for — so its binding is minted fresh
+  at delivery. Checked as normal, a queue would fail 100% of the time. An interactive
+  turn still gets the full divergence check.
+- Ready means the turn ENDED (`result` / `turn_complete`, detected with the same parser
+  the live stream uses), with the 30s idle clock as a backstop so a holder that dies
+  cannot wedge the queue. Thirty seconds of silence alone would fire during a long tool
+  call and inject into the middle of a turn.
+- Durable under the data home, so it survives a server update and a pocketed phone. The
+  attempt count is persisted BEFORE each delivery, so a crash mid-flight cannot reset
+  the ceiling and retry forever. Six-hour TTL, 8 waiting per thread, 5 attempts, and a
+  cancel route for the × control.
+
+
 ## 6.36.6
 - **The session digest follows the thread instead of its opening.** Miles, from the
   lens: "It's currently showing a legacy session that I had over a day ago... The

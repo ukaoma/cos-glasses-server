@@ -24,6 +24,7 @@ import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import {
   createAgentSessionBindingsRouter,
+
   threadAttachEnabled,
 } from './routes/agent-session-bindings.js'
 import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
@@ -33,7 +34,7 @@ import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attac
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
-import { threadOccupancy } from './lib/thread-occupancy.js'
+import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
@@ -104,6 +105,12 @@ import {
 } from './lib/maintenance-lifecycle.js'
 
 const app = express()
+import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
+import { transcriptTurnEnded } from './lib/thread-turn-queue-store.js'
+import { transcriptPathFor } from './lib/native-head.js'
+import { deliverQueuedTurnOverLoopback } from './lib/thread-turn-queue-deliver.js'
+import type { QueuedThreadTurn } from './lib/thread-turn-queue.js'
+
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
 
 // Mode detection — COS mode when a full pipeline directory is configured.
@@ -491,6 +498,66 @@ app.use('/api', claudeSessionsRouter)
 // Registered AFTER agentSessionsRouter deliberately: its paths are 2 and 4 segments
 // (`/agent-sessions/bindings`, `/agent-sessions/:provider/:threadId/attachability`)
 // and cannot shadow that router's `/agent-sessions/:provider/:id` transcript route.
+// ---------------------------------------------------------------------------
+// QUEUED THREAD TURNS
+// ---------------------------------------------------------------------------
+// A turn spoken at a thread that is busy right now is PARKED instead of refused, and
+// delivered when the thread frees. Miles, 2026-08-17: "if there's a session that's
+// still running, that would just put it into the queue the same way that the user has
+// the ability to do so."
+//
+// Registered only when attach is enabled, on the SAME flag as the write routes: a
+// queue whose delivery path does not exist would accept turns it can never send.
+//
+// DELIVERY GOES BACK IN THROUGH THE FRONT DOOR, over loopback to this server's own
+// attach + turn routes. Those two carry the occupancy gate, the target fence, the
+// per-target claim, the divergence watermark, the idempotency ledger and the child-pid
+// accounting; a second copy of that sequence in a background worker is a second place
+// for the gate to drift. One request per delivered turn, at a handful of turns a day,
+// buys the guarantee that the queue CANNOT weaken the gate even by accident.
+if (threadAttachEnabled()) {
+  const queueDeps = {
+    occupancy: (provider: string, threadId: string) => {
+      try {
+        const v = threadOccupancy(provider, threadId, occupancyProbes, occupancyDirs)
+        return { attachable: v.attachable === true, reason: v.reason ?? null }
+      } catch {
+        // A throwing probe is not an open door.
+        return { attachable: false, reason: 'probe_failed' }
+      }
+    },
+    turnEnded: (provider: string, threadId: string) => {
+      if (provider !== 'claude' && provider !== 'codex') return false
+      try {
+        return transcriptTurnEnded(provider, transcriptPathFor(provider, threadId, nativeHeadDeps))
+      } catch {
+        return false
+      }
+    },
+    activity: (provider: string, threadId: string): 'working' | 'idle' | 'unknown' => {
+      try {
+        const read = occupancyProbes.transcriptMtimeMs
+        return typeof read === 'function'
+          ? holderActivity(read(provider as 'claude' | 'codex', threadId), Date.now())
+          : 'unknown'
+      } catch {
+        return 'unknown'
+      }
+    },
+    deliver: (turn: QueuedThreadTurn) => deliverQueuedTurnOverLoopback(turn, PORT, API_TOKEN),
+    now: () => Date.now(),
+  }
+  app.use('/api', createThreadTurnQueueRouter(queueDeps))
+
+  // Every 20s. Fast enough that a freed thread drains while the user is still looking
+  // at the pending row, slow enough to be nothing: the sweep does no work at all when
+  // no queue file exists. Unref'd so it never holds the process open.
+  const queueDrainTimer = setInterval(() => {
+    void drainAllThreads(queueDeps).catch(() => { /* the next sweep retries */ })
+  }, 20_000)
+  queueDrainTimer.unref()
+}
+
 app.use('/api', createAgentSessionBindingsRouter({
   probes: occupancyProbes,
   dirs: occupancyDirs,
