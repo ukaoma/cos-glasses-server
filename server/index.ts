@@ -109,6 +109,7 @@ import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-tu
 import { transcriptTurnEnded } from './lib/thread-turn-queue-store.js'
 import { transcriptPathFor } from './lib/native-head.js'
 import { deliverQueuedTurnOverLoopback } from './lib/thread-turn-queue-deliver.js'
+import { readFences, writeFences } from './lib/thread-fence-store.js'
 import type { QueuedThreadTurn } from './lib/thread-turn-queue.js'
 
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
@@ -582,6 +583,23 @@ if (threadAttachEnabled()) {
 }
 
 app.use('/api', createAgentSessionBindingsRouter({
+  // Durable fences (6.36.10), OFF BY DEFAULT.
+  //
+  // The fence is the one piece of state whose loss writes twice into a real
+  // conversation, so persisting it is the right direction. But durability
+  // without a reachable release is a REGRESSION, not a fix: today "Restart
+  // Server" in COS Control clears a fence, and making it survive restarts with
+  // no operator surface in Control turns an 8-second annoyance into a
+  // permanently dead thread that needs a terminal to clear. Miles, 2026-08-12:
+  // "we couldn't do anything without bash, that shouldn't be the case."
+  //
+  // So the storage ships inert. GET /agent-sessions/fences and
+  // POST /agent-sessions/fences/release work either way — which already removes
+  // the restart from the recovery path — and this flag flips on once COS Control
+  // has a Fences card.
+  fencePersistence: process.env.COS_THREAD_FENCE_DURABLE === '1'
+    ? { load: readFences, save: writeFences }
+    : undefined,
   probes: occupancyProbes,
   dirs: occupancyDirs,
   now: () => Date.now(),

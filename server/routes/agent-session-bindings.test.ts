@@ -2669,3 +2669,244 @@ describe('the fork route believes nothing the module did not say', () => {
     expect(turn.body.outcome).toBe('completed')
   })
 })
+
+// ---------------------------------------------------------------------------
+// DURABLE FENCES + OPERATOR RELEASE (6.36.10)
+//
+// The fence was process-local and died on every restart. The binding registry
+// records what that cost: "the process-local fence re-opened on restart and
+// delivered a second copy." Making it durable is only safe if a release ships in
+// the SAME change — otherwise a fence becomes permanent with no way back, which
+// is worse than the bug.
+// ---------------------------------------------------------------------------
+describe('durable fences', () => {
+  function memoryStore() {
+    let rows: any[] = []
+    return {
+      persistence: { load: () => rows, save: (r: any[]) => { rows = [...r] } },
+      rows: () => rows,
+    }
+  }
+
+  /** Drive one ambiguous turn, which is what arms a fence. */
+  async function fenceIt(store: ReturnType<typeof memoryStore>) {
+    const base = await start(writeDeps({
+      fencePersistence: store.persistence,
+      deliverAttachedTurn: async () => { throw new Error('socket closed') },
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-fence-0001',
+    })
+    return base
+  }
+
+  it('SURVIVES A RESTART — a new process still refuses the fenced target', async () => {
+    const store = memoryStore()
+    await fenceIt(store)
+    expect(store.rows()).toHaveLength(1)
+
+    // A brand-new router over the same store IS the restart.
+    const rebooted = await start(writeDeps({ fencePersistence: store.persistence }))
+    const again = await post(rebooted, attachPath(), { cosSessionId: 'cos-after-reboot' })
+    expect(again.status).toBe(409)
+    expect(again.body.reason).toBe('native_target_fenced')
+  })
+
+  it('records the evidence the operator needs to judge it', async () => {
+    const store = memoryStore()
+    await fenceIt(store)
+    const [row] = store.rows()
+    expect(row.provider).toBe('claude')
+    expect(row.reason).toBe('native_target_fenced')
+    expect(typeof row.fencedAt).toBe('number')
+    expect(row.turnId).toBeTruthy()
+    // The pre-turn head is what a later reviewer compares against.
+    expect(row.headBefore).toBeTruthy()
+  })
+
+  it('lists fences by DIGEST and never leaks the raw target key', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store)
+    const res = await fetch(`${base}/api/agent-sessions/fences`)
+    const text = await res.text()
+    const body = JSON.parse(text)
+    expect(res.status).toBe(200)
+    expect(body.fences).toHaveLength(1)
+    expect(body.fences[0].provider).toBe('claude')
+    // The redaction contract is absolute: the raw key embeds the native thread id.
+    expect(text).not.toContain(SID)
+    expect(text).not.toContain(store.rows()[0].targetKey)
+    expect(body.fences[0].target).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('refuses to release without an explicit confirmation, and previews it', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store)
+    const list = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    const target = list.fences[0].target
+
+    const noConfirm = await post(base, '/api/agent-sessions/fences/release', { target })
+    expect(noConfirm.status).toBe(400)
+    expect(noConfirm.body.reason).toBe('confirmation_required')
+    expect(noConfirm.body.preview.target).toBe(target)
+    // Still fenced.
+    expect(store.rows()).toHaveLength(1)
+  })
+
+  it('releases on confirmation, and the thread attaches again', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store)
+    const list = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    const target = list.fences[0].target
+
+    const released = await post(base, '/api/agent-sessions/fences/release', { target, confirm: true })
+    expect(released.status).toBe(200)
+    expect(released.body.released).toBe(true)
+    expect(store.rows()).toHaveLength(0)
+
+    const reattach = await post(base, attachPath(), { cosSessionId: 'cos-after-release' })
+    // The release is responsible for ONE thing: the target is no longer FENCED.
+    // It is not responsible for the binding the fencing turn left behind — that
+    // binding holds the target for its 30-minute TTL and refuses a second attach
+    // by design ("one non-terminal binding per target"). Asserting 201 here would
+    // be asserting someone else's contract.
+    expect(reattach.body.reason).not.toBe('native_target_fenced')
+    expect(reattach.body.reason).toBe('native_target_busy')
+  })
+
+  it('reports an unknown handle honestly instead of succeeding', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store)
+    const res = await post(base, '/api/agent-sessions/fences/release', {
+      target: 'f'.repeat(32), confirm: true,
+    })
+    expect(res.status).toBe(404)
+    expect(res.body.released).toBe(false)
+    expect(store.rows()).toHaveLength(1)
+  })
+
+  it('rejects a malformed release request', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store)
+    for (const target of [undefined, '', 123, 'x'.repeat(300)]) {
+      const res = await post(base, '/api/agent-sessions/fences/release', { target, confirm: true })
+      expect(res.status, String(target)).toBe(400)
+      expect(res.body.reason, String(target)).toBe('invalid_request')
+    }
+    expect(store.rows()).toHaveLength(1)
+  })
+
+  it('keeps working when persistence throws — the fence still holds in memory', async () => {
+    // A disk failure must not silently drop the fence for the running process.
+    const base = await start(writeDeps({
+      fencePersistence: { load: () => [], save: () => { throw new Error('disk full') } },
+      deliverAttachedTurn: async () => { throw new Error('socket closed') },
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-fence-0002',
+    })
+    const again = await post(base, attachPath(), { cosSessionId: 'cos-2' })
+    expect(again.status).toBe(409)
+    expect(again.body.reason).toBe('native_target_fenced')
+  })
+
+  it('does not read the data home when no persistence is injected', async () => {
+    // The existing suite must stay in memory; a test that began writing the real
+    // data home would leak fences between cases and into the running server.
+    const base = await start(writeDeps({ deliverAttachedTurn: async () => { throw new Error('x') } }))
+    const res = await fetch(`${base}/api/agent-sessions/fences`)
+    expect((await res.json()).fences).toEqual([])
+  })
+})
+
+describe('fence release — the guard is the authority', () => {
+  const SID2 = 'b7c1d2e3-1111-4222-8333-444455556666'
+
+  function memoryStore2() {
+    let rows: any[] = []
+    return { persistence: { load: () => rows, save: (r: any[]) => { rows = [...r] } }, rows: () => rows }
+  }
+
+  async function fenceBoth(store: ReturnType<typeof memoryStore2>) {
+    const base = await start(writeDeps({
+      fencePersistence: store.persistence,
+      deliverAttachedTurn: async () => { throw new Error('socket closed') },
+    }))
+    for (const [i, sid] of [SID, SID2].entries()) {
+      const a = await attached(base, sid)
+      await post(base, turnsPath(a.bindingId), {
+        prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: `ct-two-000${i + 1}`,
+      })
+    }
+    return base
+  }
+
+  it('releases ONLY the fence the handle names, with two fenced', async () => {
+    // Without this, deleting the digest comparison inside releaseFence survives the
+    // whole suite: the route used to pre-resolve the row, so nothing enforced it.
+    const store = memoryStore2()
+    const base = await fenceBoth(store)
+    expect(store.rows()).toHaveLength(2)
+
+    const list = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    expect(list.fences).toHaveLength(2)
+    const victim = list.fences[1]
+
+    const res = await post(base, '/api/agent-sessions/fences/release', { target: victim.target, confirm: true })
+    expect(res.status).toBe(200)
+
+    const after = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    expect(after.fences).toHaveLength(1)
+    expect(after.fences[0].target).toBe(list.fences[0].target)
+    expect(after.fences[0].target).not.toBe(victim.target)
+  })
+
+  it('does NOT report a release it could not durably record', async () => {
+    // Telling an operator the thread is open, when the next restart will fence it
+    // again with no record of why, is worse than refusing.
+    let rows: any[] = []
+    let failing = false
+    const base = await start(writeDeps({
+      fencePersistence: {
+        load: () => rows,
+        save: (r: any[]) => { if (failing) throw new Error('disk full'); rows = [...r] },
+      },
+      deliverAttachedTurn: async () => { throw new Error('socket closed') },
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-persistfail-1',
+    })
+    const list = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+
+    failing = true
+    const res = await post(base, '/api/agent-sessions/fences/release', {
+      target: list.fences[0].target, confirm: true,
+    })
+    expect(res.status).toBe(500)
+    expect(res.body.released).toBe(false)
+    expect(res.body.reason).toBe('persist_failed')
+
+    // Still fenced, in memory AND on disk.
+    expect(rows).toHaveLength(1)
+    const still = await post(base, attachPath(), { cosSessionId: 'cos-after-failed-release' })
+    expect(still.body.reason).toBe('native_target_fenced')
+  })
+
+  it('reports degraded persistence instead of looking healthy', async () => {
+    const base = await start(writeDeps({
+      fencePersistence: { load: () => [], save: () => { throw new Error('disk full') } },
+      deliverAttachedTurn: async () => { throw new Error('socket closed') },
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-degraded-1',
+    })
+    const list = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    // A memory-only fence behaves identically until the process restarts.
+    expect(list.degraded).toBe(true)
+    expect(list.fences).toHaveLength(1)
+  })
+})

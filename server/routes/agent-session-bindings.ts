@@ -94,6 +94,7 @@
 // does not — a future remount above the parser — the POST routes see a non-object
 // and answer 400. They never treat an unparsed body as an empty one.
 
+import type { FenceRecord } from '../lib/thread-fence-store.js'
 import { Router, type Request, type Response } from 'express'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -268,6 +269,12 @@ export type AttachedTurnResult =
   | { ok: boolean; delivery: 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' }
 
 export interface AgentSessionBindingsDeps {
+  /**
+   * Durable fence storage. OPTIONAL, and omitting it is what keeps the existing
+   * suite in memory: a test that silently began writing the real data home would
+   * leak fences between cases and into the running server. Production wires it.
+   */
+  fencePersistence?: FencePersistence
   probes: OccupancyProbes
   dirs: OccupancyDirs
   /** Epoch ms. Injected so lease expiry is decidable in a test without waiting. */
@@ -829,24 +836,86 @@ export const MAX_TRACKED_HEADS = 512
 /** A COS session id may contain ':' and '/', which is exactly why it is never projected. */
 export const COS_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/
 
+/** What a fence records about the turn that set it. */
+export interface FenceEvidence {
+  provider: string
+  /** The head BEFORE the ambiguous turn. Null ONLY when the failure happened
+   *  before the head was read. */
+  headBefore: string | null
+  turnId: string
+  bindingId: string | null
+  now: number
+}
+
+export type ReleaseOutcome =
+  | { ok: true; row: FenceRecord }
+  | { ok: false; reason: 'unknown_fence' | 'persist_failed' }
+
+/** Injected so TargetGuard stays testable in memory; production wires the store. */
+export interface FencePersistence {
+  load: () => FenceRecord[]
+  save: (rows: FenceRecord[]) => void
+}
+
 /**
- * The in-process half of plan 4.5 and 4.6: one COS turn per native target, and a
- * target that may already hold an undelivered turn stays shut.
+ * One COS turn per native target, and a target that may already hold an
+ * undelivered turn stays shut.
  *
- * NOT DURABLE, AND THAT IS A STATED GAP. Plan 4.5 wants the reservation
- * persisted in the job journal and rehydrated on boot, and 4.6 item 3 wants the
- * fence to have its own lifecycle and an operator release path. Both belong to
- * Phase 2, which owns that journal. What lives here is the process-lifetime
- * version, which is enough to make the two properties true for a running server
- * and fails in the safe direction on restart: a claim is released (no turn is
- * running after a restart anyway) and a FENCE is lost, which is the one that
- * matters and is why it is called out rather than implied.
+ * CLAIMS ARE PROCESS-LOCAL; FENCES ARE DURABLE (6.36.10). The two states fail in
+ * opposite directions, which is why only one of them is persisted. Losing a claim
+ * on restart is safe — no turn is running after a restart anyway. Losing a FENCE
+ * reopens a thread that may already hold an undelivered turn, and the binding
+ * registry records what that cost: "the process-local fence re-opened on restart
+ * and delivered a second copy." So fences are written through to disk and
+ * rehydrated in the constructor, and the ONLY way one leaves the map is an
+ * explicit operator release (`releaseFence`).
+ *
+ * Persistence is INJECTED rather than imported. A test that silently began writing
+ * the real data home would leak fences between cases and into the running server,
+ * so the suite runs with `null` and stays in memory.
  */
 class TargetGuard {
   /** targetKey -> turnId of the single COS turn allowed to be in flight. */
   private readonly claims = new Map<string, string>()
-  /** targetKey -> why no further turn may be delivered. */
-  private readonly fences = new Map<string, WriteRefusal>()
+  /** targetKey -> the fence record. DURABLE as of 6.36.10: persistence is injected
+   *  so tests stay in memory and only production touches the data home. */
+  private readonly fences = new Map<string, FenceRecord>()
+  private readonly persistence: FencePersistence | null
+  private persistDegraded = false
+
+  constructor(persistence: FencePersistence | null = null) {
+    this.persistence = persistence
+    if (persistence === null) return
+    // Rehydrate BEFORE the router serves. A fence that died on restart is exactly
+    // how a second copy of a turn reached a real transcript.
+    try {
+      for (const row of persistence.load()) this.fences.set(row.targetKey, row)
+    } catch (error) {
+      console.error(`[agent-session-bindings] fence rehydrate failed: ${error instanceof Error ? error.message : error}`)
+    }
+  }
+
+  /** True when the durable write succeeded (or there is nothing to persist to). */
+  private persistFences(rows: FenceRecord[]): boolean {
+    if (this.persistence === null) return true
+    try {
+      this.persistence.save(rows)
+      this.persistDegraded = false
+      return true
+    } catch (error) {
+      // The in-memory fence still holds for this process, so the thread stays shut
+      // NOW; what is lost is survival across a restart. Loud, and surfaced on
+      // GET /fences — a silent fallback is indistinguishable from working.
+      this.persistDegraded = true
+      console.error(`[agent-session-bindings] fence persist FAILED (fences hold in memory only): ${error instanceof Error ? error.message : error}`)
+      return false
+    }
+  }
+
+  /** Whether the last durable write failed. Reported, never inferred. */
+  degraded(): boolean {
+    return this.persistDegraded
+  }
   /** bindingId -> the head digest this binding is currently reconciled to. */
   private readonly heads = new Map<string, string>()
 
@@ -869,12 +938,72 @@ class TargetGuard {
     if (this.claims.get(targetKey) === turnId) this.claims.delete(targetKey)
   }
 
-  fence(targetKey: string, reason: WriteRefusal): void {
-    if (!this.fences.has(targetKey)) this.fences.set(targetKey, reason)
+  /**
+   * Write-once: the FIRST reason wins, so a later ambiguity cannot overwrite the
+   * evidence chain of an unresolved one.
+   *
+   * DEFENSIVE, AND UNVERIFIED BY EXECUTION. Both fence sites sit inside the
+   * `tryClaim` section, which serialises them per target, and a fenced target is
+   * refused at the check before it can reach either site again — so no route can
+   * currently fence the same key twice, and a mutation removing this guard passes
+   * the whole suite. It is kept because the one path that could reach it (the
+   * ambiguous site fences, then the response throws into the catch, which fences
+   * `claimedKey` again) would otherwise replace a record carrying `bindingId` with
+   * one carrying null. Do not read the passing suite as coverage of this line.
+   */
+  fence(targetKey: string, reason: WriteRefusal, evidence: FenceEvidence): void {
+    if (this.fences.has(targetKey)) return
+    this.fences.set(targetKey, {
+      targetKey,
+      provider: evidence.provider,
+      reason,
+      headBefore: evidence.headBefore,
+      turnId: evidence.turnId,
+      bindingId: evidence.bindingId,
+      fencedAt: evidence.now,
+    })
+    this.persistFences([...this.fences.values()])
   }
 
   fencedReason(targetKey: string): WriteRefusal | null {
-    return this.fences.get(targetKey) ?? null
+    const row = this.fences.get(targetKey)
+    return row === undefined ? null : (row.reason as WriteRefusal)
+  }
+
+  /** Every fence, REDACTED for the wire: the raw targetKey embeds the private
+   *  native thread id, so callers address a fence by its deterministic digest. */
+  listFences(): Array<{ target: string; provider: string; reason: string; headBefore: string | null; turnId: string; fencedAt: number }> {
+    return [...this.fences.values()].map(row => ({
+      target: opaqueRevision(row.targetKey),
+      provider: row.provider,
+      reason: row.reason,
+      headBefore: row.headBefore,
+      turnId: row.turnId,
+      fencedAt: row.fencedAt,
+    }))
+  }
+
+  /**
+   * The operator release. THE ONLY WAY A FENCE LEAVES THIS MAP.
+   *
+   * Addressed by digest, never by raw target key. Returns false when no fence
+   * matches, so a stale handle reports honestly instead of silently succeeding.
+   */
+  releaseFence(targetDigest: string): ReleaseOutcome {
+    for (const [key, row] of this.fences) {
+      // THE authority on which fence a handle names. The route also looks the row
+      // up for its preview, but the release decision is made here — a duplicate
+      // lookup upstream would leave this comparison enforced by nothing.
+      if (opaqueRevision(row.targetKey) !== targetDigest) continue
+      // PERSIST FIRST. Reporting a release that was not durably recorded is how an
+      // operator is told a thread is open, writes to it, and finds it fenced again
+      // after the next restart with no record of why.
+      const remaining = [...this.fences.values()].filter(r => r.targetKey !== key)
+      if (!this.persistFences(remaining)) return { ok: false, reason: 'persist_failed' }
+      this.fences.delete(key)
+      return { ok: true, row }
+    }
+    return { ok: false, reason: 'unknown_fence' }
   }
 
   /**
@@ -1135,7 +1264,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   const canListBindings = bindingDepsUsable(deps)
   const canWriteBindings = bindingWriteDepsUsable(deps)
   const detect = deps?.occupancy ?? threadOccupancy
-  const guard = new TargetGuard()
+  const guard = new TargetGuard(deps.fencePersistence ?? null)
   const ownership = deps?.ownership ?? { record: recordCosSpawn, release: releaseCosSpawn }
   // One per router. Injectable so the follow-on (attach accepting a `forkRef`)
   // shares this instance rather than standing up a second, disconnected one.
@@ -1215,6 +1344,54 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       return null
     }
   }
+
+  // ------------------------------------------------------------------ fences
+  //
+  // Mounted BEFORE the parameterised routes so `fences` can never be read as a
+  // provider. Both are operator surfaces: a fenced thread was previously
+  // discoverable only by trying to use it and being refused.
+  //
+  // A fence is addressed by DIGEST. The raw target key embeds the private native
+  // thread id, and the redaction contract at the top of this file is absolute.
+
+  router.get('/agent-sessions/fences', (_req, res) => {
+    // A fence list is a liveness answer; a cached one is worse than none.
+    res.set('Cache-Control', 'private, no-store')
+    // `degraded` is reported, never inferred: a memory-only fence set behaves
+    // identically to a durable one until the process restarts, so a silent
+    // fallback would be indistinguishable from working.
+    res.json({ fences: guard.listFences(), degraded: guard.degraded() })
+  })
+
+  router.post('/agent-sessions/fences/release', (req, res) => {
+    const body = (req.body ?? {}) as { target?: unknown; confirm?: unknown }
+    const target = body.target
+    if (typeof target !== 'string' || target.length === 0 || target.length > 256) {
+      res.status(400).json({ released: false, reason: 'invalid_request' })
+      return
+    }
+    res.set('Cache-Control', 'private, no-store')
+    if (body.confirm !== true) {
+      // FAILS CLOSED, like every other destructive COS call. NOTE WHAT THIS IS
+      // AND IS NOT: it is a deliberate second call, not proof a human looked.
+      // The API token is shared by the phone, the lens and every COS agent
+      // session, so nothing is structurally prevented from asserting `confirm`.
+      // It stops an accidental release, not an automated one.
+      const preview = guard.listFences().find(f => f.target === target) ?? null
+      res.status(400).json({ released: false, reason: 'confirmation_required', preview })
+      return
+    }
+    // The guard decides. It re-matches the handle itself rather than trusting a
+    // lookup performed up here, and it persists BEFORE it mutates.
+    const outcome = guard.releaseFence(target)
+    if (!outcome.ok) {
+      const status = outcome.reason === 'unknown_fence' ? 404 : 500
+      res.status(status).json({ released: false, reason: outcome.reason })
+      return
+    }
+    console.warn(`[agent-session-bindings] fence RELEASED by operator target=${target} provider=${outcome.row.provider} fencedAt=${outcome.row.fencedAt}`)
+    res.json({ released: true, target, provider: outcome.row.provider })
+  })
 
   router.get('/agent-sessions/:provider/:threadId/attachability', (req, res) => {
     // An occupancy verdict is a liveness answer with a lifetime of roughly now.
@@ -1375,7 +1552,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // again just because the binding that delivered it is gone. Checked here as
       // well as in the turn route, because a fresh attach is the obvious way around
       // a per-binding fence.
-      if (fenced !== null) return refuseAttach(res, fenced)
+      if (fenced !== null) {
+        console.warn(`[agent-session-bindings] fence hit route=attach provider=${providerParam} target=${opaqueRevision(key)}`)
+        return refuseAttach(res, fenced)
+      }
 
       const resolve = deps.resolveTarget
       if (typeof resolve !== 'function') return refuseAttach(res, 'target_unresolvable')
@@ -1623,6 +1803,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     const turnId = mintId()
     /** The target we hold a claim on, released in the finally. */
     let claimedKey: string | null = null
+    // Hoisted so the CATCH site can fence with evidence. `binding` and `head` are
+    // both declared inside the try, so neither is in scope where the route-error
+    // fence is set — without these it would store a fence it can say nothing about.
+    let fenceProvider = ''
+    let preTurnHeadDigest: string | null = null
     /** Children the adapter reported, released in the finally. */
     const recordedPids: number[] = []
     let pinnedBindingId: string | null = null
@@ -1789,6 +1974,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (gate?.ok !== true) return refuseTurn(registryRefusal(gate?.reason))
 
       const binding = deps.bindings.get!(bindingId)
+      if (binding) fenceProvider = binding.provider
       // Only `active` runs work. `staging` is the pre-commit state of the journaled
       // Chat handoff and must never execute against a Chat that can still roll back.
       const usable = assertUsable(binding ?? null, now)
@@ -1805,6 +1991,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       const key = binding.targetKey
       const fenced = guard.fencedReason(key)
       if (fenced !== null) {
+        console.warn(`[agent-session-bindings] fence hit route=turn provider=${binding.provider} target=${opaqueRevision(key)} turnId=${turnId}`)
         return refuseTurn(fenced, { retryable: false, deliveryState: 'unknown' })
       }
 
@@ -1823,6 +2010,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
 
       const head = await readHead(binding.provider, binding.nativeThreadId)
       if (head === null) return refuseTurn('native_head_unavailable')
+      preTurnHeadDigest = head.digest
 
       // The attach baseline, advanced by each completed turn and by each explicit
       // Continue Anyway. Without the advance the SECOND turn on a binding always
@@ -1928,7 +2116,18 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // Fenced under its own reason, not this turn's: `delivery_ambiguous`
         // describes what happened to THIS request, while a later caller needs to
         // be told the thread is shut and why it must be inspected first.
-        guard.fence(key, 'native_target_fenced')
+        guard.fence(key, 'native_target_fenced', {
+          provider: binding.provider,
+          headBefore: head.digest,
+          turnId,
+          bindingId,
+          now: Date.now(),
+        })
+        // A fence shuts a thread until a human acts, and until now it wrote NO log
+        // line at either site — so a fenced thread was discoverable only by trying
+        // to use it (Miles, 2026-08-18). Never log `key`: it embeds the private
+        // native thread id, which this router does not emit anywhere.
+        console.warn(`[agent-session-bindings] fence set site=ambiguous provider=${binding.provider} target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest}`)
         return reportAmbiguous()
       }
 
@@ -1958,7 +2157,21 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (deliveryAttempted) {
         // A bug in this route that happened AROUND a delivery is indistinguishable
         // from a delivery.
-        if (claimedKey !== null) guard.fence(claimedKey, 'native_target_fenced')
+        if (claimedKey !== null) {
+          guard.fence(claimedKey, 'native_target_fenced', {
+            provider: fenceProvider,
+            headBefore: preTurnHeadDigest,
+            turnId,
+            bindingId: null,
+            now: Date.now(),
+          })
+          // `head` is scoped to the try, so `preTurnHeadDigest` is hoisted to the
+          // handler specifically to reach this site. It is null ONLY when the throw
+          // happened before the head was read. An earlier version of this line
+          // hardcoded `unavailable` and so contradicted the record it had just
+          // written — an operator would read "no baseline" off a fence that has one.
+          console.warn(`[agent-session-bindings] fence set site=route_error target=${opaqueRevision(claimedKey)} turnId=${turnId} headBefore=${preTurnHeadDigest ?? 'unavailable'}`)
+        }
         reportAmbiguous()
       } else {
         refuseTurn('turn_failed')

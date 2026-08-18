@@ -1,5 +1,54 @@
 ## Unreleased
 
+## 6.36.10
+- **A fenced thread had no exit and left no trace.** An ambiguous delivery fences the
+  target so a prompt cannot be double-delivered into a real conversation — that is
+  correct and stays. Everything around it was wrong: the fence lived in a process-local
+  Map, wrote no log line at either site, had no list, and had no release. It was
+  discoverable only by being refused, and the only thing that cleared it was a restart.
+- **Now listable and releasable without a restart.** `GET /api/agent-sessions/fences`
+  lists them; `POST /api/agent-sessions/fences/release` clears one. Addressed by DIGEST,
+  never by raw target key — the key embeds the private native thread id. Fails closed:
+  without `confirm: true` it returns 400 with a preview of what would be reopened. That
+  confirmation is a deliberate second call, NOT proof a human looked — the API token is
+  shared by the phone, the lens and every COS agent session, so nothing is structurally
+  prevented from asserting it. The comment says so rather than overclaiming.
+- **Durable storage ships INERT, behind `COS_THREAD_FENCE_DURABLE=1`, default off.**
+  Persisting the fence is the right direction, but durability without a reachable
+  release is a regression, not a fix: today "Restart Server" in COS Control clears a
+  fence, and making it survive restarts with no operator surface in Control would turn
+  an 8-second annoyance into a permanently dead thread needing a terminal. The flag
+  flips on when COS Control has a Fences card. The routes above already remove the
+  restart from the recovery path.
+- **A write can never erase what it could not read.** `TargetGuard` hydrates only the
+  rows it understood and saves its map wholesale, so a single unrecognised row — a
+  newer schema, a partial write, one bad field — would otherwise be erased by the next
+  fence on an unrelated thread, silently reopening every other fenced thread. Writes now
+  merge unrecognised rows back through. A corrupt file is quarantined to
+  `.corrupt-<ts>` rather than dropped, and uses `durableAtomicWriteFileSync` (fsync of
+  bytes, metadata and directory; randomized exclusive temp name) rather than the
+  lightweight cache writer.
+- **A release is persisted before it is reported.** Mutating memory first and reporting
+  success meant an operator could be told a thread was open, write to it, and find it
+  fenced again after the next restart with no record of why. A failed write now returns
+  500 `persist_failed` and the fence holds. `GET /fences` reports `degraded` when the
+  last write failed — a memory-only fence set is otherwise indistinguishable from a
+  durable one until the process restarts.
+- **Visible.** Breadcrumbs at both fence-set sites (tagged `ambiguous` vs `route_error`)
+  and both fence-hit routes (turn, attach). No raw target key in any of them. The
+  route_error line reports the hoisted pre-turn head rather than hardcoding
+  `unavailable`, which contradicted the record it had just written.
+- **Known, not fixed here:** releasing a fence does not by itself make the thread
+  attachable — the turn that fenced it left a binding holding the target for its
+  30-minute TTL, so the next attach refuses `native_target_busy`. There is no detach
+  route. `/attachability` still does not consult the fence, so the lens menu renders
+  Continue enabled on a fenced thread; the refusal is honest, the menu is not yet.
+- **Coverage.** 11 mutations against the new guards fail the suite, including all four
+  that survived the first QA pass (the release handle check, and the provider/reason/
+  fencedAt row validators). One documented survivor remains: removing the write-once
+  guard on `fence()`, which no route can reach because both fence sites sit inside the
+  `tryClaim` section. The code says so at the call site.
+
 ## 6.36.9
 - **The queue gate can now see COS's own bindings, which closes a 30-minute lockout.**
   `threadOccupancy` sees FOREIGN holders only — `OccupancyReason` has no
