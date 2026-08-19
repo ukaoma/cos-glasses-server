@@ -211,10 +211,15 @@ describe('search scan budget', () => {
    * passing 5/5 in isolation -- a test that only fails when the machine is busy is worse
    * than no test.
    *
-   * Detection does not depend on traversal order. `dirents` and `listCodexJsonlFiles`
-   * both walk with plain `readdir`, so which files land inside the pre-fix allowance is
-   * filesystem-defined; instead the decoys outnumber the budget heavily enough that the
-   * OLD code reaches every real file only by a fluke of roughly 1 in 10,000.
+   * In both fixtures the decoys are the NEWEST files on disk. That is what the real
+   * corpus looks like -- machine transcripts are written constantly -- and it is what
+   * keeps these honest now that candidates are ranked by mtime before the budget is
+   * spent: recency ordering alone cannot rescue a real conversation sitting behind them.
+   *
+   * Before ranking landed this leaned on traversal order, which was never controllable.
+   * `readdir` returned `2026/08/01` ahead of `2026/08/18` regardless of creation order,
+   * and a draft with the Codex roles reversed put every real rollout inside the pre-fix
+   * allowance and passed against the very bug it was written to catch.
    */
   const CAP = 30
 
@@ -252,23 +257,23 @@ describe('search scan budget', () => {
     const hex = (n: number) => n.toString(16).padStart(12, '0')
     for (let i = 0; i < 40; i++) {
       const id = `bbbbbbbb-1111-2222-3333-${hex(i)}`
-      const file = join(roots.codexSessions, '2026/08/01', `rollout-2026-08-01T09-00-00-${id}.jsonl`)
+      const file = join(roots.codexSessions, '2026/08/18', `rollout-2026-08-18T20-00-00-${id}.jsonl`)
       writeJsonl(file, [
-        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-01T09:00:00.000Z","thread_source":"subagent"}}`,
+        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-18T20:00:00.000Z","thread_source":"subagent"}}`,
         '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"subagent work"}]}}',
       ])
-      touch(file, new Date('2026-08-01T09:00:00Z'))
+      touch(file, new Date('2026-08-18T20:00:00Z'))
     }
     for (let i = 0; i < 4; i++) {
       const id = `cccccccc-4444-5555-6666-${hex(i)}`
-      const file = join(roots.codexSessions, '2026/08/18', `rollout-2026-08-18T20-00-00-${id}.jsonl`)
+      const file = join(roots.codexSessions, '2026/08/01', `rollout-2026-08-01T09-00-00-${id}.jsonl`)
       // Codex derives its title from `agent_nickname` or the first user message -- there
       // is no `payload.title` -- so the first prompt is what has to be distinctive here.
       writeJsonl(file, [
-        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-18T20:00:00.000Z"}}`,
+        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-01T09:00:00.000Z"}}`,
         `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Bottle POS parity ${i}"}]}}`,
       ])
-      touch(file, new Date('2026-08-18T20:00:00Z'))
+      touch(file, new Date('2026-08-01T09:00:00Z'))
     }
 
     const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
@@ -276,6 +281,58 @@ describe('search scan budget', () => {
 
     expect(codex).toHaveLength(4)
     expect(codex.every(doc => doc.title.startsWith('Bottle POS parity'))).toBe(true)
+  })
+
+  /**
+   * Ranking, which had no coverage until a mutation removing the sort left every test
+   * green. Without it the walk is raw `readdir` order, so the newest transcript on disk
+   * is reachable only by filesystem luck -- which is exactly how Miles's running fork
+   * came to sit in the session list while being absent from a search for its own title.
+   */
+  it('reaches the newest conversation even when it is behind a corpus of older ones', async () => {
+    const { roots } = fixtureHome()
+    const hex = (n: number) => n.toString(16).padStart(12, '0')
+    for (let i = 0; i < 250; i++) {
+      const file = join(roots.claudeProjects, '-Users-ukaoma-repo-a', `aaaaaaaa-1111-2222-3333-${hex(i)}.jsonl`)
+      writeJsonl(file, [
+        `{"type":"custom-title","customTitle":"Older session ${i}"}`,
+        '{"type":"user","message":{"role":"user","content":"an older conversation"}}',
+      ])
+      touch(file, new Date('2026-06-01T09:00:00Z'))
+    }
+    const needle = join(roots.claudeProjects, '-Users-ukaoma-repo-b', 'ffffffff-9999-8888-7777-000000000001.jsonl')
+    writeJsonl(needle, [
+      '{"type":"custom-title","customTitle":"Luke Henry merge"}',
+      '{"type":"user","message":{"role":"user","content":"fold Luke H into Luke Henry"}}',
+    ])
+    touch(needle, new Date('2026-08-18T20:00:00Z'))
+
+    const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
+    expect(docs.some(doc => doc.title === 'Luke Henry merge')).toBe(true)
+  })
+
+  it('reaches the newest Codex rollout even when it is behind older ones', async () => {
+    const { roots } = fixtureHome()
+    const hex = (n: number) => n.toString(16).padStart(12, '0')
+    for (let i = 0; i < 250; i++) {
+      const id = `aaaaaaaa-1111-2222-3333-${hex(i)}`
+      const file = join(roots.codexSessions, '2026/06/01', `rollout-2026-06-01T09-00-00-${id}.jsonl`)
+      writeJsonl(file, [
+        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-06-01T09:00:00.000Z"}}`,
+        `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"an older rollout ${i}"}]}}`,
+      ])
+      touch(file, new Date('2026-06-01T09:00:00Z'))
+    }
+    const id = 'ffffffff-9999-8888-7777-000000000001'
+    const needle = join(roots.codexSessions, '2026/08/18', `rollout-2026-08-18T20-00-00-${id}.jsonl`)
+    writeJsonl(needle, [
+      `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-18T20:00:00.000Z"}}`,
+      '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Luke Henry merge"}]}}',
+    ])
+    touch(needle, new Date('2026-08-18T20:00:00Z'))
+
+    const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
+    expect(docs.some(doc => doc.title === 'Luke Henry merge')).toBe(true)
   })
 
   /**

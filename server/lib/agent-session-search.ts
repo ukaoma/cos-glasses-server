@@ -4,7 +4,18 @@
  * Keyword: local title / sidebar name / first prompt / transcript scan. No model.
  * Semantic: one OpenAI query embedding scored against those same texts.
  * Sessions have no Qdrant collection — this is not meeting or memory search.
- * The 7-day list window does not apply; older chats stay findable.
+ *
+ * REACH, measured 2026-08-18 rather than claimed. The 7-day list window does not apply,
+ * but this is not unbounded either: each provider gets a doc budget of MAX_SCAN_FILES/3,
+ * and once candidates are ranked by recency that budget IS the horizon. On this machine
+ * that is roughly 24 days of Claude, 89 days of Codex and 19 days of Cursor. An older
+ * chat is reachable only if its provider has not filled its budget with newer ones.
+ *
+ * This previously read "older chats stay findable", which was written before ranking and
+ * was never measured. Widening it means a bigger budget, which costs embedding time on
+ * the route -- not a deeper examine ceiling, which saturates. A sampled older stratum was
+ * considered and rejected: partial coverage makes a miss uninterpretable, and a search
+ * that silently samples cannot tell you whether a thing is absent or merely unsampled.
  */
 
 import { join } from 'node:path'
@@ -58,20 +69,19 @@ const MAX_SCAN_FILES = 400
  * Swept 2026-08-18 against the real corpus (1,296 Claude transcripts, 822 Codex
  * rollouts). Docs kept vs collector wall time, median of 5 warm runs:
  *
- *     HEAD   298 docs   692 ms
- *     x2     300 docs   763 ms
- *     x3     316 docs   864 ms
- *     x5     345 docs  1042 ms   <- chosen
- *     x8     396 docs  1402 ms
- *     x12    400 docs  1463 ms   (saturates MAX_SCAN_FILES)
+ * Re-swept after recency ranking landed, since ranking changes which files the ceiling
+ * is spent on -- the newest region of the corpus is the densest in machine transcripts:
  *
- * x8 is close to the reachable ceiling, but the route this feeds already exceeds COS
- * Control's 2s client timeout on most calls BEFORE any of this (measured median 2.268s,
- * of which ~1.7s is two sequential embedding round trips). Until that is fixed, work
- * bought here is work Control may discard, so this sits at the middle of the curve.
- * Raise it once the route fits the timeout.
+ *     x5     329 docs   74 claude   11.4d window   1287 ms
+ *     x8     389 docs  134 claude   21.3d window   1585 ms
+ *     x12    389 docs  134 claude   24.5d window   1697 ms   <- chosen
+ *     x16    389 docs  134 claude   24.5d window   1637 ms
+ *
+ * x12 is where the ceiling stops being the constraint and the 134-doc budget takes over:
+ * past it, examining more files finds nothing older. That is the principled stopping
+ * point -- raise until the other limit binds, then stop.
  */
-const EXAMINE_MULTIPLE = 5
+const EXAMINE_MULTIPLE = 12
 
 /**
  * `remaining` counts docs KEPT. `examined` counts files OPENED. They are different
@@ -82,7 +92,16 @@ const SEMANTIC_DOC_CAP = 120
 const SEMANTIC_MIN = 0.28
 const EMBED_MODEL = 'text-embedding-3-small'
 const EMBED_TIMEOUT_MS = 12_000
-const EMBED_BATCH = 64
+/**
+ * 128 inputs per request, and the requests go out TOGETHER.
+ *
+ * This loop used to `await` each batch in turn, so the embedding cost was a round trip
+ * per 64 docs -- about 1.7s of a 2.3s route, and it got worse as the collector started
+ * returning more docs (389 docs is 7 serialized trips at the old batch size, 4 at this
+ * one). Serialization was the expensive part, not the batch size, so both changed:
+ * fewer requests, and one round trip of latency instead of N.
+ */
+const EMBED_BATCH = 128
 
 export interface AgentSessionSearchHit extends AgentSessionRow {
   snippet: string
@@ -171,7 +190,9 @@ export async function defaultEmbedTexts(texts: string[]): Promise<number[][] | {
   if (!key) return { reason: 'no_session_embeddings' }
   if (texts.length === 0) return []
   const vectors: number[][] = new Array(texts.length)
-  for (let offset = 0; offset < texts.length; offset += EMBED_BATCH) {
+  const offsets: number[] = []
+  for (let offset = 0; offset < texts.length; offset += EMBED_BATCH) offsets.push(offset)
+  const failed = await Promise.all(offsets.map(async offset => {
     const slice = texts.slice(offset, offset + EMBED_BATCH).map(text => text.slice(0, HEAD_TEXT))
     try {
       const response = await fetch('https://api.openai.com/v1/embeddings', {
@@ -183,17 +204,19 @@ export async function defaultEmbedTexts(texts: string[]): Promise<number[][] | {
         body: JSON.stringify({ model: EMBED_MODEL, input: slice }),
         signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
       })
-      if (!response.ok) return { reason: 'embeddings_unreachable' }
+      if (!response.ok) return true
       const parsed = await response.json() as { data?: Array<{ embedding?: number[]; index?: number }> }
       const rows = Array.isArray(parsed.data) ? parsed.data : []
       for (const row of rows) {
         const index = typeof row.index === 'number' ? row.index : 0
         if (Array.isArray(row.embedding)) vectors[offset + index] = row.embedding
       }
+      return false
     } catch {
-      return { reason: 'embeddings_unreachable' }
+      return true
     }
-  }
+  }))
+  if (failed.some(Boolean)) return { reason: 'embeddings_unreachable' }
   if (vectors.some(row => !Array.isArray(row) || row.length === 0)) return { reason: 'embeddings_unreachable' }
   return vectors
 }
@@ -214,40 +237,50 @@ function pushDoc(docs: SearchDoc[], next: SearchDoc) {
 
 async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: ScanBudget) {
   const starred = await loadClaudeStarredIds(roots.claudeDesktopConfig)
+  // Stat every candidate and rank by recency BEFORE spending anything, the shape
+  // `collectCursorDocs` already used. Claude and Codex were the inconsistent ones: they
+  // walked in raw `readdir` order, so which sessions were reachable came down to
+  // filesystem layout and the newest transcript on disk was routinely never opened.
+  // Statting is not the expensive part -- measured at 41ms across 2,118 candidates.
+  const candidates: Array<{ file: string; native: string; folder: string; mtimeMs: number; birthtimeMs: number }> = []
   for (const folder of await dirents(roots.claudeProjects)) {
     const dir = join(roots.claudeProjects, folder)
     for (const name of await dirents(dir)) {
-      if (!CLAUDE_UUID_JSONL.test(name) || budget.remaining <= 0 || budget.examined <= 0) continue
+      if (!CLAUDE_UUID_JSONL.test(name)) continue
       const file = join(dir, name)
       const st = await fileStat(file)
       if (!st?.isFile) continue
-      budget.examined -= 1
-      const native = name.slice(0, -6)
-      const custom = await lastCustomTitle(file)
-      const first = await firstClaudeUserTitle(file)
-      const title = custom || first || 'Claude session'
-      // Both filters run BEFORE the doc budget is charged, and the haystack -- by far the
-      // most expensive read here -- runs only for a file we are actually keeping.
-      if (isKeepWarmSessionTitle(title)) continue
-      budget.remaining -= 1
-      const users = await transcriptHaystack('claude', file)
-      const haystack = clip(`${title}\n${custom || ''}\n${first || ''}\n${workspaceLabel(folder)}\n${users}`)
-      pushDoc(docs, {
-        title,
-        haystack,
-        row: {
-          session_id: native,
-          provider: 'claude',
-          display_label: title,
-          project: workspaceLabel(folder),
-          modified: isoFromMtime(st.mtimeMs),
-          created: isoFromMtime(st.birthtimeMs),
-          alive: false,
-          state: 'recent',
-          pinned: starred.has(native.toLowerCase()),
-        },
-      })
+      candidates.push({ file, native: name.slice(0, -6), folder, mtimeMs: st.mtimeMs, birthtimeMs: st.birthtimeMs })
     }
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  for (const candidate of candidates) {
+    if (budget.remaining <= 0 || budget.examined <= 0) break
+    budget.examined -= 1
+    const custom = await lastCustomTitle(candidate.file)
+    const first = await firstClaudeUserTitle(candidate.file)
+    const title = custom || first || 'Claude session'
+    // Both filters run BEFORE the doc budget is charged, and the haystack -- by far the
+    // most expensive read here -- runs only for a file we are actually keeping.
+    if (isKeepWarmSessionTitle(title)) continue
+    budget.remaining -= 1
+    const users = await transcriptHaystack('claude', candidate.file)
+    const haystack = clip(`${title}\n${custom || ''}\n${first || ''}\n${workspaceLabel(candidate.folder)}\n${users}`)
+    pushDoc(docs, {
+      title,
+      haystack,
+      row: {
+        session_id: candidate.native,
+        provider: 'claude',
+        display_label: title,
+        project: workspaceLabel(candidate.folder),
+        modified: isoFromMtime(candidate.mtimeMs),
+        created: isoFromMtime(candidate.birthtimeMs),
+        alive: false,
+        state: 'recent',
+        pinned: starred.has(candidate.native.toLowerCase()),
+      },
+    })
   }
   for (const starredId of starred) {
     if (docs.some(doc => doc.row.provider === 'claude' && doc.row.session_id.toLowerCase() === starredId)) continue
@@ -281,10 +314,15 @@ async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], bu
 async function collectCodexDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: ScanBudget) {
   const names = await loadCodexThreadNames(roots.codexSessions)
   const pinned = await loadCodexPinnedIds(roots.codexSessions)
+  const candidates: Array<{ file: string; mtimeMs: number; birthtimeMs: number }> = []
   for (const file of await listCodexJsonlFiles(roots.codexSessions)) {
-    if (budget.remaining <= 0 || budget.examined <= 0) break
     const st = await fileStat(file)
     if (!st?.isFile) continue
+    candidates.push({ file, mtimeMs: st.mtimeMs, birthtimeMs: st.birthtimeMs })
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  for (const { file, mtimeMs, birthtimeMs } of candidates) {
+    if (budget.remaining <= 0 || budget.examined <= 0) break
     budget.examined -= 1
     const meta = await peekCodexMeta(file)
     // Subagent rollouts are the Codex analogue of the keep-warm transcripts: 427 of 822
@@ -297,7 +335,7 @@ async function collectCodexDocs(roots: AgentSessionRoots, docs: SearchDoc[], bud
     if (isKeepWarmSessionTitle(title)) continue
     budget.remaining -= 1
     const users = await transcriptHaystack('codex', file)
-    const created = meta.created || createdFromCodexFilename(name) || isoFromMtime(st.birthtimeMs)
+    const created = meta.created || createdFromCodexFilename(name) || isoFromMtime(birthtimeMs)
     pushDoc(docs, {
       title,
       haystack: clip(`${title}\n${thread}\n${meta.title}\n${meta.cwd}\n${users}`),
@@ -306,7 +344,7 @@ async function collectCodexDocs(roots: AgentSessionRoots, docs: SearchDoc[], bud
         provider: 'codex',
         display_label: title,
         project: workspaceLabel(meta.cwd),
-        modified: isoFromMtime(st.mtimeMs),
+        modified: isoFromMtime(mtimeMs),
         created,
         alive: false,
         state: 'recent',
@@ -343,11 +381,12 @@ async function collectCursorDocs(
   const ranked = [...byId.entries()].sort((a, b) => b[1].mtimeMs - a[1].mtimeMs)
   for (const [sessionDir, candidate] of ranked) {
     if (budget.remaining <= 0) break
-    budget.remaining -= 1
     const sidebar = composerNames.get(sessionDir) || ''
     const users = await transcriptHaystack('cursor', candidate.file)
     const title = sidebar || users.split('\n')[0] || 'Cursor session'
+    // Cursor already ranked, but it charged the budget before this filter too.
     if (isKeepWarmSessionTitle(title)) continue
+    budget.remaining -= 1
     pushDoc(docs, {
       title,
       haystack: clip(`${title}\n${sidebar}\n${candidate.project}\n${users}`),

@@ -1,4 +1,22 @@
 ## Unreleased
+- **Claude and Codex now rank candidates by recency before spending the budget.** Both
+  walked in raw `readdir` order, so which sessions were reachable came down to filesystem
+  layout — `collectCursorDocs` had ranked for a while and these two were the inconsistent
+  ones. Statting every candidate first costs ~41ms across 2,118 files. Cursor also charged
+  its budget before the keep-warm filter, the same defect, now fixed.
+- **The reach claim in the module docstring was never true and is now measured.** It said
+  "older chats stay findable". Ranked and measured on this machine, search reaches roughly
+  24 days of Claude, 89 days of Codex and 19 days of Cursor, because once candidates are
+  ordered by recency the per-provider doc budget IS the horizon. `EXAMINE_MULTIPLE` was
+  re-swept and raised to 12 — the point where examining more files stops finding anything
+  older and the doc budget takes over. A sampled older stratum was considered and
+  rejected: partial coverage makes a miss uninterpretable, and a search that silently
+  samples cannot tell you whether something is absent or merely unsampled.
+- **Embedding batches go out together instead of one after another.** The loop awaited
+  each batch in turn, so cost was a round trip per 64 docs and grew as the collector
+  returned more — 389 docs is 7 serialized trips at the old size. Now 128 per request,
+  all in flight at once. Structural; not measured end to end, because this harness has no
+  OpenAI key and the running server was left alone.
 - **Session search was 68% scaffolding, and the budget was the reason.** Of the 1,296
   Claude transcripts on this machine the collector indexed 41, and 28 of those 41 were
   machine prompts — 22 Slack Bridge proxy, 4 reply-with, 2 slack_search_users. Roughly 13
