@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, statSync, truncateSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -18,6 +18,7 @@ import {
   LATEST_REPLY_MAX,
   proseSnippet,
   tailWindowStart,
+  AGENT_SESSION_MAX_FILE_BYTES,
   listAgentSessions,
   listClaudeSessions,
   listCodexSessions,
@@ -131,13 +132,33 @@ describe('Codex pins survive a May folder', () => {
     expect(opened.some(row => row.display_label === 'Markt POS 2.0 build')).toBe(false)
     expect(opened.some(row => row.display_label === 'Jewelry 2.0 Build')).toBe(false)
 
-    const store = await readFile(new URL('./agent-session-store.ts', import.meta.url), 'utf8')
-    const codexList = store.slice(
-      store.indexOf('export async function listCodexSessions'),
-      store.indexOf('export async function listCursorSessions'),
-    )
-    expect(codexList).not.toMatch('AGENT_SESSION_MAX_FILE_BYTES')
-    expect(store).toMatch('end = HEAD_BYTES - 1')
+  })
+
+  /**
+   * Replaces two source-text assertions that read this module's own characters
+   * (`not.toMatch('AGENT_SESSION_MAX_FILE_BYTES')` and `toMatch('end = HEAD_BYTES - 1')`).
+   * Text assertions go stale on any refactor and cannot observe the property they name:
+   * whether an oversize rollout is actually reachable at runtime.
+   *
+   * `truncateSync` makes the file SPARSE, so `st.size` genuinely exceeds the 32 MB gate
+   * without writing 32 MB to disk.
+   */
+  it('lists a Codex rollout larger than the size gate, which Codex deliberately lacks', async () => {
+    const now = new Date('2026-08-13T18:48:00Z')
+    const home = mkdtempSync(join(tmpdir(), 'cos-oversize-'))
+    const sessions = join(home, '.codex', 'sessions')
+    const id = 'aaaaaaaa-bbbb-cccc-dddd-999999999999'
+    const file = join(sessions, '2026/08/13', `rollout-2026-08-13T12-00-00-${id}.jsonl`)
+    writeJsonl(file, [
+      `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-13T12:00:00.000Z"}}`,
+      '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"oversize rollout"}]}}',
+    ])
+    truncateSync(file, AGENT_SESSION_MAX_FILE_BYTES + 1024)
+    touch(file, now)
+    expect(statSync(file).size).toBeGreaterThan(AGENT_SESSION_MAX_FILE_BYTES)
+
+    const listed = await listCodexSessions(sessions, now)
+    expect(listed.some(row => row.session_id === id)).toBe(true)
   })
 })
 

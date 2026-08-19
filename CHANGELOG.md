@@ -1,5 +1,26 @@
 ## Unreleased
 
+## 6.36.13
+- **Codex was spawned by bare name in four places, and it only worked here by accident.**
+  `codex` on PATH is a shell alias to `/Applications/Codex.app`, which does not exist; the real
+  binary lives in ChatGPT.app. Every bare `spawn('codex', …)` resolved through a PATH that COS
+  Control injects into the managed plist — so it worked on this machine and was ENOENT for every
+  public npx user, and for anything launchd- or Finder-spawned. The sites: the model catalog, the
+  `--add-dir` capability probe, the health probe, and `callCodexStreaming`, which is the **live
+  turn-execution path**. Each now resolves first, and each refuses in the way that suits it: the
+  live turn throws with the reason, the catalog rejects to its existing `cli-default` degradation,
+  the capability probe reports unsupported, and the health probe reports `unresolved (…)` instead
+  of collapsing "cannot find it" and "found it and it errored" into one `error`.
+- **Binary resolution moved to its own leaf module.** `provider-binary.ts` imports nothing from the
+  repo, deliberately: reaching the resolver through `attached-provider-adapter.ts` would close the
+  cycle adapter → codex-run-ledger → codex-model-catalog → adapter. The adapter re-exports it, so
+  no existing importer changed.
+- **Three source-text assertions replaced with fixtures.** Two tests asserted on this repo's own
+  characters — `not.toMatch('AGENT_SESSION_MAX_FILE_BYTES')` and `toMatch('end = HEAD_BYTES - 1')`
+  — which go stale on any refactor and cannot observe the property they name. A Codex rollout is
+  now made genuinely larger than the 32 MB gate (sparse, via `truncateSync`) and asserted to still
+  be listed. Verified by mutation: adding that gate to `listCodexSessions` fails the new test.
+
 ## 6.36.12
 - **Claude and Codex now rank candidates by recency before spending the budget.** Both
   walked in raw `readdir` order, so which sessions were reachable came down to filesystem

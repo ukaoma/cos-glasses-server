@@ -2,6 +2,11 @@
 // Concrete GPT ids resolve from Codex's live model catalog at run time.
 
 import { spawn, spawnSync } from 'node:child_process'
+// Resolved, never bare. `codex` on PATH is a shell alias to /Applications/Codex.app,
+// which does not exist; the real binary is in ChatGPT.app. A bare argv works here only
+// because COS Control injects that directory into the managed plist PATH -- it is ENOENT
+// for every public npx user, and for anything launchd- or Finder-spawned.
+import { resolveProviderBinary } from './provider-binary.js'
 import { logTokenAudit } from './token-audit.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-builder.js'
@@ -137,7 +142,14 @@ let addDirSupported: boolean | undefined
 export function codexSupportsAdditionalDir(): boolean {
   if (addDirSupported !== undefined) return addDirSupported
   try {
-    const result = spawnSync('codex', ['exec', '--help'], {
+    const resolved = resolveProviderBinary('codex')
+    if (!resolved.ok) {
+      // Cannot probe what cannot be found. Report unsupported rather than throwing:
+      // this gate only disables output publishing, and chat stays functional.
+      addDirSupported = false
+      return addDirSupported
+    }
+    const result = spawnSync(resolved.path, ['exec', '--help'], {
       encoding: 'utf8',
       timeout: 5_000,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -413,7 +425,18 @@ export async function callCodexStreaming(
   delete env.CLAUDECODE
   if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)
 
-  const proc = spawn('codex', args, {
+  // The live turn path. This one REFUSES loudly rather than degrading -- a turn that
+  // cannot reach the binary must say so, not fail later as an opaque ENOENT from inside
+  // a spawn whose argv the caller never sees.
+  const resolvedCodex = resolveProviderBinary('codex')
+  if (!resolvedCodex.ok) {
+    throw new Error(
+      `codex binary unresolved (${resolvedCodex.detail}). Checked the env override, `
+      + 'then ChatGPT.app, then PATH; /Applications/Codex.app is excluded as a stale shim.',
+    )
+  }
+
+  const proc = spawn(resolvedCodex.path, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
     cwd: codexCwd,

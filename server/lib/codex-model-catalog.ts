@@ -6,6 +6,10 @@
 // the CLI default is used only when no discovered catalog exists yet.
 
 import { spawn } from 'node:child_process'
+// Resolved, never bare -- see provider-binary.ts. This module is a leaf, and the resolver
+// was extracted precisely so importing it here cannot close the cycle
+// catalog -> adapter -> codex-run-ledger -> catalog.
+import { resolveProviderBinary } from './provider-binary.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -248,7 +252,15 @@ async function fetchAppServerModels(): Promise<CodexCatalogModel[]> {
   return new Promise((resolveModels, reject) => {
     const env = { ...process.env }
     delete env.CLAUDECODE
-    const child = spawn('codex', ['app-server', '--stdio'], {
+    const resolved = resolveProviderBinary('codex')
+    if (!resolved.ok) {
+      // Degrade, do not throw: this module already models exactly this outcome as
+      // `CodexCatalogSource = 'cli-default'`. A catalog refresh that cannot find the
+      // binary is a stale catalog, not a broken server.
+      reject(new Error(`codex binary unresolved (${resolved.detail})`))
+      return
+    }
+    const child = spawn(resolved.path, ['app-server', '--stdio'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
     })

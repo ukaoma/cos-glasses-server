@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { resolveProviderBinary } from './provider-binary.js'
 import { PYTHON_BIN } from './python-bridge.js'
 import {
   getCursorModelCatalog,
@@ -116,7 +117,12 @@ async function probeClaude(): Promise<{ value: string; available: boolean }> {
 
 async function probeCodex(): Promise<{ value: string; available: boolean }> {
   try {
-    const result = await execute('codex', ['--version'])
+    // Distinguish "cannot find the binary" from "found it and it errored" -- collapsing
+    // both to 'error' told every public npx user their Codex was broken when the real
+    // problem was a bare argv resolving through a PATH they do not have.
+    const resolved = resolveProviderBinary('codex')
+    if (!resolved.ok) return { value: `unresolved (${resolved.detail})`, available: false }
+    const result = await execute(resolved.path, ['--version'])
     const combined = `${result.stdout}\n${result.stderr}`.trim()
     const versionLine = combined.split(/\r?\n/).map(line => line.trim())
       .find(line => /^codex(?:-cli)?\s+/i.test(line))

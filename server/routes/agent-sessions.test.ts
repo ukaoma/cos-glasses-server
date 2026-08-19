@@ -124,8 +124,9 @@ describe('agent session listing', () => {
   })
 
   it('caps Codex list peeks so a 512 KB head does not read the rest of the file', async () => {
-    const store = readFileSync(new URL('../lib/agent-session-store.ts', import.meta.url), 'utf8')
-    expect(store).toMatch('end = HEAD_BYTES - 1')
+    // The source-text assertion that opened this test is gone. The fixture below already
+    // proves the behaviour, and reading the module's characters cannot observe whether the
+    // head window is respected at runtime -- it only observes that a string is present.
     const { roots } = fixtureHome()
     const file = join(roots.codexSessions, '2026/08/13', 'rollout-2026-08-13T12-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl')
     const meta = '{"type":"session_meta","payload":{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","cwd":"/repo","timestamp":"2026-08-13T12:00:00.000Z"}}'
