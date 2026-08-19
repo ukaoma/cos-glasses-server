@@ -1,4 +1,6 @@
 ## Unreleased
+
+## 6.36.12
 - **Claude and Codex now rank candidates by recency before spending the budget.** Both
   walked in raw `readdir` order, so which sessions were reachable came down to filesystem
   layout — `collectCursorDocs` had ranked for a while and these two were the inconsistent
