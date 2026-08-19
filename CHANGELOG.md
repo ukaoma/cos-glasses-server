@@ -54,6 +54,21 @@
   default install (`COS_THREAD_FENCE_DURABLE` unset) nothing is written to disk at all;
   and reading the distribution means reading `thread-fences.json` or the server log —
   there is no UI for it.
+- **A live session was reporting itself hours idle.** Separate from the fence work above.
+  `liveClaudeRows` builds a row's `modified` from the peer registry's `lastActiveAt`, which
+  tracks the REGISTRY record and not the transcript — so a session that is actively writing
+  keeps reporting whenever the registry last moved. Measured on three live sessions
+  2026-08-18: the wire said 55.3m / 407.7m / 435.0m old while their transcripts had been
+  written 0.1m / 0.2m / 5.1m earlier. Under-reporting by up to 7.2 hours. Shipped in
+  66dff88; `enrichLiveClaude` already resolves the transcript path and reads the file twice,
+  so the true mtime costs one `stat`. A resolved file that fails to stat keeps the
+  heartbeat; a session with no transcript at all (2 of 6 measured) returns early on the
+  existing guard. Prerequisite for any surface that renders a real date — without it,
+  showing the timestamp displays an actively-writing session as seven hours stale.
+  Coverage: `enrichLiveClaude` had NO execution coverage before this (every existing test
+  passes an empty live array). Two tests now drive it through `listAgentSessions`. Three
+  mutations, two caught; the third (the stat-failure fallback) SURVIVES because the
+  missing-file guard returns first, so that branch is unreached. The code says so.
 
 ## 6.36.10
 - **A fenced thread had no exit and left no trace.** An ambiguous delivery fences the
