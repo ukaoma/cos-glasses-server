@@ -1,5 +1,60 @@
 ## Unreleased
 
+## 6.36.11
+- **Fences now record WHY, so the population can be measured before anything resolves
+  automatically.** Two plans designed an automatic fence resolver and both were rejected —
+  the second because there has never been a single fence on the machine to look at. If
+  `timeout` dominates, the child had the full 21-minute budget to run tool calls before
+  SIGKILL and re-delivery would re-execute them, so no automatic clear is ever safe. That
+  question was unanswerable and now is not.
+- **`reaped` is reported by the adapter, never derived.** A signal-killed child reports
+  `code === null` and the handlers only assign `exitCode` for a numeric code — so deriving
+  "was it reaped" from `exitCode` reports NEVER REAPED for the dominant timeout shape
+  (SIGTERM, then SIGKILL), which is exactly backwards for the decision this data informs.
+  The first cut of this change did derive it. `AttachedTurnFailureResult` now carries
+  `reaped`, true from every settle reached via `close`/`error` and false only from the
+  force-settle that fires when `close` never arrived.
+- **An unreadable adapter result records nothing, not zeroes.** Reading `{}` and writing
+  `exitCode: null, childReaped: false` states two facts about a child nothing is known
+  about, indistinguishable on disk from a confirmed-unreaped timeout — corrupting the one
+  discriminator this evidence exists to establish.
+- **`fenceSite` says which site fired.** `adapterReason` cannot substitute: the catch site
+  inherits whatever the adapter last reported, so a route crash AFTER a clean delivery
+  records `ok` — the strongest possible reason NOT to re-deliver, which would otherwise
+  read as "nothing went wrong".
+- **One resolved reason for the record and the log.** The record said `unreadable_result`
+  while the breadcrumb said `unknown`, so an operator grepping for the sentinel found
+  nothing. This is the same contradiction 6.36.10 fixed at the other fence site,
+  re-committed one release later in the same handler; both now read one value.
+- **A release no longer destroys the evidence.** `releaseFence` deletes the row, and the
+  realistic first-fence sequence is: fence lands, Control's card appears, it is released,
+  the distribution is gone. The release breadcrumb now carries the whole record.
+- **Spawn identity as `{pid, startMs}` PAIRS.** `recordedPids` held bare pids and the
+  measured start was discarded; a pid alone cannot be told apart from a recycled one.
+  The evidence type is narrowed to the six adapter fields so the spread at the fence
+  sites cannot clobber the fence's own identity — `Partial<FenceEvidence>` permitted
+  `provider`, and the adapter result carries one that would write null and fail
+  `isFenceRecord` on the next read, silently un-enforcing the fence.
+- **All fields OPTIONAL and NOT in `isFenceRecord`.** That predicate is cast-based, so a
+  required field would type as present while being undefined at runtime; extending it
+  would reclassify existing rows as unrecognised and silently un-enforce them.
+- **DISK ONLY.** Nothing reaches the wire; asserted against the real `/fences` body and
+  the release preview.
+- **No behaviour change.** Nothing clears, nothing refuses differently. Upgrade, downgrade
+  and the COS Control card were all verified unaffected.
+- **Coverage, stated honestly.** The adapter's `reaped` contract is tested at the adapter,
+  driving a real `close(null)` — a route test could not cover it, because the route
+  fixtures supply `reaped` themselves and would pass with the adapter gutted. Mutation
+  results: caught — derived-from-exitCode, adapter stops reporting reaped, startMs zeroed,
+  empty spawn list, missing fenceSite, unrecorded adapterReason, wire leak. **Survived, and
+  therefore unverified: `stderrClass` is written but asserted nowhere, and `fail()`'s
+  `reaped: false` default on the `not_attempted` paths (which never fence).** The
+  `route_error` fence site remains reachable by no test.
+- **Known gaps, not fixed here:** `stderrClass` appears in the breadcrumbs but on a
+  default install (`COS_THREAD_FENCE_DURABLE` unset) nothing is written to disk at all;
+  and reading the distribution means reading `thread-fences.json` or the server log —
+  there is no UI for it.
+
 ## 6.36.10
 - **A fenced thread had no exit and left no trace.** An ambiguous delivery fences the
   target so a prompt cannot be double-delivered into a real conversation — that is

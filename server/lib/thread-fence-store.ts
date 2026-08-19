@@ -34,6 +34,69 @@ export interface FenceRecord {
   turnId: string
   bindingId: string | null
   fencedAt: number
+
+  // ── EVIDENCE (all optional, all DISK-ONLY) ────────────────
+  //
+  // WHY THIS EXISTS. Two plans designed an automatic fence resolver and both were
+  // rejected, the second because we have never observed a single fence. The
+  // distribution decides whether any automatic path is safe: if `timeout`
+  // dominates, the child had the full 21-minute budget to run tool calls before
+  // SIGKILL and re-delivery re-executes them, so no automatic clear is ever safe.
+  // If the child exited on its own with a known code, the footing is much better.
+  //
+  // EVERY FIELD IS OPTIONAL, and deliberately NOT added to `isFenceRecord`. That
+  // predicate is cast-based (`r is FenceRecord`), so a REQUIRED field would type as
+  // present while being undefined at runtime and tsc could not catch it; and
+  // extending the validator would reclassify existing rows as unrecognised, routing
+  // them into the preserved-but-inert pile and silently un-enforcing real fences.
+  //
+  // NONE OF THIS REACHES THE WIRE. The router contract carries no pid and no native
+  // thread id; `listFences()` already omits `bindingId` as precedent.
+
+  /**
+   * The adapter's own verdict.
+   *
+   * REACHABILITY IS DECIDED BY `delivery === 'ambiguous'`, i.e. the stdin-write
+   * boundary — only a turn whose prompt bytes reached the child can fence. The
+   * reachable set is therefore NOT the full `AttachedTurnFailure` enum:
+   *   timeout, provider_exit_nonzero, no_native_id_returned, native_id_mismatch,
+   *   child_stdio_unavailable (detail `write_failed`), spawn_failed (ONLY via
+   *   detail `child_error`; its other forms are `not_attempted` and never fence),
+   *   plus two this route synthesises — `ok` (the adapter reported success with a
+   *   non-delivered state, a contradiction) and `unreadable_result`.
+   * `adapter_internal_error` can NEVER fence: every emission site is
+   * `not_attempted` or guarded. `route_error` comes from the catch site.
+   */
+  adapterReason?: string
+  /**
+   * WHICH fence site fired.
+   *
+   * `adapterReason` cannot substitute. The catch site inherits whatever the
+   * adapter last reported, so a route crash AFTER a clean delivery records
+   * `ok` — the single strongest reason NOT to re-deliver, which would read as
+   * "nothing went wrong". Only this field separates them.
+   */
+  fenceSite?: 'ambiguous' | 'route_error'
+  /** Bounded self-authored discriminator, e.g. `unreaped`. Never provider output. */
+  adapterDetail?: string | null
+  exitCode?: number | null
+  /**
+   * Reported BY THE ADAPTER, never derived from `exitCode`.
+   *
+   * A signal-killed child reports `code === null`, and the adapter only assigns
+   * `exitCode` for a numeric code — so deriving this would record "never reaped"
+   * for the dominant timeout shape (SIGTERM then SIGKILL), which is the exact
+   * case this evidence exists to identify. Undefined when the adapter result was
+   * unreadable: absent, never a fabricated `false`.
+   */
+  childReaped?: boolean
+  stderrClass?: string
+  /** How long the turn ran before it failed. A timeout is ~21 minutes of tool calls. */
+  durationMs?: number
+  /** Every child COS spawned for this turn, with its MEASURED start. Both are needed:
+   *  a pid alone cannot be distinguished from a recycled one. An EMPTY list means no
+   *  child was ever spawned, which no resolver may ever read as "nothing landed". */
+  spawns?: Array<{ pid: number; startMs: number }>
 }
 
 export function fencePath(): string {

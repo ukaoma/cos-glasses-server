@@ -194,6 +194,18 @@ export interface AttachedTurnFailureResult {
    */
   detail: string | null
   exitCode: number | null
+  /**
+   * Did `close`/`exit` actually fire, i.e. did the kernel reap the child?
+   *
+   * NOT DERIVABLE FROM `exitCode`. A child killed by a signal reports
+   * `code === null`, and the handlers below only assign `exitCode` for a numeric
+   * code — so the dominant timeout shape (SIGTERM, then SIGKILL) is reaped while
+   * leaving `exitCode` null. Deriving reaping from the code therefore reports
+   * "never reaped" for exactly the case a reader most needs to identify.
+   * Only the force-settle path, which fires when `close` never arrived, is
+   * genuinely unreaped.
+   */
+  reaped: boolean
   stderrClass: AttachedStderrClass
   durationMs: number
 }
@@ -745,6 +757,10 @@ function fail(
     nativeThreadId: null,
     returnedNativeId: null,
     delivery,
+    // Conservative default: NOT OBSERVED reaped. Most `fail()` callers are
+    // `not_attempted` paths where no child exists, and the ones that do have a
+    // child override this from `settleFailure`.
+    reaped: false,
     reason,
     detail: null,
     exitCode: null,
@@ -1051,6 +1067,10 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
         nativeThreadId,
         returnedNativeId: observedIds.length === 1 ? observedIds[0]! : null,
         exitCode,
+        // Every settle but the force-settle below is reached from `finishTerminal`,
+        // which only runs from the `close`/`error` handlers — so the child was
+        // reaped. The one exception overrides this explicitly.
+        reaped: true,
         stderrClass: classifyStderr(stderrSample),
         durationMs: duration(),
         ...over,
@@ -1193,7 +1213,7 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
           // A child that survived SIGKILL cannot be reached from here, and
           // blocking forever would wedge the coordinator and any Control drain
           // behind it.
-          settleFailure('timeout', { detail: 'unreaped' })
+          settleFailure('timeout', { detail: 'unreaped', reaped: false })
         }, FORCE_SETTLE_MS)
       }, KILL_GRACE_MS)
     }, timeoutMs)

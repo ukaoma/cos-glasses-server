@@ -2910,3 +2910,181 @@ describe('fence release — the guard is the authority', () => {
     expect(list.fences).toHaveLength(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// FENCE EVIDENCE
+//
+// Two plans designed an automatic fence resolver and both were rejected, the
+// second because we have never observed a single fence. These fields exist to
+// make the population measurable BEFORE anything resolves automatically: if
+// `timeout` dominates, the child had the full 21-minute budget to run tool calls
+// before SIGKILL and re-delivery re-executes them.
+// ---------------------------------------------------------------------------
+describe('fence evidence', () => {
+  function memStore() {
+    let rows: any[] = []
+    return { persistence: { load: () => rows, save: (r: any[]) => { rows = [...r] } }, rows: () => rows }
+  }
+
+  /**
+   * THE DOMINANT SHAPE. A 21-minute timeout: SIGTERM, `close` fires with
+   * `code === null` (a signal death carries no numeric code), so the child WAS
+   * reaped while `exitCode` stays null. Deriving reaping from `exitCode` reports
+   * the opposite, which is why the adapter reports `reaped` itself.
+   */
+  const timeoutResult = {
+    ok: false, provider: 'claude', nativeThreadId: SID, returnedNativeId: null,
+    delivery: 'ambiguous', reason: 'timeout', detail: null,
+    exitCode: null, reaped: true, stderrClass: 'none', durationMs: 1_260_000,
+  }
+
+  /** The genuinely unreaped case: survived SIGKILL, force-settled 2s later. */
+  const unreapedResult = { ...timeoutResult, detail: 'unreaped', reaped: false }
+
+  async function fenceWith(store: ReturnType<typeof memStore>, result: unknown, id = 'ct-ev-0001') {
+    const base = await start(writeDeps({
+      fencePersistence: store.persistence,
+      deliverAttachedTurn: async () => result as any,
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: id,
+    })
+    return base
+  }
+
+  it('records the adapter verdict that decides whether a resolver could ever be safe', async () => {
+    const store = memStore()
+    await fenceWith(store, timeoutResult)
+    const [row] = store.rows()
+    expect(row.adapterReason).toBe('timeout')
+    expect(row.durationMs).toBe(1_260_000)
+    expect(row.fenceSite).toBe('ambiguous')
+    // THE REGRESSION THIS PINS. exitCode is null because a signal death has no
+    // numeric code, but the child WAS reaped. Deriving childReaped from exitCode
+    // would record false here -- and this is the dominant shape, so the whole
+    // distribution would read "no timeout is ever reaped".
+    expect(row.exitCode).toBeNull()
+    expect(row.childReaped).toBe(true)
+  })
+
+  it('separates a genuinely unreaped child from a signal-killed one', async () => {
+    const store = memStore()
+    await fenceWith(store, unreapedResult, 'ct-ev-0007')
+    const [row] = store.rows()
+    expect(row.adapterDetail).toBe('unreaped')
+    expect(row.childReaped).toBe(false)
+  })
+
+  it('distinguishes a child that exited on its own, which is far stronger footing', async () => {
+    const store = memStore()
+    await fenceWith(store, { ...timeoutResult, reason: 'provider_exit_nonzero', exitCode: 3, durationMs: 900 })
+    const [row] = store.rows()
+    expect(row.adapterReason).toBe('provider_exit_nonzero')
+    expect(row.exitCode).toBe(3)
+    expect(row.childReaped).toBe(true)
+  })
+
+  it('names an unreadable adapter result rather than leaving it blank', async () => {
+    // Returning undefined does NOT throw -- it reaches the ambiguous site with no
+    // readable verdict. A blank field there is indistinguishable from "nobody
+    // recorded it", so it is named.
+    const store = memStore()
+    await fenceWith(store, undefined as any, 'ct-ev-0003')
+    const [row] = store.rows()
+    expect(row.adapterReason).toBe('unreadable_result')
+    // NOTHING is invented about a child we know nothing about. A fabricated
+    // `false` here would be indistinguishable from a confirmed-unreaped timeout.
+    expect(row.childReaped).toBeUndefined()
+    expect(row.exitCode).toBeUndefined()
+  })
+
+  it('names an adapter THROW, which still lands at the ambiguous site', async () => {
+    // Naming matters here. A throw from the adapter is caught INSIDE the delivery
+    // try, which sets delivery=ambiguous -- so it fences at the ambiguous site with
+    // no evidence, not at the outer catch. The outer `route_error` site fires only
+    // for a throw in the route AFTER delivery, which no test currently reaches; do
+    // not read this case as covering it.
+    const store = memStore()
+    const base = await start(writeDeps({
+      fencePersistence: store.persistence,
+      deliverAttachedTurn: async () => { throw new Error('socket closed') },
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-ev-0006',
+    })
+    const [row] = store.rows()
+    expect(row.adapterReason).toBe('unreadable_result')
+    expect(row.childReaped).toBeUndefined()
+  })
+
+  it('records the MEASURED start alongside the pid, not just the pid', async () => {
+    // THE HEADLINE OF THIS CHANGE, and it was unasserted: every other spawns
+    // assertion is toHaveLength(0), so mutating the pushed startMs to 0 passed the
+    // entire suite. A pid alone cannot be told apart from a recycled one.
+    const PID = 515151
+    const START = 1_700_000_000_000
+    const store = memStore()
+    const base = await start(writeDeps({
+      fencePersistence: store.persistence,
+      probes: { ...freeProbes(), processStartMs: (pid: number) => (pid === PID ? START : 1) },
+      ownership: { record: () => 'recorded', release: () => true },
+      deliverAttachedTurn: async (req: any) => {
+        req.onSpawn(PID)
+        return timeoutResult as any
+      },
+    }))
+    const a = await attached(base)
+    await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-ev-0008',
+    })
+    const [row] = store.rows()
+    expect(row.spawns).toEqual([{ pid: PID, startMs: START }])
+  })
+
+  it('records an EMPTY spawn list when no child was ever spawned', async () => {
+    // The test harness adapter never calls onSpawn. An empty list must never be
+    // read by any future resolver as "nothing landed" -- it means no evidence.
+    const store = memStore()
+    await fenceWith(store, timeoutResult, 'ct-ev-0004')
+    const [row] = store.rows()
+    expect(Array.isArray(row.spawns)).toBe(true)
+    expect(row.spawns).toHaveLength(0)
+  })
+
+  it('keeps every evidence field OFF THE WIRE', async () => {
+    // The router contract carries no pid and no native thread id. listFences()
+    // already omits bindingId as precedent.
+    const store = memStore()
+    const base = await fenceWith(store, timeoutResult, 'ct-ev-0005')
+    const res = await fetch(`${base}/api/agent-sessions/fences`)
+    const text = await res.text()
+    for (const leak of ['pid', 'spawns', 'exitCode', 'adapterReason', 'childReaped', 'stderrClass', 'durationMs']) {
+      expect(text, `/fences leaked ${leak}`).not.toContain(leak)
+    }
+    const list = JSON.parse(text)
+    const preview = await post(base, '/api/agent-sessions/fences/release', { target: list.fences[0].target })
+    expect(preview.status).toBe(400)
+    for (const leak of ['pid', 'spawns', 'exitCode', 'adapterReason']) {
+      expect(preview.text, `release preview leaked ${leak}`).not.toContain(leak)
+    }
+  })
+
+  it('still enforces a legacy fence written before these fields existed', async () => {
+    // A pid-less row must hydrate and still shut the thread. Adding these fields to
+    // isFenceRecord would reclassify it as unrecognised and silently un-enforce it.
+    const legacy = {
+      targetKey: `6:claude:${SID.length}:${SID}`,
+      provider: 'claude', reason: 'native_target_fenced',
+      headBefore: 'abc', turnId: 'old-turn', bindingId: null, fencedAt: 1,
+    }
+    let rows: any[] = [legacy]
+    const base = await start(writeDeps({
+      fencePersistence: { load: () => rows, save: (r: any[]) => { rows = [...r] } },
+    }))
+    const res = await post(base, attachPath(), { cosSessionId: 'cos-legacy' })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('native_target_fenced')
+  })
+})

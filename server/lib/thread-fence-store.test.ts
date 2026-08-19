@@ -125,3 +125,60 @@ describe('thread fence store — a write must never erase what it could not read
     }
   })
 })
+
+describe('thread fence store — evidence fields survive the disk round trip', () => {
+  const withEvidence = () => row({
+    adapterReason: 'timeout',
+    adapterDetail: null,
+    fenceSite: 'ambiguous',
+    exitCode: null,
+    childReaped: true,
+    stderrClass: 'none',
+    durationMs: 1_260_000,
+    spawns: [{ pid: 515151, startMs: 1_700_000_000_000 }],
+  })
+
+  it('round-trips the nested spawns array intact', async () => {
+    // This is DISK-ONLY data with, until now, no disk-layer test at all.
+    const { readFences, writeFences } = await import('./thread-fence-store.js')
+    writeFences([withEvidence()])
+    const [back] = readFences()
+    expect(back.spawns).toEqual([{ pid: 515151, startMs: 1_700_000_000_000 }])
+    expect(back.childReaped).toBe(true)
+    expect(back.fenceSite).toBe('ambiguous')
+    expect(back.exitCode).toBeNull()
+  })
+
+  it('an evidence-bearing row still passes isFenceRecord, so a write cannot sweep it aside', async () => {
+    // THE DECISION THIS PROTECTS. The new fields were deliberately NOT added to
+    // isFenceRecord; if they had been, a row would be reclassified as unrecognised
+    // and land in the preserved-but-inert pile, silently un-enforcing a real fence.
+    // The route-level test cannot cover this: TargetGuard's constructor calls
+    // persistence.load() directly and never invokes the validator.
+    const { fencePath, readFences, writeFences } = await import('./thread-fence-store.js')
+    writeFences([withEvidence()])
+    expect(readFences()).toHaveLength(1)
+    const onDisk = JSON.parse(readFileSync(fencePath(), 'utf-8'))
+    expect(onDisk).toHaveLength(1)  // not duplicated into the preserved pile
+  })
+
+  it('distinguishes an absent field from an explicit null', async () => {
+    // A reader of the distribution must be able to tell "not recorded" from
+    // "recorded as null". JSON drops undefined and keeps null.
+    const { fencePath, readFences, writeFences } = await import('./thread-fence-store.js')
+    writeFences([row({ exitCode: null, childReaped: undefined })])
+    const raw = JSON.parse(readFileSync(fencePath(), 'utf-8'))[0]
+    expect('exitCode' in raw).toBe(true)
+    expect(raw.exitCode).toBeNull()
+    expect('childReaped' in raw).toBe(false)
+    expect(readFences()[0].childReaped).toBeUndefined()
+  })
+
+  it('keeps a legacy row with no evidence enforceable', async () => {
+    const { readFences, writeFences } = await import('./thread-fence-store.js')
+    writeFences([row()])
+    const [back] = readFences()
+    expect(back.targetKey).toBe('6:claude:4:t-01')
+    expect(back.spawns).toBeUndefined()
+  })
+})

@@ -839,6 +839,17 @@ export const COS_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/
 /** What a fence records about the turn that set it. */
 export interface FenceEvidence {
   provider: string
+  /** The adapter's verdict, or 'route_error' at the catch site. DISK-ONLY. */
+  adapterReason?: string
+  /** WHICH site fenced. `adapterReason` cannot substitute: the catch site inherits
+   *  whatever the adapter reported, so a fence can read 'ok' there. DISK-ONLY. */
+  fenceSite?: 'ambiguous' | 'route_error'
+  adapterDetail?: string | null
+  exitCode?: number | null
+  childReaped?: boolean
+  stderrClass?: string
+  durationMs?: number
+  spawns?: Array<{ pid: number; startMs: number }>
   /** The head BEFORE the ambiguous turn. Null ONLY when the failure happened
    *  before the head was read. */
   headBefore: string | null
@@ -961,6 +972,14 @@ class TargetGuard {
       turnId: evidence.turnId,
       bindingId: evidence.bindingId,
       fencedAt: evidence.now,
+      adapterReason: evidence.adapterReason,
+      fenceSite: evidence.fenceSite,
+      adapterDetail: evidence.adapterDetail,
+      exitCode: evidence.exitCode,
+      childReaped: evidence.childReaped,
+      stderrClass: evidence.stderrClass,
+      durationMs: evidence.durationMs,
+      spawns: evidence.spawns,
     })
     this.persistFences([...this.fences.values()])
   }
@@ -1389,7 +1408,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       res.status(status).json({ released: false, reason: outcome.reason })
       return
     }
-    console.warn(`[agent-session-bindings] fence RELEASED by operator target=${target} provider=${outcome.row.provider} fencedAt=${outcome.row.fencedAt}`)
+    // THE EVIDENCE DIES WITH THE ROW. `releaseFence` deletes it, and the realistic
+    // sequence is: first fence ever lands -> Control's card appears -> it is
+    // released -> the distribution this evidence exists to collect is gone. So the
+    // release line carries the whole record, not just its identity.
+    const ev = outcome.row
+    console.warn(`[agent-session-bindings] fence RELEASED by operator target=${target} provider=${ev.provider} fencedAt=${ev.fencedAt} fenceSite=${ev.fenceSite ?? 'unknown'} adapterReason=${ev.adapterReason ?? 'unknown'} detail=${ev.adapterDetail ?? 'none'} exitCode=${ev.exitCode ?? 'null'} childReaped=${ev.childReaped ?? 'unknown'} stderrClass=${ev.stderrClass ?? 'none'} durationMs=${ev.durationMs ?? 'unknown'} spawnCount=${ev.spawns?.length ?? 0}`)
     res.json({ released: true, target, provider: outcome.row.provider })
   })
 
@@ -1809,7 +1833,18 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     let fenceProvider = ''
     let preTurnHeadDigest: string | null = null
     /** Children the adapter reported, released in the finally. */
-    const recordedPids: number[] = []
+    // PAIRS, not bare pids. A pid alone cannot be told apart from a recycled one,
+    // and `startMs` is measured in the onSpawn closure and was previously discarded.
+    const recordedPids: Array<{ pid: number; startMs: number }> = []
+    // Hoisted so BOTH fence sites can record what the adapter actually reported.
+    // `result` is scoped inside the try; the ambiguous site sits after the catch.
+    // NARROW ON PURPOSE. `Partial<FenceEvidence>` would permit provider/headBefore/
+    // turnId/bindingId/now, and the spread sits AFTER them at both fence sites — so
+    // a future field could silently overwrite the fence's identity. The adapter
+    // result literally carries a `provider`, which would write null and fail
+    // `isFenceRecord` on the next read, silently un-enforcing the fence.
+    let adapterEvidence: Partial<Pick<FenceEvidence,
+      'adapterReason' | 'adapterDetail' | 'exitCode' | 'childReaped' | 'stderrClass' | 'durationMs'>> = {}
     let pinnedBindingId: string | null = null
     let requestNow = 0
     /**
@@ -2095,10 +2130,35 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             // before the prompt rather than deliver a turn that poisons the next
             // occupancy check.
             if (outcome !== 'recorded') return false
-            recordedPids.push(pid)
+            recordedPids.push({ pid, startMs })
             return true
           },
         })
+        // Read the adapter's OWN account before it goes out of scope. This is the
+        // whole point of the evidence work: `classifyDelivery` collapses six distinct
+        // failures into one word, and the difference between them is what decides
+        // whether an automatic resolver could ever be safe. A 21-minute `timeout`
+        // means the child ran tool calls; a `provider_exit_nonzero` with a code means
+        // it exited on its own. Defensive reads — the adapter is injected in tests.
+        // AN UNREADABLE RESULT RECORDS NOTHING, not zeroes. Reading `{}` and
+        // deriving `exitCode: null, childReaped: false` states two facts about a
+        // child nothing is known about, and writes them indistinguishably from a
+        // confirmed-unreaped timeout — corrupting the one discriminator this
+        // evidence exists to establish.
+        const r = (result !== null && typeof result === 'object')
+          ? result as Record<string, unknown>
+          : null
+        adapterEvidence = r === null ? {} : {
+          adapterReason: typeof r.reason === 'string' ? r.reason : (r.ok === true ? 'ok' : undefined),
+          adapterDetail: typeof r.detail === 'string' ? r.detail : null,
+          exitCode: typeof r.exitCode === 'number' ? r.exitCode : null,
+          // FROM THE ADAPTER, never derived from exitCode. A signal-killed child
+          // reports `code === null`, so deriving it would report "never reaped" for
+          // the dominant timeout shape — backwards for the decision this informs.
+          childReaped: typeof r.reaped === 'boolean' ? r.reaped : undefined,
+          stderrClass: typeof r.stderrClass === 'string' ? r.stderrClass : undefined,
+          durationMs: typeof r.durationMs === 'number' ? r.durationMs : undefined,
+        }
         delivery = classifyDelivery(result)
       } catch (error) {
         console.error(`[agent-session-bindings] adapter threw: ${error instanceof Error ? error.message : error}`)
@@ -2116,18 +2176,30 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // Fenced under its own reason, not this turn's: `delivery_ambiguous`
         // describes what happened to THIS request, while a later caller needs to
         // be told the thread is shut and why it must be inspected first.
+        // ONE resolved value for the record AND the log. The previous release
+        // fixed exactly this contradiction at the other fence site and this one
+        // re-committed it: the record said `unreadable_result` while the log said
+        // `unknown`, so an operator grepping for the sentinel found nothing.
+        const recordedReason = adapterEvidence.adapterReason ?? 'unreadable_result'
         guard.fence(key, 'native_target_fenced', {
           provider: binding.provider,
           headBefore: head.digest,
           turnId,
           bindingId,
           now: Date.now(),
+          ...adapterEvidence,
+          // NEVER blank. An unreadable adapter result and "nobody recorded it" are
+          // different facts and a missing field cannot tell them apart -- which is
+          // the whole reason this evidence exists.
+          adapterReason: recordedReason,
+          fenceSite: 'ambiguous',
+          spawns: [...recordedPids],
         })
         // A fence shuts a thread until a human acts, and until now it wrote NO log
         // line at either site — so a fenced thread was discoverable only by trying
         // to use it (Miles, 2026-08-18). Never log `key`: it embeds the private
         // native thread id, which this router does not emit anywhere.
-        console.warn(`[agent-session-bindings] fence set site=ambiguous provider=${binding.provider} target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest}`)
+        console.warn(`[agent-session-bindings] fence set site=ambiguous provider=${binding.provider} target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest} adapterReason=${recordedReason} detail=${adapterEvidence.adapterDetail ?? 'none'} exitCode=${adapterEvidence.exitCode ?? 'null'} childReaped=${adapterEvidence.childReaped ?? 'unknown'} stderrClass=${adapterEvidence.stderrClass ?? 'none'} durationMs=${adapterEvidence.durationMs ?? 'unknown'} spawnCount=${recordedPids.length}`)
         return reportAmbiguous()
       }
 
@@ -2164,20 +2236,28 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             turnId,
             bindingId: null,
             now: Date.now(),
+            // A bug in THIS route, not a provider outcome. Named rather than left
+            // blank so a later reader can tell "the adapter reported nothing" apart
+            // from "nobody recorded it". Any adapter evidence captured before the
+            // throw is still carried.
+            ...adapterEvidence,
+            adapterReason: adapterEvidence.adapterReason ?? 'route_error',
+            fenceSite: 'route_error',
+            spawns: [...recordedPids],
           })
           // `head` is scoped to the try, so `preTurnHeadDigest` is hoisted to the
           // handler specifically to reach this site. It is null ONLY when the throw
           // happened before the head was read. An earlier version of this line
           // hardcoded `unavailable` and so contradicted the record it had just
           // written — an operator would read "no baseline" off a fence that has one.
-          console.warn(`[agent-session-bindings] fence set site=route_error target=${opaqueRevision(claimedKey)} turnId=${turnId} headBefore=${preTurnHeadDigest ?? 'unavailable'}`)
+          console.warn(`[agent-session-bindings] fence set site=route_error target=${opaqueRevision(claimedKey)} turnId=${turnId} headBefore=${preTurnHeadDigest ?? 'unavailable'} adapterReason=${adapterEvidence.adapterReason ?? 'route_error'} detail=${adapterEvidence.adapterDetail ?? 'none'} exitCode=${adapterEvidence.exitCode ?? 'null'} childReaped=${adapterEvidence.childReaped ?? 'unknown'} stderrClass=${adapterEvidence.stderrClass ?? 'none'} durationMs=${adapterEvidence.durationMs ?? 'unknown'} spawnCount=${recordedPids.length}`)
         }
         reportAmbiguous()
       } else {
         refuseTurn('turn_failed')
       }
     } finally {
-      for (const pid of recordedPids) {
+      for (const { pid } of recordedPids) {
         try {
           ownership.release(pid)
         } catch (error) {

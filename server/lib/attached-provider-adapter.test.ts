@@ -1176,3 +1176,30 @@ describe('a continued turn inherits the session posture, and the bypass ban surv
     expect(findBannedPermissionArg(buildClaudeAttachedArgs('a4b2b4dd-e40c-4b08-8a11-c89a018c197d'))).toBeNull()
   })
 })
+
+describe('reaping is reported, never derived', () => {
+  // A signal-killed child reports `code === null`, and the handlers only assign
+  // `exitCode` for a numeric code. So a consumer deriving "was it reaped" from
+  // `exitCode` reports NEVER REAPED for the dominant timeout shape — the exact
+  // case a reader most needs to identify. The adapter therefore says so itself.
+
+  it('reports reaped on a signal death, where exitCode stays null', async () => {
+    const ctx = harness({
+      script: (child) => {
+        child.emitStdout(claudeLine(FORKED))
+        child.close(null)          // SIGTERM/SIGKILL: no numeric code
+      },
+    })
+    const result = expectFailure(await deliver(ctx, {}))
+    expect(result.exitCode).toBeNull()
+    // Derived-from-exitCode would be false here. That is the regression.
+    expect(result.reaped).toBe(true)
+  })
+
+  it('reports reaped on an ordinary non-zero exit', async () => {
+    const ctx = harness({ script: (child) => { child.close(3) } })
+    const result = expectFailure(await deliver(ctx, {}))
+    expect(result.exitCode).toBe(3)
+    expect(result.reaped).toBe(true)
+  })
+})
