@@ -1,4 +1,29 @@
 ## Unreleased
+- **Session search was 68% scaffolding, and the budget was the reason.** Of the 1,296
+  Claude transcripts on this machine the collector indexed 41, and 28 of those 41 were
+  machine prompts — 22 Slack Bridge proxy, 4 reply-with, 2 slack_search_users. Roughly 13
+  real conversations were searchable, which is why searching an exact session title
+  returned nothing. Two changes, which do not work apart: `isKeepWarmSessionTitle` now
+  recognises the machine families by anchored prefix, and both the Claude and Codex
+  collectors run that filter — and the Codex `thread_source === 'subagent'` check — BEFORE
+  charging the doc budget rather than after. Measured against the real corpus: 41 indexed
+  Claude docs with 28 junk becomes **79 indexed with 0 junk**.
+- **The budget now counts docs kept, not files opened.** That is the whole fix: a run of
+  machine transcripts used to consume the 134-file allowance and return nothing, so the
+  newest real transcript on disk was never reached. A second `examined` ceiling
+  (`EXAMINE_MULTIPLE`, 5x the doc budget) stops a pathological corpus walking all 1,296
+  files, and the expensive transcript-body read is deferred until a file is being kept.
+- **This also removes rows from COS Control's session LIST.** The predicate is shared by
+  all four collectors and the list path, so keep-warm and Slack Bridge entries stop
+  appearing there too. That is intended, not a side effect to fix.
+- **Control may not see any of this yet.** The search route's median is ~2.27s against
+  Control's 2s client timeout, of which ~1.7s is two sequential embedding round trips;
+  this work adds ~350ms on top. Until that timeout and `EMBED_BATCH` are addressed,
+  Control falls back to its local scanner and reports a fabricated `server_too_old`.
+- **The scan budget had no test coverage at all.** `collectAgentSessionSearchDocs` was
+  never called by any test and its `cap` was never exercised, so the branch that spends
+  the budget had never run. 21 tests added, each verified to FAIL against the previous
+  code before being kept.
 
 ## 6.36.11
 - **Fences now record WHY, so the population can be measured before anything resolves

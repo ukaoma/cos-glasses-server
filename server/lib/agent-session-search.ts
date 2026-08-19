@@ -46,6 +46,38 @@ import {
 
 const HEAD_TEXT = 8_000
 const MAX_SCAN_FILES = 400
+
+/**
+ * How many files a provider may OPEN per search, as a multiple of the docs it may KEEP.
+ *
+ * Before the filter moved ahead of the decrement, `remaining` meant "files read" -- so a
+ * run of machine transcripts consumed the whole allowance and returned nothing. Now it
+ * means "docs kept", which on its own would let a pathological corpus walk all 1,296
+ * files. This is the ceiling that stops it.
+ *
+ * Swept 2026-08-18 against the real corpus (1,296 Claude transcripts, 822 Codex
+ * rollouts). Docs kept vs collector wall time, median of 5 warm runs:
+ *
+ *     HEAD   298 docs   692 ms
+ *     x2     300 docs   763 ms
+ *     x3     316 docs   864 ms
+ *     x5     345 docs  1042 ms   <- chosen
+ *     x8     396 docs  1402 ms
+ *     x12    400 docs  1463 ms   (saturates MAX_SCAN_FILES)
+ *
+ * x8 is close to the reachable ceiling, but the route this feeds already exceeds COS
+ * Control's 2s client timeout on most calls BEFORE any of this (measured median 2.268s,
+ * of which ~1.7s is two sequential embedding round trips). Until that is fixed, work
+ * bought here is work Control may discard, so this sits at the middle of the curve.
+ * Raise it once the route fits the timeout.
+ */
+const EXAMINE_MULTIPLE = 5
+
+/**
+ * `remaining` counts docs KEPT. `examined` counts files OPENED. They are different
+ * numbers because most files on this machine are filtered out after their title is read.
+ */
+type ScanBudget = { remaining: number; examined: number }
 const SEMANTIC_DOC_CAP = 120
 const SEMANTIC_MIN = 0.28
 const EMBED_MODEL = 'text-embedding-3-small'
@@ -180,22 +212,25 @@ function pushDoc(docs: SearchDoc[], next: SearchDoc) {
   }
 }
 
-async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: { remaining: number }) {
+async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: ScanBudget) {
   const starred = await loadClaudeStarredIds(roots.claudeDesktopConfig)
   for (const folder of await dirents(roots.claudeProjects)) {
     const dir = join(roots.claudeProjects, folder)
     for (const name of await dirents(dir)) {
-      if (!CLAUDE_UUID_JSONL.test(name) || budget.remaining <= 0) continue
+      if (!CLAUDE_UUID_JSONL.test(name) || budget.remaining <= 0 || budget.examined <= 0) continue
       const file = join(dir, name)
       const st = await fileStat(file)
       if (!st?.isFile) continue
-      budget.remaining -= 1
+      budget.examined -= 1
       const native = name.slice(0, -6)
       const custom = await lastCustomTitle(file)
       const first = await firstClaudeUserTitle(file)
-      const users = await transcriptHaystack('claude', file)
       const title = custom || first || 'Claude session'
+      // Both filters run BEFORE the doc budget is charged, and the haystack -- by far the
+      // most expensive read here -- runs only for a file we are actually keeping.
       if (isKeepWarmSessionTitle(title)) continue
+      budget.remaining -= 1
+      const users = await transcriptHaystack('claude', file)
       const haystack = clip(`${title}\n${custom || ''}\n${first || ''}\n${workspaceLabel(folder)}\n${users}`)
       pushDoc(docs, {
         title,
@@ -221,10 +256,10 @@ async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], bu
     if (!desktop) continue
     const st = await fileStat(desktop)
     if (!st?.isFile) continue
-    budget.remaining -= 1
     const head = peekClaudeDesktopHead(await readWindow(desktop, false))
     const title = head.title || 'Claude session'
     if (isKeepWarmSessionTitle(title)) continue
+    budget.remaining -= 1
     pushDoc(docs, {
       title,
       haystack: clip(`${title}\n${head.cwd}\n${workspaceLabel(head.cwd)}`),
@@ -243,21 +278,24 @@ async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], bu
   }
 }
 
-async function collectCodexDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: { remaining: number }) {
+async function collectCodexDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: ScanBudget) {
   const names = await loadCodexThreadNames(roots.codexSessions)
   const pinned = await loadCodexPinnedIds(roots.codexSessions)
   for (const file of await listCodexJsonlFiles(roots.codexSessions)) {
-    if (budget.remaining <= 0) break
+    if (budget.remaining <= 0 || budget.examined <= 0) break
     const st = await fileStat(file)
     if (!st?.isFile) continue
-    budget.remaining -= 1
+    budget.examined -= 1
     const meta = await peekCodexMeta(file)
+    // Subagent rollouts are the Codex analogue of the keep-warm transcripts: 427 of 822
+    // on this machine per the 2026-08-18 census. Filtered before the doc budget is charged.
     if (!meta || meta.subagent) continue
     const name = file.split('/').pop() || file
     const native = meta.id || name.slice(0, -6)
     const thread = names.get(native) || ''
     const title = thread || meta.title || 'Codex session'
     if (isKeepWarmSessionTitle(title)) continue
+    budget.remaining -= 1
     const users = await transcriptHaystack('codex', file)
     const created = meta.created || createdFromCodexFilename(name) || isoFromMtime(st.birthtimeMs)
     pushDoc(docs, {
@@ -335,8 +373,9 @@ export async function collectAgentSessionSearchDocs(
 ): Promise<SearchDoc[]> {
   const docs: SearchDoc[] = []
   const share = Math.max(1, Math.ceil(Math.min(cap, MAX_SCAN_FILES) / 3))
-  await collectClaudeDocs(roots, docs, { remaining: share })
-  await collectCodexDocs(roots, docs, { remaining: share })
+  const examined = share * EXAMINE_MULTIPLE
+  await collectClaudeDocs(roots, docs, { remaining: share, examined })
+  await collectCodexDocs(roots, docs, { remaining: share, examined })
   await collectCursorDocs(roots, docs, { remaining: share }, now)
   docs.sort((a, b) => (b.row.modified || '').localeCompare(a.row.modified || ''))
   return docs.slice(0, Math.max(1, Math.min(cap, MAX_SCAN_FILES)))

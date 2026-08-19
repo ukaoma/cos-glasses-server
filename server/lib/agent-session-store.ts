@@ -97,10 +97,32 @@ export function isScratchCursorProject(folder: string): boolean {
 
 export const isSkippedCursorFolder = isScratchCursorProject
 
+/**
+ * Titles that belong to a MACHINE, not to a conversation Miles had.
+ *
+ * Measured 2026-08-18 by driving the real collector over the 1,296 Claude transcripts on
+ * this machine: of the 41 Claude docs it indexed, 28 were machine prompts -- 22 Slack
+ * Bridge proxy, 4 reply-with, 2 slack_search_users. Two thirds of Claude search was
+ * answering with scaffolding.
+ *
+ * Every `you are ...` prefix here is ANCHORED to a specific known caller. A bare
+ * `startsWith('you are')` would also swallow any human sentence beginning that way
+ * ("You are right that ..."), and the anchored pair covers the measured volume without
+ * that risk.
+ *
+ * Shared by all four search collectors AND the session-list path, so a title added here
+ * also stops appearing as a row in COS Control's session list. That is the intent.
+ */
 export function isKeepWarmSessionTitle(title: string): boolean {
   const t = title.trim().toLowerCase()
   if (t === 'ready') return true
-  return t.startsWith('this is an automated local readiness check')
+  if (t.startsWith('this is an automated local readiness check')) return true
+  if (t.startsWith('you are the cos slack bridge proxy')) return true
+  if (t.startsWith('you are a post-processing editor')) return true
+  if (t.startsWith('call mcp__claude_ai_slack__slack_search_users')) return true
+  if (/^reply with (exactly|the single word)\b/.test(t)) return true
+  if (t === 'say ok' || t === 'say: ok' || t === 'reply ok') return true
+  return false
 }
 
 /**

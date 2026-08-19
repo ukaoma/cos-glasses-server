@@ -4,12 +4,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  collectAgentSessionSearchDocs,
   cosineSimilarity,
   mergeSessionSearchHits,
   searchAgentSessions,
   type AgentSessionSearchHit,
   type EmbedTexts,
 } from './agent-session-search.js'
+import { isKeepWarmSessionTitle } from './agent-session-store.js'
 import { agentSessionRoots, type AgentSessionRoots } from './agent-session-store.js'
 
 const jewelryId = '019dfe42-d4ba-7152-b5ae-60f600a2675a'
@@ -187,5 +189,149 @@ describe('agent session search', () => {
     expect(row?.match).toBe('semantic')
     expect(row?.semanticScore).toBeGreaterThan(0.28)
     expect(meaning.semanticAvailable).toBe(true)
+  })
+})
+
+/**
+ * The scan budget, which had ZERO coverage until 2026-08-18.
+ *
+ * `collectAgentSessionSearchDocs` was never called directly by any test and its `cap`
+ * was never exercised, so with a dozen fixture files the 134-per-provider budget was
+ * never reached and the branch that spends it was never run. That is precisely where
+ * the defect lived: the budget was charged BEFORE the keep-warm filter, so on a real
+ * machine (1,296 Claude transcripts, ~89% machine-authored) the allowance was consumed
+ * by scaffolding and Miles's actual conversations were never reached.
+ */
+describe('search scan budget', () => {
+  /**
+   * Sized against a SMALL cap on purpose. `cap` 30 gives each provider a 10-doc budget
+   * and a 50-file examine ceiling, which exercises exactly the branch that matters while
+   * writing ~50 files instead of ~1,900. The first draft used the real 134/670 budget,
+   * created 1,910 files per run, and went flaky under the full parallel suite while
+   * passing 5/5 in isolation -- a test that only fails when the machine is busy is worse
+   * than no test.
+   *
+   * Detection does not depend on traversal order. `dirents` and `listCodexJsonlFiles`
+   * both walk with plain `readdir`, so which files land inside the pre-fix allowance is
+   * filesystem-defined; instead the decoys outnumber the budget heavily enough that the
+   * OLD code reaches every real file only by a fluke of roughly 1 in 10,000.
+   */
+  const CAP = 30
+
+  it('spends the Claude budget on kept docs, not on machine transcripts', async () => {
+    const { roots } = fixtureHome()
+    const folders = ['-Users-ukaoma-repo-a', '-Users-ukaoma-repo-b', '-Users-ukaoma-repo-c']
+    const hex = (n: number) => n.toString(16).padStart(12, '0')
+    for (let i = 0; i < 40; i++) {
+      const file = join(roots.claudeProjects, folders[i % folders.length], `aaaaaaaa-1111-2222-3333-${hex(i)}.jsonl`)
+      writeJsonl(file, ['{"type":"user","message":{"role":"user","content":"You are the COS Slack Bridge proxy serving method conversations.list"}}'])
+      // Newest on disk, so recency ordering alone could not rescue these either.
+      touch(file, new Date('2026-08-18T20:00:00Z'))
+    }
+    for (let i = 0; i < 6; i++) {
+      const file = join(roots.claudeProjects, folders[i % folders.length], `ffffffff-9999-8888-7777-${hex(i)}.jsonl`)
+      writeJsonl(file, [
+        `{"type":"custom-title","customTitle":"Jewel360 lead gen review ${i}"}`,
+        '{"type":"user","message":{"role":"user","content":"Where did the Jewel360 TOFU pipeline go"}}',
+      ])
+      touch(file, new Date('2026-08-01T09:00:00Z'))
+    }
+
+    const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
+    const claude = docs.filter(doc => doc.row.provider === 'claude')
+
+    // Every real conversation is reachable even though 40 machine transcripts sit in
+    // front of a 10-doc budget. Before the filter moved ahead of the decrement the
+    // allowance was gone long before they were reached.
+    expect(claude).toHaveLength(6)
+    expect(claude.every(doc => doc.title.startsWith('Jewel360 lead gen review'))).toBe(true)
+  })
+
+  it('spends the Codex budget on kept docs, not on subagent rollouts', async () => {
+    const { roots } = fixtureHome()
+    const hex = (n: number) => n.toString(16).padStart(12, '0')
+    for (let i = 0; i < 40; i++) {
+      const id = `bbbbbbbb-1111-2222-3333-${hex(i)}`
+      const file = join(roots.codexSessions, '2026/08/01', `rollout-2026-08-01T09-00-00-${id}.jsonl`)
+      writeJsonl(file, [
+        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-01T09:00:00.000Z","thread_source":"subagent"}}`,
+        '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"subagent work"}]}}',
+      ])
+      touch(file, new Date('2026-08-01T09:00:00Z'))
+    }
+    for (let i = 0; i < 4; i++) {
+      const id = `cccccccc-4444-5555-6666-${hex(i)}`
+      const file = join(roots.codexSessions, '2026/08/18', `rollout-2026-08-18T20-00-00-${id}.jsonl`)
+      // Codex derives its title from `agent_nickname` or the first user message -- there
+      // is no `payload.title` -- so the first prompt is what has to be distinctive here.
+      writeJsonl(file, [
+        `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-18T20:00:00.000Z"}}`,
+        `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Bottle POS parity ${i}"}]}}`,
+      ])
+      touch(file, new Date('2026-08-18T20:00:00Z'))
+    }
+
+    const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
+    const codex = docs.filter(doc => doc.row.provider === 'codex')
+
+    expect(codex).toHaveLength(4)
+    expect(codex.every(doc => doc.title.startsWith('Bottle POS parity'))).toBe(true)
+  })
+
+  /**
+   * Named for what it actually asserts. An earlier version of this called itself a test
+   * of the examine ceiling, which it was not: with no real transcripts present the doc
+   * count is zero on both sides of the fix, and what it really caught was the broadened
+   * predicate. The ceiling itself is not observable from the outside -- the examined
+   * counter is not returned -- so it is covered by construction, not by assertion.
+   */
+  it('returns nothing at all from a corpus that is only machine transcripts', async () => {
+    const { roots } = fixtureHome()
+    const hex = (n: number) => n.toString(16).padStart(12, '0')
+    for (let i = 0; i < 100; i++) {
+      const file = join(roots.claudeProjects, '-Users-ukaoma-repo-a', `aaaaaaaa-1111-2222-3333-${hex(i)}.jsonl`)
+      writeJsonl(file, ['{"type":"user","message":{"role":"user","content":"Reply with the single word READY."}}'])
+      touch(file, new Date('2026-08-18T20:00:00Z'))
+    }
+    const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
+    expect(docs.filter(doc => doc.row.provider === 'claude')).toHaveLength(0)
+  })
+})
+
+/**
+ * Table-driven, using the REAL strings these callers emit, because the counts that
+ * justified each entry span providers -- a Claude-only fixture does not reproduce them.
+ */
+describe('machine-title predicate', () => {
+  const MACHINE: Array<[string, string]> = [
+    ['claude', 'You are the COS Slack Bridge proxy serving method conversations.list'],
+    ['claude', 'You are a post-processing editor for a meeting transcript.'],
+    ['claude', 'Call mcp__claude_ai_Slack__slack_search_users with arguments {"query":"Luke"}'],
+    ['codex',  'Reply with the single word READY.'],
+    ['claude', 'Reply with the single word READY.'],
+    ['claude', 'Reply with exactly OK and nothing else'],
+    ['claude', 'say ok'],
+    ['claude', 'Say: OK'],
+    ['claude', 'reply ok'],
+    ['claude', 'ready'],
+    ['claude', 'This is an automated local readiness check, reply READY'],
+  ]
+
+  const HUMAN: Array<[string, string]> = [
+    ['claude', 'You are right that the fence never fires'],
+    ['claude', 'You are the only one who can approve the HubDB push'],
+    ['claude', 'Reply with the customer quotes from the Bottle POS deck'],
+    ['claude', 'say ok to the Quilt MSA and tell me why'],
+    ['codex',  'Luke Henry merge'],
+    ['claude', 'Jewel360 lead gen review'],
+    ['claude', 'ready to ship 6.36.11?'],
+  ]
+
+  it.each(MACHINE)('filters the %s machine title: %s', (_provider, title) => {
+    expect(isKeepWarmSessionTitle(title)).toBe(true)
+  })
+
+  it.each(HUMAN)('keeps the %s human title: %s', (_provider, title) => {
+    expect(isKeepWarmSessionTitle(title)).toBe(false)
   })
 })
