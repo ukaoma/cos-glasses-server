@@ -836,3 +836,79 @@ describe('a record bigger than the tail window does not empty the tail', () => {
     expect(parsed.assistant_message_count).toBe(1)
   })
 })
+
+describe('live Claude rows report the transcript mtime, not the registry heartbeat', () => {
+  // `liveClaudeRows` (routes/agent-sessions.ts) builds `modified` from the peer
+  // registry's `lastActiveAt`. That tracks the REGISTRY record, not the transcript,
+  // so a session that is actively writing keeps reporting whenever the registry last
+  // moved. Measured on three live sessions 2026-08-18: the wire said 55.3m / 407.7m /
+  // 435.0m old while the transcripts had been written 0.1m / 0.2m / 5.1m earlier.
+  //
+  // Every other test in this file passes `[]` for live rows, so `enrichLiveClaude`
+  // had NO execution coverage at all before this block.
+  const SID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+
+  function fixture(): { home: string; file: string } {
+    const home = mkdtempSync(join(tmpdir(), 'live-mtime-'))
+    const dir = join(home, '.claude', 'projects', '-repo')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${SID}.jsonl`)
+    writeFileSync(file, `${JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: 'Rank order these activities' },
+    })}\n`)
+    return { home, file }
+  }
+
+  const liveRow = (staleISO: string) => ({
+    session_id: SID,
+    provider: 'claude' as const,
+    display_label: 'COS-glasses Server work (meetings)',
+    project: 'repo',
+    modified: staleISO,
+    created: staleISO,
+    alive: true,
+    state: 'running' as const,
+    pinned: false,
+  })
+
+  it('replaces a stale heartbeat with the real transcript mtime', async () => {
+    const { home, file } = fixture()
+    const now = new Date('2026-08-18T20:00:00Z')
+    const realWrite = new Date(now.getTime() - 60_000)          // wrote 1 min ago
+    const staleHeartbeat = new Date(now.getTime() - 7 * 3600_000) // registry says 7h
+    touch(file, realWrite)
+
+    const rows = await listAgentSessions(
+      agentSessionRoots(home), now, [liveRow(staleHeartbeat.toISOString())], 20, 'updated',
+    )
+    const row = rows.find(r => r.session_id === SID)
+    expect(row, 'the live row survives the merge').toBeTruthy()
+    // The whole point: a session written a minute ago must not report 7 hours old.
+    expect(new Date(row!.modified).getTime()).toBe(realWrite.getTime())
+    expect(new Date(row!.modified).getTime())
+      .not.toBe(staleHeartbeat.getTime())
+  })
+
+  it('keeps the heartbeat when the transcript cannot be found', async () => {
+    // Measured: 2 of 6 live rows had no transcript on disk. No file means no better
+    // source, so the row must degrade to today's value rather than to nothing.
+    //
+    // WHAT THIS ACTUALLY COVERS: the `if (!found) return row` guard, which returns
+    // BEFORE the stat. A mutation of the `st?.isFile ? ... : row.modified` fallback
+    // survives this test, because that fallback only runs when the file was FOUND and
+    // the stat then failed — a case this fixture cannot produce without a delete race.
+    // Recorded rather than papered over: that branch is defensive and unreached.
+    const home = mkdtempSync(join(tmpdir(), 'live-nofile-'))
+    mkdirSync(join(home, '.claude', 'projects'), { recursive: true })
+    const now = new Date('2026-08-18T20:00:00Z')
+    const heartbeat = new Date(now.getTime() - 3600_000).toISOString()
+
+    const rows = await listAgentSessions(
+      agentSessionRoots(home), now, [liveRow(heartbeat)], 20, 'updated',
+    )
+    const row = rows.find(r => r.session_id === SID)
+    expect(row).toBeTruthy()
+    expect(row!.modified).toBe(heartbeat)
+  })
+})

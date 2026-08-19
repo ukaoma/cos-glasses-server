@@ -1063,9 +1063,29 @@ async function enrichLiveClaude(row: AgentSessionRow, roots: AgentSessionRoots):
   const firstPrompt = await firstClaudeUserTitle(found)
   const title = peek.customTitle ?? firstPrompt ?? row.display_label
   const fullId = found.split('/').pop()?.replace(/\.jsonl$/i, '') || row.session_id
+  // THE LIVE ROW'S `modified` IS A HEARTBEAT, NOT AN MTIME, AND IT GOES STALE.
+  //
+  // `liveClaudeRows` builds it from the peer registry's `lastActiveAt` (routes/
+  // agent-sessions.ts:257). That value tracks the registry record, not the
+  // transcript, so a session that is actively writing keeps reporting whenever the
+  // registry last moved. Measured 2026-08-18 on three live sessions: the wire said
+  // 55.3m / 407.7m / 435.0m while the transcript had been written 0.1m / 0.2m /
+  // 5.1m earlier — under-reporting a live session by up to 7.2 hours.
+  //
+  // We are already holding the resolved transcript path and have already read it
+  // twice, so the true mtime costs one stat. A failed stat keeps the heartbeat:
+  // worse, but no worse than today.
+  //
+  // THAT FALLBACK IS DEFENSIVE AND UNREACHED BY THE SUITE. `if (!found) return row`
+  // above already catches the missing-file case, so reaching `: row.modified` needs a
+  // stat to fail on a file that was just resolved. A mutation of it survives; that is
+  // recorded rather than papered over.
+  const st = await fileStat(found)
+  const modified = st?.isFile ? isoFromMtime(st.mtimeMs) : row.modified
   return {
     ...row,
     session_id: fullId,
+    modified,
     display_label: title || row.display_label || 'Claude session',
     ...discussionFields(title || row.display_label, firstPrompt || '', peek.latestAssistant),
   }
