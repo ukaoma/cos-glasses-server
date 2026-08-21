@@ -35,6 +35,7 @@ import {
   findBannedPermissionArg,
   buildClaudeAttachedArgs,
   buildCodexAttachedArgs,
+  buildCursorAttachedArgs,
   DEFAULT_ATTACHED_TIMEOUT_MS,
   KILL_GRACE_MS,
   FORCE_SETTLE_MS,
@@ -125,7 +126,7 @@ function claudeLine(sessionId: string, extra: Record<string, unknown> = {}): str
 interface HarnessOptions {
   /** Runs as a microtask after spawn returns, i.e. once listeners are wired. */
   script?: (child: FakeChild, ctx: HarnessContext) => void
-  resolveBinary?: (provider: 'claude' | 'codex') => BinaryResolution
+  resolveBinary?: (provider: 'claude' | 'codex' | 'cursor') => BinaryResolution
   processStartMs?: (pid: number) => number | null
   preflight?: () => any
   spawn?: (request: AttachedSpawnRequest) => AttachedChildProcess
@@ -693,7 +694,6 @@ describe('bounded budget', () => {
 
 describe('request validation — every refusal happens before a process exists', () => {
   const cases: Array<[string, Record<string, unknown>, string]> = [
-    ['cursor, which is Fork-only', { provider: 'cursor' }, 'invalid_provider'],
     ['an unknown provider', { provider: 'gemini' }, 'invalid_provider'],
     ['a missing provider', { provider: undefined }, 'invalid_provider'],
     // The 8-character display form is exactly what `ClaudePeer.id` holds, and
@@ -1057,12 +1057,24 @@ describe('resolveProviderBinary', () => {
 
   it('tries ChatGPT.app before anything else for codex, and never lists Codex.app', () => {
     const spec = providerBinarySpec('codex')
-    expect(spec.absolutes[0]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex')
-    expect(spec.absolutes.some(p => isKnownStaleShimPath(p))).toBe(false)
+    expect(spec).not.toBeNull()
+    expect(spec!.absolutes[0]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex')
+    expect(spec!.absolutes.some(p => isKnownStaleShimPath(p))).toBe(false)
     // `.some(isKnownStaleShimPath)` passes the index as the second argument;
     // an unusable prefixes argument must still exclude the known shim.
     expect(isKnownStaleShimPath('/Applications/Codex.app/x', 1 as any)).toBe(true)
-    expect(spec.name).toBe('codex')
+    expect(spec!.name).toBe('codex')
+  })
+
+  it('resolves cursor to agent, never to the Codex fallthrough', () => {
+    const spec = providerBinarySpec('cursor')
+    expect(spec).not.toBeNull()
+    expect(spec!.name).toBe('agent')
+    expect(spec!.envKeys).toEqual(['COS_ATTACHED_CURSOR_AGENT_BIN', 'COS_CURSOR_AGENT_BIN'])
+    expect(providerBinarySpec('gemini')).toBeNull()
+    expect(resolveProviderBinary('gemini')).toEqual({
+      ok: false, binary: 'gemini', detail: 'unknown_provider',
+    })
   })
 })
 
@@ -1125,12 +1137,23 @@ describe('plan 4.7 is enforced at runtime, not only asserted in a test', () => {
     expect(findBannedPermissionArg([])).toBeNull()
   })
 
-  it('the argv this build actually produces is clean, for BOTH providers', () => {
-    // The regression this pairs with: the check above is only useful if the real
-    // builders keep passing it.
+  it('the argv this build actually produces is clean, for all three providers', () => {
     const id = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
     expect(findBannedPermissionArg(buildClaudeAttachedArgs(id))).toBeNull()
     expect(findBannedPermissionArg(buildCodexAttachedArgs(id, '/tmp'))).toBeNull()
+    expect(findBannedPermissionArg(buildCodexAttachedArgs(id, '/tmp/path-with--force-in-it'))).toBeNull()
+    expect(findBannedPermissionArg(buildCursorAttachedArgs(id, '/tmp/path-with--force-in-it'))).toBeNull()
+    const cursorArgs = buildCursorAttachedArgs(id, '/tmp')
+    expect(cursorArgs).toContain('--mode')
+    expect(cursorArgs).toContain('ask')
+    expect(cursorArgs).toContain('--resume')
+    expect(cursorArgs).not.toContain('--force')
+  })
+
+  it('does not treat a --workspace value containing --force as a banned flag', () => {
+    expect(findBannedPermissionArg([
+      '-p', '--mode', 'ask', '--workspace', '/tmp/repo--force-clone', '--resume', 'x',
+    ])).toBeNull()
   })
 })
 

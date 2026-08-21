@@ -65,7 +65,7 @@ import { isAbsolute } from 'node:path'
 import { spawn as nodeSpawn } from 'node:child_process'
 
 import { isValidNativeThreadId } from './native-thread-id.js'
-import { isBindableProvider } from './agent-session-binding-store.js'
+import { isForkableProvider, type ForkableProvider } from './agent-session-binding-store.js'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
 import { processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import {
@@ -82,20 +82,19 @@ import {
   isAttachedPermissionPolicy,
   resolveProviderBinary,
   type AttachedChildProcess,
-  type AttachedProvider,
   type AttachedSpawnRequest,
   type AttachedStderrClass,
   type BinaryResolution,
 } from './attached-provider-adapter.js'
 
 /**
- * Providers that can be forked. Identical to the attached set on purpose.
+ * Providers that can be forked. A strict subset of the attached set.
  *
- * Re-exported from the adapter rather than redeclared: a provider that gains an
- * attached path and not a fork path (or the reverse) would leave one of the two
- * halves of this feature silently unreachable.
+ * Cursor can Continue (ask-mode resume) and cannot Fork: Agent CLI has no
+ * `--fork-session` equivalent, and advertising Fork on Cursor would 404 the
+ * only remaining write path for that row if Continue were also hidden.
  */
-export type ForkProvider = AttachedProvider
+export type ForkProvider = ForkableProvider
 
 /** Same one-member policy as the attached path. An omitted policy is refused. */
 export type ForkPermissionPolicy = 'read_only'
@@ -524,7 +523,7 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
   const duration = () => readDuration(deps, startedAt)
 
   // --- 1. Validate ------------------------------------------------------------
-  if (!isBindableProvider(request.provider)) {
+  if (!isForkableProvider(request.provider)) {
     return fail('invalid_provider', 'none', { durationMs: duration() })
   }
   const provider: ForkProvider = request.provider

@@ -5,8 +5,8 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
+import { resolveProviderBinary } from './provider-binary.js'
 import {
   CURSOR_COMPOSER_MODEL,
   CURSOR_GROK_MODEL,
@@ -93,20 +93,10 @@ function catalogCachePath(): string {
   )
 }
 
-/** Resolve the Cursor `agent` binary: PATH first, then ~/.local/bin/agent. */
+/** Resolve the Cursor `agent` binary via the shared provider table. */
 export function resolveAgentBinary(): string | undefined {
-  const configured = process.env.COS_CURSOR_AGENT_BIN?.trim()
-  if (configured && existsSync(configured)) return configured
-
-  const pathEntries = (process.env.PATH ?? '').split(':').filter(Boolean)
-  for (const entry of pathEntries) {
-    const candidate = resolve(entry, 'agent')
-    if (existsSync(candidate)) return candidate
-  }
-
-  const homeLocal = resolve(homedir(), '.local', 'bin', 'agent')
-  if (existsSync(homeLocal)) return homeLocal
-  return undefined
+  const resolved = resolveProviderBinary('cursor')
+  return resolved.ok ? resolved.path : undefined
 }
 
 /** Parse `agent models` text lines shaped like `id - Display Name`. */

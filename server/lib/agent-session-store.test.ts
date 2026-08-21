@@ -18,8 +18,10 @@ import {
   LATEST_REPLY_MAX,
   proseSnippet,
   tailWindowStart,
-  AGENT_SESSION_MAX_FILE_BYTES,
-  listAgentSessions,
+    AGENT_SESSION_MAX_FILE_BYTES,
+    AGENT_SESSION_PER_PROVIDER_LIMIT,
+    emptySessionListDropped,
+    listAgentSessions,
   listClaudeSessions,
   listCodexSessions,
   listCursorSessions,
@@ -312,6 +314,112 @@ describe('keep-warm Claude sessions stay out of the list', () => {
 
     const listed = await listClaudeSessions(join(home, '.claude', 'projects'), now, new Set())
     expect(listed.map(row => row.display_label)).toEqual(['Fireflies meeting sync'])
+  })
+})
+
+describe('LIST caps report what they hid', () => {
+  function uuid(n: number): string {
+    return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+  }
+
+  it('counts the 7-day gate, the per-provider cap, and the Cursor 32 MB skip', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cos-agent-drops-'))
+    const proj = join(home, '.claude', 'projects', 'MU-Chief-Staff')
+    mkdirSync(proj, { recursive: true })
+    const now = new Date('2026-08-19T21:00:00Z')
+    const old = new Date('2026-05-28T12:00:00Z')
+    for (let i = 0; i < 3; i++) {
+      const file = join(proj, `${uuid(i)}.jsonl`)
+      writeFileSync(file, `{"type":"custom-title","customTitle":"Old ${i}"}\n{"type":"user","message":{"role":"user","content":"old ${i}"}}\n`)
+      touch(file, old)
+    }
+    for (let i = 10; i < 32; i++) {
+      const file = join(proj, `${uuid(i)}.jsonl`)
+      writeFileSync(file, `{"type":"custom-title","customTitle":"Fresh ${i}"}\n{"type":"user","message":{"role":"user","content":"fresh ${i}"}}\n`)
+      touch(file, new Date(now.getTime() - (32 - i) * 60_000))
+    }
+
+    const cursorId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const cursorFile = join(
+      home, '.cursor', 'projects', 'Users-ukaoma-Documents-GitHub-MU-Chief-Staff',
+      'agent-transcripts', cursorId, `${cursorId}.jsonl`,
+    )
+    writeJsonl(cursorFile, [
+      '{"role":"user","message":{"content":[{"type":"text","text":"<user_query>oversized cursor</user_query>"}]}}',
+    ])
+    truncateSync(cursorFile, AGENT_SESSION_MAX_FILE_BYTES + 1024)
+    touch(cursorFile, now)
+    expect(statSync(cursorFile).size).toBeGreaterThan(AGENT_SESSION_MAX_FILE_BYTES)
+
+    const dropped = emptySessionListDropped()
+    const listed = await listClaudeSessions(
+      join(home, '.claude', 'projects'),
+      now,
+      new Set(),
+      AGENT_SESSION_PER_PROVIDER_LIMIT,
+      new Set(),
+      '',
+      dropped,
+    )
+    expect(listed).toHaveLength(AGENT_SESSION_PER_PROVIDER_LIMIT)
+    expect(listed.every(row => row.display_label.startsWith('Fresh'))).toBe(true)
+    expect(dropped.age).toBe(3)
+    expect(dropped.limit).toBe(2)
+    expect(dropped.oversized).toBe(0)
+
+    const cursorDropped = emptySessionListDropped()
+    const cursorListed = await listCursorSessions(
+      join(home, '.cursor', 'projects'),
+      now,
+      AGENT_SESSION_PER_PROVIDER_LIMIT,
+      '',
+      new Set(),
+      cursorDropped,
+    )
+    expect(cursorListed).toHaveLength(0)
+    expect(cursorDropped.oversized).toBe(1)
+    expect(cursorDropped.age).toBe(0)
+  })
+
+  it('does not count a pinned Cursor file against oversized, and a keep-warm file is not a cap drop', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cos-agent-drops-pin-'))
+    const now = new Date('2026-08-19T21:00:00Z')
+    const id = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff'
+    const file = join(
+      home, '.cursor', 'projects', 'Users-ukaoma-Documents-GitHub-MU-Chief-Staff',
+      'agent-transcripts', id, `${id}.jsonl`,
+    )
+    writeJsonl(file, [
+      '{"role":"user","message":{"content":[{"type":"text","text":"<user_query>pinned oversized</user_query>"}]}}',
+    ])
+    truncateSync(file, AGENT_SESSION_MAX_FILE_BYTES + 2048)
+    touch(file, now)
+
+    const pinnedDropped = emptySessionListDropped()
+    const pinned = await listCursorSessions(
+      join(home, '.cursor', 'projects'),
+      now,
+      AGENT_SESSION_PER_PROVIDER_LIMIT,
+      '',
+      new Set([id]),
+      pinnedDropped,
+    )
+    expect(pinned).toHaveLength(1)
+    expect(pinnedDropped.oversized).toBe(0)
+
+    const proj = join(home, '.claude', 'projects', 'MU-Chief-Staff')
+    mkdirSync(proj, { recursive: true })
+    const warm = join(proj, `${uuid(1)}.jsonl`)
+    const real = join(proj, `${uuid(2)}.jsonl`)
+    writeFileSync(warm, '{"type":"user","message":{"role":"user","content":"ready"}}\n')
+    writeFileSync(real, '{"type":"custom-title","customTitle":"Real chat"}\n{"type":"user","message":{"role":"user","content":"hello"}}\n')
+    touch(warm, now)
+    touch(real, now)
+    const warmDropped = emptySessionListDropped()
+    const listed = await listClaudeSessions(join(home, '.claude', 'projects'), now, new Set(), 20, new Set(), '', warmDropped)
+    expect(listed.map(row => row.display_label)).toEqual(['Real chat'])
+    expect(warmDropped.age).toBe(0)
+    expect(warmDropped.limit).toBe(0)
   })
 })
 

@@ -14,6 +14,7 @@ const C = 'c9999999-8888-4777-8666-555555555555'
 const DIRS: OccupancyDirs = {
   claudeSessionsDir: '/claude/sessions',
   codexLocksDir: '/codex/locks',
+  cursorChatsDir: '/cursor/chats',
 }
 
 /**

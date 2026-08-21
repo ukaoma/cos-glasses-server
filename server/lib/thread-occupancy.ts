@@ -150,6 +150,16 @@ export interface OccupancyProbes {
    * safety property here.
    */
   transcriptMtimeMs?: (provider: OccupancyProvider, threadId: string) => number | null
+  /**
+   * Cursor Agent CLI session at `~/.cursor/chats/<hash>/<id>/`, or null when
+   * that id is not exactly one continuable chats dir. Occupancy MUST NOT import
+   * fs; this is the only Cursor evidence this detector is allowed to see.
+   */
+  cursorAgentSession?: (threadId: string, chatsDir: string) => {
+    dir: string
+    cwd: string
+    hasConversation: boolean
+  } | null
 }
 
 /**
@@ -464,6 +474,8 @@ export interface OccupancyDirs {
   claudeSessionsDir: string
   /** `<CODEX_HOME|~/.codex>/thread-writer-locks` */
   codexLocksDir: string
+  /** `<COS_AGENT_SESSIONS_HOME|~>/.cursor/chats` */
+  cursorChatsDir: string
 }
 
 // ===========================================================================
@@ -551,8 +563,26 @@ export function threadOccupancy(
   probes: OccupancyProbes,
   dirs: OccupancyDirs,
 ): Occupancy {
+  if (provider === 'cursor') {
+    if (!isValidNativeThreadId(threadId)) {
+      return { attachable: false, owners: [], reason: 'invalid_thread_id' }
+    }
+    if (typeof probes.cursorAgentSession !== 'function' || typeof dirs.cursorChatsDir !== 'string') {
+      return { attachable: false, owners: [], reason: 'probe_failed' }
+    }
+    let session: { dir: string; cwd: string; hasConversation: boolean } | null
+    try {
+      session = probes.cursorAgentSession(threadId, dirs.cursorChatsDir)
+    } catch {
+      return { attachable: false, owners: [], reason: 'probe_failed' }
+    }
+    if (!session || session.hasConversation !== true) {
+      return { attachable: false, owners: [], reason: 'unsupported_provider' }
+    }
+    return { attachable: true, owners: [], reason: null }
+  }
   if (provider !== 'claude' && provider !== 'codex') {
-    // Cursor and anything unrecognised: an honest capability gap, not a failure.
+    // Anything unrecognised: an honest capability gap, not a failure.
     return { attachable: false, owners: [], reason: 'unsupported_provider' }
   }
   // Validated BEFORE any scan. A truncated or malformed id matches no record,

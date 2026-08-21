@@ -27,7 +27,7 @@ const PROC_START_UTC = 'Sun Aug 16 02:03:05 2026'
 const ACTUAL_START_MS = Date.UTC(2026, 7, 16, 2, 3, 5) // 21:03:05 CDT, same instant
 const CLAUDE_DIR = '/home/.claude/sessions'
 const CODEX_DIR = '/home/.codex/thread-writer-locks'
-const DIRS = { claudeSessionsDir: CLAUDE_DIR, codexLocksDir: CODEX_DIR }
+const DIRS = { claudeSessionsDir: CLAUDE_DIR, codexLocksDir: CODEX_DIR, cursorChatsDir: '/home/.cursor/chats' }
 
 function record(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -282,17 +282,34 @@ describe('codex occupancy', () => {
 })
 
 describe('unsupported providers', () => {
-  it('reports cursor and unknowns as unsupported, never free', () => {
-    for (const p of ['cursor', 'gemini', '']) {
+  it('reports unknowns as unsupported, never free', () => {
+    for (const p of ['gemini', '']) {
       expectOccupied(probes(), 'unsupported_provider', p)
     }
   })
 
-  it('checks the provider before the thread id', () => {
-    // An unrecognised provider is a capability gap; reporting invalid_thread_id
-    // for it would send the user chasing the wrong problem.
-    const o = threadOccupancy('cursor', 'nonsense', probes(), DIRS)
+  it('checks an unknown provider before the thread id', () => {
+    const o = threadOccupancy('gemini', 'nonsense', probes(), DIRS)
     expect(o.reason).toBe('unsupported_provider')
+  })
+
+  it('rejects a malformed cursor id before probing chats', () => {
+    const o = threadOccupancy('cursor', 'nonsense', probes({
+      cursorAgentSession: () => ({ dir: '/x', cwd: '/tmp', hasConversation: true }),
+    }), DIRS)
+    expect(o.reason).toBe('invalid_thread_id')
+    expect(o.attachable).toBe(false)
+  })
+
+  it('treats a missing cursor chats session as unsupported, not free', () => {
+    expectOccupied(probes({ cursorAgentSession: () => null }), 'unsupported_provider', 'cursor')
+  })
+
+  it('treats a resolved cursor agent session as attachable', () => {
+    const o = threadOccupancy('cursor', SID, probes({
+      cursorAgentSession: () => ({ dir: '/chats/h/id', cwd: '/tmp', hasConversation: true }),
+    }), DIRS)
+    expect(o).toMatchObject({ attachable: true, owners: [], reason: null })
   })
 })
 

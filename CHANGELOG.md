@@ -1,4 +1,36 @@
-## Unreleased
+## 6.36.16
+- **Cursor Agent Continue.** Continue now resumes a Cursor Agent CLI thread with
+  `agent --resume <id> --workspace <spawn spelling>` in ask-mode. Bindable, not
+  forkable: Fork on Cursor still has no spawn path. Occupancy treats a resolved
+  `~/.cursor/chats/<hash>/<id>/` session (`hasConversation: true`) as attachable
+  with no invented process owner. `--workspace` uses the jsonl folder slug that
+  already exists — never `realpath` of `meta.json.cwd`, which creates a second
+  transcript folder. Queue is refused for Cursor. The 6.36.15 jsonl-mtime write
+  hint is unpublished on the LIST; detail still uses the jsonl mtime the handler
+  already stat'ed as a display-only working signal, never a write gate.
+
+## 6.36.15 (unpublished)
+- **Cursor sessions can show as working.** Occupancy only scanned Claude
+  (registry) and Codex (writer lock). Cursor has neither, so every Cursor row
+  stamped `running: false` even while the jsonl was being written — the lens
+  stayed on the digest and the list never showed a live Cursor turn. The list
+  already paid for Cursor `modified` as the jsonl mtime; a write inside the same
+  30s window Claude/Codex use for `running_active` now synthesizes a display
+  hint (`running` + `running_active`, `running_foreign` still false). Detail
+  uses the file it already stat'ed. Still a hint, never a write gate. Withheld:
+  Continue on Cursor is 6.36.16, and this mtime hint is not in that train.
+
+## 6.36.14
+- **The session LIST now reports what its caps hid.** The 7-day age gate, the
+  20-per-provider cap, and the Cursor 32 MB skip used to drop rows with no
+  signal, so a 60-row list looked complete. `GET /api/agent-sessions` now carries
+  `dropped: { age, limit, oversized }`. Additive: an older client ignores the
+  key. Zero means the walk found nothing to hide, not that the caps are off.
+  Keep-warm titles and Codex files over 32 MB are not counted — Codex is listed
+  oversize on purpose; Cursor is the one that skips. Measured on this machine
+  before publish: 62 listed, **2,144** older than 7 days, **91** over the
+  per-provider cap, **0** oversized. The visible first/last ids match running
+  6.36.13, so the list membership did not change — only the silence did.
 
 ## 6.36.13
 - **Codex was spawned by bare name in four places, and it only worked here by accident.**

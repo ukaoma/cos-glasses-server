@@ -112,6 +112,15 @@ describe('parking a turn at a busy thread', () => {
     expect(res.json).toMatchObject({ error: 'unsupported_provider', queueable: false })
   })
 
+  it('refuses cursor even when occupancy would otherwise look busy', async () => {
+    await start()
+    const res = await http('POST', `/api/agent-sessions/cursor/${threadId}/queued-turns`, {
+      clientTurnId: 'ct-1', cosSessionId: 'cos-1', prompt: 'x',
+    })
+    expect(res.status).toBe(423)
+    expect(res.json).toMatchObject({ error: 'unsupported_provider', queueable: false })
+  })
+
   it('rejects a duplicate id, so a retried request cannot double-post', async () => {
     await start()
     await http('POST', POST, { clientTurnId: 'ct-1', cosSessionId: 'cos-1', prompt: 'ship it' })

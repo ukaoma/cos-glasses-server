@@ -32,10 +32,12 @@ import {
   NATIVE_HEAD_TOKEN_RE,
   TAIL_WINDOW_BYTES,
   headsDiffer,
+  isMessageBearingRow,
   isNativeHeadToken,
   nativeHead,
   realNativeHeadDeps,
   realNativeHeadDirs,
+  transcriptPathFor,
   type NativeHeadDeps,
   type NativeHeadDirs,
 } from './native-head.js'
@@ -56,9 +58,11 @@ function makeRoots(): void {
   dirs = {
     claudeProjectsDir: join(root, '.claude', 'projects'),
     codexSessionsDir: join(root, '.codex', 'sessions'),
+    cursorProjectsDir: join(root, '.cursor', 'projects'),
   }
   mkdirSync(dirs.claudeProjectsDir, { recursive: true })
   mkdirSync(dirs.codexSessionsDir, { recursive: true })
+  mkdirSync(dirs.cursorProjectsDir, { recursive: true })
   deps = realNativeHeadDeps(dirs)
 }
 
@@ -538,14 +542,14 @@ describe('nativeHead — Claude', () => {
   it('refuses providers without a certified transcript shape', () => {
     // BOTH stores are populated under the same id. A gate that merely falls
     // through to the other provider's reader would answer with that provider's
-    // token instead of refusing, and Cursor is Fork-only precisely because its
-    // transcript shape has never been certified.
+    // token instead of refusing. Cursor is certified now and covered in its
+    // own describe; this loop is the uncertified remainder.
     writeClaude('-slug', claudeTranscriptLines())
     writeCodexRollout(AUG16, codexTranscriptLines(), THREAD)
     expect(nativeHead('claude', THREAD, deps)).toMatch(NATIVE_HEAD_TOKEN_RE)
     expect(nativeHead('codex', THREAD, deps)).toMatch(NATIVE_HEAD_TOKEN_RE)
 
-    for (const provider of ['cursor', 'CLAUDE', '', 'claude-code', 'bogus']) {
+    for (const provider of ['CLAUDE', '', 'claude-code', 'bogus', 'gemini']) {
       expect(nativeHead(provider, THREAD, deps)).toBeNull()
     }
   })
@@ -902,6 +906,7 @@ describe('realNativeHeadDirs / realNativeHeadDeps', () => {
 
     expect(resolved.claudeProjectsDir).toBe(join(root, '.claude', 'projects'))
     expect(resolved.codexSessionsDir).toBe(join(root, '.codex', 'sessions'))
+    expect(resolved.cursorProjectsDir).toBe(join(root, '.cursor', 'projects'))
   })
 
   it('reads a transcript end to end through the default, un-injected dependencies', () => {
@@ -937,8 +942,41 @@ describe('readTail cannot wedge the server', () => {
     const deps = realNativeHeadDeps({
       claudeProjectsDir: join(root, '.claude', 'projects'),
       codexSessionsDir: join(root, '.codex', 'sessions'),
+      cursorProjectsDir: join(root, '.cursor', 'projects'),
     })
     expect(nativeHead('codex', thread, deps)).toBeNull()
     expect(Date.now() - started).toBeLessThan(2_000)
+  })
+})
+
+describe('Cursor Agent jsonl watermark', () => {
+  function writeCursor(lines: string[]): string {
+    const file = join(dirs.cursorProjectsDir, 'tmp-ws', 'agent-transcripts', THREAD, `${THREAD}.jsonl`)
+    mkdirSync(join(dirs.cursorProjectsDir, 'tmp-ws', 'agent-transcripts', THREAD), { recursive: true })
+    writeFileSync(file, `${lines.join('\n')}\n`)
+    return file
+  }
+
+  it('watermarks role user/assistant rows and ignores turn_ended', () => {
+    const rows = [
+      JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'hi' }] } }),
+      JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } }),
+    ]
+    writeCursor(rows)
+    expect(transcriptPathFor('cursor', THREAD, deps)?.endsWith(`${THREAD}.jsonl`)).toBe(true)
+    const before = nativeHead('cursor', THREAD, deps)
+    expect(before).toMatch(NATIVE_HEAD_TOKEN_RE)
+
+    appendFileSync(
+      join(dirs.cursorProjectsDir, 'tmp-ws', 'agent-transcripts', THREAD, `${THREAD}.jsonl`),
+      `${JSON.stringify({ type: 'turn_ended' })}\n`,
+    )
+    expect(nativeHead('cursor', THREAD, deps)).toBe(before)
+  })
+
+  it('does not classify turn_ended as a message', () => {
+    expect(isMessageBearingRow('cursor', { type: 'turn_ended' })).toBe(false)
+    expect(isMessageBearingRow('cursor', { role: 'user' })).toBe(true)
+    expect(isMessageBearingRow('cursor', { role: 'assistant' })).toBe(true)
   })
 })

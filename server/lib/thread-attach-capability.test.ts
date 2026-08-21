@@ -77,14 +77,12 @@ describe('what the server publishes', () => {
 
     expect(mayContinue(payload, 'claude')).toBe(true)
     expect(mayContinue(payload, 'codex')).toBe(true)
+    expect(mayContinue(payload, 'cursor')).toBe(true)
   })
 
-  it('never offers Cursor as continuable, gate on or off', () => {
-    // Plan 2.5: Cursor is Fork-only. A Continue offered for it would have no code
-    // path behind it — `isBindableProvider` rejects it at the attach route.
-    for (const gate of [() => true, () => false]) {
-      expect(mayContinue(threadAttachHealthFields(threadAttachCapability(gate)), 'cursor')).toBe(false)
-    }
+  it('offers Cursor as continuable once bindable, gate on or off', () => {
+    expect(mayContinue(threadAttachHealthFields(threadAttachCapability(() => true)), 'cursor')).toBe(true)
+    expect(mayContinue(threadAttachHealthFields(threadAttachCapability(() => false)), 'cursor')).toBe(false)
   })
 
   it('stays distinguishable from a server that has never heard of Continue', () => {
@@ -191,7 +189,7 @@ describe('reading a payload from any server', () => {
     })
     // A newer server naming a fourth provider must not make an older client offer
     // a Continue it cannot perform.
-    expect(capability.providers).toEqual(['claude'])
+    expect(capability.providers).toEqual(['claude', 'cursor'])
   })
 
   it('does not repeat a provider a payload lists twice', () => {
@@ -264,7 +262,7 @@ describe('the live /api/health and /api/models surfaces', () => {
     const on = await (await fetch(`${base}/api/health`)).json()
     expect(mayContinue(on, 'claude')).toBe(true)
     expect(mayContinue(on, 'codex')).toBe(true)
-    expect(mayContinue(on, 'cursor')).toBe(false)
+    expect(mayContinue(on, 'cursor')).toBe(true)
   }, 30_000)
 
   it('publishes the same answer on the surface the companion actually polls', async () => {

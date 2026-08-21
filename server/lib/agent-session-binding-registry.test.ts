@@ -270,7 +270,7 @@ describe('hydration fails closed', () => {
       `claude:${THREAD}`,                    // unprefixed — the aliasable form
       `7:claude:36:${THREAD}`,               // provider length wrong
       `6:claude:35:${THREAD}`,               // id length wrong
-      `6:cursor:36:${THREAD}`,               // provider is not bindable
+      `6:gemini:36:${THREAD}`,               // provider is not bindable
       '6:claude:8:a4b2b4dd',                 // truncated display id
       `6:claude:36:${THREAD.toUpperCase()}`, // wrong case
     ]
@@ -442,15 +442,14 @@ describe('validation happens before a value can reach a key or a path', () => {
     attachLive(reg)
     expect(reg.create(attachRequest({ bindingId: 'bind-2', nativeThreadId: 'native:evil' })).reason)
       .toBe('invalid_thread_id')
-    expect(reg.create(attachRequest({ bindingId: 'bind-2', provider: 'cursor', nativeThreadId: OTHER })).reason)
+    expect(reg.create(attachRequest({ bindingId: 'bind-2', provider: 'gemini', nativeThreadId: OTHER })).reason)
       .toBe('invalid_provider')
     expect(reg.create(attachRequest({ bindingId: 'b/../c', nativeThreadId: OTHER })).reason)
       .toBe('invalid_binding_id')
   })
 
-  it('rejects cursor, which is fork-only', () => {
-    expect(open().create(attachRequest({ provider: 'cursor' })))
-      .toEqual({ binding: null, reason: 'invalid_provider' })
+  it('accepts cursor as Continue-capable, not fork-only', () => {
+    expect(open().create(attachRequest({ provider: 'cursor' })).binding?.provider).toBe('cursor')
   })
 
   it('rejects a bindingId shaped to collide inside a marker', () => {

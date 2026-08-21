@@ -40,12 +40,14 @@ function fixtureHome(): { home: string; roots: AgentSessionRoots } {
     claudeCodeSessions: join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions'),
     codexSessions: join(home, '.codex', 'sessions'),
     cursorProjects: join(home, '.cursor', 'projects'),
+    cursorChats: join(home, '.cursor', 'chats'),
     cursorComposerDb: join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb'),
     cursorWorkspaceStorage: join(home, 'Library', 'Application Support', 'Cursor', 'User', 'workspaceStorage'),
   }
   mkdirSync(roots.claudeProjects, { recursive: true })
   mkdirSync(roots.codexSessions, { recursive: true })
   mkdirSync(roots.cursorProjects, { recursive: true })
+  mkdirSync(roots.cursorChats, { recursive: true })
   return { home, roots }
 }
 
@@ -221,6 +223,28 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map(close => close()))
 })
 
+describe('agent session list route reports dropped caps', () => {
+  it('puts dropped on the wire even when every count is zero', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cos-agent-list-drops-'))
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    try {
+      const base = await startSearchServer()
+      const res = await fetch(`${base}/api/agent-sessions?limit=20`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as {
+        dropped: { age: number; limit: number; oversized: number }
+        sessions: unknown[]
+      }
+      expect(body.dropped).toEqual({ age: 0, limit: 0, oversized: 0 })
+      expect(Array.isArray(body.sessions)).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+    }
+  })
+})
+
 describe('agent session search route', () => {
   it('registers lookup before the provider detail route', () => {
     const source = readFileSync(new URL('./agent-sessions.ts', import.meta.url), 'utf8')
@@ -293,5 +317,62 @@ describe('the running stamp the lens reads', () => {
     const out = withRunning({ session_id: ID, display_label: 'keep me' }, scanWith({}))
     expect(out.display_label).toBe('keep me')
     expect(out.session_id).toBe(ID)
+  })
+})
+
+describe('Cursor running_active reaches the wire', () => {
+  async function withCursorHome(mtime: Date, run: (base: string, id: string) => Promise<void>) {
+    const { home, roots } = fixtureHome()
+    const id = cursorId
+    const file = join(
+      roots.cursorProjects,
+      'Users-ukaoma-Documents-GitHub-MU-Chief-Staff',
+      'agent-transcripts',
+      id,
+      `${id}.jsonl`,
+    )
+    writeJsonl(file, [
+      '{"role":"user","message":{"content":[{"type":"text","text":"<user_query>Fix session landing</user_query>"}]}}',
+    ])
+    touch(file, mtime)
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    try {
+      await run(await startSearchServer(), id)
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+    }
+  }
+
+  it('stamps a just-written Cursor jsonl as working on detail, not the list', async () => {
+    await withCursorHome(new Date(), async (base, id) => {
+      const listed = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as {
+        sessions: Array<{ session_id: string; running?: boolean; running_active?: boolean; running_foreign?: boolean }>
+      }
+      // List occupancy does not invent a Cursor process owner from jsonl mtime.
+      expect(listed.sessions.find(s => s.session_id === id)).toMatchObject({
+        running: false, running_active: false,
+      })
+      const detail = await fetch(`${base}/api/agent-sessions/cursor/${id}`)
+      expect(detail.status).toBe(200)
+      expect(await detail.json()).toMatchObject({
+        running: true, running_active: true, running_foreign: false, running_stamped: true,
+      })
+    })
+  })
+
+  it('does not stamp a Cursor jsonl that stopped two minutes ago', async () => {
+    await withCursorHome(new Date(Date.now() - 120_000), async (base, id) => {
+      const listed = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as {
+        sessions: Array<{ session_id: string; running?: boolean; running_active?: boolean }>
+      }
+      expect(listed.sessions.find(s => s.session_id === id)).toMatchObject({
+        running: false, running_active: false,
+      })
+      expect(await (await fetch(`${base}/api/agent-sessions/cursor/${id}`)).json()).toMatchObject({
+        running: false, running_active: false, running_stamped: true,
+      })
+    })
   })
 })

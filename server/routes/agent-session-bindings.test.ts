@@ -92,6 +92,7 @@ function probes(over: Partial<OccupancyProbes> = {}): OccupancyProbes {
     readFile: () => JSON.stringify(record()),
     lockHolders: () => [],
     cosSpawnedPids: () => new Map<number, number>(),
+    cursorAgentSession: () => null,
     ...over,
   }
 }
@@ -128,6 +129,7 @@ function hostileProbes(): OccupancyProbes {
     readFile: boom,
     lockHolders: boom,
     cosSpawnedPids: boom,
+    cursorAgentSession: boom,
   }
 }
 
@@ -155,7 +157,7 @@ function binding(over: Partial<NativeBinding> = {}): NativeBinding {
 function deps(over: Partial<AgentSessionBindingsDeps> = {}): AgentSessionBindingsDeps {
   return {
     probes: probes(),
-    dirs: { claudeSessionsDir: claudeDir, codexLocksDir: codexDir },
+    dirs: { claudeSessionsDir: claudeDir, codexLocksDir: codexDir, cursorChatsDir: '/cursor/chats' },
     now: () => NOW,
     bindings: reg(() => []),
     // The write feature is OFF by default in production (plan 4.9), so the suite
@@ -232,7 +234,7 @@ const RESOLUTION = { workspaceFingerprint: CWD, sourceFingerprint: SOCKET }
 function writeDeps(over: Partial<AgentSessionBindingsDeps> = {}): AgentSessionBindingsDeps {
   return {
     probes: freeProbes(),
-    dirs: { claudeSessionsDir: claudeDir, codexLocksDir: codexDir },
+    dirs: { claudeSessionsDir: claudeDir, codexLocksDir: codexDir, cursorChatsDir: '/cursor/chats' },
     now: () => NOW,
     bindings: wire(openRegistry()),
     // Write tests exercise the enabled path; the gate's own tests drive OFF.
@@ -544,7 +546,7 @@ describe('validation happens before the filesystem does', () => {
   })
 
   it('treats an unrecognised provider as a capability gap, not an error status', async () => {
-    const { status, body } = await attachability(deps({ probes: hostileProbes() }), 'cursor')
+    const { status, body } = await attachability(deps({ probes: hostileProbes() }), 'gemini')
     expect(status).toBe(200)
     expect(body).toMatchObject({ attachable: false, reason: 'unsupported_provider' })
   })
@@ -556,8 +558,25 @@ describe('validation happens before the filesystem does', () => {
 
   it('reports the provider gap ahead of the id gap, matching the detector', async () => {
     // Pins the precedence so this route and threadOccupancy cannot drift apart.
-    const { body } = await attachability(deps({ probes: hostileProbes() }), 'cursor', 'not-a-uuid')
+    const { body } = await attachability(deps({ probes: hostileProbes() }), 'gemini', 'not-a-uuid')
     expect(body.reason).toBe('unsupported_provider')
+  })
+
+  it('rejects a malformed cursor id before probing chats', async () => {
+    const { body } = await attachability(deps({
+      probes: probes({ cursorAgentSession: () => ({ dir: '/x', cwd: '/tmp', hasConversation: true }) }),
+    }), 'cursor', 'not-a-uuid')
+    expect(body.reason).toBe('invalid_thread_id')
+  })
+
+  it('treats a resolved cursor agent session as attachable', async () => {
+    const { status, body } = await attachability(deps({
+      probes: probes({
+        cursorAgentSession: () => ({ dir: '/chats/h/id', cwd: '/tmp', hasConversation: true }),
+      }),
+    }), 'cursor')
+    expect(status).toBe(200)
+    expect(body).toMatchObject({ attachable: true, reason: null })
   })
 })
 
@@ -643,7 +662,7 @@ describe('every doubt the detector can raise reaches the wire as a refusal', () 
     // short-circuit were removed, these probes throw and the reason becomes
     // probe_failed instead.
     { reason: 'attach_disabled', d: () => deps({ attachEnabled: false, probes: hostileProbes() }) },
-    { reason: 'unsupported_provider', d: () => deps({ probes: hostileProbes() }), provider: 'cursor' },
+    { reason: 'unsupported_provider', d: () => deps({ probes: hostileProbes() }), provider: 'gemini' },
     { reason: 'invalid_thread_id', d: () => deps({ probes: hostileProbes() }), id: 'nope' },
     { reason: 'detector_unavailable', d: () => deps({ probes: probes({ dirExists: () => false }) }) },
     { reason: 'registry_unreadable', d: () => deps({ probes: probes({ readFile: () => null }) }) },
@@ -994,7 +1013,7 @@ describe('attach is gated on the occupancy verdict, not advised by it', () => {
   const refusals: Array<{ reason: OccupancyReason; d: () => AgentSessionBindingsDeps; provider?: string; id?: string }> = [
     { reason: 'live_desktop_process', d: () => writeDeps({ probes: probes() }) },
     { reason: 'native_thread_working', d: () => writeDeps({ probes: workingProbes() }) },
-    { reason: 'unsupported_provider', d: () => writeDeps({ probes: hostileProbes() }), provider: 'cursor' },
+    { reason: 'unsupported_provider', d: () => writeDeps({ probes: hostileProbes() }), provider: 'gemini' },
     { reason: 'invalid_thread_id', d: () => writeDeps({ probes: hostileProbes() }), id: 'not-a-uuid' },
     { reason: 'detector_unavailable', d: () => writeDeps({ probes: freeProbes({ dirExists: () => false }) }) },
     { reason: 'registry_unreadable', d: () => writeDeps({ probes: freeProbes({ readFile: () => null }) }) },
@@ -1479,6 +1498,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
       readFile: () => JSON.stringify(record({ pid: CHILD_PID, procStart: CHILD_PROC_START })),
       lockHolders: () => [],
       cosSpawnedPids: () => ledger.snapshot(),
+      cursorAgentSession: () => null,
     }
   }
 
@@ -1487,7 +1507,7 @@ describe('COS must be able to tell its own child from a desktop window', () => {
     let registered = false
     let spawnAccepted: boolean | null = null
     let seenDuringDelivery: Occupancy | null = null
-    const dirs = { claudeSessionsDir: claudeDir, codexLocksDir: codexDir }
+    const dirs = { claudeSessionsDir: claudeDir, codexLocksDir: codexDir, cursorChatsDir: '/cursor/chats' }
     const probeSet = childProbes(ledger, () => registered)
 
     const base = await start(writeDeps({
@@ -2110,7 +2130,7 @@ describe('every way a write can be refused reaches the wire with words', () => {
     // the write surface too and not only on the read-only probe.
     { reason: 'live_desktop_process', run: () => attach(writeDeps({ probes: probes() })) },
     { reason: 'native_thread_working', run: () => attach(writeDeps({ probes: workingProbes() })) },
-    { reason: 'unsupported_provider', run: () => attach(writeDeps({ probes: hostileProbes() }), { cosSessionId: 'c' }, 'cursor') },
+    { reason: 'unsupported_provider', run: () => attach(writeDeps({ probes: hostileProbes() }), { cosSessionId: 'c' }, 'gemini') },
     { reason: 'invalid_thread_id', run: () => attach(writeDeps({ probes: hostileProbes() }), { cosSessionId: 'c' }, 'claude', 'nope') },
     { reason: 'detector_unavailable', run: () => attach(writeDeps({ probes: freeProbes({ dirExists: () => false }) })) },
     { reason: 'registry_unreadable', run: () => attach(writeDeps({ probes: freeProbes({ readFile: () => null }) })) },

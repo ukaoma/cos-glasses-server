@@ -39,9 +39,13 @@ import type { AgentProvider } from './agent-session-store.js'
 
 export type BindingState = 'staging' | 'active' | 'detaching' | 'detached'
 
-/** Providers that can carry a binding. Cursor is Fork-only (plan 2.5). */
-export const BINDABLE_PROVIDERS = ['claude', 'codex'] as const
+/** Providers that can carry a Continue binding. Cursor is bindable, not forkable. */
+export const BINDABLE_PROVIDERS = ['claude', 'codex', 'cursor'] as const
 export type BindableProvider = (typeof BINDABLE_PROVIDERS)[number]
+
+/** Providers that can fork. Cursor Agent has no `--fork-session` equivalent. */
+export const FORKABLE_PROVIDERS = ['claude', 'codex'] as const
+export type ForkableProvider = (typeof FORKABLE_PROVIDERS)[number]
 
 export interface NativeBinding {
   bindingId: string
@@ -93,6 +97,10 @@ export const BINDING_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
 export function isBindableProvider(value: unknown): value is BindableProvider {
   return typeof value === 'string' && (BINDABLE_PROVIDERS as readonly string[]).includes(value)
+}
+
+export function isForkableProvider(value: unknown): value is ForkableProvider {
+  return typeof value === 'string' && (FORKABLE_PROVIDERS as readonly string[]).includes(value)
 }
 
 /**

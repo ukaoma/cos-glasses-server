@@ -43,10 +43,11 @@
 // owns the endpoints "so it cannot drift from whether they are actually
 // registered."
 //
-// `providers` is sourced from BINDABLE_PROVIDERS for the same reason. Cursor must
-// not appear (plan 2.5 makes it Fork-only), and the way to guarantee that is to
-// read the list that `isBindableProvider` — the check the attach route itself
-// applies — is built from, rather than restating two names here and hoping.
+// `providers` is sourced from BINDABLE_PROVIDERS for the same reason. Cursor is
+// Continue-capable once bindable; Fork stays on FORKABLE_PROVIDERS (claude/codex).
+// The way to guarantee the published list matches the attach route is to read
+// the list that `isBindableProvider` is built from, rather than restating names
+// here and hoping.
 //
 // ------------------------------------------------- why providers empties out
 //
@@ -86,7 +87,7 @@ export interface ThreadAttachCapability {
   /**
    * Providers that can be CONTINUED, not merely browsed or forked.
    *
-   * Empty whenever `enabled` is false. Cursor is never a member: it is Fork-only.
+   * Empty whenever `enabled` is false. Cursor is a member once bindable.
    */
   providers: BindableProvider[]
   /**

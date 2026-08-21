@@ -94,8 +94,9 @@ import { isBindableProvider, type BindableProvider } from './agent-session-bindi
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
 import { processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import { getCodexTrustMode } from './codex-run-ledger.js'
+import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
 
-/** Providers with a certified attached path. Cursor is Fork-only (plan 2.5). */
+/** Providers with a certified attached path. Cursor is bindable, not forkable. */
 export type AttachedProvider = BindableProvider
 
 /**
@@ -487,15 +488,45 @@ export function buildCodexAttachedArgs(nativeThreadId: string, cwd: string): str
 }
 
 /**
+ * Cursor Agent CLI: ask-mode resume into an existing thread.
+ *
+ * `--force` is the agent-mode bypass and is banned here. Workspace is the
+ * spawn spelling from `spawnWorkspace`, never realpath of `meta.json.cwd`.
+ */
+export function buildCursorAttachedArgs(nativeThreadId: string, cwd: string): string[] {
+  return [
+    '-p',
+    '--mode', 'ask',
+    '--model', CURSOR_SLOT_MODEL_IDS['cursor-composer'],
+    '--output-format', 'stream-json',
+    '--stream-partial-output',
+    '--trust',
+    '--workspace', cwd,
+    '--resume', nativeThreadId,
+  ]
+}
+
+const PATH_VALUED_FLAGS = new Set(['--workspace', '-C', '--cd', '--add-dir'])
+const BARE_BANNED_PERMISSION_ARGS = new Set(
+  BANNED_PERMISSION_ARGS.filter(flag => !flag.startsWith('-')),
+)
+
+/**
  * Is this argv free of every flag plan 4.7 bans?
  *
- * Substring, not equality: a banned token can arrive attached to its value
- * (`--permission-mode=bypassPermissions`, `--sandbox danger-full-access`), and an
- * equality check would wave those through while looking correct.
+ * Flag-position tokens (start with `-`) are substring-matched so
+ * `--permission-mode=bypassPermissions` still hits. Bare tokens
+ * (`danger-full-access`) match only as their own argv slot. Values of
+ * `--workspace` / `-C` are skipped: a cwd containing `--force` is a path,
+ * not a permission flag.
  */
 export function findBannedPermissionArg(args: readonly string[]): string | null {
-  for (const arg of args) {
-    const value = String(arg)
+  for (let i = 0; i < args.length; i++) {
+    const value = String(args[i])
+    const prev = i > 0 ? String(args[i - 1]) : ''
+    if (PATH_VALUED_FLAGS.has(prev)) continue
+    if (BARE_BANNED_PERMISSION_ARGS.has(value)) return value
+    if (!value.startsWith('-')) continue
     for (const banned of BANNED_PERMISSION_ARGS) {
       if (value.includes(banned)) return banned
     }
@@ -520,7 +551,9 @@ export function findBannedPermissionArg(args: readonly string[]): string | null 
 function buildArgs(provider: AttachedProvider, nativeThreadId: string, cwd: string): string[] {
   const args = provider === 'claude'
     ? buildClaudeAttachedArgs(nativeThreadId)
-    : buildCodexAttachedArgs(nativeThreadId, cwd)
+    : provider === 'codex'
+      ? buildCodexAttachedArgs(nativeThreadId, cwd)
+      : buildCursorAttachedArgs(nativeThreadId, cwd)
   const banned = findBannedPermissionArg(args)
   if (banned !== null) {
     // The flag name only. Never the argv, which carries the thread id and cwd.

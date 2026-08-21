@@ -109,11 +109,13 @@ import {
   assertUsable,
   boundToMarker,
   isBindableProvider,
+  isForkableProvider,
   isExpired,
   isPinned,
   isTerminal,
   targetKey,
   type BindableProvider,
+  type ForkableProvider,
   type BindingState,
   type NativeBinding,
 } from '../lib/agent-session-binding-store.js'
@@ -798,9 +800,11 @@ function occupancyDepsUsable(deps: AgentSessionBindingsDeps): boolean {
     typeof probes.fileExists === 'function' &&
     typeof probes.lockHolders === 'function' &&
     typeof probes.cosSpawnedPids === 'function' &&
+    typeof probes.cursorAgentSession === 'function' &&
     !!dirs &&
     typeof dirs.claudeSessionsDir === 'string' &&
-    typeof dirs.codexLocksDir === 'string'
+    typeof dirs.codexLocksDir === 'string' &&
+    typeof dirs.cursorChatsDir === 'string'
   )
 }
 
@@ -1097,7 +1101,7 @@ export function isOpaque(value: unknown): value is string {
 
 /** What the route hands `forkThread`. The client supplies none of these but the prompt. */
 export interface ForkRouteRequest {
-  provider: BindableProvider
+  provider: ForkableProvider
   nativeThreadId: string
   prompt: string
   /** Resolved server-side. Plan 4.2: the client never sends a path. */
@@ -1734,7 +1738,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // Validated HERE rather than inherited from an occupancy verdict, because
       // this route deliberately never asks for one. The id becomes a spawn
       // argument and a lock key, so `isValidNativeThreadId` is the whole guard.
-      if (!isBindableProvider(providerParam)) return refuseFork('fork_unsupported_provider')
+      if (!isForkableProvider(providerParam)) return refuseFork('fork_unsupported_provider')
       if (!isValidNativeThreadId(threadIdParam)) return refuseFork('fork_invalid_thread_id')
 
       const now = readNow()

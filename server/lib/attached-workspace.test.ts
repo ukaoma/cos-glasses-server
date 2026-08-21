@@ -118,9 +118,29 @@ describe('resolveAttachedWorkspace refuses rather than guessing', () => {
   })
 
   it('refuses an unsupported provider', () => {
-    for (const p of ['cursor', 'gemini', '']) {
+    for (const p of ['gemini', '']) {
       expect(resolveAttachedWorkspace(p, THREAD, deps())).toBeNull()
     }
+  })
+
+  it('resolves cursor from spawn spelling plus the jsonl path', () => {
+    const cwd = '/tmp/cursor-ws'
+    const jsonl = '/home/.cursor/projects/tmp-cursor-ws/agent-transcripts/id/id.jsonl'
+    const r = resolveAttachedWorkspace('cursor', THREAD, deps({
+      cursorSpawnWorkspace: () => cwd,
+      transcriptPath: () => jsonl,
+      dirExists: () => true,
+    }))!
+    expect(r.path).toBe(cwd)
+    expect(r.workspaceFingerprint).toBe(fingerprint(cwd))
+    expect(r.sourceFingerprint).toBe(fingerprint(jsonl))
+  })
+
+  it('refuses cursor without a spawn workspace', () => {
+    expect(resolveAttachedWorkspace('cursor', THREAD, deps({
+      cursorSpawnWorkspace: () => null,
+      transcriptPath: () => '/x.jsonl',
+    }))).toBeNull()
   })
 
   it('never returns the path on a fingerprint', () => {

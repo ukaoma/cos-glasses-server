@@ -19,7 +19,7 @@ import { homedir } from 'node:os'
 // Binary resolution
 // ---------------------------------------------------------------------------
 
-export type BinaryResolutionFailure = 'env_override_unusable' | 'not_found'
+export type BinaryResolutionFailure = 'env_override_unusable' | 'not_found' | 'unknown_provider'
 
 export type BinaryResolution =
   | { ok: true; path: string; source: 'env' | 'absolute' | 'path' }
@@ -94,7 +94,7 @@ export interface BinarySpec {
  * `attached-provider-adapter.ts`, and importing it back would recreate exactly the cycle
  * this extraction exists to break. Callers pass a string-union value, which is assignable.
  */
-export function providerBinarySpec(provider: string): BinarySpec {
+export function providerBinarySpec(provider: string): BinarySpec | null {
   const home = (() => {
     try {
       return homedir()
@@ -113,18 +113,30 @@ export function providerBinarySpec(provider: string): BinarySpec {
       ].filter(Boolean),
     }
   }
-  return {
-    name: 'codex',
-    envKeys: ['COS_ATTACHED_CODEX_BIN', 'COS_CODEX_BIN'],
-    absolutes: [
-      // Verified 2026-08-15: codex-cli 0.148.0-alpha.9 lives here, and there is
-      // no `codex` on PATH at all on this machine.
-      '/Applications/ChatGPT.app/Contents/Resources/codex',
-      home ? join(home, '.codex', 'bin', 'codex') : '',
-      '/opt/homebrew/bin/codex',
-      '/usr/local/bin/codex',
-    ].filter(Boolean),
+  if (provider === 'codex') {
+    return {
+      name: 'codex',
+      envKeys: ['COS_ATTACHED_CODEX_BIN', 'COS_CODEX_BIN'],
+      absolutes: [
+        // Verified 2026-08-15: codex-cli 0.148.0-alpha.9 lives here, and there is
+        // no `codex` on PATH at all on this machine.
+        '/Applications/ChatGPT.app/Contents/Resources/codex',
+        home ? join(home, '.codex', 'bin', 'codex') : '',
+        '/opt/homebrew/bin/codex',
+        '/usr/local/bin/codex',
+      ].filter(Boolean),
+    }
   }
+  if (provider === 'cursor') {
+    return {
+      name: 'agent',
+      envKeys: ['COS_ATTACHED_CURSOR_AGENT_BIN', 'COS_CURSOR_AGENT_BIN'],
+      absolutes: [
+        home ? join(home, '.local', 'bin', 'agent') : '',
+      ].filter(Boolean),
+    }
+  }
+  return null
 }
 
 /**
@@ -144,7 +156,9 @@ export function resolveProviderBinary(
   provider: string,
   env: NodeJS.ProcessEnv = process.env,
 ): BinaryResolution {
-  return resolveBinaryFromSpec(providerBinarySpec(provider), env)
+  const spec = providerBinarySpec(provider)
+  if (!spec) return { ok: false, binary: provider, detail: 'unknown_provider' }
+  return resolveBinaryFromSpec(spec, env)
 }
 
 /**

@@ -206,6 +206,10 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       return res.status(400).json({ error: 'invalid_request' })
     }
 
+    if (provider === 'cursor') {
+      return res.status(423).json({ error: 'unsupported_provider', queueable: false })
+    }
+
     // THE GATE DECIDES WHETHER PARKING IS EVEN HONEST. A structural refusal can never
     // clear, and telling someone their turn is queued when it can never run is worse
     // than refusing it. An attachable thread is not queued either -- it is sent now,

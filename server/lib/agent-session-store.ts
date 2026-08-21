@@ -27,6 +27,17 @@ const CODEX_ROLLOUT_STAMP = /^rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2}
 export type AgentProvider = 'claude' | 'codex' | 'cursor'
 export type AgentSessionSort = 'updated' | 'opened'
 
+/** Caps that drop LIST rows with no other signal. Search has its own budget. */
+export interface AgentSessionListDropped {
+  age: number
+  limit: number
+  oversized: number
+}
+
+export function emptySessionListDropped(): AgentSessionListDropped {
+  return { age: 0, limit: 0, oversized: 0 }
+}
+
 export interface AgentSessionRow {
   session_id: string
   provider: AgentProvider
@@ -47,6 +58,7 @@ export interface AgentSessionRoots {
   claudeCodeSessions: string
   codexSessions: string
   cursorProjects: string
+  cursorChats: string
   cursorComposerDb: string
   cursorWorkspaceStorage: string
 }
@@ -58,6 +70,7 @@ export function agentSessionRoots(home = process.env.COS_AGENT_SESSIONS_HOME || 
     claudeCodeSessions: join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions'),
     codexSessions: join(home, '.codex', 'sessions'),
     cursorProjects: join(home, '.cursor', 'projects'),
+    cursorChats: join(home, '.cursor', 'chats'),
     cursorComposerDb: join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb'),
     cursorWorkspaceStorage: join(home, 'Library', 'Application Support', 'Cursor', 'User', 'workspaceStorage'),
   }
@@ -836,6 +849,7 @@ export async function listClaudeSessions(
   cap = AGENT_SESSION_PER_PROVIDER_LIMIT,
   starredIds: ReadonlySet<string> = new Set(),
   desktopSessionsRoot = '',
+  dropped: AgentSessionListDropped = emptySessionListDropped(),
 ): Promise<AgentSessionRow[]> {
   const seen = new Set<string>()
   const pinnedCandidates: Array<{ file: string; native: string; project: string; mtimeMs: number; birthtimeMs: number; desktop?: string }> = []
@@ -854,7 +868,10 @@ export async function listClaudeSessions(
       if (!st?.isFile) continue
       const pinned = starredIds.has(native.toLowerCase())
       const fresh = now.getTime() - st.mtimeMs <= AGENT_SESSION_MAX_AGE_MS
-      if (!pinned && !fresh) continue
+      if (!pinned && !fresh) {
+        dropped.age += 1
+        continue
+      }
       const candidate = {
         file,
         native,
@@ -888,8 +905,12 @@ export async function listClaudeSessions(
 
   const toRows = async (candidates: typeof recentCandidates, limit: number): Promise<AgentSessionRow[]> => {
     const rows: AgentSessionRow[] = []
-    for (const candidate of candidates) {
-      if (rows.length >= Math.max(0, limit)) break
+    for (let i = 0; i < candidates.length; i++) {
+      if (rows.length >= Math.max(0, limit)) {
+        dropped.limit += candidates.length - i
+        break
+      }
+      const candidate = candidates[i]
       let title = ''
       let project = candidate.project
       let firstPrompt = ''
@@ -935,6 +956,7 @@ export async function listCodexSessions(
   sessionsRoot: string,
   now: Date,
   cap = AGENT_SESSION_PER_PROVIDER_LIMIT,
+  dropped: AgentSessionListDropped = emptySessionListDropped(),
 ): Promise<AgentSessionRow[]> {
   const names = await loadCodexThreadNames(sessionsRoot)
   const pinnedIds = await loadCodexPinnedIds(sessionsRoot)
@@ -947,7 +969,10 @@ export async function listCodexSessions(
     const fileId = idFromCodexFilename(name)
     const pinned = fileId ? pinnedIds.has(fileId) : false
     const fresh = now.getTime() - st.mtimeMs <= AGENT_SESSION_MAX_AGE_MS
-    if (!pinned && !fresh) continue
+    if (!pinned && !fresh) {
+      dropped.age += 1
+      continue
+    }
     const candidate = { file, name, mtimeMs: st.mtimeMs, birthtimeMs: st.birthtimeMs }
     if (pinned) pinnedCandidates.push(candidate)
     else recentCandidates.push(candidate)
@@ -957,8 +982,12 @@ export async function listCodexSessions(
 
   const toRows = async (candidates: typeof recentCandidates, limit: number): Promise<AgentSessionRow[]> => {
     const rows: AgentSessionRow[] = []
-    for (const candidate of candidates) {
-      if (rows.length >= Math.max(0, limit)) break
+    for (let i = 0; i < candidates.length; i++) {
+      if (rows.length >= Math.max(0, limit)) {
+        dropped.limit += candidates.length - i
+        break
+      }
+      const candidate = candidates[i]
       const meta = await peekCodexMeta(candidate.file)
       if (!meta || meta.subagent) continue
       // THE FILENAME WINS WHEN THEY DISAGREE.
@@ -1011,6 +1040,7 @@ export async function listCursorSessions(
   cap = AGENT_SESSION_PER_PROVIDER_LIMIT,
   composerDb = '',
   pinnedIds: ReadonlySet<string> = new Set(),
+  dropped: AgentSessionListDropped = emptySessionListDropped(),
 ): Promise<AgentSessionRow[]> {
   const composerNames = composerDb ? await loadCursorComposerNames(composerDb) : new Map<string, string>()
   const byId = new Map<string, { file: string; sessionDir: string; project: string; mtimeMs: number; birthtimeMs: number }>()
@@ -1024,9 +1054,15 @@ export async function listCursorSessions(
       const file = join(transcripts, sessionDir, `${sessionDir}.jsonl`)
       const st = await fileStat(file)
       if (!st?.isFile) continue
-      if (!pinned && st.size > AGENT_SESSION_MAX_FILE_BYTES) continue
+      if (!pinned && st.size > AGENT_SESSION_MAX_FILE_BYTES) {
+        dropped.oversized += 1
+        continue
+      }
       const fresh = now.getTime() - st.mtimeMs <= AGENT_SESSION_MAX_AGE_MS
-      if (!pinned && !fresh) continue
+      if (!pinned && !fresh) {
+        dropped.age += 1
+        continue
+      }
       const next = {
         file,
         sessionDir,
@@ -1045,8 +1081,12 @@ export async function listCursorSessions(
 
   const toRows = async (candidates: typeof recentCandidates, limit: number): Promise<AgentSessionRow[]> => {
     const rows: AgentSessionRow[] = []
-    for (const candidate of candidates) {
-      if (rows.length >= Math.max(0, limit)) break
+    for (let i = 0; i < candidates.length; i++) {
+      if (rows.length >= Math.max(0, limit)) {
+        dropped.limit += candidates.length - i
+        break
+      }
+      const candidate = candidates[i]
       const peek = await peekCursorDiscussion(candidate.file)
       const firstPrompt = await firstCursorUserTitle(candidate.file) ?? peek.lastUser ?? ''
       const title = composerNames.get(candidate.sessionDir)
@@ -1141,6 +1181,7 @@ export async function listAgentSessions(
   live: AgentSessionRow[] = [],
   limit = AGENT_SESSION_LIST_LIMIT,
   sort: AgentSessionSort = 'updated',
+  dropped: AgentSessionListDropped = emptySessionListDropped(),
 ): Promise<AgentSessionRow[]> {
   const starredIds = await loadClaudeStarredIds(roots.claudeDesktopConfig)
   const cursorPinned = await loadCursorPinnedIds(roots.cursorWorkspaceStorage)
@@ -1159,9 +1200,9 @@ export async function listAgentSessions(
   const cap = AGENT_SESSION_PER_PROVIDER_LIMIT
   let rows = dedupeSessions([
     ...enrichedLive,
-    ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions),
-    ...await listCodexSessions(roots.codexSessions, now, cap),
-    ...await listCursorSessions(roots.cursorProjects, now, cap, roots.cursorComposerDb, cursorPinned),
+    ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions, dropped),
+    ...await listCodexSessions(roots.codexSessions, now, cap, dropped),
+    ...await listCursorSessions(roots.cursorProjects, now, cap, roots.cursorComposerDb, cursorPinned, dropped),
   ])
   if (sort === 'opened') {
     rows = rows.filter(entry => {
@@ -1178,6 +1219,8 @@ export async function listAgentSessions(
     // pin-boosting here made the lens show July stars instead of today.
     rows.sort((a, b) => (b.modified || '').localeCompare(a.modified || ''))
   }
+  const extras = Math.max(0, rows.length - Math.max(0, limit))
+  if (extras) dropped.limit += extras
   return rows.slice(0, limit)
 }
 

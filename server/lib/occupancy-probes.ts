@@ -51,6 +51,7 @@ import { basename, join, resolve } from 'node:path'
 import { NATIVE_THREAD_ID_RE } from './native-thread-id.js'
 import { transcriptPathFor, type NativeHeadDeps } from './native-head.js'
 import { parseProcStartUtcMs, type OccupancyDirs, type OccupancyProbes } from './thread-occupancy.js'
+import { resolveCursorAgentSession } from './cursor-agent-store.js'
 
 // Re-exported rather than reimplemented. `claudeSessionsDir` already encodes the
 // COS_CLAUDE_SESSIONS_DIR -> CLAUDE_CONFIG_DIR -> ~/.claude precedence AND is the
@@ -73,7 +74,12 @@ export function codexLocksDir(): string {
 }
 
 export function realOccupancyDirs(): OccupancyDirs {
-  return { claudeSessionsDir: claudeSessionsDir(), codexLocksDir: codexLocksDir() }
+  const home = process.env.COS_AGENT_SESSIONS_HOME?.trim() || homedir()
+  return {
+    claudeSessionsDir: claudeSessionsDir(),
+    codexLocksDir: codexLocksDir(),
+    cursorChatsDir: join(home, '.cursor', 'chats'),
+  }
 }
 
 /** Absolute first, bare name as the fallback: a launchd/Finder-spawned server has no login PATH. */
@@ -441,6 +447,7 @@ export function realOccupancyProbes(ledger: SpawnLedgerAccessor): OccupancyProbe
     readFile,
     lockHolders,
     cosSpawnedPids: () => sanitizeLedger(ledger()),
+    cursorAgentSession: (threadId, chatsDir) => resolveCursorAgentSession(threadId, chatsDir),
     // transcriptMtimeMs is DELIBERATELY absent here. See `withTranscriptClock`.
   }
 }

@@ -19,7 +19,7 @@ import { PROC_START_TOLERANCE_MS, threadOccupancy, type OccupancyProbes } from '
 // structurally cannot express.
 const CLAUDE_DIR = '/Users/ukaoma/.claude/sessions'
 const CODEX_DIR = '/Users/ukaoma/.codex/thread-writer-locks'
-const DIRS = { claudeSessionsDir: CLAUDE_DIR, codexLocksDir: CODEX_DIR }
+const DIRS = { claudeSessionsDir: CLAUDE_DIR, codexLocksDir: CODEX_DIR, cursorChatsDir: '/Users/ukaoma/.cursor/chats' }
 
 const SID = '4baee514-fc15-4737-8011-8f7528b3d053'
 const CODEX_THREAD = '01a00893-e8e5-7730-b5d9-0493fc4b26f5'

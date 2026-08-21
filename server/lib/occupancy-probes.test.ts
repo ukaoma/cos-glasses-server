@@ -121,7 +121,16 @@ beforeEach(() => {
   // Dot components, exactly like the production roots.
   const sessionsDir = join(root, '.claude', 'sessions')
   const locksDir = join(root, '.codex', 'thread-writer-locks')
-  fx = { root, sessionsDir, locksDir, dirs: { claudeSessionsDir: sessionsDir, codexLocksDir: locksDir } }
+  fx = {
+    root,
+    sessionsDir,
+    locksDir,
+    dirs: {
+      claudeSessionsDir: sessionsDir,
+      codexLocksDir: locksDir,
+      cursorChatsDir: join(homedir(), '.cursor', 'chats'),
+    },
+  }
 })
 
 afterEach(() => {
@@ -731,8 +740,16 @@ describe('withTranscriptClock on a real filesystem', () => {
   function headDeps(): NativeHeadDeps {
     const projects = join(fx.root, '.claude', 'projects')
     return {
-      ...realNativeHeadDeps({ claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') }),
-      dirs: { claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') },
+      ...realNativeHeadDeps({
+        claudeProjectsDir: projects,
+        codexSessionsDir: join(fx.root, '.codex', 'sessions'),
+        cursorProjectsDir: join(fx.root, '.cursor', 'projects'),
+      }),
+      dirs: {
+        claudeProjectsDir: projects,
+        codexSessionsDir: join(fx.root, '.codex', 'sessions'),
+        cursorProjectsDir: join(fx.root, '.cursor', 'projects'),
+      },
     }
   }
 
@@ -819,8 +836,16 @@ describe('buildOccupancyProbes', () => {
   function headDeps(): NativeHeadDeps {
     const projects = join(fx.root, '.claude', 'projects')
     return {
-      ...realNativeHeadDeps({ claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') }),
-      dirs: { claudeProjectsDir: projects, codexSessionsDir: join(fx.root, '.codex', 'sessions') },
+      ...realNativeHeadDeps({
+        claudeProjectsDir: projects,
+        codexSessionsDir: join(fx.root, '.codex', 'sessions'),
+        cursorProjectsDir: join(fx.root, '.cursor', 'projects'),
+      }),
+      dirs: {
+        claudeProjectsDir: projects,
+        codexSessionsDir: join(fx.root, '.codex', 'sessions'),
+        cursorProjectsDir: join(fx.root, '.cursor', 'projects'),
+      },
     }
   }
 

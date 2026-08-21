@@ -4,6 +4,8 @@ import {
   assertUsable,
   beginDetach,
   BINDABLE_PROVIDERS,
+  FORKABLE_PROVIDERS,
+  isForkableProvider,
   boundToMarker,
   canDetach,
   carriesBoundTo,
@@ -102,12 +104,21 @@ describe('input validation', () => {
     }
   })
 
-  it('rejects cursor and unknown providers', () => {
-    expect(BINDABLE_PROVIDERS).not.toContain('cursor')
+  it('rejects unknown providers', () => {
+    expect(BINDABLE_PROVIDERS).toContain('cursor')
+    expect(createBinding({
+      bindingId: 'b', cosSessionId: 'c', provider: 'gemini', nativeThreadId: THREAD,
+      workspaceFingerprint: '', sourceFingerprint: '', ttlMs: TTL, now: NOW,
+    })).toMatchObject({ binding: null, reason: 'invalid_provider' })
+  })
+
+  it('accepts cursor as bindable, not forkable', () => {
+    expect(FORKABLE_PROVIDERS).not.toContain('cursor')
+    expect(isForkableProvider('cursor')).toBe(false)
     expect(createBinding({
       bindingId: 'b', cosSessionId: 'c', provider: 'cursor', nativeThreadId: THREAD,
       workspaceFingerprint: '', sourceFingerprint: '', ttlMs: TTL, now: NOW,
-    })).toMatchObject({ binding: null, reason: 'invalid_provider' })
+    }).binding?.provider).toBe('cursor')
   })
 
   it('rejects a bindingId that could be shaped to collide inside a marker', () => {

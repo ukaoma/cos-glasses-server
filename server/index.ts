@@ -368,7 +368,7 @@ const occupancyProbes = buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, thr
  * before a single prompt byte is written, which is the veto the route wants.
  */
 const deliverAttachedTurnForRoute = async (request: {
-  provider: 'claude' | 'codex'
+  provider: 'claude' | 'codex' | 'cursor'
   nativeThreadId: string
   prompt: string
   onSpawn: (pid: number) => boolean

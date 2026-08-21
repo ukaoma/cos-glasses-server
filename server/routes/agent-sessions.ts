@@ -11,8 +11,10 @@
 // `?sort=opened` keeps the same window on session start instead.
 // Search scans titles, sidebar names, first prompts, and transcript heads
 // without the 7-day list window. Literal /search is registered first.
-// Does not need COS_SCRIPTS_DIR. Codex subagents stay out. Files over 32 MB
-// still appear in the list; detail remains capped.
+// Does not need COS_SCRIPTS_DIR. Codex subagents stay out.
+// Codex files over 32 MB still appear in the list. Cursor files over 32 MB
+// are skipped and counted on `dropped.oversized`. The list payload now says
+// what each cap hid.
 
 import { Router } from 'express'
 import { stat } from 'node:fs/promises'
@@ -23,6 +25,7 @@ import {
   agentSessionRoots,
   findAgentSessionFile,
   listAgentSessions,
+  emptySessionListDropped,
   loadCursorComposerNames,
   parseAgentSession,
   type AgentProvider,
@@ -36,6 +39,7 @@ import {
   occupiedThreads,
   noOccupancyKnown,
   withActiveRecently,
+  isActiveRecently,
   type OccupiedScan,
   type OccupiedThread,
 } from '../lib/occupied-threads.js'
@@ -206,6 +210,16 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
  * gate; `attach` re-probes at the write, unchanged.
  */
 function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: number): OccupiedScan {
+  // Cursor: no process registry. The detail handler already stat'ed the jsonl;
+  // freshness of that file is the only honest working signal for the lens.
+  // Occupancy (the write gate) uses chats-dir resolution, not this hint.
+  if (provider === 'cursor') {
+    if (!isActiveRecently(mtimeMs, Date.now())) return { occupied: new Map(), degraded: false }
+    return {
+      occupied: new Map([[threadId, { threadId, owners: 1, foreignOwners: 0, activeRecently: true }]]),
+      degraded: false,
+    }
+  }
   if (provider !== 'claude' && provider !== 'codex') return { occupied: new Map(), degraded: false }
   try {
     const scan = occupiedThreads(
@@ -268,11 +282,12 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     const limit = boundedInteger(req.query.limit, AGENT_SESSION_LIST_LIMIT, 1, AGENT_SESSION_LIST_MAX)
     const sort = asSort(req.query.sort)
     const live = await liveClaudeRows()
-    const sessions = await listAgentSessions(agentSessionRoots(), new Date(), live, limit, sort)
+    const dropped = emptySessionListDropped()
+    const sessions = await listAgentSessions(agentSessionRoots(), new Date(), live, limit, sort, dropped)
     const scan = runningThreads(sessions)
     // Freshness is layered on AFTER occupancy, and only over what occupancy
-    // found. `Date.now()` is read once so every row in a payload is judged
-    // against the same instant.
+    // found. Cursor has no process occupancy, so the list does not invent a
+    // working hint from jsonl mtime — detail still can, from the file it stat'ed.
     const running = withActiveRecently(scan, await transcriptMtimes(scan, sessions), Date.now())
     res.json({
       sessions: sessions.map(row => withRunning(toEntry(row), running)),
@@ -283,6 +298,10 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       // True when a probe could not see clearly. The client must render "unknown"
       // rather than treating a quiet scan as "nothing is running".
       runningDegraded: running.degraded,
+      // LIST caps that previously dropped rows with no signal. Additive: an older
+      // client ignores this key. Zero means the walk found nothing to hide, not
+      // that the caps are off.
+      dropped,
     })
   } catch (error) {
     console.error(`[agent-sessions] list failed: ${error instanceof Error ? error.message : error}`)

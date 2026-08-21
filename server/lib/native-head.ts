@@ -121,10 +121,11 @@ import { createHash } from 'node:crypto'
 import { closeSync, constants as fsConstants, fstatSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { agentSessionRoots, idFromCodexFilename } from './agent-session-store.js'
+import { cursorTranscriptPath } from './cursor-agent-store.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
 
 /** Providers with a certified transcript shape. Anything else has no watermark. */
-export type NativeHeadProvider = 'claude' | 'codex'
+export type NativeHeadProvider = 'claude' | 'codex' | 'cursor'
 
 /**
  * Token prefix. Bumping it forces every stored head to compare as CHANGED,
@@ -163,6 +164,7 @@ export const TAIL_WINDOW_BYTES = 2 * 1024 * 1024
 export const TAIL_WINDOW_BYTES_BY_PROVIDER: Record<NativeHeadProvider, number> = {
   claude: 8 * 1024 * 1024,
   codex: 64 * 1024 * 1024,
+  cursor: 8 * 1024 * 1024,
 }
 
 /**
@@ -185,6 +187,8 @@ export interface NativeHeadDirs {
   claudeProjectsDir: string
   /** `<COS_AGENT_SESSIONS_HOME|~>/.codex/sessions` */
   codexSessionsDir: string
+  /** `<COS_AGENT_SESSIONS_HOME|~>/.cursor/projects` */
+  cursorProjectsDir: string
 }
 
 export interface TailRead {
@@ -308,6 +312,10 @@ export function isMessageBearingRow(
   // does not advance on real messages, i.e. divergence that never reports.
   if (provider === 'claude') return isClaudeMessageRow(row)
   if (provider === 'codex') return isCodexMessageRow(row)
+  if (provider === 'cursor') {
+    const role = row.role
+    return role === 'user' || role === 'assistant'
+  }
   return false
 }
 
@@ -391,10 +399,15 @@ export function transcriptPathFor(
     if (!isValidNativeThreadId(threadId)) return null
     if (provider === 'claude') return claudeTranscriptPath(threadId, deps)
     if (provider === 'codex') return codexRolloutPath(threadId, deps)
+    if (provider === 'cursor') return cursorAgentTranscriptPath(threadId, deps)
     return null
   } catch {
     return null
   }
+}
+
+function cursorAgentTranscriptPath(threadId: string, deps: NativeHeadDeps): string | null {
+  return cursorTranscriptPath(threadId, deps.dirs.cursorProjectsDir)
 }
 
 function claudeTranscriptPath(threadId: string, deps: NativeHeadDeps): string | null {
@@ -494,15 +507,13 @@ export function nativeHead(
   deps: NativeHeadDeps,
 ): string | null {
   try {
-    if (provider !== 'claude' && provider !== 'codex') return null
+    if (provider !== 'claude' && provider !== 'codex' && provider !== 'cursor') return null
     // Validated before any scan. A truncated or malformed id reaches a
     // filesystem path below, and "matched nothing" must never look like a
     // clean read of a real transcript.
     if (!isValidNativeThreadId(threadId)) return null
 
-    const path = provider === 'claude'
-      ? claudeTranscriptPath(threadId, deps)
-      : codexRolloutPath(threadId, deps)
+    const path = transcriptPathFor(provider, threadId, deps)
     if (path === null) return null
 
     const window = deps.tailWindowBytes ?? TAIL_WINDOW_BYTES_BY_PROVIDER[provider] ?? TAIL_WINDOW_BYTES
@@ -555,7 +566,11 @@ export function nativeHead(
 
 export function realNativeHeadDirs(): NativeHeadDirs {
   const roots = agentSessionRoots()
-  return { claudeProjectsDir: roots.claudeProjects, codexSessionsDir: roots.codexSessions }
+  return {
+    claudeProjectsDir: roots.claudeProjects,
+    codexSessionsDir: roots.codexSessions,
+    cursorProjectsDir: roots.cursorProjects,
+  }
 }
 
 function dirExists(path: string): boolean {

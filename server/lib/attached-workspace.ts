@@ -30,8 +30,10 @@ import { createHash } from 'node:crypto'
 import { closeSync, constants as fsConstants, openSync, readSync, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { realNativeHeadDeps, transcriptPathFor, type NativeHeadDeps } from './native-head.js'
+import { spawnWorkspace } from './cursor-agent-store.js'
+import { agentSessionRoots } from './agent-session-store.js'
 
-export type AttachedWorkspaceProvider = 'claude' | 'codex'
+export type AttachedWorkspaceProvider = 'claude' | 'codex' | 'cursor'
 
 export interface ResolvedWorkspace {
   /**
@@ -52,6 +54,11 @@ export interface AttachedWorkspaceDeps {
   readHead: (path: string, maxBytes: number) => string | null
   /** Does this directory exist right now? MUST THROW on "cannot tell". */
   dirExists: (path: string) => boolean
+  /**
+   * Spawn-spelling cwd for a Cursor Agent session. Never the realpath of
+   * `meta.json.cwd` — that creates a second jsonl folder (canary H).
+   */
+  cursorSpawnWorkspace?: (threadId: string) => string | null
 }
 
 /** Enough to reach a Claude message row or the Codex session meta row. */
@@ -113,6 +120,29 @@ export function resolveAttachedWorkspace(
   threadId: string,
   deps: AttachedWorkspaceDeps,
 ): ResolvedWorkspace | null {
+  if (provider === 'cursor') {
+    let cwd: string | null
+    let path: string | null
+    try {
+      cwd = deps.cursorSpawnWorkspace?.(threadId) ?? null
+      path = deps.transcriptPath('cursor', threadId)
+    } catch {
+      return null
+    }
+    if (!cwd || !isAbsolute(cwd) || cwd.includes('\0') || !path) return null
+    let exists: boolean
+    try {
+      exists = deps.dirExists(cwd)
+    } catch {
+      return null
+    }
+    if (!exists) return null
+    return {
+      path: cwd,
+      workspaceFingerprint: fingerprint(cwd),
+      sourceFingerprint: fingerprint(path),
+    }
+  }
   if (provider !== 'claude' && provider !== 'codex') return null
   let path: string | null
   let text: string | null
@@ -163,8 +193,13 @@ export function resolveAttachedWorkspace(
 export function realAttachedWorkspaceDeps(
   headDeps: NativeHeadDeps = realNativeHeadDeps(),
 ): AttachedWorkspaceDeps {
+  const roots = agentSessionRoots()
   return {
     transcriptPath: (provider, threadId) => transcriptPathFor(provider, threadId, headDeps),
+    cursorSpawnWorkspace: threadId => spawnWorkspace(threadId, {
+      cursorChatsDir: roots.cursorChats,
+      cursorProjectsDir: roots.cursorProjects,
+    }),
 
     readHead: (path, maxBytes) => {
       let fd: number | null = null
