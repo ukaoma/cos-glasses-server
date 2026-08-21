@@ -1,3 +1,26 @@
+## 6.36.18
+- **Meetings list now carries voice-assignment tags.** Each row includes
+  `voiceReview` from the sidecar head (`speakers[]`) plus whether a human
+  correction landed in the ledger. Control paints NEW / N to name / REVIEWED
+  without opening each meeting. Still a 4 KB head read — not a chunk parse.
+
+## 6.36.17
+- **Naming a new person from a wrong existing label now creates their voice profile.**
+  Enrolment after `POST /relabel` only fired when `from` was a placeholder (`Ext`,
+  `Unknown`, `Unidentified N`). The live path in Speakers review is the other one:
+  the identifier weakly matches someone already enrolled, and the reviewer says
+  **This is someone else → Use "Milo LeBaron"**. Measured 2026-08-20 on
+  `meeting_1787234635703_t4iz74`: Nick Gurney → Milo LeBaron, 19 chunks, ledger
+  `applied`, 78 profiles, no Milo. Backfill used the same guard, so the meeting
+  could not be enrolled after the fact either (`eligible: 0`, `skippedNamedSource: 1`).
+- **Enrol by target, not by source.** `enrolNamedVoice` still skips a placeholder
+  `to` and an empty `changed` list. A real `to` enrols those chunks — creates the
+  profile when it does not exist, appends when it does — through the same raw-index
+  map, coherence gate, 20-sample cap, and `correction:<sessionId>` tag. Global fold
+  of two identities remains `merge-profiles`. Per-meeting chunk assignment is not
+  that. Mutating the old `from`-placeholder guard back in fails the new Nick → Milo
+  test.
+
 ## 6.36.16
 - **Cursor Agent Continue.** Continue now resumes a Cursor Agent CLI thread with
   `agent --resume <id> --workspace <spawn spelling>` in ask-mode. Bindable, not

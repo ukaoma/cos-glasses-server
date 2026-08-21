@@ -183,3 +183,37 @@ describe('domainAbbreviation replaces the hand-written table exactly', () => {
     expect(domainAbbreviation('')).toBe('?')
   })
 })
+
+describe('meetings list carries voice-review tags from the sidecar head', () => {
+  it('counts unnamed speakers without parsing chunks', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-ops-voice-review-'))
+    try {
+      mkdirSync(join(root, 'quilt', 'meetings', '2026-08'), { recursive: true })
+      writeFileSync(
+        join(root, 'quilt', 'meetings', '2026-08', '2026-08-21_RFP.md'),
+        '# IT Retail RFP\n\n**Date** | 2026-08-21 09:00 |\n\n## Summary\nBody\n',
+      )
+      writeFileSync(
+        join(root, 'quilt', 'meetings', '2026-08', '2026-08-21_RFP.g2-chunks.json'),
+        JSON.stringify({
+          schemaVersion: 2,
+          sessionId: 'meeting_rfp_1',
+          speakers: ['Ext', 'MU', 'Peter'],
+          chunks: [{ text: 'hello', speaker: 'Ext' }],
+        }),
+      )
+      process.env.COS_OPERATIONS_DIR = root
+      const rows = listCosOperationsMeetings({ limit: 5 })
+      expect(rows).toHaveLength(1)
+      expect(rows[0].sessionId).toBe('meeting_rfp_1')
+      expect(rows[0].voiceReview).toEqual({
+        voices: 3,
+        unattributedVoices: 1,
+        namedVoices: 2,
+        humanTouched: false,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})

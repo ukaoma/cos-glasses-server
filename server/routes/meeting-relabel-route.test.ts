@@ -557,26 +557,6 @@ describe('correcting an unidentified voice', () => {
     expect(ledgerNow('meeting_e1')[1]).toMatchObject({ from: 'Ext', to: 'Luke Henry' })
   })
 
-  it('does NOT enrol when correcting one real name to another', async () => {
-    // Moving a voice between existing people is merge-profiles: explicit and
-    // confirmation-gated. Doing it implicitly here would poison profiles — a sweep of
-    // this store found two distinct people at 0.85 similarity.
-    seed('meeting_noenrol', ['Luke Henry', 'MU', 'Luke Henry'], { rawIndices: [0, 1, 2] })
-    writeChunkEmbeddings('meeting_noenrol', [{ i: 0 }, { i: 1 }, { i: 2 }])
-    await startServer()
-
-    const res = await post('/api/meeting/meeting_noenrol/relabel',
-      { from: 'Luke Henry', to: 'Chris Krubeck', confirm: true })
-    expect(res.status).toBe(200)
-    expect(res.json.enrolledEmbeddings).toBe(0)
-    expect(enrolCalls).toEqual([])
-    // attempted 0 is what separates "this was never an enrolment" from
-    // "enrolment ran and found nothing".
-    expect(res.json.enrolment).toEqual({
-      enrolled: 0, attempted: 0, created: false, clusterSkipped: 0, skipped: null,
-    })
-  })
-
   it('does not enrol a placeholder onto a placeholder', async () => {
     seed('meeting_pp', ['Ext', 'MU', 'Ext'], { rawIndices: [0, 1, 2] })
     writeChunkEmbeddings('meeting_pp', [{ i: 0 }, { i: 1 }, { i: 2 }])
@@ -922,6 +902,54 @@ describe('enrolling a named voice', () => {
     expect(enrolCalls.every(c => c.marker % 3 === 0)).toBe(true)
     expect(new Set(enrolCalls.map(c => c.marker)).size).toBe(20)
   })
+
+  it('enrols a NEW name from a wrong existing label — the Milo case', async () => {
+    // Live 2026-08-20: Nick Gurney → Milo LeBaron. The identifier had weakly
+    // matched 19 chunks to an enrolled profile. Relabel named the meeting and
+    // created no profile, because enrolment gated on placeholder `from`. Those
+    // chunks ARE the new person. Mutating that `from` placeholder-only guard
+    // back in fails this test.
+    seed('meeting_milo', ['Nick Gurney', 'MU', 'Nick Gurney', 'MU', 'Nick Gurney'], {
+      rawIndices: RAW, startTime: ONE_HOUR_AGO(),
+    })
+    writeChunkEmbeddings('meeting_milo', [
+      { i: 3, speaker: 'Nick Gurney' }, { i: 8, speaker: 'Nick Gurney' }, { i: 21, speaker: 'Nick Gurney' },
+      { i: 0, speaker: 'Vikas' }, { i: 2, speaker: 'MU' }, { i: 5, speaker: 'MU' },
+    ])
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_milo/relabel',
+      { from: 'Nick Gurney', to: 'Milo LeBaron', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
+    expect(enrolCalls.map(c => c.marker)).not.toContain(2)
+    expect(enrolCalls.every(c => c.name === 'Milo LeBaron')).toBe(true)
+    expect(res.json.enrolment).toEqual({
+      enrolled: 3, attempted: 3, created: true, clusterSkipped: 0, skipped: null,
+    })
+    expect(sidecarNow().labels).toEqual(['Milo LeBaron', 'MU', 'Milo LeBaron', 'MU', 'Milo LeBaron'])
+  })
+
+  it('appends onto an existing name from a wrong existing label', async () => {
+    // Second cluster in the same meeting: Richard Jenkins → Milo, after Milo
+    // already exists. Additional training, not a global merge.
+    seed('meeting_second', ['Richard Jenkins', 'MU', 'Richard Jenkins', 'MU', 'Richard Jenkins'], {
+      rawIndices: RAW, startTime: ONE_HOUR_AGO(),
+    })
+    writeChunkEmbeddings('meeting_second', [
+      { i: 3, speaker: 'Richard Jenkins' }, { i: 8, speaker: 'Richard Jenkins' },
+      { i: 21, speaker: 'Richard Jenkins' }, { i: 2, speaker: 'MU' },
+    ])
+    seedVoiceProfile('Milo LeBaron')
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_second/relabel',
+      { from: 'Richard Jenkins', to: 'Milo LeBaron', confirm: true })
+    expect(res.json.enrolment).toEqual({
+      enrolled: 3, attempted: 3, created: false, clusterSkipped: 0, skipped: null,
+    })
+    expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
+  })
 }, HTTP_TEST_TIMEOUT)
 
 describe('chained corrections', () => {
@@ -983,28 +1011,34 @@ describe('backfilling enrolment from a recorded correction', () => {
     expect(applied.json.confirmed).toBe(true)
   })
 
-  it('SKIPS corrections whose source was a named person', async () => {
-    // The Kirstyn case exactly: Ext -> Kirstyn is training data, but
-    // Allison Wheeler -> Kirstyn is a mis-attribution fix. Training on the second
-    // would put Allison's voice into Kirstyn's profile.
-    seed('meeting_bf2', ['Ext', 'Allison Wheeler', 'Ext'])
+  it('backfills a named-source new-name correction — the Milo hole', async () => {
+    // Today's live ledger: Nick Gurney → Milo LeBaron already applied, no
+    // profile. Re-running the rename cannot help (Milo is already the label),
+    // and the old placeholder `from` guard made backfill skip too.
+    seed('meeting_bf2', ['Nick Gurney', 'MU', 'Nick Gurney', 'MU', 'Nick Gurney'], {
+      rawIndices: [3, 5, 8, 13, 21], startTime: Date.now() - 3_600_000,
+    })
+    writeChunkEmbeddings('meeting_bf2', [
+      { i: 3, speaker: 'Nick Gurney' }, { i: 8, speaker: 'Nick Gurney' }, { i: 21, speaker: 'Nick Gurney' },
+    ])
     await startServer()
-    await post('/api/meeting/meeting_bf2/relabel', { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
     await post('/api/meeting/meeting_bf2/relabel',
-      { from: 'Allison Wheeler', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Nick Gurney', to: 'Milo LeBaron', confirm: true })
     enrolCalls.length = 0
 
-    const res = await post('/api/meeting/meeting_bf2/backfill-enrolment',
-      { speaker: 'Kirstyn Blum', confirm: true })
-    expect(res.status).toBe(200)
-    const froms = (res.json.corrections as Array<Record<string, unknown>>).map(c => c.from)
-    expect(froms).toContain('Ext')
-    expect(froms).toContain('Allison Wheeler')
-    // Both rows are REPORTED, but only the placeholder one attempted anything.
-    const named = (res.json.corrections as Array<Record<string, unknown>>)
-      .find(c => c.from === 'Allison Wheeler')
-    expect((named!.report as Record<string, unknown>).attempted).toBe(0)
-    expect(res.json.totals.skippedNamedSource).toBe(1)
+    const preview = await post('/api/meeting/meeting_bf2/backfill-enrolment',
+      { speaker: 'Milo LeBaron' })
+    expect(preview.status).toBe(200)
+    expect(preview.json.confirmed).toBe(false)
+    expect(preview.json.totals.eligible).toBe(1)
+    expect(preview.json.totals.skippedNamedSource).toBe(0)
+    expect(enrolCalls).toEqual([])
+
+    const applied = await post('/api/meeting/meeting_bf2/backfill-enrolment',
+      { speaker: 'Milo LeBaron', confirm: true })
+    expect(applied.status).toBe(200)
+    expect(applied.json.totals.enrolled).toBeGreaterThan(0)
+    expect(enrolCalls.every(c => c.name === 'Milo LeBaron')).toBe(true)
   })
 
   it('404s for a speaker with no applied correction here', async () => {

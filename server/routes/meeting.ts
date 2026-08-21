@@ -995,9 +995,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
    *
    * SAME GATES, no exceptions. It calls `enrolNamedVoice`, so raw-index mapping,
    * refusal when unmappable, voice coherence, the diversity cap and the
-   * `correction:<sessionId>` tag all apply identically. Rows whose `from` is a real
-   * person are skipped by that function's own placeholder rule, which is what keeps a
-   * mis-attribution correction (Allison Wheeler -> Kirstyn) out of the training set.
+   * `correction:<sessionId>` tag all apply identically. A named `from` is still
+   * enrolled when `to` is a real person — that is how a wrong existing match
+   * becomes a new profile (Nick Gurney → Milo LeBaron). Placeholder targets
+   * stay idle.
    *
    * FAILS CLOSED. Without `confirm: true` it reports what it would enrol and writes
    * nothing.

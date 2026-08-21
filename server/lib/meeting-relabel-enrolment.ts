@@ -86,8 +86,9 @@ export interface EnrolmentReport {
   /** Samples the voice store actually accepted. */
   enrolled: number
   /** Candidate embeddings found for the relabelled chunks, before any gating.
-   *  Zero here means this correction was never an enrolment (a real name being
-   *  corrected to another real name), not that enrolment failed. */
+   *  Zero with `skipped: null` means this correction was never an enrolment
+   *  (empty `changed`, or the target is still a placeholder), not that
+   *  enrolment failed. */
   attempted: number
   /** True ONLY when a profile did not exist for this name and now does. An
    *  existing name is APPENDED to, and must never be reported as created. */
@@ -179,12 +180,17 @@ export interface EnrolNamedVoiceInput {
 /**
  * Enrol the voice a human just named.
  *
- * SCOPED to placeholder -> real name. Correcting one real name to another is left
- * alone deliberately: moving a voice between existing people is `merge-profiles`,
- * which is explicit and confirmation-gated, and a sweep of this store put two
- * DISTINCT people at 0.85 similarity, so doing it implicitly would poison both.
+ * SCOPED to a real target name. The reviewer is assigning THESE chunks to `to`.
+ * That is a first training run when `to` has no profile (the live case: Nick
+ * Gurney → Milo LeBaron, 2026-08-20 — 19 chunks relabelled, 78 profiles, no
+ * Milo) and an append when the profile already exists. Global fold of two
+ * identities remains `merge-profiles`. Per-meeting chunk assignment is not
+ * that, and gating on `from` being a placeholder made a wrong existing label
+ * (the identifier's 0.55 Nick match) create no profile at all.
  *
- * An EXISTING name is appended to without a prompt, and reports `created: false`.
+ * Still skipped: a placeholder `to` (Ext → Unidentified 2), and an empty
+ * `changed` list. An EXISTING name is appended to without a prompt, and
+ * reports `created: false`.
  *
  * Samples are stamped `correction:<sessionId>`, not a bare source string. The
  * prefix is load-bearing in four places: `isSampleFromSession` accepts only
@@ -198,11 +204,14 @@ export interface EnrolNamedVoiceInput {
  * on disk; a voice store that refuses must not undo what the user asked for.
  */
 export function enrolNamedVoice(input: EnrolNamedVoiceInput): EnrolmentReport {
-  const { sessionId, from, to, changed, sidecar } = input
+  const { sessionId, to, changed, sidecar } = input
 
   // Not an enrolment at all. `attempted: 0` with `skipped: null` is how the
   // caller tells this apart from an enrolment that found no candidates.
-  if (!isPlaceholderLabel(from) || isPlaceholderLabel(to) || changed.length === 0) return IDLE
+  // `from` is deliberately NOT gated: a wrong existing label is how a new
+  // person first appears in review (Nick Gurney → Milo LeBaron). Gating on
+  // placeholder-only `from` labelled the meeting and taught the store nothing.
+  if (isPlaceholderLabel(to) || changed.length === 0) return IDLE
 
   if (!chunkEmbeddingsEnabled()) return { ...IDLE, skipped: 'disabled' }
   // No extractor/manager means every enrollEmbedding would return success:false.

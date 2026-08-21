@@ -94,6 +94,13 @@ export interface MeetingMeta {
   mutable?: boolean
   /** Present only when the server can state a truthful local record. */
   canonicalRecord?: string
+  /** Additive. Unique sidecar speakers + whether a human correction landed. */
+  voiceReview?: {
+    voices: number
+    unattributedVoices: number
+    namedVoices: number
+    humanTouched: boolean
+  }
 }
 
 export interface MeetingActionItem {

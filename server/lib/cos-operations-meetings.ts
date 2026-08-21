@@ -18,6 +18,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { discoveredDomains, domainAbbreviation as deriveAbbr, isSafeDomainName as safeName } from './domains.js'
 import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
 import { MEETING_SOURCE_MAX_BYTES, meetingDayCountsFromNames, meetingListLimit } from './meeting-store.js'
+import { meetingVoiceReview, parseSidecarListHead } from './meeting-voice-review.js'
 
 /**
  * The four domains of ONE user's COS. Retained as the documented example layout
@@ -151,28 +152,33 @@ const SIDECAR_HEAD_BYTES = 4096
  * them whole would make listing cost scale with total transcript size — and this
  * lister already reads every markdown file it finds.
  */
-export function sidecarSessionId(monthDir: string, meetingFilename: string): string | undefined {
+export function sidecarListHints(monthDir: string, meetingFilename: string): {
+  sessionId?: string
+  speakers: string[]
+} {
   const sidecarName = meetingFilename.replace(/\.md$/, '.g2-chunks.json')
-  if (sidecarName === meetingFilename) return undefined
+  if (sidecarName === meetingFilename) return { speakers: [] }
   const path = join(monthDir, sidecarName)
   let fd: number | null = null
   try {
     const linkStat = lstatSync(path)
-    if (linkStat.isSymbolicLink() || !linkStat.isFile() || linkStat.size === 0) return undefined
+    if (linkStat.isSymbolicLink() || !linkStat.isFile() || linkStat.size === 0) return { speakers: [] }
     const real = realpathSync(path)
-    if (dirname(real) !== realpathSync(monthDir)) return undefined
+    if (dirname(real) !== realpathSync(monthDir)) return { speakers: [] }
     const stat = statSync(real)
     fd = openSync(path, 'r')
     const buffer = Buffer.alloc(Math.min(SIDECAR_HEAD_BYTES, stat.size))
     const read = readSync(fd, buffer, 0, buffer.length, 0)
-    const match = buffer.subarray(0, read).toString('utf8')
-      .match(/"sessionId"\s*:\s*"([A-Za-z0-9:_-]{3,96})"/)
-    return match ? match[1] : undefined
+    return parseSidecarListHead(buffer.subarray(0, read).toString('utf8'))
   } catch {
-    return undefined
+    return { speakers: [] }
   } finally {
     if (fd !== null) { try { closeSync(fd) } catch { /* already closed */ } }
   }
+}
+
+export function sidecarSessionId(monthDir: string, meetingFilename: string): string | undefined {
+  return sidecarListHints(monthDir, meetingFilename).sessionId
 }
 
 function envPath(name: string): string | null {
@@ -563,8 +569,11 @@ export function listCosOperationsMeetings(options: {
               meta.recordId = `ops:${domain}:${month}:${file}`
               meta.mutable = true
               meta.canonicalRecord = `operations/${domain}/meetings/${month}/${file}`
-              const sessionId = sidecarSessionId(monthDir, file)
-              if (sessionId) meta.sessionId = sessionId
+              const hints = sidecarListHints(monthDir, file)
+              if (hints.sessionId) meta.sessionId = hints.sessionId
+              if (hints.speakers.length > 0) {
+                meta.voiceReview = meetingVoiceReview(hints.speakers, hints.sessionId)
+              }
               if (options.day && meta.date !== options.day) continue
               allMeetings.push(meta)
             } catch { /* skip unreadable files */ }
