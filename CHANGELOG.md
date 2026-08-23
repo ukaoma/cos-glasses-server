@@ -1,5 +1,37 @@
 ## 6.36.21
 
+**Fence liveness: the one thing about a fence a machine can actually establish.**
+
+`GET /agent-sessions/fences` and the release preview now carry a `liveness`
+aggregate -- `state` (`running` / `none_running` / `unknown`) plus counts. It
+answers "is a child COS spawned for this turn still writing", which is the only
+way releasing is unsafe for a reason a machine can see: admit a new turn while an
+old child is still writing and two writers interleave in one transcript.
+
+IT IS NOT A SAFETY VERDICT and no surface may render it as one. Whether the
+ambiguous turn landed stays unknowable. Two automatic fence resolvers were
+designed and both rejected (thread-fence-store.ts:40) because the dominant shape
+is `timeout`, where the child had ~21 minutes to run tool calls before SIGKILL --
+and the only fence this system has ever produced was exactly that shape. A
+classifier built on n=1 would be guessing with a confident face.
+
+The module enforces the three traps FenceRecord warns about rather than repeating
+them: a pid is matched against its RECORDED start, because the OS recycles pids;
+an empty or missing spawn list resolves to `unknown`, never `none_running`,
+because "nothing was recorded" is not "nothing ran"; and any probe that throws or
+returns something unparseable resolves toward `unknown`. A live child outranks an
+unreadable probe.
+
+Only the aggregate crosses the wire. No pid, no spawn list, and the rest of the
+evidence block stays disk-only -- widening that is a deliberate contract change,
+not a side effect of this.
+
+`listFences` now REQUIRES the probe. It was optional, and the resulting
+`deps === undefined` branch was unreachable from the route: a mutation flipping
+its default to `none_running` left all 262 route tests green. An unreached line
+that returns a confident answer is worse than no line.
+
+
 **A turn queued against a fenced thread was thrown away in about two minutes.**
 
 The thread-turn queue is wired before the agent-session-bindings router, and that
@@ -36,7 +68,7 @@ structurally permanent reason as its witness.
 
 Requires COS Control 0.5.63 for the Release button to actually work.
 
-Suite 2989 / 212 files, tsc 0. The wiring guards are mutation-verified: removing
+Suite 3003 / 213 files, tsc 0. The wiring and liveness guards are mutation-verified: removing
 the fence check from occupancy, and moving the guard below the queue, each fail
 the assertion written for them.
 

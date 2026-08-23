@@ -95,6 +95,8 @@
 // and answer 400. They never treat an unparsed body as an empty one.
 
 import type { FenceRecord } from '../lib/thread-fence-store.js'
+import { execFileSync } from 'node:child_process'
+import { fenceLiveness, makePidStartProbe, type FenceLiveness, type FenceLivenessDeps } from '../lib/fence-liveness.js'
 import { Router, type Request, type Response } from 'express'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -274,6 +276,8 @@ export interface AgentSessionBindingsDeps {
   /** Shared fence state. Omit and the router owns a private one, which is correct
    *  for tests and wrong for the server -- see the wiring note at its use site. */
   guard?: TargetGuard
+  /** Process-start probe behind the fence liveness aggregate. */
+  liveness?: FenceLivenessDeps
   /**
    * Durable fence storage. OPTIONAL, and omitting it is what keeps the existing
    * suite in memory: a test that silently began writing the real data home would
@@ -1004,8 +1008,18 @@ export class TargetGuard {
   }
 
   /** Every fence, REDACTED for the wire: the raw targetKey embeds the private
-   *  native thread id, so callers address a fence by its deterministic digest. */
-  listFences(): Array<{ target: string; provider: string; reason: string; headBefore: string | null; turnId: string; fencedAt: number }> {
+   *  native thread id, so callers address a fence by its deterministic digest.
+   *
+   *  `liveness` is the ONLY evidence field that crosses, and it crosses as an
+   *  aggregate: a state plus counts, never a pid. It answers "is a child from this
+   *  turn still writing", which is the one thing about a fence a machine can
+   *  actually establish. It is NOT a safety verdict and the UI must not render it
+   *  as one -- whether the ambiguous turn landed stays unknowable, which is why two
+   *  automatic resolvers were rejected (thread-fence-store.ts:40).
+   *
+   *  The rest of the evidence block stays disk-only. Widening that is a deliberate
+   *  contract change, not a side effect of adding this. */
+  listFences(deps: FenceLivenessDeps): Array<{ target: string; provider: string; reason: string; headBefore: string | null; turnId: string; fencedAt: number; liveness: FenceLiveness }> {
     return [...this.fences.values()].map(row => ({
       target: opaqueRevision(row.targetKey),
       provider: row.provider,
@@ -1013,6 +1027,12 @@ export class TargetGuard {
       headBefore: row.headBefore,
       turnId: row.turnId,
       fencedAt: row.fencedAt,
+      // REQUIRED, not optional. An optional probe meant a `deps === undefined`
+      // branch that the route could never take -- a mutation flipping it to
+      // `none_running` left the whole 262-test suite green, which is the
+      // definition of an unreached line. A caller with no probe must construct a
+      // deliberate one rather than fall into a default answer.
+      liveness: fenceLiveness(row.spawns, deps),
     }))
   }
 
@@ -1301,6 +1321,19 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   // BEFORE this router and must be able to see a fence; a second guard created here
   // would be a disconnected copy, and the queue would go on reading an empty one.
   const guard = deps.guard ?? new TargetGuard(deps.fencePersistence ?? null)
+  // `ps -o lstart=` is the only start-time keyword macOS ps offers. Injectable so a
+  // test drives recycled and unreadable pids without spawning real processes.
+  const livenessDeps: FenceLivenessDeps = deps.liveness ?? {
+    pidStartMs: makePidStartProbe((pid) => {
+      try {
+        return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+          encoding: 'utf8', timeout: 2_000,
+        })
+      } catch {
+        return null   // not running, or ps refused the pid
+      }
+    }),
+  }
   const ownership = deps?.ownership ?? { record: recordCosSpawn, release: releaseCosSpawn }
   // One per router. Injectable so the follow-on (attach accepting a `forkRef`)
   // shares this instance rather than standing up a second, disconnected one.
@@ -1396,7 +1429,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // `degraded` is reported, never inferred: a memory-only fence set behaves
     // identically to a durable one until the process restarts, so a silent
     // fallback would be indistinguishable from working.
-    res.json({ fences: guard.listFences(), degraded: guard.degraded() })
+    res.json({ fences: guard.listFences(livenessDeps), degraded: guard.degraded() })
   })
 
   router.post('/agent-sessions/fences/release', (req, res) => {
@@ -1413,7 +1446,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // The API token is shared by the phone, the lens and every COS agent
       // session, so nothing is structurally prevented from asserting `confirm`.
       // It stops an accidental release, not an automated one.
-      const preview = guard.listFences().find(f => f.target === target) ?? null
+      // The preview carries the liveness aggregate too: this is the exact moment a
+      // person decides, and "a child from this turn is still running" is the one
+      // thing here a machine can tell them.
+      const preview = guard.listFences(livenessDeps).find(f => f.target === target) ?? null
       res.status(400).json({ released: false, reason: 'confirmation_required', preview })
       return
     }

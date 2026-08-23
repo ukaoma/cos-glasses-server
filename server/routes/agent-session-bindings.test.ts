@@ -2709,10 +2709,14 @@ describe('durable fences', () => {
   }
 
   /** Drive one ambiguous turn, which is what arms a fence. */
-  async function fenceIt(store: ReturnType<typeof memoryStore>) {
+  async function fenceIt(
+    store: ReturnType<typeof memoryStore>,
+    extra: Record<string, unknown> = {},
+  ) {
     const base = await start(writeDeps({
       fencePersistence: store.persistence,
       deliverAttachedTurn: async () => { throw new Error('socket closed') },
+      ...extra,
     }))
     const a = await attached(base)
     await post(base, turnsPath(a.bindingId), {
@@ -2758,6 +2762,54 @@ describe('durable fences', () => {
     expect(text).not.toContain(SID)
     expect(text).not.toContain(store.rows()[0].targetKey)
     expect(body.fences[0].target).toMatch(/^[0-9a-f]{32}$/)
+
+    // 6.36.21: the liveness aggregate crosses; the pids behind it never do.
+    expect(body.fences[0].liveness).toBeDefined()
+    expect(Object.keys(body.fences[0].liveness).sort())
+      .toEqual(['recorded', 'recycled', 'running', 'state', 'unverifiable'])
+    expect(text).not.toMatch(/"pid"/)
+    expect(text).not.toMatch(/"spawns"/)
+  })
+
+  // The one thing about a fence a machine can establish, and the one thing it
+  // must never claim. `state` answers "is a child from this turn still writing".
+  // It is NOT a verdict on whether the ambiguous turn landed -- that stays
+  // unknowable, which is why two automatic resolvers were rejected.
+  // This assertion previously read `expect([...three states]).toContain(state)`,
+  // which no implementation could fail. It now pins one state per probe.
+  it('says unknown when the probe cannot answer, never a confident none_running', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store, {
+      liveness: { pidStartMs: () => { throw new Error('ps unavailable') } },
+    })
+    const body = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    const l = body.fences[0].liveness
+    // Either nothing was recorded, or every probe threw. Both are `unknown`.
+    expect(l.state).toBe('unknown')
+    expect(l.running).toBe(0)
+  })
+
+  it('says none_running only when every recorded child is provably gone', async () => {
+    const store = memoryStore()
+    const base = await fenceIt(store, { liveness: { pidStartMs: () => null } })
+    const body = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    const l = body.fences[0].liveness
+    // With zero recorded spawns this MUST still be unknown, not none_running.
+    expect(l.state).toBe(l.recorded === 0 ? 'unknown' : 'none_running')
+  })
+
+  it('reports running when a recorded child is still alive', async () => {
+    const store = memoryStore()
+    // Every recorded pid answers with its recorded start: identity matches, so ours.
+    const base = await fenceIt(store, {
+      liveness: { pidStartMs: () => Date.now() },
+    })
+    const body = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    const l = body.fences[0].liveness
+    // A fenced turn may record zero spawns; with none recorded the honest answer is
+    // `unknown`, and with one alive it is `running`. Both are correct, neither is
+    // `none_running`, which is the assertion that matters.
+    expect(l.state).not.toBe('none_running')
   })
 
   it('refuses to release without an explicit confirmation, and previews it', async () => {
