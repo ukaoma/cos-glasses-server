@@ -1,3 +1,42 @@
+## 6.36.23
+
+**Long replies stopped speaking at about three or four pages.**
+
+`MAX_TTS_CHARS = 4000` is OpenAI's input limit -- `gpt-4o-mini-tts` rejects
+anything longer -- and it was applied UP FRONT, before COS chose an engine. Kokoro
+runs locally and has no such limit, so local speech was being truncated by a rule
+belonging to an API it was not using. The sidecar then applied its own `text[:4000]`
+as a bare slice: no sentence boundary, no error, no signal to the caller. It simply
+stopped mid-word.
+
+The cap now lives where the backend is actually known. OpenAI keeps 4000, applied
+in BOTH its entry points (the cached generator and the streaming sibling -- capping
+one truncates silently through the other). Local gets 40,000, which is a memory and
+latency bound rather than a product limit. The sidecar's slice is now a named
+runaway-caller bound, overridable via `COS_TTS_MAX_INPUT_CHARS`.
+
+**Eight British English voices**, on disk all along and offered by nothing:
+bm_george, bm_daniel, bm_lewis, bm_fable, bf_emma, bf_alice, bf_isabella, bf_lily.
+`/api/tts/voices` now serves 28 local voices with an `accent` field, American
+first so `local[0]` is still the historical default.
+
+The voice pack ships 54. The other 26 -- Mandarin, Japanese, Hindi, Spanish,
+Brazilian Portuguese, Italian, French -- are deliberately NOT offered: the sidecar
+phonemises with `lang_code="a"`, so they would be read through an American English
+grapheme-to-phoneme pass, producing an accent artefact rather than the language.
+Exposing them needs a lang_code map and text in the matching language.
+
+**`isKokoroVoiceId` now checks the catalog instead of the shape.** It was
+`/^[a-z]{2}_[a-z0-9]+$/i`, which accepts any id of the right form -- the 26
+non-English voices, and ids for no voice at all. Nothing downstream refused them
+either: the sidecar falls back requested -> COS_TTS_KOKORO_VOICE -> am_echo and
+returns audio, so an unrecognised voice produced a DIFFERENT voice with no error.
+`KOKORO_VOICE_IDS` had existed for exactly this check and was never read.
+
+Suite 3008 / 213, tsc 0. Three mutations verified: restoring the shared cap on the
+local path, reintroducing the up-front cap, and dropping the British set each fail
+the assertion written for them.
+
 ## 6.36.22
 
 **`features.claudeSessions` in health**, so a client toggle can read its own state.

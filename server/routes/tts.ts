@@ -41,6 +41,7 @@ import {
   getTtsEngineMode,
   isKokoroVoiceId,
   isOpenAIVoiceId,
+  KOKORO_EN_GB_VOICE_OPTIONS,
   KOKORO_VOICE_OPTIONS,
   mapOpenAIVoiceToLocal,
   OPENAI_VOICE_OPTIONS,
@@ -63,10 +64,23 @@ export const ttsRouter = Router()
 // process lifetime — no teardown needed.
 setInterval(reapExpiredSessions, 30_000).unref()
 
-// Hard text length cap — OpenAI gpt-4o-mini-tts accepts up to 4096 input chars.
-// Anything longer would be rejected; we trim defensively at a sentence boundary
-// near the cap so the audio doesn't end mid-word.
-const MAX_TTS_CHARS = 4000
+// THE CAP IS PER BACKEND, and it is applied where the backend is known.
+//
+// 4000 is OpenAI's constraint: gpt-4o-mini-tts rejects input over 4096 chars.
+// Kokoro has no such limit -- it is a local model reading whatever it is handed.
+// This cap used to be applied up front, before the engine was chosen, so a local
+// synthesis was silently truncated at ~3-4 pages by a rule belonging to an API it
+// was not using. Long replies just stopped mid-thought.
+//
+// Applied in the generators instead, because the backend is not settled until
+// then: a local request can still fall back to OpenAI when Kokoro is unavailable,
+// and that fallback must obey OpenAI's limit even though the request did not.
+const MAX_OPENAI_TTS_CHARS = 4000
+
+// Not a product limit -- a memory and latency bound. 40k chars is roughly 40
+// minutes of speech and several hundred MB of PCM before encode. Past that, a
+// runaway caller is the likelier explanation than a real request.
+const MAX_LOCAL_TTS_CHARS = 40_000
 
 // OpenAI voice IDs supported by gpt-4o-mini-tts. Default is alloy (warm,
 // neutral, gender-neutral). Voice can be overridden per-request and the
@@ -94,13 +108,13 @@ const FORMAT_MIME: Record<string, string> = {
   pcm: 'audio/pcm',
 }
 
-/** Trim text to MAX_TTS_CHARS at a sentence boundary if possible. */
-function trimToCap(text: string): string {
-  if (text.length <= MAX_TTS_CHARS) return text
-  const slice = text.slice(0, MAX_TTS_CHARS)
+/** Trim to `cap` at a sentence boundary if possible, else a word boundary. */
+function trimToCap(text: string, cap: number): string {
+  if (text.length <= cap) return text
+  const slice = text.slice(0, cap)
   // Walk back to the last sentence terminator (.!?) to avoid mid-word cuts.
   const lastTerm = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('! '), slice.lastIndexOf('? '))
-  if (lastTerm > MAX_TTS_CHARS * 0.6) return slice.slice(0, lastTerm + 1)
+  if (lastTerm > cap * 0.6) return slice.slice(0, lastTerm + 1)
   // Fall back to the last word boundary.
   const lastSpace = slice.lastIndexOf(' ')
   return lastSpace > 0 ? slice.slice(0, lastSpace) : slice
@@ -332,6 +346,10 @@ async function generateOpenAIIntoCache(
   instructions: string,
   signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  // OpenAI's own limit, applied HERE because this is the first point that knows
+  // OpenAI is what actually runs. A local request that fell back to OpenAI arrives
+  // uncapped and must still be trimmed.
+  text = trimToCap(text, MAX_OPENAI_TTS_CHARS)
   let key: string
   try {
     key = getOpenAIKey()
@@ -425,6 +443,10 @@ async function generateLocalIntoCache(
   format: string,
   signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  // A memory/latency bound, NOT OpenAI's 4096. Kokoro reads what it is handed;
+  // the old shared cap truncated local speech at ~3-4 pages for no reason that
+  // applied to it.
+  text = trimToCap(text, MAX_LOCAL_TTS_CHARS)
   if (!isLocalTtsReady()) {
     return { ok: false, status: 503, message: 'local TTS sidecar not ready' }
   }
@@ -601,7 +623,14 @@ ttsRouter.get('/tts/voices', (_req, res) => {
       : 'local',
     localReady: isLocalTtsReady(),
     openai: OPENAI_VOICE_OPTIONS,
-    local: KOKORO_VOICE_OPTIONS,
+    // American first, then British. ONE list rather than a new key, so an existing
+    // client picks up the extra voices without a change, and `local[0]` stays the
+    // default it always was. Each entry's label carries the accent; `accent` is
+    // there so a picker can group without parsing the id prefix.
+    local: [
+      ...KOKORO_VOICE_OPTIONS.map((v) => ({ ...v, accent: 'en-US' as const })),
+      ...KOKORO_EN_GB_VOICE_OPTIONS.map((v) => ({ ...v, accent: 'en-GB' as const })),
+    ],
   })
 })
 
@@ -618,6 +647,9 @@ async function streamOpenAIToResponse(
     onFirstByte?: () => void
   },
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  // Same limit, the streaming sibling. Two OpenAI entry points, so the cap has to
+  // exist at both -- capping only the cached one would truncate silently here.
+  const text = trimToCap(opts.text, MAX_OPENAI_TTS_CHARS)
   let key: string
   try {
     key = getOpenAIKey()
@@ -629,7 +661,7 @@ async function streamOpenAIToResponse(
     return { ok: false, status: 503, message: errMsg(err) }
   }
 
-  const spoken = applyOpenAIPronunciation(opts.text)
+  const spoken = applyOpenAIPronunciation(text)
   let upstream: Response
   try {
     upstream = await fetch('https://api.openai.com/v1/audio/speech', {
@@ -715,7 +747,9 @@ ttsRouter.post('/tts/stream', async (req, res) => {
       ? instructions : DEFAULT_INSTRUCTIONS
 
     const cleaned = stripMarkdownLight(text).trim()
-    const capped = trimToCap(cleaned)
+    // NOT capped here -- the backend is not known yet, and the OpenAI limit does
+    // not apply to Kokoro. The generators cap for whichever backend actually runs.
+    const capped = cleaned
 
     const upstreamController = new AbortController()
     res.once('close', () => {
@@ -854,7 +888,9 @@ ttsRouter.post('/tts/prepare', async (req, res) => {
     }
 
     const cleaned = stripMarkdownLight(text).trim()
-    const capped = trimToCap(cleaned)
+    // NOT capped here -- the backend is not known yet, and the OpenAI limit does
+    // not apply to Kokoro. The generators cap for whichever backend actually runs.
+    const capped = cleaned
     const preferOpenAI = enginePreference === 'openai'
     const forceLocal = enginePreference === 'local'
 

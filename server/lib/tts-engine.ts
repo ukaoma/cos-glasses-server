@@ -47,6 +47,29 @@ export const KOKORO_VOICE_OPTIONS = [
   { id: 'af_river', label: 'River (af_river)' },
 ] as const
 
+/** British English presets, verified on disk in the same voice pack.
+ *
+ *  Kept a SEPARATE list rather than folded into the American one: the picker
+ *  groups by accent, and a caller that wants "the default set" should not silently
+ *  get a British voice. All 54 packaged voices were considered; only these 8 are
+ *  added, because the sidecar phonemises with `lang_code="a"` and the remaining 26
+ *  (Mandarin, Japanese, Hindi, Spanish, Portuguese, Italian, French) would be read
+ *  through an American English grapheme-to-phoneme pass. That produces an accent
+ *  artefact, not the language. Exposing them needs a lang_code map and text in the
+ *  matching language -- deliberately out of scope, not overlooked. */
+export const KOKORO_EN_GB_VOICE_OPTIONS = [
+  { id: 'bm_george', label: 'George (bm_george) · British' },
+  { id: 'bm_daniel', label: 'Daniel (bm_daniel) · British' },
+  { id: 'bm_lewis', label: 'Lewis (bm_lewis) · British' },
+  { id: 'bm_fable', label: 'Fable (bm_fable) · British' },
+  { id: 'bf_emma', label: 'Emma (bf_emma) · British' },
+  { id: 'bf_alice', label: 'Alice (bf_alice) · British' },
+  { id: 'bf_isabella', label: 'Isabella (bf_isabella) · British' },
+  { id: 'bf_lily', label: 'Lily (bf_lily) · British' },
+] as const
+
+export const KOKORO_EN_GB_VOICES = KOKORO_EN_GB_VOICE_OPTIONS.map((v) => v.id)
+
 export const KOKORO_EN_US_VOICES = KOKORO_VOICE_OPTIONS.map((v) => v.id)
 
 // OpenAI id → Kokoro when Settings still sends an OpenAI id on the local path.
@@ -63,15 +86,30 @@ const VOICE_MAP: Record<string, string> = {
 }
 
 const OPENAI_VOICE_IDS = new Set(OPENAI_VOICE_OPTIONS.map((v) => v.id))
-const KOKORO_VOICE_IDS = new Set(KOKORO_EN_US_VOICES)
+// BOTH accents, and this Set is now what `isKokoroVoiceId` actually checks.
+// Omitting either list here would make the picker offer voices the server then
+// refuses -- the UI and the server disagreeing in silence.
+const KOKORO_VOICE_IDS = new Set<string>([...KOKORO_EN_US_VOICES, ...KOKORO_EN_GB_VOICES])
 
 export function isOpenAIVoiceId(voice: string): boolean {
   return OPENAI_VOICE_IDS.has(voice as typeof OPENAI_VOICE_OPTIONS[number]['id'])
 }
 
-/** Kokoro / Misaki voice file ids look like am_echo, af_heart, bm_george. */
+/**
+ * Is this a Kokoro voice COS actually offers?
+ *
+ * THE CATALOG, not the shape. This was `/^[a-z]{2}_[a-z0-9]+$/i`, which accepts
+ * any id of the right form -- including the 26 non-English voices in the same
+ * pack, and including ids for no voice at all. Neither is refused anywhere
+ * downstream: the sidecar's `synthesize` falls back through
+ * requested -> COS_TTS_KOKORO_VOICE -> am_echo and returns audio, so an
+ * unrecognised voice produced a DIFFERENT voice with no error. The caller asked
+ * for one thing, got another, and nothing said so.
+ *
+ * `KOKORO_VOICE_IDS` existed for this and was never read.
+ */
 export function isKokoroVoiceId(voice: string): boolean {
-  return /^[a-z]{2}_[a-z0-9]+$/i.test(voice)
+  return KOKORO_VOICE_IDS.has(voice)
 }
 
 export function getTtsEngineMode(): TtsEngineMode {

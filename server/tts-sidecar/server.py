@@ -31,6 +31,9 @@ PROTOCOL = "cos-tts-v1"
 AUTH_TOKEN = os.environ.get("COS_TTS_AUTH_TOKEN", "")
 MODEL_ID = os.environ.get("COS_TTS_KOKORO_MODEL", "mlx-community/Kokoro-82M-bf16")
 DEFAULT_VOICE = os.environ.get("COS_TTS_KOKORO_VOICE", "am_echo")
+# Runaway-caller bound only. Roughly 40 minutes of speech; the server applies
+# the real per-backend cap before calling here.
+MAX_INPUT_CHARS = int(os.environ.get("COS_TTS_MAX_INPUT_CHARS", "40000"))
 SAMPLE_RATE = 24_000
 
 _model = None
@@ -210,8 +213,12 @@ def speech(req: SpeechRequest, authorization: str | None = Header(default=None))
     text = req.input.strip()
     if not text:
         raise HTTPException(status_code=400, detail="input is required")
-    if len(text) > 4000:
-        text = text[:4000]
+    # 4000 was OpenAI's input limit, applied here to a LOCAL model that has no
+    # such constraint -- and applied as a bare slice, so a long reply stopped
+    # mid-word with no error and no signal to the caller. The server now caps per
+    # backend before it calls us; this is only a runaway-caller bound.
+    if len(text) > MAX_INPUT_CHARS:
+        text = text[:MAX_INPUT_CHARS]
     try:
         audio = synthesize(text, req.voice, req.speed)
         body, mime = encode_audio(audio, req.response_format)

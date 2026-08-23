@@ -179,6 +179,51 @@ describe('TTS preparation authority', () => {
     const response = await fetch(`${base}/api/tts/voices`)
     expect(response.status).toBe(401)
   })
+
+  // The cap is PER BACKEND, and nothing else in the suite covered it -- a mutation
+  // putting the OpenAI limit back on the local path passed every existing test.
+  //
+  // The bug: 4000 is OpenAI's input limit, and it was applied up front, before the
+  // engine was chosen. Kokoro has no such limit, so local speech was cut off at
+  // ~3-4 pages by a rule belonging to an API it was not using. Long replies just
+  // stopped mid-thought.
+  //
+  // Structural, because exercising the local generator needs a live sidecar. It
+  // still fails on the mutation that matters, which a shared cap would not.
+  it('caps per backend: OpenAI at its API limit, local far above it', async () => {
+    const { readFileSync } = await import('node:fs')
+    const src = readFileSync(new URL('./tts.ts', import.meta.url).pathname, 'utf8')
+    const code = src.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n')
+
+    // No cap before the backend is known: that is where the defect lived.
+    expect(code).not.toMatch(/const capped = trimToCap\(/)
+
+    // The local generator uses the local bound, and never the OpenAI one.
+    const localStart = code.indexOf('async function generateLocalIntoCache')
+    expect(localStart).toBeGreaterThan(-1)
+    const localBody = code.slice(localStart, code.indexOf('async function', localStart + 10))
+    expect(localBody).toContain('trimToCap(text, MAX_LOCAL_TTS_CHARS)')
+    expect(localBody).not.toContain('MAX_OPENAI_TTS_CHARS')
+
+    // Both OpenAI entry points: the cached generator and the streaming sibling.
+    // Capping only one of them truncates silently through the other.
+    expect(code.match(/trimToCap\([^,]+, MAX_OPENAI_TTS_CHARS\)/g) ?? []).toHaveLength(2)
+  })
+
+  it('offers both English accents, and every id it offers is one the server accepts', async () => {
+    const { KOKORO_VOICE_OPTIONS, KOKORO_EN_GB_VOICE_OPTIONS, isKokoroVoiceId } =
+      await import('../lib/tts-engine.js')
+    const local = [
+      ...KOKORO_VOICE_OPTIONS.map(v => ({ ...v, accent: 'en-US' })),
+      ...KOKORO_EN_GB_VOICE_OPTIONS.map(v => ({ ...v, accent: 'en-GB' })),
+    ]
+    expect(local).toHaveLength(28)
+    expect(local.filter(v => v.accent === 'en-GB')).toHaveLength(8)
+    // American stays first so `local[0]` is still the historical default.
+    expect(local[0].id).toBe('am_echo')
+    // THE CONTRACT: never offer a voice the route would refuse.
+    for (const v of local) expect(isKokoroVoiceId(v.id), v.id).toBe(true)
+  })
 })
 
 describe('legacy streaming contract', () => {

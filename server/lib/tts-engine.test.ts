@@ -27,6 +27,26 @@ describe('tts-engine Phase 1 modes', () => {
     expect(resolveLocalVoice('am_michael')).toBe('am_michael')
   })
 
+  // The picker offers these, so the server has to accept them. A catalog the
+  // server then rejects is the UI-and-server-disagree bug in miniature.
+  it('accepts the British ids the picker offers', () => {
+    for (const id of ['bm_george', 'bm_daniel', 'bm_lewis', 'bm_fable',
+                      'bf_emma', 'bf_alice', 'bf_isabella', 'bf_lily']) {
+      expect(isKokoroVoiceId(id), id).toBe(true)
+      expect(resolveLocalVoice(id), id).toBe(id)
+    }
+  })
+
+  // 26 of the 54 packaged voices are Mandarin, Japanese, Hindi, Spanish,
+  // Portuguese, Italian and French. The sidecar phonemises with lang_code="a",
+  // so those would be read through an American English G2P pass -- an accent
+  // artefact, not the language. Deliberately not offered.
+  it('does NOT accept the non-English voices that ship in the same pack', () => {
+    for (const id of ['zf_xiaoxiao', 'jf_alpha', 'hf_alpha', 'ef_dora', 'if_sara', 'pf_dora', 'ff_siwis']) {
+      expect(isKokoroVoiceId(id), id).toBe(false)
+    }
+  })
+
   it('enginePreference local forces Kokoro when ready', () => {
     process.env.COS_TTS_ENGINE = 'local_first'
     expect(
