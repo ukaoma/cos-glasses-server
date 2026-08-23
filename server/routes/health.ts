@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
+import { claudeSessionsEnabled } from './claude-sessions.js'
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { COS_SCRIPTS_DIR, COS_MODE } from '../lib/python-bridge.js'
@@ -207,6 +208,17 @@ healthRouter.get('/health', async (_req, res) => {
     localFirstMeetings: localFirstMeetings !== null,
     transcriptionPolicy: transcription.mode,
     liveCues: liveCues.available,
+    // Published so a CLIENT toggle can read its own state cheaply.
+    //
+    // COS Control's "Show Claude sessions" checkbox sourced its state from
+    // GET /api/claude-sessions -- the call that also lists every session -- and the
+    // panel never made that call. The box therefore rendered OFF whatever the
+    // setting was, and the setting was ON: Miles enabled it four times against a
+    // control that could only ever show him false.
+    //
+    // This is a pure env read, so it costs nothing on a health poll, and health is
+    // what every other toggle on that screen already reads.
+    claudeSessions: claudeSessionsEnabled(),
   }
   const voice = {
     available: keyStatus.hasKey || tts_local.ready,

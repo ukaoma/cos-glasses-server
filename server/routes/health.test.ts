@@ -44,3 +44,36 @@ describe('health capability contract', () => {
     expect(body).not.toHaveProperty('cli_session_id')
   }, 20_000)
 })
+
+describe('features.claudeSessions', () => {
+  // COS Control's "Show Claude sessions" checkbox sourced its state from
+  // GET /api/claude-sessions -- the call that also lists every session -- and the
+  // panel never made that call, so the box rendered false while the setting was
+  // true. Miles enabled it four times against a control that could only show him
+  // one value. Health is what every other panel toggle already reads, and this is
+  // a pure env read, so it costs nothing on a poll.
+  it('publishes the flag so a client toggle can read its own state', async () => {
+    const prev = process.env.COS_CLAUDE_SESSIONS_ENABLED
+
+    process.env.COS_CLAUDE_SESSIONS_ENABLED = '1'
+    const on = await (await fetch(`${base}/api/health`)).json()
+    expect(on.features.claudeSessions).toBe(true)
+
+    // Anything but a literal '1' is off, matching claudeSessionsEnabled().
+    process.env.COS_CLAUDE_SESSIONS_ENABLED = 'true'
+    const loose = await (await fetch(`${base}/api/health`)).json()
+    expect(loose.features.claudeSessions).toBe(false)
+
+    delete process.env.COS_CLAUDE_SESSIONS_ENABLED
+    const off = await (await fetch(`${base}/api/health`)).json()
+    expect(off.features.claudeSessions).toBe(false)
+
+    // PRESENT even when off. A client distinguishes false from absent: absent means
+    // a server too old to report it, and the toggle must then be left alone rather
+    // than forced off.
+    expect(Object.keys(off.features)).toContain('claudeSessions')
+
+    if (prev === undefined) delete process.env.COS_CLAUDE_SESSIONS_ENABLED
+    else process.env.COS_CLAUDE_SESSIONS_ENABLED = prev
+  })
+})

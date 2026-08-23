@@ -1,3 +1,20 @@
+## 6.36.22
+
+**`features.claudeSessions` in health**, so a client toggle can read its own state.
+
+COS Control's "Show Claude sessions" checkbox sourced its state from
+`GET /api/claude-sessions` -- the call that also lists every session -- and the
+panel never made that call. The box rendered false while the setting was true, and
+Miles enabled it four times against a control that could only ever show him one
+value. Health is what every other toggle on that panel already reads, and this is
+a pure env read, so it costs nothing on a poll.
+
+Present even when off: a client must distinguish `false` from absent, because
+absent means a server too old to report it and the toggle should then be left
+alone rather than forced off.
+
+Pairs with COS Control 0.5.64.
+
 ## 6.36.21
 
 **Fence liveness: the one thing about a fence a machine can actually establish.**
