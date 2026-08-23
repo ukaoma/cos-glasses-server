@@ -105,10 +105,34 @@ describe('what may be queued at all', () => {
     expect(queueableRefusal('native_turn_in_progress')).toBe(true)
   })
 
-  it('does NOT park a fenced target, which needs a human to look', () => {
-    // "may or may not have been delivered" — waiting cannot resolve that, and queueing
-    // it risks a duplicate turn in a real conversation.
-    expect(queueableRefusal('native_target_fenced')).toBe(false)
+  // 6.36.21 INVERTED THIS, and the old reasoning was right for the world it was
+  // written in. The objection was that waiting cannot resolve "may or may not have
+  // been delivered". True -- but a PERSON resolves it, and until now there was no
+  // way for them to: releasing a fence needed a terminal. COS Control ships a
+  // working Release, releasing kicks the drain, and the turn lands on a real event
+  // rather than a clock.
+  //
+  // Queueing does not weaken the gate. Delivery re-enters the attach route, which
+  // re-runs the fence check; a turn queued against a fence that is never released
+  // expires without ever being sent.
+  it('parks a fenced target now that a person can clear one', () => {
+    expect(queueableRefusal('native_target_fenced')).toBe(true)
+  })
+
+  // The reason the line above is safe. A fenced target must report NOT attachable
+  // to the drainer, or it reads attachable, ATTEMPTS, gets refused by the attach
+  // route, and five of those retire the turn in ~2 minutes -- so the turn would be
+  // gone long before anyone saw a Release button. This is the same failure that
+  // `native_target_busy` hit before the binding was made visible to `occupancy`.
+  it('holds a fenced target instead of spending a delivery attempt', () => {
+    const fenced = { attachable: false, turnEnded: false, activity: 'idle' } as const
+    expect(drainDecision(
+      { status: 'waiting', queuedAt: 1_000, attempts: 0 }, fenced, 2_000,
+    )).toBe('hold')
+    // ...and it stays a hold however many ticks pass, because a hold spends nothing.
+    expect(drainDecision(
+      { status: 'waiting', queuedAt: 1_000, attempts: 0 }, fenced, 60_000,
+    )).toBe('hold')
   })
 
   it('refuses the structural ones outright, because they never clear', () => {

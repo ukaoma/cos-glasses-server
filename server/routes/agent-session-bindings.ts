@@ -271,6 +271,9 @@ export type AttachedTurnResult =
   | { ok: boolean; delivery: 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' }
 
 export interface AgentSessionBindingsDeps {
+  /** Shared fence state. Omit and the router owns a private one, which is correct
+   *  for tests and wrong for the server -- see the wiring note at its use site. */
+  guard?: TargetGuard
   /**
    * Durable fence storage. OPTIONAL, and omitting it is what keeps the existing
    * suite in memory: a test that silently began writing the real data home would
@@ -889,7 +892,14 @@ export interface FencePersistence {
  * the real data home would leak fences between cases and into the running server,
  * so the suite runs with `null` and stays in memory.
  */
-class TargetGuard {
+/** The fence question, narrowed for callers that must not touch anything else.
+ *  `occupancy` in index.ts reads this so a fenced target holds instead of burning
+ *  a delivery attempt; the ATTACH route remains the authority that refuses. */
+export interface TargetFenceView {
+  fencedReason(targetKey: string): WriteRefusal | null
+}
+
+export class TargetGuard {
   /** targetKey -> turnId of the single COS turn allowed to be in flight. */
   private readonly claims = new Map<string, string>()
   /** targetKey -> the fence record. DURABLE as of 6.36.10: persistence is injected
@@ -1287,7 +1297,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   const canListBindings = bindingDepsUsable(deps)
   const canWriteBindings = bindingWriteDepsUsable(deps)
   const detect = deps?.occupancy ?? threadOccupancy
-  const guard = new TargetGuard(deps.fencePersistence ?? null)
+  // INJECTABLE. index.ts owns the instance because the thread-turn queue is wired
+  // BEFORE this router and must be able to see a fence; a second guard created here
+  // would be a disconnected copy, and the queue would go on reading an empty one.
+  const guard = deps.guard ?? new TargetGuard(deps.fencePersistence ?? null)
   const ownership = deps?.ownership ?? { record: recordCosSpawn, release: releaseCosSpawn }
   // One per router. Injectable so the follow-on (attach accepting a `forkRef`)
   // shares this instance rather than standing up a second, disconnected one.

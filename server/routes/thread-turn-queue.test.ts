@@ -269,12 +269,27 @@ describe('a gate refusal does not spend the delivery ceiling', () => {
   })
 
   it('SPENDS the attempt for a refusal that can never clear', async () => {
-    // `native_target_fenced` means an earlier turn may or may not have landed. Waiting
-    // cannot resolve that, and retrying it risks a second copy in a real conversation.
+    // 6.36.21 CHANGED THE EXAMPLE, not the rule. This used `native_target_fenced`,
+    // on the reasoning that waiting cannot resolve "may or may not have landed".
+    // A person resolves it, and now they can: Control's Release works, releasing is
+    // visible to `occupancy`, and the turn lands on that event. So a fence REFUNDS.
+    //
+    // The rule itself is unchanged and still needs a witness, so this now uses a
+    // genuinely structural refusal -- one no amount of waiting or human action clears.
+    await start(); await park('ct-1')
+    const row = await drainWith({ ok: false, reason: 'native_thread_changed' })
+    expect(row.status).toBe('waiting')
+    expect(row.attempts).toBe(1)
+  })
+
+  it('REFUNDS the attempt for a fence, which a person will clear', async () => {
+    // The whole reason the fence had to become visible to `occupancy`: five spent
+    // attempts retire a turn in about two minutes, and the only fence this system
+    // has produced sat for roughly 40 hours.
     await start(); await park('ct-1')
     const row = await drainWith({ ok: false, reason: 'native_target_fenced' })
     expect(row.status).toBe('waiting')
-    expect(row.attempts).toBe(1)
+    expect(row.attempts).toBe(0)
   })
 
   it("obeys the turn route's own retryable verdict over our inference", async () => {

@@ -1,3 +1,45 @@
+## 6.36.21
+
+**A turn queued against a fenced thread was thrown away in about two minutes.**
+
+The thread-turn queue is wired before the agent-session-bindings router, and that
+router built its own `TargetGuard`. So the queue's occupancy gate could not see a
+fence at all: a fenced target reported attachable, `drainDecision` returned
+'deliver', the loopback attach refused `native_target_fenced`, and the refusal
+spent one of five delivery attempts. Five 20-second ticks retire a turn -- long
+before anyone could reach the Mac, and the only fence this system has produced sat
+for roughly 40 hours because clearing it required a terminal.
+
+This is the SAME failure `native_target_busy` hit before the binding was made
+visible to occupancy, and the note recording that fix is three lines above the
+change. Fences never got the same treatment.
+
+The server now owns one `TargetGuard`, constructed above the queue and handed to
+the router, and occupancy consults it. A fenced target holds, and a hold spends
+nothing.
+
+`native_target_fenced` is now queueable -- the one entry in that set cleared by a
+person rather than a clock. The previous reasoning (waiting cannot resolve "may or
+may not have been delivered") was correct for a world where releasing needed a
+terminal. COS Control 0.5.63 ships a Release button that runs, so the wait ends on
+a real event. Queueing does not weaken anything: delivery re-enters the attach
+route and re-runs the fence check.
+
+Fence-held turns get `FENCE_HELD_TURN_TTL_MS` (72h) instead of the ordinary 6h.
+Six hours is right for a busy thread; it is wrong for a state that ends when a
+person looks. It still expires, and it still says so.
+
+Two existing tests were retargeted rather than deleted, both with the reasoning
+kept: the one asserting a fence is NOT queueable, and the one using a fence as its
+example of a refusal that can never clear -- that rule is unchanged and now uses a
+structurally permanent reason as its witness.
+
+Requires COS Control 0.5.63 for the Release button to actually work.
+
+Suite 2989 / 212 files, tsc 0. The wiring guards are mutation-verified: removing
+the fence check from occupancy, and moving the guard below the queue, each fail
+the assertion written for them.
+
 ## 6.36.20
 
 Follow-up to 6.36.19, which was never published. QA found three things in it.

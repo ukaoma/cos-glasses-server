@@ -113,6 +113,7 @@ export async function drainThread(
       attachable: gate.attachable,
       turnEnded: deps.turnEnded(provider, threadId),
       activity: deps.activity(provider, threadId),
+      reason: gate.reason,
     }
     const decision = drainDecision(turn, seen, deps.now())
 

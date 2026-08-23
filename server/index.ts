@@ -24,10 +24,12 @@ import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import {
   createAgentSessionBindingsRouter,
+  TargetGuard,
 
   threadAttachEnabled,
 } from './routes/agent-session-bindings.js'
 import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
+import { targetKey } from './lib/agent-session-binding-store.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
 import { buildOccupancyProbes, realOccupancyDirs } from './lib/occupancy-probes.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
@@ -516,6 +518,18 @@ app.use('/api', claudeSessionsRouter)
 // accounting; a second copy of that sequence in a background worker is a second place
 // for the gate to drift. One request per delivered turn, at a handful of turns a day,
 // buys the guarantee that the queue CANNOT weaken the gate even by accident.
+// ONE guard, owned here, because the thread-turn queue below is wired BEFORE the
+// bindings router and still has to see a fence. When the router made its own, the
+// queue read an empty one: a fenced target reported attachable, the drainer
+// ATTEMPTED, the attach route refused `native_target_fenced`, and five of those
+// retired the queued turn in about two minutes. That is the identical failure the
+// binding note in `occupancy` below records, one layer over.
+const sharedTargetGuard = new TargetGuard(
+  process.env.COS_THREAD_FENCE_DURABLE === '1'
+    ? { load: readFences, save: writeFences }
+    : null,
+)
+
 if (threadAttachEnabled()) {
   const queueDeps = {
     // TWO GATES, ONE ANSWER. `threadOccupancy` sees FOREIGN holders -- another app on
@@ -544,6 +558,12 @@ if (threadAttachEnabled()) {
         // (`blocksTarget`), so an expired or terminal one correctly reads as free.
         const holder = agentSessionBindingRegistry.getByThread(provider, threadId, Date.now())
         if (holder !== null) return { attachable: false, reason: 'native_target_busy' }
+        // THE FENCE, for the same reason the binding is here and not one layer down.
+        // This is ADVISORY: the attach route stays the authority that refuses. Saying
+        // it here only means the drainer holds instead of spending an attempt, and a
+        // turn can wait out a fence that a person will clear.
+        const fenced = sharedTargetGuard.fencedReason(targetKey(provider, threadId))
+        if (fenced !== null) return { attachable: false, reason: fenced }
         return { attachable: true, reason: null }
       } catch {
         // A throwing probe is not an open door.
@@ -597,6 +617,9 @@ app.use('/api', createAgentSessionBindingsRouter({
   // POST /agent-sessions/fences/release work either way — which already removes
   // the restart from the recovery path — and this flag flips on once COS Control
   // has a Fences card.
+  // The instance the queue's `occupancy` already reads. Constructing a second one
+  // here would give the queue a permanently empty fence view.
+  guard: sharedTargetGuard,
   fencePersistence: process.env.COS_THREAD_FENCE_DURABLE === '1'
     ? { load: readFences, save: writeFences }
     : undefined,

@@ -94,6 +94,21 @@ export interface QueuedThreadTurn {
  */
 export const QUEUED_TURN_TTL_MS = 6 * 60 * 60 * 1000
 
+/**
+ * TTL for a turn held by a FENCE specifically.
+ *
+ * Six hours is right for a busy thread: the holder finishes or it never will. A
+ * fence is different in kind -- it ends when a PERSON looks, and the only fence this
+ * system has ever produced sat for about 40 hours before anyone could clear it,
+ * because clearing it needed a terminal. Expiring at six would have thrown the turn
+ * away roughly seven times over while the user was still waiting for a working
+ * Release button.
+ *
+ * It still expires. A turn that outlives this is one nobody is coming back for, and
+ * silently holding it forever is worse than telling the truth about losing it.
+ */
+export const FENCE_HELD_TURN_TTL_MS = 72 * 60 * 60 * 1000
+
 /** Waiting turns per thread. Small: this is a queue, not a backlog. */
 export const MAX_QUEUED_PER_THREAD = 8
 
@@ -141,6 +156,18 @@ const QUEUEABLE_REFUSALS: ReadonlySet<string> = new Set([
   'unverifiable_process_start',
   'unverifiable_liveness_socket',
   'probe_failed',
+  // A FENCE IS CLEARED BY A PERSON, NOT BY A CLOCK -- the one exception in this set.
+  //
+  // It is queueable because "COS sent a turn and never learned whether it arrived"
+  // is precisely the state a queued turn should outlive: the operator checks, releases,
+  // and the turn lands. Releasing kicks the drain, so the wait ends on a real event.
+  //
+  // It is ALSO why the fence had to become visible to `occupancy` (index.ts). Without
+  // that, a fenced target reads attachable, the drainer ATTEMPTS, the attach route
+  // refuses, and five of those retire the turn in about two minutes -- the identical
+  // failure the binding comment above records, and it would have made queue-and-release
+  // look like it worked while silently dropping the turn.
+  'native_target_fenced',
 ])
 
 /** Can a turn refused for this reason be parked, or must it refuse now? */
@@ -159,6 +186,9 @@ export interface DrainObservation {
   turnEnded: boolean
   /** The 30s transcript clock. `idle` is the backstop when no terminal record lands. */
   activity: 'working' | 'idle' | 'unknown'
+  /** The gate's reason when `attachable` is false. Carried ONLY so a fence -- the one
+   *  hold a clock cannot end -- can be given a longer life than a busy thread. */
+  reason?: string | null
 }
 
 export type DrainDecision = 'deliver' | 'hold' | 'expire' | 'give_up'
@@ -178,7 +208,10 @@ export function drainDecision(
 ): DrainDecision {
   if (turn.status !== 'waiting') return 'hold'
   if (!Number.isFinite(now) || !Number.isFinite(turn.queuedAt)) return 'hold'
-  if (now - turn.queuedAt >= ttlMs) return 'expire'
+  // A fence is cleared by a person, so it gets the longer clock. Everything else --
+  // including a fence we could not name -- keeps the ordinary one.
+  const effectiveTtl = seen.reason === 'native_target_fenced' ? FENCE_HELD_TURN_TTL_MS : ttlMs
+  if (now - turn.queuedAt >= effectiveTtl) return 'expire'
   if (turn.attempts >= MAX_DELIVERY_ATTEMPTS) return 'give_up'
   // THE GATE, unweakened. Everything below is about WHEN, never about whether.
   if (!seen.attachable) return 'hold'
