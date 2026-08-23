@@ -79,26 +79,29 @@ export async function resetLiveMessageEra(input: MessageEraResetInput): Promise<
   }
 
   const previous = currentMessageEraState()
-  const sessions = input.sessions ?? getActiveSessions()
-  const archiveAndRelease = input.archiveAndRelease ?? (async (session: SessionToArchive) => {
-    const result = await endSession(session.id)
-    if (!result) return true
-    if (result.exchangeCount > 0 && !result.logged) return false
-    return true
-  })
 
-  let archived = 0
-  for (const session of sessions) {
-    const released = await archiveAndRelease(session)
-    if (!released) {
-      throw new MessageEraResetError(
-        'archive_failed',
-        'Archive failed; message count was not reset.',
-        503,
-      )
-    }
-    archived++
-  }
+  // 6.36.19 — rotate the era, do NOT end the thread.
+  //
+  // This used to endSession() every live session before rotating, which is what
+  // made "reset the message count" also empty CHAT and kill the conversation the
+  // wearer was in the middle of. Miles wants the opposite shape: the next message
+  // is #1, the old cards keep their numbers, and the thread survives.
+  //
+  // Numbers stay unique because they are {messageEra, globalMsgNum}, not a bare
+  // int: the era rotates, the current-era ceiling restarts at 0, and leftover
+  // cards keep their old era. Lookup already prefers the current era
+  // (message-ref.ts:231-234) and the counter is already era-scoped
+  // (message-ref.ts:242-251), so nothing downstream needs to change to keep
+  // "message N" unambiguous.
+  //
+  // `archived` stays in the result and is now always 0. Control and the app read
+  // it, so removing the field would break them; the copy that reports it has to
+  // stop claiming sessions were archived.
+  //
+  // Deliberately no archive step here. There is nothing to release, so there is
+  // no 503 archive_failed path any more — that failure mode is gone rather than
+  // relocated. The day-archive mirror already retains history.
+  const archived = 0
 
   const next: MessageEraState = createMessageEra(input.now ?? Date.now())
   return {

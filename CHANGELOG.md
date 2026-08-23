@@ -1,3 +1,27 @@
+## 6.36.19
+- **Resetting the spoken message count no longer ends the conversation.**
+  `resetLiveMessageEra` used to `endSession` every live session before rotating
+  the era, so "reset the message count" also emptied CHAT and killed the thread
+  the wearer was in the middle of. It now rotates the era and nothing else.
+- Numbers stay unique because they were never bare ints: a number is
+  `{messageEra, globalMsgNum}`. The era rotates, the current-era ceiling
+  restarts at 0, and leftover cards keep their old era and their old number.
+  Lookup already prefers the current era (`message-ref.ts:231-234`) and the
+  counter is already era-scoped (`message-ref.ts:242-251`), so "message N" stays
+  unambiguous without a second ID scheme.
+- `archived` stays in the response and is now always `0`. Callers read the field,
+  so it is kept — but copy that reports it must stop claiming sessions were
+  archived. The `archive_failed` 503 path is **gone**, not relocated: there is no
+  archive step left to fail.
+- Tests inverted to match. A supplied `archiveAndRelease` is now asserted
+  *never to be called*, and a refusing one can no longer block the rotation.
+  Mutation-verified: reintroducing the release loop fails the suite.
+
+**Ship gate:** do not POST `/api/message-era/reset` from any surface until app
+6.8.422 is also live. Server-first plus the old companion still wipes local
+messages, and `/sessions/today/all-messages` is era-filtered so recover cannot
+bring the leftover cards back.
+
 ## 6.36.18
 - **Meetings list now carries voice-assignment tags.** Each row includes
   `voiceReview` from the sidecar head (`speakers[]`) plus whether a human

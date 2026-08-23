@@ -56,7 +56,10 @@ describe('resetLiveMessageEra', () => {
     expect(currentMessageEra()).toBe(before)
   })
 
-  it('archives live sessions then starts a new era at max 0', async () => {
+  // 6.36.19 inverted this. It used to end every live session before rotating,
+  // which is what made "reset the message count" also empty CHAT and kill the
+  // conversation in progress. The thread must now survive the reset.
+  it('rotates the era and never releases a live session', async () => {
     const { resetLiveMessageEra } = await import('./message-era-reset.js')
     const { currentMessageEra } = await import('./message-era.js')
     const released: string[] = []
@@ -66,35 +69,41 @@ describe('resetLiveMessageEra', () => {
       now: 1_700_000_000_300,
       activeRuns: 0,
       sessions: [session('abc')],
+      // Injected on purpose: if any future edit reintroduces the archive step,
+      // this records the call and the assertion below fails.
       archiveAndRelease: async (item) => {
         released.push(item.id)
         return true
       },
     })
-    expect(released).toEqual(['abc'])
+    expect(released).toEqual([])
     expect(result).toMatchObject({
       ok: true,
       previousEra: previous,
-      archived: 1,
+      archived: 0,
       max: 0,
     })
     expect(result.era.startsWith('era-')).toBe(true)
     expect(currentMessageEra()).toBe(result.era)
   })
 
-  it('does not rotate the era when archive fails', async () => {
+  // Replaces "does not rotate the era when archive fails". There is no archive
+  // step left to fail, so the 503 archive_failed path is gone rather than moved.
+  // A refusing archiveAndRelease must no longer be able to block the rotation.
+  it('rotates even when a supplied archiveAndRelease would have refused', async () => {
     const { resetLiveMessageEra } = await import('./message-era-reset.js')
     const { currentMessageEra } = await import('./message-era.js')
     const before = currentMessageEra()
-    await expect(resetLiveMessageEra({
+    const result = await resetLiveMessageEra({
       confirm: true,
       activeRuns: 0,
       sessions: [session('keep')],
       archiveAndRelease: async () => false,
-    })).rejects.toMatchObject({
-      code: 'archive_failed',
-      status: 503,
     })
-    expect(currentMessageEra()).toBe(before)
+    expect(result.ok).toBe(true)
+    expect(result.archived).toBe(0)
+    expect(result.previousEra).toBe(before)
+    expect(currentMessageEra()).toBe(result.era)
+    expect(currentMessageEra()).not.toBe(before)
   })
 })
