@@ -1,3 +1,49 @@
+## 6.36.20
+
+Follow-up to 6.36.19, which was never published. QA found three things in it.
+
+**The reset CLI mutated production archives just by importing.**
+`message-era-reset.ts` imported `endSession`/`getActiveSessions` from
+`conversation.js` and used neither -- but that module's scope runs
+`loadFromDisk()` and a boot `runDailyArchiveMirror()`. In the one-shot CLI that
+is a second process concurrently loading and rewriting the archives the live
+server owns, and `appendToArchive` appends rather than upserts, so it can
+duplicate prior-day chats. The import is gone, and a test now asserts it stays
+gone. The previous canary injected an `archiveAndRelease` and asserted it was
+never called, which only ever caught a regression routed through the callback --
+the code it replaced called `endSession()` directly as its default. `sessions`
+and `archiveAndRelease` are deleted from the input type rather than left as a
+silent no-op for a future caller.
+
+**A corrupt `message-era.json` was indistinguishable from a reset.**
+`currentMessageEraState` fell back to `legacy` on missing OR invalid content.
+Reverting to `legacy` after a real era existed is the worst available answer: it
+re-reads every era-stamped exchange as a PREVIOUS era, hiding it from
+`/all-messages`, while promoting unstamped ones to current -- and to a client it
+looks exactly like a reset nobody asked for. Missing still means `legacy`, which
+is correct for a first upgrade whose exchanges carry no stamp at all. Corrupt
+now rotates explicitly, says so on stderr, and degrades to `legacy` without
+caching only if the replacement cannot be persisted.
+
+**The header described a code path that had been removed.** It still said
+rotation stops "if an archive write fails". There is no archive write. It now
+also records what 6.36.19 quietly changed: this path does NOT archive, and the
+daily mirror skips today by design, so a same-day copy exists only after an
+explicit session end or `POST /api/archive/now`.
+
+The 409 copy on both query paths no longer tells the wearer to reopen for a
+"fresh message list" -- as of app 6.8.423 the cards stay.
+
+Requires app 6.8.423. Suite 2976 / 209 files, tsc 0, measured on a CLEAN
+checkout of this commit rather than a working tree carrying another session's
+uncommitted files -- the 6.36.19 note quoted 2981/211 from a contaminated tree,
+and that tree's untracked code would have shipped in the tarball.
+
+The conversation-import canary is mutation-verified: reintroducing the import
+fails it. One unidentified test failed on a single clean-tree run and did not
+recur across six further runs; it is not attributed to this change and it is
+recorded here rather than rounded down to "clean".
+
 ## 6.36.19
 - **Resetting the spoken message count no longer ends the conversation.**
   `resetLiveMessageEra` used to `endSession` every live session before rotating

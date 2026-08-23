@@ -82,7 +82,7 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
     throw new QueryJobAdmissionPreparationError(
       409,
       'message_era_mismatch',
-      'Reopen or update COS Glasses to start the fresh message list.',
+      'Reopen or update COS Glasses. Your cards stay; the next message is #1.',
     )
   }
   try {

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
-// Archives live sessions, then creates a fresh short-number namespace.
-// History stays in day archives. Disk mtime is enough — no server restart.
+// Creates a fresh short-number namespace. Live sessions are NOT ended and
+// nothing is archived -- the companion keeps every card. Disk mtime is enough
+// — no server restart.
 //
 //   npx tsx server/scripts/reset-message-era.ts --confirm
 
@@ -22,7 +23,7 @@ console.log(JSON.stringify({
   restartRequired: false,
   verify: 'GET /api/message-counter should return { max: 0, era: "<era above>" }',
   nextSteps: [
-    'Phone: tap RESET # or reopen the companion so the live list clears',
+    'Phone: reopen the companion — cards stay, the next message is #1',
     'Send a test message — expect #1',
   ],
 }, null, 2))

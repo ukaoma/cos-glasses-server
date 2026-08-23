@@ -60,7 +60,7 @@ queryRouter.post('/query', async (req, res) => {
     maintenanceLease.release()
     return res.status(409).json({
       error: 'message_era_mismatch',
-      detail: 'Reopen or update COS Glasses to start the fresh message list.',
+      detail: 'Reopen or update COS Glasses. Your cards stay; the next message is #1.',
       era: activeMessageEra,
     })
   }

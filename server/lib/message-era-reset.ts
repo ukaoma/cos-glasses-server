@@ -1,15 +1,23 @@
-// Archive live sessions, then start short-numbering at #1.
-// History is retained in day archives; only the current era's ceiling resets.
-// Disk mtime on message-era.json is enough — the live server re-reads it.
-// Do not rotate the era if a query is in flight or an archive write fails.
-
-import { endSession, getActiveSessions } from './conversation.js'
+// Rotate the short-number namespace. Live sessions are NOT ended and nothing
+// is archived here: the companion keeps every card, so the reset is a numbering
+// change rather than a history change.
+//
+// Do not rotate the era if a query is in flight.
+//
+// NOTE: this file deliberately imports nothing from ./conversation.js. Importing
+// it runs its module scope -- loadFromDisk() and a boot runDailyArchiveMirror()
+// -- which in the one-shot CLI means a second process concurrently loading and
+// rewriting the same archives the live server owns. appendToArchive appends
+// rather than upserts, so that duplicates prior-day chats.
+//
+// Today's exchanges are NOT archived by this path. The daily mirror skips
+// today by design (conversation.ts: `sessionDay >= todayLocal`), so a same-day
+// copy exists only after an explicit session end or POST /api/archive/now.
 import {
   createMessageEra,
   currentMessageEraState,
   type MessageEraState,
 } from './message-era.js'
-import type { SessionToArchive } from './archive.js'
 
 export class MessageEraResetError extends Error {
   readonly code: string
@@ -37,8 +45,6 @@ export interface MessageEraResetInput {
   now?: number
   activeRuns?: number
   shuttingDown?: boolean
-  sessions?: SessionToArchive[]
-  archiveAndRelease?: (session: SessionToArchive) => Promise<boolean>
 }
 
 async function resolveJobHealth(input: MessageEraResetInput): Promise<{ activeRuns: number; shuttingDown: boolean }> {

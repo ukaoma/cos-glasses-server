@@ -55,9 +55,38 @@ export function currentMessageEraState(): MessageEraState {
     cachedMtimeMs = mtimeMs
     return cached
   }
-  cached = { v: 1, era: LEGACY_MESSAGE_ERA, startedAt: 0 }
-  cachedMtimeMs = mtimeMs
-  return cached
+  // Missing is not corrupt. A legacy install upgrading for the first time has
+  // no file AND no era stamps on its exchanges, and only LEGACY_MESSAGE_ERA
+  // classifies an unstamped exchange as current. Rotating here would file every
+  // one of them under a previous era and empty the chat on upgrade.
+  if (loaded.status === 'missing') {
+    cached = { v: 1, era: LEGACY_MESSAGE_ERA, startedAt: 0 }
+    cachedMtimeMs = mtimeMs
+    return cached
+  }
+
+  // Corrupt, or present-but-invalid: the file existed, so a real era almost
+  // certainly did too, and its value is now unrecoverable. Reverting to legacy
+  // would be the worst available answer -- it re-reads every era-stamped
+  // exchange as a PREVIOUS era (hiding it from /all-messages) while promoting
+  // unstamped ones to current, and it is indistinguishable from a reset nobody
+  // asked for. Rotate explicitly and say so, so the state is self-consistent
+  // and the event is diagnosable.
+  console.error(
+    `[message-era] ${MESSAGE_ERA_FILE} was unreadable (status=${loaded.status}); `
+    + 'rotating to a fresh era. Older messages stay in day archives and remain '
+    + 'reachable by session, but not by short number.',
+  )
+  try {
+    return createMessageEra()
+  } catch (err) {
+    // Read-only or full data dir: degrade to legacy rather than crash the
+    // server, but never cache it -- the next call retries the rotation.
+    console.error('[message-era] could not persist the replacement era:', err)
+    cached = null
+    cachedMtimeMs = Number.NaN
+    return { v: 1, era: LEGACY_MESSAGE_ERA, startedAt: 0 }
+  }
 }
 
 export function currentMessageEra(): string {
