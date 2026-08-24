@@ -1,3 +1,37 @@
+## 6.36.24
+
+**Playback stopped after about a minute, whatever the reply length.**
+
+The TTS play session held a deadline fixed 60 seconds from creation. iOS WKWebView
+re-requests `audio.src` every few seconds to refill its decode buffer, so once the
+session expired those refills 404'd and the audio simply stopped mid-sentence.
+
+Measured on this machine: 250 characters is 14 seconds of speech, 4,000 characters
+is 211. So any reply over roughly 1,100 characters outlived its own session. The
+symptom was "the first ten seconds play and nothing else comes" -- the fast-path
+prefix is 250 characters, which is that 14 seconds exactly.
+
+6.36.23 removed a character cap that was also real, but the cap truncated the
+TEXT; this truncated the PLAYBACK. The ceiling was time, not length, which is what
+"caps out at a max duration" meant literally.
+
+`SESSION_TTL_MS` becomes `SESSION_IDLE_MS`, refreshed on every read, so a session
+stays alive while audio is actively playing and dies a minute after it stops.
+
+Because the session UUID IS the auth for an unauthenticated play route, a purely
+sliding window could be held open indefinitely by polling. `SESSION_MAX_LIFETIME_MS`
+(30 minutes) is an absolute ceiling that reading never extends -- far longer than
+any plausible reply, and still a bounded exposure window for a leaked URL. The
+periodic reaper honours it too.
+
+v5.9.4 made these reads non-destructive for exactly this symptom and stopped one
+step short, noting "sessions still expire on the existing 60s TTL, so the practical
+exposure window is unchanged". True, and also what left the ceiling in place.
+
+Suite 3013 / 214, tsc 0. Both halves mutation-verified: removing the refresh fails
+the playback tests, and letting a read extend past the ceiling fails the security
+tests.
+
 ## 6.36.23
 
 **Long replies stopped speaking at about three or four pages.**

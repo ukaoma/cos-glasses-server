@@ -71,7 +71,10 @@ interface SessionEntry {
   preferOpenAI?: boolean
   /** Settings forced Local/Kokoro — do not auto-escape to OpenAI on play miss. */
   forceLocal?: boolean
+  /** Idle deadline. Pushed out on every read; never past `hardExpiresAt`. */
   expiresAt: number
+  /** Absolute deadline, fixed at creation. Reading never extends it. */
+  hardExpiresAt: number
 }
 
 interface DiskSidecar {
@@ -83,7 +86,32 @@ interface DiskSidecar {
 
 const MAX_ENTRIES = 50
 const MAX_TOTAL_BYTES = 100 * 1024 * 1024 // 100 MB — in-memory cap
-const SESSION_TTL_MS = 60_000
+/**
+ * IDLE timeout, not a lifetime. Refreshed on every read.
+ *
+ * It was a fixed 60s from creation, which silently capped PLAYBACK at 60
+ * seconds: iOS WKWebView re-requests `audio.src` every few seconds to refill
+ * its decode buffer, and once the session expired those refills 404'd and the
+ * audio simply stopped. Measured on this machine, 250 characters is 14 seconds
+ * of speech and 4,000 characters is 211 -- so any reply over roughly 1,100
+ * characters outlived its own session and cut off mid-sentence.
+ *
+ * v5.9.4 made reads non-destructive for exactly this reason and stopped one
+ * step short, noting "sessions still expire on the existing 60s TTL, so the
+ * practical exposure window is unchanged". That was true, and it is also what
+ * left the ceiling in place.
+ */
+const SESSION_IDLE_MS = 60_000
+
+/**
+ * Absolute ceiling, never refreshed.
+ *
+ * The session UUID IS the auth for an unauthenticated play route, so a purely
+ * sliding window could be kept alive indefinitely by polling. Thirty minutes is
+ * far longer than any plausible single reply (211 seconds for 4,000 characters)
+ * and still bounds the exposure of a leaked URL.
+ */
+const SESSION_MAX_LIFETIME_MS = 30 * 60_000
 
 /** Disk cache configuration (env-overridable). Defaults sized for "I run this
  *  on my laptop and forget about it for months" rather than a service tier.
@@ -499,9 +527,14 @@ function sweepStaleByAge(): void {
  *  (hash, text, voice, format) bundle. The play route may reread it for native
  *  Range refills during the 60-second TTL; expired sessions are rejected and
  *  reaped by the periodic sweeper below. */
-export function createSession(s: Omit<SessionEntry, 'expiresAt'>): string {
+export function createSession(s: Omit<SessionEntry, 'expiresAt' | 'hardExpiresAt'>): string {
   const uuid = randomUUID()
-  sessions.set(uuid, { ...s, expiresAt: Date.now() + SESSION_TTL_MS })
+  const now = Date.now()
+  sessions.set(uuid, {
+    ...s,
+    expiresAt: now + SESSION_IDLE_MS,
+    hardExpiresAt: now + SESSION_MAX_LIFETIME_MS,
+  })
   return uuid
 }
 
@@ -520,10 +553,16 @@ export function createSession(s: Omit<SessionEntry, 'expiresAt'>): string {
 export function peekSession(uuid: string): SessionEntry | null {
   const s = sessions.get(uuid)
   if (!s) return null
-  if (s.expiresAt < Date.now()) {
+  const now = Date.now()
+  // Absolute ceiling first: a hard expiry must not be extendable by reading.
+  if (s.hardExpiresAt <= now || s.expiresAt < now) {
     sessions.delete(uuid)
     return null
   }
+  // SLIDING. Every Range refill during playback pushes the idle deadline out, so
+  // a session lives as long as audio is actively being played and dies a minute
+  // after it stops -- never past the hard ceiling.
+  s.expiresAt = Math.min(now + SESSION_IDLE_MS, s.hardExpiresAt)
   return s
 }
 
@@ -552,7 +591,7 @@ export function consumeSession(uuid: string): SessionEntry | null {
 export function reapExpiredSessions(): void {
   const now = Date.now()
   for (const [uuid, s] of sessions) {
-    if (s.expiresAt < now) sessions.delete(uuid)
+    if (s.hardExpiresAt <= now || s.expiresAt < now) sessions.delete(uuid)
   }
 }
 
