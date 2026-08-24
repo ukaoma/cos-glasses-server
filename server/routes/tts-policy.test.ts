@@ -3,7 +3,7 @@ import type { Server } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { SESSION_IDLE_MS } from '../lib/tts-cache.js'
+import { SESSION_IDLE_MS, SESSION_MAX_LIFETIME_MS, initialGraceMs } from '../lib/tts-cache.js'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { requireApiToken } from '../lib/api-auth.js'
 
@@ -156,26 +156,118 @@ describe('TTS preparation authority', () => {
     expect(response.status).toBe(404)
   })
 
-  // Derived from SESSION_IDLE_MS rather than a literal. The window widened to
-  // 120s so a 900-char segment survives one full playback at the slowest speed
-  // the client offers; the SECURITY property under test -- an untouched
-  // capability expires -- is unchanged and must not be quietly weakened by a
-  // constant moving underneath it.
-  it('expires the bearer capability once its idle window lapses', async () => {
+  // THE SECURITY PROPERTY, restated for the grace window and NOT weakened.
+  //
+  // An unread capability used to die SESSION_IDLE_MS after it was minted. That
+  // is why playback stopped at segment 5 of 9 on 2026-08-23: every segment is
+  // minted at /prepare, but the client cannot touch segment 5 until segment 4
+  // starts playing, 147s later. The session was already deleted, and the 404
+  // reached iOS as NotSupportedError.
+  //
+  // An unread capability now lives for a grace window DERIVED from how long the
+  // whole reply takes to speak at the slowest voice and slowest rate. What must
+  // not change is that it still expires on its own, without anyone reading it,
+  // and that once read it falls back to the tight idle window. Both are pinned.
+  // A REALISTIC multi-segment reply, not a 30-character prompt.
+  //
+  // The short string gave this suite ~6 seconds of discriminating power and
+  // never exercised a reply long enough to need a grace at all. Worse, once
+  // SESSION_IDLE_MS was re-derived from the slow voice, a 30-char reply's grace
+  // became SMALLER than the idle window, so the test asserted a distinction that
+  // no longer existed. The grace only means something for a reply whose playback
+  // outlasts the idle window.
+  const SPOKEN = Array.from(
+    { length: 150 },
+    (_, i) => `Sentence ${i} of a long spoken reply about nothing in particular.`,
+  ).join(' ')
+
+  it('keeps an unread capability alive until its turn could plausibly come', async () => {
     const startedAt = Date.now()
     const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt)
     synthesizeLocalTts.mockResolvedValue(Buffer.from('ID3-expiring-audio'))
     try {
       const prepared = await fetch(`${base}/api/tts/prepare`, {
-        method: 'POST',
-        headers: AUTH_JSON_HEADERS,
-        body: JSON.stringify({ text: 'Expire this prepared audio URL.', engine: 'local' }),
+        method: 'POST', headers: AUTH_JSON_HEADERS,
+        body: JSON.stringify({ text: SPOKEN, engine: 'local' }),
       })
       expect(prepared.status).toBe(200)
       const { url } = await prepared.json() as { url: string }
 
+      // Past the idle window, where the old flat deadline would have 404'd.
+      // Assert the premise first: a reply this long must have a grace that
+      // actually exceeds the window, or the test proves nothing.
+      expect(initialGraceMs(SPOKEN.length), 'this reply needs a grace to test')
+        .toBeGreaterThan(SESSION_IDLE_MS)
       now.mockReturnValue(startedAt + SESSION_IDLE_MS + 1)
-      expect((await fetch(`${base}${url}`)).status).toBe(404)
+      expect((await fetch(`${base}${url}`)).status, 'this 404 was the bug').toBe(200)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it('still expires an unread capability, on the derived grace', async () => {
+    const startedAt = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt)
+    synthesizeLocalTts.mockResolvedValue(Buffer.from('ID3-expiring-audio'))
+    try {
+      const prepared = await fetch(`${base}/api/tts/prepare`, {
+        method: 'POST', headers: AUTH_JSON_HEADERS,
+        body: JSON.stringify({ text: SPOKEN, engine: 'local' }),
+      })
+      const { url } = await prepared.json() as { url: string }
+
+      // Two assertions, because the first one alone is self-referential: it
+      // computes its boundary from the same helper it is testing, so ANY value
+      // -- including 24 hours -- would pass it. The second bounds the grace
+      // against something the helper does not control.
+      now.mockReturnValue(startedAt + initialGraceMs(SPOKEN.length) + 1)
+      expect((await fetch(`${base}${url}`)).status, 'an unused capability must die').toBe(404)
+
+      // A 30-character prompt is seconds of speech. Its capability must not be
+      // valid for anywhere near an hour, whatever the derivation says.
+      // Bounded against something initialGraceMs does not control: the ceiling.
+      expect(
+        initialGraceMs(SPOKEN.length),
+        'a capability must never be minted beyond the absolute ceiling',
+      ).toBeLessThanOrEqual(SESSION_MAX_LIFETIME_MS)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  // REWRITTEN. This asserted that one read collapses the capability to the idle
+  // window -- which was the defect: the client's warm reads a segment one whole
+  // segment before it plays it, so collapsing on that read revoked the grace and
+  // lost the segment. The SECURITY property is unchanged and restated below:
+  // reading must not EXTEND a capability's life. It may only decline to shorten
+  // it.
+  it('reading a capability does not extend its life', async () => {
+    const startedAt = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt)
+    synthesizeLocalTts.mockResolvedValue(Buffer.from('ID3-expiring-audio'))
+    try {
+      const prepared = await fetch(`${base}/api/tts/prepare`, {
+        method: 'POST', headers: AUTH_JSON_HEADERS,
+        body: JSON.stringify({ text: SPOKEN, engine: 'local' }),
+      })
+      const { url } = await prepared.json() as { url: string }
+
+      const grace = initialGraceMs(SPOKEN.length)
+
+      // Read it repeatedly across its whole life. None of these may buy it a
+      // single millisecond beyond the grace it was minted with.
+      for (let t = 1_000; t < grace - 1_000; t += 30_000) {
+        now.mockReturnValue(startedAt + t)
+        expect((await fetch(`${base}${url}`)).status).toBe(200)
+      }
+
+      // Past the original grace, plus an idle window. A capability that could be
+      // held open by polling would still answer here.
+      now.mockReturnValue(startedAt + grace + SESSION_IDLE_MS + 1)
+      expect(
+        (await fetch(`${base}${url}`)).status,
+        'polling must not hold a bearer capability open',
+      ).toBe(404)
     } finally {
       now.mockRestore()
     }

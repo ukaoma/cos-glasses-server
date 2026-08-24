@@ -172,6 +172,12 @@ app.use(cors({
     if (isAllowedNetworkOrigin(origin)) return cb(null, true)
     cb(new Error('CORS blocked'))
   },
+  // Without this, a cross-origin reader sees only the CORS-safelisted response
+  // headers. The companion's origin is `null` (a file:// WebView), so it is
+  // cross-origin by definition, and the TTS failure probe would log
+  // contentRange/acceptRanges as null on every single call -- leading the next
+  // reader to conclude the server had stopped sending Range headers.
+  exposedHeaders: ['Content-Range', 'Accept-Ranges'],
 }))
 // Auth middleware — always active (token is auto-generated if not set).
 // Mounted before body parsers so rejected uploads cannot consume parse memory.

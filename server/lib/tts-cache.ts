@@ -101,25 +101,68 @@ const MAX_TOTAL_BYTES = 100 * 1024 * 1024 // 100 MB — in-memory cap
  * practical exposure window is unchanged". That was true, and it is also what
  * left the ceiling in place.
  */
+/**
+ * SHARED PHYSICAL CONSTANTS for every TTS deadline in this file.
+ *
+ * These sit at the top because three separate deadlines are derived from them,
+ * and on 2026-08-23 two of those deadlines were derived from a DIFFERENT
+ * speech rate than the third. Both cannot be right, and the tests could not see
+ * the contradiction because each restated its own copy of the rate.
+ */
+
+/** The longest a single chunk can be. Mirrors the chunker in routes/tts.ts. */
+export const LATER_CHUNK_CHARS = 900
+
+/** The most text one reply can be asked to speak locally. */
+export const MAX_LOCAL_TTS_CHARS = 40_000
+
+/**
+ * Characters spoken per second by the SLOWEST voice, not the average.
+ *
+ * Measured on device 2026-08-23: am_echo ~19 chars/sec, bm_george as low as
+ * 10.6 on one segment. Every deadline below uses 10, because a window sized on
+ * the fast voice does not cover the slow one -- which is the entire class of
+ * bug these constants exist to end.
+ *
+ * CAVEAT, stated because it is load-bearing: this is one segment of one voice
+ * out of 28 shipped Kokoro voices. It errs safe for a WINDOW (too slow means
+ * too generous) but it has not been censused, and a voice slower than 10 would
+ * undersize every deadline here at once.
+ */
+export const SLOWEST_SPEECH_CHARS_PER_SEC = 10
+
+/**
+ * The slowest rate playback can actually run at.
+ *
+ * NOT the slowest option the picker offers -- that is 0.75x. This is the clamp
+ * floor in the client's getPreferredSpeed(), which exists so a poisoned
+ * localStorage value cannot produce an absurd rate. Deadlines must survive the
+ * clamp, not just the menu.
+ */
+export const MIN_PLAYBACK_RATE = 0.5
+
+/** Wall-clock ms to speak `chars` at the slowest voice and slowest rate. */
+export function worstCaseSpeechMs(chars: number): number {
+  return (chars / SLOWEST_SPEECH_CHARS_PER_SEC / MIN_PLAYBACK_RATE) * 1000
+}
+
 export const SESSION_IDLE_MS = (() => {
-  // DERIVED, like the ceiling below, and for the same reason: a window that does
-  // not cover its own inputs is the bug this replaced.
+  // COMPUTED from the shared constants, not written down.
   //
-  // Every segment's session is minted at /prepare. The client warms segment i+1
-  // at the START of segment i, so the gap between that touch and the real request
-  // is ONE FULL SEGMENT of playback. The window has to outlast that gap at the
-  // slowest speed the client offers:
+  // A session that is being read must outlast the gap between two reads. The
+  // client warms segment i+1 at the START of segment i and does not touch it
+  // again until segment i FINISHES, so that gap is one full segment:
   //
-  //   LATER_CHUNK_CHARS  900 chars
-  //   speech rate        ~19 chars/sec (measured)
-  //   MIN_SPEED          0.5x (voice-output.ts clamps here)
-  //   => 900 / 19 / 0.5 = 94.7s
+  //   worstCaseSpeechMs(LATER_CHUNK_CHARS)  =  900 / 10 / 0.5  =  180s
   //
-  // 60s covered 1x (47.4s) and 1.25x (37.9s) but NOT 0.75x (63.2s) -- a shipped
-  // option in the Settings picker. At 0.75x every other segment would 404, and
-  // because onError resolves rather than rejects, playback would skip on and
-  // sound complete while dropping half the reply. 120s covers 0.5x with margin.
-  return 120_000
+  // The previous value, 120s, was derived from ~19 chars/sec -- the FAST voice.
+  // Once bm_george was measured at 10.6 the derivation was stale, and 900 chars
+  // at 0.5x is 180s against a 120s window. That is the same defect this file
+  // has now hit three times, so the value is computed here rather than chosen.
+  //
+  // x1.5 of margin absorbs a stalled segment or a slow refill without letting an
+  // abandoned capability linger: 4.5 minutes, not 90.
+  return Math.ceil(worstCaseSpeechMs(LATER_CHUNK_CHARS) * 1.5)
 })()
 
 /**
@@ -129,24 +172,32 @@ export const SESSION_IDLE_MS = (() => {
  * sliding window could be kept alive indefinitely by polling. This bounds the
  * exposure of a leaked URL.
  *
- * DERIVED, not picked. Every segment of a reply is minted at prepare time, so
- * the ceiling has to outlast the WHOLE reply played at the SLOWEST speed the
- * client offers -- otherwise the last segments expire before playback reaches
- * them, which is the same class of bug as the 60s deadline this replaced:
+ * COMPUTED from the largest reply the system can be asked to speak, at the
+ * slowest voice and slowest rate, plus one segment of margin -- which is exactly
+ * what initialGraceMs computes, so the ceiling is defined as "the largest grace
+ * that can legally be issued":
  *
- *   MAX_LOCAL_TTS_CHARS   40,000 chars
- *   speech rate           ~19 chars per second (measured)
- *   MIN_SPEED             0.5x  (voice-output.ts clamps here)
- *   => 40000 / 19 / 0.5  = 70.2 minutes of audio
+ *   worstCaseSpeechMs(40,000) + worstCaseSpeechMs(900)
+ *     = 40000/10/0.5 + 900/10/0.5  =  8000s + 180s  =  136.3 minutes
  *
- * 30 minutes was shorter than both that and the 1x case (35.1 min), so a maximal
- * reply would have cut off near the end. 90 minutes covers the worst case with
- * margin and is still a bounded window.
+ * The previous 90 minutes was derived from ~19 chars/sec. After the slow voice
+ * was measured at 10.6 that stopped covering its own input: initialGraceMs
+ * exceeded the ceiling for any reply over ~26,400 characters, so the ceiling
+ * silently truncated the grace and a maximal reply's last segments died before
+ * playback reached them -- the segment-5 failure relocated to segment 31 of 46.
  *
- * If MAX_LOCAL_TTS_CHARS or MIN_SPEED changes, re-derive this. A ceiling that
- * silently stops covering its own inputs is exactly what went wrong before.
+ * This is a long-lived bearer capability and that is a real trade, stated rather
+ * than buried: a 40,000-character reply genuinely takes over two hours to speak
+ * at 0.5x, and the capability must outlive the audio it serves. The bound is
+ * still absolute and still unextendable by reading.
+ *
+ * There is no separate arithmetic to keep in sync. Change a shared constant and
+ * both this and the grace move together, and the test below asserts the ceiling
+ * covers the largest grace.
  */
-export const SESSION_MAX_LIFETIME_MS = 90 * 60_000
+export const SESSION_MAX_LIFETIME_MS = Math.ceil(
+  worstCaseSpeechMs(MAX_LOCAL_TTS_CHARS) + worstCaseSpeechMs(LATER_CHUNK_CHARS),
+)
 
 /** Disk cache configuration (env-overridable). Defaults sized for "I run this
  *  on my laptop and forget about it for months" rather than a service tier.
@@ -562,12 +613,60 @@ function sweepStaleByAge(): void {
  *  (hash, text, voice, format) bundle. The play route may reread it for native
  *  Range refills during the 60-second TTL; expired sessions are rejected and
  *  reaped by the periodic sweeper below. */
-export function createSession(s: Omit<SessionEntry, 'expiresAt' | 'hardExpiresAt'>): string {
+/**
+ * How long a session that has NEVER been read stays alive.
+ *
+ * WHY THIS IS NOT SESSION_IDLE_MS. Every segment of a reply is minted at
+ * /prepare, but the client only touches segment k when segment k-1 STARTS
+ * playing. For a 9-segment reply that first touch can be minutes away:
+ *
+ *   measured on device, 6,781 chars at 1.25x
+ *     seg 4  first touched at t+101s   played
+ *     seg 5  first touched at t+147s   FAILED
+ *     seg 6  first touched at t+215s   FAILED
+ *     seg 7  never reached             FAILED
+ *
+ * With a flat 120s idle deadline running from MINT, segment 5 was already dead
+ * when the client first asked for it, and the 404 arrived as
+ * NotSupportedError. Playback stopped at exactly segment 5 on every run.
+ *
+ * So the idle clock must not start before anyone could reasonably read it. An
+ * unread session gets a grace window derived from how long the WHOLE reply takes
+ * to speak at the slowest voice and slowest rate; the 120s idle window applies
+ * from the first read onward, when it means what it says.
+ */
+export function initialGraceMs(totalChars: number): number {
+  // The margin is ONE SEGMENT, not one idle window. The last segment is first
+  // touched when the second-to-last STARTS playing, so the window has to reach
+  // one segment past the end of the reply. An earlier version added
+  // SESSION_IDLE_MS here and described it as covering that gap -- which it does
+  // not, since a segment can be 180s at this file's own slowest rate.
+  const lastSegmentMs = worstCaseSpeechMs(LATER_CHUNK_CHARS)
+  return Math.max(SESSION_IDLE_MS, worstCaseSpeechMs(totalChars) + lastSegmentMs)
+}
+
+export function createSession(
+  s: Omit<SessionEntry, 'expiresAt' | 'hardExpiresAt'>,
+  opts: { graceMs?: number } = {},
+): string {
   const uuid = randomUUID()
   const now = Date.now()
+  // Number.isFinite, not just ??. Math.max(120000, NaN) is NaN, and NaN fails
+  // every comparison in peekSession, so a NaN grace would leave the session
+  // governed only by the ceiling. Cheap to close, silent if left open.
+  const requested = opts.graceMs
+  const grace = Number.isFinite(requested)
+    ? Math.max(SESSION_IDLE_MS, requested as number)
+    : SESSION_IDLE_MS
   sessions.set(uuid, {
     ...s,
-    expiresAt: now + SESSION_IDLE_MS,
+    // Belt and braces, NOT the thing that enforces the ceiling. Mutation shows
+    // removing this Math.min changes nothing observable: peekSession and
+    // reapExpiredSessions both test hardExpiresAt independently, so a grace
+    // beyond the ceiling is already unreachable. Kept because a stored deadline
+    // that lies about its own limit invites a future reader to trust it -- but
+    // do not mistake it for the guard.
+    expiresAt: Math.min(now + grace, now + SESSION_MAX_LIFETIME_MS),
     hardExpiresAt: now + SESSION_MAX_LIFETIME_MS,
   })
   return uuid
@@ -594,10 +693,27 @@ export function peekSession(uuid: string): SessionEntry | null {
     sessions.delete(uuid)
     return null
   }
-  // SLIDING. Every Range refill during playback pushes the idle deadline out, so
-  // a session lives as long as audio is actively being played and dies a minute
-  // after it stops -- never past the hard ceiling.
-  s.expiresAt = Math.min(now + SESSION_IDLE_MS, s.hardExpiresAt)
+  // SLIDING, and it may only ever EXTEND a deadline -- never shorten one.
+  //
+  // The Math.max is the whole point, and its absence was a defect that survived
+  // into review. `warmNext(i)` reads segment i+1 at the START of segment i, and
+  // then nothing touches it again until segment i FINISHES, one full segment
+  // later. If that first read collapsed the derived grace to SESSION_IDLE_MS,
+  // the warm would SPEND the grace instead of using it, and any segment whose
+  // playback exceeds 120s would expire before its turn:
+  //
+  //   900 chars at 10.6 chars/sec = 85s of audio
+  //   at 0.5x                     = 170s of wall time   >  120s
+  //
+  // Verified by replaying the real warm pattern: with a plain assignment the
+  // 6,781-char reply lost segment 1 at t+170s while holding a 1,476s grace.
+  //
+  // Every security property is unchanged. The ceiling still binds independently
+  // below. Reading still buys nothing back -- for a session with a long grace,
+  // max() returns the grace deadline it already had, so a read cannot extend a
+  // capability's life by even a millisecond. Once now + SESSION_IDLE_MS passes
+  // the original grace, this becomes an ordinary sliding window again.
+  s.expiresAt = Math.min(Math.max(s.expiresAt, now + SESSION_IDLE_MS), s.hardExpiresAt)
   return s
 }
 

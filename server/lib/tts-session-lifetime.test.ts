@@ -1,11 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  LATER_CHUNK_CHARS,
+  MAX_LOCAL_TTS_CHARS,
+  MIN_PLAYBACK_RATE,
   SESSION_IDLE_MS,
   SESSION_MAX_LIFETIME_MS,
+  SLOWEST_SPEECH_CHARS_PER_SEC,
   createSession,
   peekSession,
   reapExpiredSessions,
+  worstCaseSpeechMs,
 } from './tts-cache.js'
+
+/** Reads spaced comfortably inside the idle window, for tests that need to hold
+ *  a session warm. DERIVED, so widening the window does not silently turn these
+ *  loops into no-ops. */
+const WARM_STEP_MS = Math.floor(SESSION_IDLE_MS / 4)
+/** Enough warm reads to walk past the absolute ceiling. */
+const STEPS_PAST_CEILING = Math.ceil(SESSION_MAX_LIFETIME_MS / WARM_STEP_MS) + 2
 
 /**
  * The session UUID is the auth for an UNAUTHENTICATED play route, and it is also
@@ -67,14 +79,17 @@ describe('TTS session lifetime', () => {
   it('dies at the absolute ceiling no matter how often it is read', () => {
     const uuid = createSession({ ...SESSION })
     let alive = 0
-    // Poll every 30s for 100 minutes -- always inside the idle window.
-    for (let i = 0; i < 200; i++) {
-      vi.advanceTimersByTime(30_000)
+    // Poll well inside the idle window, for long enough to walk past the
+    // ceiling. Both the step and the count are DERIVED: hardcoded 30s x 200
+    // stopped reaching the ceiling the moment it was re-derived, and the test
+    // failed for the right reason but with a number a human had to retune.
+    for (let i = 0; i < STEPS_PAST_CEILING; i++) {
+      vi.advanceTimersByTime(WARM_STEP_MS)
       if (peekSession(uuid)) alive += 1
     }
-    // 90 minutes of reads succeed, then the hard ceiling ends it regardless.
-    expect(alive).toBeGreaterThan(170)
-    expect(alive).toBeLessThan(200)
+    // Reads succeed right up to the ceiling, then it ends regardless.
+    expect(alive).toBeGreaterThan(STEPS_PAST_CEILING * 0.8)
+    expect(alive, 'polling must not hold it open forever').toBeLessThan(STEPS_PAST_CEILING)
     expect(peekSession(uuid)).toBeNull()
   })
 
@@ -84,24 +99,24 @@ describe('TTS session lifetime', () => {
     // test jumped straight to 29m59s with no reads and failed -- correctly: the
     // session had idled out at 60s. The idle rule and the ceiling rule are
     // separate, and this one is about the ceiling.)
-    for (let i = 0; i < 179; i++) {
-      vi.advanceTimersByTime(30_000)
-      expect(peekSession(uuid), `read at ${(i + 1) * 30}s`).not.toBeNull()
+    const stepsToJustInside = Math.floor(SESSION_MAX_LIFETIME_MS / WARM_STEP_MS) - 1
+    for (let i = 0; i < stepsToJustInside; i++) {
+      vi.advanceTimersByTime(WARM_STEP_MS)
+      expect(peekSession(uuid), `read at step ${i + 1}`).not.toBeNull()
     }
-    // ~89m30s in and still alive. A read here must not buy a full idle minute
-    // past the 90m ceiling.
-    vi.advanceTimersByTime(45_000)
+    // Just inside the ceiling. A read here must not buy time past it.
+    vi.advanceTimersByTime(WARM_STEP_MS * 2)
     expect(peekSession(uuid)).toBeNull()
   })
 
   it('the reaper honours the hard ceiling too', () => {
     const uuid = createSession({ ...SESSION })
     // Kept warm by reads right up to the ceiling...
-    for (let i = 0; i < 178; i++) {
-      vi.advanceTimersByTime(30_000)
+    for (let i = 0; i < Math.floor(SESSION_MAX_LIFETIME_MS / WARM_STEP_MS) - 1; i++) {
+      vi.advanceTimersByTime(WARM_STEP_MS)
       peekSession(uuid)
     }
-    vi.advanceTimersByTime(2 * 60_000)
+    vi.advanceTimersByTime(WARM_STEP_MS * 2)
     reapExpiredSessions()
     expect(peekSession(uuid)).toBeNull()
   })
@@ -113,10 +128,11 @@ describe('the ceiling covers the longest reply it can be asked to serve', () => 
   // is 35.1 minutes at 1x and 70.2 at 0.5x, so its last segments would have
   // expired mid-playback -- the same class of bug as the 60s deadline.
   it('outlasts MAX_LOCAL_TTS_CHARS at the minimum playback speed', () => {
-    const MAX_LOCAL_TTS_CHARS = 40_000   // server/routes/tts.ts
-    const SPEECH_CHARS_PER_SEC = 19      // measured
-    const MIN_PLAYBACK_RATE = 0.5        // voice-output.ts clamp
-    const worstCaseMs = (MAX_LOCAL_TTS_CHARS / SPEECH_CHARS_PER_SEC / MIN_PLAYBACK_RATE) * 1000
+    // IMPORTED, not restated. This block used to hold private copies of 40000,
+    // 19 and 0.5. When the slow voice was measured at 10 chars/sec the source
+    // moved and these literals did not, so the test kept asserting a ceiling
+    // that no longer covered its own input -- green the whole time.
+    const worstCaseMs = worstCaseSpeechMs(MAX_LOCAL_TTS_CHARS)
     // Reads the real constant. A literal here would keep passing after someone
     // lowered the ceiling -- the exact shape that let the 60s deadline ship.
     expect(SESSION_MAX_LIFETIME_MS).toBeGreaterThan(worstCaseMs)
@@ -127,10 +143,7 @@ describe('the ceiling covers the longest reply it can be asked to serve', () => 
   // segment i starts playing -- so the idle window must outlast ONE segment at the
   // slowest speed. 60s covered 1x and 1.25x but not the shipped 0.75x option.
   it('outlasts one full segment at the minimum playback speed', () => {
-    const LATER_CHUNK_CHARS = 900        // server/routes/tts.ts
-    const SPEECH_CHARS_PER_SEC = 19
-    const MIN_PLAYBACK_RATE = 0.5
-    const oneSegmentMs = (LATER_CHUNK_CHARS / SPEECH_CHARS_PER_SEC / MIN_PLAYBACK_RATE) * 1000
+    const oneSegmentMs = worstCaseSpeechMs(LATER_CHUNK_CHARS)
     expect(SESSION_IDLE_MS).toBeGreaterThan(oneSegmentMs)
   })
 })

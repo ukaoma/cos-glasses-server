@@ -28,6 +28,7 @@ import {
   completeEntry,
   abortEntry,
   createSession,
+  initialGraceMs,
   peekSession,
   rebindSessionHash,
   reapExpiredSessions,
@@ -868,12 +869,12 @@ ttsRouter.post('/tts/stream', async (req, res) => {
 //      hash the (text, voice, format) tuple, and return a session URL.
 //   2. Client sets audio.src = `${apiBase}${sessionUrl}` and calls .play().
 //   3. The browser GETs /api/tts/play/:session using the session as a bearer
-//      capability. Range refills may reuse it during its 60-second lifetime;
+//      capability. Range refills may reuse it throughout its lifetime (see SESSION_IDLE_MS / initialGraceMs);
 //      the route serves cached bytes or starts live generation on a cold miss.
 //
 // The two-step pattern is required because authentication on the play route
 // would force XHR (no Range support, no progressive decoding). The session
-// UUID IS the auth — cryptographically random, short-lived (60s), and scoped
+// UUID IS the auth — cryptographically random, bounded by SESSION_MAX_LIFETIME_MS, and scoped
 // to one prepared audio item. It is re-readable only for native Range refills.
 ttsRouter.post('/tts/prepare', async (req, res) => {
   try {
@@ -917,6 +918,13 @@ ttsRouter.post('/tts/prepare', async (req, res) => {
     const preferOpenAI = enginePreference === 'openai'
     const forceLocal = enginePreference === 'local'
 
+    // Every segment is minted here, but the client only touches segment k when
+    // segment k-1 starts playing -- minutes later for a long reply. So each
+    // session's first deadline is derived from the WHOLE reply's speaking time,
+    // not from a flat idle window that starts before anyone could read it. See
+    // initialGraceMs; this is the bug that stopped playback at segment 5 of 9.
+    const graceMs = initialGraceMs(capped.length)
+
     const mintAndWarm = (chunk: string) => {
       const hash = hashForDecision(decision, requestedFormat, chunk, requestedInstructions)
       const uuid = createSession({
@@ -926,7 +934,7 @@ ttsRouter.post('/tts/prepare', async (req, res) => {
         format: requestedFormat,
         preferOpenAI,
         forceLocal,
-      })
+      }, { graceMs })
       // Detached preparation is deliberately local-only. It must never retain
       // authority to spend cloud budget after the client cancels or closes.
       // OpenAI generation (including Kokoro fallback) begins only from the
@@ -1076,9 +1084,14 @@ function serveCachedBody(
 ttsRouter.get('/tts/play/:session', async (req, res) => {
   // peekSession (v5.9.4) — non-destructive lookup so iOS WKWebView can issue
   // its routine HTTP Range requests for audio buffer refill without 404ing
-  // halfway through a long playback. Sessions still TTL out at 60s.
+  // halfway through a long playback. Sessions TTL out on the idle window, or on their derived grace if never read.
   const session = peekSession(req.params.session)
   if (!session) {
+    // LOG IT. The server produced this 404 and recorded nothing, so the only
+    // reporter was the client -- whose report is fire-and-forget, 3s-aborted and
+    // error-deduped. Four builds on 2026-08-23 were spent inferring a fact the
+    // server held the whole time.
+    console.warn('[tts/play] 404 session expired or unknown:', req.params.session)
     return res.status(404).json({ error: 'session expired or unknown' })
   }
 

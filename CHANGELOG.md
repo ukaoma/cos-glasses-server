@@ -1,3 +1,60 @@
+## 6.36.28
+
+THE bug. Three earlier fixes tonight were each real and none was this one.
+
+Every segment of a reply is minted at /prepare with a 120s idle deadline that
+starts AT MINT. But the client only touches segment k when segment k-1 starts
+playing. Measured on device, 6,781 chars at 1.25x:
+
+    seg 4   first touched t+101s   played
+    seg 5   first touched t+147s   FAILED
+    seg 6   first touched t+215s   FAILED
+    seg 7   never reached          FAILED
+
+Segment 5 was deleted 27s before the client first asked for it. Reproduced with
+curl against the running server, replaying the exact timeline: HTTP 404 at
+segment 5, t+216s. The 404 reaches the audio element as NotSupportedError at
+readyState 0 -- identical to every other media failure, which is why a char cap,
+a wider idle window and a render gate all left playback stopping at segment 5.
+
+WHAT CHANGED
+
+- An unread session gets a grace window DERIVED from how long the whole reply
+  takes to speak, plus one segment of margin (the last segment is first touched
+  when the second-to-last starts playing).
+- A read may only ever EXTEND a deadline, never shorten one. This is not
+  cosmetic: the client warms segment k one whole segment before playing it, so
+  collapsing the grace on that first read SPENT it. At 0.5x a 900-char segment
+  is 170s of wall time against a 120s window, and the reply lost segment 1 while
+  holding a 1,476s grace. Found by QA, after the first version of this fix.
+- SESSION_IDLE_MS and SESSION_MAX_LIFETIME_MS are now COMPUTED from shared
+  constants rather than written down. Both were derived from ~19 chars/sec, the
+  FAST voice, and this release is the one that measured the slow voice at 10.
+  Leaving them meant the file asserted two contradictory worst cases:
+    idle     900 / 10 / 0.5  =  180s   against a 120s window
+    ceiling  40,000 / 10 / 0.5 = 133 min against a 90 min ceiling
+  The ceiling had also started silently truncating the grace for any reply over
+  ~26,400 chars, relocating the same failure to roughly segment 31 of 46.
+- MAX_LOCAL_TTS_CHARS, LATER_CHUNK_CHARS, the speech rate and the minimum
+  playback rate now live in one place and are imported by the tests that used to
+  restate them. That duplication is why the contradiction above was invisible.
+- /play now logs the 404 it produces. The server held this fact all evening and
+  recorded nothing, so the only reporter was a fire-and-forget client call.
+- CORS exposes Content-Range and Accept-Ranges, without which the client's
+  failure probe reads them as null from the null-origin companion WebView.
+
+SECURITY, stated plainly rather than buried
+
+An unread capability now lives far longer than 120 seconds -- up to the ceiling,
+which is 136 minutes. That is a real widening and it is the price of playing a
+40,000-character reply, which genuinely takes over two hours at 0.5x. What is
+unchanged: the ceiling is absolute, reading cannot extend a capability past the
+grace it was minted with, and an unread capability still expires on its own.
+Both properties are pinned and both mutate red.
+
+216 files, 3047 tests in scope (218 / 3053 including a parallel session's two
+files, which are not part of this release).
+
 ## 6.36.27
 
 The sidecar renders one request at a time. The server finally acts like it.
