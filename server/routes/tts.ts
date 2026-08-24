@@ -163,13 +163,29 @@ function stripMarkdownLight(text: string): string {
  * speech). Later chunks are larger to keep the request count down; at ~1.7s
  * render each they are always many seconds ahead of playback.
  */
-const FIRST_CHUNK_CHARS = 250
-const LATER_CHUNK_CHARS = 900
+export const FIRST_CHUNK_CHARS = 250
+export const LATER_CHUNK_CHARS = 900
 
-/** Hard ceiling on segments for one reply. At LATER_CHUNK_CHARS this covers
- *  ~36,000 characters, comfortably past MAX_LOCAL_TTS_CHARS. A pathological
- *  input hits this and gets a longer final chunk rather than unbounded minting. */
-const MAX_CHUNKS = 40
+/**
+ * Hard ceiling on segments for one reply.
+ *
+ * DERIVED, and the first version was wrong: it claimed 40 chunks covered
+ * "~36,000 characters, comfortably past MAX_LOCAL_TTS_CHARS". The real coverage
+ * is 250 + 39x900 = 35,350 -- 4,650 SHORT of the 40,000 cap, not past it. A
+ * maximal reply therefore produced a 5,574-char final segment, and on the OpenAI
+ * backend `trimToCap` is applied PER SEGMENT, so 1,574 characters were silently
+ * dropped -- contradicting this chunker's own "nothing is dropped" contract two
+ * definitions above.
+ *
+ *   ceil((MAX_LOCAL_TTS_CHARS - FIRST_CHUNK_CHARS) / LATER_CHUNK_CHARS) + 1
+ *   = ceil(39750 / 900) + 1 = 45 + 1 = 46      (250 + 45x900 = 40,750)
+ *
+ * 45 was the first answer here and was itself 150 chars short -- which is why
+ * the test below computes the coverage instead of trusting this arithmetic.
+ *
+ * Re-derive if either cap moves; the test below fails if this stops covering.
+ */
+export const MAX_CHUNKS = 46
 
 /**
  * Split `text` into sequentially-playable chunks.
@@ -197,8 +213,11 @@ export function splitForChunks(text: string): string[] {
     if (rest.length <= cap) { chunks.push(rest); rest = ''; break }
 
     const window = rest.slice(0, cap)
-    // Prefer a sentence end. Same .!? + whitespace rule the prefix splitter and
-    // trimToCap use, so all three agree on what a boundary is.
+    // Prefer a sentence end. NOTE: this is `/[.!?]\s+/` while `trimToCap` matches
+    // a literal '. ' -- they disagree on '.\n' and on double spaces. Not unified
+    // here because trimToCap only ever trims a hard cap, but do not describe them
+    // as the same rule. (An earlier comment claimed all three agreed, naming a
+    // prefix splitter deleted in the same commit.)
     let cut = -1
     const re = /[.!?]\s+/g
     let m: RegExpExecArray | null

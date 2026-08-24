@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createSession, peekSession, reapExpiredSessions } from './tts-cache.js'
+import {
+  SESSION_IDLE_MS,
+  SESSION_MAX_LIFETIME_MS,
+  createSession,
+  peekSession,
+  reapExpiredSessions,
+} from './tts-cache.js'
 
 /**
  * The session UUID is the auth for an UNAUTHENTICATED play route, and it is also
@@ -43,28 +49,32 @@ describe('TTS session lifetime', () => {
     }
   })
 
+  // Derived from SESSION_IDLE_MS, not written against it. The first version of
+  // this test hardcoded 59s/61s around a 60s window and broke the moment the
+  // window was widened -- which is the good failure, but it should never have
+  // needed a human to retune two magic numbers.
   it('still expires once reads stop', () => {
     const uuid = createSession({ ...SESSION })
     vi.advanceTimersByTime(30_000)
-    expect(peekSession(uuid)).not.toBeNull()   // refreshes the idle deadline
-    vi.advanceTimersByTime(59_000)
-    expect(peekSession(uuid)).not.toBeNull()   // inside the refreshed window
-    vi.advanceTimersByTime(61_000)
-    expect(peekSession(uuid)).toBeNull()       // idle out
+    expect(peekSession(uuid)).not.toBeNull()              // refreshes the deadline
+    vi.advanceTimersByTime(SESSION_IDLE_MS - 1_000)
+    expect(peekSession(uuid)).not.toBeNull()              // inside the refreshed window
+    vi.advanceTimersByTime(SESSION_IDLE_MS + 1_000)
+    expect(peekSession(uuid)).toBeNull()                  // idle out
   })
 
   // THE SECURITY HALF. Reading must not be able to hold a session open forever.
   it('dies at the absolute ceiling no matter how often it is read', () => {
     const uuid = createSession({ ...SESSION })
     let alive = 0
-    // Poll every 30s for 40 minutes -- always inside the idle window.
-    for (let i = 0; i < 80; i++) {
+    // Poll every 30s for 100 minutes -- always inside the idle window.
+    for (let i = 0; i < 200; i++) {
       vi.advanceTimersByTime(30_000)
       if (peekSession(uuid)) alive += 1
     }
-    // 30 minutes of reads succeed, then the hard ceiling ends it regardless.
-    expect(alive).toBeGreaterThan(50)
-    expect(alive).toBeLessThan(80)
+    // 90 minutes of reads succeed, then the hard ceiling ends it regardless.
+    expect(alive).toBeGreaterThan(170)
+    expect(alive).toBeLessThan(200)
     expect(peekSession(uuid)).toBeNull()
   })
 
@@ -74,12 +84,12 @@ describe('TTS session lifetime', () => {
     // test jumped straight to 29m59s with no reads and failed -- correctly: the
     // session had idled out at 60s. The idle rule and the ceiling rule are
     // separate, and this one is about the ceiling.)
-    for (let i = 0; i < 59; i++) {
+    for (let i = 0; i < 179; i++) {
       vi.advanceTimersByTime(30_000)
       expect(peekSession(uuid), `read at ${(i + 1) * 30}s`).not.toBeNull()
     }
-    // ~29m30s in and still alive. A read here must not buy a full idle minute
-    // past the 30m ceiling.
+    // ~89m30s in and still alive. A read here must not buy a full idle minute
+    // past the 90m ceiling.
     vi.advanceTimersByTime(45_000)
     expect(peekSession(uuid)).toBeNull()
   })
@@ -87,12 +97,40 @@ describe('TTS session lifetime', () => {
   it('the reaper honours the hard ceiling too', () => {
     const uuid = createSession({ ...SESSION })
     // Kept warm by reads right up to the ceiling...
-    for (let i = 0; i < 58; i++) {
+    for (let i = 0; i < 178; i++) {
       vi.advanceTimersByTime(30_000)
       peekSession(uuid)
     }
     vi.advanceTimersByTime(2 * 60_000)
     reapExpiredSessions()
     expect(peekSession(uuid)).toBeNull()
+  })
+})
+
+describe('the ceiling covers the longest reply it can be asked to serve', () => {
+  // Every segment is minted at prepare, so the ceiling must outlast the WHOLE
+  // reply at the SLOWEST playback speed. 30 minutes did not: a 40,000-char reply
+  // is 35.1 minutes at 1x and 70.2 at 0.5x, so its last segments would have
+  // expired mid-playback -- the same class of bug as the 60s deadline.
+  it('outlasts MAX_LOCAL_TTS_CHARS at the minimum playback speed', () => {
+    const MAX_LOCAL_TTS_CHARS = 40_000   // server/routes/tts.ts
+    const SPEECH_CHARS_PER_SEC = 19      // measured
+    const MIN_PLAYBACK_RATE = 0.5        // voice-output.ts clamp
+    const worstCaseMs = (MAX_LOCAL_TTS_CHARS / SPEECH_CHARS_PER_SEC / MIN_PLAYBACK_RATE) * 1000
+    // Reads the real constant. A literal here would keep passing after someone
+    // lowered the ceiling -- the exact shape that let the 60s deadline ship.
+    expect(SESSION_MAX_LIFETIME_MS).toBeGreaterThan(worstCaseMs)
+  })
+
+  // The IDLE window has its own coverage duty, and it is NOT the same one. Every
+  // segment is minted at prepare, but the client only TOUCHES segment i+1 when
+  // segment i starts playing -- so the idle window must outlast ONE segment at the
+  // slowest speed. 60s covered 1x and 1.25x but not the shipped 0.75x option.
+  it('outlasts one full segment at the minimum playback speed', () => {
+    const LATER_CHUNK_CHARS = 900        // server/routes/tts.ts
+    const SPEECH_CHARS_PER_SEC = 19
+    const MIN_PLAYBACK_RATE = 0.5
+    const oneSegmentMs = (LATER_CHUNK_CHARS / SPEECH_CHARS_PER_SEC / MIN_PLAYBACK_RATE) * 1000
+    expect(SESSION_IDLE_MS).toBeGreaterThan(oneSegmentMs)
   })
 })

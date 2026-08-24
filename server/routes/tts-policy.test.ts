@@ -3,6 +3,7 @@ import type { Server } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { SESSION_IDLE_MS } from '../lib/tts-cache.js'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { requireApiToken } from '../lib/api-auth.js'
 
@@ -155,7 +156,12 @@ describe('TTS preparation authority', () => {
     expect(response.status).toBe(404)
   })
 
-  it('expires the bearer capability after its 60-second playback window', async () => {
+  // Derived from SESSION_IDLE_MS rather than a literal. The window widened to
+  // 120s so a 900-char segment survives one full playback at the slowest speed
+  // the client offers; the SECURITY property under test -- an untouched
+  // capability expires -- is unchanged and must not be quietly weakened by a
+  // constant moving underneath it.
+  it('expires the bearer capability once its idle window lapses', async () => {
     const startedAt = Date.now()
     const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt)
     synthesizeLocalTts.mockResolvedValue(Buffer.from('ID3-expiring-audio'))
@@ -168,7 +174,7 @@ describe('TTS preparation authority', () => {
       expect(prepared.status).toBe(200)
       const { url } = await prepared.json() as { url: string }
 
-      now.mockReturnValue(startedAt + 60_001)
+      now.mockReturnValue(startedAt + SESSION_IDLE_MS + 1)
       expect((await fetch(`${base}${url}`)).status).toBe(404)
     } finally {
       now.mockRestore()

@@ -101,17 +101,52 @@ const MAX_TOTAL_BYTES = 100 * 1024 * 1024 // 100 MB — in-memory cap
  * practical exposure window is unchanged". That was true, and it is also what
  * left the ceiling in place.
  */
-const SESSION_IDLE_MS = 60_000
+export const SESSION_IDLE_MS = (() => {
+  // DERIVED, like the ceiling below, and for the same reason: a window that does
+  // not cover its own inputs is the bug this replaced.
+  //
+  // Every segment's session is minted at /prepare. The client warms segment i+1
+  // at the START of segment i, so the gap between that touch and the real request
+  // is ONE FULL SEGMENT of playback. The window has to outlast that gap at the
+  // slowest speed the client offers:
+  //
+  //   LATER_CHUNK_CHARS  900 chars
+  //   speech rate        ~19 chars/sec (measured)
+  //   MIN_SPEED          0.5x (voice-output.ts clamps here)
+  //   => 900 / 19 / 0.5 = 94.7s
+  //
+  // 60s covered 1x (47.4s) and 1.25x (37.9s) but NOT 0.75x (63.2s) -- a shipped
+  // option in the Settings picker. At 0.75x every other segment would 404, and
+  // because onError resolves rather than rejects, playback would skip on and
+  // sound complete while dropping half the reply. 120s covers 0.5x with margin.
+  return 120_000
+})()
 
 /**
  * Absolute ceiling, never refreshed.
  *
  * The session UUID IS the auth for an unauthenticated play route, so a purely
- * sliding window could be kept alive indefinitely by polling. Thirty minutes is
- * far longer than any plausible single reply (211 seconds for 4,000 characters)
- * and still bounds the exposure of a leaked URL.
+ * sliding window could be kept alive indefinitely by polling. This bounds the
+ * exposure of a leaked URL.
+ *
+ * DERIVED, not picked. Every segment of a reply is minted at prepare time, so
+ * the ceiling has to outlast the WHOLE reply played at the SLOWEST speed the
+ * client offers -- otherwise the last segments expire before playback reaches
+ * them, which is the same class of bug as the 60s deadline this replaced:
+ *
+ *   MAX_LOCAL_TTS_CHARS   40,000 chars
+ *   speech rate           ~19 chars per second (measured)
+ *   MIN_SPEED             0.5x  (voice-output.ts clamps here)
+ *   => 40000 / 19 / 0.5  = 70.2 minutes of audio
+ *
+ * 30 minutes was shorter than both that and the 1x case (35.1 min), so a maximal
+ * reply would have cut off near the end. 90 minutes covers the worst case with
+ * margin and is still a bounded window.
+ *
+ * If MAX_LOCAL_TTS_CHARS or MIN_SPEED changes, re-derive this. A ceiling that
+ * silently stops covering its own inputs is exactly what went wrong before.
  */
-const SESSION_MAX_LIFETIME_MS = 30 * 60_000
+export const SESSION_MAX_LIFETIME_MS = 90 * 60_000
 
 /** Disk cache configuration (env-overridable). Defaults sized for "I run this
  *  on my laptop and forget about it for months" rather than a service tier.

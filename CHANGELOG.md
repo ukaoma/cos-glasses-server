@@ -1,3 +1,36 @@
+## 6.36.26
+
+Deadline hardening for the segmented TTS path shipped in 6.36.25. Three constants
+that were written rather than derived, and three tests that could not fail.
+
+- `SESSION_IDLE_MS` 60s -> 120s, DERIVED. Every segment's session is minted at
+  `/prepare`, but the client only touches segment i+1 when segment i starts
+  playing -- so the idle window has to outlast one full segment at the slowest
+  speed the client offers: `900 / 19 / 0.5 = 94.7s`. 60s covered 1x (47.4s) and
+  1.25x (37.9s) but not 0.75x (63.2s), which is a shipped option in the Settings
+  picker. At 0.75x every other segment would have 404'd, and because the client
+  resolves rather than rejects on error, playback would have continued and
+  dropped half the reply while still sounding complete.
+- `MAX_CHUNKS` 40 -> 46. 40 covered 35,350 characters against a 40,000-character
+  local cap -- 4,650 short, not "comfortably past" as its comment claimed. The
+  overflow landed in one oversized final segment, which the OpenAI backend then
+  trims PER SEGMENT, silently dropping text and contradicting the chunker's own
+  no-loss contract. (46 was the second answer; 45 was still 150 short.)
+- The timing test compared one chunk's render time against its own playback
+  time. Both sides are linear in length, so it reduced to `1.9 < 17.54` and
+  passed for every input -- including `LATER_CHUNK_CHARS = 100_000`, which
+  restores the original bug exactly. Replaced with the cumulative, serialized
+  form the sidecar actually exhibits, plus a test that scores the OLD
+  prefix/tail split as the failure it was.
+- Session-lifetime and policy tests now import `SESSION_IDLE_MS` and
+  `SESSION_MAX_LIFETIME_MS` instead of restating them as literals.
+- `SESSION_MAX_LIFETIME_MS` 30 -> 90 minutes (derived: a 40,000-char reply is
+  70.2 minutes at 0.5x).
+
+All four constants are mutation-verified: reverting each one fails a test.
+
+215 files, 3028 tests.
+
 ## 6.36.25
 
 **Spoken replies are now N segments, not a prefix and a tail.**
