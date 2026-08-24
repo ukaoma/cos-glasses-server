@@ -454,6 +454,9 @@ async function generateLocalIntoCache(
   voice: string,
   format: string,
   signal?: AbortSignal,
+  // A user is waiting on a /play render; nobody is waiting on a pre-warm.
+  // Defaults to background so a new caller cannot accidentally starve playback.
+  priority = false,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   // A memory/latency bound, NOT OpenAI's 4096. Kokoro reads what it is handed;
   // the old shared cap truncated local speech at ~3-4 pages for no reason that
@@ -471,7 +474,7 @@ async function generateLocalIntoCache(
   }
   try {
     // Local path ignores COS_VOICE_INSTRUCTIONS / per-request instructions.
-    const bytes = await synthesizeLocalTts({ text: spoken, voice, format, signal })
+    const bytes = await synthesizeLocalTts({ text: spoken, voice, format, signal, priority })
     if (!bytes.length) {
       abortEntry(hash)
       return { ok: false, status: 502, message: 'local TTS returned empty body' }
@@ -496,10 +499,11 @@ async function generateIntoCache(
   format: string,
   instructions: string,
   signal?: AbortSignal,
+  priority = false,
 ): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   if (getCached(hash)) return { ok: true }
   if (decision.backend === 'local') {
-    return generateLocalIntoCache(hash, text, decision.backendVoice, format, signal)
+    return generateLocalIntoCache(hash, text, decision.backendVoice, format, signal, priority)
   }
   return generateOpenAIIntoCache(
     hash,
@@ -520,6 +524,9 @@ async function generateWithFallback(opts: {
   enginePreference?: TtsEnginePreference | null
   signal?: AbortSignal
   sessionId?: string
+  /** True when a user is waiting (a /play cold miss). Background pre-warm
+   *  leaves it false so playback can take the sidecar ahead of it. */
+  priority?: boolean
 }): Promise<{ ok: true; hash: string } | { ok: false; status: number; message: string }> {
   const enginePreference = opts.enginePreference ?? null
   const preferOpenAI = enginePreference === 'openai'
@@ -553,6 +560,7 @@ async function generateWithFallback(opts: {
     opts.format,
     opts.instructions,
     opts.signal,
+    opts.priority === true,
   )
   if (primary.ok) {
     if (softEscapedToOpenAI) {
@@ -586,6 +594,7 @@ async function generateWithFallback(opts: {
       opts.format,
       opts.instructions,
       opts.signal,
+      opts.priority === true,
     )
     if (localResult.ok) {
       if (opts.sessionId) rebindSessionHash(opts.sessionId, localHash)
@@ -616,6 +625,7 @@ async function generateWithFallback(opts: {
       opts.format,
       opts.instructions,
       opts.signal,
+      opts.priority === true,
     )
     if (openaiResult.ok) {
       announceKokoroFallbackToOpenAI(failReason)
@@ -803,6 +813,7 @@ ttsRouter.post('/tts/stream', async (req, res) => {
         voice: decision.backendVoice,
         format: requestedFormat,
         signal: upstreamController.signal,
+        priority: true,
       })
       if (upstreamController.signal.aborted) return
       res.writeHead(200, {
@@ -1112,6 +1123,8 @@ ttsRouter.get('/tts/play/:session', async (req, res) => {
     enginePreference,
     signal: upstreamController.signal,
     sessionId: req.params.session,
+    // /play cold miss: the listener is waiting on this render right now.
+    priority: true,
   })
 
   if (!result.ok) {

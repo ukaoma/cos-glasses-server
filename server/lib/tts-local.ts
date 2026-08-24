@@ -269,6 +269,11 @@ export function getLocalTtsHealth(): {
   starting: boolean
   error: string | null
   lastFallbackToOpenAI: { at: string; reason: string } | null
+  /** Renders in flight plus queued. A reply is chunked into up to MAX_CHUNKS
+   *  segments that all pre-warm at once, and the sidecar renders one at a time,
+   *  so this is the number that explains a slow or failing segment. It was not
+   *  observable on 2026-08-23 and that cost an evening. */
+  renderQueueDepth: number
 } {
   return {
     ready: serverAvailable,
@@ -282,6 +287,7 @@ export function getLocalTtsHealth(): {
     starting: serverStarting,
     error: lastError,
     lastFallbackToOpenAI,
+    renderQueueDepth: localRenderQueueDepth(),
   }
 }
 
@@ -390,15 +396,170 @@ export function stopLocalTtsServer(): void {
 }
 
 /** Synthesize via local OpenAI-shaped speech endpoint. Returns full audio Buffer. */
+
+// ── render gate ──────────────────────────────────────────────────────────────
+//
+// The Kokoro sidecar renders ONE request at a time behind its own lock. Issuing
+// N requests concurrently therefore does not make them finish any sooner; it
+// only makes each one's timeout run while it waits its turn.
+//
+// That is what broke playback on 2026-08-23. Chunking turned a reply into 9
+// renders, all fired at once by /prepare's pre-warm. Measured on a 6,781-char
+// reply: each render took ~2.6s, but segment 5's request spent 11.5s of its
+// 12,000ms budget QUEUED. On a slightly busier machine it tipped over, returned
+// 502, and iOS surfaced it as NotSupportedError. Five of nine segments played.
+//
+// The gate makes that queue explicit on our side, which buys two things:
+//
+//   1. The synthesis timeout starts when a request ACQUIRES the gate, so it
+//      bounds RENDER time -- what it was always described as bounding. Waiting
+//      for a turn is governed separately, by a derived ceiling (below).
+//   2. Playback jumps ahead of pre-warm. A /play request has a user waiting on
+//      it; a /prepare pre-warm does not. Without priority, segment 5's playback
+//      request queues behind the pre-warms for 6, 7 and 8 -- work that is not
+//      needed until minutes later.
+//
+// Priority never reorders playback against itself: a priority waiter is placed
+// after other priority waiters and before every background one.
+
+type RenderWaiter = {
+  priority: boolean
+  resolve: () => void
+  reject: (err: Error) => void
+  signal?: AbortSignal
+  detach?: () => void
+}
+
+let gateBusy = false
+const gateWaiters: RenderWaiter[] = []
+
+/** In-flight plus queued renders. Exposed for /api/health and tests. */
+export function localRenderQueueDepth(): number {
+  return gateWaiters.length + (gateBusy ? 1 : 0)
+}
+
+/** Test-only: drop all queued waiters and free the gate. */
+export function __resetRenderGate(): void {
+  for (const w of gateWaiters.splice(0)) {
+    w.detach?.()
+    w.reject(makeAbortError('render gate reset'))
+  }
+  gateBusy = false
+}
+
+function makeAbortError(message: string): Error {
+  const err = new Error(message)
+  err.name = 'AbortError'
+  return err
+}
+
+function releaseRenderGate(): void {
+  const next = gateWaiters.shift()
+  if (!next) {
+    gateBusy = false
+    return
+  }
+  // The gate stays held; ownership passes straight to `next`. Setting
+  // gateBusy = false here would let a later arrival barge in ahead of a
+  // waiter that has already been promised the slot.
+  next.detach?.()
+  next.resolve()
+}
+
+function acquireRenderGate(priority: boolean, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(makeAbortError('local TTS request aborted'))
+  if (!gateBusy) {
+    gateBusy = true
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve, reject) => {
+    const waiter: RenderWaiter = { priority, resolve, reject, signal }
+
+    // DERIVED ceiling on queue wait, so a wedged sidecar cannot hang callers
+    // forever. Everyone ahead of us is individually bounded by the synthesis
+    // timeout, so the longest legitimate wait is that timeout once per render
+    // ahead of us -- the one in flight plus everyone already queued.
+    //
+    // The +1 is not slack, it is a race fix found by the test below. Without it
+    // the first waiter's ceiling is exactly one render budget, which expires in
+    // a dead heat with the holder's OWN timeout: the holder times out, releases
+    // the gate, and the waiter that was about to be served is rejected in the
+    // same tick. One extra budget of headroom means the queue always outlives
+    // the thing it is waiting for.
+    const ahead = gateWaiters.length + 1
+    const waitCeilingMs = (ahead + 1) * effectiveSynthTimeoutMs()
+    const timer = setTimeout(() => {
+      const at = gateWaiters.indexOf(waiter)
+      if (at >= 0) gateWaiters.splice(at, 1)
+      waiter.detach?.()
+      const err = new Error(
+        `local TTS queue wait exceeded ${waitCeilingMs}ms behind ${ahead} render(s)`,
+      )
+      err.name = 'TimeoutError'
+      reject(err)
+    }, waitCeilingMs)
+    if (typeof timer === 'object' && timer && 'unref' in timer) {
+      ;(timer as { unref: () => void }).unref()
+    }
+
+    const onAbort = () => {
+      const at = gateWaiters.indexOf(waiter)
+      if (at >= 0) gateWaiters.splice(at, 1)
+      waiter.detach?.()
+      reject(makeAbortError('local TTS request aborted'))
+    }
+    waiter.detach = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    if (priority) {
+      const firstBackground = gateWaiters.findIndex((w) => !w.priority)
+      if (firstBackground < 0) gateWaiters.push(waiter)
+      else gateWaiters.splice(firstBackground, 0, waiter)
+    } else {
+      gateWaiters.push(waiter)
+    }
+  })
+}
+
+function effectiveSynthTimeoutMs(): number {
+  return Number.isFinite(LOCAL_TTS_SYNTH_TIMEOUT_MS) && LOCAL_TTS_SYNTH_TIMEOUT_MS > 0
+    ? LOCAL_TTS_SYNTH_TIMEOUT_MS
+    : 12_000
+}
+
 export async function synthesizeLocalTts(opts: {
   text: string
   voice: string
   format: string
   signal?: AbortSignal
+  /** True for a request a user is waiting on (/play). False/undefined for
+   *  background pre-warm, which yields the sidecar to playback. */
+  priority?: boolean
 }): Promise<Buffer> {
-  const timeoutMs = Number.isFinite(LOCAL_TTS_SYNTH_TIMEOUT_MS) && LOCAL_TTS_SYNTH_TIMEOUT_MS > 0
-    ? LOCAL_TTS_SYNTH_TIMEOUT_MS
-    : 12_000
+  // Wait for the sidecar BEFORE starting the synthesis clock. The timeout
+  // below is a render budget; it was previously charged for queue time too,
+  // which is the whole reason segment 5 of 9 died at 12s while rendering in
+  // 2.6s. See the render gate above.
+  await acquireRenderGate(opts.priority === true, opts.signal)
+  try {
+    return await synthesizeLocalTtsRender(opts)
+  } finally {
+    releaseRenderGate()
+  }
+}
+
+/** The actual sidecar call. Never invoke directly -- it assumes the caller
+ *  holds the render gate, and the timeout it starts is a RENDER budget. */
+async function synthesizeLocalTtsRender(opts: {
+  text: string
+  voice: string
+  format: string
+  signal?: AbortSignal
+}): Promise<Buffer> {
+  const timeoutMs = effectiveSynthTimeoutMs()
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const signal =
     opts.signal && typeof AbortSignal.any === 'function'

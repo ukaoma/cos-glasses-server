@@ -1,3 +1,41 @@
+## 6.36.27
+
+The sidecar renders one request at a time. The server finally acts like it.
+
+WHAT BROKE. Chunking (6.36.25) split a reply into 9 segments and /prepare
+pre-warmed all 9 at once. The synthesis timeout was armed when a request was
+ISSUED, so it ran while that request sat in the sidecar's queue. Measured on a
+6,781-character reply: renders took ~2.6s each, but segment 5 spent 11.5s of its
+12,000ms budget waiting for a turn. On device it tipped over, the pre-warm
+returned 502, and iOS surfaced it as NotSupportedError. Five of nine segments
+played.
+
+The 12,000ms constant was not wrong when it was written -- its own comment says
+it exists to "bound hung sidecar so local_first can fall back before session TTL
+(~60s)", from an era when a reply was ONE render. Chunking changed the input and
+nothing re-derived the limit.
+
+- New render gate in tts-local.ts. One render reaches the sidecar at a time, so
+  the synthesis timeout now bounds RENDER, which is what it always claimed to
+  bound. Queue wait is governed separately.
+- Queue wait has its own DERIVED ceiling: one synthesis budget per render ahead,
+  plus one budget of headroom. The headroom is not slack -- without it the first
+  waiter's ceiling expires in a dead heat with the holder's own timeout, and a
+  request that was about to be served is rejected in the same tick. Found by the
+  test, not by reasoning.
+- /play outranks /prepare pre-warm. A user is waiting on the first and nobody is
+  waiting on the second; without priority, segment 5's playback request queues
+  behind pre-warms for 6, 7 and 8 -- work not needed for minutes. Priority never
+  reorders playback against itself.
+- /api/health tts_local now reports renderQueueDepth. This was not observable on
+  2026-08-23 and that cost an evening.
+
+Every guard mutation-verified, including one that only counting could catch:
+dropping the waiter's detach left all ten behaviour tests green while leaking an
+abort listener per queued render (45 of them on a 46-segment reply).
+
+217 files, 3042 tests.
+
 ## 6.36.26
 
 Deadline hardening for the segmented TTS path shipped in 6.36.25. Three constants
