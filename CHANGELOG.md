@@ -1,3 +1,44 @@
+## 6.36.25
+
+**Spoken replies are now N segments, not a prefix and a tail.**
+
+The two-segment split was a race, and the user lost it by less than a second.
+Measured on device with a 6,781-character reply:
+
+    prefix rendered in   0.5s
+    tail rendered in    12.4s  -- AFTER the prefix; the sidecar serializes
+                                  synthesis behind one lock
+    tail ready          ~12.9s after prepare
+    prefix audio         15s ... but 12.0s at the user's 1.25x playback speed
+
+The phone asked for the tail at 12.0s. It existed at 12.9s. `/play` blocks until
+synthesis finishes before sending any headers -- 11.3 seconds to first byte,
+measured -- and iOS's media loader will not wait. It buffered nothing and rejected
+with `NotSupportedError`.
+
+Widening the margin would not have fixed it: the margin depends on reply length,
+voice, playback speed and machine load. Chunking removes the race instead. The
+first segment stays small (250 chars, ~0.5s render, ~13s of speech) so first audio
+is as fast as before; later segments are 900 chars. Every segment renders roughly
+ten times faster than it plays, so the queue only gets further ahead — a property
+now asserted directly rather than assumed.
+
+`/prepare` returns `urls` (every segment, in order) plus `chunks`. `url` and
+`tailUrl` are kept, pointing at the first two, so a client older than 6.8.428
+plays a degraded two segments instead of nothing.
+
+`splitForFastPrefix` is deleted — zero callers, zero tests, and leaving a
+superseded splitter next to its replacement is how the wrong one gets used.
+
+The chunker's first test asserts that concatenating the segments reproduces the
+input's words. That caught a real defect in the first draft: the final piece was
+appended twice, so `splitForChunks('Hi.')` returned `['Hi. Hi.']`. A chunker that
+duplicates or drops text is worse than the bug it replaces, because the reply
+still sounds complete.
+
+Suite 3022 / 215, tsc 0. Mutation-verified: reverting to two segments, and
+dropping the legacy url/tailUrl, each fail the route contract test.
+
 ## 6.36.24
 
 **Playback stopped after about a minute, whatever the reply length.**

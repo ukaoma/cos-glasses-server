@@ -210,6 +210,45 @@ describe('TTS preparation authority', () => {
     expect(code.match(/trimToCap\([^,]+, MAX_OPENAI_TTS_CHARS\)/g) ?? []).toHaveLength(2)
   })
 
+  // The shape the client depends on. A long reply must come back as MANY
+  // segments, not the prefix/tail pair whose race iOS lost by under a second.
+  it('returns every segment, and keeps url/tailUrl for older clients', async () => {
+    const long = 'The quick brown fox jumps over the lazy dog. '.repeat(160)  // ~7k chars
+    const res = await fetch(`${base}/api/tts/prepare`, {
+      method: 'POST',
+      headers: AUTH_JSON_HEADERS,
+      body: JSON.stringify({ text: long, fast: true, engine: 'local' }),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+
+    expect(Array.isArray(body.urls)).toBe(true)
+    // ~7k chars at 250 + 900-char chunks is around 8 segments. The point is that
+    // it is well past two -- two is what failed.
+    expect(body.urls.length).toBeGreaterThan(4)
+    expect(body.chunks).toBe(body.urls.length)
+    for (const u of body.urls) expect(u).toMatch(/^\/api\/tts\/play\/[0-9a-f-]{36}$/)
+    // Every segment is a DISTINCT session; a repeated uuid would replay one chunk.
+    expect(new Set(body.urls).size).toBe(body.urls.length)
+
+    // Backward compatibility: a client older than 6.8.428 reads these two and
+    // plays a degraded-but-not-silent two segments.
+    expect(body.url).toBe(body.urls[0])
+    expect(body.tailUrl).toBe(body.urls[1])
+  })
+
+  it('returns a single segment for a short reply, still with urls', async () => {
+    const res = await fetch(`${base}/api/tts/prepare`, {
+      method: 'POST',
+      headers: AUTH_JSON_HEADERS,
+      body: JSON.stringify({ text: 'Hi.', fast: true, engine: 'local' }),
+    })
+    const body = await res.json()
+    expect(body.urls).toHaveLength(1)
+    expect(body.url).toBe(body.urls[0])
+    expect(body.tailUrl).toBeUndefined()
+  })
+
   it('offers both English accents, and every id it offers is one the server accepts', async () => {
     const { KOKORO_VOICE_OPTIONS, KOKORO_EN_GB_VOICE_OPTIONS, isKokoroVoiceId } =
       await import('../lib/tts-engine.js')

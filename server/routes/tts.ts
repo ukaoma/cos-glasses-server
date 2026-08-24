@@ -133,100 +133,93 @@ function stripMarkdownLight(text: string): string {
     .replace(/^[-*+]\s/gm, '- ')
 }
 
-// ── v5.9.6 fast-prefix splitter ───────────────────────────────────────────
-//
-// The "fast first-audio" path (POST /api/tts/prepare with fast: true) wants
-// to start playing audio in ~1-2s instead of the 8-15s a full-message OpenAI
-// render takes for long replies. We do that by splitting the input into a
-// short prefix the client can play immediately, and a tail that gets
-// generated in parallel and chained on prefix `ended`.
-//
-// Heuristic-only — no NLP dependency. Markdown is already stripped above.
-// Boundary detection uses the same .!? + whitespace rule as trimToCap so the
-// two stay consistent. Bounded lengths protect against pathological inputs:
-//   - MIN_PREFIX_CHARS: short greetings ("Hi.") get padded with the next
-//     sentence so the prefix is long enough to mask tail-render latency.
-//   - MAX_PREFIX_CHARS: a single long sentence ("So basically I think we…
-//     spanning 600 chars") gets cut at a word boundary instead of running on.
-const MIN_PREFIX_CHARS = 60
-const MAX_PREFIX_CHARS = 250
 
-/** Split `text` into a fast-playable prefix + a tail.
+/**
+ * Chunk sizes, in characters.
  *
- *  Contract:
- *  - Returns `{ prefix, tail }` with `prefix` non-empty and `tail` either ''
- *    (the message fits in one chunk and the route should fall back to v5.9.5
- *    single-URL behavior) or the remainder.
- *  - Prefix targets the first ~2 sentences but expands if either is short
- *    (to clear MIN_PREFIX_CHARS) and contracts if a single sentence exceeds
- *    MAX_PREFIX_CHARS (cut at the last word boundary inside the cap).
- *  - Caller is responsible for trimToCap'ping the input first. */
-export function splitForFastPrefix(text: string): { prefix: string; tail: string } {
+ * MEASURED on this machine: Kokoro renders ~1.9ms per character, and speech runs
+ * ~19 characters per second of audio. Those two numbers are what make chunking a
+ * CORRECTNESS fix rather than a latency tweak.
+ *
+ * The two-segment prefix/tail split failed like this, measured on device
+ * 2026-08-23 with a 6,781-character reply:
+ *
+ *   prefix generated in  0.5s   (250 chars)
+ *   tail generated in   12.4s   (6,531 chars) -- AFTER the prefix, because the
+ *                               sidecar serializes synthesis behind one lock
+ *   tail therefore ready ~12.9s after prepare
+ *   prefix audio         15s ... but 12.0s at the user's 1.25x playback speed
+ *
+ * The phone asked for the tail at 12.0s. It existed at 12.9s. `/play` blocks
+ * until synthesis finishes before sending any headers -- 11.3s to first byte,
+ * measured -- and iOS's media loader will not wait: it buffers nothing and
+ * rejects with NotSupportedError.
+ *
+ * A margin that depends on reply length, voice, playback speed and machine load
+ * is not a margin. Small chunks remove the race entirely: by the time chunk 1
+ * finishes playing, every later chunk is long since rendered.
+ *
+ * FIRST_CHUNK stays small so first audio is still fast (~0.5s render, ~13s of
+ * speech). Later chunks are larger to keep the request count down; at ~1.7s
+ * render each they are always many seconds ahead of playback.
+ */
+const FIRST_CHUNK_CHARS = 250
+const LATER_CHUNK_CHARS = 900
+
+/** Hard ceiling on segments for one reply. At LATER_CHUNK_CHARS this covers
+ *  ~36,000 characters, comfortably past MAX_LOCAL_TTS_CHARS. A pathological
+ *  input hits this and gets a longer final chunk rather than unbounded minting. */
+const MAX_CHUNKS = 40
+
+/**
+ * Split `text` into sequentially-playable chunks.
+ *
+ * Contract:
+ *  - Always returns at least one non-empty chunk for non-empty input.
+ *  - Concatenating the chunks reproduces the input's words in order. Nothing is
+ *    dropped -- a chunker that loses text is worse than the bug it replaces.
+ *  - Breaks at sentence terminators where possible, at word boundaries
+ *    otherwise, and mid-word only for a single unbroken run longer than a chunk.
+ *  - The first chunk is small (fast first audio); the rest are larger.
+ */
+export function splitForChunks(text: string): string[] {
   const trimmed = text.trim()
-  if (trimmed.length === 0) return { prefix: '', tail: '' }
-  // Short enough to play as a single chunk — no benefit from splitting.
-  if (trimmed.length <= MIN_PREFIX_CHARS) return { prefix: trimmed, tail: '' }
+  if (trimmed.length === 0) return []
 
-  // Walk sentence terminators forward, accumulating sentences until we cover
-  // at least MIN_PREFIX_CHARS. Up to 2 sentences if both are reasonably sized,
-  // more if the first ones are tiny. Indices point to the boundary AFTER the
-  // terminator + whitespace (the start of the next sentence).
-  const sentenceBoundaries: number[] = []
-  const re = /[.!?]\s+/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(trimmed)) !== null) {
-    sentenceBoundaries.push(m.index + m[0].length)
-  }
+  const chunks: string[] = []
+  let rest = trimmed
+  while (rest.length > 0 && chunks.length < MAX_CHUNKS) {
+    const cap = chunks.length === 0 ? FIRST_CHUNK_CHARS : LATER_CHUNK_CHARS
+    // `rest` MUST be cleared before breaking. Leaving it set made the overflow
+    // guard below append the final piece a second time -- `splitForChunks('Hi.')`
+    // returned ['Hi. Hi.']. Caught by the never-lose-a-word test, which turned
+    // out to catch duplication just as well as loss.
+    if (rest.length <= cap) { chunks.push(rest); rest = ''; break }
 
-  if (sentenceBoundaries.length === 0) {
-    // No sentence terminators (one giant run-on). Fall back to a word-boundary
-    // cut at MAX_PREFIX_CHARS. If the whole thing fits in MAX, it's a single chunk.
-    if (trimmed.length <= MAX_PREFIX_CHARS) return { prefix: trimmed, tail: '' }
-    const slice = trimmed.slice(0, MAX_PREFIX_CHARS)
-    const lastSpace = slice.lastIndexOf(' ')
-    const cut = lastSpace > MIN_PREFIX_CHARS ? lastSpace : MAX_PREFIX_CHARS
-    return {
-      prefix: trimmed.slice(0, cut).trim(),
-      tail: trimmed.slice(cut).trim(),
+    const window = rest.slice(0, cap)
+    // Prefer a sentence end. Same .!? + whitespace rule the prefix splitter and
+    // trimToCap use, so all three agree on what a boundary is.
+    let cut = -1
+    const re = /[.!?]\s+/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(window)) !== null) cut = m.index + m[0].length
+    // Only accept a sentence break that is not absurdly early, or a 3-word
+    // chunk followed by a 900-char one reads as a stutter.
+    if (cut < cap * 0.4) {
+      const space = window.lastIndexOf(' ')
+      cut = space > 0 ? space + 1 : cap
     }
+    chunks.push(rest.slice(0, cut).trim())
+    rest = rest.slice(cut).trim()
   }
-
-  // Pick the smallest cut that satisfies (length >= MIN_PREFIX_CHARS) AND
-  // covers >= 2 sentences when possible. Stop early once a candidate also
-  // exceeds MAX_PREFIX_CHARS — the previous candidate is the best fit.
-  let chosenCut = sentenceBoundaries[sentenceBoundaries.length - 1]
-  for (let i = 0; i < sentenceBoundaries.length; i++) {
-    const cut = sentenceBoundaries[i]
-    const sentencesCovered = i + 1
-    const longEnough = cut >= MIN_PREFIX_CHARS
-    const tooLong = cut > MAX_PREFIX_CHARS
-    const hasTwo = sentencesCovered >= 2
-    if (tooLong) {
-      // Previous boundary (if any) was the best fit; if this is the first
-      // boundary AND it already overshoots MAX, fall back to a word-boundary
-      // cut inside the first sentence so the prefix doesn't blow past the cap.
-      if (i === 0) {
-        const slice = trimmed.slice(0, MAX_PREFIX_CHARS)
-        const lastSpace = slice.lastIndexOf(' ')
-        const cutAt = lastSpace > MIN_PREFIX_CHARS ? lastSpace : MAX_PREFIX_CHARS
-        chosenCut = cutAt
-      } else {
-        chosenCut = sentenceBoundaries[i - 1]
-      }
-      break
-    }
-    if (longEnough && hasTwo) {
-      chosenCut = cut
-      break
-    }
-    chosenCut = cut
+  // MAX_CHUNKS reached with text left: append it to the last chunk rather than
+  // dropping it. A long final chunk is a latency problem; dropped text is a lie.
+  if (rest.length > 0 && chunks.length > 0) {
+    chunks[chunks.length - 1] = `${chunks[chunks.length - 1]} ${rest}`.trim()
   }
-
-  const prefix = trimmed.slice(0, chosenCut).trim()
-  const tail = trimmed.slice(chosenCut).trim()
-  if (tail.length === 0) return { prefix: trimmed, tail: '' }
-  return { prefix, tail }
+  return chunks.filter((c) => c.length > 0)
 }
+
 
 function openaiBudgetOk(): boolean {
   try {
@@ -936,15 +929,30 @@ ttsRouter.post('/tts/prepare', async (req, res) => {
       return res.json({ url: `/api/tts/play/${uuid}`, ...engineMeta })
     }
 
-    const { prefix, tail } = splitForFastPrefix(capped)
-    const prefixMint = mintAndWarm(prefix)
-    if (tail.length === 0) {
-      return res.json({ url: `/api/tts/play/${prefixMint.uuid}`, ...engineMeta })
+    // N SEGMENTS, not two. See splitForChunks for why the prefix/tail pair was a
+    // race the user lost by less than a second.
+    //
+    // Warm order matters and is already correct: the sidecar serializes synthesis
+    // behind one lock, so minting in order means chunk 1 renders first and every
+    // later chunk finishes long before playback reaches it.
+    const chunks = splitForChunks(capped)
+    if (chunks.length === 0) {
+      return res.status(400).json({ error: 'text is required (non-empty string)' })
     }
-    const tailMint = mintAndWarm(tail)
+    const mints = chunks.map((chunk) => mintAndWarm(chunk))
+    const urls = mints.map((m) => `/api/tts/play/${m.uuid}`)
+
+    if (urls.length === 1) {
+      return res.json({ url: urls[0], urls, chunks: 1, ...engineMeta })
+    }
     res.json({
-      url: `/api/tts/play/${prefixMint.uuid}`,
-      tailUrl: `/api/tts/play/${tailMint.uuid}`,
+      // `urls` is the real contract. `url` and `tailUrl` are kept so a client
+      // older than 6.8.428 still plays the first two segments instead of
+      // nothing -- degraded, but not broken, which is the point of keeping them.
+      url: urls[0],
+      tailUrl: urls[1],
+      urls,
+      chunks: urls.length,
       ...engineMeta,
     })
   } catch (err) {
