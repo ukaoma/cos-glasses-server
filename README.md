@@ -200,6 +200,16 @@ per-speaker diarization needs a ~26 MB voiceprint model that is deliberately
 **not** shipped in the npm package, so it is a bolt-on:
 
 ```bash
+npx --yes @gotcos/glasses-server@latest --setup-speaker-model
+```
+
+That downloads the model to `~/.cos-glasses/models/`, verifies it against a
+pinned SHA-256, and refuses to install anything that does not match. Restart the
+server afterwards and check `/api/health` — `speaker_id` should read `active`.
+
+To place it by hand instead:
+
+```bash
 mkdir -p ~/.cos-glasses/models
 # put 3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx there, then restart
 ```

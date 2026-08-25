@@ -26,6 +26,7 @@ const PKG_ROOT = resolve(__dirname, '..')
 const CONFIG_DIR = join(homedir(), '.cos-glasses')
 const PREPARE_ONLY = process.argv.includes('--prepare-only')
 const SETUP_TRANSCRIPTION = process.argv.includes('--setup-transcription')
+const SETUP_SPEAKER_MODEL = process.argv.includes('--setup-speaker-model')
 function optionValue(name) {
   const index = process.argv.indexOf(name)
   return index >= 0 ? process.argv[index + 1] : undefined
@@ -53,6 +54,104 @@ const yellow = (s) => `\x1b[33m${s}\x1b[0m`
 const dim = (s) => `\x1b[2m${s}\x1b[0m`
 const bold = (s) => `\x1b[1m${s}\x1b[0m`
 
+/**
+ * The ~26 MB voiceprint model, fetched on request.
+ *
+ * WHY THIS EXISTS. Named per-speaker diarization needs this model, and it is
+ * deliberately NOT in the npm tarball -- 26 MB on every install for a feature
+ * most users never turn on. The README documented a manual bolt-on ("put the
+ * .onnx there"), which left a managed install with no way to obtain it: the
+ * server then degrades silently to amplitude fallback (wearer vs Ext), so voice
+ * training appears to run and never learns anything. A beta user hit exactly
+ * that on 2026-08-25 and reported it as "voice training didn't work".
+ *
+ * Installed to ~/.cos-glasses/models/ deliberately. Anything inside the package
+ * is destroyed by the next update; the data home survives.
+ *
+ * The SHA-256 below was verified against the model on a working install and
+ * matched byte for byte. A download that does not match is DELETED, not
+ * installed -- this file is handed to a native loader.
+ */
+const SPEAKER_MODEL = {
+  filename: '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx',
+  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx',
+  sha256: 'c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5',
+  bytes: 26485263,
+}
+
+function sha256File(path) {
+  const { createHash } = require('crypto')
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function setupSpeakerModel() {
+  const modelsDir = join(CONFIG_DIR, 'models')
+  const dest = join(modelsDir, SPEAKER_MODEL.filename)
+
+  if (existsSync(dest)) {
+    const have = sha256File(dest)
+    if (have === SPEAKER_MODEL.sha256) {
+      console.log('  Voiceprint model already installed and verified.')
+      console.log(`  ${dest}`)
+      return 0
+    }
+    console.log('  A file is present but does not match the expected checksum.')
+    console.log(`  Replacing it. (found ${have.slice(0, 16)}...)`)
+    try { unlinkSync(dest) } catch {}
+  }
+
+  mkdirSync(modelsDir, { recursive: true })
+  const partial = `${dest}.partial`
+  console.log('  Downloading the voiceprint model (~26 MB)...')
+
+  // SYNCHRONOUS on purpose. bin/cli.cjs is CJS with no top-level await, so an
+  // async download does not block the rest of this file -- the first version of
+  // this command fell straight through into normal server startup and installed
+  // nothing. Same curl idiom the whisper model download already uses.
+  try {
+    execFileSync('curl', [
+      '-fL',
+      '--retry', '5',
+      '--retry-all-errors',
+      '--retry-delay', '2',
+      '--connect-timeout', '30',
+      '--progress-bar',
+      SPEAKER_MODEL.url,
+      '-o', partial,
+    ], { stdio: 'inherit', timeout: 10 * 60_000 })
+  } catch (err) {
+    try { if (existsSync(partial)) unlinkSync(partial) } catch {}
+    console.error(`  Download failed: ${err && err.message ? err.message : err}`)
+    return 1
+  }
+
+  // VERIFY BEFORE INSTALLING. Never rename unverified bytes into the path a
+  // native model loader reads from.
+  const got = sha256File(partial)
+  if (got !== SPEAKER_MODEL.sha256) {
+    try { unlinkSync(partial) } catch {}
+    console.error('  Checksum mismatch - refusing to install.')
+    console.error(`    expected ${SPEAKER_MODEL.sha256}`)
+    console.error(`    got      ${got}`)
+    return 1
+  }
+
+  renameSync(partial, dest)
+  console.log('  Installed and verified:')
+  console.log(`  ${dest}`)
+  console.log('')
+  console.log('  Restart the server for it to take effect.')
+  console.log('  Then check /api/health -> speaker_id: it should read "active".')
+  return 0
+}
+
+if (SETUP_SPEAKER_MODEL) {
+  console.log('')
+  console.log(bold('  COS Glasses - voiceprint model'))
+  console.log('')
+  process.exit(setupSpeakerModel())
+}
+
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('')
   console.log(bold('  COS Glasses Server'))
@@ -61,6 +160,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('    npx --yes @gotcos/glasses-server@latest')
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription')
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier balanced|max')
+  console.log('    npx --yes @gotcos/glasses-server@latest --setup-speaker-model')
   console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
   console.log('')
   console.log('  Requirements:')

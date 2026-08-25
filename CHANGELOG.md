@@ -1,3 +1,34 @@
+## 6.37.2
+
+`--setup-speaker-model` — one command to install the voiceprint model.
+
+Named per-speaker diarization needs a ~26 MB model that is deliberately not in
+the npm tarball. Until now the only way to get it was the README telling you to
+"put the .onnx there", which meant a managed install had no way to obtain it at
+all. The server then degrades SILENTLY to amplitude fallback (wearer vs Ext), so
+voice training appears to run and never learns anything. A beta user hit exactly
+that on 2026-08-25 and reported it as "voice training didn't work" -- it did run;
+it had nothing to train against.
+
+    npx --yes @gotcos/glasses-server@latest --setup-speaker-model
+
+- Downloads to ~/.cos-glasses/models/, which survives server updates. Anything
+  inside the package is destroyed by the next one.
+- Pinned SHA-256, verified BEFORE the file is moved into place. A mismatch is
+  deleted, not installed -- this file is handed to a native loader. The hash was
+  checked against the model on a working install and matches byte for byte.
+- Idempotent: an already-correct file is verified and left alone. A corrupted one
+  is replaced.
+- Synchronous, using the same curl idiom as the whisper download. The first
+  version was async and fire-and-forget, and because bin/cli.cjs is CJS with no
+  top-level await the command fell straight through into normal server startup
+  and installed nothing. Found by running it, not by reading it.
+
+The 26 MB stays out of the tarball; the install path is now a command instead of
+a paragraph.
+
+222 files, 3112 tests.
+
 ## 6.37.1
 
 Standalone meeting summaries default ON.
