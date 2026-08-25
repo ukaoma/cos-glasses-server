@@ -706,6 +706,38 @@ if (whisperCliPath && SETUP_TRANSCRIPTION) {
   }
 }
 
+// Step 5b: the voiceprint model — named per-speaker diarization.
+//
+// Folded into normal setup rather than fetched lazily on first use. Lazy would
+// fire the download at the START OF A MEETING, which is the worst possible
+// moment: 26 MB on hotel wifi degrades the exact session it exists to improve,
+// and it makes a GitHub release asset a runtime dependency instead of an
+// install-time one.
+//
+// This follows the precedent already set by the whisper models, which are 1.5 GB
+// -- sixty times larger -- downloaded here with SKIP_WHISPER_DOWNLOAD as the
+// escape hatch. Same shape, same opt-out, so nobody on a metered or restricted
+// network is forced into it.
+if (!SETUP_SPEAKER_MODEL && process.env.SKIP_SPEAKER_MODEL_DOWNLOAD !== '1') {
+  const spkDest = join(CONFIG_DIR, 'models', SPEAKER_MODEL.filename)
+  if (existsSync(spkDest) && sha256File(spkDest) === SPEAKER_MODEL.sha256) {
+    console.log(green('  ✓') + ' Voiceprint model ready ' + dim('— named speakers available'))
+  } else {
+    console.log('    ' + dim('Fetching the voiceprint model (~26 MB) for named speakers.'))
+    console.log('    ' + dim('Skip: SKIP_SPEAKER_MODEL_DOWNLOAD=1 npx --yes @gotcos/glasses-server@latest'))
+    const spkCode = setupSpeakerModel()
+    if (spkCode !== 0) {
+      // NOT fatal. Diarization is opt-in by design: without the model the server
+      // stays on wearer/Ext fallback rather than failing, so a failed fetch must
+      // not block a working install.
+      console.log(yellow('  ⚠') + ' Voiceprint model unavailable ' + dim('— speakers stay wearer/Ext'))
+      console.log('    ' + dim('Retry later: npx --yes @gotcos/glasses-server@latest --setup-speaker-model'))
+    }
+  }
+} else if (process.env.SKIP_SPEAKER_MODEL_DOWNLOAD === '1') {
+  console.log(yellow('  ⚠') + ' SKIP_SPEAKER_MODEL_DOWNLOAD=1 — named speakers unavailable')
+}
+
 if (PREPARE_ONLY && SETUP_TRANSCRIPTION) {
   console.log('')
   if (transcriptionSetupFailures.length > 0) {

@@ -1,3 +1,40 @@
+## 6.37.3
+
+Speaker ID works out of the box. A silent capture stops retrying forever. Live
+Cues says what it costs.
+
+SPEAKER MODEL IN NORMAL SETUP. 6.37.2 added `--setup-speaker-model` as a command
+you had to know about. Now the voiceprint model is fetched during ordinary setup,
+with `SKIP_SPEAKER_MODEL_DOWNLOAD=1` as the escape hatch — the same shape the
+whisper models already use, and those are 1.5 GB, sixty times larger.
+
+Deliberately NOT a lazy fetch on first use. Lazy would fire the download at the
+START OF A MEETING: 26 MB on hotel wifi degrading the exact session it exists to
+improve, and a GitHub release asset promoted from an install-time dependency to a
+runtime one. A failed fetch is non-fatal — diarization is opt-in by design, so
+the server falls back to wearer/Ext rather than refusing to start.
+
+A CAPTURE WITH NO SPEECH IS RECOVERED, NOT FAILED. The recover route threw
+`recovery produced an empty transcript` when whisper returned nothing, which left
+the capture in the unsaved list and retried it on every boot and every button
+press. Measured on this machine: one 33-second capture failed that way 1,131
+times, alternating in the log with the auto-recover path claiming success for the
+same session, while the panel showed only "1 recoverable" and the error went to
+stderr where nobody looks. The user presses Recover and nothing happens, because
+nothing can.
+
+Silence now writes a receipt with `outcome: 'no_speech'` and clears. The audio is
+NOT deleted — it leaves on the ordinary retention clock, so a capture wrongly
+judged silent by a bad decode is still on disk for its full window.
+
+LIVE CUES NOW STATES ITS COST. The flag was already documented as a master
+switch; what was missing was that every cue is a model call on your own agent
+quota. Now stated with the real bounds — at most 8 pipelines per meeting, one
+start per 60s, 30s cooldown — and the real model, Cursor Composer, which is the
+only supported value in v1.
+
+223 files, 3117 tests.
+
 ## 6.37.2
 
 `--setup-speaker-model` — one command to install the voiceprint model.

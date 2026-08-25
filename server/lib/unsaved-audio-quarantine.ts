@@ -303,6 +303,41 @@ export function isRecoveryActive(dirName: string): boolean {
   return activeRecoveries.has(dirName)
 }
 
+/**
+ * A capture that held no speech is RECOVERED, not failed.
+ *
+ * The recover route used to throw `recovery produced an empty transcript` when
+ * whisper returned nothing, which left the capture in the unsaved list and
+ * retried it on every boot and every button press. Measured 2026-08-25: one
+ * 33-second capture failed this way 1,131 times, alternating with the
+ * auto-recover path claiming success, while the panel said only "1 recoverable"
+ * and the error went to stderr where nobody looks.
+ *
+ * Silence is a legitimate outcome. There is nothing to save and nothing to
+ * retry, so the capture is receipted and clears -- with `outcome: 'no_speech'`
+ * so the distinction stays auditable rather than looking like a normal save.
+ *
+ * The audio is NOT deleted here. It leaves on the ordinary retention clock, so a
+ * capture wrongly judged silent (a bad decode, a broken model) is still on disk
+ * for its full window.
+ */
+export function markRecoveredNoSpeech(dirPath: string, chunkFiles: number): void {
+  try {
+    writeFileSync(
+      resolve(dirPath, RECOVERED_RECEIPT),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        recoveredAt: new Date().toISOString(),
+        outcome: 'no_speech',
+        chunkFiles,
+        words: 0,
+        note: 'Transcription produced no words. Audio retained until the retention clock clears it.',
+      })}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    )
+  } catch { /* receipt is best-effort; findBySessionId remains the true guard */ }
+}
+
 export function markRecovered(dirPath: string, savedFilename: string): void {
   try {
     writeFileSync(

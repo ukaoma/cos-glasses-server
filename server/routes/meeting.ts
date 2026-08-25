@@ -83,6 +83,7 @@ import {
   findQuarantineDir,
   listUnsavedCaptures,
   markRecovered,
+  markRecoveredNoSpeech,
   registerActiveRecovery,
 } from '../lib/unsaved-audio-quarantine.js'
 import {
@@ -1915,7 +1916,24 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       clearSessionHallucinationState(sessionId)
       const transcript = cleanFinalTranscript(results.map(item => item.text).join(' '))
       if (!transcript.trim()) {
-        throw new Error('recovery produced an empty transcript')
+        // SILENCE IS AN OUTCOME, NOT A FAILURE.
+        //
+        // This used to throw, which left the capture in the unsaved list and
+        // retried it forever -- 1,131 times for one 33-second capture on
+        // 2026-08-25, alternating with the auto-recover path claiming success,
+        // while the panel showed only "1 recoverable" and the error went to
+        // stderr. The user sees a Recover button that does nothing, because it
+        // literally cannot succeed on audio with no speech in it.
+        //
+        // Receipt it and let it clear. The audio stays on disk for its full
+        // retention window, so a capture wrongly judged silent is not lost.
+        markRecoveredNoSpeech(quarantineDir, entries.length)
+        console.log(
+          `[meeting/orphans] ${sessionId} held no speech `
+          + `(${entries.length} chunks, ${Math.round((Date.now() - startedAt) / 1000)}s) `
+          + '— receipted as no_speech; audio retained until retention expires',
+        )
+        return
       }
       const recoveredChunks = results.map(item => ({
         text: item.text,
