@@ -635,17 +635,20 @@ describe('the feature gate (plan 4.9): OFF is the pre-existing behavior', () => 
     expect((await fetch(`${base}/api/agent-sessions/bindings`)).status).toBe(200)
   })
 
-  it('reads the env var strictly, so a truthy-looking value stays OFF', () => {
+  it('is ON by default and OFF only for a literal "0"', () => {
+    // Default flipped to ON in 6.37.0 (Miles 2026-08-25): ship the capability
+    // active, let users opt out. The gate stays STRICT in the other direction —
+    // only an exact '0' disables, so a stray value cannot silently switch it off.
     const prior = process.env.COS_THREAD_ATTACH_ENABLED
     try {
-      for (const v of ['true', 'yes', 'on', '2', '']) {
+      for (const v of ['true', 'yes', 'on', '2', '', '1']) {
         process.env.COS_THREAD_ATTACH_ENABLED = v
-        expect(threadAttachEnabled()).toBe(false)
+        expect(threadAttachEnabled(), `value ${JSON.stringify(v)}`).toBe(true)
       }
-      process.env.COS_THREAD_ATTACH_ENABLED = '1'
-      expect(threadAttachEnabled()).toBe(true)
-      delete process.env.COS_THREAD_ATTACH_ENABLED
+      process.env.COS_THREAD_ATTACH_ENABLED = '0'
       expect(threadAttachEnabled()).toBe(false)
+      delete process.env.COS_THREAD_ATTACH_ENABLED
+      expect(threadAttachEnabled(), 'absent key means ON').toBe(true)
     } finally {
       if (prior === undefined) delete process.env.COS_THREAD_ATTACH_ENABLED
       else process.env.COS_THREAD_ATTACH_ENABLED = prior

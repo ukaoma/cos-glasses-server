@@ -1302,7 +1302,9 @@ export const TURN_UNKNOWN_COPY = 'COS has no record of that turn. Nothing was se
 export const CLIENT_TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/
 
 export function threadAttachEnabled(): boolean {
-  return process.env.COS_THREAD_ATTACH_ENABLED === '1'
+  // Default ON since 6.37.0 (Miles 2026-08-25): ship the capability active and
+  // let users opt out. Absent key = on; only a literal '0' disables.
+  return process.env.COS_THREAD_ATTACH_ENABLED !== '0'
 }
 
 export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps): Router {

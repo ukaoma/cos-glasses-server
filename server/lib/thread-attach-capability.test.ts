@@ -111,15 +111,23 @@ describe('what the server publishes', () => {
 describe('the default gate is the one that registers the write routes', () => {
   // Without this, every test above could pass against a default of `() => true`
   // and the published field would have no relationship to the env var at all.
-  it('is off for every value except exactly "1"', () => {
-    for (const value of [undefined, '', '0', 'true', 'TRUE', 'yes', ' 1', '1 ']) {
+  it('is ON for every value except a literal "0"', () => {
+    // Default flipped to ON in 6.37.0 (Miles 2026-08-25). The gate is still
+    // strict, just in the other direction: only an exact '0' turns it off, so a
+    // stray or malformed value cannot silently disable the write routes.
+    for (const value of [undefined, '', 'true', 'TRUE', 'yes', ' 1', '1 ', '1']) {
       setGateEnv(value)
-      expect(threadAttachCapability().enabled).toBe(false)
+      expect(threadAttachCapability().enabled, `value ${JSON.stringify(value)}`).toBe(true)
     }
   })
 
-  it('is on for exactly "1"', () => {
-    setGateEnv('1')
+  it('is off for exactly "0"', () => {
+    setGateEnv('0')
+    expect(threadAttachCapability().enabled).toBe(false)
+  })
+
+  it('is on by default end-to-end', () => {
+    setGateEnv(undefined)
     expect(mayContinue(threadAttachHealthFields(threadAttachCapability()), 'claude')).toBe(true)
   })
 })
@@ -251,14 +259,15 @@ describe('the live /api/health and /api/models surfaces', () => {
   })
 
   it('answers a real client asking whether to show Continue', async () => {
-    setGateEnv(undefined)
+    // OFF is now the explicit opt-out, not the default (6.37.0).
+    setGateEnv('0')
     const off = await (await fetch(`${base}/api/health`)).json()
     // Read through the same reader a client uses: this is the end-to-end claim,
     // not that three keys happen to be present.
     expect(mayContinue(off, 'claude')).toBe(false)
     expect(readThreadAttachCapability(off).supported).toBe(true)
 
-    setGateEnv('1')
+    setGateEnv(undefined)
     const on = await (await fetch(`${base}/api/health`)).json()
     expect(mayContinue(on, 'claude')).toBe(true)
     expect(mayContinue(on, 'codex')).toBe(true)

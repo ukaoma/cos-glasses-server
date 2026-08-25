@@ -5,6 +5,30 @@ topics, decisions and action items. Until now they got none of that, and the
 server compensated by returning the TRANSCRIPT in the summary slot -- which is
 why this was reported as "no proper summary and transcription."
 
+FEATURE DEFAULTS NOW ON (Miles 2026-08-25)
+
+Ship the capability active; users opt out of what they do not need. Each gate
+stays strict in the other direction -- only a literal '0' disables, so a stray
+or malformed value cannot silently switch a feature off.
+
+  COS_THREAD_ATTACH_ENABLED            Continue agent threads
+  COS_VIDEO_UPLOAD_V2                  Reliable video uploads
+  COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK  Adaptive audio cleanup
+
+COS_WHISPER_MEETING_PREVIEW (Meeting Turbo preview) was ALREADY on by default
+server-side; COS Control mis-renders its checkbox as off because it resolves
+the value as == "1" rather than != "0". That is a Control display bug, not a
+server default, and is not fixed here.
+
+Idle Metal HQ (COS_BATCH_HQ_METAL) is deliberately unchanged -- it is
+hardware-dependent and stays opt-in.
+
+Two consequences worth knowing. An in-flight video upload sets blocksRestart,
+so a drain caught mid-upload waits for it -- that is the contract, not a stuck
+gate, and must never be --forced. Adaptive playback affects review playback
+only; the raw WAV is untouched, and transcript, attribution, save and sync are
+unchanged.
+
 VOICE ENROLMENT
 
 "enroll my voice" followed by more speech created a profile NAMED with the

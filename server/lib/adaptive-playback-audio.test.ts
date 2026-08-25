@@ -86,7 +86,17 @@ describe('adaptive retained-audio profiling', () => {
 })
 
 describe('canary boundary', () => {
-  it('is explicit opt-in and returns the immutable raw path when off', async () => {
+  it('is ON by default when the key is absent', () => {
+    delete process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK
+    expect(adaptivePlaybackEnabled()).toBe(true)
+  })
+
+
+  it('opts OUT on a literal "0" and returns the immutable raw path', async () => {
+    // Default flipped to ON in 6.37.0 (Miles 2026-08-25), so the off case is now
+    // an explicit '0'. Raw WAV is untouched either way — this only affects
+    // review playback, never the transcript, attribution, save or sync.
+    process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK = '0'
     const session = join(dir, 'meeting-audio', 'meeting_a')
     mkdirSync(session, { recursive: true })
     const raw = join(session, 'chunk_0000.wav')
