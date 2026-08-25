@@ -321,11 +321,15 @@ function parseMeeting(content: string, filename: string, month: string): Meeting
   const duration = parseField(content, 'Duration')
   const transcript = extractSection(content, ['Transcript'], true)
   const storedSummary = extractSection(content, ['Summary'])
-  // Standalone recordings have no private enrichment pipeline. Returning the
-  // canonical transcript as the detail summary lets the build199 reader review
-  // the saved meeting instead of displaying only a placeholder.
+  // A placeholder is not a summary. Until 6.37 this returned the TRANSCRIPT as
+  // the summary, which put the transcript in the summary slot on every surface
+  // and read as "the summary is broken" — the bug this replaces. The transcript
+  // is returned in its own `transcript` field and each surface renders it in
+  // its own section. An empty summary is the honest state, and every consumer
+  // already handles it: display-pages.ts falls back to 'No summary available.',
+  // and COS Control's Copy-summary button correctly disables on empty.
   const summary = !storedSummary || /standalone recording|summary unavailable/i.test(storedSummary)
-    ? transcript
+    ? ''
     : storedSummary
   const topics = parseListSection(content, ['Topics Discussed'], 10)
   const decisions = parseListSection(content, ['Decisions', 'Decisions Made'], 10)
@@ -369,6 +373,10 @@ export function boundedMeetingSource(content: string): { sourceContent: string; 
 }
 
 function toMeta(detail: MeetingDetail, sessionId?: string): MeetingMeta {
+  // Must mirror what the reader actually renders (display-pages.ts
+  // formatMeetingDetailBody), or the list row advertises a page count the
+  // reader does not honour. The transcript is part of that body since 6.37;
+  // omitting it here reported every standalone meeting as ~1p.
   const detailCharEstimate = [
     detail.title,
     detail.date,
@@ -378,6 +386,7 @@ function toMeta(detail: MeetingDetail, sessionId?: string): MeetingMeta {
     detail.decisions.join('\n'),
     detail.actionItems.map(item => `${item.owner ? `[${item.owner}] ` : ''}${item.task}`).join('\n'),
     detail.attendees.join(', '),
+    detail.transcript,
   ].join('\n\n').trim().length
   return {
     filename: detail.filename,

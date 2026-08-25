@@ -4,6 +4,7 @@ import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { checkSpeakerName } from '../lib/speaker-name.js'
 import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles, mergeSpeakerProfiles } from '../lib/speaker-embeddings.js'
 import { statSync } from 'node:fs'
 import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js'
@@ -47,6 +48,20 @@ voiceRouter.post('/voice/enroll', async (req, res) => {
     // is set). Hardcoding one user's initials here enrolled every other install
     // under a stranger's name.
     const name = (req.query.name as string) || getOwnerSpeakerLabel()
+
+    // An old client can still send a whole spoken sentence as the name (the
+    // "enroll my voice" fall-through). Refuse it here: a junk profile can
+    // never match owner_speaker_label, so /voice/status would report
+    // enrolled:false forever, and the store cannot be repaired by editing
+    // voice-profiles.json — the server rewrites it from memory.
+    const nameCheck = checkSpeakerName(name, { ownerLabel: getOwnerSpeakerLabel() })
+    if (!nameCheck.ok) {
+      return res.status(400).json({
+        success: false,
+        error: nameCheck.message,
+        reason: nameCheck.reason,
+      })
+    }
 
     // Collect raw audio body
     const buffers: Buffer[] = []

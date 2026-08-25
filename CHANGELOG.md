@@ -1,3 +1,85 @@
+## 6.37.0
+
+Meetings recorded without the COS operations pipeline now get a real summary,
+topics, decisions and action items. Until now they got none of that, and the
+server compensated by returning the TRANSCRIPT in the summary slot -- which is
+why this was reported as "no proper summary and transcription."
+
+VOICE ENROLMENT
+
+"enroll my voice" followed by more speech created a profile NAMED with the
+entire spoken utterance -- a ~40-second transcript. Reported by a first-time
+user. Because a junk name never equals owner_speaker_label,
+/api/voice/status reported `enrolled: false` no matter how many times you
+enrolled, and editing voice-profiles.json by hand did not help because the
+server rewrites it from memory.
+
+Root cause was client-side: a $-anchored command regex fell through to the
+named-enrolment branch, whose capture group had no length bound. Fixed in
+COS Glasses 6.8.433.
+
+POST /api/voice/enroll now validates ?name= as well, so an OLD client cannot
+write a sentence into the profile store: at most 40 characters, at most 4
+words, letters/spaces/hyphens/apostrophes only, no sentence punctuation, and
+no self-referential phrasing. The wearer's own label is always accepted --
+including the default "Me", which is itself self-referential and would
+otherwise have been rejected by its own guard.
+
+WHAT CHANGED
+
+meeting-store parseMeeting no longer substitutes the transcript into `summary`.
+A standalone placeholder now yields an empty summary, and the transcript is
+carried in its own `transcript` field, which the reader renders as its own
+section (requires COS Glasses 6.8.433). estimatedDetailPages now counts the
+transcript, so a list row no longer advertises ~1p for a meeting that paginates
+to many.
+
+Two enrichment tiers, both standalone-only:
+
+  extractive  always on, zero tokens -- duration, word count, speaker roster
+              with talk-time split, opening excerpt. Fabricates nothing:
+              topics/decisions/actions come back empty rather than guessed.
+
+  llm         COS_MEETING_SUMMARY=1, default OFF. One `claude -p --model haiku`
+              per meeting at the ops_pending phase of finalization.
+
+It runs at ops_pending specifically because batch HQ transcription replaces the
+whole transcript; summarising earlier would describe text the file no longer
+contains. Every generated section is inserted BEFORE `## Transcript`, because
+replaceMeetingTranscriptAtomic replaces from that marker to end of file.
+
+NEVER RUNS FOR OPERATIONS USERS, and refuses twice: the caller gates on
+cosOpsPipelineConfigured(), and the writer independently refuses any file
+carrying the sync_meetings.py markers. Overwriting the summary section would
+erase them and the pipeline would skip the meeting entirely -- losing domain
+reclassification, task extraction and the operations copy.
+
+COST CONTROLS
+  - COS_MEETING_SUMMARY, read live (not frozen at module load)
+  - haiku pinned explicitly, so it can never inherit an Opus session default
+  - own daily cap (COS_MEETING_SUMMARY_DAILY_CAP, default 40), never shared
+    with the archive counter; committed only after a validated summary, so a
+    failure, auth refusal or malformed reply costs nothing
+  - circuit breaker with its own failure accounting
+  - single-slot queue, so a boot replay cannot spawn one provider per meeting
+  - wall budget anchored to the finalization job start, keeping batch decode +
+    summariser + handoff under COS Control's 90s waitForRestartProof
+  - minimum word floor; head+tail input bound, never head-only
+  - surfaced on /api/health as meeting_summary
+
+An unauthenticated CLI exits ZERO with a success-shaped payload carrying the
+bearer token. The result is screened with terminalProviderAuthFailure before
+anything is written, so a 401 can never be persisted into a meeting file.
+
+Generated prose never attributes statements to a speaker, and diarisation
+labels ("Speaker 2", "Ext", "MU") are stripped from action-item owners -- the
+speaker-review flow deliberately never rewrites these sections, so a label
+captured here would stay wrong permanently.
+
+A standalone save with no audio now schedules a finalization pass too; before
+this it was nulled and never reached ops_pending. Orphan recovery, which has
+its own path, enriches as well.
+
 ## 6.36.28
 
 THE bug. Three earlier fixes tonight were each real and none was this one.

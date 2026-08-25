@@ -20,6 +20,8 @@ import {
   getHighQualityTranscriptionCapability,
 } from '../lib/whisper-local.js'
 import { getOpenAIWhisperBudgetState } from '../lib/openai-whisper-budget.js'
+import { getMeetingSummaryBudgetState } from '../lib/meeting-summary-budget.js'
+import { meetingSummaryLLMEnabled } from '../lib/meeting-summary.js'
 import { getKeyStatus } from '../lib/openai-key.js'
 import {
   getCodexModelCatalog,
@@ -256,6 +258,10 @@ healthRouter.get('/health', async (_req, res) => {
     speakerId: speakerReadinessState,
   }
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
+  const meeting_summary = {
+    enabled: meetingSummaryLLMEnabled(),
+    ...getMeetingSummaryBudgetState(),
+  }
   const codex_models = getCodexModelCatalogSnapshot()
   // Unauthenticated /api/health publishes Cursor slot capability only; concrete
   // agent binary paths stay on the authenticated /api/models surface.
@@ -317,6 +323,7 @@ healthRouter.get('/health', async (_req, res) => {
     readiness,
     whisper_health,
     openai_whisper_budget,
+    meeting_summary,
     tts_local,
     codex_models,
     cursor_models,

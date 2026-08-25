@@ -100,7 +100,11 @@ describe('MeetingStore', () => {
     })
 
     const detail = store.detail('personal', '2026-07', saved.filename)
-    expect(detail.summary).toContain('We reviewed the launch plan')
+    // Pre-6.37 this asserted `summary` contained transcript text — it was
+    // pinning the transcript-as-summary substitution, i.e. the bug. The
+    // transcript now lives only in its own field.
+    expect(detail.summary).toBe('')
+    expect(detail.transcript).toContain('[Speaker A]: We reviewed the launch plan')
     expect(detail.transcript).toContain('[Speaker B]: I will own the follow-up.')
     expect(detail.sourceContent).toContain('# Weekly planning')
     expect(detail.sourceContent).toContain('## Transcript')
@@ -109,6 +113,49 @@ describe('MeetingStore', () => {
     expect(detail.decisions).toEqual([])
     expect(detail.actionItems).toEqual([])
     expect(detail.attendees).toEqual([])
+  })
+
+  it('a standalone placeholder yields an EMPTY summary, not the transcript', () => {
+    // Until 6.37 this returned the transcript as the summary, which put the
+    // transcript in the summary slot on every surface and read as a broken
+    // summary. That branch had no test, so the whole suite stayed green
+    // through it.
+    const previous = process.env.COS_SCRIPTS_DIR
+    delete process.env.COS_SCRIPTS_DIR
+    try {
+      const store = new MeetingStore(newRoot())
+      const saved = store.save(input())
+      const detail = store.detail('personal', saved.month, saved.filename)
+      expect(detail.summary).toBe('')
+      expect(detail.transcript).toContain('We reviewed the launch plan')
+    } finally {
+      if (previous == null) delete process.env.COS_SCRIPTS_DIR
+      else process.env.COS_SCRIPTS_DIR = previous
+    }
+  })
+
+  it('the page estimate counts the transcript the reader renders', () => {
+    const previous = process.env.COS_SCRIPTS_DIR
+    delete process.env.COS_SCRIPTS_DIR
+    try {
+      const store = new MeetingStore(newRoot())
+      const long = 'word '.repeat(4000).trim()
+      const saved = store.save(input({
+        transcript: `[Speaker A]: ${long}`,
+        chunks: [{ text: long, speaker: 'Speaker A', elapsed: 1_000, similarity: 0.9 }],
+        chunkEntries: undefined,
+      }))
+      const listed = store.list({ domain: 'personal' })
+        .find(item => item.filename === saved.filename)
+      expect(listed).toBeTruthy()
+      // A summary-only estimate reported every standalone meeting as ~1p while
+      // the reader paginated many.
+      expect(listed!.detailCharEstimate).toBeGreaterThan(long.length / 2)
+      expect(listed!.estimatedDetailPages).toBeGreaterThan(1)
+    } finally {
+      if (previous == null) delete process.env.COS_SCRIPTS_DIR
+      else process.env.COS_SCRIPTS_DIR = previous
+    }
   })
 
   it('bounds canonical meeting source on a UTF-8-safe boundary', () => {

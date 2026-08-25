@@ -153,6 +153,7 @@ import {
   readFinalizationChunkEntries,
   type MeetingFinalizationJob,
 } from '../lib/meeting-finalization-jobs.js'
+import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
 
 function cosOpsPipelineConfigured(): boolean {
   // Read env live (not the module-load COS_SCRIPTS_DIR const) so unit tests that
@@ -228,6 +229,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     allowDuringDrain: true,
     phase: 'queued',
   })
+  const jobStartedAt = Date.now()
   const task = Promise.resolve().then(async () => {
     lease.setPhase('active')
     let current = runtime.finalizationJobs.get(job.sessionId) ?? job
@@ -317,6 +319,12 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
 
     if (cosOpsPipelineConfigured()) {
       await handoffMeetingToOperations(current.meetingPath)
+    } else {
+      // Standalone: no sync_meetings.py to produce summary/topics/decisions.
+      // Runs HERE, after finalizeBatch, because batch HQ replaces the whole
+      // transcript (meeting-batch-persistence.ts:7-12) — summarising earlier
+      // would describe text the file no longer contains.
+      await enrichStandaloneMeeting(current.meetingPath, jobStartedAt)
     }
     markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
     runtime.finalizationJobs.remove(current.sessionId)
@@ -567,7 +575,12 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         : Math.max(0, Date.now() - startTime)
       const integrity = sessions.getIntegrity(sessionId)
       const needsOperations = cosOpsPipelineConfigured()
-      const finalizationRequired = sessions.hasAudio(sessionId) || needsOperations
+      // Standalone saves need a finalization pass too, for summary enrichment.
+      // Before 6.37 a standalone save with no audio nulled the job below and
+      // never reached the ops_pending slot, so enrichment could never run.
+      const standaloneEnrichmentRequired = !needsOperations
+      const finalizationRequired =
+        sessions.hasAudio(sessionId) || needsOperations || standaloneEnrichmentRequired
       const claimPending = needsOperations && earlyMeetingSyncEnabled()
 
       // Initial canonical text + structured metadata are published before any
@@ -1948,6 +1961,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       } catch { /* display is best-effort */ }
       if (cosOpsPipelineConfigured()) {
         await handoffMeetingToOperations(saved.filepath)
+      } else {
+        // Orphan recovery is its own path and never reaches
+        // scheduleFinalizationJob, so a recovered standalone meeting would
+        // otherwise stay permanently un-enriched.
+        // Full wall from here, not a shared finalization budget: recovery
+        // already holds the long-running orphan_recovery lease that COS
+        // Control surfaces and warns on before committing a drain.
+        await enrichStandaloneMeeting(saved.filepath, Date.now())
       }
     }).catch(error => {
       // The quarantined audio is untouched on failure — retry stays possible
