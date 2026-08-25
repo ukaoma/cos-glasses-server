@@ -108,18 +108,25 @@ describe('extractive tier', () => {
 })
 
 describe('flag is read live, not frozen at module load', () => {
-  it('flips within a single process', () => {
+  it('is ON by default and flips within a single process', () => {
+    // Default flipped ON in 6.37.0. Only a literal '0' disables, so a stray or
+    // malformed value cannot silently switch summaries off.
     delete process.env.COS_MEETING_SUMMARY
-    expect(meetingSummaryLLMEnabled()).toBe(false)
+    expect(meetingSummaryLLMEnabled(), 'absent key means ON').toBe(true)
     process.env.COS_MEETING_SUMMARY = '1'
     expect(meetingSummaryLLMEnabled()).toBe(true)
+    process.env.COS_MEETING_SUMMARY = 'true'
+    expect(meetingSummaryLLMEnabled(), 'a stray truthy value stays ON').toBe(true)
+    process.env.COS_MEETING_SUMMARY = ''
+    expect(meetingSummaryLLMEnabled(), 'an empty value stays ON').toBe(true)
     process.env.COS_MEETING_SUMMARY = '0'
-    expect(meetingSummaryLLMEnabled()).toBe(false)
+    expect(meetingSummaryLLMEnabled(), 'only a literal 0 disables').toBe(false)
   })
 })
 
 describe('gates — each must prevent the spawn', () => {
-  it('flag off: does not spawn', async () => {
+  it('opted OUT with "0": does not spawn', async () => {
+    process.env.COS_MEETING_SUMMARY = '0'
     const spawn = vi.fn()
     const result = await summariseMeeting(longTranscript(), { spawn })
     expect(spawn).not.toHaveBeenCalled()
@@ -127,8 +134,8 @@ describe('gates — each must prevent the spawn', () => {
     expect(result.skipReason).toBe('flag_off')
   })
 
-  it('flag on: DOES spawn — proves the gate above is the reason, not a broken seam', async () => {
-    process.env.COS_MEETING_SUMMARY = '1'
+  it('default (key absent): DOES spawn — proves the gate above is the opt-out, not a broken seam', async () => {
+    delete process.env.COS_MEETING_SUMMARY
     const spawn = vi.fn().mockResolvedValue(VALID_REPLY)
     const result = await summariseMeeting(longTranscript(), { spawn })
     expect(spawn).toHaveBeenCalledTimes(1)

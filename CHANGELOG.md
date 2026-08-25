@@ -64,8 +64,11 @@ Two enrichment tiers, both standalone-only:
               with talk-time split, opening excerpt. Fabricates nothing:
               topics/decisions/actions come back empty rather than guessed.
 
-  llm         COS_MEETING_SUMMARY=1, default OFF. One `claude -p --model haiku`
-              per meeting at the ops_pending phase of finalization.
+  llm         DEFAULT ON. One `claude -p --model haiku` per meeting at the
+              ops_pending phase of finalization. Set COS_MEETING_SUMMARY=0 to
+              opt out; only a literal 0 disables. This spends tokens on the
+              USER'S OWN provider plan, which is why every control below is
+              load-bearing rather than decorative.
 
 It runs at ops_pending specifically because batch HQ transcription replaces the
 whole transcript; summarising earlier would describe text the file no longer
@@ -79,7 +82,7 @@ erase them and the pipeline would skip the meeting entirely -- losing domain
 reclassification, task extraction and the operations copy.
 
 COST CONTROLS
-  - COS_MEETING_SUMMARY, read live (not frozen at module load)
+  - COS_MEETING_SUMMARY, read live (not frozen at module load), default ON
   - haiku pinned explicitly, so it can never inherit an Opus session default
   - own daily cap (COS_MEETING_SUMMARY_DAILY_CAP, default 40), never shared
     with the archive counter; committed only after a validated summary, so a

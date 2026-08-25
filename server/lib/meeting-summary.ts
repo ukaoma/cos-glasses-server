@@ -87,10 +87,19 @@ export const meetingSummaryBreaker = breaker
 
 /** Read LIVE, not at module load. COS Control rebuilds the runtime plist
  *  environment on update, and tests flip this per-case; a module-scope const
- *  would freeze the value at import and make both untestable. */
+ *  would freeze the value at import and make both untestable.
+ *
+ *  DEFAULT ON since 6.37.0 (Miles 2026-08-25). Shipping this off meant the
+ *  headline fix — a meeting that comes back with a real summary — reached
+ *  nobody unless they found an undocumented env var.
+ *
+ *  Unlike the display toggles that flipped on in the same release, this one
+ *  spends tokens on the USER'S OWN provider plan, which is why every control in
+ *  this module is load-bearing: a per-day cap committed only on a validated
+ *  result, a breaker with its own accounting, a minimum word floor, a
+ *  single-slot queue, and a wall budget. Only a literal '0' disables. */
 export function meetingSummaryLLMEnabled(): boolean {
-  const raw = process.env.COS_MEETING_SUMMARY?.trim()
-  return raw === '1' || raw?.toLowerCase() === 'true'
+  return process.env.COS_MEETING_SUMMARY?.trim() !== '0'
 }
 
 // ── Transcript parsing ──────────────────────────────────────
