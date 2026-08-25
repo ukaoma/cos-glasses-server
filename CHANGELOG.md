@@ -1,3 +1,27 @@
+## 6.37.1
+
+Standalone meeting summaries default ON.
+
+6.37.0 shipped everything else in this release — the honest summary slot, the
+two enrichment tiers, the voice-profile name validator, and Continue threads /
+video uploads / adaptive audio cleanup all defaulting on — but it went out with
+COS_MEETING_SUMMARY still defaulting OFF. That meant the headline fix, a meeting
+that comes back with a real summary, reached nobody unless they found an
+undocumented environment variable.
+
+Only a literal '0' disables, so a stray or malformed value cannot silently
+switch summaries off.
+
+This is a different class of default from the display toggles in 6.37.0: it
+spends tokens on the USER'S OWN provider plan. Every control in the module is
+load-bearing rather than decorative — a per-day cap counted only on a validated
+summary, a circuit breaker with its own accounting, a minimum word floor, a
+single-slot queue, and a wall budget that keeps finalization under COS Control's
+90s restart proof.
+
+No other change. Anyone already on 6.37.0 who set COS_MEETING_SUMMARY=1 by hand
+is unaffected.
+
 ## 6.37.0
 
 Meetings recorded without the COS operations pipeline now get a real summary,
