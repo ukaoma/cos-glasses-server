@@ -1,3 +1,20 @@
+## 6.39.3
+
+Local turns answer in seconds again: thinking is off by default.
+
+The Ollama bridge sent no `think` field, so a thinking-class model spent its
+full hidden reasoning chain before the first visible token. Measured on
+qwen3.5:35b the day it became the default local model: 6,265 generated tokens
+for a 150-word answer, 98.6 seconds of dead screen against 2.2 seconds with
+thinking disabled, at the same visible answer quality -- and a hard prompt
+could out-run the 180-second wall clock entirely.
+
+Every request now sends `think: false` unless COS_OLLAMA_THINK opts back in
+("1"/"true", or an explicit budget: low, medium, high, max). The daemon
+silently tolerates `think: false` on models without the thinking capability
+(verified live), so no capability gating is needed. COS Control 0.5.77
+allowlists the new key so a pinned preference survives Update Server.
+
 ## 6.39.2
 
 Every Claude fork failed; the copy it left behind was real.

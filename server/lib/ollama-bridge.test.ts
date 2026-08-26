@@ -92,8 +92,24 @@ describe('ollama bridge', () => {
     expect(chatBodies[0]).toMatchObject({
       model: 'llama3.2:latest',
       stream: true,
+      // The default request DISABLES thinking. Omitting the key would let a
+      // thinking-class model ruminate for minutes before the first visible
+      // token; sending false costs nothing on models that cannot think.
+      think: false,
     })
     expect(JSON.stringify(chatBodies[0])).not.toContain('--oss')
+  })
+
+  it('resolves COS_OLLAMA_THINK: off by default, on or leveled by explicit opt-in', async () => {
+    const { resolveOllamaThink } = await import('./ollama-bridge.js')
+    expect(resolveOllamaThink(undefined)).toBe(false)
+    expect(resolveOllamaThink('')).toBe(false)
+    expect(resolveOllamaThink('0')).toBe(false)
+    expect(resolveOllamaThink('banana')).toBe(false)
+    expect(resolveOllamaThink('1')).toBe(true)
+    expect(resolveOllamaThink('true')).toBe(true)
+    expect(resolveOllamaThink('HIGH')).toBe('high')
+    expect(resolveOllamaThink(' low ')).toBe('low')
   })
 
   it('refuses photos', async () => {
