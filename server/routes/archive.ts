@@ -1,8 +1,9 @@
 // Archive endpoints — daily conversation archive for glasses history browser
 import { Router } from 'express'
-import { listArchiveDates, listArchiveDateStrings, archiveDir, loadArchive, getArchiveChats, getArchiveDayMessages, appendToArchive } from '../lib/archive.js'
+import { listArchiveDateStrings, archiveDir, archiveIndexPath, loadArchive, getArchiveChats, getArchiveDayMessages, appendToArchive } from '../lib/archive.js'
 import { getArchiveChatMessagesNumbered } from './message-ref.js'
 import { searchArchive, MAX_LIMIT, DEFAULT_LIMIT } from '../lib/archive-search.js'
+import { refreshArchiveIndex } from '../lib/archive-index.js'
 import { getActiveSessions } from '../lib/conversation.js'
 
 export const archiveRouter = Router()
@@ -22,9 +23,19 @@ archiveRouter.param('date', (req, res, next, date) => {
 })
 
 // GET /api/archive — list all archive dates with summaries
-archiveRouter.get('/archive', (_req, res) => {
-  const archives = listArchiveDates()
-  res.json({ archives })
+archiveRouter.get('/archive', async (_req, res) => {
+  // Index-backed. The previous implementation parsed every day file to reach four
+  // summary fields; see archive-index.ts for the measurements that killed it.
+  const { entries, rebuilt, fromCache } = await refreshArchiveIndex(archiveDir(), archiveIndexPath())
+  res.json({
+    archives: entries.map(e => ({
+      date: e.date,
+      summary: e.summary,
+      chatCount: e.chatCount,
+      exchangeCount: e.exchangeCount,
+    })),
+    index: { rebuilt: rebuilt.length, fromCache },
+  })
 })
 
 // POST /api/archive/now — snapshot active sessions into today's archive (non-destructive)

@@ -94,7 +94,7 @@ export function loadArchive(date: string): DailyArchive | null {
   }
   if (result.status === 'missing') return null
   // Defense: a valid-JSON but wrong-shape day file (no chats[]) would make the
-  // readers throw 500 AND drop listArchiveDates into its catch → the whole
+  // readers throw 500 AND drop the archive listing into its catch → the whole
   // Message History list vanishes on one bad file. Coerce to an empty day.
   const data = result.data
   if (data && !Array.isArray(data.chats)) data.chats = []
@@ -367,6 +367,14 @@ export async function appendToArchive(
 // ── Query functions ─────────────────────────────────────────
 
 /** List all archive dates with summaries */
+/** Sidecar index location. Deliberately a SIBLING of the archive directory, not
+ *  a file inside it: anything living in that directory has to be excluded by
+ *  every readdir filter forever, and one missed filter turns the cache into a
+ *  phantom "day". */
+export function archiveIndexPath(): string {
+  return dataPath('archive-index.json')
+}
+
 /** The archive directory, for readers that must NOT materialise a day file. */
 export function archiveDir(): string {
   return ensureArchiveDir()
@@ -375,7 +383,8 @@ export function archiveDir(): string {
 /**
  * Date strings only, straight from readdir — no file is opened.
  *
- * `listArchiveDates()` below returns richer summaries but reaches them by
+ * The richer per-day summaries (chat and exchange counts) come from the sidecar
+ * index in archive-index.ts. The listing this replaced reached them by
  * JSON.parsing EVERY day file. Measured on the real corpus that is 1.2 GB across
  * 175 files, and the single largest day (2026-07-30, 343 MB) costs 1.2 GB heap /
  * 2.3 GB RSS to parse on its own. Anything that only needs to know WHICH days
@@ -396,29 +405,12 @@ export function listArchiveDateStrings(): string[] {
   }
 }
 
-export function listArchiveDates(): ArchiveDateSummary[] {
-  try {
-    ensureArchiveDir()
-    const files = readdirSync(ARCHIVE_DIR)
-      .filter(f => f.endsWith('.json'))
-      .sort()
-      .reverse() // newest first
-
-    return files.map(f => {
-      const date = f.replace('.json', '')
-      const archive = loadArchive(date)
-      if (!archive) return null
-      return {
-        date: archive.date,
-        summary: archive.summary,
-        chatCount: archive.chats.length,
-        exchangeCount: archive.chats.reduce((sum, c) => sum + c.exchangeCount, 0),
-      }
-    }).filter(Boolean) as ArchiveDateSummary[]
-  } catch {
-    return []
-  }
-}
+// listArchiveDates() REMOVED (2026-08-26). It produced its summaries by
+// JSON.parsing every day file -- 175 files / 1.2 GB on the real corpus, and 1.2 GB
+// heap / 2.3 GB RSS for the single largest day alone -- on the process that also
+// runs the wearer's live session. The /api/archive route now reads the sidecar
+// index (archive-index.ts) instead. Deleted rather than deprecated: an uncalled
+// landmine is still a landmine, and the next caller would not know.
 
 /** Get chat summaries for a specific day */
 export function getArchiveChats(date: string): ArchiveChatSummary[] {
