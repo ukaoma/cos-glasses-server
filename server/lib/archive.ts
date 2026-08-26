@@ -367,6 +367,35 @@ export async function appendToArchive(
 // ── Query functions ─────────────────────────────────────────
 
 /** List all archive dates with summaries */
+/** The archive directory, for readers that must NOT materialise a day file. */
+export function archiveDir(): string {
+  return ensureArchiveDir()
+}
+
+/**
+ * Date strings only, straight from readdir — no file is opened.
+ *
+ * `listArchiveDates()` below returns richer summaries but reaches them by
+ * JSON.parsing EVERY day file. Measured on the real corpus that is 1.2 GB across
+ * 175 files, and the single largest day (2026-07-30, 343 MB) costs 1.2 GB heap /
+ * 2.3 GB RSS to parse on its own. Anything that only needs to know WHICH days
+ * exist must use this instead, on a server that is also running the wearer's live
+ * session.
+ */
+export function listArchiveDateStrings(): string[] {
+  try {
+    ensureArchiveDir()
+    return readdirSync(ARCHIVE_DIR)
+      .filter(f => f.endsWith('.json'))
+      .map(f => f.slice(0, -'.json'.length))
+      .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort()
+      .reverse()
+  } catch {
+    return []
+  }
+}
+
 export function listArchiveDates(): ArchiveDateSummary[] {
   try {
     ensureArchiveDir()
