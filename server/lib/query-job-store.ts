@@ -550,11 +550,11 @@ export class QueryJobStore {
   }
 
   private applyLinkage(snapshot: QueryJobSnapshot, raw: Record<string, unknown>): void {
-    const provider = raw.provider === 'claude' || raw.provider === 'codex' || raw.provider === 'cursor'
+    const provider = raw.provider === 'claude' || raw.provider === 'codex' || raw.provider === 'cursor' || raw.provider === 'ollama'
       ? raw.provider
       : undefined
     if (provider) snapshot.provider = provider
-    const fields = ['resolvedModel', 'cliSessionId', 'claudeRunId', 'codexRunId', 'codexThreadId', 'cursorRunId'] as const
+    const fields = ['resolvedModel', 'cliSessionId', 'claudeRunId', 'codexRunId', 'codexThreadId', 'cursorRunId', 'ollamaRunId'] as const
     for (const field of fields) {
       const value = safeOptional(raw[field])
       if (value) snapshot[field] = value
@@ -886,7 +886,11 @@ export class QueryJobStore {
 
   private safeLinkage(linkage: QueryJobProviderLinkage): QueryJobProviderLinkage {
     return {
-      ...(linkage.provider === 'claude' || linkage.provider === 'codex' || linkage.provider === 'cursor'
+      // 'ollama' joined this allowlist in 6.39.1. The 6.39.0 types allowed it and
+      // query-job-runtime stamped it, but this sanitizer silently dropped it on
+      // persist -- so phone acknowledgement of a live or replayed Ollama job could
+      // never see its provider. Unknown providers still strip.
+      ...(linkage.provider === 'claude' || linkage.provider === 'codex' || linkage.provider === 'cursor' || linkage.provider === 'ollama'
         ? { provider: linkage.provider }
         : {}),
       ...(safeOptional(linkage.resolvedModel, 64) ? { resolvedModel: safeOptional(linkage.resolvedModel, 64) } : {}),
@@ -895,6 +899,7 @@ export class QueryJobStore {
       ...(safeOptional(linkage.codexRunId) ? { codexRunId: safeOptional(linkage.codexRunId) } : {}),
       ...(safeOptional(linkage.codexThreadId) ? { codexThreadId: safeOptional(linkage.codexThreadId) } : {}),
       ...(safeOptional(linkage.cursorRunId) ? { cursorRunId: safeOptional(linkage.cursorRunId) } : {}),
+      ...(safeOptional(linkage.ollamaRunId) ? { ollamaRunId: safeOptional(linkage.ollamaRunId) } : {}),
     }
   }
 

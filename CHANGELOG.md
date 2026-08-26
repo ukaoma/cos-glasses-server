@@ -1,3 +1,16 @@
+## 6.39.1
+
+Durable jobs now remember they ran on Ollama.
+
+FIXED: 6.39.0 allowed `provider: 'ollama'` in the durable-job types and the
+runtime stamped it, but the journal sanitizer (`safeLinkage`) and the replay
+reader (`applyLinkage`) both stripped it -- so a live or replayed Ollama job
+came back providerless and the phone could never acknowledge which engine
+answered. Both now persist `ollama` and `ollamaRunId`; unknown providers still
+strip. Pinned by journal round-trip tests, mutation-verified.
+
+No other changes; pairs with COS Glasses 6.8.436 and COS Control 0.5.74.
+
 ## 6.39.0
 
 Ollama is a fourth G2 picker, hidden unless a local daemon answers.

@@ -133,6 +133,40 @@ describe('QueryJobStore durable journal', () => {
     expect((await hydratedAgain.getSnapshot(admitted.job.jobId)).acknowledgedAt).toBe(now.toISOString())
   })
 
+  it('persists an ollama linkage through the journal and a rehydrate (6.39.1)', async () => {
+    // 6.39.0 allowed provider 'ollama' in the types and the runtime stamped it,
+    // but safeLinkage stripped it on persist -- so a replayed Ollama job came
+    // back providerless and the phone could never acknowledge it. These two
+    // asserts are against the JOURNAL round trip, not the in-memory snapshot.
+    const root = await tempRoot()
+    const clock = new Date('2026-08-26T20:00:00.000Z')
+    const priorBoot = new QueryJobStore({ root, bootId: 'boot-ollama', now: () => new Date(clock) })
+    const admitted = await priorBoot.admit(request(randomUUID()))
+    await priorBoot.markStarting(admitted.job.jobId)
+    await priorBoot.markRunning(admitted.job.jobId, { provider: 'ollama', resolvedModel: 'ollama' })
+    await priorBoot.updateLinkage(admitted.job.jobId, { provider: 'ollama', ollamaRunId: 'local-run-1' })
+
+    const restarted = new QueryJobStore({ root, bootId: 'boot-ollama-2', now: () => new Date(clock) })
+    await restarted.init()
+    const replayed = await restarted.getSnapshot(admitted.job.jobId)
+    expect(replayed.provider).toBe('ollama')
+    expect(replayed.ollamaRunId).toBe('local-run-1')
+  })
+
+  it('still strips an unknown provider on persist', async () => {
+    const root = await tempRoot()
+    const clock = new Date('2026-08-26T20:10:00.000Z')
+    const store = new QueryJobStore({ root, bootId: 'boot-unknown', now: () => new Date(clock) })
+    const admitted = await store.admit(request(randomUUID()))
+    await store.markStarting(admitted.job.jobId)
+    await store.markRunning(admitted.job.jobId, { provider: 'lmstudio' as never, resolvedModel: 'x' })
+
+    const restarted = new QueryJobStore({ root, bootId: 'boot-unknown-2', now: () => new Date(clock) })
+    await restarted.init()
+    const replayed = await restarted.getSnapshot(admitted.job.jobId)
+    expect(replayed.provider).toBeUndefined()
+  })
+
   it('classifies prior-boot work as interrupted and fences every client id in that provider session', async () => {
     const root = await tempRoot()
     let clock = new Date('2026-07-17T16:00:00.000Z')
