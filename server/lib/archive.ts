@@ -343,12 +343,59 @@ export async function appendToArchive(
     }
 
     if (existing) {
-      // Merge: re-number chat IDs
-      const nextId = existing.chats.length
-      for (let i = 0; i < newChats.length; i++) {
-        newChats[i].id = nextId + i
+      // UPSERT, never blind-append.
+      //
+      // `runDailyArchiveMirror` walks every session still resident in memory, skips
+      // only TODAY's, and archives the rest -- at boot and every 24h -- WITHOUT
+      // evicting them from the map. This merge used to be
+      // `existing.chats.push(...newChats)`, so a session that stayed resident gained
+      // one more copy of itself in its day file on every single restart, forever.
+      //
+      // Measured on the live corpus before this fix: 1.28 GB across 176 day files, of
+      // which ~1.26 GB (98%) was duplicates, 31 files affected. 2026-07-30.json was
+      // 343 MB holding 4,421 chats belonging to exactly TWO sessions -- ~2,210 copies
+      // of roughly 0.16 MB of real content. 2026-07-28.json was 69 MB of ONE
+      // conversation, 2,388 times over. That is why the archive index and archive
+      // search (both shipped in 6.38.0) reported inflated counts, and why a day file
+      // ever reached a size that costs 1.2 GB of heap to parse.
+      //
+      // IDENTITY IS (sessionId, startedAt). `startedAt` is the chat's first exchange
+      // timestamp, so it survives re-archiving. `id` does NOT -- it is renumbered on
+      // every merge, which is precisely why the old code could never recognise a chat
+      // it had already written. Verified against the real corpus: this key collapses
+      // 2026-07-30 from 4,421 chats to 2, and leaves an unaffected day (2026-08-17,
+      // 12 chats) at exactly 12 -- so it does not over-merge distinct conversations.
+      const keyOf = (c: ArchivedChat): string => `${c.sessionId}:${c.startedAt}`
+      const byKey = new Map<string, ArchivedChat>()
+      for (const chat of existing.chats) {
+        const key = keyOf(chat)
+        const prior = byKey.get(key)
+        // Self-heal: a file written before this fix already contains duplicates.
+        // Keep the most complete copy rather than the first one encountered.
+        if (!prior || chat.exchangeCount > prior.exchangeCount) byKey.set(key, chat)
       }
-      existing.chats.push(...newChats)
+      const hadDuplicates = byKey.size !== existing.chats.length
+
+      let changed = false
+      for (const incoming of newChats) {
+        const key = keyOf(incoming)
+        const prior = byKey.get(key)
+        // REPLACE rather than skip: a session archived yesterday with 5 exchanges that
+        // now holds 8 must update, not be discarded as "already seen".
+        if (!prior || incoming.exchangeCount > prior.exchangeCount) {
+          byKey.set(key, incoming)
+          changed = true
+        }
+      }
+
+      // Nothing new and nothing to repair: return WITHOUT rewriting. Re-serialising a
+      // large day file to produce identical bytes is pure cost on the process that
+      // also records the wearer's live session, and it is the common case at boot.
+      if (!changed && !hadDuplicates) return
+
+      const merged = [...byKey.values()].sort((a, b) => a.startedAt - b.startedAt)
+      merged.forEach((chat, i) => { chat.id = i })
+      existing.chats = merged
       existing.summary = await generateDaySummary(existing.chats, opts.skipLLM)
       existing.archivedAt = new Date().toISOString()
       saveArchive(existing)
