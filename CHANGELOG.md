@@ -1,3 +1,21 @@
+## 6.39.2
+
+Every Claude fork failed; the copy it left behind was real.
+
+`buildClaudeForkArgs` still carried `--tools ''`, the third read-only layer the
+attached path retired on 2026-08-16. On the current Claude CLI that flag makes
+a fork-resume attempt a context compaction that fails (`too_few_groups`) and
+then report a synthetic 400 "Prompt is too long" with zero input tokens -- so
+the route classified every claude fork `fork_orphan_possible` even though the
+forked transcript sat on disk complete except for the failed turn. Found the
+hour COS Control 0.5.76 put a Fork button in front of the route; isolated by
+single-flag bisection (plan-only completes, allowedTools-only completes,
+`--tools ''` alone reproduces).
+
+The fork keeps its read-only stance -- `--permission-mode plan` plus an empty
+`--allowedTools` -- and drops only the flag the CLI can no longer carry.
+Pinned by a regression test that goes red if `--tools` returns to the argv.
+
 ## 6.39.1
 
 Durable jobs now remember they ran on Ollama.

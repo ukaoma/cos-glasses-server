@@ -528,6 +528,16 @@ describe('what reaches the operating system', () => {
     expect(h.spawns).toHaveLength(0)
   })
 
+  it('claude fork argv carries no --tools flag', () => {
+    // Regression, verified live 2026-08-26: `--tools ''` on a fork-resume makes
+    // the current CLI attempt a context compaction that fails (too_few_groups)
+    // and then report a synthetic 400 "Prompt is too long" with zero input
+    // tokens -- every claude fork refused orphan_possible while the transcript
+    // copy existed. Single-flag bisection isolated it; plan + empty
+    // allowedTools alone complete normally and keep the read-only stance.
+    expect(buildClaudeForkArgs(CLAUDE_SOURCE)).not.toContain('--tools')
+  })
+
   it('emits no banned flag from the real builders', () => {
     const both = [...buildClaudeForkArgs(CLAUDE_SOURCE), ...buildCodexForkArgs(CODEX_SOURCE, CWD)].join(' ')
     for (const banned of ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox', '--full-auto', '--yolo', 'danger-full-access', 'bypassPermissions']) {

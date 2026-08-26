@@ -211,11 +211,18 @@ export function forkOrphanPossible(result: ForkResult): boolean {
  * `claude -p --resume <id> --fork-session`, read-only, prompt on stdin.
  *
  * `--fork-session` is documented by the installed CLI as "When resuming, create a
- * new session ID" and is only meaningful alongside `--resume`. The read-only pair
- * (`--permission-mode plan` plus the empty tool lists) is carried over from the
- * attached path unchanged: a fork runs a real model turn, and it does so against a
- * workspace the user did not explicitly hand us, so it gets no more authority than
- * a continuation does.
+ * new session ID" and is only meaningful alongside `--resume`. The fork keeps a
+ * read-only stance — a fork runs a real model turn against a workspace the user
+ * did not explicitly hand us — but that stance is now `--permission-mode plan`
+ * plus an empty `--allowedTools` only. The third layer this used to carry,
+ * `--tools ''`, is GONE: on the current CLI an empty --tools on a fork-resume
+ * triggers a spurious context compaction (`too_few_groups`) followed by a
+ * synthetic 400 "Prompt is too long" with zero input tokens — every claude fork
+ * failed as orphan_possible while the transcript copy sat there complete.
+ * Isolated by single-flag bisection on 2026-08-26: plan-only completed,
+ * allowedTools-only completed, `--tools ''` alone reproduced the failure. (The
+ * attached path dropped all three layers on 2026-08-16 by explicit decision;
+ * the fork deliberately keeps the two that still work.)
  *
  * `stream-json` requires `--verbose`; without it the CLI refuses and we would never
  * see the id we are required to verify.
@@ -228,7 +235,6 @@ export function buildClaudeForkArgs(nativeThreadId: string): string[] {
     '--resume', nativeThreadId,
     '--fork-session',
     '--permission-mode', 'plan',
-    '--tools', '',
     '--allowedTools', '',
   ]
 }
