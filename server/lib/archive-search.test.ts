@@ -90,6 +90,24 @@ describe('searchArchive', () => {
   })
 })
 
+describe('snippet casing', () => {
+  // Matching runs on lowercased text; snippets must NOT. Without this the results
+  // render as all-lowercase prose and read like corrupted data, which is how the
+  // first real-corpus probe of this feature looked.
+  it('returns the snippet in its original casing', async () => {
+    const sdir = mkdtempSync(join(tmpdir(), 'arch.case.'))
+    try {
+      writeFileSync(join(sdir, '2026-08-05.json'), 'Chelsie owes the Sales-vs-Education split to Jeremy', 'utf8')
+      const r = await searchArchive({ dir: sdir, dates: ['2026-08-05'], query: 'chelsie' })
+      expect(r.hits[0].snippets[0]).toContain('Chelsie')
+      expect(r.hits[0].snippets[0]).toContain('Sales-vs-Education')
+      expect(r.hits[0].snippets[0]).not.toContain('chelsie owes')
+    } finally {
+      rmSync(sdir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('chunk boundary', () => {
   // THE test. The reader pulls 1 MiB at a time, so a term straddling that
   // boundary is invisible to a naive per-chunk indexOf. Every fixture above is

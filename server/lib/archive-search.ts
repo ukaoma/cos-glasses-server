@@ -68,20 +68,37 @@ function cleanSnippet(raw: string): string {
     .trim()
 }
 
-function collectSnippets(hay: string, needle: string, offset: number, out: string[], cap: number): number {
+/**
+ * Count matches in `hayLower` but cut snippets from `hayOriginal`.
+ *
+ * Matching has to happen on the lowercased text for case-insensitivity, but a
+ * snippet cut from that text renders as all-lowercase prose -- "chelsie owes the
+ * sales-vs-education split" -- which reads like broken data in a UI. The offsets
+ * line up because toLowerCase() is length-preserving for effectively all real
+ * archive text; where it is NOT (a handful of exotic codepoints expand), the
+ * length check catches the drift and falls back to the lowered slice rather than
+ * cutting at a wrong offset.
+ */
+function collectSnippets(
+  hayLower: string,
+  hayOriginal: string,
+  needle: string,
+  out: string[],
+  cap: number,
+): number {
+  const aligned = hayLower.length === hayOriginal.length
   let found = 0
-  let i = hay.indexOf(needle)
+  let i = hayLower.indexOf(needle)
   while (i !== -1) {
     found++
     if (out.length < cap) {
       const start = Math.max(0, i - SNIPPET_RADIUS)
-      const end = Math.min(hay.length, i + needle.length + SNIPPET_RADIUS)
-      const snippet = cleanSnippet(hay.slice(start, end))
+      const end = Math.min(hayLower.length, i + needle.length + SNIPPET_RADIUS)
+      const snippet = cleanSnippet((aligned ? hayOriginal : hayLower).slice(start, end))
       if (snippet) out.push(snippet)
     }
-    i = hay.indexOf(needle, i + needle.length)
+    i = hayLower.indexOf(needle, i + needle.length)
   }
-  void offset
   return found
 }
 
@@ -112,9 +129,7 @@ export async function searchArchiveFile(
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
       bytes += Buffer.byteLength(text, 'utf8')
       const hay = carry + text
-      matches += collectSnippets(hay.toLowerCase(), needleLower, 0, snippets, MAX_SNIPPETS_PER_DAY)
-      // Snippets are taken from the lowercased haystack so their offsets line up;
-      // that costs original casing but keeps the match arithmetic honest.
+      matches += collectSnippets(hay.toLowerCase(), hay, needleLower, snippets, MAX_SNIPPETS_PER_DAY)
       carry = hay.slice(Math.max(0, hay.length - overlap))
     })
     stream.on('error', rejectDone)
