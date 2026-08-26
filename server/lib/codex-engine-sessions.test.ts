@@ -69,4 +69,75 @@ describe('Codex engine session migration and isolation', () => {
       trustMode: 'read-only',
     })?.codexThreadId).toBe('legacy-thread')
   })
+
+  it('does not resume a legacy session when extra args are on', () => {
+    const now = Date.now()
+    writeFileSync(process.env.COS_CODEX_ENGINE_SESSIONS_FILE!, JSON.stringify({
+      savedAt: new Date(now).toISOString(),
+      sessions: {
+        'session-1:codex-frontier': {
+          key: 'session-1:codex-frontier',
+          cosSessionId: 'session-1',
+          model: 'codex-frontier',
+          codexThreadId: 'cloud-thread',
+          cwd: '/tmp/cos',
+          trustMode: 'read-only',
+          savedAt: now,
+          lastUsedAt: now,
+          expiresAt: new Date(now + CODEX_ENGINE_SESSION_TTL_MS).toISOString(),
+        },
+      },
+    }))
+    expect(getCodexEngineSession({
+      cosSessionId: 'session-1',
+      model: 'codex-frontier',
+      cwd: '/tmp/cos',
+      trustMode: 'read-only',
+      engineFingerprint: '--oss\0--local-provider\0ollama',
+    })).toBeNull()
+  })
+
+  it('does not resume an OSS session after extra args are removed', () => {
+    saveCodexEngineSession({
+      cosSessionId: 'session-1',
+      model: 'codex-frontier',
+      codexThreadId: 'oss-thread',
+      cwd: '/tmp/cos',
+      trustMode: 'read-only',
+      engineFingerprint: '--oss\0--local-provider\0ollama',
+    })
+    expect(getCodexEngineSession({
+      cosSessionId: 'session-1',
+      model: 'codex-frontier',
+      cwd: '/tmp/cos',
+      trustMode: 'read-only',
+      engineFingerprint: '',
+    })).toBeNull()
+  })
+
+  it('still resumes a legacy session when extra args are off', () => {
+    const now = Date.now()
+    writeFileSync(process.env.COS_CODEX_ENGINE_SESSIONS_FILE!, JSON.stringify({
+      savedAt: new Date(now).toISOString(),
+      sessions: {
+        'session-1:codex-frontier': {
+          key: 'session-1:codex-frontier',
+          cosSessionId: 'session-1',
+          model: 'codex-frontier',
+          codexThreadId: 'cloud-thread',
+          cwd: '/tmp/cos',
+          trustMode: 'read-only',
+          savedAt: now,
+          lastUsedAt: now,
+          expiresAt: new Date(now + CODEX_ENGINE_SESSION_TTL_MS).toISOString(),
+        },
+      },
+    }))
+    expect(getCodexEngineSession({
+      cosSessionId: 'session-1',
+      model: 'codex-frontier',
+      cwd: '/tmp/cos',
+      trustMode: 'read-only',
+    })?.codexThreadId).toBe('cloud-thread')
+  })
 })

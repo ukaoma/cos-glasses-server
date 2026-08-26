@@ -1155,6 +1155,22 @@ describe('plan 4.7 is enforced at runtime, not only asserted in a test', () => {
       '-p', '--mode', 'ask', '--workspace', '/tmp/repo--force-clone', '--resume', 'x',
     ])).toBeNull()
   })
+
+  it('ignores COS_CODEX_EXTRA_ARGS on attached continue argv', () => {
+    process.env.COS_CODEX_EXTRA_ARGS = '--oss --local-provider ollama --model qwen2.5-coder'
+    const id = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
+    expect(buildCodexAttachedArgs(id, '/tmp/workspace')).toEqual([
+      'exec',
+      '--sandbox', 'read-only',
+      '--cd', '/tmp/workspace',
+      'resume',
+      '--json',
+      '--skip-git-repo-check',
+      id,
+      '-',
+    ])
+    delete process.env.COS_CODEX_EXTRA_ARGS
+  })
 })
 
 describe('a continued turn inherits the session posture, and the bypass ban survives it', () => {

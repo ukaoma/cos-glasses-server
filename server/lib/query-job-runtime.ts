@@ -13,6 +13,7 @@ import { QueryJobStore } from './query-job-store.js'
 import {
   isCodexModel,
   isCursorModel,
+  isOllamaModel,
   normalizeEffortPreference,
   normalizeModelPreference,
   type CursorExecutionMode,
@@ -101,7 +102,8 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
   }
 }
 
-function providerFor(model: ModelPreference): 'claude' | 'codex' | 'cursor' {
+function providerFor(model: ModelPreference): 'claude' | 'codex' | 'cursor' | 'ollama' {
+  if (isOllamaModel(model)) return 'ollama'
   if (isCursorModel(model)) return 'cursor'
   return isCodexModel(model) ? 'codex' : 'claude'
 }
@@ -183,6 +185,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           codexRunId: metadata?.codexRunId,
           codexThreadId: metadata?.codexThreadId,
           cursorRunId: metadata?.cursorRunId,
+          ollamaRunId: metadata?.ollamaRunId,
         } as const
         await callbacks.onStart({ sessionId, ...linkage })
         emitDisplay({ type: 'start', data: {
@@ -205,7 +208,9 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           ? { claudeRunId: metadata.runId }
           : metadata.provider === 'cursor'
             ? { cursorRunId: metadata.runId }
-            : { codexRunId: metadata.runId }),
+            : metadata.provider === 'ollama'
+              ? { ollamaRunId: metadata.runId }
+              : { codexRunId: metadata.runId }),
       }),
       onChunk: text => { callbacks.onChunk(text) },
       onToolStatus: toolName => {
@@ -239,6 +244,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           codexRunId: metadata?.codexRunId,
           codexThreadId: metadata?.codexThreadId,
           cursorRunId: metadata?.cursorRunId,
+          ollamaRunId: metadata?.ollamaRunId,
         } as const
         // Publish compatibility completion only after the durable terminal is
         // fsynced. Display subscribers can disappear without owning this job.

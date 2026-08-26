@@ -8,9 +8,11 @@ export type CodexModelPreference = 'codex-frontier' | 'codex-balanced'
 // even when features.cursor is false so version skew fail-closes instead of
 // silently remapping to Claude.
 export type CursorModelPreference = 'cursor-grok' | 'cursor-composer'
+/** Local Ollama chat slot. Hidden unless the daemon answers on loopback. */
+export type OllamaModelPreference = 'ollama'
 /** Cursor Agent CLI execution posture for glasses queries. */
 export type CursorExecutionMode = 'ask' | 'agent'
-export type ModelPreference = ClaudeModelPreference | CodexModelPreference | CursorModelPreference
+export type ModelPreference = ClaudeModelPreference | CodexModelPreference | CursorModelPreference | OllamaModelPreference
 
 /** Invalid/omitted → ask (safe for old clients that don't send a mode). */
 export function normalizeCursorExecutionMode(value: unknown): CursorExecutionMode {
@@ -25,6 +27,7 @@ export const CODEX_BALANCED_MODEL: CodexModelPreference = 'codex-balanced'
 export const CODEX_HIGH_MODEL: CodexModelPreference = CODEX_FRONTIER_MODEL
 export const CURSOR_GROK_MODEL: CursorModelPreference = 'cursor-grok'
 export const CURSOR_COMPOSER_MODEL: CursorModelPreference = 'cursor-composer'
+export const OLLAMA_MODEL: OllamaModelPreference = 'ollama'
 // Existing 6.1–6.3 installs may pin the legacy codex-high slot. Frontier is its
 // migration target; Balanced remains auto-catalog even when this override is set.
 export const CODEX_MODEL_ID = process.env.COS_CODEX_MODEL?.trim() ?? ''
@@ -49,6 +52,7 @@ export const MODEL_OPTIONS: ModelPreference[] = [
   CODEX_BALANCED_MODEL,
   CURSOR_GROK_MODEL,
   CURSOR_COMPOSER_MODEL,
+  OLLAMA_MODEL,
 ]
 
 const MODEL_SET = new Set<ModelPreference>([
@@ -60,6 +64,7 @@ const MODEL_SET = new Set<ModelPreference>([
   CODEX_BALANCED_MODEL,
   CURSOR_GROK_MODEL,
   CURSOR_COMPOSER_MODEL,
+  OLLAMA_MODEL,
 ])
 
 // Bare Claude tier aliases resolve to the newest model in that tier at spawn.
@@ -149,6 +154,21 @@ export function isCursorModel(model: ModelPreference): model is CursorModelPrefe
   return model === CURSOR_GROK_MODEL || model === CURSOR_COMPOSER_MODEL
 }
 
+export function isOllamaModel(model: ModelPreference): model is OllamaModelPreference {
+  return model === OLLAMA_MODEL
+}
+
+/** Picker families. Cursor and Ollama stay hidden until their local probe is ready. */
+export function visibleModelOptions(
+  cursorAvailable: boolean,
+  ollamaAvailable: boolean,
+): ModelPreference[] {
+  return MODEL_OPTIONS.filter(model =>
+    (!isCursorModel(model) || cursorAvailable) &&
+    (!isOllamaModel(model) || ollamaAvailable),
+  )
+}
+
 export interface RuntimeCodexModelLabel {
   preference: CodexModelPreference
   displayName: string
@@ -197,6 +217,7 @@ export function modelLabel(model: ModelPreference): string {
     case 'codex-balanced': return runtimeCodexLabels[model] ?? 'GPT Balanced'
     case 'cursor-grok': return runtimeCursorLabels[model] ?? 'Grok Fast'
     case 'cursor-composer': return runtimeCursorLabels[model] ?? 'Composer 2.5 Fast'
+    case 'ollama': return 'Ollama'
     case 'opus':
     default:
       return 'Opus'
@@ -212,6 +233,7 @@ export function modelShortLabel(model: ModelPreference): string {
     case 'codex-balanced': return 'GPT Bal'
     case 'cursor-grok': return 'Grok'
     case 'cursor-composer': return 'Composer'
+    case 'ollama': return 'Ollama'
     case 'opus':
     default:
       return 'Opus'
@@ -227,6 +249,7 @@ export function modelButtonLabel(model: ModelPreference): string {
     case 'codex-balanced': return 'GPT BAL'
     case 'cursor-grok': return 'GROK'
     case 'cursor-composer': return 'CMP'
+    case 'ollama': return 'OLLAMA'
     case 'opus':
     default:
       return 'OPUS'
@@ -242,6 +265,7 @@ export function modelTag(model: ModelPreference): string {
     case 'codex-balanced': return 'GB'
     case 'cursor-grok': return 'GK'
     case 'cursor-composer': return 'C2'
+    case 'ollama': return 'OL'
     case 'opus':
     default:
       return 'O'

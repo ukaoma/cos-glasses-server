@@ -32,6 +32,11 @@ import {
   getCursorModelCatalogSnapshot,
   isCursorProviderReady,
 } from '../lib/cursor-model-catalog.js'
+import {
+  getOllamaCatalog,
+  getOllamaCatalogSnapshot,
+  isOllamaProviderReady,
+} from '../lib/ollama-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
 import {
   MAX_OTHER_MEDIA_BYTES,
@@ -117,6 +122,7 @@ healthRouter.get('/health', async (_req, res) => {
     claude: staticProbes.claude,
     codex: staticProbes.codex,
     cursor: staticProbes.cursor,
+    ollama: staticProbes.ollama,
     uptime_seconds: Math.floor((Date.now() - serverMetrics.startedAt) / 1000),
     request_count: serverMetrics.requestCount,
   }
@@ -125,6 +131,7 @@ healthRouter.get('/health', async (_req, res) => {
   const claudeAvailable = staticProbes.claudeAvailable
   const codexAvailable = staticProbes.codexAvailable
   const cursorAvailable = staticProbes.cursorAvailable
+  const ollamaAvailable = staticProbes.ollamaAvailable
 
   // Check session cache freshness (COS mode only)
   if (COS_SCRIPTS_DIR) {
@@ -195,6 +202,7 @@ healthRouter.get('/health', async (_req, res) => {
     claude: claudeAvailable,
     codex: codexAvailable,
     cursor: cursorAvailable,
+    ollama: ollamaAvailable,
     voice: keyStatus.hasKey || tts_local.ready,
     cos_pipeline: COS_MODE,
     whisper: isWhisperLocalAvailable(),
@@ -267,6 +275,7 @@ healthRouter.get('/health', async (_req, res) => {
   // agent binary paths stay on the authenticated /api/models surface.
   const cursorSnapshot = getCursorModelCatalogSnapshot()
   const { agentBinary: _cursorAgentBinary, ...cursor_models } = cursorSnapshot
+  const ollama_models = getOllamaCatalogSnapshot()
   const meeting_sync = getMeetingSyncSnapshot()
   const progressiveHq = getProgressiveHqSnapshot()
   // Quarantined unsaved captures (6.19.0). Compact on this unauthenticated
@@ -327,6 +336,10 @@ healthRouter.get('/health', async (_req, res) => {
     tts_local,
     codex_models,
     cursor_models,
+    ollama_models: {
+      ready: ollama_models.ready,
+      model: ollama_models.model,
+    },
     meeting_sync,
     meeting_library: {
       layout: meetingLibrary.layout,
@@ -397,6 +410,7 @@ healthRouter.get('/models', async (req, res) => {
   const forceRefresh = req.query.refresh === '1'
   const catalog = await getCodexModelCatalog(forceRefresh)
   const cursorCatalog = await getCursorModelCatalog(forceRefresh)
+  const ollamaCatalog = await getOllamaCatalog(forceRefresh)
   const durableJobs = durableQueryJobStatus()
   const localFirstMeetings = localFirstMeetingsCapability(getServerInstanceId())
   const transcription = getTranscriptionPolicySnapshot()
@@ -407,6 +421,9 @@ healthRouter.get('/models', async (req, res) => {
   const richMedia = await getRichMediaProcessingCapabilities()
   const videoUploadV2 = videoUploadV2Capability(richMedia.video)
   const cursorOptions = cursorCatalog.options.filter(option => !!option.id)
+  const ollamaOptions = isOllamaProviderReady() && ollamaCatalog.model
+    ? [{ preference: 'ollama' as const, id: ollamaCatalog.model, displayName: ollamaCatalog.model }]
+    : []
   // Same helper and the same three key names as /api/health, for the reason
   // liveCues carries three lines below: the companion's 15s liveness poll reads
   // THIS surface and Main.ts states outright that /api/health alone is not used,
@@ -418,9 +435,17 @@ healthRouter.get('/models', async (req, res) => {
     options: [
       ...(catalog.options ?? []),
       ...cursorOptions,
+      ...ollamaOptions,
     ],
     cursor: cursorCatalog,
     cursorReady: isCursorProviderReady(),
+    ollama: {
+      origin: ollamaCatalog.origin,
+      model: ollamaCatalog.model,
+      models: ollamaCatalog.models,
+      refreshedAt: ollamaCatalog.refreshedAt,
+    },
+    ollamaReady: isOllamaProviderReady(),
     serverInstanceId: getServerInstanceId(),
     capabilities: {
       durableQueryJobs: {

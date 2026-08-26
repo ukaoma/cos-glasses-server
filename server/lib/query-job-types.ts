@@ -75,13 +75,14 @@ export interface QueryJobRequest {
 }
 
 export interface QueryJobProviderLinkage {
-  provider?: 'claude' | 'codex' | 'cursor'
+  provider?: 'claude' | 'codex' | 'cursor' | 'ollama'
   resolvedModel?: string
   cliSessionId?: string
   claudeRunId?: string
   codexRunId?: string
   codexThreadId?: string
   cursorRunId?: string
+  ollamaRunId?: string
 }
 
 /** Path/id-free aggregate from output-image finalization. Values are bounded

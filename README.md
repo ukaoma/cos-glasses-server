@@ -60,7 +60,7 @@ without silently losing completed replies.
 > No provider API key is needed for chat when using signed-in CLIs. Usage is
 > billed to the corresponding Claude, Codex, or Cursor subscription. Pick a
 > provider per query, or set a default with `COS_G2_DEFAULT_MODEL`
-> (`opus`|`fable`|`sonnet`|`codex-frontier`|`codex-balanced`|`cursor-grok`|`cursor-composer`).
+> (`opus`|`fable`|`sonnet`|`codex-frontier`|`codex-balanced`|`cursor-grok`|`cursor-composer`|`ollama`).
 > Claude tier aliases and the two GPT slots resolve dynamically, so new model
 > releases do not require a new glasses package. GPT discovery refreshes every
 > 15 minutes and retains its last-known-good catalog through transient failures.
@@ -75,6 +75,10 @@ without silently losing completed replies.
 > `COS_CODEX_SANDBOX=workspace-write` for workdir writes + outbound network
 > (`sandbox_workspace_write.network_access=true` is passed by the managed server
 > and should also be set in `~/.codex/config.toml` for interactive Codex).
+> Local Ollama is a **fourth picker**, shown only when `ollama serve` answers
+> `GET http://127.0.0.1:11434/api/tags` with a pulled model. Direct
+> `POST /api/chat` — not Codex `--oss`. Optional pin: `COS_OLLAMA_MODEL`.
+> `COS_CODEX_EXTRA_ARGS` is a Codex CLI hatch, not the Ollama UX. See Configuration.
 > **Claude is the most permissive provider by default.** It runs with
 > `--dangerously-skip-permissions`, so a glasses query on the Claude/Opus path can
 > run shell commands and read, edit, and write files on this Mac without prompting
@@ -173,6 +177,15 @@ optional except an installed CLI. Highlights: `BIND_HOST`, `PORT`,
 in the managed CLI working directory),
 `COS_CURSOR_AGENT_BIN` (optional absolute Cursor `agent` binary),
 `COS_CURSOR_PERSIST_SESSIONS=0` (disable Cursor session resume),
+`COS_CODEX_SANDBOX=workspace-write` (workdir writes + outbound network on GPT),
+`COS_OLLAMA_MODEL` (optional pin; must match a name from `ollama list`),
+`COS_OLLAMA_HOST` (optional loopback origin, default `http://127.0.0.1:11434`;
+non-loopback is refused),
+`COS_CODEX_EXTRA_ARGS` (Codex exec operator hatch — not the Ollama picker.
+`--oss --local-provider ollama --model qwen2.5-coder` still retargets GPT
+Frontier spawn. Put it in `~/.cos-glasses/.env`; a plist-only value is dropped
+on Update Server. G2 Codex exec only — Sessions Continue / Fork ignore it.
+No inline `#` on the EXTRA_ARGS line.),
 `COS_WEATHER_DEFAULT_LAT` / `COS_WEATHER_DEFAULT_LON` /
 `COS_WEATHER_DEFAULT_CITY` (optional home fallback when phone GPS is denied),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=0` (optional

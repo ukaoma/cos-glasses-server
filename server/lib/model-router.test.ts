@@ -3,12 +3,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   claudeCallbacks: [] as any[],
   codexCallbacks: [] as any[],
+  ollamaCallbacks: [] as any[],
+  ollamaReady: false,
   callClaudeStreaming: vi.fn(async (_query: string, sid: string, callbacks: any) => {
     mocks.claudeCallbacks.push(callbacks)
     return sid
   }),
   callCodexStreaming: vi.fn(async (_query: string, sid: string, callbacks: any) => {
     mocks.codexCallbacks.push(callbacks)
+    return sid
+  }),
+  callOllamaStreaming: vi.fn(async (_query: string, sid: string, callbacks: any) => {
+    mocks.ollamaCallbacks.push(callbacks)
     return sid
   }),
   sessionModels: new Map<string, string | null>(),
@@ -20,6 +26,15 @@ vi.mock('./claude-bridge.js', () => ({
 
 vi.mock('./codex-bridge.js', () => ({
   callCodexStreaming: mocks.callCodexStreaming,
+}))
+
+vi.mock('./ollama-bridge.js', () => ({
+  callOllamaStreaming: mocks.callOllamaStreaming,
+}))
+
+vi.mock('./ollama-catalog.js', () => ({
+  getOllamaCatalog: async () => ({ ready: mocks.ollamaReady }),
+  isOllamaProviderReady: () => mocks.ollamaReady,
 }))
 
 vi.mock('./conversation.js', () => ({
@@ -41,8 +56,11 @@ function callbacks() {
 afterEach(() => {
   mocks.claudeCallbacks.length = 0
   mocks.codexCallbacks.length = 0
+  mocks.ollamaCallbacks.length = 0
+  mocks.ollamaReady = false
   mocks.callClaudeStreaming.mockClear()
   mocks.callCodexStreaming.mockClear()
+  mocks.callOllamaStreaming.mockClear()
   mocks.sessionModels.clear()
 })
 
@@ -111,5 +129,28 @@ describe('per-session model run lock', () => {
     await callModelStreaming('second', 'reject-session', callbacks(), 'sonnet')
     expect(mocks.callClaudeStreaming).toHaveBeenCalledTimes(2)
     mocks.claudeCallbacks[0].onDone('recovered', 'sonnet')
+  })
+})
+
+describe('ollama routing', () => {
+  it('never falls through to Claude or Codex when Ollama is picked', async () => {
+    mocks.ollamaReady = true
+    await callModelStreaming('hi', 'ollama-session', callbacks(), 'ollama')
+    expect(mocks.callOllamaStreaming).toHaveBeenCalledTimes(1)
+    expect(mocks.callClaudeStreaming).not.toHaveBeenCalled()
+    expect(mocks.callCodexStreaming).not.toHaveBeenCalled()
+    mocks.ollamaCallbacks[0].onDone('local', 'ollama')
+  })
+
+  it('fails closed when Ollama is picked but the daemon is down', async () => {
+    const cb = callbacks()
+    const sid = await callModelStreaming('hi', 'ollama-down', cb, 'ollama')
+    expect(sid).toBe('ollama-down')
+    expect(mocks.callOllamaStreaming).not.toHaveBeenCalled()
+    expect(mocks.callClaudeStreaming).not.toHaveBeenCalled()
+    expect(mocks.callCodexStreaming).not.toHaveBeenCalled()
+    expect(cb.onError).toHaveBeenCalledWith(
+      expect.stringMatching(/Ollama is not running/),
+    )
   })
 })

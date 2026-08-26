@@ -8,6 +8,12 @@ const state = vi.hoisted(() => ({
   clearCalls: 0,
   terminateProviderProcess: vi.fn(),
   resolveTermination: null as null | ((value: any) => void),
+  addExchange: vi.fn(() => ({ id: 'exchange' })),
+  startCodexRun: vi.fn(() => ({ runId: 'codex-run-test' })),
+  getCodexEngineSession: vi.fn(() => ({
+    codexThreadId: 'thread-existing',
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  })),
 }))
 
 vi.mock('node:child_process', async () => {
@@ -37,7 +43,7 @@ vi.mock('./context-builder.js', () => ({
 }))
 vi.mock('./conversation.js', () => ({
   getHistory: () => [],
-  addExchange: () => ({ id: 'exchange' }),
+  addExchange: state.addExchange,
   setExchangeAttachments: vi.fn(),
   removeExchange: vi.fn(),
   formatHistoryForPrompt: () => '',
@@ -49,10 +55,7 @@ vi.mock('./conversation.js', () => ({
 }))
 vi.mock('./telegram-notify.js', () => ({ notifySessionStart: vi.fn(), notifyExchange: vi.fn() }))
 vi.mock('./codex-engine-sessions.js', () => ({
-  getCodexEngineSession: () => ({
-    codexThreadId: 'thread-existing',
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-  }),
+  getCodexEngineSession: state.getCodexEngineSession,
   saveCodexEngineSession: () => {
     state.saveCalls++
     if (state.saveThrows) throw new Error('injected engine save failure')
@@ -79,7 +82,7 @@ vi.mock('./codex-run-ledger.js', () => ({
   getCodexExecutionCwd: () => '/tmp',
   isCodexPersistenceEnabled: () => true,
   getCodexTrustMode: () => 'read-only',
-  startCodexRun: () => ({ runId: 'codex-run-test' }),
+  startCodexRun: state.startCodexRun,
   updateCodexRun: vi.fn(),
 }))
 vi.mock('./activity-preview.js', () => ({ codexActivityPreviewLines: () => [] }))
@@ -120,6 +123,10 @@ function emitCompletedAnswer() {
 }
 
 beforeEach(() => {
+  delete process.env.COS_CODEX_EXTRA_ARGS
+  state.addExchange.mockClear()
+  state.startCodexRun.mockClear()
+  state.getCodexEngineSession.mockClear()
   state.terminateProviderProcess.mockResolvedValue({
     closed: true,
     escalated: false,
@@ -129,6 +136,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  delete process.env.COS_CODEX_EXTRA_ARGS
   vi.useRealTimers()
   state.child = null
   state.saveThrows = false
@@ -270,5 +278,37 @@ describe('Codex detached finalization', () => {
     expect(callbackSet.onDone).not.toHaveBeenCalled()
     expect(callbackSet.onError).toHaveBeenCalledTimes(1)
     expect(state.clearCalls).toBe(1)
+  })
+
+  it('refuses extra args before startCodexRun, exchange, or spawn', async () => {
+    process.env.COS_CODEX_EXTRA_ARGS = '--sandbox danger-full-access'
+    const callbackSet = callbacks()
+    const sid = await callCodexStreaming('hello', 'session-test', callbackSet, undefined, undefined, undefined, undefined, {
+      lightweight: true,
+      onProviderProcess: undefined,
+    } as any)
+    expect(sid).toBe('session-test')
+    expect(callbackSet.onError).toHaveBeenCalledWith(
+      'Invalid COS_CODEX_EXTRA_ARGS (--sandbox). Edit ~/.cos-glasses/.env and restart the glasses server.',
+    )
+    expect(state.child).toBeNull()
+    expect(state.startCodexRun).not.toHaveBeenCalled()
+    expect(state.addExchange).not.toHaveBeenCalled()
+    expect(state.getCodexEngineSession).not.toHaveBeenCalled()
+  })
+
+  it('passes engineFingerprint into getCodexEngineSession', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    expect(state.getCodexEngineSession).toHaveBeenCalledWith(expect.objectContaining({
+      engineFingerprint: '',
+    }))
+    state.child = null
+    state.getCodexEngineSession.mockClear()
+    process.env.COS_CODEX_EXTRA_ARGS = '--oss --local-provider ollama'
+    await start(callbacks())
+    expect(state.getCodexEngineSession).toHaveBeenCalledWith(expect.objectContaining({
+      engineFingerprint: '--oss\0--local-provider\0ollama',
+    }))
   })
 })

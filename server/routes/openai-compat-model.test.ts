@@ -25,6 +25,12 @@ describe('OpenAI-compatible Cursor model selection', () => {
     expect(resolveModel('cursor-grok-4.6-high-fast')).toBe('cursor-grok')
   })
 
+  it('resolves the Ollama slot without stealing GPT Frontier', () => {
+    expect(resolveModel('ollama')).toBe('ollama')
+    expect(resolveModel('cos-ollama')).toBe('ollama')
+    expect(resolveModel('codex-frontier')).toBe('codex-frontier')
+  })
+
   it('retains the public server default when no Cursor override is present', () => {
     expect(selectOpenAICompatibleModel('cos-sonnet', undefined)).toBe('cos-sonnet')
     expect(resolveModel('cos-sonnet')).toBe('sonnet')

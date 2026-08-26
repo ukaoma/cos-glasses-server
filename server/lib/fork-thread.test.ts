@@ -23,7 +23,7 @@
 // `terminate`, so nothing here can signal a real process group on the developer's
 // machine with a fabricated pid.
 
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   buildClaudeForkArgs,
   buildCodexForkArgs,
@@ -35,6 +35,10 @@ import {
   type ForkResult,
 } from './fork-thread.js'
 import type { AttachedChildProcess } from './attached-provider-adapter.js'
+
+afterEach(() => {
+  delete process.env.COS_CODEX_EXTRA_ARGS
+})
 
 // --- real, measured values ---------------------------------------------------
 
@@ -529,6 +533,20 @@ describe('what reaches the operating system', () => {
     for (const banned of ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox', '--full-auto', '--yolo', 'danger-full-access', 'bypassPermissions']) {
       expect(both).not.toContain(banned)
     }
+  })
+
+  it('ignores COS_CODEX_EXTRA_ARGS on fork argv', () => {
+    process.env.COS_CODEX_EXTRA_ARGS = '--oss --local-provider ollama --model qwen2.5-coder'
+    expect(buildCodexForkArgs(CODEX_SOURCE, CWD)).toEqual([
+      'exec',
+      '--sandbox', 'read-only',
+      '--cd', CWD,
+      'fork',
+      '--json',
+      '--skip-git-repo-check',
+      CODEX_SOURCE,
+      '-',
+    ])
   })
 })
 

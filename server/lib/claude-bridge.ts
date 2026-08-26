@@ -311,6 +311,7 @@ export interface ModelRunMetadata {
   codexThreadId?: string
   cursorRunId?: string
   cursorChatId?: string
+  ollamaRunId?: string
   outputAttachments?: MediaAttachmentRef[]
   outputImageStats?: RunOutputImageCollectionStats
 }
@@ -318,7 +319,7 @@ export interface ModelRunMetadata {
 /** Public-safe provider launch metadata for durable job coordination. It
  * deliberately exposes no ChildProcess object, kill handle, paths, or env. */
 export interface ProviderProcessMetadata {
-  provider: 'claude' | 'codex' | 'cursor'
+  provider: 'claude' | 'codex' | 'cursor' | 'ollama'
   runId: string
   pid?: number
   clientJobId?: string

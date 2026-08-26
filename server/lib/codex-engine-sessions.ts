@@ -20,6 +20,7 @@ export interface CodexEngineSession {
   savedAt: number
   lastUsedAt: number
   expiresAt: string
+  engineFingerprint: string
 }
 
 interface CodexEngineSessionFile {
@@ -93,18 +94,21 @@ export function getCodexEngineSession(input: {
   model: CodexModelPreference
   cwd: string
   trustMode: CodexTrustMode
+  engineFingerprint?: string
 }): CodexEngineSession | null {
+  const { engineFingerprint = '', ...rest } = input
   const store = readStore()
   const now = Date.now()
   const sessions = pruneExpired(store.sessions, now)
-  const existing = sessions[sessionKey(input.cosSessionId, input.model)]
+  const existing = sessions[sessionKey(rest.cosSessionId, rest.model)]
   if (!existing) {
     if (Object.keys(sessions).length !== Object.keys(store.sessions).length) {
       writeStore({ sessions, savedAt: new Date().toISOString() })
     }
     return null
   }
-  if (existing.cwd !== input.cwd || existing.trustMode !== input.trustMode) return null
+  if (existing.cwd !== rest.cwd || existing.trustMode !== rest.trustMode) return null
+  if ((existing.engineFingerprint ?? '') !== (engineFingerprint ?? '')) return null
   return existing
 }
 
@@ -115,6 +119,7 @@ export function saveCodexEngineSession(input: {
   cwd: string
   trustMode: CodexTrustMode
   now?: number
+  engineFingerprint?: string
 }): CodexEngineSession {
   const now = input.now ?? Date.now()
   const store = readStore()
@@ -131,6 +136,7 @@ export function saveCodexEngineSession(input: {
     savedAt: previous?.savedAt ?? now,
     lastUsedAt: now,
     expiresAt: expiresAtFrom(now),
+    engineFingerprint: input.engineFingerprint ?? '',
   }
   sessions[key] = session
   writeStore({ sessions, savedAt: new Date().toISOString() })

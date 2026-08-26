@@ -6,6 +6,11 @@ import {
   isCursorProviderReady,
   resolveAgentBinary,
 } from './cursor-model-catalog.js'
+import {
+  getOllamaCatalog,
+  getOllamaCatalogSnapshot,
+  isOllamaProviderReady,
+} from './ollama-catalog.js'
 
 const DEFAULT_CACHE_TTL_MS = 30_000
 const PROBE_TIMEOUT_MS = 5_000
@@ -15,9 +20,11 @@ export interface HealthStaticProbeSnapshot {
   claude: string
   codex: string
   cursor: string
+  ollama: string
   claudeAvailable: boolean
   codexAvailable: boolean
   cursorAvailable: boolean
+  ollamaAvailable: boolean
 }
 
 interface CachedProbe<T> {
@@ -153,21 +160,36 @@ async function probeCursor(): Promise<{ value: string; available: boolean }> {
   }
 }
 
+async function probeOllama(): Promise<{ value: string; available: boolean }> {
+  try {
+    const catalog = await getOllamaCatalog()
+    const available = isOllamaProviderReady()
+    if (available) return { value: catalog.model || 'available', available: true }
+    return { value: catalog.error || 'unavailable', available: false }
+  } catch {
+    const snapshot = getOllamaCatalogSnapshot()
+    return { value: snapshot.error || 'error', available: false }
+  }
+}
+
 async function loadStaticHealthProbes(): Promise<HealthStaticProbeSnapshot> {
-  const [python, claude, codex, cursor] = await Promise.all([
+  const [python, claude, codex, cursor, ollama] = await Promise.all([
     probePython(),
     probeClaude(),
     probeCodex(),
     probeCursor(),
+    probeOllama(),
   ])
   return {
     python,
     claude: claude.value,
     codex: codex.value,
     cursor: cursor.value,
+    ollama: ollama.value,
     claudeAvailable: claude.available,
     codexAvailable: codex.available,
     cursorAvailable: cursor.available,
+    ollamaAvailable: ollama.available,
   }
 }
 

@@ -78,7 +78,6 @@ import {
   buildAttachedEnv,
   classifyStderr,
   extractNativeIdsFromLine,
-  findBannedPermissionArg,
   isAttachedPermissionPolicy,
   resolveProviderBinary,
   type AttachedChildProcess,
@@ -86,6 +85,7 @@ import {
   type AttachedStderrClass,
   type BinaryResolution,
 } from './attached-provider-adapter.js'
+import { findBannedPermissionArg } from './banned-permission-args.js'
 
 /**
  * Providers that can be forked. A strict subset of the attached set.
@@ -261,7 +261,7 @@ export function buildCodexForkArgs(nativeThreadId: string, cwd: string): string[
 /**
  * Build the argv, and REFUSE to hand back one carrying a banned permission flag.
  *
- * The predicate is IMPORTED from the adapter, not re-listed here. Two copies of a
+ * The predicate is IMPORTED from banned-permission-args, not re-listed here. Two copies of a
  * ban list in two modules is precisely the drift `native-thread-id.ts` was created
  * to end: the occupancy detector and the binding store each had their own idea of
  * what a thread id was, and a truncated id walked through the gap. A fork spawns a

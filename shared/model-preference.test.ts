@@ -8,6 +8,7 @@ import {
   isClaudeModel,
   isCodexModel,
   isCursorModel,
+  isOllamaModel,
   modelLabel,
   normalizeEffortPreference,
   normalizeModelPreference,
@@ -15,6 +16,7 @@ import {
   resolveCliEffortFlag,
   resolveConfiguredCodexReasoningEffort,
   resolveCodexReasoningEffort,
+  visibleModelOptions,
 } from './model-preference.js'
 
 describe('model preferences', () => {
@@ -22,15 +24,22 @@ describe('model preferences', () => {
     expect(DEFAULT_MODEL).toBe('sonnet')
     expect(MODEL_OPTIONS).toEqual([
       'opus', 'fable', 'sonnet', 'codex-frontier', 'codex-balanced',
-      'cursor-grok', 'cursor-composer',
+      'cursor-grok', 'cursor-composer', 'ollama',
     ])
     expect(isClaudeModel('fable')).toBe(true)
     expect(isCodexModel('codex-frontier')).toBe(true)
     expect(isCodexModel('codex-balanced')).toBe(true)
     expect(isCursorModel('cursor-grok')).toBe(true)
     expect(isCursorModel('cursor-composer')).toBe(true)
+    expect(isOllamaModel('ollama')).toBe(true)
     expect(modelLabel('cursor-grok')).toBe('Grok Fast')
     expect(modelLabel('cursor-composer')).toBe('Composer 2.5 Fast')
+    expect(modelLabel('ollama')).toBe('Ollama')
+    expect(visibleModelOptions(false, false)).toEqual([
+      'opus', 'fable', 'sonnet', 'codex-frontier', 'codex-balanced',
+    ])
+    expect(visibleModelOptions(true, true)).toContain('ollama')
+    expect(visibleModelOptions(true, true)).toContain('cursor-grok')
   })
 
   it('migrates legacy codex-high state to the frontier slot', () => {

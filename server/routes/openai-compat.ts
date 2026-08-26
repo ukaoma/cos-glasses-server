@@ -114,6 +114,7 @@ export function resolveModel(model?: string, _query?: string): ModelPreference {
   if (model === 'cos-haiku') return 'haiku'
   if (model === 'cos-gpt-frontier' || model === 'cos-codex-high' || model === 'cos-codex') return 'codex-frontier'
   if (model === 'cos-gpt-balanced') return 'codex-balanced'
+  if (model === 'cos-ollama' || model === 'ollama') return 'ollama'
   return normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL) ?? DEFAULT_MODEL
 }
 
@@ -126,6 +127,7 @@ const MODEL_NAMES: Record<ModelPreference, string> = {
   'codex-balanced': 'cos-gpt-balanced',
   'cursor-grok': 'cursor-grok',
   'cursor-composer': 'cursor-composer',
+  ollama: 'cos-ollama',
 }
 // Extract the user's latest message from the OpenAI messages array
 function extractUserQuery(messages: Array<{ role: string; content: string }>): string {

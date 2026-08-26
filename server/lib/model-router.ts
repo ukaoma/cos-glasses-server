@@ -1,6 +1,7 @@
 import { callClaudeStreaming, type CallOptions, type StreamCallbacks } from './claude-bridge.js'
 import { callCodexStreaming } from './codex-bridge.js'
 import { callCursorStreaming } from './cursor-bridge.js'
+import { callOllamaStreaming } from './ollama-bridge.js'
 import {
   getOrCreateSession,
   getSessionModel,
@@ -13,6 +14,7 @@ import {
   isCodexModel,
   isClaudeModel,
   isCursorModel,
+  isOllamaModel,
   normalizeModelPreference,
 } from '../../shared/model-preference.js'
 import {
@@ -20,6 +22,10 @@ import {
   isCursorProviderReady,
   resolveCursorModelOption,
 } from './cursor-model-catalog.js'
+import {
+  getOllamaCatalog,
+  isOllamaProviderReady,
+} from './ollama-catalog.js'
 import type { ModelImageInput } from './model-image-input.js'
 
 // Bridges return as soon as their subprocess is spawned, while completion is
@@ -111,6 +117,14 @@ export async function callModelStreaming(
         return sid
       }
       return await callCursorStreaming(query, sid, lockedCallbacks, resolvedModel, images, reference, globalMsgNum, options)
+    }
+    if (isOllamaModel(resolvedModel)) {
+      await getOllamaCatalog()
+      if (!isOllamaProviderReady()) {
+        await lockedCallbacks.onError('ollama-bridge: Ollama is not running. Start ollama serve on this Mac.')
+        return sid
+      }
+      return await callOllamaStreaming(query, sid, lockedCallbacks, images, reference, globalMsgNum, options)
     }
     if (isCodexModel(resolvedModel)) {
       return await callCodexStreaming(query, sid, lockedCallbacks, resolvedModel, images, reference, globalMsgNum, options)

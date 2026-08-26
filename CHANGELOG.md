@@ -1,3 +1,38 @@
+## 6.39.0
+
+Ollama is a fourth G2 picker, hidden unless a local daemon answers.
+
+When `GET http://127.0.0.1:11434/api/tags` succeeds with at least one pulled
+model, glasses and companion Settings show **Ollama**. Queries go to
+`POST /api/chat` on loopback — chat/summarize only, no tools, no vision, no
+attached Continue / Fork, no Live Cues. If the daemon drops, the slot hides and
+a saved `ollama` preference resets to Opus.
+
+Optional pin: `COS_OLLAMA_MODEL`. Optional loopback override: `COS_OLLAMA_HOST`
+(LAN / `0.0.0.0` refused). `COS_G2_DEFAULT_MODEL=ollama` is valid when the
+probe is ready.
+
+GPT Frontier / Balanced stay Codex CLI → ChatGPT. `COS_CODEX_EXTRA_ARGS` remains
+a Codex operator hatch, not the Ollama product.
+
+## 6.38.1
+
+GPT Frontier can point at a local Ollama (or LM Studio) engine without a fourth
+G2 provider. Set `COS_CODEX_EXTRA_ARGS` in `~/.cos-glasses/.env`:
+
+`COS_CODEX_EXTRA_ARGS=--oss --local-provider ollama --model qwen2.5-coder`
+
+Put `--model` inside that string so a Control-keep-alived plist `COS_CODEX_MODEL`
+cannot retarget off the local id. Sessions Continue / Fork / Settings proof
+ignore extra args. A plist-only EXTRA_ARGS dies on the next Update Server.
+
+The hatch is allowlisted (`--oss`, `--local-provider`, `--model`, `-c` keys
+`model` / `model_provider` / `oss_provider` / `model_reasoning_effort` /
+`service_tier`). It cannot pass `--sandbox`, `--permission-profile`, or a `-c`
+sandbox key. Codex still runs `--sandbox read-only`; that sandbox does not block
+the CLI's own HTTP to `localhost:11434`. `ollama serve` must be running or Codex
+exits `OSS setup failed`. This is not a COS Ollama product.
+
 ## 6.38.1
 
 The conversation archive was quietly storing the same conversations over and over.

@@ -125,6 +125,11 @@ describe('public durable-query capability health', () => {
     expect(response.status).toBe(200)
     const body = await response.json() as any
     expect(typeof body.cursorReady).toBe('boolean')
+    expect(typeof body.ollamaReady).toBe('boolean')
+    expect(body.ollama).toEqual(expect.objectContaining({
+      origin: expect.any(String),
+      model: expect.any(String),
+    }))
     expect(body.cursor?.options).toEqual([
       expect.objectContaining({ preference: 'cursor-grok' }),
       expect.objectContaining({ preference: 'cursor-composer' }),

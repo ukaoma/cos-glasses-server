@@ -7,6 +7,15 @@ import { spawn, spawnSync } from 'node:child_process'
 // because COS Control injects that directory into the managed plist PATH -- it is ENOENT
 // for every public npx user, and for anything launchd- or Finder-spawned.
 import { resolveProviderBinary } from './provider-binary.js'
+import {
+  CodexExtraArgsError,
+  assertSafeCodexExtraArgs,
+  codexEngineFingerprint,
+  parseCodexExtraArgs,
+  skipsCosModel,
+  skipsCosReasoningEffort,
+  skipsCosServiceTier,
+} from './codex-extra-args.js'
 import { logTokenAudit } from './token-audit.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-builder.js'
@@ -161,6 +170,13 @@ export function codexSupportsAdditionalDir(): boolean {
   return addDirSupported
 }
 
+export {
+  CodexExtraArgsError,
+  parseCodexExtraArgs,
+  assertSafeCodexExtraArgs,
+  codexEngineFingerprint,
+} from './codex-extra-args.js'
+
 export function buildCodexExecArgs(input: {
   codexCwd: string
   imagePaths?: string[]
@@ -170,6 +186,7 @@ export function buildCodexExecArgs(input: {
   resolvedModel?: CodexModelOption
   effort?: EffortPreference
   publisherWritableDirectory?: string
+  extra?: string[]
 }): string[] {
   const imagePaths = input.imagePaths ?? []
   const resolvedModel = input.resolvedModel
@@ -184,10 +201,18 @@ export function buildCodexExecArgs(input: {
     args.push('--add-dir', input.publisherWritableDirectory)
   }
 
+  const extra = input.extra ?? parseCodexExtraArgs(process.env.COS_CODEX_EXTRA_ARGS)
+  assertSafeCodexExtraArgs(extra)
+  args.push(...extra)
+
   const appendModelConfig = () => {
-    if (resolvedModel.id) args.push('--model', resolvedModel.id)
-    args.push('-c', `model_reasoning_effort="${reasoningEffort}"`)
-    if (serviceTier) args.push('-c', `service_tier="${serviceTier}"`)
+    if (resolvedModel.id && !skipsCosModel(extra)) args.push('--model', resolvedModel.id)
+    if (!skipsCosReasoningEffort(extra)) {
+      args.push('-c', `model_reasoning_effort="${reasoningEffort}"`)
+    }
+    if (serviceTier && !skipsCosServiceTier(extra)) {
+      args.push('-c', `service_tier="${serviceTier}"`)
+    }
   }
 
   if (input.codexThreadId) {
@@ -299,6 +324,18 @@ export async function callCodexStreaming(
   if (options?.abortSignal?.aborted) {
     throw new Error('codex-bridge: client disconnected before Codex started.')
   }
+  let extra: string[]
+  try {
+    extra = parseCodexExtraArgs(process.env.COS_CODEX_EXTRA_ARGS)
+    assertSafeCodexExtraArgs(extra)
+  } catch (error) {
+    if (error instanceof CodexExtraArgsError) {
+      await callbacks.onError(error.message)
+      return sid
+    }
+    throw error
+  }
+  const extraFingerprint = codexEngineFingerprint(extra)
   const history = getHistory(sid)
   const session = getSessionRaw(sid)
   const contextBreaks = session?.contextBreaks ?? []
@@ -310,7 +347,13 @@ export async function callCodexStreaming(
   const resolvedCodexModel = resolveCodexModelOption(model)
   const resolvedCodexEffort = resolveCodexEffortForModel(resolvedCodexModel, options?.effort)
   const engineSession = persistentCodexSession
-    ? getCodexEngineSession({ cosSessionId: sid, model, cwd: codexCwd, trustMode: codexTrustMode })
+    ? getCodexEngineSession({
+      cosSessionId: sid,
+      model,
+      cwd: codexCwd,
+      trustMode: codexTrustMode,
+      engineFingerprint: extraFingerprint,
+    })
     : null
   const imageInputs: ModelImageInput[] = images ?? []
   const imagePaths = imageInputs.map(input => input.path)
@@ -419,6 +462,7 @@ export async function callCodexStreaming(
     resolvedModel: resolvedCodexModel,
     effort: options?.effort,
     publisherWritableDirectory: outputImagePublisher?.writableDirectory,
+    extra,
   })
 
   const env = { ...process.env }
@@ -481,6 +525,7 @@ export async function callCodexStreaming(
         codexThreadId,
         cwd: codexCwd,
         trustMode: codexTrustMode,
+        engineFingerprint: extraFingerprint,
       })
       updateCodexRun(run.runId, { codexThreadId, expiresAt: saved.expiresAt })
     } catch (error) {
