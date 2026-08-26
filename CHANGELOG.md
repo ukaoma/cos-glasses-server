@@ -1,3 +1,23 @@
+## 6.38.1
+
+The conversation archive was quietly storing the same conversations over and over.
+
+FIXED: `appendToArchive` blind-appended, and the daily mirror re-archives every
+still-resident prior-day session at boot and every 24h without evicting it -- so
+each restart added another copy. Measured on a real install: 1.268 GB of archive
+of which 99.3% was duplicate; one 69 MB day file held a single conversation
+2,388 times. This also inflated the archive index's chat counts and archive
+search's match counts (both from 6.38.0) by up to ~2,200x on affected days.
+
+The merge now upserts on (sessionId, startedAt), replaces a chat that has grown,
+returns without rewriting when nothing changed, and self-heals a file written by
+the old code the next time it is touched.
+
+NEW: `server/scripts/repair-archive-duplicates.ts` -- a dry-run-by-default repair
+for day files the mirror no longer touches. Backs up every file before writing,
+refuses while the server is running, verifies by unique-chat count (never file
+size), and is idempotent.
+
 ## 6.38.0
 
 Six months of archived conversation you can finally search.
