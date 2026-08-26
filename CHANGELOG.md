@@ -1,3 +1,35 @@
+## 6.38.0
+
+Six months of archived conversation you can finally search.
+
+NEW: GET /api/archive/search?q=&from=&to=&limit=. The archive already held every
+day's conversations -- 175 day files spanning six months on a real install -- with
+no way to find anything in them.
+
+The scan never calls JSON.parse. Day sizes are wildly skewed: the median day is
+36 KB, but the largest measured is 343 MB of agent transcript, and materialising
+that one day costs 1.2 GB heap / 2.3 GB RSS. On a process that also runs the
+wearer's live session that is not affordable, so days are scanned as raw bytes
+through a stream. A hit is therefore attributed to a DATE plus surrounding text,
+not to a chat; open /archive/:date/chats for structure. A full 90-day scan
+measures at 2.4 s, so there is no index to build and nothing that can drift.
+
+FIXED: GET /api/archive no longer parses 1.2 GB to list days. It built {date,
+summary, chatCount, exchangeCount} by parsing EVERY day file and discarding the
+bodies -- one request away from a multi-gigabyte spike. It now reads a sidecar
+index keyed by each day's (size, mtimeMs). Measured on the real corpus: cold build
+2,208 ms at 248 MB RSS for all 175 days, warm read 1 ms. Both halves of the key
+matter -- size alone misses an in-place edit that preserves length.
+
+listArchiveDates() is deleted rather than deprecated. It had one caller, and an
+uncalled landmine is still a landmine.
+
+Route order is load-bearing: /archive/search is registered ABOVE /archive/:date,
+because Express matches in order and the date validator would otherwise reject it
+as :date === "search". That is the same trap that has always made
+/api/archive/dates look like an empty archive. Older servers still exhibit it, so
+clients should read a 400 "Invalid date" from the search path as "route absent".
+
 ## 6.37.3
 
 Speaker ID works out of the box. A silent capture stops retrying forever. Live
