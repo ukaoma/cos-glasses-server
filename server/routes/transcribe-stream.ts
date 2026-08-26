@@ -61,6 +61,14 @@ import {
   appendChunkEmbedding,
   sweepExpiredChunkEmbeddings,
 } from '../lib/chunk-embedding-store.js'
+import {
+  evenSpeakerRoleMode,
+  formatEvenRoleAgreement,
+  parseEvenHubSpeakerRoleBody,
+  parseEvenHubSpeakerRoleQuery,
+  warnEvenSpeakerRoleApplyNotImplemented,
+  type EvenSpeakerRoleHistogram,
+} from '../lib/even-hub-speaker-role.js'
 import { archiveSessionAudio, runMeetingAudioRetention } from '../lib/meeting-audio-archive.js'
 import {
   countChunkWavs,
@@ -276,6 +284,7 @@ export interface TranscriptChunk {
   latencyMs?: number
   audioSha256?: string
   canonical?: boolean
+  evenHubSpeakerRole?: EvenSpeakerRoleHistogram
 }
 
 export interface ProviderCandidateRecord {
@@ -1945,8 +1954,11 @@ async function processStreamChunk(opts: {
   clientElapsed?: number
   /** Original client recording start, applied only before canonical chunks. */
   startTimeOverride?: number
+  evenHubSpeakerRole?: EvenSpeakerRoleHistogram
 }): Promise<StreamChunkCompletionResponse> {
   const { sessionId, chunkIndex, clientSpeaker, audioBuffer, candidate } = opts
+  const evenHubSpeakerRole = evenSpeakerRoleMode() === 'off' ? undefined : opts.evenHubSpeakerRole
+  if (evenHubSpeakerRole) warnEvenSpeakerRoleApplyNotImplemented()
   const tReq = performance.now()
   validateSessionId(sessionId)
   validateChunkIndex(chunkIndex)
@@ -2066,6 +2078,15 @@ async function processStreamChunk(opts: {
   }
 
   const { speaker, similarity } = await speakerPromise
+  if (evenHubSpeakerRole) {
+    console.log(formatEvenRoleAgreement({
+      chunkIndex,
+      even: evenHubSpeakerRole,
+      amp: clientSpeaker,
+      emb: speaker,
+      similarity,
+    }))
+  }
   // Client time is authoritative for live network jitter and deferred replay.
   const elapsed = Number.isFinite(opts.clientElapsed) && (opts.clientElapsed as number) >= 0
     ? Math.round(opts.clientElapsed as number)
@@ -2110,6 +2131,7 @@ async function processStreamChunk(opts: {
     latencyMs,
     audioSha256,
     canonical: true,
+    evenHubSpeakerRole,
   }
   const finalExisting = session.chunks[chunkIndex]
   if (finalExisting?.text) {
@@ -2263,6 +2285,7 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
       audioBuffer,
       clientElapsed,
       startTimeOverride,
+      evenHubSpeakerRole: parseEvenHubSpeakerRoleQuery(req.query.eh),
     }))
   } catch (err: unknown) {
     sendStreamError(res, err)
@@ -2327,6 +2350,7 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/chun
       clientSpeaker: String(body.clientSpeaker ?? 'Unknown'),
       audioBuffer,
       clientElapsed: typeof body.elapsed === 'number' ? body.elapsed : Number(body.elapsed ?? 0),
+      evenHubSpeakerRole: parseEvenHubSpeakerRoleBody(body.evenHubSpeakerRole),
       candidate: {
         provider: 'iphone-whisperkit-beta',
         text: normalizeCandidateText(candidate.text),
@@ -2405,6 +2429,7 @@ transcribeStreamRouter.post('/transcribe-stream/candidates', async (req, res) =>
       clientSpeaker: String(body.clientSpeaker ?? 'Unknown'),
       audioBuffer,
       clientElapsed: typeof body.elapsed === 'number' ? body.elapsed : Number(body.elapsed ?? 0),
+      evenHubSpeakerRole: parseEvenHubSpeakerRoleBody(body.evenHubSpeakerRole),
       candidate: {
         provider: 'iphone-whisperkit-beta',
         text: normalizeCandidateText(candidate.text),
