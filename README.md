@@ -87,8 +87,12 @@ without silently losing completed replies.
 > has those tools, so you will see it use them more readily than before.
 > Set `COS_CLAUDE_TRUST_MODE=allowlist` to remove Claude's permission bypass
 > and restrict it to COS's explicit per-query tool allowlist; undeclared tools
-> then fail closed without prompting. Only the exact value `allowlist` restricts
-> anything — any other value logs a warning and stays trusted.
+> then fail closed without prompting. In allowlist mode the query keeps web
+> search/fetch and **read-only workspace access** (Read, Glob, Grep) — no
+> shell, no edits, no writes. Only the exact value `allowlist` restricts
+> anything — any other value logs a warning and stays trusted. Servers before
+> 6.41.0 denied ALL workspace reads in allowlist mode; if a hardened install
+> answers "I don't have access to your workspace files", update the server.
 
 ## Connect your phone (the one gotcha)
 

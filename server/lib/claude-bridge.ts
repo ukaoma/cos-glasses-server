@@ -459,7 +459,6 @@ export async function callClaudeStreaming(
     throw err
   }
   const allowedToolList = buildClaudeToolList({
-    includeRead: imagePaths.length > 0,
     publisherTool: outputImagePublisher?.claudeAllowedTool,
   })
   let mcpConfigArgs: string[]

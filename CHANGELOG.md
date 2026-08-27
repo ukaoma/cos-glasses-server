@@ -1,3 +1,33 @@
+## 6.41.0
+
+Allowlist mode can finally read the workspace it was pointed at.
+
+A public user set `COS_CLAUDE_TRUST_MODE=allowlist` (the security-conscious
+choice, tried first) and got "I don't have access to your workspace files."
+That was the code working as written: in allowlist mode the per-query tool
+list is the entire tool universe, and it was built as WebSearch + WebFetch,
+with Read added only when the query carried a photo. The CLI's working
+directory correctly pointed at the user's workspace; nothing in the list
+could open a file in it.
+
+Three changes, one release:
+
+- The base tool list now always includes `Read`, `Glob`, and `Grep` — the
+  read-only exploration trio. Allowlist mode becomes "web plus read-only
+  workspace": shell, edits, and writes remain impossible by construction,
+  and a new test pins that Bash/Edit/Write can never appear in this list.
+  In trusted mode (the default) the list is only an auto-approve hint, so
+  behavior there is unchanged.
+- The allowlist capability prompt now affirms workspace readability — but
+  only when the list actually grants it, so the prompt can never over-claim.
+  Without the affirmation, a model told it is "genuinely limited" tends to
+  refuse reads it has.
+- The one listless spawn (prewarm) no longer passes an empty `--tools` in
+  allowlist mode. On the current CLI that flag triggers a spurious context
+  compaction and a synthetic 400 (the same pathology isolated by the fork
+  bisection on 2026-08-26); denial now rides `--permission-mode dontAsk`
+  plus an empty `--allowedTools` alone.
+
 ## 6.40.2
 
 A finished answer could leave the stream open forever.

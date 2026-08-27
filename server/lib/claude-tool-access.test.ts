@@ -19,13 +19,26 @@ describe('Claude MCP tool access', () => {
       'mcp__calendar__list',
       'mcp__calendar__*',
     ])
-    expect(buildClaudeToolList({ includeRead: true, env })).toEqual([
+    expect(buildClaudeToolList({ env })).toEqual([
       'WebSearch',
       'WebFetch',
       'Read',
+      'Glob',
+      'Grep',
       'mcp__calendar__list',
       'mcp__calendar__*',
     ])
+  })
+
+  it('always grants the read-only workspace tools and never write or shell tools', () => {
+    // In allowlist mode this list is the whole tool universe: a hardened
+    // install must be able to read its workspace (field report 2026-08-27)
+    // while shell and writes stay impossible by construction.
+    const list = buildClaudeToolList()
+    for (const tool of ['Read', 'Glob', 'Grep']) expect(list).toContain(tool)
+    for (const tool of ['Bash', 'Edit', 'Write', 'NotebookEdit']) {
+      expect(list).not.toContain(tool)
+    }
   })
 
   it('tells the model not to fabricate unavailable connector machinery', () => {
@@ -51,6 +64,23 @@ describe('Claude MCP tool access', () => {
     expect(trusted).toContain('NOT an inventory')
     expect(trusted).toContain('PROBE first')
     expect(trusted).toContain('load LAZILY')
+  })
+
+  it('affirms workspace reads in allowlist mode ONLY when the list grants them', () => {
+    // A hardened install refusing workspace reads it actually has is the same
+    // header-mismatch defect as the 2026-07-28 over-refusal incident — and
+    // promising reads a caller did not include is its mirror image. The line
+    // must track the list, not the mode.
+    const withRead = claudeToolCapabilityPrompt(
+      ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'],
+      'allowlist',
+    )
+    expect(withRead).toContain('not on reading the workspace')
+    expect(withRead).toContain('Never refuse a workspace read')
+
+    const withoutRead = claudeToolCapabilityPrompt(['WebSearch'], 'allowlist')
+    expect(withoutRead).not.toContain('reading the workspace')
+    expect(withoutRead).not.toContain('Never refuse a workspace read')
   })
 
   it('claims the COS Python pipeline only when it is actually configured', () => {

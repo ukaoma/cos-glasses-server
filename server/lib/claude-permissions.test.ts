@@ -18,6 +18,17 @@ describe('Claude permission policy', () => {
     ])
   })
 
+  it('never emits an empty --tools when allowlist mode has no per-query list', () => {
+    // An empty --tools on the current CLI triggers a spurious context
+    // compaction followed by a synthetic 400 (fork-thread.ts bisection,
+    // 2026-08-26). The listless spawn (prewarm) must deny via dontAsk +
+    // empty allowedTools without ever passing the poisoned flag.
+    const args = claudePermissionArgs('allowlist', null)
+    expect(args).not.toContain('--tools')
+    expect(args).not.toContain('--dangerously-skip-permissions')
+    expect(args).toEqual(['--permission-mode', 'dontAsk', '--allowedTools', ''])
+  })
+
   it('keeps the current trusted behavior explicit', () => {
     expect(claudePermissionArgs('trusted', 'Read')).toEqual([
       '--dangerously-skip-permissions', '--allowedTools', 'Read',

@@ -45,10 +45,16 @@ export function claudePermissionArgs(
       : ['--dangerously-skip-permissions', '--allowedTools', allowedTools]
   }
 
-  const tools = allowedTools ?? ''
+  // No per-query list (the prewarm spawn): deny everything via dontAsk plus an
+  // empty allowedTools, but never pass an empty --tools — on the current CLI
+  // an empty --tools triggers a spurious context compaction and a synthetic
+  // 400 (single-flag bisection 2026-08-26, documented in fork-thread.ts).
+  if (allowedTools === null) {
+    return ['--permission-mode', 'dontAsk', '--allowedTools', '']
+  }
   return [
     '--permission-mode', 'dontAsk',
-    '--tools', tools,
-    '--allowedTools', tools,
+    '--tools', allowedTools,
+    '--allowedTools', allowedTools,
   ]
 }

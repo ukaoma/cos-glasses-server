@@ -89,12 +89,15 @@ export function reportClaudeExtraToolConfiguration(
 }
 
 export function buildClaudeToolList(input: {
-  includeRead?: boolean
   publisherTool?: string
   env?: NodeJS.ProcessEnv
 } = {}): string[] {
-  const tools = ['WebSearch', 'WebFetch']
-  if (input.includeRead) tools.push('Read')
+  // Read-only workspace tools are unconditional: in allowlist mode this list
+  // is the entire tool universe, and without them a hardened install cannot
+  // read the workspace the glasses are pointed at (field report 2026-08-27).
+  // Shell/Edit/Write stay excluded, so allowlist keeps its no-side-effects
+  // property. In trusted mode the list is only an auto-approve hint.
+  const tools = ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep']
   tools.push(...configuredClaudeExtraTools(input.env))
   if (input.publisherTool) tools.push(input.publisherTool)
   return [...new Set(tools)]
@@ -186,8 +189,15 @@ export function claudeToolCapabilityPrompt(
   const honesty = TOOL_HONESTY_CLAUSE
 
   if (mode === 'allowlist') {
+    // Affirm workspace readability ONLY when the list actually grants it —
+    // this prompt is something the session trusts, and promising reads a
+    // caller did not include would recreate the 2026-07-28 class of header
+    // mismatch in the opposite direction.
+    const workspaceLine = tools.includes('Read')
+      ? `\nYour working directory is the user's COS workspace: Read, Glob, and Grep are in the list so you can search and read its files. The restriction here is on shell, writes, and undeclared tools — not on reading the workspace. Never refuse a workspace read in this mode.`
+      : ''
     return `TOOL CAPABILITY CONTRACT:
-This request runs in RESTRICTED allowlist mode and is genuinely limited to these tool selectors: ${list}. Undeclared tools are denied without prompting, so a call outside this list will fail.
+This request runs in RESTRICTED allowlist mode and is genuinely limited to these tool selectors: ${list}. Undeclared tools are denied without prompting, so a call outside this list will fail.${workspaceLine}
 Selectors are permissions, not proof that a connector is online. Use a tool only when it is actually present in this session. If the user asks for a tool or connector that is absent, or a tool call fails, say that it is unavailable. ${honesty}
 ${UNTRUSTED_CONTENT_CLAUSE}`
   }
