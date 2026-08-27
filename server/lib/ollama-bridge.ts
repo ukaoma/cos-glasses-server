@@ -26,28 +26,45 @@ import {
   startOllamaRun,
 } from './ollama-run-ledger.js'
 import { notifyExchange, notifySessionStart } from './telegram-notify.js'
-import { OLLAMA_MODEL } from '../../shared/model-preference.js'
+import { OLLAMA_MODEL, type EffortPreference } from '../../shared/model-preference.js'
 
 const INACTIVITY_MS = 60_000
 const WALL_MAX_MS = 180_000
 
 /**
- * Thinking is OFF by default. A thinking-class model spends a hidden
- * reasoning chain before its first visible token -- measured 2026-08-26 on
- * qwen3.5:35b: 6,265 generated tokens for a 150-word answer (~20K thinking
- * chars), 98.6s wall against 2.2s with thinking disabled, at the same
- * visible answer quality. On the lens that is a dead screen for a minute
- * and a half, and a hard prompt can out-run WALL_MAX_MS entirely. The
- * daemon silently tolerates `think: false` on models WITHOUT the thinking
- * capability (verified live against llama3.2:1b -- HTTP 200), so no
- * capability gate is needed. COS_OLLAMA_THINK opts back in: "1"/"true"
- * enables it, or an explicit budget level passes through.
+ * Thinking follows the REQUESTED EFFORT, not a blanket switch.
+ *
+ * The default effort ('high' -- every ordinary lens turn) keeps thinking
+ * OFF: measured 2026-08-26 on qwen3.5:35b, a hidden chain turned a
+ * 2.2-second answer into 98.6 seconds of dead screen at the same visible
+ * quality, and a hard prompt can out-run WALL_MAX_MS entirely. Raising the
+ * effort raises the thinking budget with it (xhigh -> 'high', max and
+ * ultracode -> 'max'), because that is what the escalation MEANS -- the
+ * flag benchmark showed a thinking local model matching Opus 5 (10/10)
+ * where the same model without thinking scored 6-7. Level strings are
+ * accepted by the daemon on Qwen-class models (probed live), and
+ * `think: false` is silently tolerated by models WITHOUT the thinking
+ * capability (verified against llama3.2:1b -- HTTP 200), so no capability
+ * gate is needed.
+ *
+ * COS_OLLAMA_THINK, when set, PINS the behavior regardless of effort:
+ * "1"/"true" always think, "0"/"false" never think, or an explicit level.
+ * Anything unrecognized reads as unset and defers to the effort map.
  */
-export function resolveOllamaThink(raw: string | undefined): boolean | string {
+export function resolveOllamaThink(
+  raw: string | undefined,
+  effort?: EffortPreference,
+): boolean | string {
   const value = (raw ?? '').trim().toLowerCase()
   if (value === '1' || value === 'true') return true
+  if (value === '0' || value === 'false') return false
   if (value === 'low' || value === 'medium' || value === 'high' || value === 'max') return value
-  return false
+  switch (effort) {
+    case 'xhigh': return 'high'
+    case 'max':
+    case 'ultracode': return 'max'
+    default: return false
+  }
 }
 const HISTORY_LIMIT = 20
 
@@ -226,7 +243,7 @@ export async function callOllamaStreaming(
         model: catalog.model,
         messages,
         stream: true,
-        think: resolveOllamaThink(process.env.COS_OLLAMA_THINK),
+        think: resolveOllamaThink(process.env.COS_OLLAMA_THINK, options?.effort),
       }),
       signal: abort.signal,
     })

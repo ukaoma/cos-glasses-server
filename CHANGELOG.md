@@ -1,3 +1,22 @@
+## 6.40.0
+
+Local thinking now follows the effort you asked for.
+
+6.39.3 turned thinking off wholesale. This release makes it a ladder: the
+default effort keeps local turns instant, and raising the effort raises the
+thinking budget with it -- xhigh maps to a high thinking level, max and
+ultracode to the maximum. That is what the escalation means: in a controlled
+flag benchmark against an Opus 5 reference (10/10), a local Qwen model WITH
+thinking also scored 10/10, where the same model without it scored 6-7. The
+daemon accepts level strings on Qwen-class models and silently tolerates
+think:false on models without the capability (both probed live).
+
+COS_OLLAMA_THINK becomes a PIN rather than the only switch: "1"/"true"
+always think, "0"/"false" never think, an explicit level forces that level,
+and unset defers to the effort map. Pairs with COS Control 0.5.79, which
+adds a local-model picker writing COS_OLLAMA_MODEL so multi-model daemons
+stop depending on pull order.
+
 ## 6.39.3
 
 Local turns answer in seconds again: thinking is off by default.

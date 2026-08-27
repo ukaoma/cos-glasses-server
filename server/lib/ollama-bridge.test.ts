@@ -100,16 +100,42 @@ describe('ollama bridge', () => {
     expect(JSON.stringify(chatBodies[0])).not.toContain('--oss')
   })
 
-  it('resolves COS_OLLAMA_THINK: off by default, on or leveled by explicit opt-in', async () => {
+  it('maps thinking to the requested effort, with the env pin overriding', async () => {
     const { resolveOllamaThink } = await import('./ollama-bridge.js')
+    // Unset env: the effort ladder decides. The default lens effort stays fast.
     expect(resolveOllamaThink(undefined)).toBe(false)
-    expect(resolveOllamaThink('')).toBe(false)
-    expect(resolveOllamaThink('0')).toBe(false)
-    expect(resolveOllamaThink('banana')).toBe(false)
+    expect(resolveOllamaThink(undefined, 'high')).toBe(false)
+    expect(resolveOllamaThink(undefined, 'xhigh')).toBe('high')
+    expect(resolveOllamaThink(undefined, 'max')).toBe('max')
+    expect(resolveOllamaThink(undefined, 'ultracode')).toBe('max')
+    // Garbage reads as unset, deferring to effort -- never as an accidental pin.
+    expect(resolveOllamaThink('banana', 'xhigh')).toBe('high')
+    // The env pin beats effort in BOTH directions.
+    expect(resolveOllamaThink('0', 'xhigh')).toBe(false)
+    expect(resolveOllamaThink('false', 'max')).toBe(false)
     expect(resolveOllamaThink('1')).toBe(true)
-    expect(resolveOllamaThink('true')).toBe(true)
+    expect(resolveOllamaThink('true', 'high')).toBe(true)
     expect(resolveOllamaThink('HIGH')).toBe('high')
-    expect(resolveOllamaThink(' low ')).toBe('low')
+    expect(resolveOllamaThink(' low ', 'max')).toBe('low')
+  })
+
+  it('threads the request effort into the chat body think field', async () => {
+    const chatBodies: unknown[] = []
+    _setOllamaCatalogFetchForTests(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/tags')) {
+        return new Response(JSON.stringify({ models: [{ name: 'llama3.2:latest' }] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      chatBodies.push(init?.body ? JSON.parse(String(init.body)) : null)
+      return new Response(ndjsonStream([
+        '{"message":{"role":"assistant","content":"ok"},"done":true}',
+      ]), { status: 200 })
+    })
+    const collected = collectCallbacks()
+    await callOllamaStreaming('ping', 's-ollama-effort', collected.callbacks, undefined, undefined, undefined, { effort: 'xhigh' })
+    expect(chatBodies[0]).toMatchObject({ think: 'high' })
   })
 
   it('refuses photos', async () => {
