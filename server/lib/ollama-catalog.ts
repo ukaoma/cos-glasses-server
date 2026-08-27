@@ -105,6 +105,57 @@ export function isOllamaProviderReady(): boolean {
 export function _resetOllamaCatalogCache(): void {
   catalogSnapshot = unavailableCatalog(DEFAULT_OLLAMA_ORIGIN, 'unprobed')
   refreshPromise = null
+  // The show map MUST clear with the rest. A tools-on entry surviving a reset
+  // leaks into the next test's llama3.2 stub and it passes for the wrong reason.
+  showCache.clear()
+}
+
+/** Per-model `/api/show` capability cache. Deliberately separate from the
+ *  catalog snapshot: capabilities are per TAG, and folding them into the boot
+ *  `/api/tags` probe would make the health payload carry them too. */
+const showCache = new Map<string, { tools: boolean; at: number }>()
+
+/**
+ * Does this pulled tag advertise tool support?
+ *
+ * True only for a parsed `capabilities` array containing 'tools'. A timeout or
+ * a throw returns false for THIS call but writes NO cache entry — caching a
+ * failed probe as `tools=false` would be inferring absence from silence, and
+ * the tag would stay toolless for the full TTL after one slow probe.
+ */
+export async function ollamaModelSupportsTools(model: string): Promise<boolean> {
+  const tag = (model || '').trim()
+  if (!tag) return false
+  const cached = showCache.get(tag)
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.tools
+
+  const origin = catalogSnapshot.origin || DEFAULT_OLLAMA_ORIGIN
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
+    let body: unknown
+    try {
+      // ollamaFetch, never raw fetch: raw fetch bypasses the test mock and can
+      // reach a live daemon from a unit test.
+      const response = await ollamaFetch(`${origin}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: tag }),
+        signal: controller.signal,
+      })
+      if (!response.ok) return false
+      body = await response.json()
+    } finally {
+      clearTimeout(timer)
+    }
+    const capabilities = (body as { capabilities?: unknown } | null)?.capabilities
+    if (!Array.isArray(capabilities)) return false
+    const tools = capabilities.includes('tools')
+    showCache.set(tag, { tools, at: Date.now() })
+    return tools
+  } catch {
+    return false
+  }
 }
 
 async function probeOllamaCatalog(): Promise<OllamaCatalog> {

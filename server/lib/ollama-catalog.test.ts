@@ -8,6 +8,7 @@ import {
   parseOllamaTagNames,
   resolveOllamaOrigin,
   selectOllamaModel,
+  ollamaModelSupportsTools,
 } from './ollama-catalog.js'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -68,5 +69,55 @@ describe('ollama catalog', () => {
     _setOllamaCatalogFetchForTests(async () => jsonResponse({ models: [] }))
     expect((await getOllamaCatalog(true)).ready).toBe(false)
     expect(isOllamaProviderReady()).toBe(false)
+  })
+})
+
+describe('ollamaModelSupportsTools', () => {
+  afterEach(() => {
+    _resetOllamaCatalogCache()
+    _setOllamaCatalogFetchForTests(null)
+  })
+
+  it('is true only when capabilities contains tools', async () => {
+    _setOllamaCatalogFetchForTests((async (input: any) => {
+      if (String(input).endsWith('/api/show')) {
+        return new Response(JSON.stringify({ capabilities: ['completion', 'tools'] }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as any)
+    await expect(ollamaModelSupportsTools('qwen3.8:27b')).resolves.toBe(true)
+  })
+
+  it('is false when the tag advertises no tools', async () => {
+    _setOllamaCatalogFetchForTests((async (input: any) => {
+      if (String(input).endsWith('/api/show')) {
+        return new Response(JSON.stringify({ capabilities: ['completion'] }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as any)
+    await expect(ollamaModelSupportsTools('llama3.2:latest')).resolves.toBe(false)
+  })
+
+  it('is false when show throws, and does NOT cache that as tools-off', async () => {
+    let calls = 0
+    _setOllamaCatalogFetchForTests((async (input: any) => {
+      if (String(input).endsWith('/api/show')) {
+        calls += 1
+        if (calls === 1) throw new Error('ECONNRESET')
+        return new Response(JSON.stringify({ capabilities: ['tools'] }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as any)
+    // A failed probe must not pin the tag as toolless for the whole TTL:
+    // that is inferring absence from a timeout.
+    await expect(ollamaModelSupportsTools('qwen3.8:27b')).resolves.toBe(false)
+    await expect(ollamaModelSupportsTools('qwen3.8:27b')).resolves.toBe(true)
+  })
+
+  it('an empty model name is false without probing', async () => {
+    _setOllamaCatalogFetchForTests((async () => {
+      throw new Error('should not be called')
+    }) as any)
+    await expect(ollamaModelSupportsTools('')).resolves.toBe(false)
   })
 })

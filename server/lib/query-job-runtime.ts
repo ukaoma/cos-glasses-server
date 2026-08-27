@@ -38,6 +38,9 @@ const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
   WebFetch: 'Reading page...',
   Read: 'Analyzing photo...',
+  search_meetings: 'Searching meetings...',
+  search_memories: 'Searching memory...',
+  read_meeting: 'Reading meeting...',
 }
 
 export class QueryJobAdmissionPreparationError extends Error {

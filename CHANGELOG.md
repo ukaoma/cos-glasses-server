@@ -1,3 +1,45 @@
+## 6.40.1
+
+The local model can read your meetings and memories.
+
+Until now the Ollama path appended "You have no tools" to every prompt, so a
+local model could only answer from what was already in the window. It now gets
+a closed allowlist of three READ-ONLY COS tools -- `search_meetings`,
+`search_memories`, `read_meeting` -- but only when two things are true: the
+pulled tag advertises `tools` on `/api/show`, and `COS_SCRIPTS_DIR` is a real
+directory. A standalone npm install with no operations tree is unchanged, and
+so is any tag that cannot call tools.
+
+Writes, Bash, MCP, web search, web fetch, photos, Continue, Fork and Live Cues
+are all still off this path. There is no in-process search or fetch executor in
+this package, so advertising `WebSearch` would name a capability that cannot
+run; those names stay out of the tools array deliberately.
+
+The loop is bounded at five `/api/chat` POSTs per turn. Posts one through four
+may execute a tool batch; the fifth is a closing fetch, and tool calls returned
+there are refused rather than executed, so there is never a sixth. Tool results
+are capped by DROPPING whole hits, never by cutting mid-string, so the model
+always receives parseable JSON. `read_meeting` serializes a picked subset and
+never the unbounded transcript the ops helpers still attach.
+
+Search results always carry `semanticReason`, defaulting to `"none"`. Empty
+hits with a reason describe THAT call; without the field a model reads an empty
+list as proof the archive is empty and tells you that you have no meetings. The
+prompt also states that the cached context block is today's calendar and not the
+meeting library, because "No more meetings today" was being read as an archive
+claim.
+
+The Ollama system prompt is now built here rather than borrowed from the Claude
+path, which instructs the model to search the web and read photo files. Cached
+context is always included instead of keyword-gated, so a question about today's
+schedule no longer arrives with no calendar attached unless it happened to use
+the word "meeting".
+
+Cancelling a turn mid-tool reports it as cancelled rather than as a timeout, and
+an abort landing between tool calls now ends the turn instead of quietly issuing
+another POST. A cancelled `semantic_search.py` child still runs to its own 15s
+timeout; killing children is deferred.
+
 ## 6.40.0
 
 Local thinking now follows the effort you asked for.

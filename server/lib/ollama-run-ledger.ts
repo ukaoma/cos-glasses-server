@@ -92,6 +92,13 @@ export function classifyOllamaError(message: string): string {
   if (/unreachable|econnrefused|fetch failed|enotfound/.test(text)) return 'ollama.unavailable'
   if (/no models|not ready/.test(text)) return 'ollama.no_model'
   if (/text-only|photo|image/.test(text)) return 'ollama.text_only'
+  // BOTH tool codes must precede the /aborted/ branch below. A cancelled tool
+  // reads "aborted" and would otherwise be reported to the user as a timeout,
+  // and the round-cap message would fall all the way through to the generic
+  // 'ollama.error' and surface as "Ollama failed (ollama.error)" — which tells
+  // the user nothing about what actually stopped the turn.
+  if (/tool round cap/.test(text)) return 'ollama.tool_cap'
+  if (/tool aborted|tool call aborted/.test(text)) return 'ollama.tool_abort'
   if (/timeout|timed out|aborted/.test(text)) return 'ollama.timeout'
   return 'ollama.error'
 }
