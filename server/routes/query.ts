@@ -114,6 +114,22 @@ queryRouter.post('/query', async (req, res) => {
   res.write(': keepalive\n\n')
 
   let done = false
+  // The session id AS REPORTED BY THE BRIDGE.
+  //
+  // `const sid = await callModelStreaming(...)` below is not assigned until the
+  // whole call resolves, but these callbacks fire DURING that await — so any
+  // callback that reads `sid` reads a temporal-dead-zone binding and throws
+  // ReferenceError. `onStart` never noticed because its own `sid` PARAMETER
+  // shadows the outer const; `onDone` has no such parameter and did throw,
+  // after setting `done = true` and before writing the terminal event, which
+  // left the SSE socket open forever with the answer already persisted.
+  //
+  // Measured 2026-08-26: an Ollama tool turn streamed its full answer and never
+  // sent `done`; the glasses counted past 1,100 seconds on a turn that had
+  // finished in 166. Claude survived only because its bridge resolves outside
+  // the window — the same line was one scheduling change away from hanging
+  // every provider.
+  let streamSessionId: string | undefined = typeof sessionId === 'string' ? sessionId : undefined
   const abortController = new AbortController()
   res.on('close', () => {
     if (!done) abortController.abort()
@@ -123,6 +139,7 @@ queryRouter.post('/query', async (req, res) => {
   try {
     const sid = await callModelStreaming(resolvedQuery || '', sessionId, {
       onStart: (model, sid, cliSessionId, metadata) => {
+        streamSessionId = sid
         if (!done) {
           const payload = { model, sessionId: sid, cliSessionId, ...metadata }
           res.write(`event: start\ndata: ${JSON.stringify(payload)}\n\n`)
@@ -161,7 +178,7 @@ queryRouter.post('/query', async (req, res) => {
           // expiry or make maintenance proof outrun the pending write.
           if (resolvedAttachments.ids.length > 0) {
             await getMediaStore().associate(resolvedAttachments.ids, {
-              sessionId: sid,
+              sessionId: streamSessionId ?? '',
               ...(validGlobalMsgNum ? { globalMsgNum: validGlobalMsgNum } : {}),
               messageEra: activeMessageEra,
             }).catch((err) => console.error('[query] attachment association failed:', err))
@@ -171,7 +188,7 @@ queryRouter.post('/query', async (req, res) => {
             const attachments = mergeMediaAttachmentRefs(attachmentRefs, metadata?.outputAttachments)
             const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
             const payload = {
-              text: fullText, sessionId: sid, model, cliSessionId, ...runMetadata,
+              text: fullText, sessionId: streamSessionId, model, cliSessionId, ...runMetadata,
               ...(attachments.length > 0 ? { attachments } : {}),
             }
             res.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`)

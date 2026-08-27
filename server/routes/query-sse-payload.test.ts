@@ -31,9 +31,11 @@ vi.mock('../lib/message-era.js', async (importOriginal) => {
 })
 
 // Mock ONLY the model router — the query route's own logic stays real.
-// Callbacks fire on a macrotask AFTER callModelStreaming resolves, matching
-// production (bridge callbacks come from child-process events, never
-// synchronously — the route's `const sid = await ...` depends on that).
+// Callbacks fire on a macrotask AFTER callModelStreaming resolves. That models
+// the CHILD-PROCESS bridges only. It is NOT universal: the in-process Ollama
+// bridge awaits its own finalize before returning, so its callbacks run inside
+// the route's `const sid = await ...`. That ordering is covered by
+// query-inprocess-callbacks.test.ts, and the route must not depend on either.
 vi.mock('../lib/model-router.js', () => ({
   callModelStreaming: vi.fn(async (
     query: string,

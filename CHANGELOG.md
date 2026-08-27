@@ -1,3 +1,34 @@
+## 6.40.2
+
+A finished answer could leave the stream open forever.
+
+An Ollama turn with tools streamed its whole answer, persisted it, and then
+never sent the terminal `done` event. On the glasses the turn counted past
+1,100 seconds while the reply had actually completed in 166 and was already
+saved in Messages. Double-tap to cancel did nothing, because there was no live
+job to cancel.
+
+The cause is one line in the query route, and it predates the tool loop. The
+SSE callbacks are declared inside `const sid = await callModelStreaming(...)`,
+so while that call is running `sid` is in its temporal dead zone. `onStart`
+never noticed because its own `sid` PARAMETER shadows the outer binding.
+`onDone` has no such parameter: it read the outer `sid`, threw
+ReferenceError, and — critically — threw AFTER setting `done = true` and
+BEFORE writing the terminal event, so the failure could not even fall through
+to the error path. The socket stayed open with the work already committed.
+
+Only Ollama hit it. The child-process bridges resolve outside that window, so
+Claude and Codex kept working; the in-process Ollama loop awaits its own
+finalize before returning, which lands the callback squarely inside the dead
+zone. Both readers now use the session id captured from `onStart`.
+
+The existing SSE contract test could never have caught this: it fires
+callbacks on a macrotask after the router resolves, with a comment asserting
+that bridges "never" call back synchronously. That assumption is now marked
+as covering the child-process bridges only, and a new test pins the
+in-process ordering. Reverting the fix makes all three of its cases hang,
+which is the production symptom exactly.
+
 ## 6.40.1
 
 The local model can read your meetings and memories.
