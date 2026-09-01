@@ -161,9 +161,13 @@ queryRouter.post('/query', async (req, res) => {
           emitDisplay({ type: 'tool_status', data: { message } })
         }
       },
-      // Activity lines stay on this authenticated request stream. The global
-      // display stream is intentionally unauthenticated for Even Hub recovery,
-      // so observable command/output text must never be broadcast there.
+      // Activity lines stay on this authenticated request stream. The guard is
+      // unchanged; the reason has moved. Since 6.42.0 the global display stream is
+      // not "unauthenticated" — it ADMITS ticketless subscribers (200 for everyone,
+      // so an installed client keeps a live transport) and withholds CONTENT per
+      // event instead. Broadcasting observable command/output text onto that bus
+      // would leave it one allowlist entry away from an unauthenticated listener,
+      // so it is never emitted there at all.
       ...(activityToolMode === 'preview' ? {
         onActivityLine: (line: { kind: 'input' | 'output'; text: string }) => {
           if (!done) {

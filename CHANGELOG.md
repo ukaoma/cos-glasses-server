@@ -1,3 +1,74 @@
+## 6.42.0
+
+The display stream stops broadcasting your meetings to the local network.
+
+`GET /api/display-stream` has been public since it was written, because
+EventSource cannot attach an `X-Cos-Token` header. That is still true, so the
+route is still public and still returns 200 to everyone — but what it SENDS is
+now decided per event. A subscriber that proves it holds the pairing token gets
+the whole bus. A subscriber that does not gets a live transport, the handshake,
+the keepalive, replay-gap notices, and one projected lifecycle marker. It never
+receives a transcript, an answer, a coaching cue, a tool status or an error.
+
+**COS Glasses app 6.8.441 is required to restore full content delivery.** Older
+builds keep working — that is the entire reason the connection is not rejected —
+but they connect without a capability, so they will see the content-suppressed
+stream: no live transcript on the lens and no streamed answers, while meeting
+capture, saving, and offline sync continue normally. 6.8.441 is the first app
+build that fetches a ticket and reconnects on `contentAuthorized: false`. Nothing
+else states this, so state it here: update the app with the server.
+
+Two ways to prove you hold the token:
+
+- `X-Cos-Token` on the request, for every fetch-based consumer (COS Control, the
+  companion's own connection probe, curl). Preferred wherever it is possible.
+- `GET /api/display-stream/<expiry>.<hmac>` for EventSource, which cannot send a
+  header. The ticket is an HMAC over its own expiry keyed on the pairing token,
+  so it is stateless, unforgeable without the key, and invalidated the instant
+  the token rotates. `GET /api/models` mints one; `GET /api/health` advertises the
+  capability so a client can detect an older server by its absence.
+
+An invalid or expired ticket is never rejected. It degrades to the ticketless
+stream, so a client whose ticket died mid-reconnect keeps its transport instead
+of entering a retry loop — and the `ready` frame now carries
+`contentAuthorized: <boolean>` so it can tell the difference and re-mint. Without
+that field a degraded stream is indistinguishable from a healthy one.
+
+The ticket TTL is 15 minutes, chosen by the platform rather than by taste: a
+backgrounded Even Hub WebView is suspended and cannot re-mint, and the Even Hub
+review loop locks the phone for five minutes. A 2-minute TTL was guaranteed to
+be dead on the reviewer's exact path. Minting requires the pairing token, so the
+TTL only bounds the value of a ticket that leaks out of a URL.
+
+Also in this release:
+
+- `recording_stop` reaches ticketless subscribers as a PROJECTION carrying only
+  `sessionId`. The production payload also carries `filename`, which embeds the
+  transcript-derived meeting title (`..._Q3_Budget_Cuts_Layoffs_....md`), plus
+  duration and business domain. An allowlist of event TYPES passed the whole
+  event through and would have broadcast the title of every meeting.
+- `replay_gap` reaches ticketless subscribers too. It carries only a reason, the
+  cursor the client itself sent, the watermark already in `ready`, and a buffer
+  boundary, and withholding it strands a client on a dead cursor after a server
+  restart. The buffer it describes is still never served without a ticket.
+- The ticketed path is exempt from the recovery lease classifier. It matched by
+  exact string, so the new path segment classified as a leased request — and an
+  SSE lease never settles, so a connected lens would have held the recovery gate
+  open and 409'd every COS Control server restart. (In this build the admission
+  middleware is exported but not mounted, so that was latent, not live; the
+  classification is a contract a build that mounts it would inherit.) Lease kinds
+  are also redacted now, so `GET /api/recovery/status` can never republish a live
+  display ticket or TTS capability as plain text.
+- `mintDisplayTicket` throws on an empty token instead of returning a ticket that
+  can never verify, and `/api/models` omits the field rather than advertising a
+  dead capability.
+- Ticketless connects are summarized once a minute with a count instead of logged
+  per connect. `retry: 3000` means one stale client would otherwise write ~1,200
+  lines an hour into the launchd log.
+- `.env.example` said a token is required on every `/api` call. It is not, and it
+  never was: four paths are public and two are capability URLs. That file ships in
+  the npm tarball.
+
 ## 6.41.0
 
 Allowlist mode can finally read the workspace it was pointed at.

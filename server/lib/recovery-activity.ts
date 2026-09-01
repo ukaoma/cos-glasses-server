@@ -29,6 +29,40 @@ const EXEMPT_EXACT = new Set([
   'POST /api/recovery/server/restart',
 ])
 
+/**
+ * Exempt by PREFIX, because the display stream grew a path segment.
+ *
+ * EXEMPT_EXACT matches whole strings, so `GET /api/display-stream/<exp>.<hmac>`
+ * (6.42.0's ticketed form) fell through to 'request' and would take a lease. An SSE
+ * connection has no `finish`, and `close` only converts the lease to a 120s grace
+ * window that a live socket never reaches — so one connected lens would hold the
+ * recovery gate open indefinitely and 409 every COS Control server restart. A
+ * long-lived stream is the exact shape that must never take a lease.
+ *
+ * SCOPE, stated honestly: in THIS build `recoveryAdmissionMiddleware` is exported
+ * but never mounted (`grep -rn "recovery-activity" server` shows routes/recovery.ts
+ * importing only acquireMaintenance and getRecoveryActivityStatus), so no lease is
+ * taken for any route and the 409 above is latent rather than live. The
+ * classification is still a published contract that a build mounting the middleware
+ * would inherit, so it is fixed here rather than left as a trap.
+ */
+const EXEMPT_GET_PREFIXES = ['/api/display-stream/']
+
+/**
+ * A capability URL is a live bearer credential. GET /api/recovery/status publishes
+ * every lease `kind` verbatim, and that route is reachable by anyone who can already
+ * read status — so a kind built from the raw path would republish a working display
+ * ticket (or a TTS playback capability) as plain text in a diagnostic response.
+ *
+ * Redaction happens where the kind is BUILT, not where it is read, so no future
+ * reader of `active` can reintroduce the leak.
+ */
+export function redactCapabilityPath(path: string): string {
+  return path
+    .replace(/^(\/api\/display-stream)\/[^/]+$/, '$1/<ticket>')
+    .replace(/^(\/api\/tts\/play)\/[^/]+$/, '$1/<capability>')
+}
+
 const OPERATION_GET_PREFIXES = [
   '/api/models',
   '/v1/models',
@@ -53,6 +87,10 @@ export function classifyRecoveryRoute(method: string, path: string): RecoveryRou
   const verb = method.toUpperCase()
   const normalized = path.split('?')[0]
   if (EXEMPT_EXACT.has(`${verb} ${normalized}`)) return 'exempt'
+  if ((verb === 'GET' || verb === 'HEAD')
+    && EXEMPT_GET_PREFIXES.some(prefix => normalized.startsWith(prefix))) {
+    return 'exempt'
+  }
   if (!normalized.startsWith('/api/') && !normalized.startsWith('/v1/')) return 'exempt'
   if (verb !== 'GET' && verb !== 'HEAD') return 'operation'
   if (OPERATION_GET_PREFIXES.some(prefix => normalized === prefix || normalized.startsWith(prefix))) {
@@ -144,7 +182,10 @@ export function recoveryAdmissionMiddleware(req: Request, res: Response, next: N
   }
 
   const id = `${routeClass}:${++sequence}`
-  const release = createLease(`${req.method} ${(req.originalUrl || req.path).split('?')[0]}`, id)
+  const release = createLease(
+    `${req.method} ${redactCapabilityPath((req.originalUrl || req.path).split('?')[0])}`,
+    id,
+  )
   res.once('finish', release)
   res.once('close', () => {
     const lease = active.get(id)

@@ -1,6 +1,6 @@
 {
   "name": "@gotcos/glasses-server",
-  "version": "6.41.0",
+  "version": "6.42.0",
   "description": "COS Glasses \u2014 self-hosted AI heads-up-display server for Even G2 smart glasses, powered by Claude Code, Codex, Cursor Agent CLI, or local Ollama",
   "type": "module",
   "bin": {

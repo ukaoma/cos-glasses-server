@@ -34,6 +34,30 @@ describe('global API authentication boundary', () => {
     async path => expect((await request(path)).status).toBe(204),
   )
 
+  // The display-stream capability mirrors the TTS one: admitted on SHAPE at this
+  // boundary, signature verified in the route. `/api/display-stream` itself stays in
+  // the public set above ON PURPOSE — removing it would 401 every installed client,
+  // because neither EventSource in the app can attach a header.
+  it.each(['GET', 'HEAD'])('%s admits a shape-valid display-stream capability', async method => {
+    const ticket = `1780000000.${'a'.repeat(64)}`
+    expect((await request(`/api/display-stream/${ticket}`, { method })).status).toBe(204)
+  })
+
+  it.each([
+    '/api/display-stream/not-a-ticket',
+    '/api/display-stream/1780000000',
+    `/api/display-stream/1780000000.${'a'.repeat(63)}`,
+    `/api/display-stream/1780000000.${'A'.repeat(64)}`,
+    `/api/display-stream/abc.${'a'.repeat(64)}`,
+  ])('rejects a malformed display-stream capability %s', async path => {
+    expect((await request(path)).status).toBe(401)
+  })
+
+  it('does not admit a display-stream capability on a non-GET method', async () => {
+    const ticket = `1780000000.${'a'.repeat(64)}`
+    expect((await request(`/api/display-stream/${ticket}`, { method: 'POST' })).status).toBe(401)
+  })
+
   it.each(['GET', 'HEAD'])('%s allows a canonical TTS playback capability without a header', async method => {
     const response = await request(`/api/tts/play/${VALID_UNKNOWN_CAPABILITY}`, { method })
     expect(response.status).toBe(204)

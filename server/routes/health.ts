@@ -10,6 +10,7 @@ import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contra
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { profileProvenanceSummary, speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
 import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
+import { mintDisplayTicket, DISPLAY_TICKET_TTL_SECONDS } from '../lib/display-ticket.js'
 import { correctionStoreStats } from '../lib/meeting-corrections.js'
 import { meetingAudioStats } from '../lib/meeting-audio-archive.js'
 import { adaptivePlaybackStatus } from '../lib/adaptive-playback-audio.js'
@@ -353,6 +354,14 @@ healthRouter.get('/health', async (_req, res) => {
     review_audio: reviewAudio,
     ...(voiceProvenance ? { voice_provenance: voiceProvenance } : {}),
     capabilities: {
+      // Advertised on the PUBLIC health route on purpose: a client deciding whether
+      // to request a display ticket may not hold a usable token yet, and an old
+      // server simply omits this key, which is how a new client detects it.
+      displayStream: {
+        ticketSupported: true,
+        ticketTtlSeconds: DISPLAY_TICKET_TTL_SECONDS,
+        contentRequiresTicket: true,
+      },
       transcription: {
         ...transcription,
         live: transcriptionLive,
@@ -429,6 +438,9 @@ healthRouter.get('/models', async (req, res) => {
   // THIS surface and Main.ts states outright that /api/health alone is not used,
   // so a capability published only there is invisible to the phone.
   const threadAttach = threadAttachCapability()
+  // mintDisplayTicket refuses an empty key, because a ticket signed with '' can
+  // never verify. Omit the field rather than publish a dead capability.
+  const apiToken = process.env.COS_API_TOKEN ?? ''
   res.json({
     ...catalog,
     ...threadAttachHealthFields(threadAttach),
@@ -447,6 +459,33 @@ healthRouter.get('/models', async (req, res) => {
     },
     ollamaReady: isOllamaProviderReady(),
     serverInstanceId: getServerInstanceId(),
+    // Minted here rather than on a route of its own: this response is already
+    // authenticated, and the mint is stateless, so it costs nothing and stores
+    // nothing.
+    //
+    // TWO THINGS THIS ROUTE IS NOT, both of which the client must plan around:
+    //
+    // 1. It IS fetched before every connect in the 6.8.441 client — every retry
+    //    calls connectDisplayBus() with no argument, which re-runs
+    //    probeConnectionTarget, which fetches this route. Do not assume that of
+    //    any OTHER client: nothing in the protocol requires it, and a client that
+    //    minted once at pairing would go content-free one TTL later.
+    // 2. Its drain behaviour is NOT what classifyRecoveryRoute implies. That
+    //    classifier puts /api/models in OPERATION_GET_PREFIXES, but its only
+    //    consumer — recoveryAdmissionMiddleware — is never mounted in this build,
+    //    and the gate that IS mounted (server/index.ts) returns next() for every
+    //    GET/HEAD/OPTIONS on its first line. So this route answers 200 during a
+    //    COS Control drain today. Treat the classifier's verdict as the contract a
+    //    build that mounts that middleware would enforce, not as current behaviour.
+    //    (The ticketed display-stream path is exempt either way, so an already-held
+    //    ticket keeps working through a drain — which is still why the TTL has to
+    //    outlive one.)
+    //
+    // So the CLIENT carries the re-mint obligation: fetch /api/models and reconnect
+    // when a display-stream `ready` frame reports `contentAuthorized: false`, or
+    // when DISPLAY_TICKET_TTL_SECONDS has elapsed since the last mint — retrying if
+    // the fetch 503s. Nothing on the server can re-mint on the client's behalf.
+    ...(apiToken ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
     capabilities: {
       durableQueryJobs: {
         enabled: durableJobs.enabled,
