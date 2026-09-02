@@ -1,3 +1,39 @@
+## 6.42.1
+
+Hardening of the 6.42.0 display-stream ticket, from a four-validator QA pass
+that tested the FIX rather than the original finding. Nothing here changes the
+wire contract; every 6.42.0 client keeps working unchanged.
+
+- **A refused ticket now says why.** `explainDisplayTicket` returns
+  `expired | bad-signature | malformed`, and the throttled summary line counts
+  each. Before this the server could not tell "a client needs to re-mint"
+  (expired — expected after every native EventSource retry on a stale URL) from
+  "someone holds a ticket this token never signed". The author's own log had
+  seven unexplained rejections in three windows.
+- **The allowlist uses `Object.hasOwn`.** The projection map is an object
+  literal and inherited `Object.prototype`; a type of `constructor` would have
+  resolved to a truthy identity and passed the event through whole. Unreachable
+  via the typed union; the allowlist must not depend on that.
+- **Ticketless connects no longer materialise the replay buffer.** Gap detection
+  still runs; the up-to-200-event filter does not. A stale install retrying
+  every 3s was doing that filter and discarding it each time.
+- **`?probe=1` skips the replay write.** The client's connection probe is
+  authorized (it sends the token) and was handed the whole buffer on every
+  reconnect, then aborted the socket — 1,164 "Replayed 200" lines in one day.
+  A 6.42.0 server ignores the flag (verified live), so a new client against an
+  old server loses nothing.
+- **Comments corrected.** `api-auth.ts` no longer claims a path segment avoids
+  URL logs (it does not; the TTL is what bounds a leaked URL). `index.ts` names
+  both capability URLs. `health.ts` states plainly that authorization is decided
+  once per socket and that a per-event re-check would be a breaking change.
+- **The 6.42.0 note "6.8.441 restores full content delivery" was too broad.**
+  It is true for the phone companion. The lens entrypoint was untouched in
+  6.8.441 and connects bare; app 6.9.442 ports the ticket to it.
+- Tests: the adversarial event list is now derived from a `Record` keyed on the
+  union, so a twelfth event type is a compile error rather than a silent gap; a
+  projection that throws is proven not to reach the emitter; the probe is proven
+  to receive no replay; every verdict is exercised.
+
 ## 6.42.0
 
 The display stream stops broadcasting your meetings to the local network.
@@ -10,7 +46,7 @@ the whole bus. A subscriber that does not gets a live transport, the handshake,
 the keepalive, replay-gap notices, and one projected lifecycle marker. It never
 receives a transcript, an answer, a coaching cue, a tool status or an error.
 
-**COS Glasses app 6.8.441 is required to restore full content delivery.** Older
+**COS Glasses app 6.8.441 restores full content delivery to the PHONE COMPANION (`index.html`).** It does not touch the lens entrypoint (`glasses.html` / `glasses-entry.ts`), which still connects bare and, wherever it can reach the server at all, now receives lifecycle events only. Whether that entrypoint reaches the server is unproven either way; 6.9.442 ports the ticket to it regardless. Older
 builds keep working — that is the entire reason the connection is not rejected —
 but they connect without a capability, so they will see the content-suppressed
 stream: no live transcript on the lens and no streamed answers, while meeting

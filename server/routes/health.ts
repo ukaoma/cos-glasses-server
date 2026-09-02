@@ -482,9 +482,18 @@ healthRouter.get('/models', async (req, res) => {
     //    outlive one.)
     //
     // So the CLIENT carries the re-mint obligation: fetch /api/models and reconnect
-    // when a display-stream `ready` frame reports `contentAuthorized: false`, or
-    // when DISPLAY_TICKET_TTL_SECONDS has elapsed since the last mint — retrying if
-    // the fetch 503s. Nothing on the server can re-mint on the client's behalf.
+    // when a display-stream `ready` frame reports `contentAuthorized: false`,
+    // retrying if the fetch 503s. Nothing on the server can re-mint on the
+    // client's behalf.
+    //
+    // AUTHORIZATION IS DECIDED ONCE PER SOCKET, at connect. A ticket that was
+    // valid when the EventSource opened keeps that socket authorized for its whole
+    // life — QA on 2026-09-01 held an 8-second ticket open for 32s and content
+    // kept flowing. That is deliberate: the shipped client re-mints only on
+    // RECONNECT, never on a timer, so a per-event re-check would blank every
+    // 6.8.441 lens fifteen minutes into a meeting. The TTL therefore bounds how
+    // long a LEAKED URL can open a new socket, not how long an open socket lives.
+    // Changing that is a breaking change that needs a client version gate first.
     ...(apiToken ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
     capabilities: {
       durableQueryJobs: {

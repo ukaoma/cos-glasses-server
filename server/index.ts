@@ -181,9 +181,10 @@ app.use(cors({
 }))
 // Auth middleware — always active (token is auto-generated if not set).
 // Mounted before body parsers so rejected uploads cannot consume parse memory.
-// The only capability-URL exception is a canonical /tts/play/<UUID> GET/HEAD;
-// authenticated /tts/prepare mints it for native audio players that cannot set
-// X-Cos-Token headers.
+// Two capability-URL exceptions: a canonical /tts/play/<UUID> GET/HEAD (minted by
+// authenticated /tts/prepare for native audio players) and
+// /display-stream/<exp>.<hmac> GET/HEAD (minted on authenticated /api/models for
+// EventSource, which cannot set X-Cos-Token either). See api-auth.ts.
 app.use('/api', requireApiToken(API_TOKEN))
 
 // Fail-closed catch-all for mutation routes that do not own a more specific
