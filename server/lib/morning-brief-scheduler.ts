@@ -128,6 +128,9 @@ export class MorningBriefScheduler {
   private ledger: MorningBriefLedger
   private timer: ReturnType<typeof setInterval> | null = null
   private tickInFlight: Promise<TickResult> | null = null
+  /** One chain for tick() AND runNow(): the in-progress read in runNow and the
+   * ledger write in fire() must never interleave with a scheduled fire. */
+  private serial: Promise<unknown> = Promise.resolve()
   private readonly now: () => number
   private readonly log: (line: string) => void
   readonly quarantinedConfig?: string
@@ -181,8 +184,14 @@ export class MorningBriefScheduler {
   /** One scheduler pass. Serialised: a slow submission never overlaps the next tick. */
   tick(): Promise<TickResult> {
     if (this.tickInFlight) return this.tickInFlight
-    this.tickInFlight = this.runTick().finally(() => { this.tickInFlight = null })
+    this.tickInFlight = this.serialize(() => this.runTick()).finally(() => { this.tickInFlight = null })
     return this.tickInFlight
+  }
+
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.serial.then(fn, fn)
+    this.serial = next.then(() => undefined, () => undefined)
+    return next
   }
 
   private async runTick(): Promise<TickResult> {
@@ -195,7 +204,11 @@ export class MorningBriefScheduler {
   }
 
   /** "Run now" from a settings surface. Bounded per day; refused while a brief is live. */
-  async runNow(): Promise<MorningBriefRun> {
+  runNow(): Promise<MorningBriefRun> {
+    return this.serialize(() => this.runNowInner())
+  }
+
+  private async runNowInner(): Promise<MorningBriefRun> {
     if (!this.deps.durableJobsEnabled()) {
       throw new MorningBriefRunError(409, 'durable_jobs_off', 'Turn on Background jobs in COS Control to run the brief.')
     }
@@ -227,14 +240,45 @@ export class MorningBriefScheduler {
       ? scheduledClientJobId(day, this.config.timezone)
       : randomUUID()
 
-    // Resume: a ledger row with no job id. Adopt an admission the coordinator
-    // may already hold for this identity before considering a fresh submit.
-    if (resume) {
+    // Adopt before minting, on EVERY scheduled fire — not only the crash-resume
+    // branch. A submit that threw after admission, a ledger row lost to
+    // quarantine, and a plain resume all find the coordinator already holding
+    // this day's identity. A manual fire mints a fresh UUID and can never hit,
+    // so it skips the round trip. Reusing `existing.globalMsgNum` is safe even
+    // though liveReservations() skips submitError rows: the store's own
+    // reservation source (query-job-runtime registers the coordinator's live
+    // identities) holds an admitted job's number independently of the ledger.
+    if (trigger === 'scheduled') {
       const existing = await this.deps.findByClientGeneration(clientJobId, 1).catch(() => undefined)
       if (existing) {
-        const adopted: MorningBriefRun = { ...resume, jobId: existing.jobId, lastKnownStatus: existing.status }
+        const priorRow = resume ?? this.ledger.runs.filter(r => r.day === day && r.trigger === trigger).at(-1)
+        // Carry every current and future ledger field from the row being
+        // replaced; drop only the submit error (the job exists), then override
+        // the identity and provenance columns from what is actually admitted.
+        const { submitError: _dropped, ...carried } = priorRow ?? {}
+        const adopted: MorningBriefRun = {
+          ...carried,
+          id: priorRow?.id ?? randomUUID(),
+          day,
+          trigger,
+          attempt,
+          firedAt: priorRow?.firedAt ?? existing.acceptedAt,
+          clientJobId,
+          generation: 1,
+          sessionId: priorRow?.sessionId ?? existing.sessionId,
+          messageEra: priorRow?.messageEra ?? existing.messageEra ?? this.deps.currentMessageEra(),
+          globalMsgNum: priorRow?.globalMsgNum ?? existing.globalMsgNum ?? this.deps.currentMessageMax() + 1,
+          sections: priorRow?.sections ?? briefSections(this.config, day),
+          jobId: existing.jobId,
+          lastKnownStatus: existing.status,
+        }
+        if (priorRow?.globalMsgNum == null && existing.globalMsgNum == null) {
+          this.log(`adopted job ${existing.jobId} carried no message number; minted #${adopted.globalMsgNum}`)
+        }
+        // Reusing the prior row's id makes replaceRun REPLACE the day's row
+        // rather than push a second one for the same job.
         this.replaceRun(adopted)
-        this.log(`adopted ${trigger} brief for ${day} as job ${existing.jobId}`)
+        this.log(`adopted ${trigger} brief for ${day} as job ${existing.jobId} (${priorRow ? `replacing ledger row ${priorRow.id}` : 'no ledger row'})`)
         return adopted
       }
     }
@@ -272,6 +316,9 @@ export class MorningBriefScheduler {
         activityToolMode: 'status',
         attachmentIds: [],
         attachmentRefs: [],
+        // The label every surface renders as ROUTINE. Outside the fingerprint,
+        // so a run admitted on 6.43.3 still adopts here by identity.
+        origin: { kind: 'routine', id: 'morning-brief' },
       })
       const accepted: MorningBriefRun = { ...run, jobId: admission.job.jobId, lastKnownStatus: admission.job.status }
       this.replaceRun(accepted)

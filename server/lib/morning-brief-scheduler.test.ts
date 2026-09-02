@@ -191,6 +191,57 @@ describe('MorningBriefScheduler', () => {
     expect(h.fake.submissions).toHaveLength(0)
   })
 
+  it('adopts an admitted brief on a scheduled fire even when the ledger row still carries the submit error', async () => {
+    // 6.43.4: the adopt runs on EVERY scheduled fire, not only the crash-resume
+    // branch. Attempt 1 threw AFTER the coordinator admitted the job; the retry
+    // must find it by identity, replace the day's row (not push a second), and
+    // never resubmit.
+    h.setNow(SLOT)
+    h.fake.failNext = { code: 'lost_202', message: 'response lost' }
+    const first = await h.scheduler.tick()
+    expect(first).toMatchObject({ fired: true, run: { attempt: 1, submitError: { code: 'lost_202' } } })
+    const held = snapshot('held-after-throw', {
+      clientJobId: scheduledClientJobId('2026-09-01', CHICAGO), sessionId: 'session-1', messageEra: 'era-test', globalMsgNum: 42,
+    })
+    h.fake.jobs.set(held.jobId, held)
+    h.setNow(SLOT + 3 * 60_000)
+    const second = await h.scheduler.tick()
+    expect(second).toMatchObject({ fired: true, run: { attempt: 2, jobId: 'held-after-throw', globalMsgNum: 42 } })
+    expect((second as { run: { submitError?: unknown } }).run.submitError).toBeUndefined()
+    expect(h.fake.submissions).toHaveLength(0)
+    const paths = morningBriefPaths(h.root)
+    const ledger = JSON.parse(readFileSync(paths.runs, 'utf8')) as { runs: Array<{ day: string; trigger: string; jobId?: string }> }
+    expect(ledger.runs.filter(run => run.day === '2026-09-01' && run.trigger === 'scheduled')).toHaveLength(1)
+    expect(ledger.runs[0].jobId).toBe('held-after-throw')
+    expect(h.logs.some(line => line.includes('adopted scheduled brief') && line.includes('replacing ledger row'))).toBe(true)
+  })
+
+  it('looks the store up exactly once per scheduled fire and never for a manual one', async () => {
+    let lookups = 0
+    const local = harness({
+      findByClientGeneration: async () => { lookups++; return undefined },
+    })
+    try {
+      local.setNow(SLOT)
+      const scheduled = await local.scheduler.tick()
+      expect(lookups).toBe(1)
+      // Let the scheduled brief land so "Run now" is not refused as in-progress.
+      local.complete((scheduled as { run: { jobId: string } }).run.jobId, 'landed')
+      local.setNow(SLOT + 10 * 60_000)
+      await local.scheduler.runNow()
+      expect(lookups).toBe(1)
+    } finally {
+      local.scheduler.stop()
+      rmSync(local.root, { recursive: true, force: true })
+    }
+  })
+
+  it('stamps the submit body with the routine origin', async () => {
+    h.setNow(SLOT)
+    await h.scheduler.tick()
+    expect(h.fake.submissions[0]).toMatchObject({ origin: { kind: 'routine', id: 'morning-brief' } })
+  })
+
   it('a failed submission retries two minutes later, then gives up after three attempts', async () => {
     h.setNow(SLOT)
     h.fake.failNext = { code: 'query_job_coordinator_shutting_down', message: 'down' }

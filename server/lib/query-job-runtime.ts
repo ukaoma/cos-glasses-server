@@ -116,6 +116,13 @@ function providerFor(model: ModelPreference): 'claude' | 'codex' | 'cursor' | 'o
  * cache. Journaled request/response text always wins over bridge-written
  * partial rows; validated media refs may be merged because output media can
  * finish immediately before a crash. Exact provenance collapses duplicates. */
+/** The origin label as it travels on the display bus and the message views:
+ * FLATTENED (`origin: 'routine', originId: 'morning-brief'`) so every client
+ * parses one shape, and identical on `start`, `done` and `error`. */
+function originStamp(request: QueryJobRequest): { origin?: 'routine' | 'task'; originId?: string } {
+  return request.origin ? { origin: request.origin.kind, originId: request.origin.id } : {}
+}
+
 async function projectPublicConversationTerminal(
   job: QueryJobSnapshot,
   request: QueryJobRequest,
@@ -148,6 +155,7 @@ async function projectPublicConversationTerminal(
     request.attachmentRefs,
     request.messageEra,
     normalizeModelPreference(request.model),
+    request.origin,
   )
   reconcileExchangeByJobIdentity(
     request.sessionId,
@@ -158,6 +166,7 @@ async function projectPublicConversationTerminal(
     mergeMediaAttachmentRefs(outputAttachments, existingOutputAttachments),
     request.messageEra,
     normalizeModelPreference(request.model),
+    request.origin,
   )
   flushConversationToDisk()
 }
@@ -202,6 +211,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           model,
           sessionId,
           cliSessionId,
+          ...originStamp(request),
           ...metadata,
         } })
       },
@@ -279,6 +289,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
             sessionId: request.sessionId,
             model,
             cliSessionId,
+            ...originStamp(request),
             ...runMetadata,
             ...(attachments.length > 0 ? { attachments } : {}),
           } })
@@ -296,6 +307,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           turnId,
           messageEra: request.messageEra,
           globalMsgNum: request.globalMsgNum,
+          ...originStamp(request),
           error,
         } })
       },

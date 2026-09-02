@@ -37,6 +37,20 @@ export interface Exchange {
    * photos on the user exchange, model-published images on the assistant
    * exchange. Bytes, filesystem paths, and capabilities never persist here. */
   attachments?: MediaAttachmentRef[]
+  /** Who started the job that produced this pair, when it was not the person
+   * on the phone or the glasses: `routine` (the scheduler) or `task` (a
+   * dispatched task). Absent on every human prompt. The phone's own `g2` stamp
+   * never reaches the server; this is the server's half of the label. */
+  origin?: 'routine' | 'task'
+  /** `morning-brief`, or a task's 12-hex id. */
+  originId?: string
+}
+
+/** Structural twin of `QueryJobOrigin` so the conversation store takes no
+ * import from the job module. */
+export interface ExchangeOriginStamp {
+  kind: 'routine' | 'task'
+  id: string
 }
 
 export interface ExchangeJobProvenance {
@@ -528,6 +542,7 @@ export function reconcileExchangeByJobIdentity(
   attachments?: MediaAttachmentRef[],
   messageEra?: string,
   modelPreference?: ModelPreference | null,
+  origin?: ExchangeOriginStamp,
 ): ReconciledExchange {
   if (!validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) {
     throw new Error('conversation: invalid durable job identity')
@@ -572,6 +587,7 @@ export function reconcileExchangeByJobIdentity(
       generation: identity.generation,
       ...(stampedModel ? { modelPreference: stampedModel } : {}),
       ...(validatedAttachments.length > 0 ? { attachments: validatedAttachments } : {}),
+      ...(origin ? { origin: origin.kind, originId: origin.id } : {}),
     }
     session.exchanges.push(exchange)
   } else {
@@ -580,6 +596,9 @@ export function reconcileExchangeByJobIdentity(
     exchange.globalMsgNum = globalMsgNum
     exchange.messageEra = projectedMessageEra
     if (stampedModel) exchange.modelPreference = stampedModel
+    // Guarded like the model: the cursor and ollama bridges reconcile the user
+    // half mid-run WITHOUT an origin, and must not erase the runtime's stamp.
+    if (origin) { exchange.origin = origin.kind; exchange.originId = origin.id }
     if (validatedAttachments.length > 0) exchange.attachments = validatedAttachments
     else delete exchange.attachments
 

@@ -13,6 +13,7 @@ import {
   isTerminalQueryJobStatus,
   normalizeQueryJobError,
   parseQueryJobOutputImageStats,
+  originWasDropped,
   parseQueryJobRequest,
   requestFingerprint,
   sanitizeQueryJobActivity,
@@ -317,6 +318,8 @@ export class QueryJobStore {
       journalFailures: 0,
       interruptedOnBoot: 0,
       evictedHydratedJobs: 0,
+      originDropped: 0,
+      fingerprintMismatches: 0,
       lastErrorCode: null,
       lastSuccessfulWriteAt: null,
       rootFingerprint: createHash('sha256').update(options.root).digest('hex').slice(0, 16),
@@ -436,10 +439,21 @@ export class QueryJobStore {
     if (!hydrated) {
       if (record.type !== 'accepted' || !record.request || record.eventSeq !== 1) return undefined
       let request: QueryJobRequest
+      // Lenient: a record written by another build hydrates with an unknown
+      // origin dropped (and counted) rather than being discarded.
       try { request = parseQueryJobRequest(record.request) } catch { return undefined }
+      if (originWasDropped(record.request, request)) this.health.originDropped++
       const fingerprint = requestFingerprint(request)
-      if (fingerprint !== record.requestFingerprint
-        || request.clientJobId !== record.clientJobId
+      if (fingerprint !== record.requestFingerprint) {
+        // A mismatch DROPS the job from hydration. Say so once, loudly: a
+        // counter in /api/health is read after the history has already gone.
+        if (this.health.fingerprintMismatches === 0) {
+          console.error(`[query-jobs] journal fingerprint mismatch for ${record.jobId}; the job is not hydrated (the running build picks different identity keys than the writer, or the record was edited)`)
+        }
+        this.health.fingerprintMismatches++
+        return undefined
+      }
+      if (request.clientJobId !== record.clientJobId
         || request.generation !== record.generation) return undefined
       const acceptedAt = record.persistedAt
       const retentionUntil = new Date(new Date(acceptedAt).getTime() + this.retentionDays * 86_400_000).toISOString()
@@ -626,7 +640,10 @@ export class QueryJobStore {
 
   async admit(raw: unknown): Promise<QueryJobAdmissionResult> {
     await this.ensureInitialized()
-    const request = parseQueryJobRequest(raw)
+    // Strict: only the server's own scheduler and dispatcher send an origin
+    // object, so a malformed one is a bug and throws (→ 400 at the route).
+    const request = parseQueryJobRequest(raw, { strictOrigin: true })
+    if (originWasDropped(raw, request)) this.health.originDropped++
     const fingerprint = requestFingerprint(request)
     const existingIdentity = this.identitiesByKey.get(identityKey(request.clientJobId, request.generation))
     if (existingIdentity) await this.ensureHydrated(existingIdentity.jobId)

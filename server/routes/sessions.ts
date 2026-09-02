@@ -315,6 +315,8 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
     globalMsgNum?: number
     messageEra?: string
     modelPreference?: string
+    origin?: 'routine' | 'task'
+    originId?: string
     attachments?: MediaAttachmentRef[]
   }> = []
   const liveSessions = getActiveSessions()
@@ -331,6 +333,10 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
           const messageEra = ex.messageEra ?? next.messageEra
           const attachments = turnAttachments(session.id, globalMsgNum, messageEra, activeEra, ex.attachments, next.attachments)
           const modelPreference = resolveExchangePairModel(ex, next, session.modelPreference)
+          // Both halves of a pair are stamped together by the terminal
+          // projection; pick BOTH fields from ONE half so a mid-run insert
+          // (stamped later) can never pair one half's kind with the other's id.
+          const stamped = ex.origin ? ex : next
           liveMessages.push({
             query: ex.content,
             text: next.content,
@@ -341,6 +347,7 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
             ...(globalMsgNum != null ? { no: globalMsgNum, globalMsgNum } : {}),
             ...(messageEra ? { messageEra } : {}),
             ...(modelPreference ? { modelPreference } : {}),
+            ...(stamped.origin ? { origin: stamped.origin, ...(stamped.originId ? { originId: stamped.originId } : {}) } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++

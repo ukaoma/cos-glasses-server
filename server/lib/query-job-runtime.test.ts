@@ -206,6 +206,40 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
+  it('carries a routine origin onto the bus and both projected exchanges', async () => {
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const clientJobId = randomUUID()
+    const admission = await runtime.queryJobCoordinator.submit({
+      clientJobId,
+      generation: 1,
+      query: 'the morning brief',
+      sessionId: 'runtime-session',
+      model: 'codex-frontier',
+      globalMsgNum: 78,
+      attachmentIds: [],
+      attachmentRefs: [],
+      activityToolMode: 'status',
+      origin: { kind: 'routine', id: 'morning-brief' },
+    })
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(admission.job.jobId))
+    const stamp = { origin: 'routine', originId: 'morning-brief' }
+    expect(mocks.emitDisplay).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'start',
+      data: expect.objectContaining({ clientJobId, ...stamp }),
+    }))
+    expect(mocks.emitDisplay).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'done',
+      data: expect.objectContaining({ clientJobId, ...stamp }),
+    }))
+    const stampedCalls = mocks.reconcileExchange.mock.calls.filter(call => call[1]?.clientJobId === clientJobId)
+    expect(stampedCalls).toHaveLength(2)
+    for (const call of stampedCalls) {
+      expect(call[8]).toEqual({ kind: 'routine', id: 'morning-brief' })
+    }
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
   it('defaults omitted Cursor mode to agent on durable jobs', async () => {
     const runtime = await import('./query-job-runtime.js')
     await runtime.initQueryJobRuntime()

@@ -136,6 +136,31 @@ describe('durable query job HTTP contract', () => {
     expect(await conflict.json()).toMatchObject({ error: { code: 'job_identity_conflict' } })
   })
 
+  it('rejects a malformed origin object with 400 invalid_origin and admits a routine origin', async () => {
+    const malformed = await fetch(`${base}/api/query-jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientJobId: randomUUID(), generation: 1, query: 'x', origin: { kind: 'maintenance', id: 'x' } }),
+    })
+    expect(malformed.status).toBe(400)
+    expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_origin' } })
+
+    const routine = await fetch(`${base}/api/query-jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientJobId: randomUUID(), generation: 1, query: 'x', origin: { kind: 'routine', id: 'morning-brief' } }),
+    })
+    expect(routine.status).toBe(202)
+
+    // The phone's local string shape is never an error.
+    const bare = await fetch(`${base}/api/query-jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientJobId: randomUUID(), generation: 1, query: 'x', origin: 'g2' }),
+    })
+    expect(bare.status).toBe(202)
+  })
+
   it('replays named SSE events, closes at terminal, and redacts activity details', async () => {
     const clientJobId = randomUUID()
     const admission = await fetch(`${base}/api/query-jobs`, {

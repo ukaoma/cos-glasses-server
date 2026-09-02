@@ -507,11 +507,11 @@ export function getArchiveChatMessages(
  *  (sessionId, timestamp) instead of bare timestamp (collision-prone). */
 export function getArchiveDayMessages(
   date: string,
-): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; attachments?: MediaAttachmentRef[] }> {
+): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; origin?: 'routine' | 'task'; originId?: string; attachments?: MediaAttachmentRef[] }> {
   const archive = loadArchive(date)
   if (!archive) return []
 
-  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; attachments?: MediaAttachmentRef[] }> = []
+  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; origin?: 'routine' | 'task'; originId?: string; attachments?: MediaAttachmentRef[] }> = []
   for (const chat of archive.chats) {
     for (let i = 0; i < chat.exchanges.length; i++) {
       const ex = chat.exchanges[i]
@@ -522,6 +522,8 @@ export function getArchiveDayMessages(
           const globalMsgNum = ex.globalMsgNum ?? next.globalMsgNum
           const messageEra = ex.messageEra ?? next.messageEra
           const modelPreference = resolveExchangePairModel(ex, next, null)
+          // Same one-half rule as the live view (routes/sessions.ts).
+          const stamped = ex.origin ? ex : next
           messages.push({
             query: ex.content,
             text: next.content,
@@ -531,6 +533,7 @@ export function getArchiveDayMessages(
             ...(globalMsgNum != null ? { no: globalMsgNum, globalMsgNum } : {}),
             ...(messageEra ? { messageEra } : {}),
             ...(modelPreference ? { modelPreference } : {}),
+            ...(stamped.origin ? { origin: stamped.origin, ...(stamped.originId ? { originId: stamped.originId } : {}) } : {}),
             ...(attachments.length > 0 ? { attachments } : {}),
           })
           i++

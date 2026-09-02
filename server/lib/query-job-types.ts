@@ -52,6 +52,33 @@ export interface QueryJobPromptReference {
   response: string
 }
 
+/**
+ * Who STARTED a job, when it was not the person holding the phone or the
+ * glasses. A label, nothing more: the server never infers anything from its
+ * absence (Miles, 2026-09-02). `routine` is the scheduler (`morning-brief`),
+ * `task` is a dispatch of a captured task (the id is the task's 12-hex id).
+ * Human prompts typed on the phone carry no origin; the phone stamps `g2`
+ * locally for prompts spoken on the glasses and never sends it here.
+ */
+export interface QueryJobOrigin {
+  kind: 'routine' | 'task'
+  id: string
+}
+
+/** One alphabet for both kinds: `morning-brief` and a 12-hex task id both fit.
+ * Up to 64 chars — COS Control bounds `originId` to the same length. */
+export const QUERY_JOB_ORIGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+
+export interface ParseQueryJobRequestOptions {
+  /** Admission: a present-but-malformed origin OBJECT is a bug in the caller
+   * (only the server's own scheduler and dispatcher send one) and throws.
+   * Hydration leaves this off: a record written by another build must still
+   * hydrate, with the unknown origin dropped and counted. A bare STRING origin
+   * is dropped on both paths — it is the phone's local `'g2'` shape, never an
+   * error. */
+  strictOrigin?: boolean
+}
+
 /** Immutable, persistence-safe request. Provider-only objects (paths, image
  * bytes, AbortControllers, handoff runtime state) deliberately do not fit. */
 export interface QueryJobRequest {
@@ -72,6 +99,10 @@ export interface QueryJobRequest {
   attachmentIds: string[]
   attachmentRefs: MediaAttachmentRef[]
   activityToolMode: QueryJobActivityMode
+  /** Present only on server-started jobs. NOT part of the request fingerprint
+   * (see `FINGERPRINT_KEYS`), so a rollback to a build that drops it still
+   * hydrates the journal. */
+  origin?: QueryJobOrigin
 }
 
 export interface QueryJobProviderLinkage {
@@ -177,6 +208,13 @@ export interface QueryJobStoreHealth {
   journalFailures: number
   interruptedOnBoot: number
   evictedHydratedJobs: number
+  /** Requests whose `origin` was present but not one this build recognises
+   * (a bare string, or an object of a later build's kind) and was dropped. */
+  originDropped: number
+  /** Journal `accepted` records whose stored fingerprint no longer matches the
+   * running build's `requestFingerprint` — each one is a job that did NOT
+   * hydrate. Zero is the only healthy value. */
+  fingerprintMismatches: number
   lastErrorCode: string | null
   lastSuccessfulWriteAt: string | null
   rootFingerprint: string
@@ -226,7 +264,7 @@ function boundedContent(value: unknown, field: string, max: number, allowEmpty =
 
 /** Parse untrusted admission input into the only request shape allowed in the
  * private journal. Unknown keys are dropped before fingerprinting. */
-export function parseQueryJobRequest(raw: unknown): QueryJobRequest {
+export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequestOptions = {}): QueryJobRequest {
   if (!raw || typeof raw !== 'object') throw new QueryJobValidationError('invalid_request')
   const input = raw as Record<string, unknown>
   const clientJobId = requiredString(input.clientJobId, 'client_job_id', 36).toLowerCase()
@@ -272,6 +310,21 @@ export function parseQueryJobRequest(raw: unknown): QueryJobRequest {
     ? input.activityToolMode
     : 'status'
 
+  // `== null` covers both absent and JSON null, the way `reference` and
+  // `globalMsgNum` are read above. A non-object (the phone's local `'g2'`
+  // string) is silently absent on every path; the store counts the drop.
+  let origin: QueryJobOrigin | undefined
+  if (input.origin != null && typeof input.origin === 'object') {
+    const candidate = input.origin as Record<string, unknown>
+    const kind = candidate.kind
+    const id = candidate.id
+    if ((kind === 'routine' || kind === 'task') && typeof id === 'string' && QUERY_JOB_ORIGIN_ID_RE.test(id)) {
+      origin = { kind, id }
+    } else if (options.strictOrigin) {
+      throw new QueryJobValidationError('invalid_origin')
+    }
+  }
+
   const attachmentIds = parseMediaIdList(input.attachmentIds)
   const attachmentRefs = parseMediaAttachmentRefs(input.attachmentRefs ?? input.attachments)
   if (!query.trim() && attachmentIds.length === 0 && attachmentRefs.length === 0) {
@@ -295,7 +348,17 @@ export function parseQueryJobRequest(raw: unknown): QueryJobRequest {
     attachmentIds,
     attachmentRefs,
     activityToolMode,
+    ...(origin ? { origin } : {}),
   }
+}
+
+/** True when the raw admission/journal input carried an `origin` the parser
+ * did not keep — a bare string, or an object shape this build does not know.
+ * The store counts these; the parser stays pure. */
+export function originWasDropped(raw: unknown, request: QueryJobRequest): boolean {
+  if (!raw || typeof raw !== 'object') return false
+  const rawOrigin = (raw as Record<string, unknown>).origin
+  return rawOrigin != null && request.origin == null
 }
 
 function canonical(value: unknown): unknown {
@@ -305,8 +368,40 @@ function canonical(value: unknown): unknown {
   return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonical(record[key])]))
 }
 
+/**
+ * The request keys that make up a job's IDENTITY — frozen at the sixteen keys
+ * `QueryJobRequest` had before `origin` existed. Provenance and enforcement
+ * keys (`origin`, and any later `trustMode`/`toolAllowlist`) are deliberately
+ * outside it: a build that does not know a key must still hydrate the journal
+ * a newer build wrote, and a rollback must never discard a week of jobs.
+ *
+ * Consequence, stated: two submissions for the same (clientJobId, generation)
+ * that differ only in those excluded keys are the SAME job, and the second
+ * returns the first. Server-started jobs mint one identity per run, so this
+ * never bites them; for phone prompts the excluded keys are never sent.
+ *
+ * Pick contract: an absent key is OMITTED. It is never materialised as
+ * null/''/0/[] — `JSON.stringify` drops undefined but keeps null, so a `?? null`
+ * pick would re-hash every stored request and silently drop the journal.
+ */
+export const FINGERPRINT_KEYS = [
+  'clientJobId', 'generation', 'query', 'sessionId', 'model', 'effort',
+  'cursorExecutionMode', 'messageEra', 'globalMsgNum', 'reference', 'handoffCode',
+  'handoffLatest', 'clientQueueItemId', 'attachmentIds', 'attachmentRefs',
+  'activityToolMode',
+] as const satisfies readonly (keyof QueryJobRequest)[]
+
+function pickFingerprintKeys(request: QueryJobRequest): Record<string, unknown> {
+  const picked: Record<string, unknown> = {}
+  for (const key of FINGERPRINT_KEYS) {
+    const value = request[key]
+    if (value !== undefined) picked[key] = value
+  }
+  return picked
+}
+
 export function requestFingerprint(request: QueryJobRequest): string {
-  return createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex')
+  return createHash('sha256').update(JSON.stringify(canonical(pickFingerprintKeys(request)))).digest('hex')
 }
 
 export function isTerminalQueryJobStatus(status: QueryJobStatus): status is QueryJobTerminalStatus {

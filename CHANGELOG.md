@@ -1,3 +1,33 @@
+## 6.43.4
+
+Every message now says who started it.
+
+- **Server-started jobs carry an origin label.** A durable job request may
+  carry `origin: { kind: 'routine' | 'task', id }`; the scheduled morning
+  brief sends `{ kind: 'routine', id: 'morning-brief' }`. The label lands on
+  both halves of the projected exchange (`origin`, `originId`), on the display
+  bus (`start`, `done`, `error`, flattened to the same two keys), and on the
+  today/all-messages and day-archive views the phone and COS Control read.
+  A prompt typed on the phone carries nothing; the phone's own `G2` stamp
+  never reaches the server. Nothing is inferred from the label's absence.
+- **The request fingerprint is pinned to the sixteen identity keys it always
+  had.** `origin` (and any future provenance or enforcement key) is outside
+  it, so a build that does not know the key still hydrates a journal written
+  by one that does, and a rollback from this version to 6.43.3 keeps every
+  retained job. Stored fingerprints are byte-identical before and after.
+- **Admission is strict about a malformed origin object (400 `invalid_origin`),
+  hydration is lenient** (the unknown origin is dropped and counted). A bare
+  string origin is dropped on both paths. Two new store counters on
+  `/api/health`: `originDropped` and `fingerprintMismatches` — the second is a
+  job that did NOT hydrate, and the first mismatch logs at error level.
+- **The scheduler adopts an admitted brief on every scheduled fire**, not only
+  on the crash-resume branch, and replaces the day's ledger row instead of
+  pushing a second one; "Run now" is serialised with the scheduled tick so
+  the two cannot both admit a brief for the same day.
+- Briefs that ran on 6.43.0–6.43.3 stay unlabeled; badges start with runs
+  from this version. A routine's reply is unlabeled while it is still running
+  and gains the label when it lands.
+
 ## 6.43.3
 
 Managed-server updates no longer hinge on one vendor's meter.
