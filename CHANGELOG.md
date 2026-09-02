@@ -1,3 +1,72 @@
+## 6.43.0
+
+The brief is waiting before you ask for it.
+
+A start-of-day brief now runs on a schedule inside the server and lands in
+the inbox as an ordinary numbered reply — no prompt, no "run the good-morning
+skill", no phone awake at 07:00. Jun Kiat Lee's first-week note said it
+plainly: he deployed COS to his G2 expecting a push at the start of the day and
+nothing came, because until now the only thing that could start a brief was a
+person typing. The server is the one process awake at that hour, so it owns
+the schedule.
+
+What you get, by default: weekdays at 07:00 in the Mac's own timezone, four
+sections any COS brain can fill — Calendar, From recent meetings (decisions,
+deadlines, owed items), Due (tasks inside a seven-day horizon), and Waiting on
+you (unanswered mentions and asks across whatever channels the brain can
+read). Everything else in the catalog — Knowledge graph, Reflection, Health,
+an Opening reading, a Metrics pulse, a workspace skill, a custom section — is
+off until you turn it on. The brief is composed from the sources you choose,
+in the order you choose, with the windows you choose, so it is yours rather
+than a template with your name on it.
+
+How it works, so the cost is legible:
+
+- One durable query job per local calendar day, submitted to the same
+  coordinator every phone prompt uses. It survives the phone being asleep and
+  is projected into the conversation store with a reserved message number when
+  it completes, so the companion's history hydration surfaces it like any
+  reply.
+- The fire is remembered in a ledger written BEFORE admission. A crash between
+  that write and the 202 is resumed by a per-day client identity, never re-run.
+  A failed admission (store degraded, server draining) retries at most three
+  times, two minutes apart, then gives the day up.
+- A Mac asleep through the slot still fires inside a catch-up window (three
+  hours by default, up to twelve). Past that, the day is skipped rather than
+  delivered at lunch.
+- "Run now" is capped at five a day and refused while a brief is live.
+- The whole thing is inert when COS Control's "Background jobs" switch is off
+  or maintenance admissions are closed. The prompt is read-only by contract:
+  it forbids sending, creating, or editing anything.
+
+The prompt itself carries the evidence discipline the good-morning routine
+learned the hard way: a source that cannot be read produces one honest
+"unavailable" line; nothing is invented; only items with a hard edge (a
+decision, a date, a dollar figure, an owner) make the cut; the scribe's
+extracted action-item list is never pasted verbatim. Enable the "Workspace
+skill" source with `/good-morning` and that skill's output IS the brief —
+which is how Miles's own routine rides this without being rewritten.
+
+Surface:
+
+- `GET /api/morning-brief` — config, the source catalog (labels, descriptions,
+  option schemas a settings screen can render), status with `nextRunAt`, and
+  recent runs with live job status and the message number each produced.
+- `PUT /api/morning-brief` — patch any field; a bad time, zone, model, or
+  skill name is a 400 with a named code, never a silent keep.
+- `POST /api/morning-brief/run` — fire one now (202; 409 while one runs; 429
+  past the daily cap).
+- `GET /api/morning-brief/preview` — the exact prompt today's brief would send.
+- `/api/health` advertises `features.morningBrief` and
+  `capabilities.morningBrief` (`enabled`, `time`, `timezone`, `nextRunAt`,
+  `lastRunAt`, `lastRunStatus`, `gate`) — times and gate only, no prompt, no
+  ids.
+
+Config lives at `~/.cos-glasses/data/morning-brief/config.json` (0600), the
+ledger beside it. `COS_MORNING_BRIEF_DIR` relocates both. Schedule arithmetic
+uses Node's Intl in the configured IANA zone, and is covered across both US DST
+transitions and a zone east of UTC.
+
 ## 6.42.1
 
 Hardening of the 6.42.0 display-stream ticket, from a four-validator QA pass

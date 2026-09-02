@@ -83,6 +83,8 @@ import { initializeServerInstanceId } from './lib/server-instance-id.js'
 import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-user-config.js'
 import { getTranscriptionProfileStatus } from './lib/profile.js'
 import { createQueryJobsRouter } from './routes/query-jobs.js'
+import { createMorningBriefRouter } from './routes/morning-brief.js'
+import { getMorningBriefScheduler, startMorningBriefScheduler, stopMorningBriefScheduler } from './lib/morning-brief-runtime.js'
 import {
   initQueryJobRuntime,
   preparePublicDurableQueryAdmission,
@@ -488,6 +490,9 @@ app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
 app.use('/api', queryRouter)
+// The scheduled start-of-day brief: settings, status, run-now. Same auth as
+// every other settings route; the brief itself is an ordinary durable job.
+app.use('/api', createMorningBriefRouter(getMorningBriefScheduler))
 app.use('/api', providerProofRouter)
 app.use('/api', transcribeRouter)
 // Ported from cos-glasses-app in 6.24.0. The companion's Sessions tab has been
@@ -713,6 +718,7 @@ async function gracefulShutdown(): Promise<void> {
   gracefulShutdownStarted = true
   const forceExit = setTimeout(() => process.exit(1), 8_000)
   forceExit.unref?.()
+  stopMorningBriefScheduler()
   try {
     await shutdownQueryJobRuntime('server_shutdown')
   } catch (error) {
@@ -909,6 +915,10 @@ listenRequiredServers(listeners).then(() => {
       } else {
         console.log('[COS API] Durable query jobs: disabled by COS_DURABLE_QUERY_JOBS=0')
       }
+      // The morning brief rides the durable coordinator, so it starts only once
+      // that store is ready. Its own tick checks the durable-jobs switch and the
+      // maintenance gate, so starting it here is safe when either is off.
+      startMorningBriefScheduler()
     }).catch(error => {
       // The store remains degraded and rejects admission. Legacy /api/query is
       // still mounted, so the kill switch is an immediate rollback.

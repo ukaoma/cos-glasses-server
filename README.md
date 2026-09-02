@@ -208,6 +208,29 @@ Telegram activity export is disabled by default even when a private COS
 pipeline contains `.telegram_config.json`; enable it only with the explicit
 `COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
 
+## Morning brief (6.43.0)
+
+A start-of-day brief runs on a schedule inside the server and waits in the
+inbox as a numbered reply. Default: weekdays at 07:00 in the Mac's timezone,
+with Calendar, recent-meeting decisions, tasks due this week, and what is
+waiting on you. Turn on more sources (knowledge graph, reflection, health, an
+opening reading, a metrics pulse, one of your own skills such as
+`/good-morning`, a custom section), reorder them, and set their windows from
+COS Control or the companion, or directly:
+
+```bash
+curl -H "X-COS-Token: $COS_TOKEN" http://127.0.0.1:3141/api/morning-brief
+curl -H "X-COS-Token: $COS_TOKEN" -X PUT -H 'Content-Type: application/json' \
+  -d '{"time":"06:30","sources":[{"id":"skill","enabled":true,"options":{"name":"/good-morning"}}]}' \
+  http://127.0.0.1:3141/api/morning-brief
+curl -H "X-COS-Token: $COS_TOKEN" -X POST http://127.0.0.1:3141/api/morning-brief/run
+```
+
+One provider run per local day, remembered in a ledger so a restart never
+doubles it; a Mac asleep at the slot still fires inside a three-hour catch-up
+window; "Run now" is capped at five a day. Off entirely when Background jobs
+are off. The brief is read-only by contract.
+
 ## Speaker diarization (opt-in)
 
 Without a voiceprint model this server does not classify speakers at all — it
