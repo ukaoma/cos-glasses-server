@@ -126,7 +126,8 @@ export function resolveFromArchiveDir(
  *  global numbers (the archive-lib read path strips globalMsgNum; the browser
  *  needs it so "reference message N" is self-evident from the screen). Same
  *  user->next-assistant pairing as the lib; the pair's number is the user
- *  turn's stamp (falling back to the assistant's). Dir-param form for tests. */
+ *  turn's stamp (falling back to the assistant's). Dir-param form for tests.
+ *  Deliberately no origin label here (6.43.4): the day view carries it. */
 export function readArchiveChatNumbered(
   dir: string,
   date: string,

@@ -173,6 +173,14 @@ function loadFromDisk(): void {
         if (refs.length > 0) exchange.attachments = refs
         else delete exchange.attachments
       }
+      // Same boundary for the origin label (6.43.4): only the two kinds this
+      // build renders survive a load, and an id never survives without its kind.
+      if (exchange.origin !== 'routine' && exchange.origin !== 'task') {
+        delete exchange.origin
+        delete exchange.originId
+      } else if (typeof exchange.originId !== 'string' || !exchange.originId) {
+        delete exchange.originId
+      }
     }
     sessions.set(id, session)
     loaded++

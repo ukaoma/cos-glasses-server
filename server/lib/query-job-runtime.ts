@@ -112,17 +112,18 @@ function providerFor(model: ModelPreference): 'claude' | 'codex' | 'cursor' | 'o
   return isCodexModel(model) ? 'codex' : 'claude'
 }
 
+/** The origin label as it travels on the display bus and the message views:
+ * FLATTENED (`origin: 'routine', originId: 'morning-brief'`) so every client
+ * parses one shape, and identical on `start`, `done` and `error`. Spread LAST
+ * into each event so no provider metadata key can overwrite it. */
+function originStamp(request: QueryJobRequest): { origin?: NonNullable<QueryJobRequest['origin']>['kind']; originId?: string } {
+  return request.origin ? { origin: request.origin.kind, originId: request.origin.id } : {}
+}
+
 /** Project the authoritative terminal journal into the derived conversation
  * cache. Journaled request/response text always wins over bridge-written
  * partial rows; validated media refs may be merged because output media can
  * finish immediately before a crash. Exact provenance collapses duplicates. */
-/** The origin label as it travels on the display bus and the message views:
- * FLATTENED (`origin: 'routine', originId: 'morning-brief'`) so every client
- * parses one shape, and identical on `start`, `done` and `error`. */
-function originStamp(request: QueryJobRequest): { origin?: 'routine' | 'task'; originId?: string } {
-  return request.origin ? { origin: request.origin.kind, originId: request.origin.id } : {}
-}
-
 async function projectPublicConversationTerminal(
   job: QueryJobSnapshot,
   request: QueryJobRequest,
@@ -211,8 +212,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           model,
           sessionId,
           cliSessionId,
-          ...originStamp(request),
           ...metadata,
+          ...originStamp(request),
         } })
       },
       onProviderProcess: metadata => callbacks.onProviderProcess({
@@ -289,9 +290,9 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
             sessionId: request.sessionId,
             model,
             cliSessionId,
-            ...originStamp(request),
             ...runMetadata,
             ...(attachments.length > 0 ? { attachments } : {}),
+            ...originStamp(request),
           } })
         } finally {
           attachmentLease?.release()

@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  FINGERPRINT_EXCLUDED,
   FINGERPRINT_KEYS,
+  FINGERPRINT_KEYS_COVER_REQUEST,
   QUERY_JOB_ORIGIN_ID_RE,
   QueryJobValidationError,
   originWasDropped,
@@ -20,6 +22,21 @@ const minimal = {
   generation: 1,
   query: 'hello',
   sessionId: 'session-origin',
+}
+
+const full16 = {
+  model: 'opus',
+  effort: 'high',
+  cursorExecutionMode: 'ask',
+  messageEra: 'era1',
+  globalMsgNum: 78,
+  reference: { query: 'earlier q', response: 'earlier a' },
+  handoffCode: 'ABCD',
+  handoffLatest: true,
+  clientQueueItemId: 'q1',
+  attachmentIds: [],
+  attachmentRefs: [],
+  activityToolMode: 'status',
 }
 
 const full = {
@@ -73,23 +90,35 @@ describe('origin on the durable request', () => {
     expect(QUERY_JOB_ORIGIN_ID_RE.test(`${sixtyFour}a`)).toBe(false)
   })
 
-  it('throws on a malformed origin object only at admission, and drops it at hydration', () => {
+  it('throws on a known kind with a bad id only at admission, and drops it at hydration', () => {
     const malformed = [
-      { kind: 'maintenance', id: 'x' },
       { kind: 'routine' },
       { kind: 'routine', id: 'Has Upper' },
       { kind: 'task', id: '' },
+      { kind: 'task', id: 'a'.repeat(65) },
     ]
     for (const origin of malformed) {
       expect(() => parseQueryJobRequest({ ...minimal, origin }, { strictOrigin: true }))
         .toThrow(QueryJobValidationError)
       expect(parseQueryJobRequest({ ...minimal, origin }).origin).toBeUndefined()
     }
+    let code: string | undefined
     try {
-      parseQueryJobRequest({ ...minimal, origin: { kind: 'maintenance', id: 'x' } }, { strictOrigin: true })
+      parseQueryJobRequest({ ...minimal, origin: { kind: 'routine' } }, { strictOrigin: true })
     } catch (error) {
-      expect((error as QueryJobValidationError).code).toBe('invalid_origin')
+      code = (error as QueryJobValidationError).code
     }
+    expect(code).toBe('invalid_origin')
+  })
+
+  it('never throws on an unknown kind, even at admission: it is dropped and reported', () => {
+    // The public job route parses with strictOrigin. A newer client's kind
+    // must degrade to unlabeled, never 400 every prompt it sends.
+    const raw = { ...minimal, origin: { kind: 'maintenance', id: 'x' } }
+    const strict = parseQueryJobRequest(raw, { strictOrigin: true })
+    expect(strict.origin).toBeUndefined()
+    expect(originWasDropped(raw, strict)).toBe(true)
+    expect(parseQueryJobRequest(raw).origin).toBeUndefined()
   })
 
   it('reports a dropped origin so the store can count it', () => {
@@ -111,6 +140,10 @@ describe('the fingerprint pick', () => {
       'activityToolMode',
     ])
     expect(FINGERPRINT_KEYS).not.toContain('origin')
+    // Every request key is in exactly one list; the type-level assertion is
+    // what fails a build when a key is added without picking a side.
+    expect([...FINGERPRINT_EXCLUDED]).toEqual(['origin'])
+    expect(FINGERPRINT_KEYS_COVER_REQUEST).toBe(true)
   })
 
   it('is byte-identical to the whole-request hash for a minimal (7-key) request', () => {
@@ -135,8 +168,9 @@ describe('the fingerprint pick', () => {
     expect(legacyFingerprint(plain)).toBe(requestFingerprint(stamped))
   })
 
-  it('omits absent keys rather than materialising them (the null-pick mutation)', () => {
-    // A pick written as `?? null` would make the minimal request hash differ
+  it('never materialises an absent optional as null (a null would change the legacy hash)', () => {
+    // The parser's conditional spreads are what keep an absent key absent; a
+    // pick written as `?? null` would make the minimal request hash differ
     // from its legacy hash. Prove the property directly on the minimal shape.
     const parsed = parseQueryJobRequest(minimal)
     const withNulls = { ...parsed, model: null, effort: null, reference: null } as unknown as QueryJobRequest
@@ -178,11 +212,100 @@ describe('journal hydration with an origin', () => {
     expect(store.getHealth().originDropped).toBe(1)
   })
 
-  it('rejects a malformed origin object at admission with invalid_origin', async () => {
+  it('rejects a known kind with a bad id at admission with invalid_origin', async () => {
     root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
     const store = new QueryJobStore({ root, bootId: randomUUID() })
     await store.init()
-    await expect(store.admit({ ...minimal, clientJobId: randomUUID(), origin: { kind: 'maintenance', id: 'x' } }))
+    await expect(store.admit({ ...minimal, clientJobId: randomUUID(), origin: { kind: 'routine', id: 'Has Upper' } }))
       .rejects.toMatchObject({ code: 'invalid_origin' })
+  })
+
+  it('admits an unknown kind, dropped and counted once per job created (not per retry)', async () => {
+    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    const store = new QueryJobStore({ root, bootId: randomUUID() })
+    await store.init()
+    const clientJobId = randomUUID()
+    const first = await store.admit({ ...minimal, clientJobId, origin: { kind: 'maintenance', id: 'x' } })
+    expect(first.created).toBe(true)
+    // The durable-client retry: same identity, same body. Not a second drop.
+    const retry = await store.admit({ ...minimal, clientJobId, origin: { kind: 'maintenance', id: 'x' } })
+    expect(retry.created).toBe(false)
+    expect(store.getHealth().originDropped).toBe(1)
+  })
+
+  /** The journal partition(s) under a store root, as parsed records. */
+  function readJournal(storeRoot: string): Array<{ file: string; lines: Array<Record<string, unknown>> }> {
+    return readdirSync(storeRoot).filter(name => name.endsWith('.jsonl')).map(file => ({
+      file,
+      lines: readFileSync(join(storeRoot, file), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>),
+    }))
+  }
+  function rewriteAccepted(storeRoot: string, mutate: (record: Record<string, unknown>) => void): void {
+    for (const { file, lines } of readJournal(storeRoot)) {
+      for (const record of lines) if (record.type === 'accepted') mutate(record)
+      writeFileSync(join(storeRoot, file), lines.map(line => JSON.stringify(line)).join('\n') + '\n')
+    }
+  }
+
+  it('does not hydrate a record whose stored fingerprint disagrees, and counts it', async () => {
+    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    const first = new QueryJobStore({ root, bootId: randomUUID() })
+    await first.init()
+    const admitted = await first.admit({ ...minimal, clientJobId: randomUUID() })
+    rewriteAccepted(root, record => { record.requestFingerprint = 'f'.repeat(64) })
+    const second = new QueryJobStore({ root, bootId: randomUUID() })
+    const health = await second.init()
+    expect(health.fingerprintMismatches).toBe(1)
+    expect(health.hydratedJobs).toBe(0)
+    await expect(second.getExecution(admitted.job.jobId)).rejects.toMatchObject({ code: 'query_job_not_found' })
+  })
+
+  it('hydrates a record carrying a kind this build does not know, dropped and counted exactly once across an eviction replay', async () => {
+    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    const writer = new QueryJobStore({ root, bootId: randomUUID() })
+    await writer.init()
+    const admitted = await writer.admit({ ...minimal, clientJobId: randomUUID() })
+    rewriteAccepted(root, record => {
+      (record.request as Record<string, unknown>).origin = { kind: 'maintenance', id: 'x' }
+    })
+    // One hydrated-job slot: admitting a second job evicts the first, and the
+    // next read replays its record through applyRecord a second time.
+    const reader = new QueryJobStore({ root, bootId: randomUUID(), maxHydratedJobs: 1 })
+    const health = await reader.init()
+    expect(health.originDropped).toBe(1)
+    expect(health.fingerprintMismatches).toBe(0)
+    await reader.admit({ ...minimal, clientJobId: randomUUID(), sessionId: 'session-other' })
+    const execution = await reader.getExecution(admitted.job.jobId)
+    expect(execution.request.origin).toBeUndefined()
+    expect(reader.getHealth().originDropped).toBe(1)
+  })
+
+  it('hydrates a journal actually written by 6.43.3, with matching fingerprints (the fixture, not an oracle)', async () => {
+    // server/lib/__fixtures__/query-jobs-6.43.3/ was produced by the 6.43.3
+    // QueryJobStore (git archive e7fc47f~1) admitting a full 16-key request and
+    // a minimal one, with the clock pinned to 2099 so retention never expires
+    // it. A test that hydrates real bytes cannot be repaired by editing an
+    // oracle; only by keeping the fingerprint byte-compatible.
+    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    const fixtureDir = new URL('./__fixtures__/query-jobs-6.43.3/', import.meta.url)
+    const files = readdirSync(fixtureDir).filter(name => name.endsWith('.jsonl'))
+    expect(files.length).toBeGreaterThan(0)
+    for (const file of files) copyFileSync(new URL(file, fixtureDir), join(root, file))
+    const store = new QueryJobStore({ root, bootId: randomUUID(), now: () => new Date('2099-01-01T13:00:00Z') })
+    const health = await store.init()
+    expect(health.hydratedJobs).toBe(2)
+    expect(health.fingerprintMismatches).toBe(0)
+    expect(health.originDropped).toBe(0)
+    expect(health.malformedRows).toBe(0)
+    const full = await store.admit({
+      ...full16,
+      clientJobId: '11111111-1111-4111-8111-111111111111',
+      generation: 2,
+      query: 'written by 6.43.3',
+      sessionId: 'session-6-43-3',
+    })
+    // Same identity, same sixteen keys: the 6.43.3 job is returned, not conflicted.
+    expect(full.created).toBe(false)
+    expect(full.job.clientJobId).toBe('11111111-1111-4111-8111-111111111111')
   })
 })

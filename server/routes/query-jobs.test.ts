@@ -136,14 +136,23 @@ describe('durable query job HTTP contract', () => {
     expect(await conflict.json()).toMatchObject({ error: { code: 'job_identity_conflict' } })
   })
 
-  it('rejects a malformed origin object with 400 invalid_origin and admits a routine origin', async () => {
+  it('rejects a known kind with a bad id (400 invalid_origin), admits a routine origin, and never refuses an unknown kind', async () => {
     const malformed = await fetch(`${base}/api/query-jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientJobId: randomUUID(), generation: 1, query: 'x', origin: { kind: 'routine', id: 'Has Upper' } }),
+    })
+    expect(malformed.status).toBe(400)
+    expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_origin' } })
+
+    // A kind this build does not know is a label it cannot render, not a
+    // reason to refuse the job: a newer client must not have every prompt 400'd.
+    const unknownKind = await fetch(`${base}/api/query-jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientJobId: randomUUID(), generation: 1, query: 'x', origin: { kind: 'maintenance', id: 'x' } }),
     })
-    expect(malformed.status).toBe(400)
-    expect(await malformed.json()).toMatchObject({ error: { code: 'invalid_origin' } })
+    expect(unknownKind.status).toBe(202)
 
     const routine = await fetch(`${base}/api/query-jobs`, {
       method: 'POST',

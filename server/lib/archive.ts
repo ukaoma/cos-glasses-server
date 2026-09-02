@@ -472,7 +472,8 @@ export function getArchiveChats(date: string): ArchiveChatSummary[] {
 }
 
 /** Get paired Q&A messages for a specific chat within a day. Request refs on
- * the user turn and model-output refs on the assistant turn surface together. */
+ * the user turn and model-output refs on the assistant turn surface together.
+ * Deliberately no origin label here (6.43.4): the day view carries it. */
 export function getArchiveChatMessages(
   date: string,
   chatIndex: number,

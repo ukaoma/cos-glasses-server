@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { morningBriefPaths, MORNING_BRIEF_LIMITS } from './morning-brief-config.js'
 import {
+  MORNING_BRIEF_ROUTINE_ID,
   MorningBriefRunError,
   MorningBriefScheduler,
   scheduledClientJobId,
@@ -239,7 +240,48 @@ describe('MorningBriefScheduler', () => {
   it('stamps the submit body with the routine origin', async () => {
     h.setNow(SLOT)
     await h.scheduler.tick()
-    expect(h.fake.submissions[0]).toMatchObject({ origin: { kind: 'routine', id: 'morning-brief' } })
+    expect(MORNING_BRIEF_ROUTINE_ID).toBe('morning-brief')
+    expect(h.fake.submissions[0]).toMatchObject({ origin: { kind: 'routine', id: MORNING_BRIEF_ROUTINE_ID } })
+  })
+
+  it('queues "Run now" behind an in-flight scheduled tick: one admission, one ledger row', async () => {
+    // 6.43.4 [W2]: runNowInner's check-then-act used to run concurrently with
+    // fire(). With the submit held open, an unserialised runNow would reach
+    // the coordinator while the tick's submission is still pending.
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let calls = 0
+    const local = harness({
+      submit: async (request): Promise<MorningBriefSubmission> => {
+        calls++
+        await gate
+        const job = snapshot(randomUUID(), request)
+        local.fake.jobs.set(job.jobId, job)
+        local.fake.submissions.push(request)
+        return { job, created: true }
+      },
+    })
+    try {
+      local.setNow(SLOT)
+      const tick = local.scheduler.tick()
+      const manual = local.scheduler.runNow()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      // Only the tick has reached the coordinator; the manual run is waiting.
+      expect(calls).toBe(1)
+      release()
+      const [tickResult, manualResult] = await Promise.allSettled([tick, manual])
+      expect(tickResult.status).toBe('fulfilled')
+      // The manual run ran after the tick and was refused: that day's brief is live.
+      expect(manualResult.status).toBe('rejected')
+      expect((manualResult as PromiseRejectedResult).reason).toBeInstanceOf(MorningBriefRunError)
+      expect(local.fake.submissions).toHaveLength(1)
+      const ledger = JSON.parse(readFileSync(morningBriefPaths(local.root).runs, 'utf8')) as { runs: Array<{ trigger: string }> }
+      expect(ledger.runs).toHaveLength(1)
+      expect(ledger.runs[0].trigger).toBe('scheduled')
+    } finally {
+      local.scheduler.stop()
+      rmSync(local.root, { recursive: true, force: true })
+    }
   })
 
   it('a failed submission retries two minutes later, then gives up after three attempts', async () => {

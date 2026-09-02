@@ -240,6 +240,44 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
+  it('carries the origin onto the error event too, spread after provider metadata', async () => {
+    mocks.callModelStreaming.mockImplementationOnce(async (
+      _query: string,
+      sessionId: string,
+      callbacks: Record<string, (...args: any[]) => unknown>,
+    ) => {
+      await callbacks.onStart?.('codex-frontier', sessionId, undefined, {})
+      await callbacks.onError?.('provider exploded')
+    })
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const clientJobId = randomUUID()
+    const admission = await runtime.queryJobCoordinator.submit({
+      clientJobId,
+      generation: 1,
+      query: 'the morning brief',
+      sessionId: 'runtime-session',
+      model: 'codex-frontier',
+      globalMsgNum: 79,
+      attachmentIds: [],
+      attachmentRefs: [],
+      activityToolMode: 'status',
+      origin: { kind: 'task', id: 'a3f19c0b2d4e' },
+    })
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      const snapshot = await runtime.queryJobCoordinator.getSnapshot(admission.job.jobId)
+      if (snapshot.status === 'failed') break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect((await runtime.queryJobCoordinator.getSnapshot(admission.job.jobId)).status).toBe('failed')
+    expect(mocks.emitDisplay).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      data: expect.objectContaining({ clientJobId, origin: 'task', originId: 'a3f19c0b2d4e' }),
+    }))
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
   it('defaults omitted Cursor mode to agent on durable jobs', async () => {
     const runtime = await import('./query-job-runtime.js')
     await runtime.initQueryJobRuntime()

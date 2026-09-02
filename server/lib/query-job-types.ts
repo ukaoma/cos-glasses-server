@@ -57,8 +57,9 @@ export interface QueryJobPromptReference {
  * glasses. A label, nothing more: the server never infers anything from its
  * absence (Miles, 2026-09-02). `routine` is the scheduler (`morning-brief`),
  * `task` is a dispatch of a captured task (the id is the task's 12-hex id).
- * Human prompts typed on the phone carry no origin; the phone stamps `g2`
- * locally for prompts spoken on the glasses and never sends it here.
+ * Human prompts typed on the phone carry no origin. The phone stamps `g2`
+ * locally for prompts spoken on the glasses, as a bare string; if that string
+ * ever reaches this route it is dropped and counted, never rejected.
  */
 export interface QueryJobOrigin {
   kind: 'routine' | 'task'
@@ -66,7 +67,8 @@ export interface QueryJobOrigin {
 }
 
 /** One alphabet for both kinds: `morning-brief` and a 12-hex task id both fit.
- * Up to 64 chars — COS Control bounds `originId` to the same length. */
+ * Up to 64 chars is this server's own bound (a routine slug, a 12-hex task id
+ * and a bare sha256 all fit); COS Control 0.5.185 mirrors it in its allowlist. */
 export const QUERY_JOB_ORIGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 export interface ParseQueryJobRequestOptions {
@@ -318,11 +320,19 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     const candidate = input.origin as Record<string, unknown>
     const kind = candidate.kind
     const id = candidate.id
-    if ((kind === 'routine' || kind === 'task') && typeof id === 'string' && QUERY_JOB_ORIGIN_ID_RE.test(id)) {
-      origin = { kind, id }
-    } else if (options.strictOrigin) {
-      throw new QueryJobValidationError('invalid_origin')
+    if (kind === 'routine' || kind === 'task') {
+      if (typeof id === 'string' && QUERY_JOB_ORIGIN_ID_RE.test(id)) {
+        origin = { kind, id }
+      } else if (options.strictOrigin) {
+        // A kind this build knows with an id it cannot accept is a bug in the
+        // caller that stamped it (the scheduler, the dispatcher): loud.
+        throw new QueryJobValidationError('invalid_origin')
+      }
     }
+    // A kind this build does NOT know is a label it cannot render, never a
+    // reason to refuse the job: the public job route reaches this parser with
+    // strictOrigin, so an unknown kind must degrade to unlabeled (and be
+    // counted by the store), or a newer client would have every prompt 400'd.
   }
 
   const attachmentIds = parseMediaIdList(input.attachmentIds)
@@ -377,12 +387,17 @@ function canonical(value: unknown): unknown {
  *
  * Consequence, stated: two submissions for the same (clientJobId, generation)
  * that differ only in those excluded keys are the SAME job, and the second
- * returns the first. Server-started jobs mint one identity per run, so this
- * never bites them; for phone prompts the excluded keys are never sent.
+ * returns the first. The scheduled brief reuses one identity per DAY across
+ * its three attempts, and its excluded keys never differ between attempts; a
+ * genuine resubmit differs in `globalMsgNum`, which IS in the fingerprint, so
+ * it conflicts rather than silently adopting. Phone prompts never send an
+ * excluded key.
  *
- * Pick contract: an absent key is OMITTED. It is never materialised as
- * null/''/0/[] — `JSON.stringify` drops undefined but keeps null, so a `?? null`
- * pick would re-hash every stored request and silently drop the journal.
+ * Pick contract: an absent key stays absent. The parser never materialises an
+ * optional as null/''/0/[] (every optional is a conditional spread in its
+ * return literal), and `JSON.stringify` drops an undefined value, so the pick
+ * needs no guard of its own. A `?? null` pick WOULD re-hash every stored
+ * request and silently drop the journal; the test pins that property.
  */
 export const FINGERPRINT_KEYS = [
   'clientJobId', 'generation', 'query', 'sessionId', 'model', 'effort',
@@ -391,12 +406,16 @@ export const FINGERPRINT_KEYS = [
   'activityToolMode',
 ] as const satisfies readonly (keyof QueryJobRequest)[]
 
+/** The request keys deliberately OUTSIDE the identity. Every key of
+ * `QueryJobRequest` must appear in exactly one of the two lists: adding a key
+ * without naming it here or above fails to compile, so the author picks a side. */
+export const FINGERPRINT_EXCLUDED = ['origin'] as const satisfies readonly (keyof QueryJobRequest)[]
+type FingerprintUncovered = Exclude<keyof QueryJobRequest, typeof FINGERPRINT_KEYS[number] | typeof FINGERPRINT_EXCLUDED[number]>
+export const FINGERPRINT_KEYS_COVER_REQUEST: FingerprintUncovered extends never ? true : never = true
+
 function pickFingerprintKeys(request: QueryJobRequest): Record<string, unknown> {
   const picked: Record<string, unknown> = {}
-  for (const key of FINGERPRINT_KEYS) {
-    const value = request[key]
-    if (value !== undefined) picked[key] = value
-  }
+  for (const key of FINGERPRINT_KEYS) picked[key] = request[key]
   return picked
 }
 

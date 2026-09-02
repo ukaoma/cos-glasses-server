@@ -108,6 +108,9 @@ export type TickResult =
 
 /** Deterministic v4-shaped client id for one local day, so a retry after a
  * crashed submission admits as the SAME job. The store dedupes on it. */
+/** The routine id every surface renders as ROUTINE for the morning brief. */
+export const MORNING_BRIEF_ROUTINE_ID = 'morning-brief'
+
 export function scheduledClientJobId(day: string, timezone: string): string {
   const digest = createHash('sha256').update(`morning-brief|${timezone}|${day}`).digest()
   const bytes = Buffer.from(digest.subarray(0, 16))
@@ -154,7 +157,11 @@ export class MorningBriefScheduler {
   start(): void {
     if (this.timer) return
     const tickMs = Math.max(1_000, this.deps.tickMs ?? 30_000)
-    this.timer = setInterval(() => { void this.tick() }, tickMs)
+    // A rejected tick must never become an unhandled rejection (Node exits on
+    // one by default): log it and let the next interval try again.
+    this.timer = setInterval(() => {
+      this.tick().catch(error => this.log(`tick failed: ${error instanceof Error ? error.message : String(error)}`))
+    }, tickMs)
     this.timer.unref?.()
     this.log(`scheduled ${this.config.enabled ? `daily at ${this.config.time} ${this.config.timezone}` : 'off'} · next ${nextScheduledFire(this.config, this.now()) ?? 'none'}`)
   }
@@ -318,7 +325,7 @@ export class MorningBriefScheduler {
         attachmentRefs: [],
         // The label every surface renders as ROUTINE. Outside the fingerprint,
         // so a run admitted on 6.43.3 still adopts here by identity.
-        origin: { kind: 'routine', id: 'morning-brief' },
+        origin: { kind: 'routine', id: MORNING_BRIEF_ROUTINE_ID },
       })
       const accepted: MorningBriefRun = { ...run, jobId: admission.job.jobId, lastKnownStatus: admission.job.status }
       this.replaceRun(accepted)

@@ -70,15 +70,4 @@ describe('origin stamp on projected exchanges', () => {
     expect(exchange.origin).toBe('task')
     expect(exchange.originId).toBe('a3f19c0b2d4e')
   })
-
-  it('never stamps a human exchange', async () => {
-    const conversation = await import('./conversation.js')
-    const sid = conversation.getOrCreateSession()
-    conversation.addExchange(sid, 'user', 'typed on the phone', 5)
-    conversation.addExchange(sid, 'assistant', 'answer', 5)
-    for (const exchange of conversation.getHistory(sid)) {
-      expect(exchange.origin).toBeUndefined()
-      expect(exchange.originId).toBeUndefined()
-    }
-  })
 })

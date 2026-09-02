@@ -79,7 +79,9 @@ sessionsRouter.post('/sessions/:id/context-break', (req, res) => {
   res.json({ ok: true })
 })
 
-// GET /api/sessions/:id/messages — client-compatible format (paired Q&A)
+// GET /api/sessions/:id/messages — client-compatible format (paired Q&A).
+// Deliberately carries no origin/originId (6.43.4): this is the legacy paired
+// shape. The labelled views are today/all-messages and the day archive.
 sessionsRouter.get('/sessions/:id/messages', (req, res) => {
   const exchanges = getHistory(req.params.id)
   if (exchanges.length === 0) {

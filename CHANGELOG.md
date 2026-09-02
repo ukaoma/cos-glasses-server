@@ -15,15 +15,24 @@ Every message now says who started it.
   it, so a build that does not know the key still hydrates a journal written
   by one that does, and a rollback from this version to 6.43.3 keeps every
   retained job. Stored fingerprints are byte-identical before and after.
-- **Admission is strict about a malformed origin object (400 `invalid_origin`),
-  hydration is lenient** (the unknown origin is dropped and counted). A bare
-  string origin is dropped on both paths. Two new store counters on
-  `/api/health`: `originDropped` and `fingerprintMismatches` — the second is a
-  job that did NOT hydrate, and the first mismatch logs at error level.
+- **Admission is strict only about a known kind with a bad id (400
+  `invalid_origin`).** An unknown kind, and the phone's bare-string stamp, are
+  dropped and counted on both paths, so a newer client's label degrades to
+  unlabeled and never refuses the job; hydration is lenient throughout. Two new
+  store counters on `/api/health`: `originDropped` (once per job created, once
+  per journal record hydrated) and `fingerprintMismatches` — the second is a
+  job that did NOT hydrate, and the first mismatch logs at error level. No
+  client reads either yet; `/api/health` is where a human sees them.
+- **The label is validated at every boundary it crosses.** The conversation
+  store drops an unknown kind (and an orphan id) when it loads from disk, and
+  the bus stamp is spread after provider metadata so no provider key can
+  overwrite it. A real 6.43.3-written journal is committed as a fixture and
+  hydrated by the suite, in addition to the in-process hash oracle.
 - **The scheduler adopts an admitted brief on every scheduled fire**, not only
-  on the crash-resume branch, and replaces the day's ledger row instead of
-  pushing a second one; "Run now" is serialised with the scheduled tick so
-  the two cannot both admit a brief for the same day.
+  on the crash-resume branch, and replaces the last of the day's scheduled
+  ledger rows instead of pushing another; "Run now" and the scheduled tick
+  are serialised, so two overlapping admissions can no longer interleave. A
+  manual and a scheduled brief on the same day remain two briefs, by design.
 - Briefs that ran on 6.43.0–6.43.3 stay unlabeled; badges start with runs
   from this version. A routine's reply is unlabeled while it is still running
   and gains the label when it lands.

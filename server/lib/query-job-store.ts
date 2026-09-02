@@ -442,7 +442,11 @@ export class QueryJobStore {
       // Lenient: a record written by another build hydrates with an unknown
       // origin dropped (and counted) rather than being discarded.
       try { request = parseQueryJobRequest(record.request) } catch { return undefined }
-      if (originWasDropped(record.request, request)) this.health.originDropped++
+      // Counted once per job: ensureHydrated replays this same record after an
+      // LRU eviction, and by then the identity is already registered below.
+      // (The mismatch counter needs no such guard: a mismatch returns before
+      // the identity is registered, so a replay can never reach it.)
+      if (!this.identitiesByJobId.has(record.jobId) && originWasDropped(record.request, request)) this.health.originDropped++
       const fingerprint = requestFingerprint(request)
       if (fingerprint !== record.requestFingerprint) {
         // A mismatch DROPS the job from hydration. Say so once, loudly: a
@@ -640,10 +644,13 @@ export class QueryJobStore {
 
   async admit(raw: unknown): Promise<QueryJobAdmissionResult> {
     await this.ensureInitialized()
-    // Strict: only the server's own scheduler and dispatcher send an origin
-    // object, so a malformed one is a bug and throws (→ 400 at the route).
+    // Strict only where strictness is safe on the public route: a KNOWN kind
+    // with an id this server cannot accept is a bug in the scheduler or the
+    // dispatcher that stamped it and throws (→ 400). An unknown kind, or the
+    // phone's bare-string stamp, is dropped and counted below — once per job
+    // created, never per retry of the same identity.
     const request = parseQueryJobRequest(raw, { strictOrigin: true })
-    if (originWasDropped(raw, request)) this.health.originDropped++
+    const originDropped = originWasDropped(raw, request)
     const fingerprint = requestFingerprint(request)
     const existingIdentity = this.identitiesByKey.get(identityKey(request.clientJobId, request.generation))
     if (existingIdentity) await this.ensureHydrated(existingIdentity.jobId)
@@ -680,6 +687,7 @@ export class QueryJobStore {
       const highestGeneration = lineage.reduce((max, item) => Math.max(max, item.generation), 0)
       if (request.generation <= highestGeneration) throw new QueryJobGenerationOrderError(request.clientJobId)
 
+      if (originDropped) this.health.originDropped++
       const now = this.now().toISOString()
       const jobId = randomUUID()
       const turnId = randomUUID()
