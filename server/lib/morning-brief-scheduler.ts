@@ -36,6 +36,14 @@ import {
   serverTimezone,
 } from './morning-brief-config.js'
 import { composeMorningBriefPrompt } from './morning-brief-prompt.js'
+import {
+  briefSections,
+  sectionOutcomes,
+  type MorningBriefCoverage,
+  type MorningBriefCoverageService,
+  type MorningBriefSectionOutcome,
+} from './morning-brief-coverage.js'
+import type { MessageReservation } from './message-reservations.js'
 import { decideScheduledFire, localClock, nextScheduledFire } from './morning-brief-schedule.js'
 import type { QueryJobSnapshot } from './query-job-types.js'
 import { isTerminalQueryJobStatus } from './query-job-types.js'
@@ -57,6 +65,8 @@ export interface MorningBriefSchedulerDeps {
   ownerName: () => string
   durableJobsEnabled: () => boolean
   admissionsOpen: () => boolean
+  /** Per-source reach (counts behind each source). Absent on a bare harness. */
+  coverage?: MorningBriefCoverageService
   now?: () => number
   tickMs?: number
   log?: (line: string) => void
@@ -69,12 +79,14 @@ export class MorningBriefRunError extends Error {
   }
 }
 
-export interface MorningBriefRunView extends MorningBriefRun {
+export interface MorningBriefRunView extends Omit<MorningBriefRun, 'sections'> {
   status: string
   completedAt?: string
   error?: { code: string; message: string }
   /** First ~120 chars of the answer, for a list row. Never the whole brief. */
   preview?: string
+  /** Which asked-for sections the answer opened, once the run is terminal. */
+  sections?: MorningBriefSectionOutcome[]
 }
 
 export interface MorningBriefStatus {
@@ -241,6 +253,7 @@ export class MorningBriefScheduler {
       sessionId,
       messageEra,
       globalMsgNum,
+      sections: resume?.sections ?? briefSections(this.config, day),
     }
     // Ledger first. A crash after this line is a resume, not a second brief.
     this.replaceRun(run)
@@ -291,21 +304,26 @@ export class MorningBriefScheduler {
     const rows = this.ledger.runs.slice(-Math.max(1, Math.min(limit, MORNING_BRIEF_LIMITS.retainedRuns))).reverse()
     const views: MorningBriefRunView[] = []
     for (const run of rows) {
+      const pending = run.sections?.length ? run.sections.map(section => ({ ...section, state: 'pending' as const })) : undefined
       if (!run.jobId) {
-        views.push({ ...run, status: run.submitError ? 'submit_failed' : 'submitting', ...(run.submitError ? { error: run.submitError } : {}) })
+        views.push({ ...run, sections: pending, status: run.submitError ? 'submit_failed' : 'submitting', ...(run.submitError ? { error: run.submitError } : {}) })
         continue
       }
       const snapshot = await this.deps.getSnapshot(run.jobId).catch(() => undefined)
       if (!snapshot) {
-        views.push({ ...run, status: run.lastKnownStatus ?? 'unknown' })
+        views.push({ ...run, sections: pending, status: run.lastKnownStatus ?? 'unknown' })
         continue
       }
       if (snapshot.status !== run.lastKnownStatus && isTerminalQueryJobStatus(snapshot.status)) {
         this.replaceRun({ ...run, lastKnownStatus: snapshot.status })
       }
       const answer = snapshot.response ?? snapshot.partialText ?? ''
+      const sections = run.sections?.length && snapshot.status === 'completed'
+        ? sectionOutcomes(run.sections, snapshot.response ?? '')
+        : pending
       views.push({
         ...run,
+        sections,
         status: snapshot.status,
         ...(snapshot.completedAt ? { completedAt: snapshot.completedAt } : {}),
         ...(snapshot.error ? { error: { code: snapshot.error.code, message: snapshot.error.message } } : {}),
@@ -313,6 +331,39 @@ export class MorningBriefScheduler {
       })
     }
     return views
+  }
+
+  /** Per-source reach for the settings surfaces. `null` when the harness has
+   * no probes. `force` re-runs the probes instead of serving the cache. */
+  async coverage(force = false): Promise<MorningBriefCoverage | null> {
+    if (!this.deps.coverage) return null
+    try {
+      return await this.deps.coverage.describe(this.config, force)
+    } catch (error) {
+      this.log(`coverage failed: ${(error as Error).message}`)
+      return null
+    }
+  }
+
+  /**
+   * Numbers this scheduler has minted for runs that are not terminal yet: the
+   * ledger row exists BEFORE the job does, and the job's own reservation
+   * (query-job-store identities) ends the moment its terminal projection
+   * writes the exchange. Bounded to a day so a crashed row cannot pin the
+   * counter forever; the resume path reuses the same number anyway.
+   */
+  liveReservations(era: string): MessageReservation[] {
+    const floor = this.now() - 24 * 60 * 60_000
+    const out: MessageReservation[] = []
+    for (const run of this.ledger.runs) {
+      if (typeof run.globalMsgNum !== 'number' || run.submitError) continue
+      if (run.lastKnownStatus && isTerminalQueryJobStatus(run.lastKnownStatus as never)) continue
+      const fired = Date.parse(run.firedAt)
+      if (!Number.isFinite(fired) || fired < floor) continue
+      if (era !== run.messageEra) continue
+      out.push({ globalMsgNum: run.globalMsgNum, messageEra: run.messageEra, owner: `brief:${run.day}` })
+    }
+    return out
   }
 
   async status(): Promise<MorningBriefStatus> {

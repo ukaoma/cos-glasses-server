@@ -81,4 +81,38 @@ describe('message-ref era scoping', () => {
     expect(res.status).toBe(400)
     expect(res.body.code).toBe('confirmation_required')
   })
+
+  it('GET /message-counter counts numbers held by not-yet-projected jobs (6.43.1)', async () => {
+    writeFileSync(join(dir, 'archive', '2026-09-01.json'), JSON.stringify({
+      date: '2026-09-01',
+      chats: [{ id: 1, sessionId: 's', exchanges: [
+        { role: 'user', content: 'q', globalMsgNum: 73, messageEra: 'era-x' },
+        { role: 'assistant', content: 'a', globalMsgNum: 73, messageEra: 'era-x' },
+      ] }],
+    }))
+    const era = await import('../lib/message-era.js')
+    vi.spyOn(era, 'currentMessageEra').mockReturnValue('era-x')
+    const reservations = await import('../lib/message-reservations.js')
+    reservations.resetMessageReservationSourcesForTests()
+    const unregister = reservations.registerMessageReservationSource(() => [{ globalMsgNum: 74, messageEra: 'era-x', owner: 'brief:2026-09-01' }])
+    const express = (await import('express')).default
+    const { messageRefRouter } = await import('./message-ref.js')
+    const app = express()
+    app.use('/api', messageRefRouter)
+    try {
+      const body = await new Promise<{ max: number; era: string }>((resolve, reject) => {
+        const http = app.listen(0, '127.0.0.1', async () => {
+          try {
+            const addr = http.address()
+            const port = typeof addr === 'object' && addr ? addr.port : 0
+            resolve(await fetch(`http://127.0.0.1:${port}/api/message-counter`).then(r => r.json()) as { max: number; era: string })
+          } catch (err) { reject(err) } finally { http.close() }
+        })
+      })
+      expect(body).toEqual({ max: 74, era: 'era-x' })
+    } finally {
+      unregister()
+      vi.restoreAllMocks()
+    }
+  })
 })

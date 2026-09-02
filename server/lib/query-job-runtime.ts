@@ -33,6 +33,7 @@ import {
   type QueryJobSnapshot,
 } from './query-job-types.js'
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
+import { registerMessageReservationSource } from './message-reservations.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -337,6 +338,14 @@ export const queryJobCoordinator = new QueryJobCoordinator(queryJobStore, runner
   acquireSessionLock: acquireModelSessionRunLock,
   acquireMaintenanceWork: () => acquireMaintenanceWork('durable_query', { phase: 'queued' }),
 })
+
+// A job's number is a live reservation from admission until its terminal
+// projection; the counter must see it or the phone mints it again.
+registerMessageReservationSource(() => queryJobCoordinator.liveMessageReservations().map(item => ({
+  globalMsgNum: item.globalMsgNum,
+  ...(item.messageEra ? { messageEra: item.messageEra } : {}),
+  owner: `job:${item.jobId}`,
+})))
 
 export function initQueryJobRuntime() {
   if (!durableQueryJobsEnabled()) return Promise.resolve(queryJobCoordinator.getHealth())

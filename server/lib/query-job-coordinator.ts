@@ -596,6 +596,12 @@ export class QueryJobCoordinator {
     }
   }
 
+  /** Message numbers held by admitted, not-yet-terminal jobs (see
+   * lib/message-reservations.ts). Sync: read straight off the store's identities. */
+  liveMessageReservations(): Array<{ jobId: string; sessionId: string; messageEra?: string; globalMsgNum: number }> {
+    return this.store.listLiveMessageReservations()
+  }
+
   getHealth(): QueryJobCoordinatorHealth {
     return {
       activeRuns: this.active.size,

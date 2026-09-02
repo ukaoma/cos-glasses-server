@@ -69,6 +69,11 @@ interface QueryJobIdentity {
   status: QueryJobStatus
   updatedAt: string
   orphanFenceUntil?: string
+  /** The number and era the client minted for this job, carried on the
+   * always-in-memory identity so a live reservation can be enumerated without
+   * hydrating the journal. See lib/message-reservations.ts. */
+  messageEra?: string
+  globalMsgNum?: number
 }
 
 export interface QueryJobMutationResult {
@@ -541,6 +546,8 @@ export class QueryJobStore {
       status: record.status,
       updatedAt: record.persistedAt,
       ...(snapshot.orphanFenceUntil ? { orphanFenceUntil: snapshot.orphanFenceUntil } : {}),
+      ...(typeof hydrated.request.messageEra === 'string' ? { messageEra: hydrated.request.messageEra } : {}),
+      ...(typeof hydrated.request.globalMsgNum === 'number' ? { globalMsgNum: hydrated.request.globalMsgNum } : {}),
     }
     this.identitiesByJobId.set(identity.jobId, identity)
     this.identitiesByKey.set(identityKey(identity.clientJobId, identity.generation), identity)
@@ -1014,6 +1021,27 @@ export class QueryJobStore {
       } catch (error) {
         if (!(error instanceof QueryJobNotFoundError)) throw error
       }
+    }
+    return out
+  }
+
+  /**
+   * Numbers held by jobs that are admitted but not yet terminal. Synchronous
+   * and in-memory on purpose: /api/message-counter answers on every phone
+   * send, and identities are never evicted (only hydrated bodies are).
+   * Before init the map is empty, so the answer is an honest nothing.
+   */
+  listLiveMessageReservations(): Array<{ jobId: string; sessionId: string; messageEra?: string; globalMsgNum: number }> {
+    const out: Array<{ jobId: string; sessionId: string; messageEra?: string; globalMsgNum: number }> = []
+    for (const identity of this.identitiesByJobId.values()) {
+      if (isTerminalQueryJobStatus(identity.status)) continue
+      if (typeof identity.globalMsgNum !== 'number') continue
+      out.push({
+        jobId: identity.jobId,
+        sessionId: identity.sessionId,
+        ...(identity.messageEra ? { messageEra: identity.messageEra } : {}),
+        globalMsgNum: identity.globalMsgNum,
+      })
     }
     return out
   }

@@ -231,6 +231,13 @@ doubles it; a Mac asleep at the slot still fires inside a three-hour catch-up
 window; "Run now" is capped at five a day. Off entirely when Background jobs
 are off. The brief is read-only by contract.
 
+Since 6.43.1 the same `GET /api/morning-brief` response carries `coverage`,
+one row per source saying what the server can see behind it (meetings stored,
+memories and threads, whether the named skill exists) and every run reports
+which sections the answer actually opened. Numbers reserved by a running
+brief count toward `/api/message-counter`, so the phone never mints the same
+`#NNN` twice.
+
 ## Speaker diarization (opt-in)
 
 Without a voiceprint model this server does not classify speakers at all — it

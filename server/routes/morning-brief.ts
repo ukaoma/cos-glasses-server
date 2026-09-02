@@ -3,7 +3,8 @@
 //   GET  /api/morning-brief          config + source catalog + status + recent runs
 //   PUT  /api/morning-brief          patch the config (validated; 400 on a bad field)
 //   POST /api/morning-brief/run      fire a brief now (202; 409 while one runs; 429 past the daily cap)
-//   GET  /api/morning-brief/runs     recent runs with live job status and message numbers
+//   GET  /api/morning-brief/runs     recent runs with live job status, message numbers, section outcomes
+//   GET  /api/morning-brief/coverage what each source can reach right now (?refresh=1 re-probes)
 //   GET  /api/morning-brief/preview  the exact prompt today's brief would send
 //
 // Authenticated by the global /api middleware like every other settings route.
@@ -24,6 +25,7 @@ export function createMorningBriefRouter(scheduler: () => MorningBriefScheduler)
       sources: describeMorningBriefSources(),
       status: await instance.status(),
       runs: await instance.listRuns(7),
+      coverage: await instance.coverage(),
     }
   }
 
@@ -69,6 +71,18 @@ export function createMorningBriefRouter(scheduler: () => MorningBriefScheduler)
     } catch (error) {
       console.error('[morning-brief] runs failed:', error)
       res.status(500).json({ error: { code: 'morning_brief_unavailable', message: 'Could not read the morning brief runs.' } })
+    }
+  })
+
+  router.get('/morning-brief/coverage', async (req, res) => {
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true'
+    try {
+      const coverage = await scheduler().coverage(refresh)
+      if (!coverage) return res.status(503).json({ error: { code: 'coverage_unavailable', message: 'This server has no coverage probes.' } })
+      res.json({ coverage })
+    } catch (error) {
+      console.error('[morning-brief] coverage failed:', error)
+      res.status(500).json({ error: { code: 'coverage_failed', message: 'Could not read source coverage.' } })
     }
   })
 

@@ -506,6 +506,8 @@ export interface MorningBriefRun {
   submitError?: { code: string; message: string }
   /** Terminal state copied from the job when last observed. */
   lastKnownStatus?: string
+  /** The sections this run was asked for, in order, from the config at fire time. */
+  sections?: Array<{ id: MorningBriefSourceId; label: string }>
 }
 
 export interface MorningBriefLedger {

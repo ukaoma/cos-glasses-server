@@ -312,3 +312,73 @@ describe('MorningBriefScheduler', () => {
     }
   })
 })
+
+describe('MorningBriefScheduler sections, outcomes, and reservations (6.43.1)', () => {
+  it('stores the asked-for sections on the ledger row and reads the outcome back once the job completes', async () => {
+    h.setNow(SLOT + 1_000)
+    const tick = await h.scheduler.tick()
+    expect(tick.fired).toBe(true)
+    const run = (tick as { run: { id: string; jobId?: string; sections?: Array<{ id: string; label: string }> } }).run
+    expect(run.sections?.map(s => s.id)).toEqual(['calendar', 'meetings', 'tasks', 'waiting'])
+    const onDisk = JSON.parse(readFileSync(morningBriefPaths(h.root).runs, 'utf8')) as { runs: Array<{ sections?: unknown[] }> }
+    expect(onDisk.runs[0].sections).toHaveLength(4)
+
+    let [view] = await h.scheduler.listRuns(1)
+    expect(view.sections?.every(s => s.state === 'pending')).toBe(true)
+
+    h.complete(run.jobId!, 'CALENDAR\n9:00 Standup\nFROM RECENT MEETINGS\nBudget decided\nDUE\nInvoice Friday\nWaiting on you: unavailable (no Slack)\nOrder your energy: ship.')
+    ;[view] = await h.scheduler.listRuns(1)
+    expect(view.sections?.map(s => `${s.id}:${s.state}`)).toEqual([
+      'calendar:present', 'meetings:present', 'tasks:present', 'waiting:unavailable',
+    ])
+  })
+
+  it('holds the reserved number from the ledger write until the job is terminal', async () => {
+    h.setNow(SLOT + 1_000)
+    expect(h.scheduler.liveReservations('era-test')).toEqual([])
+    const tick = await h.scheduler.tick()
+    const run = (tick as { run: { jobId?: string; globalMsgNum?: number } }).run
+    expect(run.globalMsgNum).toBe(42)
+    expect(h.scheduler.liveReservations('era-test')).toEqual([{ globalMsgNum: 42, messageEra: 'era-test', owner: 'brief:2026-09-01' }])
+    expect(h.scheduler.liveReservations('era-other')).toEqual([])
+
+    h.complete(run.jobId!, 'CALENDAR\nnothing')
+    await h.scheduler.listRuns(1) // observes the terminal status and records it
+    expect(h.scheduler.liveReservations('era-test')).toEqual([])
+  })
+
+  it('drops a reservation older than a day, and one whose submit failed', async () => {
+    h.fake.failNext = { code: 'boom', message: 'no' }
+    h.setNow(SLOT + 1_000)
+    await h.scheduler.tick()
+    expect(h.scheduler.liveReservations('era-test')).toEqual([])
+    h.setNow(SLOT + 2 * 60_000 + 1_000)
+    const tick = await h.scheduler.tick()
+    expect(tick.fired).toBe(true)
+    expect(h.scheduler.liveReservations('era-test').map(r => r.globalMsgNum)).toEqual([42])
+    h.setNow(SLOT + 25 * 60 * 60_000)
+    expect(h.scheduler.liveReservations('era-test')).toEqual([])
+  })
+
+  it('answers coverage as null without probes and delegates to the service with the live config', async () => {
+    expect(await h.scheduler.coverage()).toBeNull()
+    const { MorningBriefCoverageService } = await import('./morning-brief-coverage.js')
+    const seen: string[] = []
+    const withProbes = harness({
+      coverage: new MorningBriefCoverageService({
+        meetings: () => ({ count: 7, newestMonth: '2026-09', layout: 'direct' }),
+        skill: name => { seen.push(name); return { found: true, where: '.claude/skills' } },
+      }),
+    })
+    try {
+      withProbes.scheduler.updateConfig({ sources: [{ id: 'skill', enabled: true, options: { name: '/good-morning' } }] })
+      const coverage = await withProbes.scheduler.coverage()
+      expect(coverage?.sources.find(s => s.id === 'meetings')).toMatchObject({ state: 'ready', counts: { stored: 7 } })
+      expect(coverage?.sources.find(s => s.id === 'skill')).toMatchObject({ state: 'ready' })
+      expect(seen).toEqual(['/good-morning'])
+    } finally {
+      withProbes.scheduler.stop()
+      rmSync(withProbes.root, { recursive: true, force: true })
+    }
+  })
+})

@@ -1,3 +1,37 @@
+## 6.43.1
+
+Two things the first night of the morning brief taught us, plus the depth
+behind each source.
+
+- **A running brief no longer collides with your next message.** The brief
+  reserved #74 at 22:18 and was still running when the phone minted #74 for
+  the next prompt at 22:25, because `/api/message-counter` only counted
+  exchanges that had already been projected. Numbers held by admitted,
+  not-yet-terminal durable jobs (and by the brief's own ledger row, which
+  exists before the job does) now count toward the ceiling. New
+  `lib/message-reservations.ts` registry; the job store keeps the number on
+  its always-in-memory identity so the answer is synchronous and survives a
+  restart.
+- **Sources show what is behind them.** `GET /api/morning-brief` now carries
+  `coverage`: one row per source with a state (`ready`, `empty`,
+  `unavailable`, `runtime`) and a summary line such as "2,312 meetings
+  stored, newest Sep 2026", "6,705 memories · 66 threads (12 active)", or
+  "/good-morning found under .claude/skills". Same wells COS Control's
+  Activity tiles read (meeting library, context status, the pipeline bridge
+  for calendar and tasks, the reflection log). Probes are cached for five
+  minutes and bounded to eight seconds each; a source the server cannot see
+  (Slack, health, dashboards) says so as `runtime` instead of showing a dash.
+  `GET /api/morning-brief/coverage?refresh=1` re-probes on demand.
+- **Each run records what it was asked for and what came back.** The ledger
+  row stores the sections the brief was composed with, and once the job
+  completes the run view reports each as `present`, `unavailable` (the
+  prompt's "<Section>: unavailable" line), `skipped` (silent-skip sections
+  with nothing behind them), or `missing`. A skill section is present unless
+  the answer says the skill was not found.
+
+No config migration: existing `config.json` and `runs.json` files load as
+they are; older run rows simply have no section outcome.
+
 ## 6.43.0
 
 The brief is waiting before you ask for it.

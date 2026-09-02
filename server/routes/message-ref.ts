@@ -26,6 +26,7 @@ import {
   exchangeBelongsToEra,
 } from '../lib/message-era.js'
 import { MessageEraResetError, resetLiveMessageEra } from '../lib/message-era-reset.js'
+import { maxReservedGlobalMsgNum } from '../lib/message-reservations.js'
 
 // v6.3.0 — read archives from the SAME persistent location the archive-mirror
 // writes to (~/.cos-glasses/data/archive via dataPath), not a package-relative
@@ -248,5 +249,9 @@ messageRefRouter.get('/message-counter', (_req, res) => {
       if (typeof ex?.globalMsgNum === 'number' && ex.globalMsgNum > liveMax) liveMax = ex.globalMsgNum
     }
   }
-  res.json({ max: Math.max(liveMax, maxGlobalMsgNumInDir(ARCHIVE_DIR, era)), era })
+  // 6.43.1 — numbers minted for jobs that are admitted but not yet projected
+  // (a running morning brief, a desk session's durable job) are part of the
+  // ceiling. Without them the phone re-minted #74 on 2026-09-01.
+  const reservedMax = maxReservedGlobalMsgNum(era)
+  res.json({ max: Math.max(liveMax, maxGlobalMsgNumInDir(ARCHIVE_DIR, era), reservedMax), era })
 })

@@ -9,6 +9,7 @@ import { morningBriefPaths } from '../lib/morning-brief-config.js'
 import { MorningBriefScheduler } from '../lib/morning-brief-scheduler.js'
 import type { QueryJobSnapshot } from '../lib/query-job-types.js'
 import { createMorningBriefRouter } from './morning-brief.js'
+import { MorningBriefCoverageService } from '../lib/morning-brief-coverage.js'
 
 let root = ''
 let server: Server
@@ -58,6 +59,10 @@ beforeAll(async () => {
     ownerName: () => 'Jun',
     durableJobsEnabled: () => true,
     admissionsOpen: () => true,
+    coverage: new MorningBriefCoverageService({
+      meetings: () => ({ count: 2312, newestMonth: '2026-09', layout: 'multi_domain' }),
+      skill: name => ({ found: name.replace(/^\//, '') === 'good-morning', where: '.claude/skills' }),
+    }, { now: () => now }),
     now: () => now,
     log: () => {},
   })
@@ -148,5 +153,32 @@ describe('POST /api/morning-brief/run', () => {
     // Nothing on this surface carries the prompt text.
     const everything = JSON.stringify(await (await fetch(`${base}/api/morning-brief`)).json())
     expect(everything).not.toContain('Morning brief for Jun')
+  })
+})
+
+describe('coverage (6.43.1)', () => {
+  it('GET /morning-brief carries per-source coverage, and PUT reflects a renamed skill without re-probing', async () => {
+    const before = await fetch(`${base}/api/morning-brief`).then(r => r.json()) as any
+    expect(before.coverage.ttlMs).toBeGreaterThan(0)
+    const meetings = before.coverage.sources.find((s: any) => s.id === 'meetings')
+    expect(meetings).toMatchObject({ state: 'ready', summary: '2,312 meetings stored, newest Sep 2026.' })
+    expect(before.coverage.sources.map((s: any) => s.id)).toEqual(before.config.sources.map((s: any) => s.id))
+
+    const put = await fetch(`${base}/api/morning-brief`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources: [{ id: 'skill', enabled: true, options: { name: '/good-morning' } }] }),
+    })
+    expect(put.status).toBe(200)
+    const after = await put.json() as any
+    expect(after.coverage.sources.find((s: any) => s.id === 'skill')).toMatchObject({ state: 'ready', summary: '/good-morning found under .claude/skills.' })
+    for (const row of after.coverage.sources) expect(JSON.stringify(row)).not.toMatch(/\/Users|tmp/)
+  })
+
+  it('GET /morning-brief/coverage answers on its own and honours refresh=1', async () => {
+    const res = await fetch(`${base}/api/morning-brief/coverage?refresh=1`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as any
+    expect(body.coverage.sources.length).toBeGreaterThan(0)
   })
 })
