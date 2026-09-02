@@ -11,7 +11,7 @@ import {
   type DisplayEvent,
   type PublishedDisplayEvent,
 } from '../lib/display-bus.js'
-import { type DisplayTicketVerdict, explainDisplayTicket, verifyDisplayTicket } from '../lib/display-ticket.js'
+import { type DisplayTicketVerdict, explainDisplayTicket } from '../lib/display-ticket.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 
 export const displayRouter = Router()
@@ -234,9 +234,11 @@ function serveDisplayStream(req: Request, res: Response, authorized: boolean): v
   // Gap detection is needed for every subscriber; MATERIALISING the up-to-200
   // event buffer is only needed for one we will actually write it to. A stale
   // ticketless install retrying every 3s was filtering the whole buffer each
-  // time and discarding it.
+  // time and discarding it — and so was every authorized `probe=1` connect,
+  // whose write is skipped below. The term here must match that `else if`.
+  const materialize = authorized && req.query.probe !== '1'
   const replay = replayDisplayEvents(
-    cursorBootId, Number.isFinite(cursorEventId) ? cursorEventId : 0, { materialize: authorized },
+    cursorBootId, Number.isFinite(cursorEventId) ? cursorEventId : 0, { materialize },
   )
   if (replay.gap) {
     // Ticketless-VISIBLE on purpose. The payload is transport metadata only —

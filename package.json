@@ -40,7 +40,8 @@
     ".cos-profile.example.json",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "author": "COS Contributors",
   "license": "MIT",
@@ -49,6 +50,7 @@
     "url": "git+https://github.com/ukaoma/cos-glasses-server.git"
   },
   "homepage": "https://www.gotcos.com",
+  "bugs": { "url": "https://github.com/ukaoma/cos-glasses-server/issues" },
   "publishConfig": {
     "access": "public"
   },

@@ -55,3 +55,11 @@ describe('package manifest', () => {
     expect(first?.[1]).toBe(pkg.version)
   })
 })
+
+describe('package.json ships the security surface', () => {
+  it('lists SECURITY.md in files and names a bugs URL', () => {
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { files?: string[]; bugs?: { url?: string } }
+    expect(pkg.files).toContain('SECURITY.md')
+    expect(pkg.bugs?.url).toMatch(/github\.com\/ukaoma\/cos-glasses-server\/issues/)
+  })
+})

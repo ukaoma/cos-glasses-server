@@ -33,6 +33,17 @@ wire contract; every 6.42.0 client keeps working unchanged.
   union, so a twelfth event type is a compile error rather than a silent gap; a
   projection that throws is proven not to reach the emitter; the probe is proven
   to receive no replay; every verdict is exercised.
+- **The probe no longer BUILDS the replay buffer either.** The first cut of this
+  release skipped only the write for `?probe=1`; `materialize` was still keyed
+  on authorization, so an authorized probe filtered up to 200 events and dropped
+  them. One term, matched to the write guard, closes it.
+- **Two guards gained the tests that prove them.** A mutation run during
+  `/validate-plan` (2026-09-01) found the `Object.hasOwn` allowlist guard and
+  the per-reason counter both survived mutation with the suite green.
+  `display-ticketless.test.ts` now emits prototype-keyed event types
+  (`constructor`, `toString`, …) and asserts exact per-reason counts.
+- `SECURITY.md` and a `bugs` field. Two security releases in a row, and there
+  was nowhere to report the next one.
 
 ## 6.42.0
 

@@ -391,10 +391,49 @@ describe('the rejection log names WHY a ticket was refused', () => {
     await touch(`${base}/api/display-stream`)
     const line = warn.mock.calls.map(c => String(c[0])).find(l => l.includes('ticketless subscriber'))
     expect(line).toBeDefined()
-    // The first connect flushes the line, so counts reflect only it; the others
-    // are held for the next interval. What matters is the SHAPE of the line.
-    expect(line).toMatch(/\d+ expired, \d+ bad-signature, \d+ malformed; \d+ bare/)
+    // The first connect flushes the line, so its counts reflect only that connect:
+    // ONE expired ticket. Exact numbers, not \d+ — a counter that never
+    // incremented matched the shape and stayed green (mutation M5, 2026-09-01).
+    expect(line).toContain('(1 with a rejected ticket: 1 expired, 0 bad-signature, 0 malformed; 0 bare)')
   })
+
+  it.each([
+    { label: 'bad-signature', path: () => `/api/display-stream/${mintDisplayTicket('some-other-token', Date.now())}`,
+      expected: '(1 with a rejected ticket: 0 expired, 1 bad-signature, 0 malformed; 0 bare)' },
+    { label: 'bare', path: () => '/api/display-stream',
+      expected: '(0 with a rejected ticket: 0 expired, 0 bad-signature, 0 malformed; 1 bare)' },
+  ])('attributes a $label connect to its own bucket', async ({ path, expected }) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const base = await startServer()
+    await touch(`${base}${path()}`)
+    const line = warn.mock.calls.map(c => String(c[0])).find(l => l.includes('ticketless subscriber'))
+    expect(line).toContain(expected)
+  })
+})
+
+describe('the allowlist is keyed by OWN property, never by prototype', () => {
+  useDisplayStreamHarness()
+
+  // An object literal inherits Object.prototype, so a bare
+  // `TICKETLESS_PROJECTIONS[type]` resolves 'constructor' to `Object` — a
+  // function — and would call it as the projection, passing the event through
+  // whole. Unreachable through the typed union today, which is exactly why the
+  // guard was mutation-green without this test (M2, 2026-09-01): nothing ever
+  // exercised it. `constructor` and `toString` are the cases that pass through
+  // under a bare index; `__proto__` and `hasOwnProperty` throw and are caught.
+  // Only the first two pin the hasOwn guard; the last two document that the
+  // throw is caught (mutation-verified 2026-09-01) — trim the right ones.
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'withholds an event typed %s from a ticketless subscriber', async (type) => {
+      const base = await startServer()
+      const body = await collect(`${base}/api/display-stream`, () => {
+        expect(() => emitDisplay({ type, data: { text: 'PROTO_CANARY' } } as unknown as DisplayEvent)).not.toThrow()
+      })
+      expect(body).toContain('event: ready')
+      expect(body).not.toContain(`event: ${type}`)
+      expect(body).not.toContain('PROTO_CANARY')
+    },
+  )
 })
 
 describe('a projection that throws cannot reach the emitter', () => {
