@@ -1,4 +1,4 @@
-## 6.43.2
+## 6.43.3
 
 Managed-server updates no longer hinge on one vendor's meter.
 
@@ -13,17 +13,25 @@ Managed-server updates no longer hinge on one vendor's meter.
   `provider_bad_answer`, or `provider_failed`. The `error` sentence is one
   fixed phrase per code; vendor text never leaves the server. COS Control
   0.5.184 uses the code to treat a quota as a skip when another provider
-  proves.
+  proves (on 6.43.2 and older it classifies the error sentence instead).
 - **Cursor is a proof provider.** `{"provider":"cursor"}` runs the Cursor
   `agent` in documented read-only ask mode with the prompt on stdin and reads
   the result event, so a Mac with Cursor signed in can prove an update while
   Claude and Codex are both at their limits.
+
+## 6.43.2
+
+What actually reached npm under this number (published 2026-09-02 07:27 CDT
+from the commit before the proof codes landed):
+
 - **The Claude proof states its empty MCP config explicitly**
   (`--strict-mcp-config --mcp-config '{"mcpServers":{}}'`) instead of relying
   on `CLAUDE_CODE_SAFE_MODE` alone. Without safe mode, `--tools ''` on Claude
   Code 2.1.251 still loads the whole catalog, which on a large fleet is a
   244K-token request Haiku refuses before any API call. Belt and braces; the
   2026-09-01 rollbacks were the session limit, not this.
+- The message-reservation rationale in code and changelog states the
+  observed double #74 accurately (one exchange shown twice by the companion).
 
 ## 6.43.1
 
