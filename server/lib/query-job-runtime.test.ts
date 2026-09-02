@@ -240,6 +240,37 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
+  it('lets no provider metadata key overwrite the stamp (spread order on start and done)', async () => {
+    // ModelRunMetadata declares no origin key today; this pins the order for
+    // the day an untyped value flows through the wholesale spread.
+    mocks.callModelStreaming.mockImplementationOnce(async (
+      _query: string,
+      sessionId: string,
+      callbacks: Record<string, (...args: any[]) => unknown>,
+    ) => {
+      await callbacks.onStart?.('codex-frontier', sessionId, undefined, { origin: 'bogus', originId: 'nope' })
+      callbacks.onChunk?.('durable ')
+      await callbacks.onAnswerReady?.('durable answer')
+      await callbacks.onDone?.('durable answer', 'codex-frontier', undefined, { origin: 'bogus', originId: 'nope' })
+    })
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const clientJobId = randomUUID()
+    const admission = await runtime.queryJobCoordinator.submit({
+      clientJobId, generation: 1, query: 'the morning brief', sessionId: 'runtime-session',
+      model: 'codex-frontier', globalMsgNum: 80, attachmentIds: [], attachmentRefs: [], activityToolMode: 'status',
+      origin: { kind: 'routine', id: 'morning-brief' },
+    })
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(admission.job.jobId))
+    for (const type of ['start', 'done']) {
+      expect(mocks.emitDisplay).toHaveBeenCalledWith(expect.objectContaining({
+        type,
+        data: expect.objectContaining({ clientJobId, origin: 'routine', originId: 'morning-brief' }),
+      }))
+    }
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
   it('carries the origin onto the error event too, spread after provider metadata', async () => {
     mocks.callModelStreaming.mockImplementationOnce(async (
       _query: string,

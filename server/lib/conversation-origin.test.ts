@@ -59,6 +59,41 @@ describe('origin stamp on projected exchanges', () => {
     expect(exchange.originId).toBe('morning-brief')
   })
 
+  it('validates the stamp at the load boundary: unknown kinds and orphan ids are dropped, real stamps survive', async () => {
+    const now = Date.now()
+    disk.loaded = {
+      status: 'ok',
+      data: {
+        sessions: {
+          loaded: {
+            id: 'loaded',
+            exchanges: [
+              { role: 'assistant', content: 'unknown kind', timestamp: now, origin: 'maintenance', originId: 'x' },
+              { role: 'assistant', content: 'routine without id', timestamp: now, origin: 'routine' },
+              { role: 'assistant', content: 'task with empty id', timestamp: now, origin: 'task', originId: '' },
+              { role: 'assistant', content: 'the brief', timestamp: now, origin: 'routine', originId: 'morning-brief' },
+              { role: 'assistant', content: 'plain', timestamp: now },
+            ],
+            lastActivity: now,
+            createdAt: now,
+            modelPreference: null,
+            contextBreaks: [],
+          },
+        },
+        savedAt: new Date(now).toISOString(),
+      },
+    }
+    const conversation = await import('./conversation.js')
+    const history = conversation.getHistory('loaded')
+    expect(history.map(ex => [ex.content, ex.origin ?? null, ex.originId ?? null])).toEqual([
+      ['unknown kind', null, null],
+      ['routine without id', 'routine', null],
+      ['task with empty id', 'task', null],
+      ['the brief', 'routine', 'morning-brief'],
+      ['plain', null, null],
+    ])
+  })
+
   it('gains the stamp when a stamped reconcile updates an unstamped insert (the terminal projection)', async () => {
     const conversation = await import('./conversation.js')
     const sid = conversation.getOrCreateSession()

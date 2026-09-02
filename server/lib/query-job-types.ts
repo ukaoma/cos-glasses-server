@@ -72,12 +72,13 @@ export interface QueryJobOrigin {
 export const QUERY_JOB_ORIGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 export interface ParseQueryJobRequestOptions {
-  /** Admission: a present-but-malformed origin OBJECT is a bug in the caller
-   * (only the server's own scheduler and dispatcher send one) and throws.
-   * Hydration leaves this off: a record written by another build must still
-   * hydrate, with the unknown origin dropped and counted. A bare STRING origin
-   * is dropped on both paths — it is the phone's local `'g2'` shape, never an
-   * error. */
+  /** Admission (the public job route reaches the parser with this on): a KNOWN
+   * kind whose id fails the alphabet is a bug in the server's own scheduler or
+   * dispatcher, and throws. An UNKNOWN kind never throws on any path — it is a
+   * label this build cannot render, dropped and counted, so a newer client is
+   * never refused. Hydration leaves this off: a record written by another
+   * build must still hydrate. A bare STRING origin is dropped on both paths —
+   * it is the phone's local `'g2'` shape, never an error. */
   strictOrigin?: boolean
 }
 
