@@ -52,7 +52,12 @@ export function getDisplayWatermark(): { bootId: string; eventId: number } {
   return { bootId: serverMetrics.bootId, eventId }
 }
 
-export function replayDisplayEvents(bootId: string | null, afterEventId: number): DisplayReplayResult {
+export function replayDisplayEvents(
+  bootId: string | null,
+  afterEventId: number,
+  opts: { materialize?: boolean } = {},
+): DisplayReplayResult {
+  const materialize = opts.materialize !== false
   const oldestEventId = replayBuffer[0]?.eventId ?? eventId + 1
   const latestEventId = eventId
   if (bootId && bootId !== serverMetrics.bootId) {
@@ -65,7 +70,7 @@ export function replayDisplayEvents(bootId: string | null, afterEventId: number)
     return { events: [], gap: true, reason: 'buffer_overflow', oldestEventId, latestEventId }
   }
   return {
-    events: replayBuffer.filter(item => item.eventId > afterEventId),
+    events: materialize ? replayBuffer.filter(item => item.eventId > afterEventId) : [],
     gap: false,
     oldestEventId,
     latestEventId,

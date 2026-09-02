@@ -13,12 +13,15 @@ const PUBLIC_API_PATHS = new Set([
 // Native HTML audio requests cannot attach X-Cos-Token. The UUID minted by
 // authenticated POST /tts/prepare is therefore a short-lived bearer
 // capability. Keep this exception exact: GET/HEAD only, one canonical v4 UUID
-// path segment, and no query-token fallback that could leak into URL logs.
+// path segment, and no query-token fallback. (A path segment reaches access and
+// proxy logs exactly as a query string does — the TTL is what bounds a leaked
+// URL; the point of refusing a query form is that it is trivially added back by
+// accident and routinely forwarded.)
 const TTS_PLAYBACK_CAPABILITY_PATH = /^\/tts\/play\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 // EventSource has the identical constraint, so the display stream reuses the same
 // shape: `/display-stream/<expUnixSeconds>.<hex hmac>`, GET/HEAD only, path segment,
-// no query-token fallback. Admission here is SHAPE ONLY — the signature is verified
+// no query-token fallback (same reasoning as above — this is not log hygiene). Admission here is SHAPE ONLY — the signature is verified
 // in the route, which is the only place that holds the API token.
 //
 // `/display-stream` itself STAYS PUBLIC, deliberately. Removing it would make a

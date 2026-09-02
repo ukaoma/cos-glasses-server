@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import {
   DISPLAY_TICKET_TTL_SECONDS,
+  explainDisplayTicket,
   mintDisplayTicket,
   verifyDisplayTicket,
 } from './display-ticket.js'
@@ -103,5 +104,22 @@ describe('display stream capability ticket', () => {
     expect(DISPLAY_TICKET_TTL_SECONDS).toBeGreaterThanOrEqual(600)
     const ticket = mintDisplayTicket(TOKEN, NOW)
     expect(verifyDisplayTicket(TOKEN, ticket, NOW + 5 * 60_000)).toBe(true)
+  })
+})
+
+describe('explainDisplayTicket names the refusal', () => {
+  it('returns each verdict for its cause, and verify agrees on ok', () => {
+    const good = mintDisplayTicket(TOKEN, NOW)
+    expect(explainDisplayTicket(TOKEN, good, NOW)).toBe('ok')
+    expect(verifyDisplayTicket(TOKEN, good, NOW)).toBe(true)
+    expect(explainDisplayTicket(TOKEN, good, NOW + (DISPLAY_TICKET_TTL_SECONDS + 1) * 1000)).toBe('expired')
+    expect(explainDisplayTicket('other-token', good, NOW)).toBe('bad-signature')
+    expect(explainDisplayTicket(TOKEN, 'not-a-ticket', NOW)).toBe('malformed')
+    expect(explainDisplayTicket(TOKEN, good.toUpperCase(), NOW)).toBe('malformed')
+    expect(explainDisplayTicket('', good, NOW)).toBe('malformed')
+    // Expiry outranks signature: a stale ticket is 'expired' even when forged, so
+    // the compare is never reached for the common case.
+    const staleForged = mintDisplayTicket('other-token', NOW - (DISPLAY_TICKET_TTL_SECONDS + 5) * 1000)
+    expect(explainDisplayTicket(TOKEN, staleForged, NOW)).toBe('expired')
   })
 })

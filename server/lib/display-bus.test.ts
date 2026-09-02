@@ -44,3 +44,20 @@ describe('display bus publish identity', () => {
     offB()
   })
 })
+
+describe('replayDisplayEvents materialize option', () => {
+  it('returns the same gap verdict but an empty event list when not materializing', () => {
+    __resetDisplayBusForTests()
+    emitDisplay({ type: 'chunk', data: { text: 'a' } })
+    emitDisplay({ type: 'chunk', data: { text: 'b' } })
+    const full = replayDisplayEvents(serverMetrics.bootId, 0)
+    const lean = replayDisplayEvents(serverMetrics.bootId, 0, { materialize: false })
+    expect(full.events).toHaveLength(2)
+    expect(lean.events).toHaveLength(0)
+    expect(lean.gap).toBe(full.gap)
+    expect(lean.oldestEventId).toBe(full.oldestEventId)
+    expect(lean.latestEventId).toBe(full.latestEventId)
+    // A gap is still a gap regardless of materialize.
+    expect(replayDisplayEvents('old-boot', 1, { materialize: false }).gap).toBe(true)
+  })
+})

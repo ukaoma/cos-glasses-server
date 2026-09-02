@@ -2,7 +2,7 @@ import express from 'express'
 import { createServer, type Server } from 'node:http'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __resetDisplayBusForTests, emitDisplay, type DisplayEvent } from '../lib/display-bus.js'
-import { mintDisplayTicket } from '../lib/display-ticket.js'
+import { mintDisplayTicket, DISPLAY_TICKET_TTL_SECONDS } from '../lib/display-ticket.js'
 import { __resetDisplayStreamLogForTests, displayRouter } from './display.js'
 
 /**
@@ -111,18 +111,30 @@ async function touch(url: string): Promise<void> {
  * presence signal, and no server-side emitter for it exists as of 6.42.0. See the
  * TICKETLESS_PROJECTIONS block in display.ts.
  */
-const CONTENT_TYPES: Array<{ type: DisplayEvent['type']; data: Record<string, unknown> }> = [
-  { type: 'transcript_chunk', data: { text: 'CANARY_TRANSCRIPT', speaker: 'MU', sessionId: 's1' } },
-  { type: 'prompt_transcript', data: { text: 'CANARY_PROMPT' } },
-  { type: 'chunk', data: { text: 'CANARY_CHUNK' } },
-  { type: 'done', data: { text: 'CANARY_DONE' } },
-  { type: 'session_restore', data: { sessionId: 'CANARY_SESSION' } },
-  { type: 'coaching_nudge', data: { text: 'CANARY_NUDGE' } },
-  { type: 'start', data: { model: 'CANARY_MODEL', sessionId: 's1' } },
-  { type: 'tool_status', data: { message: 'CANARY_TOOL' } },
-  { type: 'error', data: { error: 'CANARY_ERROR' } },
-  { type: 'recording_start', data: { sessionId: 'CANARY_START_SESSION', title: 'CANARY_START_TITLE' } },
-]
+// EXHAUSTIVE BY CONSTRUCTION. A `Record` keyed on the union fails to COMPILE when
+// a twelfth DisplayEvent type is added, which is the only way this list stays
+// honest: a hand-written array typed `DisplayEvent['type']` gives membership, not
+// coverage, and a new type would be safely withheld at runtime while never being
+// probed here (QA, 2026-09-01). `recording_stop` is the one allowlisted member;
+// its own tests below use the production-shaped fixture.
+const FIXTURE_BY_TYPE: Record<DisplayEvent['type'], Record<string, unknown>> = {
+  transcript_chunk: { text: 'CANARY_TRANSCRIPT', speaker: 'MU', sessionId: 's1' },
+  prompt_transcript: { text: 'CANARY_PROMPT' },
+  chunk: { text: 'CANARY_CHUNK' },
+  done: { text: 'CANARY_DONE' },
+  session_restore: { sessionId: 'CANARY_SESSION' },
+  coaching_nudge: { text: 'CANARY_NUDGE' },
+  start: { model: 'CANARY_MODEL', sessionId: 's1' },
+  tool_status: { message: 'CANARY_TOOL' },
+  error: { error: 'CANARY_ERROR' },
+  recording_start: { sessionId: 'CANARY_START_SESSION', title: 'CANARY_START_TITLE' },
+  recording_stop: { sessionId: 'CANARY_STOP_SESSION', filename: 'CANARY_STOP_FILE.md', durationMin: 1, domain: 'x' },
+}
+const ALLOWLISTED: ReadonlySet<DisplayEvent['type']> = new Set(['recording_stop'])
+const CONTENT_TYPES: Array<{ type: DisplayEvent['type']; data: Record<string, unknown> }> =
+  (Object.keys(FIXTURE_BY_TYPE) as Array<DisplayEvent['type']>)
+    .filter(type => !ALLOWLISTED.has(type))
+    .map(type => ({ type, data: FIXTURE_BY_TYPE[type] }))
 
 /**
  * The REAL production payload, field for field.
@@ -362,5 +374,57 @@ describe('ticketless connects are summarized, not logged per connect', () => {
     // The one line that IS emitted is the first connect. The other three are counted
     // and held for the next interval, which is why this is a summary and not a drop.
     expect(lines[0]).toContain('1 ticketless subscriber(s)')
+  })
+})
+
+
+describe('the rejection log names WHY a ticket was refused', () => {
+  useDisplayStreamHarness()
+
+  it('distinguishes expired from bad-signature from bare', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const base = await startServer()
+    const stale = mintDisplayTicket(TOKEN, Date.now() - (DISPLAY_TICKET_TTL_SECONDS + 5) * 1000)
+    const forged = mintDisplayTicket('some-other-token', Date.now())
+    await touch(`${base}/api/display-stream/${stale}`)
+    await touch(`${base}/api/display-stream/${forged}`)
+    await touch(`${base}/api/display-stream`)
+    const line = warn.mock.calls.map(c => String(c[0])).find(l => l.includes('ticketless subscriber'))
+    expect(line).toBeDefined()
+    // The first connect flushes the line, so counts reflect only it; the others
+    // are held for the next interval. What matters is the SHAPE of the line.
+    expect(line).toMatch(/\d+ expired, \d+ bad-signature, \d+ malformed; \d+ bare/)
+  })
+})
+
+describe('a projection that throws cannot reach the emitter', () => {
+  useDisplayStreamHarness()
+
+  it('survives a recording_stop with a null payload and keeps the subscriber', async () => {
+    const base = await startServer()
+    const text = await collect(`${base}/api/display-stream`, () => {
+      // The projection reads data.sessionId; on null that throws. It must be
+      // caught INSIDE the listener, or it propagates through bus.emit() into
+      // meeting.ts's save path. transcribe-stream.ts:2164 emits unguarded.
+      expect(() => emitDisplay({ type: 'recording_stop', data: null as never })).not.toThrow()
+      emitDisplay({ type: 'recording_stop', data: { sessionId: 'AFTER', durationMin: 2, filename: 'x.md', domain: 'd' } })
+    })
+    expect(text).toContain('event: ready')
+    expect(text).toContain('AFTER')
+  })
+})
+
+describe('the connection probe is not a consumer', () => {
+  useDisplayStreamHarness()
+
+  it('an authorized probe=1 connect gets the handshake and no replay', async () => {
+    const base = await startServer()
+    emitDisplay({ type: 'chunk', data: { text: 'REPLAY_PROBE_CANARY' } })
+    const probe = await collect(`${base}/api/display-stream?probe=1`, () => {}, { 'X-Cos-Token': TOKEN })
+    expect(probe).toContain('"contentAuthorized":true')
+    expect(probe).not.toContain('REPLAY_PROBE_CANARY')
+    // Control: the same authorized connect WITHOUT probe=1 does get the buffer.
+    const full = await collect(`${base}/api/display-stream`, () => {}, { 'X-Cos-Token': TOKEN })
+    expect(full).toContain('REPLAY_PROBE_CANARY')
   })
 })

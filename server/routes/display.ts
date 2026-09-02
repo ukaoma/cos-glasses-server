@@ -11,7 +11,7 @@ import {
   type DisplayEvent,
   type PublishedDisplayEvent,
 } from '../lib/display-bus.js'
-import { verifyDisplayTicket } from '../lib/display-ticket.js'
+import { type DisplayTicketVerdict, explainDisplayTicket, verifyDisplayTicket } from '../lib/display-ticket.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 
 export const displayRouter = Router()
@@ -93,7 +93,13 @@ const TICKETLESS_PROJECTIONS: {
  * Never returns the input event unchanged — the projection is always applied.
  */
 function projectForTicketless(event: PublishedDisplayEvent): PublishedDisplayEvent | null {
-  const project = TICKETLESS_PROJECTIONS[event.type]
+  // hasOwn, not a bare index: the map is an object literal and inherits
+  // Object.prototype, so a type of "constructor" would resolve to `Object` — a
+  // truthy identity function — and pass the event through whole. Unreachable via
+  // the typed union today; the allowlist must not depend on that staying true.
+  const project = Object.hasOwn(TICKETLESS_PROJECTIONS, event.type)
+    ? TICKETLESS_PROJECTIONS[event.type]
+    : undefined
   if (!project) return null
   return { ...event, data: project(event.data) }
 }
@@ -134,25 +140,37 @@ const TICKETLESS_LOG_INTERVAL_MS = 60_000
 let ticketlessConnects = 0
 let ticketlessRejectedTickets = 0
 let ticketlessLoggedAt = 0
+// Per-reason so the log can tell "a client needs to re-mint" (expired — expected
+// after every native EventSource retry on a stale URL) from "someone is holding
+// a ticket this token never signed" (bad-signature — a rotation, or a probe).
+const ticketlessByReason: Record<Exclude<DisplayTicketVerdict, 'ok'> | 'none', number> = {
+  none: 0, malformed: 0, expired: 0, 'bad-signature': 0,
+}
 
-function noteTicketlessConnect(rejectedTicket: boolean): void {
+function noteTicketlessConnect(reason: Exclude<DisplayTicketVerdict, 'ok'> | 'none'): void {
   ticketlessConnects++
-  if (rejectedTicket) ticketlessRejectedTickets++
+  if (reason !== 'none') ticketlessRejectedTickets++
+  ticketlessByReason[reason]++
   const now = Date.now()
   if (ticketlessLoggedAt !== 0 && now - ticketlessLoggedAt < TICKETLESS_LOG_INTERVAL_MS) return
   ticketlessLoggedAt = now
+  const { expired, 'bad-signature': bad, malformed, none } = ticketlessByReason
   console.warn(
     `[display-bus] ${ticketlessConnects} ticketless subscriber(s)`
-    + ` (${ticketlessRejectedTickets} with a rejected ticket) — content withheld, lifecycle only`,
+    + ` (${ticketlessRejectedTickets} with a rejected ticket:`
+    + ` ${expired} expired, ${bad} bad-signature, ${malformed} malformed; ${none} bare)`
+    + ` — content withheld, lifecycle only`,
   )
   ticketlessConnects = 0
   ticketlessRejectedTickets = 0
+  for (const k of Object.keys(ticketlessByReason) as Array<keyof typeof ticketlessByReason>) ticketlessByReason[k] = 0
 }
 
 export function __resetDisplayStreamLogForTests(): void {
   ticketlessConnects = 0
   ticketlessRejectedTickets = 0
   ticketlessLoggedAt = 0
+  for (const k of Object.keys(ticketlessByReason) as Array<keyof typeof ticketlessByReason>) ticketlessByReason[k] = 0
 }
 
 /**
@@ -213,7 +231,13 @@ function serveDisplayStream(req: Request, res: Response, authorized: boolean): v
   const watermark = getDisplayWatermark()
   res.write(`event: ready\ndata: ${JSON.stringify({ ...watermark, contentAuthorized: authorized })}\n\n`)
 
-  const replay = replayDisplayEvents(cursorBootId, Number.isFinite(cursorEventId) ? cursorEventId : 0)
+  // Gap detection is needed for every subscriber; MATERIALISING the up-to-200
+  // event buffer is only needed for one we will actually write it to. A stale
+  // ticketless install retrying every 3s was filtering the whole buffer each
+  // time and discarding it.
+  const replay = replayDisplayEvents(
+    cursorBootId, Number.isFinite(cursorEventId) ? cursorEventId : 0, { materialize: authorized },
+  )
   if (replay.gap) {
     // Ticketless-VISIBLE on purpose. The payload is transport metadata only —
     // reason, the cursor the client itself sent, the watermark already in `ready`,
@@ -226,11 +250,17 @@ function serveDisplayStream(req: Request, res: Response, authorized: boolean): v
       watermark,
       oldestEventId: replay.oldestEventId,
     })}\n\n`)
-  } else if (authorized) {
+  } else if (authorized && req.query.probe !== '1') {
     // The replay buffer holds up to REPLAY_BUFFER_SIZE past events, so serving it
     // to a ticketless subscriber would be a retroactive transcript dump — a larger
     // disclosure than the live subscription. Skipped entirely rather than filtered,
     // so no future event type can leak through a per-item test here.
+    //
+    // `probe=1` is the client's connection probe: it opens this stream ONLY to read
+    // the `ready` watermark and then aborts. It sends the token, so it is
+    // authorized — and was being handed the full buffer on every reconnect and
+    // throwing it away (1,164 "Replayed 200" lines in one day's log). A probe is
+    // never a consumer; it gets the handshake and nothing else.
     for (const event of replay.events) writeEvent(res, event)
     if (replay.events.length > 0) {
       console.log(`[display-bus] Replayed ${replay.events.length} publish-owned events after ${cursorEventId}`)
@@ -265,7 +295,7 @@ function serveDisplayStream(req: Request, res: Response, authorized: boolean): v
 // is withheld above unless the caller sent a valid token header.
 displayRouter.get('/display-stream', (req, res) => {
   const authorized = headerAuthorized(req)
-  if (!authorized) noteTicketlessConnect(false)
+  if (!authorized) noteTicketlessConnect('none')
   serveDisplayStream(req, res, authorized)
 })
 
@@ -276,9 +306,9 @@ displayRouter.get('/display-stream', (req, res) => {
 // is degraded from `contentAuthorized:false` in the `ready` frame, and re-mints.
 displayRouter.get('/display-stream/:ticket', (req, res) => {
   const apiToken = process.env.COS_API_TOKEN ?? ''
-  const ticketOk = verifyDisplayTicket(apiToken, req.params.ticket)
-  const authorized = ticketOk || headerAuthorized(req)
-  if (!authorized) noteTicketlessConnect(true)
+  const verdict = explainDisplayTicket(apiToken, req.params.ticket)
+  const authorized = verdict === 'ok' || headerAuthorized(req)
+  if (!authorized) noteTicketlessConnect(verdict)
   serveDisplayStream(req, res, authorized)
 })
 

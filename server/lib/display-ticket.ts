@@ -79,21 +79,41 @@ export function mintDisplayTicket(
  * itself, so a forged expiry changes the signed message and fails the HMAC — the
  * claim cannot be edited without the key.
  */
+/**
+ * Why a ticket was refused. `verifyDisplayTicket` collapsed every refusal to
+ * `false`, so the server's only signal was "N rejected" with no way to tell an
+ * EXPIRED ticket (a client that needs to re-mint — expected on every native
+ * EventSource retry after a WebView suspension) from a BAD SIGNATURE (a rotated
+ * token, or a forgery). QA on 2026-09-01 found >=7 rejections in three
+ * consecutive windows on the author's own device and could not say which.
+ */
+export type DisplayTicketVerdict = 'ok' | 'malformed' | 'expired' | 'bad-signature'
+
+export function explainDisplayTicket(
+  apiToken: string,
+  ticket: unknown,
+  nowMs: number = Date.now(),
+): DisplayTicketVerdict {
+  if (typeof ticket !== 'string' || !apiToken) return 'malformed'
+  const separator = ticket.indexOf('.')
+  if (separator <= 0) return 'malformed'
+  const expRaw = ticket.slice(0, separator)
+  const provided = ticket.slice(separator + 1)
+  if (!/^\d{1,15}$/.test(expRaw) || !/^[0-9a-f]{64}$/.test(provided)) return 'malformed'
+  const exp = Number(expRaw)
+  // Unreachable while the regex caps exp at 15 digits (MAX_SAFE_INTEGER has 16);
+  // kept as the belt for a widened regex. A mutation test proved it dead.
+  if (!Number.isSafeInteger(exp)) return 'malformed'
+  // Expiry is checked BEFORE the compare so a stale ticket cannot be probed for
+  // signature validity, and so the common rejection costs no hashing.
+  if (Math.floor(nowMs / 1000) >= exp) return 'expired'
+  return timingSafeTokenEqual(provided, signature(apiToken, exp)) ? 'ok' : 'bad-signature'
+}
+
 export function verifyDisplayTicket(
   apiToken: string,
   ticket: unknown,
   nowMs: number = Date.now(),
 ): boolean {
-  if (typeof ticket !== 'string' || !apiToken) return false
-  const separator = ticket.indexOf('.')
-  if (separator <= 0) return false
-  const expRaw = ticket.slice(0, separator)
-  const provided = ticket.slice(separator + 1)
-  if (!/^\d{1,15}$/.test(expRaw) || !/^[0-9a-f]{64}$/.test(provided)) return false
-  const exp = Number(expRaw)
-  if (!Number.isSafeInteger(exp)) return false
-  // Expiry is checked BEFORE the compare so a stale ticket cannot be probed for
-  // signature validity, and so the common rejection costs no hashing.
-  if (Math.floor(nowMs / 1000) >= exp) return false
-  return timingSafeTokenEqual(provided, signature(apiToken, exp))
+  return explainDisplayTicket(apiToken, ticket, nowMs) === 'ok'
 }
