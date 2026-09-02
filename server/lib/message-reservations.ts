@@ -4,9 +4,12 @@
 // reports, and a durable job carries the number it was minted with until its
 // terminal projection writes the exchange into the session. Between admission
 // and projection the number existed nowhere the counter looked, so a second
-// producer minted it again: on 2026-09-01 the scheduled morning brief reserved
-// #74 at 22:18:40 and the phone handed #74 to "Cross surface" at 22:25:15,
-// because its counter only re-syncs at boot and the server said max was 73.
+// producer could mint it again: a running morning brief holds its number for
+// minutes while the phone's counter, which only re-syncs at boot, still sits
+// below it. (The double "#74" seen on 2026-09-01 turned out to be the phone
+// showing ONE exchange twice, a display-bus placeholder plus the hydrated
+// row, fixed in companion 6.9.445. The window this closes is real all the
+// same: the same night's ledger shows the brief holding #74 for 6m35s.)
 //
 // Every holder of a not-yet-projected number registers a source here. The
 // counter route and the brief's own reservation read the union. Sources

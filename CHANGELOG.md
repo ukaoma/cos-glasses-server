@@ -17,15 +17,16 @@ Managed-server updates pass their Claude readiness proof again.
 Two things the first night of the morning brief taught us, plus the depth
 behind each source.
 
-- **A running brief no longer collides with your next message.** The brief
-  reserved #74 at 22:18 and was still running when the phone minted #74 for
-  the next prompt at 22:25, because `/api/message-counter` only counted
-  exchanges that had already been projected. Numbers held by admitted,
-  not-yet-terminal durable jobs (and by the brief's own ledger row, which
-  exists before the job does) now count toward the ceiling. New
-  `lib/message-reservations.ts` registry; the job store keeps the number on
-  its always-in-memory identity so the answer is synchronous and survives a
-  restart.
+- **A running brief can no longer collide with your next message.** A brief
+  holds its number for the minutes it runs, but `/api/message-counter` only
+  counted exchanges that had already been projected, so a phone whose counter
+  last synced at boot could mint the same number for its next prompt. Numbers
+  held by admitted, not-yet-terminal durable jobs (and by the brief's own
+  ledger row, which exists before the job does) now count toward the ceiling.
+  New `lib/message-reservations.ts` registry; the job store keeps the number
+  on its always-in-memory identity so the answer is synchronous and survives
+  a restart. (The double #74 reported on 6.9.443 was the companion showing one
+  exchange twice; companion 6.9.445 fixes that side.)
 - **Sources show what is behind them.** `GET /api/morning-brief` now carries
   `coverage`: one row per source with a state (`ready`, `empty`,
   `unavailable`, `runtime`) and a summary line such as "2,312 meetings
