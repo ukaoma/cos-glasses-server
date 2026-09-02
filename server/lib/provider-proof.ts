@@ -110,12 +110,23 @@ export function runBounded(
 export const CLAUDE_PROOF_MODEL = 'haiku'
 export const CLAUDE_PROOF_TIMEOUT_MS = 45_000
 
+/** No MCP servers for the proof. Claude Code 2.1.251 turns `--tools ''`
+ * into "load the whole catalog, expose none of it", and on a Mac with a
+ * large MCP fleet that catalog alone was ~244K tokens against Haiku's 200K
+ * window: "Prompt is too long", exit 1, zero API time. Six 6.43.1 update
+ * attempts rolled back on 2026-09-01/02 before a single request was made.
+ * An explicit empty config with --strict-mcp-config keeps the proof under
+ * 20K tokens and is what a readiness check should be anyway. */
+export const CLAUDE_PROOF_MCP_CONFIG = '{"mcpServers":{}}'
+
 export function claudeProofArgs(): string[] {
   return [
     '-p',
     '--model', CLAUDE_PROOF_MODEL,
     '--output-format', 'json',
     '--permission-mode', 'dontAsk',
+    '--strict-mcp-config',
+    '--mcp-config', CLAUDE_PROOF_MCP_CONFIG,
     '--tools', '',
     '--allowedTools', '',
     '--system-prompt', PROOF_PROMPT,

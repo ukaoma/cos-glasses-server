@@ -1,3 +1,17 @@
+## 6.43.2
+
+Managed-server updates pass their Claude readiness proof again.
+
+- **The proof no longer loads your MCP catalog.** COS Control verifies a
+  candidate server by running one real `claude -p --model haiku` query with
+  no tools. On Claude Code 2.1.251, `--tools ''` still loads every MCP
+  server's tool definitions, and on a Mac with a large fleet that alone was
+  about 244,000 tokens against Haiku's 200,000-token window: "Prompt is too
+  long", exit 1, zero API time, and the update rolled back to the previous
+  server every time (six attempts on 6.43.1). The proof now passes
+  `--strict-mcp-config` with an empty MCP config, which keeps it under
+  20,000 tokens and answers in about two seconds. Nothing else changed.
+
 ## 6.43.1
 
 Two things the first night of the morning brief taught us, plus the depth

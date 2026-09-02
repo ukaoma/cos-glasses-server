@@ -29,6 +29,13 @@ describe('transactional provider proof parsing', () => {
     expect(CLAUDE_PROOF_TIMEOUT_MS).toBe(45_000)
     expect(claudeProofArgs()).toContain('--model')
     expect(claudeProofArgs()[claudeProofArgs().indexOf('--model') + 1]).toBe('haiku')
+    // 6.43.2 — the proof must not load the user's MCP catalog: with the
+    // fleet on Miles's Mac, `--tools ''` alone produced a 244K-token request
+    // that Haiku refused before any API call, and every update rolled back.
+    const args = claudeProofArgs()
+    expect(args).toContain('--strict-mcp-config')
+    expect(args[args.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}')
+    expect(args.indexOf('--strict-mcp-config')).toBeLessThan(args.indexOf('--tools'))
   })
 
   it('isolates readiness from oversized project configuration', async () => {
