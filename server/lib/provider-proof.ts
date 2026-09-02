@@ -1,8 +1,28 @@
 import { spawn } from 'node:child_process'
 import { cosBrainDir } from './launch-dir.js'
+import { resolveAgentBinary } from './cursor-model-catalog.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 
-export type ProofProvider = 'claude' | 'codex'
+export type ProofProvider = 'claude' | 'codex' | 'cursor'
+export const PROOF_PROVIDERS: readonly ProofProvider[] = ['claude', 'codex', 'cursor']
+
+/**
+ * Why a proof did not pass, as a stable code COS Control can branch on
+ * without reading logs. `provider_quota` is the one that matters: a vendor
+ * session or usage limit is a fact about the vendor's meter, not about the
+ * candidate server, and an update must not roll back on it when another
+ * provider proves. (2026-09-01: six 6.43.1 updates rolled back on Claude's
+ * session limit while Codex proved in 7 s.)
+ */
+export type ProviderProofCode =
+  | 'provider_quota'
+  | 'provider_auth'
+  | 'provider_context_overflow'
+  | 'provider_missing'
+  | 'provider_timeout'
+  | 'provider_canceled'
+  | 'provider_bad_answer'
+  | 'provider_failed'
 
 export interface ProviderProofResult {
   provider: ProofProvider
@@ -10,6 +30,7 @@ export interface ProviderProofResult {
   durationMs: number
   cached: boolean
   error?: string
+  code?: ProviderProofCode
 }
 
 const PROOF_TOKEN = 'COS_CONTROL_OK'
@@ -110,13 +131,14 @@ export function runBounded(
 export const CLAUDE_PROOF_MODEL = 'haiku'
 export const CLAUDE_PROOF_TIMEOUT_MS = 45_000
 
-/** No MCP servers for the proof. Claude Code 2.1.251 turns `--tools ''`
- * into "load the whole catalog, expose none of it", and on a Mac with a
- * large MCP fleet that catalog alone was ~244K tokens against Haiku's 200K
- * window: "Prompt is too long", exit 1, zero API time. Six 6.43.1 update
- * attempts rolled back on 2026-09-01/02 before a single request was made.
- * An explicit empty config with --strict-mcp-config keeps the proof under
- * 20K tokens and is what a readiness check should be anyway. */
+/** No MCP servers for the proof, stated explicitly rather than relied on
+ * from CLAUDE_CODE_SAFE_MODE alone. Without safe mode, Claude Code 2.1.251
+ * turns `--tools ''` into "load the whole catalog, expose none of it", and
+ * on a Mac with a large MCP fleet that catalog alone is ~244K tokens against
+ * Haiku's 200K window ("Prompt is too long", exit 1, zero API time). Safe
+ * mode currently prevents that; an explicit empty config with
+ * --strict-mcp-config keeps the proof under 20K tokens whatever a future
+ * CLI does with the safe-mode flag. */
 export const CLAUDE_PROOF_MCP_CONFIG = '{"mcpServers":{}}'
 
 export function claudeProofArgs(): string[] {
@@ -172,11 +194,85 @@ function safeProofError(result: ProcessResult): string {
   return 'provider returned no valid proof response'
 }
 
+const QUOTA_RE = /usage limit|hit your (?:usage |session )?limit|session limit|rate.?limit|too many requests|\b429\b|\bquota\b|resets? (?:at|in) |over capacity|overloaded|\b529\b|plan limit/i
+const AUTH_RE = /not logged in|please (?:log ?in|sign in)|invalid api key|authentication|unauthori[sz]ed|\b401\b|\b403\b|login required|token (?:has )?expired|no credentials/i
+const OVERFLOW_RE = /prompt is too long|context window|too many tokens|exceeds the (?:model|context)/i
+const MISSING_RE = /ENOENT|command not found|no such file/i
+
+/** Vendor text the provider printed, so the code can be derived without ever
+ * returning that text to a caller. Claude's JSON `result` carries the error
+ * sentence on `is_error`; Codex and Cursor print it on stderr or as a
+ * result/error event. */
+export function classifyProofFailure(result: ProcessResult, answer: string, expected = PROOF_TOKEN): ProviderProofCode {
+  if (result.aborted) return 'provider_canceled'
+  if (result.timedOut) return 'provider_timeout'
+  const haystack = `${result.stderr}\n${result.stdout}`.slice(0, 40_000)
+  if (result.code === null && MISSING_RE.test(haystack)) return 'provider_missing'
+  if (OVERFLOW_RE.test(haystack)) return 'provider_context_overflow'
+  if (QUOTA_RE.test(haystack)) return 'provider_quota'
+  if (AUTH_RE.test(haystack)) return 'provider_auth'
+  if (result.code === 0) return answer === expected ? 'provider_failed' : 'provider_bad_answer'
+  return 'provider_failed'
+}
+
+/** One safe sentence per code; never the vendor's text. */
+export function describeProofCode(code: ProviderProofCode, result: ProcessResult): string {
+  switch (code) {
+    case 'provider_quota': return 'provider session or usage limit reached'
+    case 'provider_auth': return 'provider is not signed in'
+    case 'provider_context_overflow': return 'provider refused the proof prompt as too long'
+    case 'provider_missing': return 'provider binary is not installed or not on PATH'
+    case 'provider_timeout': return 'provider proof timed out'
+    case 'provider_canceled': return 'provider proof canceled'
+    case 'provider_bad_answer': return 'provider answered but not with the proof token'
+    default: return safeProofError(result)
+  }
+}
+
+export const CURSOR_PROOF_TIMEOUT_MS = 120_000
+
+/** Cursor `agent` in documented read-only ask mode, one stream-json turn, the
+ * prompt on stdin like the bridge. No `--model`: the account default is the
+ * readiness question, not any particular model. */
+export function cursorProofArgs(workspace = cosBrainDir() ?? process.cwd()): string[] {
+  return ['-p', '--mode', 'ask', '--output-format', 'stream-json', '--trust', '--workspace', workspace]
+}
+
+/** The final `result` event wins; assistant deltas with a timestamp are the
+ * fallback, mirroring cursor-bridge's extractCursorResponseText. */
+export function cursorProofText(stdout: string): string {
+  let deltas = ''
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue
+    let event: any
+    try { event = JSON.parse(line) } catch { continue }
+    const type = String(event?.type ?? '').toLowerCase()
+    if (type === 'result') {
+      if (event?.subtype === 'success' && event?.is_error !== true && typeof event?.result === 'string') return event.result.trim()
+      continue
+    }
+    if (type !== 'assistant' || typeof event?.timestamp_ms !== 'number') continue
+    if (event?.model_call_id != null && event.model_call_id !== '') continue
+    const content = event?.message?.content
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (typeof block === 'string') deltas += block
+        else if (typeof block?.text === 'string') deltas += block.text
+      }
+    } else if (typeof event?.text === 'string') {
+      deltas += event.text
+    }
+  }
+  return deltas.trim()
+}
+
 async function executeProof(provider: ProofProvider, signal?: AbortSignal): Promise<ProviderProofResult> {
   const started = Date.now()
-  const result = provider === 'claude'
-    ? await runBounded('claude', claudeProofArgs(), '', CLAUDE_PROOF_TIMEOUT_MS, signal)
-    : await runBounded('codex', [
+  let result: ProcessResult
+  if (provider === 'claude') {
+    result = await runBounded('claude', claudeProofArgs(), '', CLAUDE_PROOF_TIMEOUT_MS, signal)
+  } else if (provider === 'codex') {
+    result = await runBounded('codex', [
       'exec',
       '--sandbox', 'read-only',
       '--skip-git-repo-check',
@@ -185,16 +281,25 @@ async function executeProof(provider: ProofProvider, signal?: AbortSignal): Prom
       '--ephemeral',
       '-',
     ], PROOF_PROMPT, 120_000, signal)
+  } else {
+    const binary = resolveAgentBinary()
+    result = binary
+      ? await runBounded(binary, cursorProofArgs(), PROOF_PROMPT, CURSOR_PROOF_TIMEOUT_MS, signal)
+      : { code: null, stdout: '', stderr: 'ENOENT: cursor agent binary not found', timedOut: false, aborted: false }
+  }
   const text = provider === 'claude'
     ? claudeProofText(result.stdout)
-    : codexProofText(result.stdout)
+    : provider === 'codex' ? codexProofText(result.stdout) : cursorProofText(result.stdout)
   const ok = result.code === 0 && text === PROOF_TOKEN
+  if (ok) return { provider, ok, durationMs: Date.now() - started, cached: false }
+  const code = classifyProofFailure(result, text)
   return {
     provider,
-    ok,
+    ok: false,
     durationMs: Date.now() - started,
     cached: false,
-    ...(ok ? {} : { error: safeProofError(result) }),
+    error: describeProofCode(code, result),
+    code,
   }
 }
 

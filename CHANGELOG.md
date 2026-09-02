@@ -1,16 +1,29 @@
 ## 6.43.2
 
-Managed-server updates pass their Claude readiness proof again.
+Managed-server updates no longer hinge on one vendor's meter.
 
-- **The proof no longer loads your MCP catalog.** COS Control verifies a
-  candidate server by running one real `claude -p --model haiku` query with
-  no tools. On Claude Code 2.1.251, `--tools ''` still loads every MCP
-  server's tool definitions, and on a Mac with a large fleet that alone was
-  about 244,000 tokens against Haiku's 200,000-token window: "Prompt is too
-  long", exit 1, zero API time, and the update rolled back to the previous
-  server every time (six attempts on 6.43.1). The proof now passes
-  `--strict-mcp-config` with an empty MCP config, which keeps it under
-  20,000 tokens and answers in about two seconds. Nothing else changed.
+- **The readiness proof reports why it failed, as a code.** COS Control
+  verifies a candidate server with one real no-tool query per installed
+  provider. On 2026-09-01 Claude had hit its session limit, Codex proved in
+  seven seconds, and six 6.43.1 updates still rolled back because the only
+  answer was "provider process exited 1". `POST /api/diagnostics/provider-proof`
+  now returns `code`: `provider_quota` (vendor session or usage limit),
+  `provider_auth` (not signed in), `provider_context_overflow`,
+  `provider_missing`, `provider_timeout`, `provider_canceled`,
+  `provider_bad_answer`, or `provider_failed`. The `error` sentence is one
+  fixed phrase per code; vendor text never leaves the server. COS Control
+  0.5.184 uses the code to treat a quota as a skip when another provider
+  proves.
+- **Cursor is a proof provider.** `{"provider":"cursor"}` runs the Cursor
+  `agent` in documented read-only ask mode with the prompt on stdin and reads
+  the result event, so a Mac with Cursor signed in can prove an update while
+  Claude and Codex are both at their limits.
+- **The Claude proof states its empty MCP config explicitly**
+  (`--strict-mcp-config --mcp-config '{"mcpServers":{}}'`) instead of relying
+  on `CLAUDE_CODE_SAFE_MODE` alone. Without safe mode, `--tools ''` on Claude
+  Code 2.1.251 still loads the whole catalog, which on a large fleet is a
+  244K-token request Haiku refuses before any API call. Belt and braces; the
+  2026-09-01 rollbacks were the session limit, not this.
 
 ## 6.43.1
 

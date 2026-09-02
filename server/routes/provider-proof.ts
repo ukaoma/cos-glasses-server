@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { runProviderProof, type ProofProvider } from '../lib/provider-proof.js'
+import { PROOF_PROVIDERS, runProviderProof, type ProofProvider } from '../lib/provider-proof.js'
 import {
   acquireMaintenanceWork,
   maintenanceErrorPayload,
@@ -17,8 +17,8 @@ providerProofRouter.post('/diagnostics/provider-proof', async (req, res) => {
     || address.startsWith('127.') || address.startsWith('::ffff:127.')
   if (!loopback) return res.status(403).json({ error: 'loopback_required' })
   const provider = req.body?.provider
-  if (provider !== 'claude' && provider !== 'codex') {
-    return res.status(400).json({ error: 'provider must be claude or codex' })
+  if (!PROOF_PROVIDERS.includes(provider)) {
+    return res.status(400).json({ error: 'provider must be claude, codex, or cursor', code: 'provider_unknown' })
   }
   const controllerProof = maintenanceOperationCredentialsValid({
     leaseId: typeof req.headers['x-cos-maintenance-lease'] === 'string'
