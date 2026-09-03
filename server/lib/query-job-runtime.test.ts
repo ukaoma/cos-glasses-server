@@ -294,6 +294,7 @@ describe('public durable query runtime', () => {
       attachmentRefs: [],
       activityToolMode: 'status',
       origin: { kind: 'task', id: 'a3f19c0b2d4e' },
+      dispatch: { restricted: true, tools: ['Read', 'Grep', 'Glob'] },
     })
     const deadline = Date.now() + 5_000
     while (Date.now() < deadline) {

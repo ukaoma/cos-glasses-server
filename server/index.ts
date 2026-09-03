@@ -59,6 +59,7 @@ import { promptEditRouter } from './routes/prompt-edit.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
 import { welcomeContextRouter } from './routes/welcome-context.js'
 import { liveCuesRouter } from './routes/live-cues.js'
+import { tasksRouter } from './routes/tasks.js'
 import { memoryRouter } from './routes/memory.js'
 import { threadsRouter } from './routes/threads.js'
 import { shutdownLiveCues } from './lib/live-cues-engine.js'
@@ -689,6 +690,7 @@ app.use('/api', promptEditRouter)
 app.use('/api', bookmarksRouter)
 app.use('/api', welcomeContextRouter)
 app.use('/api', liveCuesRouter)
+app.use('/api', tasksRouter)
 
 // OpenAI-compatible endpoint for the G2 Agent (ER "Add Agent")
 // Mounted at root — routes are /v1/chat/completions and /v1/models

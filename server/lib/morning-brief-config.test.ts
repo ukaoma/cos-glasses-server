@@ -91,6 +91,7 @@ describe('applyMorningBriefPatch', () => {
     expect(() => applyMorningBriefPatch(base, { model: 'gpt-9' })).toThrow(/model/)
     expect(() => applyMorningBriefPatch(base, { sources: [{ id: 'skill', options: { name: 'rm -rf /' } }] })).toThrow(/slash name/)
     expect(() => applyMorningBriefPatch(base, { catchUpMinutes: 100_000 })).toThrow(/catchUpMinutes/)
+    expect(() => applyMorningBriefPatch(base, { taskCatchUpMinutes: 10 })).toThrow(/taskCatchUpMinutes/)
     expect(() => applyMorningBriefPatch(base, 'nope')).toThrow(/JSON object/)
   })
 
@@ -144,6 +145,7 @@ describe('coerceMorningBriefConfig', () => {
     expect(config.time).toBe('07:00')
     expect(config.days).toEqual([1, 5])
     expect(config.catchUpMinutes).toBe(MORNING_BRIEF_LIMITS.defaultCatchUpMinutes)
+    expect(config.taskCatchUpMinutes).toBe(180)
     expect(config.model).toBeUndefined()
     expect(config.sources).toHaveLength(MORNING_BRIEF_SOURCES.length)
     expect(config.closingInstruction).toBe('')

@@ -1,3 +1,12 @@
+## 6.44.0
+
+Task store: one COS `tasks.md` contract with a durable lock, columns, and a run ledger.
+
+- Bridge subcommands `task-rows`, `task-capture`, `task-set-run-at`, `task-set-marker`, `task-move`, and `task-check` are first-class. Standalone installs without a COS pipeline return `cos_pipeline_not_configured` instead of an empty object.
+- `GET /api/tasks` and `/api/tasks/runs` project the board and the ledger. Capture, check, move, and schedule go through the same writer lock the Python side uses.
+- Morning-brief config gains `taskCatchUpMinutes` (default 180). Task due/missed math uses `taskInstant`, which steps a spring-forward gap by 60 minutes instead of pretending `zonedInstant` already did that.
+- Health advertises `capabilities.tasks.gate` so a new client can tell an old server from a new one.
+
 ## 6.43.4
 
 Every message now says who started it.

@@ -92,8 +92,14 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
   }
   try {
     const resolved = await resolveQueryAttachments(input)
+    const { dispatch: _strippedDispatch, origin: rawOrigin, ...rest } = input
+    const origin = (rawOrigin && typeof rawOrigin === 'object' && (rawOrigin as { kind?: string }).kind === 'task')
+      ? undefined
+      : rawOrigin
+    if (_strippedDispatch !== undefined || origin !== rawOrigin) queryJobStore.noteOriginStripped()
     return {
-      ...input,
+      ...rest,
+      ...(origin !== undefined ? { origin } : {}),
       messageEra: activeEra,
       attachmentIds: resolved.ids,
       attachmentRefs: resolved.refs,

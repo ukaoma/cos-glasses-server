@@ -319,6 +319,7 @@ export class QueryJobStore {
       interruptedOnBoot: 0,
       evictedHydratedJobs: 0,
       originDropped: 0,
+      originStripped: 0,
       fingerprintMismatches: 0,
       lastErrorCode: null,
       lastSuccessfulWriteAt: null,
@@ -1160,6 +1161,10 @@ export class QueryJobStore {
     this.health.retainedIdentities = this.identitiesByJobId.size
     this.health.subscribers = this.subscriberCount
     this.health.counts = counts
+  }
+
+  noteOriginStripped(): void {
+    this.health.originStripped++
   }
 
   getHealth(): QueryJobStoreHealth {

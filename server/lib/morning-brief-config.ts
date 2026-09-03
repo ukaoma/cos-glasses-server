@@ -29,6 +29,12 @@ import {
 export const MORNING_BRIEF_PROTOCOL_VERSION = 1 as const
 export const MORNING_BRIEF_CONFIG_VERSION = 1 as const
 
+export const TASK_CATCH_UP_LIMITS = Object.freeze({
+  defaultMinutes: 180,
+  minMinutes: 30,
+  maxMinutes: 720,
+})
+
 export const MORNING_BRIEF_LIMITS = Object.freeze({
   /** How late after the slot a missed fire may still happen (Mac was asleep). */
   maxCatchUpMinutes: 12 * 60,
@@ -91,6 +97,8 @@ export interface MorningBriefConfig {
   /** 0 = Sunday … 6 = Saturday. */
   days: number[]
   catchUpMinutes: number
+  /** How late a task runAt may still count as due (not missed). */
+  taskCatchUpMinutes: number
   model?: ModelPreference
   effort?: EffortPreference
   /** Ordered: section order in the brief. */
@@ -271,6 +279,7 @@ export function defaultMorningBriefConfig(now = new Date()): MorningBriefConfig 
     timezone: serverTimezone(),
     days: [1, 2, 3, 4, 5],
     catchUpMinutes: MORNING_BRIEF_LIMITS.defaultCatchUpMinutes,
+    taskCatchUpMinutes: TASK_CATCH_UP_LIMITS.defaultMinutes,
     sources: defaultSources(),
     closingInstruction: '',
     updatedAt: now.toISOString(),
@@ -389,6 +398,13 @@ export function applyMorningBriefPatch(current: MorningBriefConfig, raw: unknown
     }
     next.catchUpMinutes = minutes
   }
+  if ('taskCatchUpMinutes' in patch) {
+    const minutes = Number(patch.taskCatchUpMinutes)
+    if (!Number.isSafeInteger(minutes) || minutes < TASK_CATCH_UP_LIMITS.minMinutes || minutes > TASK_CATCH_UP_LIMITS.maxMinutes) {
+      throw new MorningBriefConfigError('invalid_task_catch_up', `taskCatchUpMinutes must be ${TASK_CATCH_UP_LIMITS.minMinutes} to ${TASK_CATCH_UP_LIMITS.maxMinutes}.`)
+    }
+    next.taskCatchUpMinutes = minutes
+  }
   if ('model' in patch) {
     if (patch.model == null || patch.model === '') {
       delete next.model
@@ -429,6 +445,7 @@ export function coerceMorningBriefConfig(raw: unknown, now = new Date()): Mornin
   const input = raw as Record<string, unknown>
   const time = typeof input.time === 'string' && TIME_RE.test(input.time.trim()) ? input.time.trim() : base.time
   const catchUp = Number(input.catchUpMinutes)
+  const taskCatchUp = Number(input.taskCatchUpMinutes)
   const model = normalizeModelPreference(input.model)
   const effort = normalizeEffortPreference(input.effort)
   let sources: MorningBriefSource[]
@@ -441,6 +458,10 @@ export function coerceMorningBriefConfig(raw: unknown, now = new Date()): Mornin
     days: normalizeDays(input.days, base.days),
     catchUpMinutes: Number.isSafeInteger(catchUp) && catchUp >= 0 && catchUp <= MORNING_BRIEF_LIMITS.maxCatchUpMinutes
       ? catchUp : base.catchUpMinutes,
+    taskCatchUpMinutes: Number.isSafeInteger(taskCatchUp)
+      && taskCatchUp >= TASK_CATCH_UP_LIMITS.minMinutes
+      && taskCatchUp <= TASK_CATCH_UP_LIMITS.maxMinutes
+      ? taskCatchUp : base.taskCatchUpMinutes,
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     sources,
@@ -463,7 +484,7 @@ export function morningBriefPaths(root?: string): MorningBriefStorePaths {
   return { config: `${base}/config.json`, runs: `${base}/runs.json` }
 }
 
-function ensurePrivateDir(file: string): void {
+export function ensurePrivateDir(file: string): void {
   const dir = dirname(file)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   try { chmodSync(dir, 0o700) } catch { /* best effort */ }

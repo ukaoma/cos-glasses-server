@@ -74,8 +74,10 @@ export function shiftDay(day: string, delta: number): string {
  * The instant at which `day` reaches `minutes` past midnight in `timezone`.
  * Two-pass offset correction: read the zone's wall clock at a UTC guess, apply
  * the difference, and re-check once so a DST transition between the guess and
- * the target lands on the right side. On a non-existent local time (spring
- * forward) this returns the first instant after the gap.
+ * the target lands on the right side. A non-existent local time local-clocks
+ * ~60 min early on the old offset (02:30 CDT gap → 01:30; 02:00 → 01:00);
+ * 03:00 lands on 03:00 CDT. `taskInstant` adds 60 min when earlier:
+ * 02:00→03:00, 02:30→03:30.
  */
 export function zonedInstant(day: string, minutes: number, timezone: string): number {
   const [y, m, d] = day.split('-').map(Number)
@@ -88,6 +90,21 @@ export function zonedInstant(day: string, minutes: number, timezone: string): nu
     guess += diffMinutes * 60_000
   }
   return guess
+}
+
+/** Instant for a task runAt. If the rendered local (day, minutes) is earlier
+ * than requested (spring-forward gap), add 60 minutes up to three times.
+ * Fall back to the first zonedInstant. */
+export function taskInstant(day: string, minutes: number, timezone: string): number {
+  const first = zonedInstant(day, minutes, timezone)
+  let instant = first
+  for (let pass = 0; pass < 3; pass++) {
+    const clock = localClock(instant, timezone)
+    const earlier = clock.day < day || (clock.day === day && clock.minutes < minutes)
+    if (!earlier) return instant
+    instant += 60 * 60_000
+  }
+  return first
 }
 
 function daysBetween(fromDay: string, toDay: string): number {

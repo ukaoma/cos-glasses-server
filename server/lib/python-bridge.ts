@@ -78,9 +78,9 @@ if (pythonAvailable) {
  * pipeline is configured; otherwise resolves to an empty/no-op result so the
  * context builder degrades gracefully on a standalone install.
  */
-export function callPython(args: string[], timeoutMs = 30_000): Promise<unknown> {
+export function callPython(args: string[], timeoutMs = 30_000, input?: string): Promise<unknown> {
   if (pythonAvailable) {
-    return callPythonDirect(args, timeoutMs)
+    return callPythonDirect(args, timeoutMs, input)
   }
   return Promise.resolve(standaloneNoop(args))
 }
@@ -186,6 +186,13 @@ function standaloneNoop(args: string[]): unknown {
       return { error: 'cos_pipeline_not_configured' }
     }
     case 'badges': return {}
+    case 'task-rows':
+    case 'task-capture':
+    case 'task-set-run-at':
+    case 'task-set-marker':
+    case 'task-move':
+    case 'task-check':
+      return { error: { code: 'cos_pipeline_not_configured' } }
     default: return {}
   }
 }
@@ -199,15 +206,18 @@ function argLimit(args: string[], fallback: number): number {
 }
 
 /** Full Python bridge — requires the user's venv + cos_api_bridge.py. */
-function callPythonDirect(args: string[], timeoutMs: number): Promise<unknown> {
+function callPythonDirect(args: string[], timeoutMs: number, input?: string): Promise<unknown> {
   return new Promise((resolvePromise, reject) => {
-    execFile(
+    const child = execFile(
       PYTHON_BIN!,
       [BRIDGE_SCRIPT!, ...args],
       { cwd: COS_SCRIPTS_DIR!, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
           const msg = stderr?.trim() || err.message
+          if (typeof msg === 'string' && msg.includes('unknown command')) {
+            return resolvePromise({ error: { code: 'cos_pipeline_not_configured', message: msg } })
+          }
           return reject(new Error(`python-bridge: ${msg}`))
         }
         try {
@@ -217,5 +227,9 @@ function callPythonDirect(args: string[], timeoutMs: number): Promise<unknown> {
         }
       }
     )
+    if (input != null) {
+      child.stdin?.write(input)
+      child.stdin?.end()
+    }
   })
 }

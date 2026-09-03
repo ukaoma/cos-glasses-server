@@ -155,6 +155,8 @@ describe('callPython serves files when no bridge exists', () => {
     // Unrelated commands are untouched by the file tier.
     expect(await callPython(['calendar'])).toEqual({ events: [] })
     expect(await callPython(['badges'])).toEqual({})
+    expect(await callPython(['task-capture'])).toEqual({ error: { code: 'cos_pipeline_not_configured' } })
+    expect(await callPython(['task-rows'])).toEqual({ error: { code: 'cos_pipeline_not_configured' } })
   })
 
   it('returns a per-type overview', async () => {

@@ -142,7 +142,7 @@ describe('the fingerprint pick', () => {
     expect(FINGERPRINT_KEYS).not.toContain('origin')
     // Every request key is in exactly one list; the type-level assertion is
     // what fails a build when a key is added without picking a side.
-    expect([...FINGERPRINT_EXCLUDED]).toEqual(['origin'])
+    expect([...FINGERPRINT_EXCLUDED]).toEqual(['origin', 'dispatch'])
     expect(FINGERPRINT_KEYS_COVER_REQUEST).toBe(true)
   })
 

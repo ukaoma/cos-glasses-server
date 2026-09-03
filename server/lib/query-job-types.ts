@@ -106,7 +106,11 @@ export interface QueryJobRequest {
    * (see `FINGERPRINT_KEYS`), so a rollback to a build that drops it still
    * hydrates the journal. */
   origin?: QueryJobOrigin
+  /** Read-only dispatch constraint. Excluded from the fingerprint. */
+  dispatch?: { restricted: true; tools: readonly string[] }
 }
+
+export const DISPATCH_ALLOWED_TOOLS = ['Read', 'Grep', 'Glob'] as const
 
 export interface QueryJobProviderLinkage {
   provider?: 'claude' | 'codex' | 'cursor' | 'ollama'
@@ -214,6 +218,8 @@ export interface QueryJobStoreHealth {
   /** Requests whose `origin` was present but not one this build recognises
    * (a bare string, or an object of a later build's kind) and was dropped. */
   originDropped: number
+  /** Public-route admissions that had `dispatch` or `origin.kind==='task'` stripped. */
+  originStripped: number
   /** Journal `accepted` records whose stored fingerprint no longer matches the
    * running build's `requestFingerprint` — each one is a job that did NOT
    * hydrate. Zero is the only healthy value. */
@@ -225,6 +231,10 @@ export interface QueryJobStoreHealth {
 }
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+export function isClientJobId(value: string): boolean {
+  return CLIENT_JOB_ID_RE.test(value.toLowerCase())
+}
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/
 const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
 const SECRET_PATTERNS: RegExp[] = [
@@ -336,6 +346,11 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     // counted by the store), or a newer client would have every prompt 400'd.
   }
 
+  const dispatch = parseDispatch(input.dispatch)
+  if (options.strictOrigin && origin?.kind === 'task' && !dispatch) {
+    throw new QueryJobValidationError('invalid_dispatch')
+  }
+
   const attachmentIds = parseMediaIdList(input.attachmentIds)
   const attachmentRefs = parseMediaAttachmentRefs(input.attachmentRefs ?? input.attachments)
   if (!query.trim() && attachmentIds.length === 0 && attachmentRefs.length === 0) {
@@ -360,7 +375,22 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     attachmentRefs,
     activityToolMode,
     ...(origin ? { origin } : {}),
+    ...(dispatch ? { dispatch } : {}),
   }
+}
+
+function parseDispatch(raw: unknown): QueryJobRequest['dispatch'] | undefined {
+  if (raw == null) return undefined
+  if (!raw || typeof raw !== 'object') throw new QueryJobValidationError('invalid_dispatch')
+  const rec = raw as Record<string, unknown>
+  if (rec.restricted !== true || !Array.isArray(rec.tools) || rec.tools.length === 0) {
+    throw new QueryJobValidationError('invalid_dispatch')
+  }
+  const tools = rec.tools.map(String)
+  if (tools.some(tool => !(DISPATCH_ALLOWED_TOOLS as readonly string[]).includes(tool))) {
+    throw new QueryJobValidationError('invalid_dispatch')
+  }
+  return { restricted: true, tools }
 }
 
 /** True when the raw admission/journal input carried an `origin` the parser
@@ -410,7 +440,7 @@ export const FINGERPRINT_KEYS = [
 /** The request keys deliberately OUTSIDE the identity. Every key of
  * `QueryJobRequest` must appear in exactly one of the two lists: adding a key
  * without naming it here or above fails to compile, so the author picks a side. */
-export const FINGERPRINT_EXCLUDED = ['origin'] as const satisfies readonly (keyof QueryJobRequest)[]
+export const FINGERPRINT_EXCLUDED = ['origin', 'dispatch'] as const satisfies readonly (keyof QueryJobRequest)[]
 type FingerprintUncovered = Exclude<keyof QueryJobRequest, typeof FINGERPRINT_KEYS[number] | typeof FINGERPRINT_EXCLUDED[number]>
 export const FINGERPRINT_KEYS_COVER_REQUEST: FingerprintUncovered extends never ? true : never = true
 
