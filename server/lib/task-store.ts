@@ -10,6 +10,8 @@ import {
 } from './morning-brief-config.js'
 import { localClock, shiftDay, taskInstant } from './morning-brief-schedule.js'
 import { callPython, pythonBridgeAvailable } from './python-bridge.js'
+import { resolveCosOperationsDir } from './cos-operations-meetings.js'
+import { taskDomainNames } from './domains.js'
 import { isClientJobId } from './query-job-types.js'
 import { DEFAULT_MODEL, isClaudeModel } from '../../shared/model-preference.js'
 
@@ -30,8 +32,16 @@ export const TASK_BRIDGE_TIMEOUT_MS = 12_000
 export const TASK_JOB_LOST_MS = 6 * 60 * 60_000
 export const TASK_LOCK_RETRY = Object.freeze({ attempts: 3, spacingMs: 300 })
 export const TASK_TODAY_PURGE_HORIZON_DAYS = 7
-export const FULL_DOMAINS = ['quilt', 'personal', 'hermit_crabs', 'sprocket_rocket'] as const
-export type TaskDomain = (typeof FULL_DOMAINS)[number]
+/** Domains come from the user's own config and their own `operations/` tree, not
+ *  from a list baked into the build. The previous constant here was one user's
+ *  four business units, which is why a second COS install could not name
+ *  anything that worked. `taskDomainNames` unions configured domains with every
+ *  directory holding a `tasks.md`. */
+export function taskDomains(): string[] {
+  return taskDomainNames(resolveCosOperationsDir())
+}
+
+export type TaskDomain = string
 export type TaskRunStatus = 'dispatching' | 'running' | 'done' | 'superseded' | 'failed' | 'orphaned'
 export const TASK_RUN_TERMINAL = new Set<TaskRunStatus>(['done', 'superseded', 'failed', 'orphaned'])
 export type TaskColumn = 'done' | 'running' | 'today' | 'carried' | 'scheduled' | 'inbox'
@@ -329,7 +339,7 @@ export async function loadDomainRows(domain: TaskDomain, day: string): Promise<B
 }
 
 export async function loadAllRows(day: string): Promise<BridgeTaskRow[]> {
-  const groups = await Promise.all(FULL_DOMAINS.map(domain => loadDomainRows(domain, day)))
+  const groups = await Promise.all(taskDomains().map(domain => loadDomainRows(domain, day)))
   return groups.flat()
 }
 
@@ -420,8 +430,8 @@ export async function captureTask(body: {
   if (!pythonBridgeAvailable()) throw new TaskRunError(503, 'cos_pipeline_not_configured', 'COS pipeline is not configured.')
   if (!body.captureId) throw new TaskRunError(400, 'capture_id_required', 'captureId is required.')
   if (!isClientJobId(body.captureId)) throw new TaskRunError(422, 'invalid_capture_id', 'captureId must be a UUID v4.')
-  if (!FULL_DOMAINS.includes(body.domain as TaskDomain)) {
-    throw new TaskRunError(400, 'invalid_domain', 'full domain required')
+  if (!taskDomains().includes(body.domain)) {
+    throw new TaskRunError(400, 'invalid_domain', `unknown domain: ${body.domain}`)
   }
   const paths = taskStorePaths()
   const seen = loadCapturesSeen(paths)

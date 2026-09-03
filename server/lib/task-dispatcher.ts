@@ -29,7 +29,7 @@ import {
   type QueryJobSnapshot,
 } from './query-job-types.js'
 import {
-  FULL_DOMAINS,
+  taskDomains,
   TASK_DISPATCH_LIMITS,
   TASK_DISPATCH_WALL_MS,
   TASK_JOB_LOST_MS,
@@ -597,7 +597,7 @@ export async function reconcileDispatch(injected?: TaskDispatcherDeps): Promise<
   }
   const timer = setTimeout(() => lease?.release(), TASK_LEASE_CEILING_MS)
   try {
-    const groups = await Promise.all(FULL_DOMAINS.map(domain => (deps.loadRows ? deps.loadRows(clock.day) : loadDomainRows(domain, clock.day))))
+    const groups = await Promise.all(taskDomains().map(domain => (deps.loadRows ? deps.loadRows(clock.day) : loadDomainRows(domain, clock.day))))
     const rows = groups.flat()
     const ledger = loadTaskLedger(pathsOf(deps))
     const live = ledger.filter(run => run.status === 'dispatching' || run.status === 'running')

@@ -8,11 +8,13 @@ import {
   classifyDomain,
   configuredDomains,
   discoveredDomains,
+  discoveredTaskDomains,
   domainAbbreviation,
   domainForMeeting,
   domainNames,
   isSafeDomainName,
   resolveDomains,
+  taskDomainNames,
 } from './domains.js'
 import { clearProfileCache } from './profile.js'
 
@@ -272,5 +274,53 @@ describe('domainForMeeting decides what a save is filed under', () => {
   it('refuses an unsafe explicit domain instead of building a path from it', () => {
     profile({ domains: ['personal', 'business'] })
     expect(domainForMeeting('../../etc', 'mm hmm okay', ops)).toBe(FALLBACK_DOMAIN)
+  })
+})
+
+// Task domains are discovered by `tasks.md`, NOT by a meetings tree. Measured on
+// a real install: `uncategorized/` has meetings/YYYY-MM and no tasks.md, so
+// reusing meetings discovery would offer a task domain whose file is absent.
+describe('discoveredTaskDomains', () => {
+  it('finds directories with a tasks.md and ignores the rest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-taskdom-'))
+    for (const d of ['quilt', 'personal']) {
+      mkdirSync(join(root, d), { recursive: true })
+      writeFileSync(join(root, d, 'tasks.md'), '- [ ] x\n')
+    }
+    // Meetings but no tasks.md — the `uncategorized` shape.
+    mkdirSync(join(root, 'uncategorized', 'meetings', '2026-09'), { recursive: true })
+    // Neither.
+    mkdirSync(join(root, 'scripts'), { recursive: true })
+    // tasks.md as a DIRECTORY is not a task file.
+    mkdirSync(join(root, 'weird', 'tasks.md'), { recursive: true })
+
+    expect(discoveredTaskDomains(root)).toEqual(['personal', 'quilt'])
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('is total over a missing or unreadable root', () => {
+    expect(discoveredTaskDomains(null)).toEqual([])
+    expect(discoveredTaskDomains(join(tmpdir(), 'cos-does-not-exist-xyz'))).toEqual([])
+  })
+})
+
+describe('taskDomainNames', () => {
+  it('returns what is on disk when nothing is configured', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-taskdom2-'))
+    for (const d of ['quilt', 'hermit_crabs']) {
+      mkdirSync(join(root, d), { recursive: true })
+      writeFileSync(join(root, d, 'tasks.md'), '')
+    }
+    // This is the property that protects the existing install: no profile
+    // domains, so the union is exactly the folders that are already there.
+    expect(taskDomainNames(root)).toEqual(['hermit_crabs', 'quilt'])
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('falls back to the two defaults only when there is nothing at all', () => {
+    expect(taskDomainNames(null)).toEqual(['personal', 'business'])
+    // And never to one user's business units.
+    expect(taskDomainNames(null)).not.toContain('quilt')
+    expect(taskDomainNames(null)).not.toContain('sprocket_rocket')
   })
 })

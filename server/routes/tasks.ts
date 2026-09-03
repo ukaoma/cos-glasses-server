@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import { queryJobCoordinator } from '../lib/query-job-runtime.js'
 import { runTaskNow } from '../lib/task-dispatcher.js'
+import { domainAbbreviation } from '../lib/domains.js'
+import { domainLabel } from '../lib/domain-label.js'
 import {
   TaskBridgeError,
   TaskRunError,
@@ -12,6 +14,7 @@ import {
   moveTask,
   saveDispatchCap,
   setTaskRunAt,
+  taskDomains,
   tasksGate,
   workBadgeCount,
 } from '../lib/task-store.js'
@@ -104,6 +107,21 @@ tasksRouter.patch('/tasks/dispatch-cap', (req, res) => {
     const cap = Number((req.body ?? {}).capPerDay)
     saveDispatchCap(cap)
     res.json({ capPerDay: loadDispatchCap() })
+  } catch (error) {
+    sendError(res, error)
+  }
+})
+
+/** The domain list a client should offer, so no picker hardcodes one user's
+ *  business units. `abbr` is derived server-side so every surface agrees on the
+ *  badge; the two abbreviation maps that used to live in the app disagreed. */
+tasksRouter.get('/domains', (_req, res) => {
+  try {
+    const names = taskDomains()
+    res.json({
+      domains: names.map(name => ({ name, abbr: domainAbbreviation(name), label: domainLabel(name) })),
+      gate: tasksGate(),
+    })
   } catch (error) {
     sendError(res, error)
   }

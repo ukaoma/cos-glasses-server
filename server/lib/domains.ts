@@ -135,6 +135,45 @@ export function discoveredDomains(operationsDir: string | null): string[] {
 }
 
 /**
+ * Immediate subdirectories of `operationsDir` holding a `tasks.md`.
+ *
+ * A SEPARATE signal from `discoveredDomains`, deliberately. That one requires a
+ * `meetings/YYYY-MM` tree, which is the right shape for the meeting lister and
+ * the wrong shape here: measured on this install, `uncategorized/` has a months
+ * tree and no `tasks.md`, so reusing meetings discovery would offer a task
+ * domain whose file does not exist, while a domain with tasks and no meetings
+ * yet would be invisible. The task store reads `tasks.md`, so that is the file
+ * that decides.
+ */
+export function discoveredTaskDomains(operationsDir: string | null): string[] {
+  if (!operationsDir || !existsSync(operationsDir)) return []
+  let names: string[]
+  try {
+    names = readdirSync(operationsDir, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => e.name)
+  } catch { return [] }
+  return names.filter(isSafeDomainName).filter(name => {
+    try { return statSync(join(operationsDir, name, 'tasks.md')).isFile() } catch { return false }
+  }).sort()
+}
+
+/**
+ * Task domains: configured first, then any directory with a `tasks.md`.
+ *
+ * Same union rule as `resolveDomains` and for the same reason — Miles has no
+ * `domains` in his profile, discovery finds his four, and the union is exactly
+ * his four, so switching the task store onto this changes nothing about his
+ * install while removing one user's business units from everyone else's build.
+ */
+export function taskDomainNames(operationsDir: string | null): string[] {
+  const configured = configuredDomains().map(d => d.name)
+  const discovered = discoveredTaskDomains(operationsDir)
+  if (configured.length === 0 && discovered.length === 0) return [...DEFAULT_DOMAINS]
+  const known = new Set(configured.map(n => n.toLowerCase()))
+  return [...configured, ...discovered.filter(n => !known.has(n.toLowerCase()))]
+}
+
+/**
  * Every domain this COS has, as a UNION of configuration and what is on disk.
  *
  * A union rather than a replacement, and the distinction is load-bearing:

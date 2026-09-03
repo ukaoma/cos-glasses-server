@@ -1,3 +1,12 @@
+## 6.44.2
+
+Task domains come from the user, not from the build.
+
+- `FULL_DOMAINS` was `['quilt','personal','hermit_crabs','sprocket_rocket']` — one user's business units, compiled into everyone's copy. The task store and dispatcher now resolve domains through `taskDomainNames`, a union of the profile's `domains` and every directory under `operations/` holding a `tasks.md`. On an install with no configured domains this returns exactly the folders already there, so nothing changes for an existing setup; a fresh COS gets `personal` and `business`.
+- Task discovery keys on `tasks.md`, deliberately NOT on the `meetings/YYYY-MM` tree that `discoveredDomains` requires. Measured here: `uncategorized/` has a months tree and no `tasks.md`, so reusing meetings discovery would have offered a task domain whose file does not exist, and a domain with tasks but no meetings yet would have been invisible.
+- Capture now rejects an unknown domain with the name it was given instead of "full domain required".
+- New `GET /api/domains` returns `{ domains: [{ name, abbr, label }], gate }` so no client hardcodes a picker. `abbr` is derived server-side, ending the two disagreeing abbreviation maps; `label` is derived from the key and leaves a name the user wrote as prose ("DNP study") untouched.
+
 ## 6.44.1
 
 Board and lens titles are readable.
