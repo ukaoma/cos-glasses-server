@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import { queryJobCoordinator } from '../lib/query-job-runtime.js'
 import { runTaskNow } from '../lib/task-dispatcher.js'
-import { domainAbbreviation } from '../lib/domains.js'
+import { domainAbbreviation, isSafeDomainName } from '../lib/domains.js'
+import { updateProfileFields } from '../lib/profile.js'
 import { domainLabel } from '../lib/domain-label.js'
 import {
   TaskBridgeError,
@@ -121,6 +122,46 @@ tasksRouter.get('/domains', (_req, res) => {
     const names = taskDomains()
     res.json({
       domains: names.map(name => ({ name, abbr: domainAbbreviation(name), label: domainLabel(name) })),
+      gate: tasksGate(),
+    })
+  } catch (error) {
+    sendError(res, error)
+  }
+})
+
+/** Set the user's domain list. Replaces it wholesale: the client shows the
+ *  current list and sends back what it wants, which is what a settings pane does.
+ *  Discovered folders are NOT written here — they keep showing because the read
+ *  side unions them in, so removing a name from config never hides a folder that
+ *  still holds tasks. */
+tasksRouter.put('/domains', (req, res) => {
+  try {
+    const raw = (req.body ?? {}).domains
+    if (!Array.isArray(raw)) throw new TaskRunError(400, 'domains_required', 'domains must be an array')
+    if (raw.length > 32) throw new TaskRunError(422, 'too_many_domains', 'at most 32 domains')
+    const names: string[] = []
+    const seen = new Set<string>()
+    for (const entry of raw) {
+      const name = typeof entry === 'string'
+        ? entry
+        : (entry && typeof entry === 'object' && typeof (entry as { name?: unknown }).name === 'string')
+          ? (entry as { name: string }).name
+          : ''
+      const trimmed = name.trim()
+      if (!trimmed) continue
+      if (!isSafeDomainName(trimmed)) {
+        throw new TaskRunError(422, 'invalid_domain_name', `not a usable domain name: ${trimmed}`)
+      }
+      const key = trimmed.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      names.push(trimmed)
+    }
+    updateProfileFields({ domains: names })
+    const resolved = taskDomains()
+    res.json({
+      domains: resolved.map(name => ({ name, abbr: domainAbbreviation(name), label: domainLabel(name) })),
+      configured: names,
       gate: tasksGate(),
     })
   } catch (error) {

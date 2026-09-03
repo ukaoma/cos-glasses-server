@@ -3,6 +3,7 @@
 A task row carries enough to show and edit it.
 
 - `GET /api/tasks` rows gain `text` (the whole description), `source`, `checked`, and `owner`/`agentState`/`agentNo` when present. `title` still exists and is still capped at 44 characters, which is a G2 lens row budget: applying it to every surface is why COS Control rendered "Send James/John the call recording + recap…" in a window 1900px wide. Additive on purpose so clients through 6.9.451, which read `title`, keep working.
+- `PUT /api/domains` sets the user's domain list, so a settings pane can write it instead of the user hand-editing `~/.cos-glasses/.cos-profile.json`. It replaces the configured list wholesale and validates each name for path safety; discovered folders are never written, so removing a name from config cannot hide a folder that still holds tasks.
 - `PATCH /api/tasks/:id` accepts `text`, rewriting a task's words through a new `task-set-text` bridge subcommand. The source block, the `[run ...]` schedule, and any agent marker are rebuilt from parsed state, so editing the words never drops provenance. A task with a running agent is refused, since rewriting the line would change the task the agent was dispatched against.
 
 ## 6.44.2
