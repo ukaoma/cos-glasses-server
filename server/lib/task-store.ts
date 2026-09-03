@@ -116,7 +116,16 @@ export interface TaskBoardRow {
   id: string
   ref: string
   domain: string
+  /** Capped to TASK_TITLE_MAX for a lens row. */
   title: string
+  /** The whole description, for surfaces with room. */
+  text: string
+  source?: string
+  owner?: string
+  delegated?: boolean
+  agentState?: 'running' | 'done' | 'failed'
+  agentNo?: number
+  checked: boolean
   column: TaskColumn
   priority: string
   runAt?: string
@@ -389,6 +398,17 @@ export function projectRow(
     ref: row.ref,
     domain: row.domain,
     title: taskTitle(row.description),
+    // `title` stays capped for the lens; `text` is the whole line. The cap is a
+    // G2 row budget and was being applied to every surface, so a Mac window
+    // 1900px wide showed "Send James/John the call recording + recap…". Additive
+    // on purpose: clients through 6.9.451 read `title` and must keep working.
+    text: row.description,
+    ...(row.source ? { source: row.source } : {}),
+    ...(row.owner ? { owner: row.owner } : {}),
+    ...(row.delegated ? { delegated: true } : {}),
+    ...(row.agent_state ? { agentState: row.agent_state } : {}),
+    ...(row.agent_no != null ? { agentNo: row.agent_no } : {}),
+    checked: row.is_checked,
     column: col,
     priority: row.priority,
     ...(runAt ? { runAt: new Date(taskInstant(runAt.day, runAt.minutes, tz)).toISOString() } : {}),
@@ -456,6 +476,14 @@ export async function setTaskRunAt(domain: string, id: string, runAt: string | n
   }
   const args = ['task-set-run-at', domain, id, runAt ?? '--clear']
   await withLockRetry(() => bridge(args))
+}
+
+/** Rewrite a task's words. The bridge preserves its source block and schedule. */
+export async function setTaskText(domain: string, id: string, text: string): Promise<void> {
+  const clean = text.replace(/\s+/g, ' ').trim()
+  if (!clean) throw new TaskRunError(400, 'text_required', 'text is required')
+  if (clean.length > 2000) throw new TaskRunError(422, 'text_too_long', 'text must be 2000 characters or fewer')
+  await withLockRetry(() => bridge(['task-set-text', domain, id], clean))
 }
 
 export async function moveTask(domain: string, id: string, section: string, nowMs = Date.now()): Promise<void> {

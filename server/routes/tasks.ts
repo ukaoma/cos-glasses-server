@@ -14,6 +14,7 @@ import {
   moveTask,
   saveDispatchCap,
   setTaskRunAt,
+  setTaskText,
   taskDomains,
   tasksGate,
   workBadgeCount,
@@ -141,14 +142,16 @@ tasksRouter.patch('/tasks/:id', async (req, res) => {
   try {
     const body = req.body ?? {}
     const domain = requireDomain(body.domain)
-    if ('runAt' in body) {
+    if ('text' in body) {
+      await setTaskText(domain, req.params.id, String(body.text))
+    } else if ('runAt' in body) {
       await setTaskRunAt(domain, req.params.id, body.runAt == null || body.runAt === '' ? null : String(body.runAt))
     } else if ('section' in body) {
       await moveTask(domain, req.params.id, String(body.section))
     } else if ('checked' in body) {
       await checkTask({ domain, id: req.params.id, checked: body.checked === true })
     } else {
-      throw new TaskRunError(400, 'invalid_patch', 'Expected runAt, section, or checked.')
+      throw new TaskRunError(400, 'invalid_patch', 'Expected text, runAt, section, or checked.')
     }
     res.json({ ok: true })
   } catch (error) {

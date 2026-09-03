@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   TASK_TITLE_MAX,
   beyondCatchUp,
+  projectRow,
   column,
   flags,
   isCatchUpDue,
@@ -179,5 +180,58 @@ describe('taskTitle', () => {
   it('does not leave dangling punctuation before the ellipsis', () => {
     const out = taskTitle('Support Storm expansion marketing plan — the whole thing')
     expect(out).not.toMatch(/[\s\u2014,;:-]\u2026$/)
+  })
+})
+
+// A projected row used to carry only a 44-character title, a budget sized for a
+// G2 lens row and applied to every surface: COS Control rendered
+// "Send James/John the call recording + recap…" in a 1900px window. `text` is
+// additive so clients through 6.9.451, which read `title`, keep working.
+
+describe('projectRow context fields', () => {
+  const bridgeRow = (over: Partial<BridgeTaskRow> = {}): BridgeTaskRow => ({
+    ref: 'quilt-1', id: 'abc123', domain: 'quilt',
+    description: 'x'.repeat(TASK_TITLE_MAX * 3),
+    priority: 'normal', is_checked: false, archived: false, line_number: 5,
+    source: 'meeting 2026-09-01', owner: null, delegated: false,
+    needs_review: false, thread: null, run_at: null, agent_state: null,
+    agent_no: null, section: 'inbox', section_day: null, ...over,
+  })
+  const project = (over: Partial<BridgeTaskRow> = {}) =>
+    projectRow(bridgeRow(over), [], DAY, NOW, TZ, 180)
+
+  it('carries the whole description alongside the capped title', () => {
+    const row = project()!
+    expect(row.title.length).toBeLessThanOrEqual(TASK_TITLE_MAX)
+    expect(row.text.length).toBeGreaterThan(TASK_TITLE_MAX)
+    expect(row.text).toBe('x'.repeat(TASK_TITLE_MAX * 3))
+  })
+
+  it('carries the source block so a detail view can show provenance', () => {
+    expect(project()!.source).toBe('meeting 2026-09-01')
+    // Absent rather than an empty string, so a client can test for it.
+    expect(project({ source: null })).not.toHaveProperty('source')
+  })
+
+  it('reports checked state, owner, delegation and agent state', () => {
+    expect(project({ is_checked: true })!.checked).toBe(true)
+    expect(project()!.checked).toBe(false)
+    expect(project({ owner: 'Gina' })!.owner).toBe('Gina')
+    expect(project({ agent_state: 'running' })!.agentState).toBe('running')
+    expect(project({ agent_state: 'done', agent_no: 3 })!.agentNo).toBe(3)
+  })
+
+  it('keeps a delegated row off the board entirely', () => {
+    // Not a missing field: a delegated task is someone else's, so column()
+    // gives it no lane and the row is dropped. Asserting the flag would have
+    // been asserting a row that does not exist.
+    expect(project({ delegated: true })).toBeNull()
+  })
+
+  it('omits optional context rather than emitting nulls', () => {
+    const row = project()!
+    for (const k of ['owner', 'delegated', 'agentState', 'agentNo']) {
+      expect(row).not.toHaveProperty(k)
+    }
   })
 })
