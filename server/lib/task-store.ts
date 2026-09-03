@@ -333,6 +333,34 @@ export async function loadAllRows(day: string): Promise<BridgeTaskRow[]> {
   return groups.flat()
 }
 
+/** Board and lens titles come from a raw tasks.md line, which carries markdown
+ *  emphasis and is usually far longer than a row. Slicing the raw line cut words
+ *  and left unbalanced `**` on 119 of 201 live rows, so a row read
+ *  "**Provide data migration process docs by ind". Strip the markup first (which
+ *  buys back the four characters the asterisks were spending), then cut on a word
+ *  boundary. The cap is exported so tests pin the real value rather than a copy. */
+export const TASK_TITLE_MAX = 44
+
+export function taskTitle(line: string): string {
+  const plain = line
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Underscore emphasis must be anchored: a bare `_` between word characters is
+    // an identifier (cos_python, hermit_crabs), not markup, and stripping it
+    // corrupts the row. Asterisks need no such care, so one catch-all below clears
+    // them whether the pair is balanced or not — and after a slice, it often is not.
+    .replace(/(^|[\s(])_([^_]+)_(?=[\s).,;:!?]|$)/g, '$1$2')
+    .replace(/\*+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (plain.length <= TASK_TITLE_MAX) return plain
+  const cut = plain.slice(0, TASK_TITLE_MAX - 1)
+  const space = cut.lastIndexOf(' ')
+  // Only honour a word boundary that is not so early it throws the title away.
+  const body = space > TASK_TITLE_MAX * 0.6 ? cut.slice(0, space) : cut
+  return `${body.replace(/[\s\u2014\u2013,;:.-]+$/, '')}\u2026`
+}
+
 export function projectRow(
   row: BridgeTaskRow,
   ledger: readonly TaskRun[],
@@ -350,7 +378,7 @@ export function projectRow(
     id: row.id,
     ref: row.ref,
     domain: row.domain,
-    title: row.description.slice(0, 44),
+    title: taskTitle(row.description),
     column: col,
     priority: row.priority,
     ...(runAt ? { runAt: new Date(taskInstant(runAt.day, runAt.minutes, tz)).toISOString() } : {}),
@@ -502,7 +530,7 @@ export function projectTaskRun(
   run: TaskRun,
   snapshot?: { status: string; completedAt?: string } | null,
 ): TaskRunView {
-  const title = run.line.slice(0, 44)
+  const title = taskTitle(run.line)
   const base = {
     id: run.id,
     kind: 'task' as const,

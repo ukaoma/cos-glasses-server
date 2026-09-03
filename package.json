@@ -1,6 +1,6 @@
 {
   "name": "@gotcos/glasses-server",
-  "version": "6.44.0",
+  "version": "6.44.1",
   "description": "COS Glasses \u2014 self-hosted AI heads-up-display server for Even G2 smart glasses, powered by Claude Code, Codex, Cursor Agent CLI, or local Ollama",
   "type": "module",
   "bin": {
@@ -50,7 +50,9 @@
     "url": "git+https://github.com/ukaoma/cos-glasses-server.git"
   },
   "homepage": "https://www.gotcos.com",
-  "bugs": { "url": "https://github.com/ukaoma/cos-glasses-server/issues" },
+  "bugs": {
+    "url": "https://github.com/ukaoma/cos-glasses-server/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

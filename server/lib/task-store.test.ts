@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  TASK_TITLE_MAX,
   beyondCatchUp,
   column,
   flags,
   isCatchUpDue,
   latestLedgerRow,
+  taskTitle,
   type BridgeTaskRow,
   type TaskRun,
 } from './task-store.js'
@@ -115,3 +117,67 @@ describe('column and flags', () => {
   })
 })
 
+// A raw `.slice(0, 44)` cut words in half and left unbalanced `**` on 119 of the
+// 201 rows the live server was serving, so the phone board read
+// "**Provide data migration process docs by ind". Every bound below is derived
+// from TASK_TITLE_MAX so widening the cap cannot silently strand these.
+
+describe('taskTitle', () => {
+  it('keeps the cap inside the G2 list-row budget', () => {
+    // The cap is a DISPLAY constraint, not an arbitrary number: the Even vendor
+    // spec gives a list row 64 characters, and the board prefixes a domain tag.
+    // Every other test derives its bounds from TASK_TITLE_MAX, so without this
+    // one nothing notices the cap being widened past what a row can render.
+    expect(TASK_TITLE_MAX).toBeLessThanOrEqual(64)
+    expect(TASK_TITLE_MAX).toBeGreaterThanOrEqual(24)
+  })
+
+  it('strips markdown emphasis instead of spending characters on it', () => {
+    expect(taskTitle('**Share ICP document with Blair**')).toBe('Share ICP document with Blair')
+    expect(taskTitle('Ship the *draft* today')).toBe('Ship the draft today')
+    expect(taskTitle('Ship the _draft_ today')).toBe('Ship the draft today')
+    expect(taskTitle('Run cos_python sync.py')).toBe('Run cos_python sync.py')
+    expect(taskTitle('Run `cos_python sync.py`')).toBe('Run cos_python sync.py')
+    expect(taskTitle('See [the doc](https://example.com/x)')).toBe('See the doc')
+  })
+
+  it('clears asterisks whether the emphasis pair is balanced or not', () => {
+    // Production shape: the source was balanced, the 44-char slice was not.
+    expect(taskTitle('**Unclosed bold that never closes')).toBe('Unclosed bold that never closes')
+    expect(taskTitle('Half *open emphasis')).toBe('Half open emphasis')
+    expect(taskTitle(`**${'a'.repeat(TASK_TITLE_MAX * 2)}** tail`)).not.toContain('*')
+  })
+
+  it('never exceeds the cap', () => {
+    for (const n of [0, 1, TASK_TITLE_MAX - 1, TASK_TITLE_MAX, TASK_TITLE_MAX + 1, TASK_TITLE_MAX * 4]) {
+      expect(taskTitle('word '.repeat(n)).length).toBeLessThanOrEqual(TASK_TITLE_MAX)
+    }
+  })
+
+  it('cuts on a word boundary and marks the cut', () => {
+    // Padded so the character at the cap lands INSIDE a word; with data that
+    // happens to break on a space, a raw slice passes this test unchanged.
+    const words = `${'x'.repeat(TASK_TITLE_MAX - 4)} bravocharlie delta`
+    const out = taskTitle(words)
+    expect(out.endsWith('\u2026')).toBe(true)
+    // The visible body must be whole words from the source, never a split token.
+    const body = out.slice(0, -1).trim()
+    expect(words.startsWith(body)).toBe(true)
+    expect(words[body.length] === ' ' || body.length === words.length).toBe(true)
+  })
+
+  it('keeps a single long token rather than returning almost nothing', () => {
+    const out = taskTitle(`${'z'.repeat(TASK_TITLE_MAX * 2)} tail`)
+    expect(out.length).toBeGreaterThan(TASK_TITLE_MAX * 0.6)
+  })
+
+  it('passes a short title through untouched and collapses stray whitespace', () => {
+    expect(taskTitle('Call Silas')).toBe('Call Silas')
+    expect(taskTitle('  Call   Silas  ')).toBe('Call Silas')
+  })
+
+  it('does not leave dangling punctuation before the ellipsis', () => {
+    const out = taskTitle('Support Storm expansion marketing plan — the whole thing')
+    expect(out).not.toMatch(/[\s\u2014,;:-]\u2026$/)
+  })
+})

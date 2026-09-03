@@ -1,3 +1,11 @@
+## 6.44.1
+
+Board and lens titles are readable.
+
+- `projectRow` and `projectTaskRun` sliced the raw `tasks.md` line at 44 characters, so a title kept its markdown and was cut mid-word: 119 of the 201 rows served today began with an unbalanced `**`, and one row read `**Provide data migration process docs by ind`. Both now go through `taskTitle`, which strips code spans, links and emphasis first — buying back the characters the asterisks were spending — then cuts on a word boundary and marks the cut. Verified over all 312 live task lines: none over the cap, none with a stray asterisk, none empty.
+- Underscore emphasis is anchored, so `cos_python` and `hermit_crabs` survive; only `_emphasis_` is stripped.
+- `TASK_TITLE_MAX` is exported so tests pin the real cap instead of a copy of it.
+
 ## 6.44.0
 
 Task store: one COS `tasks.md` contract with a durable lock, columns, and a run ledger.
