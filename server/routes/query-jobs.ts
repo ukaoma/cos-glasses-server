@@ -270,7 +270,7 @@ export function createQueryJobsRouter(
     try {
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
-      const job = await coordinator.cancel(jobId, generation)
+      const { job } = await coordinator.cancel(jobId, generation)
       return res.json({ job })
     } catch (error) {
       const wire = wireError(error)

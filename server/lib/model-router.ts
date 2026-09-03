@@ -105,6 +105,10 @@ export async function callModelStreaming(
   }
 
   try {
+    if (options?.dispatch && !isClaudeModel(resolvedModel)) {
+      await lockedCallbacks.onError('dispatch_requires_claude')
+      return sid
+    }
     // Cursor slots fail closed — never fall through to Claude/Codex.
     if (isCursorModel(resolvedModel)) {
       await getCursorModelCatalog()

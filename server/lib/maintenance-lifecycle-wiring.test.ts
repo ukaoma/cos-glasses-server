@@ -21,6 +21,10 @@ describe('maintenance admission wiring', () => {
     // is taken in the engine (lib), not a route — and the ASR feed hook must
     // stay fire-and-forget with a rejection sink.
     expect(source('server/lib/live-cues-engine.ts')).toContain("acquireMaintenanceWork('live_cue_pipeline')")
+    expect(source('server/lib/task-dispatcher.ts')).toContain("acquireMaintenanceWork('task_dispatch')")
+    const callOptions = source('server/lib/claude-bridge.ts').match(/export interface CallOptions \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(callOptions).toContain('dispatch?: { restricted: true; tools: readonly string[] }')
+    expect(callOptions).not.toContain('model?:')
     expect(source('server/routes/transcribe-stream.ts')).toContain('void feedLiveCueTranscript(')
     expect(source('server/routes/transcribe-stream.ts')).toContain('.catch(() => {})')
   })

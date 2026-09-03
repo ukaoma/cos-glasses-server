@@ -25,7 +25,9 @@ export const TASK_DISPATCH_LIMITS = Object.freeze({
 })
 export const TASK_DISPATCH_WALL_MS = 25_000
 export const TASK_LEASE_CEILING_MS = 2 * TASK_DISPATCH_WALL_MS
+export const TASK_RECONCILE_WALL_MS = 40_000
 export const TASK_BRIDGE_TIMEOUT_MS = 12_000
+export const TASK_JOB_LOST_MS = 6 * 60 * 60_000
 export const TASK_LOCK_RETRY = Object.freeze({ attempts: 3, spacingMs: 300 })
 export const TASK_TODAY_PURGE_HORIZON_DAYS = 7
 export const FULL_DOMAINS = ['quilt', 'personal', 'hermit_crabs', 'sprocket_rocket'] as const
@@ -407,7 +409,13 @@ export async function captureTask(body: {
   return { ok: true, fell_to_inbox: payload.fell_to_inbox, section: payload.section }
 }
 
-export async function setTaskRunAt(domain: string, id: string, runAt: string | null): Promise<void> {
+export async function setTaskRunAt(domain: string, id: string, runAt: string | null, nowMs = Date.now()): Promise<void> {
+  const { clock } = briefContext(nowMs)
+  const row = await findTaskRow(domain, id, clock.day)
+  if (!row) throw new TaskBridgeError('task_not_found', `no task ${id} in ${domain}`)
+  if (row.agent_state === 'running' || liveLedgerFor(id, clock.day)) {
+    throw new TaskRunError(409, 'task_running', 'A run is already in flight for this task.')
+  }
   const args = ['task-set-run-at', domain, id, runAt ?? '--clear']
   await withLockRetry(() => bridge(args))
 }
@@ -471,6 +479,146 @@ export function saveDispatchCap(capPerDay: number, paths = taskStorePaths()): vo
   durableAtomicWriteFileSync(paths.cap, `${JSON.stringify({ capPerDay }, null, 2)}\n`, { mode: 0o600 })
 }
 
+export interface TaskRunView {
+  id: string
+  kind: 'task'
+  trigger: TaskRun['trigger']
+  status: string
+  firedAt: string
+  completedAt?: string
+  globalMsgNum?: number
+  title: string
+  taskId: string
+  jobId?: string
+  clientJobId: string
+  generation: 1
+  messageEra?: string
+  sessionId: string
+  error?: { code: string; message: string }
+  catchUp?: boolean
+}
+
+export function projectTaskRun(
+  run: TaskRun,
+  snapshot?: { status: string; completedAt?: string } | null,
+): TaskRunView {
+  const title = run.line.slice(0, 44)
+  const base = {
+    id: run.id,
+    kind: 'task' as const,
+    trigger: run.trigger,
+    firedAt: run.firedAt,
+    ...(run.completedAt ? { completedAt: run.completedAt } : {}),
+    ...(run.globalMsgNum != null ? { globalMsgNum: run.globalMsgNum } : {}),
+    title,
+    taskId: run.taskId,
+    ...(run.jobId ? { jobId: run.jobId } : {}),
+    clientJobId: run.clientJobId,
+    generation: 1 as const,
+    ...(run.messageEra ? { messageEra: run.messageEra } : {}),
+    sessionId: run.sessionId,
+    ...(run.catchUp ? { catchUp: true } : {}),
+  }
+  switch (run.status) {
+    case 'dispatching':
+      return { ...base, status: 'submitting' }
+    case 'running':
+      return {
+        ...base,
+        status: snapshot?.status ?? 'running',
+        ...(snapshot?.completedAt ? { completedAt: snapshot.completedAt } : {}),
+      }
+    case 'done':
+      return { ...base, status: 'completed' }
+    case 'superseded':
+      return {
+        ...base,
+        status: 'canceled',
+        error: { code: 'superseded', message: 'Rescheduled before it ran' },
+      }
+    case 'failed':
+      return {
+        ...base,
+        status: 'failed',
+        error: run.error ?? { code: 'failed', message: `Task ${run.status} on the Mac` },
+      }
+    case 'orphaned':
+      return {
+        ...base,
+        status: 'canceled',
+        error: { code: 'orphaned', message: run.error?.message ?? 'Task orphaned on the Mac' },
+      }
+  }
+}
+
 export function listTaskRuns(limit = 20, paths = taskStorePaths()): TaskRun[] {
   return loadTaskLedger(paths).sort((a, b) => b.firedAt.localeCompare(a.firedAt)).slice(0, limit)
+}
+
+export async function listProjectedTaskRuns(
+  getSnapshot: (jobId: string) => Promise<{ status: string; completedAt?: string } | undefined>,
+  limit = 20,
+  paths = taskStorePaths(),
+): Promise<TaskRunView[]> {
+  const runs = listTaskRuns(limit, paths)
+  return Promise.all(runs.map(async run => {
+    const snapshot = run.status === 'running' && run.jobId
+      ? await getSnapshot(run.jobId).catch(() => undefined)
+      : undefined
+    return projectTaskRun(run, snapshot)
+  }))
+}
+
+export function composeTaskDigest(rows: readonly TaskBoardRow[]): string {
+  const today = rows.filter(row => row.column === 'today' || row.column === 'carried').length
+  const running = rows.filter(row => row.column === 'running').length
+  const scheduled = rows.filter(row => row.column === 'scheduled').length
+  const inbox = rows.filter(row => row.column === 'inbox').length
+  const missed = rows.filter(row => row.missed).length
+  const failed = rows.filter(row => row.failed).length
+  const clamp = (n: number) => (n > 99 ? '99+' : String(n))
+  const lines = [`TASKS Today ${clamp(today)} · Run ${clamp(running)} · Sched ${clamp(scheduled)} · Inbox ${clamp(inbox)}`]
+  if (missed > 0 || failed > 0) lines.push(`Missed ${clamp(missed)} · Failed ${clamp(failed)}`)
+  return lines.join('\n')
+}
+
+export function composeTaskDispatchPrompt(line: string, day: string, tz: string): string {
+  return [
+    `Scheduled task for ${day} (${tz}).`,
+    '',
+    'Do this work from what is already on this Mac. Read-only: do not send messages, edit files, or change calendar events.',
+    '',
+    `Task: ${line}`,
+    '',
+    'Reply with a short status the wearer can read on glasses.',
+  ].join('\n')
+}
+
+export function liveTaskReservations(era: string, nowMs = Date.now(), paths = taskStorePaths()) {
+  const floor = nowMs - 24 * 60 * 60_000
+  const out: Array<{ globalMsgNum: number; messageEra: string; owner: string }> = []
+  for (const run of loadTaskLedger(paths)) {
+    if (typeof run.globalMsgNum !== 'number') continue
+    if (era !== run.messageEra) continue
+    const fired = Date.parse(run.firedAt)
+    if (!Number.isFinite(fired) || fired < floor) continue
+    out.push({ globalMsgNum: run.globalMsgNum, messageEra: run.messageEra ?? era, owner: `task:${run.taskId}` })
+  }
+  return out
+}
+
+export async function setTaskMarker(domain: string, id: string, marker: string | null): Promise<void> {
+  const args = ['task-set-marker', domain, id, marker ?? '--clear']
+  await withLockRetry(() => bridge(args))
+}
+
+export async function findTaskRow(domain: string, id: string, day: string): Promise<BridgeTaskRow | undefined> {
+  const rows = await loadDomainRows(domain as TaskDomain, day)
+  return rows.find(row => row.id === id)
+}
+
+export function liveLedgerFor(taskId: string, day: string, paths = taskStorePaths()): TaskRun | undefined {
+  return loadTaskLedger(paths).find(run =>
+    run.taskId === taskId && run.day === day && (run.status === 'dispatching' || run.status === 'running'),
+  )
 }

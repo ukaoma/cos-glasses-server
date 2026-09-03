@@ -30,6 +30,8 @@ export interface MorningBriefPromptInput {
   day: string
   ownerName: string
   trigger: 'scheduled' | 'manual'
+  /** Optional TASKS digest. Kept only when the full prompt still fits. */
+  taskDigest?: string
 }
 
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -200,7 +202,7 @@ const KNOWN_IDS = new Set<MorningBriefSourceId>(MORNING_BRIEF_SOURCES.map(spec =
 
 /** Compose the brief prompt. Enabled sources become numbered sections in the
  * user's order; a section whose source has nothing to say is skipped. */
-export function composeMorningBriefPrompt(input: MorningBriefPromptInput): string {
+function assembleMorningBriefPrompt(input: MorningBriefPromptInput, includeDigest: boolean): string {
   const { config, day, ownerName, trigger } = input
   const slotMinutes = parseTime(config.time)
   const slot = `${String(Math.floor(slotMinutes / 60)).padStart(2, '0')}:${String(slotMinutes % 60).padStart(2, '0')}`
@@ -244,6 +246,11 @@ export function composeMorningBriefPrompt(input: MorningBriefPromptInput): strin
     lines.push('')
   }
 
+  if (includeDigest && input.taskDigest) {
+    lines.push(input.taskDigest)
+    lines.push('')
+  }
+
   lines.push(
     'Format for the glasses: plain text only. No markdown headings, tables, or bullet symbols; a section is its label on one line followed by short lines. ' +
     'Keep every line under 60 characters where you can, because the lens is 576 pixels wide and wraps silently. Keep the whole brief under about 60 lines; ' +
@@ -256,7 +263,14 @@ export function composeMorningBriefPrompt(input: MorningBriefPromptInput): strin
   )
   lines.push('Do not say "here is" or "I found". Do not add a preamble or a sign-off.')
 
-  const prompt = lines.join('\n')
+  return lines.join('\n')
+}
+
+export function composeMorningBriefPrompt(input: MorningBriefPromptInput): string {
+  const withDigest = assembleMorningBriefPrompt(input, true)
+  const prompt = input.taskDigest && withDigest.length <= MORNING_BRIEF_PROMPT_MAX_CHARS
+    ? withDigest
+    : assembleMorningBriefPrompt(input, false)
   return prompt.length > MORNING_BRIEF_PROMPT_MAX_CHARS
     ? `${prompt.slice(0, MORNING_BRIEF_PROMPT_MAX_CHARS - 1)}…`
     : prompt

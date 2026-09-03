@@ -3,6 +3,7 @@ import {
   QueryJobStore,
   QueryJobStoreError,
   type QueryJobAdmissionResult,
+  type QueryJobMutationResult,
   type QueryJobSubscription,
 } from './query-job-store.js'
 import {
@@ -502,7 +503,7 @@ export class QueryJobCoordinator {
     }
   }
 
-  async cancel(jobId: string, generation: number): Promise<QueryJobSnapshot> {
+  async cancel(jobId: string, generation: number): Promise<QueryJobMutationResult> {
     const result = await this.store.cancel(jobId, generation)
     if (result.applied) {
       const active = this.active.get(jobId)
@@ -514,7 +515,12 @@ export class QueryJobCoordinator {
         this.finishActive(active)
       }
     }
-    return result.job
+    return result
+  }
+
+  finishIfActive(jobId: string): void {
+    const active = this.active.get(jobId)
+    if (active) this.finishActive(active)
   }
 
   getSnapshot(jobId: string, generation?: number): Promise<QueryJobSnapshot> {

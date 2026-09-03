@@ -70,6 +70,10 @@ export interface MorningBriefSchedulerDeps {
   now?: () => number
   tickMs?: number
   log?: (line: string) => void
+  dispatchDueTasks?: () => Promise<{ fired: number; reason?: string }>
+  reconcileDispatch?: () => Promise<{ fired: number; reason?: string }>
+  onDispatch?: (result: { fired: number; reason?: string }) => void
+  taskDigest?: (day: string) => string | Promise<string>
 }
 
 export class MorningBriefRunError extends Error {
@@ -134,6 +138,10 @@ export class MorningBriefScheduler {
   /** One chain for tick() AND runNow(): the in-progress read in runNow and the
    * ledger write in fire() must never interleave with a scheduled fire. */
   private serial: Promise<unknown> = Promise.resolve()
+  private serialTasks: Promise<unknown> = Promise.resolve()
+  private serialTasksDepth = 0
+  private dispatchInFlight: Promise<unknown> | null = null
+  private reconcileInFlight: Promise<unknown> | null = null
   private readonly now: () => number
   private readonly log: (line: string) => void
   readonly quarantinedConfig?: string
@@ -190,6 +198,23 @@ export class MorningBriefScheduler {
 
   /** One scheduler pass. Serialised: a slow submission never overlaps the next tick. */
   tick(): Promise<TickResult> {
+    if (this.deps.dispatchDueTasks && !this.dispatchInFlight) {
+      const mine = this.serializeTaskWork(() => this.deps.dispatchDueTasks!())
+      this.dispatchInFlight = mine
+      void mine.then(
+        result => this.deps.onDispatch?.(result),
+        () => undefined,
+      ).finally(() => {
+        if (this.dispatchInFlight === mine) this.dispatchInFlight = null
+      })
+    }
+    if (this.deps.reconcileDispatch && !this.reconcileInFlight) {
+      const mine = this.serializeTaskWork(() => this.deps.reconcileDispatch!())
+      this.reconcileInFlight = mine
+      void mine.finally(() => {
+        if (this.reconcileInFlight === mine) this.reconcileInFlight = null
+      })
+    }
     if (this.tickInFlight) return this.tickInFlight
     this.tickInFlight = this.serialize(() => this.runTick()).finally(() => { this.tickInFlight = null })
     return this.tickInFlight
@@ -199,6 +224,22 @@ export class MorningBriefScheduler {
     const next = this.serial.then(fn, fn)
     this.serial = next.then(() => undefined, () => undefined)
     return next
+  }
+
+  private serializeTaskWork<T>(fn: () => Promise<T> | T): Promise<T> {
+    if (this.serialTasksDepth > 0) {
+      return Promise.reject(new Error('nested serializeTaskWork'))
+    }
+    const run = this.serialTasks.then(async () => {
+      this.serialTasksDepth += 1
+      try {
+        return await fn()
+      } finally {
+        this.serialTasksDepth -= 1
+      }
+    })
+    this.serialTasks = run.then(() => undefined, () => undefined)
+    return run
   }
 
   private async runTick(): Promise<TickResult> {
@@ -309,7 +350,14 @@ export class MorningBriefScheduler {
     // Ledger first. A crash after this line is a resume, not a second brief.
     this.replaceRun(run)
 
-    const prompt = composeMorningBriefPrompt({ config: this.config, day, ownerName: this.deps.ownerName(), trigger })
+    const digest = this.deps.taskDigest ? await this.deps.taskDigest(day) : undefined
+    const prompt = composeMorningBriefPrompt({
+      config: this.config,
+      day,
+      ownerName: this.deps.ownerName(),
+      trigger,
+      ...(digest ? { taskDigest: digest } : {}),
+    })
     try {
       const admission = await this.deps.submit({
         clientJobId,

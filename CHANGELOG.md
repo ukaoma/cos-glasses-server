@@ -6,6 +6,8 @@ Task store: one COS `tasks.md` contract with a durable lock, columns, and a run 
 - `GET /api/tasks` and `/api/tasks/runs` project the board and the ledger. Capture, check, move, and schedule go through the same writer lock the Python side uses.
 - Morning-brief config gains `taskCatchUpMinutes` (default 180). Task due/missed math uses `taskInstant`, which steps a spring-forward gap by 60 minutes instead of pretending `zonedInstant` already did that.
 - Health advertises `capabilities.tasks.gate` so a new client can tell an old server from a new one.
+- `POST /api/tasks/:id/run` is Run now: a restricted Claude job (`Read` / `Grep` / `Glob`) on the same durable path as the morning brief. The same task already live → 409 `task_running`. A second different task while the slot is reserved → 503 `dispatch_slots_busy`.
+- `GET /api/tasks` returns `{ tasks, workBadge, gate }`. A client that still expects a domain map must adapt.
 
 ## 6.43.4
 

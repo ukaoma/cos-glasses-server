@@ -54,6 +54,12 @@ export type MaintenanceWorkKind =
   // budget must stay under COS Control's 90s drain timeout (main.swift:1853)
   // or every drain that catches a cue in flight hard-fails to Repair.
   | 'live_cue_pipeline'
+  // Scheduled-task dispatch and reconcile (6.44.0). Held for
+  // TASK_LEASE_CEILING_MS so an Update Server drain cannot unload the
+  // server while a restricted Claude submit or marker write is live.
+  // Two `task_dispatch` leases (dispatch + reconcile) are expected —
+  // acquire() is a concurrent Map, not a per-kind mutex.
+  | 'task_dispatch'
   // Miles-triggered recovery of a quarantined unsaved capture (6.19.0):
   // batch-transcribes retained WAVs into a durable scribe. Held for the whole
   // background run so an Update Server drain waits for it like any batch.

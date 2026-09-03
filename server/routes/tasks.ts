@@ -1,11 +1,13 @@
 import { Router } from 'express'
+import { queryJobCoordinator } from '../lib/query-job-runtime.js'
+import { runTaskNow } from '../lib/task-dispatcher.js'
 import {
   TaskBridgeError,
   TaskRunError,
   captureTask,
   checkTask,
   listBoard,
-  listTaskRuns,
+  listProjectedTaskRuns,
   loadDispatchCap,
   moveTask,
   saveDispatchCap,
@@ -40,12 +42,16 @@ function requireDomain(value: unknown): string {
   return value
 }
 
-tasksRouter.get('/tasks/runs', (req, res) => {
+tasksRouter.get('/tasks/runs', async (req, res) => {
   if (tasksGate() === 'disabled') {
     return res.status(503).json({ error: { code: 'cos_pipeline_not_configured', message: 'COS pipeline is not configured.' }, gate: 'disabled' })
   }
   const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
-  res.json({ runs: listTaskRuns(Number.isFinite(limit) ? limit : 20) })
+  const runs = await listProjectedTaskRuns(
+    jobId => queryJobCoordinator.getSnapshot(jobId).catch(() => undefined),
+    Number.isFinite(limit) ? limit : 20,
+  )
+  res.json({ runs })
 })
 
 tasksRouter.get('/tasks/next', async (_req, res) => {
@@ -132,11 +138,15 @@ tasksRouter.patch('/tasks/:id', async (req, res) => {
   }
 })
 
-tasksRouter.post('/tasks/:id/run', (_req, res) => {
-  res.status(409).json({
-    error: {
-      code: 'durable_jobs_off',
-      message: 'Task dispatch lands with the rest of Train 1 Phase 7.',
-    },
-  })
+tasksRouter.post('/tasks/:id/run', async (req, res) => {
+  try {
+    const domain = requireDomain((req.body ?? {}).domain)
+    const result = await runTaskNow(req.params.id, domain)
+    res.status(202).json(result)
+  } catch (error) {
+    if (error instanceof TaskRunError && error.code === 'dispatch_slots_busy') {
+      res.setHeader('Retry-After', '30')
+    }
+    sendError(res, error)
+  }
 })

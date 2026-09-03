@@ -13,9 +13,16 @@ import { maxGlobalMsgNumInDir } from '../routes/message-ref.js'
 import { dataPath } from './data-dir.js'
 import { getOwnerName } from './profile.js'
 import { durableQueryJobsEnabled } from './query-job-feature.js'
-import { queryJobCoordinator } from './query-job-runtime.js'
+import { projectPublicConversationTerminal, queryJobCoordinator } from './query-job-runtime.js'
 import { maintenanceAdmissionsOpen } from './maintenance-lifecycle.js'
 import { maxReservedGlobalMsgNum, registerMessageReservationSource } from './message-reservations.js'
+import {
+  bindTaskDispatcher,
+  dispatchDueTasks,
+  reconcileDispatch,
+  reservationsForEra,
+} from './task-dispatcher.js'
+import { composeTaskDigest, listBoard } from './task-store.js'
 import { morningBriefPaths } from './morning-brief-config.js'
 import { MorningBriefScheduler } from './morning-brief-scheduler.js'
 import {
@@ -162,9 +169,25 @@ export function probeSkill(rawName: string, workDir = resolveProviderWorkDir({ s
 
 let scheduler: MorningBriefScheduler | null = null
 let unregisterReservations: (() => void) | null = null
+let unregisterTaskReservations: (() => void) | null = null
 
 export function getMorningBriefScheduler(): MorningBriefScheduler {
   if (!scheduler) {
+    bindTaskDispatcher({
+      submit: raw => queryJobCoordinator.submit(raw),
+      findByClientGeneration: (clientJobId, generation) => queryJobCoordinator.getByClientGeneration(clientJobId, generation),
+      getSnapshot: jobId => queryJobCoordinator.getSnapshot(jobId),
+      getExecution: jobId => queryJobCoordinator.store.getExecution(jobId),
+      cancel: (jobId, generation) => queryJobCoordinator.cancel(jobId, generation),
+      complete: (jobId, input) => queryJobCoordinator.store.complete(jobId, input),
+      createSession,
+      currentMessageEra,
+      currentMessageMax,
+      durableJobsEnabled: durableQueryJobsEnabled,
+      admissionsOpen: maintenanceAdmissionsOpen,
+      projectTerminal: projectPublicConversationTerminal,
+      finishIfActive: jobId => queryJobCoordinator.finishIfActive(jobId),
+    })
     const instance = new MorningBriefScheduler({
       paths: morningBriefPaths(),
       submit: raw => queryJobCoordinator.submit(raw),
@@ -184,9 +207,15 @@ export function getMorningBriefScheduler(): MorningBriefScheduler {
         reflection: probeReflection,
         skill: name => probeSkill(name),
       }),
+      dispatchDueTasks,
+      reconcileDispatch,
+      taskDigest: async () => {
+        try { return composeTaskDigest(await listBoard()) } catch { return '' }
+      },
     })
     // The ledger row exists before the job does; its number must count.
     unregisterReservations = registerMessageReservationSource(() => instance.liveReservations(currentMessageEra()))
+    unregisterTaskReservations = registerMessageReservationSource(() => reservationsForEra(currentMessageEra()))
     scheduler = instance
   }
   return scheduler
@@ -200,4 +229,6 @@ export function stopMorningBriefScheduler(): void {
   scheduler?.stop()
   unregisterReservations?.()
   unregisterReservations = null
+  unregisterTaskReservations?.()
+  unregisterTaskReservations = null
 }

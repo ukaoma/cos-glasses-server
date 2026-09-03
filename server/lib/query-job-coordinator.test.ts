@@ -201,10 +201,10 @@ describe('QueryJobCoordinator provider ownership', () => {
     await expect(value.cancel(first.job.jobId, 2)).rejects.toBeInstanceOf(QueryJobGenerationMismatchError)
     expect(contexts.get(first.job.jobId)!.signal.aborted).toBe(false)
     const canceled = await value.cancel(first.job.jobId, 1)
-    expect(canceled.status).toBe('canceled')
+    expect(canceled.job.status).toBe('canceled')
     expect(contexts.get(first.job.jobId)!.signal.aborted).toBe(true)
     const canceledAgain = await value.cancel(first.job.jobId, 1)
-    expect(canceledAgain.eventSeq).toBe(canceled.eventSeq)
+    expect(canceledAgain.job.eventSeq).toBe(canceled.job.eventSeq)
 
     const second = await value.submit(admission(clientJobId, 2, 'second'))
     await waitFor(() => contexts.get(second.job.jobId), Boolean)
@@ -223,7 +223,7 @@ describe('QueryJobCoordinator provider ownership', () => {
     const admitted = await value.submit(admission())
     await waitFor(() => context, Boolean)
     const canceled = await value.cancel(admitted.job.jobId, 1)
-    expect(canceled.status).toBe('canceled')
+    expect(canceled.job.status).toBe('canceled')
 
     expect(await context!.callbacks.onDone({ text: 'late provider output' })).toBe(false)
     expect(await context!.callbacks.onError({ code: 'late_error', message: 'also stale' })).toBe(false)

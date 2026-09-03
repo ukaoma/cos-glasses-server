@@ -130,7 +130,7 @@ function originStamp(request: QueryJobRequest): { origin?: NonNullable<QueryJobR
  * cache. Journaled request/response text always wins over bridge-written
  * partial rows; validated media refs may be merged because output media can
  * finish immediately before a crash. Exact provenance collapses duplicates. */
-async function projectPublicConversationTerminal(
+export async function projectPublicConversationTerminal(
   job: QueryJobSnapshot,
   request: QueryJobRequest,
 ): Promise<void> {
@@ -340,6 +340,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       requestAttachments: resolvedAttachments.refs,
       attachmentPromptBlock: resolvedAttachments.promptBlock,
       sessionLockHeld: true,
+      ...(request.dispatch ? { dispatch: request.dispatch } : {}),
     },
   )
 }

@@ -54,6 +54,7 @@ import {
   buildClaudeToolList,
   claudeMcpConfigArgs,
   claudeToolCapabilityPrompt,
+  readOnlyCapabilityPrompt,
 } from './claude-tool-access.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
@@ -388,6 +389,8 @@ export interface CallOptions {
   cursorExecutionMode?: import('../../shared/model-preference.js').CursorExecutionMode
   /** Durable coordinator already owns the per-session provider lease. */
   sessionLockHeld?: boolean
+  /** Read-only scheduled-task dispatch. Same shape as QueryJobRequest.dispatch. */
+  dispatch?: { restricted: true; tools: readonly string[] }
 }
 
 export async function callClaudeStreaming(
@@ -418,7 +421,7 @@ export async function callClaudeStreaming(
   // Notify client immediately — model is known before any async work
   // Pass existing CLI session ID if resuming (new sessions get it after first result)
   const resolvedCliKey = cliSessionKey(sid, resolvedModel)
-  let existingCliSession = cliSessionMap.get(resolvedCliKey)
+  let existingCliSession = options?.dispatch ? undefined : cliSessionMap.get(resolvedCliKey)
   callbacks.onStart?.(resolvedModel, sid, existingCliSession, {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
@@ -461,14 +464,18 @@ export async function callClaudeStreaming(
   const allowedToolList = buildClaudeToolList({
     publisherTool: outputImagePublisher?.claudeAllowedTool,
   })
-  let mcpConfigArgs: string[]
-  try {
-    mcpConfigArgs = claudeMcpConfigArgs()
-  } catch (err) {
-    outputImagePublisher?.cleanup()
-    throw err
+  let mcpConfigArgs: string[] = []
+  if (!options?.dispatch) {
+    try {
+      mcpConfigArgs = claudeMcpConfigArgs()
+    } catch (err) {
+      outputImagePublisher?.cleanup()
+      throw err
+    }
   }
-  systemPrompt = `${systemPrompt}\n\n${claudeToolCapabilityPrompt(allowedToolList)}`
+  systemPrompt = options?.dispatch
+    ? `${systemPrompt}\n\n${readOnlyCapabilityPrompt('scheduled task dispatch', 'Read, Grep and Glob only; no writes, no shell, no web', 'the task owner on the Mac')}`
+    : `${systemPrompt}\n\n${claudeToolCapabilityPrompt(allowedToolList)}`
   if (outputImagePublisher) systemPrompt = `${systemPrompt}\n\n${outputImagePublisher.promptInstructions}`
 
   // Phase: thinking (waiting for Claude to start)
@@ -519,7 +526,8 @@ export async function callClaudeStreaming(
 
   // Check if we have a prior CLI session for this COS session.
   // If not, use the pre-warmed session (eliminates 2-15s cold start on first query).
-  if (!existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL) {
+  // Restricted dispatch never steals the pre-warmed unrestricted session.
+  if (!options?.dispatch && !existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL) {
     // Only the default model consumes the pre-warmed session.
     // Hey Even (Haiku) cold-starts its own session to avoid model contamination.
     existingCliSession = preWarmedCliSessionId
@@ -540,11 +548,21 @@ export async function callClaudeStreaming(
     '--output-format', 'stream-json',
     '--verbose',  // Required: stream-json requires --verbose
     '--system-prompt', systemPrompt,
-    ...mcpConfigArgs,
+    ...(options?.dispatch ? [] : mcpConfigArgs),
   ]
 
   // Full and lightweight paths share the same explicit MCP selector contract.
-  if (options?.lightweight) {
+  if (options?.dispatch) {
+    args.push(
+      '--restricted',
+      '--tools', options.dispatch.tools.join(','),
+      '--permission-mode', 'dontAsk',
+      '--strict-mcp-config',
+      '--mcp-config', '{"mcpServers":{}}',
+      '--no-session-persistence',
+      '--include-partial-messages',
+    )
+  } else if (options?.lightweight) {
     args.push(...claudePermissionArgs(getClaudeTrustMode(), tools))
   } else {
     args.push(...claudePermissionArgs(getClaudeTrustMode(), tools), '--include-partial-messages')
@@ -929,7 +947,7 @@ export async function callClaudeStreaming(
             continue
           }
           // Capture CLI session ID for future --resume (avoids cold start on next query)
-          if (event.session_id) {
+          if (event.session_id && !options?.dispatch) {
             cliSessionMap.set(resolvedCliKey, event.session_id)
             scheduleCliSessionSave()
             updateClaudeRun(run.runId, { cliSessionId: event.session_id })

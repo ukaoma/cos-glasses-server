@@ -133,4 +133,37 @@ describe('composeMorningBriefPrompt', () => {
     expect(a.length).toBeLessThan(MORNING_BRIEF_PROMPT_MAX_CHARS)
     expect(a.length).toBeLessThan(48_000)
   })
+
+  it('keeps a task digest that still fits and drops one that would exceed the ceiling', () => {
+    const config = applyMorningBriefPatch(base, {})
+    const without = composeMorningBriefPrompt({ config, day: '2026-09-01', ownerName: 'Jun', trigger: 'scheduled' })
+    const room = MORNING_BRIEF_PROMPT_MAX_CHARS - without.length - 2
+    const keep = composeMorningBriefPrompt({
+      config,
+      day: '2026-09-01',
+      ownerName: 'Jun',
+      trigger: 'scheduled',
+      taskDigest: `TASKDIGEST ${'x'.repeat(Math.max(1, room - 20))}`,
+    })
+    expect(keep).toContain('TASKDIGEST')
+    expect(keep.length).toBeLessThanOrEqual(MORNING_BRIEF_PROMPT_MAX_CHARS)
+    const drop = composeMorningBriefPrompt({
+      config,
+      day: '2026-09-01',
+      ownerName: 'Jun',
+      trigger: 'scheduled',
+      taskDigest: `TASKDIGEST ${'x'.repeat(Math.max(room + 32, 64))}`,
+    })
+    expect(drop).not.toContain('TASKDIGEST')
+    expect(drop).toBe(without)
+    const atMax = composeMorningBriefPrompt({
+      config,
+      day: '2026-09-01',
+      ownerName: 'Jun',
+      trigger: 'scheduled',
+      taskDigest: `TASKDIGEST ${'x'.repeat(Math.max(1, room - 12))}`,
+    })
+    expect(atMax).toContain('TASKDIGEST')
+    expect(atMax.length).toBeLessThanOrEqual(MORNING_BRIEF_PROMPT_MAX_CHARS)
+  })
 })
