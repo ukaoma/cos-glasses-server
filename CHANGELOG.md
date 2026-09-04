@@ -1,3 +1,22 @@
+## 6.44.4
+
+Stage, a finish line, and no dispatch without one.
+
+- A task row carries `stage` (planning, active or review) and `doneWhen`. Both
+  live in the tasks.md line, not a sidecar: the task id is a sha256 of the
+  normalized description, so an id-keyed store would orphan itself the first time
+  the text was edited. An unmarked row reads as planning, so nothing needed
+  migrating.
+- `PATCH /api/tasks/:id` accepts `stage` and `doneWhen`.
+- **`runTaskNow` refuses a task with no finish line**, `409 done_when_required`,
+  at the single choke point every dispatch passes through. An agent sent at a
+  task with no definition of done cannot succeed at it and cannot be judged to
+  have failed either.
+- Fixes a round-trip bug older than this release: the writer joins end-of-line
+  markers with spaces while the reader's regex allowed none between them, so a
+  row carrying both a run time and an agent marker silently lost the run time on
+  every read.
+
 ## 6.44.3
 
 A task row carries enough to show and edit it.
