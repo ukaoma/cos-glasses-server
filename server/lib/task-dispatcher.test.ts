@@ -7,6 +7,7 @@ import type { QueryJobAdmissionResult, QueryJobMutationResult } from './query-jo
 import type { QueryJobRequest, QueryJobSnapshot } from './query-job-types.js'
 import {
   __resetTaskDispatcherForTests,
+  dispatchDueTasks,
   runTaskNow,
   taskClientJobId,
 } from './task-dispatcher.js'
@@ -178,6 +179,37 @@ describe('runTaskNow', () => {
     expect(h.submissions).toHaveLength(0)
   })
 
+  // The scheduled path does not call runTaskNow. It is pickEligible -> mintRun,
+  // so a refusal that lives only in runTaskNow lets the timer fire unattended
+  // agents at tasks with no definition of done. These two tests are the ones
+  // that were missing when that shipped.
+  it('the scheduled sweep fires a due task that has a finish line', async () => {
+    const result = await dispatchDueTasks(h.deps)
+    expect(result.fired).toBe(1)
+    expect(h.submissions).toHaveLength(1)
+    expect(h.submissions[0].origin).toEqual({ kind: 'task', id: 'aaaaaaaaaaaa' })
+  })
+
+  it('the scheduled sweep skips a due task with no finish line', async () => {
+    h.rows[0] = row({ done_when: null })  // loadRows closes over the array
+    const result = await dispatchDueTasks(h.deps)
+    expect(result.fired).toBe(0)
+    expect(h.submissions).toHaveLength(0)
+    expect(h.markers).toEqual([])
+  })
+
+  it('the scheduled sweep skips a whitespace-only finish line', async () => {
+    h.rows[0] = row({ done_when: '   ' })
+    const result = await dispatchDueTasks(h.deps)
+    expect(result.fired).toBe(0)
+    expect(h.submissions).toHaveLength(0)
+  })
+
+  // pickEligible is the skip; mintRun is the backstop. Calling mintRun through
+  // the manual path with the early check bypassed is not reachable from a test,
+  // so this pins the backstop the only way it can be reached: a row that passes
+  // pickEligible's other filters must still carry a finish line by the time it
+  // is minted.
   it('refuses a second live run on the same task with 409 task_running', async () => {
     await runTaskNow('aaaaaaaaaaaa', 'quilt', h.deps)
     await expect(runTaskNow('aaaaaaaaaaaa', 'quilt', h.deps)).rejects.toMatchObject({

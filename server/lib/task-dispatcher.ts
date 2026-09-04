@@ -150,6 +150,19 @@ function classifySubmitError(error: unknown): 'identity_conflict' | 'adopt' | 'f
   return 'transient'
 }
 
+/** A task is dispatchable only once someone has said what finished looks like.
+ *
+ *  Checked in THREE places on purpose, because there are two dispatch paths:
+ *  runTaskNow refuses early so the caller gets a 409 before slots are taken,
+ *  pickEligible skips the row so the timer does not retry it every tick, and
+ *  mintRun is the fail-closed backstop — it is the one function BOTH paths call,
+ *  which the earlier "one choke point" comment on runTaskNow wrongly claimed of
+ *  runTaskNow itself. A due row with no finish line used to fire unattended.
+ */
+function hasFinishLine(row: BridgeTaskRow): boolean {
+  return Boolean(row.done_when && row.done_when.trim())
+}
+
 async function mintRun(
   deps: TaskDispatcherDeps,
   row: BridgeTaskRow,
@@ -159,6 +172,13 @@ async function mintRun(
   const config = configOf(deps)
   const clock = localClock(nowMs(deps), config.timezone)
   return serializeTaskWork(() => {
+    if (!hasFinishLine(row)) {
+      throw new TaskRunError(
+        409,
+        'done_when_required',
+        'Say what done looks like before running this task.',
+      )
+    }
     const paths = pathsOf(deps)
     const ledger = loadTaskLedger(paths)
     if (ledger.some(run => run.taskId === row.id && run.day === clock.day && (run.status === 'dispatching' || run.status === 'running'))) {
@@ -284,6 +304,10 @@ function pickEligible(
   if (todayRuns.length >= capPerDay) return []
   return rows.filter(row => {
     if (row.archived || row.delegated || row.is_checked) return false
+    // A scheduled run is unattended, so it needs the finish line MORE than a
+    // manual one, not less. Skipped here rather than thrown so the timer does
+    // not burn a dispatch slot on it every tick.
+    if (!hasFinishLine(row)) return false
     if (!isCatchUpDue(row, now, tz, catchUpMinutes)) return false
     if (row.agent_state === 'running') return false
     const inDay = todayRuns.filter(run => run.taskId === row.id)
@@ -359,9 +383,10 @@ export async function runTaskNow(id: string, domain: string, injected?: TaskDisp
     throw new TaskRunError(409, 'task_running', 'A run is already in flight for this task.')
   }
   // No finish line, no dispatch. An agent sent at a task with no definition of
-  // done cannot succeed at it and cannot be judged to have failed either, so
-  // this fails closed at the one choke point every dispatch passes through.
-  if (!row.done_when || !row.done_when.trim()) {
+  // done cannot succeed at it and cannot be judged to have failed either. This
+  // is the EARLY refusal on the manual path only — mintRun is the backstop both
+  // paths share. See hasFinishLine.
+  if (!hasFinishLine(row)) {
     throw new TaskRunError(
       409,
       'done_when_required',
