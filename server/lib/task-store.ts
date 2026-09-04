@@ -102,6 +102,12 @@ export interface BridgeTaskRow {
   agent_no: number | null
   section: string
   section_day: string | null
+  /** Workflow stage. null/absent means planning, the unmarked default.
+   *  Optional so new server code against an older bridge degrades to planning
+   *  rather than throwing during a partial deploy. */
+  stage?: 'planning' | 'active' | 'review' | null
+  /** The finish line. A dispatch is refused while this is empty. */
+  done_when?: string | null
 }
 
 export interface TaskFlags {
@@ -111,6 +117,10 @@ export interface TaskFlags {
   late: boolean
   carriedOver: boolean
 }
+
+/** Board stage. Planning is the default and carries no marker in tasks.md. */
+export type TaskStage = 'planning' | 'active' | 'review'
+export const TASK_STAGES: readonly TaskStage[] = ['planning', 'active', 'review']
 
 export interface TaskBoardRow {
   id: string
@@ -131,6 +141,9 @@ export interface TaskBoardRow {
   runAt?: string
   section: string
   sectionDay?: string
+  stage: TaskStage
+  /** Absent until someone says what finished looks like. Gates `run`. */
+  doneWhen?: string
   due: boolean
   missed: boolean
   failed: boolean
@@ -414,6 +427,8 @@ export function projectRow(
     ...(runAt ? { runAt: new Date(taskInstant(runAt.day, runAt.minutes, tz)).toISOString() } : {}),
     section: row.section,
     ...(row.section_day ? { sectionDay: row.section_day } : {}),
+    stage: row.stage ?? 'planning',
+    ...(row.done_when ? { doneWhen: row.done_when } : {}),
     ...mark,
   }
 }
@@ -484,6 +499,26 @@ export async function setTaskText(domain: string, id: string, text: string): Pro
   if (!clean) throw new TaskRunError(400, 'text_required', 'text is required')
   if (clean.length > 2000) throw new TaskRunError(422, 'text_too_long', 'text must be 2000 characters or fewer')
   await withLockRetry(() => bridge(['task-set-text', domain, id], clean))
+}
+
+/** Move a task between board stages. 'planning' clears the marker. */
+export async function setTaskStage(domain: string, id: string, stage: TaskStage): Promise<void> {
+  if (!TASK_STAGES.includes(stage)) {
+    throw new TaskRunError(422, 'invalid_stage', `stage must be one of ${TASK_STAGES.join(', ')}`)
+  }
+  await withLockRetry(() => bridge(['task-set-stage', domain, id, stage === 'planning' ? '--clear' : stage]))
+}
+
+/** Set or clear the finish line. Empty clears it, which re-blocks `run`. */
+export async function setTaskDoneWhen(domain: string, id: string, text: string): Promise<void> {
+  const clean = text.replace(/\s+/g, ' ').trim()
+  if (clean.length > 500) {
+    throw new TaskRunError(422, 'done_when_too_long', 'done_when must be 500 characters or fewer')
+  }
+  if (clean.includes('**')) {
+    throw new TaskRunError(422, 'invalid_done_when', 'done_when cannot contain ** markup')
+  }
+  await withLockRetry(() => bridge(['task-set-done-when', domain, id], clean))
 }
 
 export async function moveTask(domain: string, id: string, section: string, nowMs = Date.now()): Promise<void> {

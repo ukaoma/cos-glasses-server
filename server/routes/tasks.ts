@@ -19,6 +19,9 @@ import {
   taskDomains,
   tasksGate,
   workBadgeCount,
+  setTaskStage,
+  setTaskDoneWhen,
+  type TaskStage,
 } from '../lib/task-store.js'
 
 export const tasksRouter = Router()
@@ -191,8 +194,12 @@ tasksRouter.patch('/tasks/:id', async (req, res) => {
       await moveTask(domain, req.params.id, String(body.section))
     } else if ('checked' in body) {
       await checkTask({ domain, id: req.params.id, checked: body.checked === true })
+    } else if ('stage' in body) {
+      await setTaskStage(domain, req.params.id, String(body.stage) as TaskStage)
+    } else if ('doneWhen' in body) {
+      await setTaskDoneWhen(domain, req.params.id, body.doneWhen == null ? '' : String(body.doneWhen))
     } else {
-      throw new TaskRunError(400, 'invalid_patch', 'Expected text, runAt, section, or checked.')
+      throw new TaskRunError(400, 'invalid_patch', 'Expected text, runAt, section, checked, stage, or doneWhen.')
     }
     res.json({ ok: true })
   } catch (error) {

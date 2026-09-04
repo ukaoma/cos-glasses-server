@@ -358,6 +358,16 @@ export async function runTaskNow(id: string, domain: string, injected?: TaskDisp
   if (row.agent_state === 'running') {
     throw new TaskRunError(409, 'task_running', 'A run is already in flight for this task.')
   }
+  // No finish line, no dispatch. An agent sent at a task with no definition of
+  // done cannot succeed at it and cannot be judged to have failed either, so
+  // this fails closed at the one choke point every dispatch passes through.
+  if (!row.done_when || !row.done_when.trim()) {
+    throw new TaskRunError(
+      409,
+      'done_when_required',
+      'Say what done looks like before running this task.',
+    )
+  }
   const runAt = parseRunAt(row.run_at)
   if (runAt && runAt.day > clock.day) {
     throw new TaskRunError(409, 'scheduled_future', 'Run now is not allowed on a future scheduled task.')

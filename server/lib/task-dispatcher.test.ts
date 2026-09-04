@@ -53,6 +53,9 @@ function row(overrides: Partial<BridgeTaskRow> = {}): BridgeTaskRow {
     id: 'aaaaaaaaaaaa',
     domain: 'quilt',
     description: 'Call Jeremy about Q3',
+    // Dispatch requires a finish line, so the runnable fixture carries one.
+    // The refusal path is covered by its own test below.
+    done_when: 'Jeremy confirms the Q3 number',
     priority: 'inbox',
     is_checked: false,
     archived: false,
@@ -156,6 +159,23 @@ describe('runTaskNow', () => {
     expect(ledger.runs).toHaveLength(1)
     expect(ledger.runs[0].status).toBe('running')
     expect(ledger.runs[0].jobId).toBeTruthy()
+  })
+
+  it('refuses a task with no finish line with 409 done_when_required', async () => {
+    h.rows[0] = row({ done_when: null })  // loadRows closes over the array
+    await expect(runTaskNow('aaaaaaaaaaaa', 'quilt', h.deps)).rejects.toMatchObject({
+      status: 409,
+      code: 'done_when_required',
+    })
+    expect(h.submissions).toHaveLength(0)
+  })
+
+  it('refuses a finish line that is only whitespace', async () => {
+    h.rows[0] = row({ done_when: '   ' })
+    await expect(runTaskNow('aaaaaaaaaaaa', 'quilt', h.deps)).rejects.toMatchObject({
+      code: 'done_when_required',
+    })
+    expect(h.submissions).toHaveLength(0)
   })
 
   it('refuses a second live run on the same task with 409 task_running', async () => {
