@@ -168,3 +168,64 @@ describe('callPython serves files when no bridge exists', () => {
     }))
   })
 })
+
+// Learning / knowledge commands (COS Control Memories, Phase 0.3).
+//
+// The file tier ends in `default: return {}`, and an empty object reads as
+// SUCCESS to a route. So every learning command must carry an explicit case
+// that says the pipeline is not configured, in the STRING form the memory
+// routes read. Two pins: (1) EXECUTION — each listed name answers with the
+// string-form error and an unlisted name still falls to `{}`; (2) PARITY —
+// when the Python bridge is reachable on this machine, its `_LEARNING_COMMANDS`
+// frozenset literal equals LEARNING_COMMANDS, so the two lists cannot drift
+// silently in either direction.
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+function pythonBridgeSource(): string | null {
+  const candidates = [
+    process.env.COS_SCRIPTS_DIR ? resolve(process.env.COS_SCRIPTS_DIR, 'cos_api_bridge.py') : null,
+    // sibling checkout on Miles's Macs; vitest runs from the repo root
+    resolve(process.cwd(), '../Ukaoma Chief Of Staff/MU-Chief-Staff/operations/scripts/cos_api_bridge.py'),
+  ].filter((p): p is string => !!p)
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return readFileSync(candidate, 'utf8')
+  }
+  return null
+}
+
+describe('learning commands in the file tier', () => {
+  it('every LEARNING_COMMANDS name answers with the string-form not-configured error', async () => {
+    const { callPython, LEARNING_COMMANDS } = await bridge()
+    expect(LEARNING_COMMANDS.length).toBeGreaterThanOrEqual(9)
+    for (const name of LEARNING_COMMANDS) {
+      expect(await callPython([name]), name).toEqual({ error: 'cos_pipeline_not_configured' })
+    }
+  })
+
+  it('an unlisted command still falls to the empty-object default, which is why the pin exists', async () => {
+    const { callPython } = await bridge()
+    expect(await callPython(['graph-nope'])).toEqual({})
+  })
+
+  it('never uses the object-form error for a learning command', async () => {
+    const { callPython, LEARNING_COMMANDS } = await bridge()
+    for (const name of LEARNING_COMMANDS) {
+      const result = await callPython([name]) as { error: unknown }
+      expect(typeof result.error, name).toBe('string')
+    }
+  })
+
+  const source = pythonBridgeSource()
+  it.runIf(source !== null)('matches the Python bridge _LEARNING_COMMANDS frozenset literal (parity pin)', async () => {
+    const { LEARNING_COMMANDS } = await bridge()
+    const match = /_LEARNING_COMMANDS\s*=\s*frozenset\(\{([^}]*)\}\)/.exec(source!)
+    expect(match, 'frozenset literal not found in cos_api_bridge.py').not.toBeNull()
+    const names = new Set(Array.from(match![1].matchAll(/'([a-z][a-z0-9-]*)'/g), m => m[1]))
+    expect(names).toEqual(new Set(LEARNING_COMMANDS))
+  })
+  it.runIf(source === null)('parity pin skipped: cos_api_bridge.py not reachable on this machine (set COS_SCRIPTS_DIR)', () => {
+    // Not a pass: the parity pin could not run here. Set COS_SCRIPTS_DIR to run it.
+    expect(source).toBeNull()
+  })
+})

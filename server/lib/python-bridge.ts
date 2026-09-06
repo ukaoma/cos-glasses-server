@@ -38,6 +38,25 @@ if (!COS_SCRIPTS_DIR) {
 export const PYTHON_BIN: string | null = COS_SCRIPTS_DIR ? resolve(COS_SCRIPTS_DIR, 'venv/bin/python3') : null
 const BRIDGE_SCRIPT: string | null = COS_SCRIPTS_DIR ? resolve(COS_SCRIPTS_DIR, 'cos_api_bridge.py') : null
 
+/**
+ * The bridge commands served by operations/scripts/learning_bridge.py (COS
+ * Control Memories, Phase 0.3). Every name here has an explicit file-tier case
+ * in `standaloneNoop` below, and python-bridge-files.test.ts pins this list
+ * against the Python bridge's `_LEARNING_COMMANDS` frozenset when that file is
+ * reachable. Grows in the same commit as each later command.
+ */
+export const LEARNING_COMMANDS = [
+  'context-learning-graph-status',
+  'learning-events',
+  'learning-event',
+  'learning-status',
+  'graph-status',
+  'graph-search',
+  'graph-entity',
+  'graph-passages',
+  'graph-index-build',
+] as const
+
 // The optional Python bridge is available only when the user points us at a real
 // COS pipeline that ships the venv + bridge script. Standalone installs never
 // have these, so callPython() degrades to a no-op.
@@ -186,6 +205,21 @@ function standaloneNoop(args: string[]): unknown {
       return { error: 'cos_pipeline_not_configured' }
     }
     case 'badges': return {}
+    // Learning / knowledge commands (COS Control Memories, Phase 0.3). These
+    // need the Python bridge; the file tier has no learning stores or graph
+    // index to serve, so each says so in the STRING form the memory routes
+    // read. LEARNING_COMMANDS above is pinned against `_LEARNING_COMMANDS` in
+    // operations/scripts/cos_api_bridge.py by python-bridge-files.test.ts.
+    case 'context-learning-graph-status':
+    case 'learning-events':
+    case 'learning-event':
+    case 'learning-status':
+    case 'graph-status':
+    case 'graph-search':
+    case 'graph-entity':
+    case 'graph-passages':
+    case 'graph-index-build':
+      return { error: 'cos_pipeline_not_configured' }
     case 'task-rows':
     case 'task-capture':
     case 'task-set-run-at':
