@@ -837,6 +837,92 @@ export function normalizeIngestKickoff(value: unknown): IngestKickoff {
   }
 }
 
+export const KNOWLEDGE_SETUP_SAMPLE_MAX = 3
+
+/**
+ * A folder or file path the user chose for the setup path. Unlike
+ * `stringOrAbsent`, which hides local paths from surfaces that must not leak
+ * them, this keeps the path: COS Control shows it back to the person who
+ * picked it, on the Mac it lives on.
+ */
+function chosenPathOrAbsent(value: unknown, max = 1000): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed.slice(0, max) : undefined
+}
+export const KNOWLEDGE_ASK_MAX_CHARS = 400
+
+export interface KnowledgeSetupCheck { id: string; ok: boolean; detail: string }
+export interface KnowledgeSetupSource { path: string; enabled: boolean; exists: boolean; files: number | null; added_at: string | null }
+
+/** `graph-setup-status`: the checklist behind the Knowledge setup path. */
+export function normalizeKnowledgeSetup(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  const owner = asRecord(s.owner) ?? {}
+  const queue = asRecord(s.queue) ?? {}
+  const graph = asRecord(s.graph) ?? {}
+  const budget = asRecord(s.budget) ?? {}
+  const schedule = asRecord(s.schedule) ?? {}
+  const sample = asRecord(s.sample) ?? {}
+  const checks: KnowledgeSetupCheck[] = (Array.isArray(s.checks) ? s.checks : []).flatMap((row) => {
+    const r = asRecord(row); if (!r) return []
+    const id = stringOrAbsent(r.id, 40); if (!id) return []
+    return [{ id, ok: r.ok === true, detail: stringOrAbsent(r.detail, 400) ?? '' }]
+  })
+  return {
+    ready: checks.length > 0 && checks.every(c => c.ok),
+    checks,
+    owner: {
+      owner_host: stringOrAbsent(owner.owner_host, 120) ?? null,
+      this_host: stringOrAbsent(owner.this_host, 120) ?? null,
+      is_owner: owner.is_owner === true,
+      source: stringOrAbsent(owner.source, 16) ?? 'none',
+    },
+    sources: normalizeKnowledgeSources(s.sources),
+    queue: { pending: integerOrAbsent(queue.pending) ?? null, indexed: integerOrAbsent(queue.indexed) ?? null },
+    graph: { entities: integerOrAbsent(graph.entities) ?? null, relationships: integerOrAbsent(graph.relationships) ?? null },
+    budget: { used: integerOrAbsent(budget.used) ?? null, cap: integerOrAbsent(budget.cap) ?? null },
+    schedule: { installed: schedule.installed === true, interval_s: integerOrAbsent(schedule.interval_s) ?? null, plist: chosenPathOrAbsent(schedule.plist, 400) ?? null },
+    sample: {
+      candidates: (Array.isArray(sample.candidates) ? sample.candidates : []).flatMap((row) => {
+        const r = asRecord(row); const path = r ? chosenPathOrAbsent(r.path) : undefined
+        return path ? [{ path, bytes: integerOrAbsent(r!.bytes) ?? null }] : []
+      }).slice(0, KNOWLEDGE_SETUP_SAMPLE_MAX),
+      queued: integerOrAbsent(sample.queued) ?? 0,
+      indexed: integerOrAbsent(sample.indexed) ?? 0,
+    },
+    lock: normalizeIngestKickoff({ lock: s.lock }).lock,
+    ask_ready: s.ask_ready === true,
+    protocol: integerOrAbsent(s.protocol) ?? null,
+  }
+}
+
+export function normalizeKnowledgeSources(value: unknown): KnowledgeSetupSource[] {
+  return (Array.isArray(value) ? value : []).flatMap((row) => {
+    const r = asRecord(row); if (!r) return []
+    const path = chosenPathOrAbsent(r.path); if (!path) return []
+    return [{ path, enabled: r.enabled !== false, exists: r.exists !== false, files: integerOrAbsent(r.files) ?? null, added_at: isoOrAbsent(r.added_at) ?? null }]
+  })
+}
+
+/** `graph-ingest-sample`: what was queued, what was not, and whether a run started. */
+export function normalizeSampleKickoff(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  const rows = (key: string, extra: string) => (Array.isArray(s[key]) ? (s[key] as unknown[]) : []).flatMap((row) => {
+    const r = asRecord(row); const path = r ? chosenPathOrAbsent(r.path) : undefined
+    return path ? [{ path, [extra]: stringOrAbsent(r![extra], 200) ?? null }] : []
+  })
+  return { ...normalizeIngestKickoff(s), queued: rows('queued', 'id'), skipped: rows('skipped', 'reason') }
+}
+
+/** `graph-ask`: one answer from the graph, bounded. */
+export function normalizeGraphAnswer(value: unknown): { question: string; mode: string; answer: string; elapsed_s: number | null } | null {
+  const s = asRecord(value) ?? {}
+  const answer = typeof s.answer === 'string' ? s.answer.slice(0, 20_000) : null
+  if (answer === null) return null
+  return { question: stringOrAbsent(s.question, KNOWLEDGE_ASK_MAX_CHARS) ?? '', mode: stringOrAbsent(s.mode, 16) ?? 'hybrid', answer, elapsed_s: typeof s.elapsed_s === 'number' && Number.isFinite(s.elapsed_s) ? s.elapsed_s : null }
+}
+
 export function normalizeContextBrowserStatus(value: unknown): ContextBrowserStatus {
   const source = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : {}

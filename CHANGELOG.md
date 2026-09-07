@@ -1,3 +1,28 @@
+## 6.44.9
+
+Knowledge from zero: the setup path behind COS Control's Knowledge tab.
+
+- `GET /api/context/graph/setup` is the readiness checklist (`graph-setup-status`):
+  the LightRAG SDK, the model backend, the embedding key, the owner Mac, the
+  source folders, the queue and graph counts, today's budget, the scheduled
+  agent, and up to three sample documents ready to index.
+- `POST /api/context/graph/setup/sources` `{ action, path }` adds, removes,
+  enables or disables a source folder (`graph-setup-sources`); the list comes
+  back. `POST /api/context/graph/setup/owner` makes this Mac the ingestion
+  owner (`graph-setup-owner`).
+- `POST /api/context/graph/setup/sample` (202) queues up to three documents
+  from the enabled sources through the indexer's own dedup and starts one
+  bounded run (`graph-ingest-sample`); the reply names what was queued, what
+  was skipped and why, and the run's pid or the reason nothing started.
+- `POST /api/context/graph/ask` `{ q }` asks the graph one question
+  (`graph-ask`, hybrid mode, 150 s bound) and returns the answer with its
+  elapsed time. `POST /api/context/graph/setup/schedule` `{ enabled, interval_s }`
+  installs or removes the `com.cos.lightrag-ingest` agent on the owner Mac
+  (`graph-schedule`), logging under ~/Library/Logs/COS.
+- A replica answers 409 `not_owner` on every write; a bad field is a 400
+  before the bridge is called. Each person's graph, queue, owner file and
+  sources stay on their own Mac by construction.
+
 ## 6.44.8
 
 One more learning write: start indexing the queue.

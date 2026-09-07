@@ -446,6 +446,87 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(callBridge).not.toHaveBeenCalled()
   })
 
+  it('setup: the checklist normalizes every block and ready means every check passed', async () => {
+    callBridge.mockResolvedValueOnce({
+      checks: [{ id: 'sdk', ok: true, detail: 'lightrag-hku 1.4.9' }, { id: 'embeddings', ok: false, detail: 'OPENAI_API_KEY is not set' }],
+      owner: { owner_host: 'M3.local', this_host: 'M3.local', is_owner: true, source: 'file' },
+      sources: [{ path: '/Users/q/Notes', enabled: true, exists: true, files: 12, added_at: '2026-09-06T23:00:00+00:00' }, { nope: true }],
+      queue: { pending: 3, indexed: 0 }, graph: { entities: null, relationships: null }, budget: { used: 0, cap: 1500 },
+      schedule: { installed: false, interval_s: null, plist: null },
+      sample: { candidates: [{ path: '/Users/q/Notes/a.md', bytes: 2048 }, { path: '/Users/q/Notes/b.md', bytes: 900 }, { path: '/Users/q/Notes/c.md', bytes: 4000 }, { path: '/Users/q/Notes/d.md', bytes: 1 }], queued: 0, indexed: 0 },
+      lock: { state: 'free', owner_pid: null }, ask_ready: false, protocol: 1,
+    })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/graph/setup`)
+    expect(response.status).toBe(200)
+    const body = await response.json() as Record<string, any>
+    expect(body.ready).toBe(false)
+    expect(body.checks).toEqual([{ id: 'sdk', ok: true, detail: 'lightrag-hku 1.4.9' }, { id: 'embeddings', ok: false, detail: 'OPENAI_API_KEY is not set' }])
+    expect(body.owner).toEqual({ owner_host: 'M3.local', this_host: 'M3.local', is_owner: true, source: 'file' })
+    expect(body.sources).toEqual([{ path: '/Users/q/Notes', enabled: true, exists: true, files: 12, added_at: '2026-09-06T23:00:00+00:00' }])
+    expect(body.sample.candidates).toHaveLength(3)
+    expect(body.schedule.installed).toBe(false)
+    expect(callBridge).toHaveBeenCalledWith(['graph-setup-status'], 20_000)
+  })
+
+  it('setup sources: single-token argv, the list comes back, a bad action or path is a 400 before the bridge', async () => {
+    callBridge.mockResolvedValueOnce({ sources: [{ path: '/Users/q/Notes', enabled: true, exists: true, files: 12, added_at: null }], protocol: 1 })
+    const base = await startTestServer()
+    const ok = await fetch(`${base}/api/context/graph/setup/sources`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'add', path: '/Users/q/Notes' }) })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ sources: [{ path: '/Users/q/Notes', enabled: true, exists: true, files: 12, added_at: null }] })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-sources', '--action=add', '--path=/Users/q/Notes'], 15_000)
+    callBridge.mockClear()
+    for (const body of [{ action: 'wipe', path: '/x' }, { action: 'add', path: '' }, { action: 'add' }]) {
+      const bad = await fetch(`${base}/api/context/graph/setup/sources`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      expect(bad.status, JSON.stringify(body)).toBe(400)
+    }
+    expect(callBridge).not.toHaveBeenCalled()
+    callBridge.mockResolvedValueOnce({ error: 'path_not_found', message: 'No folder at /Users/q/Nope', protocol: 1 })
+    const missing = await fetch(`${base}/api/context/graph/setup/sources`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'add', path: '/Users/q/Nope' }) })
+    expect(missing.status).toBe(404)
+    expect(await missing.json()).toEqual({ error: 'path_not_found', message: 'No folder at /Users/q/Nope' })
+  })
+
+  it('setup owner, sample, ask and schedule ride their own commands and statuses', async () => {
+    const base = await startTestServer()
+    callBridge.mockResolvedValueOnce({ owner: { owner_host: 'M3.local', this_host: 'M3.local', is_owner: true, source: 'file' }, protocol: 1 })
+    const owner = await fetch(`${base}/api/context/graph/setup/owner`, { method: 'POST' })
+    expect(owner.status).toBe(200)
+    expect(await owner.json()).toEqual({ owner: { owner_host: 'M3.local', this_host: 'M3.local', is_owner: true, source: 'file' } })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-owner', '--this-mac'], 10_000)
+
+    callBridge.mockResolvedValueOnce({ started: true, already_running: false, pid: 61, limit: 3, pending: 3, lock: { state: 'free', owner_pid: null }, queued: [{ path: '/Users/q/Notes/a.md', id: 'doc_1' }], skipped: [{ path: '/Users/q/Notes/b.md', reason: 'already_indexed' }], protocol: 1 })
+    const sample = await fetch(`${base}/api/context/graph/setup/sample`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limit: 3 }) })
+    expect(sample.status).toBe(202)
+    const kicked = await sample.json() as Record<string, any>
+    expect(kicked.started).toBe(true)
+    expect(kicked.queued).toEqual([{ path: '/Users/q/Notes/a.md', id: 'doc_1' }])
+    expect(kicked.skipped).toEqual([{ path: '/Users/q/Notes/b.md', reason: 'already_indexed' }])
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-ingest-sample', '--limit=3', '--reason=control'], 90_000)
+    expect((await fetch(`${base}/api/context/graph/setup/sample`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limit: 4 }) })).status).toBe(400)
+
+    callBridge.mockResolvedValueOnce({ question: 'Who runs demand generation?', mode: 'hybrid', answer: 'Graham Hoffman leads demand generation.', elapsed_s: 41.2, protocol: 1 })
+    const ask = await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'Who runs demand generation?' }) })
+    expect(ask.status).toBe(200)
+    expect(await ask.json()).toEqual({ question: 'Who runs demand generation?', mode: 'hybrid', answer: 'Graham Hoffman leads demand generation.', elapsed_s: 41.2 })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-ask', '--q=Who runs demand generation?'], 150_000)
+    expect((await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'hi' }) })).status).toBe(400)
+
+    callBridge.mockResolvedValueOnce({ schedule: { installed: true, interval_s: 3600, plist: '/Users/q/Library/LaunchAgents/com.cos.lightrag-ingest.plist' }, protocol: 1 })
+    const schedule = await fetch(`${base}/api/context/graph/setup/schedule`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true, interval_s: 3600 }) })
+    expect(schedule.status).toBe(200)
+    expect(await schedule.json()).toEqual({ installed: true, interval_s: 3600, plist: '/Users/q/Library/LaunchAgents/com.cos.lightrag-ingest.plist' })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-schedule', '--enabled=true', '--interval-s=3600'], 20_000)
+    expect((await fetch(`${base}/api/context/graph/setup/schedule`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: 'yes' }) })).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/setup/schedule`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true, interval_s: 60 }) })).status).toBe(400)
+
+    callBridge.mockResolvedValueOnce({ error: 'not_owner', message: 'Only the ingestion owner (M3.local) may index the queue.', owner_host: 'M3.local', protocol: 1 })
+    const replica = await fetch(`${base}/api/context/graph/setup/schedule`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) })
+    expect(replica.status).toBe(409)
+    expect(await replica.json()).toEqual({ error: 'not_owner', message: 'Only the ingestion owner (M3.local) may index the queue.', owner_host: 'M3.local' })
+  })
+
   it('ingest on a replica answers 409 not_owner with the bridge sentence and the owner host', async () => {
     callBridge.mockResolvedValueOnce({ error: 'not_owner', message: 'Only the ingestion owner (Ukaoma-Mac-Studio.local) may index the queue.', owner_host: 'Ukaoma-Mac-Studio.local', this_host: 'Air.local', protocol: 1 })
     const base = await startTestServer()
@@ -469,6 +550,8 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     }
     expect((await fetch(`${base}/api/context/graph/index`, { method: 'POST' })).status).toBe(503)
     expect((await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/setup`)).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'anything at all' }) })).status).toBe(503)
   })
 
   it('requires the API token on every new route (one 401 each)', async () => {
@@ -479,7 +562,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
-      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest']] as const) {
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
       // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):

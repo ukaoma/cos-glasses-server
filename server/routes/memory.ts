@@ -25,6 +25,12 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   normalizeIngestKickoff,
   INGEST_LIMIT_DEFAULT,
   INGEST_LIMIT_MAX,
+  normalizeKnowledgeSetup,
+  normalizeKnowledgeSources,
+  normalizeSampleKickoff,
+  normalizeGraphAnswer,
+  KNOWLEDGE_SETUP_SAMPLE_MAX,
+  KNOWLEDGE_ASK_MAX_CHARS,
   normalizeLearningEventDetail,
   normalizeLearningEvents,
   normalizeLearningStatus,
@@ -335,6 +341,132 @@ memoryRouter.post('/context/graph/ingest', async (req, res) => {
     res.status(202).json(normalizeIngestKickoff(data))
   } catch (error) {
     console.warn('[context] ingest bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+// ── Knowledge setup (6.44.9): from zero to a first index, in COS Control ──
+//
+// Six bridge commands behind one guided path: the readiness checklist, the
+// source folders, the owner Mac, three sample documents, one question, and
+// the scheduled batches. Every write is bounded and owner-only; a replica
+// answers 409 not_owner. Paths and questions ride as single argv tokens.
+
+/** Map a bridge error to the status the setup routes share. */
+function sendSetupError(res: import('express').Response, code: string, data: unknown): void {
+  const detail = asDetail(data)
+  if (code === 'not_owner') { res.status(409).json({ error: code, message: detail.message, owner_host: detail.owner_host ?? null }); return }
+  if (code.endsWith('_not_found')) { res.status(404).json({ error: code, message: detail.message }); return }
+  if (code.startsWith('invalid_')) { res.status(400).json({ error: code, message: detail.message }); return }
+  res.status(503).json({ error: code })
+}
+
+function asDetail(data: unknown): { message?: string; owner_host?: string } {
+  const d = (typeof data === 'object' && data !== null ? data : {}) as { message?: unknown; owner_host?: unknown }
+  return { message: typeof d.message === 'string' ? d.message : undefined, owner_host: typeof d.owner_host === 'string' ? d.owner_host : undefined }
+}
+
+memoryRouter.get('/context/graph/setup', async (_req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const data = await callPython(['graph-setup-status'], 20_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.json(normalizeKnowledgeSetup(data))
+  } catch (error) {
+    console.warn('[context] setup bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** `{ action: add | remove | enable | disable, path }` → the source list after the change. */
+memoryRouter.post('/context/graph/setup/sources', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const body = (req.body ?? {}) as { action?: unknown; path?: unknown }
+  const action = typeof body.action === 'string' ? body.action : ''
+  const path = typeof body.path === 'string' ? body.path.trim() : ''
+  if (!['add', 'remove', 'enable', 'disable'].includes(action)) { res.status(400).json({ error: 'invalid_action', message: 'action must be add, remove, enable or disable' }); return }
+  if (!path || path.length > 1000 || path.includes('\0')) { res.status(400).json({ error: 'invalid_path', message: 'path must be 1 to 1000 characters' }); return }
+  try {
+    const data = await callPython(['graph-setup-sources', `--action=${action}`, `--path=${path}`], 15_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    const source = data as { sources?: unknown }
+    res.json({ sources: normalizeKnowledgeSources(source.sources) })
+  } catch (error) {
+    console.warn('[context] setup bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+memoryRouter.post('/context/graph/setup/owner', async (_req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const data = await callPython(['graph-setup-owner', '--this-mac'], 10_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.json(normalizeKnowledgeSetup({ owner: (data as { owner?: unknown }).owner }).owner === undefined ? {} : { owner: normalizeKnowledgeSetup(data).owner })
+  } catch (error) {
+    console.warn('[context] setup bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** 202: queue up to three sample documents from the enabled sources and start one bounded run. */
+memoryRouter.post('/context/graph/setup/sample', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const raw = (req.body as { limit?: unknown } | undefined)?.limit
+  const limit = raw === undefined || raw === null ? KNOWLEDGE_SETUP_SAMPLE_MAX : Number(raw)
+  if (!Number.isInteger(limit) || limit < 1 || limit > KNOWLEDGE_SETUP_SAMPLE_MAX) { res.status(400).json({ error: 'invalid_limit', message: `limit must be an integer from 1 to ${KNOWLEDGE_SETUP_SAMPLE_MAX}` }); return }
+  try {
+    const data = await callPython(['graph-ingest-sample', `--limit=${limit}`, '--reason=control'], 90_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.status(202).json(normalizeSampleKickoff(data))
+  } catch (error) {
+    console.warn('[context] sample bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** One question to the graph. Two model calls under the query budget; bounded to 150 s. */
+memoryRouter.post('/context/graph/ask', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const q = typeof (req.body as { q?: unknown } | undefined)?.q === 'string' ? ((req.body as { q: string }).q).trim() : ''
+  if (q.length < 3 || q.length > KNOWLEDGE_ASK_MAX_CHARS) { res.status(400).json({ error: 'invalid_query', message: `q must be 3 to ${KNOWLEDGE_ASK_MAX_CHARS} characters` }); return }
+  try {
+    const data = await callPython(['graph-ask', `--q=${q}`], 150_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    const answer = normalizeGraphAnswer(data)
+    if (!answer) { res.status(503).json({ error: 'graph_no_answer' }); return }
+    res.json(answer)
+  } catch (error) {
+    console.warn('[context] ask bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** `{ enabled, interval_s? }` → install or remove the scheduled batch agent on the owner Mac. */
+memoryRouter.post('/context/graph/setup/schedule', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const body = (req.body ?? {}) as { enabled?: unknown; interval_s?: unknown }
+  if (typeof body.enabled !== 'boolean') { res.status(400).json({ error: 'invalid_enabled', message: 'enabled must be true or false' }); return }
+  const interval = body.interval_s === undefined || body.interval_s === null ? 3600 : Number(body.interval_s)
+  if (!Number.isInteger(interval) || interval < 900 || interval > 86_400) { res.status(400).json({ error: 'invalid_interval', message: 'interval_s must be an integer from 900 to 86400' }); return }
+  try {
+    const data = await callPython(['graph-schedule', `--enabled=${body.enabled}`, `--interval-s=${interval}`], 20_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.json(normalizeKnowledgeSetup({ schedule: (data as { schedule?: unknown }).schedule ?? data }).schedule)
+  } catch (error) {
+    console.warn('[context] schedule bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
