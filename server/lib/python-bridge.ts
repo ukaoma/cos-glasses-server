@@ -211,6 +211,13 @@ function standaloneNoop(args: string[]): unknown {
     // read. LEARNING_COMMANDS above is pinned against `_LEARNING_COMMANDS` in
     // operations/scripts/cos_api_bridge.py by python-bridge-files.test.ts.
     case 'context-learning-graph-status':
+      // The one learning command with a SHAPE: both blocks present and unavailable,
+      // so the /context/status merge path is exercised in the file tier too.
+      return {
+        learning: { available: false, state: 'cos_pipeline_not_configured' },
+        graph: { available: false, state: 'cos_pipeline_not_configured' },
+        protocol: 1,
+      }
     case 'learning-events':
     case 'learning-event':
     case 'learning-status':

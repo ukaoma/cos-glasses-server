@@ -419,6 +419,16 @@ complete setup. The file tier is read from the code path taken only when no
 bridge is configured, so adding it cannot change the behaviour of an install that
 already has one.
 
+Since 6.44.5 the bridge tier also serves recent learning and the knowledge graph,
+read-only: `/api/context/learning` (events, cursor-paged, with a per-store
+coverage map), `/api/context/learning/status`, `/api/context/learning/:id`, and
+`/api/context/graph/{status,search,entity,passages}`, plus `POST
+/api/context/graph/index`, which only asks the pipeline to start a detached index
+build and answers 202. Nothing in the file tier can answer these, so they return
+503 with the bridge state there; older servers 404 them, which is how a client
+tells the versions apart. `/api/context/status` carries `learning` and `graph`
+blocks when the bridge can produce them and omits them otherwise.
+
 The API is read-only in both tiers. Standalone installs with neither a bridge nor
 a notes folder report the feature as unavailable without affecting messages,
 meetings, transcription, or agents.

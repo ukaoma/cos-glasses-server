@@ -1,3 +1,36 @@
+## 6.44.5
+
+Recent learning and the knowledge graph, read-only, for COS Control.
+
+- `GET /api/context/status` also carries `learning` and `graph` blocks. They come
+  from a second bridge call (`context-learning-graph-status`, 1.5 s budget) made
+  alongside the existing one with `Promise.allSettled`, so a bridge that predates
+  the command, times out, or answers `{ error }` leaves `memory` and `threads`
+  exactly as they were and the two blocks absent. Nothing an existing client
+  reads has changed; a client that wants the blocks checks for them.
+- Eight read routes: `GET /api/context/learning` (cursor-paged events with a
+  per-store coverage map), `GET /api/context/learning/status`,
+  `GET /api/context/learning/:id`, `GET /api/context/graph/status`,
+  `GET /api/context/graph/search`, `GET /api/context/graph/entity`,
+  `GET /api/context/graph/passages`, and one `POST /api/context/graph/index`
+  that answers 202 and only asks the bridge to start a detached index build
+  (`graph-index-build --reason control`). The HTTP handler never runs
+  `--build-index`, `--apply-curation`, `--process-queue` or `graph-sync`; a
+  source test pins that. Every route sits behind the API token like the rest of
+  `/api`, answers `Cache-Control: private, no-store`, and 503s with the bridge
+  state when no pipeline is configured.
+- Bodies are allowlisted before they leave: counts pass only as integers, event
+  ids must match `evt_` plus sixteen hex characters, unknown fields and local
+  paths never pass, and an `{ error }` from the bridge becomes a status (404 for
+  `*_not_found`, 400 for `invalid_*`, 503 otherwise) rather than a 200. Found
+  while writing the tests: the passages shape always carries an `error` key,
+  `null` on success, and the first draft read the key alone as a failure.
+- Caps are the bridge's, restated at the edge: 50 events per page, 30 search
+  hits, 5 passages, a 200-character entity id, 160-character query.
+- Older servers 404 these paths, which is how a client tells 6.44.5 apart from
+  what it had. A second Mac still on 6.44.2 picks up 6.44.3 and 6.44.4 with this
+  install; nothing in those two needs a step in between.
+
 ## 6.44.4
 
 Stage, a finish line, and no dispatch without one.

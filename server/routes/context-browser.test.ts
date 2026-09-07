@@ -231,3 +231,230 @@ describe('a file-backed install reaches the same routes', () => {
     expect(callBridge).not.toHaveBeenCalled()
   })
 })
+
+
+// ── Recent learning and Knowledge routes (6.44.5) ──
+
+import { requireApiToken } from '../lib/api-auth.js'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const STATUS_BASE = {
+  available: true, protocol: 1,
+  memory: { available: true, total: 4875, state: 'ready' },
+  threads: { available: true, total: 30, active: 20, stale: 4, resolved: 6, state: 'ready' },
+}
+const STATUS_EXTRA = {
+  learning: { available: true, state: 'ready', count: 121, to_review: { patterns: 1, task_proposals: 120 }, last_ts: '2026-08-31', stores_readable: 6, secret_path: '/Users/x' },
+  graph: { available: true, state: 'ready', entities: 40359, relationships: 88369, source_updated_at: '2026-08-31T16:21:34+00:00', index_state: 'fresh',
+           queue_pending: 56, owner_host: 'Ukaoma-Mac-Studio.local', is_owner: true, replica: false, processor_state: 'none', lock_state: 'free' },
+  protocol: 1,
+}
+const EVENT = {
+  event_id: 'evt_0123456789abcdef', lesson_id: 'siq_6bef5169aea2', event_type: 'proposed', ts: '2026-08-17T05:00:00.000000+00:00',
+  store: 'self_improvement_queue', title: 'daily-reflect: Repair the sync path', scope: 'task', category: 'daily-reflect', engine: 'task',
+  target: { kind: 'task-proposal', id: 'siq_6bef5169aea2', version: null }, applies_to: [], source_refs: [{ kind: 'self_improvement_queue', id: 'line:7', excerpt: 'Repair' }],
+  prior_event_id: null, outcome: null, provenance: 'complete', ordinal: 1, scripts_dir: '/private/leak',
+}
+
+function stubBoth(base: unknown, extra: unknown | Error): void {
+  callBridge.mockImplementation(async (args: string[]) => {
+    if (args[0] === 'context-status') { if (base instanceof Error) throw base; return base }
+    if (args[0] === 'context-learning-graph-status') { if (extra instanceof Error) throw extra; return extra }
+    throw new Error(`unexpected bridge call ${args.join(' ')}`)
+  })
+}
+
+describe('/context/status merges the learning and graph blocks (6.44.5)', () => {
+  afterEach(() => { callBridge.mockReset(); contextSource.mockReturnValue('bridge') })
+
+  it('carries both blocks, allowlisted, when the second call answers', async () => {
+    stubBoth(STATUS_BASE, STATUS_EXTRA)
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/context/status`)).json() as Record<string, unknown>
+    expect(body.memory).toEqual({ available: true, total: 4875, state: 'ready' })
+    expect(body.learning).toEqual({ available: true, state: 'ready', count: 121, to_review: { patterns: 1, task_proposals: 120 }, last_ts: '2026-08-31', stores_readable: 6 })
+    expect(body.graph).toEqual({ available: true, state: 'ready', entities: 40359, relationships: 88369, source_updated_at: '2026-08-31T16:21:34+00:00', index_state: 'fresh',
+      queue_pending: 56, owner_host: 'Ukaoma-Mac-Studio.local', is_owner: true, replica: false, processor_state: 'none', lock_state: 'free' })
+    expect(JSON.stringify(body)).not.toContain('/Users/')
+    expect(callBridge).toHaveBeenCalledTimes(2)
+    expect(callBridge.mock.calls[1]).toEqual([['context-learning-graph-status'], 1_500])
+  })
+
+  it.each([
+    ['rejected (older bridge: unknown command, exit 1, empty stderr)', new Error('')],
+    ['an { error } answer', { error: 'unknown command: context-learning-graph-status' }],
+    ['a timed-out second call', new Error('Command failed: timeout')],
+    ['a non-object answer', 'garbage'],
+  ])('leaves memory and threads intact and the blocks absent when the second call is %s', async (_label, extra) => {
+    stubBoth(STATUS_BASE, extra)
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/context/status`)).json() as Record<string, unknown>
+    expect(body).toEqual({ available: true, protocol: 1, memory: STATUS_BASE.memory, threads: STATUS_BASE.threads })
+    expect('learning' in body).toBe(false)
+    expect('graph' in body).toBe(false)
+  })
+
+  it('reports bridge_error for a rejected base call regardless of the second', async () => {
+    stubBoth(new Error('temporary python failure'), STATUS_EXTRA)
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/context/status`)).json() as Record<string, unknown>
+    expect(body.memory).toEqual({ available: false, total: 0, state: 'bridge_error', reason: 'bridge_error' })
+    expect('learning' in body).toBe(false)
+  })
+
+  it('never carries the blocks on the not-configured early return', async () => {
+    contextSource.mockReturnValue(null)
+    bridgeState.mockReturnValue('pipeline_missing')
+    const base = await startTestServer()
+    const body = await (await fetch(`${base}/api/context/status`)).json() as Record<string, unknown>
+    expect(callBridge).not.toHaveBeenCalled()
+    expect('learning' in body).toBe(false)
+    expect('graph' in body).toBe(false)
+  })
+})
+
+describe('recent learning and knowledge routes (6.44.5)', () => {
+  afterEach(() => { callBridge.mockReset(); contextSource.mockReturnValue('bridge') })
+
+  it('lists learning events with the cursor and coverage, allowlisted and no-store', async () => {
+    callBridge.mockResolvedValueOnce({
+      events: [EVENT, { event_id: 'not-an-id', event_type: 'proposed', ts: '2026-08-17T05:00:00+00:00' }, { ...EVENT, event_id: 'evt_fedcba9876543210', event_type: 'bogus' }],
+      total: 3, next_cursor: { since_ts: '2026-08-17T05:00:00.000000+00:00', since_event_id: 'evt_0123456789abcdef' },
+      coverage: { self_improvement_queue: { state: 'ok', count: 120, detail: '/Users/leak' }, bot_memory: { state: 'unavailable', count: 'x' } }, protocol: 1,
+    })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/learning?days=30&limit=5&kind=proposed,checked&since_ts=2026-09-01T00:00:00Z&since_event_id=evt_0123456789abcdef`)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('private, no-store')
+    const body = await response.json() as { events: Array<Record<string, unknown>>; total: number; next_cursor: unknown; coverage: Record<string, unknown> }
+    expect(body.events.map(e => e.event_id)).toEqual(['evt_0123456789abcdef'])
+    expect(body.events[0]).not.toHaveProperty('scripts_dir')
+    expect(body.events[0].target).toEqual({ kind: 'task-proposal', id: 'siq_6bef5169aea2', version: null })
+    expect(body.total).toBe(3)
+    expect(body.next_cursor).toEqual({ since_ts: '2026-08-17T05:00:00.000000+00:00', since_event_id: 'evt_0123456789abcdef' })
+    expect(body.coverage.bot_memory).toEqual({ state: 'unavailable', count: 0 })
+    expect(JSON.stringify(body)).not.toContain('/Users/')
+    expect(callBridge).toHaveBeenCalledWith(['learning-events', '--days', '30', '--limit', '5', '--kind', 'proposed,checked', '--since-ts', '2026-09-01T00:00:00Z', '--since-event-id', 'evt_0123456789abcdef'], 8_000)
+  })
+
+  it('serves one event with its detail, and 404s an unknown id, 400 a malformed one', async () => {
+    callBridge.mockResolvedValueOnce({ ...EVENT, detail: { bodies: ['body one', 'body two'], task: 'daily-reflect', future: false, logged_times: 2, extra: 'dropped' } })
+    const base = await startTestServer()
+    const ok = await fetch(`${base}/api/context/learning/evt_0123456789abcdef`)
+    expect(ok.status).toBe(200)
+    const body = await ok.json() as { detail: Record<string, unknown> }
+    expect(body.detail).toEqual({ bodies: ['body one', 'body two'], task: 'daily-reflect', future: false, logged_times: 2 })
+    callBridge.mockResolvedValueOnce({ error: 'learning_event_not_found', protocol: 1 })
+    expect((await fetch(`${base}/api/context/learning/evt_ffffffffffffffff`)).status).toBe(404)
+    expect((await fetch(`${base}/api/context/learning/evt_bad`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/learning/status`)).status).not.toBe(400)  // the status route is registered before :id
+  })
+
+  it('serves learning status and graph status, allowlisted', async () => {
+    callBridge.mockResolvedValueOnce({ stores: { self_improvement_queue: { readable: true, state: 'ok', count: 120, last_ts: '2026-08-31T05:00:00+00:00' } },
+      to_review: { count: 121, pattern: 1, 'task-proposal': 120 }, orphan_decisions: 0, no_store_active: false, engines: ['task'], counts_by_type: { proposed: 836, weird: 3 }, protocol: 1 })
+    const base = await startTestServer()
+    const status = await (await fetch(`${base}/api/context/learning/status`)).json() as Record<string, unknown>
+    expect(status).toEqual({ stores: { self_improvement_queue: { readable: true, state: 'ok', count: 120, last_ts: '2026-08-31T05:00:00+00:00' } },
+      to_review: { count: 121, pattern: 1, 'task-proposal': 120 }, orphan_decisions: 0, no_store_active: false, engines: ['task'], counts_by_type: { proposed: 836 } })
+    callBridge.mockResolvedValueOnce({ entities: 40359, relationships: 88369, index_state: 'fresh', source: { owner_host: 'm3', is_owner: true, owner_state: 'owner' },
+      queue: { pending: 56, oldest_pending_at: '2026-08-31T16:58:00+00:00' }, budget: { used: 0, cap: 1500 }, lock: { state: 'free', owner_pid: null, error: null },
+      processor: { state: 'none', plist: false }, build: { state: 'done', error: '/Users/leak', wall_s: 4.4 }, protocol: 1, scripts_dir: '/Users/leak' })
+    const graph = await (await fetch(`${base}/api/context/graph/status`)).json() as Record<string, unknown>
+    expect(graph.entities).toBe(40359)
+    expect((graph.source as Record<string, unknown>).owner_state).toBe('owner')
+    expect((graph.queue as Record<string, unknown>).pending).toBe(56)
+    expect((graph.build as Record<string, unknown>).wall_s).toBe(4.4)
+    expect(JSON.stringify(graph)).not.toContain('/Users/')
+    expect(graph).not.toHaveProperty('scripts_dir')
+  })
+
+  it('validates search, entity and passages inputs before the bridge is called', async () => {
+    const base = await startTestServer()
+    expect((await fetch(`${base}/api/context/graph/search?q=a`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/search?q=${'x'.repeat(161)}`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/entity`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/entity?id=${encodeURIComponent('a\u0007b')}`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages?relationA=COS`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages?entity=COS&relationA=x&relationB=y`)).status).toBe(400)
+    expect(callBridge).not.toHaveBeenCalled()
+  })
+
+  it('searches, opens an entity, reads passages; 404 on an unknown entity', async () => {
+    callBridge.mockResolvedValueOnce({ items: [{ id: 'COS', type: 'artifact', degree: 183, description: 'x' }], total: 722, index_state: 'fresh', matcher: 'fts5', window: 2000, offset: 0, limit: 2, protocol: 1 })
+    const base = await startTestServer()
+    const search = await (await fetch(`${base}/api/context/graph/search?q=COS&limit=2&type=artifact`)).json() as Record<string, unknown>
+    expect(search.total).toBe(722)
+    expect(search.items).toEqual([{ id: 'COS', type: 'artifact', degree: 183, description: 'x' }])
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-search', '--q', 'COS', '--limit', '2', '--offset', '0', '--type', 'artifact'], 8_000)
+    callBridge.mockResolvedValueOnce({ found: true, id: 'Miles Ukaoma', type: 'person', degree: 5251, description: 'd', descriptions: ['d'], edges: [{ source: 'Miles Ukaoma', target: 'Ryan Hopkins', weight: 228, description: 'e' }],
+      neighbors: [{ id: 'Ryan Hopkins', type: 'person', degree: 300 }], total_relationships: 5251, source_status: 'resolved', source_count: 200, source_resolved: 200, index_state: 'fresh', protocol: 1 })
+    const entity = await (await fetch(`${base}/api/context/graph/entity?id=${encodeURIComponent('Miles Ukaoma')}&limit=1`)).json() as Record<string, unknown>
+    expect(entity.found).toBe(true)
+    expect(entity.edges).toEqual([{ source: 'Miles Ukaoma', target: 'Ryan Hopkins', weight: 228, description: 'e' }])
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-entity', '--id', 'Miles Ukaoma', '--offset', '0', '--limit', '1'], 8_000)
+    callBridge.mockResolvedValueOnce({ error: 'entity_not_found', protocol: 1 })
+    expect((await fetch(`${base}/api/context/graph/entity?id=nobody`)).status).toBe(404)
+    callBridge.mockResolvedValueOnce({ items: [{ chunk_id: 'chunk-1', doc_id: 'doc-1', order: 0, excerpt: 'text', source: { status: 'resolved', key: 'k', title: 't', date: '2026-04-04', summary: 's' } }],
+      total: 88, index_state: 'fresh', index_built_at: '2026-09-06T22:45:20+00:00', fallback: null, unavailable: [], note: null, error: null, protocol: 1 })
+    const passagesResponse = await fetch(`${base}/api/context/graph/passages?relationA=COS&relationB=${encodeURIComponent('Miles Ukaoma')}&limit=9`)
+    const passages = await passagesResponse.json() as Record<string, unknown>
+    expect(passages, `status ${passagesResponse.status} calls ${JSON.stringify(callBridge.mock.calls)}`).toMatchObject({ total: 88 })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-passages', '--relation-a', 'COS', '--relation-b', 'Miles Ukaoma', '--limit', '5'], 8_000)
+  })
+
+  it('kicks off an index build with 202 through the spawning bridge command only', async () => {
+    callBridge.mockResolvedValueOnce({ started: true, already_running: false, pid: 4242, receipt: { state: 'running', started_at: '2026-09-06T23:00:00+00:00', pid: 4242, host: 'm3' }, protocol: 1 })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/graph/index`, { method: 'POST' })
+    expect(response.status).toBe(202)
+    const body = await response.json() as Record<string, unknown>
+    expect(body.started).toBe(true)
+    expect((body.receipt as Record<string, unknown>).state).toBe('running')
+    expect(callBridge).toHaveBeenCalledWith(['graph-index-build', '--reason', 'control'], 5_000)
+  })
+
+  it('answers 503 with the string-form reason when the pipeline is not configured or the bridge fails', async () => {
+    callBridge.mockResolvedValueOnce({ error: 'cos_pipeline_not_configured' })
+    const base = await startTestServer()
+    expect(await (await fetch(`${base}/api/context/graph/status`)).json()).toEqual({ error: 'cos_pipeline_not_configured' })
+    callBridge.mockRejectedValueOnce(new Error('boom'))
+    expect((await fetch(`${base}/api/context/learning`)).status).toBe(503)
+    contextSource.mockReturnValue(null)
+    bridgeState.mockReturnValue('pipeline_missing')
+    for (const path of ['/api/context/learning', '/api/context/learning/status', '/api/context/graph/status', '/api/context/graph/search?q=COS', '/api/context/graph/entity?id=COS', '/api/context/graph/passages?entity=COS']) {
+      const response = await fetch(`${base}${path}`)
+      expect(response.status, path).toBe(503)
+      expect(await response.json()).toEqual({ error: 'pipeline_missing' })
+    }
+    expect((await fetch(`${base}/api/context/graph/index`, { method: 'POST' })).status).toBe(503)
+  })
+
+  it('requires the API token on every new route (one 401 each)', async () => {
+    const app = express()
+    app.use('/api', requireApiToken('test-token'))
+    app.use('/api', memoryRouter)
+    const server = await new Promise<ReturnType<typeof app.listen>>(resolve => { const l = app.listen(0, '127.0.0.1', () => resolve(l)) })
+    closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index']] as const) {
+      const response = await fetch(`${base}${path}`, { method })
+      expect(response.status, `${method} ${path}`).toBe(401)
+    }
+    expect(callBridge).not.toHaveBeenCalled()
+  })
+
+  it('never lets the HTTP handler run an SDK or ingest command, and never logs the request URL', () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'memory.ts'), 'utf8')
+    for (const forbidden of ['--build-index', '--apply-curation', '--process-queue', 'graph-sync', 'graph-curation']) {
+      expect(source, forbidden).not.toContain(`'${forbidden}'`)
+    }
+    expect(source).not.toMatch(/req\.url|originalUrl/)
+    // the only build path is the spawning bridge command, at a bounded timeout
+    expect(source).toContain("callPython(['graph-index-build', '--reason', 'control'], 5_000)")
+  })
+})

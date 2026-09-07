@@ -199,6 +199,14 @@ describe('learning commands in the file tier', () => {
     const { callPython, LEARNING_COMMANDS } = await bridge()
     expect(LEARNING_COMMANDS.length).toBeGreaterThanOrEqual(9)
     for (const name of LEARNING_COMMANDS) {
+      if (name === 'context-learning-graph-status') {
+        expect(await callPython([name])).toEqual({
+          learning: { available: false, state: 'cos_pipeline_not_configured' },
+          graph: { available: false, state: 'cos_pipeline_not_configured' },
+          protocol: 1,
+        })
+        continue
+      }
       expect(await callPython([name]), name).toEqual({ error: 'cos_pipeline_not_configured' })
     }
   })
@@ -211,6 +219,7 @@ describe('learning commands in the file tier', () => {
   it('never uses the object-form error for a learning command', async () => {
     const { callPython, LEARNING_COMMANDS } = await bridge()
     for (const name of LEARNING_COMMANDS) {
+      if (name === 'context-learning-graph-status') continue
       const result = await callPython([name]) as { error: unknown }
       expect(typeof result.error, name).toBe('string')
     }

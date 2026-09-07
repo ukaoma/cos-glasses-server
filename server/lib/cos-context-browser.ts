@@ -365,6 +365,423 @@ export interface ContextBrowserStatus {
   source?: 'bridge' | 'files'
   memory: { available: boolean; total: number; state: string; reason?: string }
   threads: { available: boolean; total: number; active: number; stale: number; resolved: number; state: string; reason?: string }
+  /** Recent learning / To review, served by learning_bridge.py since 6.44.5. Absent on older bridges. */
+  learning?: LearningBlock
+  /** Knowledge graph status, served by learning_bridge.py since 6.44.5. Absent on older bridges. */
+  graph?: GraphBlock
+}
+
+export interface LearningBlock {
+  available: boolean
+  state: string
+  count?: number
+  to_review?: { patterns?: number; task_proposals?: number }
+  last_ts?: string
+  orphan_decisions?: number
+  stores_readable?: number
+}
+
+export interface GraphBlock {
+  available: boolean
+  state: string
+  entities?: number
+  relationships?: number
+  source_updated_at?: string
+  index_state?: string
+  index_built_at?: string
+  queue_pending?: number
+  owner_host?: string
+  is_owner?: boolean
+  replica?: boolean
+  processor_state?: string
+  lock_state?: string
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+/**
+ * A count is carried ONLY when the bridge sent a clean integer. finiteInteger()
+ * would coerce '1', 1.5 and true to a number and default a missing field to 0,
+ * which is how an absent block would read as "0 to review".
+ */
+function integerOrAbsent(value: unknown): number | undefined {
+  return Number.isInteger(value) && (value as number) >= 0 ? value as number : undefined
+}
+
+function isoOrAbsent(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined
+  const cleaned = cleanContextText(value, 40)
+  return Number.isFinite(Date.parse(cleaned)) ? cleaned : undefined
+}
+
+function stringOrAbsent(value: unknown, limit: number): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined
+  const cleaned = cleanContextText(value, limit)
+  return cleaned || undefined
+}
+
+function booleanOrAbsent(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+function defined<T extends Record<string, unknown>>(record: T): T {
+  for (const key of Object.keys(record)) if (record[key] === undefined) delete record[key]
+  return record
+}
+
+export function normalizeLearningBlock(value: unknown): LearningBlock | null {
+  const source = asRecord(value)
+  if (!source) return null
+  const review = asRecord(source.to_review)
+  const toReview = review ? defined({ patterns: integerOrAbsent(review.patterns), task_proposals: integerOrAbsent(review.task_proposals) }) : undefined
+  return defined({
+    available: source.available === true,
+    state: cleanContextText(source.state, 64) || (source.available === true ? 'ready' : 'unavailable'),
+    count: integerOrAbsent(source.count),
+    to_review: toReview && Object.keys(toReview).length ? toReview : undefined,
+    last_ts: isoOrAbsent(source.last_ts),
+    orphan_decisions: integerOrAbsent(source.orphan_decisions),
+    stores_readable: integerOrAbsent(source.stores_readable),
+  }) as LearningBlock
+}
+
+export function normalizeGraphBlock(value: unknown): GraphBlock | null {
+  const source = asRecord(value)
+  if (!source) return null
+  return defined({
+    available: source.available === true,
+    state: cleanContextText(source.state, 64) || (source.available === true ? 'ready' : 'unavailable'),
+    entities: integerOrAbsent(source.entities),
+    relationships: integerOrAbsent(source.relationships),
+    source_updated_at: isoOrAbsent(source.source_updated_at),
+    index_state: stringOrAbsent(source.index_state, 32),
+    index_built_at: isoOrAbsent(source.index_built_at),
+    queue_pending: integerOrAbsent(source.queue_pending),
+    owner_host: stringOrAbsent(source.owner_host, 128),
+    is_owner: booleanOrAbsent(source.is_owner),
+    replica: booleanOrAbsent(source.replica),
+    processor_state: stringOrAbsent(source.processor_state, 32),
+    lock_state: stringOrAbsent(source.lock_state, 32),
+  }) as GraphBlock
+}
+
+// ── Recent learning payloads (GET /context/learning, /context/learning/:id) ──
+
+export const LEARNING_EVENT_ID_PATTERN = /^evt_[a-f0-9]{16}$/
+export const LEARNING_EVENT_TYPES = new Set(['captured', 'proposed', 'promotable', 'saved', 'retrieved', 'used', 'checked', 'dismissed', 'reverted', 'reopened', 'consolidated', 'previewed'])
+const LEARNING_LIST_LIMIT = 50
+const LEARNING_DETAIL_KEYS = ['shape', 'task', 'kind', 'layer', 'date', 'future', 'logged_times', 'memory_type', 'capture', 'source', 'content', 'before', 'after', 'rule', 'status', 'occurrences', 'threshold', 'entry', 'truncated'] as const
+
+export interface LearningEvent {
+  event_id: string
+  lesson_id: string | null
+  event_type: string
+  ts: string
+  store: string
+  title: string
+  scope: string
+  category: string | null
+  engine: string
+  target: { kind: string | null; id: string; version: string | null }
+  applies_to: Array<{ kind: string; name: string; cadence: string | null; evidence: string }>
+  source_refs: Array<{ kind: string; id: string; excerpt: string }>
+  prior_event_id: string | null
+  outcome: { name: string; result: string; evaluator: string; ts: string | null } | null
+  provenance: string
+  ordinal?: number
+}
+
+function normalizeLearningEvent(value: unknown, excerptLimit: number): LearningEvent | null {
+  const source = asRecord(value)
+  if (!source || typeof source.event_id !== 'string' || !LEARNING_EVENT_ID_PATTERN.test(source.event_id)) return null
+  const eventType = cleanContextText(source.event_type, 32)
+  if (!LEARNING_EVENT_TYPES.has(eventType)) return null
+  const ts = isoOrAbsent(source.ts)
+  if (!ts) return null
+  const target = asRecord(source.target) ?? {}
+  const outcome = asRecord(source.outcome)
+  const appliesTo = Array.isArray(source.applies_to) ? source.applies_to.slice(0, 10).map(asRecord).filter((r): r is Record<string, unknown> => !!r).map(r => ({
+    kind: cleanContextText(r.kind, 16), name: cleanContextText(r.name, 160),
+    cadence: stringOrAbsent(r.cadence, 120) ?? null, evidence: cleanContextText(r.evidence, 240),
+  })) : []
+  const refs = Array.isArray(source.source_refs) ? source.source_refs.slice(0, 10).map(asRecord).filter((r): r is Record<string, unknown> => !!r).map(r => ({
+    kind: cleanContextText(r.kind, 32), id: cleanContextText(r.id, 200), excerpt: cleanContextText(r.excerpt, excerptLimit),
+  })) : []
+  const event: LearningEvent = {
+    event_id: source.event_id,
+    lesson_id: stringOrAbsent(source.lesson_id, 200) ?? null,
+    event_type: eventType,
+    ts,
+    store: cleanContextText(source.store, 40),
+    title: cleanContextText(source.title, 160),
+    scope: cleanContextText(source.scope, 24) || 'unknown',
+    category: stringOrAbsent(source.category, 160) ?? null,
+    engine: cleanContextText(source.engine, 24) || 'unknown',
+    target: { kind: stringOrAbsent(target.kind, 24) ?? null, id: cleanContextText(target.id, 200), version: stringOrAbsent(target.version, 64) ?? null },
+    applies_to: appliesTo,
+    source_refs: refs,
+    prior_event_id: typeof source.prior_event_id === 'string' && LEARNING_EVENT_ID_PATTERN.test(source.prior_event_id) ? source.prior_event_id : null,
+    outcome: outcome ? {
+      name: cleanContextText(outcome.name, 160), result: cleanContextText(outcome.result, 24),
+      evaluator: cleanContextText(outcome.evaluator, 64), ts: isoOrAbsent(outcome.ts) ?? null,
+    } : null,
+    provenance: cleanContextText(source.provenance, 24) || 'unavailable',
+  }
+  const ordinal = integerOrAbsent(source.ordinal)
+  if (ordinal !== undefined) event.ordinal = ordinal
+  return event
+}
+
+export interface LearningCoverage { [store: string]: { state: string; count: number; detail?: string } }
+
+export function normalizeLearningCoverage(value: unknown): LearningCoverage {
+  const source = asRecord(value) ?? {}
+  const out: LearningCoverage = {}
+  for (const [store, raw] of Object.entries(source).slice(0, 16)) {
+    const entry = asRecord(raw)
+    if (!entry) continue
+    const key = cleanContextText(store, 40)
+    if (!key) continue
+    out[key] = defined({
+      state: cleanContextText(entry.state, 32) || 'unavailable',
+      count: integerOrAbsent(entry.count) ?? 0,
+      detail: stringOrAbsent(entry.detail, 240),
+    }) as { state: string; count: number; detail?: string }
+  }
+  return out
+}
+
+export function normalizeLearningEvents(value: unknown, limit: number): {
+  events: LearningEvent[]; total: number; next_cursor: { since_ts: string; since_event_id: string } | null; coverage: LearningCoverage
+} {
+  const source = asRecord(value) ?? {}
+  const cap = Math.max(1, Math.min(limit, LEARNING_LIST_LIMIT))
+  const events = (Array.isArray(source.events) ? source.events : []).slice(0, cap)
+    .map(item => normalizeLearningEvent(item, 240)).filter((e): e is LearningEvent => !!e)
+  const cursor = asRecord(source.next_cursor)
+  const sinceTs = cursor ? isoOrAbsent(cursor.since_ts) : undefined
+  const sinceId = cursor && typeof cursor.since_event_id === 'string' && LEARNING_EVENT_ID_PATTERN.test(cursor.since_event_id) ? cursor.since_event_id : undefined
+  return {
+    events,
+    total: integerOrAbsent(source.total) ?? events.length,
+    next_cursor: sinceTs && sinceId ? { since_ts: sinceTs, since_event_id: sinceId } : null,
+    coverage: normalizeLearningCoverage(source.coverage),
+  }
+}
+
+export function normalizeLearningEventDetail(value: unknown): (LearningEvent & { detail: Record<string, unknown> }) | null {
+  const event = normalizeLearningEvent(value, 1200)
+  if (!event) return null
+  const raw = asRecord((value as Record<string, unknown>).detail) ?? {}
+  const detail: Record<string, unknown> = {}
+  for (const key of LEARNING_DETAIL_KEYS) {
+    const item = raw[key]
+    if (item === undefined || item === null) continue
+    if (key === 'bodies' as string) continue
+    if (typeof item === 'boolean') detail[key] = item
+    else if (Number.isInteger(item)) detail[key] = item
+    else if (typeof item === 'string') detail[key] = cleanContextText(item, 1200)
+  }
+  if (Array.isArray(raw.bodies)) detail.bodies = raw.bodies.slice(0, 12).map(body => cleanContextText(body, 1200))
+  return { ...event, detail }
+}
+
+export interface LearningStatus {
+  stores: LearningCoverage & { [store: string]: { state: string; count: number; detail?: string; readable?: boolean; last_ts?: string } }
+  to_review: { count: number; pattern: number; 'task-proposal': number }
+  orphan_decisions: number
+  no_store_active: boolean
+  engines: string[]
+  counts_by_type: Record<string, number>
+}
+
+export function normalizeLearningStatus(value: unknown): LearningStatus {
+  const source = asRecord(value) ?? {}
+  const stores: LearningStatus['stores'] = {}
+  for (const [store, raw] of Object.entries(asRecord(source.stores) ?? {}).slice(0, 16)) {
+    const entry = asRecord(raw)
+    const key = cleanContextText(store, 40)
+    if (!entry || !key) continue
+    stores[key] = defined({
+      state: cleanContextText(entry.state, 32) || 'unavailable',
+      count: integerOrAbsent(entry.count) ?? 0,
+      readable: booleanOrAbsent(entry.readable),
+      last_ts: isoOrAbsent(entry.last_ts),
+    }) as LearningStatus['stores'][string]
+  }
+  const review = asRecord(source.to_review) ?? {}
+  const counts: Record<string, number> = {}
+  for (const [type, raw] of Object.entries(asRecord(source.counts_by_type) ?? {})) {
+    if (LEARNING_EVENT_TYPES.has(type) && Number.isInteger(raw)) counts[type] = raw as number
+  }
+  return {
+    stores,
+    to_review: { count: integerOrAbsent(review.count) ?? 0, pattern: integerOrAbsent(review.pattern) ?? 0, 'task-proposal': integerOrAbsent(review['task-proposal']) ?? 0 },
+    orphan_decisions: integerOrAbsent(source.orphan_decisions) ?? 0,
+    no_store_active: source.no_store_active === true,
+    engines: stringList(source.engines, 8, 24),
+    counts_by_type: counts,
+  }
+}
+
+// ── Knowledge graph payloads (GET /context/graph/*) ──
+
+export const GRAPH_ENTITY_ID_LIMIT = 200
+export const GRAPH_INDEX_STATES = new Set(['fresh', 'stale', 'missing', 'source_missing'])
+
+export function normalizeIndexReceipt(value: unknown): Record<string, unknown> | null {
+  const source = asRecord(value)
+  if (!source) return null
+  return defined({
+    state: stringOrAbsent(source.state, 16) ?? null,
+    started_at: isoOrAbsent(source.started_at) ?? null,
+    ended_at: isoOrAbsent(source.ended_at) ?? null,
+    pid: integerOrAbsent(source.pid) ?? null,
+    host: stringOrAbsent(source.host, 128) ?? null,
+    reason: stringOrAbsent(source.reason, 64) ?? null,
+    error: stringOrAbsent(source.error, 240) ?? null,
+    wall_s: typeof source.wall_s === 'number' && Number.isFinite(source.wall_s) ? source.wall_s : null,
+    peak_rss_mb: typeof source.peak_rss_mb === 'number' && Number.isFinite(source.peak_rss_mb) ? source.peak_rss_mb : null,
+    node_count: integerOrAbsent(source.node_count) ?? null,
+    edge_count: integerOrAbsent(source.edge_count) ?? null,
+    build_seq: integerOrAbsent(source.build_seq) ?? null,
+    degraded: source.degraded === true,
+  })
+}
+
+export function normalizeGraphStatus(value: unknown): Record<string, unknown> {
+  const source = asRecord(value) ?? {}
+  const src = asRecord(source.source) ?? {}
+  const queue = asRecord(source.queue) ?? {}
+  const budget = asRecord(source.budget) ?? {}
+  const lock = asRecord(source.lock) ?? {}
+  const processor = asRecord(source.processor) ?? {}
+  const indexState = stringOrAbsent(source.index_state, 32)
+  return {
+    entities: integerOrAbsent(source.entities) ?? null,
+    relationships: integerOrAbsent(source.relationships) ?? null,
+    source_updated_at: isoOrAbsent(source.source_updated_at) ?? null,
+    index_built_at: isoOrAbsent(source.index_built_at) ?? null,
+    index_state: indexState && GRAPH_INDEX_STATES.has(indexState) ? indexState : 'missing',
+    index_degraded: source.index_degraded === true,
+    build: normalizeIndexReceipt(source.build),
+    source: {
+      owner_host: stringOrAbsent(src.owner_host, 128) ?? null,
+      this_host: stringOrAbsent(src.this_host, 128) ?? null,
+      is_owner: src.is_owner === true,
+      owner_state: stringOrAbsent(src.owner_state, 16) ?? 'unset',
+      replica: src.replica === true,
+      source_sha256_prefix: stringOrAbsent(src.source_sha256_prefix, 16) ?? null,
+      index_built_on_host: stringOrAbsent(src.index_built_on_host, 128) ?? null,
+      index_host_mismatch: src.index_host_mismatch === true,
+    },
+    queue: {
+      live_total: integerOrAbsent(queue.live_total) ?? null,
+      pending: integerOrAbsent(queue.pending) ?? null,
+      failed: integerOrAbsent(queue.failed) ?? null,
+      deferred: integerOrAbsent(queue.deferred) ?? null,
+      oldest_pending_at: isoOrAbsent(queue.oldest_pending_at) ?? null,
+      oldest_pending_age_s: integerOrAbsent(queue.oldest_pending_age_s) ?? null,
+      missing_sources: integerOrAbsent(queue.missing_sources) ?? null,
+      conflict_copies: integerOrAbsent(queue.conflict_copies) ?? null,
+    },
+    budget: { used: integerOrAbsent(budget.used) ?? null, cap: integerOrAbsent(budget.cap) ?? null },
+    lock: { state: stringOrAbsent(lock.state, 16) ?? 'unknown', owner_pid: integerOrAbsent(lock.owner_pid) ?? null, error: stringOrAbsent(lock.error, 64) ?? null },
+    last_run: normalizeIndexReceipt(source.last_run),
+    processor: {
+      state: stringOrAbsent(processor.state, 24) ?? 'none',
+      plist: processor.plist === true,
+      cadence_s: integerOrAbsent(processor.cadence_s) ?? null,
+      last_run_at: isoOrAbsent(processor.last_run_at) ?? null,
+      last_outcome: stringOrAbsent(processor.last_outcome, 24) ?? null,
+    },
+  }
+}
+
+export function normalizeGraphSearch(value: unknown, limit: number): Record<string, unknown> {
+  const source = asRecord(value) ?? {}
+  const items = (Array.isArray(source.items) ? source.items : []).slice(0, Math.max(1, Math.min(limit, 30))).map(asRecord)
+    .filter((r): r is Record<string, unknown> => !!r && typeof r.id === 'string')
+    .map(r => ({ id: cleanContextText(r.id, GRAPH_ENTITY_ID_LIMIT), type: stringOrAbsent(r.type, 40) ?? null, degree: integerOrAbsent(r.degree) ?? 0, description: cleanContextText(r.description, 240) }))
+  return {
+    items,
+    total: integerOrAbsent(source.total) ?? items.length,
+    scope: 'full-index',
+    index_built_at: isoOrAbsent(source.index_built_at) ?? null,
+    index_state: stringOrAbsent(source.index_state, 32) ?? 'missing',
+    matcher: stringOrAbsent(source.matcher, 16) ?? null,
+    window: integerOrAbsent(source.window) ?? null,
+    offset: integerOrAbsent(source.offset) ?? 0,
+    limit: integerOrAbsent(source.limit) ?? items.length,
+  }
+}
+
+export function normalizeGraphEntity(value: unknown): Record<string, unknown> | null {
+  const source = asRecord(value)
+  if (!source || source.found !== true || typeof source.id !== 'string') return null
+  const edges = (Array.isArray(source.edges) ? source.edges : []).slice(0, 30).map(asRecord).filter((r): r is Record<string, unknown> => !!r).map(r => ({
+    source: cleanContextText(r.source, GRAPH_ENTITY_ID_LIMIT), target: cleanContextText(r.target, GRAPH_ENTITY_ID_LIMIT),
+    weight: typeof r.weight === 'number' && Number.isFinite(r.weight) ? r.weight : null, description: cleanContextText(r.description, 240),
+  }))
+  const neighbors = (Array.isArray(source.neighbors) ? source.neighbors : []).slice(0, 30).map(asRecord).filter((r): r is Record<string, unknown> => !!r).map(r => ({
+    id: cleanContextText(r.id, GRAPH_ENTITY_ID_LIMIT), type: stringOrAbsent(r.type, 40) ?? null, degree: integerOrAbsent(r.degree) ?? 0,
+  }))
+  return {
+    found: true,
+    id: cleanContextText(source.id, GRAPH_ENTITY_ID_LIMIT),
+    type: stringOrAbsent(source.type, 40) ?? null,
+    degree: integerOrAbsent(source.degree) ?? 0,
+    description: cleanContextText(source.description, 1200),
+    description_length: integerOrAbsent(source.description_length) ?? null,
+    descriptions: stringList(source.descriptions, 12, 1200),
+    created_at: integerOrAbsent(source.created_at) ?? null,
+    first_seen_build: integerOrAbsent(source.first_seen_build) ?? null,
+    edges, neighbors,
+    total_relationships: integerOrAbsent(source.total_relationships) ?? edges.length,
+    offset: integerOrAbsent(source.offset) ?? 0,
+    limit: integerOrAbsent(source.limit) ?? edges.length,
+    source_status: stringOrAbsent(source.source_status, 16) ?? 'unresolved',
+    source_count: integerOrAbsent(source.source_count) ?? 0,
+    source_resolved: integerOrAbsent(source.source_resolved) ?? 0,
+    index_built_at: isoOrAbsent(source.index_built_at) ?? null,
+    index_state: stringOrAbsent(source.index_state, 32) ?? 'missing',
+  }
+}
+
+export function normalizeGraphPassages(value: unknown): Record<string, unknown> {
+  const source = asRecord(value) ?? {}
+  const items = (Array.isArray(source.items) ? source.items : []).slice(0, 5).map(asRecord).filter((r): r is Record<string, unknown> => !!r).map(r => {
+    const src = asRecord(r.source) ?? {}
+    return {
+      chunk_id: cleanContextText(r.chunk_id, 80), doc_id: stringOrAbsent(r.doc_id, 80) ?? null,
+      order: integerOrAbsent(r.order) ?? null, excerpt: cleanContextText(r.excerpt, 1200),
+      source: {
+        status: stringOrAbsent(src.status, 16) ?? 'unresolved', key: stringOrAbsent(src.key, 200) ?? null,
+        title: stringOrAbsent(src.title, 200) ?? null, date: stringOrAbsent(src.date, 40) ?? null, summary: stringOrAbsent(src.summary, 120) ?? null,
+      },
+    }
+  })
+  return {
+    items,
+    total: integerOrAbsent(source.total) ?? items.length,
+    index_state: stringOrAbsent(source.index_state, 32) ?? null,
+    index_built_at: isoOrAbsent(source.index_built_at) ?? null,
+    fallback: stringOrAbsent(source.fallback, 24) ?? null,
+    unavailable: stringList(source.unavailable, 8, 64),
+    note: stringOrAbsent(source.note, 240) ?? null,
+  }
+}
+
+export function normalizeIndexBuildKickoff(value: unknown): { started: boolean; already_running: boolean; pid: number | null; receipt: Record<string, unknown> | null } {
+  const source = asRecord(value) ?? {}
+  return {
+    started: source.started === true,
+    already_running: source.already_running === true,
+    pid: integerOrAbsent(source.pid) ?? null,
+    receipt: normalizeIndexReceipt(source.receipt),
+  }
 }
 
 export function normalizeContextBrowserStatus(value: unknown): ContextBrowserStatus {
@@ -390,6 +807,10 @@ export function normalizeContextBrowserStatus(value: unknown): ContextBrowserSta
   const incompatibleState = protocolCompatible ? '' : 'bridge_outdated'
   const memoryState = incompatibleState || cleanState(memory.state, memoryAvailable ? 'ready' : 'unavailable')
   const threadState = incompatibleState || cleanState(threads.state, threadsAvailable ? 'ready' : 'unavailable')
+  // The learning and graph blocks (6.44.5) sit behind the SAME protocol gate; an
+  // absent block stays absent so the two toEqual pins on older payloads hold.
+  const learning = protocolCompatible ? normalizeLearningBlock(source.learning) : null
+  const graph = protocolCompatible ? normalizeGraphBlock(source.graph) : null
   return {
     available: protocolCompatible && source.available === true,
     protocol,
@@ -420,5 +841,7 @@ export function normalizeContextBrowserStatus(value: unknown): ContextBrowserSta
         ? { reason: 'bridge_outdated' }
         : threads.reason ? { reason: cleanState(threads.reason, threadState) } : {}),
     },
+    ...(learning ? { learning } : {}),
+    ...(graph ? { graph } : {}),
   }
 }

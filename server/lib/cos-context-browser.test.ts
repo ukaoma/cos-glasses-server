@@ -305,3 +305,46 @@ describe('protocol compatibility is strict, pre-coercion', () => {
     expect(status(2).protocol).not.toBe(1)
   })
 })
+
+
+// ── learning and graph blocks (6.44.5) ──
+import { normalizeGraphBlock, normalizeGraphPassages, normalizeLearningBlock, normalizeLearningEvents } from './cos-context-browser.js'
+
+describe('learning and graph blocks', () => {
+  it('allowlists fields and carries counts only when they are clean integers', () => {
+    expect(normalizeLearningBlock({ available: true, state: 'ready', count: '121', to_review: { patterns: 1.5, task_proposals: 120 }, last_ts: 'not a date', orphan_decisions: -1, scripts_dir: '/Users/x' }))
+      .toEqual({ available: true, state: 'ready', to_review: { task_proposals: 120 } })
+    expect(normalizeGraphBlock({ available: true, state: 'ready', entities: true, relationships: 88369, index_state: 'fresh', is_owner: 'yes', replica: false, owner_host: '/Users/ukaoma/host' }))
+      .toEqual({ available: true, state: 'ready', relationships: 88369, index_state: 'fresh', replica: false, owner_host: '[local path hidden]' })
+    expect(normalizeLearningBlock('garbage')).toBeNull()
+    expect(normalizeGraphBlock(null)).toBeNull()
+    expect(normalizeLearningBlock({})).toEqual({ available: false, state: 'unavailable' })
+  })
+
+  it('stays absent behind the protocol gate and on payloads without the blocks', () => {
+    const outdated = normalizeContextBrowserStatus({ available: true, protocol: 2, memory: {}, threads: {}, learning: { available: true, state: 'ready' } })
+    expect('learning' in outdated).toBe(false)
+    const plain = normalizeContextBrowserStatus({ available: true, protocol: 1, memory: { available: true, total: 1, state: 'ready' }, threads: { available: true, total: 0, active: 0, stale: 0, resolved: 0, state: 'empty' } })
+    expect('learning' in plain).toBe(false)
+    expect('graph' in plain).toBe(false)
+    const withBlocks = normalizeContextBrowserStatus({ available: true, protocol: 1, memory: { available: true, total: 1, state: 'ready' },
+      threads: { available: true, total: 0, active: 0, stale: 0, resolved: 0, state: 'empty' }, learning: { available: false, state: 'no_store' }, graph: { available: true, state: 'ready', entities: 9 } })
+    expect(withBlocks.learning).toEqual({ available: false, state: 'no_store' })
+    expect(withBlocks.graph).toEqual({ available: true, state: 'ready', entities: 9 })
+  })
+
+  it('drops events with a bad id, type or timestamp and caps the list', () => {
+    const good = { event_id: 'evt_0123456789abcdef', event_type: 'captured', ts: '2026-09-06T10:00:00+00:00', store: 'bot_memory', title: 't', scope: 'unknown', engine: 'unknown', target: {}, provenance: 'complete' }
+    const result = normalizeLearningEvents({ events: [good, { ...good, event_id: 'evt_x' }, { ...good, event_type: 'nope' }, { ...good, ts: 'never' }, { ...good, event_id: 'evt_fedcba9876543210' }], total: 5 }, 1)
+    expect(result.events.map(e => e.event_id)).toEqual(['evt_0123456789abcdef'])
+    expect(result.total).toBe(5)
+    expect(result.next_cursor).toBeNull()
+  })
+
+  it('normalizes the passages shape to its seven keys; the error key becomes the HTTP status, never a body field', () => {
+    const shape = normalizeGraphPassages({ items: [], total: 0, index_state: 'fresh', index_built_at: null, fallback: null, unavailable: [], note: 'x', error: null })
+    expect(Object.keys(shape).sort()).toEqual(['fallback', 'index_built_at', 'index_state', 'items', 'note', 'total', 'unavailable'])
+    expect(shape).toMatchObject({ items: [], total: 0, index_state: 'fresh', note: 'x' })
+    expect('error' in normalizeGraphPassages({ items: [], total: 0, error: 'invalid_relation' })).toBe(false)
+  })
+})
