@@ -418,6 +418,42 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(callBridge).toHaveBeenCalledWith(['graph-index-build', '--reason', 'control'], 5_000)
   })
 
+  it('starts one bounded queue ingest with 202 through the spawning bridge command, single-token argv', async () => {
+    callBridge.mockResolvedValueOnce({ started: true, already_running: false, pid: 5151, limit: 25, pending: 48, lock: { state: 'free', owner_pid: null }, log: '/x/ingest.log', protocol: 1 })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limit: 25 }) })
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({ started: true, already_running: false, nothing_pending: false, budget_exhausted: false, pid: 5151, limit: 25, pending: 48, lock: { state: 'free', owner_pid: null }, budget: null })
+    expect(callBridge).toHaveBeenCalledWith(['graph-ingest-start', '--limit=25', '--reason=control'], 5_000)
+  })
+
+  it('ingest: a missing limit means 10, a bad one is a 400 before the bridge, a held lock is a 202 that did not start', async () => {
+    callBridge.mockResolvedValueOnce({ started: false, already_running: true, limit: 10, pending: 48, lock: { state: 'exclusive', owner_pid: 777 }, protocol: 1 })
+    const base = await startTestServer()
+    const held = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })
+    expect(held.status).toBe(202)
+    const body = await held.json() as Record<string, unknown>
+    expect(body.started).toBe(false)
+    expect(body.already_running).toBe(true)
+    expect((body.lock as Record<string, unknown>).owner_pid).toBe(777)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-ingest-start', '--limit=10', '--reason=control'], 5_000)
+    callBridge.mockClear()
+    for (const limit of [0, 51, 2.5, 'ten']) {
+      const bad = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limit }) })
+      expect(bad.status, String(limit)).toBe(400)
+      expect((await bad.json() as { error: string }).error).toBe('invalid_limit')
+    }
+    expect(callBridge).not.toHaveBeenCalled()
+  })
+
+  it('ingest on a replica answers 409 not_owner with the bridge sentence and the owner host', async () => {
+    callBridge.mockResolvedValueOnce({ error: 'not_owner', message: 'Only the ingestion owner (Ukaoma-Mac-Studio.local) may index the queue.', owner_host: 'Ukaoma-Mac-Studio.local', this_host: 'Air.local', protocol: 1 })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({ error: 'not_owner', message: 'Only the ingestion owner (Ukaoma-Mac-Studio.local) may index the queue.', owner_host: 'Ukaoma-Mac-Studio.local' })
+  })
+
   it('answers 503 with the string-form reason when the pipeline is not configured or the bridge fails', async () => {
     callBridge.mockResolvedValueOnce({ error: 'cos_pipeline_not_configured' })
     const base = await startTestServer()
@@ -432,6 +468,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
       expect(await response.json()).toEqual({ error: 'pipeline_missing' })
     }
     expect((await fetch(`${base}/api/context/graph/index`, { method: 'POST' })).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })).status).toBe(503)
   })
 
   it('requires the API token on every new route (one 401 each)', async () => {
@@ -442,7 +479,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
-      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index']] as const) {
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
       // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):

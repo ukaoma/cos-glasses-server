@@ -22,6 +22,9 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   normalizeGraphSearch,
   normalizeGraphStatus,
   normalizeIndexBuildKickoff,
+  normalizeIngestKickoff,
+  INGEST_LIMIT_DEFAULT,
+  INGEST_LIMIT_MAX,
   normalizeLearningEventDetail,
   normalizeLearningEvents,
   normalizeLearningStatus,
@@ -299,6 +302,39 @@ memoryRouter.post('/context/graph/index', async (_req, res) => {
     res.status(202).json(normalizeIndexBuildKickoff(data))
   } catch (error) {
     console.warn('[context] graph bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/**
+ * 202 Accepted: start ONE bounded, detached queue ingest on the ingestion
+ * owner (`lightrag_indexer.py --process-queue --limit N`). The bridge command
+ * only spawns and answers, so this never holds the ingest lock or waits on a
+ * model call. A replica answers 409 `not_owner`; a held lock, an empty queue
+ * or a spent daily budget come back as a 202 whose flags say why nothing
+ * started. Poll GET /context/graph/status for `lock.state` and `queue.pending`.
+ */
+memoryRouter.post('/context/graph/ingest', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const raw = (req.body as { limit?: unknown } | undefined)?.limit
+  const limit = raw === undefined || raw === null ? INGEST_LIMIT_DEFAULT : Number(raw)
+  if (!Number.isInteger(limit) || limit < 1 || limit > INGEST_LIMIT_MAX) {
+    res.status(400).json({ error: 'invalid_limit', message: `limit must be an integer from 1 to ${INGEST_LIMIT_MAX}` })
+    return
+  }
+  try {
+    const data = await callPython(['graph-ingest-start', `--limit=${limit}`, '--reason=control'], 5_000)
+    const code = bridgeErrorCode(data)
+    if (code === 'not_owner') {
+      const detail = data as { message?: unknown; owner_host?: unknown }
+      res.status(409).json({ error: code, message: typeof detail.message === 'string' ? detail.message : undefined, owner_host: typeof detail.owner_host === 'string' ? detail.owner_host : null })
+      return
+    }
+    if (code) { res.status(code.startsWith('invalid_') ? 400 : 503).json({ error: code }); return }
+    res.status(202).json(normalizeIngestKickoff(data))
+  } catch (error) {
+    console.warn('[context] ingest bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })

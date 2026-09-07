@@ -1,3 +1,18 @@
+## 6.44.8
+
+One more learning write: start indexing the queue.
+
+- `POST /api/context/graph/ingest` with `{ "limit": 1..50 }` (default 10) asks
+  the bridge's `graph-ingest-start` to run one bounded, detached
+  `lightrag_indexer.py --process-queue --limit N` on the ingestion owner and
+  answers 202 at once with `{ started, pid, limit, pending, lock }`. Nothing
+  started is still a 202 with the reason as a flag: `already_running` (the
+  ingest lock is held by a Claude session, a scheduled run or a backup),
+  `nothing_pending`, or `budget_exhausted` with `{ used, cap }`. A replica
+  answers 409 `not_owner` with the owner host. The child stops on its own: the
+  limit, the daily call cap inside the indexer, and the lock it holds for the
+  run. COS Control 0.5.192's Sync card uses it for Index now.
+
 ## 6.44.7
 
 One learning write: a review decision.

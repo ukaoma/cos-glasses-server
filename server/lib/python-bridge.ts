@@ -57,6 +57,7 @@ export const LEARNING_COMMANDS = [
   'graph-index-build',
   'learning-to-review',
   'learning-decide',
+  'graph-ingest-start',
 ] as const
 
 // The optional Python bridge is available only when the user points us at a real
@@ -230,6 +231,7 @@ function standaloneNoop(args: string[]): unknown {
     case 'graph-index-build':
     case 'learning-to-review':
     case 'learning-decide':
+    case 'graph-ingest-start':
       return { error: 'cos_pipeline_not_configured' }
     case 'task-rows':
     case 'task-capture':

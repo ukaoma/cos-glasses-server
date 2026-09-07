@@ -803,6 +803,40 @@ export function normalizeIndexBuildKickoff(value: unknown): { started: boolean; 
   }
 }
 
+export const INGEST_LIMIT_DEFAULT = 10
+export const INGEST_LIMIT_MAX = 50
+
+export interface IngestKickoff {
+  started: boolean
+  already_running: boolean
+  nothing_pending: boolean
+  budget_exhausted: boolean
+  pid: number | null
+  limit: number | null
+  pending: number | null
+  lock: { state: string; owner_pid: number | null } | null
+  budget: { used: number; cap: number } | null
+}
+
+/** The bridge's `graph-ingest-start` answer, every flag a real boolean. */
+export function normalizeIngestKickoff(value: unknown): IngestKickoff {
+  const source = asRecord(value) ?? {}
+  const lock = asRecord(source.lock)
+  const budget = asRecord(source.budget)
+  return {
+    started: source.started === true,
+    already_running: source.already_running === true,
+    nothing_pending: source.nothing_pending === true,
+    budget_exhausted: source.budget_exhausted === true,
+    pid: integerOrAbsent(source.pid) ?? null,
+    limit: integerOrAbsent(source.limit) ?? null,
+    pending: integerOrAbsent(source.pending) ?? null,
+    lock: lock ? { state: stringOrAbsent(lock.state, 16) ?? 'unknown', owner_pid: integerOrAbsent(lock.owner_pid) ?? null } : null,
+    budget: budget && integerOrAbsent(budget.used) !== undefined && integerOrAbsent(budget.cap) !== undefined
+      ? { used: integerOrAbsent(budget.used)!, cap: integerOrAbsent(budget.cap)! } : null,
+  }
+}
+
 export function normalizeContextBrowserStatus(value: unknown): ContextBrowserStatus {
   const source = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : {}
