@@ -527,6 +527,26 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(await replica.json()).toEqual({ error: 'not_owner', message: 'Only the ingestion owner (M3.local) may index the queue.', owner_host: 'M3.local' })
   })
 
+  it('ingest progress: the last Control-started run, normalized, read-only', async () => {
+    callBridge.mockResolvedValueOnce({ running: true, pid: 4242, lock: { state: 'exclusive', owner_pid: 4242 }, external: false, pending: 2, total: 3, done: 1, failed: 1,
+      current: { id: 'doc_ccc', est_calls: 7 }, items: [{ id: 'doc_aaa', outcome: 'indexed', seconds: 40.5 }, { id: 'doc_bbb', outcome: 'failed', reason: 'Document status missing — marked failed for retry' }],
+      remaining_calls: 1461, budget: { used: 22, cap: 1500 }, ended: false, log_tail: ['Processing 3 pending items...', '  Ingesting: doc_ccc... (est 7 calls, 1461 remaining)'], log_age_s: 12.5, protocol: 1 })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/graph/ingest/progress`)
+    expect(response.status).toBe(200)
+    const body = await response.json() as Record<string, any>
+    expect(body.running).toBe(true)
+    expect(body.external).toBe(false)
+    expect(body.total).toBe(3)
+    expect(body.done).toBe(1)
+    expect(body.failed).toBe(1)
+    expect(body.current).toEqual({ id: 'doc_ccc', est_calls: 7 })
+    expect(body.items).toEqual([{ id: 'doc_aaa', outcome: 'indexed', seconds: 40.5, reason: null }, { id: 'doc_bbb', outcome: 'failed', seconds: null, reason: 'Document status missing — marked failed for retry' }])
+    expect(body.log_tail).toHaveLength(2)
+    expect(body.lock).toEqual({ state: 'exclusive', owner_pid: 4242 })
+    expect(callBridge).toHaveBeenCalledWith(['graph-ingest-progress'], 10_000)
+  })
+
   it('ingest on a replica answers 409 not_owner with the bridge sentence and the owner host', async () => {
     callBridge.mockResolvedValueOnce({ error: 'not_owner', message: 'Only the ingestion owner (Ukaoma-Mac-Studio.local) may index the queue.', owner_host: 'Ukaoma-Mac-Studio.local', this_host: 'Air.local', protocol: 1 })
     const base = await startTestServer()
@@ -551,6 +571,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect((await fetch(`${base}/api/context/graph/index`, { method: 'POST' })).status).toBe(503)
     expect((await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })).status).toBe(503)
     expect((await fetch(`${base}/api/context/graph/setup`)).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/ingest/progress`)).status).toBe(503)
     expect((await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'anything at all' }) })).status).toBe(503)
   })
 
@@ -562,7 +583,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
-      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule']] as const) {
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
       // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):

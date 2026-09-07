@@ -1,3 +1,16 @@
+## 6.44.10
+
+Ingest progress for COS Control.
+
+- `GET /api/context/graph/ingest/progress` (the bridge's `graph-ingest-progress`,
+  read-only): where the current or last Control-started run stands. The run's
+  total, how many are indexed and failed, the document in flight with its
+  estimated calls, the last eight outcomes with their seconds, the budget line,
+  the queue's pending count, and the log's last lines. A run started somewhere
+  else (a Claude session) holds the lock but writes no log here, so it reports
+  as `external` with the counts only. COS Control 0.5.195's Sync card polls it
+  every five seconds while the ingest lock is held.
+
 ## 6.44.9
 
 Knowledge from zero: the setup path behind COS Control's Knowledge tab.

@@ -923,6 +923,38 @@ export function normalizeGraphAnswer(value: unknown): { question: string; mode: 
   return { question: stringOrAbsent(s.question, KNOWLEDGE_ASK_MAX_CHARS) ?? '', mode: stringOrAbsent(s.mode, 16) ?? 'hybrid', answer, elapsed_s: typeof s.elapsed_s === 'number' && Number.isFinite(s.elapsed_s) ? s.elapsed_s : null }
 }
 
+export interface IngestProgressItem { id: string; outcome: 'indexed' | 'failed' | 'unknown'; seconds: number | null; reason: string | null }
+
+/** `graph-ingest-progress`: where the current or last Control-started run stands. */
+export function normalizeIngestProgress(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  const current = asRecord(s.current)
+  const budget = asRecord(s.budget)
+  const items: IngestProgressItem[] = (Array.isArray(s.items) ? s.items : []).flatMap((row) => {
+    const r = asRecord(row); const id = r ? stringOrAbsent(r.id, 200) : undefined
+    if (!id) return []
+    const outcome: IngestProgressItem['outcome'] = r!.outcome === 'indexed' ? 'indexed' : r!.outcome === 'failed' ? 'failed' : 'unknown'
+    return [{ id, outcome, seconds: typeof r!.seconds === 'number' && Number.isFinite(r!.seconds) ? r!.seconds : null, reason: stringOrAbsent(r!.reason, 200) ?? null }]
+  }).slice(-8)
+  return {
+    running: s.running === true,
+    pid: integerOrAbsent(s.pid) ?? null,
+    external: s.external === true,
+    pending: integerOrAbsent(s.pending) ?? null,
+    total: integerOrAbsent(s.total) ?? null,
+    done: integerOrAbsent(s.done) ?? 0,
+    failed: integerOrAbsent(s.failed) ?? 0,
+    current: current && stringOrAbsent(current.id, 200) ? { id: stringOrAbsent(current.id, 200)!, est_calls: integerOrAbsent(current.est_calls) ?? null } : null,
+    items,
+    remaining_calls: integerOrAbsent(s.remaining_calls) ?? null,
+    budget: budget && integerOrAbsent(budget.used) !== undefined && integerOrAbsent(budget.cap) !== undefined ? { used: integerOrAbsent(budget.used)!, cap: integerOrAbsent(budget.cap)! } : null,
+    ended: s.ended === true,
+    log_tail: (Array.isArray(s.log_tail) ? s.log_tail : []).filter((l): l is string => typeof l === 'string').map(l => l.slice(0, 300)).slice(-24),
+    log_age_s: typeof s.log_age_s === 'number' && Number.isFinite(s.log_age_s) ? s.log_age_s : null,
+    lock: normalizeIngestKickoff({ lock: s.lock }).lock,
+  }
+}
+
 export function normalizeContextBrowserStatus(value: unknown): ContextBrowserStatus {
   const source = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : {}

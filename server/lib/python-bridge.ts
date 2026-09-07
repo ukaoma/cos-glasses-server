@@ -64,6 +64,7 @@ export const LEARNING_COMMANDS = [
   'graph-ingest-sample',
   'graph-ask',
   'graph-schedule',
+  'graph-ingest-progress',
 ] as const
 
 // The optional Python bridge is available only when the user points us at a real
@@ -244,6 +245,7 @@ function standaloneNoop(args: string[]): unknown {
     case 'graph-ingest-sample':
     case 'graph-ask':
     case 'graph-schedule':
+    case 'graph-ingest-progress':
       return { error: 'cos_pipeline_not_configured' }
     case 'task-rows':
     case 'task-capture':

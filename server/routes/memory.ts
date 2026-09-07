@@ -29,6 +29,7 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   normalizeKnowledgeSources,
   normalizeSampleKickoff,
   normalizeGraphAnswer,
+  normalizeIngestProgress,
   KNOWLEDGE_SETUP_SAMPLE_MAX,
   KNOWLEDGE_ASK_MAX_CHARS,
   normalizeLearningEventDetail,
@@ -341,6 +342,21 @@ memoryRouter.post('/context/graph/ingest', async (req, res) => {
     res.status(202).json(normalizeIngestKickoff(data))
   } catch (error) {
     console.warn('[context] ingest bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** Where the current or last Control-started ingest stands (6.44.10). Read-only. */
+memoryRouter.get('/context/graph/ingest/progress', async (_req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const data = await callPython(['graph-ingest-progress'], 10_000)
+    const code = bridgeErrorCode(data)
+    if (code) { res.status(503).json({ error: code }); return }
+    res.json(normalizeIngestProgress(data))
+  } catch (error) {
+    console.warn('[context] progress bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
