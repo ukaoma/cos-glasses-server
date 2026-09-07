@@ -853,6 +853,51 @@ function chosenPathOrAbsent(value: unknown, max = 1000): string | undefined {
 export const KNOWLEDGE_ASK_MAX_CHARS = 400
 
 export interface KnowledgeSetupCheck { id: string; ok: boolean; detail: string }
+
+export const EMBEDDING_PROVIDERS = ['openai-large', 'openai-small', 'ollama', 'onnx'] as const
+export const EXTRACTION_TIERS = ['haiku', 'sonnet', 'opus'] as const
+
+/** `embedding` block of the setup status (6.44.11): the choice, the lock, every provider's readiness. */
+export function normalizeEmbeddingBlock(value: unknown): Record<string, unknown> | null {
+  const e = asRecord(value)
+  if (!e) return null
+  const manifest = asRecord(e.manifest)
+  const fetch = asRecord(e.fetch)
+  const providers = (Array.isArray(e.providers) ? e.providers : []).flatMap((row) => {
+    const r = asRecord(row); const id = r ? stringOrAbsent(r.id, 24) : undefined
+    if (!id) return []
+    return [{
+      id, label: stringOrAbsent(r!.label, 40) ?? id, model: stringOrAbsent(r!.model, 120) ?? '', dimensions: integerOrAbsent(r!.dimensions) ?? null,
+      kind: r!.kind === 'local' ? 'local' : 'cloud', cost: stringOrAbsent(r!.cost, 200) ?? '', needs: stringOrAbsent(r!.needs, 200) ?? '',
+      ready: r!.ready === true, detail: stringOrAbsent(r!.detail, 200) ?? '', selected: r!.selected === true,
+    }]
+  })
+  return {
+    provider: stringOrAbsent(e.provider, 24) ?? null,
+    label: stringOrAbsent(e.label, 40) ?? null,
+    model: stringOrAbsent(e.model, 120) ?? null,
+    dimensions: integerOrAbsent(e.dimensions) ?? null,
+    kind: e.kind === 'local' ? 'local' : 'cloud',
+    cost: stringOrAbsent(e.cost, 200) ?? null,
+    chosen_at: isoOrAbsent(e.chosen_at) ?? null,
+    locked: e.locked === true,
+    mismatch: e.mismatch === true,
+    manifest: manifest ? { provider: stringOrAbsent(manifest.provider, 24) ?? null, model: stringOrAbsent(manifest.model, 120) ?? null, dimensions: integerOrAbsent(manifest.dimensions) ?? null, adopted: manifest.adopted === true } : null,
+    providers,
+    fetch: fetch ? { provider: stringOrAbsent(fetch.provider, 24) ?? null, model: stringOrAbsent(fetch.model, 120) ?? null, state: stringOrAbsent(fetch.state, 16) ?? 'unknown', pid: integerOrAbsent(fetch.pid) ?? null, started_at: isoOrAbsent(fetch.started_at) ?? null, ended_at: isoOrAbsent(fetch.ended_at) ?? null, error: stringOrAbsent(fetch.error, 300) ?? null } : null,
+  }
+}
+
+/** `extraction` block: the tier and the three choices. */
+export function normalizeExtractionBlock(value: unknown): Record<string, unknown> | null {
+  const x = asRecord(value)
+  if (!x) return null
+  const tiers = (Array.isArray(x.tiers) ? x.tiers : []).flatMap((row) => {
+    const r = asRecord(row); const id = r ? stringOrAbsent(r.id, 16) : undefined
+    return id ? [{ id, label: stringOrAbsent(r!.label, 40) ?? id, detail: stringOrAbsent(r!.detail, 200) ?? '', selected: r!.selected === true }] : []
+  })
+  return { tier: stringOrAbsent(x.tier, 16) ?? null, label: stringOrAbsent(x.label, 40) ?? null, detail: stringOrAbsent(x.detail, 200) ?? null, tiers }
+}
 export interface KnowledgeSetupSource { path: string; enabled: boolean; exists: boolean; files: number | null; added_at: string | null }
 
 /** `graph-setup-status`: the checklist behind the Knowledge setup path. */
@@ -892,6 +937,8 @@ export function normalizeKnowledgeSetup(value: unknown): Record<string, unknown>
       indexed: integerOrAbsent(sample.indexed) ?? 0,
     },
     lock: normalizeIngestKickoff({ lock: s.lock }).lock,
+    embedding: normalizeEmbeddingBlock(s.embedding),
+    extraction: normalizeExtractionBlock(s.extraction),
     ask_ready: s.ask_ready === true,
     protocol: integerOrAbsent(s.protocol) ?? null,
   }

@@ -1,3 +1,22 @@
+## 6.44.11
+
+Choose how Knowledge indexes: the embedding and the extraction tier.
+
+- The setup checklist carries an `embedding` block (the chosen provider,
+  model and dimensions; whether the graph is locked to it; every provider's
+  readiness on this Mac; a fetch receipt) and an `extraction` block (the
+  tier and the three choices).
+- `POST /api/context/graph/setup/embedding` `{ provider, model?, fetch? }`
+  chooses OpenAI large (the historical default), OpenAI small, a local premium
+  model through Ollama, or a local light model through fastembed/ONNX, and can
+  start the local model's fetch. One choice serves LightRAG and every Qdrant
+  collection. A graph built with another embedding answers 409
+  `embedding_locked`, and every indexing kickoff answers `embedding_mismatch`
+  rather than opening a dimension-bound store with the wrong vectors.
+- `POST /api/context/graph/setup/extraction` `{ tier }` chooses Fast (Haiku),
+  Balanced (Sonnet) or Deep (Opus) for entity extraction; it takes effect on
+  the next run.
+
 ## 6.44.10
 
 Ingest progress for COS Control.

@@ -527,6 +527,41 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(await replica.json()).toEqual({ error: 'not_owner', message: 'Only the ingestion owner (M3.local) may index the queue.', owner_host: 'M3.local' })
   })
 
+  it('setup embedding and extraction: the choice rides its own commands; a built graph refuses with 409', async () => {
+    const base = await startTestServer()
+    callBridge.mockResolvedValueOnce({ embedding: { provider: 'onnx', label: 'Local light', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, kind: 'local', cost: 'Free', chosen_at: '2026-09-07T13:00:00+00:00', locked: false, mismatch: false, manifest: null,
+      providers: [{ id: 'openai-large', label: 'OpenAI large', model: 'text-embedding-3-large', dimensions: 3072, kind: 'cloud', cost: 'c', needs: 'n', ready: true, detail: 'Key present', selected: false }, { id: 'onnx', label: 'Local light', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, kind: 'local', cost: 'Free', needs: 'n', ready: false, detail: 'not fetched', selected: true }], fetch: null },
+      fetch: { started: true, already_running: false, pid: 909 }, protocol: 1 })
+    const chosen = await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'onnx', fetch: true }) })
+    expect(chosen.status).toBe(200)
+    const body = await chosen.json() as Record<string, any>
+    expect(body.embedding.provider).toBe('onnx')
+    expect(body.embedding.providers).toHaveLength(2)
+    expect(body.embedding.providers[1]).toEqual({ id: 'onnx', label: 'Local light', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, kind: 'local', cost: 'Free', needs: 'n', ready: false, detail: 'not fetched', selected: true })
+    expect(body.fetch).toEqual({ started: true, already_running: false, pid: 909 })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-embedding', '--provider=onnx', '--fetch'], 90_000)
+    callBridge.mockClear()
+    for (const b of [{ provider: 'cohere' }, { provider: 'ollama', model: 'bad name!' }]) {
+      expect((await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) })).status, JSON.stringify(b)).toBe(400)
+    }
+    expect(callBridge).not.toHaveBeenCalled()
+    callBridge.mockResolvedValueOnce({ error: 'embedding_locked', message: 'this graph was built with openai-large (text-embedding-3-large, 3072 dims); the chosen embedding is ollama (bge-m3, 1024 dims). Rebuild the graph to change it.', protocol: 1 })
+    const locked = await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'ollama', model: 'bge-m3' }) })
+    expect(locked.status).toBe(409)
+    expect((await locked.json() as { error: string }).error).toBe('embedding_locked')
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-embedding', '--provider=ollama', '--model=bge-m3'], 90_000)
+    callBridge.mockResolvedValueOnce({ extraction: { tier: 'sonnet', label: 'Balanced', detail: 'd', tiers: [{ id: 'haiku', label: 'Fast', detail: 'a', selected: false }, { id: 'sonnet', label: 'Balanced', detail: 'd', selected: true }, { id: 'opus', label: 'Deep', detail: 'o', selected: false }] }, protocol: 1 })
+    const tier = await fetch(`${base}/api/context/graph/setup/extraction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'sonnet' }) })
+    expect(tier.status).toBe(200)
+    expect((await tier.json() as Record<string, any>).extraction.tier).toBe('sonnet')
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-extraction', '--tier=sonnet'], 15_000)
+    expect((await fetch(`${base}/api/context/graph/setup/extraction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'gpt' }) })).status).toBe(400)
+    callBridge.mockResolvedValueOnce({ error: 'embedding_mismatch', message: 'This graph was built with openai-large; the chosen embedding is onnx. Choose the embedding it was built with, or rebuild the graph.', protocol: 1 })
+    const mismatch = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })
+    expect(mismatch.status).toBe(409)
+    expect((await mismatch.json() as { error: string }).error).toBe('embedding_mismatch')
+  })
+
   it('ingest progress: the last Control-started run, normalized, read-only', async () => {
     callBridge.mockResolvedValueOnce({ running: true, pid: 4242, lock: { state: 'exclusive', owner_pid: 4242 }, external: false, pending: 2, total: 3, done: 1, failed: 1,
       current: { id: 'doc_ccc', est_calls: 7 }, items: [{ id: 'doc_aaa', outcome: 'indexed', seconds: 40.5 }, { id: 'doc_bbb', outcome: 'failed', reason: 'Document status missing — marked failed for retry' }],
@@ -583,7 +618,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
-      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule']] as const) {
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule'], ['POST', '/api/context/graph/setup/embedding'], ['POST', '/api/context/graph/setup/extraction']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
       // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):

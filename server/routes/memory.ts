@@ -30,6 +30,10 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   normalizeSampleKickoff,
   normalizeGraphAnswer,
   normalizeIngestProgress,
+  normalizeEmbeddingBlock,
+  normalizeExtractionBlock,
+  EMBEDDING_PROVIDERS,
+  EXTRACTION_TIERS,
   KNOWLEDGE_SETUP_SAMPLE_MAX,
   KNOWLEDGE_ASK_MAX_CHARS,
   normalizeLearningEventDetail,
@@ -338,7 +342,7 @@ memoryRouter.post('/context/graph/ingest', async (req, res) => {
       res.status(409).json({ error: code, message: typeof detail.message === 'string' ? detail.message : undefined, owner_host: typeof detail.owner_host === 'string' ? detail.owner_host : null })
       return
     }
-    if (code) { res.status(code.startsWith('invalid_') ? 400 : 503).json({ error: code }); return }
+    if (code) { sendSetupError(res, code, data); return }
     res.status(202).json(normalizeIngestKickoff(data))
   } catch (error) {
     console.warn('[context] ingest bridge failure:', (error as Error).message)
@@ -372,6 +376,7 @@ memoryRouter.get('/context/graph/ingest/progress', async (_req, res) => {
 function sendSetupError(res: import('express').Response, code: string, data: unknown): void {
   const detail = asDetail(data)
   if (code === 'not_owner') { res.status(409).json({ error: code, message: detail.message, owner_host: detail.owner_host ?? null }); return }
+  if (code === 'embedding_locked' || code === 'embedding_mismatch') { res.status(409).json({ error: code, message: detail.message }); return }
   if (code.endsWith('_not_found')) { res.status(404).json({ error: code, message: detail.message }); return }
   if (code.startsWith('invalid_')) { res.status(400).json({ error: code, message: detail.message }); return }
   res.status(503).json({ error: code })
@@ -467,6 +472,54 @@ memoryRouter.post('/context/graph/ask', async (req, res) => {
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
+
+/** `{ provider, model?, fetch? }` → the embedding for every knowledge store (6.44.11). 409 when the graph was built with another. */
+memoryRouter.post('/context/graph/setup/embedding', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; fetch?: unknown }
+  const provider = typeof body.provider === 'string' ? body.provider : ''
+  if (!(EMBEDDING_PROVIDERS as readonly string[]).includes(provider)) { res.status(400).json({ error: 'invalid_provider', message: `provider must be one of ${EMBEDDING_PROVIDERS.join(', ')}` }); return }
+  const model = typeof body.model === 'string' ? body.model.trim() : ''
+  if (model.length > 120 || !/^[A-Za-z0-9._:/-]*$/.test(model)) { res.status(400).json({ error: 'invalid_model', message: 'model names are letters, digits, dots, colons, slashes and dashes' }); return }
+  const argv = ['graph-setup-embedding', `--provider=${provider}`]
+  if (model) argv.push(`--model=${model}`)
+  if (body.fetch === true) argv.push('--fetch')
+  try {
+    const data = await callPython(argv, 90_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    const d = data as { embedding?: unknown; fetch?: unknown }
+    res.json({ embedding: normalizeEmbeddingBlock(d.embedding), fetch: asRecord(d.fetch) ? { started: (d.fetch as { started?: unknown }).started === true, already_running: (d.fetch as { already_running?: unknown }).already_running === true, pid: integerOrNull((d.fetch as { pid?: unknown }).pid) } : null })
+  } catch (error) {
+    console.warn('[context] embedding bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** `{ tier }` → the extraction tier: haiku (Fast), sonnet (Balanced), opus (Deep). */
+memoryRouter.post('/context/graph/setup/extraction', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const tier = typeof (req.body as { tier?: unknown } | undefined)?.tier === 'string' ? (req.body as { tier: string }).tier : ''
+  if (!(EXTRACTION_TIERS as readonly string[]).includes(tier)) { res.status(400).json({ error: 'invalid_tier', message: `tier must be one of ${EXTRACTION_TIERS.join(', ')}` }); return }
+  try {
+    const data = await callPython(['graph-setup-extraction', `--tier=${tier}`], 15_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.json({ extraction: normalizeExtractionBlock((data as { extraction?: unknown }).extraction) })
+  } catch (error) {
+    console.warn('[context] extraction bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+function integerOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) ? value : null
+}
 
 /** `{ enabled, interval_s? }` → install or remove the scheduled batch agent on the owner Mac. */
 memoryRouter.post('/context/graph/setup/schedule', async (req, res) => {
