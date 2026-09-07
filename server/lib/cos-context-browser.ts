@@ -776,6 +776,23 @@ export function normalizeGraphPassages(value: unknown): Record<string, unknown> 
   }
 }
 
+/** The review decision the bridge wrote back: lesson, decision, stamp, id, who. */
+export function normalizeReviewDecision(value: unknown): Record<string, unknown> | null {
+  const source = asRecord(value)
+  const row = asRecord(source?.decision)
+  if (!row) return null
+  const decision = stringOrAbsent(row.decision, 16)
+  const lessonId = stringOrAbsent(row.lesson_id, 200)
+  if (!lessonId || (decision !== 'dismissed' && decision !== 'reopened')) return null
+  return {
+    lesson_id: lessonId,
+    decision,
+    ts: isoOrAbsent(row.ts) ?? null,
+    event_id: LEARNING_EVENT_ID_PATTERN.test(String(row.event_id ?? '')) ? String(row.event_id) : null,
+    by: stringOrAbsent(row.by, 32) ?? null,
+  }
+}
+
 export function normalizeIndexBuildKickoff(value: unknown): { started: boolean; already_running: boolean; pid: number | null; receipt: Record<string, unknown> | null } {
   const source = asRecord(value) ?? {}
   return {

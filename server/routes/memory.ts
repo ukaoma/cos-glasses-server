@@ -13,7 +13,7 @@ import { searchMemories } from '../lib/context-library-search.js'
 function contextConfigured(): boolean {
   return contextSourceAvailable() !== null
 }
-import { LEARNING_REVIEW_LIMIT,
+import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   GRAPH_ENTITY_ID_LIMIT,
   LEARNING_EVENT_ID_PATTERN,
   MEMORY_ID_PATTERN,
@@ -163,6 +163,26 @@ memoryRouter.get('/context/learning/review', async (req, res) => {
     sendBridgeAnswer(res, await callPython(args, 8_000), value => normalizeLearningEvents(value, limit, LEARNING_REVIEW_LIMIT))
   } catch (error) {
     console.warn('[context] learning review bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'learning_unavailable' })
+  }
+})
+
+memoryRouter.post('/context/learning/:id/review', async (req, res) => {
+  noStore(res)
+  // The one learning write (6.44.7): a review decision on a lesson, appended to
+  // the review ledger by the bridge. Dismissed leaves To review, reopened
+  // returns; nothing else is touched. The lesson id is a store id, not an event id.
+  const lessonId = String(req.params.id)
+  const decision = typeof req.body?.decision === 'string' ? req.body.decision : ''
+  if (!lessonId || lessonId.length > 200 || CONTROL_CHARACTER.test(lessonId)) { res.status(400).json({ error: 'invalid_lesson_id' }); return }
+  if (decision !== 'dismissed' && decision !== 'reopened') { res.status(400).json({ error: 'invalid_decision' }); return }
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 400) : ''
+    const answer = await callPython(['learning-decide', `--id=${lessonId}`, `--decision=${decision}`, ...(note ? [`--note=${note}`] : [])], 8_000)
+    sendBridgeAnswer(res, answer, value => normalizeReviewDecision(value))
+  } catch (error) {
+    console.warn('[context] learning decide bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'learning_unavailable' })
   }
 })

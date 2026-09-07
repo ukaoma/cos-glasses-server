@@ -1,3 +1,13 @@
+## 6.44.7
+
+One learning write: a review decision.
+
+- `POST /api/context/learning/:id/review` with `{ "decision": "dismissed" | "reopened" }`
+  appends a review-ledger row through the bridge's `learning-decide`. A
+  dismissed proposal leaves the To review set on the next read; reopened puts
+  it back. Nothing else is written: no skill, no memory, no graph. COS Control
+  0.5.191's Memories tab uses it for Dismiss and Restore proposal.
+
 ## 6.44.6
 
 What /qa found in 6.44.5 before anyone installed it.

@@ -48,6 +48,7 @@ const closers: Array<() => Promise<void>> = []
 
 async function startTestServer(): Promise<string> {
   const app = express()
+  app.use(express.json({ limit: '1mb' }))  // the real app mounts a body parser before the routers (index.ts)
   app.use('/api', memoryRouter)
   app.use('/api', threadsRouter)
   const server = await new Promise<ReturnType<typeof app.listen>>(resolve => {
@@ -537,5 +538,39 @@ describe('QA-2 folds on the learning and knowledge routes (6.44.5)', () => {
     expect((await fetch(`${base}/api/context/graph/passages?relationA=${'x'.repeat(201)}&relationB=COS`)).status).toBe(400)
     expect((await fetch(`${base}/api/context/graph/passages?relationA=COS&relationB=${encodeURIComponent('a\u0007b')}`)).status).toBe(400)
     expect(callBridge).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('review decisions (6.44.7)', () => {
+  afterEach(() => { callBridge.mockReset(); contextSource.mockReturnValue('bridge') })
+
+  it('writes a decision through the bridge and returns the normalized row', async () => {
+    callBridge.mockResolvedValueOnce({ decision: { lesson_id: 'siq_6bef5169aea2', decision: 'dismissed', ts: '2026-09-07T02:00:00.000000+00:00', event_id: 'evt_0123456789abcdef', by: 'control', note: 'not now', scripts_dir: '/Users/x' }, protocol: 1 })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/learning/siq_6bef5169aea2/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'dismissed', note: 'not now' }) })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ lesson_id: 'siq_6bef5169aea2', decision: 'dismissed', ts: '2026-09-07T02:00:00.000000+00:00', event_id: 'evt_0123456789abcdef', by: 'control' })
+    expect(callBridge).toHaveBeenCalledWith(['learning-decide', '--id=siq_6bef5169aea2', '--decision=dismissed', '--note=not now'], 8_000)
+  })
+
+  it('refuses a bad decision or lesson id before the bridge, and 503s without a pipeline', async () => {
+    const base = await startTestServer()
+    expect((await fetch(`${base}/api/context/learning/siq_x/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'later' }) })).status).toBe(400)
+    expect((await fetch(`${base}/api/context/learning/${encodeURIComponent('a\u0007b')}/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'dismissed' }) })).status).toBe(400)
+    expect(callBridge).not.toHaveBeenCalled()
+    contextSource.mockReturnValue(null)
+    bridgeState.mockReturnValue('pipeline_missing')
+    expect((await fetch(`${base}/api/context/learning/siq_x/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'dismissed' }) })).status).toBe(503)
+  })
+
+  it('requires the token on the review route too', async () => {
+    const app = express()
+    app.use('/api', requireApiToken('test-token'))
+    app.use('/api', memoryRouter)
+    const server = await new Promise<ReturnType<typeof app.listen>>(resolve => { const l = app.listen(0, '127.0.0.1', () => resolve(l)) })
+    closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    expect((await fetch(`${base}/api/context/learning/siq_x/review`, { method: 'POST' })).status).toBe(401)
   })
 })
