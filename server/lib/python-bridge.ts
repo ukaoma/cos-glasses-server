@@ -55,6 +55,7 @@ export const LEARNING_COMMANDS = [
   'graph-entity',
   'graph-passages',
   'graph-index-build',
+  'learning-to-review',
 ] as const
 
 // The optional Python bridge is available only when the user points us at a real
@@ -226,6 +227,7 @@ function standaloneNoop(args: string[]): unknown {
     case 'graph-entity':
     case 'graph-passages':
     case 'graph-index-build':
+    case 'learning-to-review':
       return { error: 'cos_pipeline_not_configured' }
     case 'task-rows':
     case 'task-capture':
@@ -255,7 +257,10 @@ function callPythonDirect(args: string[], timeoutMs: number, input?: string): Pr
       { cwd: COS_SCRIPTS_DIR!, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
-          const msg = stderr?.trim() || err.message
+          // The bridge prints its unknown-command answer to STDOUT and exits 1
+          // (cos_api_bridge.py), so an older checkout must be probed there too, or
+          // every learning route answers 503 instead of not-configured (QA 2026-09-06).
+          const msg = stderr?.trim() || stdout?.trim() || err.message
           if (typeof msg === 'string' && msg.includes('unknown command')) {
             return resolvePromise({ error: { code: 'cos_pipeline_not_configured', message: msg } })
           }

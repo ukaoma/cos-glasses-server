@@ -13,7 +13,7 @@ import { searchMemories } from '../lib/context-library-search.js'
 function contextConfigured(): boolean {
   return contextSourceAvailable() !== null
 }
-import {
+import { LEARNING_REVIEW_LIMIT,
   GRAPH_ENTITY_ID_LIMIT,
   LEARNING_EVENT_ID_PATTERN,
   MEMORY_ID_PATTERN,
@@ -35,6 +35,7 @@ export const memoryRouter = Router()
 let overviewCache: { expiresAt: number; value: ReturnType<typeof normalizeMemoryOverview> } | null = null
 
 memoryRouter.get('/context/status', async (_req, res) => {
+  noStore(res)
   if (!contextConfigured()) {
     const state = pythonBridgeState()
     res.json(normalizeContextBrowserStatus({
@@ -105,7 +106,7 @@ function sendBridgeAnswer(res: import('express').Response, data: unknown, normal
   }
   const value = normalize(data)
   if (value === null || value === undefined) {
-    res.status(404).json({ error: 'not_found' })
+    res.status(404).json({ error: 'record_not_found' })
     return
   }
   res.json(value)
@@ -124,7 +125,8 @@ memoryRouter.get('/context/learning/status', async (_req, res) => {
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
   try {
     sendBridgeAnswer(res, await callPython(['learning-status', '--no-memory'], 8_000), normalizeLearningStatus)
-  } catch {
+  } catch (error) {
+    console.warn('[context] learning bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'learning_unavailable' })
   }
 })
@@ -137,13 +139,30 @@ memoryRouter.get('/context/learning', async (req, res) => {
   const sinceTs = typeof req.query.since_ts === 'string' && Number.isFinite(Date.parse(req.query.since_ts)) ? req.query.since_ts.slice(0, 40) : ''
   const sinceId = typeof req.query.since_event_id === 'string' && LEARNING_EVENT_ID_PATTERN.test(req.query.since_event_id) ? req.query.since_event_id : ''
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
-  const args = ['learning-events', '--days', String(days), '--limit', String(limit)]
-  if (kind) args.push('--kind', kind)
-  if (sinceTs) args.push('--since-ts', sinceTs)
-  if (sinceId) args.push('--since-event-id', sinceId)
+  const args = ['learning-events', `--days=${days}`, `--limit=${limit}`]
+  if (kind) args.push(`--kind=${kind}`)
+  if (sinceTs) args.push(`--since-ts=${sinceTs}`)
+  if (sinceId) args.push(`--since-event-id=${sinceId}`)
   try {
     sendBridgeAnswer(res, await callPython(args, 8_000), value => normalizeLearningEvents(value, limit))
-  } catch {
+  } catch (error) {
+    console.warn('[context] learning bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'learning_unavailable' })
+  }
+})
+
+memoryRouter.get('/context/learning/review', async (req, res) => {
+  noStore(res)
+  // The strict To review set (learning_events.to_review) as event rows, so the
+  // chip, Doctor and the list count the same thing. Small set: one page.
+  const limit = boundedInteger(req.query.limit, LEARNING_REVIEW_LIMIT, 1, LEARNING_REVIEW_LIMIT)
+  const days = req.query.days === undefined ? null : boundedInteger(req.query.days, 3650, 1, 3650)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const args = ['learning-to-review', `--limit=${limit}`, ...(days ? [`--days=${days}`] : [])]
+    sendBridgeAnswer(res, await callPython(args, 8_000), value => normalizeLearningEvents(value, limit, LEARNING_REVIEW_LIMIT))
+  } catch (error) {
+    console.warn('[context] learning review bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'learning_unavailable' })
   }
 })
@@ -153,8 +172,9 @@ memoryRouter.get('/context/learning/:id', async (req, res) => {
   if (!LEARNING_EVENT_ID_PATTERN.test(req.params.id)) { res.status(400).json({ error: 'invalid_event_id' }); return }
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
   try {
-    sendBridgeAnswer(res, await callPython(['learning-event', '--id', req.params.id], 8_000), normalizeLearningEventDetail)
-  } catch {
+    sendBridgeAnswer(res, await callPython(['learning-event', `--id=${req.params.id}`], 8_000), normalizeLearningEventDetail)
+  } catch (error) {
+    console.warn('[context] learning bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'learning_unavailable' })
   }
 })
@@ -166,7 +186,8 @@ memoryRouter.get('/context/graph/status', async (_req, res) => {
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
   try {
     sendBridgeAnswer(res, await callPython(['graph-status'], 8_000), normalizeGraphStatus)
-  } catch {
+  } catch (error) {
+    console.warn('[context] graph bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
@@ -182,11 +203,14 @@ memoryRouter.get('/context/graph/search', async (req, res) => {
   const offset = boundedInteger(req.query.offset, 0, 0, 100_000)
   const type = typeof req.query.type === 'string' ? req.query.type.replace(/[^A-Za-z0-9_ -]/g, '').slice(0, 40) : ''
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
-  const args = ['graph-search', '--q', query, '--limit', String(limit), '--offset', String(offset)]
-  if (type) args.push('--type', type)
+  // One token per value (`--q=...`): a value beginning with `-` is then never
+  // read by argparse as a flag (QA 2026-09-06).
+  const args = ['graph-search', `--q=${query}`, `--limit=${limit}`, `--offset=${offset}`]
+  if (type) args.push(`--type=${type}`)
   try {
     sendBridgeAnswer(res, await callPython(args, 8_000), value => normalizeGraphSearch(value, limit))
-  } catch {
+  } catch (error) {
+    console.warn('[context] graph bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
@@ -202,9 +226,16 @@ memoryRouter.get('/context/graph/entity', async (req, res) => {
   const offset = boundedInteger(req.query.offset, 0, 0, 100_000)
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
   try {
-    sendBridgeAnswer(res, await callPython(['graph-entity', '--id', id, '--offset', String(offset), '--limit', String(limit)], 8_000),
-      value => normalizeGraphEntity(value))
-  } catch {
+    const answer = await callPython(['graph-entity', `--id=${id}`, `--offset=${offset}`, `--limit=${limit}`], 8_000)
+    // A no-index or unknown-entity answer is a PAYLOAD from the bridge (found: false);
+    // it becomes a 404 with the class Control renders, never a 503 (QA 2026-09-06).
+    if (bridgePayload(answer) && answer.found !== true) {
+      res.status(404).json({ error: answer.index_state === 'missing' ? 'index_missing' : 'entity_not_found' })
+      return
+    }
+    sendBridgeAnswer(res, answer, value => normalizeGraphEntity(value))
+  } catch (error) {
+    console.warn('[context] graph bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
@@ -222,11 +253,12 @@ memoryRouter.get('/context/graph/passages', async (req, res) => {
   const limit = boundedInteger(req.query.limit, 5, 1, 5)
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
   const args = entity
-    ? ['graph-passages', '--entity', entity, '--limit', String(limit)]
-    : ['graph-passages', '--relation-a', relationA, '--relation-b', relationB, '--limit', String(limit)]
+    ? ['graph-passages', `--entity=${entity}`, `--limit=${limit}`]
+    : ['graph-passages', `--relation-a=${relationA}`, `--relation-b=${relationB}`, `--limit=${limit}`]
   try {
     sendBridgeAnswer(res, await callPython(args, 8_000), normalizeGraphPassages)
-  } catch {
+  } catch (error) {
+    console.warn('[context] graph bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })
@@ -245,7 +277,8 @@ memoryRouter.post('/context/graph/index', async (_req, res) => {
     const code = bridgeErrorCode(data)
     if (code) { res.status(503).json({ error: code }); return }
     res.status(202).json(normalizeIndexBuildKickoff(data))
-  } catch {
+  } catch (error) {
+    console.warn('[context] graph bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'graph_unavailable' })
   }
 })

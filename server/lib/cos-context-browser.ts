@@ -472,6 +472,8 @@ export function normalizeGraphBlock(value: unknown): GraphBlock | null {
 export const LEARNING_EVENT_ID_PATTERN = /^evt_[a-f0-9]{16}$/
 export const LEARNING_EVENT_TYPES = new Set(['captured', 'proposed', 'promotable', 'saved', 'retrieved', 'used', 'checked', 'dismissed', 'reverted', 'reopened', 'consolidated', 'previewed'])
 const LEARNING_LIST_LIMIT = 50
+/** The strict To review set is small (121 today); one page shows it whole. */
+export const LEARNING_REVIEW_LIMIT = 200
 const LEARNING_DETAIL_KEYS = ['shape', 'task', 'kind', 'layer', 'date', 'future', 'logged_times', 'memory_type', 'capture', 'source', 'content', 'before', 'after', 'rule', 'status', 'occurrences', 'threshold', 'entry', 'truncated'] as const
 
 export interface LearningEvent {
@@ -553,11 +555,11 @@ export function normalizeLearningCoverage(value: unknown): LearningCoverage {
   return out
 }
 
-export function normalizeLearningEvents(value: unknown, limit: number): {
+export function normalizeLearningEvents(value: unknown, limit: number, max = LEARNING_LIST_LIMIT): {
   events: LearningEvent[]; total: number; next_cursor: { since_ts: string; since_event_id: string } | null; coverage: LearningCoverage
 } {
   const source = asRecord(value) ?? {}
-  const cap = Math.max(1, Math.min(limit, LEARNING_LIST_LIMIT))
+  const cap = Math.max(1, Math.min(limit, max))
   const events = (Array.isArray(source.events) ? source.events : []).slice(0, cap)
     .map(item => normalizeLearningEvent(item, 240)).filter((e): e is LearningEvent => !!e)
   const cursor = asRecord(source.next_cursor)
@@ -568,6 +570,7 @@ export function normalizeLearningEvents(value: unknown, limit: number): {
     total: integerOrAbsent(source.total) ?? events.length,
     next_cursor: sinceTs && sinceId ? { since_ts: sinceTs, since_event_id: sinceId } : null,
     coverage: normalizeLearningCoverage(source.coverage),
+    ...(integerOrAbsent(source.review_count) !== undefined ? { review_count: integerOrAbsent(source.review_count) } : {}),
   }
 }
 
@@ -579,7 +582,6 @@ export function normalizeLearningEventDetail(value: unknown): (LearningEvent & {
   for (const key of LEARNING_DETAIL_KEYS) {
     const item = raw[key]
     if (item === undefined || item === null) continue
-    if (key === 'bodies' as string) continue
     if (typeof item === 'boolean') detail[key] = item
     else if (Number.isInteger(item)) detail[key] = item
     else if (typeof item === 'string') detail[key] = cleanContextText(item, 1200)
@@ -708,7 +710,7 @@ export function normalizeGraphSearch(value: unknown, limit: number): Record<stri
   return {
     items,
     total: integerOrAbsent(source.total) ?? items.length,
-    scope: 'full-index',
+    scope: stringOrAbsent(source.scope, 32) ?? 'full-index',
     index_built_at: isoOrAbsent(source.index_built_at) ?? null,
     index_state: stringOrAbsent(source.index_state, 32) ?? 'missing',
     matcher: stringOrAbsent(source.matcher, 16) ?? null,

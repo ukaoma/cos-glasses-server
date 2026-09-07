@@ -336,7 +336,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(body.next_cursor).toEqual({ since_ts: '2026-08-17T05:00:00.000000+00:00', since_event_id: 'evt_0123456789abcdef' })
     expect(body.coverage.bot_memory).toEqual({ state: 'unavailable', count: 0 })
     expect(JSON.stringify(body)).not.toContain('/Users/')
-    expect(callBridge).toHaveBeenCalledWith(['learning-events', '--days', '30', '--limit', '5', '--kind', 'proposed,checked', '--since-ts', '2026-09-01T00:00:00Z', '--since-event-id', 'evt_0123456789abcdef'], 8_000)
+    expect(callBridge).toHaveBeenCalledWith(['learning-events', '--days=30', '--limit=5', '--kind=proposed,checked', '--since-ts=2026-09-01T00:00:00Z', '--since-event-id=evt_0123456789abcdef'], 8_000)
   })
 
   it('serves one event with its detail, and 404s an unknown id, 400 a malformed one', async () => {
@@ -389,13 +389,13 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const search = await (await fetch(`${base}/api/context/graph/search?q=COS&limit=2&type=artifact`)).json() as Record<string, unknown>
     expect(search.total).toBe(722)
     expect(search.items).toEqual([{ id: 'COS', type: 'artifact', degree: 183, description: 'x' }])
-    expect(callBridge).toHaveBeenLastCalledWith(['graph-search', '--q', 'COS', '--limit', '2', '--offset', '0', '--type', 'artifact'], 8_000)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-search', '--q=COS', '--limit=2', '--offset=0', '--type=artifact'], 8_000)
     callBridge.mockResolvedValueOnce({ found: true, id: 'Miles Ukaoma', type: 'person', degree: 5251, description: 'd', descriptions: ['d'], edges: [{ source: 'Miles Ukaoma', target: 'Ryan Hopkins', weight: 228, description: 'e' }],
       neighbors: [{ id: 'Ryan Hopkins', type: 'person', degree: 300 }], total_relationships: 5251, source_status: 'resolved', source_count: 200, source_resolved: 200, index_state: 'fresh', protocol: 1 })
     const entity = await (await fetch(`${base}/api/context/graph/entity?id=${encodeURIComponent('Miles Ukaoma')}&limit=1`)).json() as Record<string, unknown>
     expect(entity.found).toBe(true)
     expect(entity.edges).toEqual([{ source: 'Miles Ukaoma', target: 'Ryan Hopkins', weight: 228, description: 'e' }])
-    expect(callBridge).toHaveBeenLastCalledWith(['graph-entity', '--id', 'Miles Ukaoma', '--offset', '0', '--limit', '1'], 8_000)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-entity', '--id=Miles Ukaoma', '--offset=0', '--limit=1'], 8_000)
     callBridge.mockResolvedValueOnce({ error: 'entity_not_found', protocol: 1 })
     expect((await fetch(`${base}/api/context/graph/entity?id=nobody`)).status).toBe(404)
     callBridge.mockResolvedValueOnce({ items: [{ chunk_id: 'chunk-1', doc_id: 'doc-1', order: 0, excerpt: 'text', source: { status: 'resolved', key: 'k', title: 't', date: '2026-04-04', summary: 's' } }],
@@ -403,7 +403,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const passagesResponse = await fetch(`${base}/api/context/graph/passages?relationA=COS&relationB=${encodeURIComponent('Miles Ukaoma')}&limit=9`)
     const passages = await passagesResponse.json() as Record<string, unknown>
     expect(passages, `status ${passagesResponse.status} calls ${JSON.stringify(callBridge.mock.calls)}`).toMatchObject({ total: 88 })
-    expect(callBridge).toHaveBeenLastCalledWith(['graph-passages', '--relation-a', 'COS', '--relation-b', 'Miles Ukaoma', '--limit', '5'], 8_000)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-passages', '--relation-a=COS', '--relation-b=Miles Ukaoma', '--limit=5'], 8_000)
   })
 
   it('kicks off an index build with 202 through the spawning bridge command only', async () => {
@@ -440,21 +440,102 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const server = await new Promise<ReturnType<typeof app.listen>>(resolve => { const l = app.listen(0, '127.0.0.1', () => resolve(l)) })
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-    for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
+    for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
       ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
+      // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):
+      // with the token the same path must be ANSWERED, never 404 from Express.
+      callBridge.mockResolvedValueOnce({ error: 'cos_pipeline_not_configured' })
+      const withToken = await fetch(`${base}${path}`, { method, headers: { 'x-cos-token': 'test-token' } })
+      expect(withToken.status, `${method} ${path} with token`).not.toBe(404)
+      expect(withToken.status, `${method} ${path} with token`).not.toBe(401)
     }
-    expect(callBridge).not.toHaveBeenCalled()
   })
 
   it('never lets the HTTP handler run an SDK or ingest command, and never logs the request URL', () => {
     const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'memory.ts'), 'utf8')
     for (const forbidden of ['--build-index', '--apply-curation', '--process-queue', 'graph-sync', 'graph-curation']) {
-      expect(source, forbidden).not.toContain(`'${forbidden}'`)
+      // Any quote form, and the bare token inside a template literal: a double-quoted
+      // literal slipped past the single-quote check in QA (2026-09-06).
+      expect(source, forbidden).not.toMatch(new RegExp(`["'\`\\$\\{]\\s*${forbidden}\\b`))
     }
     expect(source).not.toMatch(/req\.url|originalUrl/)
     // the only build path is the spawning bridge command, at a bounded timeout
     expect(source).toContain("callPython(['graph-index-build', '--reason', 'control'], 5_000)")
+  })
+})
+
+
+describe('QA-2 folds on the learning and knowledge routes (6.44.5)', () => {
+  afterEach(() => { callBridge.mockReset(); contextSource.mockReturnValue('bridge') })
+
+  it('serves the strict To review set on /context/learning/review, whole, before the :id route', async () => {
+    callBridge.mockResolvedValueOnce({ events: [EVENT], total: 121, review_count: 121, coverage: {}, protocol: 1 })
+    const base = await startTestServer()
+    const response = await fetch(`${base}/api/context/learning/review?limit=999`)
+    expect(response.status).toBe(200)
+    const body = await response.json() as Record<string, unknown>
+    expect(body.total).toBe(121)
+    expect(body.review_count).toBe(121)
+    expect(callBridge).toHaveBeenCalledWith(['learning-to-review', '--limit=200'], 8_000)
+  })
+
+  it('pins the route caps at the argv: learning 50, search 30 (widening the source fails here)', async () => {
+    callBridge.mockResolvedValue({ events: [], total: 0, items: [], protocol: 1 })
+    const base = await startTestServer()
+    await fetch(`${base}/api/context/learning?limit=999`)
+    expect(callBridge).toHaveBeenLastCalledWith(['learning-events', '--days=30', '--limit=50'], 8_000)
+    await fetch(`${base}/api/context/graph/search?q=COS&limit=999`)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-search', '--q=COS', '--limit=30', '--offset=0'], 8_000)
+  })
+
+  it('answers 404 with a precise class for a missing index or an unknown entity, never 503', async () => {
+    const base = await startTestServer()
+    callBridge.mockResolvedValueOnce({ found: false, id: 'COS', index_state: 'missing', index_built_at: null, protocol: 1 })
+    let response = await fetch(`${base}/api/context/graph/entity?id=COS`)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({ error: 'index_missing' })
+    callBridge.mockResolvedValueOnce({ found: false, id: 'Nobody', index_state: 'fresh', protocol: 1 })
+    response = await fetch(`${base}/api/context/graph/entity?id=Nobody`)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({ error: 'entity_not_found' })
+  })
+
+  it('sends every user value as one token so a leading hyphen is never read as a flag', async () => {
+    callBridge.mockResolvedValue({ items: [], total: 0, events: [], found: true, id: '-x', protocol: 1 })
+    const base = await startTestServer()
+    await fetch(`${base}/api/context/graph/search?q=${encodeURIComponent('-x')}`)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-search', '--q=-x', '--limit=30', '--offset=0'], 8_000)
+    await fetch(`${base}/api/context/graph/entity?id=${encodeURIComponent('-x')}`)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-entity', '--id=-x', '--offset=0', '--limit=30'], 8_000)
+    await fetch(`${base}/api/context/graph/passages?entity=${encodeURIComponent('-x')}`)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-passages', '--entity=-x', '--limit=5'], 8_000)
+    await fetch(`${base}/api/context/learning/evt_0123456789abcdef`)
+    expect(callBridge).toHaveBeenLastCalledWith(['learning-event', '--id=evt_0123456789abcdef'], 8_000)
+  })
+
+  it('pins learning-status --no-memory, the already_running 202, and no-store on /context/status', async () => {
+    const base = await startTestServer()
+    callBridge.mockResolvedValueOnce({ stores: {}, to_review: { count: 0 }, protocol: 1 })
+    await fetch(`${base}/api/context/learning/status`)
+    expect(callBridge).toHaveBeenLastCalledWith(['learning-status', '--no-memory'], 8_000)
+    callBridge.mockResolvedValueOnce({ started: false, already_running: true, pid: 4242, receipt: { state: 'running' }, protocol: 1 })
+    const kickoff = await fetch(`${base}/api/context/graph/index`, { method: 'POST' })
+    expect(kickoff.status).toBe(202)
+    expect((await kickoff.json() as Record<string, unknown>).already_running).toBe(true)
+    stubBoth(STATUS_BASE, STATUS_EXTRA)
+    const status = await fetch(`${base}/api/context/status`)
+    expect(status.headers.get('cache-control')).toBe('private, no-store')
+  })
+
+  it('rejects control characters and over-length values on search and passages before the bridge', async () => {
+    const base = await startTestServer()
+    expect((await fetch(`${base}/api/context/graph/search?q=${encodeURIComponent('ab\u0007')}`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages?entity=${encodeURIComponent('a\u0007b')}`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages?entity=${'x'.repeat(201)}`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages?relationA=${'x'.repeat(201)}&relationB=COS`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/passages?relationA=COS&relationB=${encodeURIComponent('a\u0007b')}`)).status).toBe(400)
+    expect(callBridge).not.toHaveBeenCalled()
   })
 })

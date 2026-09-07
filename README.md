@@ -425,7 +425,7 @@ coverage map), `/api/context/learning/status`, `/api/context/learning/:id`, and
 `/api/context/graph/{status,search,entity,passages}`, plus `POST
 /api/context/graph/index`, which only asks the pipeline to start a detached index
 build and answers 202. Nothing in the file tier can answer these, so they return
-503 with the bridge state there; older servers 404 them, which is how a client
+503 `cos_pipeline_not_configured` there; older servers 404 them, which is how a client
 tells the versions apart. `/api/context/status` carries `learning` and `graph`
 blocks when the bridge can produce them and omits them otherwise.
 

@@ -1,3 +1,28 @@
+## 6.44.6
+
+What /qa found in 6.44.5 before anyone installed it.
+
+- `GET /api/context/learning/review`: the strict To review set (the bridge's
+  `learning-to-review`, the same set the status block counts) as event rows,
+  one page of up to 200. 6.44.5's list approximated it with a kind filter and
+  showed "50 of 837" beside a chip that said 121.
+- Every user value now rides as one argv token (`--q=...`, `--id=...`,
+  `--entity=...`), so a search term or entity name that begins with `-` can no
+  longer be read by the bridge's argument parser as a flag.
+- An older COS bridge prints its unknown-command answer to stdout; the server
+  probed only stderr, so every learning route on such a bridge answered 503
+  instead of `cos_pipeline_not_configured`. Both are probed now.
+- A `found: false` entity answer is a 404 with a class Control can name,
+  `index_missing` or `entity_not_found`, never a 503; the null-normalizer
+  fallback says `record_not_found`.
+- `/api/context/status` answers `Cache-Control: private, no-store` like the
+  eight routes that shipped with it; it carries private counts.
+- Every learning and graph route logs the bridge failure it used to swallow,
+  and the search shape passes the bridge's own `scope` through.
+- On the COS side (same night): a JSON error exits 0 so it is parsed rather
+  than rejected, the bot-memory reach is bounded at 2.5 s so a wedged Qdrant
+  cannot blank the file stores, and entity descriptions cap at 12.
+
 ## 6.44.5
 
 Recent learning and the knowledge graph, read-only, for COS Control.
@@ -8,7 +33,7 @@ Recent learning and the knowledge graph, read-only, for COS Control.
   the command, times out, or answers `{ error }` leaves `memory` and `threads`
   exactly as they were and the two blocks absent. Nothing an existing client
   reads has changed; a client that wants the blocks checks for them.
-- Eight read routes: `GET /api/context/learning` (cursor-paged events with a
+- Seven read routes: `GET /api/context/learning` (cursor-paged events with a
   per-store coverage map), `GET /api/context/learning/status`,
   `GET /api/context/learning/:id`, `GET /api/context/graph/status`,
   `GET /api/context/graph/search`, `GET /api/context/graph/entity`,
