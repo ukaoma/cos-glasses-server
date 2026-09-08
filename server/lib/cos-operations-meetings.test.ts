@@ -217,3 +217,31 @@ describe('meetings list carries voice-review tags from the sidecar head', () => 
     }
   })
 })
+
+
+describe('sessionId fallback to the server\'s own recordings root (6.44.16)', () => {
+  it('reads the sidecar from the recordings root when the operations copy has none, and omits it when neither has one', () => {
+    const ops = mkdtempSync(join(tmpdir(), 'cos-ops-fallback-'))
+    const recordings = mkdtempSync(join(tmpdir(), 'cos-rec-fallback-'))
+    try {
+      const month = '2026-09'
+      mkdirSync(join(ops, 'personal', 'meetings', month), { recursive: true })
+      mkdirSync(join(recordings, month), { recursive: true })
+      const md = (title: string) => `# ${title}\n\n| Field | Value |\n|---|---|\n| **Date** | 2026-09-04 |\n| **Source** | G2 Glasses |\n| **Domain** | personal |\n`
+      writeFileSync(join(ops, 'personal', 'meetings', month, '2026-09-04_G2_Recording_2026-09-04_0815_ca525117.md'), md('G2 Recording 2026-09-04 0815'))
+      writeFileSync(join(recordings, month, '2026-09-04_G2_Recording_2026-09-04_0815_ca525117.g2-chunks.json'), JSON.stringify({ schemaVersion: 2, sessionId: 'meeting_1788527707103', chunks: [] }))
+      writeFileSync(join(ops, 'personal', 'meetings', month, '2026-09-03_G2_Recording_2026-09-03_0700_orphan.md'), md('G2 Recording 2026-09-03 0700'))
+      process.env.COS_OPERATIONS_DIR = ops
+      process.env.COS_SCRIPTS_DIR = '/tmp/does-not-matter/scripts'
+      const rows = listCosOperationsMeetings({ limit: 10, recordingsRoot: recordings })
+      const byTitle = Object.fromEntries(rows.map(r => [r.title, r.sessionId]))
+      expect(byTitle['G2 Recording 2026-09-04 0815']).toBe('meeting_1788527707103')
+      expect(byTitle['G2 Recording 2026-09-03 0700']).toBeUndefined()
+      // a recordings root that does not exist is simply not consulted
+      expect(listCosOperationsMeetings({ limit: 10, recordingsRoot: join(recordings, 'missing') }).map(r => r.sessionId)).toEqual([undefined, undefined])
+    } finally {
+      rmSync(ops, { recursive: true, force: true })
+      rmSync(recordings, { recursive: true, force: true })
+    }
+  })
+})

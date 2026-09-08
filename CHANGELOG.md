@@ -1,3 +1,19 @@
+## 6.44.16
+
+A G2 recording keeps its session id when its sidecar only exists in the server's own recordings folder.
+
+- Chelsie and Queen, 2026-09-08: "Meetings to review is empty, and it says 3
+  recent meetings have no session id." On Miles's Mac the same three-row case
+  was three KC-week recordings whose markdown reached the operations tree
+  through git while the `.g2-chunks.json` sidecar, which is gitignored there,
+  did not; the row lost its session id and Speakers could not open it.
+- `listCosOperationsMeetings` now reads the sidecar from the server's own
+  recordings root by the same stem when the copy beside the markdown is
+  missing (`recordingsRoot` option, default the data dir). The review lookup
+  already resolves a session through the standalone store, so the row opens.
+  A meeting with no sidecar anywhere still omits the field rather than
+  inventing one.
+
 ## 6.44.15
 
 Voice profiles named after a spoken sentence are repaired at load.

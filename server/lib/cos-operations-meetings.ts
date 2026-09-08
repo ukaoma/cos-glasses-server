@@ -19,6 +19,7 @@ import { discoveredDomains, domainAbbreviation as deriveAbbr, isSafeDomainName a
 import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
 import { MEETING_SOURCE_MAX_BYTES, meetingDayCountsFromNames, meetingListLimit } from './meeting-store.js'
 import { meetingVoiceReview, parseSidecarListHead } from './meeting-voice-review.js'
+import { dataPath } from './data-dir.js'
 
 /**
  * The four domains of ONE user's COS. Retained as the documented example layout
@@ -528,9 +529,12 @@ export function listCosOperationsMeetings(options: {
   domain?: string
   month?: string
   day?: string
+  /** The server's own recordings root; tests point it at a temp dir. */
+  recordingsRoot?: string
 } = {}): CosOperationsMeetingMeta[] {
   const operationsDir = resolveCosOperationsDir()
   if (!operationsDir) return []
+  const recordingsRoot = options.recordingsRoot ?? dataPath('recordings')
 
   const scoped = Boolean(options.month || options.day)
   const limit = meetingListLimit(options.limit, scoped)
@@ -569,7 +573,17 @@ export function listCosOperationsMeetings(options: {
               meta.recordId = `ops:${domain}:${month}:${file}`
               meta.mutable = true
               meta.canonicalRecord = `operations/${domain}/meetings/${month}/${file}`
-              const hints = sidecarListHints(monthDir, file)
+              // The sidecar is gitignored in the operations tree, so a G2 recording
+              // whose markdown arrived through git or iCloud (three of Miles's KC-week
+              // recordings, 2026-09-08) sits there without one and the row loses its
+              // session id, which reads as "cannot be reviewed". The server that saved
+              // it still holds the sidecar under its own recordings root by the same
+              // stem; read that one when the copy beside the markdown is missing.
+              let hints = sidecarListHints(monthDir, file)
+              if (!hints.sessionId && recordingsRoot) {
+                const fallbackDir = join(recordingsRoot, month)
+                if (existsSync(fallbackDir)) hints = sidecarListHints(fallbackDir, file)
+              }
               if (hints.sessionId) meta.sessionId = hints.sessionId
               if (hints.speakers.length > 0) {
                 meta.voiceReview = meetingVoiceReview(hints.speakers, hints.sessionId)
