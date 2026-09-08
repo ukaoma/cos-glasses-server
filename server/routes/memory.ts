@@ -34,6 +34,12 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   normalizeExtractionBlock,
   normalizeGuardrails,
   normalizeGuardrailsRun,
+  normalizeMergePreview,
+  normalizeMergeStatus,
+  normalizeMergeKickoff,
+  normalizeDuplicates,
+  MERGE_NAME_LIMIT,
+  DUPLICATES_LIMIT_MAX,
   EMBEDDING_PROVIDERS,
   EXTRACTION_TIERS,
   KNOWLEDGE_SETUP_SAMPLE_MAX,
@@ -289,6 +295,106 @@ memoryRouter.post('/context/memory-guardrails/run', async (req, res) => {
   }
 })
 
+// ── Curation (6.44.14): the Manage sheet's merge, with a preview, a worker and a receipt ──
+//
+// Miles 2026-09-08: "Build the Manage merge path with the preview" and "address any of
+// the obvious duplicates like the miels and queen example without clobbering entities."
+// The merge is a DETACHED worker: the two hand merges of 2026-09-08 took ~2 minutes of
+// vector-store rewriting, far past any request budget. The kickoff answers 202 with a
+// ticket; GET /context/graph/merge is the receipt to poll. Two people the graph knows
+// to be different (Miles Ukaoma / Miles Mallard) come back 409 merge_blocked.
+
+function mergeNames(body: unknown): { source: string; target: string } | null {
+  const b = (body ?? {}) as { source?: unknown; target?: unknown }
+  const source = typeof b.source === 'string' ? b.source.trim() : ''
+  const target = typeof b.target === 'string' ? b.target.trim() : ''
+  if (source.length < 1 || source.length > MERGE_NAME_LIMIT || target.length < 1 || target.length > MERGE_NAME_LIMIT) return null
+  return { source, target }
+}
+
+/** `{ source, target }` → what the merge would do. Read-only; a blocked pair answers 200 with `blocked: true`. */
+memoryRouter.post('/context/graph/merge/preview', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const names = mergeNames(req.body)
+  if (!names) { res.status(400).json({ error: 'invalid_entity', message: `source and target must be 1 to ${MERGE_NAME_LIMIT} characters` }); return }
+  try {
+    const data = await callPython(['graph-merge-preview', `--source=${names.source}`, `--target=${names.target}`], 20_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.json(normalizeMergePreview(data, names.source, names.target))
+  } catch (error) {
+    console.warn('[context] merge preview bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/**
+ * `{ source, target, confirm: true, rule? }` → start the merge worker on the owner Mac; 202 with the ticket and receipt.
+ * Without `confirm: true` the answer is 400 confirmation_required with the preview. 409 when the pair is blocked, a merge
+ * is already running, the ingest lock is held, this is a replica, or the chosen embedding cannot embed right now.
+ */
+memoryRouter.post('/context/graph/merge', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const names = mergeNames(req.body)
+  if (!names) { res.status(400).json({ error: 'invalid_entity', message: `source and target must be 1 to ${MERGE_NAME_LIMIT} characters` }); return }
+  const body = (req.body ?? {}) as { confirm?: unknown; rule?: unknown }
+  if (body.confirm !== undefined && typeof body.confirm !== 'boolean') { res.status(400).json({ error: 'invalid_confirm', message: 'confirm must be true or false' }); return }
+  if (body.rule !== undefined && body.rule !== null && (typeof body.rule !== 'object' || Array.isArray(body.rule))) { res.status(400).json({ error: 'invalid_rule', message: 'rule must be an object' }); return }
+  const argv = ['graph-merge', `--source=${names.source}`, `--target=${names.target}`, '--by=control']
+  if (body.confirm === true) argv.push('--confirm')
+  if (body.rule && typeof body.rule === 'object') {
+    const r = body.rule as Record<string, unknown>
+    const rule: Record<string, string> = {}
+    for (const key of ['scope', 'pattern', 'replacement']) if (typeof r[key] === 'string') rule[key] = (r[key] as string).slice(0, MERGE_NAME_LIMIT)
+    argv.push(`--rule=${JSON.stringify(rule)}`)
+  }
+  try {
+    // 20 s: the kickoff reads the index and probes the embedding, then spawns and answers.
+    const data = await callPython(argv, 20_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.status(202).json(normalizeMergeKickoff(data))
+  } catch (error) {
+    console.warn('[context] merge bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** The current or last merge's receipt with the worker's log tail. A dead worker reads as failed, never as running. */
+memoryRouter.get('/context/graph/merge', async (_req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const data = await callPython(['graph-merge-status'], 10_000)
+    const code = bridgeErrorCode(data)
+    if (code) { res.status(503).json({ error: code }); return }
+    res.json(normalizeMergeStatus(data))
+  } catch (error) {
+    console.warn('[context] merge status bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
+/** `?limit=` → person entities whose names look like one person, grouped with a confidence. Proposals only. */
+memoryRouter.get('/context/graph/duplicates', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const raw = req.query.limit
+  const limit = raw === undefined ? 25 : Number(raw)
+  if (!Number.isInteger(limit) || limit < 1 || limit > DUPLICATES_LIMIT_MAX) { res.status(400).json({ error: 'invalid_limit', message: `limit must be an integer from 1 to ${DUPLICATES_LIMIT_MAX}` }); return }
+  try {
+    const data = await callPython(['graph-duplicates', `--limit=${limit}`], 30_000)
+    const code = bridgeErrorCode(data)
+    if (code) { sendSetupError(res, code, data); return }
+    res.json(normalizeDuplicates(data))
+  } catch (error) {
+    console.warn('[context] duplicates bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'graph_unavailable' })
+  }
+})
+
 memoryRouter.get('/context/learning/:id', async (req, res) => {
   noStore(res)
   if (!LEARNING_EVENT_ID_PATTERN.test(req.params.id)) { res.status(400).json({ error: 'invalid_event_id' }); return }
@@ -467,6 +573,19 @@ function sendSetupError(res: import('express').Response, code: string, data: unk
   const detail = asDetail(data)
   if (code === 'not_owner') { res.status(409).json({ error: code, message: detail.message, owner_host: detail.owner_host ?? null }); return }
   if (code === 'embedding_locked' || code === 'embedding_mismatch') { res.status(409).json({ error: code, message: detail.message }); return }
+  if (code === 'merge_blocked') {
+    // 6.44.14: two entities the graph knows to be different people. The preview rides along so the page can say why.
+    const d = (typeof data === 'object' && data !== null ? data : {}) as { preview?: unknown }
+    res.status(409).json({ error: code, message: detail.message, preview: d.preview ? normalizeMergePreview(d.preview) : null }); return
+  }
+  if (code === 'merge_running' || code === 'lock_held') {
+    const d = (typeof data === 'object' && data !== null ? data : {}) as { receipt?: unknown; lock?: unknown }
+    res.status(409).json({ error: code, message: detail.message, receipt: d.receipt ? normalizeMergeStatus({ receipt: d.receipt }).receipt : null, lock: normalizeIngestKickoff({ lock: d.lock }).lock }); return
+  }
+  if (code === 'confirmation_required') {
+    const d = (typeof data === 'object' && data !== null ? data : {}) as { preview?: unknown }
+    res.status(400).json({ error: code, message: detail.message, preview: d.preview ? normalizeMergePreview(d.preview) : null }); return
+  }
   if (code === 'embedding_not_ready') {
     // 6.44.12: the chosen embedding cannot embed on this Mac right now. The
     // bridge refused before spawning; pass its fix through so the page can show it.

@@ -1121,3 +1121,120 @@ export function normalizeContextBrowserStatus(value: unknown): ContextBrowserSta
     ...(graph ? { graph } : {}),
   }
 }
+
+// ── Curation (6.44.14): merge preview, the merge worker's receipt, duplicate proposals ──
+
+export const MERGE_NAME_LIMIT = 200
+export const DUPLICATES_LIMIT_MAX = 100
+export const MERGE_RECEIPT_STATES = ['running', 'merging', 'indexing', 'exporting', 'done', 'failed'] as const
+export type MergeReceiptState = typeof MERGE_RECEIPT_STATES[number]
+
+function entityCard(value: unknown, fallbackId: string): Record<string, unknown> {
+  const r = asRecord(value) ?? {}
+  return {
+    id: stringOrAbsent(r.id, MERGE_NAME_LIMIT) ?? fallbackId,
+    found: r.found === true,
+    type: stringOrAbsent(r.type, 40) ?? null,
+    degree: integerOrAbsent(r.degree) ?? 0,
+    descriptions: (Array.isArray(r.descriptions) ? r.descriptions : []).filter((d): d is string => typeof d === 'string').map(d => cleanContextText(d, 300)).filter(Boolean).slice(0, 3),
+    description_count: integerOrAbsent(r.description_count) ?? 0,
+    created_at: integerOrAbsent(r.created_at) ?? null,
+  }
+}
+
+/** `graph-merge-preview`: what a merge would do, read from the index. `blocked` wins over every warning. */
+export function normalizeMergePreview(value: unknown, source = '', target = ''): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  const effect = asRecord(s.effect)
+  return {
+    available: s.available === true,
+    index_state: stringOrAbsent(s.index_state, 20) ?? 'missing',
+    index_built_at: isoOrAbsent(s.index_built_at) ?? null,
+    source: entityCard(s.source, source),
+    target: entityCard(s.target, target),
+    shared_neighbors: (Array.isArray(s.shared_neighbors) ? s.shared_neighbors : []).filter((n): n is string => typeof n === 'string').map(n => cleanContextText(n, MERGE_NAME_LIMIT)).filter(Boolean).slice(0, 10),
+    shared_count: integerOrAbsent(s.shared_count) ?? 0,
+    adjacent: s.adjacent === true,
+    effect: effect ? { moved: integerOrAbsent(effect.moved) ?? 0, collapsed: integerOrAbsent(effect.collapsed) ?? 0, embeddings: integerOrAbsent(effect.embeddings) ?? 0, estimated_seconds: integerOrAbsent(effect.estimated_seconds) ?? null } : null,
+    name_signal: stringOrAbsent(s.name_signal, 80) ?? null,
+    blocked: s.blocked === true,
+    block_reason: stringOrAbsent(s.block_reason, 300) ?? null,
+    warnings: (Array.isArray(s.warnings) ? s.warnings : []).flatMap((w) => {
+      const r = asRecord(w); const code = r ? stringOrAbsent(r.code, 40) : undefined; const text = r ? stringOrAbsent(r.text, 300) : undefined
+      return code && text ? [{ code, text }] : []
+    }).slice(0, 8),
+  }
+}
+
+/** The worker's receipt: one merge per Mac at a time, every step stamped. */
+export function normalizeMergeReceipt(value: unknown): Record<string, unknown> | null {
+  const r = asRecord(value)
+  if (!r) return null
+  const state = typeof r.state === 'string' && (MERGE_RECEIPT_STATES as readonly string[]).includes(r.state) ? r.state as MergeReceiptState : null
+  if (!state) return null
+  const before = asRecord(r.before); const after = asRecord(r.after)
+  return {
+    ticket: stringOrAbsent(r.ticket, 40) ?? null,
+    state,
+    step: stringOrAbsent(r.step, 20) ?? null,
+    source: stringOrAbsent(r.source, MERGE_NAME_LIMIT) ?? null,
+    target: stringOrAbsent(r.target, MERGE_NAME_LIMIT) ?? null,
+    by: stringOrAbsent(r.by, 40) ?? null,
+    pid: integerOrAbsent(r.pid) ?? null,
+    started_at: isoOrAbsent(r.started_at) ?? null,
+    finished_at: isoOrAbsent(r.finished_at) ?? null,
+    elapsed_s: typeof r.elapsed_s === 'number' && Number.isFinite(r.elapsed_s) ? r.elapsed_s : null,
+    before: before ? { source: integerOrAbsent(before.source) ?? null, target: integerOrAbsent(before.target) ?? null } : null,
+    after: after ? { target: integerOrAbsent(after.target) ?? null, source_present: after.source_present === true } : null,
+    embedded_texts: integerOrAbsent(r.embedded_texts) ?? null,
+    snapshot: stringOrAbsent(r.snapshot, 400) ?? null,
+    rule: asRecord(r.rule) ? { scope: stringOrAbsent((r.rule as Record<string, unknown>).scope, 40) ?? null, pattern: stringOrAbsent((r.rule as Record<string, unknown>).pattern, MERGE_NAME_LIMIT) ?? null, replacement: stringOrAbsent((r.rule as Record<string, unknown>).replacement, MERGE_NAME_LIMIT) ?? null } : null,
+    error: stringOrAbsent(r.error, 400) ?? null,
+    export_note: stringOrAbsent(r.export_note, 200) ?? null,
+  }
+}
+
+/** `graph-merge` (202) and `graph-merge-status`: the receipt plus the worker's log tail. */
+export function normalizeMergeStatus(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  return {
+    running: s.running === true,
+    receipt: normalizeMergeReceipt(s.receipt),
+    log_tail: (Array.isArray(s.log_tail) ? s.log_tail : []).filter((l): l is string => typeof l === 'string').map(l => l.slice(0, 300)).slice(-24),
+  }
+}
+
+export function normalizeMergeKickoff(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  return {
+    started: s.started === true,
+    ticket: stringOrAbsent(s.ticket, 40) ?? null,
+    pid: integerOrAbsent(s.pid) ?? null,
+    estimated_seconds: integerOrAbsent(s.estimated_seconds) ?? null,
+    receipt: normalizeMergeReceipt(s.receipt),
+  }
+}
+
+/** `graph-duplicates`: person entities whose names look like one person. Proposals, never merges. */
+export function normalizeDuplicates(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  const groups = (Array.isArray(s.groups) ? s.groups : []).flatMap((g) => {
+    const r = asRecord(g); const target = r ? stringOrAbsent(r.target, MERGE_NAME_LIMIT) : undefined
+    if (!r || !target) return []
+    const members = (Array.isArray(r.members) ? r.members : []).flatMap((m) => {
+      const mr = asRecord(m); const id = mr ? stringOrAbsent(mr.id, MERGE_NAME_LIMIT) : undefined
+      if (!mr || !id) return []
+      return [{ id, degree: integerOrAbsent(mr.degree) ?? 0, shared_neighbors: integerOrAbsent(mr.shared_neighbors) ?? 0, description: stringOrAbsent(mr.description, 300) ?? '', why: stringOrAbsent(mr.why, 80) ?? null }]
+    }).slice(0, 6)
+    const confidence = r.confidence === 'high' || r.confidence === 'medium' || r.confidence === 'low' ? r.confidence : 'low'
+    return members.length >= 2 ? [{ target, members, confidence, reasons: (Array.isArray(r.reasons) ? r.reasons : []).filter((x): x is string => typeof x === 'string').map(x => cleanContextText(x, 80)).slice(0, 6), linked: r.linked === true }] : []
+  }).slice(0, DUPLICATES_LIMIT_MAX)
+  return {
+    available: s.available === true,
+    index_state: stringOrAbsent(s.index_state, 20) ?? 'missing',
+    index_built_at: isoOrAbsent(s.index_built_at) ?? null,
+    scanned: integerOrAbsent(s.scanned) ?? 0,
+    total_groups: integerOrAbsent(s.total_groups) ?? groups.length,
+    groups,
+  }
+}

@@ -1,3 +1,44 @@
+## 6.44.14
+
+The Manage sheet's merge, with a preview, a worker and a receipt, plus a
+duplicates scan that proposes and never merges.
+
+- Miles 2026-09-08: "Build the Manage merge path with the preview", and
+  "address any of the obvious duplicates like the miels and queen example
+  from above without clobbering entities. You did good in deflecting miles
+  mallard vs the other miles profiles."
+- `POST /api/context/graph/merge/preview` `{ source, target }`: both entities
+  from this Mac's index, shared neighbors, the effect (relationships moved and
+  collapsed, texts re-embedded, about how long), a name signal, warnings
+  (types differ, larger into smaller, nothing links them, a large merge), and
+  `blocked` with its reason for a pair the graph knows to be different people
+  (Miles Ukaoma / Miles Mallard, Manoj Bisht / Manoj Kumar, the Kyles, the
+  Jacobuses, and any pair the user kept apart).
+- `POST /api/context/graph/merge` `{ source, target, confirm: true, rule? }`:
+  starts ONE detached worker on the ingestion owner and answers 202 with a
+  ticket and the receipt. The worker takes the exclusive ingest lock, copies
+  the GraphML aside, runs LightRAG's own entity merge (no deprecated strategy
+  argument), appends a curation ledger row, rebuilds the per-Mac index and
+  the Observatory export, and stamps its receipt at every step. Measured: the
+  hand merges of 2026-09-08 took about two minutes, so this is never a request.
+  Without `confirm` the answer is 400 `confirmation_required` with the preview;
+  409 `merge_blocked`, `merge_running`, `lock_held`, `not_owner`, or
+  `embedding_not_ready` (a merge re-embeds 1 + degree texts).
+- `GET /api/context/graph/merge`: the receipt with the worker's log tail. A
+  worker that died reads as failed with the snapshot intact, never as running.
+- `GET /api/context/graph/duplicates?limit=`: person entities whose names are
+  variants of one another (same first name with a surname within two letters,
+  whole names within two letters, one name spelling out the other, a bare
+  first name that matches exactly one full name), grouped under the full name
+  with the most connections, with shared-neighbor counts and a confidence.
+  Possessives ("Miles Ukaoma's Son") and ambiguous first names are left alone;
+  blocked pairs never share a group. Nothing here merges.
+- Four bridge commands: `graph-merge-preview`, `graph-merge`,
+  `graph-merge-status`, `graph-duplicates` (28 in the parity set).
+- Test: the 6.44.13 guardrails-run pin expected a zone-less `created_at` to
+  read as null; the normalizer has always passed a parseable timestamp through,
+  and the pin failed at HEAD. Corrected to the passed-through value.
+
 ## 6.44.13
 
 Prune or accept a captured memory, and guardrails that prune nonsense for you.

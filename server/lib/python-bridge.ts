@@ -70,6 +70,10 @@ export const LEARNING_COMMANDS = [
   'memory-review',
   'memory-guardrails',
   'memory-guardrails-run',
+  'graph-merge-preview',
+  'graph-merge',
+  'graph-merge-status',
+  'graph-duplicates',
 ] as const
 
 // The optional Python bridge is available only when the user points us at a real
@@ -256,6 +260,10 @@ function standaloneNoop(args: string[]): unknown {
     case 'memory-review':
     case 'memory-guardrails':
     case 'memory-guardrails-run':
+    case 'graph-merge-preview':
+    case 'graph-merge':
+    case 'graph-merge-status':
+    case 'graph-duplicates':
       return { error: 'cos_pipeline_not_configured' }
     case 'task-rows':
     case 'task-capture':

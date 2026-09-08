@@ -629,10 +629,88 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(run.status).toBe(200)
     const body = await run.json() as Record<string, any>
     expect(body.run.flagged).toBe(1)
-    expect(body.verdicts[0]).toEqual({ id: 'mem_a', type: 'decision', created_at: null, excerpt: 'AAAA', verdict: 'prune', reasons: ['only 1 distinct characters'], by: 'rules', applied: false })
+    expect(body.verdicts[0]).toEqual({ id: 'mem_a', type: 'decision', created_at: '2026-09-07T20:05:00', excerpt: 'AAAA', verdict: 'prune', reasons: ['only 1 distinct characters'], by: 'rules', applied: false })
     expect(callBridge).toHaveBeenLastCalledWith(['memory-guardrails-run', '--days=30', '--llm=false'], 60_000)
     expect((await fetch(`${base}/api/context/memory-guardrails/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ days: 0 }) })).status).toBe(400)
     expect((await fetch(`${base}/api/context/memory-guardrails/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apply: 'yes' }) })).status).toBe(400)
+  })
+
+  it('curation (6.44.14): merge preview, the worker kickoff, its receipt, and duplicates; blocked pairs 409', async () => {
+    const base = await startTestServer()
+    const preview = { available: true, index_state: 'fresh', index_built_at: '2026-09-08T12:00:00+00:00',
+      source: { id: 'MU (Miles Ukaoma)', found: true, type: 'person', degree: 2, descriptions: ['Speaker label expanded.'], description_count: 1, created_at: 1776929319 },
+      target: { id: 'Miles Ukaoma', found: true, type: 'person', degree: 5408, descriptions: ['SVP Marketing at Quilt.'], description_count: 12, created_at: 1776929319 },
+      shared_neighbors: ['COS'], shared_count: 1, adjacent: true, effect: { moved: 0, collapsed: 2, embeddings: 3, estimated_seconds: 150 },
+      name_signal: 'one name spells out the other', blocked: false, block_reason: null, warnings: [{ code: 'large_merge', text: 'x' }], protocol: 1 }
+    callBridge.mockResolvedValueOnce(preview)
+    const pv = await fetch(`${base}/api/context/graph/merge/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'MU (Miles Ukaoma)', target: 'Miles Ukaoma' }) })
+    expect(pv.status).toBe(200)
+    const pvBody = await pv.json() as Record<string, any>
+    expect(pvBody.source.degree).toBe(2); expect(pvBody.target.degree).toBe(5408); expect(pvBody.shared_neighbors).toEqual(['COS'])
+    expect(pvBody.effect).toEqual({ moved: 0, collapsed: 2, embeddings: 3, estimated_seconds: 150 }); expect(pvBody.blocked).toBe(false); expect(pvBody.warnings).toEqual([{ code: 'large_merge', text: 'x' }])
+    expect(pvBody).not.toHaveProperty('protocol')
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-merge-preview', '--source=MU (Miles Ukaoma)', '--target=Miles Ukaoma'], 20_000)
+    expect((await fetch(`${base}/api/context/graph/merge/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: '', target: 'x' }) })).status).toBe(400)
+
+    // a blocked pair previews as blocked (200) and refuses to start (409 merge_blocked, preview attached)
+    callBridge.mockResolvedValueOnce({ ...preview, source: { ...preview.source, id: 'Miles Mallard' }, blocked: true, block_reason: 'Miles Ukaoma and Miles Mallard are different people. Merging them is refused.' })
+    const blocked = await fetch(`${base}/api/context/graph/merge/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Miles Mallard', target: 'Miles Ukaoma' }) })
+    expect(blocked.status).toBe(200); expect((await blocked.json() as Record<string, any>).blocked).toBe(true)
+    callBridge.mockResolvedValueOnce({ error: 'merge_blocked', message: 'Miles Ukaoma and Miles Mallard are different people. Merging them is refused.', preview: { ...preview, blocked: true }, protocol: 1 })
+    const refused = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Miles Mallard', target: 'Miles Ukaoma', confirm: true }) })
+    expect(refused.status).toBe(409)
+    const refusedBody = await refused.json() as Record<string, any>
+    expect(refusedBody.error).toBe('merge_blocked'); expect(refusedBody.message).toContain('different people'); expect(refusedBody.preview.blocked).toBe(true)
+
+    // no confirm: the bridge answers confirmation_required and the route says 400 with the preview
+    callBridge.mockResolvedValueOnce({ error: 'confirmation_required', message: 'Review the preview, then send --confirm.', preview, protocol: 1 })
+    const unconfirmed = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'MU (Miles Ukaoma)', target: 'Miles Ukaoma' }) })
+    expect(unconfirmed.status).toBe(400); expect((await unconfirmed.json() as Record<string, any>).preview.target.id).toBe('Miles Ukaoma')
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-merge', '--source=MU (Miles Ukaoma)', '--target=Miles Ukaoma', '--by=control'], 20_000)
+    expect((await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'a', target: 'b', confirm: 'yes' }) })).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'a', target: 'b', rule: [1] }) })).status).toBe(400)
+
+    // confirmed: 202 with the ticket and the receipt; the rule rides as one JSON argv token
+    const receipt = { ticket: '20260908_120000_0001', state: 'running', step: 'starting', source: 'MU (Miles Ukaoma)', target: 'Miles Ukaoma', by: 'control', pid: 4242, started_at: '2026-09-08T12:00:00+00:00', before: { source: 2, target: 5408 }, after: null, embedded_texts: null, snapshot: null, rule: { scope: 'person', pattern: 'MU (Miles Ukaoma)', replacement: 'Miles Ukaoma' }, error: null }
+    callBridge.mockResolvedValueOnce({ started: true, ticket: receipt.ticket, pid: 4242, receipt, estimated_seconds: 150, preview, protocol: 1 })
+    const started = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'MU (Miles Ukaoma)', target: 'Miles Ukaoma', confirm: true, rule: { scope: 'person', pattern: 'MU (Miles Ukaoma)', replacement: 'Miles Ukaoma', extra: 'dropped' } }) })
+    expect(started.status).toBe(202)
+    const kicked = await started.json() as Record<string, any>
+    expect(kicked.started).toBe(true); expect(kicked.ticket).toBe(receipt.ticket); expect(kicked.estimated_seconds).toBe(150)
+    expect(kicked.receipt.state).toBe('running'); expect(kicked.receipt.before).toEqual({ source: 2, target: 5408 }); expect(kicked.receipt.rule.pattern).toBe('MU (Miles Ukaoma)')
+    expect(kicked).not.toHaveProperty('preview')
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-merge', '--source=MU (Miles Ukaoma)', '--target=Miles Ukaoma', '--by=control', '--confirm', `--rule=${JSON.stringify({ scope: 'person', pattern: 'MU (Miles Ukaoma)', replacement: 'Miles Ukaoma' })}`], 20_000)
+
+    // a second kickoff while one runs: 409 merge_running with the receipt; a held lock: 409 lock_held
+    callBridge.mockResolvedValueOnce({ error: 'merge_running', message: 'A merge is already running on this Mac.', receipt, protocol: 1 })
+    const running = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Niala', target: 'Niala Samnarine', confirm: true }) })
+    expect(running.status).toBe(409); expect((await running.json() as Record<string, any>).receipt.ticket).toBe(receipt.ticket)
+    callBridge.mockResolvedValueOnce({ error: 'lock_held', message: 'The ingest lock is held.', lock: { state: 'exclusive', owner_pid: 77 }, protocol: 1 })
+    const held = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Niala', target: 'Niala Samnarine', confirm: true }) })
+    expect(held.status).toBe(409); expect((await held.json() as Record<string, any>).lock).toEqual({ state: 'exclusive', owner_pid: 77 })
+
+    // the receipt: a done merge with its counts and the log tail; an unknown state is dropped, not passed through
+    callBridge.mockResolvedValueOnce({ running: false, receipt: { ...receipt, state: 'done', step: 'done', after: { target: 5409, source_present: false }, embedded_texts: 3, snapshot: '/Users/q/.lightrag_backups/pre_merge_20260908_120000.graphml', elapsed_s: 121.4, finished_at: '2026-09-08T12:02:01+00:00' }, log_tail: ['[t] merged MU (Miles Ukaoma) -> Miles Ukaoma', '[t] done in 121.4 s'], protocol: 1 })
+    const st = await fetch(`${base}/api/context/graph/merge`)
+    expect(st.status).toBe(200)
+    const stBody = await st.json() as Record<string, any>
+    expect(stBody.running).toBe(false); expect(stBody.receipt.state).toBe('done'); expect(stBody.receipt.after).toEqual({ target: 5409, source_present: false }); expect(stBody.receipt.embedded_texts).toBe(3); expect(stBody.log_tail).toHaveLength(2)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-merge-status'], 10_000)
+    callBridge.mockResolvedValueOnce({ running: false, receipt: { ...receipt, state: 'exploded' }, log_tail: [], protocol: 1 })
+    expect(((await (await fetch(`${base}/api/context/graph/merge`)).json()) as Record<string, any>).receipt).toBeNull()
+
+    // duplicates: groups bounded and typed; Miles Mallard never appears next to Miles Ukaoma because the bridge never sends it
+    callBridge.mockResolvedValueOnce({ available: true, index_state: 'fresh', index_built_at: '2026-09-08T12:00:00+00:00', scanned: 2690, total_groups: 246,
+      groups: [{ target: 'Niala Samnarine', confidence: 'high', reasons: ['bare first name with one full name in the index'], linked: true,
+        members: [{ id: 'Niala Samnarine', degree: 948, shared_neighbors: 0, description: 'VP Customer Marketing.', why: null }, { id: 'Niala', degree: 56, shared_neighbors: 27, description: '', why: 'bare first name with one full name in the index' }] },
+        { target: 'Lonely', confidence: 'weird', members: [{ id: 'Lonely', degree: 1 }] }], protocol: 1 })
+    const dup = await fetch(`${base}/api/context/graph/duplicates?limit=25`)
+    expect(dup.status).toBe(200)
+    const dupBody = await dup.json() as Record<string, any>
+    expect(dupBody.scanned).toBe(2690); expect(dupBody.groups).toHaveLength(1); expect(dupBody.groups[0].members[1]).toEqual({ id: 'Niala', degree: 56, shared_neighbors: 27, description: '', why: 'bare first name with one full name in the index' })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-duplicates', '--limit=25'], 30_000)
+    expect((await fetch(`${base}/api/context/graph/duplicates?limit=0`)).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/duplicates?limit=101`)).status).toBe(400)
   })
 
   it('ingest progress: the last Control-started run, normalized, read-only', async () => {
@@ -681,6 +759,9 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect((await fetch(`${base}/api/context/graph/setup`)).status).toBe(503)
     expect((await fetch(`${base}/api/context/graph/ingest/progress`)).status).toBe(503)
     expect((await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'anything at all' }) })).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/merge/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'a', target: 'b' }) })).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/merge`)).status).toBe(503)
+    expect((await fetch(`${base}/api/context/graph/duplicates`)).status).toBe(503)
   })
 
   it('requires the API token on every new route (one 401 each)', async () => {
@@ -691,7 +772,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
-      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule'], ['POST', '/api/context/graph/setup/embedding'], ['POST', '/api/context/graph/setup/extraction'], ['POST', '/api/context/memory/mem_1/review'], ['GET', '/api/context/memory-guardrails'], ['PUT', '/api/context/memory-guardrails'], ['POST', '/api/context/memory-guardrails/run']] as const) {
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule'], ['POST', '/api/context/graph/setup/embedding'], ['POST', '/api/context/graph/setup/extraction'], ['POST', '/api/context/memory/mem_1/review'], ['GET', '/api/context/memory-guardrails'], ['PUT', '/api/context/memory-guardrails'], ['POST', '/api/context/memory-guardrails/run'], ['POST', '/api/context/graph/merge/preview'], ['POST', '/api/context/graph/merge'], ['GET', '/api/context/graph/merge'], ['GET', '/api/context/graph/duplicates']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
       // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):
