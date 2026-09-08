@@ -540,6 +540,10 @@ voiceRouter.get('/voice/profiles', (_req, res) => {
             embeddings: p.embeddings.length,
             isOwner: p.name === owner,
             sources: bySource,
+            // 6.44.15: a profile whose name on disk was a spoken sentence was
+            // renamed at load; the client offers a rename.
+            needsName: p.needsName === true,
+            ...(p.renamedFrom ? { renamedFrom: p.renamedFrom } : {}),
             // Provenance alignment is now an invariant; surfacing it makes a
             // future regression visible instead of silent.
             sourcesAligned: (p.sources?.length ?? 0) === p.embeddings.length,

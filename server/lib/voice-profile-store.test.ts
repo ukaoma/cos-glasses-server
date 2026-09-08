@@ -29,6 +29,7 @@ import {
   saveVoiceProfileStore,
   type ProfileStore,
   type VoiceProfile,
+  junkNameReason,
 } from './voice-profile-store.js'
 
 let dir: string
@@ -433,5 +434,40 @@ describe('delete-person is auditable', () => {
     const store: ProfileStore = { profiles: [profile('MU', 2, undefined)] }
     expect(deleteProfileFromStore(store, 'Nobody')).toEqual({ removedProfiles: 0, removedEmbeddings: 0 })
     expect(store.profiles).toHaveLength(1)
+  })
+})
+
+
+describe('junk profile names (6.44.15)', () => {
+  const emb = [[0.1, 0.2, 0.3]]
+  it('renames a profile whose name is a spoken sentence, keeps its training, and flags it', () => {
+    const spoken = 'My Voice My Name Is Chelsie Hodgkiss And I Am The Director Of Operations At Quilt Software And I Am Recording This So The Glasses Know Me'
+    const { store, repairs } = normalizeProfileStore({ profiles: [
+      { name: spoken, embeddings: emb, sources: ['manual'] },
+      { name: 'Chelsie Hodgkiss', embeddings: emb, sources: ['manual'] },
+      { name: 'MU', embeddings: emb, sources: ['manual'] },
+      { name: 'Speaker 2', embeddings: emb, sources: ['manual'] },
+      { name: 'Another sentence, with punctuation.', embeddings: emb, sources: ['manual'] },
+    ] })
+    const names = store.profiles.map(p => p.name)
+    expect(names).toEqual(['Unnamed voice 1', 'Chelsie Hodgkiss', 'MU', 'Speaker 2', 'Unnamed voice 2'])
+    expect(store.profiles[0]).toMatchObject({ needsName: true, renamedFrom: spoken.slice(0, 60), embeddings: emb, sources: ['manual'] })
+    expect(store.profiles[1].needsName).toBeUndefined()
+    expect(repairs.profilesRenamed).toBe(2)
+    expect(hasRepairs(repairs)).toBe(true)
+    expect(describeRepairs(repairs)).toContain('2 profile(s) named after a spoken sentence')
+  })
+
+  it('never renames a legacy short label, and a placeholder that already exists is skipped', () => {
+    const { store, repairs } = normalizeProfileStore({ profiles: [
+      { name: 'Unnamed voice 1', embeddings: emb },
+      { name: 'one two three four five six words here', embeddings: emb },
+    ] })
+    expect(store.profiles.map(p => p.name)).toEqual(['Unnamed voice 1', 'Unnamed voice 2'])
+    expect(repairs.profilesRenamed).toBe(1)
+    expect(junkNameReason('MU')).toBeNull()
+    expect(junkNameReason('Me')).toBeNull()
+    expect(junkNameReason('Luke H.')).toBeNull()
+    expect(junkNameReason('x'.repeat(41))).toBe('too_long')
   })
 })

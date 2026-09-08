@@ -1,3 +1,22 @@
+## 6.44.15
+
+Voice profiles named after a spoken sentence are repaired at load.
+
+- Chelsie 2026-09-08: her `voice-profiles.json` held two profiles whose name
+  was the entire enrolment speech ("My Voice My Name Is Chelsie Hodgkiss And I
+  Am The Director…", ~600 characters), written by a client older than the
+  8/25 guards. Speaker ID was "active" and could never match anything, and the
+  file cannot be repaired by hand because the server rewrites it from memory.
+- `normalizeProfileStore` now renames a name that is too long, has more than
+  four words, or is three-plus words with sentence punctuation to
+  `Unnamed voice N`, keeps every embedding and its provenance, records
+  `renamedFrom` (the first 60 characters) and `needsName: true`, and counts it
+  in the load repairs (`profilesRenamed`). Legacy short labels ("MU",
+  "Speaker 2", "Luke H.") are never touched. `GET /api/voice/profiles` carries
+  `needsName` and `renamedFrom` so COS Control's speaker review can offer the
+  rename; `POST /api/voice/merge-profiles` folds the placeholder into the
+  right person as before.
+
 ## 6.44.14
 
 The Manage sheet's merge, with a preview, a worker and a receipt, plus a

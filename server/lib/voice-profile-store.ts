@@ -11,6 +11,7 @@
 // by execution rather than by asserting on source text. speaker-embeddings.ts
 // delegates to it and keeps the sherpa-onnx manager in sync.
 
+import { checkSpeakerName, type SpeakerNameRejection } from './speaker-name.js'
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
@@ -21,6 +22,12 @@ export interface VoiceProfile {
   embeddings: number[][]
   /** Provenance: 'manual' | 'fireflies' | 'g2-training' | 'auto:<sessionId>' | … */
   sources?: string[]
+  /** The name on disk was a spoken sentence, not a name (an old client's
+   *  "enroll my voice" fall-through); it was renamed at load and the training
+   *  kept. COS Control's speaker review shows it for renaming. */
+  needsName?: boolean
+  /** The first 60 characters of the name it was loaded with. */
+  renamedFrom?: string
 }
 
 export interface ProfileStore {
@@ -42,6 +49,9 @@ export interface StoreRepairs {
   dimensionMismatch: number
   /** Entries with no usable name, or duplicate names collapsed. */
   profilesDropped: number
+  /** Names that were a whole spoken sentence (too long, too many words, or
+   *  sentence punctuation), renamed to `Unnamed voice N` with the training kept. */
+  profilesRenamed: number
 }
 
 export function emptyRepairs(): StoreRepairs {
@@ -51,17 +61,19 @@ export function emptyRepairs(): StoreRepairs {
     embeddingsDropped: 0,
     dimensionMismatch: 0,
     profilesDropped: 0,
+    profilesRenamed: 0,
   }
 }
 
 export function hasRepairs(r: StoreRepairs): boolean {
   return r.sourcesRealigned > 0 || r.sourcesCoerced > 0 || r.embeddingsDropped > 0
-    || r.dimensionMismatch > 0 || r.profilesDropped > 0
+    || r.dimensionMismatch > 0 || r.profilesDropped > 0 || r.profilesRenamed > 0
 }
 
 export function describeRepairs(r: StoreRepairs): string {
   const parts: string[] = []
   if (r.profilesDropped) parts.push(`${r.profilesDropped} unusable profile(s)`)
+  if (r.profilesRenamed) parts.push(`${r.profilesRenamed} profile(s) named after a spoken sentence, renamed for review`)
   if (r.embeddingsDropped) parts.push(`${r.embeddingsDropped} unusable embedding row(s)`)
   if (r.sourcesRealigned) parts.push(`${r.sourcesRealigned} profile(s) with misaligned sources[]`)
   if (r.sourcesCoerced) parts.push(`${r.sourcesCoerced} null/non-string source slot(s)`)
@@ -106,11 +118,27 @@ export function normalizeProfileStore(raw: unknown): { store: ProfileStore; repa
   if (!Array.isArray(rawProfiles)) return { store: { profiles: [] }, repairs }
 
   const byName = new Map<string, VoiceProfile>()
+  let unnamed = 0
   for (const candidate of rawProfiles) {
-    const name = typeof (candidate as VoiceProfile)?.name === 'string'
+    const rawName = typeof (candidate as VoiceProfile)?.name === 'string'
       ? (candidate as VoiceProfile).name.trim()
       : ''
-    if (!name) { repairs.profilesDropped++; continue }
+    if (!rawName) { repairs.profilesDropped++; continue }
+    // Chelsie's store (2026-09-08) held two profiles named with the entire
+    // enrolment speech (~600 characters), written by a client older than the
+    // 6.8.433 / server 8/25 guards. A name like that can never match a speaker
+    // label, and the file cannot be repaired by hand because the server
+    // rewrites it from memory. Keep the training, give it a placeholder name,
+    // and flag it so COS Control offers a rename. Only the sentence shapes are
+    // renamed; legacy short labels ("MU", "Speaker 2") are left exactly as is.
+    const junk = junkNameReason(rawName)
+    let renamedFrom: string | undefined
+    let name = rawName
+    if (junk) {
+      do { name = `Unnamed voice ${++unnamed}` } while (byName.has(name) || rawProfiles.some(p => (p as VoiceProfile)?.name === name))
+      renamedFrom = rawName.slice(0, 60)
+      repairs.profilesRenamed++
+    }
 
     const rawEmbeddings = Array.isArray((candidate as VoiceProfile).embeddings)
       ? (candidate as VoiceProfile).embeddings as unknown[]
@@ -154,10 +182,21 @@ export function normalizeProfileStore(raw: unknown): { store: ProfileStore; repa
       existing.sources!.push(...sources)
       continue
     }
-    byName.set(name, { name, embeddings, sources })
+    byName.set(name, { name, embeddings, sources, ...(renamedFrom ? { needsName: true, renamedFrom } : {}) })
   }
 
   return { store: { profiles: [...byName.values()] }, repairs }
+}
+
+/** The sentence shapes only: too long, too many words, or sentence punctuation. */
+export function junkNameReason(name: string): SpeakerNameRejection | null {
+  const check = checkSpeakerName(name, { ownerLabel: name })
+  if (check.ok) return null
+  if (check.reason === 'too_long' || check.reason === 'too_many_words') return check.reason
+  // Sentence punctuation alone is not enough: "Luke H." is a legitimate legacy
+  // alias. Three or more words with punctuation is speech, not a name.
+  if (check.reason === 'sentence_like' && name.trim().split(/\s+/).length >= 3) return check.reason
+  return null
 }
 
 export type StoreLoad = {
