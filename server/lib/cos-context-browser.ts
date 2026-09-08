@@ -869,10 +869,26 @@ export function normalizeEmbeddingBlock(value: unknown): Record<string, unknown>
     return [{
       id, label: stringOrAbsent(r!.label, 40) ?? id, model: stringOrAbsent(r!.model, 120) ?? '', dimensions: integerOrAbsent(r!.dimensions) ?? null,
       kind: r!.kind === 'local' ? 'local' : 'cloud', cost: stringOrAbsent(r!.cost, 200) ?? '', needs: stringOrAbsent(r!.needs, 200) ?? '',
-      ready: r!.ready === true, detail: stringOrAbsent(r!.detail, 200) ?? '', selected: r!.selected === true,
+      ready: r!.ready === true, present: r!.present === true, detail: stringOrAbsent(r!.detail, 200) ?? '',
+      fix: stringOrAbsent(r!.fix, 300) ?? null, selected: r!.selected === true,
     }]
   })
+  // 6.44.12: the down-select. `preference.local_only` is the one question the
+  // user answers (may text leave this Mac?), `recommended` the mark it moves,
+  // `ready`/`fix` whether the chosen provider can embed right now and what
+  // would make it so. Absent on an older bridge: null, never a guess.
+  const preference = asRecord(e.preference)
+  const recommended = asRecord(e.recommended)
+  const recommendedId = recommended ? stringOrAbsent(recommended.id, 24) : undefined
   return {
+    ready: e.ready === true,
+    fix: stringOrAbsent(e.fix, 300) ?? null,
+    preference: { local_only: preference && typeof preference.local_only === 'boolean' ? preference.local_only : null },
+    recommended: recommendedId ? {
+      id: recommendedId, label: stringOrAbsent(recommended!.label, 40) ?? recommendedId, reason: stringOrAbsent(recommended!.reason, 300) ?? '',
+      local_only: typeof recommended!.local_only === 'boolean' ? recommended!.local_only : null,
+      key_present: recommended!.key_present === true, ollama_present: recommended!.ollama_present === true,
+    } : null,
     provider: stringOrAbsent(e.provider, 24) ?? null,
     label: stringOrAbsent(e.label, 40) ?? null,
     model: stringOrAbsent(e.model, 120) ?? null,

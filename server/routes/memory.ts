@@ -335,7 +335,9 @@ memoryRouter.post('/context/graph/ingest', async (req, res) => {
     return
   }
   try {
-    const data = await callPython(['graph-ingest-start', `--limit=${limit}`, '--reason=control'], 5_000)
+    // 20 s, not 5: the kickoff gates on the embedding's readiness, which probes Ollama
+    // (2 s bound) before it spawns. The spawn itself still returns at once (QA 2026-09-07).
+    const data = await callPython(['graph-ingest-start', `--limit=${limit}`, '--reason=control'], 20_000)
     const code = bridgeErrorCode(data)
     if (code === 'not_owner') {
       const detail = data as { message?: unknown; owner_host?: unknown }
@@ -377,6 +379,13 @@ function sendSetupError(res: import('express').Response, code: string, data: unk
   const detail = asDetail(data)
   if (code === 'not_owner') { res.status(409).json({ error: code, message: detail.message, owner_host: detail.owner_host ?? null }); return }
   if (code === 'embedding_locked' || code === 'embedding_mismatch') { res.status(409).json({ error: code, message: detail.message }); return }
+  if (code === 'embedding_not_ready') {
+    // 6.44.12: the chosen embedding cannot embed on this Mac right now. The
+    // bridge refused before spawning; pass its fix through so the page can show it.
+    const d = (typeof data === 'object' && data !== null ? data : {}) as { provider?: unknown; fix?: unknown }
+    res.status(409).json({ error: code, message: detail.message, provider: typeof d.provider === 'string' ? d.provider : null, fix: typeof d.fix === 'string' ? d.fix : null })
+    return
+  }
   if (code.endsWith('_not_found')) { res.status(404).json({ error: code, message: detail.message }); return }
   if (code.startsWith('invalid_')) { res.status(400).json({ error: code, message: detail.message }); return }
   res.status(503).json({ error: code })
@@ -473,16 +482,25 @@ memoryRouter.post('/context/graph/ask', async (req, res) => {
   }
 })
 
-/** `{ provider, model?, fetch? }` → the embedding for every knowledge store (6.44.11). 409 when the graph was built with another. */
+/**
+ * `{ provider?, model?, fetch?, local_only? }` → the embedding for every knowledge store (6.44.11). 409 when the graph was built with another.
+ * 6.44.12: `local_only` (boolean) records the one question the down-select asks, may text leave this Mac; alone it moves the
+ * Recommended mark and changes no choice. One of `provider` or `local_only` is required.
+ */
 memoryRouter.post('/context/graph/setup/embedding', async (req, res) => {
   noStore(res)
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
-  const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; fetch?: unknown }
+  const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; fetch?: unknown; local_only?: unknown }
   const provider = typeof body.provider === 'string' ? body.provider : ''
-  if (!(EMBEDDING_PROVIDERS as readonly string[]).includes(provider)) { res.status(400).json({ error: 'invalid_provider', message: `provider must be one of ${EMBEDDING_PROVIDERS.join(', ')}` }); return }
+  const hasPreference = body.local_only !== undefined && body.local_only !== null
+  if (hasPreference && typeof body.local_only !== 'boolean') { res.status(400).json({ error: 'invalid_local_only', message: 'local_only must be true or false' }); return }
+  if (!provider && !hasPreference) { res.status(400).json({ error: 'invalid_provider', message: `provider must be one of ${EMBEDDING_PROVIDERS.join(', ')}, or local_only must be given` }); return }
+  if (provider && !(EMBEDDING_PROVIDERS as readonly string[]).includes(provider)) { res.status(400).json({ error: 'invalid_provider', message: `provider must be one of ${EMBEDDING_PROVIDERS.join(', ')}` }); return }
   const model = typeof body.model === 'string' ? body.model.trim() : ''
   if (model.length > 120 || !/^[A-Za-z0-9._:/-]*$/.test(model)) { res.status(400).json({ error: 'invalid_model', message: 'model names are letters, digits, dots, colons, slashes and dashes' }); return }
-  const argv = ['graph-setup-embedding', `--provider=${provider}`]
+  const argv = ['graph-setup-embedding']
+  if (provider) argv.push(`--provider=${provider}`)
+  if (hasPreference) argv.push(`--local-only=${body.local_only === true ? 'true' : 'false'}`)
   if (model) argv.push(`--model=${model}`)
   if (body.fetch === true) argv.push('--fetch')
   try {

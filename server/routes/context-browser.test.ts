@@ -424,7 +424,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const response = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limit: 25 }) })
     expect(response.status).toBe(202)
     expect(await response.json()).toEqual({ started: true, already_running: false, nothing_pending: false, budget_exhausted: false, pid: 5151, limit: 25, pending: 48, lock: { state: 'free', owner_pid: null }, budget: null })
-    expect(callBridge).toHaveBeenCalledWith(['graph-ingest-start', '--limit=25', '--reason=control'], 5_000)
+    expect(callBridge).toHaveBeenCalledWith(['graph-ingest-start', '--limit=25', '--reason=control'], 20_000)
   })
 
   it('ingest: a missing limit means 10, a bad one is a 400 before the bridge, a held lock is a 202 that did not start', async () => {
@@ -436,7 +436,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     expect(body.started).toBe(false)
     expect(body.already_running).toBe(true)
     expect((body.lock as Record<string, unknown>).owner_pid).toBe(777)
-    expect(callBridge).toHaveBeenLastCalledWith(['graph-ingest-start', '--limit=10', '--reason=control'], 5_000)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-ingest-start', '--limit=10', '--reason=control'], 20_000)
     callBridge.mockClear()
     for (const limit of [0, 51, 2.5, 'ten']) {
       const bad = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limit }) })
@@ -537,7 +537,10 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const body = await chosen.json() as Record<string, any>
     expect(body.embedding.provider).toBe('onnx')
     expect(body.embedding.providers).toHaveLength(2)
-    expect(body.embedding.providers[1]).toEqual({ id: 'onnx', label: 'Local light', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, kind: 'local', cost: 'Free', needs: 'n', ready: false, detail: 'not fetched', selected: true })
+    expect(body.embedding.providers[1]).toEqual({ id: 'onnx', label: 'Local light', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, kind: 'local', cost: 'Free', needs: 'n', ready: false, present: false, detail: 'not fetched', fix: null, selected: true })
+    expect(body.embedding.ready).toBe(false)
+    expect(body.embedding.preference).toEqual({ local_only: null })
+    expect(body.embedding.recommended).toBeNull()
     expect(body.fetch).toEqual({ started: true, already_running: false, pid: 909 })
     expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-embedding', '--provider=onnx', '--fetch'], 90_000)
     callBridge.mockClear()
@@ -560,6 +563,43 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const mismatch = await fetch(`${base}/api/context/graph/ingest`, { method: 'POST' })
     expect(mismatch.status).toBe(409)
     expect((await mismatch.json() as { error: string }).error).toBe('embedding_mismatch')
+  })
+
+  it('setup embedding 6.44.12: the local_only answer rides alone, moves the Recommended mark, and a not-ready choice refuses every kickoff with the fix', async () => {
+    const base = await startTestServer()
+    const block = { provider: 'openai-large', label: 'OpenAI large', model: 'text-embedding-3-large', dimensions: 3072, kind: 'cloud', cost: 'c', chosen_at: null, locked: false, mismatch: false, manifest: null,
+      ready: true, fix: null, preference: { local_only: true },
+      recommended: { id: 'ollama', label: 'Local premium', reason: 'Nothing leaves this Mac, and Ollama is already running here.', local_only: true, key_present: true, ollama_present: true },
+      providers: [
+        { id: 'openai-large', label: 'OpenAI large', model: 'text-embedding-3-large', dimensions: 3072, kind: 'cloud', cost: 'c', needs: 'n', ready: true, present: true, detail: 'Key present', fix: null, selected: true },
+        { id: 'ollama', label: 'Local premium', model: 'bge-m3', dimensions: 1024, kind: 'local', cost: 'Free', needs: 'n', ready: false, present: true, detail: 'Ollama is running; bge-m3 is not pulled yet', fix: 'Fetch the model (ollama pull bge-m3) from Knowledge setup.', selected: false },
+      ], fetch: null }
+    callBridge.mockResolvedValueOnce({ embedding: block, fetch: null, protocol: 1 })
+    const answered = await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ local_only: true }) })
+    expect(answered.status).toBe(200)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-embedding', '--local-only=true'], 90_000)
+    const body = await answered.json() as Record<string, any>
+    expect(body.embedding.provider).toBe('openai-large')
+    expect(body.embedding.preference).toEqual({ local_only: true })
+    expect(body.embedding.recommended).toEqual({ id: 'ollama', label: 'Local premium', reason: 'Nothing leaves this Mac, and Ollama is already running here.', local_only: true, key_present: true, ollama_present: true })
+    expect(body.embedding.providers[1]).toMatchObject({ id: 'ollama', ready: false, present: true, fix: 'Fetch the model (ollama pull bge-m3) from Knowledge setup.' })
+    expect(body.embedding.ready).toBe(true)
+    expect(body.fetch).toBeNull()
+    callBridge.mockResolvedValueOnce({ embedding: block, fetch: null, protocol: 1 })
+    await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ local_only: false, provider: 'openai-small' }) })
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-setup-embedding', '--provider=openai-small', '--local-only=false'], 90_000)
+    callBridge.mockClear()
+    expect((await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ local_only: 'yes' }) })).status).toBe(400)
+    expect((await fetch(`${base}/api/context/graph/setup/embedding`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) })).status).toBe(400)
+    expect(callBridge).not.toHaveBeenCalled()
+    for (const path of ['/api/context/graph/ingest', '/api/context/graph/setup/sample']) {
+      callBridge.mockResolvedValueOnce({ error: 'embedding_not_ready', provider: 'onnx', label: 'Local light', fix: 'Fetch the model from Knowledge setup; it installs the fastembed engine and downloads the 130 MB model.',
+        message: 'Local light is chosen but not ready on this Mac. Fetch the model from Knowledge setup; it installs the fastembed engine and downloads the 130 MB model.', protocol: 1 })
+      const refused = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      expect(refused.status, path).toBe(409)
+      expect(await refused.json()).toEqual({ error: 'embedding_not_ready', provider: 'onnx', fix: 'Fetch the model from Knowledge setup; it installs the fastembed engine and downloads the 130 MB model.',
+        message: 'Local light is chosen but not ready on this Mac. Fetch the model from Knowledge setup; it installs the fastembed engine and downloads the 130 MB model.' })
+    }
   })
 
   it('ingest progress: the last Control-started run, normalized, read-only', async () => {

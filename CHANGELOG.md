@@ -1,3 +1,29 @@
+## 6.44.12
+
+The Knowledge down-select, and a fail-closed embedding gate.
+
+- Miles 2026-09-07: the local embeddings are the free path for people who
+  run COS without an OpenAI key, and the setup's job is to help each person
+  down-select. The `embedding` block now carries `preference.local_only`
+  (the one question the user answers: may text leave this Mac?),
+  `recommended` (which provider to mark and the one-sentence reason: a key
+  plus the cloud allowed recommends OpenAI large; stay local recommends
+  Local premium when Ollama is running on the Mac, else Local light), and
+  `ready`/`fix` for the chosen provider. Every provider row carries
+  `present` (the key, Ollama, or the engine is there) and `fix` (the
+  sentence that makes it ready) beside `ready`.
+- `POST /api/context/graph/setup/embedding` accepts `local_only` (boolean),
+  alone or with `provider`; alone it moves the Recommended mark and changes
+  no choice. One of `provider` or `local_only` is required.
+- Every indexing kickoff (`POST /api/context/graph/ingest`, `/setup/sample`)
+  answers 409 `embedding_not_ready` `{ provider, fix, message }` when the
+  chosen embedding cannot embed on this Mac right now (no key, Ollama not
+  running or the model not pulled, fastembed absent), instead of spawning an
+  indexer that dies in its log. A status block without `ready` counts as
+  not ready.
+- The ingest kickoff's bridge budget is 20 s, not 5: the readiness gate probes
+  Ollama before it spawns, and the spawn still returns at once.
+
 ## 6.44.11
 
 Choose how Knowledge indexes: the embedding and the extraction tier.
