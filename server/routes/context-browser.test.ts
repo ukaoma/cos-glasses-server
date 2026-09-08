@@ -602,6 +602,39 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     }
   })
 
+  it('memory review: accept and prune ride the bridge; guardrails get, set and run are bounded', async () => {
+    const base = await startTestServer()
+    callBridge.mockResolvedValueOnce({ decision: { lesson_id: 'mem_1', decision: 'pruned', ts: '2026-09-08T01:30:00+00:00', event_id: 'evt_0123456789abcdef', by: 'control', note: '' }, deleted: true, protocol: 1 })
+    const pruned = await fetch(`${base}/api/context/memory/mem_1/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'prune' }) })
+    expect(pruned.status).toBe(200)
+    expect(await pruned.json()).toEqual({ decision: { lesson_id: 'mem_1', decision: 'pruned', ts: '2026-09-08T01:30:00+00:00', event_id: 'evt_0123456789abcdef', by: 'control' }, deleted: true })
+    expect(callBridge).toHaveBeenLastCalledWith(['memory-review', '--id=mem_1', '--decision=prune'], 20_000)
+    expect((await fetch(`${base}/api/context/memory/mem_1/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'delete' }) })).status).toBe(400)
+    callBridge.mockResolvedValueOnce({ error: 'memory_not_found', message: 'No memory mem_9 in the store', protocol: 1 })
+    expect((await fetch(`${base}/api/context/memory/mem_9/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'accept' }) })).status).toBe(404)
+
+    callBridge.mockResolvedValueOnce({ guardrails: { min_words: 6, min_distinct_chars: 8, max_repeat_ratio: 0.5, banned_patterns: ['lorem ipsum'], llm_review: { enabled: false, model: 'haiku', max_per_run: 20 }, updated_at: null, by: null }, philosophy_rubric_lines: 22, protocol: 1 })
+    const got = await fetch(`${base}/api/context/memory-guardrails`)
+    expect(got.status).toBe(200)
+    expect((await got.json() as Record<string, any>).guardrails.llm_review).toEqual({ enabled: false, model: 'haiku', max_per_run: 20 })
+    callBridge.mockResolvedValueOnce({ guardrails: { min_words: 9, min_distinct_chars: 8, max_repeat_ratio: 0.5, banned_patterns: [], llm_review: { enabled: true, model: 'sonnet', max_per_run: 5 }, updated_at: '2026-09-08T01:31:00+00:00', by: 'control' }, philosophy_rubric_lines: 22, protocol: 1 })
+    const set = await fetch(`${base}/api/context/memory-guardrails`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ min_words: 9, llm_review: { enabled: true, model: 'sonnet', max_per_run: 5 } }) })
+    expect(set.status).toBe(200)
+    expect(callBridge).toHaveBeenLastCalledWith(['memory-guardrails', '--stdin'], 15_000, JSON.stringify({ min_words: 9, llm_review: { enabled: true, model: 'sonnet', max_per_run: 5 } }))
+    expect((await fetch(`${base}/api/context/memory-guardrails`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify([1]) })).status).toBe(400)
+
+    callBridge.mockResolvedValueOnce({ run: { id: 'run_1', started_at: '2026-09-08T01:32:00+00:00', ended_at: '2026-09-08T01:32:01+00:00', days: 30, scanned: 12, flagged: 1, review: 0, kept: 11, llm_reviewed: 0, llm_enabled: false, applied: false, pruned: 0 },
+      verdicts: [{ id: 'mem_a', type: 'decision', created_at: '2026-09-07T20:05:00', excerpt: 'AAAA', verdict: 'prune', reasons: ['only 1 distinct characters'], by: 'rules' }], protocol: 1 })
+    const run = await fetch(`${base}/api/context/memory-guardrails/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ days: 30, llm: false }) })
+    expect(run.status).toBe(200)
+    const body = await run.json() as Record<string, any>
+    expect(body.run.flagged).toBe(1)
+    expect(body.verdicts[0]).toEqual({ id: 'mem_a', type: 'decision', created_at: null, excerpt: 'AAAA', verdict: 'prune', reasons: ['only 1 distinct characters'], by: 'rules', applied: false })
+    expect(callBridge).toHaveBeenLastCalledWith(['memory-guardrails-run', '--days=30', '--llm=false'], 60_000)
+    expect((await fetch(`${base}/api/context/memory-guardrails/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ days: 0 }) })).status).toBe(400)
+    expect((await fetch(`${base}/api/context/memory-guardrails/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apply: 'yes' }) })).status).toBe(400)
+  })
+
   it('ingest progress: the last Control-started run, normalized, read-only', async () => {
     callBridge.mockResolvedValueOnce({ running: true, pid: 4242, lock: { state: 'exclusive', owner_pid: 4242 }, external: false, pending: 2, total: 3, done: 1, failed: 1,
       current: { id: 'doc_ccc', est_calls: 7 }, items: [{ id: 'doc_aaa', outcome: 'indexed', seconds: 40.5 }, { id: 'doc_bbb', outcome: 'failed', reason: 'Document status missing — marked failed for retry' }],
@@ -658,7 +691,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     closers.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     for (const [method, path] of [['GET', '/api/context/learning'], ['GET', '/api/context/learning/status'], ['GET', '/api/context/learning/review'], ['GET', '/api/context/learning/evt_0123456789abcdef'],
-      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule'], ['POST', '/api/context/graph/setup/embedding'], ['POST', '/api/context/graph/setup/extraction']] as const) {
+      ['GET', '/api/context/graph/status'], ['GET', '/api/context/graph/search?q=COS'], ['GET', '/api/context/graph/entity?id=COS'], ['GET', '/api/context/graph/passages?entity=COS'], ['POST', '/api/context/graph/index'], ['POST', '/api/context/graph/ingest'], ['GET', '/api/context/graph/ingest/progress'], ['GET', '/api/context/graph/setup'], ['POST', '/api/context/graph/setup/sources'], ['POST', '/api/context/graph/setup/owner'], ['POST', '/api/context/graph/setup/sample'], ['POST', '/api/context/graph/ask'], ['POST', '/api/context/graph/setup/schedule'], ['POST', '/api/context/graph/setup/embedding'], ['POST', '/api/context/graph/setup/extraction'], ['POST', '/api/context/memory/mem_1/review'], ['GET', '/api/context/memory-guardrails'], ['PUT', '/api/context/memory-guardrails'], ['POST', '/api/context/memory-guardrails/run']] as const) {
       const response = await fetch(`${base}${path}`, { method })
       expect(response.status, `${method} ${path}`).toBe(401)
       // A 401 alone cannot tell a protected route from a missing one (QA 2026-09-06):

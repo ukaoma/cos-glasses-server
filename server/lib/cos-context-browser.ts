@@ -470,7 +470,8 @@ export function normalizeGraphBlock(value: unknown): GraphBlock | null {
 // ── Recent learning payloads (GET /context/learning, /context/learning/:id) ──
 
 export const LEARNING_EVENT_ID_PATTERN = /^evt_[a-f0-9]{16}$/
-export const LEARNING_EVENT_TYPES = new Set(['captured', 'proposed', 'promotable', 'saved', 'retrieved', 'used', 'checked', 'dismissed', 'reverted', 'reopened', 'consolidated', 'previewed'])
+export const LEARNING_EVENT_TYPES = new Set(['captured', 'proposed', 'promotable', 'saved', 'retrieved', 'used', 'checked', 'dismissed', 'reverted', 'reopened', 'consolidated', 'previewed', 'accepted', 'pruned'])
+export const REVIEW_DECISIONS = new Set(['dismissed', 'reopened', 'accepted', 'pruned'])
 const LEARNING_LIST_LIMIT = 50
 /** The strict To review set is small (121 today); one page shows it whole. */
 export const LEARNING_REVIEW_LIMIT = 200
@@ -783,7 +784,7 @@ export function normalizeReviewDecision(value: unknown): Record<string, unknown>
   if (!row) return null
   const decision = stringOrAbsent(row.decision, 16)
   const lessonId = stringOrAbsent(row.lesson_id, 200)
-  if (!lessonId || (decision !== 'dismissed' && decision !== 'reopened')) return null
+  if (!lessonId || !decision || !REVIEW_DECISIONS.has(decision)) return null
   return {
     lesson_id: lessonId,
     decision,
@@ -1015,6 +1016,47 @@ export function normalizeIngestProgress(value: unknown): Record<string, unknown>
     log_tail: (Array.isArray(s.log_tail) ? s.log_tail : []).filter((l): l is string => typeof l === 'string').map(l => l.slice(0, 300)).slice(-24),
     log_age_s: typeof s.log_age_s === 'number' && Number.isFinite(s.log_age_s) ? s.log_age_s : null,
     lock: normalizeIngestKickoff({ lock: s.lock }).lock,
+  }
+}
+
+export const GUARDRAIL_LLM_TIERS = ['haiku', 'sonnet', 'opus'] as const
+
+/** The user's memory guardrails (6.44.13), every field bounded. */
+export function normalizeGuardrails(value: unknown): Record<string, unknown> | null {
+  const g = asRecord(value)
+  if (!g) return null
+  const llm = asRecord(g.llm_review) ?? {}
+  return {
+    min_words: integerOrAbsent(g.min_words) ?? 6,
+    min_distinct_chars: integerOrAbsent(g.min_distinct_chars) ?? 8,
+    max_repeat_ratio: typeof g.max_repeat_ratio === 'number' && Number.isFinite(g.max_repeat_ratio) ? g.max_repeat_ratio : 0.5,
+    banned_patterns: (Array.isArray(g.banned_patterns) ? g.banned_patterns : []).filter((p): p is string => typeof p === 'string').slice(0, 50).map(p => p.slice(0, 200)),
+    llm_review: {
+      enabled: llm.enabled === true,
+      model: (GUARDRAIL_LLM_TIERS as readonly string[]).includes(String(llm.model)) ? String(llm.model) : 'haiku',
+      max_per_run: integerOrAbsent(llm.max_per_run) ?? 20,
+    },
+    updated_at: isoOrAbsent(g.updated_at) ?? null,
+    by: stringOrAbsent(g.by, 32) ?? null,
+  }
+}
+
+/** One guardrails run: the receipt and the verdicts with their reasons. */
+export function normalizeGuardrailsRun(value: unknown): Record<string, unknown> {
+  const s = asRecord(value) ?? {}
+  const r = asRecord(s.run) ?? {}
+  const verdicts = (Array.isArray(s.verdicts) ? s.verdicts : []).flatMap((row) => {
+    const v = asRecord(row); const id = v ? stringOrAbsent(v.id, 200) : undefined
+    if (!id) return []
+    const verdict = v!.verdict === 'prune' || v!.verdict === 'keep' || v!.verdict === 'review' ? v!.verdict : 'review'
+    return [{ id, type: stringOrAbsent(v!.type, 32) ?? '', created_at: isoOrAbsent(v!.created_at) ?? null, excerpt: typeof v!.excerpt === 'string' ? v!.excerpt.slice(0, 200) : '', verdict,
+      reasons: (Array.isArray(v!.reasons) ? v!.reasons : []).filter((x): x is string => typeof x === 'string').slice(0, 8).map(x => x.slice(0, 300)), by: stringOrAbsent(v!.by, 16) ?? 'rules', applied: v!.applied === true }]
+  }).slice(0, 500)
+  return {
+    run: { id: stringOrAbsent(r.id, 64) ?? null, started_at: isoOrAbsent(r.started_at) ?? null, ended_at: isoOrAbsent(r.ended_at) ?? null, days: integerOrAbsent(r.days) ?? null,
+      scanned: integerOrAbsent(r.scanned) ?? 0, flagged: integerOrAbsent(r.flagged) ?? 0, review: integerOrAbsent(r.review) ?? 0, kept: integerOrAbsent(r.kept) ?? 0,
+      llm_reviewed: integerOrAbsent(r.llm_reviewed) ?? 0, llm_enabled: r.llm_enabled === true, applied: r.applied === true, pruned: integerOrAbsent(r.pruned) ?? 0 },
+    verdicts,
   }
 }
 

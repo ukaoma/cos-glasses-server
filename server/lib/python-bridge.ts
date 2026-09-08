@@ -67,6 +67,9 @@ export const LEARNING_COMMANDS = [
   'graph-ingest-progress',
   'graph-setup-embedding',
   'graph-setup-extraction',
+  'memory-review',
+  'memory-guardrails',
+  'memory-guardrails-run',
 ] as const
 
 // The optional Python bridge is available only when the user points us at a real
@@ -250,6 +253,9 @@ function standaloneNoop(args: string[]): unknown {
     case 'graph-ingest-progress':
     case 'graph-setup-embedding':
     case 'graph-setup-extraction':
+    case 'memory-review':
+    case 'memory-guardrails':
+    case 'memory-guardrails-run':
       return { error: 'cos_pipeline_not_configured' }
     case 'task-rows':
     case 'task-capture':

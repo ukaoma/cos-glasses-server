@@ -32,6 +32,8 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
   normalizeIngestProgress,
   normalizeEmbeddingBlock,
   normalizeExtractionBlock,
+  normalizeGuardrails,
+  normalizeGuardrailsRun,
   EMBEDDING_PROVIDERS,
   EXTRACTION_TIERS,
   KNOWLEDGE_SETUP_SAMPLE_MAX,
@@ -198,6 +200,92 @@ memoryRouter.post('/context/learning/:id/review', async (req, res) => {
   } catch (error) {
     console.warn('[context] learning decide bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'learning_unavailable' })
+  }
+})
+
+// ── Memory review and guardrails (6.44.13) ──────────────────────────
+//
+// Accept stamps a captured memory as reviewed; prune deletes it. Both are
+// review-ledger rows the timeline shows. The guardrails are the user's own
+// rules; a run scans, judges (rules, then an optional bounded model pass),
+// and prunes only with apply.
+
+memoryRouter.post('/context/memory/:id/review', async (req, res) => {
+  noStore(res)
+  const memoryId = String(req.params.id)
+  const decision = typeof req.body?.decision === 'string' ? req.body.decision : ''
+  if (!memoryId || memoryId.length > 200 || CONTROL_CHARACTER.test(memoryId)) { res.status(400).json({ error: 'invalid_memory_id' }); return }
+  if (decision !== 'accept' && decision !== 'prune') { res.status(400).json({ error: 'invalid_decision', message: 'decision must be accept or prune' }); return }
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 400) : ''
+    const answer = await callPython(['memory-review', `--id=${memoryId}`, `--decision=${decision}`, ...(note ? [`--note=${note}`] : [])], 20_000)
+    const code = bridgeErrorCode(answer)
+    if (code) { sendSetupError(res, code, answer); return }
+    const a = answer as { decision?: unknown; deleted?: unknown }
+    const row = normalizeReviewDecision({ decision: a.decision })
+    if (!row) { res.status(503).json({ error: 'memory_review_unavailable' }); return }
+    res.json({ decision: row, deleted: a.deleted === true })
+  } catch (error) {
+    console.warn('[context] memory review bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'memory_unavailable' })
+  }
+})
+
+memoryRouter.get('/context/memory-guardrails', async (_req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  try {
+    const answer = await callPython(['memory-guardrails'], 15_000)
+    const code = bridgeErrorCode(answer)
+    if (code) { sendSetupError(res, code, answer); return }
+    const a = answer as { guardrails?: unknown; philosophy_rubric_lines?: unknown }
+    res.json({ guardrails: normalizeGuardrails(a.guardrails), philosophy_rubric_lines: Number.isInteger(a.philosophy_rubric_lines) ? a.philosophy_rubric_lines : 0 })
+  } catch (error) {
+    console.warn('[context] guardrails bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'memory_unavailable' })
+  }
+})
+
+memoryRouter.put('/context/memory-guardrails', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const body = req.body
+  if (!body || typeof body !== 'object' || Array.isArray(body)) { res.status(400).json({ error: 'invalid_guardrails', message: 'the body must be a JSON object' }); return }
+  const text = JSON.stringify(body)
+  if (text.length > 16_000) { res.status(400).json({ error: 'invalid_guardrails', message: 'the guardrails patch is too large' }); return }
+  try {
+    const answer = await callPython(['memory-guardrails', '--stdin'], 15_000, text)
+    const code = bridgeErrorCode(answer)
+    if (code) { sendSetupError(res, code, answer); return }
+    const a = answer as { guardrails?: unknown; philosophy_rubric_lines?: unknown }
+    res.json({ guardrails: normalizeGuardrails(a.guardrails), philosophy_rubric_lines: Number.isInteger(a.philosophy_rubric_lines) ? a.philosophy_rubric_lines : 0 })
+  } catch (error) {
+    console.warn('[context] guardrails bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'memory_unavailable' })
+  }
+})
+
+/** `{ days?, apply?, llm? }` → scan the captured memories; prune the flagged ones only with apply. Bounded: 30 days, one model pass of max_per_run. */
+memoryRouter.post('/context/memory-guardrails/run', async (req, res) => {
+  noStore(res)
+  if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
+  const body = (req.body ?? {}) as { days?: unknown; apply?: unknown; llm?: unknown }
+  const days = body.days === undefined || body.days === null ? 30 : Number(body.days)
+  if (!Number.isInteger(days) || days < 1 || days > 3650) { res.status(400).json({ error: 'invalid_days', message: 'days must be an integer from 1 to 3650' }); return }
+  if (body.apply !== undefined && typeof body.apply !== 'boolean') { res.status(400).json({ error: 'invalid_apply', message: 'apply must be true or false' }); return }
+  if (body.llm !== undefined && body.llm !== null && typeof body.llm !== 'boolean') { res.status(400).json({ error: 'invalid_llm', message: 'llm must be true or false' }); return }
+  const argv = ['memory-guardrails-run', `--days=${days}`]
+  if (body.apply === true) argv.push('--apply')
+  if (typeof body.llm === 'boolean') argv.push(`--llm=${body.llm}`)
+  try {
+    const answer = await callPython(argv, body.llm === false ? 60_000 : 400_000)
+    const code = bridgeErrorCode(answer)
+    if (code) { sendSetupError(res, code, answer); return }
+    res.json(normalizeGuardrailsRun(answer))
+  } catch (error) {
+    console.warn('[context] guardrails run bridge failure:', (error as Error).message)
+    res.status(503).json({ error: 'memory_unavailable' })
   }
 })
 

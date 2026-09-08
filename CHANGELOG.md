@@ -1,3 +1,26 @@
+## 6.44.13
+
+Prune or accept a captured memory, and guardrails that prune nonsense for you.
+
+- Miles 2026-09-07, looking at a captured decision that read "AAAA...":
+  "we need the ability to either prune or accept the memory", and "an
+  automated review ... another person could set their own guardrails that
+  automatically just prune out stuff like this."
+- `POST /api/context/memory/:id/review` `{ decision: accept | prune, note? }`
+  stamps a captured memory as reviewed or deletes it; either way a review
+  ledger row (`accepted`, `pruned`) the learning timeline shows. Both are new
+  event types.
+- `GET` and `PUT /api/context/memory-guardrails`: the user's own rules
+  (minimum words, distinct characters, a repeat-ratio ceiling, banned
+  patterns, and an optional model pass: on or off, the tier, at most N per
+  run). The same rules refuse nonsense at capture time in the bridge's COS.
+- `POST /api/context/memory-guardrails/run` `{ days?, apply?, llm? }` scans
+  the captured memories, judges them (rules first; the model pass against
+  the COS philosophy principles only on what survives, only when enabled),
+  and returns every verdict with its reasons. Nothing is deleted without
+  `apply`; a record a person accepted is never flagged.
+- Includes 6.44.12, never published.
+
 ## 6.44.12
 
 The Knowledge down-select, and a fail-closed embedding gate.
