@@ -176,3 +176,42 @@ describe('an EMPTY session must not hold the restart lock for 30 minutes', () =>
     expect(result.staleSessions[0].chunks).toBe(0)
   })
 })
+
+describe('Control recovery reflects transcript availability, not phone state', () => {
+  it('does not offer a Save for an idle empty session shell and preserves late-upload admission', async () => {
+    const now = Date.now()
+    const mod = await seedSession('empty-shell', now - 120 * 60_000, 0)
+    expect(mod.getStrandedCaptures(now)).toEqual([])
+    expect(mod.getMeetingSessionStatus('empty-shell').state).toBe('active')
+    expect(mod.__sessionsForTests.has('empty-shell')).toBe(true)
+  })
+
+  it('labels completed silent audio without claiming the phone has an unsaved meeting', async () => {
+    const now = Date.now()
+    const mod = await seedSession('completed-silent', now - 120 * 60_000, 0)
+    const session = mod.__sessionsForTests.get('completed-silent')
+    session.receivedIndices = [0]
+    session.asrCompletedIndices = [0]
+    session.emptyCompletions = { '0': { text: '', canonical: false } }
+    expect(mod.getStrandedCaptures(now)).toMatchObject([
+      { sessionId: 'completed-silent', chunks: 0, canSave: false, transcriptState: 'no_speech' },
+    ])
+    expect(mod.getMeetingSessionStatus('completed-silent').state).toBe('active')
+    expect(session.receivedIndices).toEqual([0])
+    // A delayed phone upload can still append real speech to this same ledger.
+    session.chunks.push({ text: 'Late speech', elapsed: 20000, receivedAt: now })
+    expect(mod.getStrandedCaptures(now)[0]).toMatchObject({ canSave: true, transcriptState: 'ready' })
+  })
+
+  it('keeps untranscribed received audio visible and never mistakes partial ASR for silence', async () => {
+    const now = Date.now()
+    const mod = await seedSession('asr-pending', now - 120 * 60_000, 0)
+    const session = mod.__sessionsForTests.get('asr-pending')
+    session.receivedIndices = [0, 1]
+    session.asrCompletedIndices = [0]
+    expect(mod.getStrandedCaptures(now)[0]).toMatchObject({ canSave: false, transcriptState: 'processing' })
+    const ready = await seedSession('ready-to-save', now - 40 * 60_000, 1)
+    expect(ready.getStrandedCaptures(now).find((row: any) => row.sessionId === 'ready-to-save'))
+      .toMatchObject({ canSave: true, transcriptState: 'ready' })
+  })
+})

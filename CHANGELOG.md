@@ -1,3 +1,11 @@
+## 6.45.1
+
+Knowledge opens with a bounded graph and supports verified question plans for COS Control 0.5.208.
+
+- Expose the initial overview through the authenticated workspace route. Model-assisted graph answers may carry validated anchors, waypoints and traversal results from the configured advanced pipeline. Plans navigate only; they cannot save or activate knowledge.
+- Add paired owner-name setup and editing with conflict detection, durable private profile writes and preservation of existing vocabulary and settings. Display identity does not transfer journal or indexing authority.
+- Report whether retained captures have a saveable transcript, unfinished transcription, or completed audio with no usable speech. Empty session shells are not advertised as recoverable recordings. Audio and late-upload admission retain their existing protections.
+
 ## 6.45.0
 
 Versioned local memory and explicit session identity for COS Control 0.5.207.

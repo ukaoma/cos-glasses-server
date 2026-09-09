@@ -463,6 +463,8 @@ export interface StrandedCapture {
   /** Minutes of audio actually captured before it went quiet. */
   capturedMinutes: number
   chunks: number
+  transcriptState: 'ready' | 'processing' | 'no_speech'
+  canSave: boolean
   /** When the sweeper will save this on the user's behalf. */
   promotesAt: string
   /** Readable draft on disk, once the capture has been stale long enough. */
@@ -485,21 +487,30 @@ export interface StrandedCapture {
  */
 export function getStrandedCaptures(now = Date.now()): StrandedCapture[] {
   const drafts = new Map(listStrandedDrafts(STRANDED_DRAFT_DIR).map(d => [d.sessionId, d]))
-  return getTranscriptionSessionLiveness(now).staleSessions.map(stale => {
+  return getTranscriptionSessionLiveness(now).staleSessions.flatMap(stale => {
     const session = sessions.get(stale.sessionId)
     const lastActivityAt = session?.lastActivityAt ?? now - stale.silentForMs
     const draft = drafts.get(stale.sessionId) ?? null
-    return {
+    const received = session?.receivedIndices ?? []
+    // An empty session shell is not evidence that audio was lost. Leave its
+    // ledger open so a backgrounded phone can still upload before retention.
+    if (!stale.chunks && !received.length && !hasSessionAudio(stale.sessionId)) return []
+    const completed = new Set(session?.asrCompletedIndices ?? [])
+    const noSpeech = !stale.chunks && received.length > 0 && received.every(index => completed.has(index))
+    const transcriptState: StrandedCapture['transcriptState'] = stale.chunks ? 'ready' : noSpeech ? 'no_speech' : 'processing'
+    return [{
       sessionId: stale.sessionId,
       idleMinutes: Math.round(stale.silentForMs / 60_000),
       capturedMinutes: Math.round(
         Math.max(0, lastActivityAt - (session?.startTime ?? lastActivityAt)) / 60_000,
       ),
       chunks: stale.chunks,
+      transcriptState,
+      canSave: transcriptState === 'ready',
       promotesAt: new Date(lastActivityAt + LOCAL_FIRST_MEETING_IDLE_RETENTION_MS).toISOString(),
       draftPath: draft?.path ?? null,
       draftBytes: draft?.bytes ?? null,
-    }
+    }]
   })
 }
 

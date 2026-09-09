@@ -1,6 +1,9 @@
 import { Router } from 'express'
 import { callPython, contextSourceAvailable, pythonBridgeState } from '../lib/python-bridge.js'
 import { searchMemories } from '../lib/context-library-search.js'
+import { getOwnerName, setProfileOwnerName } from '../lib/profile.js'
+import { resetDecoderCaches } from '../lib/whisper-local.js'
+import { resetVocabEchoCache } from '../lib/hallucination-filter.js'
 
 /**
  * Is there anything to serve — a Python bridge OR plain files on disk?
@@ -54,6 +57,24 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
 } from '../lib/cos-context-browser.js'
 
 export const memoryRouter = Router()
+// Profile setup is available before a memory bridge is configured. API authentication still applies.
+memoryRouter.get('/context/profile/owner', (_req, res) => {
+  const name = getOwnerName()
+  res.json({ owner_name: name === 'User' ? null : name })
+})
+memoryRouter.post('/context/profile/owner', (req, res) => {
+  try {
+    const body = req.body as Record<string, unknown>
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['owner_name','expected_owner'].includes(key))) { res.status(400).json({ error: 'invalid_owner_profile' }); return }
+    const name = setProfileOwnerName(body.owner_name, body.expected_owner)
+    resetDecoderCaches(); resetVocabEchoCache()
+    res.json({ owner_name: name })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    const reason = ['owner_changed','invalid_owner_name','invalid_expected_owner','profile_unreadable'].includes(message) ? message : 'profile_save_failed'
+    res.status(reason === 'owner_changed' ? 409 : reason.startsWith('invalid_') ? 400 : 503).json({ error: reason })
+  }
+})
 memoryRouter.use((req, res, next) => {
   if (['owner', 'audience', 'authority_host', 'authority_epoch'].some(key => key in req.query || (req.body && key in req.body))) {
     res.status(400).json({ error: 'caller_authority_forbidden' }); return
@@ -62,7 +83,7 @@ memoryRouter.use((req, res, next) => {
 })
 // Additive workspace protocol. The existing /memory array contract remains intact.
 // Authentication is the instance pairing token; caller fields cannot select an owner.
-const WORKSPACE_ACTIONS = new Set(['status', 'graph_expand', 'graph_paths', 'graph_resolve', 'list_explorations', 'get_exploration',
+const WORKSPACE_ACTIONS = new Set(['status', 'graph_overview', 'graph_expand', 'graph_paths', 'graph_resolve', 'list_explorations', 'get_exploration',
   'save_exploration', 'save_assertion', 'policy_get', 'policy_set', 'memory_page', 'learning_page', 'review_page', 'get_memory', 'review_memory', 'trace_summary', 'source_status', 'refresh_source', 'current_sources', 'identity_split_preview', 'identity_status', 'identity_keep_apart', 'rule_page', 'propose_rule', 'review_rule', 'rollback_rule', 'activate_rule', 'rule_evaluation'])
 memoryRouter.post('/context/memory/workspace', async (req, res) => {
   noStore(res)

@@ -1,14 +1,14 @@
 // Profile loader — reads user identity from .cos-profile.json (gitignored)
 // Falls back to generic defaults for users who haven't configured a profile
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { resolve, dirname } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 
 const APP_ROOT = resolve(import.meta.dirname, '../..')
 
-const PLACEHOLDER_OWNER_NAMES = new Set(['your name', 'user'])
+const PLACEHOLDER_OWNER_NAMES = new Set(['your name', 'user', 'me', 'owner', 'wearer'])
 const PLACEHOLDER_VOCABULARY = new Set(['nameone', 'nametwo', 'yourcompany', 'productname'])
 const PLACEHOLDER_CORRECTIONS = new Set(['soundalike\u0000yourname'])
 
@@ -53,8 +53,9 @@ export function loadProfileObject(): Record<string, unknown> {
 function loadProfile(): Record<string, unknown> {
   if (profileCache) return profileCache
   try {
-    profileCache = JSON.parse(readFileSync(profilePath(), 'utf-8'))
-    return profileCache!
+    const parsed: unknown = JSON.parse(readFileSync(profilePath(), 'utf-8'))
+    profileCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+    return profileCache
   } catch {
     profileCache = {}
     return profileCache
@@ -96,6 +97,29 @@ export function loadProfileField(field: string, fallback: string): string {
 export function getOwnerName(): string {
   const value = loadProfileField('owner_name', 'User').trim()
   return !value || PLACEHOLDER_OWNER_NAMES.has(value.toLowerCase()) ? 'User' : value
+}
+
+/** Display identity only. Never reassign journal authority or the ingestion-owner Mac. */
+export function setProfileOwnerName(name: unknown, expected: unknown): string {
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 120 || /[\x00-\x1f\x7f]/.test(name) || PLACEHOLDER_OWNER_NAMES.has(name.trim().toLowerCase())) throw new Error('invalid_owner_name')
+  if (expected !== null && typeof expected !== 'string') throw new Error('invalid_expected_owner')
+  let current: Record<string, unknown> = {}
+  const source = profilePath()
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(source, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid_profile')
+    current = parsed as Record<string, unknown>
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('profile_unreadable')
+  }
+  const previous = typeof current.owner_name === 'string' ? current.owner_name.trim() : ''
+  const actual = !previous || PLACEHOLDER_OWNER_NAMES.has(previous.toLowerCase()) ? null : previous
+  if (actual !== expected) throw new Error('owner_changed')
+  const target = process.env.COS_PROFILE_PATH?.trim() ? source : homeProfilePath()
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+  atomicWriteFileSync(target, JSON.stringify({ ...current, owner_name: name.trim() }, null, 2), { mode: 0o600 })
+  clearProfileCache()
+  return name.trim()
 }
 
 /** Short speaker label for the glasses wearer, used by diarization to fast-path

@@ -990,11 +990,19 @@ export function normalizeSampleKickoff(value: unknown): Record<string, unknown> 
 }
 
 /** `graph-ask`: one answer from the graph, bounded. */
-export function normalizeGraphAnswer(value: unknown): { question: string; mode: string; answer: string; elapsed_s: number | null } | null {
+export function normalizeGraphAnswer(value: unknown): { question: string; mode: string; answer: string; elapsed_s: number | null; investigation?: Record<string, unknown> } | null {
   const s = asRecord(value) ?? {}
   const answer = typeof s.answer === 'string' ? s.answer.slice(0, 20_000) : null
   if (answer === null) return null
-  return { question: stringOrAbsent(s.question, KNOWLEDGE_ASK_MAX_CHARS) ?? '', mode: stringOrAbsent(s.mode, 16) ?? 'hybrid', answer, elapsed_s: typeof s.elapsed_s === 'number' && Number.isFinite(s.elapsed_s) ? s.elapsed_s : null }
+  const candidate = asRecord(s.investigation)
+  let investigation: Record<string, unknown> | undefined
+  if (candidate?.status === 'unavailable') investigation = { status: 'unavailable', message: stringOrAbsent(candidate.message, 500) ?? 'No verified graph plan is available.' }
+  if (candidate?.status === 'ready' && Array.isArray(candidate.nodes) && candidate.nodes.length <= 200 && Array.isArray(candidate.links) && candidate.links.length <= 500 && JSON.stringify(candidate).length <= 500_000) {
+    // Python validates this read-only plan against the policy-filtered graph and generation.
+    // Forward only the canvas contract; it never becomes an arbitrary workspace request.
+    investigation = Object.fromEntries(['status','message','nodes','links','anchors','waypoints','filters','paths','generation','truncated','truncation_reason','scope'].filter(key => candidate[key] !== undefined).map(key => [key, candidate[key]]))
+  }
+  return { question: stringOrAbsent(s.question, KNOWLEDGE_ASK_MAX_CHARS) ?? '', mode: stringOrAbsent(s.mode, 16) ?? 'hybrid', answer, elapsed_s: typeof s.elapsed_s === 'number' && Number.isFinite(s.elapsed_s) ? s.elapsed_s : null, ...(investigation ? { investigation } : {}) }
 }
 
 export interface IngestProgressItem { id: string; outcome: 'indexed' | 'failed' | 'unknown'; seconds: number | null; reason: string | null }

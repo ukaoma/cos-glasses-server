@@ -329,6 +329,8 @@ healthRouter.get('/health', async (_req, res) => {
       idleMinutes: item.idleMinutes,
       capturedMinutes: item.capturedMinutes,
       chunks: item.chunks,
+      transcriptState: item.transcriptState,
+      canSave: item.canSave,
       promotesAt: item.promotesAt,
       hasDraft: item.draftPath != null,
     })),
