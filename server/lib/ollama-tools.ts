@@ -166,7 +166,7 @@ function capHits<T>(payload: Record<string, unknown>, hits: T[]): string {
  * it found nothing.
  *
  * Empty hits plus a reason describe THIS call. Without the reason a model reads
- * an empty list as proof the archive is empty and tells Miles he has no
+ * an empty list as proof the archive is empty and tells the user he has no
  * meetings. `semanticReason` is `"none"` rather than absent so the field can
  * never be silently missing.
  */

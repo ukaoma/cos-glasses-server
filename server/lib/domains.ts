@@ -160,7 +160,7 @@ export function discoveredTaskDomains(operationsDir: string | null): string[] {
 /**
  * Task domains: configured first, then any directory with a `tasks.md`.
  *
- * Same union rule as `resolveDomains` and for the same reason — Miles has no
+ * Same union rule as `resolveDomains` and for the same reason — the user has no
  * `domains` in his profile, discovery finds his four, and the union is exactly
  * his four, so switching the task store onto this changes nothing about his
  * install while removing one user's business units from everyone else's build.
@@ -182,7 +182,7 @@ export function taskDomainNames(operationsDir: string | null): string[] {
  *    ROUTED before any folder exists.
  *  - On disk but not configured: still listed, so a folder someone made by hand
  *    never becomes invisible. This is also what protects an existing install —
- *    Miles has no `domains` in his profile, discovery finds his four, and the
+ *    the user has no `domains` in his profile, discovery finds his four, and the
  *    union is exactly his four. Nothing is written to his profile and nothing
  *    about his setup changes.
  *  - Neither: the DEFAULTS. Only a genuinely fresh COS ever sees them, which is

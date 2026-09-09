@@ -67,6 +67,7 @@ export const LEARNING_COMMANDS = [
   'graph-ingest-progress',
   'graph-setup-embedding',
   'graph-setup-extraction',
+  'memory-workspace',
   'memory-review',
   'memory-guardrails',
   'memory-guardrails-run',
@@ -116,9 +117,9 @@ if (pythonAvailable) {
  * pipeline is configured; otherwise resolves to an empty/no-op result so the
  * context builder degrades gracefully on a standalone install.
  */
-export function callPython(args: string[], timeoutMs = 30_000, input?: string): Promise<unknown> {
+export function callPython(args: string[], timeoutMs = 30_000, input?: string, signal?: AbortSignal): Promise<unknown> {
   if (pythonAvailable) {
-    return callPythonDirect(args, timeoutMs, input)
+    return callPythonDirect(args, timeoutMs, input, signal)
   }
   return Promise.resolve(standaloneNoop(args))
 }
@@ -257,6 +258,7 @@ function standaloneNoop(args: string[]): unknown {
     case 'graph-ingest-progress':
     case 'graph-setup-embedding':
     case 'graph-setup-extraction':
+    case 'memory-workspace':
     case 'memory-review':
     case 'memory-guardrails':
     case 'memory-guardrails-run':
@@ -285,12 +287,12 @@ function argLimit(args: string[], fallback: number): number {
 }
 
 /** Full Python bridge — requires the user's venv + cos_api_bridge.py. */
-function callPythonDirect(args: string[], timeoutMs: number, input?: string): Promise<unknown> {
+function callPythonDirect(args: string[], timeoutMs: number, input?: string, signal?: AbortSignal): Promise<unknown> {
   return new Promise((resolvePromise, reject) => {
     const child = execFile(
       PYTHON_BIN!,
       [BRIDGE_SCRIPT!, ...args],
-      { cwd: COS_SCRIPTS_DIR!, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+      { cwd: COS_SCRIPTS_DIR!, timeout: timeoutMs, maxBuffer: 1024 * 1024, signal },
       (err, stdout, stderr) => {
         if (err) {
           // The bridge prints its unknown-command answer to STDOUT and exits 1

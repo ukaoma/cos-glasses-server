@@ -510,7 +510,7 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const ask = await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'Who runs demand generation?' }) })
     expect(ask.status).toBe(200)
     expect(await ask.json()).toEqual({ question: 'Who runs demand generation?', mode: 'hybrid', answer: 'Graham Hoffman leads demand generation.', elapsed_s: 41.2 })
-    expect(callBridge).toHaveBeenLastCalledWith(['graph-ask', '--q=Who runs demand generation?'], 150_000)
+    expect(callBridge).toHaveBeenLastCalledWith(['graph-ask', '--q=Who runs demand generation?'], 150_000, undefined, expect.any(AbortSignal))
     expect((await fetch(`${base}/api/context/graph/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q: 'hi' }) })).status).toBe(400)
 
     callBridge.mockResolvedValueOnce({ schedule: { installed: true, interval_s: 3600, plist: '/Users/q/Library/LaunchAgents/com.cos.lightrag-ingest.plist' }, protocol: 1 })
@@ -617,6 +617,11 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
     const got = await fetch(`${base}/api/context/memory-guardrails`)
     expect(got.status).toBe(200)
     expect((await got.json() as Record<string, any>).guardrails.llm_review).toEqual({ enabled: false, model: 'haiku', max_per_run: 20 })
+    // The portable runtime cannot run model review. Losing this field at the
+    // HTTP boundary made the native WebView offer a control it cannot execute.
+    callBridge.mockResolvedValueOnce({ guardrails: { llm_review: { supported: false, enabled: true, max_per_run: 0 } } })
+    const portable = await fetch(`${base}/api/context/memory-guardrails`)
+    expect((await portable.json() as Record<string, any>).guardrails.llm_review).toMatchObject({ supported: false, enabled: false, max_per_run: 0 })
     callBridge.mockResolvedValueOnce({ guardrails: { min_words: 9, min_distinct_chars: 8, max_repeat_ratio: 0.5, banned_patterns: [], llm_review: { enabled: true, model: 'sonnet', max_per_run: 5 }, updated_at: '2026-09-08T01:31:00+00:00', by: 'control' }, philosophy_rubric_lines: 22, protocol: 1 })
     const set = await fetch(`${base}/api/context/memory-guardrails`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ min_words: 9, llm_review: { enabled: true, model: 'sonnet', max_per_run: 5 } }) })
     expect(set.status).toBe(200)

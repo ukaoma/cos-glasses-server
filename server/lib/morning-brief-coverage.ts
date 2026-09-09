@@ -3,7 +3,7 @@
 // The Sources list names an INSTRUCTION ("Meetings", "Knowledge graph"); the
 // server can also say how deep the well is behind it: 2,312 meetings stored,
 // 6,705 memories and 66 threads, the /good-morning skill found under
-// .claude/skills. Miles (2026-09-01): "I'm assuming we should see all of these
+// .claude/skills. the user (2026-09-01): "I'm assuming we should see all of these
 // stats when we turn it on." Those are the same numbers COS Control's Activity
 // tiles show, read from the same places, so the card agrees with the tiles.
 //

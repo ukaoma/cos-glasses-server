@@ -90,7 +90,7 @@ export async function resetLiveMessageEra(input: MessageEraResetInput): Promise<
   //
   // This used to endSession() every live session before rotating, which is what
   // made "reset the message count" also empty CHAT and kill the conversation the
-  // wearer was in the middle of. Miles wants the opposite shape: the next message
+  // wearer was in the middle of. the user wants the opposite shape: the next message
   // is #1, the old cards keep their numbers, and the thread survives.
   //
   // Numbers stay unique because they are {messageEra, globalMsgNum}, not a bare

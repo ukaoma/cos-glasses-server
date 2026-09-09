@@ -102,13 +102,17 @@ export async function drainThread(
 
   let delivered = 0, held = 0, retired = 0
   let dirty = false
+  let refusedGate: ReturnType<ThreadTurnQueueDeps['occupancy']> | null = null
 
   for (const turn of queue) {
     if (turn.status !== 'waiting') continue
 
-    // Observed FRESH for each turn: delivering one makes the thread busy again, so a
-    // verdict from the top of the loop would be stale by the second item.
-    const gate = deps.occupancy(provider, threadId)
+    // Reuse only refusal within this synchronous pass. Rechecking a busy thread
+    // for every queued row repeats a whole-process descriptor scan. A refusal
+    // can delay delivery until the next sweep, but can never authorize a write.
+    // Positive verdicts and all checks after a delivery remain fresh.
+    const gate: ReturnType<ThreadTurnQueueDeps['occupancy']> = refusedGate ?? deps.occupancy(provider, threadId)
+    if (!gate.attachable) refusedGate = gate
     const seen: DrainObservation = {
       attachable: gate.attachable,
       turnEnded: deps.turnEnded(provider, threadId),
@@ -135,11 +139,13 @@ export async function drainThread(
     dirty = true
 
     let outcome: { ok: boolean; reason?: string; serverRetryable?: boolean }
+    refusedGate = null
     try {
       outcome = await deps.deliver(turn)
     } catch (error) {
       outcome = { ok: false, reason: error instanceof Error ? error.message : 'deliver_threw' }
     }
+    refusedGate = null
 
     if (outcome.ok) {
       turn.status = 'delivered'
@@ -147,7 +153,7 @@ export async function drainThread(
       delivered += 1
     } else if (isRetryableDelivery(outcome)) {
       // A GATE REFUSAL IS NOT A FAILED DELIVERY, so it must not spend the ceiling --
-      // measured cost of getting this wrong: three of Miles's turns retired in about
+      // measured cost of getting this wrong: three of the user's turns retired in about
       // two minutes each, never delivered, while the 6h TTL never got to matter.
       //
       // REFUNDED, not deferred. The increment and its fsync stay BEFORE the call

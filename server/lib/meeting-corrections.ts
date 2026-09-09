@@ -19,8 +19,8 @@
 // WHAT IS DELIBERATELY NOT CORRECTED. The meeting markdown's Summary, Topics,
 // Decisions and Action Items are LLM prose that refers to people by BARE FIRST
 // NAME ("Jeremy pushed back", "Chris raised Beamer sentiment"). Verified on a
-// real scribe: 6 of 12 speakers appear that way. This org has two Kyles, two
-// Jacobuses and two Chrises, so a find/replace on a first name in narrative text
+// real scribe: 6 of 12 speakers appear that way. This org has two Alexes, two
+// Jordans and two Chrises, so a find/replace on a first name in narrative text
 // would silently rewrite a sentence about a different person. Prose is left
 // alone and flagged stale instead — `proseStale` on the applied row.
 
@@ -41,7 +41,7 @@ export type CorrectionPhase = 'intent' | 'applied' | 'failed' | 'confirmed'
  * demoted.
  *
  * Distinct from a rename, and it has to be: `relabelSidecarJson` rejects
- * `from === to`, so "yes, this really is Queen Ukaoma" cannot be expressed as a
+ * `from === to`, so "yes, this really is Sam Example" cannot be expressed as a
  * correction at all. The floor exists because a 0.56 match is not evidence — but
  * a person who was in the room IS evidence, and there was no way to record it.
  * The panel demoted the row, told the reviewer to name it, and then offered a

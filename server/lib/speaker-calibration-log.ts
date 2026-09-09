@@ -29,7 +29,7 @@ export interface CalibrationPurgeResult {
  *
  * Pure so the matching rule can be tested without touching the filesystem.
  * Matching is exact on the `speaker` field only: a substring match would delete
- * every "Miles Mallard" row when removing "Miles", and the name also appears in
+ * every "Alex Other" row when removing "the user", and the name also appears in
  * no other field.
  */
 export function filterCalibrationRows(

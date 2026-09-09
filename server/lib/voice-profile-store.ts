@@ -124,7 +124,7 @@ export function normalizeProfileStore(raw: unknown): { store: ProfileStore; repa
       ? (candidate as VoiceProfile).name.trim()
       : ''
     if (!rawName) { repairs.profilesDropped++; continue }
-    // Chelsie's store (2026-09-08) held two profiles named with the entire
+    // Casey's store (2026-09-08) held two profiles named with the entire
     // enrolment speech (~600 characters), written by a client older than the
     // 6.8.433 / server 8/25 guards. A name like that can never match a speaker
     // label, and the file cannot be repaired by hand because the server
@@ -445,7 +445,7 @@ export function profileCentroid(embeddings: number[][]): number[] {
 }
 
 /** How close two profiles' centroids are. This is the number a merge must be
- *  justified by: names are not evidence, and `Miles Mallard` / `Manoj Kumar`
+ *  justified by: names are not evidence, and `Alex Other` / `Jordan Other`
  *  are different humans who would merge happily on a name heuristic. */
 export function profileSimilarity(a: VoiceProfile, b: VoiceProfile): number {
   return rowCosine(profileCentroid(a.embeddings), profileCentroid(b.embeddings))

@@ -6,7 +6,7 @@
 // review panel could show a phrase but never let anyone HEAR it, and its own
 // copy said "naming this needs its audio, which is no longer held."
 //
-// Miles's decision: keep a week, so review can happen on a weekend rather than
+// the user's decision: keep a week, so review can happen on a weekend rather than
 // only within hours of the meeting, and stay under 8 GB.
 //
 // SIZING IS MEASURED, NOT GUESSED. Real recording volume over the 14 days to
@@ -30,14 +30,14 @@ import { dataPath } from './data-dir.js'
 
 export const MEETING_AUDIO_DIR = 'meeting-audio'
 
-/** One week, per Miles: review should survive until a weekend. */
+/** One week, per the user: review should survive until a weekend. */
 export function meetingAudioTtlMs(): number {
   const raw = Number(process.env.COS_MEETING_AUDIO_RETENTION_DAYS)
   const days = Number.isFinite(raw) && raw > 0 ? raw : 7
   return days * 24 * 60 * 60 * 1000
 }
 
-/** Total budget for retained meeting audio. Miles: stay under 8 GB. */
+/** Total budget for retained meeting audio. the user: stay under 8 GB. */
 export function meetingAudioMaxBytes(): number {
   const raw = Number(process.env.COS_MEETING_AUDIO_MAX_BYTES)
   return Number.isFinite(raw) && raw > 0 ? raw : 8 * 1024 * 1024 * 1024

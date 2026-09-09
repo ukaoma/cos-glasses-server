@@ -25,7 +25,7 @@ export type SessionStreamState = 'working' | 'idle' | 'done'
 
 export type SessionStreamDraft =
   | { kind: 'tool'; verb: SessionStreamVerb; target: string; detail: string }
-  // The user's own words for the turn being worked on. Miles: "we should see the query
+  // The user's own words for the turn being worked on. the user: "we should see the query
   // that the user has versus it just being a blank slate where it says working. That
   // way, the user at least knows what the agent is actively working on."
   //
@@ -145,7 +145,7 @@ function countLines(value: unknown): number {
 /**
  * The part of a shell command worth 40 columns.
  *
- * WHAT WENT WRONG ON HARDWARE. Miles's 9:20 screenshot showed `bash ses...` and
+ * WHAT WENT WRONG ON HARDWARE. the user's 9:20 screenshot showed `bash ses...` and
  * `bash s...` -- a shell command reduced to two characters. Two causes compounding:
  * the raw command was sent whole, and the CLIENT then treated it as a PATH and kept
  * only the text after the last `/`. So `cd /Users/.../cos-glasses-app && grep -n x
@@ -347,7 +347,7 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
   //
   // This used to drop both, on the reasoning that "the prompt came from this device".
   // That is true of a Continue turn and FALSE of the case that matters most: a session
-  // running in a Mac window, where the user row is the question Miles typed there and
+  // running in a Mac window, where the user row is the question the user typed there and
   // the glasses have never seen it. Dropping it is what made the live view a blank
   // slate that said WORKING and nothing else.
   //

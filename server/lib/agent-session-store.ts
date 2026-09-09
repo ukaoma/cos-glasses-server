@@ -111,7 +111,7 @@ export function isScratchCursorProject(folder: string): boolean {
 export const isSkippedCursorFolder = isScratchCursorProject
 
 /**
- * Titles that belong to a MACHINE, not to a conversation Miles had.
+ * Titles that belong to a MACHINE, not to a conversation the user had.
  *
  * Measured 2026-08-18 by driving the real collector over the 1,296 Claude transcripts on
  * this machine: of the 41 Claude docs it indexed, 28 were machine prompts -- 22 Slack
@@ -141,7 +141,7 @@ export function isKeepWarmSessionTitle(title: string): boolean {
 /**
  * The compaction preamble, which the harness writes as a USER turn.
  *
- * Miles's 2026-08-17 screenshot had this sitting in the DISCUSSION list as though he
+ * the user's 2026-08-17 screenshot had this sitting in the DISCUSSION list as though he
  * had asked it: "This session is being continued from a previous conversation… Summary:
  * ## 1. Primary Request and Intent". It is scaffolding, and it lands in the digest at
  * full length because it IS recent -- compaction happens mid-session -- so recency
@@ -251,7 +251,7 @@ export function proseSnippet(text: string, max = 160): string {
  * swipes of deliberate reading; 21,757 would be 109. Bounded on purpose: this
  * crosses a phone radio and renders on a 576x288 HUD.
  *
- * WHY NOT LOWER. 2,000 would still cut 7.5% of replies, and Miles's 1,821-char reply
+ * WHY NOT LOWER. 2,000 would still cut 7.5% of replies, and the user's 1,821-char reply
  * — the one that started this — sits inside the band that a 2,000 cap leaves with no
  * headroom at all.
  */
@@ -311,7 +311,7 @@ const DIGEST_TURN_MAX = 220
  * "frames everything after it" -- see the head-first block in composeDiscussionDigest,
  * which was itself a fix for a digest that spent everything on the tail.
  *
- * Miles overruled it from hardware, 2026-08-17, looking at a digest whose first two
+ * the user overruled it from hardware, 2026-08-17, looking at a digest whose first two
  * bullets were a question from the previous day and a compaction preamble: "It needs to
  * refresh to the most recent response inside of the thread. The discussion should show
  * the questions that we're asking and a summary of those most recent things, not
@@ -322,7 +322,7 @@ const DIGEST_TURN_MAX = 220
  * occupying the two most valuable slots in a list about what is happening NOW.
  *
  * Left as a constant rather than deleting the head path: this is a judgement call about
- * emphasis, and one number is the whole reversal if Miles wants some framing back.
+ * emphasis, and one number is the whole reversal if the user wants some framing back.
  */
 const DIGEST_HEAD_TURNS = 0
 
@@ -641,14 +641,96 @@ export function normalizeClaudeSessionId(raw: string): string {
   return id
 }
 
-export function peekClaudeDesktopHead(text: string): { title: string; cwd: string } {
-  const unescape = (value: string) => value.replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-  const title = /"title"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(text)
-  const cwd = /"cwd"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(text)
-  return {
-    title: title ? unescape(title[1]).slice(0, 120) : '',
-    cwd: cwd ? unescape(cwd[1]) : '',
+/** Read completed top-level fields from a bounded JSON prefix. Nested transcript
+ * strings are not metadata. Repeated keys and non-string values fail closed. */
+export function desktopMetadataPrefix(text: string): { fields: Map<string, string | null>; complete: boolean } {
+  const fields = new Map<string, string | null>()
+  let i = 0
+  const space = () => { while (/\s/.test(text[i] || '') && i < text.length) i++ }
+  const string = (): string | undefined => {
+    const start = i
+    if (text[i++] !== '"') return undefined
+    let escaped = false
+    while (i < text.length) {
+      const ch = text[i++]
+      if (!escaped && ch === '"') {
+        try { return JSON.parse(text.slice(start, i)) as string } catch { return undefined }
+      }
+      if (!escaped && ch === '\\') escaped = true
+      else escaped = false
+    }
+    return undefined
   }
+  space()
+  if (text[i++] !== '{') return { fields, complete: false }
+  while (i < text.length) {
+    space()
+    if (text[i] === '}') return { fields, complete: true }
+    const key = string(); if (key === undefined) break
+    space(); if (text[i++] !== ':') break
+    space()
+    let value: string | null = null
+    if (text[i] === '"') { const parsed = string(); if (parsed === undefined) break; value = parsed }
+    else {
+      let depth = 0, inString = false, escaped = false
+      while (i < text.length) {
+        const ch = text[i]
+        if (!inString && depth === 0 && (ch === ',' || ch === '}')) break
+        i++
+        if (inString) {
+          if (!escaped && ch === '"') inString = false
+          if (!escaped && ch === '\\') escaped = true; else escaped = false
+        } else if (ch === '"') inString = true
+        else if (ch === '{' || ch === '[') depth++
+        else if (ch === '}' || ch === ']') depth--
+      }
+      if (i === text.length) break
+    }
+    fields.set(key, fields.has(key) ? null : value)
+    space()
+    if (text[i] === '}') return { fields, complete: true }
+    if (text[i++] !== ',') break
+  }
+  return { fields, complete: false }
+}
+
+export function peekClaudeDesktopHead(text: string): { title: string; cwd: string; cliSessionId: string } {
+  const { fields, complete } = desktopMetadataPrefix(text)
+  const cli = fields.get('cliSessionId')
+  const normalized = typeof cli === 'string' ? normalizeClaudeSessionId(cli) : ''
+  return {
+    title: (fields.get('title') || '').slice(0, 120),
+    cwd: fields.get('cwd') || '',
+    cliSessionId: fields.has('cliSessionId')
+      ? (CLAUDE_UUID_JSONL.test(normalized + '.jsonl') ? normalized : '!invalid')
+      : (complete ? '' : '!unreadable'),
+  }
+}
+
+type ClaudeDesktopHead = ReturnType<typeof peekClaudeDesktopHead> & { file: string; mtimeMs: number }
+
+/** Explicit Desktop→CLI aliases only. A conflicting alias cannot select a transcript. */
+export async function loadClaudeDesktopAliases(root: string): Promise<Map<string, ClaudeDesktopHead | null>> {
+  const aliases = new Map<string, ClaudeDesktopHead | null>()
+  if (!root) return aliases
+  for (const account of await dirents(root)) {
+    for (const workspace of await dirents(join(root, account))) {
+      const dir = join(root, account, workspace)
+      for (const name of await dirents(dir)) {
+        if (!name.startsWith('local_') || !name.endsWith('.json')) continue
+        const id = normalizeClaudeSessionId(name.slice(0, -5))
+        if (!CLAUDE_UUID_JSONL.test(id + '.jsonl')) continue
+        const file = join(dir, name), st = await fileStat(file)
+        if (!st?.isFile) continue
+        const head = { ...peekClaudeDesktopHead(await readWindow(file, false)), file, mtimeMs: st.mtimeMs }
+        const previous = aliases.get(id)
+        if (previous === null) continue
+        if (previous && previous.cliSessionId !== head.cliSessionId) aliases.set(id, null)
+        else if (!previous || head.mtimeMs >= previous.mtimeMs) aliases.set(id, head)
+      }
+    }
+  }
+  return aliases
 }
 
 export async function loadClaudeStarredIds(configPath: string): Promise<Set<string>> {
@@ -851,6 +933,16 @@ export async function listClaudeSessions(
   desktopSessionsRoot = '',
   dropped: AgentSessionListDropped = emptySessionListDropped(),
 ): Promise<AgentSessionRow[]> {
+  const aliases = await loadClaudeDesktopAliases(desktopSessionsRoot)
+  const canonical = (id: string) => { const cli = aliases.get(id)?.cliSessionId; return cli && CLAUDE_UUID_JSONL.test(cli + '.jsonl') ? cli : id }
+  const canonicalStars = new Set([...starredIds].map(canonical))
+  const canonicalLive = new Set([...liveIds].map(canonical))
+  const desktopByCli = new Map<string, ClaudeDesktopHead>()
+  for (const [id, head] of aliases) {
+    if (!head) continue
+    const key = canonical(id), prev = desktopByCli.get(key)
+    if (!prev || head.mtimeMs >= prev.mtimeMs) desktopByCli.set(key, head)
+  }
   const seen = new Set<string>()
   const pinnedCandidates: Array<{ file: string; native: string; project: string; mtimeMs: number; birthtimeMs: number; desktop?: string }> = []
   const recentCandidates: Array<{ file: string; native: string; project: string; mtimeMs: number; birthtimeMs: number; desktop?: string }> = []
@@ -862,11 +954,11 @@ export async function listClaudeSessions(
       if (!CLAUDE_UUID_JSONL.test(name)) continue
       const native = name.slice(0, -6)
       const shortId = native.slice(0, 8)
-      if (liveIds.has(shortId) || liveIds.has(native)) continue
+      if (canonicalLive.has(shortId) || canonicalLive.has(native)) continue
       const file = join(dir, name)
       const st = await fileStat(file)
       if (!st?.isFile) continue
-      const pinned = starredIds.has(native.toLowerCase())
+      const pinned = canonicalStars.has(native.toLowerCase())
       const fresh = now.getTime() - st.mtimeMs <= AGENT_SESSION_MAX_AGE_MS
       if (!pinned && !fresh) {
         dropped.age += 1
@@ -878,15 +970,16 @@ export async function listClaudeSessions(
         project: workspaceLabel(folder),
         mtimeMs: st.mtimeMs,
         birthtimeMs: st.birthtimeMs,
+        desktop: desktopByCli.get(native)?.file,
       }
       seen.add(native.toLowerCase())
       if (pinned) pinnedCandidates.push(candidate)
       else recentCandidates.push(candidate)
     }
   }
-  for (const starred of starredIds) {
-    if (seen.has(starred) || liveIds.has(starred) || liveIds.has(starred.slice(0, 8))) continue
-    const desktop = await findClaudeDesktopFile(desktopSessionsRoot, starred)
+  for (const starred of canonicalStars) {
+    if (seen.has(starred) || canonicalLive.has(starred) || canonicalLive.has(starred.slice(0, 8))) continue
+    const desktop = desktopByCli.get(starred)?.file
     if (!desktop) continue
     const st = await fileStat(desktop)
     if (!st?.isFile) continue
@@ -921,11 +1014,11 @@ export async function listClaudeSessions(
         title = peek.customTitle ?? firstPrompt
         latestAssistant = peek.latestAssistant
       }
-      if ((!title || !project) && (candidate.desktop || desktopSessionsRoot)) {
+      if (candidate.desktop || !title || !project) {
         const desktop = candidate.desktop || await findClaudeDesktopFile(desktopSessionsRoot, candidate.native)
         if (desktop) {
           const head = peekClaudeDesktopHead(await readWindow(desktop, false))
-          if (!title && head.title) title = head.title
+          if (head.title) title = head.title
           if (!project && head.cwd) project = workspaceLabel(head.cwd)
         }
       }
@@ -939,7 +1032,7 @@ export async function listClaudeSessions(
         modified: isoFromMtime(candidate.mtimeMs),
         created: isoFromMtime(candidate.birthtimeMs),
         alive: false,
-        pinned: starredIds.has(candidate.native.toLowerCase()),
+        pinned: canonicalStars.has(candidate.native.toLowerCase()),
         ...discussionFields(title, firstPrompt, latestAssistant),
       }))
     }
@@ -997,9 +1090,9 @@ export async function listCodexSessions(
       // `session_meta` record wholesale, so the new rollout carries the PARENT's id
       // while its filename carries its own.
       //
-      // Miles forked "Markt POS 2.0 build" into "POS Nation 3.0 build" and the fork
+      // the user forked "Example project 2.0 build" into "Example project 3.0 build" and the fork
       // never appeared in the session list. It had not failed to index -- it was indexed
-      // AS its parent, so the list showed one `Markt POS 2.0 build` row whose modified
+      // AS its parent, so the list showed one `Example project 2.0 build` row whose modified
       // time was the fork's activity. Two conversations, one identity, and the newer one
       // invisible.
       //
@@ -1183,7 +1276,11 @@ export async function listAgentSessions(
   sort: AgentSessionSort = 'updated',
   dropped: AgentSessionListDropped = emptySessionListDropped(),
 ): Promise<AgentSessionRow[]> {
-  const starredIds = await loadClaudeStarredIds(roots.claudeDesktopConfig)
+  const originalStars = await loadClaudeStarredIds(roots.claudeDesktopConfig)
+  const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+  const canonical = (id: string) => { const cli = aliases.get(id)?.cliSessionId; return cli && CLAUDE_UUID_JSONL.test(cli + '.jsonl') ? cli : id }
+  const starredIds = new Set([...originalStars].map(canonical))
+  live = live.map(row => row.provider === 'claude' ? { ...row, session_id: canonical(normalizeClaudeSessionId(row.session_id)) } : row)
   const cursorPinned = await loadCursorPinnedIds(roots.cursorWorkspaceStorage)
   const enrichedLive = (await Promise.all(live.map(row => enrichLiveClaude(row, roots))))
     .filter(entry => !isKeepWarmSessionTitle(entry.display_label))
@@ -1233,15 +1330,29 @@ export async function findAgentSessionFile(
   if (!isSafeSessionId(sessionId)) return null
   const needle = sessionId.trim().toLowerCase()
   if (provider === 'claude') {
+    const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    const files = new Map<string, string[]>()
     for (const folder of await dirents(roots.claudeProjects)) {
       const dir = join(roots.claudeProjects, folder)
       for (const name of await dirents(dir)) {
-        if (!name.endsWith('.jsonl')) continue
+        if (!CLAUDE_UUID_JSONL.test(name)) continue
+        const file = join(dir, name)
+        if (!(await fileStat(file))?.isFile) continue
         const id = name.slice(0, -6).toLowerCase()
-        if (id === needle || id.startsWith(needle)) return join(dir, name)
+        files.set(id, [...(files.get(id) || []), file])
       }
     }
-    return null
+    const exact = aliases.has(needle) || files.has(needle)
+    const ids = new Set<string>()
+    for (const [id, head] of aliases) {
+      if (!(exact ? id === needle : id.startsWith(needle))) continue
+      if (!head) return null
+      ids.add(head.cliSessionId || id)
+    }
+    for (const id of files.keys()) if (exact ? id === needle : id.startsWith(needle)) ids.add(id)
+    if (ids.size !== 1) return null
+    const matches = files.get([...ids][0]) || []
+    return matches.length === 1 ? matches[0] : null
   }
   if (provider === 'codex') {
     for (const file of await listCodexJsonlFiles(roots.codexSessions)) {
@@ -1469,18 +1580,18 @@ export async function parseAgentSession(
   /**
    * Add a user turn to the recency digest -- or decline to.
    *
-   * TWO DECLINES, both found by parsing Miles's own 94 MiB session rather than by
+   * TWO DECLINES, both found by parsing the user's own 94 MiB session rather than by
    * reasoning about the code.
    *
    * `injected`: STRUCTURAL, not a heuristic. Claude marks a slash-command body with
    * `isMeta: true` and a compaction preamble with `isCompactSummary: true`. Both are
-   * written as USER rows, so both rendered in the digest as things Miles had asked --
+   * written as USER rows, so both rendered in the digest as things the user had asked --
    * his screenshot led with "This session is being continued from a previous
    * conversation… Summary: ## 1. Primary Request and Intent". Neither is an ask, and
    * both are recent, so recency ordering alone leaves them exactly where they were.
    *
    * `fromTail` on a TRUNCATED read: the head window IS the session opening. Feeding it
-   * into a recency list is the very thing Miles objected to -- "not something that's
+   * into a recency list is the very thing the user objected to -- "not something that's
    * the 'first' message" -- and on a large session the 60-turn window never fills, so
    * those opening turns survive to the top of the digest forever. Measured on his
    * session: the two leading bullets were both head-window turns from the previous day.

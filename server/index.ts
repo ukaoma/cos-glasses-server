@@ -334,7 +334,7 @@ const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
  * that also registers the write routes (6.33.0).
  *
  * Without the clock, a foreign holder is terminal and Continue is refused for
- * any thread with a Claude Code window open on it — including the ones Miles
+ * any thread with a Claude Code window open on it — including the ones the user
  * actually works in, because he leaves those windows open. With it, a holder
  * measured idle is continuable and only a holder measured WRITING is refused.
  *
@@ -518,7 +518,7 @@ app.use('/api', claudeSessionsRouter)
 // QUEUED THREAD TURNS
 // ---------------------------------------------------------------------------
 // A turn spoken at a thread that is busy right now is PARKED instead of refused, and
-// delivered when the thread frees. Miles, 2026-08-17: "if there's a session that's
+// delivered when the thread frees. the user, 2026-08-17: "if there's a session that's
 // still running, that would just put it into the queue the same way that the user has
 // the ability to do so."
 //
@@ -550,7 +550,7 @@ if (threadAttachEnabled()) {
     // `OccupancyReason` has no `native_target_busy` member, because that refusal is
     // produced only by the binding registry inside `bindings.create`.
     //
-    // That gap is what trapped Miles on 2026-08-18. Continue refused
+    // That gap is what trapped the user on 2026-08-18. Continue refused
     // `native_target_busy` (a live COS binding held the thread), the client armed the
     // queue, he dictated -- and this gate, asking occupancy alone, answered
     // `attachable: true`, so the route replied `409 thread_free` ("Pick Continue again
@@ -623,7 +623,7 @@ app.use('/api', createAgentSessionBindingsRouter({
   // without a reachable release is a REGRESSION, not a fix: today "Restart
   // Server" in COS Control clears a fence, and making it survive restarts with
   // no operator surface in Control turns an 8-second annoyance into a
-  // permanently dead thread that needs a terminal to clear. Miles, 2026-08-12:
+  // permanently dead thread that needs a terminal to clear. the user, 2026-08-12:
   // "we couldn't do anything without bash, that shouldn't be the case."
   //
   // So the storage ships inert. GET /agent-sessions/fences and

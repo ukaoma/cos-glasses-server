@@ -60,7 +60,7 @@ export type MaintenanceWorkKind =
   // Two `task_dispatch` leases (dispatch + reconcile) are expected —
   // acquire() is a concurrent Map, not a per-kind mutex.
   | 'task_dispatch'
-  // Miles-triggered recovery of a quarantined unsaved capture (6.19.0):
+  // the user-triggered recovery of a quarantined unsaved capture (6.19.0):
   // batch-transcribes retained WAVs into a durable scribe. Held for the whole
   // background run so an Update Server drain waits for it like any batch.
   // Long runs are made visible: the active-recovery registry renders a

@@ -86,8 +86,11 @@ export function realOccupancyDirs(): OccupancyDirs {
 const PS_BIN = existsSync('/bin/ps') ? '/bin/ps' : 'ps'
 const LSOF_BIN = existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof'
 
-/** Both probes sit in the interactive attach path. lsof can block for seconds on a stale mount. */
+/** Both probes sit in the interactive attach path and remain hard bounded. */
 const PROBE_TIMEOUT_MS = 2_000
+// A whole-process descriptor scan measured ~2 s on a healthy busy Mac. Give
+// lsof its own budget; timeout still refuses attachment rather than assuming idle.
+const LOCK_PROBE_TIMEOUT_MS = 5_000
 const PROBE_MAX_BUFFER = 1 << 20
 
 /** A registry record is a few hundred bytes. Anything larger is not one. */
@@ -147,11 +150,11 @@ export interface ProbeOutcome {
   spawnError: string | null
 }
 
-function runProbe(bin: string, args: string[]): ProbeOutcome {
+function runProbe(bin: string, args: string[], timeoutMs = PROBE_TIMEOUT_MS): ProbeOutcome {
   try {
     const stdout = execFileSync(bin, args, {
       encoding: 'utf8',
-      timeout: PROBE_TIMEOUT_MS,
+      timeout: timeoutMs,
       killSignal: 'SIGKILL',
       maxBuffer: PROBE_MAX_BUFFER,
       env: probeEnv(),
@@ -355,7 +358,7 @@ export function lockHolders(path: string): number[] {
   // `--` terminates option parsing so a path can never be read as a flag; `-w`
   // suppresses mount-point warnings that would otherwise make a successful probe
   // look like the failure case below.
-  return interpretLockHolders(runProbe(LSOF_BIN, ['-w', '-t', '--', path]), path)
+  return interpretLockHolders(runProbe(LSOF_BIN, ['-w', '-t', '--', path], LOCK_PROBE_TIMEOUT_MS), path)
 }
 
 /**

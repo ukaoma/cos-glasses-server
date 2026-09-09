@@ -491,7 +491,7 @@ export interface OccupancyDirs {
 //
 // WHY THE OLD RULE WAS WRONG. The registry records an OPEN WINDOW, not active
 // generation. `~/.claude/sessions/<pid>.json` for a session that finished ten
-// minutes ago is byte-identical to one mid-turn. Miles keeps Claude Code
+// minutes ago is byte-identical to one mid-turn. the user keeps Claude Code
 // windows open, so Continue was refused for exactly the threads he cares about
 // and allowed only for the ones he had abandoned. The gate was measuring the
 // wrong thing, not measuring it too strictly.

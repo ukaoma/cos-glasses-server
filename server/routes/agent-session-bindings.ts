@@ -1302,7 +1302,7 @@ export const TURN_UNKNOWN_COPY = 'COS has no record of that turn. Nothing was se
 export const CLIENT_TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/
 
 export function threadAttachEnabled(): boolean {
-  // Default ON since 6.37.0 (Miles 2026-08-25): ship the capability active and
+  // Default ON since 6.37.0 (the user 2026-08-25): ship the capability active and
   // let users opt out. Absent key = on; only a literal '0' disables.
   return process.env.COS_THREAD_ATTACH_ENABLED !== '0'
 }
@@ -2252,7 +2252,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         })
         // A fence shuts a thread until a human acts, and until now it wrote NO log
         // line at either site — so a fenced thread was discoverable only by trying
-        // to use it (Miles, 2026-08-18). Never log `key`: it embeds the private
+        // to use it (the user, 2026-08-18). Never log `key`: it embeds the private
         // native thread id, which this router does not emit anywhere.
         console.warn(`[agent-session-bindings] fence set site=ambiguous provider=${binding.provider} target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest} adapterReason=${recordedReason} detail=${adapterEvidence.adapterDetail ?? 'none'} exitCode=${adapterEvidence.exitCode ?? 'null'} childReaped=${adapterEvidence.childReaped ?? 'unknown'} stderrClass=${adapterEvidence.stderrClass ?? 'none'} durationMs=${adapterEvidence.durationMs ?? 'unknown'} spawnCount=${recordedPids.length}`)
         return reportAmbiguous()

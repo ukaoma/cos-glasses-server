@@ -43,7 +43,7 @@ export function claudeSessionsEnabled(): boolean {
  * Show real session names instead of the recomputed folder name?
  *
  * Default OFF, so the published package is safe for anyone: a `user` or `auto` name
- * describes the WORK ("Kevin/Miles grievance analysis"), and this socket binds
+ * describes the WORK ("Alex/Jordan grievance analysis"), and this socket binds
  * 0.0.0.0 behind a private-network allowlist, so anyone on the LAN holding the token
  * would read it off the wire.
  *

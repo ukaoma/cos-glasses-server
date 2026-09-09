@@ -72,7 +72,7 @@ function cleanSnippet(raw: string): string {
  * Count matches in `hayLower` but cut snippets from `hayOriginal`.
  *
  * Matching has to happen on the lowercased text for case-insensitivity, but a
- * snippet cut from that text renders as all-lowercase prose -- "chelsie owes the
+ * snippet cut from that text renders as all-lowercase prose -- "casey owes the
  * sales-vs-education split" -- which reads like broken data in a UI. The offsets
  * line up because toLowerCase() is length-preserving for effectively all real
  * archive text; where it is NOT (a handful of exotic codepoints expand), the

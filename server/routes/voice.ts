@@ -441,15 +441,15 @@ voiceRouter.post('/voice/enroll-ext', async (req, res) => {
 
 // ── Voice sample playback (6.21.18) ───────────────────────────────────────
 //
-// Miles: hearing three seconds of a voice settles an identity question that a
+// the user: hearing three seconds of a voice settles an identity question that a
 // similarity score cannot. These two paths need NO retention change — the audio
 // already exists:
 //
 //   training-audio  what the system thinks a NAMED person sounds like
 //   ext-audio       an UNIDENTIFIED voice, 72-hour window
 //
-// The first is the higher-value one for the review panel: "is this really Navaz?"
-// is answered by playing Navaz's own profile sample, not by playing the segment
+// The first is the higher-value one for the review panel: "is this really Jamie?"
+// is answered by playing Jamie's own profile sample, not by playing the segment
 // under review.
 
 /** Newest WAV in a directory — the most representative recent sample. */
@@ -646,7 +646,7 @@ function fanOutTotals(runs: readonly SpeakerRenameFanOut[]): {
 
 // Fails closed below the search-accept threshold. A wrong merge destroys BOTH
 // identities at once and cannot be undone from the store alone, so the only
-// acceptable evidence is acoustic. `force` exists for the case where Miles
+// acceptable evidence is acoustic. `force` exists for the case where the user
 // knows something the audio does not, and it is logged.
 voiceRouter.post('/voice/merge-profiles', (req, res) => {
   try {

@@ -38,7 +38,7 @@ export const EXPECTED_EMBEDDING_DIM = 192
  * non-invertible timbre vectors, so the privacy argument that motivates a short
  * audio window does not carry across unchanged.
  *
- * Flagged for Miles rather than assumed: if he wants these on the 8-hour clock
+ * Flagged for the user rather than assumed: if he wants these on the 8-hour clock
  * too, set the env var to a fraction and the correction loop becomes same-day
  * only.
  */

@@ -159,7 +159,7 @@ export function analyzePlaybackWav(buffer: Buffer): AudioSignalProfile | null {
 
 export function adaptivePlaybackEnabled(): boolean {
   // Private canary: explicit opt-in, explicit 0 rollback through COS Control.
-  // Default ON since 6.37.0 (Miles 2026-08-25). Absent key = on; only a
+  // Default ON since 6.37.0 (the user 2026-08-25). Absent key = on; only a
   // literal '0' disables. Raw WAV is untouched either way — this affects
   // review playback only, never the transcript, attribution, save or sync.
   return process.env.COS_MEETING_AUDIO_ADAPTIVE_PLAYBACK !== '0'

@@ -520,3 +520,12 @@ BIND_HOST=0.0.0.0 npm run start:server
 ## License
 
 MIT. Learn more at [gotcos.com](https://www.gotcos.com).
+
+
+### Optional owner-local memory runtime
+
+The package includes a checksummed public Python runtime. It uses a unique owner, separate data root, reviewed memory states, current source snapshots, explicit document-link graph paths and saved explorations. Initial memory search is keyword based; semantic embeddings and inferred extraction are separate optional integrations. No private COS checkout or corpus is included. Existing plain-file setup remains available.
+
+Run `glasses-memory-setup --runtime-dir /absolute/path/to/cos-memory-runtime --data-root /absolute/path/to/private-memory` with Python 3.11+ installed. Set `COS_SCRIPTS_DIR` to the runtime directory in your server configuration, then restart the server. Add an explicitly granted Markdown/text source using `venv/bin/python3 manage.py grant /path/to/notes.md --title "Project"` from that runtime directory. The bundled README documents captures, reviews, document links, source refresh, upgrade and staged restore. Keep the latest independent deletion checkpoint separately from restorable snapshots.
+
+This is a local owner instance, separate from app.gotcos.com tenants and hosted Sessions. Installing the package does not upload your corpus or enable household sharing. A source build or local setup test is not proof of a published registry version; use the release ledger for actual availability.

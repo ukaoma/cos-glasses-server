@@ -8,7 +8,7 @@
 // (2026-08-06 Health Score V2): 135 sidecar chunks collapse to 46 speaker runs,
 // while the markdown carries 70 turns — and they disagree on who spoke, with the
 // markdown's 4th turn attributed to Joe Karbowski where the sidecar's 4th run
-// says Richard Jenkins. The transcript was rendered from a different
+// says Riley Example. The transcript was rendered from a different
 // segmentation pass. So:
 //
 //   * There is NO mapping from a chunk index to a transcript turn.
@@ -22,7 +22,7 @@
 //
 // AND WHAT IS NEVER REWRITTEN: the Summary / Topics / Decisions / Action Items
 // prose. It refers to people by bare first name — 6 of 12 speakers did so on the
-// meeting above — and this org has two Kyles, two Jacobuses and two Chrises, so
+// meeting above — and this org has two Alexes, two Jordans and two Chrises, so
 // a first-name substitution in narrative text would rewrite sentences about
 // somebody else. Reported as `proseStale` instead.
 

@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, statSync, truncateSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, statSync, truncateSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import {
   agentSessionRoots,
+  findAgentSessionFile,
   composeDiscussionDigest,
   isWrapperPrompt,
   composeDiscussionSummary,
@@ -1039,5 +1040,66 @@ describe('live Claude rows report the transcript mtime, not the registry heartbe
     const row = rows.find(r => r.session_id === SID)
     expect(row).toBeTruthy()
     expect(row!.modified).toBe(heartbeat)
+  })
+})
+
+describe('Claude Desktop aliases and independent forks', () => {
+  const desktopId = '60cc1468-427d-4894-b615-24c624c68107'
+  const cliId = '95c5ebcb-a36b-4f9b-ade0-32ac169096d6'
+  const forkId = '95c5ebcb-1111-2222-3333-444444444444'
+  function fixture() {
+    const home = mkdtempSync(join(tmpdir(), 'cos-session-alias-'))
+    const roots = agentSessionRoots(home)
+    const desk = join(roots.claudeCodeSessions, 'account', 'workspace', `local_${desktopId}.json`)
+    mkdirSync(join(desk, '..'), { recursive: true })
+    writeFileSync(desk, JSON.stringify({ title: 'Shared title', cliSessionId: cliId, cwd: '/repo' }))
+    const parent = join(roots.claudeProjects, 'repo', `${cliId}.jsonl`)
+    const fork = join(roots.claudeProjects, 'repo', `${forkId}.jsonl`)
+    for (const [path, text] of [[parent, 'Parent only'], [fork, 'Fork continued']]) {
+      writeJsonl(path, [JSON.stringify({ type: 'custom-title', customTitle: 'Shared title' }),
+        JSON.stringify({ type: 'user', message: { role: 'user', content: text } })])
+    }
+    return { roots, desk, parent, fork }
+  }
+  it('lists one canonical pinned row for an alias, retaining a real same-title fork', async () => {
+    const { roots, parent, fork } = fixture()
+    const rows = await listClaudeSessions(roots.claudeProjects, new Date(), new Set(), 20, new Set([desktopId]), roots.claudeCodeSessions)
+    expect(rows.map(r => r.session_id).sort()).toEqual([cliId, forkId].sort())
+    expect(rows.find(r => r.session_id === cliId)).toMatchObject({ pinned: true, display_label: 'Shared title' })
+    expect(rows.find(r => r.session_id === forkId)?.pinned).toBe(false)
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBe(parent)
+    expect(await findAgentSessionFile('claude', cliId, roots)).toBe(parent)
+    expect(await findAgentSessionFile('claude', forkId, roots)).toBe(fork)
+    expect((await parseAgentSession('claude', (await findAgentSessionFile('claude', forkId, roots))!)).discussion_digest).toContain('Fork continued')
+    expect((await parseAgentSession('claude', (await findAgentSessionFile('claude', desktopId, roots))!)).discussion_digest).not.toContain('Fork continued')
+    expect(await findAgentSessionFile('claude', '95c5ebcb', roots)).toBeNull()
+  })
+  it('uses only top-level metadata and refuses malformed explicit aliases', async () => {
+    const { roots, desk, parent, fork } = fixture()
+    writeFileSync(desk, JSON.stringify({ settings: { cliSessionId: forkId }, padding: 'x'.repeat(12 * 1024), cliSessionId: cliId }))
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBe(parent)
+    const own = join(roots.claudeProjects, 'repo', `${desktopId}.jsonl`)
+    writeJsonl(own, ['{}'])
+    writeFileSync(desk, JSON.stringify({ cliSessionId: 'not-a-valid-uuid' }))
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBeNull()
+    expect(await findAgentSessionFile('claude', forkId, roots)).toBe(fork)
+  })
+  it('does not substitute a fork for a missing alias target', async () => {
+    const { roots, parent } = fixture()
+    unlinkSync(parent)
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBeNull()
+  })
+  it('rejects conflicting aliases and duplicate exact transcript files', async () => {
+    const { roots, parent } = fixture()
+    const duplicate = join(roots.claudeProjects, 'other', `${cliId}.jsonl`)
+    writeJsonl(duplicate, ['{}'])
+    expect(await findAgentSessionFile('claude', cliId, roots)).toBeNull()
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBeNull()
+    unlinkSync(duplicate)
+    const conflicting = join(roots.claudeCodeSessions, 'other', 'workspace', `local_${desktopId}.json`)
+    mkdirSync(join(conflicting, '..'), { recursive: true })
+    writeFileSync(conflicting, JSON.stringify({ cliSessionId: forkId }))
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBeNull()
+    expect(await findAgentSessionFile('claude', cliId, roots)).toBe(parent)
   })
 })

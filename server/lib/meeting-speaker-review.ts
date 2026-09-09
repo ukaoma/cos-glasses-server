@@ -54,7 +54,7 @@ export const UNATTRIBUTED = new Set(['Unknown', 'Ext', '', 'Speaker 1', 'Speaker
  * distinct.
  *
  * De-attributing to a single shared `Ext` folded every corrected voice into one
- * row: on the 2026-08-06 Ditto meeting Miles named five wrong attributions, and
+ * row: on the 2026-08-06 Ditto meeting the user named five wrong attributions, and
  * collapsing them would have destroyed his ability to tell those five voices
  * apart afterwards — which is exactly what he then needs playback for. Numbering
  * keeps them separable while asserting no identity.
@@ -80,9 +80,9 @@ export const CONFIDENT_SIMILARITY = 0.65
  *
  * The identifier accepts a match at SEARCH_THRESHOLD = 0.55, so a single segment
  * scoring 0.55 currently arrives in the panel wearing somebody's full name. On
- * Miles's 2026-08-06 Ditto meeting that produced Richard Jenkins (1 segment,
+ * the user's 2026-08-06 Ditto meeting that produced Riley Example (1 segment,
  * 0.60), Luke Henry (1 segment, 0.55), Dylan Jackson (2 segments, 0.58) and
- * Navaz Sharif (3 segments, 0.58) — and he confirmed none of them were in the
+ * Jamie Sharif (3 segments, 0.58) — and he confirmed none of them were in the
  * room. Presenting those as names is the defect; the reviewer then has to undo
  * an assertion the system should never have made.
  *

@@ -4,7 +4,7 @@
 //
 // v1 floored the attendee block and shipped every other section verbatim. On the
 // 2026-08-06 IJO Post-Mortem — where the review asserts exactly ONE voice — all
-// 14 unasserted names still reached the clipboard, including one Miles had
+// 14 unasserted names still reached the clipboard, including one the user had
 // already confirmed was never in the room, as `[Name]:` transcript labels. The
 // stated contract, "only asserted voices are named", was false for the largest
 // output.
@@ -69,7 +69,7 @@ export interface ParsedScribe {
    * Sections that are none of the above, in document order.
    *
    * v1 discarded these, losing 116,820 characters across the corpus including
-   * `Granola Structured Notes (canonical)` — Miles's own write-up — and
+   * `Granola Structured Notes (canonical)` — the user's own write-up — and
    * `Fathom Action Items (with exact timestamps)`. "Copy the meeting" has to
    * copy the meeting.
    */
@@ -322,7 +322,7 @@ export interface AttendeeRenderOptions {
    *
    * Gating on `voicedMs` instead tripped on 16 of 23 real meetings, because any
    * overlap at all exceeds the union of voiced time — at 70% the line stops being
-   * a signal and becomes boilerplate on something Miles pastes into Slack. Rows
+   * a signal and becomes boilerplate on something the user pastes into Slack. Rows
    * adding to more than the meeting LENGTH is the genuinely confusing case (71m
    * of rows inside a 66-minute meeting), and that is ~10% of meetings.
    */
@@ -380,10 +380,10 @@ export function renderAttendees(voices: AttendeeLine[], o: AttendeeRenderOptions
  * written sentence mangles grammar and can hit the wrong person. So the applied
  * correction row records `proseStale: true` and, until now, NOTHING read it.
  *
- * Real case, 2026-08-07: Miles removed "Clem Ukaoma" from a personal call that
- * was only him and Queen (his father's voice matched a similar profile). All 8
- * label sites were rewritten correctly; the LLM summary still opened "Miles,
- * Queen, and Clem talk through..." and the payload said nothing. An allowlist
+ * Regression example (synthetic names): the user removed "Morgan Example" from a personal call that
+ * had only two participants (a third participant's voice matched a similar profile). All 8
+ * label sites were rewritten correctly; the LLM summary still opened "the user,
+ * Sam, and Morgan talk through..." and the payload said nothing. An allowlist
  * ("this name was not confirmed") is far too weak here — he did not fail to
  * confirm this person, he explicitly said they were not in the room.
  */

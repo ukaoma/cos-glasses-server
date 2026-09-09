@@ -176,7 +176,7 @@ async function readRangeAt(path: string, offset: number, length: number): Promis
  * The last complete records before a byte offset, for the OPEN-time seed.
  *
  * WHY THIS EXISTS. The tail starts at the file's current size, so opening a session
- * that is already working showed an EMPTY page that filled one line at a time. Miles,
+ * that is already working showed an EMPTY page that filled one line at a time. the user,
  * on hardware: "the live session pulling is a little lackluster." You walk up to the
  * desk and the monitor is blank. The history is right there in the file; the tailer was
  * simply choosing not to read it.

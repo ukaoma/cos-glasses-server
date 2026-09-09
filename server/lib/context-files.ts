@@ -97,7 +97,7 @@ const NOTE_EXTENSIONS = ['.md', '.markdown', '.txt']
  *
  * SYMLINKS ARE FIRST-CLASS, and that is a correction. A `Dirent` reports a symlink
  * as `isSymbolicLink()`, NOT as `isDirectory()` or `isFile()`, so the first version
- * of this walk silently skipped every linked file and linked subfolder. Queen hit
+ * of this walk silently skipped every linked file and linked subfolder. Sam hit
  * exactly that on 2026-08-09: she wired `operations/memory` at her real note store
  * with a symlink, which worked only because `findDir` uses `statSync` and follows
  * links — anything linked one level deeper would have vanished with no error.

@@ -247,7 +247,7 @@ healthRouter.get('/health', async (_req, res) => {
     // COS Control's "Show Claude sessions" checkbox sourced its state from
     // GET /api/claude-sessions -- the call that also lists every session -- and the
     // panel never made that call. The box therefore rendered OFF whatever the
-    // setting was, and the setting was ON: Miles enabled it four times against a
+    // setting was, and the setting was ON: the user enabled it four times against a
     // control that could only ever show him false.
     //
     // This is a pure env read, so it costs nothing on a health poll, and health is

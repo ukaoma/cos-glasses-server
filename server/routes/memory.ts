@@ -54,6 +54,41 @@ import { normalizeReviewDecision, LEARNING_REVIEW_LIMIT,
 } from '../lib/cos-context-browser.js'
 
 export const memoryRouter = Router()
+memoryRouter.use((req, res, next) => {
+  if (['owner', 'audience', 'authority_host', 'authority_epoch'].some(key => key in req.query || (req.body && key in req.body))) {
+    res.status(400).json({ error: 'caller_authority_forbidden' }); return
+  }
+  next()
+})
+// Additive workspace protocol. The existing /memory array contract remains intact.
+// Authentication is the instance pairing token; caller fields cannot select an owner.
+const WORKSPACE_ACTIONS = new Set(['status', 'graph_expand', 'graph_paths', 'graph_resolve', 'list_explorations', 'get_exploration',
+  'save_exploration', 'save_assertion', 'policy_get', 'policy_set', 'memory_page', 'learning_page', 'review_page', 'get_memory', 'review_memory', 'trace_summary', 'source_status', 'refresh_source', 'current_sources', 'identity_split_preview', 'identity_status', 'identity_keep_apart', 'rule_page', 'propose_rule', 'review_rule', 'rollback_rule', 'activate_rule', 'rule_evaluation'])
+memoryRouter.post('/context/memory/workspace', async (req, res) => {
+  noStore(res)
+  const body = req.body
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !WORKSPACE_ACTIONS.has(body.action)
+      || ['owner','audience','actor','path','authority_host','authority_epoch'].some(key => key in body)) {
+    res.status(400).json({ error: 'invalid_workspace_request' }); return
+  }
+  const input = JSON.stringify(body)
+  if (Buffer.byteLength(input) > 512 * 1024) { res.status(413).json({ error: 'request_too_large' }); return }
+  const cancellation = new AbortController()
+  res.once('close', () => { if (!res.writableEnded) cancellation.abort() })
+  try {
+    const result = await callPython(['memory-workspace'], 20_000, input, cancellation.signal) as Record<string, unknown>
+    if (!result || typeof result !== 'object' || result.error) {
+      res.status(409).json(result || { error: 'invalid_workspace_response' }); return
+    }
+    if (result.protocol !== 1 || Buffer.byteLength(JSON.stringify(result)) > 900 * 1024) {
+      res.status(502).json({ error: 'unsupported_workspace_response' }); return
+    }
+    res.json(result)
+  } catch (error) {
+    res.status(503).json({ error: 'workspace_unavailable', message: error instanceof Error ? error.message : 'Workspace unavailable' })
+  }
+})
+
 let overviewCache: { expiresAt: number; value: ReturnType<typeof normalizeMemoryOverview> } | null = null
 
 memoryRouter.get('/context/status', async (_req, res) => {
@@ -211,7 +246,7 @@ memoryRouter.post('/context/learning/:id/review', async (req, res) => {
 
 // ── Memory review and guardrails (6.44.13) ──────────────────────────
 //
-// Accept stamps a captured memory as reviewed; prune deletes it. Both are
+// Accept activates a captured memory; prune quarantines it. Both are
 // review-ledger rows the timeline shows. The guardrails are the user's own
 // rules; a run scans, judges (rules, then an optional bounded model pass),
 // and prunes only with apply.
@@ -228,10 +263,10 @@ memoryRouter.post('/context/memory/:id/review', async (req, res) => {
     const answer = await callPython(['memory-review', `--id=${memoryId}`, `--decision=${decision}`, ...(note ? [`--note=${note}`] : [])], 20_000)
     const code = bridgeErrorCode(answer)
     if (code) { sendSetupError(res, code, answer); return }
-    const a = answer as { decision?: unknown; deleted?: unknown }
+    const a = answer as { decision?: unknown; deleted?: unknown; quarantined?: unknown; receipt?: unknown }
     const row = normalizeReviewDecision({ decision: a.decision })
     if (!row) { res.status(503).json({ error: 'memory_review_unavailable' }); return }
-    res.json({ decision: row, deleted: a.deleted === true })
+    res.json({ decision: row, deleted: a.deleted === true, ...(a.quarantined === true ? { quarantined: true } : {}), ...(a.receipt ? { receipt: a.receipt } : {}) })
   } catch (error) {
     console.warn('[context] memory review bridge failure:', (error as Error).message)
     res.status(503).json({ error: 'memory_unavailable' })
@@ -297,12 +332,12 @@ memoryRouter.post('/context/memory-guardrails/run', async (req, res) => {
 
 // ── Curation (6.44.14): the Manage sheet's merge, with a preview, a worker and a receipt ──
 //
-// Miles 2026-09-08: "Build the Manage merge path with the preview" and "address any of
-// the obvious duplicates like the miels and queen example without clobbering entities."
+// the user 2026-09-08: "Build the Manage merge path with the preview" and "address any of
+// the obvious duplicates like the alxe and sam example without clobbering entities."
 // The merge is a DETACHED worker: the two hand merges of 2026-09-08 took ~2 minutes of
 // vector-store rewriting, far past any request budget. The kickoff answers 202 with a
 // ticket; GET /context/graph/merge is the receipt to poll. Two people the graph knows
-// to be different (Miles Ukaoma / Miles Mallard) come back 409 merge_blocked.
+// to be different (Alex Example / Alex Other) come back 409 merge_blocked.
 
 function mergeNames(body: unknown): { source: string; target: string } | null {
   const b = (body ?? {}) as { source?: unknown; target?: unknown }
@@ -572,6 +607,7 @@ memoryRouter.get('/context/graph/ingest/progress', async (_req, res) => {
 function sendSetupError(res: import('express').Response, code: string, data: unknown): void {
   const detail = asDetail(data)
   if (code === 'not_owner') { res.status(409).json({ error: code, message: detail.message, owner_host: detail.owner_host ?? null }); return }
+  if (code === 'governed_merge_unavailable') { res.status(409).json({ error: code, message: detail.message }); return }
   if (code === 'embedding_locked' || code === 'embedding_mismatch') { res.status(409).json({ error: code, message: detail.message }); return }
   if (code === 'merge_blocked') {
     // 6.44.14: two entities the graph knows to be different people. The preview rides along so the page can say why.
@@ -676,8 +712,10 @@ memoryRouter.post('/context/graph/ask', async (req, res) => {
   if (!contextConfigured()) { res.status(503).json({ error: pythonBridgeState() }); return }
   const q = typeof (req.body as { q?: unknown } | undefined)?.q === 'string' ? ((req.body as { q: string }).q).trim() : ''
   if (q.length < 3 || q.length > KNOWLEDGE_ASK_MAX_CHARS) { res.status(400).json({ error: 'invalid_query', message: `q must be 3 to ${KNOWLEDGE_ASK_MAX_CHARS} characters` }); return }
+  const cancellation = new AbortController()
+  res.once('close', () => { if (!res.writableEnded) cancellation.abort() })
   try {
-    const data = await callPython(['graph-ask', `--q=${q}`], 150_000)
+    const data = await callPython(['graph-ask', `--q=${q}`], 150_000, undefined, cancellation.signal)
     const code = bridgeErrorCode(data)
     if (code) { sendSetupError(res, code, data); return }
     const answer = normalizeGraphAnswer(data)

@@ -54,7 +54,7 @@ const CLIENT_REQUEST_RE = /^[A-Za-z0-9._:-]{16,160}$/
 const MEDIA_ID_RE = /^m_[0-9a-f]{24}$/
 
 export function videoUploadV2Enabled(): boolean {
-  // Default ON since 6.37.0 (Miles 2026-08-25). Absent key = on; only a
+  // Default ON since 6.37.0 (the user 2026-08-25). Absent key = on; only a
   // literal '0' disables. NOTE: an in-flight upload sets blocksRestart, so a
   // drain caught mid-upload waits for it — that is the intended contract, not
   // a stuck gate, and must never be --forced.

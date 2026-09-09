@@ -12,7 +12,7 @@
 // and connectors it already has. So a "source" here is an instruction the
 // composer turns into one section of the prompt, and a user personalises the
 // brief by choosing sources and their windows rather than by editing prose.
-// Miles (2026-09-01): "the user should be able to define the different sources
+// the user (2026-09-01): "the user should be able to define the different sources
 // that will be pulled into their brief so that it's as useful as possible."
 
 import { chmodSync, mkdirSync } from 'node:fs'

@@ -8,9 +8,9 @@
 // WHY NOT DECODE THE PROJECT SLUG. Claude files transcripts under
 // `~/.claude/projects/<slug>/<id>.jsonl` where the slug is the cwd with separators
 // replaced. Decoding it back is LOSSY and wrong on this very machine:
-//     slug   -Users-ukaoma-Documents-GitHub-Ukaoma-Chief-Of-Staff-MU-Chief-Staff
-//     naive  /Users/ukaoma/Documents/GitHub/Ukaoma/Chief/Of/Staff/MU/Chief/Staff
-//     real   /Users/ukaoma/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff
+//     slug   -Users-example-Documents-GitHub-Example-Chief-Of-Staff-MU-Chief-Staff
+//     naive  /Users/example/Documents/GitHub/Example/Chief/Of/Staff/MU/Chief/Staff
+//     real   /Users/example/Documents/GitHub/Example Chief Of Staff/MU-Chief-Staff
 // The real path contains spaces AND hyphens, so the mapping is not invertible.
 // Resuming in the wrong cwd is not a harmless error: Claude associates a session
 // with its project, so a mismatched cwd risks writing a NEW session instead of

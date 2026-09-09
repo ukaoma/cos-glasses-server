@@ -405,7 +405,7 @@ const STRIPPED_ENV_KEYS: readonly string[] = ['CLAUDECODE', 'COS_API_TOKEN']
  * the prompt is the user's private text; stdin also matches what both ordinary
  * bridges already do.
  *
- * THE TURN INHERITS THE SESSION'S OWN PERMISSIONS (Miles, 2026-08-16, explicit).
+ * THE TURN INHERITS THE SESSION'S OWN PERMISSIONS (the user, 2026-08-16, explicit).
  *
  * This used to force two independent read-only layers: `--permission-mode plan`
  * plus an empty `--tools`/`--allowedTools` pair. The result was a Continue that

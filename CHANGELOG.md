@@ -1,9 +1,27 @@
+## 6.45.0
+
+Versioned local memory and explicit session identity for COS Control 0.5.207.
+
+- Ship the standalone memory runtime with owner-scoped journal records,
+  revision checks, idempotent operations, deletion frontiers, source provenance,
+  review history, and bounded relationship paths with identity constraints.
+- Expose memory workspace capabilities and installation diagnostics. Optional
+  private graph SDK integration remains in the configured local harness.
+- Resolve Claude Desktop aliases using explicit CLI identifiers, preserve real
+  forks with identical titles, and reject ambiguous or missing transcript targets.
+- Allow bounded descriptor scans on busy Macs while keeping attachment refusals
+  conservative. Reuse a refusal within one queue pass; check again before delivery.
+- Learning evidence distinguishes retrieval from application and observed
+  outcomes. The release does not claim measured long-term error reduction.
+- Refresh the tested query-parser dependency to qs 6.16.0, closing the
+  production dependency audit findings for array limits and isBuffer handling.
+
 ## 6.44.16
 
 A G2 recording keeps its session id when its sidecar only exists in the server's own recordings folder.
 
-- Chelsie and Queen, 2026-09-08: "Meetings to review is empty, and it says 3
-  recent meetings have no session id." On Miles's Mac the same three-row case
+- Casey and Sam, 2026-09-08: "Meetings to review is empty, and it says 3
+  recent meetings have no session id." On the user's Mac the same three-row case
   was three KC-week recordings whose markdown reached the operations tree
   through git while the `.g2-chunks.json` sidecar, which is gitignored there,
   did not; the row lost its session id and Speakers could not open it.
@@ -18,8 +36,8 @@ A G2 recording keeps its session id when its sidecar only exists in the server's
 
 Voice profiles named after a spoken sentence are repaired at load.
 
-- Chelsie 2026-09-08: her `voice-profiles.json` held two profiles whose name
-  was the entire enrolment speech ("My Voice My Name Is Chelsie Hodgkiss And I
+- Casey 2026-09-08: her `voice-profiles.json` held two profiles whose name
+  was the entire enrolment speech ("My Voice My Name Is Casey Example And I
   Am The Director…", ~600 characters), written by a client older than the
   8/25 guards. Speaker ID was "active" and could never match anything, and the
   file cannot be repaired by hand because the server rewrites it from memory.
@@ -38,17 +56,17 @@ Voice profiles named after a spoken sentence are repaired at load.
 The Manage sheet's merge, with a preview, a worker and a receipt, plus a
 duplicates scan that proposes and never merges.
 
-- Miles 2026-09-08: "Build the Manage merge path with the preview", and
-  "address any of the obvious duplicates like the miels and queen example
-  from above without clobbering entities. You did good in deflecting miles
-  mallard vs the other miles profiles."
+- the user 2026-09-08: "Build the Manage merge path with the preview", and
+  "address any of the obvious duplicates like the alxe and sam example
+  from above without clobbering entities. You did good in deflecting alex
+  mallard vs the other alex profiles."
 - `POST /api/context/graph/merge/preview` `{ source, target }`: both entities
   from this Mac's index, shared neighbors, the effect (relationships moved and
   collapsed, texts re-embedded, about how long), a name signal, warnings
   (types differ, larger into smaller, nothing links them, a large merge), and
   `blocked` with its reason for a pair the graph knows to be different people
-  (Miles Ukaoma / Miles Mallard, Manoj Bisht / Manoj Kumar, the Kyles, the
-  Jacobuses, and any pair the user kept apart).
+  (Alex Example / Alex Other, Jordan Example / Jordan Other, the Alexes, the
+  Jordans, and any pair the user kept apart).
 - `POST /api/context/graph/merge` `{ source, target, confirm: true, rule? }`:
   starts ONE detached worker on the ingestion owner and answers 202 with a
   ticket and the receipt. The worker takes the exclusive ingest lock, copies
@@ -66,7 +84,7 @@ duplicates scan that proposes and never merges.
   whole names within two letters, one name spelling out the other, a bare
   first name that matches exactly one full name), grouped under the full name
   with the most connections, with shared-neighbor counts and a confidence.
-  Possessives ("Miles Ukaoma's Son") and ambiguous first names are left alone;
+  Possessives ("Alex Example's Son") and ambiguous first names are left alone;
   blocked pairs never share a group. Nothing here merges.
 - Four bridge commands: `graph-merge-preview`, `graph-merge`,
   `graph-merge-status`, `graph-duplicates` (28 in the parity set).
@@ -78,7 +96,7 @@ duplicates scan that proposes and never merges.
 
 Prune or accept a captured memory, and guardrails that prune nonsense for you.
 
-- Miles 2026-09-07, looking at a captured decision that read "AAAA...":
+- the user 2026-09-07, looking at a captured decision that read "AAAA...":
   "we need the ability to either prune or accept the memory", and "an
   automated review ... another person could set their own guardrails that
   automatically just prune out stuff like this."
@@ -101,7 +119,7 @@ Prune or accept a captured memory, and guardrails that prune nonsense for you.
 
 The Knowledge down-select, and a fail-closed embedding gate.
 
-- Miles 2026-09-07: the local embeddings are the free path for people who
+- the user 2026-09-07: the local embeddings are the free path for people who
   run COS without an OpenAI key, and the setup's job is to help each person
   down-select. The `embedding` block now carries `preference.local_only`
   (the one question the user answers: may text leave this Mac?),
@@ -474,7 +492,7 @@ learned the hard way: a source that cannot be read produces one honest
 decision, a date, a dollar figure, an owner) make the cut; the scribe's
 extracted action-item list is never pasted verbatim. Enable the "Workspace
 skill" source with `/good-morning` and that skill's output IS the brief —
-which is how Miles's own routine rides this without being rewritten.
+which is how the user's own routine rides this without being rewritten.
 
 Surface:
 
@@ -970,7 +988,7 @@ topics, decisions and action items. Until now they got none of that, and the
 server compensated by returning the TRANSCRIPT in the summary slot -- which is
 why this was reported as "no proper summary and transcription."
 
-FEATURE DEFAULTS NOW ON (Miles 2026-08-25)
+FEATURE DEFAULTS NOW ON (the user 2026-08-25)
 
 Ship the capability active; users opt out of what they do not need. Each gate
 stays strict in the other direction -- only a literal '0' disables, so a stray
@@ -1321,7 +1339,7 @@ the assertion written for them.
 COS Control's "Show Claude sessions" checkbox sourced its state from
 `GET /api/claude-sessions` -- the call that also lists every session -- and the
 panel never made that call. The box rendered false while the setting was true, and
-Miles enabled it four times against a control that could only ever show him one
+the user enabled it four times against a control that could only ever show him one
 value. Health is what every other toggle on that panel already reads, and this is
 a pure env read, so it costs nothing on a poll.
 
@@ -1761,7 +1779,7 @@ bring the leftover cards back.
 
 
 ## 6.36.7
-- **A turn spoken at a busy thread is now queued instead of refused.** Miles: "if
+- **A turn spoken at a busy thread is now queued instead of refused.** the user: "if
   there's a session that's still running, that would just put it into the queue the same
   way that the user has the ability to do so." The thread was never stuck — measured at
   the moment he asked, its transcript mtime was 3s old against a 30s window, so the gate
@@ -1778,7 +1796,7 @@ bring the leftover cards back.
   attach and turn routes. Those carry the gate, the target fence, the per-target claim,
   the watermark, the idempotency ledger and the child-pid accounting; a second copy in a
   background worker would be a second place for the gate to drift.
-- **The watermark exemption, approved explicitly by Miles.** A queued turn drains after
+- **The watermark exemption, approved explicitly by the user.** A queued turn drains after
   the thread has moved on — that is what it waited for — so its binding is minted fresh
   at delivery. Checked as normal, a queue would fail 100% of the time. An interactive
   turn still gets the full divergence check.
@@ -1793,7 +1811,7 @@ bring the leftover cards back.
 
 
 ## 6.36.6
-- **The session digest follows the thread instead of its opening.** Miles, from the
+- **The session digest follows the thread instead of its opening.** the user, from the
   lens: "It's currently showing a legacy session that I had over a day ago... The
   discussion should show the questions that we're asking and a summary of those most
   recent things, not something that's the 'first' message." The whole budget now goes
@@ -2017,7 +2035,7 @@ bring the leftover cards back.
 - **Session bodies get a real digest.** `GET /api/agent-sessions/:provider/:id` adds
   `discussion_digest`: up to **2000 chars** of what actually happened — the opening
   ask, the most recent user turns in order, and where the assistant left off.
-- **The list row is untouched at 180.** Miles: "it should be in the body not the
+- **The list row is untouched at 180.** the user: "it should be in the body not the
   title, the row should be no more than the 180 characters." `discussion_summary`
   keeps its 180-char budget for the single-line row; the digest is a separate field
   the detail page reads. One shared field could not serve both — a 2000-char gist
@@ -2152,8 +2170,8 @@ bring the leftover cards back.
 
 **Measured reach, so callers do not assume more than it delivers.** The distance
 budget is 1 edit for 5-8 character words, so it catches single-edit misses
-(`Austen` → Austin, `Nyala` → Niala) but NOT `Miyala` → Niala (2 edits) or
-`Yukoma` → Ukaoma (3). Wiring it does **not** remove the need for explicit
+(`Austen` → Austin, `Nyala` → Riley) but NOT `Rileyy` → Riley (2 edits) or
+`Exampel` → Example (3). Wiring it does **not** remove the need for explicit
 `whisper_corrections` entries on multi-edit misses; the new test asserts both
 directions so that is not re-derived later.
 
@@ -2244,7 +2262,7 @@ four defects, since the writer was correct in every case. 8 mutations, all caugh
 
 A video attachment is summarized from stills. The old rule was one still per 15
 seconds, floored at 1 and capped at 8, which gave a 12 second clip **one** frame
-and a 44 second clip **three** - not enough to tell what a video contains. Miles,
+and a 44 second clip **three** - not enough to tell what a video contains. the user,
 on a fridge sweep: "it only selects three chunks from the video."
 
 - Frame count is now `clamp(round(seconds / 6), 8, 16)`. A 12s clip and a 44s
@@ -2354,7 +2372,7 @@ Proof: 460 suites / 1,515 tests, isolated runtime directory, plus clean TypeScri
 
 ## 6.24.3
 
-Auto-recovery of quarantined audio has never run in production. Miles saw the symptom
+Auto-recovery of quarantined audio has never run in production. the user saw the symptom
 for three turns: "1 recoverable" that opening the phone app could not clear.
 
 - **My call sat inside a bare `catch {}`.** `autoRecoverOneQuarantinedCapture()` was one
@@ -2427,8 +2445,8 @@ sidebar does.
 - `project` comes from the `cwd` on the session records, not from decoding the
   directory name. Claude Code replaces path separators with dashes and a real dash is
   indistinguishable from a separator afterwards, so
-  `-Users-ukaoma-Documents-GitHub-Ukaoma-Chief-Of-Staff-MU-Chief-Staff` decoded to
-  "Ukaoma-Chief-Of-Staff-MU-Chief-Staff" where the sidebar says "MU-Chief-Staff".
+  `-Users-example-Documents-GitHub-Example-Chief-Of-Staff-MU-Chief-Staff` decoded to
+  "Example-Chief-Of-Staff-MU-Chief-Staff" where the sidebar says "MU-Chief-Staff".
 
 ## 6.24.0
 
@@ -2454,7 +2472,7 @@ sessions on this Mac arrives behind a flag.
   31.7 MB was parsed synchronously per request, the detail endpoint included, on a
   process that also streams live audio; now async and cached against file identity
   (161ms cold, 15ms warm). And the filename filter matched iCloud sync-conflict
-  duplicates: `.session_index_cache_Ukaoma-Mac-Studio 3.json` shared 543 of its 602
+  duplicates: `.session_index_cache_Example-Mac-Studio 3.json` shared 543 of its 602
   rows with the canonical file, so the merged list served 543 duplicates. Verified on
   real data: 37,700 naive becomes 37,157 served, exactly 543 removed. Filtering ` N`
   filenames would have been wrong in the other direction, since ` 2.json` holds 245
@@ -2554,7 +2572,7 @@ hardcoded. 14 new tests here, full suite 1425 serially.
 
 ## 6.23.0
 
-A recording whose phone goes away now becomes a meeting on its own. Miles: "we end
+A recording whose phone goes away now becomes a meeting on its own. the user: "we end
 up with a meeting that is orphaned that we have no ability to keep."
 
 Found live while writing this: two sessions stranded for 184 and 24 minutes, holding
@@ -2609,7 +2627,7 @@ flake under file parallelism, which is a pre-existing isolation bug.
 ## 6.22.1
 
 Notes attached from somewhere else by a symlink are now read properly. Found by
-Queen within hours of 6.22.0, on the very first real setup.
+Sam within hours of 6.22.0, on the very first real setup.
 
 - **A symlinked subfolder or file was silently skipped.** `readdirSync` reports a
   symlink as `isSymbolicLink()`, never as `isDirectory()` or `isFile()`, so the walk
@@ -2846,15 +2864,15 @@ nothing she could name would work.
   correction row has recorded `proseStale: true` for exactly this since the feature
   shipped — and NOTHING read it.
 
-  Real case, 2026-08-07: Miles removed "Clem Ukaoma" from a personal call that was
-  only him and Queen (his father's voice matched a similar profile). All 8 label
-  sites were rewritten correctly. The LLM summary still opened "Miles, Queen, and
-  Clem talk through..." and the payload said nothing at all. The allowlist covered
+  Regression example (synthetic names): the user removed "Morgan Example" from a personal call that was
+  only him and Sam (a third participant's voice matched a similar profile). All 8 label
+  sites were rewritten correctly. The LLM summary still opened "the user, Sam, and
+  Morgan talk through..." and the payload said nothing at all. The allowlist covered
   it only as "not confirmed", which is far too weak: he did not fail to confirm
   that person, he explicitly said they were not in the room.
 
   The payload now carries `removedNames` and states it above the write-up: *"You
-  removed "Clem Ukaoma" from this meeting. The write-up below was written before
+  removed "Morgan Example" from this meeting. The write-up below was written before
   that and still uses the name: treat every mention of it as a capture error, not
   a participant."* The prose is left intact — the record stays, the correction
   travels beside it.
@@ -2897,7 +2915,7 @@ without the floor.
   person: `"MU" by wearing the device; "Gina Obert" by voice match; "Luke Henry"
   because a human named that voice`. Labels are quoted, so a typed "Smith, John"
   cannot read as two people, and the caveat now covers different SPELLINGS of a
-  confirmed name (labels are `MU` while the prose says "Miles").
+  confirmed name (labels are `MU` while the prose says "the user").
 
 - **A lone named voice no longer gets a share.** "100% of identified speech" is
   always true with one name and reads as "he did all the talking" — on 23 real
@@ -3135,7 +3153,7 @@ without the floor.
 - Review playback falls back to ext-audio. The 7-day archive introduced in
   6.21.18 is FORWARD-ONLY — it starts filling when a meeting is saved under that
   version — so on upgrade day the panel had no play buttons at all, which is what
-  Miles hit. ext-audio already holds 72 hours of unrecognised-speaker audio keyed
+  the user hit. ext-audio already holds 72 hours of unrecognised-speaker audio keyed
   by the same raw capture index; measured across 14 real meetings, 90-100% of
   those files correspond to a chunk the sidecar labels `Ext`. That is exactly the
   set a reviewer most needs to hear.
@@ -3149,7 +3167,7 @@ without the floor.
 ## 6.21.18
 
 Everything a human needs to correct who spoke, and to hear the voice before
-deciding. Four changes that landed together after Miles reviewed the 2026-08-06
+deciding. Four changes that landed together after the user reviewed the 2026-08-06
 Ditto meeting and found eleven attributed voices, most of them wrong.
 
 - A NAME MUST BE EARNED. `identifySpeaker` accepts a match at 0.55, so one
@@ -3170,7 +3188,7 @@ Ditto meeting and found eleven attributed voices, most of them wrong.
   discarding which meeting each sample came from, and now stamps
   `g2-training:<sessionId>`. Samples written before this are relabellable but not
   retractable.
-- MEETING AUDIO KEPT 7 DAYS, 8 GB budget (Miles's call: review should survive to
+- MEETING AUDIO KEPT 7 DAYS, 8 GB budget (the user's call: review should survive to
   a weekend). Chunk WAVs previously died with the batch pipeline —
   `session-audio` held 0 files. Hard-linked at the single choke point before the
   rename, so it costs no extra disk and outlives the pipeline's cleanup. Sized on
@@ -3201,7 +3219,7 @@ FIXES FOUND BY QA BEFORE PUBLISH (nothing above ever shipped):
   read "Unidentified voice" in 4 of 9 meetings, once with 285 of their own
   segments. `thrashesWith` still renders, so a mixed row is still visible.
 - DE-ATTRIBUTION NUMBERS ITS LABELS. `Unidentified 1`, `Unidentified 2`, … rather
-  than one shared `Ext`. Miles found five wrong attributions in one meeting;
+  than one shared `Ext`. the user found five wrong attributions in one meeting;
   collapsing them into a single row would have destroyed his ability to tell
   those voices apart, which is exactly what playback is for next.
 - DE-ATTRIBUTION DELETES THE ATTENDEE BULLET instead of renaming it. Renaming
@@ -3256,7 +3274,7 @@ Requires COS Control 0.5.0+ to use the scoped correction and playback surfaces.
 
 - `POST /api/meeting/:sessionId/relabel` — correct who a voice was in ONE
   meeting. Body `{ from, to, chunks?, confirm | dryRun, force? }`.
-- Per-meeting by design, not a global merge. Miles: "changing it doesn't mean
+- Per-meeting by design, not a global merge. the user: "changing it doesn't mean
   that all previous chunks should also be moved. It should be meeting by
   meeting, with the goal of hardening or refining the voice profiles." The
   identifier mishearing a voice in one room is not evidence that every past
@@ -3276,7 +3294,7 @@ Requires COS Control 0.5.0+ to use the scoped correction and playback surfaces.
   human never selected. The response says why rather than staying silent.
 - Narrative prose is NEVER rewritten — only reported as `proseStale` with the
   forms found. Verified on a real scribe: 6 of 12 speakers are referred to by
-  bare first name in the summary, and with two Kyles, two Jacobuses and two
+  bare first name in the summary, and with two Alexes, two Jordans and two
   Chrises in this org a first-name substitution would rewrite sentences about
   someone else. The confirmation message says this before a human commits.
 - `/api/health` reports `speaker_corrections` (sessions, applied, pending,
@@ -3296,7 +3314,7 @@ Requires COS Control 0.5.0+ to use the scoped correction and playback surfaces.
 - `Ext` is deliberately included. An unidentified voice is the one case with no
   other route to being trained at all.
 - RETENTION IS 14 DAYS, not the 8 hours used for audio snippets
-  (`COS_CHUNK_EMBEDDING_TTL_DAYS` to change it). Two reasons, both worth Miles
+  (`COS_CHUNK_EMBEDDING_TTL_DAYS` to change it). Two reasons, both worth the user
   overriding if he disagrees: 8 hours cannot survive a weekend, so a Friday
   meeting could never be corrected on Monday; and an embedding is not audio — it
   is a non-invertible timbre vector that cannot be played back, so the privacy
@@ -3596,7 +3614,7 @@ unsaved capture, and makes batch status stop lying about finished work.
 - **Unsaved captures are visible.** `/api/health` gains `unsaved_captures`
   (count + compact items, same exposure level as `meeting_sync`). The
   authenticated `GET /api/meeting/orphans` returns full detail.
-- **Miles-triggered recovery, surface-only by decision (2026-08-02).**
+- **the user-triggered recovery, surface-only by decision (2026-08-02).**
   `POST /api/meeting/orphans/:sessionId/recover` batch-transcribes the
   quarantined WAVs (same segment/enhance/Metal-preempt contract as HQ polish,
   under a new `orphan_recovery` maintenance lease), writes a durable scribe,
@@ -4066,9 +4084,9 @@ unsaved capture, and makes batch status stop lying about finished work.
 
 ### A cloned Codex conversation gets its own identity
 
-Miles forked "Markt POS 2.0 build" into "POS Nation 3.0 build" and the fork never
+the user forked "Example project 2.0 build" into "Example project 3.0 build" and the fork never
 appeared in the sessions list. It had not failed to index -- it was indexed AS ITS
-PARENT. The list showed one `Markt POS 2.0 build` row whose modified time was the
+PARENT. The list showed one `Example project 2.0 build` row whose modified time was the
 fork's activity: two conversations, one identity, and the newer one invisible.
 
 Cloning copies the parent's `session_meta` record wholesale, so the new rollout carries
@@ -4094,7 +4112,7 @@ and a clone of a clone doubles again.
 
 ### The seeded query was being crowded out by the steps
 
-Caught by probing the live stream after shipping 6.36.2, before Miles tested it: a
+Caught by probing the live stream after shipping 6.36.2, before the user tested it: a
 real session seeded 8 events -- 6 tool calls, one prose, one status -- and **no
 prompt**. The seed took "the last 7 events of any kind", and in a busy run the
 user's question is twenty or thirty steps back, so the activity you opened the page
@@ -4111,12 +4129,12 @@ scrolling window.
 
 ### The live view stops being a blank slate
 
-Three changes, all from Miles watching a real session on hardware.
+Three changes, all from the user watching a real session on hardware.
 
 - **The user's query is now an event.** A `user` record used to be dropped whole,
   on the reasoning that "the prompt came from this device" -- true of a Continue
   turn and false of the case that matters most, a session running in a Mac window
-  where that record is the question Miles typed there and the glasses have never
+  where that record is the question the user typed there and the glasses have never
   seen it. Dropping it is why the lens said WORKING and gave no clue what it was
   working ON. Tool results stay dropped; harness wrappers
   (`<system-reminder>`, `<cos-alarms>`, the memory and bulletin blocks) are
@@ -4145,7 +4163,7 @@ Needs COS Glasses 6.8.374 to render any of it.
 
 ### A reply keeps its line structure
 
-Miles, from a G2 screenshot: a session reply arrived on the lens as one unbroken
+the user, from a G2 screenshot: a session reply arrived on the lens as one unbroken
 paragraph carrying three headings and six bullets, none of them visible.
 
 `proseBody` collapsed ALL whitespace, and both the one-line list gist and the
@@ -4213,7 +4231,7 @@ Needs COS Glasses 6.8.372 to be visible. An older app never calls the route.
 
 ### The newest assistant reply arrives whole instead of at 160 characters
 
-- **The defect.** Miles opened a session on the glasses and the newest reply was cut
+- **The defect.** the user opened a session on the glasses and the newest reply was cut
   off mid-sentence. The session detail payload had NO full-text field: it carried
   `discussion_summary` (180 chars) and `discussion_digest` (2000), and the newest
   reply appeared only as the `Latest:` line inside the digest, produced by
@@ -4283,7 +4301,7 @@ Needs COS Glasses 6.8.372 to be visible. An older app never calls the route.
 ### A continued turn now runs with the session's own permissions
 
 - **This widens what Continue can do.** A prompt spoken into the glasses can run
-  tools on the Mac with nobody at the keyboard. Authorized explicitly by Miles
+  tools on the Mac with nobody at the keyboard. Authorized explicitly by the user
   after his first real continued turn came back reporting that every tool was
   disabled, which is not the point of the feature.
 - Claude drops `--permission-mode plan` and the empty `--tools`/`--allowedTools`

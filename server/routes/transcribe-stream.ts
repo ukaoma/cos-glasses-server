@@ -144,7 +144,7 @@ const THANKYOU_FILTER = process.env.COS_WHISPER_THANKYOU_FILTER !== '0'
 const MEETING_PREVIEW_MAX_BYTES = 512 * 1024
 let meetingPreviewBusy = false
 
-// DEFAULT ON as of 6.21.22 (Miles, 2026-08-06: "I want it to default to being
+// DEFAULT ON as of 6.21.22 (the user, 2026-08-06: "I want it to default to being
 // on... it's stable and makes meetings so much better"). Opt-OUT now, matching
 // STRIP_BRAND_URLS / THANKYOU_FILTER above: set COS_WHISPER_MEETING_PREVIEW=0
 // to disable. The committed Large-v3 transcript remains authoritative and

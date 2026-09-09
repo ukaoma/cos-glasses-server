@@ -2,7 +2,7 @@
 // one id space, disjoint prefixes — so a reference is never ambiguous about which
 // one it means. `.` is permitted because a file id carries its extension; it
 // cannot traverse, since `/` is excluded and a bare `..` cannot match the prefix.
-export const MEMORY_ID_PATTERN = /^(?:mem|file)_[A-Za-z0-9._:-]{1,120}$/
+export const MEMORY_ID_PATTERN = /^(?:mem|file|point)_[A-Za-z0-9._:-]{1,160}$/
 export const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
@@ -33,7 +33,7 @@ const UNC_PATH = /\\\\[A-Za-z0-9._-]+\\(?:[^\\\r\n]+\\?)*/g
 /**
  * Trim a greedy path match back to its last plausible component.
  *
- * Keeps `…/Ukaoma Chief Of Staff/MU/ops/comp.md` whole (every space is followed by
+ * Keeps `…/Example Chief Of Staff/MU/ops/comp.md` whole (every space is followed by
  * more path) while not swallowing the trailing prose in `/Users/me/x.md here`.
  * A component qualifies if it is followed by a `/` or contains a dot.
  */
@@ -208,7 +208,7 @@ export function normalizeMemoryList(value: unknown, limit: number): MemoryListIt
   for (const row of value.slice(0, Math.max(0, Math.min(limit, 50)))) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) continue
     const source = row as Record<string, unknown>
-    const id = cleanContextText(source.id, 128)
+    const id = cleanContextText(source.id, 170)
     if (!MEMORY_ID_PATTERN.test(id)) continue
     result.push({
       id,
@@ -242,7 +242,7 @@ export function normalizeMemoryDetail(value: unknown): (MemoryListItem & {
 function normalizeThread(value: unknown, detail: boolean): ThreadListItem | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const source = value as Record<string, unknown>
-  const id = cleanContextText(source.id, 128)
+  const id = cleanContextText(source.id, 170)
   if (!THREAD_ID_PATTERN.test(id)) return null
   const rawMeetings = Array.isArray(source.meetings) && source.meetings.length
     ? source.meetings
@@ -663,6 +663,7 @@ export function normalizeGraphStatus(value: unknown): Record<string, unknown> {
   const processor = asRecord(source.processor) ?? {}
   const indexState = stringOrAbsent(source.index_state, 32)
   return {
+    engine: stringOrAbsent(source.engine, 48) ?? 'lightrag',
     entities: integerOrAbsent(source.entities) ?? null,
     relationships: integerOrAbsent(source.relationships) ?? null,
     source_updated_at: isoOrAbsent(source.source_updated_at) ?? null,
@@ -913,7 +914,16 @@ export function normalizeExtractionBlock(value: unknown): Record<string, unknown
     const r = asRecord(row); const id = r ? stringOrAbsent(r.id, 16) : undefined
     return id ? [{ id, label: stringOrAbsent(r!.label, 40) ?? id, detail: stringOrAbsent(r!.detail, 200) ?? '', selected: r!.selected === true }] : []
   })
-  return { tier: stringOrAbsent(x.tier, 16) ?? null, label: stringOrAbsent(x.label, 40) ?? null, detail: stringOrAbsent(x.detail, 200) ?? null, tiers }
+  const run = asRecord(x.execution)
+  const execution = run ? {
+    provider: stringOrAbsent(run.provider, 40) ?? null,
+    requested_model: stringOrAbsent(run.requested_model, 120) ?? null,
+    reasoning_effort: stringOrAbsent(run.reasoning_effort, 20) ?? null,
+    actual_identity: stringOrAbsent(run.actual_identity, 120) ?? 'unverified',
+    state: stringOrAbsent(run.state, 40) ?? 'unknown',
+    error: stringOrAbsent(run.error, 160) ?? null,
+  } : null
+  return { tier: stringOrAbsent(x.tier, 16) ?? null, label: stringOrAbsent(x.label, 40) ?? null, detail: stringOrAbsent(x.detail, 200) ?? null, tiers, execution }
 }
 export interface KnowledgeSetupSource { path: string; enabled: boolean; exists: boolean; files: number | null; added_at: string | null }
 
@@ -1032,7 +1042,8 @@ export function normalizeGuardrails(value: unknown): Record<string, unknown> | n
     max_repeat_ratio: typeof g.max_repeat_ratio === 'number' && Number.isFinite(g.max_repeat_ratio) ? g.max_repeat_ratio : 0.5,
     banned_patterns: (Array.isArray(g.banned_patterns) ? g.banned_patterns : []).filter((p): p is string => typeof p === 'string').slice(0, 50).map(p => p.slice(0, 200)),
     llm_review: {
-      enabled: llm.enabled === true,
+      ...(typeof llm.supported === 'boolean' ? { supported: llm.supported } : {}),
+      enabled: llm.supported !== false && llm.enabled === true,
       model: (GUARDRAIL_LLM_TIERS as readonly string[]).includes(String(llm.model)) ? String(llm.model) : 'haiku',
       max_per_run: integerOrAbsent(llm.max_per_run) ?? 20,
     },

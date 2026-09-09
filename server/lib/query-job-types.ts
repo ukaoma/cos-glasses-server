@@ -55,7 +55,7 @@ export interface QueryJobPromptReference {
 /**
  * Who STARTED a job, when it was not the person holding the phone or the
  * glasses. A label, nothing more: the server never infers anything from its
- * absence (Miles, 2026-09-02). `routine` is the scheduler (`morning-brief`),
+ * absence (the user, 2026-09-02). `routine` is the scheduler (`morning-brief`),
  * `task` is a dispatch of a captured task (the id is the task's 12-hex id).
  * Human prompts typed on the phone carry no origin. The phone stamps `g2`
  * locally for prompts spoken on the glasses, as a bare string; if that string

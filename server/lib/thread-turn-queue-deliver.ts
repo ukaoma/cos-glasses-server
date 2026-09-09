@@ -17,7 +17,7 @@
 // against a current baseline, which is what the user meant by queueing it: "append this
 // to whatever the thread is when it frees". An interactive turn still gets the full
 // divergence check, because there the user composed against a state they were looking
-// at and a silent change is genuinely surprising. Miles approved this explicitly.
+// at and a silent change is genuinely surprising. the user approved this explicitly.
 //
 // FAILS CLOSED, AND AMBIGUITY IS A FAILURE. Anything other than a clean admission
 // resolves `ok: false`, which returns the turn to the queue rather than marking it

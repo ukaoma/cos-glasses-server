@@ -1,4 +1,4 @@
-// Message-number eras let Miles start again at #1 without deleting history.
+// Message-number eras let the user start again at #1 without deleting history.
 // Old sessions/day archives remain immutable and browseable; the current era
 // alone owns short voice references such as "reference message 4".
 //

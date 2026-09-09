@@ -574,7 +574,7 @@ export function listCosOperationsMeetings(options: {
               meta.mutable = true
               meta.canonicalRecord = `operations/${domain}/meetings/${month}/${file}`
               // The sidecar is gitignored in the operations tree, so a G2 recording
-              // whose markdown arrived through git or iCloud (three of Miles's KC-week
+              // whose markdown arrived through git or iCloud (three of the user's KC-week
               // recordings, 2026-09-08) sits there without one and the row loses its
               // session id, which reads as "cannot be reviewed". The server that saved
               // it still holds the sidecar under its own recordings root by the same

@@ -107,7 +107,7 @@ function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
 async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { signal?: AbortSignal }): Promise<string> {
   let cleaned = applyNegativeRules(applyCorrections(text)).replace(/\s+/g, ' ').trim() || text
   // applyCorrections above is an EXACT string map, so it only fixes misspellings someone
-  // already hand-authored. A novel miss ("Miyala" for Niala, "Yukoma" for Ukaoma) sails
+  // already hand-authored. A novel miss ("Rileyy" for Riley, "Exampel" for Example) sails
   // through it. The Levenshtein pass is what catches those, and until now it had exactly
   // ONE call site — transcribe-audio.ts:252, the server-transcription route — so phone
   // Moonshine dictation, which arrives here as text, never got it. Same construction and

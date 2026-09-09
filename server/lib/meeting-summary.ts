@@ -89,7 +89,7 @@ export const meetingSummaryBreaker = breaker
  *  environment on update, and tests flip this per-case; a module-scope const
  *  would freeze the value at import and make both untestable.
  *
- *  DEFAULT ON since 6.37.0 (Miles 2026-08-25). Shipping this off meant the
+ *  DEFAULT ON since 6.37.0 (the user 2026-08-25). Shipping this off meant the
  *  headline fix — a meeting that comes back with a real summary — reached
  *  nobody unless they found an undocumented env var.
  *

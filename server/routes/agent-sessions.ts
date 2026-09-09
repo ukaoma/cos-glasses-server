@@ -198,7 +198,7 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
  * the hint from whichever list row the user tapped. That worked exactly once: the
  * detail page was a single fetch, so the borrowed flags were frozen at the moment
  * it opened and could never clear, which is half of why a finished session stayed
- * "active" on the glasses until Miles navigated away. A page that polls needs a
+ * "active" on the glasses until the user navigated away. A page that polls needs a
  * payload that carries its own liveness.
  *
  * NEARLY FREE HERE. The handler has already resolved the transcript path and
@@ -382,7 +382,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       first_prompt: parsed.first_prompt,
       discussion_summary: parsed.discussion_summary || '',
       // Detail only. The list row (line 73) deliberately stays on the 180-char
-      // summary — Miles: "it should be in the body not the title, the row should
+      // summary — the user: "it should be in the body not the title, the row should
       // be no more than the 180 characters."
       discussion_digest: parsed.discussion_digest || '',
       // The newest assistant reply, whole. ADDITIVE: the digest above still carries

@@ -29,7 +29,7 @@
 //
 // Consequence, measured on `meeting_1786628481833_eagkaz`: naming one voice
 // enrolled 73 of 103 rows belonging to OTHER PEOPLE — 22 chunks of MU (the device
-// owner), 16 Vikas, 10 Vishnu, 8 Niranjan, 7 Anil, 6 Chris, 3 Manoj, 1 Navaz, and
+// owner), 16 Riley, 10 Taylor, 8 Casey, 7 Morgan, 6 Chris, 3 Jordan, 1 Jamie, and
 // only 30 that were actually the named voice. It reported SUCCESS, because rows do
 // come back from the store; they were simply the wrong rows.
 //

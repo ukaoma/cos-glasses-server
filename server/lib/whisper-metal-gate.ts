@@ -1,6 +1,6 @@
 // GPU admission control for post-meeting batch HQ transcription.
 //
-// THE PROBLEM: Miles goes meeting -> meeting. Meeting A's post-save HQ polish
+// THE PROBLEM: the user goes meeting -> meeting. Meeting A's post-save HQ polish
 // (whisper-cli large-v3) often overlaps Meeting B's live ASR. Both want Metal.
 // 6.14.1 fixed the clash bluntly by pinning batch to CPU forever, which taxes
 // every idle polish to protect the overlap case.

@@ -29,7 +29,7 @@
 //     process also streams live audio, so that blocked the event loop. Now async
 //     and cached against file identity.
 //  4. The filename filter matched iCloud sync-conflict duplicates. On this machine
-//     `.session_index_cache_Ukaoma-Mac-Studio 3.json` shares 543 of its 602 rows
+//     `.session_index_cache_Example-Mac-Studio 3.json` shares 543 of its 602 rows
 //     with the canonical file, so the merged list served 543 duplicates. Filtering
 //     ` N` filenames out would be wrong in the other direction: ` 2.json` holds 245
 //     rows that appear nowhere else. Dedupe therefore happens by session_id, newest

@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 // WHY
 // ---------------------------------------------------------------------------
-// Miles, 2026-08-17, looking at a thread he could not continue: "This thread, the
+// the user, 2026-08-17, looking at a thread he could not continue: "This thread, the
 // COS-glasses server, has actually completed, but it's still locked. Ideally, what would
 // happen is if there's a session that's still running, that would just put it into the
 // queue the same way that the user has the ability to do so." His example was his own
@@ -31,7 +31,7 @@
 // when it can never run is worse than refusing.
 //
 // ---------------------------------------------------------------------------
-// THE WATERMARK EXEMPTION -- Miles approved this explicitly
+// THE WATERMARK EXEMPTION -- the user approved this explicitly
 // ---------------------------------------------------------------------------
 // A binding carries a content watermark, and a write is refused with
 // `native_thread_changed` when the thread's head digest moved since the turn was
@@ -46,7 +46,7 @@
 // divergence check, because there the user composed against a state they were looking
 // at and a silent change is genuinely surprising.
 //
-// Miles, asked directly before this was built: "Yeah, this is a fine exemption."
+// the user, asked directly before this was built: "Yeah, this is a fine exemption."
 //
 // ---------------------------------------------------------------------------
 // WHAT MAKES A TURN READY, AND WHY NOT "IDLE"

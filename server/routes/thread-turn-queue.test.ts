@@ -20,7 +20,7 @@ import { rmSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { createThreadTurnQueueRouter, drainThread, type ThreadTurnQueueDeps } from './thread-turn-queue.js'
 import { readQueue, writeQueue } from '../lib/thread-turn-queue-store.js'
-import type { QueuedThreadTurn } from '../lib/thread-turn-queue.js'
+import { MAX_QUEUED_PER_THREAD, MAX_DELIVERY_ATTEMPTS, QUEUED_TURN_TTL_MS, FENCE_HELD_TURN_TTL_MS, type QueuedThreadTurn } from '../lib/thread-turn-queue.js'
 
 let server: Server | null = null
 /** Unique per test, so two tests cannot see each other's queue file. */
@@ -242,6 +242,31 @@ describe('the drainer', () => {
     })
     expect(delivered).toEqual(['ct-1'])
     expect(readQueue('claude', threadId, clock).find(t => t.clientTurnId === 'ct-2')!.status).toBe('waiting')
+  })
+
+  it('scans a refused thread once per drain and checks it again next time', async () => {
+    await start()
+    for (let i = 0; i < MAX_QUEUED_PER_THREAD; i++) await park(`ct-${i}`)
+    const occupancy = vi.fn(() => gate)
+    expect((await drainThread('claude', threadId, { ...deps(), occupancy })).held).toBe(MAX_QUEUED_PER_THREAD)
+    expect(occupancy).toHaveBeenCalledTimes(1)
+    await drainThread('claude', threadId, { ...deps(), occupancy })
+    expect(occupancy).toHaveBeenCalledTimes(2)
+    expect(delivered).toEqual([])
+  })
+
+  it('still applies each row expiry and attempt ceiling under one fence refusal', async () => {
+    await start(); await park('old'); await park('exhausted'); await park('fence-held')
+    clock = FENCE_HELD_TURN_TTL_MS + 10_000
+    const rows = readQueue('claude', threadId, clock)
+    rows[0].queuedAt = clock - FENCE_HELD_TURN_TTL_MS
+    rows[1].queuedAt = clock - 1; rows[1].attempts = MAX_DELIVERY_ATTEMPTS
+    rows[2].queuedAt = clock - QUEUED_TURN_TTL_MS - 1
+    writeQueue('claude', threadId, rows)
+    const occupancy = vi.fn(() => ({ attachable: false, reason: 'native_target_fenced' }))
+    expect(await drainThread('claude', threadId, { ...deps(), occupancy })).toEqual({ delivered: 0, held: 1, retired: 2 })
+    expect(occupancy).toHaveBeenCalledTimes(1)
+    expect(readQueue('claude', threadId, clock).map(t => t.status)).toEqual(['expired', 'refused', 'waiting'])
   })
 })
 

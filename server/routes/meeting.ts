@@ -30,7 +30,7 @@ import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
  * The label a de-attributed voice takes, numbered within its meeting.
  *
  * NOT a shared `Ext`. De-attributing to one label folded every corrected voice
- * into a single row — on the 2026-08-06 Ditto meeting Miles named five wrong
+ * into a single row — on the 2026-08-06 Ditto meeting the user named five wrong
  * attributions, and collapsing them would have destroyed his ability to tell
  * those five voices apart, which is precisely what he needs playback for next.
  *
@@ -807,7 +807,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // ── Per-meeting speaker relabel (6.21.16) ─────────────────────────────
   //
   // Corrects who a voice was in ONE meeting. Deliberately not a global merge:
-  // Miles, on the design — "changing it doesn't mean that all previous chunks
+  // the user, on the design — "changing it doesn't mean that all previous chunks
   // should also be moved. It should be meeting by meeting, with the goal of
   // hardening or refining the voice profiles." The identifier mishearing a voice
   // in one room is not evidence that every past attribution was wrong.
@@ -927,9 +927,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       durationMs: review.durationMs || 0,
       // Names this human explicitly de-attributed. The ledger has recorded
       // `proseStale` on every applied de-attribution since the feature shipped and
-      // NOTHING has ever read it: on 2026-08-07 Miles removed "Clem Ukaoma" from a
-      // call that was only him and Queen, all 8 label sites were rewritten, and the
-      // summary still opened "Miles, Queen, and Clem talk through..." with no
+      // NOTHING has ever read it: on 2026-08-07 the user removed "Morgan Example" from a
+      // call that had only two participants, all 8 label sites were rewritten, and the
+      // summary still opened "the user, Sam, and Morgan talk through..." with no
       // indication anywhere in the payload.
       removed: appliedCorrections(sessionId)
         .filter(r => isUnattributed(r.to))
@@ -1292,7 +1292,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   //
   // The inverse of naming an unknown voice: this voice was NOT that person.
   //
-  // Miles, on the 2026-08-06 Ditto meeting: none of the eleven attributed
+  // the user, on the 2026-08-06 Ditto meeting: none of the eleven attributed
   // voices were actually in the room, and there was no way to say so. Naming an
   // unknown was possible; un-naming a wrong guess was not.
   //
@@ -1633,7 +1633,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
   // ── Review playback (6.21.18) ─────────────────────────────────────────
   //
-  // Miles: "I can quickly play that, and I'm going to hear the voice and know
+  // the user: "I can quickly play that, and I'm going to hear the voice and know
   // immediately who the speaker is. As a final confirmation."
   //
   // A phrase in the panel is a weaker signal than three seconds of the actual
@@ -1781,7 +1781,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   })
 
   // ── Unsaved-capture recovery (6.19.0) ─────────────────────────────────
-  // Surface-only by decision (Miles, 2026-08-02): the server NEVER drives
+  // Surface-only by decision (the user, 2026-08-02): the server NEVER drives
   // recovery on its own. It lists what the quarantine holds, and one
   // authenticated POST drives one capture to a durable scribe.
   const recoveringOrphans = new Set<string>()

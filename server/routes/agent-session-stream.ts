@@ -245,7 +245,7 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // THE SEED. The last few steps of what already happened, before anything live.
   //
   // Without it, opening a session that is already working shows an empty page that
-  // fills one line at a time, which is what Miles reported from hardware. The screen
+  // fills one line at a time, which is what the user reported from hardware. The screen
   // should look like a monitor you just walked up to, not one that was switched on.
   //
   // BOUNDED TO WHAT THE LENS CAN SHOW. `SEED_EVENTS` is the live window, so the seed

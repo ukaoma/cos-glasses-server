@@ -1,6 +1,6 @@
 // What may become a voice-profile name.
 //
-// WHY THIS EXISTS (Chelsie Hodgkiss, first-time user, 2026-08-25)
+// WHY THIS EXISTS (Casey Example, first-time user, 2026-08-25)
 // Saying "enroll my voice" and continuing to talk produced a profile whose
 // NAME was the entire ~40-second transcript. Two runs, two junk profiles, one
 // embedding each. Because no junk name ever equals owner_speaker_label,
