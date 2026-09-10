@@ -34,7 +34,8 @@
 //     That is the intended chain: detector_unavailable is for "no such install",
 //     probe_failed is for "the mechanism exists and broke".
 
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { readdir } from 'node:fs/promises'
 import {
   closeSync,
   constants as fsConstants,
@@ -358,6 +359,7 @@ export function lockHolders(path: string): number[] {
   // `--` terminates option parsing so a path can never be read as a flag; `-w`
   // suppresses mount-point warnings that would otherwise make a successful probe
   // look like the failure case below.
+  lockSnapshotStats.single += 1
   return interpretLockHolders(runProbe(LSOF_BIN, ['-w', '-t', '--', path], LOCK_PROBE_TIMEOUT_MS), path)
 }
 
@@ -405,6 +407,252 @@ export function interpretLockHolders(out: ProbeOutcome, path: string): number[] 
     pids.add(pid)
   }
   return [...pids]
+}
+
+// ------------------------------------------------------------- batched lock probe
+//
+// MEASURED 2026-09-10. One `lsof -t` on one lock is a whole-system descriptor scan:
+// 2.25 to 2.35 s on this Mac across three runs, and `lockHolders` runs it with
+// `execFileSync`, so every listed Codex row that still has a writer lock on disk
+// froze the ENTIRE glasses server for that long — a `/api/health` poll measured
+// 2.52 s during one list request. Seven locks sat in `thread-writer-locks`, all held
+// open by the Codex app. Passing all seven paths to a single lsof cost 3.07 s, one
+// scan instead of seven, and the async form leaves the event loop free.
+//
+// THIS IS FOR THE DISPLAY HINT ONLY. `lockHolders` above is unchanged and is what
+// the write gate (`threadOccupancy` at attach and turn time) keeps calling: a fresh
+// synchronous probe at the moment of the write. A snapshot can be up to
+// LOCK_SNAPSHOT_TTL_MS stale, which is fine for a badge and not for a gate.
+//
+// Doubt stays doubt. A path lsof named in a status error is checked with our own
+// lstat exactly as the single probe does: absent means no holders, anything else is
+// recorded as doubt and the wrapper THROWS for that path, so the scan marks the
+// thread degraded rather than free.
+
+/** How long a lock snapshot is FRESH: a list inside this window spawns nothing. */
+export const LOCK_SNAPSHOT_TTL_MS = 10_000
+/**
+ * How long a STALE snapshot may still answer while a refresh runs behind it. A
+ * reopen between 10 s and 60 s after the last probe gets the old badge at once and
+ * the new one on the next poll; past 60 s the list waits for a fresh probe. The
+ * held-lock badge changes on the scale of minutes (a Codex window opening or
+ * closing), so a minute of lag on a display hint is the whole price.
+ */
+export const LOCK_SNAPSHOT_MAX_AGE_MS = 60_000
+
+export interface LockHolderSnapshot {
+  /** Locks directory the snapshot describes. */
+  dir: string
+  /** Epoch ms the probe finished. */
+  at: number
+  /** Holders per lock path. A path present with [] was probed and nobody holds it. */
+  holders: Map<string, number[]>
+  /** Paths the probe could not settle, with the reason. */
+  doubt: Map<string, string>
+}
+
+/**
+ * Counters for tests. `probes` is batched lsof runs; `single` is the synchronous
+ * per-lock `lockHolders` runs, which a list served from a snapshot must never make.
+ */
+export const lockSnapshotStats = { probes: 0, single: 0 }
+
+function refuseUnlessLockPath(path: string): void {
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    throw new Error('batchLockHolders: refusing an unusable path')
+  }
+  const name = basename(path)
+  if (!name.endsWith('.lock') || !NATIVE_THREAD_ID_RE.test(name.slice(0, -'.lock'.length))) {
+    throw new Error('batchLockHolders: refusing a path that is not a <native-thread-id>.lock')
+  }
+}
+
+/**
+ * Turn one batched `lsof -F pn` run into holders per requested path, or throw when
+ * the run as a whole cannot be trusted.
+ *
+ * Field output is one record per line: `p<pid>` opens a process, then `f<fd>` and
+ * `n<path>` pairs follow for each descriptor. Paths lsof was not asked about are
+ * ignored. A requested path missing from stdout is unheld unless stderr carries a
+ * `status error on <path>` for it, in which case our own lstat decides between
+ * absent (no holders) and doubt.
+ */
+export function interpretBatchLockHolders(out: ProbeOutcome, paths: readonly string[]): { holders: Map<string, number[]>; doubt: Map<string, string> } {
+  const holders = new Map<string, number[]>()
+  const doubt = new Map<string, string>()
+  const wanted = new Set(paths)
+  if (!out.ok) {
+    if (out.spawnError !== null) throw new Error(`batchLockHolders: lsof unavailable (${out.spawnError})`)
+    if (out.killed) throw new Error('batchLockHolders: lsof timed out')
+    // MEASURED: lsof exits 1 whenever ANY requested file has no holder, while
+    // still printing the holders of the others. So exit 1 is the ordinary mixed
+    // reading for a batch and its stdout is parsed like a clean run; empty
+    // stdout on exit 1 is "nobody holds any of them". Only another status is a
+    // run this reading cannot trust.
+    if (out.status !== 1) {
+      throw new Error(`batchLockHolders: lsof failed (status=${out.status}) ${out.stderr.trim().slice(0, 160)}`)
+    }
+  }
+  const pidsByPath = new Map<string, Set<number>>()
+  let pid: number | null = null
+  for (const raw of out.stdout.split('\n')) {
+    const line = raw.trimEnd()
+    if (line.length === 0) continue
+    const tag = line[0], value = line.slice(1)
+    if (tag === 'p') {
+      if (!/^\d+$/.test(value)) throw new Error('batchLockHolders: unrecognised lsof output')
+      const parsed = Number(value)
+      if (!isProbablePid(parsed)) throw new Error('batchLockHolders: lsof reported an implausible pid')
+      pid = parsed
+    } else if (tag === 'n') {
+      if (pid === null) throw new Error('batchLockHolders: unrecognised lsof output')
+      if (!wanted.has(value)) continue
+      const set = pidsByPath.get(value) ?? new Set<number>()
+      set.add(pid)
+      pidsByPath.set(value, set)
+    }
+    // `f` and any other field is descriptor detail this reading does not use.
+  }
+  for (const path of wanted) {
+    const pids = pidsByPath.get(path)
+    if (pids) {
+      holders.set(path, [...pids])
+      continue
+    }
+    if (out.stderr.includes(`status error on ${path}:`)) {
+      if (presence(path) === 'absent') holders.set(path, [])
+      else doubt.set(path, 'lsof could not inspect the lock')
+      continue
+    }
+    holders.set(path, [])
+  }
+  return { holders, doubt }
+}
+
+function runProbeAsync(bin: string, args: string[], timeoutMs: number): Promise<ProbeOutcome> {
+  return new Promise(resolve => {
+    execFile(bin, args, {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: PROBE_MAX_BUFFER,
+      env: probeEnv(),
+    }, (error: any, stdout, stderr) => {
+      if (!error) {
+        resolve({ ok: true, stdout: String(stdout), stderr: String(stderr ?? ''), status: 0, killed: false, spawnError: null })
+        return
+      }
+      const spawned = typeof error?.status === 'number' || typeof error?.code === 'number' || typeof error?.signal === 'string'
+      resolve({
+        ok: false,
+        stdout: String(error?.stdout ?? stdout ?? ''),
+        stderr: String(error?.stderr ?? stderr ?? ''),
+        status: typeof error?.code === 'number' ? error.code : (typeof error?.status === 'number' ? error.status : null),
+        killed: Boolean(error?.killed) || Boolean(error?.signal),
+        spawnError: spawned ? null : String(error?.code ?? error?.message ?? 'spawn failed'),
+      })
+    })
+  })
+}
+
+/**
+ * Holders for many locks in ONE lsof, off the event loop. Empty input spawns nothing.
+ * Throws when the run cannot be trusted; per-path doubt is returned, not thrown.
+ */
+export async function batchLockHolders(paths: readonly string[], timeoutMs = LOCK_PROBE_TIMEOUT_MS): Promise<{ holders: Map<string, number[]>; doubt: Map<string, string> }> {
+  const unique = [...new Set(paths)]
+  for (const path of unique) refuseUnlessLockPath(path)
+  if (unique.length === 0) return { holders: new Map(), doubt: new Map() }
+  lockSnapshotStats.probes += 1
+  const out = await runProbeAsync(LSOF_BIN, ['-w', '-F', 'pn', '--', ...unique], timeoutMs)
+  return interpretBatchLockHolders(out, unique)
+}
+
+let lockSnapshot: LockHolderSnapshot | null = null
+let lockSnapshotInFlight: { dir: string; promise: Promise<LockHolderSnapshot> } | null = null
+
+/** Tests only: drop the cached snapshot and zero the probe counter. */
+export function resetLockSnapshot(): void {
+  lockSnapshot = null
+  lockSnapshotInFlight = null
+  lockSnapshotStats.probes = 0
+  lockSnapshotStats.single = 0
+}
+
+/** The cached snapshot for this locks dir if it is not past MAX_AGE, else null. No I/O. */
+export function peekCodexLockSnapshot(locksDir: string, now = Date.now()): LockHolderSnapshot | null {
+  if (!lockSnapshot || lockSnapshot.dir !== locksDir) return null
+  return now - lockSnapshot.at <= LOCK_SNAPSHOT_MAX_AGE_MS ? lockSnapshot : null
+}
+
+/**
+ * Every lock in the directory, probed in one lsof, cached for LOCK_SNAPSHOT_TTL_MS.
+ *
+ * Reads the directory itself rather than taking the caller's thread ids, so it can be
+ * started before the session walk knows which rows it will list and run alongside
+ * it. Concurrent callers share one in-flight probe. A missing or unreadable
+ * directory yields an EMPTY snapshot: the scan's `fileExists` check already skips a
+ * lock that is not there, and a lock it does find that the snapshot does not cover
+ * falls back to the synchronous probe in `withLockSnapshot`.
+ */
+export async function codexLockSnapshot(locksDir: string, now = Date.now()): Promise<LockHolderSnapshot> {
+  const cached = peekCodexLockSnapshot(locksDir, now)
+  if (cached && now - cached.at <= LOCK_SNAPSHOT_TTL_MS) return cached
+  const inFlight = lockSnapshotInFlight && lockSnapshotInFlight.dir === locksDir ? lockSnapshotInFlight.promise : null
+  // Stale but inside MAX_AGE: answer now, refresh behind the answer.
+  if (cached) {
+    if (!inFlight) void startLockProbe(locksDir, now).catch(() => { /* the next caller retries */ })
+    return cached
+  }
+  if (inFlight) return inFlight
+  return startLockProbe(locksDir, now)
+}
+
+async function startLockProbe(locksDir: string, now: number): Promise<LockHolderSnapshot> {
+  const promise = (async () => {
+    let names: string[] = []
+    try {
+      names = await readdir(locksDir)
+    } catch {
+      names = []
+    }
+    const paths = names
+      .filter(name => name.endsWith('.lock') && NATIVE_THREAD_ID_RE.test(name.slice(0, -'.lock'.length)))
+      .map(name => join(locksDir, name))
+    const result = await batchLockHolders(paths)
+    // Aged from the moment the probe was ASKED for, not from when lsof finished:
+    // a reading is only as fresh as its start, and the caller's clock is the
+    // test seam.
+    const snapshot: LockHolderSnapshot = { dir: locksDir, at: now, holders: result.holders, doubt: result.doubt }
+    lockSnapshot = snapshot
+    return snapshot
+  })()
+  lockSnapshotInFlight = { dir: locksDir, promise }
+  try {
+    return await promise
+  } finally {
+    if (lockSnapshotInFlight?.promise === promise) lockSnapshotInFlight = null
+  }
+}
+
+/**
+ * A probe set whose `lockHolders` answers from the snapshot for the paths it covers.
+ *
+ * A covered path answers synchronously with no spawn; a path in `doubt` THROWS, which
+ * is the same signal the live probe sends and lands the thread on degraded; a path
+ * the snapshot never saw (a lock created after the directory was read) goes to the
+ * wrapped probe, so the fallback is the exact behaviour that shipped before.
+ */
+export function withLockSnapshot(probes: OccupancyProbes, snapshot: LockHolderSnapshot): OccupancyProbes {
+  return {
+    ...probes,
+    lockHolders: (path: string) => {
+      const doubt = snapshot.doubt.get(path)
+      if (doubt !== undefined) throw new Error(`lockHolders: ${doubt}`)
+      const held = snapshot.holders.get(path)
+      return held !== undefined ? [...held] : probes.lockHolders(path)
+    },
+  }
 }
 
 /** Supplies the pid -> process-start map that is the only route to a self-owned verdict. */

@@ -51,6 +51,18 @@ import {
   realOccupancyProbes,
   withTranscriptClock,
 } from './occupancy-probes.js'
+import {
+  LOCK_SNAPSHOT_MAX_AGE_MS,
+  LOCK_SNAPSHOT_TTL_MS,
+  batchLockHolders,
+  codexLockSnapshot,
+  interpretBatchLockHolders,
+  lockSnapshotStats,
+  peekCodexLockSnapshot,
+  resetLockSnapshot,
+  withLockSnapshot,
+  type LockHolderSnapshot,
+} from './occupancy-probes.js'
 import { realNativeHeadDeps, type NativeHeadDeps } from './native-head.js'
 import {
   holderActivity,
@@ -901,5 +913,123 @@ describe('buildOccupancyProbes', () => {
     for (const notTrue of [1, 'true', {}] as unknown as boolean[]) {
       expect(buildOccupancyProbes(emptyLedger, headDeps(), notTrue).transcriptMtimeMs).toBeUndefined()
     }
+  })
+})
+
+// ------------------------------------------------- batched lock holders (list hint)
+
+describe('batched lock holders', () => {
+  beforeEach(() => { mkdirSync(fx.locksDir, { recursive: true }); resetLockSnapshot() })
+
+  const lockA = () => join(fx.locksDir, `${THREAD_A}.lock`)
+  const lockB = () => join(fx.locksDir, `${THREAD_B}.lock`)
+  const outcome = (over: Partial<ProbeOutcome>): ProbeOutcome =>
+    ({ ok: true, stdout: '', stderr: '', status: 0, killed: false, spawnError: null, ...over })
+
+  it('maps field output to holders per requested path and ignores paths it did not ask about', () => {
+    const stdout = `p4242\nf34\nn${lockA()}\nf35\nn/elsewhere/x.lock\np4343\nf9\nn${lockA()}\n`
+    const { holders, doubt } = interpretBatchLockHolders(outcome({ stdout }), [lockA(), lockB()])
+    expect(holders.get(lockA())).toEqual([4242, 4343])
+    expect(holders.get(lockB())).toEqual([])
+    expect(holders.has('/elsewhere/x.lock')).toBe(false)
+    expect(doubt.size).toBe(0)
+    // Exit 1 with holders on stdout is lsof's ordinary answer when one of the
+    // files is unheld. It must read exactly like the clean run above.
+    const mixed = interpretBatchLockHolders(outcome({ ok: false, status: 1, stdout }), [lockA(), lockB()])
+    expect(mixed.holders.get(lockA())).toEqual([4242, 4343])
+    expect(mixed.holders.get(lockB())).toEqual([])
+  })
+
+  it('reads exit 1 with nothing on either stream as nobody holding anything', () => {
+    const { holders, doubt } = interpretBatchLockHolders(outcome({ ok: false, status: 1 }), [lockA(), lockB()])
+    expect([...holders.values()]).toEqual([[], []])
+    expect(doubt.size).toBe(0)
+  })
+
+  it('settles a status error with its own lstat: absent is free, present is doubt', () => {
+    writeFileSync(lockA(), '')
+    const stderr = `lsof: status error on ${lockA()}: No such file or directory\n`
+      + `lsof: status error on ${lockB()}: No such file or directory\n`
+    const { holders, doubt } = interpretBatchLockHolders(outcome({ ok: false, status: 1, stderr }), [lockA(), lockB()])
+    expect(holders.get(lockB())).toEqual([])
+    expect(holders.has(lockA())).toBe(false)
+    expect(doubt.get(lockA())).toMatch(/could not inspect/)
+  })
+
+  it('refuses a run it cannot trust rather than reporting every lock free', () => {
+    expect(() => interpretBatchLockHolders(outcome({ ok: false, status: null, killed: true }), [lockA()])).toThrow(/timed out/)
+    expect(() => interpretBatchLockHolders(outcome({ ok: false, status: null, spawnError: 'ENOENT' }), [lockA()])).toThrow(/unavailable/)
+    expect(() => interpretBatchLockHolders(outcome({ stdout: `n${lockA()}\n` }), [lockA()])).toThrow(/unrecognised/)
+    expect(() => interpretBatchLockHolders(outcome({ stdout: 'pabc\n' }), [lockA()])).toThrow(/unrecognised/)
+    expect(() => interpretBatchLockHolders(outcome({ stdout: 'p0\n' }), [lockA()])).toThrow(/implausible/)
+    expect(() => interpretBatchLockHolders(outcome({ ok: false, status: 2, stderr: 'boom' }), [lockA()])).toThrow(/status=2/)
+  })
+
+  it('probes many locks with one lsof and reports the real holder', async () => {
+    writeFileSync(lockA(), '')
+    writeFileSync(lockB(), '')
+    openFds.push(openSync(lockA(), 'r+'))
+    const { holders, doubt } = await batchLockHolders([lockA(), lockB(), lockA()])
+    expect(holders.get(lockA())).toContain(process.pid)
+    expect(holders.get(lockB())).toEqual([])
+    expect(doubt.size).toBe(0)
+    expect(lockSnapshotStats.probes).toBe(1)
+    await expect(batchLockHolders([join(fx.locksDir, 'not-a-thread.lock')])).rejects.toThrow(/refusing/)
+    expect(await batchLockHolders([])).toEqual({ holders: new Map(), doubt: new Map() })
+    expect(lockSnapshotStats.probes).toBe(1)
+  })
+
+  it('a snapshot answers a whole TTL from one probe, serves stale while refreshing, then waits past max age', async () => {
+    writeFileSync(lockA(), '')
+    openFds.push(openSync(lockA(), 'r+'))
+    const t0 = 1_000_000
+    const [first, twin] = await Promise.all([codexLockSnapshot(fx.locksDir, t0), codexLockSnapshot(fx.locksDir, t0)])
+    expect(first).toBe(twin)
+    expect(first.holders.get(lockA())).toContain(process.pid)
+    expect(lockSnapshotStats.probes).toBe(1)
+    expect(await codexLockSnapshot(fx.locksDir, t0 + LOCK_SNAPSHOT_TTL_MS)).toBe(first)
+    expect(lockSnapshotStats.probes).toBe(1)
+    // Stale but inside max age: the old reading comes back at once and a refresh
+    // runs behind it. Wait for that refresh to land before counting probes.
+    const stale = await codexLockSnapshot(fx.locksDir, t0 + LOCK_SNAPSHOT_TTL_MS + 1)
+    expect(stale).toBe(first)
+    const deadline = Date.now() + 15_000
+    while (peekCodexLockSnapshot(fx.locksDir, t0 + LOCK_SNAPSHOT_TTL_MS + 2) === first && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    const refreshed = peekCodexLockSnapshot(fx.locksDir, t0 + LOCK_SNAPSHOT_TTL_MS + 2)
+    expect(refreshed).not.toBe(first)
+    expect(refreshed?.at).toBe(t0 + LOCK_SNAPSHOT_TTL_MS + 1)
+    expect(lockSnapshotStats.probes).toBe(2)
+    // Past max age nothing is served from memory: the caller waits for a fresh probe.
+    expect(peekCodexLockSnapshot(fx.locksDir, refreshed!.at + LOCK_SNAPSHOT_MAX_AGE_MS + 1)).toBeNull()
+    const fresh = await codexLockSnapshot(fx.locksDir, refreshed!.at + LOCK_SNAPSHOT_MAX_AGE_MS + 1)
+    expect(fresh.at).toBe(refreshed!.at + LOCK_SNAPSHOT_MAX_AGE_MS + 1)
+    expect(lockSnapshotStats.probes).toBe(3)
+    // Another locks directory is never answered from this one.
+    expect(peekCodexLockSnapshot(join(fx.root, 'elsewhere'), fresh.at)).toBeNull()
+  }, 30_000)
+
+  it('a missing locks directory is an empty snapshot, not a throw', async () => {
+    const snapshot = await codexLockSnapshot(join(fx.root, 'no-such-dir'), 5)
+    expect(snapshot.holders.size).toBe(0)
+    expect(lockSnapshotStats.probes).toBe(0)
+  })
+
+  it('withLockSnapshot answers covered paths without a spawn, throws on doubt, falls through otherwise', () => {
+    const calls: string[] = []
+    const base = { ...realOccupancyProbes(() => new Map()), lockHolders: (path: string) => { calls.push(path); return [7] } }
+    const snapshot: LockHolderSnapshot = {
+      dir: fx.locksDir,
+      at: 0,
+      holders: new Map([[lockA(), [4242]]]),
+      doubt: new Map([[lockB(), 'lsof could not inspect the lock']]),
+    }
+    const probes = withLockSnapshot(base, snapshot)
+    expect(probes.lockHolders(lockA())).toEqual([4242])
+    expect(() => probes.lockHolders(lockB())).toThrow(/could not inspect/)
+    const other = join(fx.locksDir, '019fc80a-cc79-7921-8541-000000000000.lock')
+    expect(probes.lockHolders(other)).toEqual([7])
+    expect(calls).toEqual([other])
   })
 })

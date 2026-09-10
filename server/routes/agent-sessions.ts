@@ -26,9 +26,12 @@ import {
   findAgentSessionFile,
   listAgentSessions,
   emptySessionListDropped,
+  loadClaudeDesktopAliases,
   loadCursorComposerNames,
   parseAgentSession,
   type AgentProvider,
+  type AgentSessionRoots,
+  type ClaudeAliasMap,
   type AgentSessionRow,
   type AgentSessionSort,
 } from '../lib/agent-session-store.js'
@@ -43,7 +46,15 @@ import {
   type OccupiedScan,
   type OccupiedThread,
 } from '../lib/occupied-threads.js'
-import { realOccupancyDirs, realOccupancyProbes } from '../lib/occupancy-probes.js'
+import {
+  codexLockSnapshot,
+  peekCodexLockSnapshot,
+  realOccupancyDirs,
+  realOccupancyProbes,
+  withLockSnapshot,
+  type LockHolderSnapshot,
+} from '../lib/occupancy-probes.js'
+import type { OccupancyDirs } from '../lib/thread-occupancy.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 
 export const agentSessionsRouter = Router()
@@ -86,12 +97,17 @@ function toSearchHit(row: AgentSessionSearchHit) {
  * seconds or minutes before the user acts and a desktop session opened in that gap
  * is exactly the race the per-write probe exists to catch.
  */
-function runningThreads(rows: readonly AgentSessionRow[]): OccupiedScan {
+function runningThreads(rows: readonly AgentSessionRow[], dirs: OccupancyDirs, snapshot: LockHolderSnapshot | null): OccupiedScan {
   try {
-    const dirs = realOccupancyDirs()
     // The spawn ledger is what lets a turn COS itself queued read as ours rather
     // than as a foreign desktop window holding the thread.
-    const probes = realOccupancyProbes(cosSpawnedPids)
+    //
+    // Codex lock holders come from ONE batched lsof taken for the whole request
+    // (see `codexLockSnapshot`), not one 2.3 s synchronous scan per listed row.
+    // With no snapshot — the batch failed — the wrapped probe runs exactly as
+    // before, so the worst case is the old cost, never a wrong verdict.
+    const base = realOccupancyProbes(cosSpawnedPids)
+    const probes = snapshot ? withLockSnapshot(base, snapshot) : base
     const byProvider = new Map<string, string[]>()
     for (const row of rows) {
       if (row.provider !== 'claude' && row.provider !== 'codex') continue
@@ -137,13 +153,14 @@ function runningThreads(rows: readonly AgentSessionRow[]): OccupiedScan {
 async function transcriptMtimes(
   scan: OccupiedScan,
   rows: readonly AgentSessionRow[],
+  roots: AgentSessionRoots,
+  aliases: ClaudeAliasMap,
 ): Promise<Map<string, number | null>> {
   const mtimes = new Map<string, number | null>()
   if (scan.occupied.size === 0) return mtimes
 
   const providerById = new Map<string, AgentProvider>()
   for (const row of rows) providerById.set(row.session_id, row.provider)
-  const roots = agentSessionRoots()
 
   await Promise.all([...scan.occupied.keys()].map(async threadId => {
     try {
@@ -155,7 +172,8 @@ async function transcriptMtimes(
         mtimes.set(threadId, null)
         return
       }
-      const file = await findAgentSessionFile(provider, threadId, roots)
+      // The shared alias map: this used to rebuild it from 564 files per held thread.
+      const file = await findAgentSessionFile(provider, threadId, roots, new Date(), aliases)
       mtimes.set(threadId, file ? (await stat(file)).mtimeMs : null)
     } catch {
       mtimes.set(threadId, null)
@@ -222,11 +240,16 @@ function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: nu
   }
   if (provider !== 'claude' && provider !== 'codex') return { occupied: new Map(), degraded: false }
   try {
+    const dirs = realOccupancyDirs()
+    // A detail open inside LOCK_SNAPSHOT_TTL_MS of a list answers from that list's
+    // snapshot; otherwise the single synchronous probe runs as it always has.
+    const snapshot = peekCodexLockSnapshot(dirs.codexLocksDir)
+    const base = realOccupancyProbes(cosSpawnedPids)
     const scan = occupiedThreads(
       provider,
       [threadId],
-      realOccupancyProbes(cosSpawnedPids),
-      realOccupancyDirs(),
+      snapshot ? withLockSnapshot(base, snapshot) : base,
+      dirs,
     )
     return withActiveRecently(scan, new Map([[threadId, mtimeMs]]), Date.now())
   } catch (error) {
@@ -281,14 +304,26 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
   try {
     const limit = boundedInteger(req.query.limit, AGENT_SESSION_LIST_LIMIT, 1, AGENT_SESSION_LIST_MAX)
     const sort = asSort(req.query.sort)
+    const roots = agentSessionRoots()
+    const dirs = realOccupancyDirs()
+    // The lock probe is a 2-3 s lsof that needs only the locks directory, so it
+    // starts NOW and runs under the walk instead of after it. A failed batch is
+    // logged and the scan below falls back to the per-lock probe.
+    const snapshotPromise: Promise<LockHolderSnapshot | null> = codexLockSnapshot(dirs.codexLocksDir).catch(error => {
+      console.error(`[agent-sessions] lock snapshot failed: ${error instanceof Error ? error.message : error}`)
+      return null
+    })
+    // ONE alias load per request, shared by the walk, every live row and every
+    // held thread. Measured 2026-09-10: sixteen loads of 119 MB before this line.
+    const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
     const live = await liveClaudeRows()
     const dropped = emptySessionListDropped()
-    const sessions = await listAgentSessions(agentSessionRoots(), new Date(), live, limit, sort, dropped)
-    const scan = runningThreads(sessions)
+    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases)
+    const scan = runningThreads(sessions, dirs, await snapshotPromise)
     // Freshness is layered on AFTER occupancy, and only over what occupancy
     // found. Cursor has no process occupancy, so the list does not invent a
     // working hint from jsonl mtime — detail still can, from the file it stat'ed.
-    const running = withActiveRecently(scan, await transcriptMtimes(scan, sessions), Date.now())
+    const running = withActiveRecently(scan, await transcriptMtimes(scan, sessions, roots, aliases), Date.now())
     res.json({
       sessions: sessions.map(row => withRunning(toEntry(row), running)),
       total: sessions.length,

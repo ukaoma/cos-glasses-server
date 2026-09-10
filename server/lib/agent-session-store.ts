@@ -709,10 +709,41 @@ export function peekClaudeDesktopHead(text: string): { title: string; cwd: strin
 
 type ClaudeDesktopHead = ReturnType<typeof peekClaudeDesktopHead> & { file: string; mtimeMs: number }
 
+/** The alias map one request shares. Null marks an id whose alias records conflict. */
+export type ClaudeAliasMap = Map<string, ClaudeDesktopHead | null>
+
+/**
+ * Per-file memo of the parsed desktop head, keyed by path, invalidated by (mtime, size).
+ *
+ * MEASURED 2026-09-10 on the owner's Mac: 564 `local_*.json` records, 292 of them
+ * over the 256 KB head window, 119 MB read and prefix-parsed per load, 635 ms per
+ * load — and the list route loaded it SIXTEEN times per request (twice in the walk,
+ * once per live row, once per held thread), which was 1.9 GB and ten of the twelve
+ * seconds the G2 Sessions page waited. 547 of the 564 files were older than a week
+ * and had not changed. A record is re-read only when its stat moves; an unchanged
+ * file costs one lstat. Entries for files that vanish are dropped on the next load
+ * of their root, so the memo never outgrows the directory it mirrors.
+ *
+ * `desktopAliasStats` is the test seam: a load that hits the memo reports it there,
+ * so "read once per mtime" is asserted by counting reads rather than by timing.
+ */
+const desktopHeadMemo = new Map<string, { mtimeMs: number; size: number; head: ReturnType<typeof peekClaudeDesktopHead> }>()
+export const desktopAliasStats = { loads: 0, reads: 0, memoHits: 0 }
+
+/** Tests only: forget every memoized head and zero the counters. */
+export function resetDesktopAliasMemo(): void {
+  desktopHeadMemo.clear()
+  desktopAliasStats.loads = 0
+  desktopAliasStats.reads = 0
+  desktopAliasStats.memoHits = 0
+}
+
 /** Explicit Desktop→CLI aliases only. A conflicting alias cannot select a transcript. */
-export async function loadClaudeDesktopAliases(root: string): Promise<Map<string, ClaudeDesktopHead | null>> {
-  const aliases = new Map<string, ClaudeDesktopHead | null>()
+export async function loadClaudeDesktopAliases(root: string): Promise<ClaudeAliasMap> {
+  const aliases: ClaudeAliasMap = new Map()
   if (!root) return aliases
+  desktopAliasStats.loads += 1
+  const seen = new Set<string>()
   for (const account of await dirents(root)) {
     for (const workspace of await dirents(join(root, account))) {
       const dir = join(root, account, workspace)
@@ -722,13 +753,28 @@ export async function loadClaudeDesktopAliases(root: string): Promise<Map<string
         if (!CLAUDE_UUID_JSONL.test(id + '.jsonl')) continue
         const file = join(dir, name), st = await fileStat(file)
         if (!st?.isFile) continue
-        const head = { ...peekClaudeDesktopHead(await readWindow(file, false)), file, mtimeMs: st.mtimeMs }
+        seen.add(file)
+        const memo = desktopHeadMemo.get(file)
+        let peeked: ReturnType<typeof peekClaudeDesktopHead>
+        if (memo && memo.mtimeMs === st.mtimeMs && memo.size === st.size) {
+          peeked = memo.head
+          desktopAliasStats.memoHits += 1
+        } else {
+          peeked = peekClaudeDesktopHead(await readWindow(file, false))
+          desktopHeadMemo.set(file, { mtimeMs: st.mtimeMs, size: st.size, head: peeked })
+          desktopAliasStats.reads += 1
+        }
+        const head = { ...peeked, file, mtimeMs: st.mtimeMs }
         const previous = aliases.get(id)
         if (previous === null) continue
         if (previous && previous.cliSessionId !== head.cliSessionId) aliases.set(id, null)
         else if (!previous || head.mtimeMs >= previous.mtimeMs) aliases.set(id, head)
       }
     }
+  }
+  const prefix = root.endsWith('/') ? root : root + '/'
+  for (const key of desktopHeadMemo.keys()) {
+    if (key.startsWith(prefix) && !seen.has(key)) desktopHeadMemo.delete(key)
   }
   return aliases
 }
@@ -932,8 +978,9 @@ export async function listClaudeSessions(
   starredIds: ReadonlySet<string> = new Set(),
   desktopSessionsRoot = '',
   dropped: AgentSessionListDropped = emptySessionListDropped(),
+  preloadedAliases?: ClaudeAliasMap,
 ): Promise<AgentSessionRow[]> {
-  const aliases = await loadClaudeDesktopAliases(desktopSessionsRoot)
+  const aliases = preloadedAliases ?? await loadClaudeDesktopAliases(desktopSessionsRoot)
   const canonical = (id: string) => { const cli = aliases.get(id)?.cliSessionId; return cli && CLAUDE_UUID_JSONL.test(cli + '.jsonl') ? cli : id }
   const canonicalStars = new Set([...starredIds].map(canonical))
   const canonicalLive = new Set([...liveIds].map(canonical))
@@ -1210,9 +1257,9 @@ export async function listCursorSessions(
   ]
 }
 
-async function enrichLiveClaude(row: AgentSessionRow, roots: AgentSessionRoots): Promise<AgentSessionRow> {
+async function enrichLiveClaude(row: AgentSessionRow, roots: AgentSessionRoots, aliases?: ClaudeAliasMap): Promise<AgentSessionRow> {
   if (row.provider !== 'claude') return row
-  const found = await findAgentSessionFile('claude', row.session_id, roots)
+  const found = await findAgentSessionFile('claude', row.session_id, roots, new Date(), aliases)
   if (!found) return row
   const peek = await peekClaudeDiscussion(found)
   const firstPrompt = await firstClaudeUserTitle(found)
@@ -1275,14 +1322,17 @@ export async function listAgentSessions(
   limit = AGENT_SESSION_LIST_LIMIT,
   sort: AgentSessionSort = 'updated',
   dropped: AgentSessionListDropped = emptySessionListDropped(),
+  preloadedAliases?: ClaudeAliasMap,
 ): Promise<AgentSessionRow[]> {
   const originalStars = await loadClaudeStarredIds(roots.claudeDesktopConfig)
-  const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+  // ONE alias load for the whole walk. Before this the walk loaded it here AND
+  // inside listClaudeSessions AND once per live row through the finder.
+  const aliases = preloadedAliases ?? await loadClaudeDesktopAliases(roots.claudeCodeSessions)
   const canonical = (id: string) => { const cli = aliases.get(id)?.cliSessionId; return cli && CLAUDE_UUID_JSONL.test(cli + '.jsonl') ? cli : id }
   const starredIds = new Set([...originalStars].map(canonical))
   live = live.map(row => row.provider === 'claude' ? { ...row, session_id: canonical(normalizeClaudeSessionId(row.session_id)) } : row)
   const cursorPinned = await loadCursorPinnedIds(roots.cursorWorkspaceStorage)
-  const enrichedLive = (await Promise.all(live.map(row => enrichLiveClaude(row, roots))))
+  const enrichedLive = (await Promise.all(live.map(row => enrichLiveClaude(row, roots, aliases))))
     .filter(entry => !isKeepWarmSessionTitle(entry.display_label))
     .map(entry => {
       if (entry.provider === 'claude' && starredIds.has(normalizeClaudeSessionId(entry.session_id))) {
@@ -1297,7 +1347,7 @@ export async function listAgentSessions(
   const cap = AGENT_SESSION_PER_PROVIDER_LIMIT
   let rows = dedupeSessions([
     ...enrichedLive,
-    ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions, dropped),
+    ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions, dropped, aliases),
     ...await listCodexSessions(roots.codexSessions, now, cap, dropped),
     ...await listCursorSessions(roots.cursorProjects, now, cap, roots.cursorComposerDb, cursorPinned, dropped),
   ])
@@ -1326,20 +1376,26 @@ export async function findAgentSessionFile(
   sessionId: string,
   roots: AgentSessionRoots,
   now = new Date(),
+  preloadedAliases?: ClaudeAliasMap,
 ): Promise<string | null> {
   if (!isSafeSessionId(sessionId)) return null
   const needle = sessionId.trim().toLowerCase()
   if (provider === 'claude') {
-    const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    // A caller that resolves several ids in one request (the list route: every
+    // live row, then every held thread) hands the map in; each call used to
+    // rebuild it from disk, which is the 16-loads-per-request the memo above
+    // describes. Absent, the memo still makes a rebuild cheap.
+    const aliases = preloadedAliases ?? await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    // Names only. This used to lstat every transcript on this Mac (1,697 of
+    // them) to keep directories out of the candidate set, on every call. The
+    // isFile check now runs on the one id that matched, below.
     const files = new Map<string, string[]>()
     for (const folder of await dirents(roots.claudeProjects)) {
       const dir = join(roots.claudeProjects, folder)
       for (const name of await dirents(dir)) {
         if (!CLAUDE_UUID_JSONL.test(name)) continue
-        const file = join(dir, name)
-        if (!(await fileStat(file))?.isFile) continue
         const id = name.slice(0, -6).toLowerCase()
-        files.set(id, [...(files.get(id) || []), file])
+        files.set(id, [...(files.get(id) || []), join(dir, name)])
       }
     }
     const exact = aliases.has(needle) || files.has(needle)
@@ -1351,7 +1407,10 @@ export async function findAgentSessionFile(
     }
     for (const id of files.keys()) if (exact ? id === needle : id.startsWith(needle)) ids.add(id)
     if (ids.size !== 1) return null
-    const matches = files.get([...ids][0]) || []
+    const matches: string[] = []
+    for (const file of files.get([...ids][0]) || []) {
+      if ((await fileStat(file))?.isFile) matches.push(file)
+    }
     return matches.length === 1 ? matches[0] : null
   }
   if (provider === 'codex') {

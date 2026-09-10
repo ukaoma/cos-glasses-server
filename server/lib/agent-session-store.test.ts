@@ -31,6 +31,7 @@ import {
   loadCursorPinnedIds,
   parseAgentSession,
 } from './agent-session-store.js'
+import { desktopAliasStats, loadClaudeDesktopAliases, resetDesktopAliasMemo } from './agent-session-store.js'
 
 function touch(path: string, at: Date): void {
   const epoch = at.getTime() / 1000
@@ -1100,6 +1101,71 @@ describe('Claude Desktop aliases and independent forks', () => {
     mkdirSync(join(conflicting, '..'), { recursive: true })
     writeFileSync(conflicting, JSON.stringify({ cliSessionId: forkId }))
     expect(await findAgentSessionFile('claude', desktopId, roots)).toBeNull()
+    expect(await findAgentSessionFile('claude', cliId, roots)).toBe(parent)
+  })
+})
+
+describe('desktop alias heads are read once per file mtime', () => {
+  const desktopId = '60cc1468-427d-4894-b615-24c624c68107'
+  const cliId = '95c5ebcb-a36b-4f9b-ade0-32ac169096d6'
+  const otherId = '11111111-2222-4333-8444-555555555555'
+  function fixture() {
+    resetDesktopAliasMemo()
+    const home = mkdtempSync(join(tmpdir(), 'cos-alias-memo-'))
+    const roots = agentSessionRoots(home)
+    const dir = join(roots.claudeCodeSessions, 'account', 'workspace')
+    mkdirSync(dir, { recursive: true })
+    const a = join(dir, `local_${desktopId}.json`)
+    const b = join(dir, `local_${otherId}.json`)
+    writeFileSync(a, JSON.stringify({ title: 'A', cliSessionId: cliId, cwd: '/repo' }))
+    writeFileSync(b, JSON.stringify({ title: 'B', cwd: '/other' }))
+    touch(a, new Date('2026-09-01T00:00:00Z'))
+    touch(b, new Date('2026-09-01T00:00:00Z'))
+    return { roots, a, b }
+  }
+
+  it('re-reads only a record whose stat moved and forgets one that vanished', async () => {
+    const { roots, a, b } = fixture()
+    const first = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    expect(first.get(desktopId)?.cliSessionId).toBe(cliId)
+    expect(desktopAliasStats).toMatchObject({ loads: 1, reads: 2, memoHits: 0 })
+    const second = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    expect(second.get(desktopId)?.title).toBe('A')
+    expect(desktopAliasStats).toMatchObject({ loads: 2, reads: 2, memoHits: 2 })
+    // Rewritten with a new mtime: read again, and the NEW content is what comes back.
+    writeFileSync(a, JSON.stringify({ title: 'A renamed', cliSessionId: cliId, cwd: '/repo' }))
+    touch(a, new Date('2026-09-02T00:00:00Z'))
+    const third = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    expect(third.get(desktopId)?.title).toBe('A renamed')
+    expect(desktopAliasStats).toMatchObject({ loads: 3, reads: 3, memoHits: 3 })
+    unlinkSync(b)
+    const fourth = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    expect(fourth.has(otherId)).toBe(false)
+    expect(desktopAliasStats).toMatchObject({ loads: 4, reads: 3, memoHits: 4 })
+  })
+
+  it('the finder and the walk take a preloaded map instead of loading their own', async () => {
+    const { roots } = fixture()
+    const parent = join(roots.claudeProjects, 'repo', `${cliId}.jsonl`)
+    writeJsonl(parent, [JSON.stringify({ type: 'user', message: { role: 'user', content: 'Parent' } })])
+    const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    expect(desktopAliasStats.loads).toBe(1)
+    expect(await findAgentSessionFile('claude', desktopId, roots, new Date(), aliases)).toBe(parent)
+    expect(await findAgentSessionFile('claude', cliId, roots, new Date(), aliases)).toBe(parent)
+    const rows = await listAgentSessions(roots, new Date(), [], 60, 'updated', emptySessionListDropped(), aliases)
+    expect(rows.map(r => r.session_id)).toEqual([cliId])
+    expect(desktopAliasStats.loads).toBe(1)
+    // Without the map a call loads for itself, through the memo.
+    expect(await findAgentSessionFile('claude', desktopId, roots)).toBe(parent)
+    expect(desktopAliasStats.loads).toBe(2)
+    expect(desktopAliasStats.reads).toBe(2)
+  })
+
+  it('a directory wearing a transcript name is still not a transcript', async () => {
+    const { roots } = fixture()
+    const parent = join(roots.claudeProjects, 'repo', `${cliId}.jsonl`)
+    writeJsonl(parent, ['{}'])
+    mkdirSync(join(roots.claudeProjects, 'other', `${cliId}.jsonl`), { recursive: true })
     expect(await findAgentSessionFile('claude', cliId, roots)).toBe(parent)
   })
 })

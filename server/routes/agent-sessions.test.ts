@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import express from 'express'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -7,6 +7,8 @@ import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { agentSessionsRouter, withRunning } from './agent-sessions.js'
 import type { OccupiedScan } from '../lib/occupied-threads.js'
+import { lockSnapshotStats, resetLockSnapshot } from '../lib/occupancy-probes.js'
+import { desktopAliasStats, resetDesktopAliasMemo } from '../lib/agent-session-store.js'
 import {
   createdFromCodexFilename,
   idFromCodexFilename,
@@ -228,6 +230,10 @@ describe('agent session list route reports dropped caps', () => {
     const home = mkdtempSync(join(tmpdir(), 'cos-agent-list-drops-'))
     const previous = process.env.COS_AGENT_SESSIONS_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home
+    // The list now probes the locks directory up front; point it at the fixture so
+    // this test never scans the real ~/.codex (a 3 s lsof on a busy Mac).
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(home, '.codex')
     try {
       const base = await startSearchServer()
       const res = await fetch(`${base}/api/agent-sessions?limit=20`)
@@ -241,6 +247,8 @@ describe('agent session list route reports dropped caps', () => {
     } finally {
       if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
       else process.env.COS_AGENT_SESSIONS_HOME = previous
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previousCodexHome
     }
   })
 })
@@ -375,4 +383,86 @@ describe('Cursor running_active reaches the wire', () => {
       })
     })
   })
+})
+
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** Render epoch ms the way `ps -o lstart=` does under TZ=UTC (same helper as the probe suite). */
+function psLstartUtc(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} `
+    + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} ${d.getUTCFullYear()}`
+}
+
+describe('the list pays one alias load and one lock probe per request', () => {
+  it('marks held Codex and Claude rows as running from one snapshot and one alias map', async () => {
+    const { home, roots } = fixtureHome()
+    const claudeId = '7f294432-c6b6-45b5-ba27-3a9b9ce1a33a'
+    const file = join(roots.codexSessions, '2026/09/10', `rollout-2026-09-10T08-00-00-${marktId}.jsonl`)
+    writeJsonl(file, [
+      `{"timestamp":"2026-09-10T13:00:00.000Z","type":"session_meta","payload":{"id":"${marktId}","cwd":"/Users/ukaoma/Documents/GitHub/MU-Chief-Staff","originator":"Codex Desktop","timestamp":"2026-09-10T13:00:00.000Z"}}`,
+      '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hold this thread open"}]}}',
+    ])
+    writeJsonl(join(roots.claudeProjects, 'repo', `${claudeId}.jsonl`), [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'A live Claude window holds this' } }),
+    ])
+    // A registry record naming THIS process as the live holder of the Claude thread,
+    // self-consistent the way the probe suite builds one.
+    const sessionsDir = join(home, '.claude', 'sessions')
+    mkdirSync(sessionsDir, { recursive: true })
+    const socketPath = join(home, '.claude', `${process.pid}.sock`)
+    writeFileSync(socketPath, '')
+    writeFileSync(join(sessionsDir, `${process.pid}.json`), JSON.stringify({
+      pid: process.pid,
+      sessionId: claudeId,
+      procStart: psLstartUtc(Date.now() - process.uptime() * 1000),
+      messagingSocketPath: socketPath,
+      cwd: home,
+      kind: 'interactive',
+      entrypoint: 'claude-desktop',
+    }))
+    const locksDir = join(home, '.codex', 'thread-writer-locks')
+    mkdirSync(locksDir, { recursive: true })
+    const lock = join(locksDir, `${marktId}.lock`)
+    writeFileSync(lock, '')
+    const fd = openSync(lock, 'r+')
+    const saved: Array<[string, string | undefined]> = []
+    const setEnv = (key: string, value: string) => { saved.push([key, process.env[key]]); process.env[key] = value }
+    setEnv('COS_AGENT_SESSIONS_HOME', home)
+    setEnv('CODEX_HOME', join(home, '.codex'))
+    setEnv('COS_CLAUDE_SESSIONS_DIR', sessionsDir)
+    resetLockSnapshot()
+    resetDesktopAliasMemo()
+    try {
+      const base = await startSearchServer()
+      const first = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as {
+        sessions: Array<{ session_id: string; provider: string; running: boolean; running_foreign: boolean }>
+        runningDegraded: boolean
+      }
+      expect(first.sessions.find(entry => entry.session_id === marktId)).toMatchObject({ running: true, running_foreign: true })
+      expect(first.sessions.find(entry => entry.session_id === claudeId)).toMatchObject({ provider: 'claude', running: true })
+      expect(first.runningDegraded).toBe(false)
+      // One batched probe, no per-lock probe, one alias load — even though a held
+      // Claude thread sent the route back through the finder for its mtime.
+      expect(lockSnapshotStats).toEqual({ probes: 1, single: 0 })
+      expect(desktopAliasStats.loads).toBe(1)
+      // A second list inside the snapshot TTL spawns nothing and loads aliases once more.
+      const second = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as typeof first
+      expect(second.sessions.find(entry => entry.session_id === marktId)?.running).toBe(true)
+      expect(lockSnapshotStats).toEqual({ probes: 1, single: 0 })
+      expect(desktopAliasStats.loads).toBe(2)
+      // The detail route reads the same snapshot: no lsof for a thread the list just probed.
+      const detail = await (await fetch(`${base}/api/agent-sessions/codex/${marktId}`)).json() as { running: boolean; running_stamped: boolean }
+      expect(detail).toMatchObject({ running: true, running_stamped: true })
+      expect(lockSnapshotStats).toEqual({ probes: 1, single: 0 })
+    } finally {
+      closeSync(fd)
+      for (const [key, value] of saved.reverse()) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 20_000)
 })
