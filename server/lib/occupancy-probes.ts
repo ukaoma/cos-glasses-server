@@ -45,6 +45,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -477,10 +478,35 @@ function refuseUnlessLockPath(path: string): void {
  * `status error on <path>` for it, in which case our own lstat decides between
  * absent (no holders) and doubt.
  */
+/**
+ * The spellings under which lsof may report a requested lock.
+ *
+ * lsof prints the kernel's resolved path, not the caller's: a lock reached through
+ * macOS's `/var` symlink comes back as `/private/var/...`, and a symlinked
+ * CODEX_HOME does the same. Requested paths keep the caller's spelling as the map
+ * key; the match accepts either spelling. Unresolvable paths keep only the literal.
+ */
+function lsofPathSpellings(path: string): string[] {
+  try {
+    const resolved = realpathSync.native(path)
+    return resolved === path ? [path] : [path, resolved]
+  } catch {
+    return [path]
+  }
+}
+
 export function interpretBatchLockHolders(out: ProbeOutcome, paths: readonly string[]): { holders: Map<string, number[]>; doubt: Map<string, string> } {
   const holders = new Map<string, number[]>()
   const doubt = new Map<string, string>()
   const wanted = new Set(paths)
+  const requestedBySpelling = new Map<string, string[]>()
+  for (const path of wanted) {
+    for (const spelling of lsofPathSpellings(path)) {
+      const list = requestedBySpelling.get(spelling) ?? []
+      list.push(path)
+      requestedBySpelling.set(spelling, list)
+    }
+  }
   if (!out.ok) {
     if (out.spawnError !== null) throw new Error(`batchLockHolders: lsof unavailable (${out.spawnError})`)
     if (out.killed) throw new Error('batchLockHolders: lsof timed out')
@@ -506,10 +532,13 @@ export function interpretBatchLockHolders(out: ProbeOutcome, paths: readonly str
       pid = parsed
     } else if (tag === 'n') {
       if (pid === null) throw new Error('batchLockHolders: unrecognised lsof output')
-      if (!wanted.has(value)) continue
-      const set = pidsByPath.get(value) ?? new Set<number>()
-      set.add(pid)
-      pidsByPath.set(value, set)
+      const requested = requestedBySpelling.get(value)
+      if (!requested) continue
+      for (const path of requested) {
+        const set = pidsByPath.get(path) ?? new Set<number>()
+        set.add(pid)
+        pidsByPath.set(path, set)
+      }
     }
     // `f` and any other field is descriptor detail this reading does not use.
   }

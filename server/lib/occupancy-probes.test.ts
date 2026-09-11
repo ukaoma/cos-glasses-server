@@ -23,6 +23,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -963,6 +964,25 @@ describe('batched lock holders', () => {
     expect(() => interpretBatchLockHolders(outcome({ stdout: 'pabc\n' }), [lockA()])).toThrow(/unrecognised/)
     expect(() => interpretBatchLockHolders(outcome({ stdout: 'p0\n' }), [lockA()])).toThrow(/implausible/)
     expect(() => interpretBatchLockHolders(outcome({ ok: false, status: 2, stderr: 'boom' }), [lockA()])).toThrow(/status=2/)
+  })
+
+  it('matches a holder that lsof reports under the resolved spelling of a symlinked locks dir', () => {
+    // macOS tmpdir is `/var/...`, a symlink to `/private/var/...`, and lsof prints
+    // the latter. The probe tests below only passed where tmpdir had no symlink.
+    const realDir = join(fx.root, 'real-locks')
+    const linkDir = join(fx.root, 'linked-locks')
+    mkdirSync(realDir, { recursive: true })
+    symlinkSync(realDir, linkDir)
+    const viaLink = join(linkDir, `${THREAD_A}.lock`)
+    writeFileSync(viaLink, '')
+    const resolved = realpathSync.native(viaLink)
+    expect(resolved).not.toBe(viaLink)
+    const { holders, doubt } = interpretBatchLockHolders(
+      outcome({ ok: true, status: 0, stdout: `p${process.pid}\nf11\nn${resolved}\n` }),
+      [viaLink],
+    )
+    expect(holders.get(viaLink)).toEqual([process.pid])
+    expect(doubt.size).toBe(0)
   })
 
   it('probes many locks with one lsof and reports the real holder', async () => {
