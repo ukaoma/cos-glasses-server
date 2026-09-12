@@ -5,6 +5,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { dataPath } from './data-dir.js'
+import { MeetingFinalizationJobStore, type MeetingFinalizationJob } from './meeting-finalization-jobs.js'
 import { listActiveRecoveries } from './unsaved-audio-quarantine.js'
 
 export const BATCH_PROGRESS_FILENAME = '_batch_progress.json'
@@ -211,27 +212,69 @@ function markerFresh(dir: string, maxAgeMs = 15 * 60_000): boolean {
   }
 }
 
+export interface MeetingSyncSnapshotOptions {
+  /** Test seam. Production health omits this and reads the durable job store
+   *  when `root` is the live pending-batch directory. Custom roots stay empty
+   *  unless the caller injects jobs, so unit tests cannot inherit live handoff. */
+  finalizationJobs?: MeetingFinalizationJob[]
+}
+
+function listFinalizationJobsForSnapshot(
+  root: string,
+  options?: MeetingSyncSnapshotOptions,
+): MeetingFinalizationJob[] {
+  if (options && 'finalizationJobs' in options) return options.finalizationJobs ?? []
+  if (root !== pendingBatchRoot()) return []
+  try {
+    return new MeetingFinalizationJobStore().list()
+  } catch {
+    return []
+  }
+}
+
+function finalizationSyncRow(job: MeetingFinalizationJob): MeetingSyncMeeting {
+  const phase: MeetingSyncMeeting['phase'] = job.phase === 'ops_pending'
+    ? 'persisting'
+    : job.phase === 'batch_pending'
+      ? 'hq_polish'
+      : 'queued'
+  const label = job.phase === 'ops_pending'
+    ? 'Saving to meeting library · do not update/restart'
+    : job.phase === 'batch_pending'
+      ? 'HQ polish · pending handoff'
+      : 'Finishing capture · do not update/restart'
+  return {
+    meetingId: job.sessionId,
+    phase,
+    percent: null,
+    segmentsDone: null,
+    segmentsTotal: null,
+    chunkFiles: 0,
+    updatedAt: job.updatedAt,
+    label,
+  }
+}
+
 /** Snapshot of pending HQ polish work for /api/health and COS Control. */
 export function getMeetingSyncSnapshot(
   root: string = pendingBatchRoot(),
+  options?: MeetingSyncSnapshotOptions,
 ): MeetingSyncSnapshot {
   const meetings: MeetingSyncMeeting[] = []
   const retained: MeetingSyncRetainedMeeting[] = []
-  if (!existsSync(root)) {
-    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings, retained }
-  }
-
   let dirs: string[] = []
-  try {
-    dirs = readdirSync(root).filter(name => {
-      try {
-        return statSync(join(root, name)).isDirectory()
-      } catch {
-        return false
-      }
-    })
-  } catch {
-    return { active: false, percent: null, label: 'Idle', blocksRestart: false, meetings, retained }
+  if (existsSync(root)) {
+    try {
+      dirs = readdirSync(root).filter(name => {
+        try {
+          return statSync(join(root, name)).isDirectory()
+        } catch {
+          return false
+        }
+      })
+    } catch {
+      dirs = []
+    }
   }
 
   for (const name of dirs) {
@@ -339,6 +382,17 @@ export function getMeetingSyncSnapshot(
       ...row,
       label: `Recovering unsaved capture${percent != null ? ` ${percent}%` : ''} · do not update/restart`,
     })
+  }
+
+  // After HQ polish clears pending-batch progress, the durable finalizer still
+  // holds meeting_batch_finalization while it writes the library copy. Control
+  // then showed Meeting sync Idle with restart locked (2026-09-09 local 6.45.1
+  // rollout). Same contract as active recoveries: this window is active work.
+  const seen = new Set(meetings.map(meeting => meeting.meetingId))
+  for (const job of listFinalizationJobsForSnapshot(root, options)) {
+    if (seen.has(job.sessionId)) continue
+    seen.add(job.sessionId)
+    meetings.push(finalizationSyncRow(job))
   }
 
   if (meetings.length === 0) {

@@ -13,6 +13,7 @@ import { dataPath } from '../lib/data-dir.js'
 import { purgeSpeakerCalibrationRows, relabelSpeakerCalibrationRows } from '../lib/speaker-calibration-log.js'
 import { trainingSourceFor } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
+import { extAudioChunkPath, listExtAudioChunks } from '../lib/meeting-audio-archive.js'
 import { getVoiceDirectorySnapshot, invalidateVoiceDirectory } from '../lib/voice-directory.js'
 import { greedyDiversitySelect } from '../lib/voice-enrolment-selection.js'
 import { fanOutSpeakerRename, type SpeakerRenameFanOut } from '../lib/speaker-rename-fanout.js'
@@ -336,6 +337,10 @@ voiceRouter.get('/voice/ext-audio', (_req, res) => {
         chunks: wavFiles.length,
         ageHours: parseFloat(ageHours),
         expiresIn: `${Math.max(0, 72 - parseFloat(ageHours)).toFixed(1)}h`,
+        // 6.45.3 — the chunk indices a reviewer can ask to hear (`?chunk=` on
+        // the sample route). Queen, 2026-09-12: the Add-a-voice panel let her
+        // name a session but not listen to it; naming is a guess without this.
+        chunkIndices: listExtAudioChunks(d.name),
       }
     }).filter(s => s.chunks > 0)
 
@@ -496,12 +501,29 @@ voiceRouter.get('/voice/profiles/:name/sample', (req, res) => {
 })
 
 // GET /api/voice/ext-audio/:sessionId/sample — hear an unidentified voice.
+// 6.45.3 — `?chunk=<index>` picks one held chunk (indices come from the listing's
+// `chunkIndices`); without it the newest chunk is served, as before.
 voiceRouter.get('/voice/ext-audio/:sessionId/sample', (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   const sessionId = String(req.params.sessionId ?? '')
   const dirPath = speakerDirPath(EXT_AUDIO_DIR, sessionId)
   if (!dirPath) {
     res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+    return
+  }
+  const chunkRaw = req.query.chunk
+  if (chunkRaw !== undefined) {
+    const chunkIndex = Number.parseInt(String(chunkRaw), 10)
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      res.status(400).json({ error: 'Invalid chunk', reason: 'invalid_chunk' })
+      return
+    }
+    const chunkWav = extAudioChunkPath(sessionId, chunkIndex)
+    if (!chunkWav) {
+      res.status(404).json({ error: 'No ext-audio retained for that chunk', reason: 'no_ext_audio_chunk' })
+      return
+    }
+    sendAudioFile(res, chunkWav)
     return
   }
   const wav = existsSync(dirPath) ? newestWav(dirPath) : null

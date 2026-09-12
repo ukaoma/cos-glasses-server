@@ -288,11 +288,55 @@ async function runDailyArchiveMirror(): Promise<void> {
   if (mirrored > 0) updateGlassesSessionCache()
 }
 
+// 6.45.3 — the mirror runs at every LOCAL DAY ROLLOVER, not only every 24 h from
+// boot. With a server started at 21:24 the interval landed at 21:25 each evening,
+// so a whole day's finished sessions sat in a blind spot until then: not "today"
+// for `GET /api/sessions/today/all-messages`, not yet in any day archive. On
+// 2026-09-12 07:00 Control showed "No turns today" (true) and no archive for
+// 2026-09-11 (ten turns, #125 to #134, still live in sessions.json). Three
+// triggers now: boot, a timer aimed at the next local midnight, and a lazy check
+// from the routes that read the day views, so yesterday appears on the first
+// read after midnight. Serialized: one run at a time, once per local day.
+let lastMirrorDay = ''
+let mirrorInFlight: Promise<void> | null = null
+
+/** Milliseconds until thirty seconds past the next local midnight; never less than a second. */
+export function msUntilNextLocalDay(now = Date.now()): number {
+  const d = new Date(now)
+  const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 30)
+  return Math.max(1_000, next.getTime() - now)
+}
+
+/** Mirror prior-day sessions once per local day. Returns true when a run happened. */
+export async function ensureArchiveMirrorForDay(now = Date.now()): Promise<boolean> {
+  const today = localDay(now)
+  if (lastMirrorDay === today) return false
+  if (!mirrorInFlight) {
+    mirrorInFlight = runDailyArchiveMirror()
+      .then(() => { lastMirrorDay = today })
+      .finally(() => { mirrorInFlight = null })
+  }
+  await mirrorInFlight
+  return true
+}
+
+/** Test seam: forget the last mirrored day. */
+export function __resetArchiveMirrorForTests(): void {
+  lastMirrorDay = ''
+}
+
+function scheduleArchiveMirrorAtNextLocalDay(): void {
+  const timer = setTimeout(() => {
+    ensureArchiveMirrorForDay()
+      .catch(err => console.error('[conversation] mirror rollover error:', err))
+      .finally(scheduleArchiveMirrorAtNextLocalDay)
+  }, msUntilNextLocalDay())
+  timer.unref?.()
+}
+
 // Fire-and-forget at boot so module load isn't blocked on disk + LLM fallback I/O.
-runDailyArchiveMirror().catch(err => console.error('[conversation] mirror boot error:', err))
-setInterval(() => {
-  runDailyArchiveMirror().catch(err => console.error('[conversation] mirror interval error:', err))
-}, 24 * 60 * 60_000)
+ensureArchiveMirrorForDay().catch(err => console.error('[conversation] mirror boot error:', err))
+scheduleArchiveMirrorAtNextLocalDay()
 
 // Track whether session is brand new (for first-query notification)
 const newSessions = new Set<string>()

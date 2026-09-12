@@ -2,9 +2,10 @@
 import { Router } from 'express'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { getRecentSessions, getHistory, sessionExists, addContextBreak, endSession, getSessionRaw, getActiveSessions, resolveExchangePairModel } from '../lib/conversation.js'
+import { getRecentSessions, getHistory, sessionExists, addContextBreak, endSession, getSessionRaw, getActiveSessions, resolveExchangePairModel, ensureArchiveMirrorForDay } from '../lib/conversation.js'
 import { buildSessionLogEntry, writeSessionLog } from '../lib/session-log.js'
-import { getArchiveDayMessages } from '../lib/archive.js'
+import { getArchiveDayMessages, listArchiveDateStrings } from '../lib/archive.js'
+import { recentMessagesLimit, selectRecentMessages } from '../lib/recent-messages.js'
 import { localDay } from '../lib/local-day.js'
 import { clearCodexEngineSession } from '../lib/codex-engine-sessions.js'
 import { mergeMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
@@ -282,16 +283,23 @@ sessionsRouter.get('/sessions/today/live-chats', (_req, res) => {
   res.json({ chats })
 })
 
-// GET /api/sessions/today/all-messages — merged view of today's archived + live session messages.
-// Dedup key is `sessionId|timestamp` (was bare timestamp, which collided on NTP skew or
-// same-ms adds). `sessionId` is always known for live exchanges; archive messages fall
-// back to the archived chat's sessionId via getArchiveDayMessages.
-sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
+// GET /api/sessions/today/all-messages — the newest messages, live + archived, one window.
+// 6.45.3 — the path keeps its name for the two clients that call it (COS Control's
+// Recent view, the phone's history recovery) but the view is a ROLLING WINDOW of the
+// newest `limit` (default 30, `?limit=` up to 100) across every live session and as many
+// archived days as it takes, not a calendar day. Dedup key is `sessionId|timestamp`
+// (was bare timestamp, which collided on NTP skew or same-ms adds); `sessionId` is
+// always known for live exchanges; archive messages fall back to the archived chat's
+// sessionId via getArchiveDayMessages. `date` stays in the response for compatibility.
+sessionsRouter.get('/sessions/today/all-messages', async (req, res) => {
+  // 6.45.3 — first read after midnight files yesterday before answering.
+  await ensureArchiveMirrorForDay().catch(() => {})
   const todayDate = localDay()
+  const limit = recentMessagesLimit(req.query.limit)
   const activeEra = currentMessageEraState()
   const era = activeEra.era
 
-  const archivedMessages = getArchiveDayMessages(todayDate)
+  const archivedDay = (date: string) => getArchiveDayMessages(date)
     .filter(m => exchangeBelongsToEra(m, era))
     .map(m => {
       const globalMsgNum = m.globalMsgNum ?? m.no
@@ -323,8 +331,7 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
   }> = []
   const liveSessions = getActiveSessions()
   for (const session of liveSessions) {
-    const sessionDay = localDay(session.lastActivity)
-    if (sessionDay !== todayDate) continue
+    // Every live session, whatever day it last spoke: the window decides, not the calendar.
     for (let i = 0; i < session.exchanges.length; i++) {
       const ex = session.exchanges[i]
       if (ex.role === 'user') {
@@ -358,17 +365,13 @@ sessionsRouter.get('/sessions/today/all-messages', (_req, res) => {
     }
   }
 
-  // Merge, dedup by (sessionId, timestamp), sort chronologically.
-  const seen = new Set<string>()
-  const keyOf = (m: { sessionId?: string; timestamp: number }) => `${m.sessionId ?? ''}|${m.timestamp}`
-  const merged = [...archivedMessages, ...liveMessages]
-    .filter(m => {
-      const k = keyOf(m as any)
-      if (seen.has(k)) return false
-      seen.add(k)
-      return true
-    })
-    .sort((a, b) => a.timestamp - b.timestamp)
+  // Newest `limit` across live sessions and archived days (newest day first, read
+  // only while the window is short), dedup by (sessionId, timestamp), chronological.
+  const merged = selectRecentMessages(
+    liveMessages as Array<(typeof liveMessages)[number] | ReturnType<typeof archivedDay>[number]>,
+    listArchiveDateStrings().map(date => () => archivedDay(date)),
+    limit,
+  )
 
-  res.json({ messages: merged, date: todayDate })
+  res.json({ messages: merged, date: todayDate, window: { kind: 'recent', limit } })
 })

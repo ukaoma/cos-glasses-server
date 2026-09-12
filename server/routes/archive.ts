@@ -2,6 +2,7 @@
 import { Router } from 'express'
 import { listArchiveDateStrings, archiveDir, archiveIndexPath, loadArchive, getArchiveChats, getArchiveDayMessages, appendToArchive } from '../lib/archive.js'
 import { getArchiveChatMessagesNumbered } from './message-ref.js'
+import { ensureArchiveMirrorForDay } from '../lib/conversation.js'
 import { searchArchive, MAX_LIMIT, DEFAULT_LIMIT } from '../lib/archive-search.js'
 import { refreshArchiveIndex } from '../lib/archive-index.js'
 import { getActiveSessions } from '../lib/conversation.js'
@@ -24,6 +25,8 @@ archiveRouter.param('date', (req, res, next, date) => {
 
 // GET /api/archive — list all archive dates with summaries
 archiveRouter.get('/archive', async (_req, res) => {
+  // 6.45.3 — the listing files yesterday's finished sessions before it answers.
+  await ensureArchiveMirrorForDay().catch(() => {})
   // Index-backed. The previous implementation parsed every day file to reach four
   // summary fields; see archive-index.ts for the measurements that killed it.
   const { entries, rebuilt, fromCache } = await refreshArchiveIndex(archiveDir(), archiveIndexPath())

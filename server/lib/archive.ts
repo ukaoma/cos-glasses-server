@@ -3,6 +3,7 @@
 // Each day's archive contains one or more "chats" (split by context breaks)
 // Summaries are generated via `claude -p --model sonnet`, budget-capped per day.
 
+import { localDay } from './local-day.js'
 import { chmodSync, mkdirSync, readdirSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -549,7 +550,7 @@ export function getArchiveDayMessages(
 
 /** Check if yesterday needs archiving (handles overnight server restarts) */
 export function checkYesterdayArchive(): void {
-  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+  const yesterday = localDay(Date.now() - 86_400_000)
   const existing = loadArchive(yesterday)
   if (!existing) {
     // No yesterday archive exists — but we can't archive sessions that are already expired

@@ -1,3 +1,13 @@
+## 6.45.3
+
+The phone can list the skills this Mac will actually run.
+
+- `GET /api/skills` returns the slash catalog from the selected workspace (`.agents/skills`, then `.claude/skills`) plus `~/.claude/skills`. Nested agent folders flatten with `:`. Generated `source-command-*` duplicates stay out. Paths never leave the box.
+- COS Glasses 6.9.468 paints that list on Views instead of a hardcoded cheat sheet.
+- A held voice can be heard before it is named. `GET /api/voice/ext-audio` lists `chunkIndices` per held session and `GET /api/voice/ext-audio/:sessionId/sample?chunk=<index>` serves that one chunk (no `chunk` still serves the newest). COS Control's Add-a-voice panel uses it to play portions of a session before naming it (Queen, 2026-09-12: "no way to listen to the voices that are here").
+- Recent is a rolling window. `GET /api/sessions/today/all-messages` keeps its path for COS Control and the phone but now answers with the newest 30 messages (`?limit=` up to 100) across every live session and as many archived days as it takes, deduplicated against their archive mirrors. Messages leave Recent only by ageing out of the window; nothing is hidden by the calendar. Control's Recent view and the phone's history recovery read this without change.
+- Yesterday's turns no longer vanish for a day. The archive mirror ran every 24 h from boot (21:25 on the current uptime), so finished sessions from the previous local day were neither "today" for `GET /api/sessions/today/all-messages` nor in any day archive until the evening; on 2026-09-12 07:00 Control showed no turns while ten from the 11th sat live in `sessions.json`. The mirror now runs at boot, at the next local midnight, and lazily from the today and archive-listing routes, once per local day. `checkYesterdayArchive` keys on the local day like everything else.
+
 ## 6.45.2
 
 The G2 Sessions list answers in under a second again instead of eleven, and loading it no longer stalls the rest of the server.

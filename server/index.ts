@@ -62,6 +62,7 @@ import { liveCuesRouter } from './routes/live-cues.js'
 import { tasksRouter } from './routes/tasks.js'
 import { memoryRouter } from './routes/memory.js'
 import { threadsRouter } from './routes/threads.js'
+import { skillsRouter } from './routes/skills.js'
 import { shutdownLiveCues } from './lib/live-cues-engine.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
@@ -671,6 +672,7 @@ app.use('/api', meetingRouter)
 app.use('/api', meetingsRouter)
 app.use('/api', memoryRouter)
 app.use('/api', threadsRouter)
+app.use('/api', skillsRouter)
 app.use('/api', openaiKeyRouter)
 // v6.3.0 — Message History, cross-day 'reference message N', and history
 // recovery for public npx users (previously full-COS-server only).

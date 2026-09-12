@@ -26,6 +26,27 @@ describe('meeting-batch-progress', () => {
     }
   })
 
+  it('surfaces library handoff even when pending-batch is missing', () => {
+    const root = join(tmpdir(), `cos-meeting-sync-missing-${process.pid}-${Date.now()}`)
+    const snap = getMeetingSyncSnapshot(root, {
+      finalizationJobs: [{
+        schemaVersion: 1,
+        sessionId: 'meeting_handoff',
+        meetingPath: '/tmp/recordings/meeting.md',
+        sidecarPath: '/tmp/recordings/meeting.json',
+        audioDir: null,
+        streamingWordCount: 12,
+        phase: 'ops_pending',
+        claimPending: false,
+        createdAt: '2026-09-09T20:00:00.000Z',
+        updatedAt: '2026-09-09T20:01:00.000Z',
+      }],
+    })
+    expect(snap.active).toBe(true)
+    expect(snap.blocksRestart).toBe(true)
+    expect(snap.label).toContain('Saving to meeting library')
+  })
+
   it('surfaces percent from _batch_progress.json', () => {
     const root = join(tmpdir(), `cos-meeting-sync-pct-${process.pid}-${Date.now()}`)
     const meeting = join(root, 'meeting_abc')
@@ -171,6 +192,68 @@ describe('meeting-batch-progress', () => {
       expect(snap.active).toBe(false)
       expect(snap.blocksRestart).toBe(false)
       expect(snap.retained).toHaveLength(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('an ops_pending library handoff renders as active work with blocksRestart', () => {
+    const root = join(tmpdir(), `cos-meeting-sync-handoff-${process.pid}-${Date.now()}`)
+    mkdirSync(root, { recursive: true })
+    try {
+      const snap = getMeetingSyncSnapshot(root, {
+        finalizationJobs: [{
+          schemaVersion: 1,
+          sessionId: 'meeting_handoff',
+          meetingPath: '/tmp/recordings/meeting.md',
+          sidecarPath: '/tmp/recordings/meeting.json',
+          audioDir: null,
+          streamingWordCount: 12,
+          phase: 'ops_pending',
+          claimPending: false,
+          createdAt: '2026-09-09T20:00:00.000Z',
+          updatedAt: '2026-09-09T20:01:00.000Z',
+        }],
+      })
+      expect(snap.active).toBe(true)
+      expect(snap.blocksRestart).toBe(true)
+      expect(snap.label).toContain('Saving to meeting library')
+      expect(snap.meetings).toHaveLength(1)
+      expect(snap.meetings[0]!.phase).toBe('persisting')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not duplicate a session already visible as HQ polish', () => {
+    const root = join(tmpdir(), `cos-meeting-sync-dedupe-${process.pid}-${Date.now()}`)
+    const meeting = join(root, 'meeting_abc')
+    mkdirSync(meeting, { recursive: true })
+    try {
+      writeFileSync(join(meeting, 'chunk_0000.wav'), 'x')
+      writeFileSync(join(meeting, BATCH_PENDING_MARKER), String(Date.now()))
+      writeMeetingBatchProgress(meeting, {
+        phase: 'hq_polish',
+        segmentsDone: 1,
+        segmentsTotal: 2,
+        meetingId: 'meeting_abc',
+      })
+      const snap = getMeetingSyncSnapshot(root, {
+        finalizationJobs: [{
+          schemaVersion: 1,
+          sessionId: 'meeting_abc',
+          meetingPath: '/tmp/recordings/meeting.md',
+          sidecarPath: '/tmp/recordings/meeting.json',
+          audioDir: meeting,
+          streamingWordCount: 12,
+          phase: 'batch_pending',
+          claimPending: false,
+          createdAt: '2026-09-09T20:00:00.000Z',
+          updatedAt: '2026-09-09T20:01:00.000Z',
+        }],
+      })
+      expect(snap.meetings).toHaveLength(1)
+      expect(snap.label).toContain('50%')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
