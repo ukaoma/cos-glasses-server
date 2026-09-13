@@ -43,6 +43,7 @@ describe('buildHeldVoiceGroups', () => {
       { sessionId: 'meeting_d', chunkIndex: 6 },
     ])
     expect(groups[0].id).toBe('meeting_a#0')
+    expect(groups.map(g => g.distinctCount)).toEqual([5, 3, 2])
     for (const g of groups) {
       expect(g.coherence).toBeGreaterThanOrEqual(HELD_GROUP_SUGGESTION_FLOOR)
       expect(g.members.some(m => m.sessionId === g.seed.sessionId && m.chunkIndex === g.seed.chunkIndex)).toBe(true)
@@ -71,27 +72,84 @@ describe('buildHeldVoiceGroups', () => {
     expect(r.loose).toHaveLength(4)
   })
 
-  it('suggests the enrolled profile a group sounds like, tiered by the live identifier\'s own bars', () => {
-    // Chris sits at cosine 0.80 to voice 0: above the auto-enrol bar (0.72) -> high.
-    // Pat sits at 0.64 to voice 1: above the floor (0.55) but below the bar -> likely.
-    // Sam sits at 0.40 to voice 2: under the floor -> no suggestion at all.
-    const chris = voiceSample(0, 5, 0.75)
-    const pat = voiceSample(1, 6, 1.2)
-    const sam = voiceSample(2, 7, 2.29)
-    expect(rawCosineSimilarity(chris, voiceSample(0, 20, 0))).toBeCloseTo(0.8, 2)
-    expect(rawCosineSimilarity(pat, voiceSample(1, 20, 0))).toBeCloseTo(0.64, 2)
-    expect(rawCosineSimilarity(sam, voiceSample(2, 20, 0))).toBeCloseTo(0.4, 2)
+  it('suggests the profile that VOUCHES for a group: two agreeing samples, scored on the second-best', () => {
+    // Chris has two samples at 0.80 and 0.78 to voice 0: both clear the floor,
+    // the score is the second (0.78), above the auto-enrol bar -> high.
+    // Pat has two at 0.64 and 0.60 to voice 1: -> likely at 0.60.
+    // Sam has one sample at 0.40 to voice 2: under the floor -> nothing.
+    const chrisA = voiceSample(0, 5, 0.75), chrisB = voiceSample(0, 6, 0.8)
+    const patA = voiceSample(1, 7, 1.2), patB = voiceSample(1, 8, 4 / 3)
+    const sam = voiceSample(2, 9, 2.29)
+    expect(rawCosineSimilarity(chrisB, voiceSample(0, 20, 0))).toBeCloseTo(0.78, 2)
+    expect(rawCosineSimilarity(patB, voiceSample(1, 20, 0))).toBeCloseTo(0.6, 2)
     const profiles = [
-      { name: 'Chris', embeddings: [Array.from(chris)], sources: ['manual'] },
-      { name: 'Pat', embeddings: [Array.from(pat)], sources: ['manual'] },
+      { name: 'Chris', embeddings: [Array.from(chrisA), Array.from(chrisB)], sources: ['manual', 'manual'] },
+      { name: 'Pat', embeddings: [Array.from(patA), Array.from(patB)], sources: ['manual', 'manual'] },
       { name: 'Sam', embeddings: [Array.from(sam)], sources: ['manual'] },
     ]
     const { groups } = buildHeldVoiceGroups(crowd(), profiles)
-    expect(groups[0].suggestion).toMatchObject({ name: 'Chris', tier: 'high' })
+    expect(groups[0].suggestion).toMatchObject({ name: 'Chris', tier: 'high', agreeing: 2, of: 2, anchor: 'manual' })
     expect(groups[0].suggestion!.similarity).toBeGreaterThanOrEqual(HELD_GROUP_HIGH_CONFIDENCE)
-    expect(groups[1].suggestion).toMatchObject({ name: 'Pat', tier: 'likely' })
+    expect(groups[0].suggestion!.similarity).toBeLessThan(0.79)
+    expect(groups[1].suggestion).toMatchObject({ name: 'Pat', tier: 'likely', agreeing: 2, of: 2 })
     expect(groups[1].suggestion!.similarity).toBeLessThan(HELD_GROUP_HIGH_CONFIDENCE)
     expect(groups[2].suggestion).toBeNull()
+  })
+
+  it('one polluted sample in a big profile cannot vouch for a group (live store, 2026-09-12)', () => {
+    // 19 samples of somebody else plus ONE sample that is nearly this voice:
+    // best-of says 0.99, the profile as a whole says no.
+    const polluted = {
+      name: 'Jessica',
+      embeddings: [Array.from(voiceSample(0, 30, 0.05)), ...Array.from({ length: 19 }, (_, k) => Array.from(voiceSample(60 + k, 61 + k)))],
+      sources: Array.from({ length: 20 }, () => 'correction'),
+    }
+    const { groups } = buildHeldVoiceGroups(crowd(), [polluted])
+    expect(groups[0].suggestion).toBeNull()
+    // The same voice with a SECOND agreeing sample is vouched for.
+    const repaired = { ...polluted, embeddings: [...polluted.embeddings, Array.from(voiceSample(0, 31, 0.8))] }
+    expect(buildHeldVoiceGroups(crowd(), [repaired]).groups[0].suggestion).toMatchObject({ name: 'Jessica', agreeing: 2, of: 21 })
+  })
+
+  it('samples from a bulk session enrol cannot vouch on their own (live store, 2026-09-12)', () => {
+    // Five ext-retroactive samples agree with voice 0 — that is the household
+    // voice an earlier "name this session" wrote into somebody's profile.
+    const bulk = {
+      name: 'Jessie',
+      embeddings: [0.75, 0.8, 0.85, 0.9, 1.0].map((w, k) => Array.from(voiceSample(0, 40 + k, w))),
+      sources: ['ext-retroactive', 'ext-retroactive', 'ext-retroactive:meeting_9', 'ext-retroactive', 'ext-retroactive'],
+    }
+    expect(buildHeldVoiceGroups(crowd(), [bulk]).groups[0].suggestion).toBeNull()
+    // One agreeing sample from an anchored source, and the profile can vouch.
+    const anchored = { ...bulk, embeddings: [...bulk.embeddings, Array.from(voiceSample(0, 45, 0.7))], sources: [...bulk.sources, 'correction:meeting_3'] }
+    expect(buildHeldVoiceGroups(crowd(), [anchored]).groups[0].suggestion).toMatchObject({ name: 'Jessie', agreeing: 6, of: 6, anchor: 'correction' })
+    // An auto-enrolled or unknown-provenance sample is not an anchor either.
+    for (const src of ['auto:meeting_1', 'unknown']) {
+      const weak = { ...bulk, embeddings: anchored.embeddings, sources: [...bulk.sources, src] }
+      expect(buildHeldVoiceGroups(crowd(), [weak]).groups[0].suggestion).toBeNull()
+    }
+  })
+
+  it('a one-sample profile can only vouch as likely', () => {
+    const solo = { name: 'Solo', embeddings: [Array.from(voiceSample(0, 5, 0.3))], sources: ['manual'] }
+    expect(rawCosineSimilarity(new Float32Array(solo.embeddings[0]), voiceSample(0, 20, 0))).toBeGreaterThan(HELD_GROUP_HIGH_CONFIDENCE)
+    expect(buildHeldVoiceGroups(crowd(), [solo]).groups[0].suggestion).toMatchObject({ name: 'Solo', tier: 'likely', agreeing: 1, of: 1 })
+  })
+
+  it('folds the same chunk banked twice into one sample, and keeps both wavs in the members', () => {
+    // A recording started twice 12 ms apart banks every chunk under two ids.
+    const twice = [
+      sample('meeting_x', 0, 0, 20), sample('meeting_x_dup', 0, 0, 20),
+      sample('meeting_x', 1, 0, 21), sample('meeting_x_dup', 1, 0, 21),
+      sample('meeting_x', 2, 0, 22),
+      sample('meeting_x', 9, 40, 41), sample('meeting_x_dup', 9, 40, 41),
+    ]
+    const { groups, loose } = buildHeldVoiceGroups(twice, [])
+    expect(groups).toHaveLength(1)
+    expect(groups[0]).toMatchObject({ sampleCount: 5, distinctCount: 3 })
+    expect(groups[0].coherence).toBeLessThan(0.999)
+    // The doubled artifact is NOT a two-sample voice; it is one loose sample with two wavs.
+    expect(loose).toEqual([{ sessionId: 'meeting_x', chunkIndex: 9 }, { sessionId: 'meeting_x_dup', chunkIndex: 9 }])
   })
 
   it('suggestProfile ignores profile samples of another dimension and empty profiles', () => {

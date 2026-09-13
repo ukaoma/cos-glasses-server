@@ -57,6 +57,31 @@ export const HELD_EMBEDDING_CACHE_DIR = 'held-voice-embeddings'
  *  here means "the identifier would have trusted this itself". */
 export const HELD_GROUP_HIGH_CONFIDENCE = 0.72
 
+/** A profile vouches for a group only when at least this many of ITS samples
+ *  clear the floor, and the score is the SECOND-best of them. Measured on the
+ *  live store 2026-09-12: the largest held group (120 samples, 18 meetings)
+ *  scored 0.894 against one of Jessica Thompson's 40 samples while her other 39
+ *  sat at a median of 0.098 — that one sample is a stranger written into her
+ *  profile by an earlier correction, and best-of would have offered a one-click
+ *  way to write twenty more. Two agreeing samples cannot be one pollutant. */
+export const HELD_SUGGESTION_MIN_SUPPORT = 2
+
+/** Sources whose samples may vouch for a group. `ext-retroactive` — a whole held
+ *  session enrolled under one typed name, the profile-poisoning default this
+ *  module replaces — `auto` and `unknown` may not. On the live store, 2026-09-12,
+ *  EVERY "high" suggestion was carried by ext-retroactive samples alone: a
+ *  household voice heard in 18 meetings that an earlier bulk enrol had written
+ *  into two people's profiles, offered back as those people. A correction, a
+ *  Fireflies or manual enrolment, a G2 enrolment, a chunk banked on a live
+ *  match, or a held group a human named after listening is an anchor; a bulk
+ *  guess is not. */
+export const HELD_ANCHOR_SOURCES: ReadonlySet<string> = new Set(['manual', 'fireflies', 'g2-enrollment', 'g2-training', 'correction', 'ext-group'])
+
+/** Two held chunks this alike are the same recording banked twice (a session
+ *  started twice 12 ms apart is 49 such pairs on the live store), not two
+ *  samples of a voice. They fold into one before grouping. */
+export const HELD_DUPLICATE_SIMILARITY = 0.999
+
 /** Below the identifier's own accept floor, no name is suggested at all.
  *  Speaker identity is a suggestion, never an assertion; under the floor the
  *  honest word is "unidentified". */
@@ -91,9 +116,16 @@ export type HeldSuggestionTier = 'high' | 'likely'
 
 export interface HeldGroupSuggestion {
   name: string
-  /** Cosine of the group centroid against the nearest sample of that profile. */
+  /** Cosine of the group centroid against the profile's SECOND-best sample (its
+   *  only sample, for a one-sample profile). Never the single best: see
+   *  `HELD_SUGGESTION_MIN_SUPPORT`. */
   similarity: number
   tier: HeldSuggestionTier
+  /** How many of the profile's samples clear the floor, out of how many. */
+  agreeing: number
+  of: number
+  /** The provenance of the strongest agreeing sample from an anchored source. */
+  anchor: string
 }
 
 export interface HeldVoiceGroup {
@@ -102,8 +134,11 @@ export interface HeldVoiceGroup {
   /** Sorted by session then chunk. */
   members: HeldSampleRef[]
   sessions: string[]
+  /** Wavs on disk — what naming or discarding consumes. */
   sampleCount: number
-  /** Mean pairwise cosine inside the group. Always at or above the floor. */
+  /** Samples after exact duplicates fold. A group needs two of these. */
+  distinctCount: number
+  /** Mean pairwise cosine among the distinct samples. Always at or above the floor. */
   coherence: number
   /** The member closest to everyone else — the one to play first. */
   seed: HeldSampleRef
@@ -303,34 +338,60 @@ function centroid(embeddings: Float32Array[]): Float32Array {
 }
 
 /**
- * The enrolled profile a vector is nearest, if that is above the floor.
+ * The enrolled profile that VOUCHES for a vector.
  *
- * Best-of over the profile's samples rather than its mean, for the reason
- * chunk-embedding-diagnostics gives: a profile spans rooms and microphones, and
- * averaging them buries the one recorded in conditions like these.
+ * Not best-of. A profile spans rooms and microphones, so its nearest sample is
+ * the right measure of "could this be them" — but it is also exactly what one
+ * mis-enrolled sample produces, and the live store has those. So a profile
+ * with two or more samples must have at least `HELD_SUGGESTION_MIN_SUPPORT`
+ * of them above the floor, and its score is the second-best: one pollutant
+ * cannot clear that bar alone. At least one agreeing sample must come from an
+ * anchored source (`HELD_ANCHOR_SOURCES`). A one-sample profile can only vouch
+ * as "likely", never "high" — nothing corroborates it.
  */
 export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[]): HeldGroupSuggestion | null {
-  let bestName: string | null = null
-  let best = -Infinity
+  let best: HeldGroupSuggestion | null = null
   for (const profile of profiles) {
-    for (const candidate of profile.embeddings) {
-      if (candidate.length !== embedding.length) continue
-      const value = rawCosineSimilarity(embedding, new Float32Array(candidate))
-      if (value > best) { best = value; bestName = profile.name }
+    const rows: Array<{ sim: number; source: string }> = []
+    profile.embeddings.forEach((candidate, i) => {
+      if (candidate.length !== embedding.length) return
+      const source = (profile.sources?.[i] ?? 'unknown').split(':')[0]
+      rows.push({ sim: rawCosineSimilarity(embedding, new Float32Array(candidate)), source })
+    })
+    if (rows.length === 0) continue
+    rows.sort((a, b) => b.sim - a.sim)
+    const agreeing = rows.filter(r => r.sim >= HELD_GROUP_SUGGESTION_FLOOR)
+    const anchored = agreeing.find(r => HELD_ANCHOR_SOURCES.has(r.source))
+    if (!anchored) continue
+    let score: number
+    let tier: HeldSuggestionTier
+    if (rows.length >= 2) {
+      if (agreeing.length < HELD_SUGGESTION_MIN_SUPPORT) continue
+      score = rows[1].sim
+      tier = score >= HELD_GROUP_HIGH_CONFIDENCE ? 'high' : 'likely'
+    } else {
+      score = rows[0].sim
+      tier = 'likely'
+    }
+    if (!best || score > best.similarity) {
+      best = { name: profile.name, similarity: Number(score.toFixed(4)), tier, agreeing: agreeing.length, of: rows.length, anchor: anchored.source }
     }
   }
-  if (bestName === null || best < HELD_GROUP_SUGGESTION_FLOOR) return null
-  return { name: bestName, similarity: Number(best.toFixed(4)), tier: best >= HELD_GROUP_HIGH_CONFIDENCE ? 'high' : 'likely' }
+  return best
 }
 
 /**
  * Carve the held samples into voices.
  *
- * One pairwise matrix; then repeatedly take the dominant mutually coherent
- * cluster out of what remains until nothing coheres. Whatever is left is loose.
- * A group is at least TWO samples: a lone sample has no evidence of being a
- * voice rather than a noise, and it is listed loose so the reviewer can throw
- * it out or, hearing a real person in it, name it on its own.
+ * One pairwise matrix. Exact duplicates (the same chunk banked under two
+ * session ids) fold into one distinct sample first, or every doubled recording
+ * would read as a two-sample voice of perfect coherence. Then repeatedly take
+ * the dominant mutually coherent cluster out of what remains until nothing
+ * coheres. Whatever is left is loose. A group is at least TWO distinct samples:
+ * a lone sample has no evidence of being a voice rather than a noise, and it
+ * is listed loose so the reviewer can throw it out or, hearing a real person
+ * in it, name it on its own. Members and loose always carry EVERY wav,
+ * duplicates included, so naming or discarding consumes the copies too.
  */
 export function buildHeldVoiceGroups(
   samples: HeldSample[],
@@ -340,7 +401,20 @@ export function buildHeldVoiceGroups(
   const groups: HeldVoiceGroup[] = []
   if (samples.length === 0) return { groups, loose: [] }
   const sim = pairwiseSimilarityMatrix(samples.map(s => s.embedding))
-  let active = samples.map((_, i) => i)
+  // Fold exact duplicates: each distinct sample is represented by its lowest
+  // index and carries the refs of every copy.
+  const copies = new Map<number, number[]>()
+  const rep = samples.map((_, i) => i)
+  for (let i = 0; i < samples.length; i++) {
+    if (rep[i] !== i) continue
+    copies.set(i, [i])
+    for (let j = i + 1; j < samples.length; j++) {
+      if (rep[j] === j && sim[i][j] >= HELD_DUPLICATE_SIMILARITY) { rep[j] = i; copies.get(i)!.push(j) }
+    }
+  }
+  const refsOf = (idx: number[]): HeldSampleRef[] =>
+    idx.flatMap(i => copies.get(i)!).map(i => ({ sessionId: samples[i].sessionId, chunkIndex: samples[i].chunkIndex })).sort(compareRefs)
+  let active = [...copies.keys()]
   for (;;) {
     // ONE guard, load-bearing on its own: a lone candidate comes back from the
     // matrix search as its own cluster of one, and a group needs two.
@@ -351,13 +425,14 @@ export function buildHeldVoiceGroups(
     for (let a = 0; a < memberIdx.length; a++) {
       for (let b = a + 1; b < memberIdx.length; b++) { sum += sim[memberIdx[a]][memberIdx[b]]; pairs++ }
     }
-    const members = memberIdx.map(i => ({ sessionId: samples[i].sessionId, chunkIndex: samples[i].chunkIndex })).sort(compareRefs)
+    const members = refsOf(memberIdx)
     const seedSample = samples[cluster.seed]
     groups.push({
       id: sampleKey(members[0]),
       members,
       sessions: [...new Set(members.map(m => m.sessionId))].sort(),
       sampleCount: members.length,
+      distinctCount: memberIdx.length,
       coherence: Number((pairs > 0 ? sum / pairs : 1).toFixed(4)),
       seed: { sessionId: seedSample.sessionId, chunkIndex: seedSample.chunkIndex },
       suggestion: suggestProfile(centroid(memberIdx.map(i => samples[i].embedding)), profiles),
@@ -366,7 +441,7 @@ export function buildHeldVoiceGroups(
     active = active.filter(i => !taken.has(i))
   }
   groups.sort((a, b) => b.sampleCount - a.sampleCount || b.coherence - a.coherence || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  const loose = active.map(i => ({ sessionId: samples[i].sessionId, chunkIndex: samples[i].chunkIndex })).sort(compareRefs)
+  const loose = refsOf(active)
   return { groups, loose }
 }
 
