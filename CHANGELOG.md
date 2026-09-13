@@ -1,3 +1,13 @@
+## 6.45.5
+
+Sessions carry their last real activity and last tool (2026-09-13), for the phone Sessions list in COS Glasses 6.9.470.
+
+- `GET /api/agent-sessions` rows and `GET /api/agent-sessions/:provider/:sessionId` add `last_activity_at` (ISO time of the newest Claude user or assistant record, or the newest Codex `response_item`) and `last_tool` (the most recent tool call in the latest turn: Claude `tool_use`, Codex function, custom tool, local shell and web search calls) when the transcript has them. Both are omitted otherwise, and Cursor rows are unchanged, so an older client sees the payload it always did.
+- Why: a Claude Desktop relaunch appends bookkeeping records (`queue-operation` and similar) to every open transcript, so the file time moved with nobody working. On 2026-09-13, 18 of 60 listed rows shared one relaunch timestamp and sorted as the newest sessions on the Mac.
+- `running_active` ("working now") is judged by the last real record when it is known and older than the file write (`activityClockMs`), so a relaunch no longer reads as 30 seconds of work on every held session.
+- Cost: `lib/agent-session-activity.ts` reads the last 256 KiB of each listed transcript and widens x4 up to 16 MiB only when that tail holds no conversation record (measured record sizes reach 1.7 MB for Claude and 11.9 MB for Codex). Reads are memoized on mtime and size, least recently used evicted first, and at most 8 transcripts are read at once. Rows carry their resolved transcript path server-side only; `toEntry` projects named fields, so the path never reaches the wire.
+- Tests: `agent-session-activity.test.ts` (relaunch bookkeeping ignored, newest tool of the latest turn only, a tool result keeps the turn open whichever marker it carries, a parsing half line dropped, every Codex tool kind, widening and its cap, re-reads on mtime or size change and not otherwise, LRU eviction, the working-now clock, bounded concurrency) and route tests for a Codex thread and a Claude thread after a relaunch, with no path on the list or the detail, plus a Claude thread this process holds: a relaunch write does not read as working on the list or the detail, and a record inside the 30 s window still does.
+
 ## 6.45.4
 
 Two things from 2026-09-12: a dictated prompt that ended in a sentence nobody said, and held voices that could only be named one meeting at a time. Both went through a four-validator QA pass against a copy of Miles's live store before they shipped; what that pass corrected is recorded inline.

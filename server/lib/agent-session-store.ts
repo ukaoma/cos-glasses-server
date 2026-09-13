@@ -50,6 +50,10 @@ export interface AgentSessionRow {
   pinned: boolean
   first_prompt?: string
   discussion_summary?: string
+  /** 6.45.5: the transcript this row was read from, when the walk resolved one. Server
+   *  only: `toEntry` projects named fields, so this never reaches the wire. It lets the
+   *  list read each row's last activity without resolving the file a second time. */
+  file?: string
 }
 
 export interface AgentSessionRoots {
@@ -1076,6 +1080,7 @@ export async function listClaudeSessions(
         provider: 'claude',
         display_label: title,
         project,
+        file: candidate.file,
         modified: isoFromMtime(candidate.mtimeMs),
         created: isoFromMtime(candidate.birthtimeMs),
         alive: false,
@@ -1159,6 +1164,7 @@ export async function listCodexSessions(
         provider: 'codex',
         display_label: title,
         project: workspaceLabel(meta.cwd),
+        file: candidate.file,
         modified: isoFromMtime(candidate.mtimeMs),
         created,
         alive: false,
@@ -1288,6 +1294,7 @@ async function enrichLiveClaude(row: AgentSessionRow, roots: AgentSessionRoots, 
     ...row,
     session_id: fullId,
     modified,
+    file: found,
     display_label: title || row.display_label || 'Claude session',
     ...discussionFields(title || row.display_label, firstPrompt || '', peek.latestAssistant),
   }

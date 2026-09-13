@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { agentSessionsRouter, withRunning } from './agent-sessions.js'
 import type { OccupiedScan } from '../lib/occupied-threads.js'
 import { lockSnapshotStats, resetLockSnapshot } from '../lib/occupancy-probes.js'
+import { ACTIVE_RECENTLY_WINDOW_MS } from '../lib/thread-occupancy.js'
 import { desktopAliasStats, resetDesktopAliasMemo } from '../lib/agent-session-store.js'
 import {
   createdFromCodexFilename,
@@ -253,6 +254,88 @@ describe('agent session list route reports dropped caps', () => {
   })
 })
 
+describe('last activity and last tool on the wire (6.45.5)', () => {
+  it('reads them from the transcript records, not the file time, on the list and the detail', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cos-agent-activity-'))
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(home, '.codex')
+    const id = '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b'
+    const now = new Date()
+    const day = now.toISOString().slice(0, 10).split('-')
+    const file = join(home, '.codex', 'sessions', day[0], day[1], day[2], `rollout-${day.join('-')}T09-00-00-${id}.jsonl`)
+    const lastTurn = new Date(now.getTime() - 3 * 60 * 60_000).toISOString()
+    writeJsonl(file, [
+      JSON.stringify({ timestamp: new Date(now.getTime() - 4 * 60 * 60_000).toISOString(), type: 'session_meta', payload: { id, cwd: '/Users/x/project' } }),
+      JSON.stringify({ timestamp: new Date(now.getTime() - 4 * 60 * 60_000).toISOString(), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Tidy the session list' }] } }),
+      JSON.stringify({ timestamp: lastTurn, type: 'response_item', payload: { type: 'function_call', name: 'apply_patch' } }),
+      JSON.stringify({ timestamp: now.toISOString(), type: 'event_msg', payload: { type: 'token_count' } }),
+    ])
+    touch(file, now)
+    try {
+      const base = await startSearchServer()
+      const list = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as { sessions: Array<Record<string, unknown>> }
+      const row = list.sessions.find(entry => entry.session_id === id)
+      expect(row, 'the fixture thread is listed').toBeTruthy()
+      expect(row!.last_activity_at).toBe(lastTurn)
+      expect(row!.last_tool).toBe('apply_patch')
+      expect(row!.modified).not.toBe(lastTurn)
+      expect(row).not.toHaveProperty('file')
+      const detail = await (await fetch(`${base}/api/agent-sessions/codex/${id}`)).json() as Record<string, unknown>
+      expect(detail.last_activity_at).toBe(lastTurn)
+      expect(detail.last_tool).toBe('apply_patch')
+      expect(detail).not.toHaveProperty('file')
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previousCodexHome
+    }
+  })
+})
+
+describe('last activity for a Claude thread after a Desktop relaunch (6.45.5)', () => {
+  it('ignores the relaunch bookkeeping on the list and the detail', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cos-agent-activity-claude-'))
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(home, '.codex')
+    const id = '5f0c1d2e-3a4b-4c5d-8e9f-a0b1c2d3e4f5'
+    const now = new Date()
+    const proj = join(home, '.claude', 'projects', 'MU-Chief-Staff')
+    mkdirSync(proj, { recursive: true })
+    const file = join(proj, `${id}.jsonl`)
+    const asked = new Date(now.getTime() - 50 * 60 * 60_000).toISOString()
+    const answered = new Date(now.getTime() - 49 * 60 * 60_000).toISOString()
+    writeJsonl(file, [
+      JSON.stringify({ type: 'user', timestamp: asked, message: { role: 'user', content: 'Tidy the sessions list' } }),
+      JSON.stringify({ type: 'assistant', timestamp: answered, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: {} }] } }),
+      JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: now.toISOString() }),
+      JSON.stringify({ type: 'queue-operation', operation: 'dequeue', timestamp: now.toISOString() }),
+    ])
+    touch(file, now)
+    try {
+      const base = await startSearchServer()
+      const list = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as { sessions: Array<Record<string, unknown>> }
+      const row = list.sessions.find(entry => entry.session_id === id)
+      expect(row, 'the fixture Claude thread is listed').toBeTruthy()
+      expect(row!.last_activity_at).toBe(answered)
+      expect(row!.last_tool).toBe('Edit')
+      expect(row).not.toHaveProperty('file')
+      const detail = await (await fetch(`${base}/api/agent-sessions/claude/${id}`)).json() as Record<string, unknown>
+      expect(detail.last_activity_at).toBe(answered)
+      expect(detail).not.toHaveProperty('file')
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previousCodexHome
+    }
+  })
+})
+
 describe('agent session search route', () => {
   it('registers lookup before the provider detail route', () => {
     const source = readFileSync(new URL('./agent-sessions.ts', import.meta.url), 'utf8')
@@ -464,5 +547,64 @@ describe('the list pays one alias load and one lock probe per request', () => {
         else process.env[key] = value
       }
     }
+  }, 20_000)
+})
+
+describe('working now on a held Claude thread follows the last real record (6.45.5)', () => {
+  // A thread this process holds, whose transcript a relaunch's bookkeeping just wrote.
+  async function heldClaude(lastRecordMs: number) {
+    const { home, roots } = fixtureHome()
+    const id = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
+    const file = join(roots.claudeProjects, 'repo', `${id}.jsonl`)
+    const now = new Date()
+    writeJsonl(file, [
+      JSON.stringify({ type: 'user', timestamp: new Date(lastRecordMs - 1_000).toISOString(), message: { role: 'user', content: 'Tidy the sessions list' } }),
+      JSON.stringify({ type: 'assistant', timestamp: new Date(lastRecordMs).toISOString(), message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', input: {} }] } }),
+      JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: now.toISOString() }),
+    ])
+    touch(file, now)
+    const sessionsDir = join(home, '.claude', 'sessions')
+    mkdirSync(sessionsDir, { recursive: true })
+    const socketPath = join(home, '.claude', `${process.pid}.sock`)
+    writeFileSync(socketPath, '')
+    writeFileSync(join(sessionsDir, `${process.pid}.json`), JSON.stringify({
+      pid: process.pid,
+      sessionId: id,
+      procStart: psLstartUtc(Date.now() - process.uptime() * 1000),
+      messagingSocketPath: socketPath,
+      cwd: home,
+      kind: 'interactive',
+      entrypoint: 'claude-desktop',
+    }))
+    const saved: Array<[string, string | undefined]> = []
+    const setEnv = (key: string, value: string) => { saved.push([key, process.env[key]]); process.env[key] = value }
+    setEnv('COS_AGENT_SESSIONS_HOME', home)
+    setEnv('CODEX_HOME', join(home, '.codex'))
+    setEnv('COS_CLAUDE_SESSIONS_DIR', sessionsDir)
+    resetLockSnapshot()
+    resetDesktopAliasMemo()
+    try {
+      const base = await startSearchServer()
+      const list = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as { sessions: Array<Record<string, unknown>> }
+      const detail = await (await fetch(`${base}/api/agent-sessions/claude/${id}`)).json() as Record<string, unknown>
+      return { row: list.sessions.find(entry => entry.session_id === id), detail }
+    } finally {
+      for (const [key, value] of saved.reverse()) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+
+  it('does not read a relaunch write as work, on the list or the detail', async () => {
+    const { row, detail } = await heldClaude(Date.now() - 10 * ACTIVE_RECENTLY_WINDOW_MS)
+    expect(row, 'the held thread is listed').toMatchObject({ running: true, running_active: false })
+    expect(detail).toMatchObject({ running: true, running_active: false })
+  }, 20_000)
+
+  it('still reads a record inside the window as work, so the check above can fail', async () => {
+    const { row, detail } = await heldClaude(Date.now() - 2_000)
+    expect(row, 'the held thread is listed').toMatchObject({ running: true, running_active: true })
+    expect(detail).toMatchObject({ running: true, running_active: true })
   }, 20_000)
 })

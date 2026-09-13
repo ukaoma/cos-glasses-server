@@ -16,6 +16,7 @@
 // are skipped and counted on `dropped.oversized`. The list payload now says
 // what each cap hid.
 
+import { ACTIVITY_READ_CONCURRENCY, activityClockMs, mapWithConcurrency, readSessionActivity, type SessionActivity } from '../lib/agent-session-activity.js'
 import { Router } from 'express'
 import { stat } from 'node:fs/promises'
 import {
@@ -260,7 +261,7 @@ function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: nu
   }
 }
 
-function toEntry(row: AgentSessionRow) {
+function toEntry(row: AgentSessionRow, activity?: SessionActivity | null) {
   return {
     session_id: row.session_id,
     provider: row.provider,
@@ -280,6 +281,11 @@ function toEntry(row: AgentSessionRow) {
     alive: row.alive,
     state: row.state,
     pinned: row.pinned,
+    // 6.45.5: when the session last DID something and its last tool, read from the
+    // transcript's own records (lib/agent-session-activity.ts). Omitted, not null, when
+    // unknown, so an older client and a Cursor row see exactly the payload they did.
+    ...(activity?.lastActivityAt ? { last_activity_at: activity.lastActivityAt } : {}),
+    ...(activity?.lastTool ? { last_tool: activity.lastTool } : {}),
   }
 }
 
@@ -319,13 +325,25 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     const live = await liveClaudeRows()
     const dropped = emptySessionListDropped()
     const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases)
+    // 6.45.5: each row's last real activity, read from its transcript records. Memoized on
+    // mtime and size, so a steady poll re-reads nothing; bounded so a cold list of 80 rows
+    // never holds 80 descriptors at once.
+    const activity = await mapWithConcurrency(sessions, ACTIVITY_READ_CONCURRENCY, row =>
+      row.file ? readSessionActivity(row.provider, row.file) : Promise.resolve(null))
+    const activityById = new Map(sessions.map((row, index) => [row.session_id, activity[index]]))
     const scan = runningThreads(sessions, dirs, await snapshotPromise)
     // Freshness is layered on AFTER occupancy, and only over what occupancy
     // found. Cursor has no process occupancy, so the list does not invent a
     // working hint from jsonl mtime — detail still can, from the file it stat'ed.
-    const running = withActiveRecently(scan, await transcriptMtimes(scan, sessions, roots, aliases), Date.now())
+    // 6.45.5: judged by the last real record when it is known, so a relaunch's bookkeeping
+    // write no longer reads as 30 seconds of work on every held session.
+    const clocks = await transcriptMtimes(scan, sessions, roots, aliases)
+    for (const [threadId, mtimeMs] of clocks) {
+      if (mtimeMs !== null) clocks.set(threadId, activityClockMs(mtimeMs, activityById.get(threadId)))
+    }
+    const running = withActiveRecently(scan, clocks, Date.now())
     res.json({
-      sessions: sessions.map(row => withRunning(toEntry(row), running)),
+      sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index]), running)),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
@@ -397,7 +415,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       if (named) parsed.display_label = named
     }
     const modified = st.mtime.toISOString()
-    const running = runningForThread(provider, parsed.session_id, st.mtimeMs)
+    const activity = await readSessionActivity(provider, found)
+    const running = runningForThread(provider, parsed.session_id, activityClockMs(st.mtimeMs, activity))
     res.json({
       ...withRunning({ session_id: parsed.session_id }, running),
       // The client must be able to tell "this server stamped nothing" from "this
@@ -445,6 +464,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       total_output_tokens: 0,
       file_size_bytes: parsed.file_size_bytes,
       omitted_tools: parsed.omitted_tools,
+      ...(activity.lastActivityAt ? { last_activity_at: activity.lastActivityAt } : {}),
+      ...(activity.lastTool ? { last_tool: activity.lastTool } : {}),
     })
   } catch (error) {
     console.error(`[agent-sessions] detail failed: ${error instanceof Error ? error.message : error}`)
