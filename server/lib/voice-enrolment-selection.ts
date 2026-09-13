@@ -82,10 +82,19 @@ export function dominantCoherentCluster(
   const n = embeddings.length
   if (n === 0) return { members: [], seed: -1 }
   if (n === 1) return { members: [0], seed: 0 }
+  return dominantCoherentClusterFromMatrix(pairwiseSimilarityMatrix(embeddings), embeddings.map((_, i) => i), floor)
+}
 
-  // Full pairwise matrix once: the refinement below reads it repeatedly, and
-  // recomputing a 192-dim cosine inside that loop is the difference between
-  // microseconds and seconds on a long meeting.
+/**
+ * Full pairwise cosine matrix, computed once. The refinement in
+ * `dominantCoherentClusterFromMatrix` reads it repeatedly, and recomputing a
+ * 192-dim cosine inside that loop is the difference between microseconds and
+ * seconds on a long meeting. Held-voice grouping (6.45.4) also builds it once
+ * for every sample in the retention window and then carves cluster after
+ * cluster out of the same matrix.
+ */
+export function pairwiseSimilarityMatrix(embeddings: Float32Array[]): number[][] {
+  const n = embeddings.length
   const sim: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0))
   for (let i = 0; i < n; i++) {
     sim[i][i] = 1
@@ -95,14 +104,31 @@ export function dominantCoherentCluster(
       sim[j][i] = s
     }
   }
+  return sim
+}
+
+/**
+ * `dominantCoherentCluster` over a precomputed matrix and an explicit candidate
+ * set. `members` and `seed` are indices into the matrix (the same index space
+ * as `candidates`), so a caller carving several clusters out of one pool passes
+ * the survivors back in without renumbering anything. Same contract otherwise:
+ * a lone candidate is its own cluster; a crowd that agrees on nothing is EMPTY.
+ */
+export function dominantCoherentClusterFromMatrix(
+  sim: number[][],
+  candidates: number[],
+  floor: number = VOICE_COHERENCE_FLOOR,
+): CoherentCluster {
+  if (candidates.length === 0) return { members: [], seed: -1 }
+  if (candidates.length === 1) return { members: [candidates[0]], seed: candidates[0] }
 
   let bestSeed = -1
   let bestAgree: number[] = []
   let bestMean = -Infinity
-  for (let i = 0; i < n; i++) {
+  for (const i of candidates) {
     const agree: number[] = []
     let sum = 0
-    for (let j = 0; j < n; j++) {
+    for (const j of candidates) {
       if (i !== j && sim[i][j] >= floor) { agree.push(j); sum += sim[i][j] }
     }
     const meanSim = agree.length > 0 ? sum / agree.length : -Infinity

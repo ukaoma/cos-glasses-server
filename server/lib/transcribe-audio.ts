@@ -1,3 +1,4 @@
+import type { WhisperWord } from './whisper-local.js'
 import {
   transcribeLocal,
   transcribeHighQuality,
@@ -28,6 +29,8 @@ export type TranscribeMode = 'hq' | 'fast'
 
 export interface TranscribeAudioResult {
   text: string
+  /** 6.45.4 — the decoder's timed words with token probability, when the backend produced them. */
+  words?: WhisperWord[]
   backend: string
   mode: TranscribeMode
   requestedMode: TranscribeMode
@@ -158,6 +161,7 @@ export async function transcribeAudioBuffer(
   }
 
   let text: string
+  let words: WhisperWord[] | undefined
   let backend: string
   let actualQuality: 'hq' | 'fast' | 'cloud'
   let degradationReason: string | undefined = effectiveMode !== requestedMode ? 'audio_too_long' : undefined
@@ -170,6 +174,7 @@ export async function transcribeAudioBuffer(
       // still enhances in meeting-batch-transcribe.ts — this path is prompt/interactive only.
       const result = await transcribeHighQuality(audioBuffer, undefined, { priority: 'interactive' })
       text = result.text
+      words = result.words
       actualQuality = result.actualQuality
       if (result.actualQuality === 'hq') {
         backend = 'hq-large-v3'
@@ -183,6 +188,7 @@ export async function transcribeAudioBuffer(
       try {
         const result = await transcribeLocal(audioBuffer, undefined, undefined, { affectsCircuit })
         text = result.text
+        words = result.words
         backend = `fast-local-${result.backend}`
         actualQuality = 'fast'
       } catch (localErr: any) {
@@ -203,6 +209,7 @@ export async function transcribeAudioBuffer(
     try {
       const result = await transcribeLocal(audioBuffer, undefined, undefined, { affectsCircuit })
       text = result.text
+      words = result.words
       backend = `fast-local-${result.backend}`
       actualQuality = 'fast'
     } catch (localErr: any) {
@@ -270,6 +277,7 @@ export async function transcribeAudioBuffer(
 
   return {
     text: text.trim(),
+    ...(words && words.length > 0 ? { words } : {}),
     backend,
     mode: effectiveMode,
     requestedMode,

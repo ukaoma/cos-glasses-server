@@ -16,6 +16,7 @@ import {
   transcriptQualityRank,
   type PromptDraftTranscriptRecord,
 } from '../lib/prompt-draft-store.js'
+import { guardPromptTail, speechWindowsFromWav } from '../lib/prompt-tail-guard.js'
 import {
   transcribeAudioBuffer,
   resolveTranscribeMode,
@@ -291,7 +292,15 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
       const policy = purpose === 'warm' ? 'local-only' as const : 'automatic' as const
       const result = await transcribeAudioBuffer(audio, { mode, policy })
       if (!isCurrentChunk(draftId, chunkIndex, audio)) return ''
-      const text = sanitizeTranscript(draftId, result.text)
+      // 6.45.4 — the sentence Whisper invents after the speaker stops. Never trims
+      // audio; drops a trailing sentence only on the junk lexicon or on silence
+      // plus the decoder's own low confidence (prompt-tail-guard.ts).
+      const guarded = guardPromptTail({ text: result.text, words: result.words, speech: speechWindowsFromWav(audio) })
+      for (const drop of guarded.dropped) {
+        console.warn(`[prompt-draft] tail_drop ${draftId}/${chunkIndex} ${purpose}/${mode} (${drop.reason}, start=${drop.startSec ?? '?'}s, lastSpeech=${guarded.lastSpeechEndSec ?? '?'}s, p=${drop.meanProbability?.toFixed(2) ?? '?'}): "${drop.text.slice(0, 100)}"`)
+      }
+      if (guarded.dropped.length > 0 && !guarded.text.trim()) throw new NoSpeechDetectedError(result.text)
+      const text = sanitizeTranscript(draftId, guarded.text)
       const record: PromptDraftTranscriptRecord = {
         text, hash, requestedMode: result.requestedMode, actualQuality: result.actualQuality,
         backend: result.backend, degraded: result.degraded,
