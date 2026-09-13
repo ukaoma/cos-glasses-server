@@ -51,20 +51,24 @@ export const TAIL_MAX_DROPS = 2
 export const TAIL_WINDOW_SEC = 10
 
 /**
- * Whole-sentence fillers. Each pattern is anchored at both ends so it matches a
- * sentence that IS the filler and nothing that merely contains its words.
- * "See you later" and "the end" are deliberately absent: both occur in real
- * dictation ("See you later." at the end of a message; "put the risks at the
- * end"), and whisper's inventions are the caption-credit shapes below.
+ * Whole-sentence fillers. Each pattern is anchored at both ends AND closed —
+ * no free-text tail — so it matches a sentence that IS the filler and nothing
+ * that merely starts with its words. The re-validation of 2026-09-12 caught
+ * `.{0,30}` tails letting "Thanks for watching the demo.", "Transcript from the
+ * Silas call is in the folder." and "Subscribe me to the newsletter." through.
+ * "See you later", "the end", "transcribed by" and "translated by" are
+ * deliberately absent: each occurs in real dictation ("Translated by Friday."),
+ * and whisper's inventions are the caption-credit shapes below. A filler this
+ * list misses fails SAFE: the text stays.
  */
 export const TAIL_FILLER_SENTENCES: readonly RegExp[] = [
-  /^(?:thanks?|thank you)(?: (?:all|everyone|guys|so much|very much))? for (?:watching|listening)(?: .{0,30})?[.!]?$/i,
-  /^(?:subtitles?|captions?|transcript(?:ion)?) (?:by|provided by|created by|from) .{1,60}$/i,
-  /^(?:transcribed|translated) by .{1,60}$/i,
-  /^(?:please )?(?:like(?:,)? (?:and )?)?(?:share(?:,)? (?:and )?)?subscribe(?: .{0,40})?[.!]?$/i,
-  /^(?:don'?t|do not) forget to (?:like(?: and)? )?subscribe(?: .{0,40})?[.!]?$/i,
-  /^(?:i(?:'ll| will)? )?see you(?: all| guys)? (?:next time|in the next (?:one|video|episode))[.!]?$/i,
-  /^(?:i(?:'m| am) (?:going to|gonna) |i (?:need|have|got) to |i gotta |let me |gonna )?(?:go (?:to )?)?(?:the )?(?:bathroom|restroom|toilet)(?: (?:real quick|really quick|right quick|quick|now))?[.!]?$/i,
+  /^(?:thanks?|thank you)(?: (?:all|everyone|guys|so much|very much))? for (?:watching|listening)(?:,? (?:everyone|everybody|guys|all))?[.!]?$/i,
+  /^(?:subtitles?|captions?) (?:by|provided by|created by) (?:the )?[\w.'’-]+(?: [\w.'’-]+){0,2}(?: community)?[.!]?$/i,
+  /^transcript(?:ion)? by [\w'’-]+\.(?:com|org|net|io|ai)[.!]?$/i,
+  /^(?:please )?(?:like(?:,)? (?:and )?)?(?:share(?:,)? (?:and )?)?subscribe(?: to (?:my|the|our) channel)?[.!]?$/i,
+  /^(?:don['’]?t|do not) forget to (?:like(?: and)? )?subscribe(?: to (?:my|the|our) channel)?[.!]?$/i,
+  /^(?:i(?:['’]ll| will)? )?see you(?: all| guys)? (?:next time|in the next (?:one|video|episode))[.!]?$/i,
+  /^(?:i(?:['’]m| am) (?:going to|gonna) |i (?:need|have|got) to |i gotta |let me |gonna )?(?:go (?:to )?)?(?:the )?(?:bathroom|restroom|toilet)(?: (?:real quick|really quick|right quick|quick|now))?[.!]?$/i,
 ]
 
 export interface SpeechWindows {
@@ -97,6 +101,9 @@ function tailWindow(wav: Buffer): { wav: Buffer; offsetSec: number; whole: boole
   if (rate !== VAD_SAMPLE_RATE || channels !== 1 || bits !== 16) return { wav, offsetSec: 0, whole: true }
   const bytesPerSec = rate * blockAlign
   const pcmBytes = wav.length - WAV_HEADER
+  // A body that is not whole samples cannot be windowed on a sample boundary;
+  // hand it over untouched, where the VAD refuses it as unmeasured.
+  if (pcmBytes % blockAlign !== 0) return { wav, offsetSec: 0, whole: true }
   if (pcmBytes <= TAIL_WINDOW_SEC * bytesPerSec) return { wav, offsetSec: 0, whole: true }
   const tailBytes = Math.floor((TAIL_WINDOW_SEC * bytesPerSec) / blockAlign) * blockAlign
   const start = wav.length - tailBytes
@@ -161,6 +168,9 @@ export function matchesTailLexicon(sentence: string): boolean {
 export interface TailTokenStats {
   startSec: number | null
   meanProbability: number | null
+  /** Index of the sentence's first token, so a caller that drops the sentence
+   *  can trim its tokens before judging the one before it. */
+  tokenStart: number | null
 }
 
 /**
@@ -170,7 +180,7 @@ export interface TailTokenStats {
  * inert and the sentence stays.
  */
 export function tailTokenStats(words: WhisperWord[] | undefined, sentence: string): TailTokenStats {
-  const none = { startSec: null, meanProbability: null }
+  const none = { startSec: null, meanProbability: null, tokenStart: null }
   if (!words || words.length === 0) return none
   const target = sentence.replace(/\s+/g, '').length
   if (target === 0) return none
@@ -182,13 +192,18 @@ export function tailTokenStats(words: WhisperWord[] | undefined, sentence: strin
   }
   if (acc < target) return none
   const slice = words.slice(i)
+  // The tail must SPELL the sentence, not merely be as long as it: a
+  // correction that changed a token's length ("Carrot IQ" -> "CaratIQ") would
+  // otherwise shift the window and its start time. Mismatch fails safe.
+  const letters = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
+  if (letters(slice.map(w => String(w.word ?? '')).join('')) !== letters(sentence)) return none
   let sum = 0
   let n = 0
   for (const w of slice) {
     if (typeof w.probability === 'number' && Number.isFinite(w.probability)) { sum += w.probability; n++ }
   }
   const start = typeof slice[0]?.start === 'number' && Number.isFinite(slice[0].start) ? slice[0].start : null
-  return { startSec: start, meanProbability: n > 0 ? sum / n : null }
+  return { startSec: start, meanProbability: n > 0 ? sum / n : null, tokenStart: i }
 }
 
 export type TailDropReason = 'lexicon' | 'low_confidence_after_speech'
@@ -210,14 +225,16 @@ export function guardPromptTail(input: { text: string; words?: WhisperWord[]; sp
   const sentences = splitSentences(input.text)
   const dropped: TailDrop[] = []
   const lastSpeechEnd = input.speech.available ? input.speech.lastSpeechEndSec : null
+  // Tokens still standing: a dropped sentence's tokens leave with it, so the
+  // sentence before it is judged against its own tokens.
+  let remaining = input.words
   while (sentences.length > 0 && dropped.length < TAIL_MAX_DROPS) {
     const last = sentences[sentences.length - 1]
     let reason: TailDropReason | null = null
-    let stats: TailTokenStats = { startSec: null, meanProbability: null }
+    const stats = tailTokenStats(remaining, last)
     if (matchesTailLexicon(last)) {
       reason = 'lexicon'
     } else if (lastSpeechEnd !== null) {
-      stats = tailTokenStats(input.words, last)
       if (
         stats.startSec !== null && stats.meanProbability !== null
         && stats.startSec >= lastSpeechEnd + TAIL_SILENCE_MIN_SEC
@@ -234,6 +251,7 @@ export function guardPromptTail(input: { text: string; words?: WhisperWord[]; sp
     if (!reason) break
     dropped.push({ text: last, reason, startSec: stats.startSec, meanProbability: stats.meanProbability })
     sentences.pop()
+    if (remaining && stats.tokenStart !== null) remaining = remaining.slice(0, stats.tokenStart)
   }
   return { text: sentences.join(' '), dropped, lastSpeechEndSec: lastSpeechEnd }
 }

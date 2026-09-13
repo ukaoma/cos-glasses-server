@@ -29,10 +29,12 @@ describe('rule (a): whole-sentence fillers', () => {
   it('drops the caption credits whisper invents, as whole sentences', () => {
     for (const filler of [
       'Thanks for watching!', 'Thank you for listening.', 'Thank you so much for watching.',
-      'Subtitles by the Amara.org community', 'Transcribed by ESO, translated by —',
+      'Subtitles by the Amara.org community', 'Captions by Steamteam.',
       'See you in the next video.', "I'll see you next time.",
       "Don't forget to like and subscribe.", 'Please subscribe to my channel.',
       'I need to go to the bathroom.', 'Gonna go to the restroom real quick.',
+      // curly apostrophes, as some keyboards and clients emit them
+      'I’m going to go to the bathroom.', 'Don’t forget to subscribe.', 'Transcript by rev.com',
     ]) {
       expect(matchesTailLexicon(filler), filler).toBe(true)
     }
@@ -49,12 +51,26 @@ describe('rule (a): whole-sentence fillers', () => {
       'Ask Graham for the demand gen plan. I will see you in the morning.',
       "Remind me I'm going to go to the bathroom before the call.",
       'Send the deck to Chris. Thanks.',
+      // the re-validation's eight (2026-09-12): a filler's opening words in a real sentence
+      'Transcript from the Silas call is in the folder.',
+      'Captions from the webinar are attached.',
+      'Transcription by the end of day please.',
+      'Translated by Friday.',
+      'Subscribe me to the newsletter.',
+      'Please subscribe Gina to the Tableau license.',
+      'Share and subscribe the deck with Ryan.',
+      'Thanks for watching the demo.',
     ]
     for (const text of real) {
       const r = guardPromptTail({ text, speech: SPEECH_UNKNOWN })
       expect(r.text, text).toBe(text)
       expect(r.dropped).toEqual([])
     }
+  })
+
+  it('leaves "Transcribed by ESO" to the whole-chunk filter: a real "Translated by Friday." costs more than it saves', () => {
+    expect(matchesTailLexicon('Transcribed by ESO, translated by —')).toBe(false)
+    expect(guardPromptTail({ text: 'Translated by Friday.', speech: SPEECH_UNKNOWN }).text).toBe('Translated by Friday.')
   })
 
   it('a one-sentence chunk that is only a filler empties, and that is the only way the lexicon empties a chunk', () => {
@@ -72,8 +88,16 @@ describe('rule (b): silence plus low confidence, on whisper TOKENS', () => {
 
   it('aligns the last sentence by characters across subword tokens', () => {
     const stats = tailTokenStats(tokens(`${spoken} ${invented}`), 'I will grab the other folder.')
+    expect(stats.tokenStart).toBe(6)
     expect(stats.startSec).toBeCloseTo(4.5, 5)
     expect(stats.meanProbability).toBeCloseTo((0.3 + 0.2 * 7) / 8, 5)
+  })
+
+  it('refuses an alignment whose tokens are as long as the sentence but do not spell it', () => {
+    // A correction changed a token's length ("Carrot IQ" -> "CaratIQ"): the
+    // character count still lands, the letters do not. Nulls -> sentence kept.
+    const drifted = tokens('Call@4.5:0.2 Carrot@4.7:0.2 IQ@4.9:0.2 today@5.0:0.2 .@5.2:0.2')
+    expect(tailTokenStats(drifted, 'Call CaratIQ today ok.')).toEqual({ startSec: null, meanProbability: null, tokenStart: null })
   })
 
   it('drops a low-confidence sentence that starts a second after the last speech', () => {

@@ -61,4 +61,16 @@ describe('speechWindowsFromWav (6.45.4)', () => {
     const { speechWindowsFromWav: silent } = await withVad(() => ({ trimmedWav: Buffer.alloc(0), speechRatio: 0, segments: [], measured: true }))
     expect(silent(wav(25))).toEqual({ available: true, lastSpeechEndSec: 15, speechRatio: 0, whole: false })
   })
+
+  it('hands an odd-length body over whole rather than windowing it off a sample boundary', async () => {
+    const seen: number[] = []
+    const { speechWindowsFromWav } = await withVad((buf: Buffer) => {
+      seen.push(buf.length)
+      // the real VAD refuses an odd body (Int16Array on an odd byteLength throws) -> unmeasured
+      return { trimmedWav: Buffer.alloc(0), speechRatio: 0, segments: [] }
+    })
+    const odd = Buffer.concat([wav(25), Buffer.alloc(1)])
+    expect(speechWindowsFromWav(odd).available).toBe(false)
+    expect(seen).toEqual([odd.length])
+  })
 })

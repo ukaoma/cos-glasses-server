@@ -480,7 +480,7 @@ let listingMemo: { fingerprint: string; at: number; result: HeldVoiceGroupsResul
 function listingFingerprint(sessionIds: string[]): string {
   let profilesStamp = '0'
   try { profilesStamp = String(statSync(dataPath('voice-profiles.json')).mtimeMs) } catch {}
-  return `${isEmbeddingAvailable() ? 'm' : '-'}|${profilesStamp}|` + sessionIds.map(id => `${id}:${listExtAudioChunks(id).join(',')}`).join(';')
+  return `${isEmbeddingAvailable() ? 'm' : '-'}|${getOwnerSpeakerLabel()}|${profilesStamp}|` + sessionIds.map(id => `${id}:${listExtAudioChunks(id).join(',')}`).join(';')
 }
 
 export function __resetHeldListingMemoForTests(): void { listingMemo = null }
@@ -650,6 +650,9 @@ export interface EnrollHeldGroupPlan {
   selected: number
   sessions: string[]
   profileEmbeddings: number
+  /** Whether the speaker model is loaded: false means a confirmed request will
+   *  be refused (503) even though this preview could be computed. */
+  speakerModel: boolean
 }
 
 export interface EnrollHeldGroupResult extends EnrollHeldGroupPlan {
@@ -725,7 +728,10 @@ export function enrollHeldGroup(name: string, refs: HeldSampleRef[], opts: { dry
     selected: selected.length,
     sessions: [...new Set(core.map(s => s.sessionId))].sort(),
     profileEmbeddings: existingCount,
+    speakerModel: isEmbeddingAvailable(),
   }
+  // A dry run writes no profile and deletes no wav. It may still decode and
+  // cache vectors for the samples it was asked about, and arm the sweep.
   if (dryRun) return { ...plan, dryRun: true, enrolled: 0, deleted: 0 }
   if (!isEmbeddingAvailable()) {
     throw new HeldGroupError(503, 'speaker_model_unavailable', 'The speaker model is not loaded on this Mac, so nothing can be enrolled. Nothing was changed.', { ...plan })
