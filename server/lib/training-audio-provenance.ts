@@ -49,7 +49,7 @@ export function trainingSourceFor(filename: string): string {
 export function isSampleFromSession(source: string | undefined | null, sessionId: string): boolean {
   const s = String(source ?? '')
   if (!sessionId) return false
-  for (const prefix of ['auto:', 'correction:', 'g2-training:']) {
+  for (const prefix of ['auto:', 'correction:', 'g2-training:', 'ext-group:']) {
     if (s.startsWith(prefix) && s.slice(prefix.length) === sessionId) return true
   }
   return false

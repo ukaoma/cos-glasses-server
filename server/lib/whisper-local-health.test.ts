@@ -217,7 +217,7 @@ describe('whisper-server health reconciliation', () => {
     expect(source).toContain("'-t', (isBatch && !useMetal) ? String(requestedThreads) : '16'")
     // Interactive HQ stays outside batch device policy.
     expect(source).toContain("{ device: 'metal', reason: 'interactive'")
-    expect(source).toContain("const captureBatchWords = opts.priority === 'batch'")
+    expect(source).toContain("const captureWords = opts.priority === 'batch' || opts.words === true")
     expect(source).toContain("args.push('-ojf', '-of', outBase)")
   })
 

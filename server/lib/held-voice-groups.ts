@@ -16,88 +16,97 @@
 //            identifier's own floor, carved cluster by cluster out of one
 //            pairwise matrix — the same rule that guards profile corrections)
 //   loose    which samples cohere with nothing — the random artifacts
-//   sounds like  the enrolled profile a group's centroid is nearest, above the
-//            floor, so a group that the live identifier MISSED can be folded
-//            back into the profile it belongs to. That is the self-healing
-//            loop: a voice enrolled once, in one room, misses in the next room;
-//            its misses land here as a group that "sounds like X"; one click
-//            appends them and the profile gains the room.
+//   sounds like  the enrolled profile that VOUCHES for a group: two or more of
+//            its samples above the floor, one of them from a source that may
+//            vouch (`vouchesForIdentity`), scored on the group's seed sample
+//            against the profile's second-best — so one polluted sample cannot
+//            vouch alone. That is the self-healing loop: a voice enrolled once,
+//            in one room, misses in the next room; its misses land here as a
+//            group that "may be X"; one confirmation appends them.
 //
 // WHERE THE VECTORS COME FROM. `chunk-embedding-store.ts` has banked every
 // chunk's embedding — 'Ext' included — for 14 days since 6.21.15, and the ext
-// wav and the banked row share the chunk index. So the ordinary case costs no
-// audio decode at all. A sample without a banked row (store disabled, or a
-// session older than the bank) is extracted from its wav inside a time budget
-// and cached beside the bank, so it is paid for once. The cache lives in its
-// OWN directory rather than inside the session folder: the 72-hour purge in
-// transcribe-stream reads the mtime of the first directory entry, and a cache
-// file rewritten late would have extended a session's life by that much.
+// wav and the banked row share the chunk index (verified: both writes use the
+// same buffer in one call). So the ordinary case costs no audio decode at all.
+// A sample without a banked row is decoded inside a time budget and cached in
+// its own directory (the 72-hour purge reads the mtime of the first entry in a
+// session folder, so nothing new may live there), and finished by a background
+// sweep. The banked row outlives a wav that is named or discarded: it belongs
+// to the meeting's corrections, not to this panel.
+//
+// WHAT THE REAL STORE TAUGHT (2026-09-12, a copy of Miles's data): best-of let
+// one polluted sample vouch (0.894 against one of 40 samples, the other 39 at a
+// median of 0.098); every "high" match was carried by `ext-retroactive` samples
+// alone, a whole-session bulk enrol that had written one household voice into
+// two people's profiles; 49 exact-duplicate chunk pairs from recordings started
+// twice 12 ms apart made twelve perfect-coherence "voices"; and a centroid
+// scores higher than any single sample, so the auto-enrol bar only means what
+// it says on a real sample.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { dataPath } from './data-dir.js'
 import { extAudioChunkPath, listExtAudioChunks } from './meeting-audio-archive.js'
 import { EXPECTED_EMBEDDING_DIM, decodeEmbedding, encodeEmbedding, readChunkEmbeddings } from './chunk-embedding-store.js'
-import { enrollEmbedding, extractEmbedding, rawCosineSimilarity, readVoiceProfiles, type VoiceProfile } from './speaker-embeddings.js'
+import {
+  AUTO_ENROLL_THRESHOLD, enrollEmbedding, extractEmbedding, isEmbeddingAvailable, rawCosineSimilarity, readVoiceProfiles,
+  type VoiceProfile,
+} from './speaker-embeddings.js'
+import { vouchesForIdentity } from './embedding-eviction.js'
+import { getOwnerSpeakerLabel } from './profile.js'
 import {
   MAX_ENROL_PER_CORRECTION,
   VOICE_COHERENCE_FLOOR,
-  dominantCoherentCluster,
   dominantCoherentClusterFromMatrix,
   greedyDiversitySelect,
   pairwiseSimilarityMatrix,
 } from './voice-enrolment-selection.js'
 
-/** Where extracted-on-demand vectors are kept. One JSON file per held session. */
+/** Where decoded-on-demand vectors are kept. One JSON file per held session. */
 export const HELD_EMBEDDING_CACHE_DIR = 'held-voice-embeddings'
 
-/** A group whose centroid clears this against a profile is offered as that
- *  person with one click. It is the bar the live path uses before it will
- *  auto-enrol a chunk (transcribe-stream: `similarity >= 0.72`), so "high"
- *  here means "the identifier would have trusted this itself". */
-export const HELD_GROUP_HIGH_CONFIDENCE = 0.72
-
-/** A profile vouches for a group only when at least this many of ITS samples
- *  clear the floor, and the score is the SECOND-best of them. Measured on the
- *  live store 2026-09-12: the largest held group (120 samples, 18 meetings)
- *  scored 0.894 against one of Jessica Thompson's 40 samples while her other 39
- *  sat at a median of 0.098 — that one sample is a stranger written into her
- *  profile by an earlier correction, and best-of would have offered a one-click
- *  way to write twenty more. Two agreeing samples cannot be one pollutant. */
-export const HELD_SUGGESTION_MIN_SUPPORT = 2
-
-/** Sources whose samples may vouch for a group. `ext-retroactive` — a whole held
- *  session enrolled under one typed name, the profile-poisoning default this
- *  module replaces — `auto` and `unknown` may not. On the live store, 2026-09-12,
- *  EVERY "high" suggestion was carried by ext-retroactive samples alone: a
- *  household voice heard in 18 meetings that an earlier bulk enrol had written
- *  into two people's profiles, offered back as those people. A correction, a
- *  Fireflies or manual enrolment, a G2 enrolment, a chunk banked on a live
- *  match, or a held group a human named after listening is an anchor; a bulk
- *  guess is not. */
-export const HELD_ANCHOR_SOURCES: ReadonlySet<string> = new Set(['manual', 'fireflies', 'g2-enrollment', 'g2-training', 'correction', 'ext-group'])
-
-/** Two held chunks this alike are the same recording banked twice (a session
- *  started twice 12 ms apart is 49 such pairs on the live store), not two
- *  samples of a voice. They fold into one before grouping. */
-export const HELD_DUPLICATE_SIMILARITY = 0.999
+/** A group whose SEED sample clears this against a profile's second-best sample
+ *  is "high": the bar `autoEnroll` itself enrols at (0.88), applied at the same
+ *  grain — one sample against a profile — never to a centroid, which scores
+ *  higher than any of its samples. */
+export const HELD_GROUP_HIGH_CONFIDENCE = AUTO_ENROLL_THRESHOLD
 
 /** Below the identifier's own accept floor, no name is suggested at all.
  *  Speaker identity is a suggestion, never an assertion; under the floor the
  *  honest word is "unidentified". */
 export const HELD_GROUP_SUGGESTION_FLOOR = VOICE_COHERENCE_FLOOR
 
+/** A profile vouches only when at least this many of ITS samples clear the
+ *  floor, and the score is the SECOND-best of them. */
+export const HELD_SUGGESTION_MIN_SUPPORT = 2
+
+/** Two held chunks this alike are the same recording banked twice, not two
+ *  samples of a voice. They fold into one before grouping and before enrolment. */
+export const HELD_DUPLICATE_SIMILARITY = 0.999
+
 /** How long one listing may spend decoding audio for samples the bank does not
- *  hold. Past this they are reported as `pending` and finished in the
- *  background; the panel is never held for a whole window of decodes. */
+ *  hold. Past this they are `pending`, finished by the sweep. */
 export const HELD_EXTRACTION_BUDGET_MS = 1_000
 
-/** A correction or discard names at most this many samples. 40 per session
- *  times a ten-session window is the realistic ceiling; the cap is a guard
- *  against a runaway client, not a product limit. */
-export const MAX_HELD_MEMBERS_PER_REQUEST = 400
+/** How long a naming request may spend decoding. A sample past this is
+ *  `notReady` — untouched, listed for the next attempt — rather than a blocked
+ *  event loop: one decode is ~126 ms on this Mac, so an unbudgeted request of
+ *  a few hundred samples would stall live transcription for a minute. */
+export const HELD_ENROLL_DECODE_BUDGET_MS = 2_000
 
-/** The provenance stamped on a profile sample that came from a held group. */
+/** A naming or discard request names at most this many samples. The live
+ *  window measured 906 held chunks over 32 sessions (2026-09-12); forty per
+ *  session over a hundred sessions is the honest ceiling. Guards a runaway
+ *  client, not a product limit. */
+export const MAX_HELD_MEMBERS_PER_REQUEST = 4_000
+
+/** The listing is memoised this long while nothing held has changed. Control
+ *  reloads it with every sessions refresh, and the matrix is synchronous. */
+export const HELD_LISTING_MEMO_MS = 15_000
+
+/** The provenance stamped on a profile sample that came from a held group:
+ *  `ext-group:<sessionId>`, so the meeting's "not in this meeting" retraction
+ *  can find it. */
 export const HELD_GROUP_SOURCE = 'ext-group'
 
 export interface HeldSampleRef {
@@ -107,31 +116,27 @@ export interface HeldSampleRef {
 
 export interface HeldSample extends HeldSampleRef {
   embedding: Float32Array
-  /** 'banked' — from the chunk-embedding store at capture time;
-   *  'extracted' — decoded from the wav now or on an earlier listing. */
-  embeddingSource: 'banked' | 'extracted'
 }
 
 export type HeldSuggestionTier = 'high' | 'likely'
 
 export interface HeldGroupSuggestion {
   name: string
-  /** Cosine of the group centroid against the profile's SECOND-best sample (its
-   *  only sample, for a one-sample profile). Never the single best: see
-   *  `HELD_SUGGESTION_MIN_SUPPORT`. */
+  /** Cosine of the group's seed sample against the profile's SECOND-best sample
+   *  (its only sample, for a one-sample profile). Never the single best. */
   similarity: number
   tier: HeldSuggestionTier
-  /** How many of the profile's samples clear the floor, out of how many. */
+  /** How many of the profile's samples clear the floor, out of all of them. */
   agreeing: number
   of: number
-  /** The provenance of the strongest agreeing sample from an anchored source. */
+  /** The provenance of the strongest agreeing sample that may vouch. */
   anchor: string
 }
 
 export interface HeldVoiceGroup {
   /** The first member's key. Stable while that member is held. */
   id: string
-  /** Sorted by session then chunk. */
+  /** Every wav, duplicates included. Sorted by session then chunk. */
   members: HeldSampleRef[]
   sessions: string[]
   /** Wavs on disk — what naming or discarding consumes. */
@@ -140,25 +145,27 @@ export interface HeldVoiceGroup {
   distinctCount: number
   /** Mean pairwise cosine among the distinct samples. Always at or above the floor. */
   coherence: number
-  /** The member closest to everyone else — the one to play first. */
+  /** The member closest to everyone else — the one to play first, and the one scored. */
   seed: HeldSampleRef
   suggestion: HeldGroupSuggestion | null
 }
 
 export interface HeldVoiceGroupsResult {
-  /** Largest first, then most coherent. */
   groups: HeldVoiceGroup[]
-  /** Samples that cohere with nothing held. */
   loose: HeldSampleRef[]
   sessions: number
   /** Wavs on disk. */
   samples: number
   /** Samples that have a vector and took part in grouping. */
   embedded: number
-  /** Samples still waiting for a decode. A later listing will have them. */
+  /** Samples still waiting for a decode — or, with the speaker model not
+   *  loaded, waiting for it. */
   pending: number
-  /** Samples whose wav could not be decoded into a vector at all. */
+  /** Samples whose wav can never be turned into a vector. */
   unusable: number
+  /** Whether the speaker model is loaded on this Mac. Without it, nothing
+   *  outside the bank can be grouped and nothing can be enrolled. */
+  speakerModel: boolean
   generatedAt: string
 }
 
@@ -169,7 +176,7 @@ export interface CollectedHeldSamples {
   sessions: number
   totalChunks: number
   /** Vectors decoded from audio during THIS call. */
-  extractedNow: number
+  decoded: number
 }
 
 export class HeldGroupError extends Error {
@@ -181,7 +188,12 @@ export class HeldGroupError extends Error {
 
 // ── Paths ──────────────────────────────────────────────────────────────────
 
-const SESSION_ID_SHAPE = /^[A-Za-z0-9:_.-]{3,96}$/
+/** The shape the chunk store and the meeting store accept. Session ids reach a
+ *  filesystem path on every side; a looser validator than the writer's would
+ *  only admit ids nothing else can find. */
+const SESSION_ID_SHAPE = /^[A-Za-z0-9:_-]{3,96}$/
+
+function normalizeSessionId(sessionId: string): string { return sessionId.replace(/:/g, '_') }
 
 function extAudioRoot(): string { return dataPath('ext-audio') }
 
@@ -192,6 +204,7 @@ export function heldSessionIds(): string[] {
   const out: string[] = []
   for (const d of readdirSync(root, { withFileTypes: true })) {
     if (!d.isDirectory()) continue
+    if (!SESSION_ID_SHAPE.test(d.name)) continue
     if (listExtAudioChunks(d.name).length === 0) continue
     out.push(d.name)
   }
@@ -199,9 +212,9 @@ export function heldSessionIds(): string[] {
 }
 
 function cachePath(sessionId: string): string | null {
-  if (!SESSION_ID_SHAPE.test(sessionId) || sessionId.includes('..')) return null
+  if (!SESSION_ID_SHAPE.test(sessionId)) return null
   const dir = dataPath(HELD_EMBEDDING_CACHE_DIR)
-  const path = join(dir, `${sessionId.replace(/:/g, '_')}.json`)
+  const path = join(dir, `${normalizeSessionId(sessionId)}.json`)
   return resolve(path).startsWith(resolve(dir) + '/') ? path : null
 }
 
@@ -236,11 +249,13 @@ function writeCache(sessionId: string, cache: Record<string, string>): void {
   }
 }
 
-/** Drop cache files for sessions the 72-hour purge has already removed. */
+/** Drop cache files for sessions the 72-hour purge has already removed, and
+ *  any temp file a crash left behind. */
 function pruneStaleCaches(liveSessionIds: Set<string>): void {
   const dir = dataPath(HELD_EMBEDDING_CACHE_DIR)
   if (!existsSync(dir)) return
   for (const f of readdirSync(dir)) {
+    if (f.endsWith('.json.tmp')) { try { unlinkSync(join(dir, f)) } catch {} continue }
     if (!f.endsWith('.json')) continue
     if (liveSessionIds.has(f.slice(0, -'.json'.length))) continue
     try { unlinkSync(join(dir, f)) } catch {}
@@ -258,30 +273,33 @@ function compareRefs(a: HeldSampleRef, b: HeldSampleRef): number {
 export interface CollectOptions {
   /** Milliseconds of audio decoding allowed. 0 decodes nothing; Infinity decodes all. */
   budgetMs?: number
-  /** Restrict to these sessions (and, when given, to these chunk indices). */
-  only?: Map<string, Set<number> | null>
+  /** Restrict to these sessions and chunk indices. */
+  only?: Map<string, Set<number>>
   now?: () => number
 }
 
 /**
  * Every held sample that has a vector, plus the ones that do not yet.
  *
- * Bank first, cache second, audio third — and audio only inside the budget.
+ * Bank first, cache second, audio third — audio only inside the budget and
+ * only with the speaker model loaded. Without the model every unbanked sample
+ * is `pending`: nothing can decode it now, and the sweep does not run.
  */
 export function collectHeldSamples(opts: CollectOptions = {}): CollectedHeldSamples {
   const budgetMs = opts.budgetMs ?? HELD_EXTRACTION_BUDGET_MS
   const now = opts.now ?? (() => Date.now())
   const deadline = now() + budgetMs
+  const modelReady = isEmbeddingAvailable()
   const sessionIds = opts.only ? [...opts.only.keys()].filter(id => SESSION_ID_SHAPE.test(id)).sort() : heldSessionIds()
   const samples: HeldSample[] = []
   const pending: HeldSampleRef[] = []
   const unusable: HeldSampleRef[] = []
   let totalChunks = 0
-  let extractedNow = 0
+  let decoded = 0
 
   for (const sessionId of sessionIds) {
-    const wanted = opts.only?.get(sessionId) ?? null
-    const indices = listExtAudioChunks(sessionId).filter(i => wanted === null || wanted.has(i))
+    const wanted = opts.only?.get(sessionId)
+    const indices = listExtAudioChunks(sessionId).filter(i => !wanted || wanted.has(i))
     if (indices.length === 0) continue
     totalChunks += indices.length
 
@@ -293,76 +311,91 @@ export function collectHeldSamples(opts: CollectOptions = {}): CollectedHeldSamp
     for (const chunkIndex of indices) {
       const ref = { sessionId, chunkIndex }
       const fromBank = banked.get(chunkIndex)
-      if (fromBank) { samples.push({ ...ref, embedding: fromBank, embeddingSource: 'banked' }); continue }
+      if (fromBank) { samples.push({ ...ref, embedding: fromBank }); continue }
       const fromCache = cache[String(chunkIndex)]
       if (fromCache !== undefined) {
-        const decoded = fromCache === '' ? null : decodeEmbedding(fromCache)
-        if (decoded && decoded.length === EXPECTED_EMBEDDING_DIM) { samples.push({ ...ref, embedding: decoded, embeddingSource: 'extracted' }); continue }
-        // '' is a remembered failure: the wav decoded to nothing once and will
-        // again. Anything else that fails to decode is a corrupt cache entry.
+        const vector = fromCache === '' ? null : decodeEmbedding(fromCache)
+        if (vector && vector.length === EXPECTED_EMBEDDING_DIM) { samples.push({ ...ref, embedding: vector }); continue }
+        // '' is a remembered refusal: the wav decoded to the wrong shape once
+        // and will again. Anything else that fails to decode is a corrupt
+        // entry, re-decoded below.
         if (fromCache === '') { unusable.push(ref); continue }
       }
-      if (now() >= deadline) { pending.push(ref); continue }
+      if (!modelReady || now() >= deadline) { pending.push(ref); continue }
       const wav = extAudioChunkPath(sessionId, chunkIndex)
-      let embedding: Float32Array | null = null
-      try { embedding = wav ? extractEmbedding(readFileSync(wav)) : null } catch { embedding = null }
-      extractedNow++
-      if (embedding && embedding.length === EXPECTED_EMBEDDING_DIM) {
-        cache[String(chunkIndex)] = encodeEmbedding(embedding)
+      let vector: Float32Array | null = null
+      try { vector = wav ? extractEmbedding(readFileSync(wav)) : null } catch { vector = null }
+      decoded++
+      if (vector && vector.length === EXPECTED_EMBEDDING_DIM) {
+        cache[String(chunkIndex)] = encodeEmbedding(vector)
         cacheDirty = true
-        samples.push({ ...ref, embedding, embeddingSource: 'extracted' })
-      } else if (embedding) {
-        // Wrong dimension: the model changed. Remember the refusal.
+        samples.push({ ...ref, embedding: vector })
+      } else if (vector) {
         cache[String(chunkIndex)] = ''
         cacheDirty = true
         unusable.push(ref)
       } else {
-        // null also means "the model is not loaded"; do not cache that, the
-        // next listing may have it.
+        // The model is loaded and still returned nothing: the audio itself is
+        // the problem (unreadable wav). Nothing to retry.
+        cache[String(chunkIndex)] = ''
+        cacheDirty = true
         unusable.push(ref)
       }
     }
     if (cacheDirty) writeCache(sessionId, cache)
   }
-  if (!opts.only) pruneStaleCaches(new Set(sessionIds.map(id => id.replace(/:/g, '_'))))
-  return { samples, pending, unusable, sessions: sessionIds.length, totalChunks, extractedNow }
+  if (!opts.only) pruneStaleCaches(new Set(sessionIds.map(normalizeSessionId)))
+  return { samples, pending, unusable, sessions: sessionIds.length, totalChunks, decoded }
 }
 
 // ── Grouping ───────────────────────────────────────────────────────────────
 
-function centroid(embeddings: Float32Array[]): Float32Array {
-  const out = new Float32Array(embeddings[0].length)
-  for (const e of embeddings) for (let i = 0; i < out.length; i++) out[i] += e[i]
-  for (let i = 0; i < out.length; i++) out[i] /= embeddings.length
-  return out
+/** Exact duplicates fold onto the lowest index; `copies` lists every index
+ *  each representative stands for. */
+export function foldDuplicates(sim: number[][], count: number): { reps: number[]; copies: Map<number, number[]> } {
+  const copies = new Map<number, number[]>()
+  const rep = Array.from({ length: count }, (_, i) => i)
+  for (let i = 0; i < count; i++) {
+    if (rep[i] !== i) continue
+    copies.set(i, [i])
+    for (let j = i + 1; j < count; j++) {
+      if (rep[j] === j && sim[i][j] >= HELD_DUPLICATE_SIMILARITY) { rep[j] = i; copies.get(i)!.push(j) }
+    }
+  }
+  return { reps: [...copies.keys()], copies }
+}
+
+export interface SuggestOptions {
+  /** The wearer's own label. Never offered: one click would write a stranger
+   *  into the profile that drives owner detection. */
+  ownerLabel?: string
 }
 
 /**
- * The enrolled profile that VOUCHES for a vector.
+ * The enrolled profile that VOUCHES for a sample.
  *
- * Not best-of. A profile spans rooms and microphones, so its nearest sample is
- * the right measure of "could this be them" — but it is also exactly what one
- * mis-enrolled sample produces, and the live store has those. So a profile
- * with two or more samples must have at least `HELD_SUGGESTION_MIN_SUPPORT`
- * of them above the floor, and its score is the second-best: one pollutant
- * cannot clear that bar alone. At least one agreeing sample must come from an
- * anchored source (`HELD_ANCHOR_SOURCES`). A one-sample profile can only vouch
- * as "likely", never "high" — nothing corroborates it.
+ * Every profile is scored: its samples' cosines against `embedding`, sorted.
+ * With two or more samples a profile is a candidate only when at least
+ * `HELD_SUGGESTION_MIN_SUPPORT` of them clear the floor, and its score is the
+ * second-best; a one-sample profile is a candidate at its one score and can
+ * only ever be "likely". The best-scoring candidate wins — and if that winner
+ * has no agreeing sample from a source that may vouch (`vouchesForIdentity`),
+ * the answer is NO suggestion, not the runner-up: the runner-up is a different
+ * person, and the voice most likely belongs to the profile that cannot vouch.
  */
-export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[]): HeldGroupSuggestion | null {
-  let best: HeldGroupSuggestion | null = null
+export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[], opts: SuggestOptions = {}): HeldGroupSuggestion | null {
+  type Candidate = { name: string; score: number; tier: HeldSuggestionTier; agreeing: number; of: number; anchor: string | null }
+  let best: Candidate | null = null
   for (const profile of profiles) {
+    if (opts.ownerLabel && profile.name === opts.ownerLabel) continue
     const rows: Array<{ sim: number; source: string }> = []
     profile.embeddings.forEach((candidate, i) => {
       if (candidate.length !== embedding.length) return
-      const source = (profile.sources?.[i] ?? 'unknown').split(':')[0]
-      rows.push({ sim: rawCosineSimilarity(embedding, new Float32Array(candidate)), source })
+      rows.push({ sim: rawCosineSimilarity(embedding, new Float32Array(candidate)), source: profile.sources?.[i] ?? 'unknown' })
     })
     if (rows.length === 0) continue
     rows.sort((a, b) => b.sim - a.sim)
     const agreeing = rows.filter(r => r.sim >= HELD_GROUP_SUGGESTION_FLOOR)
-    const anchored = agreeing.find(r => HELD_ANCHOR_SOURCES.has(r.source))
-    if (!anchored) continue
     let score: number
     let tier: HeldSuggestionTier
     if (rows.length >= 2) {
@@ -370,51 +403,46 @@ export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[]
       score = rows[1].sim
       tier = score >= HELD_GROUP_HIGH_CONFIDENCE ? 'high' : 'likely'
     } else {
+      if (rows[0].sim < HELD_GROUP_SUGGESTION_FLOOR) continue
       score = rows[0].sim
       tier = 'likely'
     }
-    if (!best || score > best.similarity) {
-      best = { name: profile.name, similarity: Number(score.toFixed(4)), tier, agreeing: agreeing.length, of: rows.length, anchor: anchored.source }
+    const anchored = agreeing.find(r => vouchesForIdentity(r.source))
+    const candidate: Candidate = {
+      name: profile.name, score, tier, agreeing: agreeing.length, of: profile.embeddings.length,
+      anchor: anchored ? anchored.source.split(':')[0] : null,
     }
+    if (!best || candidate.score > best.score) best = candidate
   }
-  return best
+  if (!best || best.anchor === null) return null
+  return { name: best.name, similarity: Number(best.score.toFixed(4)), tier: best.tier, agreeing: best.agreeing, of: best.of, anchor: best.anchor }
+}
+
+export interface BuildOptions extends SuggestOptions {
+  floor?: number
 }
 
 /**
  * Carve the held samples into voices.
  *
- * One pairwise matrix. Exact duplicates (the same chunk banked under two
- * session ids) fold into one distinct sample first, or every doubled recording
- * would read as a two-sample voice of perfect coherence. Then repeatedly take
- * the dominant mutually coherent cluster out of what remains until nothing
- * coheres. Whatever is left is loose. A group is at least TWO distinct samples:
- * a lone sample has no evidence of being a voice rather than a noise, and it
- * is listed loose so the reviewer can throw it out or, hearing a real person
- * in it, name it on its own. Members and loose always carry EVERY wav,
- * duplicates included, so naming or discarding consumes the copies too.
+ * One pairwise matrix. Exact duplicates fold into one distinct sample first, or
+ * every doubled recording would read as a two-sample voice of perfect
+ * coherence. Then repeatedly take the dominant mutually coherent cluster out of
+ * what remains until nothing coheres. Whatever is left is loose. A group is at
+ * least TWO distinct samples: a lone sample has no evidence of being a voice
+ * rather than a noise, and it is listed loose so the reviewer can throw it out
+ * or, hearing a real person in it, name it on its own. Members and loose carry
+ * EVERY wav, duplicates included, so naming or discarding consumes the copies.
  */
-export function buildHeldVoiceGroups(
-  samples: HeldSample[],
-  profiles: VoiceProfile[],
-  floor: number = VOICE_COHERENCE_FLOOR,
-): { groups: HeldVoiceGroup[]; loose: HeldSampleRef[] } {
+export function buildHeldVoiceGroups(samples: HeldSample[], profiles: VoiceProfile[], opts: BuildOptions = {}): { groups: HeldVoiceGroup[]; loose: HeldSampleRef[] } {
+  const floor = opts.floor ?? VOICE_COHERENCE_FLOOR
   const groups: HeldVoiceGroup[] = []
   if (samples.length === 0) return { groups, loose: [] }
   const sim = pairwiseSimilarityMatrix(samples.map(s => s.embedding))
-  // Fold exact duplicates: each distinct sample is represented by its lowest
-  // index and carries the refs of every copy.
-  const copies = new Map<number, number[]>()
-  const rep = samples.map((_, i) => i)
-  for (let i = 0; i < samples.length; i++) {
-    if (rep[i] !== i) continue
-    copies.set(i, [i])
-    for (let j = i + 1; j < samples.length; j++) {
-      if (rep[j] === j && sim[i][j] >= HELD_DUPLICATE_SIMILARITY) { rep[j] = i; copies.get(i)!.push(j) }
-    }
-  }
+  const { reps, copies } = foldDuplicates(sim, samples.length)
   const refsOf = (idx: number[]): HeldSampleRef[] =>
     idx.flatMap(i => copies.get(i)!).map(i => ({ sessionId: samples[i].sessionId, chunkIndex: samples[i].chunkIndex })).sort(compareRefs)
-  let active = [...copies.keys()]
+  let active = reps
   for (;;) {
     // ONE guard, load-bearing on its own: a lone candidate comes back from the
     // matrix search as its own cluster of one, and a group needs two.
@@ -435,23 +463,42 @@ export function buildHeldVoiceGroups(
       distinctCount: memberIdx.length,
       coherence: Number((pairs > 0 ? sum / pairs : 1).toFixed(4)),
       seed: { sessionId: seedSample.sessionId, chunkIndex: seedSample.chunkIndex },
-      suggestion: suggestProfile(centroid(memberIdx.map(i => samples[i].embedding)), profiles),
+      suggestion: suggestProfile(seedSample.embedding, profiles, opts),
     })
     const taken = new Set(memberIdx)
     active = active.filter(i => !taken.has(i))
   }
   groups.sort((a, b) => b.sampleCount - a.sampleCount || b.coherence - a.coherence || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  const loose = refsOf(active)
-  return { groups, loose }
+  return { groups, loose: refsOf(active) }
 }
 
+// ── Listing ────────────────────────────────────────────────────────────────
+
+let listingMemo: { fingerprint: string; at: number; result: HeldVoiceGroupsResult } | null = null
+
+/** What the listing depends on: which wavs are held, and the profile store. */
+function listingFingerprint(sessionIds: string[]): string {
+  let profilesStamp = '0'
+  try { profilesStamp = String(statSync(dataPath('voice-profiles.json')).mtimeMs) } catch {}
+  return `${isEmbeddingAvailable() ? 'm' : '-'}|${profilesStamp}|` + sessionIds.map(id => `${id}:${listExtAudioChunks(id).join(',')}`).join(';')
+}
+
+export function __resetHeldListingMemoForTests(): void { listingMemo = null }
+
 /** The listing. Decodes within the budget; anything past it is `pending` and
- *  the background sweep finishes it for the next call. */
-export function heldVoiceGroups(opts: { budgetMs?: number } = {}): HeldVoiceGroupsResult {
-  const collected = collectHeldSamples({ budgetMs: opts.budgetMs })
-  const { groups, loose } = buildHeldVoiceGroups(collected.samples, readVoiceProfiles().profiles)
+ *  the background sweep finishes it for the next call. Memoised briefly while
+ *  nothing held has changed. */
+export function heldVoiceGroups(opts: { budgetMs?: number; now?: () => number } = {}): HeldVoiceGroupsResult {
+  const now = opts.now ?? (() => Date.now())
+  const sessionIds = heldSessionIds()
+  const fingerprint = listingFingerprint(sessionIds)
+  if (listingMemo && listingMemo.fingerprint === fingerprint && now() - listingMemo.at < HELD_LISTING_MEMO_MS && listingMemo.result.pending === 0) {
+    return listingMemo.result
+  }
+  const collected = collectHeldSamples({ budgetMs: opts.budgetMs, now })
+  const { groups, loose } = buildHeldVoiceGroups(collected.samples, readVoiceProfiles().profiles, { ownerLabel: getOwnerSpeakerLabel() })
   if (collected.pending.length > 0) scheduleHeldEmbeddingSweep()
-  return {
+  const result: HeldVoiceGroupsResult = {
     groups,
     loose,
     sessions: collected.sessions,
@@ -459,28 +506,44 @@ export function heldVoiceGroups(opts: { budgetMs?: number } = {}): HeldVoiceGrou
     embedded: collected.samples.length,
     pending: collected.pending.length,
     unusable: collected.unusable.length,
+    speakerModel: isEmbeddingAvailable(),
     generatedAt: new Date().toISOString(),
   }
+  listingMemo = { fingerprint, at: now(), result }
+  return result
 }
 
 // ── Background decode ──────────────────────────────────────────────────────
 
-const SWEEP_SLICE_MS = 250
-const SWEEP_GAP_MS = 50
+export const SWEEP_SLICE_MS = 250
+export const SWEEP_GAP_MS = 50
 let sweepTimer: NodeJS.Timeout | null = null
+let sweepLastPending: number | null = null
+
+/** One slice of the sweep. `progressed` is false when the pending count did
+ *  not fall — the scheduler stops rather than spin. */
+export function runHeldEmbeddingSweepTick(budgetMs: number = SWEEP_SLICE_MS): { pending: number; progressed: boolean } {
+  let pending = 0
+  try { pending = collectHeldSamples({ budgetMs }).pending.length } catch { pending = 0 }
+  const progressed = sweepLastPending === null || pending < sweepLastPending
+  sweepLastPending = pending
+  if (pending === 0) listingMemo = null
+  return { pending, progressed }
+}
 
 /**
  * Finish the decodes a listing could not afford, a slice at a time, off the
- * request path. Single-flight; each slice persists through the cache, so a
- * server restart loses at most one slice of work.
+ * request path. Single-flight; each slice persists through the cache; stops
+ * when nothing is pending, when a slice made no progress, or when the speaker
+ * model is not loaded (nothing could decode).
  */
 export function scheduleHeldEmbeddingSweep(): void {
-  if (sweepTimer) return
+  if (sweepTimer || !isEmbeddingAvailable()) return
+  sweepLastPending = null
   const tick = () => {
     sweepTimer = null
-    let pending = 0
-    try { pending = collectHeldSamples({ budgetMs: SWEEP_SLICE_MS }).pending.length } catch { pending = 0 }
-    if (pending > 0) {
+    const { pending, progressed } = runHeldEmbeddingSweepTick()
+    if (pending > 0 && progressed && isEmbeddingAvailable()) {
       sweepTimer = setTimeout(tick, SWEEP_GAP_MS)
       sweepTimer.unref()
     }
@@ -489,33 +552,41 @@ export function scheduleHeldEmbeddingSweep(): void {
   sweepTimer.unref()
 }
 
+export function __heldSweepArmedForTests(): boolean { return sweepTimer !== null }
+
 export function __resetHeldEmbeddingSweepForTests(): void {
   if (sweepTimer) clearTimeout(sweepTimer)
   sweepTimer = null
+  sweepLastPending = null
+  listingMemo = null
 }
 
 // ── Corrections ────────────────────────────────────────────────────────────
 
-/** Validate a request body's member list into refs. Throws on shape errors. */
+/** Validate a request body's member list into refs: de-duplicated, normalised,
+ *  then capped. Throws on shape errors. */
 export function parseHeldMembers(raw: unknown): HeldSampleRef[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new HeldGroupError(400, 'invalid_members', 'members must be a non-empty array of { sessionId, chunkIndex }')
   }
-  if (raw.length > MAX_HELD_MEMBERS_PER_REQUEST) {
-    throw new HeldGroupError(400, 'too_many_members', `members is capped at ${MAX_HELD_MEMBERS_PER_REQUEST} per request`)
-  }
   const seen = new Set<string>()
   const refs: HeldSampleRef[] = []
   for (const item of raw) {
-    const sessionId = typeof (item as { sessionId?: unknown })?.sessionId === 'string' ? String((item as { sessionId: string }).sessionId) : ''
-    const chunkIndex = Number((item as { chunkIndex?: unknown })?.chunkIndex)
-    if (!SESSION_ID_SHAPE.test(sessionId) || sessionId.includes('..') || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
+    const rawSession = (item as { sessionId?: unknown })?.sessionId
+    const rawChunk = (item as { chunkIndex?: unknown })?.chunkIndex
+    const sessionId = typeof rawSession === 'string' ? normalizeSessionId(rawSession) : ''
+    const chunkIndex = typeof rawChunk === 'number' ? rawChunk
+      : typeof rawChunk === 'string' && /^\d{1,9}$/.test(rawChunk) ? Number(rawChunk) : NaN
+    if (!SESSION_ID_SHAPE.test(sessionId) || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
       throw new HeldGroupError(400, 'invalid_members', 'each member needs a sessionId and a non-negative integer chunkIndex')
     }
     const ref = { sessionId, chunkIndex }
     if (seen.has(sampleKey(ref))) continue
     seen.add(sampleKey(ref))
     refs.push(ref)
+  }
+  if (refs.length > MAX_HELD_MEMBERS_PER_REQUEST) {
+    throw new HeldGroupError(400, 'too_many_members', `members is capped at ${MAX_HELD_MEMBERS_PER_REQUEST} distinct samples per request`, { distinct: refs.length })
   }
   return refs.sort(compareRefs)
 }
@@ -530,84 +601,108 @@ function onlyMap(refs: HeldSampleRef[]): Map<string, Set<number>> {
   return only
 }
 
+/** Which of these refs are still held on disk. */
+export function previewDiscard(refs: HeldSampleRef[]): { present: HeldSampleRef[]; missing: HeldSampleRef[] } {
+  const present: HeldSampleRef[] = []
+  const missing: HeldSampleRef[] = []
+  for (const ref of refs) (extAudioChunkPath(ref.sessionId, ref.chunkIndex) ? present : missing).push(ref)
+  return { present, missing }
+}
+
 /** Remove the wavs behind these refs. Returns what was removed and what was not there. */
 export function discardHeldSamples(refs: HeldSampleRef[]): { removed: HeldSampleRef[]; missing: HeldSampleRef[] } {
   const removed: HeldSampleRef[] = []
   const missing: HeldSampleRef[] = []
   const touched = new Map<string, Record<string, string>>()
   for (const ref of refs) {
-    const wav = extAudioChunkPath(ref.sessionId, ref.chunkIndex)
-    if (!wav) { missing.push(ref); continue }
-    try { unlinkSync(wav); removed.push(ref) } catch { missing.push(ref); continue }
     const cache = touched.get(ref.sessionId) ?? readCache(ref.sessionId)
     delete cache[String(ref.chunkIndex)]
     touched.set(ref.sessionId, cache)
+    const wav = extAudioChunkPath(ref.sessionId, ref.chunkIndex)
+    if (!wav) { missing.push(ref); continue }
+    try { unlinkSync(wav); removed.push(ref) } catch { missing.push(ref) }
   }
   for (const [sessionId, cache] of touched) writeCache(sessionId, cache)
+  listingMemo = null
+  console.log(`[held-voice] discard: removed=${removed.length} missing=${missing.length} sessions=[${[...new Set(refs.map(r => r.sessionId))].join(',')}]`)
   return { removed, missing }
 }
 
-export interface EnrollHeldGroupResult {
+export interface EnrollHeldGroupPlan {
   speaker: string
   /** True when no profile of that name existed before. */
   created: boolean
-  /** Samples the request named. */
+  /** Distinct samples the request named. */
   submitted: number
-  /** Of those, the ones still held on disk with a usable vector. */
+  /** Of those, the ones held on disk with a usable vector. */
   resolved: number
+  /** Resolved samples after exact duplicates fold. */
+  distinct: number
   missing: HeldSampleRef[]
-  /** The mutually coherent core that was treated as this one voice. */
+  /** Held but not yet decoded within the request budget: untouched, listed for
+   *  the next attempt. The sweep is working on them. */
+  notReady: HeldSampleRef[]
+  /** Wavs in the mutually coherent core that was treated as this one voice. */
   coherent: number
   /** Submitted samples that did NOT cohere with the core. Left on disk, untouched. */
   leftBehind: HeldSampleRef[]
-  /** Diverse subset of the core actually written to the profile. */
+  /** Diverse subset of the distinct core to be written to the profile. */
   selected: number
+  sessions: string[]
+  profileEmbeddings: number
+}
+
+export interface EnrollHeldGroupResult extends EnrollHeldGroupPlan {
+  dryRun: boolean
   enrolled: number
   /** Wavs removed: the whole core, selected or not, because all of it is now a known voice. */
   deleted: number
-  profileEmbeddings: number
 }
 
 /**
  * Name a set of held samples as one person.
  *
  * NEVER cuts a corner on coherence: the submitted set is re-clustered here
- * regardless of what the client believed, and only the mutually coherent core
- * is written. A set that agrees on nothing is refused outright rather than
- * enrolled as "whichever stranger came first". A single sample is allowed —
- * naming sample by sample is exactly what a low-confidence voice needs — and a
- * human hearing one chunk is the evidence.
+ * regardless of what the client believed, duplicates folded first, and only
+ * the mutually coherent core is written. A set that agrees on nothing is
+ * refused outright rather than enrolled as "whichever stranger came first". A
+ * single sample is allowed — naming sample by sample is exactly what a
+ * low-confidence voice needs — and a human hearing one chunk is the evidence.
  *
- * Deletes only the core's wavs. The existing enroll-ext route removed the WHOLE
- * session directory, which in a five-person meeting threw away four people's
- * evidence to name one; here the samples that were not this voice stay held.
+ * Deletes only the core's wavs, and only after at least one sample was
+ * written. With the speaker model not loaded nothing can be written, so the
+ * request is refused before it touches anything.
  */
-export function enrollHeldGroup(name: string, refs: HeldSampleRef[]): EnrollHeldGroupResult {
-  const collected = collectHeldSamples({ only: onlyMap(refs), budgetMs: Infinity })
+export function enrollHeldGroup(name: string, refs: HeldSampleRef[], opts: { dryRun?: boolean } = {}): EnrollHeldGroupResult {
+  const dryRun = opts.dryRun === true
+  const collected = collectHeldSamples({ only: onlyMap(refs), budgetMs: HELD_ENROLL_DECODE_BUDGET_MS })
+  if (collected.pending.length > 0) scheduleHeldEmbeddingSweep()
   const have = new Map(collected.samples.map(s => [sampleKey(s), s]))
-  const missing = refs.filter(r => !have.has(sampleKey(r)))
+  const notReadyKeys = new Set(collected.pending.map(sampleKey))
+  const notReady = refs.filter(r => notReadyKeys.has(sampleKey(r)))
+  const missing = refs.filter(r => !have.has(sampleKey(r)) && !notReadyKeys.has(sampleKey(r)))
   const resolved = refs.filter(r => have.has(sampleKey(r))).map(r => have.get(sampleKey(r))!)
   if (resolved.length === 0) {
-    throw new HeldGroupError(404, 'no_samples', 'None of those samples are held any more, or none could be turned into a voiceprint.', {
-      missing, unusable: collected.unusable.length,
+    throw new HeldGroupError(404, 'no_samples', notReady.length > 0
+      ? 'Those samples are still being read; try again in a moment.'
+      : 'None of those samples are held any more, or none could be turned into a voiceprint.', {
+      missing, notReady, unusable: collected.unusable.length,
     })
   }
 
-  let coreIdx: number[]
-  if (resolved.length === 1) {
-    coreIdx = [0]
-  } else {
-    const cluster = dominantCoherentCluster(resolved.map(s => s.embedding))
-    if (cluster.members.length === 0) {
-      throw new HeldGroupError(409, 'incoherent', 'Those samples do not sound like one person. Nothing was enrolled; name them separately or discard the odd ones out.', {
-        submitted: refs.length, resolved: resolved.length,
-      })
-    }
-    coreIdx = cluster.members
+  const sim = pairwiseSimilarityMatrix(resolved.map(s => s.embedding))
+  const { reps, copies } = foldDuplicates(sim, resolved.length)
+  const cluster = reps.length === 1 ? { members: reps, seed: reps[0] } : dominantCoherentClusterFromMatrix(sim, reps)
+  if (cluster.members.length === 0) {
+    throw new HeldGroupError(409, 'incoherent', 'Those samples do not sound like one person. Nothing was enrolled; name them separately or discard the odd ones out.', {
+      submitted: refs.length, resolved: resolved.length, distinct: reps.length,
+    })
   }
-  const coreSet = new Set(coreIdx)
-  const core = coreIdx.map(i => resolved[i])
-  const leftBehind = resolved.filter((_, i) => !coreSet.has(i)).map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex }))
+  const coreReps = cluster.members
+  const coreSet = new Set(coreReps)
+  const expand = (idx: number[]): HeldSample[] => idx.flatMap(i => copies.get(i)!).map(i => resolved[i])
+  const core = expand(coreReps)
+  const leftBehind = expand(reps.filter(i => !coreSet.has(i))).map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex })).sort(compareRefs)
 
   const existing = readVoiceProfiles().profiles.find(p => p.name === name)
   // A primitive snapshot, taken BEFORE the loop: the store hands back its live
@@ -615,26 +710,37 @@ export function enrollHeldGroup(name: string, refs: HeldSampleRef[]): EnrollHeld
   // until the first write invalidates the cache. Reading `.length` afterwards
   // counted the new samples twice (caught by the route test, 2026-09-12).
   const existingCount = existing?.embeddings.length ?? 0
-  const selected = greedyDiversitySelect(core.map(s => s.embedding), MAX_ENROL_PER_CORRECTION)
-  let enrolled = 0
-  for (const emb of selected) {
-    if (enrollEmbedding(name, emb, HELD_GROUP_SOURCE, true).success) enrolled++
-  }
-  const { removed } = enrolled > 0
-    ? discardHeldSamples(core.map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex })))
-    : { removed: [] as HeldSampleRef[] }
-
-  return {
+  const bySample = new Map<Float32Array, HeldSample>(coreReps.map(i => [resolved[i].embedding, resolved[i]]))
+  const selected = greedyDiversitySelect(coreReps.map(i => resolved[i].embedding), MAX_ENROL_PER_CORRECTION)
+  const plan: EnrollHeldGroupPlan = {
     speaker: name,
     created: !existing,
     submitted: refs.length,
     resolved: resolved.length,
+    distinct: reps.length,
     missing,
+    notReady,
     coherent: core.length,
     leftBehind,
     selected: selected.length,
-    enrolled,
-    deleted: removed.length,
-    profileEmbeddings: existingCount + enrolled,
+    sessions: [...new Set(core.map(s => s.sessionId))].sort(),
+    profileEmbeddings: existingCount,
   }
+  if (dryRun) return { ...plan, dryRun: true, enrolled: 0, deleted: 0 }
+  if (!isEmbeddingAvailable()) {
+    throw new HeldGroupError(503, 'speaker_model_unavailable', 'The speaker model is not loaded on this Mac, so nothing can be enrolled. Nothing was changed.', { ...plan })
+  }
+
+  let enrolled = 0
+  for (const emb of selected) {
+    const sample = bySample.get(emb)
+    const source = sample ? `${HELD_GROUP_SOURCE}:${sample.sessionId}` : HELD_GROUP_SOURCE
+    if (enrollEmbedding(name, emb, source, true).success) enrolled++
+  }
+  if (enrolled === 0) {
+    throw new HeldGroupError(409, 'nothing_enrolled', `The profile store refused every sample for ${name}; nothing was deleted.`, { ...plan })
+  }
+  const { removed } = discardHeldSamples(core.map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex })))
+  console.log(`[held-voice] enroll "${name}" (${existing ? 'appended' : 'created'}): submitted=${refs.length} resolved=${resolved.length} distinct=${reps.length} coherent=${core.length} selected=${selected.length} enrolled=${enrolled} deleted=${removed.length} leftBehind=${leftBehind.length} notReady=${notReady.length} sessions=[${plan.sessions.join(',')}]`)
+  return { ...plan, dryRun: false, enrolled, deleted: removed.length, profileEmbeddings: existingCount + enrolled }
 }

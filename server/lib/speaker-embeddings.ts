@@ -88,7 +88,14 @@ const CALIBRATION_LOG = resolve(DATA_DIR, 'speaker-calibration.jsonl')
 // Thresholds
 const VERIFY_THRESHOLD = 0.65
 const SEARCH_THRESHOLD = 0.55
-const AUTO_ENROLL_THRESHOLD = 0.88    // High bar — must be very confident before auto-enrolling
+/** The bar `autoEnroll` enrols at. From 6.45.4 also the bar at which a held
+ *  group is offered as a person with one click ("high"): the identifier would
+ *  have written that sample itself. */
+export const AUTO_ENROLL_THRESHOLD = 0.88    // High bar — must be very confident before auto-enrolling
+/** The live path only ASKS autoEnroll about a chunk above this; autoEnroll
+ *  then applies AUTO_ENROLL_THRESHOLD. Named so transcribe-stream and the
+ *  held-voice panel read the same number (6.45.4). */
+export const AUTO_ENROLL_CANDIDATE_SIMILARITY = 0.72
 const AUTO_ENROLL_CONSENSUS = 2       // Must match N times in same session before enrolling
 // Raised 20 -> 40 on 2026-08-06. Measured, not guessed: search latency is 1 us
 // at 20, 40 AND 80 samples per speaker (77 speakers, sherpa SpeakerEmbeddingManager),

@@ -23,7 +23,8 @@ describe('fast local transcription ownership', () => {
       applyCorrections: (text: string) => text,
     }))
     vi.doMock('./audio-enhance.js', () => ({ enhanceAudio: async (b: Buffer) => b }))
-    vi.doMock('./speaker-embeddings.js', () => ({ getAllSpeakerNames: () => [] }))
+    vi.doMock('./speaker-embeddings.js', () => ({
+    AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88, getAllSpeakerNames: () => [] }))
     vi.doMock('./openai-whisper-budget.js', () => ({
       assertOpenAIWhisperBudget: vi.fn(),
       recordOpenAIWhisperUsage: vi.fn(),

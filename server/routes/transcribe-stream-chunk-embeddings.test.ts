@@ -45,6 +45,7 @@ async function mountRoute(opts: {
   }))
   vi.doMock('../lib/audio-enhance.js', () => ({ enhanceAudio: async (audio: Buffer) => audio }))
   vi.doMock('../lib/speaker-embeddings.js', () => ({
+    AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
     identifySpeaker: opts.identify,
     isEmbeddingAvailable: () => true,
     // Must return the real shape: the route reads .enrolled off it.

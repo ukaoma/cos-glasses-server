@@ -16,7 +16,7 @@ import {
   transcriptQualityRank,
   type PromptDraftTranscriptRecord,
 } from '../lib/prompt-draft-store.js'
-import { guardPromptTail, speechWindowsFromWav } from '../lib/prompt-tail-guard.js'
+import { SPEECH_UNKNOWN, guardPromptTail, speechWindowsFromWav } from '../lib/prompt-tail-guard.js'
 import {
   transcribeAudioBuffer,
   resolveTranscribeMode,
@@ -506,7 +506,9 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/peek', async (req, res) => {
       lease.setPhase('active')
       try {
         const result = await transcribeWhisperPreview(audio)
-        const text = sanitizeTranscript(draftId, result.text, false)
+        // 6.45.4: the same whole-sentence filler rule as the commit path, so an
+        // invented closing line never paints on the lens only to vanish later.
+        const text = sanitizeTranscript(draftId, guardPromptTail({ text: result.text, speech: SPEECH_UNKNOWN }).text, false)
         if (!text) return
         if (!loadPromptDraftMeta(draftId)) return
         emitDisplay({

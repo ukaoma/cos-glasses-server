@@ -32,6 +32,11 @@ export interface TrimResult {
   trimmedWav: Buffer
   speechRatio: number
   segments: Array<{ startSample: number; sampleCount: number }>
+  /** True when the VAD ran over the audio and `segments` is its verdict. Absent
+   *  on every fallback (model not loaded, audio too short, internal error), which
+   *  otherwise look identical to measured silence. A reader deciding to drop
+   *  text on "no speech" must require this. (6.45.4: prompt-tail-guard) */
+  measured?: true
 }
 
 /** Initialize Silero VAD. Returns true if model loaded, false otherwise. */
@@ -124,7 +129,7 @@ export function trimSilence(wavBuffer: Buffer): TrimResult {
 
     if (speechSegments.length === 0 || totalSpeechSamples === 0) {
       // No speech detected — return original unchanged
-      return { trimmedWav: wavBuffer, speechRatio: 0.0, segments: [] }
+      return { trimmedWav: wavBuffer, speechRatio: 0.0, segments: [], measured: true }
     }
 
     // Concatenate speech segments into a single Float32Array
@@ -168,10 +173,10 @@ export function trimSilence(wavBuffer: Buffer): TrimResult {
 
     // Guard: if trimmed result is too small for Whisper, fall back to original
     if (trimmedWav.length < 100) {
-      return { trimmedWav: wavBuffer, speechRatio, segments: segmentInfo }
+      return { trimmedWav: wavBuffer, speechRatio, segments: segmentInfo, measured: true }
     }
 
-    return { trimmedWav, speechRatio, segments: segmentInfo }
+    return { trimmedWav, speechRatio, segments: segmentInfo, measured: true }
   } catch (err: any) {
     console.error('[silero-vad] trimSilence error:', err.message)
     return fallback

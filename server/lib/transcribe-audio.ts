@@ -172,7 +172,7 @@ export async function transcribeAudioBuffer(
       // A0 (2026-07-30): ffmpeg enhance light (highpass=f=80) was measured dropping
       // leading speech on compose ("device just for your awareness"). Meeting batch
       // still enhances in meeting-batch-transcribe.ts — this path is prompt/interactive only.
-      const result = await transcribeHighQuality(audioBuffer, undefined, { priority: 'interactive' })
+      const result = await transcribeHighQuality(audioBuffer, undefined, { priority: 'interactive', words: true })
       text = result.text
       words = result.words
       actualQuality = result.actualQuality

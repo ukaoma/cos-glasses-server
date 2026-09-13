@@ -52,6 +52,7 @@ describe('voice directory corpus aggregation', () => {
     vi.doMock('./meeting-corrections.js', () => ({ confirmedLabels: () => new Set<string>() }))
     vi.doMock('./profile.js', () => ({ getOwnerSpeakerLabel: () => 'MU' }))
     vi.doMock('./speaker-embeddings.js', () => ({
+    AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
       readVoiceProfiles: () => ({ profiles: [
         { name: 'Niala', embeddings: [[1], [2]], sources: ['manual', 'fireflies'] },
         { name: 'Never Heard', embeddings: [[3]], sources: ['manual'] },

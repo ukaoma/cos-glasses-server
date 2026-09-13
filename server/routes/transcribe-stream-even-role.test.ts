@@ -36,6 +36,7 @@ async function mountRoute(identify: (...args: unknown[]) => unknown): Promise<{
   }))
   vi.doMock('../lib/audio-enhance.js', () => ({ enhanceAudio: async (audio: Buffer) => audio }))
   vi.doMock('../lib/speaker-embeddings.js', () => ({
+    AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
     identifySpeaker: identify,
     isEmbeddingAvailable: () => true,
     autoEnroll: vi.fn().mockReturnValue({ enrolled: false, reason: 'test' }),

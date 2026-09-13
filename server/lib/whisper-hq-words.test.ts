@@ -54,7 +54,7 @@ describe('batch HQ word restore (CPU whisper-cli -ojf)', () => {
 
   it('keeps batch word capture on whisper-cli JSON, never live verbose_json', () => {
     const source = readFileSync(new URL('./whisper-local.ts', import.meta.url), 'utf8')
-    expect(source).toContain("const captureBatchWords = opts.priority === 'batch'")
+    expect(source).toContain("const captureWords = opts.priority === 'batch' || opts.words === true")
     expect(source).toContain("args.push('-ojf', '-of', outBase)")
     expect(source).toContain("formData.append('response_format', 'json')")
     expect(source).not.toMatch(/formData\.append\('response_format',\s*'verbose_json'\)/)

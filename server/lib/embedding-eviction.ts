@@ -42,6 +42,8 @@ export function provenanceTier(source: string | undefined | null): ProvenanceTie
     case 'correction':
     case 'ext-retroactive':
     case 'g2-enrollment':
+    // 6.45.4: a held group a human named after listening (held-voice-groups).
+    case 'ext-group':
       return 'human'
     // The identifier chose the label; a human approved the batch run.
     case 'g2-training':
@@ -55,6 +57,23 @@ export function provenanceTier(source: string | undefined | null): ProvenanceTie
     default:
       return 'unknown'
   }
+}
+
+/**
+ * May a sample of this provenance VOUCH for an unidentified voice — be the
+ * corroboration behind "this held group sounds like X"?
+ *
+ * Narrower than `provenanceTier === 'human'` on purpose. `ext-retroactive` is a
+ * whole held session enrolled under one typed name: a human supplied the name,
+ * so eviction protects it, but nobody listened to each sample, and on the live
+ * store 2026-09-12 every "high" suggestion was carried by such samples alone —
+ * one household voice that a bulk enrol had written into two people's
+ * profiles, offered back as those people. `auto` and `unknown` never vouch.
+ */
+export function vouchesForIdentity(source: string | undefined | null): boolean {
+  const head = String(source ?? '').trim().split(/[:_]/)[0].toLowerCase()
+  return head === 'manual' || head === 'fireflies' || head === 'g2-enrollment'
+    || head === 'g2-training' || head === 'correction' || head === 'ext-group'
 }
 
 /** True for a sample created by a human correcting a specific meeting. */

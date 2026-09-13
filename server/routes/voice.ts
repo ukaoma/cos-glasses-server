@@ -1,6 +1,6 @@
 // Voice enrollment, status, and multi-speaker training endpoints
 
-import { Router } from 'express'
+import express, { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -17,7 +17,7 @@ import { extAudioChunkPath, listExtAudioChunks } from '../lib/meeting-audio-arch
 import { getVoiceDirectorySnapshot, invalidateVoiceDirectory } from '../lib/voice-directory.js'
 import { greedyDiversitySelect } from '../lib/voice-enrolment-selection.js'
 import { fanOutSpeakerRename, type SpeakerRenameFanOut } from '../lib/speaker-rename-fanout.js'
-import { HeldGroupError, discardHeldSamples, enrollHeldGroup, heldVoiceGroups, parseHeldMembers } from '../lib/held-voice-groups.js'
+import { HeldGroupError, discardHeldSamples, enrollHeldGroup, heldVoiceGroups, parseHeldMembers, previewDiscard } from '../lib/held-voice-groups.js'
 import { resolveCosOperationsDir } from '../lib/cos-operations-meetings.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
@@ -547,6 +547,11 @@ voiceRouter.get('/voice/ext-audio/:sessionId/sample', (req, res) => {
 // let the random artifacts be thrown out instead of named. See
 // lib/held-voice-groups.ts for the rule (mutually coherent at the identifier's
 // own floor) and for why the vectors cost no decode in the ordinary case.
+//
+// Both mutations fail closed like every sibling here: without `confirm: true`
+// they answer 400 `confirmation required` with a preview of exactly what would
+// change, and `dryRun: true` returns that preview as a 200. COS Control sends
+// `confirm` after its own two-click gate.
 
 // GET /api/voice/held-groups
 voiceRouter.get('/voice/held-groups', (_req, res) => {
@@ -558,11 +563,20 @@ voiceRouter.get('/voice/held-groups', (_req, res) => {
   }
 })
 
+function heldGroupFailure(res: express.Response, err: unknown): void {
+  if (err instanceof HeldGroupError) {
+    res.status(err.status).json({ success: false, error: err.message, reason: err.reason, ...err.details })
+    return
+  }
+  res.status(500).json({ success: false, error: errMsg(err) })
+}
+
 // POST /api/voice/held-groups/enroll — name a group (or any set of held
-// samples) as one person. Body: { name, members: [{ sessionId, chunkIndex }] }.
-// A name that already has a profile is APPENDED to: "add more fidelity in
-// samples to a given voice". Only the coherent core is written and only its
-// wavs are removed; samples that were not this voice stay held.
+// samples) as one person. Body: { name, members: [{ sessionId, chunkIndex }],
+// confirm?: true, dryRun?: true }. A name that already has a profile is
+// APPENDED to: "add more fidelity in samples to a given voice". Only the
+// coherent core is written and only its wavs are removed; samples that were
+// not this voice stay held.
 voiceRouter.post('/voice/held-groups/enroll', (req, res) => {
   try {
     const nameCheck = checkSpeakerName(req.body?.name, { ownerLabel: getOwnerSpeakerLabel() })
@@ -571,6 +585,24 @@ voiceRouter.post('/voice/held-groups/enroll', (req, res) => {
     }
     const name = String(req.body.name).trim()
     const members = parseHeldMembers(req.body?.members)
+    const dryRun = req.body?.dryRun === true
+    const confirm = req.body?.confirm === true
+    if (dryRun || !confirm) {
+      const plan = enrollHeldGroup(name, members, { dryRun: true })
+      const verb = plan.created ? 'create' : 'add to'
+      const summary = `Would ${verb} ${name} from ${plan.coherent} of ${plan.resolved} held sample${plan.resolved === 1 ? '' : 's'}`
+        + (plan.leftBehind.length > 0 ? `, leaving ${plan.leftBehind.length} that do not sound like the same person` : '')
+        + (plan.notReady.length > 0 ? `, with ${plan.notReady.length} still being read` : '')
+        + `, and delete the audio it used.`
+      if (dryRun) return res.json({ success: true, ...plan, message: summary })
+      return res.status(400).json({
+        success: false,
+        error: 'confirmation required',
+        reason: 'confirmation_required',
+        message: `${summary} Pass { confirm: true } to proceed.`,
+        preview: plan,
+      })
+    }
     const result = enrollHeldGroup(name, members)
     invalidateVoiceDirectory()
     const verb = result.created ? 'Created' : 'Added to'
@@ -579,22 +611,36 @@ voiceRouter.post('/voice/held-groups/enroll', (req, res) => {
       ...result,
       message: result.leftBehind.length > 0
         ? `${verb} ${name} from ${result.coherent} of ${result.resolved} samples; ${result.leftBehind.length} did not sound like the same person and stay held.`
-        : `${verb} ${name} from ${result.coherent} sample${result.coherent === 1 ? '' : 's'}.`,
+        : `${verb} ${name} from ${result.coherent} sample${result.coherent === 1 ? '' : 's'}.`
+          + (result.notReady.length > 0 ? ` ${result.notReady.length} still being read; they stay held.` : ''),
     })
   } catch (err: unknown) {
-    if (err instanceof HeldGroupError) {
-      return res.status(err.status).json({ success: false, error: err.message, reason: err.reason, ...err.details })
-    }
-    res.status(500).json({ success: false, error: errMsg(err) })
+    heldGroupFailure(res, err)
   }
 })
 
 // POST /api/voice/held-groups/discard — throw held samples out without naming
-// them. Body: { members: [{ sessionId, chunkIndex }] }. This is how the loose
-// artifacts leave the panel.
+// them. Body: { members: [{ sessionId, chunkIndex }], confirm?: true, dryRun?: true }.
+// This is how the loose artifacts leave the panel.
 voiceRouter.post('/voice/held-groups/discard', (req, res) => {
   try {
     const members = parseHeldMembers(req.body?.members)
+    const dryRun = req.body?.dryRun === true
+    const confirm = req.body?.confirm === true
+    if (dryRun || !confirm) {
+      const preview = previewDiscard(members)
+      const summary = `Would discard ${preview.present.length} held sample${preview.present.length === 1 ? '' : 's'}`
+        + (preview.missing.length > 0 ? ` (${preview.missing.length} already gone)` : '') + '.'
+      if (dryRun) return res.json({ success: true, dryRun: true, wouldRemove: preview.present.length, missing: preview.missing, message: summary })
+      return res.status(400).json({
+        success: false,
+        error: 'confirmation required',
+        reason: 'confirmation_required',
+        message: `${summary} Pass { confirm: true } to proceed.`,
+        wouldRemove: preview.present.length,
+        missing: preview.missing,
+      })
+    }
     const result = discardHeldSamples(members)
     res.json({
       success: true,
@@ -603,10 +649,7 @@ voiceRouter.post('/voice/held-groups/discard', (req, res) => {
       message: `Discarded ${result.removed.length} held sample${result.removed.length === 1 ? '' : 's'}.`,
     })
   } catch (err: unknown) {
-    if (err instanceof HeldGroupError) {
-      return res.status(err.status).json({ success: false, error: err.message, reason: err.reason, ...err.details })
-    }
-    res.status(500).json({ success: false, error: errMsg(err) })
+    heldGroupFailure(res, err)
   }
 })
 

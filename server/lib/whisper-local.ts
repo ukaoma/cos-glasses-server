@@ -940,6 +940,11 @@ export async function transcribeHighQuality(
    *  an infinite loop. */
   opts: {
     priority?: 'interactive' | 'batch'
+    /** Ask whisper-cli for per-token timing and probability (`-ojf`) on an
+     *  interactive decode too. Batch always captures them. The prompt path
+     *  needs them for the tail guard (6.45.4): without this flag the guard's
+     *  confidence rule could never fire, which QA caught on 2026-09-12. */
+    words?: boolean
     forceCpu?: boolean
     forceCpuReason?: string
     threads?: number
@@ -965,8 +970,9 @@ export async function transcribeHighQuality(
   const tmpWav = join('/tmp', `cos-whisper-hq-${id}.wav`)
   const outBase = join('/tmp', `cos-whisper-hq-${id}`)
   const jsonPath = `${outBase}.json`
-  // Word clocks only on post-meeting CPU polish. Live stays compact JSON.
-  const captureBatchWords = opts.priority === 'batch'
+  // Word clocks on post-meeting CPU polish, and on any decode that asks for
+  // them (the prompt tail guard). Other live decodes stay compact JSON.
+  const captureWords = opts.priority === 'batch' || opts.words === true
 
   const modelPath = resolveBatchModel()
   const useLargeV3 = modelPath === BATCH_MODEL_LARGE_V3
@@ -1013,7 +1019,7 @@ export async function transcribeHighQuality(
         '-np',
         '--prompt', buildPrompt(context),
       ]
-      if (captureBatchWords) {
+      if (captureWords) {
         args.push('-ojf', '-of', outBase)
       }
       if (useVad) {
@@ -1120,7 +1126,7 @@ export async function transcribeHighQuality(
 
     let finalText = text
     let words: WhisperWord[] | undefined
-    if (captureBatchWords) {
+    if (captureWords) {
       try {
         if (existsSync(jsonPath)) {
           const parsed = parseWhisperCliFullJson(readFileSync(jsonPath, 'utf8'))
@@ -1142,7 +1148,7 @@ export async function transcribeHighQuality(
     const modelTag = useLargeV3 ? 'large-v3' : 'turbo'
     console.log(
       `[whisper-hq] Batch transcribed in ${elapsed}ms ` +
-      `(${modelTag}${useVad ? '+vad' : ''}${captureBatchWords ? '+words' : ''}` +
+      `(${modelTag}${useVad ? '+vad' : ''}${captureWords ? '+words' : ''}` +
       `${words ? `, ${words.length} words` : ''}` +
       // Device forensics: without these, "why is polish slow today" is
       // unanswerable after the fact.
@@ -1162,7 +1168,7 @@ export async function transcribeHighQuality(
     return words ? { text: corrected, words, ...metadata } : { text: corrected, ...metadata }
   } finally {
     try { unlinkSync(tmpWav) } catch { /* cleanup */ }
-    if (captureBatchWords) {
+    if (captureWords) {
       try { unlinkSync(jsonPath) } catch { /* cleanup */ }
     }
   }

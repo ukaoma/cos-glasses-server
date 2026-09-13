@@ -69,6 +69,7 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
   mergeCalls = []
   directoryForceCalls = []
   vi.doMock('../lib/speaker-embeddings.js', () => ({
+    AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
     // Distinct embedding per file so greedy diversity selection has something
     // real to work with.
     extractEmbedding: (buf: Buffer) => {

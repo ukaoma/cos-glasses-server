@@ -38,6 +38,7 @@ describe('meeting transcription local-first failure contract', () => {
     }))
     vi.doMock('../lib/audio-enhance.js', () => ({ enhanceAudio: async (audio: Buffer) => audio }))
     vi.doMock('../lib/speaker-embeddings.js', () => ({
+    AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
       identifySpeaker: vi.fn(),
       isEmbeddingAvailable: () => false,
       autoEnroll: vi.fn(),

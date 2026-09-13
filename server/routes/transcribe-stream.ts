@@ -39,7 +39,7 @@ import { errMsg } from '../lib/utils.js'
 import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
-import { identifySpeaker, isEmbeddingAvailable, autoEnroll, getEmbeddingCount } from '../lib/speaker-embeddings.js'
+import { identifySpeaker, isEmbeddingAvailable, autoEnroll, getEmbeddingCount, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
 import {
   assertOpenAIWhisperBudget,
   recordOpenAIWhisperUsage,
@@ -1157,7 +1157,9 @@ setInterval(() => {
         const dirPath = resolve(EXT_AUDIO_DIR, dir)
         try {
           const files = readdirSync(dirPath)
-          if (files.length === 0) { rmSync(dirPath, { recursive: true, force: true }); continue }
+          // 6.45.4: an emptied session (every held sample named or discarded)
+          // frees its per-session cap too, so the next stranger can be held.
+          if (files.length === 0) { rmSync(dirPath, { recursive: true, force: true }); extAudioCounts.delete(dir); continue }
           const { mtimeMs } = statSync(resolve(dirPath, files[0]))
           if (Date.now() - mtimeMs > EXT_AUDIO_TTL_MS) {
             rmSync(dirPath, { recursive: true, force: true })
@@ -1897,7 +1899,7 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
     console.log(`[speaker] Embedding: ${speaker} vs Amplitude: ${clientSpeaker} (sim: ${embeddingResult.similarity.toFixed(2)})`)
   }
 
-  if (embeddingResult.similarity >= 0.72 && speaker !== 'Ext') {
+  if (embeddingResult.similarity >= AUTO_ENROLL_CANDIDATE_SIMILARITY && speaker !== 'Ext') {
     const enrollResult = autoEnroll(speaker, audioBuffer, embeddingResult.similarity, sessionId)
     if (enrollResult.enrolled) {
       console.log(`[speaker] Auto-enrolled ${speaker} from G2 mic (sim: ${embeddingResult.similarity.toFixed(3)})`)

@@ -205,6 +205,52 @@ describe('public prompt draft recovery contract', () => {
     expect(autoCleanDictation).not.toHaveBeenCalled()
   })
 
+  it('6.45.4: drops an invented closing sentence from the committed chunk and keeps the prompt', async () => {
+    transcribeAudioBuffer.mockImplementation(async () => ({
+      text: 'Send the deck to Chris. I am going to go to the bathroom.',
+      words: [
+        { word: 'Send', start: 0.0, end: 0.2, probability: 0.9 }, { word: 'the', start: 0.3, end: 0.4, probability: 0.9 },
+        { word: 'deck', start: 0.5, end: 0.7, probability: 0.9 }, { word: 'to', start: 0.9, end: 1.0, probability: 0.9 },
+        { word: 'Chris', start: 1.1, end: 1.4, probability: 0.8 }, { word: '.', start: 1.5, end: 1.6, probability: 0.9 },
+        { word: 'I', start: 4.5, end: 4.6, probability: 0.3 }, { word: 'am', start: 4.6, end: 4.7, probability: 0.2 },
+        { word: 'going', start: 4.8, end: 4.9, probability: 0.2 }, { word: 'to', start: 5.0, end: 5.1, probability: 0.2 },
+        { word: 'go', start: 5.1, end: 5.2, probability: 0.2 }, { word: 'to', start: 5.2, end: 5.3, probability: 0.2 },
+        { word: 'the', start: 5.3, end: 5.4, probability: 0.2 }, { word: 'bath', start: 5.4, end: 5.5, probability: 0.2 },
+        { word: 'room', start: 5.5, end: 5.6, probability: 0.2 }, { word: '.', start: 5.6, end: 5.7, probability: 0.2 },
+      ],
+      backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+    }))
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId: started.json.draftId, chunkIndex: 0, text: 'Send the deck to Chris.' },
+    }))
+    const finalized = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast`)
+    expect(finalized.status).toBe(200)
+    expect(finalized.json.text).toBe('Send the deck to Chris.')
+  })
+
+  it('6.45.4: a chunk that is only a filler is refused as no speech, and a real prompt with the same words is kept', async () => {
+    // Keyed on the audio's length: the route may re-wrap the bytes it hands
+    // the decoder, so the first byte is not a reliable tag. Chunk 0 is short.
+    transcribeAudioBuffer.mockImplementation(async (buf: Buffer) => ({
+      text: buf.length < 4800 ? 'Thanks for watching.' : 'Summarize the Bottle POS notes and put the risks up front.',
+      backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', degraded: false, elapsedMs: 20, audioBytes: 3200,
+    }))
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 7))
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=1&mode=fast`, Buffer.alloc(6400, 8))
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalledWith({
+      type: 'prompt_transcript',
+      data: { draftId: started.json.draftId, chunkIndex: 1, text: 'Summarize the Bottle POS notes and put the risks up front.' },
+    }))
+    const finalized = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast`)
+    expect(finalized.status).toBe(200)
+    expect(finalized.json.text).toBe('Summarize the Bottle POS notes and put the risks up front.')
+    expect(emitDisplay).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ text: 'Thanks for watching.' }) }))
+  })
+
   it('does not speculative-HQ-warm when mode=fast', async () => {
     transcribeAudioBuffer.mockResolvedValue({
       text: 'fast only', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast',
