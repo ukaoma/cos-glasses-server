@@ -1,3 +1,11 @@
+## 6.46.1
+
+G2 recordings show in a multi-folder Meetings library that has no COS pipeline to file them. No Control or glasses update is needed.
+
+- A Meetings library on a multi-folder operations tree (COS_OPERATIONS_DIR), on a Mac without a working COS pipeline (no COS_SCRIPTS_DIR, or no venv Python or sync_meetings.py in it), listed only that tree. G2 recordings saved there never reach it, so Control's Meetings window showed an empty month while the recordings sat in the server's own recordings store. GET /api/meetings now lists them beside the operations rows, with their months and day counts.
+- A recording that also reached the operations tree is listed once, as the operations copy matched by the session id in its sidecar, and its day is counted once.
+- Where the COS pipeline can run, the list is unchanged: sync_meetings.py decides which recordings join the operations tree. Search and meeting detail already read the recordings store in every layout.
+
 ## 6.46.0
 
 Name held voice samples and preview the meeting labels they will change. Paired Control build: 0.5.223.

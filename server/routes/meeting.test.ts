@@ -1,5 +1,5 @@
 import express from 'express'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -285,6 +285,92 @@ describe('meeting save/list/detail API', () => {
     expect(await directDetail.json()).toMatchObject({
       title: 'Existing Review', librarySource: 'direct_library', mutable: false,
     })
+  })
+
+  // 2026-09-14: a Starter Kit multi-folder library with no COS_SCRIPTS_DIR showed an empty month in Control while
+  // every G2 save sat in the server's recordings store.
+  it('lists standalone G2 saves beside a multi-folder library that has no COS pipeline, once each', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    const operations = join(h.parent, 'operations')
+    const juneOps = join(operations, 'quilt', 'meetings', '2026-06')
+    mkdirSync(juneOps, { recursive: true })
+    writeFileSync(join(juneOps, '2026-06-02_Ops_Review.md'), '# Ops Review\n\n**Date** | 2026-06-02 09:00 |\n\n## Summary\nOperations record.\n')
+    process.env.COS_OPERATIONS_DIR = operations
+
+    const savedRes = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'New G2 meeting', domain: 'personal' }),
+    })
+    expect(savedRes.status).toBe(200)
+    const saved = await savedRes.json() as any
+
+    const list = await (await h.api('/api/meetings?limit=20&domain=all')).json() as any
+    expect(list.layout).toBe('multi_domain')
+    expect(list.source).toBe('mixed_library')
+    expect(list.months).toEqual(['2026-07', '2026-06'])
+    expect(list.meetings.map((meeting: any) => meeting.title)).toEqual(['New G2 meeting', 'Ops Review'])
+    expect(list.meetings[0]).toMatchObject({
+      filename: saved.filename, sessionId: 'meeting_route_001', librarySource: 'standalone_recordings', mutable: true,
+    })
+    expect(list.meetings[1]).toMatchObject({ librarySource: 'cos_operations' })
+
+    const july = await (await h.api('/api/meetings?month=2026-07')).json() as any
+    expect(july.meetings.map((meeting: any) => meeting.filename)).toEqual([saved.filename])
+    expect(july.days).toEqual([{ date: '2026-07-15', count: 1 }])
+    const emptyDay = await (await h.api('/api/meetings?day=2026-07-01')).json() as any
+    expect(emptyDay.meetings).toEqual([])
+    expect(emptyDay.days).toEqual([{ date: '2026-07-15', count: 1 }])
+    const detail = await h.api(`/api/meetings/personal/2026-07/${saved.filename}`)
+    expect(detail.status).toBe(200)
+    expect(await detail.json()).toMatchObject({ title: 'New G2 meeting' })
+
+    // The copy that reached operations carries the same sessionId in its sidecar: it wins and is counted once.
+    const julyOps = join(operations, 'personal', 'meetings', '2026-07')
+    mkdirSync(julyOps, { recursive: true })
+    const sidecar = saved.filename.replace(/\.md$/, '.g2-chunks.json')
+    copyFileSync(join(h.recordingsRoot, '2026-07', saved.filename), join(julyOps, saved.filename))
+    copyFileSync(join(h.recordingsRoot, '2026-07', sidecar), join(julyOps, sidecar))
+    const synced = await (await h.api('/api/meetings?month=2026-07')).json() as any
+    expect(synced.meetings).toHaveLength(1)
+    expect(synced.meetings[0]).toMatchObject({ sessionId: 'meeting_route_001', librarySource: 'cos_operations' })
+    expect(synced.days).toEqual([{ date: '2026-07-15', count: 1 }])
+    const syncedEmptyDay = await (await h.api('/api/meetings?day=2026-07-01')).json() as any
+    expect(syncedEmptyDay.days).toEqual([{ date: '2026-07-15', count: 1 }])
+  })
+
+  it('leaves a multi-folder library to a COS pipeline that can run, and lists the store when it cannot', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    const operations = join(h.parent, 'operations')
+    const julyOps = join(operations, 'quilt', 'meetings', '2026-07')
+    mkdirSync(julyOps, { recursive: true })
+    writeFileSync(join(julyOps, '2026-07-02_Ops_Review.md'), '# Ops Review\n\n**Date** | 2026-07-02 09:00 |\n\n## Summary\nOperations record.\n')
+    process.env.COS_OPERATIONS_DIR = operations
+    const savedRes = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'New G2 meeting', domain: 'personal' }),
+    })
+    expect(savedRes.status).toBe(200)
+    const saved = await savedRes.json() as any
+
+    const scripts = join(h.parent, 'cos-scripts')
+    mkdirSync(join(scripts, 'venv', 'bin'), { recursive: true })
+    writeFileSync(join(scripts, 'venv', 'bin', 'python3'), '')
+    writeFileSync(join(scripts, 'sync_meetings.py'), '')
+    process.env.COS_SCRIPTS_DIR = scripts
+    const piped = await (await h.api('/api/meetings?month=2026-07')).json() as any
+    expect(piped.meetings.map((meeting: any) => meeting.title)).toEqual(['Ops Review'])
+    expect(piped.days).toEqual([{ date: '2026-07-02', count: 1 }])
+    expect(piped.source).toBe('cos_operations')
+
+    rmSync(join(scripts, 'sync_meetings.py'))
+    const noSyncScript = await (await h.api('/api/meetings?month=2026-07')).json() as any
+    expect(noSyncScript.meetings.map((meeting: any) => meeting.filename)).toContain(saved.filename)
+    expect(noSyncScript.days).toEqual([{ date: '2026-07-02', count: 1 }, { date: '2026-07-15', count: 1 }])
+
+    writeFileSync(join(scripts, 'sync_meetings.py'), '')
+    rmSync(join(scripts, 'venv', 'bin', 'python3'))
+    const noPython = await (await h.api('/api/meetings?month=2026-07')).json() as any
+    expect(noPython.meetings.map((meeting: any) => meeting.filename)).toContain(saved.filename)
   })
 
   it('filters the meeting library by month and day without changing the unfiltered G2 cap', async () => {

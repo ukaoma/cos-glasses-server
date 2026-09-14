@@ -17,6 +17,7 @@ import {
 import type { MeetingMeta } from '../lib/meeting-store.js'
 import { meetingListLimit } from '../lib/meeting-store.js'
 import { searchMeetingLibrary } from '../lib/meeting-library-search.js'
+import { g2RecordingsReachOperations } from '../lib/g2-ops-handoff.js'
 
 const MONTH_QUERY = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_QUERY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -85,6 +86,10 @@ function mergeDayCounts(
   return [...counts.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([date, count]) => ({ date, count }))
+}
+
+function dayCountsOf(rows: MeetingMeta[]): Array<{ date: string; count: number }> {
+  return mergeDayCounts([rows.map(row => ({ date: row.date, count: 1 }))])
 }
 
 function uniqueSortedMonths(groups: string[][]): string[] {
@@ -161,17 +166,53 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
       }
 
       if (library.layout === 'multi_domain') {
-        const meetings = listCosOperationsMeetings({
-          limit,
-          domain,
-          month: filters.month,
-          day: filters.day,
-        })
+        if (g2RecordingsReachOperations()) {
+          const meetings = listCosOperationsMeetings({
+            limit,
+            domain,
+            month: filters.month,
+            day: filters.day,
+          })
+          res.json({
+            meetings,
+            months: listCosOperationsMeetingMonths(domain),
+            days: filters.month ? listCosOperationsMeetingDays(filters.month, domain) : [],
+            source: 'cos_operations',
+            layout: 'multi_domain',
+            root: library.root,
+            rootFingerprint: library.rootFingerprint,
+            meetingCount: meetings.length,
+            warnings: library.warnings,
+          })
+          return
+        }
+
+        // No COS pipeline can file this Mac's G2 recordings into the operations folder (a Starter Kit library
+        // without COS_SCRIPTS_DIR, 2026-09-14), so they live only in this server's store. List them beside the
+        // operations rows. Operations rows go first, so a copy that did reach operations wins by sessionId, and
+        // the day counts skip the store row it covers. Day counts always describe the whole month.
+        const operations = listCosOperationsMeetings(listOptions)
+        const standalone = store.list(listOptions).map(withStandaloneIdentity)
+        const meetings = mergeMeetingSources([operations, standalone], limit, sourceLimit)
+        let days: Array<{ date: string; count: number }> = []
+        if (filters.month) {
+          const monthOperations = filters.day
+            ? listCosOperationsMeetings({ limit: sourceLimit, domain, month: filters.month })
+            : operations
+          const monthStore = filters.day
+            ? store.list({ limit: sourceLimit, domain, month: filters.month })
+            : standalone
+          const covered = new Set(monthOperations.flatMap(row => (row.sessionId ? [row.sessionId] : [])))
+          days = mergeDayCounts([
+            listCosOperationsMeetingDays(filters.month, domain),
+            dayCountsOf(monthStore.filter(row => !row.sessionId || !covered.has(row.sessionId))),
+          ])
+        }
         res.json({
           meetings,
-          months: listCosOperationsMeetingMonths(domain),
-          days: filters.month ? listCosOperationsMeetingDays(filters.month, domain) : [],
-          source: 'cos_operations',
+          months: uniqueSortedMonths([listCosOperationsMeetingMonths(domain), store.listMonths()]),
+          days,
+          source: standalone.length > 0 ? 'mixed_library' : 'cos_operations',
           layout: 'multi_domain',
           root: library.root,
           rootFingerprint: library.rootFingerprint,

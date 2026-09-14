@@ -11,7 +11,7 @@
 //   3. Run sync_meetings.py --g2-only --g2-file with the private-app retry helper.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { resolveCosOperationsDir } from './cos-operations-meetings.js'
 import { runG2EnrichmentWithRetry } from './g2-enrichment-runner.js'
@@ -220,6 +220,20 @@ export function stageRecordingIntoOperations(
   // identity/revision sidecar has validated and committed.
   durableAtomicWriteFileSync(destPath, patched, { mode: 0o600 })
   return destPath
+}
+
+/**
+ * Whether a G2 recording saved now can reach operations/ at all. The save path skips the pipeline when
+ * COS_SCRIPTS_DIR is unset, and runOperationsSync throws when the venv Python or sync_meetings.py is missing, so in
+ * each of those cases the recording stays only in the server's own store. GET /api/meetings reads this to decide
+ * whether a multi-folder library must list that store itself. Reads env live, like cosOpsPipelineConfigured in
+ * routes/meeting.ts.
+ */
+export function g2RecordingsReachOperations(): boolean {
+  const raw = process.env.COS_SCRIPTS_DIR?.trim()
+  if (!raw) return false
+  const scriptsDir = resolve(raw)
+  return existsSync(resolve(scriptsDir, 'venv/bin/python3')) && existsSync(join(scriptsDir, 'sync_meetings.py'))
 }
 
 async function runOperationsSync(localMeetingPath: string, claimOnly: boolean): Promise<void> {
