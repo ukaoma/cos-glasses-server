@@ -28,6 +28,7 @@ export function persistBatchDecisionSidecar(
   if (batchResult.qualityReport) sidecar.batchQualityReport = batchResult.qualityReport
 
   if (batchApplied) {
+    sidecar.lifecycleRevision = Number(sidecar.lifecycleRevision ?? 0) + 1
     sidecar.batchTranscript = batchResult.batchTranscript
     sidecar.batchSegments = batchResult.batchSegments?.map(result => ({
       startChunkIdx: result.segment.startChunkIdx,

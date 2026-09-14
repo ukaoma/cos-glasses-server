@@ -462,7 +462,7 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
       const monthDir = join(meetingsBase, month)
       let sidecars: string[]
       try {
-        sidecars = readdirSync(monthDir).filter(f => f.endsWith('.g2-chunks.json')).sort().reverse()
+        sidecars = readdirSync(monthDir).filter(f => f.endsWith('.g2-chunks.json') && !/ \d+(\.[A-Za-z0-9-]+)*\.json$/.test(f)).sort().reverse()
       } catch { continue }
 
       for (const sidecarName of sidecars) {

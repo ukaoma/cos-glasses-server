@@ -39,7 +39,7 @@ import { errMsg } from '../lib/utils.js'
 import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
-import { identifySpeaker, isEmbeddingAvailable, autoEnroll, getEmbeddingCount, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
+import { identifySpeaker, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
 import {
   assertOpenAIWhisperBudget,
   recordOpenAIWhisperUsage,
@@ -78,6 +78,7 @@ import {
   sweepOrphanedSessionAudio,
 } from '../lib/unsaved-audio-quarantine.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
+import { saveTrainingAudioSample } from '../lib/training-audio-save.js'
 import {
   LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
   compressIndexRanges,
@@ -157,7 +158,6 @@ function meetingTurboPreviewEnabled(): boolean {
 // Audio persistence: save G2-mic chunks for speakers who need more training data
 const AUDIO_SAVE_DIR = dataPath('training-audio')
 ensurePrivateDirectory(AUDIO_SAVE_DIR)
-const MAX_SAVED_CHUNKS_PER_SPEAKER = 30  // ~5 min of audio per speaker, cleaned after training
 // Age bound. The count cap above is NOT a retention policy: a speaker who never
 // gets trained keeps 30 WAVs of their voice indefinitely, and the only cleanup
 // path was a manual /voice/train-g2 call. ext-audio has had a 72h sweep since it
@@ -216,25 +216,6 @@ function hasFreshPreservedAudioMarker(dirPath: string): boolean {
   } catch {
     return false
   }
-}
-
-// In-memory training audio counts — lazy-initialized from disk on first access per speaker
-const trainingAudioCounts = new Map<string, number>()
-function getTrainingCount(speakerDir: string): number {
-  let count = trainingAudioCounts.get(speakerDir)
-  if (count === undefined) {
-    try {
-      if (existsSync(speakerDir)) {
-        count = readdirSync(speakerDir).filter((f: string) => f.endsWith('.wav')).length
-      } else {
-        count = 0
-      }
-    } catch {
-      count = 0
-    }
-    trainingAudioCounts.set(speakerDir, count)
-  }
-  return count
 }
 
 function sha256Hex(buffer: Buffer): string {
@@ -1907,26 +1888,17 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
   }
 
   if (speaker !== 'Ext' && embeddingResult.similarity > 0.50) {
-    const embCount = getEmbeddingCount(speaker)
-    if (embCount < 20) {
-      try {
-        const speakerDir = resolve(AUDIO_SAVE_DIR, speaker.replace(/\s+/g, '_'))
-        ensurePrivateDirectory(speakerDir)
-        const existing = getTrainingCount(speakerDir)
-        if (existing < MAX_SAVED_CHUNKS_PER_SPEAKER) {
-          const filename = `${sessionId}_chunk${chunkIndex}_sim${embeddingResult.similarity.toFixed(2)}.wav`
-          const savePath = resolve(speakerDir, filename)
-          writeFile(savePath, audioBuffer, { mode: 0o600 }).catch(err =>
-            console.warn(`[training-audio] Async save failed for ${speaker}: ${err.message}`)
-          )
-          trainingAudioCounts.set(speakerDir, existing + 1)
-          console.log(`[training-audio] Saved ${speaker} chunk (sim=${embeddingResult.similarity.toFixed(2)}, ${audioBuffer.length}b, total=${existing + 1})`)
-        }
-      } catch (audioSaveErr: unknown) {
-        console.warn(`[training-audio] Save failed for ${speaker}: ${errMsg(audioSaveErr)}`)
-      }
-    } else if (chunkIndex % 20 === 0) {
-      console.log(`[training-audio] ${speaker} at ${embCount} embeddings (>= 15), skipping save`)
+    // Audio has its own count and TTL. A full profile still needs examples
+    // from new meetings; deleting/expiring old audio immediately frees a slot.
+    try {
+      const speakerDir = resolve(AUDIO_SAVE_DIR, speaker.replace(/\s+/g, '_'))
+      ensurePrivateDirectory(speakerDir)
+      const filename = `${sessionId}_chunk${chunkIndex}_sim${embeddingResult.similarity.toFixed(2)}.wav`
+      saveTrainingAudioSample(speakerDir, filename, audioBuffer).then(saved => {
+        if (saved) console.log(`[training-audio] Saved ${speaker} chunk (sim=${embeddingResult.similarity.toFixed(2)}, ${audioBuffer.length}b)`)
+      }).catch(err => console.warn(`[training-audio] Async save failed for ${speaker}: ${err.message}`))
+    } catch (audioSaveErr: unknown) {
+      console.warn(`[training-audio] Save failed for ${speaker}: ${errMsg(audioSaveErr)}`)
     }
   }
 

@@ -35,7 +35,7 @@ export const CORRECTIONS_DIR = 'meeting-corrections'
  * `intent` goes down before any file is touched; `applied` or `failed` closes it.
  * An unclosed intent is an incomplete correction, not a successful one.
  */
-export type CorrectionPhase = 'intent' | 'applied' | 'failed' | 'confirmed'
+export type CorrectionPhase = 'intent' | 'applied' | 'failed' | 'confirmed' | 'confirmed-chunks' | 'reverted'
 /**
  * A human confirming the identifier was RIGHT about a label the display floor
  * demoted.
@@ -54,7 +54,7 @@ export type CorrectionPhase = 'intent' | 'applied' | 'failed' | 'confirmed'
 export const CONFIRMATION_PHASE = 'confirmed' as const
 
 /** Runtime counterpart of CorrectionPhase. Must stay in step with it. */
-const VALID_PHASES = new Set<string>(['intent', 'applied', 'failed', 'confirmed'])
+const VALID_PHASES = new Set<string>(['intent', 'applied', 'failed', 'confirmed', 'confirmed-chunks', 'reverted'])
 
 /** Narrowing guard, so the reader keeps its type safety with one phase list. */
 function isCorrectionPhase(value: unknown): value is CorrectionPhase {
@@ -91,6 +91,9 @@ export interface CorrectionRow {
    * mistake becomes an unrecoverable one.
    */
   scope: 'meeting'
+  source?: string
+  batchId?: string
+  priorLabels?: Record<string, string>
   surfaces?: CorrectionSurfaces
   /** True when narrative prose still carries the old label. See the header. */
   proseStale?: boolean
@@ -160,6 +163,9 @@ export function readCorrections(sessionId: string): CorrectionReadResult {
         to: o.to,
         chunks: Array.isArray(o.chunks) ? o.chunks.filter((n): n is number => typeof n === 'number') : [],
         scope: 'meeting',
+        source: typeof o.source === 'string' ? o.source : undefined,
+        batchId: typeof o.batchId === 'string' ? o.batchId : undefined,
+        priorLabels: o.priorLabels && typeof o.priorLabels === 'object' ? o.priorLabels as Record<string, string> : undefined,
         surfaces: isSurfaces(o.surfaces) ? o.surfaces : undefined,
         proseStale: typeof o.proseStale === 'boolean' ? o.proseStale : undefined,
         error: typeof o.error === 'string' ? o.error : undefined,
@@ -194,8 +200,10 @@ function isSurfaces(v: unknown): v is CorrectionSurfaces {
  */
 export function confirmedLabels(sessionId: string): Set<string> {
   const confirmed = new Set<string>()
-  for (const row of readCorrections(sessionId).rows) {
-    if (row.phase === 'confirmed') confirmed.add(row.to)
+  const rows = readCorrections(sessionId).rows
+  const revoked = new Set(rows.filter(r => r.phase === 'reverted').map(r => r.batchId ?? r.id))
+  for (const row of rows) {
+    if (row.phase === 'confirmed' && row.chunks.length === 0 && !revoked.has(row.batchId ?? row.id)) confirmed.add(row.to)
   }
   return confirmed
 }
@@ -208,7 +216,9 @@ export function pendingCorrections(sessionId: string): CorrectionRow[] {
 
 /** Only the corrections that actually landed — the ones piece 3 may train on. */
 export function appliedCorrections(sessionId: string): CorrectionRow[] {
-  return readCorrections(sessionId).rows.filter(r => r.phase === 'applied')
+  const rows = readCorrections(sessionId).rows
+  const reverted = new Set(rows.filter(r => r.phase === 'reverted').map(r => r.batchId ?? r.id))
+  return rows.filter(r => r.phase === 'applied' && !reverted.has(r.batchId ?? r.id))
 }
 
 /**
@@ -259,4 +269,32 @@ export function correctionStoreStats(): {
     }
   } catch { /* report what we have */ }
   return { sessions, applied, pending, failed }
+}
+
+/** Chunk-scoped vouching never promotes other positions carrying the same label. */
+export function confirmedChunks(sessionId: string): Map<number, string> {
+  const rows = readCorrections(sessionId).rows
+  const revoked = new Set(rows.filter(r => r.phase === 'reverted').map(r => r.batchId ?? r.id))
+  const out = new Map<number, string>()
+  for (const row of rows) {
+    if (revoked.has(row.batchId ?? row.id)) continue
+    if (row.phase === 'confirmed-chunks' || row.phase === 'confirmed') {
+      for (const position of row.chunks) out.set(position, row.to)
+    }
+  }
+  return out
+}
+
+/** Boot closeout records interrupted intent explicitly; no automatic retry. */
+export function closeInterruptedCorrections(): number {
+  const dir = dataPath(CORRECTIONS_DIR)
+  if (!existsSync(dir)) return 0
+  let count = 0
+  for (const file of readdirSync(dir).filter(n => n.endsWith('.jsonl'))) {
+    const sessionId = file.slice(0, -6)
+    for (const row of pendingCorrections(sessionId)) {
+      if (appendCorrection(sessionId, { ...row, phase: 'failed', at: new Date().toISOString(), error: 'interrupted naming — review to resume or revert' })) count++
+    }
+  }
+  return count
 }

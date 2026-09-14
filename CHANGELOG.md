@@ -1,3 +1,15 @@
+## 6.46.0
+
+Name held voice samples and preview the meeting labels they will change. Paired Control build: 0.5.223.
+
+- Individual held samples can suggest an existing voice using the same second-best-sample scoring as groups, with a clear margin and owner-proximity caution. Suggestions remain proposals.
+- Naming returns a server-stored preview first. Apply checks the preview, voice store, raw chunk map and each meeting copy again, holds the COS sync lock where available, and writes chunk-scoped confirmations. Wider matches must agree with the named samples and the updated voice profile in their source meeting.
+- Corrected labels reach HQ word speakers, live chunks and operations copies. Transcript words remain unchanged; only fully aligned turn labels change. Newer speaker corrections survive re-import. Search catches up through the existing indexing queue; graph staleness is explicit.
+- Each naming has durable copy receipts and Undo. Interrupted work requires review. Undo restores eligible labels, retains enrolled voice samples, and never resurrects deleted audio. Held audio is deleted after successful meeting receipts.
+- Existing-name matching resolves stored spelling before preview. Owner naming requires an explicit acknowledgement and stronger acoustic match. Older clients cannot apply the new naming contract without a preview.
+- Voice-profile merges retain stronger source evidence before applying oldest-first eviction within a source tier. Training audio has its own retention capacity, independent of profile size, and freed slots are usable without a restart.
+- Compatibility: 6.45.5 safely ignores chunk-scoped confirmations. It does not understand reverted batch history; keep 6.46.0 for naming recovery and Undo history after rollback.
+
 ## 6.45.5
 
 Sessions carry their last real activity and last tool (2026-09-13), for the phone Sessions list in COS Glasses 6.9.470.

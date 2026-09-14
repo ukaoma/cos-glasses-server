@@ -101,7 +101,7 @@ const AUTO_ENROLL_CONSENSUS = 2       // Must match N times in same session befo
 // at 20, 40 AND 80 samples per speaker (77 speakers, sherpa SpeakerEmbeddingManager),
 // so the old cap defended nothing — while 61 of 77 profiles sat AT it, meaning
 // every correction cost a sample. 20 extra slots per speaker is ~1.2 MB.
-const MAX_EMBEDDINGS_PER_SPEAKER = 40
+export const MAX_EMBEDDINGS_PER_SPEAKER = 40
 const SAMPLE_RATE = 16000
 
 // Module-level state — sherpa-onnx-node is CJS with no TS types (SDK v0.0.7 interop)

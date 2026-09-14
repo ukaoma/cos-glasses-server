@@ -132,23 +132,12 @@ describe('merging in the store', () => {
     expect(store.profiles[0].sources).toHaveLength(20)
   })
 
-  it('the CAPPED survivors come from BOTH profiles, not the first one whole', () => {
-    // Taking the first `cap` indices keeps the target intact and discards every
-    // absorbed sample — the counts look identical and the merge accomplishes
-    // nothing. Provenance prefixes make the split visible.
-    const store: ProfileStore = {
-      profiles: [
-        profile('Luke Henry', cluster(0, 20), 'fireflies'),
-        profile('Luke H', cluster(4, 20), 'g2-training'),
-      ],
-    }
-    mergeProfilesInStore(store, 'Luke Henry', ['Luke H'], { cap: 20 })
-    const sources = store.profiles[0].sources!
-    const fromTarget = sources.filter(x => x.startsWith('fireflies')).length
-    const fromAbsorbed = sources.filter(x => x.startsWith('g2-training')).length
-    expect(fromTarget).toBeGreaterThan(3)
-    expect(fromAbsorbed).toBeGreaterThan(3)
-    expect(fromTarget + fromAbsorbed).toBe(20)
+  it('the capped survivors preserve stronger provenance before diversity', () => {
+    const target = profile('Luke Henry', cluster(0,20)); target.sources = target.embeddings.map(()=>'fireflies:x')
+    const absorbed = profile('Luke H', cluster(4,20)); absorbed.sources = absorbed.embeddings.map(()=>'g2-training:y')
+    const store: ProfileStore = { profiles: [target, absorbed] }
+    mergeProfilesInStore(store, 'Luke Henry', ['Luke H'], { cap:20 })
+    expect(store.profiles[0].sources).toEqual(Array(20).fill('g2-training:y'))
   })
 
   it('realigns a SHORT target sources[] before absorbing', () => {

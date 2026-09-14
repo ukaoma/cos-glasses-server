@@ -15,6 +15,7 @@ import { checkSpeakerName, type SpeakerNameRejection } from './speaker-name.js'
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
+import { EVICTION_ORDER, provenanceTier } from './embedding-eviction.js'
 
 export interface VoiceProfile {
   name: string
@@ -454,7 +455,7 @@ export function profileSimilarity(a: VoiceProfile, b: VoiceProfile): number {
 /** Pick the N most acoustically diverse samples, carrying provenance along.
  *
  *  A merge routinely produces more samples than the per-speaker cap (two
- *  capped profiles make 40 against a cap of 20), and which 20 survive matters:
+ *  capped profiles make 80 against a cap of 40), and which 40 survive matters:
  *  taking the first N would keep one profile's acoustic conditions and discard
  *  the other's, which is the opposite of what merging is for. Greedy
  *  max-min-distance keeps the spread.
@@ -517,7 +518,7 @@ export function mergeProfilesInStore(
   from: string[],
   options: { cap?: number } = {},
 ): MergeOutcome {
-  const cap = options.cap ?? 20
+  const cap = options.cap ?? 40
   const target = store.profiles.find(p => p.name === into)
   const outcome: MergeOutcome = {
     similarity: {},
@@ -552,7 +553,11 @@ export function mergeProfilesInStore(
 
   if (outcome.mergedFrom.length === 0) return outcome
 
-  const keep = selectDiverseIndices(embeddings, cap)
+  // Preserve stronger label provenance. Within one
+  // source tier retain newer evidence, matching weakest-first/oldest eviction.
+  const keep = embeddings.map((_, i) => i).sort((a, b) =>
+    EVICTION_ORDER.indexOf(provenanceTier(sources[b])) - EVICTION_ORDER.indexOf(provenanceTier(sources[a])) || b - a,
+  ).slice(0, cap).sort((a, b) => a - b)
   outcome.droppedToCap = embeddings.length - keep.length
   target.embeddings = keep.map(i => embeddings[i])
   target.sources = keep.map(i => sources[i])

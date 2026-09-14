@@ -15,7 +15,8 @@ import { sendAudioFile } from '../lib/send-audio.js'
 import { adaptivePlaybackAudio } from '../lib/adaptive-playback-audio.js'
 import { chunkDiagnostics } from '../lib/chunk-embedding-diagnostics.js'
 import { errMsg } from '../lib/utils.js'
-import { confirmedLabels } from '../lib/meeting-corrections.js'
+import { setNamingSessionLiveness } from '../lib/held-naming-batches.js'
+import { confirmedLabels, confirmedChunks } from '../lib/meeting-corrections.js'
 import {
   extAudioChunkPath,
   listExtAudioChunks,
@@ -457,6 +458,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const finalizationJobs = deps.finalizationJobs ?? new MeetingFinalizationJobStore()
   const router = Router()
   const savingSessions = new Set<string>()
+  setNamingSessionLiveness(id => sessions.getStartTime(id) !== null || savingSessions.has(id) || activeFinalizationJobs.has(id))
 
   router.get('/meeting/sessions/:sessionId/status', (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
@@ -773,6 +775,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // floor re-demotes a confirmed name on every reload, and the reviewer
       // confirms the same voice forever.
       confirmed: confirmedLabels(sessionId),
+      confirmedChunks: confirmedChunks(sessionId),
       phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
       // The sidecar's own durationMs is the meeting's true end. Deriving it from
       // max(elapsed) uses the START of the last chunk, which made the final
@@ -870,6 +873,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const review = reviewMeetingSpeakers(attachRawChunkIndices(chunks, sidecar.chunkEntries), {
       owner: getOwnerSpeakerLabel(),
       confirmed: confirmedLabels(sessionId),
+      confirmedChunks: confirmedChunks(sessionId),
       // This route renders no phrases; the default of 3 per voice computed and
       // discarded 48 transcript excerpts on a 16-voice meeting.
       phrasesPerVoice: 1,

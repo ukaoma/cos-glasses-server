@@ -226,3 +226,28 @@ export function greedyDiversitySelect(embeddings: Float32Array[], maxN: number):
 
   return [...selected].map(i => embeddings[i])
 }
+
+/** A mutually coherent cluster anchored to EVERY explicitly named sample.
+ * Indices refer to [...seedMembers, ...candidates]. A larger unrelated voice
+ * can never win. Inconsistent seeds fail closed; a valid seed with no wider
+ * match remains represented so the caller may still label its exact position.
+ */
+export function coherentClusterContaining(
+  seedMembers: Float32Array[], candidates: Float32Array[], floor = VOICE_COHERENCE_FLOOR,
+): CoherentCluster {
+  if (!seedMembers.length) return { members: [], seed: -1 }
+  const all = [...seedMembers, ...candidates]
+  const valid = (v: Float32Array) => v.length === seedMembers[0].length
+    && v.length > 0 && Array.from(v).every(Number.isFinite) && v.some(n => n !== 0)
+  if (!Number.isFinite(floor) || seedMembers.some(v => !valid(v))) return { members: [], seed: -1 }
+  const sim = pairwiseSimilarityMatrix(all)
+  const members = seedMembers.map((_, i) => i)
+  for (const i of members) for (const j of members) {
+    if (i !== j && !(sim[i][j] >= floor)) return { members: [], seed: -1 }
+  }
+  const eligible = candidates.map((_, i) => i + seedMembers.length)
+    .filter(i => valid(all[i]))
+    .sort((a, b) => Math.min(...members.map(j => sim[b][j])) - Math.min(...members.map(j => sim[a][j])) || a - b)
+  for (const i of eligible) if (members.every(j => sim[i][j] >= floor)) members.push(i)
+  return { members: members.sort((a,b) => a-b), seed: 0 }
+}

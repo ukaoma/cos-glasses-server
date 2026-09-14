@@ -41,6 +41,57 @@ function chunks(seq: string[], text = (i: number, s: string) => `${s} said somet
   return seq.map((s, i) => ({ speaker: s, text: text(i, s), elapsed: i * 7000, similarity: 0.8 }))
 }
 
+describe('chunk-scoped human confirmation', () => {
+  const sample = (): ReviewChunk[] => Array.from({ length: 8 }, (_, i) => ({
+    speaker: i === 3 || i === 7 ? 'Brigitta Pólya' : 'Ext',
+    text: `distinct spoken phrase ${i}`,
+    similarity: 0.2,
+    // Raw capture indices deliberately differ from compacted positions.
+    chunkIndex: i + 20,
+    elapsed: i * 1000,
+  }))
+
+  it('credits confirmed position 3 without asserting sibling position 7', () => {
+    const review = reviewMeetingSpeakers(sample(), { confirmedChunks: new Map([[3, 'Brigitta Pólya']]) })
+    const voice = review.voices.find(v => v.label === 'Brigitta Pólya')!
+    expect(voice).toMatchObject({ segments: 2, confirmedSegments: 1, nameAsserted: false, confirmedByHuman: false })
+    expect(review.assertedSegments).toBe(1)
+    expect(review.segments).toBe(8)
+  })
+
+  it('waives the aggregate floor only when every same-label position is confirmed', () => {
+    const review = reviewMeetingSpeakers(sample(), {
+      confirmedChunks: new Map([[3, 'Brigitta Pólya'], [7, 'Brigitta Pólya']]),
+    })
+    expect(review.voices.find(v => v.label === 'Brigitta Pólya')).toMatchObject({
+      confirmedSegments: 2, nameAsserted: true, confirmedByHuman: true,
+    })
+    expect(review.assertedSegments).toBe(2)
+  })
+
+  it('keeps legacy whole-label vouching and does not double-count scoped positions', () => {
+    const review = reviewMeetingSpeakers(sample(), {
+      confirmed: new Set(['Brigitta Pólya']), confirmedChunks: new Map([[3, 'Brigitta Pólya']]),
+    })
+    expect(review.voices.find(v => v.label === 'Brigitta Pólya')?.confirmedSegments).toBe(2)
+    expect(review.assertedSegments).toBe(2)
+  })
+
+  it('ignores stale labels, raw capture indices, missing positions, and placeholder vouches', () => {
+    const review = reviewMeetingSpeakers(sample(), {
+      confirmedChunks: new Map([[3, 'Former Name'], [23, 'Brigitta Pólya'], [-1, 'Brigitta Pólya'], [0, 'Ext']]),
+    })
+    expect(review.voices.every(v => v.confirmedSegments === 0)).toBe(true)
+    expect(review.assertedSegments).toBe(0)
+  })
+
+  it('credits normal asserted voices once without claiming human confirmation', () => {
+    const review = reviewMeetingSpeakers(chunks(['MU', 'MU', 'MU']), { owner: 'MU' })
+    expect(review.voices[0]).toMatchObject({ confirmedSegments: 0, nameAsserted: true, confirmedByHuman: false })
+    expect(review.assertedSegments).toBe(3)
+  })
+})
+
 describe('run lengths', () => {
   it('counts consecutive runs, not totals', () => {
     expect(speakerRuns(['a','a','a','b','a','a'], 'a')).toEqual([3, 2])

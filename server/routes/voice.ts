@@ -18,6 +18,7 @@ import { getVoiceDirectorySnapshot, invalidateVoiceDirectory } from '../lib/voic
 import { greedyDiversitySelect } from '../lib/voice-enrolment-selection.js'
 import { fanOutSpeakerRename, type SpeakerRenameFanOut } from '../lib/speaker-rename-fanout.js'
 import { HeldGroupError, discardHeldSamples, enrollHeldGroup, heldVoiceGroups, parseHeldMembers, previewDiscard } from '../lib/held-voice-groups.js'
+import { previewHeldNaming, applyHeldNaming, undoHeldNaming, resumeHeldNaming, namingBatchList, resolveStoredName, NAMING_CAPABILITIES } from '../lib/held-naming-batches.js'
 import { resolveCosOperationsDir } from '../lib/cos-operations-meetings.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
@@ -150,7 +151,7 @@ voiceRouter.get('/voice/training-status', async (_req, res) => {
 //  1. Until the reader path above was fixed it saw an empty directory, so a
 //     no-argument call was harmless. It is not harmless any more — it now reaches
 //     every accumulated speaker directory at once.
-//  2. Enrolling N samples into a profile capped at 20 evicts the oldest sample N
+//  2. Enrolling N samples into a profile capped at 40 evicts the oldest sample N
 //     times. A 30-WAV directory would therefore discard EVERY pre-existing
 //     embedding for that speaker, replacing months of curated training with one
 //     meeting's audio. Diversity selection bounds the enrollment instead.
@@ -557,7 +558,7 @@ voiceRouter.get('/voice/ext-audio/:sessionId/sample', (req, res) => {
 voiceRouter.get('/voice/held-groups', (_req, res) => {
   try {
     res.set('Cache-Control', 'private, no-store')
-    res.json(heldVoiceGroups())
+    res.json({ ...heldVoiceGroups(), namingCapabilities: NAMING_CAPABILITIES })
   } catch (err: unknown) {
     res.status(500).json({ error: errMsg(err) })
   }
@@ -577,46 +578,29 @@ function heldGroupFailure(res: express.Response, err: unknown): void {
 // APPENDED to: "add more fidelity in samples to a given voice". Only the
 // coherent core is written and only its wavs are removed; samples that were
 // not this voice stay held.
-voiceRouter.post('/voice/held-groups/enroll', (req, res) => {
+voiceRouter.post('/voice/held-groups/enroll', async (req, res) => {
   try {
     const nameCheck = checkSpeakerName(req.body?.name, { ownerLabel: getOwnerSpeakerLabel() })
-    if (!nameCheck.ok) {
-      return res.status(400).json({ success: false, error: nameCheck.message, reason: nameCheck.reason })
-    }
-    const name = String(req.body.name).trim()
+    if (!nameCheck.ok) return res.status(400).json({ success:false,error:nameCheck.message,reason:nameCheck.reason })
+    const name = resolveStoredName(String(req.body.name).trim())
     const members = parseHeldMembers(req.body?.members)
-    const dryRun = req.body?.dryRun === true
-    const confirm = req.body?.confirm === true
-    if (dryRun || !confirm) {
-      const plan = enrollHeldGroup(name, members, { dryRun: true })
-      const verb = plan.created ? 'create' : 'add to'
-      const summary = `Would ${verb} ${name} from ${plan.coherent} of ${plan.resolved} held sample${plan.resolved === 1 ? '' : 's'}`
-        + (plan.leftBehind.length > 0 ? `, leaving ${plan.leftBehind.length} that do not sound like the same person` : '')
-        + (plan.notReady.length > 0 ? `, with ${plan.notReady.length} still being read` : '')
-        + `, and delete the audio it used.`
-      if (dryRun) return res.json({ success: true, ...plan, message: summary })
-      return res.status(400).json({
-        success: false,
-        error: 'confirmation required',
-        reason: 'confirmation_required',
-        message: `${summary} Pass { confirm: true } to proceed.`,
-        preview: plan,
-      })
+    if (!req.body?.previewHash || req.body?.dryRun === true) {
+      if (name.owner && req.body?.confirm === true && req.body?.dryRun !== true) return res.status(400).json({success:false,error:'Owner confirmation requires a preview and ownerAck',reason:'owner_confirmation_required'})
+      return res.json(previewHeldNaming(name.name,members))
     }
-    const result = enrollHeldGroup(name, members)
+    const result = await applyHeldNaming(name.name,members,String(req.body.previewHash),{confirm:req.body?.confirm===true,ownerAck:req.body?.ownerAck===true,listened:req.body?.listened===true})
     invalidateVoiceDirectory()
-    const verb = result.created ? 'Created' : 'Added to'
-    res.json({
-      success: true,
-      ...result,
-      message: result.leftBehind.length > 0
-        ? `${verb} ${name} from ${result.coherent} of ${result.resolved} samples; ${result.leftBehind.length} did not sound like the same person and stay held.`
-        : `${verb} ${name} from ${result.coherent} sample${result.coherent === 1 ? '' : 's'}.`
-          + (result.notReady.length > 0 ? ` ${result.notReady.length} still being read; they stay held.` : ''),
-    })
-  } catch (err: unknown) {
-    heldGroupFailure(res, err)
-  }
+    return res.json(result)
+  } catch (err) { heldGroupFailure(res,err) }
+})
+voiceRouter.get('/voice/held-groups/batches', (_req,res) => {
+  try { return res.json(namingBatchList()) } catch(err) { heldGroupFailure(res,err) }
+})
+voiceRouter.post('/voice/held-groups/undo', async (req,res) => {
+  try { const result=await undoHeldNaming(String(req.body?.batchId??''),req.body?.confirm===true);invalidateVoiceDirectory();return res.json(result) } catch(err) { heldGroupFailure(res,err) }
+})
+voiceRouter.post('/voice/held-groups/resume', (req,res) => {
+  try { return res.json(resumeHeldNaming(String(req.body?.batchId??''))) } catch(err) { heldGroupFailure(res,err) }
 })
 
 // POST /api/voice/held-groups/discard — throw held samples out without naming
@@ -750,17 +734,19 @@ voiceRouter.get('/voice/directory', async (req, res) => {
  * NEVER THROWS. A merge that succeeded in the store must not report failure because a
  * meeting file was unreadable; the failure is reported in the payload instead.
  */
-function fanOutMergeToMeetings(
+async function fanOutMergeToMeetings(
   merged: readonly string[],
   into: string,
   apply: boolean,
-): { operationsDir: string | null; runs: SpeakerRenameFanOut[]; error?: string } {
+): Promise<{ operationsDir: string | null; runs: SpeakerRenameFanOut[]; error?: string }> {
   const operationsDir = resolveCosOperationsDir()
   // Not an error. A server with no COS library is a supported install; it simply has
   // no meetings to carry the rename to.
   if (!operationsDir || merged.length === 0) return { operationsDir, runs: [] }
   try {
-    return { operationsDir, runs: merged.map(name => fanOutSpeakerRename(operationsDir, name, into, { apply })) }
+    const runs: SpeakerRenameFanOut[] = []
+    for (const name of merged) runs.push(await fanOutSpeakerRename(operationsDir, name, into, { apply }))
+    return { operationsDir, runs }
   } catch (err: unknown) {
     return { operationsDir, runs: [], error: errMsg(err) }
   }
@@ -786,7 +772,7 @@ function fanOutTotals(runs: readonly SpeakerRenameFanOut[]): {
 // identities at once and cannot be undone from the store alone, so the only
 // acceptable evidence is acoustic. `force` exists for the case where the user
 // knows something the audio does not, and it is logged.
-voiceRouter.post('/voice/merge-profiles', (req, res) => {
+voiceRouter.post('/voice/merge-profiles', async (req, res) => {
   try {
     const into = typeof req.body?.into === 'string' ? req.body.into.trim() : ''
     const rawFrom = req.body?.from
@@ -821,7 +807,7 @@ voiceRouter.post('/voice/merge-profiles', (req, res) => {
       // ACTUALLY merge, so a refused pair does not advertise a rewrite that will not
       // run. This walks the meeting library, which is why it happens here -- once, on a
       // deliberate human action -- and not on any hot path.
-      const fan = fanOutMergeToMeetings(preview.merged, into, false)
+      const fan = await fanOutMergeToMeetings(preview.merged, into, false)
       return res.status(400).json({
         error: 'confirmation required',
         message: `Merging is not reversible from the store alone. Review the similarity scores, then pass { confirm: true }.`,
@@ -860,7 +846,7 @@ voiceRouter.post('/voice/merge-profiles', (req, res) => {
     // The fan-out honours `dryRun` for the same reason the merge does: a dry run must
     // stay a dry run all the way down, or `dryRun: true` becomes the most dangerous
     // parameter in the API.
-    const fan = fanOutMergeToMeetings(report.merged, into, !dryRun)
+    const fan = await fanOutMergeToMeetings(report.merged, into, !dryRun)
     res.json({
       ...report,
       dryRun,

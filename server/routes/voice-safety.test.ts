@@ -664,63 +664,84 @@ describe('/voice/directory exposes honest bounded cross-meeting evidence', () =>
 // them. The review panel re-reads those strings from disk on every request.
 // ---------------------------------------------------------------------------
 describe('a merge carries the rename out to the meeting library', () => {
-  /** A meeting in the shape the production library actually uses. */
-  function meeting(domain: string, month: string, base: string, speaker: string): {
-    md: string; sidecar: string
+  /** Both canonical copies and their raw capture map, as the v2 writer needs. */
+  function meeting(domain: string, month: string, base: string, speaker: string,
+    turns = [{ speaker, text: 'A thing was said.' }, { speaker: 'MU', text: 'Agreed.' }]): {
+    md: string; sidecar: string; localMd: string; localSidecar: string
   } {
     const dir = join(opsDir, domain, 'meetings', month)
     mkdirSync(dir, { recursive: true })
+    const scripts = join(opsDir, 'scripts')
+    mkdirSync(scripts, { recursive: true })
+    writeFileSync(join(scripts, 'cos_python'), '#!/bin/sh\nexec /usr/bin/python3 "$@"\n', { mode: 0o700 })
+    process.env.COS_SCRIPTS_DIR = scripts
+    const sessionId = `meeting_${domain}_${month}_${base}`.replace(/[^A-Za-z0-9_-]/g, '_')
+    const localDir = join(dataDir, 'recordings', month.slice(0, 7))
+    mkdirSync(localDir, { recursive: true })
     const md = join(dir, `${base}.md`)
-    writeFileSync(md, [
+    const localStem = `${month.slice(0, 7)}-01_${sessionId}`
+    const localMd = join(localDir, `${localStem}.md`)
+    const markdown = [
       '# Sync', '', '## Attendees', '', `- ${speaker}`, '- MU', '',
-      '## Transcript', '', `[${speaker}]:`, 'A thing was said.', '', '[MU]:', 'Agreed.', '',
-    ].join('\n'))
+      '## Transcript', '', ...turns.flatMap(turn => [`[${turn.speaker}]:`, turn.text, '']),
+    ].join('\n')
     const sidecar = join(dir, `${base}.g2-chunks.json`)
-    writeFileSync(sidecar, JSON.stringify({
-      chunks: [{ speaker, text: 'A thing was said.' }, { speaker: 'MU', text: 'Agreed.' }],
-    }))
-    return { md, sidecar }
+    const localSidecar = join(localDir, `${localStem}.g2-chunks.json`)
+    const chunks = turns.map((turn, i) => ({ ...turn, elapsed: i * 5000, similarity: 0.2 }))
+    const doc = { sessionId, speakers: [...new Set(chunks.map(chunk => chunk.speaker))], chunks,
+      chunkEntries: chunks.map((chunk, i) => ({ chunkIndex: i * 4 + 3, chunk })),
+      correctionRevision: 0, lifecycleRevision: 1 }
+    for (const path of [md, localMd]) writeFileSync(path, markdown)
+    for (const path of [sidecar, localSidecar]) writeFileSync(path, JSON.stringify(doc))
+    return { md, sidecar, localMd, localSidecar }
   }
 
   it('shows the blast radius in the confirm preview, and rewrites NOTHING yet', async () => {
     // The confirm gate exists so a human sees what a merge does before it happens.
     // Rewriting production meeting records is the largest thing it does, so a preview
     // that omitted it would be hiding the part that matters.
-    const { md, sidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    const { md, sidecar, localMd, localSidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma' })
     expect(res.status).toBe(400)
     expect(res.json.error).toBe('confirmation required')
-    expect(res.json.meetingRewrite.files).toBe(2)
+    expect(res.json.meetingRewrite.files).toBe(4)
     expect(res.json.meetingRewrite.labels).toBeGreaterThan(0)
     expect(res.json.meetingRewrite.dryRun).toBe(true)
 
     expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
     expect(readFileSync(sidecar, 'utf-8')).toContain('Clem Ukaoma')
+    expect(readFileSync(localMd, 'utf-8')).toBe(readFileSync(md, 'utf-8'))
+    expect(readFileSync(localSidecar, 'utf-8')).toBe(readFileSync(sidecar, 'utf-8'))
+    expect(existsSync(join(dataDir, 'meeting-corrections'))).toBe(false)
   })
 
   it('rewrites both the transcript and the sidecar on confirm, and names the files', async () => {
-    const { md, sidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    const { md, sidecar, localMd, localSidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
       { into: 'MU', from: 'Clem Ukaoma', confirm: true })
     expect(res.status).toBe(200)
 
+    expect(res.json.meetingRewrite.skipped).toEqual([])
     const after = readFileSync(md, 'utf-8')
     expect(after).toContain('[MU]:')
     expect(after).not.toContain('[Clem Ukaoma]:')
-    expect(after).not.toContain('- Clem Ukaoma')
+    // v2 preserves attendee evidence; only the proven transcript positions move.
+    expect(after).toContain('- Clem Ukaoma')
     expect(JSON.parse(readFileSync(sidecar, 'utf-8')).chunks.map((c: {speaker: string}) => c.speaker))
       .toEqual(['MU', 'MU'])
+    expect(readFileSync(localMd, 'utf-8')).toBe(after)
+    expect(readFileSync(localSidecar, 'utf-8')).toBe(readFileSync(sidecar, 'utf-8'))
 
     // Counts alone would not let an operator audit or diff what was touched.
-    // realpathSync because the resolver canonicalises, and on macOS the tmpdir is a
-    // symlink (/var -> /private/var). Comparing the raw fixture path fails on a
+    // Resolve both sides because the operations resolver canonicalises and on
+    // macOS the tmpdir is a symlink (/var -> /private/var). Raw paths differ on a
     // difference that has nothing to do with the behaviour under test.
-    expect(res.json.meetingRewrite.markdown[0].path).toBe(realpathSync(md))
-    expect(res.json.meetingRewrite.sidecars[0].path).toBe(realpathSync(sidecar))
+    expect(res.json.meetingRewrite.markdown.map((file: any) => realpathSync(file.path))).toEqual([realpathSync(localMd), realpathSync(md)])
+    expect(res.json.meetingRewrite.sidecars.map((file: any) => realpathSync(file.path))).toEqual([realpathSync(localSidecar), realpathSync(sidecar)])
   })
 
   it('leaves the library untouched on dryRun, all the way down', async () => {
@@ -758,7 +779,7 @@ describe('a merge carries the rename out to the meeting library', () => {
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
       { into: 'MU', from: 'Clem Ukaoma', confirm: true })
     expect(res.status).toBe(200)
-    expect(res.json.meetingRewrite.files).toBe(4)   // two real meetings x (md + sidecar)
+    expect(res.json.meetingRewrite.files).toBe(8)   // two meetings x two copies x (md + sidecar)
     expect(readFileSync(conflictMonth.md, 'utf-8')).toContain('[Clem Ukaoma]:')
     expect(readFileSync(conflictFile.md, 'utf-8')).toContain('[Clem Ukaoma]:')
   })
@@ -784,11 +805,7 @@ describe('a merge carries the rename out to the meeting library', () => {
     // meeting they appear in, off the back of a typo.
     //
     // Found by mutation: swapping `report.merged` for `from` passed all 51 tests.
-    const dir = join(opsDir, 'quilt', 'meetings', '2026-08')
-    mkdirSync(dir, { recursive: true })
-    const other = join(dir, 'other.md')
-    writeFileSync(other, ['## Attendees', '', '- Niala Boodhoo', '',
-      '## Transcript', '', '[Niala Boodhoo]:', 'Unrelated.', ''].join('\n'))
+    const other = meeting('quilt', '2026-08', 'unrelated', 'Niala Boodhoo')
 
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
@@ -798,7 +815,10 @@ describe('a merge carries the rename out to the meeting library', () => {
     expect(res.json.merged).toEqual(['Clem Ukaoma'])
     expect(res.json.missing).toEqual(['Niala Boodhoo'])
     // Her name survives untouched. She was never merged into anything.
-    expect(readFileSync(other, 'utf-8')).toContain('[Niala Boodhoo]:')
+    for (const path of [other.md, other.localMd]) expect(readFileSync(path, 'utf-8')).toContain('[Niala Boodhoo]:')
+    for (const path of [other.sidecar, other.localSidecar]) {
+      expect(JSON.parse(readFileSync(path, 'utf-8')).chunks[0].speaker).toBe('Niala Boodhoo')
+    }
   })
 
   it('counts sidecar labels from the relabelled CHUNKS, not from a truthy result', async () => {
@@ -806,21 +826,18 @@ describe('a merge carries the rename out to the meeting library', () => {
     // as a number, which would have reported 0 labels for every sidecar -- a fan-out
     // announcing success while rewriting nothing. Mutation-proven: hardcoding the
     // count to 1 passed the whole suite before this existed.
-    const dir = join(opsDir, 'quilt', 'meetings', '2026-08')
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'many.g2-chunks.json'), JSON.stringify({
-      chunks: [
+    meeting('quilt', '2026-08', 'many', 'Clem Ukaoma', [
         { speaker: 'Clem Ukaoma', text: 'one' },
         { speaker: 'MU', text: 'two' },
         { speaker: 'Clem Ukaoma', text: 'three' },
         { speaker: 'Clem Ukaoma', text: 'four' },
-      ],
-    }))
+    ])
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
       { into: 'MU', from: 'Clem Ukaoma', confirm: true })
     expect(res.status).toBe(200)
-    expect(res.json.meetingRewrite.sidecars[0].labels).toBe(3)
-    expect(res.json.meetingRewrite.labels).toBe(3)
+    expect(res.json.meetingRewrite.sidecars.map((file: any) => file.labels)).toEqual([3, 3])
+    expect(res.json.meetingRewrite.markdown.map((file: any) => file.labels)).toEqual([3, 3])
+    expect(res.json.meetingRewrite.labels).toBe(12)
   })
 })

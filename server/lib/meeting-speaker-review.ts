@@ -133,6 +133,9 @@ export interface Phrase {
 export interface VoiceReview {
   label: string
   segments: number
+  /** Exact positions a human vouched for. A partial count does not waive the
+   *  display floor for other positions carrying the same label. */
+  confirmedSegments: number
   /** Voiced milliseconds credited to this voice. See `SpeakingTimeSource` for
    *  how it was measured — the two methods are not comparable. */
   speakingMs: number
@@ -242,15 +245,15 @@ export interface MeetingSpeakerReview {
   /** False when no chunk carries a real speaker — a recovered capture. */
   attributed: boolean
   /**
-   * Segments belonging to voices this review asserts a NAME for.
+   * Segments belonging to asserted voices, plus individually confirmed
+   * positions in a voice whose remaining segments are still candidates.
    *
    * `attributed` is a boolean that only goes false at 100% unidentified, so a
    * meeting where 295 of 299 chunks matched nobody still reports `true` and
    * renders as though it were normally attributed. This is the graded version:
    * measured Ext share across 14 retained sessions ran from 24% to 100%.
    *
-   * Counts SEGMENTS OF ASSERTED VOICES, not chunks carrying a person-shaped
-   * label — see the derivation for why those differ. Denominator is `segments`
+   * A name-shaped label alone earns no credit. Denominator is `segments`
    * (every chunk, including unlabelled ones), so `assertedSegments / segments`
    * is the ratio every client should compute.
    *
@@ -581,6 +584,7 @@ export function reviewMeetingSpeakers(
      * the sidecar already carries it.
      */
     confirmed?: Set<string>
+    confirmedChunks?: Map<number, string>
     /**
      * The sidecar's `batchSegments`, when the HQ pass has run. Their word
      * timings give real voiced time; without them speaking time falls back to
@@ -590,7 +594,11 @@ export function reviewMeetingSpeakers(
   } = {},
 ): MeetingSpeakerReview {
   const owner = options.owner ?? 'Me'
-  const confirmed = options.confirmed ?? new Set<string>()
+  const confirmed = new Set(options.confirmed ?? [])
+  for (const label of new Set(chunks.map(c => c.speaker ?? ''))) {
+    const positions = chunks.flatMap((c, i) => c.speaker === label ? [i] : [])
+    if (positions.length > 0 && positions.every(i => options.confirmedChunks?.get(i) === label)) confirmed.add(label)
+  }
   const limit = options.phrasesPerVoice ?? 3
   const sequence = chunks.map(c => c.speaker ?? '')
   // The caller's durationMs (the sidecar's own) is the meeting's true end.
@@ -637,6 +645,8 @@ export function reviewMeetingSpeakers(
     const sims = own.map(c => c.similarity).filter((s): s is number => typeof s === 'number' && s > 0)
     const runs = speakerRuns(sequence, label)
     const unattributed = isUnattributed(label)
+    const confirmedSegments = unattributed ? 0 : confirmed.has(label) ? own.length
+      : chunks.reduce((n, c, i) => n + Number(c.speaker === label && options.confirmedChunks?.get(i) === label), 0)
 
     const thrashesWith: ThrashPair[] = []
     if (!unattributed) {
@@ -698,6 +708,7 @@ export function reviewMeetingSpeakers(
     return {
       label,
       segments: own.length,
+      confirmedSegments,
       speakingMs: speakingFor(label),
       meanSimilarity: meanSim,
       meanRun: Math.round(mean(runs) * 100) / 100,
@@ -724,7 +735,9 @@ export function reviewMeetingSpeakers(
     // labels would claim three quarters of the meeting was identified above a
     // list of rows reading "Unidentified voice", which is the confusion this
     // number exists to remove.
-    assertedSegments: voices.reduce((n, v) => (v.nameAsserted ? n + v.segments : n), 0),
+    // A scoped vouch adds only its exact positions, without promoting the
+    // candidate row or double-counting an already asserted voice.
+    assertedSegments: voices.reduce((n, v) => n + (v.nameAsserted ? v.segments : v.confirmedSegments), 0),
     speakingTimeSource,
     // UNION, not sum. Speakers overlap — crosstalk means two people are each
     // correctly credited for the same wall-clock second, so per-speaker times

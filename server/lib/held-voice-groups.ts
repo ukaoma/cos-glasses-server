@@ -49,11 +49,12 @@ import { dataPath } from './data-dir.js'
 import { extAudioChunkPath, listExtAudioChunks } from './meeting-audio-archive.js'
 import { EXPECTED_EMBEDDING_DIM, decodeEmbedding, encodeEmbedding, readChunkEmbeddings } from './chunk-embedding-store.js'
 import {
-  AUTO_ENROLL_THRESHOLD, enrollEmbedding, extractEmbedding, isEmbeddingAvailable, rawCosineSimilarity, readVoiceProfiles,
+  AUTO_ENROLL_THRESHOLD, MAX_EMBEDDINGS_PER_SPEAKER, enrollEmbedding, extractEmbedding, isEmbeddingAvailable, rawCosineSimilarity, readVoiceProfiles,
   type VoiceProfile,
 } from './speaker-embeddings.js'
-import { vouchesForIdentity } from './embedding-eviction.js'
+import { chooseEviction, vouchesForIdentity } from './embedding-eviction.js'
 import { getOwnerSpeakerLabel } from './profile.js'
+import { alignedSources, appendEmbedding, dropEmbeddingAt, profileSimilarity } from './voice-profile-store.js'
 import {
   MAX_ENROL_PER_CORRECTION,
   VOICE_COHERENCE_FLOOR,
@@ -112,6 +113,7 @@ export const HELD_GROUP_SOURCE = 'ext-group'
 export interface HeldSampleRef {
   sessionId: string
   chunkIndex: number
+  suggestion?: HeldGroupSuggestion | null
 }
 
 export interface HeldSample extends HeldSampleRef {
@@ -131,6 +133,10 @@ export interface HeldGroupSuggestion {
   of: number
   /** The provenance of the strongest agreeing sample that may vouch. */
   anchor: string
+  runnerUpSimilarity?: number
+  margin?: number
+  ownerSimilarity?: number
+  ownerCaution?: boolean
 }
 
 export interface HeldVoiceGroup {
@@ -365,6 +371,9 @@ export function foldDuplicates(sim: number[][], count: number): { reps: number[]
   return { reps: [...copies.keys()], copies }
 }
 
+export const HELD_SUGGESTION_MIN_MARGIN = 0.05
+export const HELD_NEAR_PROFILE_SIMILARITY = 0.95
+
 export interface SuggestOptions {
   /** The wearer's own label. Never offered: one click would write a stranger
    *  into the profile that drives owner detection. */
@@ -386,15 +395,22 @@ export interface SuggestOptions {
 export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[], opts: SuggestOptions = {}): HeldGroupSuggestion | null {
   type Candidate = { name: string; score: number; tier: HeldSuggestionTier; agreeing: number; of: number; anchor: string | null }
   let best: Candidate | null = null
+  const candidates: Candidate[] = []
+  let ownerScore = 0
   for (const profile of profiles) {
-    if (opts.ownerLabel && profile.name === opts.ownerLabel) continue
     const rows: Array<{ sim: number; source: string }> = []
     profile.embeddings.forEach((candidate, i) => {
-      if (candidate.length !== embedding.length) return
+      if (candidate.length !== embedding.length || !candidate.every(Number.isFinite)) return
       rows.push({ sim: rawCosineSimilarity(embedding, new Float32Array(candidate)), source: profile.sources?.[i] ?? 'unknown' })
     })
     if (rows.length === 0) continue
     rows.sort((a, b) => b.sim - a.sim)
+    // Caution is proximity evidence, not permission to suggest/enrol the owner.
+    // One very close owner sample warrants listening even without two anchors.
+    if (opts.ownerLabel && profile.name.normalize('NFKC').toLowerCase() === opts.ownerLabel.normalize('NFKC').toLowerCase()) {
+      ownerScore = Math.max(ownerScore, rows[0].sim)
+      continue
+    }
     const agreeing = rows.filter(r => r.sim >= HELD_GROUP_SUGGESTION_FLOOR)
     let score: number
     let tier: HeldSuggestionTier
@@ -412,10 +428,26 @@ export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[]
       name: profile.name, score, tier, agreeing: agreeing.length, of: profile.embeddings.length,
       anchor: anchored ? anchored.source.split(':')[0] : null,
     }
+    candidates.push(candidate)
     if (!best || candidate.score > best.score) best = candidate
   }
   if (!best || best.anchor === null) return null
-  return { name: best.name, similarity: Number(best.score.toFixed(4)), tier: best.tier, agreeing: best.agreeing, of: best.of, anchor: best.anchor }
+  const winner = profiles.find(p => p.name === best!.name)!
+  // Near-duplicate profile pairs represent an existing identity ambiguity, not
+  // independent competing acoustic evidence. Do not let that pair erase the
+  // margin against genuinely different voices. Never merge or rename here.
+  const runnerUp = candidates.filter(c => c.name !== best!.name).filter(c => {
+    const other = profiles.find(p => p.name === c.name)!
+    return profileSimilarity(winner, other) < HELD_NEAR_PROFILE_SIMILARITY
+  }).reduce((score, c) => Math.max(score, c.score), 0)
+  const margin = best.score - runnerUp
+  if (margin < HELD_SUGGESTION_MIN_MARGIN) return null
+  return {
+    name: best.name, similarity: Number(best.score.toFixed(4)), tier: best.tier,
+    agreeing: best.agreeing, of: best.of, anchor: best.anchor,
+    runnerUpSimilarity: Number(runnerUp.toFixed(4)), margin: Number(margin.toFixed(4)),
+    ownerSimilarity: Number(ownerScore.toFixed(4)), ownerCaution: ownerScore >= 0.65 || ownerScore > best.score,
+  }
 }
 
 export interface BuildOptions extends SuggestOptions {
@@ -469,7 +501,12 @@ export function buildHeldVoiceGroups(samples: HeldSample[], profiles: VoiceProfi
     active = active.filter(i => !taken.has(i))
   }
   groups.sort((a, b) => b.sampleCount - a.sampleCount || b.coherence - a.coherence || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  return { groups, loose: refsOf(active) }
+  const byKey = new Map(samples.map(s => [sampleKey(s), s]))
+  const loose = refsOf(active).map(ref => {
+    const suggestion = suggestProfile(byKey.get(sampleKey(ref))!.embedding, profiles, opts)
+    return suggestion ? { ...ref, suggestion } : ref
+  })
+  return { groups, loose }
 }
 
 // ── Listing ────────────────────────────────────────────────────────────────
@@ -495,6 +532,7 @@ export function heldVoiceGroups(opts: { budgetMs?: number; now?: () => number } 
   if (listingMemo && listingMemo.fingerprint === fingerprint && now() - listingMemo.at < HELD_LISTING_MEMO_MS && listingMemo.result.pending === 0) {
     return listingMemo.result
   }
+  const started = performance.now()
   const collected = collectHeldSamples({ budgetMs: opts.budgetMs, now })
   const { groups, loose } = buildHeldVoiceGroups(collected.samples, readVoiceProfiles().profiles, { ownerLabel: getOwnerSpeakerLabel() })
   if (collected.pending.length > 0) scheduleHeldEmbeddingSweep()
@@ -508,6 +546,11 @@ export function heldVoiceGroups(opts: { budgetMs?: number; now?: () => number } 
     unusable: collected.unusable.length,
     speakerModel: isEmbeddingAvailable(),
     generatedAt: new Date().toISOString(),
+  }
+  console.log(`[held-voice] scored listing: samples=${result.samples} suggestions=${loose.filter(r => r.suggestion).length} ms=${(performance.now() - started).toFixed(1)} floor=${HELD_GROUP_SUGGESTION_FLOOR} support=${HELD_SUGGESTION_MIN_SUPPORT} margin=${HELD_SUGGESTION_MIN_MARGIN}`)
+  for (const ref of loose) if (ref.suggestion) {
+    const p = ref.suggestion
+    console.log(`[held-voice] suggestion: key=${sampleKey(ref)} voice=${JSON.stringify(p.name)} secondBest=${p.similarity} agreeing=${p.agreeing}/${p.of} anchor=${p.anchor} runnerUp=${p.runnerUpSimilarity} margin=${p.margin} ownerScore=${p.ownerSimilarity} ownerCaution=${p.ownerCaution}`)
   }
   listingMemo = { fingerprint, at: now(), result }
   return result
@@ -657,6 +700,10 @@ export interface EnrollHeldGroupPlan {
 
 export interface EnrollHeldGroupResult extends EnrollHeldGroupPlan {
   dryRun: boolean
+  coreMembers?: HeldSampleRef[]
+  /** Exact selected vectors accepted/refused by the store, not expanded duplicates. */
+  enrolledMembers?: HeldSampleRef[]
+  rejectedMembers?: HeldSampleRef[]
   enrolled: number
   /** Wavs removed: the whole core, selected or not, because all of it is now a known voice. */
   deleted: number
@@ -676,7 +723,7 @@ export interface EnrollHeldGroupResult extends EnrollHeldGroupPlan {
  * written. With the speaker model not loaded nothing can be written, so the
  * request is refused before it touches anything.
  */
-export function enrollHeldGroup(name: string, refs: HeldSampleRef[], opts: { dryRun?: boolean } = {}): EnrollHeldGroupResult {
+export function enrollHeldGroup(name: string, refs: HeldSampleRef[], opts: { dryRun?: boolean; deleteAudio?: boolean } = {}): EnrollHeldGroupResult {
   const dryRun = opts.dryRun === true
   const collected = collectHeldSamples({ only: onlyMap(refs), budgetMs: HELD_ENROLL_DECODE_BUDGET_MS })
   if (collected.pending.length > 0) scheduleHeldEmbeddingSweep()
@@ -732,21 +779,65 @@ export function enrollHeldGroup(name: string, refs: HeldSampleRef[], opts: { dry
   }
   // A dry run writes no profile and deletes no wav. It may still decode and
   // cache vectors for the samples it was asked about, and arm the sweep.
-  if (dryRun) return { ...plan, dryRun: true, enrolled: 0, deleted: 0 }
+  if (dryRun) return { ...plan, coreMembers: core.map(({ sessionId, chunkIndex }) => ({ sessionId, chunkIndex })), dryRun: true, enrolled: 0, deleted: 0 }
   if (!isEmbeddingAvailable()) {
     throw new HeldGroupError(503, 'speaker_model_unavailable', 'The speaker model is not loaded on this Mac, so nothing can be enrolled. Nothing was changed.', { ...plan })
   }
 
   let enrolled = 0
+  const enrolledMembers: HeldSampleRef[] = [], rejectedMembers: HeldSampleRef[] = []
   for (const emb of selected) {
     const sample = bySample.get(emb)
     const source = sample ? `${HELD_GROUP_SOURCE}:${sample.sessionId}` : HELD_GROUP_SOURCE
-    if (enrollEmbedding(name, emb, source, true).success) enrolled++
+    const accepted = enrollEmbedding(name, emb, source, true).success
+    if (accepted) enrolled++
+    if (sample) (accepted ? enrolledMembers : rejectedMembers).push({ sessionId: sample.sessionId, chunkIndex: sample.chunkIndex })
   }
   if (enrolled === 0) {
-    throw new HeldGroupError(409, 'nothing_enrolled', `The profile store refused every sample for ${name}; nothing was deleted.`, { ...plan })
+    throw new HeldGroupError(409, 'nothing_enrolled', `The profile store refused every sample for ${name}; nothing was deleted.`, { ...plan, enrolledMembers, rejectedMembers })
   }
-  const { removed } = discardHeldSamples(core.map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex })))
+  const coreMembers = core.map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex }))
+  const { removed } = opts.deleteAudio === false ? { removed: [] } : discardHeldSamples(coreMembers)
   console.log(`[held-voice] enroll "${name}" (${existing ? 'appended' : 'created'}): submitted=${refs.length} resolved=${resolved.length} distinct=${reps.length} coherent=${core.length} selected=${selected.length} enrolled=${enrolled} deleted=${removed.length} leftBehind=${leftBehind.length} notReady=${notReady.length} sessions=[${plan.sessions.join(',')}]`)
-  return { ...plan, dryRun: false, enrolled, deleted: removed.length, profileEmbeddings: existingCount + enrolled }
+  return { ...plan, coreMembers, enrolledMembers, rejectedMembers, dryRun: false, enrolled, deleted: removed.length, profileEmbeddings: existingCount + enrolled }
+}
+
+
+/** Preview the exact evidence enrollment will retain, without touching the store.
+ * Duplicate recordings count once; selection and cap eviction match enrollment.
+ * Wider matching must use this projection, never every submitted held vector. */
+export function projectHeldEnrollment(name: string, refs: HeldSampleRef[]): {
+  plan: EnrollHeldGroupResult; profiles: VoiceProfile[]; selectedMembers: HeldSampleRef[]
+} {
+  const plan = enrollHeldGroup(name, refs, { dryRun: true })
+  const coreRefs = plan.coreMembers ?? []
+  const collected = collectHeldSamples({ only: onlyMap(coreRefs), budgetMs: HELD_ENROLL_DECODE_BUDGET_MS })
+  const byKey = new Map(collected.samples.map(sample => [sampleKey(sample), sample]))
+  const core = coreRefs.map(ref => byKey.get(sampleKey(ref)))
+  if (core.some(sample => !sample)) throw new HeldGroupError(409, 'samples_changed', 'The held samples changed while preparing the preview. Preview again.')
+  const samples = core as HeldSample[]
+  const matrix = pairwiseSimilarityMatrix(samples.map(sample => sample.embedding))
+  const { reps } = foldDuplicates(matrix, samples.length)
+  const representatives = reps.map(i => samples[i])
+  const selected = greedyDiversitySelect(representatives.map(sample => sample.embedding), MAX_ENROL_PER_CORRECTION)
+  const byEmbedding = new Map(representatives.map(sample => [sample.embedding, sample]))
+  // readVoiceProfiles shares embedding arrays with the cache. Clone every row
+  // before simulating append/eviction so a preview cannot alter live evidence.
+  const profiles = readVoiceProfiles().profiles.map(profile => ({
+    ...profile, embeddings: profile.embeddings.map(row => [...row]), sources: [...(profile.sources ?? [])],
+  }))
+  let target = profiles.find(profile => profile.name === name)
+  if (!target) { target = { name, embeddings: [], sources: [] }; profiles.push(target) }
+  const selectedMembers: HeldSampleRef[] = []
+  for (const embedding of selected) {
+    const sample = byEmbedding.get(embedding)!
+    const source = `${HELD_GROUP_SOURCE}:${sample.sessionId}`
+    if (target.embeddings.length >= MAX_EMBEDDINGS_PER_SPEAKER) {
+      const choice = chooseEviction(alignedSources(target), source, MAX_EMBEDDINGS_PER_SPEAKER)
+      dropEmbeddingAt(target, choice?.index ?? 0)
+    }
+    appendEmbedding(target, Array.from(embedding), source)
+    selectedMembers.push({ sessionId: sample.sessionId, chunkIndex: sample.chunkIndex })
+  }
+  return { plan, profiles, selectedMembers }
 }

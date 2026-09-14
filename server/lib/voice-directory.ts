@@ -14,7 +14,7 @@ import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { dataPath } from './data-dir.js'
-import { confirmedLabels } from './meeting-corrections.js'
+import { confirmedLabels, confirmedChunks } from './meeting-corrections.js'
 import { resolveCosOperationsDir, resolveMeetingLibrary } from './cos-operations-meetings.js'
 import {
   isUnattributed,
@@ -298,6 +298,7 @@ export async function buildVoiceDirectorySnapshot(): Promise<VoiceDirectorySnaps
         owner,
         phrasesPerVoice: 1,
         confirmed: confirmedLabels(sessionId),
+      confirmedChunks: confirmedChunks(sessionId),
         durationMs: typeof record.durationMs === 'number' ? record.durationMs : undefined,
         batchSegments: Array.isArray(record.batchSegments)
           ? record.batchSegments as SpeakerWordSegment[]

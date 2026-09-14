@@ -3,7 +3,7 @@
 // extractor and the profile store are stood in for.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -34,6 +34,12 @@ function seedWav(sessionId: string, chunk: number, axis: number): void {
   const dir = join(dataDir, 'ext-audio', sessionId)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, `ext_chunk${chunk}_${1000 + chunk}.wav`), wavFor(axis))
+  const month=join(dataDir,'recordings','2026-09');mkdirSync(month,{recursive:true})
+  const stem=`2026-09-13_${sessionId}`,side=join(month,stem+'.g2-chunks.json'),md=join(month,stem+'.md')
+  const doc=existsSync(side)?JSON.parse(readFileSync(side,'utf8')):{sessionId,chunks:[],chunkEntries:[],speakers:['Ext']}
+  if(!doc.chunkEntries.some((e:any)=>e.chunkIndex===chunk))doc.chunkEntries.push({chunkIndex:chunk,chunk:{text:`words at raw ${chunk}`,speaker:'Ext',similarity:.2,elapsed:(chunk+1)*1000}})
+  doc.chunkEntries.sort((a:any,b:any)=>a.chunkIndex-b.chunkIndex);doc.chunks=doc.chunkEntries.map((e:any)=>e.chunk)
+  writeFileSync(side,JSON.stringify(doc));writeFileSync(md,'# Fixture\n\n## Attendees\n\n## Transcript\n\n'+doc.chunks.map((c:any)=>`[Ext]: ${c.text}`).join('\n\n')+'\n')
 }
 
 async function seedBank(sessionId: string, chunk: number, axis: number, wobbleAxis: number): Promise<void> {
@@ -88,7 +94,7 @@ async function startServer(): Promise<void> {
   })
 }
 
-function call(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: any }> {
+function requestCall(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body)
     const req = request(`${baseUrl}${path}`, {
@@ -106,6 +112,15 @@ function call(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ s
     if (payload) req.write(payload)
     req.end()
   })
+}
+
+async function call(method:'GET'|'POST',path:string,body?:any):Promise<{status:number;json:any}> {
+  if(path==='/api/voice/held-groups/enroll' && body?.confirm===true && !body.previewHash) {
+    const preview=await requestCall(method,path,{...body,confirm:false})
+    if(preview.status!==200)return preview
+    return requestCall(method,path,{...body,previewHash:preview.json.previewHash,listened:true})
+  }
+  return requestCall(method,path,body)
 }
 
 beforeEach(() => {
@@ -248,10 +263,10 @@ describe('POST /api/voice/held-groups/enroll', () => {
     await startServer()
     const members = [...VOICE0, { sessionId: 'meeting_a', chunkIndex: 7 }]
     const refused = await call('POST', '/api/voice/held-groups/enroll', { name: 'Chris', members })
-    expect(refused.status).toBe(400)
-    expect(refused.json).toMatchObject({ success: false, reason: 'confirmation_required' })
-    expect(refused.json.preview).toMatchObject({ created: false, submitted: 5, resolved: 5, distinct: 5, coherent: 4, selected: 4, leftBehind: [{ sessionId: 'meeting_a', chunkIndex: 7 }] })
-    expect(refused.json.message).toContain('Would add to Chris from 4 of 5 held samples')
+    expect(refused.status).toBe(200)
+    expect(refused.json).toMatchObject({ success: true, kind: 'preview' })
+    expect(refused.json).toMatchObject({ created: false, submitted: 5, resolved: 5, distinct: 5, coherent: 4, selected: 4, leftBehind: [{ sessionId: 'meeting_a', chunkIndex: 7 }] })
+    expect(refused.json.previewHash).toHaveLength(64)
     const dry = await call('POST', '/api/voice/held-groups/enroll', { name: 'Chris', members, dryRun: true })
     expect(dry.status).toBe(200)
     expect(dry.json).toMatchObject({ success: true, dryRun: true, enrolled: 0, deleted: 0, coherent: 4 })
@@ -268,7 +283,7 @@ describe('POST /api/voice/held-groups/enroll', () => {
     expect(status).toBe(200)
     expect(json).toMatchObject({ success: true, speaker: 'Chris', created: false, submitted: 5, resolved: 5, coherent: 4, enrolled: 4, deleted: 4, profileEmbeddings: 5, dryRun: false })
     expect(json.leftBehind).toEqual([{ sessionId: 'meeting_a', chunkIndex: 7 }])
-    expect(json.message).toContain('Added to Chris from 4 of 5 samples')
+    expect(json.kind).toBe('applied')
     expect(enrollCalls).toHaveLength(4)
     expect(enrollCalls.every(c => c.name === 'Chris' && c.skipDedup)).toBe(true)
     expect(enrollCalls.map(c => c.source).sort()).toEqual(['ext-group:meeting_a', 'ext-group:meeting_a', 'ext-group:meeting_b', 'ext-group:meeting_c'])
@@ -286,7 +301,7 @@ describe('POST /api/voice/held-groups/enroll', () => {
     const { status, json } = await call('POST', '/api/voice/held-groups/enroll', { name: 'Queen', members: [{ sessionId: 'meeting_b', chunkIndex: 30 }], confirm: true })
     expect(status).toBe(200)
     expect(json).toMatchObject({ created: true, coherent: 1, enrolled: 1, deleted: 1, leftBehind: [] })
-    expect(json.message).toBe('Created Queen from 1 sample.')
+    expect(json.kind).toBe('applied')
     expect(existsSync(wavPath('meeting_b', 30))).toBe(false)
   })
 
@@ -387,6 +402,13 @@ describe('POST /api/voice/held-groups/enroll', () => {
     expect(enrollCalls).toEqual([])
     expect(existsSync(wavPath('meeting_a', 0))).toBe(true)
   })
+})
+
+it('legacy confirm without a previewHash is always a preview and never applies',async()=>{
+  await seedCrowd();await startServer()
+  const result=await requestCall('POST','/api/voice/held-groups/enroll',{name:'Chris',members:VOICE0,confirm:true})
+  expect(result.status).toBe(200);expect(result.json.kind).toBe('preview');expect(enrollCalls).toHaveLength(0)
+  expect(existsSync(wavPath('meeting_a',0))).toBe(true)
 })
 
 describe('POST /api/voice/held-groups/discard', () => {

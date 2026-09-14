@@ -23,6 +23,9 @@ const DOMAIN_REVIEW_MARKER = '<!-- g2-needs-domain-review -->'
 const HQ_PENDING_MARKER = '<!-- g2-hq-state: pending -->'
 const OPERATIONS_OWNED_SIDECAR_FIELDS = new Set([
   'blended_into',
+  'claimed_parent',
+  'correctionRevision',
+  'labelsNewerThanGraph',
   'dedupEvidence',
   'enrichmentState',
   'finalPath',
@@ -124,6 +127,12 @@ function parseSidecar(path: string): Record<string, unknown> | null {
   }
 }
 
+export function g2Revision(value: unknown): number {
+  if (value === undefined || value === null) return 0
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new Error('Invalid G2 revision')
+  return value
+}
+
 /** Merge server-owned capture truth while preserving operations-owned match state. */
 export function mergeG2OperationsSidecar(
   sourcePath: string,
@@ -139,8 +148,8 @@ export function mergeG2OperationsSidecar(
     throw new Error(`Refusing G2 sidecar merge across sessions (${existingSession} != ${sourceSession})`)
   }
 
-  const priorRevision = Number(existing.lifecycleRevision ?? 0)
-  const nextRevision = Math.max(Number(options.revision ?? 0), Number(source.lifecycleRevision ?? 0))
+  const priorRevision = g2Revision(existing.lifecycleRevision)
+  const nextRevision = Math.max(g2Revision(options.revision), g2Revision(source.lifecycleRevision))
   if (Number.isFinite(priorRevision) && Number.isFinite(nextRevision) && nextRevision < priorRevision) {
     throw new Error(`Refusing regressing G2 sidecar revision ${nextRevision} < ${priorRevision}`)
   }
@@ -149,10 +158,19 @@ export function mergeG2OperationsSidecar(
   for (const field of OPERATIONS_OWNED_SIDECAR_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(existing, field)) merged[field] = existing[field]
   }
+  const correctionFields = ['chunks', 'chunkEntries', 'speakers', 'batchSegments', 'batchApplied', 'correctionRevision', 'labelsNewerThanGraph']
+  if (g2Revision(existing.correctionRevision) > g2Revision(source.correctionRevision)) {
+    for (const field of correctionFields) {
+      if (Object.prototype.hasOwnProperty.call(existing, field)) merged[field] = existing[field]
+      else delete merged[field]
+    }
+  }
+  merged.correctionRevision = Math.max(g2Revision(existing.correctionRevision), g2Revision(source.correctionRevision))
+  merged.labelsNewerThanGraph = existing.labelsNewerThanGraph === true || source.labelsNewerThanGraph === true
   merged.lifecycleRevision = Math.max(priorRevision || 0, nextRevision || 0)
-  const inferredFinalHqState = source.batchApplied === true
+  const inferredFinalHqState = merged.batchApplied === true
     ? 'accepted'
-    : source.batchQualityReport
+    : merged.batchQualityReport
       ? 'rejected'
       : 'unavailable'
   merged.hqState = options.hqState
@@ -184,7 +202,11 @@ export function stageRecordingIntoOperations(
   const destDir = join(operationsDir, 'personal', 'meetings', month)
   mkdirSync(destDir, { recursive: true })
   const destPath = join(destDir, basename(localMeetingPath))
-  const patched = patchRecordingForG2Pipeline(readFileSync(localMeetingPath, 'utf8'), options)
+  const sourceSidecar = parseSidecar(localMeetingPath.replace(/\.md$/, '.g2-chunks.json'))
+  const destinationSidecar = parseSidecar(destPath.replace(/\.md$/, '.g2-chunks.json'))
+  const keepMarkdown = g2Revision(destinationSidecar?.correctionRevision) > g2Revision(sourceSidecar?.correctionRevision)
+  if (keepMarkdown && !existsSync(destPath)) throw new Error('Corrected operations markdown missing; refusing stale import')
+  const patched = keepMarkdown ? readFileSync(destPath, 'utf8') : patchRecordingForG2Pipeline(readFileSync(localMeetingPath, 'utf8'), options)
 
   const stem = basename(localMeetingPath, '.md')
   const localDir = dirname(localMeetingPath)

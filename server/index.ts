@@ -51,6 +51,7 @@ import { promptDraftsRouter } from './routes/prompt-drafts.js'
 import { cliDebugRouter } from './routes/cli-debug.js'
 import { maintenanceRouter } from './routes/maintenance.js'
 import { ttsRouter } from './routes/tts.js'
+import { recoverInterruptedNaming } from './lib/held-naming-batches.js'
 import { voiceRouter } from './routes/voice.js'
 import { glossaryRouter } from './routes/glossary.js'
 import { handoffsRouter } from './routes/handoffs.js'
@@ -684,6 +685,7 @@ app.use('/api', promptDraftsRouter)
 app.use('/api', cliDebugRouter)
 app.use('/api', maintenanceRouter)
 app.use('/api', ttsRouter)
+recoverInterruptedNaming()
 app.use('/api', voiceRouter)
 app.use('/api', glossaryRouter)
 app.use('/api', handoffsRouter)

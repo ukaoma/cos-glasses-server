@@ -49,7 +49,7 @@ describe('voice directory corpus aggregation', () => {
       resolveCosOperationsDir: () => operations,
       resolveMeetingLibrary: () => ({ layout: 'direct', root: direct }),
     }))
-    vi.doMock('./meeting-corrections.js', () => ({ confirmedLabels: () => new Set<string>() }))
+    vi.doMock('./meeting-corrections.js', () => ({ confirmedLabels: () => new Set<string>(), confirmedChunks: () => new Map<number,string>() }))
     vi.doMock('./profile.js', () => ({ getOwnerSpeakerLabel: () => 'MU' }))
     vi.doMock('./speaker-embeddings.js', () => ({
     AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
