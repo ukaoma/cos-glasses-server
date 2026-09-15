@@ -11,7 +11,12 @@
  * run the named test files, and require them to FAIL. A mutation that leaves the suite green
  * is a finding - that branch is unreached - and is reported as SURVIVED.
  *
- * THREE THINGS IT PROVES, IN ORDER:
+ * FOUR THINGS IT PROVES, IN ORDER:
+ *   0. The target suites are GREEN UNMUTATED. Without this the gate is unfalsifiable: a kill
+ *      is decided from a non-zero vitest exit, and a suite that was ALREADY red returns
+ *      non-zero for every mutant, so an inert edit that changes no behaviour reads as killed
+ *      and the whole run reports a number that means nothing. The baseline runs first and the
+ *      gate refuses to continue without it.
  *   1. The target string appears EXACTLY ONCE, or the mutation is ambiguous and is refused.
  *   2. The mutated file differs from the original, so the edit actually landed.
  *   3. The file is restored BYTE FOR BYTE afterwards, verified by sha256, including when the
@@ -293,6 +298,25 @@ if (selected.length === 0) {
   console.error(`No matching cases. Known: ${CASES.map(c => c.name).join(', ')}`)
   process.exit(2)
 }
+
+/**
+ * The union of every target suite has to be GREEN before a single mutation is applied.
+ *
+ * WITHOUT THIS THE GATE CANNOT FAIL. A kill is decided from a non-zero vitest exit, and a
+ * suite that was already red returns non-zero for every mutant — so an inert edit that
+ * changes no behaviour at all reads as killed, and the run reports a number that means
+ * nothing. Found by the pipeline agent in their own harness, proved there with an inert
+ * comment edit against a deliberately red suite, and reported here because this gate decides
+ * a kill the same way.
+ */
+const baselineSuites = [...new Set(selected.flatMap(testCase => testCase.tests))].sort()
+console.log(`baseline: ${baselineSuites.length} suite(s), unmutated`)
+if (!runTests(baselineSuites)) {
+  console.error('BASELINE NOT GREEN - refusing to run. Every mutant would read as KILLED.')
+  console.error(`Suites: ${baselineSuites.join(' ')}`)
+  process.exit(2)
+}
+console.log('baseline green')
 
 /** Everything currently mutated, so an interrupt puts it all back. */
 const open = new Map()
