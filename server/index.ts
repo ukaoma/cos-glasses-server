@@ -129,7 +129,8 @@ import {
 
 const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
-import { queuedThreadKeys, transcriptTurnEnded } from './lib/thread-turn-queue-store.js'
+import { queuedThreadKeys, transcriptTurnEnded, transcriptTurnVerdict } from './lib/thread-turn-queue-store.js'
+import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
 import { createDrainKick } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
 import { deliverQueuedTurnOverLoopback } from './lib/thread-turn-queue-deliver.js'
@@ -637,6 +638,29 @@ if (threadAttachEnabled()) {
             && signal.stopAt >= (signal.turnStartedAt ?? 0) && signal.subagentsOpen === 0) return true
         }
         return transcriptTurnEnded(provider, transcriptPathFor(provider, threadId, nativeHeadDeps))
+      } catch {
+        return false
+      }
+    },
+    // 6.48.1: positive evidence the holder's turn is OPEN, which outranks the 30 s idle
+    // backstop (a long tool leaves the transcript untouched while it runs). Bounded: a
+    // signal or a tail older than OPEN_TURN_CEILING_MS is not evidence any more, so a
+    // crashed mid-tool session still drains by the backstop rather than holding for the TTL.
+    turnOpen: (provider: string, threadId: string): boolean => {
+      if (provider !== 'claude' && provider !== 'codex') return false
+      try {
+        const now = Date.now()
+        if (provider === 'claude') {
+          const signal = signalFor(threadId)
+          if (signal && signal.turnOpen && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS) return true
+        }
+        const path = transcriptPathFor(provider, threadId, nativeHeadDeps)
+        const verdict = transcriptTurnVerdict(provider, path)
+        if (!verdict || verdict.ended) return false
+        if (verdict.reason !== 'tool_pending' && verdict.reason !== 'prompt_open') return false
+        const read = occupancyProbes.transcriptMtimeMs
+        const mtime = typeof read === 'function' ? read(provider, threadId) : null
+        return typeof mtime === 'number' && now - mtime <= OPEN_TURN_CEILING_MS
       } catch {
         return false
       }

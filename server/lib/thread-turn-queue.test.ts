@@ -185,3 +185,20 @@ describe('the pending row keeps its meaning', () => {
     expect(queuePosition(q, 'c')).toBe(1)
   })
 })
+
+describe('drainDecision with positive turn-open evidence (6.48.1)', () => {
+  const turn = { status: 'waiting' as const, queuedAt: 1_000, attempts: 0 }
+  const now = 2_000
+  it('an OPEN turn holds even when the transcript clock reads idle (a long tool leaves the file untouched)', () => {
+    expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'idle', turnOpen: true }, now)).toBe('hold')
+  })
+  it('turnEnded still delivers ahead of it, and no evidence keeps the idle backstop', () => {
+    expect(drainDecision(turn, { attachable: true, turnEnded: true, activity: 'idle', turnOpen: true }, now)).toBe('deliver')
+    expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'idle', turnOpen: false }, now)).toBe('deliver')
+    expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'idle' }, now)).toBe('deliver')
+    expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'working', turnOpen: false }, now)).toBe('hold')
+  })
+  it('the gate is unweakened: not attachable holds whatever the turn says', () => {
+    expect(drainDecision(turn, { attachable: false, turnEnded: true, activity: 'idle', turnOpen: false, reason: 'native_thread_working' }, now)).toBe('hold')
+  })
+})

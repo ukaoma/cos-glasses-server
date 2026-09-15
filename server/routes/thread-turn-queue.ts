@@ -16,6 +16,7 @@
 // EVERY DEPENDENCY IS INJECTED so the whole path is testable without a live server.
 
 import { Router, type Request, type Response } from 'express'
+import { COS_SESSION_ID_RE } from './agent-session-bindings.js'
 import {
   admitToQueue, drainDecision, queueableRefusal, queuePosition,
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
@@ -27,6 +28,8 @@ export interface ThreadTurnQueueDeps {
   occupancy: (provider: string, threadId: string) => { attachable: boolean; reason: string | null }
   /** Did the holder's last transcript record end a turn? */
   turnEnded: (provider: string, threadId: string) => boolean
+  /** 6.48.1, optional: is the holder's turn positively OPEN right now (see DrainObservation.turnOpen)? */
+  turnOpen?: (provider: string, threadId: string) => boolean
   /** The 30s transcript clock, as a backstop. */
   activity: (provider: string, threadId: string) => 'working' | 'idle' | 'unknown'
   /**
@@ -77,6 +80,11 @@ function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unk
  * return false and spend an attempt. A new refusal added upstream is therefore bounded
  * by default rather than silently retried forever.
  */
+/** A throwing turnOpen probe is not evidence either way. */
+function safeTurnOpen(deps: ThreadTurnQueueDeps, provider: string, threadId: string): boolean | undefined {
+  try { return deps.turnOpen!(provider, threadId) } catch { return undefined }
+}
+
 function isRetryableDelivery(outcome: { reason?: string; serverRetryable?: boolean }): boolean {
   // The turn route publishes its own verdict; it outranks our inference either way.
   if (outcome.serverRetryable === false) return false
@@ -116,6 +124,7 @@ export async function drainThread(
     const seen: DrainObservation = {
       attachable: gate.attachable,
       turnEnded: deps.turnEnded(provider, threadId),
+      turnOpen: deps.turnOpen ? safeTurnOpen(deps, provider, threadId) : undefined,
       activity: deps.activity(provider, threadId),
       reason: gate.reason,
     }
@@ -211,6 +220,12 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     const prompt = typeof body.prompt === 'string' ? body.prompt : ''
     if (!clientTurnId || !cosSessionId || !prompt.trim()) {
       return res.status(400).json({ error: 'invalid_request' })
+    }
+    // 6.48.1: the attach route refuses an id outside COS_SESSION_ID_RE as invalid_request,
+    // which the drainer treats as retryable, so a bad id used to sit in the queue for the
+    // whole TTL. Refuse it here, where the client can still fix it.
+    if (!COS_SESSION_ID_RE.test(cosSessionId)) {
+      return res.status(400).json({ error: 'invalid_request', reason: 'invalid_cos_session_id' })
     }
 
     if (provider === 'cursor') {

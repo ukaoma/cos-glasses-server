@@ -408,6 +408,20 @@ const CASES = [
     replace: '      void stamp',
     tests: ['server/routes/agent-session-stream.test.ts'],
   },
+  {
+    name: 'turns-open-holds-over-idle',
+    file: 'server/lib/thread-turn-queue.ts',
+    find: "  if (seen.turnOpen === true) return 'hold'",
+    replace: '  void seen.turnOpen',
+    tests: ['server/lib/thread-turn-queue.test.ts'],
+  },
+  {
+    name: 'turns-deliver-sends-epoch-and-target',
+    file: 'server/lib/thread-turn-queue-deliver.ts',
+    find: "        epoch,\n        targetKey: targetKey(turn.provider, turn.threadId),",
+    replace: '',
+    tests: ['server/lib/thread-turn-queue-deliver.test.ts'],
+  },
 ]
 
 function sha256(text) {

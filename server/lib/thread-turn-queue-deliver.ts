@@ -26,6 +26,7 @@
 
 import { request } from 'node:http'
 import type { QueuedThreadTurn } from './thread-turn-queue.js'
+import { targetKey } from './agent-session-binding-store.js'
 
 /** Per-request ceiling. Attach and turn both answer immediately; the turn route
  *  admits with 202 and does the long work in the background. */
@@ -97,16 +98,26 @@ export async function deliverQueuedTurnOverLoopback(
     }
     const bindingId = typeof attach.body.bindingId === 'string' ? attach.body.bindingId : ''
     if (!bindingId) return { ok: false, reason: 'attach_no_binding' }
-
+    // 6.48.1: the turns route has required `epoch` and `targetKey` since the binding
+    // hardening, and refused this body as `invalid_request` (retryable, so the turn was
+    // refunded and held forever: every drained follow-up since then never landed; found by
+    // the 6.48.1 live proof, 2026-09-15). The epoch is the one the attach just minted and
+    // the target key is the server's own function of (provider, native id), exactly what
+    // the phone sends.
+    const epoch = typeof attach.body.epoch === 'number' && Number.isInteger(attach.body.epoch) && attach.body.epoch >= 1 ? attach.body.epoch : null
+    if (epoch === null) return { ok: false, reason: 'attach_no_epoch' }
+    const boundTo = typeof attach.body.boundTo === 'string' ? attach.body.boundTo : undefined
     const sent = await post(
       port, token,
       `/api/agent-sessions/bindings/${encodeURIComponent(bindingId)}/turns`,
-      // `clientTurnId` is carried through unchanged so the turn route's own
-      // idempotency ledger recognises a re-delivery of the SAME turn. Without it a
-      // retry after an ambiguous response would put the sentence in twice.
-      { clientTurnId: turn.clientTurnId, prompt: turn.prompt },
+      {
+        clientTurnId: turn.clientTurnId,
+        prompt: turn.prompt,
+        epoch,
+        targetKey: targetKey(turn.provider, turn.threadId),
+        ...(boundTo ? { boundTo } : {}),
+      },
     )
-    // 202 is the success shape: admitted, delivered in the background, poll the ledger.
     if (sent.status === 202 || sent.status === 200) return { ok: true }
     // Same defect on the turn leg: `refuseTurn` emits `reason`/`reasonCopy`/`retryable`
     // and no `error`. `retryable` is the server's OWN judgement about this refusal --

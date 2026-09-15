@@ -186,6 +186,14 @@ export interface DrainObservation {
   turnEnded: boolean
   /** The 30s transcript clock. `idle` is the backstop when no terminal record lands. */
   activity: 'working' | 'idle' | 'unknown'
+  /**
+   * 6.48.1: POSITIVE evidence the turn is still open (a tool_use awaiting its result, a
+   * prompt newer than the last reply, or the hooks saying the turn has not stopped),
+   * bounded by the caller to a recent window. It outranks the idle backstop: a 40 s tool
+   * leaves the transcript untouched for 40 s, and "idle for 30 s" used to deliver a
+   * follow-up straight into that live turn (measured 2026-09-15 on the 6.48.1 live proof).
+   */
+  turnOpen?: boolean
   /** The gate's reason when `attachable` is false. Carried ONLY so a fence -- the one
    *  hold a clock cannot end -- can be given a longer life than a busy thread. */
   reason?: string | null
@@ -219,6 +227,7 @@ export function drainDecision(
   // terminal record. `working` holds even when attachable, because attachable only says
   // no one else owns it -- it does not say a turn is not mid-flight.
   if (seen.turnEnded) return 'deliver'
+  if (seen.turnOpen === true) return 'hold'
   return seen.activity === 'idle' ? 'deliver' : 'hold'
 }
 

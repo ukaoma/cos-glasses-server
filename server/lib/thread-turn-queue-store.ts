@@ -13,7 +13,7 @@ import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readd
 import { join } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
-import { turnFromTail, type SessionStreamProvider } from './session-stream-events.js'
+import { turnFromTail, type SessionStreamProvider, type TurnFromTail } from './session-stream-events.js'
 import { pruneQueue, type QueuedThreadTurn } from './thread-turn-queue.js'
 
 /** Bytes of transcript tail read to decide whether the last turn ended. */
@@ -135,16 +135,20 @@ export function queuedThreadKeys(): Array<{ provider: string; threadId: string }
  * unreadable transcript is not evidence a turn finished, and false only means the
  * queue HOLDS, which is always the safe answer.
  */
+/** The full tail verdict, for callers that need to know OPEN as well as ended. Null on any doubt. */
+export function transcriptTurnVerdict(provider: SessionStreamProvider, path: string | null): TurnFromTail | null {
+  const lines = readTail(path)
+  return lines === null ? null : turnFromTail(provider, lines)
+}
+
 export function transcriptTurnEnded(provider: SessionStreamProvider, path: string | null): boolean {
-  if (!path || !existsSync(path)) return false
+  return transcriptTurnVerdict(provider, path)?.ended === true
+}
+
+/** The bounded tail as lines, with the same two open flags; null when it cannot be read. */
+function readTail(path: string | null): string[] | null {
+  if (!path || !existsSync(path)) return null
   try {
-    // BOTH flags, and both are load-bearing -- hazard-invariants.test.ts enforces
-    // them and each is right on its own terms. O_NOFOLLOW: a symlinked `<id>.jsonl`
-    // could point at any file on disk and would be parsed here as a transcript.
-    // O_NONBLOCK: `openSync` on a FIFO with no writer NEVER RETURNS, and it is a
-    // synchronous syscall on Node's single thread, so one planted path would stop
-    // health, meeting save and transcribe-stream along with this drain. That one is
-    // recorded in the repo as three reproductions of the same bug, >34s to SIGKILL.
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     try {
       const size = fstatSync(fd).size
@@ -154,11 +158,11 @@ export function transcriptTurnEnded(provider: SessionStreamProvider, path: strin
       const lines = buf.toString('utf-8').split('\n')
       // The first line of a tail read is almost always a fragment.
       if (start > 0) lines.shift()
-      return turnFromTail(provider, lines).ended
+      return lines
     } finally {
       closeSync(fd)
     }
   } catch {
-    return false
+    return null
   }
 }
