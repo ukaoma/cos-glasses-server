@@ -345,6 +345,124 @@ describe('pacing', () => {
   })
 })
 
+describe('summary', () => {
+  // Canary-verified 2026-09-14: the field resolves, `overview` and
+  // `action_items` are STRINGS and `keywords` is a list.
+  const SUMMARY = {
+    overview: 'The team agreed the launch date and split the follow-ups.',
+    action_items: '**Miles**\nSend the brief\n\n**Gina**\n- Draft the post\n',
+    keywords: ['launch', 'brief'],
+  }
+
+  it('asks for it alongside sentences, and not on the id-only probe', async () => {
+    const queries: string[] = []
+    const budget = new FirefliesBudget({ path: join(newRoot(), '.fireflies-budget.json') })
+    const client = new FirefliesClient({
+      transport: async ({ body }) => {
+        const parsed = JSON.parse(body) as { query: string; variables?: { limit?: number } }
+        queries.push(parsed.query)
+        // Fail the 50 and the 10 so the descent reaches the id-only probe.
+        if (parsed.variables?.limit !== 1) return { kind: 'too_large' }
+        return parsed.query.includes('sentences') ? { kind: 'too_large' } : okPage(1)
+      },
+      key: () => KEY,
+      budget,
+    })
+    await client.listPage({ skip: 0 })
+
+    const withSentences = queries.filter(query => query.includes('sentences'))
+    const idOnly = queries.filter(query => !query.includes('sentences'))
+    expect(withSentences.length).toBeGreaterThan(0)
+    expect(idOnly.length).toBeGreaterThan(0)
+    for (const query of withSentences) expect(query).toContain('summary { overview action_items keywords }')
+    // The probe exists to name a transcript too big to fetch; asking it for
+    // more would work against the one thing it is for.
+    for (const query of idOnly) expect(query).not.toContain('summary')
+  })
+
+  it('carries overview, action items and keywords onto the record', () => {
+    const result = normalizeFirefliesTranscript({ ...(transcripts(1)[0] as Record<string, unknown>), summary: SUMMARY })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.record.overview).toBe(SUMMARY.overview)
+    // One string, newlines and all. Splitting is the render's job.
+    expect(result.record.actionItems).toBe(SUMMARY.action_items)
+    expect(result.record.keywords).toEqual(['launch', 'brief'])
+  })
+
+  it.each([
+    ['absent', {}],
+    ['null', { summary: null }],
+    ['empty object', { summary: {} }],
+    ['whitespace only', { summary: { overview: '   ', action_items: '\n\n' } }],
+    ['wrong shape', { summary: 'a summary' }],
+  ])('treats a %s summary as absent rather than an error', (_label, overrides) => {
+    const result = normalizeFirefliesTranscript({ ...(transcripts(1)[0] as Record<string, unknown>), ...overrides })
+    expect(result.ok, 'a missing summary must never refuse the transcript').toBe(true)
+    if (!result.ok) return
+    expect(result.record.overview).toBeNull()
+    expect(result.record.actionItems).toBeNull()
+    expect(result.record.keywords).toEqual([])
+    // The thing we actually came for is still there.
+    expect(result.record.sentences.length).toBeGreaterThan(0)
+  })
+
+  it('keeps only real keyword strings', () => {
+    const result = normalizeFirefliesTranscript({
+      ...(transcripts(1)[0] as Record<string, unknown>),
+      summary: { keywords: ['launch', '', '  ', 42, null, { a: 1 }, 'brief'] },
+    })
+    expect(result.ok && result.record.keywords).toEqual(['launch', 'brief'])
+  })
+})
+
+describe('one transcript by id', () => {
+  it('asks for sentences and summary, and returns the transcript', async () => {
+    const queries: string[] = []
+    const budget = new FirefliesBudget({ path: join(newRoot(), '.fireflies-budget.json') })
+    const client = new FirefliesClient({
+      transport: async ({ body }) => {
+        const parsed = JSON.parse(body) as { query: string; variables?: { id?: string } }
+        queries.push(parsed.query)
+        return http(200, { data: { transcript: { id: parsed.variables?.id, title: 'One' } } })
+      },
+      key: () => KEY,
+      budget,
+    })
+    const result = await client.getTranscript('01KTQDNA393VRVDRF8VATAFJZR')
+    expect((result.transcript as { id: string }).id).toBe('01KTQDNA393VRVDRF8VATAFJZR')
+    expect(queries[0]).toContain('transcript(id: $id)')
+    expect(queries[0]).toContain('sentences {')
+    expect(queries[0]).toContain('summary { overview action_items keywords }')
+    expect(result.calls).toBe(1)
+  })
+
+  it('reports a transcript that is not there as absent, not as a failure', async () => {
+    const budget = new FirefliesBudget({ path: join(newRoot(), '.fireflies-budget.json') })
+    const client = new FirefliesClient({
+      transport: async () => http(200, { data: { transcript: null } }),
+      key: () => KEY,
+      budget,
+    })
+    const result = await client.getTranscript('01KTQDNA393VRVDRF8VATAFJZR')
+    expect(result.transcript).toBeUndefined()
+    expect(result.failure).toBeUndefined()
+  })
+
+  it('refuses an id of the wrong shape without spending a call', async () => {
+    const calls: number[] = []
+    const budget = new FirefliesBudget({ path: join(newRoot(), '.fireflies-budget.json') })
+    const client = new FirefliesClient({
+      transport: async () => { calls.push(1); return okPage(1) },
+      key: () => KEY,
+      budget,
+    })
+    const result = await client.getTranscript('../../etc/passwd')
+    expect(result.failure).toEqual({ state: 'vendor_error', code: 'id_shape_changed' })
+    expect(calls).toEqual([])
+  })
+})
+
 describe('normalize', () => {
   const base = {
     id: '01KTQDNA393VRVDRF8VATAFJZR',
