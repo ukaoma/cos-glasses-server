@@ -337,6 +337,77 @@ const CASES = [
     replace: '  const signal = signalFor(input.sessionId)',
     tests: ['server/routes/session-hooks-wire.test.ts', 'server/lib/session-hooks-runtime.test.ts'],
   },
+  // 6.48.1 session turns.
+  {
+    name: 'turns-tool-opens-turn',
+    file: 'server/lib/session-signal-store.ts',
+    find: "  if (prev.turnOpen || prev.ended || str(p.agent_id)) return {}\n  return { turnOpen: true, turnStartedAt: prev.turnStartedAt ?? at }",
+    replace: '  return {}',
+    tests: ['server/lib/session-signal-store.test.ts'],
+  },
+  {
+    name: 'turns-subagent-tool-does-not-open',
+    file: 'server/lib/session-signal-store.ts',
+    find: "  if (prev.turnOpen || prev.ended || str(p.agent_id)) return {}",
+    replace: '  if (prev.turnOpen || prev.ended) return {}',
+    tests: ['server/lib/session-signal-store.test.ts'],
+  },
+  {
+    name: 'turns-b6-grace',
+    file: 'server/lib/thread-occupancy.ts',
+    find: "  return stopAt + STOP_BOOKKEEPING_GRACE_MS >= mtime ? 'idle' : activity",
+    replace: "  return 'idle'",
+    tests: ['server/lib/thread-occupancy.test.ts'],
+  },
+  {
+    name: 'turns-b6-null-is-strict',
+    file: 'server/lib/thread-occupancy.ts',
+    find: "  if (typeof stopAt !== 'number' || !Number.isFinite(stopAt)) return activity",
+    replace: "  if (typeof stopAt !== 'number' || !Number.isFinite(stopAt)) return 'idle'",
+    tests: ['server/lib/thread-occupancy.test.ts'],
+  },
+  {
+    name: 'turns-tail-pending-tool-holds',
+    file: 'server/lib/session-stream-events.ts',
+    find: "        verdict = pendingToolUses.size === 0 ? { ended: true, reason: 'terminal_stop' } : { ended: false, reason: 'tool_pending' }",
+    replace: "        verdict = { ended: true, reason: 'terminal_stop' }",
+    tests: ['server/lib/turn-from-tail.test.ts'],
+  },
+  {
+    name: 'turns-kick-folds-into-one',
+    file: 'server/lib/thread-drain-kick.ts',
+    find: "    if (!followUp) {\n      stats.folded++\n      const current = inFlight\n      followUp = current.then(() => { followUp = null; return sweep() })\n    } else {\n      stats.folded++\n    }\n    return followUp",
+    replace: "    stats.folded++\n    return runOnce()",
+    tests: ['server/lib/thread-drain-kick.test.ts'],
+  },
+  {
+    name: 'turns-kick-only-when-queued',
+    file: 'server/lib/thread-drain-kick.ts',
+    find: '      if (!queueNames(sessionId)) return false',
+    replace: '      void sessionId',
+    tests: ['server/lib/thread-drain-kick.test.ts'],
+  },
+  {
+    name: 'turns-status-mapping',
+    file: 'server/lib/session-stream-events.ts',
+    find: "    : derived.agent_state === 'ended' ? 'done'",
+    replace: "    : derived.agent_state === 'ended' ? 'idle'",
+    tests: ['server/lib/session-stream-events.test.ts'],
+  },
+  {
+    name: 'turns-replay-only-in-ring',
+    file: 'server/routes/agent-session-stream.ts',
+    find: "bounds.oldest <= after + 1 && after <= bounds.newest",
+    replace: "true",
+    tests: ['server/routes/agent-session-stream.test.ts'],
+  },
+  {
+    name: 'turns-live-status-only-on-change',
+    file: 'server/routes/agent-session-stream.ts',
+    find: '      if (stamp === lastStamp) return',
+    replace: '      void stamp',
+    tests: ['server/routes/agent-session-stream.test.ts'],
+  },
 ]
 
 function sha256(text) {

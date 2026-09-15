@@ -162,8 +162,16 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   }
 }
 
+/** 6.48.1: the drain kick's counters, registered by the composition root when thread attach is on. */
+let drainKickStats: (() => { passes: number; kicks: number; folded: number; inFlight: boolean }) | null = null
+export function registerDrainKickStats(read: () => { passes: number; kicks: number; folded: number; inFlight: boolean }): void {
+  drainKickStats = read
+}
+
 export interface SessionHooksHealth {
   enabled: boolean
+  /** The Stop-driven drain (6.48.1): null when thread attach is off. */
+  drain: { passes: number; kicks: number; folded: number; inFlight: boolean } | null
   /** The install state word; `installed` below is its boolean. */
   state: HookStatus['state']
   installed: boolean
@@ -206,6 +214,7 @@ export function sessionHooksHealthFields(): { sessionHooks: SessionHooksHealth }
   return {
     sessionHooks: {
       enabled: sessionHooksEnabled(),
+      drain: drainKickStats ? drainKickStats() : null,
       state: status.state,
       installed: status.installed,
       scriptSha: status.scriptSha,
@@ -267,5 +276,6 @@ export function __resetSessionHooksForTests(): void {
   parentCache.clear()
   recentCosPids.clear()
   entrypointAttempts.clear()
+  drainKickStats = null
   statusCache = null
 }

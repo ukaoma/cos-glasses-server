@@ -23,7 +23,7 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { registerDrainKickStats, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -669,6 +669,7 @@ if (threadAttachEnabled()) {
     drain: () => drainAllThreads(queueDeps),
     queuedThreadIds: () => queuedThreadKeys().map(k => k.threadId),
   })
+  registerDrainKickStats(() => drainKick.stats())
   const queueDrainTimer = setInterval(() => { void drainKick.sweep() }, 20_000)
   queueDrainTimer.unref()
   if (sessionHooksEnabled()) {

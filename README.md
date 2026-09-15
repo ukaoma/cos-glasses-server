@@ -189,6 +189,12 @@ its Sessions tab. Rows change only while the server runs with `COS_CLAUDE_SESSIO
 (the spool is still drained and stamped, rows are exactly as before). Removing the package
 does not remove the hooks: run `--hooks uninstall` first.
 
+Since 6.48.1 the hooks also drive the follow-up queue (a queued Continue lands when the
+engine's `Stop` fires, not on the next sweep), the attach gate (a Desktop holder whose
+turn just ended reads idle at once), and the live session stream (every `status` draft
+carries `agent_state` and friends; `?after=<cursor>` replays a reconnect, `?seed=turn`
+opens at the current prompt). `COS_SESSION_HOOK_SSE=0` keeps the stream's frames as 6.48.0.
+
 ## Configuration
 
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
