@@ -36,6 +36,7 @@
     "server/models/silero_vad.onnx",
     "shared",
     "!server/**/*.test.ts",
+    "!server/scripts/engine-canary.ts",
     "!shared/**/*.test.ts",
     ".env.example",
     ".cos-profile.example.json",
