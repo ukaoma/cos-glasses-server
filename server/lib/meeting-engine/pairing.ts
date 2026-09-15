@@ -12,6 +12,7 @@ import {
   type FirefliesMeetingInput,
   type G2RecordingInput,
   type G2TimingMode,
+  EVIDENCE_BIN_MS,
   contentEvidence,
   firefliesInterval,
   g2Interval,
@@ -36,6 +37,27 @@ export const AUTO_DOMINANCE = 3
 /** Below this, content evidence is noise and nothing is offered. */
 export const SUGGEST_MIN_ANCHORS = 10
 
+/**
+ * How far the offset that shared phrases imply may sit from what the two CLOCKS say.
+ *
+ * WHY A BAND. Content decides which meeting a capture belongs to, but content alone cannot
+ * tell a meeting from the boilerplate it shares with its neighbour: a recurring agenda read
+ * out in the 10:30 call stacks into one dense bin against the 10:00 capture exactly as a
+ * real match does. The clocks separate them.
+ *
+ * WHY FIFTEEN MINUTES AND NOT FIVE. Measured over all 198 scored recordings, not the ten
+ * the alignment sample used: the winning pair's skew runs median 84 s, p90 271 s, with a
+ * real tail — 9 of the 167 winners that ARE the recorded merge sit past 300 s and the
+ * worst sits at 5,877 s. At a 300 s band three genuine merges collapse from K 5,700, 3,923
+ * and 3,980 to K 1, and the reproduction gate fails at 159 / 19 / 20. At 900 s the gate
+ * holds (161 / 20 / 17) and the contaminating neighbour, 1,620 s off its clock, is still
+ * refused with room to spare.
+ *
+ * WHAT IT DOES NOT DO. Two meetings less than about fifteen minutes apart are not separated
+ * by this rule; K and dominance remain the defence there.
+ */
+export const PAIRING_CLOCK_BAND_S = 900
+
 /** Two Fireflies recordings of ONE meeting start within this many seconds of each other. */
 export const DUPLICATE_START_S = 300
 
@@ -59,6 +81,8 @@ export interface CandidateScore {
   sentenceCount: number
   startMs: number
   durationS: number
+  /** Shared phrases the clock band threw out: high means boilerplate, not a match. */
+  anchorsOutsideClockBand: number
 }
 
 export interface CandidateRejection {
@@ -170,7 +194,11 @@ export function scoreRecording(
   const { candidates, rejections } = candidatesFor(recording, meetings)
   const scored: CandidateScore[] = []
   for (const meeting of candidates) {
-    const evidence = contentEvidence(words, meeting.sentences)
+    // Centred on the clocks: t_ff - t_g2 equals g2Start - ffStart for a real match.
+    const evidence = contentEvidence(words, meeting.sentences, EVIDENCE_BIN_MS, {
+      centreMs: recording.startMs - meeting.startMs,
+      halfWidthMs: PAIRING_CLOCK_BAND_S * 1000,
+    })
     if (evidence.offsetMs !== null && !offsetPlacesCaptureInside(evidence.offsetMs, recording, meeting)) {
       rejections.push({ firefliesId: meeting.id, reason: 'offset_outside_interval', k: evidence.k, offsetMs: evidence.offsetMs })
       continue
@@ -182,6 +210,7 @@ export function scoreRecording(
       sentenceCount: meeting.sentences.length,
       startMs: meeting.startMs,
       durationS: meeting.durationS,
+      anchorsOutsideClockBand: evidence.outsideBand,
     })
   }
   // (k, id) descending: the measurement sorted the same tuples in reverse.

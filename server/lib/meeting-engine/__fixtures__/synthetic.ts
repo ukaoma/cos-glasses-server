@@ -66,6 +66,11 @@ export function subPhrase(source: PhraseSpec, count: number, startS: number, spe
   return { tokens: source.tokens.slice(0, count), startS, endS: startS + perToken * count, speaker }
 }
 
+/** The same phrase spoken at a different point in a recording. */
+export function shiftPhrase(source: PhraseSpec, deltaS: number): PhraseSpec {
+  return { ...source, startS: source.startS + deltaS, endS: source.endS + deltaS }
+}
+
 export function firefliesMeeting(options: {
   id: string
   startMs: number

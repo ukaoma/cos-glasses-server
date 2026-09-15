@@ -261,13 +261,26 @@ export interface AnchorSample {
   offsetMs: number
 }
 
+/**
+ * A window of believable offsets, centred on what the two clocks say.
+ *
+ * Shared phrases whose implied offset sits outside it are boilerplate — the same agenda
+ * read out in a different meeting — not evidence about THIS one.
+ */
+export interface EvidenceBand {
+  centreMs: number
+  halfWidthMs: number
+}
+
 export interface ContentEvidence {
   /** Anchors in the densest offset bin plus its two neighbours. */
   k: number
   /** Start of the densest bin, in ms. Null when nothing is shared. */
   offsetMs: number | null
-  /** Every shared unique trigram, for the split spans. */
+  /** Every shared unique trigram that counted, for the split spans. */
   samples: AnchorSample[]
+  /** Shared trigrams the band threw out. Zero when no band was applied. */
+  outsideBand: number
 }
 
 /**
@@ -284,8 +297,14 @@ export function contentEvidence(
   g2Words: readonly TimedWord[],
   firefliesSentences: readonly FirefliesSentenceInput[],
   binMs: number = EVIDENCE_BIN_MS,
+  band?: EvidenceBand,
 ): ContentEvidence {
-  return contentEvidenceFromTrigrams(uniqueTrigrams(g2Words), uniqueTrigrams(firefliesTimedWords(firefliesSentences)), binMs)
+  return contentEvidenceFromTrigrams(
+    uniqueTrigrams(g2Words),
+    uniqueTrigrams(firefliesTimedWords(firefliesSentences)),
+    binMs,
+    band,
+  )
 }
 
 /** The same, when both trigram maps are already built (the split scores many captures against one recording). */
@@ -293,18 +312,24 @@ export function contentEvidenceFromTrigrams(
   g2Trigrams: Map<string, number>,
   firefliesTrigrams: Map<string, number>,
   binMs: number = EVIDENCE_BIN_MS,
+  band?: EvidenceBand,
 ): ContentEvidence {
   const bins = new Map<number, number>()
   const samples: AnchorSample[] = []
+  let outsideBand = 0
   for (const [key, g2Ms] of g2Trigrams) {
     const firefliesMs = firefliesTrigrams.get(key)
     if (firefliesMs === undefined) continue
     const offsetMs = firefliesMs - g2Ms
+    if (band && Math.abs(offsetMs - band.centreMs) > band.halfWidthMs) {
+      outsideBand++
+      continue
+    }
     samples.push({ firefliesMs, g2Ms, offsetMs })
     const bin = offsetBin(offsetMs, binMs)
     bins.set(bin, (bins.get(bin) ?? 0) + 1)
   }
-  if (bins.size === 0) return { k: 0, offsetMs: null, samples }
+  if (bins.size === 0) return { k: 0, offsetMs: null, samples, outsideBand }
   let densest = 0
   let best = -1
   for (const [bin, count] of bins) {
@@ -314,7 +339,7 @@ export function contentEvidenceFromTrigrams(
     }
   }
   const k = best + (bins.get(densest - 1) ?? 0) + (bins.get(densest + 1) ?? 0)
-  return { k, offsetMs: densest * binMs, samples }
+  return { k, offsetMs: densest * binMs, samples, outsideBand }
 }
 
 /** The anchors that back an offset: the densest bin and its neighbours, by Fireflies time. */

@@ -4,8 +4,10 @@ import {
   AUTO_DOMINANCE,
   AUTO_MIN_ANCHORS,
   CANDIDATE_PAD_S,
+  PAIRING_CLOCK_BAND_S,
   SUGGEST_MIN_ANCHORS,
   groupAutoMerges,
+  offsetPlacesCaptureInside,
   scoreRecording,
   tierFor,
 } from './pairing.js'
@@ -14,6 +16,7 @@ import {
   g2Capture,
   matchingPair,
   phrase,
+  shiftPhrase,
   subPhrase,
   tokensForAnchors,
 } from './__fixtures__/synthetic.js'
@@ -45,12 +48,21 @@ describe('tier boundaries', () => {
   })
 
   it('merges at exactly 3x the next meeting and suggests just below it', () => {
+    // The rival starts ten minutes after the capture and its shared run sits ten minutes
+    // into the capture, so the offset it implies MATCHES its clock. A rival whose clocks
+    // disagree is thrown out by the band and cannot be the thing dominance is measured
+    // against.
     const build = (k1: number) => {
       const main = phrase('alpha', k1, 60)
-      const rivalPhrase = subPhrase(main, tokensForAnchors(30), 300)
-      const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: HALF_HOUR_S * 1000, phrases: [main], offsetMs: 0 })
+      const sharedLater = phrase('shared', 30, 660)
+      const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: HALF_HOUR_S * 1000, phrases: [main, sharedLater], offsetMs: 0 })
       const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: HALF_HOUR_S, phrases: [main] })
-      const rival = firefliesMeeting({ id: 'f2', startMs: START + 2_400_000, durationS: HALF_HOUR_S, phrases: [rivalPhrase] })
+      const rival = firefliesMeeting({
+        id: 'f2',
+        startMs: START + 600_000,
+        durationS: HALF_HOUR_S,
+        phrases: [shiftPhrase(sharedLater, -600)],
+      })
       return scoreRecording(capture, [meeting, rival])
     }
     const dominant = build(AUTO_MIN_ANCHORS * AUTO_DOMINANCE)
@@ -72,35 +84,34 @@ describe('tier boundaries', () => {
 describe('the offset must place the capture inside the recording', () => {
   const LONG_S = 9000
 
-  function scoreAtOffset(offsetMs: number) {
+  it('accepts a capture the recording is long enough to hold', () => {
     const spoken = phrase('zeta', 40, 60)
-    const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: LONG_S * 1000, phrases: [spoken], offsetMs })
+    const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: LONG_S * 1000, phrases: [spoken], offsetMs: 0 })
     const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: LONG_S, phrases: [spoken] })
-    return scoreRecording(capture, [meeting])
-  }
-
-  it('accepts an offset inside the padded interval', () => {
-    const scored = scoreAtOffset(-(CANDIDATE_PAD_S / 2) * 1000)
+    const scored = scoreRecording(capture, [meeting])
     expect(scored.tier).toBe('auto_merge')
     expect(scored.rejections.filter(r => r.reason === 'offset_outside_interval')).toHaveLength(0)
   })
 
-  it('rejects shared phrases whose offset puts the capture before the recording', () => {
-    const scored = scoreAtOffset(-(CANDIDATE_PAD_S * 2) * 1000)
-    expect(scored.tier).toBe('none')
-    expect(scored.candidates).toHaveLength(0)
-    expect(scored.rejections.map(r => r.reason)).toContain('offset_outside_interval')
-  })
-
-  it('rejects an offset that runs the capture off the end of a short recording', () => {
-    // Two and a half hours of capture whose shared phrases sit at the close of a half-hour
-    // meeting: the content says the capture continues for two hours the meeting never had.
-    const spoken = phrase('tail', 40, 1700, 60)
-    const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: LONG_S * 1000, phrases: [spoken], offsetMs: 1_790_000 })
+  it('rejects a two-and-a-half-hour capture placed inside a half-hour recording', () => {
+    // The clocks agree, so the band is happy; the arithmetic still says this capture runs
+    // two hours past anything the meeting recorded.
+    const spoken = phrase('zeta', 40, 60)
+    const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: LONG_S * 1000, phrases: [spoken], offsetMs: 0 })
     const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: HALF_HOUR_S, phrases: [spoken] })
     const scored = scoreRecording(capture, [meeting])
     expect(scored.rejections.map(r => r.reason)).toContain('offset_outside_interval')
+    expect(scored.candidates).toHaveLength(0)
     expect(scored.tier).toBe('none')
+  })
+
+  it('refuses a placement before the recording began', () => {
+    // Tested on the predicate itself: the clock band (900 s) is tighter than this pad
+    // (3600 s), so no realistic capture reaches scoreRecording with an offset this early.
+    const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: HALF_HOUR_S * 1000, phrases: [phrase('zeta', 40, 60)], offsetMs: 0 })
+    const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: HALF_HOUR_S, phrases: [phrase('zeta', 40, 60)] })
+    expect(offsetPlacesCaptureInside(-(CANDIDATE_PAD_S - 1) * 1000, capture, meeting)).toBe(true)
+    expect(offsetPlacesCaptureInside(-(CANDIDATE_PAD_S + 1) * 1000, capture, meeting)).toBe(false)
   })
 })
 
@@ -130,10 +141,15 @@ describe('duplicate recordings of one meeting', () => {
   })
 
   it('would have refused without the collapse, because each is the other\'s rival', () => {
-    const { capture, thin, full } = twoBots()
-    const apart = { ...full, startMs: full.startMs + 3_600_000 }
+    // Ten minutes earlier and the same words ten minutes later into its own recording: too
+    // far apart to be one meeting recorded twice, close enough that its clock agrees.
+    const main = phrase('alpha', 90, 60)
+    const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: HALF_HOUR_S * 1000, phrases: [main], offsetMs: 0 })
+    const thin = firefliesMeeting({ id: 'f-thin', startMs: START, durationS: HALF_HOUR_S, phrases: [main] })
+    const apart = firefliesMeeting({ id: 'f-apart', startMs: START - 600_000, durationS: HALF_HOUR_S, phrases: [shiftPhrase(main, 600)] })
     const scored = scoreRecording(capture, [thin, apart])
     expect(scored.duplicateFirefliesIds).toEqual([])
+    expect([scored.k1, scored.k2]).toEqual([90, 90])
     expect(scored.tier).toBe('suggest')
   })
 })
@@ -144,12 +160,14 @@ describe('grouping captures of one meeting', () => {
     const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: 3600, phrases: parts })
     // Deliberately out of start order, to prove the group sorts them.
     const captures = parts
+      // offsetMs matches each capture's start: its words are stored at times relative to
+      // its OWN clock, which is what the clock band checks.
       .map((part, i) => g2Capture({
         sessionId: `s${i}`,
         startMs: START + i * 600_000,
         durationMs: 600_000,
         phrases: [part],
-        offsetMs: 0,
+        offsetMs: i * 600_000,
       }))
       .reverse()
     return { meeting, captures }
@@ -168,19 +186,13 @@ describe('grouping captures of one meeting', () => {
 
 describe('contamination', () => {
   /**
-   * EXPOSURE, PINNED DELIBERATELY. When Fireflies recorded the meeting NEXT DOOR but not
-   * this one, the neighbour is the only candidate, so `K2` is 0, dominance is satisfied by
-   * default, and shared boilerplate alone carries the capture into the wrong meeting.
-   *
-   * Neither reading of the offset rule stops it: the content offset here is -180 s and the
-   * clock offset -1800 s, both far inside the ±3600 s pad. The release answers this with
-   * D14 (every recording finalized before install is advisory) and Revert, not with the
-   * engine. The measurement cannot speak to it either — all 198 scored recordings had a
-   * real parent, so this case never arose in it.
-   *
-   * If a later release wants the engine itself to refuse this, THIS is the fixture.
+   * The case the clock band exists for. Fireflies recorded the meeting NEXT DOOR but not
+   * this one, so the neighbour is the only candidate: K2 is 0 and dominance is satisfied by
+   * default. Content alone would merge the capture into the wrong meeting on 40 phrases of
+   * shared agenda. The phrases imply an offset of -180 s while the clocks say -1800 s, and
+   * 1,620 s is far outside the band, so none of them count.
    */
-  it('merges into the neighbouring meeting when it is the only recording, on boilerplate alone', () => {
+  it('refuses the neighbouring meeting when only its clock-implausible boilerplate is shared', () => {
     const ownWords = phrase('own', 200, 60)
     const boilerplate = phrase('agenda', 40, 300)
     const capture = g2Capture({
@@ -198,20 +210,22 @@ describe('contamination', () => {
       phrases: [subPhrase(boilerplate, tokensForAnchors(40), 120)],
     })
     const scored = scoreRecording(capture, [nextMeeting])
-    expect(scored.k1).toBe(40)
-    expect(scored.k2).toBe(0)
-    expect(scored.tier).toBe('auto_merge')
+    expect(scored.tier).toBe('none')
+    expect(scored.k1).toBe(0)
+    expect(scored.candidates[0].anchorsOutsideClockBand).toBe(40)
   })
 
-  it('demotes that neighbour to a suggestion as soon as a rival recording exists', () => {
+  it('still merges the same capture into its own meeting, whose clock agrees', () => {
     const ownWords = phrase('own', 200, 60)
     const boilerplate = phrase('agenda', 40, 300)
     const capture = g2Capture({ sessionId: 's1', startMs: START, durationMs: HALF_HOUR_S * 1000, phrases: [ownWords, boilerplate], offsetMs: 0 })
+    const mine = firefliesMeeting({ id: 'f-mine', startMs: START, durationS: HALF_HOUR_S, phrases: [ownWords, boilerplate] })
     const nextMeeting = firefliesMeeting({ id: 'f-next', startMs: START + HALF_HOUR_S * 1000, durationS: HALF_HOUR_S, phrases: [subPhrase(boilerplate, tokensForAnchors(40), 120)] })
-    const otherRoom = firefliesMeeting({ id: 'f-other', startMs: START + 2_400_000, durationS: HALF_HOUR_S, phrases: [subPhrase(boilerplate, tokensForAnchors(20), 60)] })
-    const scored = scoreRecording(capture, [nextMeeting, otherRoom])
-    expect([scored.k1, scored.k2]).toEqual([40, 20])
-    expect(scored.tier).toBe('suggest')
+    const scored = scoreRecording(capture, [mine, nextMeeting])
+    expect(scored.tier).toBe('auto_merge')
+    expect(scored.primaryFirefliesId).toBe('f-mine')
+    expect(scored.k2).toBe(0)
+    expect(PAIRING_CLOCK_BAND_S).toBe(900)
   })
 
   it('picks the capture\'s own meeting when both are recorded', () => {
@@ -266,7 +280,9 @@ describe('contamination', () => {
       phrases: [subPhrase(agenda, tokensForAnchors(40), 60)],
     })
     const scored = scoreRecording(capture, [today, templatedNeighbour])
-    expect([scored.k1, scored.k2]).toEqual([150, 40])
+    // The neighbour's forty agenda phrases imply an offset 50 minutes from its clock, so
+    // they count for nothing and it is not even a rival.
+    expect([scored.k1, scored.k2]).toEqual([150, 0])
     expect(scored.tier).toBe('auto_merge')
     expect(scored.primaryFirefliesId).toBe('f-today')
   })

@@ -97,6 +97,31 @@ describe('content evidence', () => {
     expect(combined.offsetMs).toBe(EVIDENCE_BIN_MS)
   })
 
+  it('counts only the anchors inside the band, and reports what it threw out', () => {
+    // Two anchors where the clocks say the meeting is, and three stacked in one bin a long
+    // way off — the shape of boilerplate shared with a different meeting.
+    const g2 = new Map([['a', 0], ['b', 0], ['c', 0], ['d', 0], ['e', 0]])
+    const fireflies = new Map([
+      ['a', 100_000], ['b', 102_000],
+      ['c', 900_000], ['d', 902_000], ['e', 904_000],
+    ])
+    const band = { centreMs: 100_000, halfWidthMs: 300_000 }
+
+    // Without the band the contaminating bin wins outright, K and all.
+    const unbanded = contentEvidenceFromTrigrams(g2, fireflies)
+    expect([unbanded.k, unbanded.offsetMs, unbanded.outsideBand]).toEqual([3, 900_000, 0])
+
+    const banded = contentEvidenceFromTrigrams(g2, fireflies, EVIDENCE_BIN_MS, band)
+    expect([banded.k, banded.offsetMs, banded.outsideBand]).toEqual([2, 100_000, 3])
+  })
+
+  it('keeps an anchor exactly on the band edge and drops the next millisecond', () => {
+    const g2 = new Map([['edge', 0], ['past', 0]])
+    const band = { centreMs: 0, halfWidthMs: 300_000 }
+    expect(contentEvidenceFromTrigrams(g2, new Map([['edge', 300_000]]), EVIDENCE_BIN_MS, band).outsideBand).toBe(0)
+    expect(contentEvidenceFromTrigrams(g2, new Map([['past', 300_001]]), EVIDENCE_BIN_MS, band).outsideBand).toBe(1)
+  })
+
   it('finds nothing in common between two different conversations', () => {
     const mine = phrase('mine', 40, 60)
     const theirs = phrase('theirs', 40, 60)
