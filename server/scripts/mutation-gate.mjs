@@ -80,7 +80,7 @@ const CASES = [
   {
     name: 'capture-gate',
     file: 'server/lib/meeting-actions.ts',
-    find: "  return (byKind.recording_chunk ?? 0) > 0 || (byKind.meeting_save ?? 0) > 0",
+    find: '  return CAPTURE_LEASE_KINDS.some(kind => (byKind[kind] ?? 0) > 0)',
     replace: '  return false',
     tests: ['server/lib/meeting-actions-collect.test.ts'],
   },

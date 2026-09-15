@@ -642,6 +642,8 @@ export class MeetingMergeRunner {
   private forceNextCollection = false
   /** Operations paths per Fireflies id, remembered from the last collected pass. */
   private firefliesPaths: Record<string, { sidecarRelPath?: string; scribeRelPath?: string }> | null = null
+  /** A pass live meeting work turned away, owed to the first tick that finds the way clear. */
+  private deferredTrigger: string | null = null
 
   constructor(deps: MergeRunnerDeps = {}) {
     this.store = deps.store ?? getMeetingActionsStore()
@@ -777,6 +779,16 @@ export class MeetingMergeRunner {
       this.trigger('pending_retry')
       return { fired: true, reason: 'pending_retry' }
     }
+    // A pass live meeting work turned away (QA round 2). While that work still runs, firing it
+    // would only defer again, and so would a due run, so both wait. Once the work is done the
+    // owed pass runs under its own trigger, rather than six hours later.
+    if (this.deferredTrigger) {
+      if (this.captureActive()) return { fired: false, reason: 'capture_active' }
+      const owed = this.deferredTrigger
+      this.deferredTrigger = null
+      this.trigger(owed)
+      return { fired: true, reason: 'deferred_pass' }
+    }
     if (now - this.lastDueRunAt < ENGINE_DUE_INTERVAL_MS) return { fired: false, reason: 'not_due' }
     this.lastDueRunAt = now
     this.trigger('tick')
@@ -825,8 +837,14 @@ export class MeetingMergeRunner {
     }
 
     if (!this.admissionsOpen()) return await this.finishRun({ ...summary, skippedReason: 'maintenance_deferred' })
-    // Principle 7. A capture in flight owns the CPU; the backlog can wait 30 seconds.
-    if (this.captureActive()) return await this.finishRun({ ...summary, skippedReason: 'capture_active' })
+    // Principle 7. Live meeting work owns the CPU; the backlog can wait 30 seconds. The pass is
+    // REMEMBERED, so the tick runs it once that work is done.
+    if (this.captureActive()) {
+      this.deferredTrigger = trigger
+      return await this.finishRun({ ...summary, skippedReason: 'capture_active' })
+    }
+    // This pass is running now, and every pass is a full pass, so nothing is owed any more.
+    this.deferredTrigger = null
 
     const before = this.store.read()
     this.loadHashCache(before)
@@ -1785,6 +1803,78 @@ export class MeetingMergeRunner {
     })
   }
 
+  /**
+   * The evidence a HUMAN-accepted merge carries (QA round 2, blocker 1).
+   *
+   * WHAT WAS WRONG. The accept path called `takeMergeAction` with no `group`, so the derived
+   * sidecar recorded K1 = K2 = 0, a merge with no evidence behind it, and alignment had no
+   * pairing offset to search around. It fell back to the difference between the two clocks,
+   * which on a capture whose clock is minutes off puts the alignment band beside the real
+   * anchors: the capture attaches unaligned and no speaker is relabelled, silently.
+   *
+   * WHERE EACH HALF COMES FROM.
+   *   - K1 and K2 from the suggestion's STORED evidence: what the person was shown when they
+   *     agreed, from a full scoring pass. Re-scoring against only this suggestion's meetings
+   *     would report K2 = 0 for every one-meeting suggestion, because K2 is the best OTHER
+   *     meeting and there is no other.
+   *   - Offsets from RE-SCORING this suggestion's own captures against its own meetings. An
+   *     offset is the dominant bin of the phrases one capture shares with one meeting, so it does
+   *     not depend on the other candidates. The fingerprint check before this proved these are
+   *     the bytes that were suggested.
+   *
+   * A scoring failure does not block a merge a person asked for: it proceeds with the stored
+   * evidence and no offsets, which is exactly the old alignment, and logs why.
+   */
+  private async groupForAcceptedMerge(
+    suggestion: MergeSuggestionRecord,
+    g2ById: Map<string, G2RecordingInput>,
+    firefliesById: Map<string, FirefliesMeetingInput>,
+  ): Promise<MergeGroup | undefined> {
+    const canonical = suggestion.inputs
+    const captures = canonical.sessionIds
+      .map(sessionId => g2ById.get(sessionId))
+      .filter((row): row is G2RecordingInput => row != null)
+      .sort((a, b) => a.startMs - b.startMs)
+    const meetings = canonical.firefliesIds
+      .map(ffId => firefliesById.get(ffId))
+      .filter((row): row is FirefliesMeetingInput => row != null)
+    if (captures.length === 0 || meetings.length === 0) return undefined
+
+    let pairings: PairingResult[] = []
+    try {
+      const scored = await this.engine({ kind: 'score', g2: captures, fireflies: meetings })
+      if (scored.kind === 'score') pairings = scored.pairings
+    } catch (error) {
+      this.log(`accepted merge ${suggestion.id}: offsets unavailable: ${describe(error)}`)
+    }
+
+    // The primary is the meeting these captures actually paired with, when they name one of
+    // this suggestion's own; otherwise the suggestion's first, which is what accept used before.
+    const votes = new Map<string, number>()
+    for (const pairing of pairings) {
+      const primary = pairing.primaryFirefliesId
+      if (primary && canonical.firefliesIds.includes(primary)) votes.set(primary, (votes.get(primary) ?? 0) + 1)
+    }
+    const primaryFirefliesId = [...votes.entries()]
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))[0]?.[0]
+      ?? canonical.firefliesIds[0]
+    if (!primaryFirefliesId) return undefined
+
+    const offsetMsBySession: Record<string, number | null> = {}
+    for (const capture of captures) {
+      const pairing = pairings.find(row => row.sessionId === capture.sessionId)
+      offsetMsBySession[capture.sessionId] = pairing && pairing.primaryFirefliesId === primaryFirefliesId ? pairing.offsetMs : null
+    }
+    return {
+      primaryFirefliesId,
+      alternateFirefliesIds: canonical.firefliesIds.filter(ffId => ffId !== primaryFirefliesId).sort(),
+      sessionIds: captures.map(capture => capture.sessionId),
+      k1: suggestion.evidence.K1,
+      k2: suggestion.evidence.K2,
+      offsetMsBySession,
+    }
+  }
+
   /** Imports mode: turn a suggestion into a real merge, or a real split. */
   acceptSuggestion(id: string): Promise<{ ok: boolean; actionId: string }> {
     this.assertAdmissions()
@@ -1843,11 +1933,13 @@ export class MeetingMergeRunner {
         if (taken.ok) await this.markSuggestion(id, 'accepted')
         return { ok: taken.ok, actionId: taken.id }
       }
+      const group = await this.groupForAcceptedMerge(suggestion, g2ById, firefliesById)
       const taken = await this.takeMergeAction({
         canonical: suggestion.inputs,
         fingerprints,
         tier: 'accepted_suggestion',
         mode,
+        ...(group ? { group } : {}),
         inputs,
         g2ById,
         firefliesById,
@@ -2086,6 +2178,8 @@ export class MeetingMergeRunner {
     lastRun?: EngineRunSummary
     firstRun?: ActionsStoreFile['status']['firstRun']
     counts: {
+      /** Every applied action revert-all would undo: any tier but `legacy_applied`. */
+      applied: number
       auto: number
       suggested: number
       none: number
@@ -2102,6 +2196,11 @@ export class MeetingMergeRunner {
     const store = this.store.read()
     const pipelineSees = await this.pipelineStatus(store)
     const counts = {
+      // EVERY applied action a person can undo, any tier (QA round 2, blocker 5). Control's
+      // Undo-all count added OPEN suggestions to `auto`, so a Mac with suggestions and nothing
+      // merged offered "Undo all merges" and then previewed "Undo 0 merges". `legacy_applied`
+      // is out for the reason revert-all leaves it out: the pipeline made those merges.
+      applied: store.actions.filter(row => row.state === 'applied' && row.tier !== 'legacy_applied').length,
       auto: store.actions.filter(row => row.tier === 'auto' && row.state === 'applied').length,
       suggested: store.suggestions.filter(row => row.state === 'open').length,
       none: store.status.lastRun?.none ?? 0,
@@ -2120,6 +2219,11 @@ export class MeetingMergeRunner {
       && pipelineSees != null
       && pipelineSees.active
       && pipelineSees.mode !== 'apply'
+      // Only when there IS something applied (QA round 2, blocker 4). An actions file the
+      // pipeline cannot read prints `advise / active / 0`: the gate held on over nothing
+      // readable. Reading that as the benign rollback state reassured a person whose merge
+      // record was gone. It now reports as a mismatch, which Control shows as an alarm.
+      && pipelineSees.appliedActions > 0
     const mismatch = pipelineSees != null
       && !mergesRemainApplied
       && ((mode === 'apply') !== (pipelineSees.mode === 'apply' || pipelineSees.active))
@@ -2209,17 +2313,31 @@ function describe(error: unknown): string {
 }
 
 /**
- * Whether a meeting is being captured right now.
+ * Whether live meeting work owns the CPU right now.
  *
- * `recording_chunk` is the lease every live chunk write takes, and `meeting_save` the one a
- * capture's own save holds. Deliberately NOT `meeting_batch_finalization`: the merge run is
- * TRIGGERED from inside that lease (`routes/meeting.ts`, at the end of the finalization
- * job), so counting it would defer the very pass the finalization just asked for, and the
- * six-hourly tick would be the next chance to score a meeting that finished minutes ago.
+ * Five lease kinds, all work a person is waiting on: `recording_chunk` (every live chunk
+ * write), `meeting_save` (a capture's own save), `meeting_batch_finalization` (batch
+ * transcription of a finished capture), `orphan_recovery` (a stranded capture being rebuilt)
+ * and `one_shot_transcription`. The last three were missing (QA round 2), and each is
+ * transcription or rebuild work a backlog score competes with for the same cores.
+ *
+ * IT GATES PASS START ONLY. A pass already running is not interrupted.
+ *
+ * THE FINALIZATION TRIGGER IS NOT LOST. `g2_finalized` fires from INSIDE the finalization
+ * lease (`routes/meeting.ts`), so its pass now defers. The runner remembers it and the next
+ * 30 s tick that finds none of these leases held runs it (`tick()`), not the six-hourly run.
  */
+export const CAPTURE_LEASE_KINDS = [
+  'recording_chunk',
+  'meeting_save',
+  'meeting_batch_finalization',
+  'orphan_recovery',
+  'one_shot_transcription',
+] as const
+
 function defaultCaptureActive(): boolean {
   const byKind = maintenanceLifecycle.snapshot().activeByKind as Record<string, number>
-  return (byKind.recording_chunk ?? 0) > 0 || (byKind.meeting_save ?? 0) > 0
+  return CAPTURE_LEASE_KINDS.some(kind => (byKind[kind] ?? 0) > 0)
 }
 
 /** The alignment offsets pairing measured, or undefined when it measured none. */

@@ -330,7 +330,11 @@ requires.
 
 Suggestion states are `open`, `confirmed`, `accepted` and `dismissed`. Accepting
 in imports mode compares fingerprints and returns 409 `suggestion_stale` on a
-mismatch.
+mismatch. An accepted merge carries the suggestion's stored `K1` and `K2` into the
+derived sidecar's `evidence`, and each capture's offset from re-scoring the
+suggestion's own captures against its own meetings into alignment. Before QA round
+2 it carried neither, so its sidecar said `K1 = K2 = 0` and alignment fell back to
+the two clocks.
 
 ### Suggestion sides
 
@@ -359,13 +363,20 @@ downstream has to re-implement the record-id hash.
 Advise mode with an ACTIVE pipeline is NOT a disagreement: `merge_engine_active()`
 stays true while any applied action exists, precisely so the old blend path does
 not restart over merged scribes after a rollback. That state is reported as
-`mergesRemainApplied: true`. When the pipeline cannot be asked, `pipelineSees` is
+`mergesRemainApplied: true`, and only when `pipelineSees.appliedActions > 0`.
+Advise, active and zero applied is also what the pipeline prints when it cannot
+read its own actions file, so that combination reports `mergesRemainApplied: false`
+and `mismatch: true` rather than the reassuring rollback state. When the pipeline cannot be asked, `pipelineSees` is
 null and both flags are false: not known is not disagrees.
 
 The status probe (`sync_meetings.py --merge-engine-status`, at most once every
 five minutes) runs with the INHERITED environment. Injecting the server's own
 `COS_DATA_DIR` made the child resolve the server's own mode file, so the answer
 was the server reading itself back and a real disagreement could not be observed.
+
+`counts.applied` is every action in state `applied`, any tier except
+`legacy_applied`: exactly the set `revert-all` would undo, and the only count an
+Undo-all control may show. It never includes suggestions.
 
 `counts` carries `pending` and `revertPending` separately: an undo that cannot
 finish is the state `POST /api/meeting-engine/mode` refuses on, and folding it
@@ -374,6 +385,14 @@ into `pending` hid it.
 `lastRun` carries `skippedReason` when a pass did nothing - `maintenance_deferred`,
 `capture_active`, `inputs_unchanged`, `inputs_unreadable`, `too_many_inputs` -
 plus `inputsSkipped` (refused inputs by reason) and `clockBand` statistics.
+
+`capture_active` covers five maintenance lease kinds: `recording_chunk`,
+`meeting_save`, `meeting_batch_finalization`, `orphan_recovery` and
+`one_shot_transcription`. It gates the start of a pass only. A pass deferred this
+way is remembered: the 30 s tick answers `{ fired: false, reason: "capture_active" }`
+while any of those leases is held, and `{ fired: true, reason: "deferred_pass" }`
+when it runs the owed pass under its original trigger. `g2_finalized` fires from
+inside the finalization lease, so its pass always takes this route.
 
 ## The pipeline half
 

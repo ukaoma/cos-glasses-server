@@ -35,7 +35,8 @@ import {
   toEngineSentences,
 } from './meeting-actions.js'
 import { MeetingActionsStore, actionIdFor, suggestionIdFor } from './meeting-actions-store.js'
-import { runEngine } from './meeting-engine/worker.js'
+import { type EngineRequest, runEngine } from './meeting-engine/worker.js'
+import { EVIDENCE_BIN_MS } from './meeting-engine/evidence.js'
 import type { PipelineAttempt } from './pipeline-runner.js'
 import { firefliesMeeting, g2Capture, matchingPair, phrase } from './meeting-engine/__fixtures__/synthetic.js'
 
@@ -1074,6 +1075,77 @@ describe('suggestions', () => {
   })
 })
 
+/**
+ * QA round 2, blocker 1: an accepted merge carries the evidence behind it.
+ *
+ * The accept path passed no `group`, so the derived sidecar said K1 = K2 = 0 and alignment had
+ * no pairing offset, falling back to the difference between the two clocks. This reads the
+ * DERIVE REQUEST itself, so it fails on the old path however the renderer behaves.
+ */
+describe('an accepted merge carries its evidence', () => {
+  it('passes the stored K1 and K2 and the re-scored offset to the derive request', async () => {
+    // 15 shared phrases is a suggestion, not an automatic merge. The capture's WORDS sit 42 s
+    // off the transcript while both clocks say the same start, so the clock fallback is 0 and
+    // only pairing can supply the real offset.
+    const phrases = [phrase('acceptw', 15, 60)]
+    const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: 1800, phrases, title: 'Synthetic meeting' })
+    const capture = {
+      ...g2Capture({ sessionId: 's1', startMs: START, durationMs: 1_800_000, phrases, offsetMs: 42_000, labels: [{ speaker: 'Nadia Okonkwo', startS: 0, similarity: 0.9 }] }),
+      finalizedAtMs: START + 1_800_000,
+    }
+    const inputs: EngineInputs = {
+      g2: [capture],
+      fireflies: [meeting],
+      g2Meta: { s1: { sha256: 'a'.repeat(64), finalizedAtMs: START + 1_800_000 } },
+      firefliesMeta: { f1: {} },
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'cos-accept-evidence-'))
+    roots.push(dir)
+    const root = join(dir, 'imports')
+    const store = new MeetingActionsStore({ root })
+    const requests: EngineRequest[] = []
+    const runner = new MeetingMergeRunner({
+      store,
+      library: new ImportedMeetingLibrary({ root }),
+      mode: () => 'imports',
+      isPipelineMac: () => false,
+      collectInputs: () => inputs,
+      runEngine: async request => {
+        requests.push(request)
+        return runEngine(request)
+      },
+      acquireLease: () => ({ id: 'l', setPhase: () => undefined, release: () => undefined }),
+      admissionsOpen: () => true,
+      captureActive: () => false,
+      spawnPipeline: null,
+      now: () => START - 1,
+      log: () => undefined,
+    })
+
+    await runner.run('score')
+    const suggestion = store.read().suggestions[0]
+    expect(suggestion).toMatchObject({ kind: 'merge', state: 'open' })
+    expect(suggestion.evidence.K1).toBeGreaterThan(0)
+
+    requests.length = 0
+    expect((await runner.acceptSuggestion(suggestion.id)).ok).toBe(true)
+    const derive = requests.find(request => request.kind === 'derive_merge')
+    if (!derive || derive.kind !== 'derive_merge') throw new Error('expected a derive_merge request')
+    // The evidence the person was shown, not zeros.
+    expect(derive.input.evidence).toEqual({ k1: suggestion.evidence.K1, k2: suggestion.evidence.K2 })
+    // The offset pairing measured, not the clock fallback of 0. Pairing reports offsets in
+    // `EVIDENCE_BIN_MS` bins (10 s), so a 42 s shift reads back within one bin of 42 000, which
+    // is also at least 32 000 away from the 0 the clock fallback would have used.
+    const offset = derive.input.coarseOffsetMsBySession?.s1
+    expect(typeof offset).toBe('number')
+    expect(Math.abs(Math.abs(offset as number) - 42_000)).toBeLessThanOrEqual(EVIDENCE_BIN_MS)
+    // And written where a person reads why the merge happened.
+    const sidecarPath = store.read().actions[0].outputs[0].sidecarPath!
+    const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8')) as { evidence: unknown }
+    expect(sidecar.evidence).toEqual({ K1: suggestion.evidence.K1, K2: suggestion.evidence.K2 })
+  })
+})
+
 describe('advise answers survive the switch to apply', () => {
   it('a confirmed would-merge becomes an accepted action once the mode is apply', async () => {
     const h = harness({ inputs: pairedInputs(), mode: 'advise' })
@@ -1206,6 +1278,47 @@ describe('status', () => {
     h.setCapture(true)
     await h.runner.run('deferred')
     expect(h.store.read().status.firstRun).toBeUndefined()
+  })
+
+  it('counts every applied action in counts.applied, any tier but legacy, never a suggestion', async () => {
+    // QA round 2, blocker 5. Control's Undo-all count added OPEN suggestions to applied
+    // actions, so a Mac with suggestions and nothing merged offered an Undo of zero merges.
+    const h = harness({ inputs: pairedInputs() })
+    await h.runner.run('test')
+    const at = new Date(START).toISOString()
+    await h.store.update(store => {
+      store.actions.push(
+        { id: 'a_00000000000000a1', kind: 'merge', tier: 'accepted_suggestion', inputs: { sessionIds: ['sx'], firefliesIds: ['fx'] }, fingerprints: '', outputs: [], outputSha256: [], state: 'applied', mode: 'imports', at },
+        { id: 'a_00000000000000a2', kind: 'merge', tier: 'legacy_applied', inputs: { sessionIds: ['sy'], firefliesIds: [] }, fingerprints: '', outputs: [], outputSha256: [], state: 'applied', mode: 'apply', at },
+        { id: 'a_00000000000000a3', kind: 'merge', tier: 'auto', inputs: { sessionIds: ['sz'], firefliesIds: ['fz'] }, fingerprints: '', outputs: [], outputSha256: [], state: 'reverted', mode: 'imports', at },
+      )
+      store.suggestions.push({ id: 's_00000000000000b1', kind: 'merge', inputs: { sessionIds: ['sq'], firefliesIds: ['fq'] }, fingerprints: '', evidence: { K1: 12, K2: 0 }, state: 'open', at })
+    })
+    const status = await h.runner.status()
+    // The run's automatic merge plus the accepted one. Not the legacy, the reverted or the suggestion.
+    expect(status.counts.applied).toBe(2)
+    expect(status.counts.auto).toBe(1)
+    expect(status.counts.suggested).toBe(1)
+    // Exactly the set revert-all would undo.
+    expect((await h.runner.revertAll({ dryRun: true })).actions).toHaveLength(status.counts.applied)
+  })
+
+  it('reports merges remaining applied when the pipeline counts some', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'advise' })
+    h.setSpawn(() => attempt({ code: 0, stdout: '{"mode":"advise","active":true,"applied_actions":2}\n' }))
+    const status = await h.runner.status()
+    expect(status.mergesRemainApplied).toBe(true)
+    expect(status.mismatch).toBe(false)
+  })
+
+  it('does NOT read advise, active and zero applied as the benign rollback state', async () => {
+    // QA round 2, blocker 4. An actions file the pipeline cannot read prints exactly this. It
+    // must surface as a disagreement rather than the reassuring rollback sentence.
+    const h = harness({ inputs: pairedInputs(), mode: 'advise' })
+    h.setSpawn(() => attempt({ code: 0, stdout: '{"mode":"advise","active":true,"applied_actions":0}\n' }))
+    const status = await h.runner.status()
+    expect(status.mergesRemainApplied).toBe(false)
+    expect(status.mismatch).toBe(true)
   })
 
   it('reports null and no mismatch when the pipeline cannot be asked', async () => {

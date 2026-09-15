@@ -295,6 +295,11 @@ describe('principle 7: the pass defers while a capture is live', () => {
   it.each([
     ['a live chunk write', 'recording_chunk' as const],
     ['a meeting saving itself', 'meeting_save' as const],
+    // QA round 2: batch transcription, orphan rebuild and one-shot transcription are live
+    // meeting work too, and a backlog score competes with each for the same cores.
+    ['a finalization pass', 'meeting_batch_finalization' as const],
+    ['an orphan being recovered', 'orphan_recovery' as const],
+    ['a one-shot transcription', 'one_shot_transcription' as const],
   ])('defers while %s holds its lease, and runs once it is released', async (_label, kind) => {
     const { root } = operationsTree(2)
     const { runner, store } = productionGateRunner(root)
@@ -309,19 +314,29 @@ describe('principle 7: the pass defers while a capture is live', () => {
     expect(store.read().status.lastRun?.skippedReason).toBeUndefined()
   })
 
-  it('does NOT defer while a finalization lease is held', async () => {
-    // The merge run is triggered from inside `meeting_batch_finalization` (routes/meeting.ts,
-    // at the end of the finalization job). Counting it would defer the very pass the
-    // finalization just asked for, and the six-hourly tick would be the next chance.
+  it('defers the pass a finalization triggers, and the next tick runs it once the lease is gone', async () => {
+    // `g2_finalized` fires from INSIDE the finalization lease (routes/meeting.ts), so counting
+    // that lease defers the very pass the finalization asked for. The deferral has to be owed to
+    // the tick, or the next chance to merge a meeting that just finished is six hours away.
     const { root } = operationsTree(2)
     const { runner, store } = productionGateRunner(root)
     const lease = acquireMaintenanceWork('meeting_batch_finalization', { allowDuringDrain: true })
     try {
-      await runner.run('from-finalization')
-      expect(store.read().status.lastRun?.skippedReason).toBeUndefined()
+      runner.trigger('g2_finalized')
+      await runner.idle()
+      expect(store.read().status.lastRun).toMatchObject({ trigger: 'g2_finalized', skippedReason: 'capture_active' })
+      // Still inside the lease: the owed pass is held, and no other run fires in its place.
+      expect(runner.tick()).toEqual({ fired: false, reason: 'capture_active' })
     } finally {
       lease.release()
     }
+    expect(runner.tick()).toEqual({ fired: true, reason: 'deferred_pass' })
+    await runner.idle()
+    expect(store.read().status.lastRun?.trigger).toBe('g2_finalized')
+    expect(store.read().status.lastRun?.skippedReason).toBeUndefined()
+    // Owed once, not forever.
+    expect(runner.tick()).not.toMatchObject({ reason: 'deferred_pass' })
+    await runner.idle()
   })
 })
 
