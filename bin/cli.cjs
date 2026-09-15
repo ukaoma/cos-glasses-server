@@ -27,6 +27,7 @@ const CONFIG_DIR = join(homedir(), '.cos-glasses')
 const PREPARE_ONLY = process.argv.includes('--prepare-only')
 const SETUP_TRANSCRIPTION = process.argv.includes('--setup-transcription')
 const SETUP_SPEAKER_MODEL = process.argv.includes('--setup-speaker-model')
+const HOOKS_ACTION = process.argv.includes('--hooks') ? process.argv[process.argv.indexOf('--hooks') + 1] : undefined
 function optionValue(name) {
   const index = process.argv.indexOf(name)
   return index >= 0 ? process.argv[index + 1] : undefined
@@ -145,6 +146,26 @@ function setupSpeakerModel() {
   return 0
 }
 
+// --hooks install|status|uninstall: the Claude Code session hook (6.48.0). Runs before the
+// banner and the runtime checks, resolving tsx itself; the managed runtime never comes
+// through here (Control uses POST /api/session-hooks/install on the running server).
+if (process.argv.includes('--hooks')) {
+  if (!['install', 'status', 'uninstall'].includes(HOOKS_ACTION)) {
+    console.error('Usage: --hooks install|status|uninstall [--dry-run] [--port N]')
+    process.exit(64)
+  }
+  let hooksTsx
+  try {
+    hooksTsx = require.resolve('tsx/esm', { paths: [PKG_ROOT] })
+  } catch {
+    console.error('COS package dependencies are incomplete; run npm install in the package first.')
+    process.exit(2)
+  }
+  const rest = process.argv.slice(process.argv.indexOf('--hooks') + 1)
+  const child = require('child_process').spawnSync(process.execPath, ['--import', hooksTsx, join(PKG_ROOT, 'server', 'scripts', 'hooks-cli.ts'), ...rest], { cwd: PKG_ROOT, stdio: 'inherit' })
+  process.exit(child.status ?? 1)
+}
+
 if (SETUP_SPEAKER_MODEL) {
   console.log('')
   console.log(bold('  COS Glasses - voiceprint model'))
@@ -162,6 +183,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier balanced|max')
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-speaker-model')
   console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
+  console.log('    npx --yes @gotcos/glasses-server@latest --hooks install|status|uninstall [--dry-run]')
   console.log('')
   console.log('  Requirements:')
   console.log('    - Node.js 20.11+')

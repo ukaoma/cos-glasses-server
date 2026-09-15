@@ -28,7 +28,12 @@ import {
   type ClaudePeer,
   type PeerProbes,
   type RawClaudeSession,
+  type ClaudePeerRecord,
+  peerRecordFacts,
+  toWirePeer,
 } from '../lib/claude-session-registry.js'
+import { deriveForRow } from '../lib/session-hooks-runtime.js'
+import { derivedRowFields, type RegistryFacts } from '../lib/session-state-derive.js'
 
 export const claudeSessionsRouter = Router()
 
@@ -92,6 +97,15 @@ export async function readClaudePeers(
   probes: PeerProbes = realProbes,
   showNames = claudeSessionNamesVisible(),
 ): Promise<ClaudePeer[]> {
+  return (await readClaudePeerRecords(dir, probes, showNames)).map(toWirePeer)
+}
+
+/** The peers with the deriver's facts attached. Server-side only; see `toWirePeer`. */
+export async function readClaudePeerRecords(
+  dir: string,
+  probes: PeerProbes = realProbes,
+  showNames = claudeSessionNamesVisible(),
+): Promise<ClaudePeerRecord[]> {
   let names: string[]
   try {
     names = await readdir(dir)
@@ -101,7 +115,7 @@ export async function readClaudePeers(
     // separately so this cannot be mistaken for "the feature is off".
     return []
   }
-  const peers: ClaudePeer[] = []
+  const peers: ClaudePeerRecord[] = []
   for (const name of names.filter(n => REGISTRY_FILENAME.test(n)).slice(0, MAX_REGISTRY_FILES)) {
     const full = join(dir, name)
     try {
@@ -114,7 +128,8 @@ export async function readClaudePeers(
       let mtimeMs: number | null = null
       try { mtimeMs = (await stat(full)).mtimeMs } catch { /* raced the reaper */ }
       const peer = toPeer(raw, probes, mtimeMs, showNames)
-      if (peer) peers.push(peer)
+      const facts = peerRecordFacts(raw)
+      if (peer && facts) peers.push({ ...peer, ...facts })
     } catch {
       // ENOENT between readdir and read is NORMAL here — the reaper is actively
       // unlinking these — and a torn read is expected because writes are
@@ -122,7 +137,12 @@ export async function readClaudePeers(
       continue
     }
   }
-  return sortPeers(peers)
+  return sortPeers(peers) as ClaudePeerRecord[]
+}
+
+/** The deriver's view of a registry record. */
+export function registryFacts(record: ClaudePeerRecord): RegistryFacts {
+  return { alive: record.alive, status: record.status, waitingFor: record.waitingFor, statusUpdatedAt: record.statusUpdatedAt, lastActiveAt: record.lastActiveAt }
 }
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -148,9 +168,16 @@ claudeSessionsRouter.get('/claude-sessions', async (req, res) => {
   }
   try {
     const limit = boundedInteger(req.query.limit, 30, 1, 100)
-    const peers = await readClaudePeers(claudeSessionsDir())
+    const records = await readClaudePeerRecords(claudeSessionsDir())
+    const peers = records.map(toWirePeer)
+    // 6.48.0: the same derived state every surface reads, stamped ADDITIVELY on the wire
+    // peer. `toPeer` stays byte-identical (its key set is pinned); the eight extra keys
+    // come from the signal store and the registry facts an older client never sees.
     res.json({
-      peers: peers.slice(0, limit),
+      peers: records.slice(0, limit).map(record => ({
+        ...toWirePeer(record),
+        ...derivedRowFields(deriveForRow({ sessionId: record.sessionId, registry: registryFacts(record) })),
+      })),
       counts: countPeers(peers),
       enabled: true,
       generatedAt: Date.now(),

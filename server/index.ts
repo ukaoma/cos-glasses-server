@@ -22,6 +22,8 @@ import { agentSessionsRouter } from './routes/agent-sessions.js'
 import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
+import { createSessionHooksRouter } from './routes/session-hooks.js'
+import { startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -382,6 +384,11 @@ const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
  */
 const occupancyProbes = buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())
 
+// 6.48.0: the hook spool ingester and the one signal store every session row reads. Starts
+// before any router is registered so the first list request already sees the replayed
+// ledger. With COS_SESSION_HOOKS off it still drains and stamps the spool (see the module).
+const sessionHooksRuntime = startSessionHooksRuntime({ port: PORT })
+
 /**
  * The shim between the route's request shape and the adapter's.
  *
@@ -537,6 +544,7 @@ app.use('/api', agentSessionStreamRouter)
 // Presence view of Claude Code sessions on this Mac. Dark unless
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)
+app.use('/api', createSessionHooksRouter({ port: PORT }))
 // Phase 0 of Continue Original Agent Thread: can COS write into a desktop thread
 // without colliding with a live writer? Read-only — it answers, it never attaches.
 // Registered AFTER agentSessionsRouter deliberately: its paths are 2 and 4 segments
@@ -760,6 +768,7 @@ async function gracefulShutdown(): Promise<void> {
   stopMorningBriefScheduler()
   stopMeetingImportScheduler()
   stopMeetingMergeScheduler()
+  sessionHooksRuntime.stop()
   try {
     await shutdownQueryJobRuntime('server_shutdown')
   } catch (error) {

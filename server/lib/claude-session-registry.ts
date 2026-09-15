@@ -43,6 +43,7 @@ export interface RawClaudeSession {
   status?: unknown
   updatedAt?: unknown
   waitingFor?: unknown
+  statusUpdatedAt?: unknown
 }
 
 export interface ClaudePeer {
@@ -61,6 +62,30 @@ export interface ClaudePeer {
   waitingFor: string | null
   lastActiveAt: number | null
   startedAt: number | null
+}
+
+/**
+ * A peer plus the facts the state deriver needs and the wire must not carry: the full
+ * session id (the wire shortens it on purpose) and when `status` last moved. Built by
+ * `readClaudePeerRecords`; `readClaudePeers` strips it back to the wire shape.
+ */
+export interface ClaudePeerRecord extends ClaudePeer {
+  sessionId: string
+  pid: number
+  statusUpdatedAt: number | null
+}
+
+export function peerRecordFacts(raw: RawClaudeSession): { sessionId: string; pid: number; statusUpdatedAt: number | null } | null {
+  const pid = Number(raw.pid)
+  const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId : ''
+  if (!Number.isInteger(pid) || pid <= 0 || !sessionId) return null
+  return { sessionId: sessionId.toLowerCase(), pid, statusUpdatedAt: millis(raw.statusUpdatedAt) }
+}
+
+/** The wire shape and nothing else: a record is never serialized as is. */
+export function toWirePeer(record: ClaudePeerRecord): ClaudePeer {
+  const { sessionId: _sessionId, pid: _pid, statusUpdatedAt: _statusUpdatedAt, ...peer } = record
+  return peer
 }
 
 export interface PeerProbes {

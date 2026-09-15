@@ -79,6 +79,7 @@ import {
   threadAttachCapability,
   threadAttachHealthFields,
 } from '../lib/thread-attach-capability.js'
+import { sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
 
 export const healthRouter = Router()
 
@@ -349,6 +350,7 @@ healthRouter.get('/health', async (_req, res) => {
     ...checks,
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
+    ...sessionHooksHealthFields(),
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),

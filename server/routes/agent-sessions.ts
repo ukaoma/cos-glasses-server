@@ -37,7 +37,10 @@ import {
   type AgentSessionSort,
 } from '../lib/agent-session-store.js'
 import { searchAgentSessions, type AgentSessionSearchHit } from '../lib/agent-session-search.js'
-import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeers } from './claude-sessions.js'
+import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
+import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
+import { deriveForRow } from '../lib/session-hooks-runtime.js'
+import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 import {
   occupiedThreads,
@@ -261,7 +264,7 @@ function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: nu
   }
 }
 
-function toEntry(row: AgentSessionRow, activity?: SessionActivity | null) {
+function toEntry(row: AgentSessionRow, activity?: SessionActivity | null, derived?: DerivedSessionState) {
   return {
     session_id: row.session_id,
     provider: row.provider,
@@ -286,12 +289,19 @@ function toEntry(row: AgentSessionRow, activity?: SessionActivity | null) {
     // unknown, so an older client and a Cursor row see exactly the payload they did.
     ...(activity?.lastActivityAt ? { last_activity_at: activity.lastActivityAt } : {}),
     ...(activity?.lastTool ? { last_tool: activity.lastTool } : {}),
+    // 6.48.0: the one derived state (hook > registry > transcript) with its provenance.
+    // Under a NEW key: `state` above is `running|recent` and Control renders any other
+    // value there as "Running". Omitted entirely when nothing is known, like the two above.
+    ...derivedRowFields(derived),
   }
 }
 
-async function liveClaudeRows(): Promise<AgentSessionRow[]> {
+async function liveClaudePeerRecords(): Promise<ClaudePeerRecord[]> {
   if (!claudeSessionsEnabled()) return []
-  const peers = await readClaudePeers(claudeSessionsDir(), undefined, claudeSessionNamesVisible())
+  return readClaudePeerRecords(claudeSessionsDir(), undefined, claudeSessionNamesVisible())
+}
+
+function liveClaudeRows(peers: ClaudePeerRecord[]): AgentSessionRow[] {
   return peers.filter(peer => peer.alive).map(peer => ({
     session_id: peer.id,
     provider: 'claude' as const,
@@ -322,7 +332,8 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     // ONE alias load per request, shared by the walk, every live row and every
     // held thread. Measured 2026-09-10: sixteen loads of 119 MB before this line.
     const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
-    const live = await liveClaudeRows()
+    const peers = await liveClaudePeerRecords()
+    const live = liveClaudeRows(peers)
     const dropped = emptySessionListDropped()
     const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases)
     // 6.45.5: each row's last real activity, read from its transcript records. Memoized on
@@ -342,8 +353,29 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       if (mtimeMs !== null) clocks.set(threadId, activityClockMs(mtimeMs, activityById.get(threadId)))
     }
     const running = withActiveRecently(scan, clocks, Date.now())
+    // Derived AFTER the walk: live rows carry the registry's eight-character id until
+    // `enrichLiveClaude` finds their transcript, and the deriver wants the full one where
+    // it exists. The registry facts are joined back by prefix; a transcript-only row (an
+    // ended job, a tab closed hours ago) still gets a state from its activity clock.
+    const now = Date.now()
+    const peersByPrefix = new Map(peers.map(peer => [peer.sessionId.slice(0, 8), peer]))
+    const derivedById = new Map<string, DerivedSessionState | undefined>()
+    for (const row of sessions) {
+      if (row.provider !== 'claude') continue
+      const peer = peersByPrefix.get(row.session_id.slice(0, 8).toLowerCase())
+      const hint = running.occupied.get(row.session_id)
+      derivedById.set(row.session_id, deriveForRow({
+        sessionId: row.session_id,
+        registry: peer ? registryFacts(peer) : undefined,
+        transcript: {
+          inFlight: hint?.activeRecently === true,
+          lastActivityAt: activityById.get(row.session_id)?.lastActivityAt ? Date.parse(activityById.get(row.session_id)!.lastActivityAt!) : null,
+        },
+        now,
+      }))
+    }
     res.json({
-      sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index]), running)),
+      sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index], derivedById.get(row.session_id)), running)),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
@@ -417,8 +449,20 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     const modified = st.mtime.toISOString()
     const activity = await readSessionActivity(provider, found)
     const running = runningForThread(provider, parsed.session_id, activityClockMs(st.mtimeMs, activity))
+    // 6.48.0: the detail carries the same derived state as its list row. The registry is
+    // read once here (a few hundred small files at most) because the detail has no walk.
+    let derived: DerivedSessionState | undefined
+    if (provider === 'claude') {
+      const peer = (await liveClaudePeerRecords()).find(p => p.sessionId === parsed.session_id.toLowerCase())
+      derived = deriveForRow({
+        sessionId: parsed.session_id,
+        registry: peer ? registryFacts(peer) : undefined,
+        transcript: { inFlight: running.occupied.get(parsed.session_id)?.activeRecently === true, lastActivityAt: activity.lastActivityAt ? Date.parse(activity.lastActivityAt) : null },
+      })
+    }
     res.json({
       ...withRunning({ session_id: parsed.session_id }, running),
+      ...derivedRowFields(derived),
       // The client must be able to tell "this server stamped nothing" from "this
       // server stamped false", because the two demand opposite behaviour: an old
       // server's silence means keep using the hint borrowed from the list row, and
