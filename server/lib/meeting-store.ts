@@ -97,10 +97,35 @@ export interface MeetingMeta {
   decisionCount?: number
   actionCount?: number
   attendeeCount?: number
-  /** Additive archive identity. Older companions ignore these fields. */
-  librarySource?: 'direct_library' | 'cos_operations' | 'standalone_recordings'
+  /** Additive archive identity. Older companions ignore these fields.
+   *
+   *  `imported` is a meeting this Mac never recorded (Fireflies, 6.47.0) and
+   *  `blended` is a record DERIVED from other records — a merge of one meeting's
+   *  Fireflies transcript with its G2 captures, or one piece of a split long
+   *  recording. Both are read-only: their content is a function of their inputs,
+   *  so editing one would be overwritten by the next re-derive. */
+  librarySource?: 'direct_library' | 'cos_operations' | 'standalone_recordings' | 'imported' | 'blended'
   recordId?: string
   mutable?: boolean
+  /** Where the meeting actually came from, when `domain` is a routing value
+   *  rather than the meeting's own domain. Every imported row carries
+   *  `domain: 'imported'`, so without this a Quilt call and a personal one are
+   *  indistinguishable on the row. */
+  originDomain?: string
+  /** How a `blended` record was derived. Absent on every other source. */
+  derivedKind?: 'merge' | 'split'
+  /** The action that produced a derived record, so Control can offer its Undo. */
+  actionId?: string
+  /** Every G2 capture a merged record holds, in start order. `sessionId` carries
+   *  the earliest of them so session-keyed surfaces keep working. */
+  g2SessionIds?: string[]
+  /** A split piece carries no `sessionId` of its own — it is a span of a longer
+   *  recording, not a capture — but names the capture whose content defined it. */
+  sourceSessionId?: string
+  /** 0-based position of a split piece inside its source recording. */
+  pieceIndex?: number
+  /** Inputs of a derived record, for the detail view's source links. */
+  sources?: Array<{ kind: 'g2' | 'fireflies'; id: string; recordId?: string }>
   /** Present only when the server can state a truthful local record. */
   canonicalRecord?: string
   /** Additive. Unique sidecar speakers + whether a human correction landed. */

@@ -35,12 +35,11 @@ import {
   type TasksProbe,
 } from './morning-brief-coverage.js'
 import {
-  listCosOperationsMeetingDays,
   listCosOperationsMeetingMonths,
-  listDirectLibraryMeetingDays,
   listDirectLibraryMeetingMonths,
   resolveMeetingLibrary,
 } from './cos-operations-meetings.js'
+import { importedLibraryMonths, supersededDayCounts } from './imported-library-rows.js'
 import { getMeetingStore } from './meeting-store.js'
 import { COS_SCRIPTS_DIR, callPython, contextSourceAvailable, pythonBridgeAvailable } from './python-bridge.js'
 import { resolveProviderWorkDir } from './launch-dir.js'
@@ -68,20 +67,33 @@ function sumDayCounts(months: string[], days: (month: string) => Array<{ count: 
   return total
 }
 
+/**
+ * How many meetings this Mac holds, counted the way the LIST counts them.
+ *
+ * Shares `supersededDayCounts` with `/api/meetings`, so the brief and the
+ * Meetings list can never disagree about a day: a merged record replaced its
+ * import and its capture in the list, and it replaces them here too. On a Mac
+ * with no derived records the helper is the same uncapped filename scan it has
+ * always been.
+ */
 export function probeMeetings(): MeetingsProbe | null {
   const library = resolveMeetingLibrary()
   if (library.layout === 'direct') {
-    const months = listDirectLibraryMeetingMonths()
-    return { count: sumDayCounts(months, listDirectLibraryMeetingDays), newestMonth: months[0] ?? null, layout: library.layout }
+    const months = uniqueMonths([listDirectLibraryMeetingMonths(), importedLibraryMonths()])
+    return { count: sumDayCounts(months, month => supersededDayCounts(month, 'direct')), newestMonth: months[0] ?? null, layout: library.layout }
   }
   if (library.layout === 'multi_domain') {
-    const months = listCosOperationsMeetingMonths('all')
-    return { count: sumDayCounts(months, month => listCosOperationsMeetingDays(month, 'all')), newestMonth: months[0] ?? null, layout: library.layout }
+    const months = uniqueMonths([listCosOperationsMeetingMonths('all'), importedLibraryMonths()])
+    return { count: sumDayCounts(months, month => supersededDayCounts(month, 'multi_domain')), newestMonth: months[0] ?? null, layout: library.layout }
   }
   if (library.layout === 'invalid_explicit_root') return null
   const store = getMeetingStore()
-  const months = store.listMonths()
-  return { count: sumDayCounts(months, month => store.listDayCounts(month)), newestMonth: months[0] ?? null, layout: 'standalone' }
+  const months = uniqueMonths([store.listMonths(), importedLibraryMonths()])
+  return { count: sumDayCounts(months, month => supersededDayCounts(month, 'standalone', { store })), newestMonth: months[0] ?? null, layout: 'standalone' }
+}
+
+function uniqueMonths(groups: string[][]): string[] {
+  return [...new Set(groups.flat())].sort().reverse()
 }
 
 export async function probeContext(): Promise<ContextProbe | null> {

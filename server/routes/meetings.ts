@@ -7,10 +7,8 @@ import {
   getDirectLibraryMeetingDetail,
   getCosOperationsMeetingDetail,
   listDirectLibraryMeetings,
-  listDirectLibraryMeetingDays,
   listDirectLibraryMeetingMonths,
   listCosOperationsMeetings,
-  listCosOperationsMeetingDays,
   listCosOperationsMeetingMonths,
   resolveMeetingLibrary,
 } from '../lib/cos-operations-meetings.js'
@@ -18,9 +16,37 @@ import type { MeetingMeta } from '../lib/meeting-store.js'
 import { meetingListLimit } from '../lib/meeting-store.js'
 import { searchMeetingLibrary } from '../lib/meeting-library-search.js'
 import { g2RecordingsReachOperations } from '../lib/g2-ops-handoff.js'
+import {
+  type ImportedMeetingLibrary,
+  IMPORTED_DOMAIN,
+  getImportedMeetingLibrary,
+} from '../lib/imported-meeting-library.js'
+import {
+  type DerivedRecordSummary,
+  derivedSourcesFor,
+  dropSupersededRows,
+  importedLibraryMonths,
+  listImportedLibraryRows,
+  readDerivedRecords,
+  supersededDayCounts,
+  supersededFromRows,
+  supersededInputsOf,
+  withDerivedIdentity,
+} from '../lib/imported-library-rows.js'
 
 const MONTH_QUERY = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_QUERY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
+
+/**
+ * The only filenames the imported branch of detail will answer for.
+ *
+ * Deliberately stricter than "is it in the imports folder": a G2 recording whose
+ * TITLE contains the word "merged" produces a store filename that must keep
+ * resolving through the store, and a hand-dropped or iCloud-conflicted file in
+ * the imports root must not be served as a record. The branch falls through on a
+ * miss rather than 404ing, so a near-miss is answered by the next source.
+ */
+export const IMPORTED_DETAIL_FILENAME = /^\d{4}-\d{2}-\d{2}_(?:fireflies|merged|piece)_[0-9a-f]{16}\.md$/
 
 function withStandaloneIdentity(meeting: MeetingMeta): MeetingMeta {
   return {
@@ -74,29 +100,78 @@ function parseListFilters(query: { month?: unknown; day?: unknown }): {
   return { month, day }
 }
 
-function mergeDayCounts(
-  groups: Array<Array<{ date: string; count: number }>>,
-): Array<{ date: string; count: number }> {
-  const counts = new Map<string, number>()
-  for (const group of groups) {
-    for (const { date, count } of group) {
-      counts.set(date, (counts.get(date) ?? 0) + count)
-    }
-  }
-  return [...counts.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([date, count]) => ({ date, count }))
-}
-
-function dayCountsOf(rows: MeetingMeta[]): Array<{ date: string; count: number }> {
-  return mergeDayCounts([rows.map(row => ({ date: row.date, count: 1 }))])
-}
-
 function uniqueSortedMonths(groups: string[][]): string[] {
   return [...new Set(groups.flat())].sort().reverse()
 }
 
-export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): Router {
+/**
+ * Detail for one record of the imported library, or null to fall through.
+ *
+ * NULL, NEVER 404. The three detail sources share one URL shape, and a record
+ * that is not here may still be an operations meeting or a store recording, so a
+ * miss has to hand the request on. The two gates — the routing domain and the
+ * strict filename — are what keep an ordinary meeting out of this branch.
+ *
+ * A merged record answers with `sources[]`, each input naming the record that
+ * still holds it. Nothing is read from the client: the record's own sidecar is
+ * the only thing consulted.
+ */
+function importedMeetingDetail(
+  domain: string,
+  month: string,
+  filename: string,
+  store: MeetingStore,
+  library: ImportedMeetingLibrary,
+): MeetingMeta | null {
+  if (domain !== IMPORTED_DOMAIN) return null
+  if (!IMPORTED_DETAIL_FILENAME.test(filename)) return null
+  const detail = library.detail(month, filename)
+  if (!detail) return null
+  if (detail.librarySource !== 'blended') return detail as MeetingMeta
+  const record = readDerivedRecords(library).find(entry => entry.recordId === detail.recordId)
+  if (!record) return detail as MeetingMeta
+  return {
+    ...withDerivedIdentity(detail as MeetingMeta, record),
+    sources: derivedSourcesFor(record, store),
+  }
+}
+
+/**
+ * The imported library's contribution to one list request.
+ *
+ * Read ONCE per request: the derived sidecars decide both what the derived rows
+ * say about themselves and which G2, import and long-original rows they have
+ * taken over, and reading them twice would let a write between the two reads
+ * show a meeting and its merged replacement side by side.
+ */
+function importedContribution(
+  options: { limit: number; domain: string; month?: string; day?: string },
+  library: ImportedMeetingLibrary,
+): {
+  imports: MeetingMeta[]
+  derived: MeetingMeta[]
+  records: DerivedRecordSummary[]
+  drop: (rows: MeetingMeta[]) => MeetingMeta[]
+  present: boolean
+} {
+  const records = readDerivedRecords(library)
+  const { imports, derived } = listImportedLibraryRows(options, library, records)
+  const superseded = supersededInputsOf(records)
+  return {
+    imports,
+    derived,
+    records,
+    drop: rows => dropSupersededRows(rows, superseded),
+    present: imports.length > 0 || derived.length > 0,
+  }
+}
+
+export function createMeetingsRouter(
+  store: MeetingStore = getMeetingStore(),
+  // Injectable so a test can drive a whole imports library without reaching the
+  // process-wide data home. Production passes nothing and gets the singleton.
+  importsLibrary: ImportedMeetingLibrary = getImportedMeetingLibrary(),
+): Router {
   const router = Router()
 
   // GET /api/meetings?limit=20&domain=all
@@ -131,6 +206,7 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
       const listOptions = { limit: sourceLimit, domain, month: filters.month, day: filters.day }
 
       if (library.layout === 'direct') {
+        const imported = importedContribution(listOptions, importsLibrary)
         const operations = cosOperationsMeetingsConfigured()
           ? listCosOperationsMeetings(listOptions)
           : []
@@ -138,24 +214,30 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
           ? listDirectLibraryMeetings({ limit: sourceLimit, month: filters.month, day: filters.day })
           : []
         const standalone = store.list(listOptions).map(withStandaloneIdentity)
-        const meetings = mergeMeetingSources([operations, direct, standalone], limit, sourceLimit)
+        // Derived rows lead. They carry the sessionId of the earliest capture they
+        // hold, so leading makes a merged record win that session outright even if
+        // its sidecar became unreadable and the supersession filter went quiet.
+        const meetings = mergeMeetingSources([
+          imported.derived,
+          imported.drop(operations),
+          imported.drop(direct),
+          imported.drop(standalone),
+          imported.drop(imported.imports),
+        ], limit, sourceLimit)
         const months = uniqueSortedMonths([
           ...(cosOperationsMeetingsConfigured() ? [listCosOperationsMeetingMonths(domain)] : []),
           ...(domain === 'all' || domain === 'library' ? [listDirectLibraryMeetingMonths()] : []),
           store.listMonths(),
+          importedLibraryMonths(importsLibrary),
         ])
         const days = filters.month
-          ? mergeDayCounts([
-            ...(cosOperationsMeetingsConfigured() ? [listCosOperationsMeetingDays(filters.month, domain)] : []),
-            ...(domain === 'all' || domain === 'library' ? [listDirectLibraryMeetingDays(filters.month)] : []),
-            store.listDayCounts(filters.month),
-          ])
+          ? supersededDayCounts(filters.month, 'direct', { domain, store, library: importsLibrary })
           : []
         res.json({
           meetings,
           months,
           days,
-          source: operations.length > 0 ? 'mixed_library' : 'direct_library',
+          source: operations.length > 0 || imported.present ? 'mixed_library' : 'direct_library',
           layout: 'direct',
           root: library.root,
           rootFingerprint: library.rootFingerprint,
@@ -167,16 +249,21 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
 
       if (library.layout === 'multi_domain') {
         if (g2RecordingsReachOperations()) {
-          const meetings = listCosOperationsMeetings({
+          // The pipeline owns this tree, so the tree is the whole library: no
+          // imports, no derived records from `data/imports`. A merge here was
+          // spliced into the Fireflies scribe, which declares the captures it
+          // holds, so the capture's own row is dropped from its own tree.
+          const rows = listCosOperationsMeetings({
             limit,
             domain,
             month: filters.month,
             day: filters.day,
           })
+          const meetings = dropSupersededRows(rows, supersededFromRows(rows))
           res.json({
             meetings,
             months: listCosOperationsMeetingMonths(domain),
-            days: filters.month ? listCosOperationsMeetingDays(filters.month, domain) : [],
+            days: filters.month ? supersededDayCounts(filters.month, 'multi_domain', { domain, store, library: importsLibrary, pipeline: true }) : [],
             source: 'cos_operations',
             layout: 'multi_domain',
             root: library.root,
@@ -191,28 +278,27 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
         // without COS_SCRIPTS_DIR, 2026-09-14), so they live only in this server's store. List them beside the
         // operations rows. Operations rows go first, so a copy that did reach operations wins by sessionId, and
         // the day counts skip the store row it covers. Day counts always describe the whole month.
+        const imported = importedContribution(listOptions, importsLibrary)
         const operations = listCosOperationsMeetings(listOptions)
         const standalone = store.list(listOptions).map(withStandaloneIdentity)
-        const meetings = mergeMeetingSources([operations, standalone], limit, sourceLimit)
-        let days: Array<{ date: string; count: number }> = []
-        if (filters.month) {
-          const monthOperations = filters.day
-            ? listCosOperationsMeetings({ limit: sourceLimit, domain, month: filters.month })
-            : operations
-          const monthStore = filters.day
-            ? store.list({ limit: sourceLimit, domain, month: filters.month })
-            : standalone
-          const covered = new Set(monthOperations.flatMap(row => (row.sessionId ? [row.sessionId] : [])))
-          days = mergeDayCounts([
-            listCosOperationsMeetingDays(filters.month, domain),
-            dayCountsOf(monthStore.filter(row => !row.sessionId || !covered.has(row.sessionId))),
-          ])
-        }
+        const meetings = mergeMeetingSources([
+          imported.derived,
+          imported.drop(operations),
+          imported.drop(standalone),
+          imported.drop(imported.imports),
+        ], limit, sourceLimit)
+        const days = filters.month
+          ? supersededDayCounts(filters.month, 'multi_domain', { domain, store, library: importsLibrary, pipeline: false })
+          : []
         res.json({
           meetings,
-          months: uniqueSortedMonths([listCosOperationsMeetingMonths(domain), store.listMonths()]),
+          months: uniqueSortedMonths([
+            listCosOperationsMeetingMonths(domain),
+            store.listMonths(),
+            importedLibraryMonths(importsLibrary),
+          ]),
           days,
-          source: standalone.length > 0 ? 'mixed_library' : 'cos_operations',
+          source: standalone.length > 0 || imported.present ? 'mixed_library' : 'cos_operations',
           layout: 'multi_domain',
           root: library.root,
           rootFingerprint: library.rootFingerprint,
@@ -222,17 +308,23 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
         return
       }
 
-      const meetings = store.list({
-        limit,
+      const imported = importedContribution(listOptions, importsLibrary)
+      const standalone = store.list({
+        limit: sourceLimit,
         domain,
         month: filters.month,
         day: filters.day,
       }).map(withStandaloneIdentity)
+      const meetings = mergeMeetingSources([
+        imported.derived,
+        imported.drop(standalone),
+        imported.drop(imported.imports),
+      ], limit, sourceLimit)
       res.json({
         meetings,
-        months: store.listMonths(),
-        days: filters.month ? store.listDayCounts(filters.month) : [],
-        source: 'standalone_recordings',
+        months: uniqueSortedMonths([store.listMonths(), importedLibraryMonths(importsLibrary)]),
+        days: filters.month ? supersededDayCounts(filters.month, 'standalone', { domain, store, library: importsLibrary }) : [],
+        source: imported.present ? 'mixed_library' : 'standalone_recordings',
         layout: 'standalone',
         meetingCount: meetings.length,
       })
@@ -284,6 +376,12 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
         }
       }
 
+      const imported = importedMeetingDetail(domain, month, filename, store, importsLibrary)
+      if (imported) {
+        res.json(imported)
+        return
+      }
+
       if (cosOperationsMeetingsConfigured()) {
         const detail = getCosOperationsMeetingDetail(domain, month, filename)
         if (detail) {
@@ -312,6 +410,18 @@ export function createMeetingsRouter(store: MeetingStore = getMeetingStore()): R
           res.json(detail)
           return
         }
+      }
+
+      const imported = importedMeetingDetail(
+        req.params.domain,
+        req.params.month,
+        req.params.filename,
+        store,
+        importsLibrary,
+      )
+      if (imported) {
+        res.json(imported)
+        return
       }
 
       if (cosOperationsMeetingsConfigured()) {

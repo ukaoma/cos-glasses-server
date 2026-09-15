@@ -20,6 +20,7 @@ import { fanOutSpeakerRename, type SpeakerRenameFanOut } from '../lib/speaker-re
 import { HeldGroupError, discardHeldSamples, enrollHeldGroup, heldVoiceGroups, parseHeldMembers, previewDiscard } from '../lib/held-voice-groups.js'
 import { previewHeldNaming, applyHeldNaming, undoHeldNaming, resumeHeldNaming, namingBatchList, resolveStoredName, NAMING_CAPABILITIES } from '../lib/held-naming-batches.js'
 import { resolveCosOperationsDir } from '../lib/cos-operations-meetings.js'
+import { assertVoiceEvidenceSource } from '../lib/voice-evidence-guard.js'
 
 // These MUST match the writer in transcribe-stream.ts, which saves under
 // dataPath(). They previously resolved relative to __dirname — i.e. inside the
@@ -364,6 +365,10 @@ voiceRouter.post('/voice/enroll-ext', async (req, res) => {
     if (!name || typeof name !== 'string' || name.length < 2) {
       return res.status(400).json({ error: 'name is required (min 2 chars)' })
     }
+    // An imported or derived record never has audio to enrol from, and its
+    // speaker names came from a vendor rather than a voiceprint.
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId])
+    if (evidenceRefusal) return res.status(evidenceRefusal.status).json(evidenceRefusal.body)
 
     if (!existsSync(EXT_AUDIO_DIR)) {
       return res.json({ enrolled: 0, message: 'No ext-audio available' })
@@ -583,6 +588,19 @@ voiceRouter.post('/voice/held-groups/enroll', async (req, res) => {
     const nameCheck = checkSpeakerName(req.body?.name, { ownerLabel: getOwnerSpeakerLabel() })
     if (!nameCheck.ok) return res.status(400).json({ success:false,error:nameCheck.message,reason:nameCheck.reason })
     const name = resolveStoredName(String(req.body.name).trim())
+    // Held samples are audio this Mac captured. A member pointing at an imported
+    // or derived record is not held audio, so it never reaches the preview.
+    //
+    // ON THE RAW BODY, BEFORE parseHeldMembers. That parser calls
+    // `normalizeSessionId`, which rewrites every colon to an underscore for the
+    // on-disk directory name, so `blended:<h16>` arrives here as
+    // `blended_<h16>` and an id-kind guard reading the parsed members never
+    // fires. Caught by the execution test, which is the only place it could be.
+    const rawMembers = Array.isArray(req.body?.members) ? req.body.members : []
+    const evidenceRefusal = assertVoiceEvidenceSource(
+      rawMembers.map((member: unknown) => (member as { sessionId?: unknown })?.sessionId),
+    )
+    if (evidenceRefusal) return res.status(evidenceRefusal.status).json(evidenceRefusal.body)
     const members = parseHeldMembers(req.body?.members)
     if (!req.body?.previewHash || req.body?.dryRun === true) {
       if (name.owner && req.body?.confirm === true && req.body?.dryRun !== true) return res.status(400).json({success:false,error:'Owner confirmation requires a preview and ownerAck',reason:'owner_confirmation_required'})

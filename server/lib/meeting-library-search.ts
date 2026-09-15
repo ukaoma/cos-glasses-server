@@ -19,6 +19,20 @@ import {
   resolveMeetingLibrary,
   sidecarSessionId,
 } from './cos-operations-meetings.js'
+import {
+  type ImportedMeetingLibrary,
+  type ImportedRecordKind,
+  IMPORTED_DOMAIN,
+  IMPORTED_FILENAME_PATTERN,
+  getImportedMeetingLibrary,
+  importRecordId,
+} from './imported-meeting-library.js'
+import {
+  type SupersededInputs,
+  importedLibraryMonths,
+  readDerivedRecords,
+  supersededInputsOf,
+} from './imported-library-rows.js'
 import { getMeetingStore, MeetingStore } from './meeting-store.js'
 import type { MeetingMeta } from './meeting-store.js'
 
@@ -67,6 +81,10 @@ export function libraryRefFromPath(filePath: string): { domain: string; month: s
   if (ops) return { domain: ops[1], month: ops[2], filename: ops[3] }
   const standalone = normalized.match(/\/recordings\/(\d{4}-\d{2})\/([^/]+\.md)$/i)
   if (standalone) return { domain: 'personal', month: standalone[1], filename: standalone[2] }
+  // BEFORE the direct-library shape, which is the bare `<month>/<file>.md` tail
+  // every one of these paths ends with and would otherwise claim them all.
+  const imports = normalized.match(/\/imports\/(\d{4}-\d{2})\/([^/]+\.md)$/i)
+  if (imports) return { domain: IMPORTED_DOMAIN, month: imports[1], filename: imports[2] }
   const direct = normalized.match(/\/(\d{4}-\d{2})\/([^/]+\.md)$/)
   if (direct) return { domain: 'library', month: direct[1], filename: direct[2] }
   return null
@@ -121,19 +139,87 @@ function sourceFrom(content: string): string {
   return match ? match[1].replace(/\s*\|?\s*$/, '').trim() : ''
 }
 
+/**
+ * The record id a hit opens.
+ *
+ * The imported and derived branches derive it from the FILENAME's hash rather
+ * than from the row, because a semantic hit arrives as a file path and has no
+ * row behind it. `importRecordId` is the one definition of that shape, shared
+ * with the library and the list, so a hit and a row can never name one record
+ * two different ways.
+ */
 function hitIdentity(row: {
   domain: string
   month: string
   filename: string
   librarySource?: MeetingMeta['librarySource']
   sessionId?: string
+  recordId?: string
 }): Pick<MeetingSearchHit, 'recordId' | 'month' | 'filename' | 'domain'> {
   const recordId = row.librarySource === 'direct_library'
     ? `direct:${row.month}:${row.filename}`
     : row.librarySource === 'standalone_recordings'
       ? `standalone:${row.sessionId || `${row.domain}:${row.month}:${row.filename}`}`
-      : `ops:${row.domain}:${row.month}:${row.filename}`
+      : row.librarySource === 'imported' || row.librarySource === 'blended'
+        ? row.recordId || importedRecordIdFromFilename(row.filename) || `ops:${row.domain}:${row.month}:${row.filename}`
+        : `ops:${row.domain}:${row.month}:${row.filename}`
   return { recordId, month: row.month, filename: row.filename, domain: row.domain }
+}
+
+/** `2026-09-10_merged_<h16>.md` names its own record. Null when it does not. */
+export function importedRecordIdFromFilename(filename: string): string | null {
+  const match = filename.match(IMPORTED_FILENAME_PATTERN)
+  if (!match) return null
+  return importRecordId(match[2] as ImportedRecordKind, match[3])
+}
+
+/**
+ * Keyword hits from the imported library.
+ *
+ * Runs BEFORE standalone and shares the same file budget, so a Mac with a large
+ * imported library cannot starve its own recordings of scan budget or the other
+ * way round. Supersession is applied by the caller, so one meeting gives one hit
+ * whether it is the import, the capture, or the merged record that matched.
+ */
+function keywordHitsFromImports(
+  tokens: string[],
+  domainFilter: string,
+  budget: { remaining: number },
+  library: ImportedMeetingLibrary = getImportedMeetingLibrary(),
+): MeetingSearchHit[] {
+  const hits: MeetingSearchHit[] = []
+  for (const month of importedLibraryMonths(library)) {
+    if (budget.remaining <= 0) break
+    for (const row of library.list({ month, domain: domainFilter })) {
+      if (budget.remaining <= 0) break
+      budget.remaining -= 1
+      let content = ''
+      try {
+        content = readFileSync(join(library.root, row.month, row.filename), 'utf8').slice(0, HEAD_BYTES)
+      } catch {
+        content = ''
+      }
+      const haystack = `${row.filename}\n${row.title}\n${row.originDomain}\n${content}`
+      const scored = scoreKeywordMatch(tokens, row.title, haystack)
+      if (scored.score <= 0) continue
+      hits.push({
+        recordId: row.recordId,
+        title: row.title,
+        date: row.date,
+        domain: row.domain,
+        duration: row.duration,
+        month: row.month,
+        filename: row.filename,
+        source: row.source,
+        librarySource: row.librarySource,
+        snippet: scored.snippet || row.title,
+        keywordScore: scored.score,
+        semanticScore: 0,
+        match: 'keyword',
+      })
+    }
+  }
+  return hits
 }
 
 function keywordHitsFromOps(tokens: string[], domainFilter: string, budget: { remaining: number }): MeetingSearchHit[] {
@@ -296,11 +382,55 @@ export function keywordSearchMeetings(
   if (library.layout === 'direct' && (domain === 'all' || domain === 'library')) {
     for (const hit of keywordHitsFromDirect(tokens, budget)) push(hit)
   }
+  // Imports before standalone, sharing one budget: a large imported library must
+  // not be scanned only after the recordings have spent the allowance, and the
+  // reverse must not happen either.
+  for (const hit of keywordHitsFromImports(tokens, domain, budget)) push(hit)
   for (const hit of keywordHitsFromStandalone(tokens, domain, budget, store)) push(hit)
-  return [...grouped.values()].sort((a, b) => b.keywordScore - a.keywordScore)
+  return dropSupersededHits([...grouped.values()]).sort((a, b) => b.keywordScore - a.keywordScore)
 }
 
-interface SemanticRawHit {
+/**
+ * One meeting, one hit.
+ *
+ * A merged record contains the transcript of both its import and its capture, so
+ * a query that matches the meeting matches all three files. The list already
+ * drops the inputs a derived record holds; the search has to drop them too or
+ * the same conversation comes back three times under three titles.
+ *
+ * Only the imports root is consulted. On a Mac where the PIPELINE applied the
+ * merge there is nothing to drop: the merge was spliced into the Fireflies
+ * scribe in place and the capture's standalone scribe was retired, so only one
+ * file holds the meeting.
+ */
+export function dropSupersededHits(
+  hits: MeetingSearchHit[],
+  superseded: SupersededInputs = supersededInputsOf(readDerivedRecords()),
+): MeetingSearchHit[] {
+  if (superseded.isEmpty) return hits
+  return hits.filter(hit => {
+    if (hit.librarySource === 'blended') return true
+    if (superseded.importRecordIds.has(hit.recordId)) return false
+    if (hit.sessionId && superseded.g2Sessions.has(hit.sessionId)) return false
+    return true
+  })
+}
+
+/**
+ * Which library a path belongs to.
+ *
+ * An imports path decides between `imported` and `blended` from the FILENAME's
+ * own kind, so a merged record found by semantic search is labelled the same way
+ * the list labels it rather than as a plain import.
+ */
+function librarySourceForRef(refDomain: string | undefined, filename: string): MeetingMeta['librarySource'] {
+  if (refDomain === 'library') return 'direct_library'
+  if (refDomain !== IMPORTED_DOMAIN) return 'cos_operations'
+  const match = filename.match(IMPORTED_FILENAME_PATTERN)
+  return match && match[2] !== 'fireflies' ? 'blended' : 'imported'
+}
+
+export interface SemanticRawHit {
   title?: string
   date?: string
   domain?: string
@@ -310,7 +440,16 @@ interface SemanticRawHit {
   meeting_id?: string
 }
 
-function semanticHitToLibrary(raw: SemanticRawHit): MeetingSearchHit | null {
+/**
+ * One semantic result as a library hit.
+ *
+ * Exported for the identity tests: a semantic hit arrives as a FILE PATH with no
+ * row behind it, so this is the only place where an imported or derived record's
+ * id has to be reconstructed from the filename. The keyword scan never exercises
+ * that branch, and an untested reconstruction is how a hit and a row end up
+ * naming one record two different ways.
+ */
+export function semanticHitToLibrary(raw: SemanticRawHit): MeetingSearchHit | null {
   const fromPath = raw.file_path ? libraryRefFromPath(raw.file_path) : null
   const domain = fromPath?.domain || raw.domain || ''
   const date = raw.date || ''
@@ -321,12 +460,8 @@ function semanticHitToLibrary(raw: SemanticRawHit): MeetingSearchHit | null {
   }
   if (!filename || !month) return null
   const title = raw.title || titleFrom('', filename)
-  const identity = hitIdentity({
-    domain: domain || 'quilt',
-    month,
-    filename,
-    librarySource: fromPath?.domain === 'library' ? 'direct_library' : 'cos_operations',
-  })
+  const librarySource = librarySourceForRef(fromPath?.domain, filename)
+  const identity = hitIdentity({ domain: domain || 'quilt', month, filename, librarySource })
   const semanticScore = typeof raw.score === 'number' && Number.isFinite(raw.score) ? Math.max(0, Math.min(1, raw.score)) : 0
   return {
     ...identity,
@@ -334,7 +469,7 @@ function semanticHitToLibrary(raw: SemanticRawHit): MeetingSearchHit | null {
     date,
     duration: '',
     source: '',
-    librarySource: identity.recordId.startsWith('direct:') ? 'direct_library' : 'cos_operations',
+    librarySource: identity.recordId.startsWith('direct:') ? 'direct_library' : librarySource,
     snippet: String(raw.summary || '').slice(0, 180),
     keywordScore: 0,
     semanticScore,

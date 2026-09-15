@@ -313,6 +313,15 @@ describe('meeting save/list/detail API', () => {
       filename: saved.filename, sessionId: 'meeting_route_001', librarySource: 'standalone_recordings', mutable: true,
     })
     expect(list.meetings[1]).toMatchObject({ librarySource: 'cos_operations' })
+    // 6.47.0: every row carries its source and whether it may be edited, and an
+    // ordinary meeting is never labelled as derived. `mixed_library` here is the
+    // store beside operations, with no imported library in play.
+    for (const meeting of list.meetings) {
+      expect(typeof meeting.librarySource).toBe('string')
+      expect(typeof meeting.mutable).toBe('boolean')
+      expect(meeting.derivedKind).toBeUndefined()
+      expect(meeting.originDomain).toBeUndefined()
+    }
 
     const july = await (await h.api('/api/meetings?month=2026-07')).json() as any
     expect(july.meetings.map((meeting: any) => meeting.filename)).toEqual([saved.filename])
