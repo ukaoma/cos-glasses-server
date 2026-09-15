@@ -1,23 +1,23 @@
 import {
   chmodSync,
-  closeSync,
-  constants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
   readdirSync,
-  realpathSync,
   unlinkSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
-import { FALLBACK_DOMAIN, domainAbbreviation, isSafeDomainName } from './domains.js'
+import { FALLBACK_DOMAIN, isSafeDomainName } from './domains.js'
+import {
+  existingRootRealpath,
+  safeDirectoryRealpath,
+  safeReadFile,
+  safeReadFileHead,
+} from './meeting-file-guards.js'
+import { parseMeeting, toMeta } from './meeting-parse.js'
 import type {
   ProviderCandidateRecord,
   IndexedTranscriptChunk,
@@ -51,9 +51,18 @@ export function meetingDayCountsFromNames(names: string[]): Array<{ date: string
 
 const SAFE_FILENAME_PATTERN = /^\d{4}-\d{2}-\d{2}_[A-Za-z0-9][A-Za-z0-9_-]{0,95}\.md$/
 const DOMAIN_PATTERN = /^[a-z][a-z0-9_]{0,31}$/
-const MAX_MEETING_BYTES = 10 * 1024 * 1024
-const DETAIL_CHUNK_ESTIMATE_CHARS = 1_700
-export const MEETING_SOURCE_MAX_BYTES = 100_000
+
+// The parser and the filesystem guards moved to their own modules in 6.47.0 so
+// the imported library can share them rather than grow a second copy. They are
+// re-exported here because every existing caller and test imports them from
+// this module, and a shared helper is not a reason to move anyone's import.
+export {
+  MEETING_SOURCE_MAX_BYTES,
+  boundedMeetingSource,
+  parseField,
+  parseMeeting,
+  toMeta,
+} from './meeting-parse.js'
 
 export class MeetingStoreError extends Error {
   constructor(
@@ -241,179 +250,8 @@ function canonicalProvider(chunks: TranscriptChunk[]): 'server-whisper' | 'iphon
   return 'mixed'
 }
 
-function parseField(content: string, field: string): string {
-  const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const table = content.match(new RegExp(`\\*\\*${escaped}\\*\\*\\s*\\|\\s*(.+)`, 'i'))
-  if (table) return table[1].replace(/\s*\|?\s*$/, '').trim()
-  const plain = content.match(new RegExp(`\\*\\*${escaped}:\\*\\*\\s*(.+)`, 'i'))
-  return plain ? plain[1].trim() : ''
-}
-
-function extractSection(content: string, headings: string[], toEnd = false): string {
-  for (const heading of headings) {
-    const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const pattern = toEnd
-      ? new RegExp(`##\\s+${escaped}\\s*\\n([\\s\\S]*)$`, 'i')
-      : new RegExp(`##\\s+${escaped}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`, 'i')
-    const match = content.match(pattern)
-    if (match) return match[1].trim()
-  }
-  return ''
-}
-
-function parseListSection(content: string, headings: string[], limit: number): string[] {
-  const section = extractSection(content, headings)
-  if (!section) return []
-  return section
-    .split('\n')
-    .filter(line => /^\s*[-*]\s+/.test(line))
-    .map(line => line.replace(/^\s*[-*]\s+/, '').trim())
-    .filter(Boolean)
-    .slice(0, limit)
-}
-
-function parseActions(content: string): MeetingActionItem[] {
-  const section = extractSection(content, ['Action Items', 'Tasks', 'Next Steps'])
-  if (!section) return []
-  return section
-    .split('\n')
-    .filter(line => /^\s*(?:[-*]|\[[ xX]\])\s+/.test(line))
-    .map(line => {
-      const cleaned = line
-        .replace(/^\s*[-*]\s+/, '')
-        .replace(/^\[[ xX]\]\s*/, '')
-        .replace(/`\[REVIEW\]`\s*/i, '')
-        .trim()
-      const ownerMatch = cleaned.match(/\(\*\*(.+?)\*\*\)\s*$/)
-      return {
-        task: ownerMatch ? cleaned.replace(ownerMatch[0], '').trim() : cleaned,
-        owner: ownerMatch ? ownerMatch[1] : '',
-      }
-    })
-    .filter(item => item.task.length > 0)
-    .slice(0, 15)
-}
-
-function parseAttendees(content: string): string[] {
-  return parseListSection(content, ['Attendees'], 20).map(line => {
-    const match = line.match(/^\*\*(.+?)\*\*/) || line.match(/^([^(]+)/)
-    return match ? match[1].trim() : line
-  })
-}
-
-function parseDurationMinutes(duration: string): number | undefined {
-  if (!duration) return undefined
-  const value = duration.toLowerCase()
-  const colon = value.match(/\b(\d+):(\d{2})\b/)
-  if (colon) return Number(colon[1]) * 60 + Number(colon[2])
-  let total = 0
-  const hours = value.match(/(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b/)
-  if (hours) total += Math.round(Number(hours[1]) * 60)
-  const minutes = value.match(/(\d+)\s*(?:m|min|mins|minute|minutes)\b/)
-  if (minutes) total += Number(minutes[1])
-  return total > 0 ? total : undefined
-}
-
-function parseMeeting(content: string, filename: string, month: string): MeetingDetail {
-  const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
-  const date = parseField(content, 'Date') || filename.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || 'unknown'
-  const domain = parseField(content, 'Domain') || FALLBACK_DOMAIN
-  const duration = parseField(content, 'Duration')
-  const transcript = extractSection(content, ['Transcript'], true)
-  const storedSummary = extractSection(content, ['Summary'])
-  // A placeholder is not a summary. Until 6.37 this returned the TRANSCRIPT as
-  // the summary, which put the transcript in the summary slot on every surface
-  // and read as "the summary is broken" — the bug this replaces. The transcript
-  // is returned in its own `transcript` field and each surface renders it in
-  // its own section. An empty summary is the honest state, and every consumer
-  // already handles it: display-pages.ts falls back to 'No summary available.',
-  // and COS Control's Copy-summary button correctly disables on empty.
-  const summary = !storedSummary || /standalone recording|summary unavailable/i.test(storedSummary)
-    ? ''
-    : storedSummary
-  const topics = parseListSection(content, ['Topics Discussed'], 10)
-  const decisions = parseListSection(content, ['Decisions', 'Decisions Made'], 10)
-  const actionItems = parseActions(content)
-  const attendees = parseAttendees(content)
-  const source = boundedMeetingSource(content)
-
-  return {
-    filename,
-    title: heading || basename(filename, '.md').split('_').slice(1).join(' ') || 'Untitled Meeting',
-    date,
-    domain,
-    // Shared derivation. This was slice(0,2), which rendered sprocket_rocket as
-    // "SP" while cos-operations-meetings rendered it "SR" — two schemes in one
-    // codebase, disagreeing with each other.
-    domainAbbr: domainAbbreviation(domain),
-    source: parseField(content, 'Source'),
-    duration,
-    ...(parseDurationMinutes(duration) !== undefined ? { durationMinutes: parseDurationMinutes(duration) } : {}),
-    month,
-    summary,
-    topics,
-    decisions,
-    actionItems,
-    attendees,
-    transcript,
-    ...source,
-  }
-}
-
-/** Return enough canonical source for grounded meeting follow-ups without
- * allowing an unexpectedly large archive record to inflate every response.
- * The boundary backs up over UTF-8 continuation bytes so the prefix never
- * ends with a replacement character. */
-export function boundedMeetingSource(content: string): { sourceContent: string; sourceTruncated: boolean } {
-  const bytes = Buffer.from(content, 'utf8')
-  if (bytes.length <= MEETING_SOURCE_MAX_BYTES) return { sourceContent: content, sourceTruncated: false }
-  let end = MEETING_SOURCE_MAX_BYTES
-  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1
-  return { sourceContent: bytes.subarray(0, end).toString('utf8'), sourceTruncated: true }
-}
-
-function toMeta(detail: MeetingDetail, sessionId?: string): MeetingMeta {
-  // Must mirror what the reader actually renders (display-pages.ts
-  // formatMeetingDetailBody), or the list row advertises a page count the
-  // reader does not honour. The transcript is part of that body since 6.37;
-  // omitting it here reported every standalone meeting as ~1p.
-  const detailCharEstimate = [
-    detail.title,
-    detail.date,
-    detail.duration || detail.source,
-    detail.summary,
-    detail.topics.join('\n'),
-    detail.decisions.join('\n'),
-    detail.actionItems.map(item => `${item.owner ? `[${item.owner}] ` : ''}${item.task}`).join('\n'),
-    detail.attendees.join(', '),
-    detail.transcript,
-  ].join('\n\n').trim().length
-  return {
-    filename: detail.filename,
-    ...(sessionId ? { sessionId } : {}),
-    title: detail.title,
-    date: detail.date,
-    domain: detail.domain,
-    domainAbbr: detail.domainAbbr,
-    source: detail.source,
-    duration: detail.duration,
-    ...(detail.durationMinutes !== undefined ? { durationMinutes: detail.durationMinutes } : {}),
-    month: detail.month,
-    detailCharEstimate,
-    estimatedDetailPages: Math.max(1, Math.ceil(detailCharEstimate / DETAIL_CHUNK_ESTIMATE_CHARS)),
-    topicCount: detail.topics.length,
-    decisionCount: detail.decisions.length,
-    actionCount: detail.actionItems.length,
-    attendeeCount: detail.attendees.length,
-  }
-}
-
 /** Enough to clear the sidecar's leading metadata keys whatever their order. */
 const SIDECAR_HEAD_BYTES = 4096
-
-function isContained(parent: string, child: string): boolean {
-  return child === parent || child.startsWith(`${parent}${sep}`)
-}
 
 export class MeetingStore {
   readonly root: string
@@ -548,24 +386,24 @@ export class MeetingStore {
   /** Durable idempotency lookup for a client retry after its save response was lost. */
   findBySessionId(rawSessionId: string): SavedMeeting | null {
     const sessionId = normalizeSessionId(rawSessionId)
-    const rootReal = this.existingRootRealpath()
+    const rootReal = this.rootRealpath()
     if (!rootReal) return null
     for (const month of readdirSync(this.root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()) {
       const monthDir = join(this.root, month)
-      const monthReal = this.safeDirectoryRealpath(monthDir, rootReal)
+      const monthReal = safeDirectoryRealpath(monthDir, rootReal)
       if (!monthReal) continue
       const sidecars = readdirSync(monthDir)
         .filter(name => /^\d{4}-\d{2}-\d{2}_[A-Za-z0-9][A-Za-z0-9_-]{0,95}\.g2-chunks\.json$/.test(name))
         .sort()
         .reverse()
       for (const sidecarName of sidecars) {
-        const sidecarText = this.safeReadFile(monthDir, monthReal, sidecarName)
+        const sidecarText = safeReadFile(monthDir, monthReal, sidecarName)
         if (sidecarText === null) continue
         try {
           const sidecar = JSON.parse(sidecarText) as Record<string, unknown>
           if (sidecar.sessionId !== sessionId) continue
           const filename = sidecarName.replace(/\.g2-chunks\.json$/, '.md')
-          const markdown = this.safeReadMeeting(monthDir, monthReal, filename)
+          const markdown = safeReadFile(monthDir, monthReal, filename)
           if (markdown === null) continue
           const detail = parseMeeting(markdown, filename, month)
           const durationMs = typeof sidecar.durationMs === 'number' && Number.isFinite(sidecar.durationMs)
@@ -602,18 +440,18 @@ export class MeetingStore {
     if (options.day && !DAY_PATTERN.test(options.day)) {
       throw new MeetingStoreError('Invalid day filter', 400, 'invalid_day')
     }
-    const rootReal = this.existingRootRealpath()
+    const rootReal = this.rootRealpath()
     if (!rootReal) return []
     const meetings: MeetingMeta[] = []
 
     for (const month of readdirSync(this.root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()) {
       if (options.month && month !== options.month) continue
       const monthDir = join(this.root, month)
-      const monthReal = this.safeDirectoryRealpath(monthDir, rootReal)
+      const monthReal = safeDirectoryRealpath(monthDir, rootReal)
       if (!monthReal) continue
       for (const filename of readdirSync(monthDir).filter(name => SAFE_FILENAME_PATTERN.test(name)).sort().reverse()) {
         try {
-          const content = this.safeReadMeeting(monthDir, monthReal, filename)
+          const content = safeReadFile(monthDir, monthReal, filename)
           if (content === null) continue
           const detail = parseMeeting(content, filename, month)
           if (domain !== 'all' && detail.domain !== domain) continue
@@ -632,20 +470,20 @@ export class MeetingStore {
 
   /** Folder names only. Used by the Control calendar pager. */
   listMonths(): string[] {
-    const rootReal = this.existingRootRealpath()
+    const rootReal = this.rootRealpath()
     if (!rootReal) return []
     return readdirSync(this.root)
-      .filter(name => MONTH_PATTERN.test(name) && this.safeDirectoryRealpath(join(this.root, name), rootReal))
+      .filter(name => MONTH_PATTERN.test(name) && safeDirectoryRealpath(join(this.root, name), rootReal))
       .sort()
       .reverse()
   }
 
   listDayCounts(month: string): Array<{ date: string; count: number }> {
     if (!MONTH_PATTERN.test(month)) return []
-    const rootReal = this.existingRootRealpath()
+    const rootReal = this.rootRealpath()
     if (!rootReal) return []
     const monthDir = join(this.root, month)
-    const monthReal = this.safeDirectoryRealpath(monthDir, rootReal)
+    const monthReal = safeDirectoryRealpath(monthDir, rootReal)
     if (!monthReal) return []
     return meetingDayCountsFromNames(
       readdirSync(monthDir).filter(name => SAFE_FILENAME_PATTERN.test(name) || name.endsWith('.md')),
@@ -663,71 +501,23 @@ export class MeetingStore {
       throw new MeetingStoreError('Invalid filename', 400, 'invalid_filename')
     }
 
-    const rootReal = this.existingRootRealpath()
+    const rootReal = this.rootRealpath()
     if (!rootReal) throw new MeetingStoreError('Meeting not found', 404, 'meeting_not_found')
     const monthDir = join(this.root, month)
-    const monthReal = this.safeDirectoryRealpath(monthDir, rootReal)
+    const monthReal = safeDirectoryRealpath(monthDir, rootReal)
     if (!monthReal) throw new MeetingStoreError('Meeting not found', 404, 'meeting_not_found')
-    const content = this.safeReadMeeting(monthDir, monthReal, filename)
+    const content = safeReadFile(monthDir, monthReal, filename)
     if (content === null) throw new MeetingStoreError('Meeting not found', 404, 'meeting_not_found')
     const detail = parseMeeting(content, filename, month)
     if (detail.domain !== domain) throw new MeetingStoreError('Meeting not found', 404, 'meeting_not_found')
     return detail
   }
 
-  private existingRootRealpath(): string | null {
-    if (!existsSync(this.root)) return null
-    const stat = lstatSync(this.root)
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new MeetingStoreError('Unsafe recordings directory', 500, 'unsafe_recordings_store')
-    }
-    return realpathSync(this.root)
-  }
-
-  private safeDirectoryRealpath(path: string, parentReal: string): string | null {
-    try {
-      const stat = lstatSync(path)
-      if (stat.isSymbolicLink() || !stat.isDirectory()) return null
-      const real = realpathSync(path)
-      return isContained(parentReal, real) && dirname(real) === parentReal ? real : null
-    } catch {
-      return null
-    }
-  }
-
-  private safeReadMeeting(monthDir: string, monthReal: string, filename: string): string | null {
-    return this.safeReadFile(monthDir, monthReal, filename)
-  }
-
-  /** Read only the first `bytes` of a file, with the same symlink,
-   *  containment, and O_NOFOLLOW guards as safeReadFile.
-   *
-   *  Exists so `list()` can lift one field out of a chunk sidecar without
-   *  reading it whole: sidecars run to megabytes (1.3 MB for a 32-minute
-   *  meeting) and would also trip safeReadFile's MAX_MEETING_BYTES cap, which
-   *  is sized for markdown. */
-  private safeReadFileHead(monthDir: string, monthReal: string, filename: string, bytes: number): string | null {
-    const filepath = join(monthDir, filename)
-    let fd: number | null = null
-    try {
-      const linkStat = lstatSync(filepath)
-      if (linkStat.isSymbolicLink() || !linkStat.isFile()) return null
-      const real = realpathSync(filepath)
-      if (!isContained(monthReal, real) || dirname(real) !== monthReal) return null
-      fd = openSync(filepath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-      const stat = fstatSync(fd)
-      if (!stat.isFile()) return null
-      const buffer = Buffer.alloc(Math.min(bytes, stat.size))
-      if (buffer.length === 0) return ''
-      const read = readSync(fd, buffer, 0, buffer.length, 0)
-      return buffer.subarray(0, read).toString('utf8')
-    } catch {
-      return null
-    } finally {
-      if (fd !== null) {
-        try { closeSync(fd) } catch { /* already closed */ }
-      }
-    }
+  private rootRealpath(): string | null {
+    return existingRootRealpath(
+      this.root,
+      () => new MeetingStoreError('Unsafe recordings directory', 500, 'unsafe_recordings_store'),
+    )
   }
 
   /** The sessionId recorded in a meeting's chunk sidecar, if it has one.
@@ -738,31 +528,10 @@ export class MeetingStore {
   private sidecarSessionId(monthDir: string, monthReal: string, meetingFilename: string): string | undefined {
     const sidecarName = meetingFilename.replace(/\.md$/, '.g2-chunks.json')
     if (sidecarName === meetingFilename) return undefined
-    const head = this.safeReadFileHead(monthDir, monthReal, sidecarName, SIDECAR_HEAD_BYTES)
+    const head = safeReadFileHead(monthDir, monthReal, sidecarName, SIDECAR_HEAD_BYTES)
     if (!head) return undefined
     const match = head.match(/"sessionId"\s*:\s*"([A-Za-z0-9:_-]{3,96})"/)
     return match ? match[1] : undefined
-  }
-
-  private safeReadFile(monthDir: string, monthReal: string, filename: string): string | null {
-    const filepath = join(monthDir, filename)
-    let fd: number | null = null
-    try {
-      const linkStat = lstatSync(filepath)
-      if (linkStat.isSymbolicLink() || !linkStat.isFile()) return null
-      const real = realpathSync(filepath)
-      if (!isContained(monthReal, real) || dirname(real) !== monthReal) return null
-      fd = openSync(filepath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-      const stat = fstatSync(fd)
-      if (!stat.isFile() || stat.size > MAX_MEETING_BYTES) return null
-      return readFileSync(fd, 'utf8')
-    } catch {
-      return null
-    } finally {
-      if (fd !== null) {
-        try { closeSync(fd) } catch { /* already closed */ }
-      }
-    }
   }
 }
 
