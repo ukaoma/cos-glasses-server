@@ -54,6 +54,7 @@ import {
 } from './imported-meeting-library.js'
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { meetingEngineMode, type MeetingEngineMode } from './meeting-engine-mode.js'
+import { triggerMeetingMergeRun } from './meeting-actions.js'
 import { securePrivateDirectory } from './secure-user-config.js'
 
 export const IMPORT_WINDOW_DAYS = [7, 30, 90] as const
@@ -403,7 +404,11 @@ export class FirefliesImporter {
   }
 
   private refuseInAdviseMode(): void {
-    if (this.mode() === 'advise') {
+    // Anything that is not `imports` is a Mac whose own pipeline owns Fireflies.
+    // Written as "not imports" rather than "is advise" because 6.47.0 added a
+    // THIRD mode, `apply`, and a pipeline Mac in apply mode must refuse for
+    // exactly the same reason an advise one does.
+    if (this.mode() !== 'imports') {
       throw new ImportRefusedError(
         409,
         'operations_pipeline_owns_fireflies',
@@ -419,7 +424,7 @@ export class FirefliesImporter {
     for (const [reason, hashes] of Object.entries(this.ledger.skipped)) skipped[reason] = hashes.length
     return {
       mode,
-      state: mode === 'advise' ? 'refused_pipeline' : this.active ? 'running' : this.ledger.state,
+      state: mode !== 'imports' ? 'refused_pipeline' : this.active ? 'running' : this.ledger.state,
       running: this.active !== null,
       keyConfigured: this.deps.key() != null,
       keepImporting: this.ledger.keepImporting,
@@ -642,7 +647,7 @@ export class FirefliesImporter {
 
   /** Should a poll fire right now, and if not, why not. */
   pollDue(): { due: boolean; reason?: string } {
-    if (this.mode() === 'advise') return { due: false, reason: 'refused_pipeline' }
+    if (this.mode() !== 'imports') return { due: false, reason: 'refused_pipeline' }
     if (!this.ledger.keepImporting) return { due: false, reason: 'keep_importing_off' }
     if (this.active) return { due: false, reason: 'import_in_progress' }
     if (!this.deps.key()) return { due: false, reason: 'fireflies_key_missing' }
@@ -721,6 +726,9 @@ export function getFirefliesImporter(): FirefliesImporter {
       client: getFirefliesClient(),
       budget: getFirefliesBudget(),
       key: () => getFirefliesKeyStore().key(),
+      // A page of imports is new evidence for the merge engine. The runner queues, defers
+      // under a drain or a live capture, and never throws back into the import loop.
+      onPageSealed: () => triggerMeetingMergeRun('import_page_sealed'),
     })
   }
   return importer
