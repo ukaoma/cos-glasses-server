@@ -64,7 +64,7 @@ interface Harness {
   setNow: (ms: number) => void
   advance: (ms: number) => void
   setKey: (key: string | null) => void
-  setMode: (mode: 'advise' | 'imports') => void
+  setMode: (mode: 'advise' | 'imports' | 'apply') => void
   setAdmissions: (open: boolean) => void
   failLease: (error: Error | null) => void
   sealed: Array<{ runId: string; written: string[] }>
@@ -80,7 +80,7 @@ function harness(options: {
   roots.push(root)
   let now = NOW
   let key: string | null = options.key === undefined ? 'ff_key_0123456789abcdef' : options.key
-  let mode: 'advise' | 'imports' = 'imports'
+  let mode: 'advise' | 'imports' | 'apply' = 'imports'
   let admissions = true
   let leaseError: Error | null = null
   const requests: Harness['requests'] = []
@@ -133,7 +133,7 @@ function harness(options: {
     setNow: (ms: number) => { now = ms },
     advance: (ms: number) => { now += ms },
     setKey: (value: string | null) => { key = value },
-    setMode: (value: 'advise' | 'imports') => { mode = value },
+    setMode: (value: 'advise' | 'imports' | 'apply') => { mode = value },
     setAdmissions: (open: boolean) => { admissions = open },
     failLease: (error: Error | null) => { leaseError = error },
   }
@@ -214,6 +214,19 @@ describe('advise mode', () => {
     const h = harness()
     h.setMode('advise')
     expect(() => h.importer.settings({ keepImporting: false })).toThrow(/pipeline already brings in/)
+    expect(existsSync(join(h.root, 'imports'))).toBe(false)
+  })
+
+  it('refuses in APPLY mode for the same reason, not only in advise', () => {
+    // 6.47.0 added a third mode. A pipeline Mac in apply mode still has a pipeline that
+    // owns Fireflies, so a refusal written as "is advise" rather than "is not imports"
+    // would start importing every meeting a second time the moment a person switched.
+    const h = harness()
+    h.setMode('apply')
+    expect(() => h.importer.run({})).toThrow(ImportRefusedError)
+    expect(() => h.importer.settings({ keepImporting: false })).toThrow(/pipeline already brings in/)
+    expect(h.importer.status().state).toBe('refused_pipeline')
+    expect(h.importer.pollDue()).toEqual({ due: false, reason: 'refused_pipeline' })
     expect(existsSync(join(h.root, 'imports'))).toBe(false)
   })
 })

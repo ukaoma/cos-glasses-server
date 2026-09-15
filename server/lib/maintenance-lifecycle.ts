@@ -74,6 +74,14 @@ export type MaintenanceWorkKind =
   // importer checks admissions before each fetch and treats a drain error here
   // as "defer this page", so an Update Server waits only for file writes.
   | 'meeting_import'
+  // One merge action (6.47.0): the derived-record write in imports mode, or the
+  // pipeline spawn in apply mode. Held PER ACTION, never across a whole run, and
+  // the spawn's own wall is 75s (pipeline-runner.ts), under COS Control's 90s
+  // drain timeout (main.swift waitForRestartProof). The runner catches
+  // `maintenance_drain_active` and defers the action rather than fighting the
+  // drain: nothing is written at that point, so the next run repeats the same
+  // decision at no cost.
+  | 'meeting_merge'
 
 export type MaintenanceWorkPhase = 'queued' | 'active'
 export type MaintenanceOperationScope = 'same_boot' | 'cross_boot'

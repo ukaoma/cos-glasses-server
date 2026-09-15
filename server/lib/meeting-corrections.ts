@@ -108,11 +108,35 @@ function sessionFile(sessionId: string): string | null {
   return resolve(path).startsWith(resolve(dir) + '/') ? path : null
 }
 
+export type CorrectionListener = (sessionId: string, row: CorrectionRow) => void
+
+const correctionListeners = new Set<CorrectionListener>()
+
+/**
+ * Be told when a speaker correction lands, wherever it came from.
+ *
+ * ONE PLACE, NOT THREE ROUTES. Relabel, confirm and de-attribute are three handlers today
+ * and a fourth is a plausible next release; a listener wired into each of them is a listener
+ * the fourth silently does not get. Every one of them closes its correction here, so this is
+ * where "a human changed who said what in this meeting" actually happens.
+ *
+ * A listener that throws is contained: a correction has already been recorded by the time
+ * this runs, and a downstream reaction failing must never make the correction look failed.
+ */
+export function onCorrectionApplied(listener: CorrectionListener): () => void {
+  correctionListeners.add(listener)
+  return () => { correctionListeners.delete(listener) }
+}
+
 /**
  * Append one row. Returns false rather than throwing on a bad session id or an
  * unwritable directory — but note the caller's contract: if the INTENT row
  * cannot be written, the rewrite must not proceed. An unrecorded mutation is
  * exactly what this file exists to prevent.
+ *
+ * Listeners run only AFTER the row is durable, and only when it was written: a
+ * subscriber told about a correction that never landed would act on a change
+ * that does not exist.
  */
 export function appendCorrection(sessionId: string, row: CorrectionRow): boolean {
   const path = sessionFile(sessionId)
@@ -120,10 +144,17 @@ export function appendCorrection(sessionId: string, row: CorrectionRow): boolean
   try {
     mkdirSync(dataPath(CORRECTIONS_DIR), { recursive: true, mode: 0o700 })
     appendFileSync(path, JSON.stringify(row) + '\n', { mode: 0o600 })
-    return true
   } catch {
     return false
   }
+  for (const listener of correctionListeners) {
+    try {
+      listener(sessionId, row)
+    } catch (error) {
+      console.warn('[meeting-corrections] listener failed:', error)
+    }
+  }
+  return true
 }
 
 export interface CorrectionReadResult {

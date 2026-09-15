@@ -22,6 +22,7 @@ import {
   type G2RecordingInput,
   g2TimedWords,
   labelIntervals,
+  median,
 } from './evidence.js'
 import { type AttributionState, type Alignment, alignRecording } from './align.js'
 import {
@@ -30,6 +31,7 @@ import {
   type SpeakerVerification,
   ATTRIBUTE_MODE,
   attributeSentences,
+  isGenericLabel,
 } from './attribute.js'
 import type { SplitPiece } from './split.js'
 
@@ -454,6 +456,166 @@ export function renderSplitPiece(input: PieceDeriveInput): DeriveResult {
   }
 
   return finish([...head, ...attendeeSection, ...sources], [captureSection], transcript, sidecar, attribution.verification, input.limits)
+}
+
+// ── The pipeline patch (6.47.0, WS4, apply mode) ──────────────────────────────
+//
+// WHY A PATCH AND NOT A FILE (v3 blocker 11). In apply mode the merged content goes into a
+// scribe the COS pipeline already wrote, and that scribe is RICHER than anything this
+// module renders: an LLM summary, decisions, action items, notes, a domain folder and a
+// title a person may have corrected. Handing the pipeline a whole file would replace all of
+// it with a thinner one. The engine emits only what it ADDS, and the pipeline splices.
+//
+// The row forms below are the ones the private blend already writes
+// (`sync_meetings.py:1934-1968`), not new ones, so a merged scribe is indistinguishable
+// from a hand-blended one to every existing reader.
+
+/** The Source row a blended operations scribe carries. Source order is the pipeline's. */
+export const PIPELINE_SOURCES_LABEL = 'Fireflies + G2 Glasses'
+
+/** Stamped on a blended scribe by the old path and by this one; the old path reads it. */
+export const MARKER_BLENDED = '<!-- g2-transcript-blended -->'
+export const MARKER_MERGE_ACTION_PREFIX = '<!-- merge-action: '
+export const MARKER_G2_SESSION_PREFIX = '<!-- g2-session: '
+export const MARKER_G2_SOURCE_PREFIX = '<!-- g2-source: '
+
+/**
+ * A generic Fireflies label is mapped to a G2 name only when that name holds the label
+ * nearly outright.
+ *
+ * WHY BOTH A SHARE AND A FLOOR ON COUNT. The map is applied to EVERY line carrying that
+ * label, including lines no capture covered, so it is an assertion about the whole speaker
+ * rather than about the sentences that were measured. A 100% agreement over two sentences is
+ * not evidence of that; 70% over five is the weakest thing that is.
+ */
+export const SPEAKER_MAP_MIN_SHARE = 0.7
+export const SPEAKER_MAP_MIN_SENTENCES = 5
+
+export interface PipelineSpeakerMapEntry {
+  name: string
+  similarity: number
+  sentences: number
+}
+
+export interface PipelinePatch {
+  /** Markdown inserted before `## Transcript`, in order. */
+  sections: string[]
+  /** Metadata-table rows, as whole lines. */
+  rows: string[]
+  /** Comment markers appended to the scribe. */
+  markers: string[]
+  /** `{ firefliesLabel: { name, similarity, sentences } }` for generic labels only. */
+  speakerMap: Record<string, PipelineSpeakerMapEntry>
+  /** What the Speaker Verification row says, for Control to render without re-parsing. */
+  verification: SpeakerVerification[]
+}
+
+export interface PipelinePatchInput extends MergeDeriveInput {
+  /** Operations-relative `.g2-chunks.json` path per capture, for the `g2-source` marker. */
+  sidecarRelPathBySession?: Record<string, string>
+}
+
+/**
+ * Build the patch the pipeline splices into an existing Fireflies scribe.
+ *
+ * It runs the SAME alignment and attribution as `renderMergedRecord`, so a record derived in
+ * imports mode and a scribe blended in apply mode carry identical speaker conclusions. What
+ * differs is only what is emitted: additions, never a replacement.
+ */
+export function renderPipelinePatch(input: PipelinePatchInput): PipelinePatch {
+  const alternates = input.alternates ?? []
+  const mode = input.attributeMode ?? ATTRIBUTE_MODE
+  const alignments = input.captures.map(capture => {
+    const { words } = g2TimedWords(capture)
+    const coarse = input.coarseOffsetMsBySession?.[capture.sessionId]
+      ?? (capture.startMs - input.primary.startMs)
+    return { capture, alignment: alignRecording(words, input.primary.sentences, coarse) }
+  })
+  const attribution = attributeSentences(
+    input.primary.sentences,
+    alignments.map(entry => ({ sessionId: entry.capture.sessionId, alignment: entry.alignment, labels: labelIntervals(entry.capture) })),
+    mode,
+  )
+
+  const sections: string[] = []
+  if (input.captures.length > 0) {
+    sections.push(sectionsOf(['## G2 Capture', '', ...input.captures.flatMap((capture, index) => [
+      `### Capture ${index + 1} — ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`,
+      '',
+      ...captureLines(capture),
+      '',
+    ])]))
+  }
+  if (alternates.length > 0) {
+    sections.push(sectionsOf(['## Alternate Transcript', '', ...alternates.flatMap(meeting => [
+      `### Fireflies ${meeting.id}`,
+      '',
+      ...firefliesLines(meeting.sentences),
+      '',
+    ])]))
+  }
+
+  const rows = [
+    `| **Sources** | ${PIPELINE_SOURCES_LABEL} |`,
+    `| **Speaker Verification** | ${verificationRow(attribution.verification)} |`,
+  ]
+
+  const markers = [
+    MARKER_BLENDED,
+    ...input.captures.flatMap(capture => {
+      const relPath = input.sidecarRelPathBySession?.[capture.sessionId]
+      return [
+        ...(relPath ? [`${MARKER_G2_SOURCE_PREFIX}${relPath} -->`] : []),
+        `${MARKER_G2_SESSION_PREFIX}${capture.sessionId} -->`,
+      ]
+    }),
+    `${MARKER_MERGE_ACTION_PREFIX}${input.actionId} -->`,
+  ]
+
+  return {
+    sections,
+    rows,
+    markers,
+    speakerMap: speakerMapFrom(attribution.labels),
+    verification: attribution.verification,
+  }
+}
+
+/**
+ * One G2 name per generic Fireflies label, where the evidence is overwhelming.
+ *
+ * Only GENERIC labels are mapped. A Fireflies label that already names a person is a name a
+ * person's calendar or a human gave, and D13's rule that a voiceprint never overwrites a
+ * human name is enforced here as well as in `attribute.ts`.
+ */
+export function speakerMapFrom(labels: readonly SentenceLabel[]): Record<string, PipelineSpeakerMapEntry> {
+  const byLabel = new Map<string, { total: number; names: Map<string, { count: number; similarities: number[] }> }>()
+  for (const label of labels) {
+    if (!isGenericLabel(label.ffLabel)) continue
+    const entry = byLabel.get(label.ffLabel) ?? { total: 0, names: new Map() }
+    entry.total += 1
+    if (label.g2Label && !isGenericLabel(label.g2Label)) {
+      const name = entry.names.get(label.g2Label) ?? { count: 0, similarities: [] }
+      name.count += 1
+      name.similarities.push(label.similarity)
+      entry.names.set(label.g2Label, name)
+    }
+    byLabel.set(label.ffLabel, entry)
+  }
+
+  const map: Record<string, PipelineSpeakerMapEntry> = {}
+  for (const [ffLabel, entry] of [...byLabel.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    if (entry.names.size !== 1) continue
+    const [name, stats] = [...entry.names.entries()][0]
+    if (stats.count < SPEAKER_MAP_MIN_SENTENCES) continue
+    if (entry.total === 0 || stats.count / entry.total < SPEAKER_MAP_MIN_SHARE) continue
+    map[ffLabel] = {
+      name,
+      similarity: Number(median(stats.similarities).toFixed(2)),
+      sentences: stats.count,
+    }
+  }
+  return map
 }
 
 /**

@@ -46,6 +46,14 @@ import { openaiKeyRouter } from './routes/openai-key.js'
 import { firefliesKeyRouter } from './routes/fireflies-key.js'
 import { meetingImportRouter } from './routes/meeting-import.js'
 import { startMeetingImportScheduler, stopMeetingImportScheduler } from './lib/meeting-import.js'
+import { meetingSuggestionsRouter } from './routes/meeting-suggestions.js'
+import { meetingActionsRouter } from './routes/meeting-actions.js'
+import { meetingEngineRouter } from './routes/meeting-engine.js'
+import {
+  redrivePendingMergeActions,
+  startMeetingMergeScheduler,
+  stopMeetingMergeScheduler,
+} from './lib/meeting-actions.js'
 import { getImportedMeetingLibrary } from './lib/imported-meeting-library.js'
 import { maintenanceLifecycle } from './lib/maintenance-lifecycle.js'
 import { messageRefRouter } from './routes/message-ref.js'
@@ -229,6 +237,14 @@ app.use('/api', (req, res, next) => {
     // maintenance lease per page and checks admissions itself, so the global
     // request lease would only double-own the same work.
     || req.path === '/meeting-import/fireflies/run'
+    // The suggestion and action mutations queue onto the merge runner, which takes its
+    // own `meeting_merge` lease PER ACTION and catches a drain by deferring that action.
+    // The global request lease would double-own the same work, and in apply mode it
+    // would hold across a 75s pipeline spawn — past COS Control's 90s drain timeout.
+    // Each of these still refuses on its own when admissions are closed.
+    || req.path.startsWith('/meeting-suggestions/')
+    || req.path.startsWith('/meeting-actions/')
+    || req.path === '/meeting-engine/mode'
     || req.path.startsWith('/prompt-drafts')
     || req.path.startsWith('/maintenance/drain')
   if (lifecycleOwned) return next()
@@ -687,6 +703,10 @@ app.use('/api', openaiKeyRouter)
 // Fireflies: the key, and importing meetings this Mac did not record (6.47.0).
 app.use('/api', firefliesKeyRouter)
 app.use('/api', meetingImportRouter)
+// The merge engine: what it wants decided, what it did, and its own state (6.47.0).
+app.use('/api', meetingSuggestionsRouter)
+app.use('/api', meetingActionsRouter)
+app.use('/api', meetingEngineRouter)
 // v6.3.0 — Message History, cross-day 'reference message N', and history
 // recovery for public npx users (previously full-COS-server only).
 app.use('/api', messageRefRouter)
@@ -738,6 +758,7 @@ async function gracefulShutdown(): Promise<void> {
   forceExit.unref?.()
   stopMorningBriefScheduler()
   stopMeetingImportScheduler()
+  stopMeetingMergeScheduler()
   try {
     await shutdownQueryJobRuntime('server_shutdown')
   } catch (error) {
@@ -947,6 +968,20 @@ listenRequiredServers(listeners).then(() => {
     // while admissions are closed, and past its share of the daily budget, so
     // starting it here is safe in every configuration.
     startMeetingImportScheduler()
+
+    // The merge engine's own 30s tick (a full pass every six hours), and the
+    // central speaker-correction hook that re-derives affected records. Both
+    // defer while a capture is live or admissions are closed.
+    startMeetingMergeScheduler()
+
+    // AFTER the imports sweep, not before: the sweep removes a killed write's
+    // debris, and re-driving a pending apply into a half-written decision is
+    // exactly what the sweep exists to prevent. A pending action is one a
+    // previous process wrote and did not finish; the pipeline steps are
+    // idempotent, so re-driving one that actually completed is a no-op.
+    void redrivePendingMergeActions()
+      .then(count => { if (count > 0) console.log(`[meeting-merge] re-drove ${count} pending action(s)`) })
+      .catch(error => console.warn('[meeting-merge] pending re-drive failed', error))
 
     void initQueryJobRuntime().then(health => {
       if (process.env.COS_DURABLE_QUERY_JOBS !== '0') {

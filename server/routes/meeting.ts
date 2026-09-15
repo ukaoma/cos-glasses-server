@@ -10,6 +10,7 @@ import { emitDisplay } from '../lib/display-bus.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, appliedCorrections, pendingCorrections } from '../lib/meeting-corrections.js'
+import { triggerMeetingMergeRun } from '../lib/meeting-actions.js'
 import { isSampleFromSession, untraceableSampleCount } from '../lib/training-audio-provenance.js'
 import { sendAudioFile } from '../lib/send-audio.js'
 import { adaptivePlaybackAudio } from '../lib/adaptive-playback-audio.js'
@@ -332,6 +333,10 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
       await enrichStandaloneMeeting(current.meetingPath, jobStartedAt)
     }
     markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
+    // The capture is finished and its files are durable, so the merge engine may score it.
+    // Fire-and-forget by contract: the runner queues, defers under a drain or a live
+    // capture, and never throws back at the finalization path.
+    triggerMeetingMergeRun('g2_finalized')
     runtime.finalizationJobs.remove(current.sessionId)
     finalizationRetryCounts.delete(key)
   }).catch(error => {
@@ -689,6 +694,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         markCanonicalFinalizationState(saved.sidecarPath, finalizationJob.phase, claimPending)
       } else if (finalizationJob) {
         markCanonicalFinalizationState(saved.sidecarPath, 'complete', false)
+        triggerMeetingMergeRun('g2_finalized')
         finalizationJobs.remove(sessionId)
         finalizationJob = null
       }
@@ -2092,6 +2098,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // Control surfaces and warns on before committing a drain.
         await enrichStandaloneMeeting(saved.filepath, Date.now())
       }
+      triggerMeetingMergeRun('orphan_recovered')
     }).catch(error => {
       // The quarantined audio is untouched on failure — retry stays possible
       // until the retention clock clears it.
