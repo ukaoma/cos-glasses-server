@@ -43,6 +43,11 @@ import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.j
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
+import { firefliesKeyRouter } from './routes/fireflies-key.js'
+import { meetingImportRouter } from './routes/meeting-import.js'
+import { startMeetingImportScheduler, stopMeetingImportScheduler } from './lib/meeting-import.js'
+import { getImportedMeetingLibrary } from './lib/imported-meeting-library.js'
+import { maintenanceLifecycle } from './lib/maintenance-lifecycle.js'
 import { messageRefRouter } from './routes/message-ref.js'
 import { archiveRouter } from './routes/archive.js'
 import { sessionsRouter } from './routes/sessions.js'
@@ -220,6 +225,10 @@ app.use('/api', (req, res, next) => {
     || req.path === '/transcribe'
     || req.path.startsWith('/transcribe-stream')
     || req.path === '/meeting/save'
+    // The import run answers 202 and keeps working. It takes its own
+    // maintenance lease per page and checks admissions itself, so the global
+    // request lease would only double-own the same work.
+    || req.path === '/meeting-import/fireflies/run'
     || req.path.startsWith('/prompt-drafts')
     || req.path.startsWith('/maintenance/drain')
   if (lifecycleOwned) return next()
@@ -675,6 +684,9 @@ app.use('/api', memoryRouter)
 app.use('/api', threadsRouter)
 app.use('/api', skillsRouter)
 app.use('/api', openaiKeyRouter)
+// Fireflies: the key, and importing meetings this Mac did not record (6.47.0).
+app.use('/api', firefliesKeyRouter)
+app.use('/api', meetingImportRouter)
 // v6.3.0 — Message History, cross-day 'reference message N', and history
 // recovery for public npx users (previously full-COS-server only).
 app.use('/api', messageRefRouter)
@@ -725,6 +737,7 @@ async function gracefulShutdown(): Promise<void> {
   const forceExit = setTimeout(() => process.exit(1), 8_000)
   forceExit.unref?.()
   stopMorningBriefScheduler()
+  stopMeetingImportScheduler()
   try {
     await shutdownQueryJobRuntime('server_shutdown')
   } catch (error) {
@@ -914,6 +927,26 @@ listenRequiredServers(listeners).then(() => {
     // Resume already-saved meetings whose post-response HQ/operations work
     // was interrupted by a prior server update or process exit.
     resumeMeetingFinalizationJobs()
+
+    // Debris from an import killed mid-write: a temp file, or a sidecar whose
+    // markdown never landed. Both are invisible to every reader, so nothing
+    // would ever surface them. Skipped while a writer holds the lease, because
+    // mid-write that sidecar is the correct intermediate state.
+    try {
+      const swept = getImportedMeetingLibrary().sweep({
+        isBusy: () => (maintenanceLifecycle.snapshot().activeByKind.meeting_import ?? 0) > 0,
+      })
+      if (swept.removedTemp > 0 || swept.removedSidecars > 0) {
+        console.log(`[imports] startup sweep: ${swept.removedTemp} temp file(s), ${swept.removedSidecars} orphan sidecar(s)`)
+      }
+    } catch (error) {
+      console.warn('[imports] startup sweep failed', error)
+    }
+
+    // The Fireflies poll. Its own tick refuses in advise mode, without a key,
+    // while admissions are closed, and past its share of the daily budget, so
+    // starting it here is safe in every configuration.
+    startMeetingImportScheduler()
 
     void initQueryJobRuntime().then(health => {
       if (process.env.COS_DURABLE_QUERY_JOBS !== '0') {

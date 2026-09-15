@@ -68,6 +68,12 @@ export type MaintenanceWorkKind =
   // committing a drain into a decode that outlives its 90s timeout
   // (main.swift:1963 waitForRestartProof).
   | 'orphan_recovery'
+  // One page of a Fireflies import (6.47.0). Held over the page's WRITES, not
+  // its network fetch: a page fetch can run to 30s, and with vendor 5xx retries
+  // far longer, which would push a drain past COS Control's 90s timeout. The
+  // importer checks admissions before each fetch and treats a drain error here
+  // as "defer this page", so an Update Server waits only for file writes.
+  | 'meeting_import'
 
 export type MaintenanceWorkPhase = 'queued' | 'active'
 export type MaintenanceOperationScope = 'same_boot' | 'cross_boot'
