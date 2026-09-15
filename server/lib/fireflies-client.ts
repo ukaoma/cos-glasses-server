@@ -113,6 +113,13 @@ export interface FirefliesTranscriptRecord {
   organizerEmail: string | null
   participants: string[]
   sentences: FirefliesSentence[]
+  /** The vendor's summary. Absent on plans or meetings that have none, which
+   *  is a normal state and never a reason to refuse a meeting: the transcript
+   *  is the record, and the summary is something extra on top of it. */
+  overview: string | null
+  /** ONE string with newlines in it, not a list. Split at the render. */
+  actionItems: string | null
+  keywords: string[]
 }
 
 export type FirefliesSkipReason =
@@ -259,11 +266,31 @@ export class FirefliesBudget {
 
 const LIST_FIELDS = 'id title date duration organizer_email participants'
 const SENTENCE_FIELDS = 'sentences { speaker_name speaker_id text start_time end_time }'
+/**
+ * Canary-verified on 2026-09-14 with one live call: the field resolves with no
+ * GraphQL error, `overview` and `action_items` come back as STRINGS (600-900
+ * and 200-900 characters in the sample) and `keywords` as a list.
+ *
+ * Asked for only alongside sentences. The id-only probe exists to name a
+ * transcript too large to fetch, so adding fields to it would work against the
+ * one thing it is for.
+ */
+const SUMMARY_FIELDS = 'summary { overview action_items keywords }'
+const DETAIL_FIELDS = `${LIST_FIELDS} ${SENTENCE_FIELDS} ${SUMMARY_FIELDS}`
 
 export function firefliesListQuery(limit: number, skip: number, withSentences: boolean): string {
+  const fields = withSentences ? `${LIST_FIELDS} ${SENTENCE_FIELDS} ${SUMMARY_FIELDS}` : LIST_FIELDS
   return JSON.stringify({
-    query: `query CosImportList($limit: Int, $skip: Int) { transcripts(limit: $limit, skip: $skip) { ${LIST_FIELDS}${withSentences ? ` ${SENTENCE_FIELDS}` : ''} } }`,
+    query: `query CosImportList($limit: Int, $skip: Int) { transcripts(limit: $limit, skip: $skip) { ${fields} } }`,
     variables: { limit, skip },
+  })
+}
+
+/** One transcript by id. Same fields as a list page carries for each row. */
+export function firefliesTranscriptQuery(id: string): string {
+  return JSON.stringify({
+    query: `query CosImportDetail($id: String!) { transcript(id: $id) { ${DETAIL_FIELDS} } }`,
+    variables: { id },
   })
 }
 
@@ -451,6 +478,13 @@ export function normalizeFirefliesTranscript(raw: unknown): FirefliesNormalizeRe
     ? item.participants.filter((value): value is string => typeof value === 'string')
     : []
 
+  // A missing or null summary is ABSENT, never an error. The field is not on
+  // every plan and not on every meeting, and refusing a transcript over it
+  // would throw away the thing we actually came for.
+  const summary = item.summary && typeof item.summary === 'object' && !Array.isArray(item.summary)
+    ? item.summary as Record<string, unknown>
+    : null
+
   return {
     ok: true,
     record: {
@@ -462,8 +496,18 @@ export function normalizeFirefliesTranscript(raw: unknown): FirefliesNormalizeRe
       organizerEmail: typeof item.organizer_email === 'string' ? item.organizer_email : null,
       participants,
       sentences,
+      overview: nonEmptyString(summary?.overview),
+      actionItems: nonEmptyString(summary?.action_items),
+      keywords: Array.isArray(summary?.keywords)
+        ? (summary.keywords as unknown[]).filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        : [],
     },
   }
+}
+
+/** A string the vendor actually filled in, or null. Whitespace is not content. */
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
 }
 
 export interface FirefliesClientOptions {
@@ -697,6 +741,36 @@ export class FirefliesClient {
       out.stop = true
       return
     }
+  }
+
+  /**
+   * One transcript by id, with its sentences and summary.
+   *
+   * The list is how the importer reads the vendor, so this is for the cases a
+   * page cannot serve: re-reading a single meeting whose content changed, and
+   * WS3 re-deriving one record without walking a window.
+   */
+  async getTranscript(id: string): Promise<{ transcript?: unknown; failure?: FirefliesFailure; calls: number }> {
+    const key = this.resolveKey()
+    if (!key) return { failure: { state: 'invalid_key' }, calls: 0 }
+    if (!FIREFLIES_ID_PATTERN.test(id)) {
+      return { failure: { state: 'vendor_error', code: 'id_shape_changed' }, calls: 0 }
+    }
+    const accounting = { calls: 0 }
+    const result = await this.send(
+      key,
+      firefliesTranscriptQuery(id),
+      { timeoutMs: FIREFLIES_PAGE_TIMEOUT_MS, retryServerErrors: true },
+      accounting,
+    )
+    if (result.kind === 'transport') {
+      return { failure: { state: result.reason === 'too_large' ? 'vendor_error' : 'unreachable', ...(result.reason === 'too_large' ? { code: 'response_too_large' } : {}) }, calls: accounting.calls }
+    }
+    if (result.kind !== 'data') return { failure: result.failure, calls: accounting.calls }
+    const transcript = (result.data as { transcript?: unknown }).transcript
+    // A vendor that answers "no such transcript" with a null is not an error
+    // state: the caller asked about something that is not there any more.
+    return { transcript: transcript ?? undefined, calls: accounting.calls }
   }
 
   /**

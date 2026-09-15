@@ -187,9 +187,56 @@ describe('a successful import', () => {
     const write = buildFirefliesImport({
       id: IDS[0], title: 'No length', dateMs: NOW, durationSeconds: null, durationSource: 'unknown',
       organizerEmail: null, participants: [], sentences: [{ speakerName: 'A', speakerId: null, text: 'hi', startTime: 0, endTime: 0 }],
+      overview: null, actionItems: null, keywords: [],
     }, { importedAt: new Date(NOW).toISOString() })
     expect((write.sidecar as { pairable: boolean }).pairable).toBe(false)
     expect(write.markdown).not.toContain('**Duration**')
+  })
+})
+
+describe('the vendor summary end to end', () => {
+  const SUMMARY = {
+    overview: 'The team agreed the launch date and split the follow-ups.',
+    action_items: '**Miles**\nSend the brief\n\n**Gina**\nDraft the post\n',
+    keywords: ['launch', 'brief'],
+  }
+
+  it('renders the summary and keeps the vendor original in the sidecar', async () => {
+    const h = harness({ page: skip => okPage(skip === 0 ? [transcript(IDS[0], { summary: SUMMARY })] : []) })
+    await runOnce(h)
+
+    const [row] = h.library.list()
+    const markdown = readFileSync(join(h.library.root, '2026-09', row.filename), 'utf8')
+    expect(markdown).toContain('## Summary')
+    expect(markdown).toContain(SUMMARY.overview)
+    expect(markdown).toContain('- Send the brief')
+    expect(markdown).toContain('- Draft the post')
+
+    const detail = h.library.detail('2026-09', row.filename)!
+    expect(detail.summary).toBe(SUMMARY.overview)
+    expect(detail.actionItems).toHaveLength(4)
+
+    // The markdown collapses `**` so a sentence cannot forge a field; the
+    // sidecar is where the vendor's own text survives that, unedited.
+    const sidecar = h.library.readSidecar('2026-09', row.filename) as Record<string, unknown>
+    expect(sidecar.overview).toBe(SUMMARY.overview)
+    expect(sidecar.actionItems).toBe(SUMMARY.action_items)
+    expect(sidecar.keywords).toEqual(['launch', 'brief'])
+  })
+
+  it('imports a meeting with no summary, with neither section', async () => {
+    const h = harness({ page: skip => okPage(skip === 0 ? [transcript(IDS[0], { summary: null })] : []) })
+    await runOnce(h)
+
+    expect(h.importer.status().state).toBe('ok')
+    const [row] = h.library.list()
+    const markdown = readFileSync(join(h.library.root, '2026-09', row.filename), 'utf8')
+    expect(markdown).not.toContain('## Summary')
+    expect(markdown).not.toContain('## Action Items')
+    const sidecar = h.library.readSidecar('2026-09', row.filename) as Record<string, unknown>
+    expect(sidecar.overview).toBeNull()
+    expect(sidecar.actionItems).toBeNull()
+    expect(sidecar.keywords).toEqual([])
   })
 })
 
@@ -452,12 +499,22 @@ describe('a vendor that never ends', () => {
     // with a full one and nothing is ever older than the window, the budget
     // cannot stop this run and the window cannot either. Found by mutating the
     // window guard: without this bound the run spun until the test timed out.
+    //
+    // The fake vendor ENDS a few pages past the cap rather than running
+    // forever. A fake with no end can only prove the cap by timing out, and a
+    // timeout is indistinguishable from a hang: mutating the cap away then
+    // hangs the suite instead of failing it, which is not a test result.
+    // A LITERAL, not the constant under test: a bound derived from the very
+    // number the mutation changes moves with the mutant, and the run then
+    // pages to 100,005 instead of failing. That is how this test first came
+    // back "inconclusive (timeout)" rather than killing the mutant.
+    const vendorEndsAtPage = 205
     const h = harness({
       plan: 'business',
-      page: skip => okPage(Array.from({ length: 50 }, (_, index) => transcript(
+      page: skip => (skip >= vendorEndsAtPage * 50 ? okPage([]) : okPage(Array.from({ length: 50 }, (_, index) => transcript(
         `01KTQDNA393VRVDRF8VATA${String(skip + index).padStart(4, '0')}`,
         { sentences: [] },
-      ))),
+      )))),
     })
     await runOnce(h)
     const status = h.importer.status()
@@ -520,11 +577,23 @@ describe('poll', () => {
 
   it('refuses to spend more than its share of the day', async () => {
     const h = harness({ plan: 'free' })
-    const ceiling = Math.floor(h.budget.cap()! * IMPORT_POLL_BUDGET_SHARE)
-    while (h.budget.snapshot().calls < ceiling) h.budget.tryConsume({})
+    // A LITERAL half of the free plan's 50, and a BOUNDED loop. Deriving the
+    // ceiling from the constant under test moved it with the mutant, and the
+    // unbounded `while` then spun forever once the budget refused a call: the
+    // mutant hung the suite instead of failing it.
+    const ceiling = 25
+    for (let spent = 0; spent < ceiling && h.budget.snapshot().calls < ceiling; spent++) {
+      h.budget.tryConsume({})
+    }
+    expect(h.budget.snapshot().calls).toBe(ceiling)
 
     h.advance(IMPORT_POLL_INTERVAL_MS + 1)
+    // The PREDICATE, not tick(): asserting on tick() means a mutant that lets
+    // the poll through starts a real run inside the assertion, and the test
+    // then races that run instead of reporting on the decision.
+    expect(h.importer.pollDue()).toEqual({ due: false, reason: 'poll_budget_share' })
     expect(h.importer.tick()).toEqual({ fired: false, reason: 'poll_budget_share' })
+    expect(h.importer.isRunning()).toBe(false)
   })
 
   it('refuses without a key and while admissions are closed', () => {

@@ -169,6 +169,22 @@ export interface ImportedTranscriptLine {
   startTime: number
 }
 
+/**
+ * The vendor hands back action items as ONE string with newlines in it, not as
+ * a list, so the split belongs here rather than in the parser: `## Action
+ * Items` is a bulleted section, and `parseActions` reads one item per line.
+ *
+ * A line that already starts with a bullet loses it, or the render would show
+ * two. Blank lines are dropped rather than becoming empty bullets.
+ */
+export function actionItemLines(value: string | null | undefined): string[] {
+  if (!value) return []
+  return value
+    .split(/\r?\n/)
+    .map(line => line.replace(/^\s*(?:[-*\u2022]|\d+[.)])\s+/, '').trim())
+    .filter(line => line.length > 0)
+}
+
 export interface FirefliesImportRender {
   title: string
   dateMs: number

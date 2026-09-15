@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   IMPORTED_FILENAME_PATTERN,
+  actionItemLines,
   IMPORT_MARKDOWN_MAX_BYTES,
   IMPORT_SIDECAR_MAX_BYTES,
   ImportedLibraryError,
@@ -146,6 +147,60 @@ describe('template', () => {
     const markdown = render({ sentences: many })
     expect(Buffer.byteLength(markdown)).toBeLessThanOrEqual(IMPORT_MARKDOWN_MAX_BYTES)
     expect(markdown).toContain(TRANSCRIPT_TRUNCATED_NOTE)
+  })
+})
+
+describe('the vendor summary', () => {
+  const OVERVIEW = 'The team agreed the launch date and split the follow-ups.'
+  // The vendor hands these back as ONE string with newlines in it.
+  const ACTION_ITEMS = '**Miles**\nSend the brief\n\n**Gina**\n- Draft the post\n  \n1. Book the room\n'
+
+  it('splits action items into one bullet per line', () => {
+    expect(actionItemLines(ACTION_ITEMS)).toEqual([
+      '**Miles**', 'Send the brief', '**Gina**', 'Draft the post', 'Book the room',
+    ])
+    // Every bullet shape the vendor has been seen to use, so the character
+    // class is covered rather than merely present. A literal bullet here would
+    // make this file non-ASCII, so it is written as an escape.
+    expect(actionItemLines('\u2022 bullet\n* star\n- dash\n1. first\n2) second')).toEqual([
+      'bullet', 'star', 'dash', 'first', 'second',
+    ])
+    // Blank, absent and null are all "no action items", never an empty bullet.
+    expect(actionItemLines('')).toEqual([])
+    expect(actionItemLines(null)).toEqual([])
+    expect(actionItemLines(undefined)).toEqual([])
+    expect(actionItemLines('\n  \n\n')).toEqual([])
+    expect(actionItemLines('one line only')).toEqual(['one line only'])
+  })
+
+  it('renders both sections and reads them back', () => {
+    const library = newLibrary()
+    const markdown = render({ overview: OVERVIEW, actionItems: actionItemLines(ACTION_ITEMS) })
+    const result = write(library, { markdown })
+    const detail = library.detail(result.month, result.filename)!
+
+    expect(detail.summary).toBe(OVERVIEW)
+    expect(detail.actionItems.map(item => item.task)).toEqual([
+      '*Miles*', 'Send the brief', '*Gina*', 'Draft the post', 'Book the room',
+    ])
+    // The rest of the round trip is unchanged by the new sections.
+    expect(detail.date).toBe('2026-09-10')
+    expect(detail.durationMinutes).toBe(47)
+    expect(markdown.indexOf('## Summary')).toBeLessThan(markdown.indexOf('## Action Items'))
+    expect(markdown.indexOf('## Action Items')).toBeLessThan(markdown.indexOf('## Transcript'))
+  })
+
+  it('omits each section when the vendor gave nothing', () => {
+    const library = newLibrary()
+    const result = write(library, { markdown: render() })
+    const markdown = readFileSync(result.filepath, 'utf8')
+    expect(markdown).not.toContain('## Summary')
+    expect(markdown).not.toContain('## Action Items')
+    expect(library.detail(result.month, result.filename)!.summary).toBe('')
+
+    const overviewOnly = render({ overview: OVERVIEW })
+    expect(overviewOnly).toContain('## Summary')
+    expect(overviewOnly).not.toContain('## Action Items')
   })
 })
 

@@ -45,6 +45,7 @@ import {
   DEFAULT_ORIGIN_DOMAIN,
   type ImportedMeetingLibrary,
   type ImportedRecordWrite,
+  actionItemLines,
   getImportedMeetingLibrary,
   importHash,
   importRecordId,
@@ -192,11 +193,14 @@ export function buildFirefliesImport(
   const speakers = [...new Set(record.sentences.map(sentence => sentence.speakerName).filter(Boolean))]
   const attendees = record.participants.length > 0 ? record.participants : speakers
 
+  const actionItems = actionItemLines(record.actionItems)
   const markdown = renderImportMarkdown({
     title: record.title,
     dateMs: record.dateMs,
     durationSeconds: record.durationSeconds,
     attendees,
+    ...(record.overview ? { overview: record.overview } : {}),
+    ...(actionItems.length > 0 ? { actionItems } : {}),
     sentences: record.sentences.map(sentence => ({
       speakerName: sentence.speakerName,
       text: sentence.text,
@@ -233,6 +237,12 @@ export function buildFirefliesImport(
       sentenceCount: record.sentences.length,
       importedAt: options.importedAt,
       title: record.title,
+      // The vendor's own summary, kept unedited beside the rendered record.
+      // The markdown collapses `##` and `**` to keep a sentence from forging a
+      // section; the sidecar is where the original survives that.
+      overview: record.overview,
+      actionItems: record.actionItems,
+      keywords: record.keywords,
       sentences: record.sentences,
     },
   }
