@@ -22,6 +22,8 @@ interface Calls {
   revert: Array<{ id: string; dryRun?: boolean; previewHash?: string }>
   revertAll: Array<{ dryRun?: boolean; previewHash?: string }>
   setMode: unknown[]
+  getAction: string[]
+  retry: string[]
 }
 
 let calls: Calls
@@ -47,7 +49,16 @@ function fakeRunner(): MeetingMergeRunner {
       calls.revertAll.push(options)
       return reject({ previewHash: 'f'.repeat(64), actions: ['a_1'] })
     },
-    status: () => reject({ mode: 'advise', pipelineSees: null, mismatch: false, counts: { auto: 0, suggested: 0, none: 0, reverted: 0, pending: 0, failed: 0 }, running: false }),
+    getAction: (id: string) => { calls.getAction.push(id); if (refuse) throw refuse; return { id, state: 'failed' } },
+    retryAction: (id: string) => { calls.retry.push(id); return reject({ ok: true, state: 'pending', direction: 'apply' }) },
+    status: () => reject({
+      mode: 'advise',
+      pipelineSees: null,
+      mismatch: false,
+      mergesRemainApplied: false,
+      counts: { auto: 0, suggested: 0, none: 0, reverted: 0, pending: 0, revertPending: 0, failed: 0 },
+      running: false,
+    }),
     setMode: (mode: unknown) => { calls.setMode.push(mode); if (refuse) throw refuse; return Promise.resolve({ mode }) },
   } as unknown as MeetingMergeRunner
 }
@@ -72,7 +83,7 @@ async function post(url: string, body: unknown = {}) {
 }
 
 beforeEach(() => {
-  calls = { listSuggestions: [], listActions: [], accept: [], confirm: [], dismiss: [], revert: [], revertAll: [], setMode: [] }
+  calls = { listSuggestions: [], listActions: [], accept: [], confirm: [], dismiss: [], revert: [], revertAll: [], setMode: [], getAction: [], retry: [] }
   refuse = null
 })
 
@@ -161,6 +172,47 @@ describe('actions', () => {
     await post(`${url}/api/meeting-actions/revert-all`, { dryRun: true })
     expect(calls.revertAll).toEqual([{ dryRun: true, previewHash: undefined }])
     expect(calls.revert).toEqual([])
+  })
+
+  it('returns one action by id', async () => {
+    const url = await base()
+    const res = await fetch(`${url}/api/meeting-actions/a_abc`)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ action: { id: 'a_abc', state: 'failed' } })
+    expect(calls.getAction).toEqual(['a_abc'])
+  })
+
+  it('never reads revert-all as a single action', async () => {
+    const url = await base()
+    await fetch(`${url}/api/meeting-actions/revert-all`)
+    // The single-action GET is a different METHOD from the revert-all POST, so this is a
+    // real lookup of an id-shaped string. The runner refuses it; nothing reverts.
+    expect(calls.getAction).toEqual(['revert-all'])
+    expect(calls.revertAll).toEqual([])
+  })
+
+  it('retries a failed action', async () => {
+    const url = await base()
+    const res = await post(`${url}/api/meeting-actions/a_abc/retry`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, state: 'pending', direction: 'apply' })
+    expect(calls.retry).toEqual(['a_abc'])
+  })
+
+  it('renders a retry refusal as its own status and code, not a 500', async () => {
+    refuse = new ActionRefusedError(409, 'run_in_progress', 'COS is working on meetings right now.')
+    const url = await base()
+    const res = await post(`${url}/api/meeting-actions/a_abc/retry`)
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: { code: 'run_in_progress', message: 'COS is working on meetings right now.' } })
+  })
+
+  it('renders a single-action refusal as its own status and code', async () => {
+    refuse = new ActionRefusedError(404, 'action_not_found', 'That action is gone.')
+    const url = await base()
+    const res = await fetch(`${url}/api/meeting-actions/a_abc`)
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: { code: 'action_not_found', message: 'That action is gone.' } })
   })
 
   it('renders a revert refusal as its status and code', async () => {

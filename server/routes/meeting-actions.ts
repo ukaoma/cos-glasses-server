@@ -1,13 +1,19 @@
 // What the engine did, and how to undo it (6.47.0, WS4).
 //
 //   GET  /api/meeting-actions?limit=
+//   GET  /api/meeting-actions/:id              one action
 //   POST /api/meeting-actions/:id/revert       { dryRun } or { previewHash }
+//   POST /api/meeting-actions/:id/retry        a failed action, in its own direction
 //   POST /api/meeting-actions/revert-all       { dryRun } or { previewHash }
 //
 // TWO CALLS, ALWAYS. A revert asks for the preview first and gets a `previewHash` covering
 // the outputs' CURRENT bytes; sending it back is what proves the person is undoing the thing
 // they were shown. This follows the held-groups enroll gate in `voice.ts`, and for the same
 // reason: the blast radius belongs in the preview, not in an apology afterwards.
+//
+// RETRY EXISTS BECAUSE FAILURE WAS TERMINAL. An action that used its one automatic retry
+// stayed failed until the server restarted, and even a restart only re-drove WAITING rows.
+// Control's Retry button reloaded the list and nothing else. This is the route it needed.
 //
 // `revert-all` is declared BEFORE `/:id/revert`. Express matches in order, and without that
 // ordering `revert-all` is read as an action whose id is the literal string "revert-all".
@@ -34,6 +40,15 @@ export function createMeetingActionsRouter(deps: MeetingActionsRouterDeps): Rout
     }
   })
 
+  router.get('/meeting-actions/:id', (req, res) => {
+    try {
+      res.set('Cache-Control', 'private, no-store')
+      res.json({ action: deps.runner().getAction(String(req.params.id)) })
+    } catch (error) {
+      actionRefusal(error, res, 'meeting_action_unavailable', 'That action could not be read.')
+    }
+  })
+
   router.post('/meeting-actions/revert-all', (req, res) => {
     deps.runner().revertAll({ dryRun: req.body?.dryRun === true, previewHash: asHash(req.body?.previewHash) })
       .then(result => res.json(result))
@@ -47,6 +62,14 @@ export function createMeetingActionsRouter(deps: MeetingActionsRouterDeps): Rout
     })
       .then(result => res.json(result))
       .catch(error => actionRefusal(error, res, 'meeting_action_revert_failed', 'That merge could not be undone.'))
+  })
+
+  router.post('/meeting-actions/:id/retry', (req, res) => {
+    // Every refusal arrives as a rejection: `retryAction` is async, so a drain, a run in
+    // flight and a wrong state all land in the same handler as a real failure.
+    deps.runner().retryAction(String(req.params.id))
+      .then(result => res.json(result))
+      .catch(error => actionRefusal(error, res, 'meeting_action_retry_failed', 'That one could not be tried again.'))
   })
 
   return router

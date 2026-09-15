@@ -9,7 +9,8 @@
 // --apply-merge-decision` does not exist yet (WS8b). Each test hands the runner a spawn that
 // answers with the contract's exit codes and result lines.
 
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -80,7 +81,7 @@ function applied(actionId: string, overrides: Partial<MergePipelineResult> = {})
   return attempt({ code: 0, resultLines: [JSON.stringify(result)], stdout: `${MERGE_PREFIX}${JSON.stringify(result)}\n` })
 }
 
-function harness(options: { inputs?: EngineInputs; mode?: 'imports' | 'advise' | 'apply'; now?: number } = {}): Harness {
+function harness(options: { inputs?: EngineInputs; mode?: 'imports' | 'advise' | 'apply'; now?: number; collect?: 'real' } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'cos-runner-'))
   roots.push(dir)
   const root = join(dir, 'imports')
@@ -104,15 +105,20 @@ function harness(options: { inputs?: EngineInputs; mode?: 'imports' | 'advise' |
     library,
     mode: () => state.mode,
     isPipelineMac: () => state.mode !== 'imports',
-    collectInputs: async () => {
-      // The chain is only observable from inside a pass. Counting overlapping passes here
-      // is what proves the promise chain serializes rather than merely deduplicating.
-      concurrency.now += 1
-      concurrency.max = Math.max(concurrency.max, concurrency.now)
-      await new Promise(done => setTimeout(done, 5))
-      concurrency.now -= 1
-      return state.inputs
-    },
+    // `collect: 'real'` leaves this dep OUT, so the runner uses its own collector against
+    // whatever COS_OPERATIONS_DIR points at. That is the only way a tree diff proves
+    // anything: an injected collector means the runner never learns the tree exists.
+    ...(options.collect === 'real' ? {} : {
+      collectInputs: async () => {
+        // The chain is only observable from inside a pass. Counting overlapping passes here
+        // is what proves the promise chain serializes rather than merely deduplicating.
+        concurrency.now += 1
+        concurrency.max = Math.max(concurrency.max, concurrency.now)
+        await new Promise(done => setTimeout(done, 5))
+        concurrency.now -= 1
+        return state.inputs
+      },
+    }),
     // In-process, not on a worker thread: the decision layer is what is under test, and a
     // worker per test would make every one of them a second slower for nothing.
     runEngine: async request => runEngine(request),
@@ -289,17 +295,100 @@ describe('advise mode writes nothing outside the imports root', () => {
     expect(h.store.read().suggestions[0].state).toBe('confirmed')
   })
 
-  it('writes ONLY under the imports root, proven by a tree diff', async () => {
-    const outside = mkdtempSync(join(tmpdir(), 'cos-operations-'))
-    roots.push(outside)
-    writeFileSync(join(outside, 'scribe.md'), '# untouched\n')
-    const before = readdirSync(outside).sort()
-    const h = harness({ inputs: pairedInputs(), mode: 'advise' })
-    await h.runner.run('test')
-    expect(readdirSync(outside).sort()).toEqual(before)
-    expect(readFileSync(join(outside, 'scribe.md'), 'utf8')).toBe('# untouched\n')
+  /**
+   * The tree diff, run against the tree the runner actually reads.
+   *
+   * THE OLD VERSION OF THIS TEST COULD NOT FAIL. It made a directory, put one file in it,
+   * ran a harness whose inputs were injected synthetic objects, and asserted the directory
+   * was unchanged. The runner had never been told that directory existed and had no way to
+   * write to it, so the assertion held for a reason that has nothing to do with advise mode.
+   *
+   * This version points `COS_OPERATIONS_DIR` at the diffed tree and lets the runner use its
+   * REAL collector, so the pass reads those files, scores them, and would write into that
+   * tree if advise mode ever let it. Every file is hashed before and after, not just listed,
+   * because an in-place splice changes no filename.
+   */
+  it('writes ONLY under the imports root, proven by a hash diff of the tree it reads', async () => {
+    const operations = mkdtempSync(join(tmpdir(), 'cos-operations-'))
+    roots.push(operations)
+    const monthDir = join(operations, 'personal', 'meetings', '2026-08')
+    mkdirSync(monthDir, { recursive: true })
+    const pair = matchingPair({ k: 60, sessionId: 'tree_s1', firefliesId: 'tree_f1', startMs: START })
+    writeFileSync(join(monthDir, '2026-08-20_Standup.md'), operationsScribe('Standup', 'G2 Glasses'))
+    writeFileSync(join(monthDir, '2026-08-20_Standup.g2-chunks.json'), JSON.stringify({
+      sessionId: pair.capture.sessionId,
+      startTime: pair.capture.startMs,
+      durationMs: pair.capture.durationMs,
+      chunks: pair.capture.chunks,
+      batchSegments: pair.capture.batchSegments,
+    }))
+    writeFileSync(join(monthDir, '2026-08-20_Weekly.md'), operationsScribe('Weekly', 'Fireflies'))
+    writeFileSync(join(monthDir, '2026-08-20_Weekly.fireflies.json'), JSON.stringify({
+      sidecar_version: 1,
+      clipped: false,
+      id: pair.meeting.id,
+      date: pair.meeting.startMs,
+      duration: 30,
+      participants: [],
+      sentences: pair.meeting.sentences,
+    }))
+
+    const before = hashTree(operations)
+    expect(Object.keys(before)).toHaveLength(4)
+
+    const previous = process.env.COS_OPERATIONS_DIR
+    process.env.COS_OPERATIONS_DIR = operations
+    try {
+      // NO injected collector: this pass reads the tree above through the real one.
+      const h = harness({ mode: 'advise', collect: 'real' })
+      const outcome = await h.runner.run('test')
+      // Proof the runner SAW the tree: without it there is nothing to advise about, and a
+      // green diff would again mean nothing.
+      expect(outcome.wouldMerge).toBe(1)
+      expect(h.store.read().suggestions[0]).toMatchObject({ kind: 'would_merge', state: 'open' })
+      expect(hashTree(operations)).toEqual(before)
+      expect(h.spawns).toEqual([])
+      expect(existsSync(join(h.library.root, 'decisions'))).toBe(false)
+    } finally {
+      if (previous == null) delete process.env.COS_OPERATIONS_DIR
+      else process.env.COS_OPERATIONS_DIR = previous
+    }
   })
 })
+
+/** A scribe in the shape every reader in this repo parses. */
+function operationsScribe(title: string, source: string): string {
+  return [
+    `# ${title}`,
+    '',
+    '| Field | Value |',
+    '|-------|-------|',
+    '| **Date** | 2026-08-20 15:00 |',
+    '| **Duration** | 30 minutes |',
+    `| **Source** | ${source} |`,
+    '| **Domain** | personal |',
+    '',
+    '## Transcript',
+    '',
+    '[00:00:05] Speaker A: Synthetic line.',
+    '',
+  ].join('\n')
+}
+
+/** Every file under `root`, by relative path, with its sha256. */
+function hashTree(root: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(dir, entry.name)
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (entry.isDirectory()) walk(full, rel)
+      else out[rel] = createHash('sha256').update(readFileSync(full)).digest('hex')
+    }
+  }
+  walk(root, '')
+  return out
+}
 
 describe('apply mode', () => {
   it('writes one decision file per action and spawns the pipeline', async () => {
@@ -597,6 +686,204 @@ describe('reverting in apply mode', () => {
     await h.runner.revert(action.id, { previewHash: preview.previewHash })
     // The claim stands, so the next drive finishes it rather than starting over.
     expect(h.store.read().actions[0].state).toBe('revert_pending')
+  })
+})
+
+/**
+ * QA round 1, blockers 1 and 2: a deferred Undo is re-driven, and a retried Undo stays an
+ * Undo.
+ *
+ * WHAT WAS WRONG. `tick()` and the pass's own drive loop both selected only `pending`, so an
+ * Undo the sync lock deferred sat in `revert_pending` until the server restarted — with
+ * `setMode` refusing the whole time because something was in flight, and no affordance in
+ * Control. And a revert that failed retryably was reset to `pending`, where the next drive
+ * read the direction off the state and spawned `--apply-merge-decision`: Undo became Redo.
+ */
+describe('a deferred or failed revert', () => {
+  async function appliedApplyAction(): Promise<{ h: Harness; actionId: string }> {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    await h.runner.run('test')
+    return { h, actionId: h.store.read().actions[0].id }
+  }
+
+  async function claimRevert(h: Harness, actionId: string): Promise<void> {
+    const preview = await h.runner.revert(actionId, { dryRun: true }) as RevertPreview
+    await h.runner.revert(actionId, { previewHash: preview.previewHash })
+  }
+
+  it('is picked up by the tick, not left until a restart', async () => {
+    const { h, actionId } = await appliedApplyAction()
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
+    await claimRevert(h, actionId)
+    expect(h.store.read().actions[0].state).toBe('revert_pending')
+    // The lock retry window passes.
+    h.setNow(START + PIPELINE_LOCK_RETRY_MS + 1)
+    expect(h.runner.tick()).toMatchObject({ fired: true, reason: 'pending_retry' })
+  })
+
+  it('is re-driven by the next pass as a REVERT, not as an apply', async () => {
+    const { h, actionId } = await appliedApplyAction()
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
+    await claimRevert(h, actionId)
+    h.spawns.length = 0
+    h.setNow(START + PIPELINE_LOCK_RETRY_MS + 1)
+    h.setSpawn(args => applied(String(args[1]), { status: 'reverted' }))
+    await h.runner.run('retry')
+    expect(h.spawns.map(row => row.args[0])).toEqual(['--revert-merge-decision'])
+    expect(h.store.read().actions[0].state).toBe('reverted')
+  })
+
+  it('retries as a revert after a partial result, never as an apply', async () => {
+    const { h, actionId } = await appliedApplyAction()
+    h.spawns.length = 0
+    // `partial` is retryable, which is exactly the path that used to flip the direction.
+    h.setSpawn(args => applied(String(args[1]), { status: 'partial', step: 'archive', error_code: 'archive_busy' }))
+    await claimRevert(h, actionId)
+    const row = h.store.read().actions[0]
+    expect(row.state).toBe('revert_pending')
+    expect(row.direction).toBe('revert')
+    h.setNow(START + PIPELINE_LOCK_RETRY_MS + 1)
+    h.spawns.length = 0
+    h.setSpawn(args => applied(String(args[1]), { status: 'reverted' }))
+    await h.runner.run('retry')
+    expect(h.spawns.map(row2 => row2.args[0])).toEqual(['--revert-merge-decision'])
+    expect(h.store.read().actions[0].state).toBe('reverted')
+  })
+
+  it('counts revert_pending in status on its own, not folded into pending', async () => {
+    const { h, actionId } = await appliedApplyAction()
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
+    await claimRevert(h, actionId)
+    const status = await h.runner.status()
+    expect(status.counts.revertPending).toBe(1)
+    expect(status.counts.pending).toBe(0)
+  })
+
+  it('is re-driven on boot through the waiting driver', async () => {
+    const { h, actionId } = await appliedApplyAction()
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
+    await claimRevert(h, actionId)
+    h.spawns.length = 0
+    h.setSpawn(args => applied(String(args[1]), { status: 'reverted' }))
+    await h.runner.driveWaitingAction(actionId)
+    expect(h.spawns.map(row => row.args[0])).toEqual(['--revert-merge-decision'])
+  })
+})
+
+/** QA round 1, blocker 4: a failed action is not terminal. */
+describe('retrying a failed action', () => {
+  async function failedApplyAction(): Promise<{ h: Harness; actionId: string }> {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_DECISION_INVALID, stderr: 'COS_MERGE_DECISION_INVALID=sha_mismatch\n' }))
+    await h.runner.run('test')
+    const action = h.store.read().actions[0]
+    expect(action.state).toBe('failed')
+    return { h, actionId: action.id }
+  }
+
+  it('puts it back in its own direction and drives it', async () => {
+    const { h, actionId } = await failedApplyAction()
+    h.spawns.length = 0
+    h.setSpawn(args => applied(String(args[1])))
+    const result = await h.runner.retryAction(actionId)
+    expect(result).toMatchObject({ ok: true, state: 'pending', direction: 'apply' })
+    await h.runner.idle()
+    expect(h.spawns.map(row => row.args[0])).toContain('--apply-merge-decision')
+    expect(h.store.read().actions[0].state).toBe('applied')
+  })
+
+  it('resets the attempt budget, or the first retry is the last', async () => {
+    const { h, actionId } = await failedApplyAction()
+    await h.runner.retryAction(actionId)
+    const row = h.store.read().actions.find(item => item.id === actionId)!
+    expect(row.attempts).toBe(0)
+    expect(row.error).toBeUndefined()
+    expect(row.diagnostics).toBeUndefined()
+  })
+
+  it('refuses an action that is not failed, and one that is already queued', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    await h.runner.run('test')
+    const actionId = h.store.read().actions[0].id
+    await expect(h.runner.retryAction(actionId)).rejects.toMatchObject({ status: 409, code: 'action_not_failed' })
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
+    const preview = await h.runner.revert(actionId, { dryRun: true }) as RevertPreview
+    await h.runner.revert(actionId, { previewHash: preview.previewHash })
+    await expect(h.runner.retryAction(actionId)).rejects.toMatchObject({ status: 409, code: 'apply_in_flight' })
+  })
+
+  it('refuses an action that is not there', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    await expect(h.runner.retryAction('a_0000000000000000')).rejects.toMatchObject({ status: 404, code: 'action_not_found' })
+  })
+
+  it('refuses during a drain', async () => {
+    const { h, actionId } = await failedApplyAction()
+    h.setAdmissions(false)
+    await expect(h.runner.retryAction(actionId)).rejects.toMatchObject({ status: 409, code: 'maintenance_drain_active' })
+  })
+
+  it('returns one action by id', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    await h.runner.run('test')
+    const actionId = h.store.read().actions[0].id
+    expect(h.runner.getAction(actionId).id).toBe(actionId)
+    expect(() => h.runner.getAction('a_ffffffffffffffff')).toThrow(ActionRefusedError)
+  })
+
+  it('a retried REVERT goes back to revert_pending', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    await h.runner.run('test')
+    const actionId = h.store.read().actions[0].id
+    // Two failures: the automatic retry, then terminal.
+    h.setSpawn(args => applied(String(args[1]), { status: 'failed', step: 'restore', error_code: 'archive_missing' }))
+    const preview = await h.runner.revert(actionId, { dryRun: true }) as RevertPreview
+    await h.runner.revert(actionId, { previewHash: preview.previewHash })
+    h.setNow(START + PIPELINE_LOCK_RETRY_MS + 1)
+    await h.runner.run('second')
+    expect(h.store.read().actions[0].state).toBe('failed')
+    expect(h.store.read().actions[0].direction).toBe('revert')
+    h.setSpawn(args => applied(String(args[1]), { status: 'reverted' }))
+    const result = await h.runner.retryAction(actionId)
+    expect(result).toMatchObject({ state: 'revert_pending', direction: 'revert' })
+  })
+})
+
+/** A failed child leaves evidence, not just a message. */
+describe('failure diagnostics', () => {
+  it('records the code, the signal, the timeout, the elapsed time and the stderr tail', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    h.setSpawn(() => attempt({
+      code: null,
+      signal: 'SIGKILL',
+      timedOut: true,
+      elapsedMs: 75_123,
+      stderr: 'Traceback (most recent call last):\n  File "sync_meetings.py", line 1\n',
+    }))
+    await h.runner.run('test')
+    const row = h.store.read().actions[0]
+    expect(row.diagnostics).toMatchObject({ code: null, signal: 'SIGKILL', timedOut: true, elapsedMs: 75_123 })
+    expect(row.diagnostics!.stderr).toContain('Traceback')
+  })
+
+  it('keeps the pipeline’s own decision-invalid line from exit 4', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    h.setSpawn(() => attempt({
+      code: PIPELINE_EXIT_DECISION_INVALID,
+      stderr: 'COS_MERGE_DECISION_INVALID=g2_sidecar_sha_mismatch\n',
+      elapsedMs: 120,
+    }))
+    await h.runner.run('test')
+    const row = h.store.read().actions[0]
+    expect(row.state).toBe('failed')
+    expect(row.diagnostics!.decisionInvalid).toBe('COS_MERGE_DECISION_INVALID=g2_sidecar_sha_mismatch')
+  })
+
+  it('records a spawn that never ran at all', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    h.setSpawn(() => { throw new Error('ENOENT python3') })
+    await h.runner.run('test')
+    expect(h.store.read().actions[0].diagnostics).toMatchObject({ spawnError: 'ENOENT python3', code: null })
   })
 })
 
@@ -958,38 +1245,142 @@ describe('reading sentences from either sidecar shape', () => {
   })
 })
 
-describe('splits', () => {
-  it('offers a long recording holding several meetings as a suggestion', async () => {
-    const longMeeting = firefliesMeeting({
-      id: 'f-long',
-      startMs: START,
-      durationS: 10_800,
-      phrases: [phrase('alphaw', 60, 60), phrase('betaw', 60, 4_000), phrase('gammaw', 60, 8_000)],
-      title: 'Long recording',
-    })
-    const captures = ['alphaw', 'betaw', 'gammaw'].map((prefix, index) => g2Capture({
-      sessionId: `s-${prefix}`,
-      startMs: START + [60, 4_000, 8_000][index] * 1000,
-      durationMs: 600_000,
-      phrases: [longMeeting.sentences[index]].map((sentence, i) => ({
-        tokens: String(sentence.text).split(' '),
-        startS: [60, 4_000, 8_000][index] + i,
-        endS: [60, 4_000, 8_000][index] + 12,
-      })),
-      offsetMs: 0,
-    }))
-    const inputs: EngineInputs = {
+/**
+ * Splits, end to end.
+ *
+ * WHAT WAS WRONG. Every split was a suggestion, nothing called `derive_piece`, and accepting
+ * one answered 200 with `ok: false` — while the changelog, the contract and Control's copy
+ * all said long recordings are split automatically with a Revert. The pieces are real now in
+ * imports mode; in apply mode the refusal is typed and the copy says so.
+ */
+function longRecordingInputs(options: { now?: number } = {}): { inputs: EngineInputs; sourceId: string } {
+  const longMeeting = firefliesMeeting({
+    id: 'f-long',
+    startMs: START,
+    durationS: 10_800,
+    phrases: [phrase('alphaw', 60, 60), phrase('betaw', 60, 4_000), phrase('gammaw', 60, 8_000)],
+    title: 'Long recording',
+  })
+  const captures = ['alphaw', 'betaw', 'gammaw'].map((prefix, index) => g2Capture({
+    sessionId: `s-${prefix}`,
+    startMs: START + [60, 4_000, 8_000][index] * 1000,
+    durationMs: 600_000,
+    phrases: [longMeeting.sentences[index]].map((sentence, i) => ({
+      tokens: String(sentence.text).split(' '),
+      startS: [60, 4_000, 8_000][index] + i,
+      endS: [60, 4_000, 8_000][index] + 12,
+    })),
+    offsetMs: 0,
+  }))
+  void options
+  return {
+    sourceId: 'f-long',
+    inputs: {
       g2: captures.map(capture => ({ ...capture, finalizedAtMs: capture.startMs + 600_000 })),
       fireflies: [longMeeting],
       g2Meta: Object.fromEntries(captures.map(capture => [capture.sessionId, { finalizedAtMs: capture.startMs + 600_000 }])),
       firefliesMeta: { 'f-long': {} },
-    }
+    },
+  }
+}
+
+describe('splits', () => {
+  it('writes one record per piece in imports mode, and the action names them all', async () => {
+    const { inputs } = longRecordingInputs()
     const h = harness({ inputs, now: START - 1 })
+    const outcome = await h.runner.run('test')
+    expect(outcome.auto).toBe(1)
+    const action = h.store.read().actions.find(row => row.kind === 'split')
+    expect(action).toBeTruthy()
+    expect(action!.state).toBe('applied')
+    expect(action!.outputs.length).toBeGreaterThan(1)
+    for (const output of action!.outputs) {
+      expect(existsSync(output.path)).toBe(true)
+      expect(output.recordId).toMatch(/^blended:[0-9a-f]{16}$/)
+    }
+    // Each piece is its OWN record, not a copy of the whole recording.
+    const recordIds = new Set(action!.outputs.map(output => output.recordId))
+    expect(recordIds.size).toBe(action!.outputs.length)
+  })
+
+  it('reverts a split by deleting every piece it wrote', async () => {
+    const { inputs } = longRecordingInputs()
+    const h = harness({ inputs, now: START - 1 })
+    await h.runner.run('test')
+    const action = h.store.read().actions.find(row => row.kind === 'split')!
+    const preview = await h.runner.revert(action.id, { dryRun: true }) as RevertPreview
+    await h.runner.revert(action.id, { previewHash: preview.previewHash })
+    expect(h.store.read().actions.find(row => row.id === action.id)!.state).toBe('reverted')
+    for (const output of action.outputs) expect(existsSync(output.path)).toBe(false)
+  })
+
+  it('leaves the long recording as a suggestion in advise mode', async () => {
+    const { inputs } = longRecordingInputs()
+    const h = harness({ inputs, mode: 'advise', now: START - 1 })
     await h.runner.run('test')
     const split = h.store.read().suggestions.find(row => row.kind === 'split')
     expect(split).toBeTruthy()
     expect(split!.id).toBe(suggestionIdFor('split', { sessionIds: [], firefliesIds: ['f-long'] }))
     expect(split!.evidence.spans!.length).toBeGreaterThan(1)
+    expect(h.store.read().actions.filter(row => row.kind === 'split')).toEqual([])
+    expect(h.library.list()).toEqual([])
+  })
+
+  it('offers rather than takes a recording that finished before the engine arrived (D14)', async () => {
+    const { inputs } = longRecordingInputs()
+    // `now` is AFTER the whole recording, so its finish is before the boundary this run
+    // stamps, which is the backlog case nobody has measured.
+    const h = harness({ inputs, now: START + 20_000_000 })
+    const outcome = await h.runner.run('test')
+    expect(outcome.auto).toBe(0)
+    expect(h.store.read().suggestions.find(row => row.kind === 'split')).toBeTruthy()
+    expect(h.store.read().actions.filter(row => row.kind === 'split')).toEqual([])
+  })
+
+  it('accepts a split suggestion in imports mode and writes the pieces', async () => {
+    const { inputs } = longRecordingInputs()
+    const h = harness({ inputs, now: START + 20_000_000 })
+    await h.runner.run('test')
+    const suggestion = h.store.read().suggestions.find(row => row.kind === 'split')!
+    const result = await h.runner.acceptSuggestion(suggestion.id)
+    expect(result.ok).toBe(true)
+    const action = h.store.read().actions.find(row => row.id === result.actionId)!
+    expect(action.kind).toBe('split')
+    expect(action.tier).toBe('accepted_suggestion')
+    expect(action.outputs.length).toBeGreaterThan(1)
+    expect(h.store.read().suggestions.find(row => row.id === suggestion.id)!.state).toBe('accepted')
+  })
+
+  it('refuses to accept a split in advise mode, and saves the answer instead', async () => {
+    const { inputs } = longRecordingInputs()
+    const h = harness({ inputs, mode: 'advise', now: START - 1 })
+    await h.runner.run('test')
+    const suggestion = h.store.read().suggestions.find(row => row.kind === 'split')!
+    await expect(h.runner.acceptSuggestion(suggestion.id)).rejects.toMatchObject({ code: 'advise_mode' })
+    await h.runner.confirmSuggestion(suggestion.id)
+    expect(h.store.read().suggestions.find(row => row.id === suggestion.id)!.state).toBe('confirmed')
+  })
+
+  it('refuses a split accept in apply mode with a typed code, and spawns nothing', async () => {
+    // A split writes NEW records. Apply mode splices a patch into a scribe that already
+    // exists, and there is no additive, revertible way to turn one scribe into three.
+    const { inputs } = longRecordingInputs()
+    const h = harness({ inputs, mode: 'advise', now: START - 1 })
+    await h.runner.run('test')
+    const suggestion = h.store.read().suggestions.find(row => row.kind === 'split')!
+    h.setMode('apply')
+    await expect(h.runner.acceptSuggestion(suggestion.id))
+      .rejects.toMatchObject({ code: 'split_not_supported_in_apply_mode', status: 409 })
+    expect(h.spawns).toEqual([])
+    expect(h.store.read().actions.filter(row => row.kind === 'split')).toEqual([])
+  })
+
+  it('never takes a split automatically in apply mode', async () => {
+    const { inputs } = longRecordingInputs()
+    const h = harness({ inputs, mode: 'apply', now: START - 1 })
+    await h.runner.run('test')
+    expect(h.store.read().actions.filter(row => row.kind === 'split')).toEqual([])
+    expect(h.store.read().suggestions.find(row => row.kind === 'split')).toBeTruthy()
   })
 })
 

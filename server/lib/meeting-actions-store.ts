@@ -47,6 +47,15 @@ export const MAX_ACTIONS = 5_000
 export const MAX_SUGGESTIONS = 5_000
 export const MAX_TOMBSTONES = 5_000
 
+/**
+ * Ceiling on remembered file hashes.
+ *
+ * The cache is rewritten to exactly what the last collected pass saw, so it prunes itself
+ * and this cap is a backstop against a pathological tree rather than the normal bound. It
+ * matters because this file is parsed on every status poll.
+ */
+export const MAX_HASH_CACHE_ENTRIES = 20_000
+
 export type ActionKind = 'merge' | 'split'
 export type ActionTier = 'auto' | 'accepted_suggestion' | 'legacy_applied'
 export type ActionState = 'pending' | 'applied' | 'failed' | 'revert_pending' | 'reverted'
@@ -68,6 +77,33 @@ export interface ActionOutput {
   sidecarPath?: string
 }
 
+/**
+ * Which way this action is being driven.
+ *
+ * WHY IT IS ON THE ROW AND NOT DERIVED FROM `state`. A failed revert is reset to `pending`
+ * so it can be retried, and `pending` is indistinguishable from "an apply that has not run
+ * yet". Deriving the direction from the state therefore turned every retried Undo into a
+ * Redo: the next drive spawned `--apply-merge-decision` on an action whose whole purpose was
+ * to take that apply back. The direction is decided once, when the action is created or when
+ * a Revert claims it, and survives every failure in between.
+ */
+export type ActionDirection = 'apply' | 'revert'
+
+/** What a pipeline child did on its way to failing. Diagnostics only; never a decision. */
+export interface PipelineFailureDiagnostics {
+  /** Null when the child never ran, or was killed by a signal. */
+  code: number | null
+  signal: string | null
+  timedOut: boolean
+  elapsedMs: number
+  /** Trimmed tail of the child's stderr. Bounded; never meeting content. */
+  stderr?: string
+  /** The pipeline's own `COS_MERGE_DECISION_INVALID=` line, on exit 4. */
+  decisionInvalid?: string
+  /** Set when the child could not be spawned at all. */
+  spawnError?: string
+}
+
 export interface MergeActionRecord {
   id: string
   kind: ActionKind
@@ -80,7 +116,11 @@ export interface MergeActionRecord {
   outputSha256: string[]
   state: ActionState
   mode: ActionMode
+  /** Apply or revert. Durable, so a failed revert retries as a revert. */
+  direction?: ActionDirection
   error?: string
+  /** What the last failing pipeline child did. Absent until one fails. */
+  diagnostics?: PipelineFailureDiagnostics
   /** Epoch ms this action may next be driven. Set on a deferred pipeline apply. */
   nextAt?: number
   at: string
@@ -90,6 +130,32 @@ export interface MergeActionRecord {
   pieceIndex?: number
   /** The parent the pipeline already merged this into, on a `legacy_applied` row. */
   legacyParentPath?: string
+}
+
+/**
+ * The state a deferred or retried action of this direction goes back to.
+ *
+ * `pending` and `revert_pending` are the two waiting states, and which one an action waits
+ * in is the ONLY durable record of what the next drive should spawn.
+ */
+export function pendingStateFor(direction: ActionDirection | undefined): ActionState {
+  return direction === 'revert' ? 'revert_pending' : 'pending'
+}
+
+/**
+ * The direction an action is being driven in.
+ *
+ * Rows written before 6.47.0's QA pass carry no `direction`, so the waiting state is the
+ * fallback: `revert_pending` could only have been reached through a Revert.
+ */
+export function directionOf(action: Pick<MergeActionRecord, 'direction' | 'state'>): ActionDirection {
+  if (action.direction) return action.direction
+  return action.state === 'revert_pending' ? 'revert' : 'apply'
+}
+
+/** Both states an action can sit in while waiting to be driven. */
+export function isWaitingState(state: ActionState): boolean {
+  return state === 'pending' || state === 'revert_pending'
 }
 
 export type SuggestionKind = 'merge' | 'would_merge' | 'split'
@@ -128,6 +194,27 @@ export interface FirstRunReport {
   errors: number
 }
 
+/**
+ * What the clock band rejected this run, and how far off the anchors it dropped were.
+ *
+ * `PAIRING_CLOCK_BAND_S` is the one rule standing between a real merge and a neighbouring
+ * meeting's boilerplate, and it was chosen from 198 scored recordings. Nothing recorded how
+ * often it FIRES on this Mac's own data, so a band that is wrong here is invisible. These
+ * counts make it observable without keeping any meeting content.
+ */
+export interface ClockBandStats {
+  /** Candidates that lost at least one anchor to the band. */
+  candidates: number
+  /** Anchors dropped, summed across candidates. */
+  anchorsDropped: number
+  /** Candidates the band reduced to zero shared anchors. */
+  candidatesZeroed: number
+  /** Largest absolute clock skew, in seconds, among the winners this run. */
+  maxWinnerSkewS: number
+  /** Median absolute clock skew, in seconds, among the winners this run. */
+  medianWinnerSkewS: number
+}
+
 export interface EngineRunSummary {
   at: string
   mode: MeetingEngineMode
@@ -142,6 +229,32 @@ export interface EngineRunSummary {
   errors: number
   /** Why the run did nothing, when it did nothing. */
   skippedReason?: string
+  /** Inputs the collector refused, by reason code. */
+  inputsSkipped?: Record<string, number>
+  /** The clock band's effect this run. Absent when nothing was scored. */
+  clockBand?: ClockBandStats
+}
+
+/** One file's identity, so an unchanged file is never read a second time. */
+export interface HashCacheEntry {
+  sha256: string
+  mtimeMs: number
+  size: number
+}
+
+/**
+ * What the last collected pass saw, so the next one can prove nothing changed.
+ *
+ * Principle 7 says the engine never blocks live capture. The pass that hashed every sidecar
+ * on the main thread broke that on its own: 817 MB of `.g2-chunks.json` read per pass, every
+ * six hours, in the same event loop as chunk writes. Both halves of the fix are here — the
+ * scan stamp lets a pass BAIL before collecting, and the hash cache means a pass that does
+ * collect only reads the files whose mtime or size moved.
+ */
+export interface InputScanStamp {
+  newestMtimeMs: number
+  count: number
+  mode: MeetingEngineMode
 }
 
 export interface EngineStatusFile {
@@ -155,6 +268,9 @@ export interface EngineStatusFile {
   /** Last answer from `sync_meetings.py --merge-engine-status`, and when. */
   pipelineSees?: { mode: string; active: boolean; appliedActions: number } | null
   pipelineSeenAt?: number
+  /** sha256 by absolute path, keyed on mtime and size. Rewritten to what the pass saw. */
+  hashCache?: Record<string, HashCacheEntry>
+  lastInputScan?: InputScanStamp
 }
 
 export interface ActionsStoreFile {

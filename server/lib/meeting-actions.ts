@@ -36,11 +36,12 @@
  */
 
 import { createHash } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { discoverMeetingDomains, resolveCosOperationsDir } from './cos-operations-meetings.js'
 import {
   DECISION_SCHEMA,
+  DecisionError,
   MERGE_RESULT_PREFIX,
   PIPELINE_EXIT_DECISION_INVALID,
   PIPELINE_EXIT_LOCK_BUSY,
@@ -49,6 +50,7 @@ import {
   type MergePipelineResult,
   deleteDecision,
   isMergePipelineResult,
+  listDecisionIds,
   readDecision,
   sha256OfFile,
   writeDecision,
@@ -57,36 +59,56 @@ import {
 import {
   type ImportedMeetingLibrary,
   getImportedMeetingLibrary,
+  importHash,
   importRecordId,
   importsRoot,
   mergedHash,
+  pieceHash,
 } from './imported-meeting-library.js'
-import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import {
+  acquireMaintenanceWork,
+  maintenanceAdmissionsOpen,
+  maintenanceLifecycle,
+  type MaintenanceWorkLease,
+} from './maintenance-lifecycle.js'
+import {
+  type ActionDirection,
   type ActionMode,
   type ActionsStoreFile,
   type CanonicalInputs,
+  type ClockBandStats,
   type EngineRunSummary,
+  type HashCacheEntry,
   type MergeActionRecord,
   type MergeSuggestionRecord,
+  type PipelineFailureDiagnostics,
+  MAX_HASH_CACHE_ENTRIES,
   MeetingActionsStore,
   actionIdFor,
+  directionOf,
   getMeetingActionsStore,
   inputPairs,
   isTombstoned,
+  isWaitingState,
+  pendingStateFor,
   suggestionIdFor,
 } from './meeting-actions-store.js'
 import {
+  type MeetingEngineMacClass,
   type MeetingEngineMode,
   type MeetingEnginePipelineMode,
   meetingEngineIsPipelineMac,
   meetingEngineMode,
+  meetingEngineModeDetail,
   writeMergeModeFile,
 } from './meeting-engine-mode.js'
 import type { FirefliesMeetingInput, FirefliesSentenceInput, G2RecordingInput } from './meeting-engine/evidence.js'
+import type { MergeGroup, PairingResult } from './meeting-engine/pairing.js'
+import type { SplitPlan } from './meeting-engine/split.js'
 import { fingerprintKey, renderPipelinePatch, type DerivedInputFingerprint } from './meeting-engine/render.js'
 import { type EngineRequest, type EngineResult, type EngineScoreResult, runEngineInWorker } from './meeting-engine/worker.js'
 import { getMeetingStore } from './meeting-store.js'
+import { type SuggestionWithSides, withSuggestionSides } from './meeting-suggestion-sides.js'
 import { onCorrectionApplied } from './meeting-corrections.js'
 import {
   type PipelineAttempt,
@@ -159,6 +181,8 @@ export interface EngineInputs {
   fireflies: FirefliesMeetingInput[]
   g2Meta: Record<string, G2InputMeta>
   firefliesMeta: Record<string, FirefliesInputMeta>
+  /** Inputs the collector refused, by reason code. Optional so a test fixture stays small. */
+  skipped?: SkipCounts
 }
 
 export interface RunOutcome extends EngineRunSummary {
@@ -190,6 +214,27 @@ const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/
 const ICLOUD_DUPLICATE = / \d+(\.[A-Za-z0-9-]+)*\.json$/
 const MAX_SIDECAR_BYTES = 64 * 1024 * 1024
 
+/**
+ * The only `.fireflies.json` shape this engine scores.
+ *
+ * `sidecar_version` exists because the first sidecars the pipeline wrote were built AFTER
+ * `_clip_superset_bleed` rewrote `source_data['sentences']` in place, so they describe a
+ * recording with a whole real meeting cut out of it. `clipped: true` says so outright.
+ * Scoring either one pairs a capture against a transcript that is missing the very minutes
+ * the capture covers, which reads as "no evidence" and silently loses the merge.
+ */
+export const FIREFLIES_SIDECAR_VERSION = 1
+
+/**
+ * Cap on a scribe read for its markers.
+ *
+ * `scribeMarkers` was the one unbounded read left in the collector: a whole operations scribe
+ * into a string, per Fireflies meeting, per pass, to look for two comment markers. The
+ * library's own markdown cap is 9 MiB, so nothing this engine wrote can reach this; what can
+ * is a file that is no longer a scribe.
+ */
+export const MAX_SCRIBE_BYTES = 10 * 1024 * 1024
+
 function readJsonFile(path: string): Record<string, unknown> | null {
   try {
     if (statSync(path).size > MAX_SIDECAR_BYTES) return null
@@ -198,6 +243,16 @@ function readJsonFile(path: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+/** Hashes a file, or answers from a cache when nothing about the file has moved. */
+export type FileHasher = (path: string) => string | undefined
+
+/** Counted refusals, so an input the engine never scored is never merely absent. */
+export type SkipCounts = Record<string, number>
+
+function countSkip(counts: SkipCounts, reason: string): void {
+  counts[reason] = (counts[reason] ?? 0) + 1
 }
 
 function numberOr(value: unknown, fallback: number): number {
@@ -244,9 +299,17 @@ function g2FromSidecar(doc: Record<string, unknown>, sessionId: string): G2Recor
   }
 }
 
-/** `<!-- g2-transcript-blended -->` and friends, from the head of a scribe. */
-function scribeMarkers(path: string): { blended: boolean; mergeActionId?: string } {
+/**
+ * `<!-- g2-transcript-blended -->` and friends, from a scribe.
+ *
+ * BOUNDED, like `readJsonFile`. A file over `MAX_SCRIBE_BYTES` is not read at all and is
+ * reported as `oversized`, which the collector turns into a counted refusal rather than a
+ * silent `blended: false`. Answering "not blended" for a file nobody read would be worse
+ * than refusing it: it is the answer that makes the engine propose merging it.
+ */
+export function scribeMarkers(path: string): { blended: boolean; mergeActionId?: string; oversized?: boolean } {
   try {
+    if (statSync(path).size > MAX_SCRIBE_BYTES) return { blended: false, oversized: true }
     const text = readFileSync(path, 'utf8')
     const mergeAction = text.match(/<!--\s*merge-action:\s*(a_[0-9a-f]{16})\s*-->/)
     return {
@@ -259,8 +322,8 @@ function scribeMarkers(path: string): { blended: boolean; mergeActionId?: string
 }
 
 /** Every G2 recording and imported Fireflies meeting this Mac holds, in imports mode. */
-function collectImportsModeInputs(library: ImportedMeetingLibrary): EngineInputs {
-  const inputs: EngineInputs = { g2: [], fireflies: [], g2Meta: {}, firefliesMeta: {} }
+function collectImportsModeInputs(library: ImportedMeetingLibrary, hash: FileHasher): EngineInputs {
+  const inputs: EngineInputs & { skipped: SkipCounts } = { g2: [], fireflies: [], g2Meta: {}, firefliesMeta: {}, skipped: {} }
   const store = getMeetingStore()
   let months: string[] = []
   try {
@@ -285,7 +348,7 @@ function collectImportsModeInputs(library: ImportedMeetingLibrary): EngineInputs
       inputs.g2Meta[sessionId] = {
         sidecarPath: path,
         ...(existsSync(scribePath) ? { scribePath } : {}),
-        sha256: sha256OfFile(path) ?? undefined,
+        sha256: hash(path),
         finalizedAtMs: recording.finalizedAtMs,
         ...(typeof doc.blended_into === 'string' ? { blendedInto: doc.blended_into } : {}),
         ...(Array.isArray(doc.blended_into) && typeof doc.blended_into[0] === 'string' ? { blendedInto: doc.blended_into[0] as string } : {}),
@@ -298,7 +361,7 @@ function collectImportsModeInputs(library: ImportedMeetingLibrary): EngineInputs
     if (row.librarySource !== 'imported') continue
     const sidecar = library.readSidecar(row.month, row.filename) as Record<string, unknown> | null
     const firefliesId = typeof sidecar?.firefliesId === 'string' ? sidecar.firefliesId : null
-    if (!sidecar || !firefliesId) continue
+    if (!sidecar || !firefliesId) { countSkip(inputs.skipped, 'import_sidecar_unreadable'); continue }
     inputs.fireflies.push({
       id: firefliesId,
       startMs: numberOr(sidecar.dateMs, 0),
@@ -313,8 +376,8 @@ function collectImportsModeInputs(library: ImportedMeetingLibrary): EngineInputs
 }
 
 /** The operations tree, in advise and apply mode. Read-only in both. */
-function collectOperationsInputs(): EngineInputs {
-  const inputs: EngineInputs = { g2: [], fireflies: [], g2Meta: {}, firefliesMeta: {} }
+function collectOperationsInputs(hash: FileHasher): EngineInputs {
+  const inputs: EngineInputs & { skipped: SkipCounts } = { g2: [], fireflies: [], g2Meta: {}, firefliesMeta: {}, skipped: {} }
   const operationsDir = resolveCosOperationsDir()
   if (!operationsDir) return inputs
 
@@ -345,7 +408,7 @@ function collectOperationsInputs(): EngineInputs {
             sidecarPath: path,
             sidecarRelPath: relative(operationsDir, path),
             ...(existsSync(scribePath) ? { scribePath, scribeRelPath: relative(operationsDir, scribePath) } : {}),
-            sha256: sha256OfFile(path) ?? undefined,
+            sha256: hash(path),
             finalizedAtMs: recording.finalizedAtMs,
             ...(blendedInto ? { blendedInto } : {}),
             ...(typeof doc.claimed_parent === 'string' ? { claimedParent: doc.claimed_parent } : {}),
@@ -356,8 +419,30 @@ function collectOperationsInputs(): EngineInputs {
         if (name.endsWith('.fireflies.json')) {
           const doc = readJsonFile(path)
           const firefliesId = typeof doc?.id === 'string' ? doc.id : null
-          if (!doc || !firefliesId || inputs.firefliesMeta[firefliesId]) continue
+          if (!doc || !firefliesId) { countSkip(inputs.skipped, 'fireflies_sidecar_unreadable'); continue }
+          if (inputs.firefliesMeta[firefliesId]) continue
+          // A sidecar written before the raw-snapshot fix holds the CLIPPED sentences: the
+          // pipeline's de-bleed rewrites `source_data['sentences']` in place, so a sidecar
+          // built after it describes a recording with a whole real meeting cut out. Scoring
+          // one pairs a capture against a transcript missing the minutes that capture
+          // covers, which reads as "no evidence" and loses the merge without saying so.
+          if (doc.sidecar_version !== FIREFLIES_SIDECAR_VERSION) {
+            countSkip(inputs.skipped, 'fireflies_sidecar_version')
+            continue
+          }
+          if (doc.clipped === true) {
+            countSkip(inputs.skipped, 'fireflies_sidecar_clipped')
+            continue
+          }
           const scribePath = path.replace(/\.fireflies\.json$/, '.md')
+          const hasScribe = existsSync(scribePath)
+          const markers = hasScribe ? scribeMarkers(scribePath) : { blended: false, oversized: false }
+          if (markers.oversized) {
+            // Nobody read this file, so nobody may say it is unblended. Refusing it keeps a
+            // merge that already happened from being proposed a second time.
+            countSkip(inputs.skipped, 'fireflies_scribe_oversized')
+            continue
+          }
           const durationMinutes = numberOr(doc.duration, 0)
           inputs.fireflies.push({
             id: firefliesId,
@@ -367,11 +452,10 @@ function collectOperationsInputs(): EngineInputs {
             title: typeof doc.title === 'string' ? doc.title : basename(scribePath, '.md'),
             participants: Array.isArray(doc.participants) ? (doc.participants as string[]) : [],
           })
-          const markers = existsSync(scribePath) ? scribeMarkers(scribePath) : { blended: false }
           inputs.firefliesMeta[firefliesId] = {
             sidecarRelPath: relative(operationsDir, path),
-            ...(existsSync(scribePath)
-              ? { scribePath, scribeRelPath: relative(operationsDir, scribePath), sha256: sha256OfFile(scribePath) ?? undefined }
+            ...(hasScribe
+              ? { scribePath, scribeRelPath: relative(operationsDir, scribePath), sha256: hash(scribePath) }
               : {}),
             blendedMarker: markers.blended,
             ...(markers.mergeActionId ? { mergeActionId: markers.mergeActionId } : {}),
@@ -383,8 +467,86 @@ function collectOperationsInputs(): EngineInputs {
   return inputs
 }
 
-export function collectEngineInputs(mode: MeetingEngineMode, library: ImportedMeetingLibrary): EngineInputs {
-  return mode === 'imports' ? collectImportsModeInputs(library) : collectOperationsInputs()
+export function collectEngineInputs(
+  mode: MeetingEngineMode,
+  library: ImportedMeetingLibrary,
+  hash: FileHasher = path => sha256OfFile(path) ?? undefined,
+): EngineInputs {
+  return mode === 'imports' ? collectImportsModeInputs(library, hash) : collectOperationsInputs(hash)
+}
+
+// ── Knowing whether anything changed, without reading anything ────────────────
+//
+// PRINCIPLE 7, THE HALF THAT IS NOT THE WORKER THREAD. The engine scores on a worker, but
+// COLLECTING its inputs happened on the main thread and hashed every sidecar it found: on
+// this Mac, 817 MB of `.g2-chunks.json` per pass. A pass fires on every G2 finalization,
+// every import page, every orphan recovery and every six hours, and most of them have
+// nothing new to look at.
+//
+// Two cheap answers, in order. First: has ANY input file moved since the last collected
+// pass? That is a readdir plus a stat per file, no reads at all, and when the answer is no
+// the pass does nothing but drive whatever the pipeline still owes. Second, when something
+// did move: only the files whose mtime or size changed are re-read, because a sha256 is a
+// pure function of bytes and the bytes are what mtime and size describe.
+
+/** The directories a pass would read inputs from, without opening any of them. */
+function inputDirectories(mode: MeetingEngineMode, library: ImportedMeetingLibrary): string[] {
+  const directories: string[] = []
+  if (mode === 'imports') {
+    const store = getMeetingStore()
+    for (const root of [store.root, library.root]) {
+      try {
+        for (const month of readdirSync(root)) {
+          if (MONTH_PATTERN.test(month)) directories.push(join(root, month))
+        }
+      } catch { /* a root that is not there holds no inputs */ }
+    }
+    return directories
+  }
+  const operationsDir = resolveCosOperationsDir()
+  if (!operationsDir) return directories
+  for (const domain of discoverMeetingDomains(operationsDir)) {
+    const base = join(operationsDir, domain, 'meetings')
+    try {
+      for (const month of readdirSync(base)) {
+        if (MONTH_PATTERN.test(month)) directories.push(join(base, month))
+      }
+    } catch { /* a domain with no meetings dir holds no inputs */ }
+  }
+  return directories
+}
+
+/** True for the filenames a collector would open. */
+function isEngineInputName(name: string): boolean {
+  if (ICLOUD_DUPLICATE.test(name)) return false
+  return name.endsWith('.g2-chunks.json') || name.endsWith('.fireflies.json') || name.endsWith('.import.json')
+}
+
+/**
+ * The newest input mtime and how many inputs there are, from stats alone.
+ *
+ * COUNT AS WELL AS MTIME, because a DELETED file leaves every surviving mtime where it was.
+ * Together they move for every change that can alter what a pass would decide.
+ */
+export function scanInputStamp(
+  mode: MeetingEngineMode,
+  library: ImportedMeetingLibrary,
+): { newestMtimeMs: number; count: number } {
+  let newestMtimeMs = 0
+  let count = 0
+  for (const directory of inputDirectories(mode, library)) {
+    let names: string[]
+    try { names = readdirSync(directory) } catch { continue }
+    for (const name of names) {
+      if (!isEngineInputName(name)) continue
+      try {
+        const stat = statSync(join(directory, name))
+        count += 1
+        if (stat.mtimeMs > newestMtimeMs) newestMtimeMs = stat.mtimeMs
+      } catch { /* vanished between readdir and stat; the next pass sees it */ }
+    }
+  }
+  return { newestMtimeMs, count }
 }
 
 // ── The runner ────────────────────────────────────────────────────────────────
@@ -449,8 +611,11 @@ export class MeetingMergeRunner {
   private readonly store: MeetingActionsStore
   private readonly library: ImportedMeetingLibrary
   private readonly mode: () => MeetingEngineMode
+  private readonly modeDetailFn: (() => ReturnType<typeof meetingEngineModeDetail>) | null
   private readonly isPipelineMac: () => boolean
   private readonly collect: (mode: MeetingEngineMode) => EngineInputs | Promise<EngineInputs>
+  /** True when the caller supplies inputs, which makes a filesystem scan meaningless. */
+  private readonly collectInjected: boolean
   private readonly engine: (request: EngineRequest) => Promise<EngineResult>
   private readonly acquireLease: () => MaintenanceWorkLease
   private readonly admissionsOpen: () => boolean
@@ -464,19 +629,91 @@ export class MeetingMergeRunner {
   private inFlight = 0
   private lastDueRunAt = 0
 
+  /** sha256 by absolute path, loaded from `.engine-status.json` on the first collected pass. */
+  private readonly hashCache = new Map<string, HashCacheEntry>()
+  private hashCacheLoaded = false
+  /** Paths this pass actually looked at. The cache is rewritten to exactly these. */
+  private hashCacheSeen = new Set<string>()
+  /** The scan stamp to record IF this pass finishes collecting; dropped if it does not. */
+  private pendingInputScan: { newestMtimeMs: number; count: number; mode: MeetingEngineMode } | null = null
+  /** Whether this pass actually read inputs, so a bailed pass does not wipe the cache. */
+  private collectedThisPass = false
+  /** Operations paths per Fireflies id, remembered from the last collected pass. */
+  private firefliesPaths: Record<string, { sidecarRelPath?: string; scribeRelPath?: string }> | null = null
+
   constructor(deps: MergeRunnerDeps = {}) {
     this.store = deps.store ?? getMeetingActionsStore()
     this.library = deps.library ?? getImportedMeetingLibrary()
     this.mode = deps.mode ?? meetingEngineMode
+    // Only the REAL predicate can report a Mac-class change, because only it reads the
+    // file and the probe. A test that injects a mode gets a detail derived from that mode,
+    // never a claim about a machine it is not describing.
+    this.modeDetailFn = deps.mode ? null : meetingEngineModeDetail
     this.isPipelineMac = deps.isPipelineMac ?? meetingEngineIsPipelineMac
-    this.collect = deps.collectInputs ?? ((mode: MeetingEngineMode) => collectEngineInputs(mode, this.library))
+    // The change-scan and the hash cache both describe the FILESYSTEM the real collector
+    // reads. A caller that supplies its own inputs is describing something else entirely, so
+    // for it the scan would answer "nothing changed" about files it never looks at and every
+    // pass after the first would do nothing.
+    this.collectInjected = deps.collectInputs != null
+    this.collect = deps.collectInputs
+      ?? ((mode: MeetingEngineMode) => collectEngineInputs(mode, this.library, path => this.hashFor(path)))
     this.engine = deps.runEngine ?? (request => runEngineInWorker(request))
     this.acquireLease = deps.acquireLease ?? (() => acquireMaintenanceWork('meeting_merge'))
     this.admissionsOpen = deps.admissionsOpen ?? maintenanceAdmissionsOpen
-    this.captureActive = deps.captureActive ?? (() => false)
+    // PRINCIPLE 7, WIRED. This defaulted to `() => false`, which made "the engine never
+    // blocks live capture" a claim no code enforced: the production constructor passed no
+    // deps at all, so the only thing that ever deferred was a test. `recording_chunk` is the
+    // lease every live chunk write takes, and `meeting_save` the one a capture's own save
+    // holds, so between them they are the window where the CPU belongs to the meeting.
+    this.captureActive = deps.captureActive ?? defaultCaptureActive
     this.spawnPipeline = deps.spawnPipeline === undefined ? defaultPipelineSpawn : deps.spawnPipeline
     this.now = deps.now ?? (() => Date.now())
     this.log = deps.log ?? ((line: string) => console.log(`[meeting-merge] ${line}`))
+  }
+
+  // ── Hashing, once per changed file ──────────────────────────────────────────
+
+  private loadHashCache(store: ActionsStoreFile): void {
+    if (this.hashCacheLoaded) return
+    this.hashCacheLoaded = true
+    for (const [path, entry] of Object.entries(store.status.hashCache ?? {})) {
+      if (entry && typeof entry.sha256 === 'string' && typeof entry.mtimeMs === 'number' && typeof entry.size === 'number') {
+        this.hashCache.set(path, entry)
+      }
+    }
+  }
+
+  /**
+   * This file's sha256, read only when the file itself has moved.
+   *
+   * mtime AND size, not mtime alone: a same-size rewrite within one filesystem timestamp tick
+   * is exactly what an atomic replace of a sidecar looks like, and size is the cheap second
+   * opinion. Both come from the `statSync` this function has to do anyway.
+   */
+  private hashFor(path: string): string | undefined {
+    let stat
+    try { stat = statSync(path) } catch { return undefined }
+    this.hashCacheSeen.add(path)
+    const cached = this.hashCache.get(path)
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.sha256
+    const sha256 = sha256OfFile(path)
+    if (!sha256) return undefined
+    this.hashCache.set(path, { sha256, mtimeMs: stat.mtimeMs, size: stat.size })
+    return sha256
+  }
+
+  /** What the cache should be persisted as, pruned to what this pass saw. */
+  private hashCacheSnapshot(): Record<string, HashCacheEntry> {
+    const out: Record<string, HashCacheEntry> = {}
+    let kept = 0
+    for (const path of this.hashCacheSeen) {
+      const entry = this.hashCache.get(path)
+      if (!entry) continue
+      if (kept >= MAX_HASH_CACHE_ENTRIES) break
+      out[path] = entry
+      kept += 1
+    }
+    return out
   }
 
   busy(): boolean {
@@ -523,13 +760,17 @@ export class MeetingMergeRunner {
     return this.enqueue(() => this.execute(trigger))
   }
 
-  /** The 30 s tick: drive pending pipeline work, and run a full pass every six hours. */
+  /** The 30 s tick: drive waiting pipeline work, and run a full pass every six hours. */
   tick(): { fired: boolean; reason?: string } {
     if (!this.admissionsOpen()) return { fired: false, reason: 'admissions_closed' }
     if (this.busy()) return { fired: false, reason: 'run_in_progress' }
     const now = this.now()
+    // BOTH waiting states. `revert_pending` was missing here and in `drivePending`, so an
+    // Undo deferred by the sync lock or by a drain sat untouched until the server restarted:
+    // the action stayed `revert_pending`, `setMode` refused because something was in flight,
+    // and Control showed no way out of it.
     const hasDue = this.store.read().actions.some(action =>
-      action.state === 'pending' && (action.nextAt ?? 0) <= now)
+      isWaitingState(action.state) && (action.nextAt ?? 0) <= now)
     if (hasDue) {
       this.trigger('pending_retry')
       return { fired: true, reason: 'pending_retry' }
@@ -562,6 +803,9 @@ export class MeetingMergeRunner {
   private async execute(trigger: string, options: { rederiveOnly?: string[] } = {}): Promise<RunOutcome> {
     const mode = this.mode()
     const startedAt = this.now()
+    this.hashCacheSeen = new Set<string>()
+    this.pendingInputScan = null
+    this.collectedThisPass = false
     const summary: RunOutcome = {
       at: new Date(startedAt).toISOString(),
       mode,
@@ -582,25 +826,48 @@ export class MeetingMergeRunner {
     // Principle 7. A capture in flight owns the CPU; the backlog can wait 30 seconds.
     if (this.captureActive()) return await this.finishRun({ ...summary, skippedReason: 'capture_active' })
 
+    const before = this.store.read()
+    this.loadHashCache(before)
+
+    // Waiting pipeline work is driven whatever else this pass decides, INCLUDING on a pass
+    // that bails: an apply or an Undo the pipeline still owes must not be held hostage to
+    // whether any input file happens to have changed.
+    const drivePending = before.actions.filter(action =>
+      isWaitingState(action.state) && (action.nextAt ?? 0) <= startedAt)
+
+    // Nothing moved since the last collected pass, so there is nothing to collect. This is
+    // the common case on every trigger and it costs one stat per input file.
+    if (!options.rederiveOnly && !this.collectInjected) {
+      const stamp = scanInputStamp(mode, this.library)
+      const last = before.status.lastInputScan
+      if (last && last.mode === mode && last.newestMtimeMs === stamp.newestMtimeMs && last.count === stamp.count) {
+        for (const action of drivePending) {
+          const driven = await this.driveWaitingAction(action.id)
+          if (!driven.ok) summary.errors += 1
+        }
+        return await this.finishRun({ ...summary, skippedReason: 'inputs_unchanged' })
+      }
+      this.pendingInputScan = { ...stamp, mode }
+    }
+
     let inputs: EngineInputs
     try {
       inputs = await this.collect(mode)
     } catch (error) {
       this.log(`input collection failed: ${describe(error)}`)
+      this.pendingInputScan = null
       return await this.finishRun({ ...summary, errors: 1, skippedReason: 'inputs_unreadable' })
     }
+    this.collectedThisPass = true
+    this.rememberFirefliesPaths(inputs)
+    if (inputs.skipped && Object.keys(inputs.skipped).length > 0) summary.inputsSkipped = inputs.skipped
     if (inputs.g2.length + inputs.fireflies.length > ENGINE_MAX_INPUTS) {
       return await this.finishRun({ ...summary, skippedReason: 'too_many_inputs' })
     }
-
-    const before = this.store.read()
     // Anything the pipeline already merged is adopted once and never scored again
     // (v3 blocker 5). Without this the engine re-proposes every merge a person already has.
     const adopted = await this.adoptLegacy(inputs, before)
     summary.alreadyMerged = adopted.size
-
-    const drivePending = before.actions.filter(action =>
-      action.state === 'pending' && (action.nextAt ?? 0) <= startedAt)
 
     const g2ById = new Map(inputs.g2.map(row => [row.sessionId, row]))
     const firefliesById = new Map(inputs.fireflies.map(row => [row.id, row]))
@@ -628,6 +895,7 @@ export class MeetingMergeRunner {
 
     if (score) {
       summary.none = score.tierCounts.none
+      summary.clockBand = clockBandStatsOf(score.pairings, g2ById, firefliesById)
 
       for (const group of score.groups) {
         const canonical = sortedInputs(group.sessionIds, [group.primaryFirefliesId, ...group.alternateFirefliesIds])
@@ -675,6 +943,15 @@ export class MeetingMergeRunner {
         const canonical = sortedInputs([], [plan.firefliesId])
         if (isTombstoned(before.tombstones, canonical)) continue
         const fingerprints = fingerprintsFor(canonical, g2ById, firefliesById, inputs.g2Meta, inputs.firefliesMeta)
+        const decision = this.classifySplit(plan.firefliesId, canonical, mode, boundary, firefliesById, before)
+        if (decision === 'skip') continue
+        if (decision === 'auto') {
+          if (autoTaken >= MAX_AUTO_ACTIONS_PER_RUN) { summary.deferredByCap += 1; continue }
+          autoTaken += 1
+          const taken = await this.takeSplitAction({ canonical, fingerprints, tier: 'auto', plan, inputs, g2ById, firefliesById })
+          if (taken.ok) { summary.auto += 1; summary.actions.push(taken.id) } else summary.errors += 1
+          continue
+        }
         const id = await this.upsertSuggestion({
           kind: 'split',
           inputs: canonical,
@@ -709,7 +986,7 @@ export class MeetingMergeRunner {
     }
 
     for (const action of drivePending) {
-      const driven = await this.drivePipelineAction(action.id)
+      const driven = await this.driveWaitingAction(action.id)
       if (!driven.ok) summary.errors += 1
     }
 
@@ -738,8 +1015,8 @@ export class MeetingMergeRunner {
     if (isTombstoned(store.tombstones, canonical)) return 'skip'
     const id = actionIdFor('merge', canonical)
     const existing = store.actions.find(action => action.id === id)
+    // `applied` is already covered by the line above; a second check for it was dead code.
     if (existing && existing.state !== 'failed' && existing.state !== 'reverted') return 'skip'
-    if (existing?.state === 'applied' && existing.fingerprints === fingerprints) return 'skip'
     const suggestion = store.suggestions.find(row => row.id === suggestionIdFor('merge', canonical)
       || row.id === suggestionIdFor('would_merge', canonical))
     if (suggestion?.state === 'dismissed') return 'skip'
@@ -749,6 +1026,38 @@ export class MeetingMergeRunner {
 
     const tooOld = canonical.sessionIds.some(sessionId => (inputs.g2Meta[sessionId]?.finalizedAtMs ?? 0) < boundary)
     return tooOld ? 'suggest' : 'auto'
+  }
+
+  /**
+   * What to do with a split plan.
+   *
+   * SPLITS ARE AN IMPORTS-MODE ACTION ONLY. A split writes NEW records, one per piece; in
+   * apply mode the pipeline's job is to splice a patch into a scribe that already exists,
+   * and there is no additive, revertible way to turn one operations scribe into three. In
+   * advise and apply the plan therefore stays a suggestion for a person to look at, which is
+   * also what the copy, the changelog and the contract now say.
+   *
+   * D14 applies here as it does to merges: a recording that finished before the engine
+   * arrived is one nobody has measured, so it is only ever offered.
+   */
+  private classifySplit(
+    firefliesId: string,
+    canonical: CanonicalInputs,
+    mode: MeetingEngineMode,
+    boundary: number,
+    firefliesById: Map<string, FirefliesMeetingInput>,
+    store: ActionsStoreFile,
+  ): 'auto' | 'suggest' | 'skip' {
+    const id = actionIdFor('split', canonical)
+    const existing = store.actions.find(action => action.id === id)
+    if (existing && existing.state !== 'failed' && existing.state !== 'reverted') return 'skip'
+    const suggestion = store.suggestions.find(row => row.id === suggestionIdFor('split', canonical))
+    if (suggestion?.state === 'dismissed' || suggestion?.state === 'accepted') return 'skip'
+    if (mode !== 'imports') return 'suggest'
+    const source = firefliesById.get(firefliesId)
+    if (!source) return 'skip'
+    const finishedAtMs = source.startMs + Math.max(0, source.durationS) * 1000
+    return finishedAtMs < boundary ? 'suggest' : 'auto'
   }
 
   /**
@@ -860,7 +1169,7 @@ export class MeetingMergeRunner {
     fingerprints: string
     tier: 'auto' | 'accepted_suggestion'
     mode: MeetingEngineMode
-    group?: { primaryFirefliesId: string; alternateFirefliesIds: string[]; sessionIds: string[]; k1: number; k2: number }
+    group?: MergeGroup
     inputs: EngineInputs
     g2ById: Map<string, G2RecordingInput>
     firefliesById: Map<string, FirefliesMeetingInput>
@@ -901,12 +1210,111 @@ export class MeetingMergeRunner {
     }
   }
 
+  /**
+   * Cut one long recording into the meetings it holds, one record per piece.
+   *
+   * IMPORTS MODE ONLY, and additive like every other action: the original import stays on
+   * disk and the pieces supersede it in the list, so Revert is deleting what was added.
+   *
+   * ALL OR NOTHING. A half-written split is a recording that appears twice, once whole and
+   * once in fragments, so a piece that fails to derive takes the whole action down and
+   * removes whatever was already written. There is no partial split state to explain.
+   */
+  /** The engine's own plan for this one recording, re-made from what is on disk now. */
+  private async splitPlanFor(source: FirefliesMeetingInput, g2: readonly G2RecordingInput[]): Promise<SplitPlan | null> {
+    const result = await this.engine({ kind: 'score', g2: [...g2], fireflies: [source] })
+    if (result.kind !== 'score') return null
+    return result.splits.find(plan => plan.firefliesId === source.id && plan.split) ?? null
+  }
+
+  private async takeSplitAction(input: {
+    canonical: CanonicalInputs
+    fingerprints: string
+    tier: 'auto' | 'accepted_suggestion'
+    plan: SplitPlan
+    inputs: EngineInputs
+    g2ById: Map<string, G2RecordingInput>
+    firefliesById: Map<string, FirefliesMeetingInput>
+  }): Promise<{ ok: boolean; id: string }> {
+    const id = actionIdFor('split', input.canonical)
+    const source = input.firefliesById.get(input.plan.firefliesId)
+    if (!source || input.plan.pieces.length < 2) return { ok: false, id }
+
+    let lease: MaintenanceWorkLease
+    try {
+      lease = this.acquireLease()
+    } catch {
+      this.log(`split ${id} deferred: maintenance_drain_active`)
+      return { ok: false, id }
+    }
+
+    const sourceRecordId = importRecordId('fireflies', importHash(source.id))
+    const written: Array<{ path: string; recordId: string; sidecarPath?: string; markdown: string; pieceIndex: number }> = []
+    try {
+      for (const piece of input.plan.pieces) {
+        const captures = piece.sessionIds
+          .map(sessionId => input.g2ById.get(sessionId))
+          .filter((row): row is G2RecordingInput => row != null)
+        const derived = await this.engine({
+          kind: 'derive_piece',
+          input: { actionId: id, tier: input.tier, source, piece, pieceCount: input.plan.pieces.length, captures },
+        })
+        if (derived.kind !== 'derive') throw new Error('engine_result_kind')
+        if (!derived.result.ok) throw new Error(derived.result.error)
+        const record = derived.result.record
+        const result = this.library.writeRecord({
+          kind: 'piece',
+          hash: pieceHash(sourceRecordId, piece.index),
+          dateMs: source.startMs + piece.startS * 1000,
+          markdown: record.markdown,
+          sidecar: record.sidecar,
+        })
+        written.push({
+          path: result.filepath,
+          recordId: importRecordId('piece', pieceHash(sourceRecordId, piece.index)),
+          sidecarPath: result.sidecarPath,
+          markdown: record.markdown,
+          pieceIndex: piece.index,
+        })
+      }
+    } catch (error) {
+      for (const piece of written) {
+        for (const path of [piece.path, piece.sidecarPath]) {
+          if (path) { try { unlinkSync(path) } catch { /* nothing written is the state we wanted */ } }
+        }
+      }
+      lease.release()
+      this.log(`split ${id} failed: ${describe(error)}`)
+      await this.failAction(id, describe(error), input.canonical, input.fingerprints, 'imports', { kind: 'split' })
+      return { ok: false, id }
+    }
+    lease.release()
+
+    await this.store.update(store => {
+      upsertAction(store, {
+        id,
+        kind: 'split',
+        tier: input.tier,
+        inputs: input.canonical,
+        fingerprints: input.fingerprints,
+        outputs: written.map(piece => ({ path: piece.path, recordId: piece.recordId, sidecarPath: piece.sidecarPath })),
+        outputSha256: written.map(piece => sha256OfText(piece.markdown)),
+        state: 'applied',
+        mode: 'imports',
+        direction: 'apply',
+        at: new Date(this.now()).toISOString(),
+      })
+    })
+    return { ok: true, id }
+  }
+
   /** imports mode: render a derived record and write it through the library. */
   private async writeImportsRecord(input: {
     id: string
     canonical: CanonicalInputs
     fingerprints: string
     tier: 'auto' | 'accepted_suggestion'
+    group?: MergeGroup
     primary: FirefliesMeetingInput
     alternates: FirefliesMeetingInput[]
     captures: G2RecordingInput[]
@@ -919,7 +1327,11 @@ export class MeetingMergeRunner {
         primary: input.primary,
         alternates: input.alternates,
         captures: input.captures,
-        evidence: { k1: 0, k2: 0 },
+        // The GROUP's real K, not zeros. The derived sidecar's `evidence` is the only record
+        // of why a merge happened, and a sidecar that says K1 = K2 = 0 says a merge with no
+        // evidence behind it took place automatically.
+        evidence: { k1: input.group?.k1 ?? 0, k2: input.group?.k2 ?? 0 },
+        ...(coarseOffsets(input.group) ? { coarseOffsetMsBySession: coarseOffsets(input.group)! } : {}),
       },
     })
     if (derived.kind !== 'derive') {
@@ -962,6 +1374,7 @@ export class MeetingMergeRunner {
     canonical: CanonicalInputs
     fingerprints: string
     tier: 'auto' | 'accepted_suggestion'
+    group?: MergeGroup
     primary: FirefliesMeetingInput
     alternates: FirefliesMeetingInput[]
     captures: G2RecordingInput[]
@@ -1003,7 +1416,8 @@ export class MeetingMergeRunner {
       primary: input.primary,
       alternates: input.alternates,
       captures: input.captures,
-      evidence: { k1: 0, k2: 0 },
+      evidence: { k1: input.group?.k1 ?? 0, k2: input.group?.k2 ?? 0 },
+      ...(coarseOffsets(input.group) ? { coarseOffsetMsBySession: coarseOffsets(input.group)! } : {}),
       sidecarRelPathBySession,
     })
     const decision: MergeDecision = {
@@ -1017,7 +1431,16 @@ export class MeetingMergeRunner {
         .map(capture => input.inputs.g2Meta[capture.sessionId]?.scribeRelPath)
         .filter((path): path is string => typeof path === 'string'),
     }
-    writeDecision(decision, this.library.root)
+    try {
+      writeDecision(decision, this.library.root)
+    } catch (error) {
+      // A patch that adds nothing would apply cleanly, retire the capture and leave the
+      // scribe exactly as it was. The refusal is recorded on the action so a person sees
+      // why this one did not happen rather than seeing it quietly not happen.
+      const code = error instanceof DecisionError ? error.code : describe(error)
+      await this.failAction(input.id, code, input.canonical, input.fingerprints, 'apply')
+      return false
+    }
 
     await this.store.update(store => {
       upsertAction(store, {
@@ -1030,6 +1453,10 @@ export class MeetingMergeRunner {
         outputSha256: [],
         state: 'pending',
         mode: 'apply',
+        // Written down HERE, once, rather than inferred from the state later. A failed
+        // apply and a failed revert both come back to a waiting state, and only this field
+        // says which command the next drive should spawn.
+        direction: 'apply',
         at: new Date(this.now()).toISOString(),
         attempts: 0,
       })
@@ -1041,54 +1468,81 @@ export class MeetingMergeRunner {
   // ── The pipeline ────────────────────────────────────────────────────────────
 
   /**
-   * Spawn the pipeline for one pending action and record what it reported.
+   * Drive one waiting action, whatever kind of Mac wrote it.
+   *
+   * An `imports`-mode action can also be left waiting — a Revert that claimed the action and
+   * then lost the process before it finished deleting. It has no pipeline to spawn, so it is
+   * finished here rather than handed to a spawn that would answer `no_pipeline` forever.
+   */
+  async driveWaitingAction(actionId: string): Promise<{ ok: boolean; state: MergeActionRecord['state']; reason?: string }> {
+    const action = this.store.read().actions.find(row => row.id === actionId)
+    if (!action) return { ok: false, state: 'failed', reason: 'action_not_found' }
+    if (!isWaitingState(action.state)) return { ok: true, state: action.state }
+    if (action.mode === 'imports') {
+      if (directionOf(action) !== 'revert') return { ok: true, state: action.state }
+      await this.revertImportsRecord(action)
+      return { ok: true, state: 'reverted' }
+    }
+    return await this.drivePipelineAction(actionId)
+  }
+
+  /**
+   * Spawn the pipeline for one waiting action and record what it reported.
    *
    * NO SERVER LOCK AROUND THE SPAWN (v3 blocker 1). The child takes the pipeline's own lock
    * with no retries. Exit 3 means it could not, which is normal while the hourly sync runs:
-   * the action stays `pending` and comes back in two minutes. Anything else is a real
+   * the action stays waiting and comes back in two minutes. Anything else is a real
    * outcome, and every failure names a step so a person can see where it stopped.
+   *
+   * THE DIRECTION COMES FROM THE ROW, NOT THE STATE. A failed revert is reset to a waiting
+   * state so it can be retried; reading the direction back out of that state turned the
+   * retry of an Undo into a Redo.
    */
   async drivePipelineAction(actionId: string): Promise<{ ok: boolean; state: MergeActionRecord['state']; reason?: string }> {
     const spawn = this.spawnPipeline
     if (!spawn) return { ok: false, state: 'pending', reason: 'no_pipeline' }
     const action = this.store.read().actions.find(row => row.id === actionId)
     if (!action) return { ok: false, state: 'failed', reason: 'action_not_found' }
-    const reverting = action.state === 'revert_pending'
-    if (action.state !== 'pending' && !reverting) return { ok: true, state: action.state }
+    if (!isWaitingState(action.state)) return { ok: true, state: action.state }
+    const direction = directionOf(action)
+    const waiting = pendingStateFor(direction)
 
     let lease: MaintenanceWorkLease
     try {
       lease = this.acquireLease()
     } catch {
       await this.deferAction(actionId, 'maintenance_drain_active')
-      return { ok: false, state: 'pending', reason: 'maintenance_drain_active' }
+      return { ok: false, state: waiting, reason: 'maintenance_drain_active' }
     }
 
     let attempt: PipelineAttempt
     try {
       attempt = await spawn(
-        reverting ? ['--revert-merge-decision', actionId] : ['--apply-merge-decision', actionId],
+        direction === 'revert' ? ['--revert-merge-decision', actionId] : ['--apply-merge-decision', actionId],
         { actionId },
       )
     } catch (error) {
       lease.release()
-      await this.failAction(actionId, `spawn_failed: ${describe(error)}`)
+      await this.failAction(actionId, `spawn_failed: ${describe(error)}`, undefined, undefined, undefined, {
+        diagnostics: { code: null, signal: null, timedOut: false, elapsedMs: 0, spawnError: describe(error) },
+      })
       return { ok: false, state: 'failed', reason: 'spawn_failed' }
     }
     lease.release()
 
     if (attempt.code === PIPELINE_EXIT_LOCK_BUSY) {
       await this.deferAction(actionId, 'sync_lock_busy')
-      return { ok: false, state: reverting ? 'revert_pending' : 'pending', reason: 'sync_lock_busy' }
+      return { ok: false, state: waiting, reason: 'sync_lock_busy' }
     }
 
+    const diagnostics = diagnosticsOf(attempt)
     const parsed = parseResultLine<MergePipelineResult>(attempt.resultLines, isMergePipelineResult)
     if (!parsed.ok) {
       // Exit 4 is terminal whatever it printed: the decision does not match the disk, and a
       // retry cannot make it match.
       const terminal = attempt.code === PIPELINE_EXIT_DECISION_INVALID
       const reason = terminal ? 'decision_invalid' : `result_unreadable:${parsed.reason}`
-      await this.failAction(actionId, reason, undefined, undefined, undefined, { retryable: !terminal })
+      await this.failAction(actionId, reason, undefined, undefined, undefined, { retryable: !terminal, diagnostics })
       return { ok: false, state: 'failed', reason }
     }
 
@@ -1104,6 +1558,7 @@ export class MeetingMergeRunner {
         row.outputSha256 = result.outputs.map(output => output.sha256)
         delete row.error
         delete row.nextAt
+        delete row.diagnostics
       })
       if (result.status === 'reverted') {
         await this.tombstoneAction(actionId)
@@ -1113,7 +1568,10 @@ export class MeetingMergeRunner {
     }
 
     const reason = result.error_code ?? result.status
-    await this.failAction(actionId, result.step ? `${reason} at ${result.step}` : reason, undefined, undefined, undefined, { retryable: true })
+    await this.failAction(actionId, result.step ? `${reason} at ${result.step}` : reason, undefined, undefined, undefined, {
+      retryable: true,
+      diagnostics,
+    })
     return { ok: false, state: 'failed', reason }
   }
 
@@ -1132,7 +1590,7 @@ export class MeetingMergeRunner {
     canonical?: CanonicalInputs,
     fingerprints?: string,
     mode?: MeetingEngineMode,
-    options: { retryable?: boolean } = {},
+    options: { retryable?: boolean; kind?: 'merge' | 'split'; diagnostics?: PipelineFailureDiagnostics } = {},
   ): Promise<void> {
     await this.store.update(store => {
       const row = store.actions.find(item => item.id === actionId)
@@ -1140,7 +1598,7 @@ export class MeetingMergeRunner {
         if (!canonical) return
         store.actions.push({
           id: actionId,
-          kind: 'merge',
+          kind: options.kind ?? 'merge',
           tier: 'auto',
           inputs: canonical,
           fingerprints: fingerprints ?? '',
@@ -1148,7 +1606,9 @@ export class MeetingMergeRunner {
           outputSha256: [],
           state: 'failed',
           mode: mode === 'apply' ? 'apply' : 'imports',
+          direction: 'apply',
           error,
+          ...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
           at: new Date(this.now()).toISOString(),
         })
         return
@@ -1156,19 +1616,30 @@ export class MeetingMergeRunner {
       const attempts = (row.attempts ?? 0) + 1
       row.attempts = attempts
       row.error = error
+      if (options.diagnostics) row.diagnostics = options.diagnostics
       // Retried once, then it stays failed until a person acts. A pipeline that keeps
       // failing on one decision would otherwise burn a spawn every thirty seconds.
-      row.state = options.retryable && attempts < PIPELINE_MAX_ATTEMPTS ? 'pending' : 'failed'
-      if (row.state === 'pending') row.nextAt = this.now() + PIPELINE_LOCK_RETRY_MS
+      // A retryable REVERT comes back as a revert: `pendingStateFor` is the only thing
+      // standing between "try the Undo again" and "do the merge a second time".
+      row.state = options.retryable && attempts < PIPELINE_MAX_ATTEMPTS ? pendingStateFor(directionOf(row)) : 'failed'
+      if (isWaitingState(row.state)) row.nextAt = this.now() + PIPELINE_LOCK_RETRY_MS
       else delete row.nextAt
     })
   }
 
   private async finishRun(summary: RunOutcome): Promise<RunOutcome> {
     const { actions, suggestions, ...run } = summary
+    const collected = this.collectedThisPass
+    const scan = this.pendingInputScan
+    const hashCache = collected ? this.hashCacheSnapshot() : null
     await this.store.update(store => {
       store.status.engineInstalledAt ??= this.now()
       store.status.lastRun = run
+      // Recorded only for a pass that actually READ the inputs. A pass that bailed saw
+      // nothing, and writing its (empty) view would throw away the cache that made it
+      // cheap, so the next pass would read every sidecar again.
+      if (collected && scan) store.status.lastInputScan = scan
+      if (collected && hashCache) store.status.hashCache = hashCache
       if (!store.status.firstRun && !run.skippedReason) {
         store.status.firstRun = {
           startedAt: run.at,
@@ -1190,9 +1661,52 @@ export class MeetingMergeRunner {
 
   // ── Suggestions ─────────────────────────────────────────────────────────────
 
-  listSuggestions(state?: string): MergeSuggestionRecord[] {
+  /**
+   * Suggestions, each with both sides resolved to something a person can read.
+   *
+   * SERVER-SIDE, because only the server can do it on the Mac where it matters. A suggestion
+   * holds canonical ids; on a pipeline Mac the Fireflies side is a scribe in the operations
+   * tree whose path no client knows. The last collected pass already learned that mapping,
+   * so it is remembered here rather than re-scanned per request.
+   */
+  listSuggestions(state?: string): SuggestionWithSides[] {
     const rows = this.store.read().suggestions
-    return state && state !== 'all' ? rows.filter(row => row.state === state) : rows
+    const filtered = state && state !== 'all' ? rows.filter(row => row.state === state) : rows
+    return withSuggestionSides(filtered, {
+      library: this.library,
+      firefliesScribeRelPaths: this.firefliesPathsForSides(),
+    })
+  }
+
+  /**
+   * Operations paths per Fireflies id, from the last collected pass or a fresh scan.
+   *
+   * A list request must not cost a full collection, and after any pass in advise or apply
+   * mode the map is already in hand. It is only rebuilt when this process has not run a pass
+   * yet, which is the first request after a restart.
+   */
+  private firefliesPathsForSides(): Record<string, { sidecarRelPath?: string; scribeRelPath?: string }> {
+    if (this.firefliesPaths) return this.firefliesPaths
+    const mode = this.mode()
+    if (mode === 'imports') return {}
+    try {
+      this.rememberFirefliesPaths(collectEngineInputs(mode, this.library, () => undefined))
+    } catch {
+      return {}
+    }
+    return this.firefliesPaths ?? {}
+  }
+
+  private rememberFirefliesPaths(inputs: EngineInputs): void {
+    const paths: Record<string, { sidecarRelPath?: string; scribeRelPath?: string }> = {}
+    for (const [id, meta] of Object.entries(inputs.firefliesMeta)) {
+      if (!meta.sidecarRelPath && !meta.scribeRelPath) continue
+      paths[id] = {
+        ...(meta.sidecarRelPath ? { sidecarRelPath: meta.sidecarRelPath } : {}),
+        ...(meta.scribeRelPath ? { scribeRelPath: meta.scribeRelPath } : {}),
+      }
+    }
+    this.firefliesPaths = paths
   }
 
   listActions(limit = 100): MergeActionRecord[] {
@@ -1200,7 +1714,62 @@ export class MeetingMergeRunner {
     return rows.slice(-Math.max(1, Math.min(limit, rows.length))).reverse()
   }
 
-  /** Imports mode: turn a suggestion into a real merge. */
+  /** One action by id, for a surface that holds a link to it rather than a page of rows. */
+  getAction(actionId: string): MergeActionRecord {
+    const row = this.store.read().actions.find(action => action.id === actionId)
+    if (!row) throw new ActionRefusedError(404, 'action_not_found', 'That action is gone.')
+    return row
+  }
+
+  /**
+   * Put a failed action back in the queue, in the direction it was already going.
+   *
+   * WHY A ROUTE AND NOT JUST THE NEXT PASS. A merge that failed twice was terminal: nothing
+   * re-drove it, the comment on the boot sweep said otherwise, and Control's Retry button
+   * only reloaded the list. Two failures on one decision is exactly the case where a person
+   * has just fixed the thing that was wrong — a missing file, a full disk, a pipeline that
+   * was mid-upgrade — and the only way to say so was to restart the server.
+   *
+   * A RETRY RESETS THE ATTEMPT BUDGET. The bounded automatic retry exists so a broken
+   * decision cannot burn a spawn every thirty seconds; a person asking for one is not that.
+   */
+  async retryAction(actionId: string): Promise<{ ok: boolean; state: MergeActionRecord['state']; direction: ActionDirection }> {
+    // ASYNC so every refusal is a REJECTED PROMISE. A method that returns a promise and
+    // sometimes throws synchronously needs two error paths at every call site, and the one
+    // a caller forgets turns a 409 into a 500.
+    this.assertAdmissions()
+    if (this.busy()) {
+      throw new ActionRefusedError(409, 'run_in_progress', 'COS is working on meetings right now. Try again shortly.')
+    }
+    const current = this.getAction(actionId)
+    if (isWaitingState(current.state)) {
+      throw new ActionRefusedError(409, 'apply_in_flight', 'That one is already queued. Give it a moment.')
+    }
+    if (current.state !== 'failed') {
+      throw new ActionRefusedError(409, 'action_not_failed', 'Only a failed action can be retried.')
+    }
+    return this.enqueue(async () => {
+      const direction = directionOf(current)
+      const state = pendingStateFor(direction)
+      await this.store.update(store => {
+        const row = store.actions.find(item => item.id === actionId)
+        if (!row || row.state !== 'failed') return
+        row.state = state
+        row.direction = direction
+        row.attempts = 0
+        row.nextAt = this.now()
+        delete row.error
+        delete row.diagnostics
+      })
+      // Fire and forget, like every other trigger: the route answers now and the pass drives
+      // it. An imports-mode action has no pipeline to spawn, and the next pass retakes a
+      // failed one from the engine, which is what its retry means.
+      this.trigger('manual_retry')
+      return { ok: true, state, direction }
+    })
+  }
+
+  /** Imports mode: turn a suggestion into a real merge, or a real split. */
   acceptSuggestion(id: string): Promise<{ ok: boolean; actionId: string }> {
     this.assertAdmissions()
     return this.enqueue(async () => {
@@ -1213,8 +1782,20 @@ export class MeetingMergeRunner {
       if (suggestion.state === 'dismissed') {
         throw new ActionRefusedError(409, 'suggestion_dismissed', 'That suggestion was dismissed.')
       }
+      const kind = suggestion.kind === 'split' ? 'split' : 'merge'
+      // A split writes NEW records, one per piece. In apply mode the pipeline splices a
+      // patch into a scribe that already exists, and there is no additive, revertible way
+      // to turn one operations scribe into three, so the honest answer is a refusal rather
+      // than a 200 that did nothing.
+      if (kind === 'split' && mode === 'apply') {
+        throw new ActionRefusedError(
+          409,
+          'split_not_supported_in_apply_mode',
+          'COS can suggest splitting this recording, but only your pipeline can split a meeting it already filed.',
+        )
+      }
       if (suggestion.state === 'accepted') {
-        return { ok: true, actionId: actionIdFor('merge', suggestion.inputs) }
+        return { ok: true, actionId: actionIdFor(kind, suggestion.inputs) }
       }
       const inputs = await this.collect(mode)
       const g2ById = new Map(inputs.g2.map(row => [row.sessionId, row]))
@@ -1224,6 +1805,27 @@ export class MeetingMergeRunner {
       // the person agreed to what they were shown.
       if (fingerprints !== suggestion.fingerprints) {
         throw new ActionRefusedError(409, 'suggestion_stale', 'These meetings changed since this was suggested. Look again.')
+      }
+      if (kind === 'split') {
+        const firefliesId = suggestion.inputs.firefliesIds[0]
+        const source = firefliesId ? firefliesById.get(firefliesId) : undefined
+        if (!source) throw new ActionRefusedError(409, 'suggestion_stale', 'That recording is no longer here. Look again.')
+        // Re-planned from the CURRENT recording rather than replayed from the suggestion's
+        // stored spans: the fingerprint proves the bytes are the same, and the plan is the
+        // engine's to make.
+        const plan = await this.splitPlanFor(source, inputs.g2)
+        if (!plan) throw new ActionRefusedError(409, 'split_no_longer_planned', 'COS no longer sees more than one meeting in that recording.')
+        const taken = await this.takeSplitAction({
+          canonical: suggestion.inputs,
+          fingerprints,
+          tier: 'accepted_suggestion',
+          plan,
+          inputs,
+          g2ById,
+          firefliesById,
+        })
+        if (taken.ok) await this.markSuggestion(id, 'accepted')
+        return { ok: taken.ok, actionId: taken.id }
       }
       const taken = await this.takeMergeAction({
         canonical: suggestion.inputs,
@@ -1327,6 +1929,11 @@ export class MeetingMergeRunner {
         const row = store.actions.find(item => item.id === actionId)
         if (!row || row.state !== 'applied') return false
         row.state = 'revert_pending'
+        // The intent, written down. Every later drive of this action reads it, including
+        // the one after a `partial` result reset the row to a waiting state.
+        row.direction = 'revert'
+        row.attempts = 0
+        delete row.error
         return true
       })
       if (!claimed) throw new ActionRefusedError(409, 'revert_in_progress', 'That undo is already running.')
@@ -1416,6 +2023,9 @@ export class MeetingMergeRunner {
             const row = store.actions.find(item => item.id === preview.actionId)
             if (!row || row.state !== 'applied') return false
             row.state = 'revert_pending'
+            row.direction = 'revert'
+            row.attempts = 0
+            delete row.error
             return true
           })
           if (!claimed) { failed.push({ id: preview.actionId, reason: 'not_applied' }); continue }
@@ -1438,18 +2048,41 @@ export class MeetingMergeRunner {
 
   // ── Status and mode ─────────────────────────────────────────────────────────
 
+  /** The mode plus what it was decided from, with a safe shape when a mode is injected. */
+  private modeDetail(): ReturnType<typeof meetingEngineModeDetail> {
+    if (this.modeDetailFn) return this.modeDetailFn()
+    const mode = this.mode()
+    return {
+      mode,
+      observedMacClass: mode === 'imports' ? 'standalone' : 'pipeline',
+      macClassChanged: false,
+    }
+  }
+
   async status(): Promise<{
     mode: MeetingEngineMode
     isPipelineMac: boolean
     pipelineSees: { mode: string; active: boolean; appliedActions: number } | null
     mismatch: boolean
+    /** Advise, with merges the pipeline still honours. Expected after a rollback, not a bug. */
+    mergesRemainApplied: boolean
+    macClass?: { observed: MeetingEngineMacClass; recorded?: MeetingEngineMacClass; changed: boolean }
     lastRun?: EngineRunSummary
     firstRun?: ActionsStoreFile['status']['firstRun']
-    counts: { auto: number; suggested: number; none: number; reverted: number; pending: number; failed: number }
+    counts: {
+      auto: number
+      suggested: number
+      none: number
+      reverted: number
+      pending: number
+      revertPending: number
+      failed: number
+    }
     engineInstalledAt?: number
     running: boolean
   }> {
-    const mode = this.mode()
+    const detail = this.modeDetail()
+    const mode = detail.mode
     const store = this.store.read()
     const pipelineSees = await this.pipelineStatus(store)
     const counts = {
@@ -1458,16 +2091,33 @@ export class MeetingMergeRunner {
       none: store.status.lastRun?.none ?? 0,
       reverted: store.actions.filter(row => row.state === 'reverted').length,
       pending: store.actions.filter(row => row.state === 'pending').length,
+      // Its own count. An Undo that cannot finish is the state `setMode` refuses on and the
+      // one Control has to be able to name, and rolling it into `pending` hid it.
+      revertPending: store.actions.filter(row => row.state === 'revert_pending').length,
       failed: store.actions.filter(row => row.state === 'failed').length,
     }
-    // The one thing a person cannot see for themselves: the server says apply, and the
-    // pipeline on the same Mac still thinks it owns the blend.
-    const mismatch = pipelineSees != null && ((mode === 'apply') !== (pipelineSees.mode === 'apply' || pipelineSees.active))
+    // ADVISE PLUS ACTIVE IS NOT A DISAGREEMENT. `merge_engine_active()` stays true while any
+    // applied action exists, precisely so the old blend path does not restart over merged
+    // scribes after the mode is rolled back. That is the documented rollback state, and
+    // reporting it as a mismatch told a person their two halves disagreed when they agreed.
+    const mergesRemainApplied = mode === 'advise'
+      && pipelineSees != null
+      && pipelineSees.active
+      && pipelineSees.mode !== 'apply'
+    const mismatch = pipelineSees != null
+      && !mergesRemainApplied
+      && ((mode === 'apply') !== (pipelineSees.mode === 'apply' || pipelineSees.active))
     return {
       mode,
-      isPipelineMac: this.isPipelineMac(),
+      isPipelineMac: mode !== 'imports',
       pipelineSees,
       mismatch,
+      mergesRemainApplied,
+      macClass: {
+        observed: detail.observedMacClass,
+        ...(detail.recordedMacClass ? { recorded: detail.recordedMacClass } : {}),
+        changed: detail.macClassChanged,
+      },
       ...(store.status.lastRun ? { lastRun: store.status.lastRun } : {}),
       ...(store.status.firstRun ? { firstRun: store.status.firstRun } : {}),
       counts,
@@ -1484,7 +2134,7 @@ export class MeetingMergeRunner {
     if (this.now() - seenAt < PIPELINE_STATUS_CACHE_MS) return store.status.pipelineSees ?? null
     let value: { mode: string; active: boolean; appliedActions: number } | null = null
     try {
-      const attempt = await spawn(['--merge-engine-status'], {})
+      const attempt = await spawn([PIPELINE_STATUS_ARG], {})
       if (attempt.code === 0) {
         const line = attempt.stdout.split(/\r?\n/).map(row => row.trim()).filter(Boolean).pop() ?? ''
         const parsed = JSON.parse(line) as Record<string, unknown>
@@ -1542,6 +2192,104 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Whether a meeting is being captured right now.
+ *
+ * `recording_chunk` is the lease every live chunk write takes, and `meeting_save` the one a
+ * capture's own save holds. Deliberately NOT `meeting_batch_finalization`: the merge run is
+ * TRIGGERED from inside that lease (`routes/meeting.ts`, at the end of the finalization
+ * job), so counting it would defer the very pass the finalization just asked for, and the
+ * six-hourly tick would be the next chance to score a meeting that finished minutes ago.
+ */
+function defaultCaptureActive(): boolean {
+  const byKind = maintenanceLifecycle.snapshot().activeByKind as Record<string, number>
+  return (byKind.recording_chunk ?? 0) > 0 || (byKind.meeting_save ?? 0) > 0
+}
+
+/** The alignment offsets pairing measured, or undefined when it measured none. */
+function coarseOffsets(group: MergeGroup | undefined): Record<string, number> | null {
+  if (!group) return null
+  const offsets: Record<string, number> = {}
+  for (const [sessionId, offsetMs] of Object.entries(group.offsetMsBySession)) {
+    if (typeof offsetMs === 'number' && Number.isFinite(offsetMs)) offsets[sessionId] = offsetMs
+  }
+  return Object.keys(offsets).length > 0 ? offsets : null
+}
+
+/** The trimmed stderr tail a diagnostics row keeps. Enough for a traceback's last frames. */
+export const DIAGNOSTIC_STDERR_CHARS = 2_000
+
+/** `COS_MERGE_DECISION_INVALID=<code>`, which the pipeline prints before exiting 4. */
+const DECISION_INVALID_LINE = /^COS_MERGE_DECISION_INVALID=.*$/m
+
+/**
+ * What a failed child did, from the attempt alone.
+ *
+ * `Command failed` with an empty stderr is three different bugs — a non-zero exit, a timeout
+ * kill, and a failed fork — and a row that records only the message cannot tell them apart
+ * afterwards. Every one of them is a separate field here.
+ */
+function diagnosticsOf(attempt: PipelineAttempt): PipelineFailureDiagnostics {
+  const stderr = attempt.stderr.trim()
+  const decisionInvalid = attempt.stderr.match(DECISION_INVALID_LINE)?.[0]
+    ?? attempt.stdout.match(DECISION_INVALID_LINE)?.[0]
+  return {
+    code: attempt.code,
+    signal: attempt.signal,
+    timedOut: attempt.timedOut,
+    elapsedMs: attempt.elapsedMs,
+    ...(stderr ? { stderr: stderr.slice(-DIAGNOSTIC_STDERR_CHARS) } : {}),
+    ...(decisionInvalid ? { decisionInvalid } : {}),
+    ...(attempt.spawnError ? { spawnError: attempt.spawnError } : {}),
+  }
+}
+
+function median(values: readonly number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
+}
+
+/**
+ * What the clock band did this run.
+ *
+ * `PAIRING_CLOCK_BAND_S` was chosen from 198 scored recordings on one Mac and nothing made
+ * its effect observable anywhere else. These five numbers do: `candidatesZeroed` rising is
+ * the band refusing real matches, and the winner skews say how much of the band this Mac's
+ * clocks actually use.
+ */
+function clockBandStatsOf(
+  pairings: readonly PairingResult[],
+  g2ById: Map<string, G2RecordingInput>,
+  firefliesById: Map<string, FirefliesMeetingInput>,
+): ClockBandStats {
+  let candidates = 0
+  let anchorsDropped = 0
+  let candidatesZeroed = 0
+  const winnerSkews: number[] = []
+  for (const pairing of pairings) {
+    for (const candidate of pairing.candidates) {
+      if (candidate.anchorsOutsideClockBand <= 0) continue
+      candidates += 1
+      anchorsDropped += candidate.anchorsOutsideClockBand
+      if (candidate.k === 0) candidatesZeroed += 1
+    }
+    if (!pairing.primaryFirefliesId) continue
+    const recording = g2ById.get(pairing.sessionId)
+    const meeting = firefliesById.get(pairing.primaryFirefliesId)
+    if (!recording || !meeting) continue
+    winnerSkews.push(Math.abs(recording.startMs - meeting.startMs) / 1000)
+  }
+  return {
+    candidates,
+    anchorsDropped,
+    candidatesZeroed,
+    maxWinnerSkewS: winnerSkews.length > 0 ? Math.round(Math.max(...winnerSkews)) : 0,
+    medianWinnerSkewS: Math.round(median(winnerSkews)),
+  }
+}
+
 function sha256OfText(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
 }
@@ -1562,6 +2310,9 @@ function addTombstones(store: ActionsStoreFile, inputs: CanonicalInputs, source:
   }
 }
 
+/** `--merge-engine-status` asks what the PIPELINE sees, so it must not be told what to see. */
+export const PIPELINE_STATUS_ARG = '--merge-engine-status'
+
 /** The real spawn. Null on a Mac with no pipeline, which is how imports mode gets no child. */
 function defaultPipelineSpawn(args: readonly string[], options: { actionId?: string }): Promise<PipelineAttempt> {
   const scriptsDir = process.env.COS_SCRIPTS_DIR?.trim()
@@ -1572,6 +2323,12 @@ function defaultPipelineSpawn(args: readonly string[], options: { actionId?: str
   if (!existsSync(script) || !existsSync(pythonBin)) {
     return Promise.reject(new Error('COS pipeline is not installed on this Mac'))
   }
+  // THE STATUS PROBE RUNS WITH THE INHERITED ENVIRONMENT. Injecting the server's own
+  // COS_DATA_DIR made the child resolve the SERVER's mode file, so `pipelineSees` was the
+  // server reading itself back and `mismatch` could not be true however far the two halves
+  // had actually drifted. The pipeline's own processes — the hourly sync, the watcher —
+  // resolve the data dir the way this child now does, which is the thing being compared.
+  const isStatusProbe = args[0] === PIPELINE_STATUS_ARG
   return runPipelineCommand({
     pythonBin,
     script,
@@ -1581,9 +2338,10 @@ function defaultPipelineSpawn(args: readonly string[], options: { actionId?: str
       ...process.env,
       PYTHONUNBUFFERED: '1',
       PATH: pipelinePath(),
-      // Explicit, not inherited: the pipeline resolves the mode file and the decision from
-      // these two, and a child that guessed either would act on the wrong Mac's state.
-      COS_DATA_DIR: dirname(importsRoot()),
+      // Explicit, not inherited, for real WORK: the pipeline resolves the mode file and the
+      // decision from these two, and a child that guessed either would act on the wrong
+      // Mac's state.
+      ...(isStatusProbe ? {} : { COS_DATA_DIR: dirname(importsRoot()) }),
       ...(options.actionId ? { COS_MERGE_DECISION_FILE: join(importsRoot(), 'decisions', `${options.actionId}.json`) } : {}),
     },
     resultPrefix: MERGE_RESULT_PREFIX,
@@ -1655,18 +2413,37 @@ export function stopMeetingMergeScheduler(): void {
   correctionHookOff = null
 }
 
-/** On boot, after the imports sweep: drive whatever a previous process left pending. */
+/**
+ * On boot, after the imports sweep: drive whatever a previous process left waiting.
+ *
+ * WAITING, NOT FAILED. A `failed` action is one that already used its automatic retry, and
+ * re-driving it on every restart is how a broken decision spawns a child every time the
+ * server comes up. A person retries it through `POST /api/meeting-actions/:id/retry`, which
+ * puts it back in the correct direction's waiting state and this sweep's own queue.
+ */
 export async function redrivePendingMergeActions(): Promise<number> {
   const active = getMeetingMergeRunner()
-  const pending = active.listActions(Number.MAX_SAFE_INTEGER)
-    .filter(row => row.state === 'pending' || row.state === 'revert_pending')
-  for (const row of pending) {
-    try { await active.drivePipelineAction(row.id) } catch { /* the tick retries */ }
+  const waiting = active.listActions(Number.MAX_SAFE_INTEGER).filter(row => isWaitingState(row.state))
+  for (const row of waiting) {
+    try { await active.driveWaitingAction(row.id) } catch { /* the tick retries */ }
   }
-  return pending.length
+  return waiting.length
 }
 
-/** Directory the stores live in, for callers that need to name it. */
-export function meetingActionsRoot(): string {
-  return importsRoot()
+/**
+ * Decision files with no action behind them.
+ *
+ * A decision is written BEFORE its action row, so a crash in that window leaves a file
+ * holding transcript text that nothing will ever read or delete. The sweep runs on boot,
+ * beside the library's own, and only removes ids no action claims.
+ */
+export function sweepOrphanDecisions(): number {
+  const known = new Set(getMeetingMergeRunner().listActions(Number.MAX_SAFE_INTEGER).map(row => row.id))
+  let removed = 0
+  for (const actionId of listDecisionIds(importsRoot())) {
+    if (known.has(actionId)) continue
+    deleteDecision(actionId, importsRoot())
+    removed += 1
+  }
+  return removed
 }

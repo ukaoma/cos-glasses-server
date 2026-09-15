@@ -47,11 +47,30 @@ export type MeetingEnginePipelineMode = 'advise' | 'apply'
 export const MERGE_MODE_FILENAME = 'merge-engine.json'
 export const MERGE_MODE_SCHEMA = 1
 
+/**
+ * What kind of Mac this install has been observed to be.
+ *
+ * WHY IT IS REMEMBERED. `g2RecordingsReachOperations()` is a LIVE probe: it stats the COS
+ * venv's python and `sync_meetings.py`. Those two go missing for reasons that have nothing
+ * to do with this Mac's identity — iCloud evicting the checkout, a `pip` rebuild, COS
+ * Control changing `COS_SCRIPTS_DIR` between two reads. Every one of those made the predicate
+ * answer `imports`, and `imports` is the one mode that lets the server IMPORT Fireflies
+ * meetings the pipeline already files, which is how one meeting becomes two rows that each
+ * look canonical.
+ *
+ * A Mac that has once been seen with a pipeline is remembered as one. A transient negative
+ * then keeps the recorded mode (advise, the safe default) rather than flipping to imports,
+ * and the disagreement is reported in engine status as an alarm instead of acted on.
+ */
+export type MeetingEngineMacClass = 'pipeline' | 'standalone'
+
 export interface MergeModeFile {
   schema: number
   mode: MeetingEnginePipelineMode
   changedAt: string
-  changedBy: 'control'
+  changedBy: 'control' | 'server'
+  /** The Mac class this install has been observed to be. Absent on a pre-QA1 file. */
+  macClass?: MeetingEngineMacClass
 }
 
 export function mergeModeFilePath(): string {
@@ -65,43 +84,114 @@ export function mergeModeFilePath(): string {
  * unknown mode — answers `advise`. A file that cannot be understood must never
  * be read as permission to write into operations/.
  */
-export function readMergeModeFile(path: string = mergeModeFilePath()): MeetingEnginePipelineMode {
+/** The whole file, or null when it cannot be understood. */
+export function readMergeModeRecord(path: string = mergeModeFilePath()): MergeModeFile | null {
   let raw: string
   try {
     raw = readFileSync(path, 'utf8')
   } catch {
-    return 'advise'
+    return null
   }
   try {
     const parsed = JSON.parse(raw) as Partial<MergeModeFile>
-    if (parsed?.schema !== MERGE_MODE_SCHEMA) return 'advise'
-    return parsed.mode === 'apply' ? 'apply' : 'advise'
+    if (parsed?.schema !== MERGE_MODE_SCHEMA) return null
+    return {
+      schema: MERGE_MODE_SCHEMA,
+      mode: parsed.mode === 'apply' ? 'apply' : 'advise',
+      changedAt: typeof parsed.changedAt === 'string' ? parsed.changedAt : new Date(0).toISOString(),
+      changedBy: parsed.changedBy === 'server' ? 'server' : 'control',
+      ...(parsed.macClass === 'pipeline' || parsed.macClass === 'standalone' ? { macClass: parsed.macClass } : {}),
+    }
   } catch {
-    return 'advise'
+    return null
   }
+}
+
+export function readMergeModeFile(path: string = mergeModeFilePath()): MeetingEnginePipelineMode {
+  return readMergeModeRecord(path)?.mode ?? 'advise'
 }
 
 /** Write the mode file atomically. The server is the only caller. */
 export function writeMergeModeFile(
   mode: MeetingEnginePipelineMode,
-  options: { path?: string; now?: () => number } = {},
+  options: { path?: string; now?: () => number; macClass?: MeetingEngineMacClass; changedBy?: 'control' | 'server' } = {},
 ): MergeModeFile {
+  const path = options.path ?? mergeModeFilePath()
+  const macClass = options.macClass ?? readMergeModeRecord(path)?.macClass
   const record: MergeModeFile = {
     schema: MERGE_MODE_SCHEMA,
     mode,
     changedAt: new Date((options.now ?? Date.now)()).toISOString(),
-    changedBy: 'control',
+    changedBy: options.changedBy ?? 'control',
+    ...(macClass ? { macClass } : {}),
   }
-  durableAtomicWriteFileSync(options.path ?? mergeModeFilePath(), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
+  durableAtomicWriteFileSync(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
   return record
 }
 
+/**
+ * Remember the Mac class, at most once per process per class.
+ *
+ * Bounded on purpose: `meetingEngineMode()` is called on every list, every detail, every
+ * status poll and every import refusal, and a write per call would be a write per request.
+ * The class only ever changes when a person installs or removes the COS pipeline, so once
+ * per process is enough to notice it.
+ */
+let rememberedMacClass: MeetingEngineMacClass | null = null
+
+/** Test seam: forget what this process has already written. */
+export function resetRememberedMacClass(): void {
+  rememberedMacClass = null
+}
+
+function rememberMacClass(macClass: MeetingEngineMacClass, current: MergeModeFile | null): void {
+  if (rememberedMacClass === macClass) return
+  rememberedMacClass = macClass
+  try {
+    writeMergeModeFile(current?.mode ?? 'advise', { macClass, changedBy: 'server' })
+  } catch {
+    // The data home is not writable. The predicate still answers; only the memory is lost.
+  }
+}
+
+/**
+ * The mode, and what it was decided from.
+ *
+ * A LIVE POSITIVE ALWAYS WINS: a Mac that can reach operations right now is a pipeline Mac,
+ * whatever the file says. A live NEGATIVE only wins when the file has never seen a pipeline
+ * here. That asymmetry is deliberate — being wrong towards `advise` writes nothing, and being
+ * wrong towards `imports` imports meetings the pipeline already owns.
+ */
+export function meetingEngineModeDetail(): {
+  mode: MeetingEngineMode
+  observedMacClass: MeetingEngineMacClass
+  recordedMacClass?: MeetingEngineMacClass
+  /** True when the recorded class and the live probe disagree. Reported, never acted on. */
+  macClassChanged: boolean
+} {
+  const reaches = g2RecordingsReachOperations()
+  const record = readMergeModeRecord()
+  const observedMacClass: MeetingEngineMacClass = reaches ? 'pipeline' : 'standalone'
+  const recordedMacClass = record?.macClass
+
+  if (reaches) {
+    rememberMacClass('pipeline', record)
+    return { mode: record?.mode ?? 'advise', observedMacClass, ...(recordedMacClass ? { recordedMacClass } : {}), macClassChanged: recordedMacClass === 'standalone' }
+  }
+  if (recordedMacClass === 'pipeline') {
+    // A transient negative. Keep the recorded mode and raise the alarm instead of importing
+    // meetings a pipeline that is merely unreadable right now still owns.
+    return { mode: record?.mode ?? 'advise', observedMacClass, recordedMacClass, macClassChanged: true }
+  }
+  rememberMacClass('standalone', record)
+  return { mode: 'imports', observedMacClass, ...(recordedMacClass ? { recordedMacClass } : {}), macClassChanged: false }
+}
+
 export function meetingEngineMode(): MeetingEngineMode {
-  if (!g2RecordingsReachOperations()) return 'imports'
-  return readMergeModeFile()
+  return meetingEngineModeDetail().mode
 }
 
 /** Whether this Mac may be switched between advise and apply at all. */
 export function meetingEngineIsPipelineMac(): boolean {
-  return g2RecordingsReachOperations()
+  return meetingEngineModeDetail().mode !== 'imports'
 }

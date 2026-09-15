@@ -117,6 +117,18 @@ export interface MergeGroup {
   sessionIds: string[]
   k1: number
   k2: number
+  /**
+   * The offset PAIRING measured for each capture, in ms, or null when it measured none.
+   *
+   * WHY THE GROUP HAS TO CARRY IT. Alignment needs a coarse offset to search around, and
+   * without one it falls back to the difference between the two CLOCKS. Pairing already knows
+   * better: it found the offset the shared phrases imply, which is the whole point of the
+   * evidence step. On the 9 of 167 winners whose clocks disagree by more than 300 s, the
+   * clock fallback puts the alignment band (`ALIGN_BAND_S = 300`) entirely off the real
+   * anchors, so alignment fails and the capture is attached without relabelling — silently,
+   * because "unaligned" is a legitimate outcome.
+   */
+  offsetMsBySession: Record<string, number | null>
 }
 
 export function tierFor(k1: number, k2: number): MergeTier {
@@ -294,6 +306,7 @@ export function groupAutoMerges(
       }
       existing.k1 = Math.max(existing.k1, result.k1)
       existing.k2 = Math.max(existing.k2, result.k2)
+      existing.offsetMsBySession[result.sessionId] = result.offsetMs
       continue
     }
     groups.set(result.primaryFirefliesId, {
@@ -302,6 +315,7 @@ export function groupAutoMerges(
       sessionIds: [result.sessionId],
       k1: result.k1,
       k2: result.k2,
+      offsetMsBySession: { [result.sessionId]: result.offsetMs },
     })
   }
   const ordered = [...groups.values()]

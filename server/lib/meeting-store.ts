@@ -17,7 +17,7 @@ import {
   safeReadFile,
   safeReadFileHead,
 } from './meeting-file-guards.js'
-import { parseMeeting, toMeta } from './meeting-parse.js'
+import { parseField, parseMeeting, toMeta } from './meeting-parse.js'
 import type {
   ProviderCandidateRecord,
   IndexedTranscriptChunk,
@@ -28,6 +28,9 @@ import type {
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
 const DAY_FILE_PREFIX = /^(\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]))_/
+
+/** Enough to clear a scribe's metadata table whatever order its rows are in. */
+const DOMAIN_HEAD_BYTES = 4096
 const LIST_CAP = 50
 const LIST_CAP_SCOPED = 200
 
@@ -63,6 +66,7 @@ export {
   parseMeeting,
   toMeta,
 } from './meeting-parse.js'
+
 
 export class MeetingStoreError extends Error {
   constructor(
@@ -107,6 +111,10 @@ export interface MeetingMeta {
   librarySource?: 'direct_library' | 'cos_operations' | 'standalone_recordings' | 'imported' | 'blended'
   recordId?: string
   mutable?: boolean
+  /** The vendor's own id for an imported meeting (the Fireflies transcript id).
+   *  Carried so no client has to re-derive `imported:fireflies:<h16>` from a hash
+   *  rule written in a comment. Absent on every non-imported row. */
+  vendorId?: string
   /** Where the meeting actually came from, when `domain` is a routing value
    *  rather than the meeting's own domain. Every imported row carries
    *  `domain: 'imported'`, so without this a Quilt call and a personal one are
@@ -503,13 +511,44 @@ export class MeetingStore {
       .reverse()
   }
 
-  listDayCounts(month: string): Array<{ date: string; count: number }> {
+  /**
+   * How many recordings this store holds per day in one month.
+   *
+   * WITHOUT A DOMAIN this is a FILENAME scan: uncapped, opens nothing, and therefore able to
+   * describe a whole month the 50-row list cannot. That property is why the calendar uses it.
+   *
+   * WITH A DOMAIN it has to read, because a recording's domain is inside the file and not in
+   * its name. A count that ignored the filter answered "3 meetings" for a day whose filtered
+   * list showed one, which is the 6.46.x upgrade bug: on a Mac with zero imports the
+   * domain-filtered calendar counted every recording in the store, whatever domain it was.
+   */
+  listDayCounts(month: string, domain = 'all'): Array<{ date: string; count: number }> {
     if (!MONTH_PATTERN.test(month)) return []
     const rootReal = this.rootRealpath()
     if (!rootReal) return []
     const monthDir = join(this.root, month)
     const monthReal = safeDirectoryRealpath(monthDir, rootReal)
     if (!monthReal) return []
+    if (domain !== 'all') {
+      if (!isSafeDomainName(domain)) return []
+      const counts = new Map<string, number>()
+      // Deliberately NOT `list()`: that caps at 200 rows for a scoped query, and a day count
+      // that silently stops counting is worse than one that costs a read. One month, heads
+      // only, through the same safe reader the list uses.
+      for (const filename of readdirSync(monthDir).filter(name => SAFE_FILENAME_PATTERN.test(name))) {
+        try {
+          const content = safeReadFileHead(monthDir, monthReal, filename, DOMAIN_HEAD_BYTES)
+          if (content === null) continue
+          if (parseField(content, 'Domain') !== domain) continue
+          const date = filename.match(DAY_FILE_PREFIX)?.[1]
+          if (!date) continue
+          counts.set(date, (counts.get(date) ?? 0) + 1)
+        } catch {
+          // One unreadable entry must not hide the rest of the month.
+        }
+      }
+      return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, count]) => ({ date, count }))
+    }
     return meetingDayCountsFromNames(
       readdirSync(monthDir).filter(name => SAFE_FILENAME_PATTERN.test(name) || name.endsWith('.md')),
     )

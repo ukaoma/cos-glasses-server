@@ -51,6 +51,7 @@ import { meetingActionsRouter } from './routes/meeting-actions.js'
 import { meetingEngineRouter } from './routes/meeting-engine.js'
 import {
   redrivePendingMergeActions,
+  sweepOrphanDecisions,
   startMeetingMergeScheduler,
   stopMeetingMergeScheduler,
 } from './lib/meeting-actions.js'
@@ -980,7 +981,14 @@ listenRequiredServers(listeners).then(() => {
     // previous process wrote and did not finish; the pipeline steps are
     // idempotent, so re-driving one that actually completed is a no-op.
     void redrivePendingMergeActions()
-      .then(count => { if (count > 0) console.log(`[meeting-merge] re-drove ${count} pending action(s)`) })
+      .then(count => { if (count > 0) console.log(`[meeting-merge] re-drove ${count} waiting action(s)`) })
+      .then(() => {
+        // A decision file is written BEFORE its action row, so a crash in that window
+        // leaves transcript text nothing will ever read or delete. Runs after the
+        // re-drive, so an action being driven right now still owns its decision.
+        const removed = sweepOrphanDecisions()
+        if (removed > 0) console.log(`[meeting-merge] removed ${removed} orphan decision file(s)`)
+      })
       .catch(error => console.warn('[meeting-merge] pending re-drive failed', error))
 
     void initQueryJobRuntime().then(health => {

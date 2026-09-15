@@ -259,11 +259,28 @@ export function createMeetingsRouter(
             month: filters.month,
             day: filters.day,
           })
-          const meetings = dropSupersededRows(rows, supersededFromRows(rows))
+          const declaredSessions = supersededFromRows(rows).g2Sessions
+          const meetings = dropSupersededRows(rows, { g2Sessions: declaredSessions, importRecordIds: new Set<string>(), isEmpty: declaredSessions.size === 0 })
+          // ONLY WHEN THE LIST SAW THE WHOLE MONTH. The row list is capped, and a capped
+          // list knows about fewer merged scribes than the month holds, so handing its
+          // sessions to an UNCAPPED day count would subtract too little and put the dot
+          // back above the row. A capped page pays for the scan instead.
+          const listSawWholeMonth = rows.length < limit
           res.json({
             meetings,
             months: listCosOperationsMeetingMonths(domain),
-            days: filters.month ? supersededDayCounts(filters.month, 'multi_domain', { domain, store, library: importsLibrary, pipeline: true }) : [],
+            // The rows above already read every scribe in this month and told us which
+            // sessions the merged ones hold. Handing that over is the difference between
+            // one read per file and two on every month request.
+            days: filters.month
+              ? supersededDayCounts(filters.month, 'multi_domain', {
+                  domain,
+                  store,
+                  library: importsLibrary,
+                  pipeline: true,
+                  ...(listSawWholeMonth ? { declaredSessions } : {}),
+                })
+              : [],
             source: 'cos_operations',
             layout: 'multi_domain',
             root: library.root,

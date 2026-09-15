@@ -133,8 +133,28 @@ export function sha256OfFile(path: string): string | null {
   }
 }
 
+/**
+ * Does this patch add anything at all?
+ *
+ * A patch with no sections, no rows and no markers is a decision the pipeline can apply
+ * successfully while changing nothing: it archives the Fireflies scribe, retires the G2
+ * standalone, writes the same bytes back, and reports `applied`. The capture disappears from
+ * the list and nothing takes its place. That is the one outcome an additive design must not
+ * be able to produce, and the cheapest place to make it impossible is the writer, which
+ * every apply and every re-drive goes through.
+ */
+export function patchIsEmpty(patch: Pick<PipelinePatch, 'sections' | 'rows' | 'markers'> | null | undefined): boolean {
+  if (!patch) return true
+  return (patch.sections?.length ?? 0) === 0
+    && (patch.rows?.length ?? 0) === 0
+    && (patch.markers?.length ?? 0) === 0
+}
+
 /** Write one decision. The directory is created 0700 and the file 0600 every time. */
 export function writeDecision(decision: MergeDecision, root?: string): string {
+  if (patchIsEmpty(decision.patch)) {
+    throw new DecisionError('A merge decision must add something to the scribe', 'patch_empty')
+  }
   const path = decisionPath(decision.actionId, root)
   securePrivateDirectory(decisionsDir(root))
   durableAtomicWriteFileSync(path, `${JSON.stringify(decision, null, 2)}\n`, { mode: 0o600 })

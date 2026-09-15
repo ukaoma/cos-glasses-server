@@ -26,8 +26,7 @@
     "COS_UNSAVED_AUDIO_RETENTION_HOURS",
     "COS_CLAUDE_TRUST_MODE",
     "COS_CODEX_SANDBOX",
-    "COS_SCRIPTS_DIR",
-    "FIREFLIES_API_KEY"
+    "COS_SCRIPTS_DIR"
   ],
   "maintenance": {
     "scope": "cross_boot",

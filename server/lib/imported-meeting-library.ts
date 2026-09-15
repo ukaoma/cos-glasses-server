@@ -316,6 +316,20 @@ function originDomainFromSidecarHead(head: string | null): string {
   return isSafeDomainName(match[1]) ? match[1] : DEFAULT_ORIGIN_DOMAIN
 }
 
+/**
+ * The vendor's own id for an imported meeting.
+ *
+ * ON THE ROW SO NO CLIENT RE-DERIVES IT. `recordId` is `imported:fireflies:<h16>`, where the
+ * h16 is `sha256("fireflies:" + firefliesId)` — one way. A surface that wanted to say "this
+ * suggestion is about THAT row" therefore had to re-implement the server's hash in its own
+ * language, from a rule written in a comment, and be kept in step with it forever. The id it
+ * hashes is already in the sidecar; carrying it is cheaper than the agreement.
+ */
+function vendorIdFromSidecarHead(head: string | null): string | undefined {
+  const match = head?.match(/"firefliesId"\s*:\s*"([^"]{1,128})"/)
+  return match ? match[1] : undefined
+}
+
 export class ImportedMeetingLibrary {
   readonly root: string
 
@@ -459,9 +473,9 @@ export class ImportedMeetingLibrary {
     const hash = match[3]
     const detail = parseMeeting(content, filename, month)
     const stamp = extractMeetingDateTime(content, filename)
-    const originDomain = originDomainFromSidecarHead(
-      safeReadFileHead(monthDir, monthReal, sidecarFilenameFor(filename), IMPORT_SIDECAR_HEAD_BYTES),
-    )
+    const sidecarHead = safeReadFileHead(monthDir, monthReal, sidecarFilenameFor(filename), IMPORT_SIDECAR_HEAD_BYTES)
+    const originDomain = originDomainFromSidecarHead(sidecarHead)
+    const vendorId = kind === 'fireflies' ? vendorIdFromSidecarHead(sidecarHead) : undefined
     const meta = toMeta({ ...detail, date: stamp.date })
     return {
       ...meta,
@@ -469,6 +483,7 @@ export class ImportedMeetingLibrary {
       domain: IMPORTED_DOMAIN,
       domainAbbr: domainAbbreviation(originDomain),
       originDomain,
+      ...(vendorId ? { vendorId } : {}),
       librarySource: kind === 'fireflies' ? 'imported' : 'blended',
       recordId: importRecordId(kind, hash),
       mutable: false,
@@ -495,9 +510,9 @@ export class ImportedMeetingLibrary {
     // time. list() splits them; detail() has to split them the same way or the
     // row and the record it opens disagree about when the meeting happened.
     const stamp = extractMeetingDateTime(content, filename)
-    const originDomain = originDomainFromSidecarHead(
-      safeReadFileHead(monthDir, monthReal, sidecarFilenameFor(filename), IMPORT_SIDECAR_HEAD_BYTES),
-    )
+    const sidecarHead = safeReadFileHead(monthDir, monthReal, sidecarFilenameFor(filename), IMPORT_SIDECAR_HEAD_BYTES)
+    const originDomain = originDomainFromSidecarHead(sidecarHead)
+    const vendorId = kind === 'fireflies' ? vendorIdFromSidecarHead(sidecarHead) : undefined
     return {
       ...detail,
       date: stamp.date,
@@ -505,6 +520,7 @@ export class ImportedMeetingLibrary {
       domain: IMPORTED_DOMAIN,
       domainAbbr: domainAbbreviation(originDomain),
       originDomain,
+      ...(vendorId ? { vendorId } : {}),
       librarySource: kind === 'fireflies' ? 'imported' : 'blended',
       recordId: importRecordId(kind, match[3]),
       mutable: false,

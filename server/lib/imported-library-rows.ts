@@ -23,8 +23,9 @@
  * morning brief.
  */
 
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { dataPath } from './data-dir.js'
 import {
   cosOperationsMeetingsConfigured,
   discoverMeetingDomains,
@@ -58,6 +59,8 @@ export {
 } from './cos-operations-meetings.js'
 
 const DAY_FILE_PREFIX = /^(\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))_/
+/** The month folder a day-prefixed filename belongs to. */
+const MONTH_FROM_DAY_FILE = /^(\d{4}-(?:0[1-9]|1[0-2]))-(?:0[1-9]|[12]\d|3[01])_/
 
 /** One derived record's identity and inputs, read from its `.derived.json`. */
 export interface DerivedRecordSummary {
@@ -424,10 +427,30 @@ export function importedLibraryDayCounts(
 
 export type SupersededLayout = 'direct' | 'multi_domain' | 'standalone'
 
+/**
+ * The session a meeting file declares, with the same fallback the LIST uses.
+ *
+ * The operations tree gitignores `.g2-chunks.json`, so a recording whose markdown arrived
+ * through git or iCloud sits there with no sidecar beside it. `listCosOperationsMeetings`
+ * handles that by looking under the server's own recordings root by the same stem; this did
+ * not, so a row the list DROPPED was still counted, and the calendar dot said two where the
+ * list showed one. A count that can disagree with the list it counts is the bug being fixed.
+ */
+function droppedSessionId(directory: string, filename: string, recordingsRoot: string): string | undefined {
+  const direct = sidecarSessionId(directory, filename)
+  if (direct) return direct
+  const month = filename.match(MONTH_FROM_DAY_FILE)?.[1]
+  if (!month) return undefined
+  const fallbackDir = join(recordingsRoot, month)
+  if (!existsSync(fallbackDir)) return undefined
+  return sidecarSessionId(fallbackDir, filename)
+}
+
 /** One `-1` per file in `directories` whose chunk sidecar names a dropped session. */
 function sessionDropCounts(
   directories: readonly string[],
   sessions: ReadonlySet<string>,
+  recordingsRoot: string = dataPath('recordings'),
 ): Array<{ date: string; count: number }> {
   if (sessions.size === 0) return []
   const drops: Array<{ date: string; count: number }> = []
@@ -441,7 +464,7 @@ function sessionDropCounts(
     for (const filename of names) {
       const date = filename.match(DAY_FILE_PREFIX)?.[1]
       if (!date) continue
-      const sessionId = sidecarSessionId(directory, filename)
+      const sessionId = droppedSessionId(directory, filename, recordingsRoot)
       if (!sessionId || !sessions.has(sessionId)) continue
       drops.push({ date, count: -1 })
     }
@@ -472,15 +495,23 @@ function operationsMonthDirs(month: string, domainFilter: string): string[] {
  * worse than a count that costs a read, and in this layout the scribe is the
  * only place the merge is recorded.
  *
- * Bounded by the month the caller asked for, and the list already reads that
- * same month's scribes to build its rows.
+ * NOT WHEN THE CALLER ALREADY KNOWS. `/api/meetings` has just read every scribe
+ * in this month to build its rows, and each merged one told it which sessions it
+ * holds. Reading the same files again to learn the same thing doubled the cost
+ * of every month request on a pipeline Mac. The caller passes what it declared;
+ * only a caller with no list of its own — `probeMeetings` — pays for the scan.
+ *
+ * The markers sit before `## Transcript`, past the summary, decisions, action
+ * items and attendees, so there is no head-sized prefix that reliably holds
+ * them: when this does read, it reads the file.
  */
 function operationsMergedSessions(
-  month: string,
-  domainFilter: string,
+  directories: readonly string[],
+  declared: ReadonlySet<string> | undefined,
 ): Set<string> {
+  if (declared) return new Set(declared)
   const sessions = new Set<string>()
-  for (const directory of operationsMonthDirs(month, domainFilter)) {
+  for (const directory of directories) {
     let names: string[]
     try {
       names = readdirSync(directory).filter(name => name.endsWith('.md'))
@@ -514,21 +545,47 @@ export function supersededDayCounts(
     library?: ImportedMeetingLibrary
     /** Whether a COS pipeline files this Mac's recordings. Read live by default. */
     pipeline?: boolean
+    /**
+     * Sessions the CALLER's rows already declare they hold.
+     *
+     * `/api/meetings` has just read every scribe in this month; passing what it found here
+     * is the difference between one read per file and two. A caller with no list of its own
+     * omits it and the scan runs.
+     */
+    declaredSessions?: ReadonlySet<string>
+    /** The server's own recordings root, for the sidecar fallback. Tests point it at a temp dir. */
+    recordingsRoot?: string
   } = {},
 ): Array<{ date: string; count: number }> {
   if (!IMPORTED_MONTH_PATTERN.test(month)) return []
   const domain = options.domain ?? 'all'
   const store = options.store ?? getMeetingStore()
   const library = options.library ?? getImportedMeetingLibrary()
-  const superseded = supersededInputsOf(readDerivedRecords(library))
+  const derivedRecords = readDerivedRecords(library)
+  const superseded = supersededInputsOf(derivedRecords)
+
+  // NOTHING IMPORTED AND NOTHING DERIVED: answer exactly as 6.46.1 did.
+  //
+  // This helper replaced three different per-layout day counts with one union, and on a
+  // plain upgrade — no Fireflies key, no imports, no merges — that union was a behaviour
+  // change nobody asked for: `direct` and `multi_domain` started adding the standalone
+  // recordings store to counts that had never included it, so a domain-filtered calendar
+  // grew dots the list could not explain. Supersession has nothing to subtract here, so
+  // there is nothing this union buys.
+  if (derivedRecords.length === 0 && importedLibraryMonths(library).length === 0) {
+    if (layout === 'direct') return listDirectLibraryMeetingDays(month)
+    if (layout === 'multi_domain') return listCosOperationsMeetingDays(month, domain)
+    return store.listDayCounts(month, domain)
+  }
 
   if (layout === 'multi_domain' && (options.pipeline ?? g2RecordingsReachOperations())) {
     // Operations rows only, as the list shows them. The imports root is not read
     // into this layout at all: on a pipeline Mac the operations tree is the one
     // library, and a derived record here would be a second row for one meeting.
+    const directories = operationsMonthDirs(month, domain)
     return mergeDayCounts([
       listCosOperationsMeetingDays(month, domain),
-      sessionDropCounts(operationsMonthDirs(month, domain), operationsMergedSessions(month, domain)),
+      sessionDropCounts(directories, operationsMergedSessions(directories, options.declaredSessions), options.recordingsRoot),
     ])
   }
 
@@ -544,7 +601,9 @@ export function supersededDayCounts(
     const root = resolveMeetingLibrary().root
     if (root) sessionDirectories.push(join(root, month))
   }
-  groups.push(store.listDayCounts(month))
+  // DOMAIN-SCOPED. Every other group here honours the filter; this one did not, so a
+  // `domain=quilt` count added every personal recording in the store to it.
+  groups.push(store.listDayCounts(month, domain))
   sessionDirectories.push(join(store.root, month))
   groups.push(importedLibraryDayCounts(month, superseded, library, domain))
 
@@ -564,9 +623,9 @@ export function supersededDayCounts(
         if (sessionId) covered.add(sessionId)
       }
     }
-    groups.push(sessionDropCounts([join(store.root, month)], covered))
+    groups.push(sessionDropCounts([join(store.root, month)], covered, options.recordingsRoot))
   }
 
-  groups.push(sessionDropCounts(sessionDirectories, superseded.g2Sessions))
+  groups.push(sessionDropCounts(sessionDirectories, superseded.g2Sessions, options.recordingsRoot))
   return mergeDayCounts(groups)
 }
