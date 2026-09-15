@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { HOOK_EVENT_NAMES, parseHookEnvelope, toolFingerprint, type HookEnvelope } from './session-hook-events.js'
 import { applyHookEvent, SessionSignalStore, type SessionSignal } from './session-signal-store.js'
-import { deriveSessionState } from './session-state-derive.js'
+import { DEAD_GRACE_MS, deriveSessionState } from './session-state-derive.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'session-hooks-6.48.0')
 const noSpawn = { isCosSpawnedPid: () => false }
@@ -146,6 +146,11 @@ describe('the reducer rules the validation rounds added', () => {
     s = applyHookEvent(s, at(base[1].ts + 5, 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'git push' } }), noSpawn)
     s = applyHookEvent(s, at(base[1].ts + 6, 'Notification', { notification_type: 'agent_needs_input', message: 'x' }), noSpawn)
     expect(s.waiting?.kind).toBe('permission')
+    // A parallel auto-allowed Bash ending does not clear the prompt; a denial of the same tool does.
+    s = applyHookEvent(s, at(base[1].ts + 6, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } }), noSpawn)
+    expect(s.waiting?.kind).toBe('permission')
+    s = applyHookEvent(s, at(base[1].ts + 7, 'PermissionDenied', { tool_name: 'Read', tool_input: { file_path: '/x' } }), noSpawn)
+    expect(s.waiting?.kind).toBe('permission')
     s = applyHookEvent(s, at(base[1].ts + 7, 'PermissionDenied', { tool_name: 'Bash' }), noSpawn)
     expect(s.waiting).toBeNull()
     s = applyHookEvent(s, at(base[1].ts + 8, 'Notification', { notification_type: 'idle_prompt', message: '' }), noSpawn)
@@ -211,18 +216,28 @@ describe('deriveSessionState ranks hook, registry and transcript', () => {
     expect(d).toMatchObject({ agent_state: 'idle', state_source: 'registry' })
   })
 
-  it('registry waiting maps to waiting/question with its text; busy and idle map through', () => {
+  it('registry waiting maps a dialog to waiting/permission and anything else to a question; busy and idle map through', () => {
+    // The registry on this Mac writes `waitingFor: "dialog open"` for a permission dialog (round 2).
     const w = deriveSessionState({ signal: undefined, registry: { alive: true, status: 'waiting', waitingFor: 'dialog open', statusUpdatedAt: 10, lastActiveAt: 10 }, transcript: undefined, now: 20 })
-    expect(w).toMatchObject({ agent_state: 'waiting', state_source: 'registry', waiting_kind: 'question', waiting_detail: 'dialog open' })
+    expect(w).toMatchObject({ agent_state: 'waiting', state_source: 'registry', waiting_kind: 'permission', waiting_detail: 'dialog open' })
+    const q = deriveSessionState({ signal: undefined, registry: { alive: true, status: 'waiting', waitingFor: 'input', statusUpdatedAt: 10, lastActiveAt: 10 }, transcript: undefined, now: 20 })
+    expect(q).toMatchObject({ agent_state: 'waiting', waiting_kind: 'question', waiting_detail: 'input' })
     expect(deriveSessionState({ signal: undefined, registry: { alive: true, status: 'busy', waitingFor: null, statusUpdatedAt: 10, lastActiveAt: 10 }, transcript: undefined, now: 20 }).agent_state).toBe('running')
   })
 
-  it('a dead pid needs two scans to end the row, and the transcript answers in between', () => {
+  it('a dead pid needs two scans at least DEAD_GRACE_MS apart to end the row, and the transcript answers in between', () => {
     const registry = { alive: false, status: 'idle', waitingFor: null, statusUpdatedAt: 10, lastActiveAt: 10 }
-    const first = deriveSessionState({ signal: undefined, registry, transcript: { inFlight: false, lastActivityAt: 5 }, now: 20 })
-    expect(first).toMatchObject({ agent_state: 'idle', state_source: 'transcript', deadScans: 1 })
-    const second = deriveSessionState({ signal: undefined, registry, transcript: { inFlight: false, lastActivityAt: 5 }, now: 30, prevDeadScans: first.deadScans })
-    expect(second).toMatchObject({ agent_state: 'ended', state_source: 'registry', deadScans: 2 })
+    const transcript = { inFlight: false, lastActivityAt: 5 }
+    const first = deriveSessionState({ signal: undefined, registry, transcript, now: 20 })
+    expect(first).toMatchObject({ agent_state: 'idle', state_source: 'transcript', deadScans: 1, deadSince: 20 })
+    // One client refresh is two requests milliseconds apart: the second scan alone is not a death.
+    const soon = deriveSessionState({ signal: undefined, registry, transcript, now: 30, prevDeadScans: first.deadScans, prevDeadSince: first.deadSince })
+    expect(soon).toMatchObject({ agent_state: 'idle', state_source: 'transcript', deadScans: 2, deadSince: 20 })
+    const later = deriveSessionState({ signal: undefined, registry, transcript, now: 20 + DEAD_GRACE_MS, prevDeadScans: soon.deadScans, prevDeadSince: soon.deadSince })
+    expect(later).toMatchObject({ agent_state: 'ended', state_source: 'registry', deadScans: 3 })
+    // Alive again (a rewritten registry file) resets the memory.
+    const back = deriveSessionState({ signal: undefined, registry: { ...registry, alive: true }, transcript, now: 20 + DEAD_GRACE_MS + 1, prevDeadScans: later.deadScans, prevDeadSince: later.deadSince })
+    expect(back).toMatchObject({ agent_state: 'idle', state_source: 'registry', deadScans: 0, deadSince: null })
   })
 
   it('an open turn with no event for half an hour is no longer trusted as running', () => {

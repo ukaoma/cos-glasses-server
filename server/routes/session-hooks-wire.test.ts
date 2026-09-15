@@ -96,9 +96,26 @@ describe('derived state on the claude-sessions wire', () => {
     const status = (await (await fetch(`${base}/api/session-hooks/status`)).json()) as { ok: boolean; sessionHooks: Record<string, unknown> }
     expect(status.ok).toBe(true)
     expect(status.sessionHooks).toMatchObject({ enabled: true, signals: 1 })
-    expect(['installed', 'drift', 'missing', 'script_outdated', 'settings_unparseable', 'settings_symlink']).toContain(status.sessionHooks.installed)
+    expect(typeof status.sessionHooks.installed).toBe('boolean')
+    expect(['installed', 'drift', 'missing', 'script_outdated', 'disabled_by_settings', 'settings_unparseable', 'settings_symlink', 'settings_unreadable']).toContain(status.sessionHooks.state)
+    expect(status.sessionHooks.installed).toBe(status.sessionHooks.state === 'installed')
+    // Codes, never messages: health is public and a message would carry the home path.
+    for (const k of ['ledgerError', 'spoolError']) {
+      const v = status.sessionHooks[k]
+      expect(v === null || /^[A-Za-z_]+$/.test(String(v))).toBe(true)
+    }
     const runs = (await (await fetch(`${base}/api/session-hooks/runs?since=${recorded[0].ts - 1}`)).json()) as { runs: Array<Record<string, unknown>> }
     expect(runs.runs).toHaveLength(1)
-    expect(runs.runs[0]).toMatchObject({ session_id: sessionId, end_reason: 'other', keep_warm: false, last_reply: 'done' })
+    expect(runs.runs[0]).toMatchObject({ session_id: sessionId, end_reason: 'other', keep_warm: false, last_reply: 'done', workspace: 'project' })
+  })
+
+  it('off means off: with COS_SESSION_HOOKS=0 the peer carries none of the eight fields', async () => {
+    process.env.COS_SESSION_HOOKS = '0'
+    const base = await start()
+    for (const env of recorded.slice(0, 3)) sessionSignalStore.apply(env)
+    const peers = ((await (await fetch(`${base}/api/claude-sessions`)).json()) as { peers: Array<Record<string, unknown>> }).peers
+    for (const k of ['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id']) {
+      expect(peers[0]).not.toHaveProperty(k)
+    }
   })
 })

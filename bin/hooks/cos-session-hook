@@ -5,28 +5,39 @@
 # on every path. Only PermissionRequest ever talks to the server, and only when the
 # desk has been idle. Everything else is a file write, so the server being down or
 # restarting never delays a Claude session.
+#
+# The installer bakes COS_GLASSES_HOME and COS_HOOK_SPOOL into the command, so this
+# script and the server can never disagree about where the token or the spool is.
 PATH=/usr/bin:/bin:/usr/sbin; umask 077; trap '' PIPE
 HOME=${HOME:-$(cd ~ 2>/dev/null && pwd)}; [ -n "$HOME" ] || exit 0
-SPOOL=${COS_HOOK_SPOOL:-$HOME/.cos-glasses/data/hook-spool}; EVENT="$1"
+GH=${COS_GLASSES_HOME:-$HOME/.cos-glasses}
+SPOOL=${COS_HOOK_SPOOL:-$GH/data/hook-spool}; EVENT="$1"
 mkdir -p "$SPOOL/rejected" 2>/dev/null || exit 0
 TS=$(perl -MTime::HiRes -e 'printf "%.0f", Time::HiRes::time()*1000' 2>/dev/null || date +%s000)
 # B8 guard: a full spool or a stale drain stamp means nobody is reading; keep only permissions.
 if [ "$EVENT" != PermissionRequest ]; then
   N=$(ls "$SPOOL" 2>/dev/null | wc -l | tr -d ' '); [ "${N:-0}" -lt 2000 ] || exit 0
-  STAMP="$SPOOL/.last-drain"; [ ! -f "$STAMP" ] || [ -z "$(find "$STAMP" -mtime +1 2>/dev/null)" ] || exit 0
+  STAMP="$SPOOL/.last-drain"; [ ! -f "$STAMP" ] || [ -z "$(find "$STAMP" -mmin +1440 2>/dev/null)" ] || exit 0   # -mtime +1 would mean two days
 fi
 T="$SPOOL/.tmp.$$.$TS"; head -c 1048576 > "$T.in"                    # stdin to disk, 1 MiB cap
 case "$(head -c 1 "$T.in")" in '{') ;; *) EVENT=rejected ;; esac
 { printf '{"ts":%s,"ppid":%s,"event":"%s","payload":' "$TS" "$PPID" "$EVENT"; cat "$T.in"; printf '}\n'; } > "$T"
-rm -f "$T.in"; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"                    # rename = publish
-[ "$EVENT" = PermissionRequest ] || exit 0
-# Desk-active fast path decided HERE (about 30 ms): no HTTP at all when someone is at the keyboard.
+rm -f "$T.in"
+if [ "$EVENT" != PermissionRequest ]; then mv "$T" "$SPOOL/$TS-$$-$EVENT.json"; exit 0; fi   # rename = publish
+# A permission request keeps its own copy: the server unlinks the published file within
+# milliseconds of the rename, and the request body below must outlive that.
+cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
+cleanup() { rm -f "$T.req"; }
+# Desk-active fast path decided HERE (about 30 ms): no HTTP at all when someone is at the
+# keyboard. An unreadable idle time fails the same way: nothing is contacted, the native
+# dialog shows.
 IDLE_NS=$(ioreg -c IOHIDSystem 2>/dev/null | awk -F'= ' '/HIDIdleTime/{print $2; exit}')
-DESK_S=$(cat "$HOME/.cos-glasses/hook-desk-idle-s" 2>/dev/null || echo 90)
-[ -n "$IDLE_NS" ] && [ "$(( ${IDLE_NS%.*} / 1000000000 ))" -lt "$DESK_S" ] && exit 0
-TOK=$(cat "$HOME/.cos-glasses/hook-token" 2>/dev/null) || exit 0
-PORT=$(cat "$HOME/.cos-glasses/hook-port" 2>/dev/null || echo 3141)
-OUT=$(curl -s --max-time 125 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
-  --data-binary @"$SPOOL/$TS-$$-$EVENT.json" "http://127.0.0.1:$PORT/api/permission-requests/ask") || exit 0
+DESK_S=$(cat "$GH/hook-desk-idle-s" 2>/dev/null || echo 90)
+{ [ -n "$IDLE_NS" ] && [ "$(( ${IDLE_NS%.*} / 1000000000 ))" -ge "$DESK_S" ]; } || { cleanup; exit 0; }
+TOK=$(cat "$GH/hook-token" 2>/dev/null); [ -n "$TOK" ] || { cleanup; exit 0; }   # no token, no request
+PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
+OUT=$(curl -s --connect-timeout 2 --max-time 125 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
+  --data-binary @"$T.req" "http://127.0.0.1:$PORT/api/permission-requests/ask") || { cleanup; exit 0; }
+cleanup
 case "$OUT" in '{"hookSpecificOutput"'*) printf '%s' "$OUT" ;; esac
 exit 0

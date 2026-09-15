@@ -14,7 +14,7 @@ import { SessionHookLedger } from './session-hook-ledger.js'
 import { startSpoolIngester, type SpoolIngester, type SpoolStats } from './session-hook-spool.js'
 import { SessionSignalStore, type SessionSignal } from './session-signal-store.js'
 import { deriveSessionState, type DerivedSessionState, type RegistryFacts, type TranscriptFacts } from './session-state-derive.js'
-import { ensureHookRuntimeFiles, ensureStableHookScript, hookStatus, type HookStatus } from './claude-hooks-installer.js'
+import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatus, type HookStatus } from './claude-hooks-installer.js'
 
 export function sessionHooksEnabled(): boolean {
   const raw = process.env.COS_SESSION_HOOKS
@@ -24,7 +24,7 @@ export function sessionHooksEnabled(): boolean {
 }
 
 export function spoolDir(): string {
-  return process.env.COS_SESSION_HOOKS_SPOOL_DIR || dataPath('hook-spool')
+  return hookSpoolDir()
 }
 
 export function deskIdleSeconds(): number {
@@ -35,8 +35,10 @@ export function deskIdleSeconds(): number {
 /** Replay this much ledger history into the store at boot. */
 export const LEDGER_REPLAY_WINDOW_MS = 6 * 60 * 60_000
 
-// A hook's ppid is the claude process when `sh -c` exec'd the script, or the `sh -c`
-// wrapper when it did not. Ask ps for the parent once and remember it for a minute.
+// A hook's ppid is the claude process itself: macOS `sh -c '<script> <Event>'` execs the
+// single command, and every recorded session (fixtures, 2026-09-15) shows one ppid across all
+// of its events. The `ps` parent lookup below is the fallback for a shell that does not exec;
+// it runs once per pid and is remembered for a minute.
 const parentCache = new Map<number, { parent: number | null; at: number }>()
 const PARENT_CACHE_MS = 60_000
 
@@ -54,13 +56,24 @@ function parentPid(pid: number): number | null {
   return parent
 }
 
-export function isCosSpawnedPid(pid: number | null): boolean {
+// A child's synchronous SessionEnd is spooled ~150 ms before the child exits, and the spawn
+// ledger forgets the pid the moment it does; the sweep that reads the file can run after.
+// So every pid the ledger ever vouched for is remembered here for a grace window.
+const recentCosPids = new Map<number, number>()
+export const COS_PID_TOMBSTONE_MS = 60_000
+
+export function isCosSpawnedPid(pid: number | null, nowMs = Date.now()): boolean {
   if (pid === null) return false
   const spawned = cosSpawnedPids()
-  if (spawned.size === 0) return false
-  if (spawned.has(pid)) return true
+  for (const p of spawned.keys()) recentCosPids.set(p, nowMs)
+  if (recentCosPids.size > 256) {
+    for (const [p, at] of recentCosPids) if (nowMs - at > COS_PID_TOMBSTONE_MS) recentCosPids.delete(p)
+  }
+  const remembered = (p: number) => { const at = recentCosPids.get(p); return at !== undefined && nowMs - at <= COS_PID_TOMBSTONE_MS }
+  if (spawned.has(pid) || remembered(pid)) return true
+  if (spawned.size === 0 && recentCosPids.size === 0) return false
   const parent = parentPid(pid)
-  return parent !== null && spawned.has(parent)
+  return parent !== null && (spawned.has(parent) || remembered(parent))
 }
 
 export const sessionSignalStore = new SessionSignalStore({ isCosSpawnedPid })
@@ -68,7 +81,9 @@ export const sessionSignalStore = new SessionSignalStore({ isCosSpawnedPid })
 let ledger: SessionHookLedger | null = null
 let ingester: SpoolIngester | null = null
 let replayed: { rows: number; applied: number } | null = null
-const deadScansById = new Map<string, number>()
+/** The two-scan memory: consecutive dead observations and when the first one was. */
+const deadById = new Map<string, { scans: number; since: number | null; at: number }>()
+const DEAD_MEMORY_MS = 60 * 60_000
 
 export interface SessionHooksRuntime {
   store: SessionSignalStore
@@ -81,18 +96,21 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   ledger = new SessionHookLedger(dataPath('session-hook-events.jsonl'))
   const enabled = sessionHooksEnabled()
   const since = Date.now() - LEDGER_REPLAY_WINDOW_MS
-  const replay = ledger.replay(since, env => { if (enabled) sessionSignalStore.apply(env) })
+  const replay = ledger.replay(since, (env, _key, child) => { if (enabled) sessionSignalStore.apply(env, child) })
   replayed = { rows: replay.rows, applied: replay.applied }
   ingester = startSpoolIngester({
     dir,
     ledger,
     seenKeys: replay.keys,
-    apply: enabled ? env => { sessionSignalStore.apply(env) } : undefined,
+    isChild: env => isCosSpawnedPid(env.ppid),
+    apply: enabled ? (env, child) => { sessionSignalStore.apply(env, child) } : undefined,
   })
   // Runtime files the script reads. The port can change per install; the token never does.
+  // The script is copied only when MISSING here: a boot must never downgrade what a newer
+  // `--hooks install` put at the stable path.
   try {
     ensureHookRuntimeFiles(options.port, deskIdleSeconds())
-    if (hookStatus().state === 'script_outdated') ensureStableHookScript()
+    ensureStableHookScript(undefined, undefined, true)
   } catch (error) {
     console.error(`[session-hooks] runtime files: ${error instanceof Error ? error.message : error}`)
   }
@@ -109,31 +127,59 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
 
 export interface SessionHooksHealth {
   enabled: boolean
-  installed: HookStatus['state']
+  /** The install state word; `installed` below is its boolean. */
+  state: HookStatus['state']
+  installed: boolean
   scriptSha: string | null
+  tokenPresent: boolean
   lastEventAt: string | null
   spoolBacklog: number
+  spoolStuck: number
+  applyErrors: number
   ledgerBytes: number
+  /** Error CODES only (ENOSPC, EACCES); a message would carry the home path onto public health. */
   ledgerError: string | null
+  spoolError: string | null
   signals: number
   replayed: { rows: number; applied: number } | null
   spool: SpoolStats | null
 }
 
+// Health is polled by three clients every few seconds; the status read (settings parse,
+// two hashes) is cheap but not free, and it cannot change faster than this.
+let statusCache: { at: number; value: HookStatus } | null = null
+const STATUS_CACHE_MS = 5_000
+
+export function cachedHookStatus(nowMs = Date.now()): HookStatus {
+  if (statusCache && nowMs - statusCache.at < STATUS_CACHE_MS) return statusCache.value
+  const value = hookStatus()
+  statusCache = { at: nowMs, value }
+  return value
+}
+
+export function invalidateHookStatus(): void {
+  statusCache = null
+}
+
 export function sessionHooksHealthFields(): { sessionHooks: SessionHooksHealth } {
-  const status = hookStatus()
+  const status = cachedHookStatus()
   const spool = ingester?.stats() ?? null
   const ledgerStats = ledger?.stats() ?? null
   const newest = sessionSignalStore.newestEventAt()
   return {
     sessionHooks: {
       enabled: sessionHooksEnabled(),
-      installed: status.state,
+      state: status.state,
+      installed: status.installed,
       scriptSha: status.scriptSha,
+      tokenPresent: status.tokenPresent,
       lastEventAt: newest ? new Date(newest).toISOString() : null,
       spoolBacklog: spool?.backlog ?? 0,
+      spoolStuck: spool?.stuck ?? 0,
+      applyErrors: spool?.applyErrors ?? 0,
       ledgerBytes: ledgerStats?.bytes ?? 0,
-      ledgerError: ledgerStats?.lastError ?? spool?.lastError ?? null,
+      ledgerError: ledgerStats?.lastError ?? null,
+      spoolError: spool?.lastError ?? null,
       signals: sessionSignalStore.size(),
       replayed,
       spool,
@@ -152,23 +198,32 @@ export function signalFor(sessionId: string): SessionSignal | undefined {
  * caller has no facts for at all get nothing, so an older payload stays byte-identical.
  */
 export function deriveForRow(input: { sessionId: string; registry?: RegistryFacts; transcript?: TranscriptFacts; now?: number }): DerivedSessionState | undefined {
+  // Off means off: with the feature disabled every row is byte-identical to 6.47.0.
+  if (!sessionHooksEnabled()) return undefined
   const signal = signalFor(input.sessionId)
   if (!signal && !input.registry && !input.transcript) return undefined
-  const key = signal?.sessionId ?? input.sessionId
+  const now = input.now ?? Date.now()
+  const key = signal?.sessionId ?? input.sessionId.toLowerCase()
+  const prev = deadById.get(key)
   const derived = deriveSessionState({
     signal,
     registry: input.registry,
     transcript: input.transcript,
-    now: input.now ?? Date.now(),
-    prevDeadScans: deadScansById.get(key) ?? 0,
+    now,
+    prevDeadScans: prev?.scans ?? 0,
+    prevDeadSince: prev?.since ?? null,
   })
-  if (deadScansById.size > 2_048) deadScansById.clear()
-  deadScansById.set(key, derived.deadScans)
+  if (deadById.size > 2_048) {
+    for (const [k, v] of deadById) if (now - v.at > DEAD_MEMORY_MS) deadById.delete(k)
+  }
+  deadById.set(key, { scans: derived.deadScans, since: derived.deadSince, at: now })
   return derived
 }
 
 export function __resetSessionHooksForTests(): void {
   sessionSignalStore.__resetForTests()
-  deadScansById.clear()
+  deadById.clear()
   parentCache.clear()
+  recentCosPids.clear()
+  statusCache = null
 }

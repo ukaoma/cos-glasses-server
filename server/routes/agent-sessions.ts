@@ -358,7 +358,13 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     // it exists. The registry facts are joined back by prefix; a transcript-only row (an
     // ended job, a tab closed hours ago) still gets a state from its activity clock.
     const now = Date.now()
-    const peersByPrefix = new Map(peers.map(peer => [peer.sessionId.slice(0, 8), peer]))
+    // First wins, and `readClaudePeerRecords` sorts alive first: a dead predecessor's file
+    // (a resumed tab, a finished Continue child) must never shadow the live record.
+    const peersByPrefix = new Map<string, ClaudePeerRecord>()
+    for (const peer of peers) {
+      const prefix = peer.sessionId.slice(0, 8)
+      if (!peersByPrefix.has(prefix)) peersByPrefix.set(prefix, peer)
+    }
     const derivedById = new Map<string, DerivedSessionState | undefined>()
     for (const row of sessions) {
       if (row.provider !== 'claude') continue
@@ -453,7 +459,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // read once here (a few hundred small files at most) because the detail has no walk.
     let derived: DerivedSessionState | undefined
     if (provider === 'claude') {
-      const peer = (await liveClaudePeerRecords()).find(p => p.sessionId === parsed.session_id.toLowerCase())
+      const peer = (await liveClaudePeerRecords()).find(p => p.sessionId === parsed.session_id.toLowerCase()) // alive first
       derived = deriveForRow({
         sessionId: parsed.session_id,
         registry: peer ? registryFacts(peer) : undefined,

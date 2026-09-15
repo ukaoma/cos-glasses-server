@@ -12,9 +12,12 @@
 // are the specification. Three rules that came out of the validation rounds:
 //
 //  1. A `waiting` entry clears only on RESOLUTION EVIDENCE for that request: the
-//     matching PostToolUse/PostToolUseFailure (same tool name + input fingerprint),
-//     PermissionDenied, Stop, UserPromptSubmit, SessionEnd, or the broker's own decision.
-//     A parallel auto-allowed Read or a sub-agent's tool must not clear a real prompt.
+//     matching PostToolUse/PostToolUseFailure/PermissionDenied (same tool name + input
+//     fingerprint), or a turn boundary (Stop, StopFailure, UserPromptSubmit, SessionEnd, a
+//     non-compact SessionStart), or the broker's own decision. A parallel auto-allowed
+//     Read or a sub-agent's tool must not clear a real prompt. The deriver adds two more
+//     clearers it can see and this store cannot: a registry status that moved after the
+//     wait, and transcript activity newer than the wait.
 //  2. A COS-spawned Continue child (`claude -p --resume <id>`) shares the Desktop tab's
 //     session id and fires its own SessionStart/Stop/SessionEnd. Events whose spooled
 //     ppid is a COS spawn are recorded as `child*` counters and never touch the phase.
@@ -23,6 +26,7 @@
 
 import type { HookEnvelope, HookEventName } from './session-hook-events.js'
 import { clipText, toolFingerprint, toolTarget } from './session-hook-events.js'
+import { isKeepWarmSessionTitle } from './agent-session-store.js'
 
 export type WaitingKind = 'permission' | 'question' | 'plan' | 'mcp_input'
 
@@ -75,11 +79,22 @@ export interface SessionSignal {
 }
 
 export interface ReducerContext {
-  /** Is this pid (or its parent) a process COS spawned itself? */
+  /** Is this pid (or its parent) a process COS spawned itself? Consulted only when the
+   *  envelope was not already classified at ingest (`child`). */
   isCosSpawnedPid: (pid: number | null) => boolean
 }
 
-const KEEP_WARM_PREFIX = /^(ready|this is an automated local readiness check)/i
+/** The tool fields the reducer reads: the live payload's, or the ledger's projection on replay. */
+function toolFacts(p: Record<string, unknown>): { name: string; target: string; fingerprint: string } {
+  const name = typeof p.tool_name === 'string' ? p.tool_name : ''
+  const projectedTarget = typeof p.tool_target === 'string' ? p.tool_target : null
+  const projectedFingerprint = typeof p.tool_fingerprint === 'string' ? p.tool_fingerprint : null
+  return {
+    name,
+    target: projectedTarget ?? toolTarget(p.tool_input),
+    fingerprint: projectedFingerprint ?? toolFingerprint(name, p.tool_input ?? null),
+  }
+}
 
 function fresh(env: HookEnvelope): SessionSignal {
   return {
@@ -114,17 +129,22 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 
 /** Waiting kinds a PostToolUse of the same tool resolves without a fingerprint match. */
 const TOOL_WAITING: Record<string, WaitingKind> = { AskUserQuestion: 'question', ExitPlanMode: 'plan' }
 
-function resolvesWaiting(waiting: WaitingSignal, toolName: string, fingerprint: string): boolean {
+function resolvesWaiting(waiting: WaitingSignal, event: HookEventName, toolName: string, fingerprint: string): boolean {
   if (waiting.fingerprint && waiting.fingerprint === fingerprint) return true
   // Question/plan tools carry no meaningful input to fingerprint; the tool name is the key.
-  return waiting.kind !== 'permission' && waiting.toolName === toolName
+  if (waiting.kind !== 'permission') return waiting.toolName === toolName
+  // A permission dialog is one at a time (canary 11: hooks run serially), and only a
+  // denied PROMPT fires PermissionDenied, so a denial naming the waiting tool is that
+  // prompt's denial even when the dialog rewrote the input. PostToolUse of the same name
+  // is not: a parallel auto-allowed Bash must not clear a prompt that still stands.
+  return event === 'PermissionDenied' && waiting.toolName === toolName
 }
 
 /**
  * Apply one envelope. Returns a NEW record; the previous one is never mutated, so a
  * subscriber holding the old value sees a consistent snapshot.
  */
-export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelope, ctx: ReducerContext): SessionSignal {
+export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelope, ctx: ReducerContext, child?: boolean): SessionSignal {
   const base = prev ? { ...prev } : fresh(env)
   const p = env.payload
   const common = {
@@ -133,8 +153,10 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
     permissionMode: str(p.permission_mode) ?? base.permissionMode,
   }
 
-  // Rule 2: a COS-spawned child on this session id is counted, never applied.
-  if (ctx.isCosSpawnedPid(env.ppid)) {
+  // Rule 2: a COS-spawned child on this session id is counted, never applied. The verdict
+  // is taken at ingest (and remembered on the ledger row) because the spawn ledger forgets
+  // a pid the moment the child exits.
+  if (child ?? ctx.isCosSpawnedPid(env.ppid)) {
     return { ...base, ...common, childEvents: base.childEvents + 1 }
   }
 
@@ -157,45 +179,44 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
         promptId: str(p.prompt_id),
         waiting: null,
         failure: null,
-        keepWarm: KEEP_WARM_PREFIX.test(prompt),
+        // The same predicate the session list uses to hide readiness checks.
+        keepWarm: prompt.length > 0 && isKeepWarmSessionTitle(prompt),
       }
     }
     case 'PreToolUse': {
-      const toolName = str(p.tool_name) ?? ''
-      const kind = TOOL_WAITING[toolName]
+      const tool = toolFacts(p)
+      const kind = TOOL_WAITING[tool.name]
       if (kind) {
         return {
           ...next,
           turnOpen: true,
-          waiting: { kind, detail: toolTarget(p.tool_input, 120), toolName, fingerprint: toolFingerprint(toolName, p.tool_input ?? null), since: env.ts, requestId: null },
+          waiting: { kind, detail: tool.target, toolName: tool.name, fingerprint: tool.fingerprint, since: env.ts, requestId: null },
         }
       }
-      return { ...next, lastTool: toolName || next.lastTool, lastToolAt: env.ts }
+      return { ...next, lastTool: tool.name || next.lastTool, lastToolAt: env.ts }
     }
     case 'PermissionRequest': {
-      const toolName = str(p.tool_name) ?? ''
-      const target = toolTarget(p.tool_input)
+      const tool = toolFacts(p)
       return {
         ...next,
         turnOpen: true,
         waiting: {
           kind: 'permission',
-          detail: target ? `${toolName} ${target}` : toolName,
-          toolName,
-          fingerprint: toolFingerprint(toolName, p.tool_input ?? null),
+          detail: tool.target ? `${tool.name} ${tool.target}` : tool.name,
+          toolName: tool.name,
+          fingerprint: tool.fingerprint,
           since: env.ts,
           requestId: null,
         },
       }
     }
     case 'PermissionDenied':
-      return { ...next, waiting: null }
     case 'PostToolUse':
     case 'PostToolUseFailure': {
-      const toolName = str(p.tool_name) ?? ''
-      const fingerprint = toolFingerprint(toolName, p.tool_input ?? null)
-      const waiting = next.waiting && resolvesWaiting(next.waiting, toolName, fingerprint) ? null : next.waiting
-      return { ...next, waiting, lastTool: toolName || next.lastTool, lastToolAt: env.ts }
+      const tool = toolFacts(p)
+      const waiting = next.waiting && resolvesWaiting(next.waiting, env.event, tool.name, tool.fingerprint) ? null : next.waiting
+      const ran = env.event !== 'PermissionDenied'
+      return { ...next, waiting, ...(ran ? { lastTool: tool.name || next.lastTool, lastToolAt: env.ts } : {}) }
     }
     case 'Notification': {
       const type = str(p.notification_type) ?? ''
@@ -242,6 +263,8 @@ export type SignalListener = (signal: SessionSignal, env: HookEnvelope) => void
 
 /** Records older than this after a SessionEnd are dropped; Control keeps its own ledger. */
 export const SIGNAL_PRUNE_AFTER_END_MS = 6 * 60 * 60_000
+/** A record with no event at all for this long is a tab that died without a SessionEnd. */
+export const SIGNAL_PRUNE_SILENT_MS = 24 * 60 * 60_000
 
 export class SessionSignalStore {
   private readonly signals = new Map<string, SessionSignal>()
@@ -252,8 +275,8 @@ export class SessionSignalStore {
     this.ctx = ctx
   }
 
-  apply(env: HookEnvelope): SessionSignal {
-    const next = applyHookEvent(this.signals.get(env.sessionId), env, this.ctx)
+  apply(env: HookEnvelope, child?: boolean): SessionSignal {
+    const next = applyHookEvent(this.signals.get(env.sessionId), env, this.ctx, child)
     this.signals.set(env.sessionId, next)
     for (const listener of this.listeners) {
       try { listener(next, env) } catch (error) {
@@ -263,14 +286,16 @@ export class SessionSignalStore {
     return next
   }
 
-  /** A permission the broker minted: attach its id so rows can carry `pending_permission_id`. */
+  /** RESERVED FOR 6.48.2 (the permission broker); no caller in 6.48.0. Attach the broker's
+   *  minted id so rows can carry `pending_permission_id`. */
   attachPermissionRequestId(sessionId: string, requestId: string | null): void {
     const current = this.signals.get(sessionId)
     if (!current?.waiting || current.waiting.kind !== 'permission') return
     this.signals.set(sessionId, { ...current, waiting: { ...current.waiting, requestId } })
   }
 
-  /** The broker decided (allow or deny): that is resolution evidence. */
+  /** RESERVED FOR 6.48.2 (the permission broker); no caller in 6.48.0. The broker decided
+   *  (allow or deny): that is resolution evidence. */
   resolveWaiting(sessionId: string): void {
     const current = this.signals.get(sessionId)
     if (!current?.waiting) return
@@ -298,11 +323,13 @@ export class SessionSignalStore {
     return () => { this.listeners.delete(listener) }
   }
 
-  /** Drop records that ended long ago. Never drops a record with an open turn. */
+  /** Drop records that ended long ago, and records silent for a day (a tab that died with no SessionEnd). */
   prune(nowMs = Date.now()): number {
     let dropped = 0
     for (const [id, signal] of this.signals) {
-      if (signal.ended && !signal.turnOpen && nowMs - signal.ended.at > SIGNAL_PRUNE_AFTER_END_MS) {
+      const endedLongAgo = !!signal.ended && !signal.turnOpen && nowMs - signal.ended.at > SIGNAL_PRUNE_AFTER_END_MS
+      const silentForADay = nowMs - signal.lastEventAt > SIGNAL_PRUNE_SILENT_MS
+      if (endedLongAgo || silentForADay) {
         this.signals.delete(id)
         dropped++
       }

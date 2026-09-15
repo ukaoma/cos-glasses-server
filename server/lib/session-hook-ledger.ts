@@ -18,7 +18,30 @@ export interface LedgerRow {
   ppid: number | null
   event: HookEventName
   session_id: string
+  /** Classified at ingest, while the pid was alive: a COS-spawned child's event. */
+  child?: boolean
   payload: Record<string, unknown>
+}
+
+function codeOf(error: unknown): string {
+  const code = (error as { code?: unknown })?.code
+  return typeof code === 'string' && code ? code : (error instanceof Error ? error.name || 'Error' : 'error')
+}
+
+function readText(path: string): string {
+  if (!existsSync(path)) return ''
+  try { return readFileSync(path, 'utf-8') } catch { return '' }
+}
+
+function oldestTs(text: string): number | null {
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const ts = (JSON.parse(line) as { ts?: unknown }).ts
+      if (typeof ts === 'number') return ts
+    } catch { continue }
+  }
+  return null
 }
 
 export class SessionHookLedger {
@@ -31,14 +54,22 @@ export class SessionHookLedger {
   }
 
   /** Append one row. Returns false (and remembers why) when the disk refused. */
-  append(key: string, env: HookEnvelope): boolean {
-    const row: LedgerRow = {
-      key,
-      ts: env.ts,
-      ppid: env.ppid,
-      event: env.event,
-      session_id: env.sessionId,
-      payload: projectHookPayload(env.event, env.payload),
+  append(key: string, env: HookEnvelope, child = false): boolean {
+    let row: LedgerRow
+    try {
+      row = {
+        key,
+        ts: env.ts,
+        ppid: env.ppid,
+        event: env.event,
+        session_id: env.sessionId,
+        ...(child ? { child: true } : {}),
+        payload: projectHookPayload(env.event, env.payload),
+      }
+    } catch (error) {
+      // A pathological payload must not escape into the sweep; the caller rejects the file.
+      this.lastError = codeOf(error)
+      return false
     }
     try {
       this.rotateIfNeeded()
@@ -47,7 +78,7 @@ export class SessionHookLedger {
       this.lastError = null
       return true
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error)
+      this.lastError = codeOf(error)
       return false
     }
   }
@@ -60,18 +91,19 @@ export class SessionHookLedger {
   }
 
   /**
-   * Replay rows newer than `sinceMs` from the current file (the rotated `.1` is history
-   * older than any replay window worth warming). Malformed lines are skipped; a boot must
-   * never fail on a torn last line.
+   * Replay rows newer than `sinceMs`. The rotated `.1` is read too whenever the current
+   * file does not reach back to `sinceMs` (a rotation inside the window would otherwise
+   * hide the rows that matter most, and forget their keys). Malformed lines are skipped;
+   * a boot must never fail on a torn last line.
    */
-  replay(sinceMs: number, apply: (env: HookEnvelope, key: string) => void): { rows: number; applied: number; keys: Set<string> } {
+  replay(sinceMs: number, apply: (env: HookEnvelope, key: string, child: boolean) => void): { rows: number; applied: number; keys: Set<string> } {
     const keys = new Set<string>()
     let rows = 0
     let applied = 0
-    if (!existsSync(this.path)) return { rows, applied, keys }
-    let text: string
-    try { text = readFileSync(this.path, 'utf-8') } catch { return { rows, applied, keys } }
-    for (const line of text.split('\n')) {
+    const current = readText(this.path)
+    const oldest = oldestTs(current)
+    const texts = oldest !== null && oldest > sinceMs ? [readText(this.path + '.1'), current] : [current]
+    for (const line of texts.join('\n').split('\n')) {
       if (!line.trim()) continue
       let row: unknown
       try { row = JSON.parse(line) } catch { continue }
@@ -83,7 +115,7 @@ export class SessionHookLedger {
       keys.add(r.key)
       if (r.ts < sinceMs) continue
       const payload = r.payload && typeof r.payload === 'object' ? r.payload as Record<string, unknown> : {}
-      apply({ ts: r.ts, ppid: typeof r.ppid === 'number' ? r.ppid : null, event: r.event, sessionId: r.session_id.toLowerCase(), payload: { session_id: r.session_id, ...payload } }, r.key)
+      apply({ ts: r.ts, ppid: typeof r.ppid === 'number' ? r.ppid : null, event: r.event, sessionId: r.session_id.toLowerCase(), payload: { session_id: r.session_id, ...payload } }, r.key, r.child === true)
       applied++
     }
     return { rows, applied, keys }

@@ -165,6 +165,30 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   `COS_WEATHER_DEFAULT_*`, otherwise omits weather. Optional `nextEvent`
   appears when `COS_SCRIPTS_DIR` calendar data is available.
 
+## Session hooks (6.48.0)
+
+Claude Code can tell the server what each session is doing (started, prompt submitted,
+waiting on a permission, turn stopped, ended) through its own hooks. Install them once:
+
+```bash
+npx --yes @gotcos/glasses-server@latest --hooks install --dry-run   # shows the merge, writes nothing
+npx --yes @gotcos/glasses-server@latest --hooks install             # merges into ~/.claude/settings.json
+npx --yes @gotcos/glasses-server@latest --hooks status
+npx --yes @gotcos/glasses-server@latest --hooks uninstall
+```
+
+The install keeps every hook you already had, backs the file up, and copies a small
+POSIX sh script to `~/.cos-glasses/bin/cos-session-hook`. The script writes one file per
+event into `~/.cos-glasses/data/hook-spool` and never contacts the server (a permission
+request may, only after the desk has been idle for 90 s, for the approval feature that ships
+next). Sessions started after the install report `state_source: hook` on
+`/api/agent-sessions` and `/api/claude-sessions`; tabs already open keep their startup
+hook snapshot until restarted. The next COS Control (0.5.231) offers the same install from
+its Sessions tab. Rows change only while the server runs with `COS_CLAUDE_SESSIONS_ENABLED=1`
+(`--hooks status` prints `serverApplies`). Turn the ingestion off with `COS_SESSION_HOOKS=0`
+(the spool is still drained and stamped, rows are exactly as before). Removing the package
+does not remove the hooks: run `--hooks uninstall` first.
+
 ## Configuration
 
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is

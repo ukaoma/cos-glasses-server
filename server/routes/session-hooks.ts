@@ -8,7 +8,8 @@
 
 import { Router } from 'express'
 import { installClaudeHooks, uninstallClaudeHooks } from '../lib/claude-hooks-installer.js'
-import { deskIdleSeconds, sessionHooksHealthFields, sessionSignalStore } from '../lib/session-hooks-runtime.js'
+import { deskIdleSeconds, invalidateHookStatus, sessionHooksHealthFields, sessionSignalStore } from '../lib/session-hooks-runtime.js'
+import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 
 export function createSessionHooksRouter(options: { port: number }): Router {
   const router = Router()
@@ -21,6 +22,7 @@ export function createSessionHooksRouter(options: { port: number }): Router {
   router.post('/session-hooks/install', (req, res) => {
     const dryRun = req.query.dryRun === '1' || (req.body && typeof req.body === 'object' && (req.body as { dryRun?: unknown }).dryRun === true)
     const result = installClaudeHooks({ port: options.port, deskIdleSeconds: deskIdleSeconds(), dryRun })
+    invalidateHookStatus()
     if (!result.ok) {
       res.status(409).json({ ok: false, reason: result.reason ?? 'install_failed', status: result.status })
       return
@@ -31,6 +33,7 @@ export function createSessionHooksRouter(options: { port: number }): Router {
   router.post('/session-hooks/uninstall', (req, res) => {
     const dryRun = req.query.dryRun === '1'
     const result = uninstallClaudeHooks({ dryRun })
+    invalidateHookStatus()
     if (!result.ok) {
       res.status(409).json({ ok: false, reason: result.reason ?? 'uninstall_failed', status: result.status })
       return
@@ -52,7 +55,8 @@ export function createSessionHooksRouter(options: { port: number }): Router {
         started_at: new Date(signal.firstSeenAt).toISOString(),
         ended_at: signal.ended ? new Date(signal.ended.at).toISOString() : null,
         end_reason: signal.ended?.reason ?? null,
-        cwd: signal.cwd,
+        // The registry route reduces cwd to a workspace name on the wire; so does this one.
+        workspace: workspaceFromCwd(signal.cwd),
         keep_warm: signal.keepWarm,
         child_events: signal.childEvents,
         last_reply: signal.lastReply || null,

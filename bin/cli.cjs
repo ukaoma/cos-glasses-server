@@ -183,7 +183,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier balanced|max')
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-speaker-model')
   console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
-  console.log('    npx --yes @gotcos/glasses-server@latest --hooks install|status|uninstall [--dry-run]')
+  console.log('    npx --yes @gotcos/glasses-server@latest --hooks install|status|uninstall [--dry-run] [--port N]')
   console.log('')
   console.log('  Requirements:')
   console.log('    - Node.js 20.11+')

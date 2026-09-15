@@ -5,11 +5,13 @@
 // this server (PermissionRequest excepted). The script wraps the payload Claude piped to
 // it: `{"ts":<ms>,"ppid":<pid>,"event":"<name>","payload":<stdin>}`.
 //
-// EVERY FIELD NAME BELOW WAS READ OFF A RECORDED 2.1.272 PAYLOAD, never off the docs.
-// The docs said `start_reason`, `end_reason`, `stop_reason` and a `tool_use_id` on
-// PermissionRequest; the recordings (2026-09-15) carry `source`, `reason`, no stop
-// reason at all, and no tool_use_id on PermissionRequest. Fixtures under
-// `__fixtures__/session-hooks-6.48.0/` are those recordings.
+// FIELD NAMES COME FROM RECORDED 2.1.272 PAYLOADS WHERE ONE EXISTS, never from the docs
+// alone. The docs said `start_reason`, `end_reason`, `stop_reason` and a `tool_use_id` on
+// PermissionRequest; the recordings (2026-09-15) carry `source`, `reason`, no stop reason
+// at all, and no tool_use_id on PermissionRequest. Fixtures under
+// `__fixtures__/session-hooks-6.48.0/` are those recordings; their README lists the
+// interactive-only events (Notification, StopFailure, sub-agents, compaction, model switch)
+// whose shapes are still the documented ones until a Desktop recording lands.
 
 import { createHash } from 'node:crypto'
 
