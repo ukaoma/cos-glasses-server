@@ -535,6 +535,56 @@ export function turnFromTail(provider: SessionStreamProvider, lines: readonly st
   return verdict
 }
 
+/**
+ * The derived session state on a `status` draft (6.48.1).
+ *
+ * EXTRA FIELDS ON THE EXISTING KIND, NEVER A NEW KIND: every shipped EHPK drops an
+ * unknown `kind` before its `seq` accounting and paints a "missed N" gap per event
+ * (validation round 1, B2). The shipped parser keeps `seq` and strips unknown fields
+ * on a `status` draft (canary 8), so an old client renders exactly as before and a
+ * new one reads the state line off the same event.
+ *
+ * `state` keeps its closed vocabulary. The table:
+ *   running -> working      waiting -> working (+ waiting_kind/detail)
+ *   idle    -> idle         failed  -> idle (+ failure)      ended -> done
+ *
+ * `done` on open flips the client to its digest body, which is intended for a session
+ * whose engine said SessionEnd. Precedence with an attached COS turn is decided by the
+ * caller: the derived state is stamped over whatever the transport chose, because the
+ * engine's own Stop is better evidence than "our child is still writing".
+ */
+export interface DerivedStatusFields {
+  agent_state: 'running' | 'waiting' | 'idle' | 'failed' | 'ended'
+  state_source: 'hook' | 'registry' | 'transcript'
+  state_since: string
+  waiting_kind?: string
+  waiting_detail?: string
+  failure?: string
+}
+
+export type StatusDraftWithDerived = { kind: 'status'; state: SessionStreamState } & Partial<DerivedStatusFields>
+
+export function statusDraftWithDerived(
+  draft: { kind: 'status'; state: SessionStreamState },
+  derived: DerivedStatusFields | undefined,
+): StatusDraftWithDerived {
+  if (!derived) return draft
+  const state: SessionStreamState =
+    derived.agent_state === 'running' || derived.agent_state === 'waiting' ? 'working'
+    : derived.agent_state === 'ended' ? 'done'
+    : 'idle'
+  return {
+    kind: 'status',
+    state,
+    agent_state: derived.agent_state,
+    state_source: derived.state_source,
+    state_since: derived.state_since,
+    ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
+    ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
+    ...(derived.failure ? { failure: derived.failure } : {}),
+  }
+}
+
 /** Draft plus transport stamps, in the field order the contract shows. */
 export function stampSessionEvent(draft: SessionStreamDraft, seq: number, at: number): SessionStreamEvent {
   return { seq, at, ...draft }

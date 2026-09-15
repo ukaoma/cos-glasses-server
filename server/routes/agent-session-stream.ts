@@ -70,8 +70,11 @@ import {
   transcriptWatcherDegraded,
   readTranscriptSeedLines,
 } from '../lib/session-transcript-watcher.js'
-import { draftsFromLine } from '../lib/session-stream-events.js'
+import { draftsFromLine, statusDraftWithDerived, type DerivedStatusFields } from '../lib/session-stream-events.js'
 import type { SessionStreamState } from '../lib/session-stream-events.js'
+import { replaySessionStream, ringBounds } from '../lib/session-stream-bus.js'
+import { deriveForRow, sessionHooksEnabled, sessionSignalStore } from '../lib/session-hooks-runtime.js'
+import { derivedRowFields } from '../lib/session-state-derive.js'
 
 export const agentSessionStreamRouter = Router()
 
@@ -84,6 +87,29 @@ export const PREHEADER_BUFFER_MAX = 200
 export function sessionStreamEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.COS_SESSION_STREAM_ENABLED !== '0'
 }
+
+/**
+ * 6.48.1: the derived session state rides every `status` draft as extra fields (see
+ * `statusDraftWithDerived`). `COS_SESSION_HOOK_SSE=0` keeps the drafts exactly as 6.48.0
+ * wrote them; the hooks themselves are unaffected. Absent means on.
+ */
+export function sessionHookSseEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.COS_SESSION_HOOK_SSE !== '0' && sessionHooksEnabled()
+}
+
+/** The hook-derived state for a Claude session the stream is showing, or nothing. */
+function derivedForStream(provider: AgentProvider, sessionId: string): DerivedStatusFields | undefined {
+  if (provider !== 'claude' || !sessionHookSseEnabled()) return undefined
+  try {
+    const derived = deriveForRow({ sessionId, remember: false })
+    return derived ? derivedRowFields(derived) as unknown as DerivedStatusFields : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A turn-anchored seed (`?seed=turn`): the newest prompt and EVERY step after it, bounded. */
+export const TURN_SEED_MAX_STEPS = 500
 
 function asProvider(value: string): AgentProvider | null {
   if (value === 'claude' || value === 'codex' || value === 'cursor') return value
@@ -205,19 +231,26 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   let seq = 0
   let closed = false
 
+  let releaseSignals: (() => void) | null = null
+
   const teardown = (): void => {
     if (closed) return
     closed = true
     if (heartbeat !== null) clearInterval(heartbeat)
     unsubscribe()
     releaseWatcher?.()
+    releaseSignals?.()
     try { res.end() } catch { /* already gone */ }
   }
 
   const write = (event: PublishedSessionEvent): void => {
     if (closed) return
     try {
-      res.write(`data: ${JSON.stringify({ seq: ++seq, ...event })}\n\n`)
+      // ONE stamping point for the derived state: every status draft this connection
+      // writes, opening or live, seeded or published, carries the same extra fields.
+      const out = event.kind === 'status' ? { ...event, ...statusDraftWithDerived(event, derivedForStream(provider, sessionId)) } : event
+      const idLine = typeof out.cursor === 'number' ? `id: ${out.cursor}\n` : ''
+      res.write(`${idLine}data: ${JSON.stringify({ seq: ++seq, ...out })}\n\n`)
     } catch {
       // A failed write means the socket is gone. Close rather than swallow, so the
       // watcher and the subscription are released instead of leaking behind a dead
@@ -257,7 +290,21 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   //
   // NEVER FATAL. A session whose history cannot be read still streams; it just starts
   // empty, exactly as it did before this existed.
-  if (path !== null && startOffset > 0) {
+  // 6.48.1 RECONNECT: `?after=<cursor>` replays from the session's ring instead of
+  // seeding, when the ring still reaches back that far. A ring that does not (server
+  // restarted, linger expired) falls through to the seed, and the client sees a cursor
+  // jump it treats as a reseed.
+  const after = Number(req.query.after)
+  const bounds = ringBounds(key)
+  // Replayable only when the ring reaches back to the cursor AND the cursor is not past
+  // the ring (a client ahead of a restarted server's fresh ring must reseed).
+  const replayable = Number.isFinite(after) && after >= 0 && bounds !== null && bounds.oldest <= after + 1 && after <= bounds.newest
+  if (replayable) {
+    for (const event of replaySessionStream(key, after)) write(event)
+  }
+  const seedMode = String(req.query.seed ?? '') === 'turn' ? 'turn' : 'window'
+
+  if (!replayable && path !== null && startOffset > 0) {
     try {
       const lines = await readTranscriptSeedLines(path, startOffset)
       const drafts = lines.flatMap(line => draftsFromLine(provider, line))
@@ -275,11 +322,17 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
       // So the newest prompt in the whole read window is emitted FIRST, unconditionally,
       // and the step budget is spent entirely on steps. The client pins it rather than
       // listing it, so it costs nothing in the scrolling window.
-      const lastPrompt = [...drafts].reverse().find(d => d.kind === 'prompt')
+      const lastPromptIndex = drafts.map(d => d.kind).lastIndexOf('prompt')
+      const lastPrompt = lastPromptIndex >= 0 ? drafts[lastPromptIndex] : undefined
       if (lastPrompt) write({ ...lastPrompt, at: Date.now() })
 
+      // 6.48.1 `?seed=turn`: the whole current turn, oldest first, so a client opening
+      // mid-turn reads it top to bottom (Terminal V2's turn-anchored open). The default
+      // stays the last SEED_EVENTS steps, which is what shipped lenses were built for.
       const steps = drafts.filter(d => d.kind === 'tool' || d.kind === 'prose')
-      for (const draft of steps.slice(-SEED_EVENTS)) {
+      const turnSteps = lastPromptIndex >= 0 ? drafts.slice(lastPromptIndex + 1).filter(d => d.kind === 'tool' || d.kind === 'prose') : steps
+      const seeded = seedMode === 'turn' ? turnSteps.slice(-TURN_SEED_MAX_STEPS) : steps.slice(-SEED_EVENTS)
+      for (const draft of seeded) {
         // NOT tagged as seeded. A replayed step is a step that really happened, and a
         // second rendering style for it would be a distinction without a use. The one
         // consequence is that the client's "N ago" clock starts at open rather than at
@@ -297,6 +350,30 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // no event can interleave and arrive out of order.
   for (const event of pending.splice(0)) write(event)
   deliver = write
+
+  // 6.48.1: every change to this session's hook signal is a live `status` draft, so the
+  // client's state line moves on the engine's own events (prompt, permission prompt,
+  // Stop, end) rather than on the transcript clock. Filtered to this session (the
+  // client may have addressed it by the registry's 8-character form).
+  if (provider === 'claude' && sessionHookSseEnabled()) {
+    const wanted = sessionId.toLowerCase()
+    const stampOf = (d: DerivedStatusFields | undefined) => d ? `${d.agent_state}|${d.waiting_kind ?? ''}|${d.waiting_detail ?? ''}|${d.failure ?? ''}` : ''
+    // Seeded from the state the opening status carried, so the first live event is a
+    // line only if it CHANGED something.
+    let lastStamp = stampOf(derivedForStream(provider, sessionId))
+    releaseSignals = sessionSignalStore.subscribe(signal => {
+      if (closed) return
+      if (signal.sessionId !== wanted && !signal.sessionId.startsWith(wanted)) return
+      const derived = derivedForStream(provider, sessionId)
+      if (!derived) return
+      // Only a CHANGE of state is a line; tool events inside a running turn are narrated
+      // by the transcript tail and must not each repaint the state.
+      const stamp = stampOf(derived)
+      if (stamp === lastStamp) return
+      lastStamp = stamp
+      write({ kind: 'status', state: 'working', at: Date.now() })
+    })
+  }
 
   releaseWatcher = path === null
     ? null

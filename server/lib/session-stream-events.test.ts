@@ -25,6 +25,7 @@ import {
   targetForTool,
   verbForToolName,
   type SessionStreamDraft,
+  statusDraftWithDerived,
 } from './session-stream-events'
 
 function claudeAssistant(...content: unknown[]) {
@@ -351,5 +352,24 @@ describe('helpers', () => {
 
   it('oneLine collapses runs of whitespace', () => {
     expect(oneLine('a\t\tb   c\n\nd', 40)).toBe('a b c d')
+  })
+})
+
+describe('statusDraftWithDerived (6.48.1)', () => {
+  const base = { kind: 'status' as const, state: 'working' as const }
+  const d = (agent_state: 'running' | 'waiting' | 'idle' | 'failed' | 'ended', extra: Record<string, string> = {}) =>
+    ({ agent_state, state_source: 'hook' as const, state_since: '2026-09-15T21:00:00.000Z', ...extra })
+
+  it('maps every agent_state onto the closed state vocabulary and keeps the extras', () => {
+    expect(statusDraftWithDerived(base, d('running'))).toEqual({ kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: '2026-09-15T21:00:00.000Z' })
+    expect(statusDraftWithDerived(base, d('waiting', { waiting_kind: 'permission', waiting_detail: 'Bash git push' }))).toMatchObject({ state: 'working', agent_state: 'waiting', waiting_kind: 'permission', waiting_detail: 'Bash git push' })
+    expect(statusDraftWithDerived(base, d('idle'))).toMatchObject({ state: 'idle', agent_state: 'idle' })
+    expect(statusDraftWithDerived(base, d('failed', { failure: 'rate_limit' }))).toMatchObject({ state: 'idle', agent_state: 'failed', failure: 'rate_limit' })
+    expect(statusDraftWithDerived(base, d('ended'))).toMatchObject({ state: 'done', agent_state: 'ended' })
+  })
+
+  it('without a derived state the draft is returned untouched, and the kind never changes', () => {
+    expect(statusDraftWithDerived(base, undefined)).toBe(base)
+    for (const st of ['running', 'waiting', 'idle', 'failed', 'ended'] as const) expect(statusDraftWithDerived(base, d(st)).kind).toBe('status')
   })
 })

@@ -234,7 +234,7 @@ export function signalFor(sessionId: string): SessionSignal | undefined {
  * Derive with the two-scan memory kept here, keyed by full id when known. Rows the
  * caller has no facts for at all get nothing, so an older payload stays byte-identical.
  */
-export function deriveForRow(input: { sessionId: string; registry?: RegistryFacts; transcript?: TranscriptFacts; now?: number }): DerivedSessionState | undefined {
+export function deriveForRow(input: { sessionId: string; registry?: RegistryFacts; transcript?: TranscriptFacts; now?: number; remember?: boolean }): DerivedSessionState | undefined {
   // Off means off: with the feature disabled every row is byte-identical to 6.47.0.
   if (!sessionHooksEnabled()) return undefined
   const signal = signalFor(input.sessionId)
@@ -250,6 +250,10 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
     prevDeadScans: prev?.scans ?? 0,
     prevDeadSince: prev?.since ?? null,
   })
+  // A reader with no registry facts (the live feed derives from the signal alone) must
+  // not touch the two-scan memory the row readers keep: a derive that saw no registry
+  // would reset a dead pid's count between two list requests.
+  if (input.remember === false || !input.registry) return derived
   if (deadById.size > 2_048) {
     for (const [k, v] of deadById) if (now - v.at > DEAD_MEMORY_MS) deadById.delete(k)
   }

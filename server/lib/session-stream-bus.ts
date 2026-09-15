@@ -21,16 +21,85 @@
 //
 // So: same transport, own keyspace. This module is deliberately small.
 //
-// NO REPLAY BUFFER HERE EITHER, and that is a decision rather than an omission. A
-// reconnecting client resumes LIVE and its 5s/15s/60s poll is what fills the gap it
-// missed; the contract gives it `seq` precisely so it can SEE the gap. Retaining a
-// per-session ring would add memory that grows with the number of sessions ever
-// opened, to duplicate a fallback that already exists and already works.
+// A BOUNDED REPLAY RING PER STREAMED SESSION (6.48.1), and why the earlier "no ring"
+// decision moved. `seq` stays per connection, so a shipped client still sees its gaps;
+// a new client ALSO reads `cursor`, monotonic per session for this server's life, and
+// reconnects with `?after=<cursor>` to be handed what it missed instead of a fresh
+// seed. The ring holds the last RING_MAX published events, keeps the ACTIVE TURN whole
+// (from its newest `prompt` draft onward, up to RING_HARD_MAX) and is dropped with the
+// session's last subscriber plus a linger, so memory is bounded by streamed sessions,
+// not by sessions ever opened. Even Terminal 0.10.4 ships the same shape (500-event
+// ring, replay on reconnect, the active turn always retained).
 
 import type { SessionStreamDraft } from './session-stream-events.js'
 
-/** A draft with the publish instant stamped. `seq` stays per connection. */
-export type PublishedSessionEvent = SessionStreamDraft & { at: number }
+/** A draft with the publish instant stamped. `seq` stays per connection; `cursor` is per session. */
+export type PublishedSessionEvent = SessionStreamDraft & { at: number; cursor?: number }
+
+/** Events the ring keeps per session. */
+export const RING_MAX = 500
+/** The active turn is never cut short of this. */
+export const RING_HARD_MAX = 2_000
+/** A session's ring outlives its last subscriber this long, so a reconnect finds the gap. */
+export const RING_LINGER_MS = 5 * 60_000
+
+interface Ring {
+  events: Array<PublishedSessionEvent & { cursor: number }>
+  nextCursor: number
+  /** Index into `events` of the newest prompt draft, or -1. */
+  turnStart: number
+  emptySince: number | null
+}
+
+const rings = new Map<string, Ring>()
+
+function ringFor(key: string): Ring {
+  let ring = rings.get(key)
+  if (!ring) {
+    ring = { events: [], nextCursor: 1, turnStart: -1, emptySince: null }
+    rings.set(key, ring)
+  }
+  return ring
+}
+
+function remember(key: string, event: PublishedSessionEvent): PublishedSessionEvent & { cursor: number } {
+  const ring = ringFor(key)
+  const stamped = { ...event, cursor: ring.nextCursor++ }
+  ring.events.push(stamped)
+  if (stamped.kind === 'prompt') ring.turnStart = ring.events.length - 1
+  // Trim the oldest, but never into the active turn until the hard cap.
+  while (ring.events.length > RING_MAX) {
+    if (ring.turnStart === 0 && ring.events.length <= RING_HARD_MAX) break
+    ring.events.shift()
+    if (ring.turnStart >= 0) ring.turnStart--
+  }
+  if (ring.turnStart < -1) ring.turnStart = -1
+  return stamped
+}
+
+/** Events published to this session after `afterCursor`, oldest first. Empty for an unknown session. */
+export function replaySessionStream(key: string, afterCursor: number): Array<PublishedSessionEvent & { cursor: number }> {
+  const ring = rings.get(key)
+  if (!ring) return []
+  const after = Number.isFinite(afterCursor) ? afterCursor : 0
+  return ring.events.filter(e => e.cursor > after)
+}
+
+/** The ring's oldest and newest cursors, so a client can tell a replay from a reseed. */
+export function ringBounds(key: string): { oldest: number; newest: number } | null {
+  const ring = rings.get(key)
+  if (!ring || ring.events.length === 0) return null
+  return { oldest: ring.events[0].cursor, newest: ring.events[ring.events.length - 1].cursor }
+}
+
+/** Drop rings whose session has had no subscriber for the linger. Called by the route on release. */
+export function sweepSessionRings(nowMs = Date.now()): number {
+  let dropped = 0
+  for (const [key, ring] of rings) {
+    if (ring.emptySince !== null && nowMs - ring.emptySince > RING_LINGER_MS) { rings.delete(key); dropped++ }
+  }
+  return dropped
+}
 
 export type SessionStreamListener = (event: PublishedSessionEvent) => void
 
@@ -78,6 +147,7 @@ export function subscribeSessionStream(key: string, listener: SessionStreamListe
   const set = existing ?? new Set<SessionStreamListener>()
   set.add(listener)
   listeners.set(key, set)
+  ringFor(key).emptySince = null
 
   let released = false
   return () => {
@@ -88,7 +158,12 @@ export function subscribeSessionStream(key: string, listener: SessionStreamListe
     const current = listeners.get(key)
     if (!current) return
     current.delete(listener)
-    if (current.size === 0) listeners.delete(key)
+    if (current.size === 0) {
+      listeners.delete(key)
+      const ring = rings.get(key)
+      if (ring) ring.emptySince = Date.now()
+      sweepSessionRings()
+    }
   }
 }
 
@@ -103,7 +178,8 @@ export function subscribeSessionStream(key: string, listener: SessionStreamListe
 export function publishSessionStream(key: string, draft: SessionStreamDraft, at: number = Date.now()): number {
   const set = listeners.get(key)
   if (!set || set.size === 0) return 0
-  const event: PublishedSessionEvent = { ...draft, at }
+  // Remembered BEFORE fan-out, so a listener that reads the ring sees this event too.
+  const event: PublishedSessionEvent = remember(key, { ...draft, at })
   let delivered = 0
   for (const listener of [...set]) {
     try {
@@ -147,4 +223,5 @@ export function isAttachedTurnActive(key: string): boolean {
 export function __resetSessionStreamBusForTests(): void {
   listeners.clear()
   attachedTurns.clear()
+  rings.clear()
 }
