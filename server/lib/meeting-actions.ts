@@ -638,6 +638,8 @@ export class MeetingMergeRunner {
   private pendingInputScan: { newestMtimeMs: number; count: number; mode: MeetingEngineMode } | null = null
   /** Whether this pass actually read inputs, so a bailed pass does not wipe the cache. */
   private collectedThisPass = false
+  /** One pass must collect even though nothing moved: a person asked for a retry. */
+  private forceNextCollection = false
   /** Operations paths per Fireflies id, remembered from the last collected pass. */
   private firefliesPaths: Record<string, { sidecarRelPath?: string; scribeRelPath?: string }> | null = null
 
@@ -837,10 +839,12 @@ export class MeetingMergeRunner {
 
     // Nothing moved since the last collected pass, so there is nothing to collect. This is
     // the common case on every trigger and it costs one stat per input file.
+    const forced = this.forceNextCollection
+    this.forceNextCollection = false
     if (!options.rederiveOnly && !this.collectInjected) {
       const stamp = scanInputStamp(mode, this.library)
       const last = before.status.lastInputScan
-      if (last && last.mode === mode && last.newestMtimeMs === stamp.newestMtimeMs && last.count === stamp.count) {
+      if (!forced && last && last.mode === mode && last.newestMtimeMs === stamp.newestMtimeMs && last.count === stamp.count) {
         for (const action of drivePending) {
           const driven = await this.driveWaitingAction(action.id)
           if (!driven.ok) summary.errors += 1
@@ -1750,20 +1754,32 @@ export class MeetingMergeRunner {
     }
     return this.enqueue(async () => {
       const direction = directionOf(current)
-      const state = pendingStateFor(direction)
+      // TWO DIFFERENT RETRIES, because the two modes fail at different layers.
+      //
+      // An APPLY-mode action failed in the pipeline, so its retry is another spawn: it goes
+      // back to its own waiting state and the next pass drives it.
+      //
+      // An IMPORTS-mode action failed in the DERIVE, so there is no child to spawn and
+      // nothing to re-drive. Its retry is the engine taking the decision again, and
+      // `classify` already retakes a `failed` row — so the row STAYS failed. Moving it to
+      // `pending` would have stranded it forever: nothing drives a pending imports action,
+      // and `classify` skips every state except `failed` and `reverted`.
+      const state: MergeActionRecord['state'] = current.mode === 'apply' ? pendingStateFor(direction) : 'failed'
       await this.store.update(store => {
         const row = store.actions.find(item => item.id === actionId)
         if (!row || row.state !== 'failed') return
         row.state = state
         row.direction = direction
         row.attempts = 0
-        row.nextAt = this.now()
+        if (isWaitingState(state)) row.nextAt = this.now()
+        else delete row.nextAt
         delete row.error
         delete row.diagnostics
       })
-      // Fire and forget, like every other trigger: the route answers now and the pass drives
-      // it. An imports-mode action has no pipeline to spawn, and the next pass retakes a
-      // failed one from the engine, which is what its retry means.
+      // The next pass would otherwise BAIL: nothing on disk has moved since the last one, and
+      // a person asking for a retry is the one case where that is not a reason to do nothing.
+      this.forceNextCollection = true
+      // Fire and forget, like every other trigger: the route answers now, the pass does it.
       this.trigger('manual_retry')
       return { ok: true, state, direction }
     })

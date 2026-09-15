@@ -854,6 +854,54 @@ describe('retrying a failed action', () => {
     await expect(h.runner.retryAction('a_0000000000000000')).rejects.toMatchObject({ status: 404, code: 'action_not_found' })
   })
 
+  /**
+   * An IMPORTS-mode retry is a different thing, and moving it to `pending` strands it.
+   *
+   * That action failed in the DERIVE, not in a pipeline child: there is nothing to spawn and
+   * nothing to re-drive. `classify` already retakes a `failed` row, and it skips every state
+   * except `failed` and `reverted` — so `pending` is a state nothing would ever leave.
+   */
+  it('leaves an imports-mode action failed, and the next pass retakes it', async () => {
+    const h = harness({ inputs: pairedInputs() })
+    // Make the derive fail: the engine answers with the wrong result kind.
+    let failDerive = true
+    const h2 = new MeetingMergeRunner({
+      store: h.store,
+      library: h.library,
+      mode: () => 'imports',
+      isPipelineMac: () => false,
+      collectInputs: () => pairedInputs(),
+      runEngine: async request => {
+        if (request.kind === 'derive_merge' && failDerive) throw new Error('derive_exploded')
+        return runEngine(request)
+      },
+      acquireLease: () => ({ id: 'l', setPhase: () => undefined, release: () => undefined }),
+      admissionsOpen: () => true,
+      captureActive: () => false,
+      spawnPipeline: null,
+      now: () => START,
+      log: () => undefined,
+    })
+    await h2.run('first')
+    const failed = h.store.read().actions[0]
+    expect(failed.state).toBe('failed')
+    expect(failed.mode).toBe('imports')
+
+    const result = await h2.retryAction(failed.id)
+    // STILL failed, because that is the state the engine retakes from.
+    expect(result).toMatchObject({ ok: true, state: 'failed', direction: 'apply' })
+    const afterRetry = h.store.read().actions[0]
+    expect(afterRetry.state).toBe('failed')
+    expect(afterRetry.attempts).toBe(0)
+    expect(afterRetry.nextAt).toBeUndefined()
+    expect(afterRetry.error).toBeUndefined()
+
+    // And the next pass takes it, rather than skipping it forever.
+    failDerive = false
+    await h2.run('after-retry')
+    expect(h.store.read().actions[0].state).toBe('applied')
+  })
+
   it('refuses during a drain', async () => {
     const { h, actionId } = await failedApplyAction()
     h.setAdmissions(false)

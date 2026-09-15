@@ -82,7 +82,7 @@ const CASES = [
   {
     name: 'input-scan-bail',
     file: 'server/lib/meeting-actions.ts',
-    find: '      if (last && last.mode === mode && last.newestMtimeMs === stamp.newestMtimeMs && last.count === stamp.count) {',
+    find: '      if (!forced && last && last.mode === mode && last.newestMtimeMs === stamp.newestMtimeMs && last.count === stamp.count) {',
     replace: '      if (false) {',
     tests: ['server/lib/meeting-actions-collect.test.ts'],
   },
@@ -246,6 +246,27 @@ const CASES = [
     find: "  return `${MARKER_G2_SOURCE_PREFIX}${base.replace(/--/g, '- -')} -->`",
     replace: '  return `${MARKER_G2_SOURCE_PREFIX}${base.replace(/--/g, "-")} -->`',
     tests: ['server/lib/meeting-engine/render-pipeline-patch.test.ts'],
+  },
+  {
+    name: 'retry-imports-stays-failed',
+    file: 'server/lib/meeting-actions.ts',
+    find: "      const state: MergeActionRecord['state'] = current.mode === 'apply' ? pendingStateFor(direction) : 'failed'",
+    replace: "      const state: MergeActionRecord['state'] = pendingStateFor(direction)",
+    tests: ['server/lib/meeting-actions.test.ts'],
+  },
+  {
+    name: 'retry-forces-a-collection',
+    file: 'server/lib/meeting-actions.ts',
+    find: '      this.forceNextCollection = true',
+    replace: '      this.forceNextCollection = false',
+    tests: ['server/lib/meeting-actions-collect.test.ts'],
+  },
+  {
+    name: 'forced-collection-is-one-shot',
+    file: 'server/lib/meeting-actions.ts',
+    find: '    this.forceNextCollection = false\n    if (!options.rederiveOnly && !this.collectInjected) {',
+    replace: '    if (!options.rederiveOnly && !this.collectInjected) {',
+    tests: ['server/lib/meeting-actions-collect.test.ts'],
   },
 ]
 

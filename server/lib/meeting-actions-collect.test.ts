@@ -214,6 +214,41 @@ describe('input collection does not stall the event loop', () => {
     expect(store.read().status.lastRun?.skippedReason).toBe('inputs_unchanged')
   })
 
+  it('collects anyway when a person asked for a retry', async () => {
+    // The bail is right on every automatic trigger and wrong on exactly one: a person
+    // pressing Retry after fixing whatever was broken. Nothing on disk has moved, and doing
+    // nothing is not an acceptable answer to a deliberate request.
+    const { root } = operationsTree(3)
+    const { runner, store } = runnerFor(root)
+    await runner.run('first')
+    await runner.run('second')
+    expect(store.read().status.lastRun?.skippedReason).toBe('inputs_unchanged')
+
+    await store.update(current => {
+      current.actions.push({
+        id: 'a_00000000000000cd',
+        kind: 'merge',
+        tier: 'auto',
+        inputs: { sessionIds: ['session_0'], firefliesIds: ['ff'] },
+        fingerprints: '',
+        outputs: [],
+        outputSha256: [],
+        state: 'failed',
+        mode: 'imports',
+        direction: 'apply',
+        error: 'derive_exploded',
+        at: new Date().toISOString(),
+      })
+    })
+    await runner.retryAction('a_00000000000000cd')
+    await runner.idle()
+    // The pass that the retry triggered COLLECTED, rather than bailing on an unchanged tree.
+    expect(store.read().status.lastRun?.skippedReason).toBeUndefined()
+    // And the force is one-shot: the pass after it bails again.
+    await runner.run('after')
+    expect(store.read().status.lastRun?.skippedReason).toBe('inputs_unchanged')
+  })
+
   it('scans with stats alone, opening nothing', () => {
     const { root } = operationsTree(3)
     setEnv('COS_OPERATIONS_DIR', root)

@@ -137,9 +137,19 @@ non-overlapping on both sides, so a run of THREE or more hyphens still leaves a
 `--` in the comment body (`x----y` becomes `x- -- -y`). Closing that means
 changing both sides in one step - a server that escaped more thoroughly would
 write a marker the pipeline reads as another tool's, which is the failure the
-basename form exists to end. Not reachable from a meeting filename observed so
-far; pinned in `render-pipeline-patch.test.ts` so it is visible rather than
-assumed fixed.
+basename form exists to end.
+
+It is REACHABLE BY CONSTRUCTION, not merely unobserved: the pipeline's
+`scribe_generator.sanitize_filename` strips only `<>:"/\|?*` and collapses
+whitespace, and never touches hyphens, so a title like `Roadmap---Final`
+survives into the scribe stem and from there into this basename.
+
+It is safe to record rather than fix because every reader of this marker on both
+sides is a SUBSTRING test (`sync_meetings.py:1589`, `:1613`, `:2806`,
+`g2_blend_backfill.py:221`), and the server never reads `g2-source` back at all.
+No HTML parser touches it, and the escape always breaks up `-->`, so the comment
+can never terminate early. Pinned in `render-pipeline-patch.test.ts` and in
+`g2_source_marker`'s own docstring on the pipeline side.
 
 ## Supersession
 

@@ -137,16 +137,23 @@ describe('what the patch adds', () => {
     ['a trailing double hyphen before the close', 'weekly--.g2-chunks.json'],
     ['two separated double hyphens', 'a--b--c.g2-chunks.json'],
     ['a single hyphen, which needs no escape', '2026-08-20_Weekly.g2-chunks.json'],
+    // ADVERSARIAL, and the only case where the early-termination assertion below can fail.
+    // On a real sidecar name it cannot: the name always ends `.g2-chunks.json` and carries
+    // no `>`, so asserting one terminator there is decoration. Here, dropping the escape
+    // puts a literal `-->` inside the body and the comment closes early.
+    ['a name containing a comment terminator', 'a-->b.g2-chunks.json'],
   ])('emits a well-formed HTML comment for %s', (_label, relPath) => {
     const marker = g2SourceMarker(relPath)
     expect(marker.startsWith('<!--')).toBe(true)
     expect(marker.endsWith('-->')).toBe(true)
-    const body = marker.slice('<!--'.length, -'-->'.length)
-    expect(body).not.toContain('--')
-    // Exactly one terminator, so nothing after the marker is swallowed into the comment
-    // and nothing before it closes the comment early.
+    // ORDER MATTERS. The `--` check below is strictly stronger and would short-circuit this
+    // one, so the terminator assertion would never actually run and could not fail. Asserted
+    // FIRST, it is the thing the `a-->b` row exists to exercise: with the escape removed the
+    // body holds a literal `-->` and the comment closes early, and this line goes red.
     expect(marker.split('-->')).toHaveLength(2)
     expect(marker.split('<!--')).toHaveLength(2)
+    const body = marker.slice('<!--'.length, -'-->'.length)
+    expect(body).not.toContain('--')
   })
 
   /**
@@ -162,10 +169,16 @@ describe('what the patch adds', () => {
    * exact failure the basename change was made to end. Closing it means changing both sides
    * in one step, and a committed fixture on the pipeline side pins one of these strings.
    *
-   * Not reachable in practice today: a meeting filename comes from
-   * `SAFE_FILENAME_PATTERN`-shaped titles, and a triple hyphen in one has not been observed.
-   * This test exists so that if it ever is, the next reader finds the limit written down
-   * instead of a comment claiming a guarantee the code does not give.
+   * REACHABLE BY CONSTRUCTION, not merely unobserved. The pipeline's
+   * `scribe_generator.sanitize_filename` strips only `<>:"/\|?*` and collapses whitespace;
+   * it never touches hyphens. `Roadmap---Final` survives into the scribe stem and from there
+   * into this basename, and that is a title someone types meaning a separator.
+   *
+   * WHY IT IS STILL SAFE. Every reader of this marker on both sides is a SUBSTRING test
+   * (`sync_meetings.py:1589`, `:1613`, `:2806`, `g2_blend_backfill.py:221`), and the server
+   * never reads `g2-source` back at all. No HTML parser touches it, and the escape always
+   * breaks up `-->`, so the comment can never terminate early. The damage is a technically
+   * malformed comment that nothing in the system objects to.
    */
   it.each([
     ['three hyphens', 'x---y.g2-chunks.json', '<!-- g2-source: x- --y.g2-chunks.json -->'],
