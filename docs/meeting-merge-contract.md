@@ -29,6 +29,21 @@ tree, and otherwise reads `dataPath('merge-engine.json')` for `advise` or
 The mode file is written only by the server, through
 `POST /api/meeting-engine/mode`. There is no environment flag.
 
+```json
+{ "schema": 1, "mode": "advise", "changedAt": "...", "changedBy": "control", "macClass": "pipeline" }
+```
+
+`macClass` is what this install has been OBSERVED to be, written by the server at
+most once per process per class. `g2RecordingsReachOperations()` is a live probe:
+it stats the COS venv's python and `sync_meetings.py`, and those go missing for
+reasons that have nothing to do with this Mac's identity - iCloud evicting the
+checkout, a pip rebuild, `COS_SCRIPTS_DIR` changing between two reads. A Mac
+recorded as `pipeline` therefore keeps its recorded mode on a live negative
+rather than falling to `imports`, and the disagreement is reported in engine
+status as `macClass: { observed, recorded, changed }`. A live POSITIVE always
+wins: being wrong towards advise writes nothing, and being wrong towards imports
+imports every meeting the pipeline already files.
+
 ## Stores
 
 All under `dataPath('imports')`, all written by the server alone.
@@ -99,6 +114,14 @@ scribe itself, spliced in place. It declares what it holds in its own body:
 The operations lister reads the last two and sets `derivedKind: "merge"`,
 `g2SessionIds[]` and `actionId` on that row.
 
+The patch the pipeline splices is a pure function of its input. ONE field can move
+its bytes for the same primary and captures: `coarseOffsetMsBySession`, the
+offset pairing measured per capture. It feeds alignment, therefore attribution,
+therefore the Speaker Verification row. Absent, alignment falls back to the
+difference between the two clocks. A fixture generated without it pins the
+fallback; one generated with it pins a different, better answer, and the
+difference is by design rather than a regression.
+
 `g2-source` carries the sidecar's BASENAME, not its operations-relative path,
 and escapes `--` to `- -`. That is the form the COS pipeline's own
 `g2_source_marker()` writes, and the pipeline compares the marker it reads
@@ -108,6 +131,15 @@ this", `blend_verified` fails, and a later refresh can append a second
 operations-relative path is not lost - it stays in the decision's
 `inputs[].sidecarRelPath` and in the derived sidecar, which is where a reader
 that needs to OPEN the file looks.
+
+KNOWN LIMIT, shared with the pipeline: `str.replace('--', '- -')` is
+non-overlapping on both sides, so a run of THREE or more hyphens still leaves a
+`--` in the comment body (`x----y` becomes `x- -- -y`). Closing that means
+changing both sides in one step - a server that escaped more thoroughly would
+write a marker the pipeline reads as another tool's, which is the failure the
+basename form exists to end. Not reachable from a meeting filename observed so
+far; pinned in `render-pipeline-patch.test.ts` so it is visible rather than
+assumed fixed.
 
 ## Supersession
 
@@ -132,6 +164,43 @@ present, and unchanged otherwise.
 Day counts come from `supersededDayCounts(month, layout)`: uncapped filename
 scans plus the derived sidecars' inputs. `probeMeetings` uses the same helper, so
 the morning brief and the Meetings list cannot disagree about a day.
+
+With NOTHING imported and NOTHING derived, that helper answers with exactly the
+6.46.1 per-layout source set: the direct library for `direct`, the operations
+tree for `multi_domain`, the recordings store for `standalone`. Supersession has
+nothing to subtract on a plain upgrade, and the union it otherwise computes added
+the standalone store to two layouts that had never counted it. Every group,
+including the store's own, honours the `domain` filter.
+
+## Splits, per mode
+
+A split writes NEW records, one per piece, each superseding the long original in
+the list. That shape only exists where the server owns the library.
+
+| Mode | What a long recording gets |
+|---|---|
+| `imports` | an automatic split after the first-run boundary, or an accepted suggestion; both write one `piece` record per span and revert by deleting them |
+| `advise` | a suggestion only. Nothing is written outside `dataPath('imports')` |
+| `apply` | a suggestion only. `POST /api/meeting-suggestions/:id/accept` answers 409 `split_not_supported_in_apply_mode` |
+
+Apply mode splices a patch into a scribe the pipeline already wrote. There is no
+additive, revertible way to turn one operations scribe into three, so the refusal
+is typed rather than a 200 that did nothing.
+
+## Apply-mode merges are frozen at apply time
+
+A record in the imports library is a function of its inputs: a speaker
+correction on one of its G2 captures fires a re-derive and the record is
+rewritten. An apply-mode merge is not that. It is the operations scribe itself,
+spliced in place, and the server does not rewrite an operations file after the
+pipeline has written it - `rederive` selects `mode === 'imports'` only.
+
+Speaker corrections still reach it, through the pipeline's own path: apply stamps
+the G2 sidecar with `blended_into`, held naming resolves the merged scribe
+through that stamp, and the merged scribe declares its sessions with
+`<!-- g2-session -->` so `findCosOperationsMeetingBySessionId` prefers it over an
+orphan sidecar. What does not happen is the merged transcript's speaker LABELS
+changing retroactively from a later voice match.
 
 ## Detail
 
@@ -212,20 +281,138 @@ local evidence.
 | `POST /api/meeting-suggestions/:id/accept` | imports mode |
 | `POST /api/meeting-suggestions/:id/confirm` | advise mode |
 | `POST /api/meeting-suggestions/:id/dismiss` | dismiss; a dismissed input set never reopens |
-| `GET /api/meeting-actions?limit=` | list actions |
+| `GET /api/meeting-actions?limit=` | list actions, newest first |
+| `GET /api/meeting-actions/:id` | one action |
 | `POST /api/meeting-actions/:id/revert` | revert one |
+| `POST /api/meeting-actions/:id/retry` | put a failed action back in its own direction |
 | `POST /api/meeting-actions/revert-all` | revert all |
-| `GET /api/meeting-engine/status` | mode, `pipelineSees`, `mismatch`, runs, first-run report |
+| `GET /api/meeting-engine/status` | mode, `pipelineSees`, `mismatch`, `mergesRemainApplied`, `macClass`, runs, first-run report |
 | `POST /api/meeting-engine/mode` | `{ mode: "advise" | "apply" }`, pipeline Macs only |
 
-Action states are `applied`, `failed`, `revert_pending` and `reverted`. Revert is
-compare-and-set: `applied` becomes `revert_pending` atomically, a second call
-gets 409 `revert_in_progress`, and a call on an already-reverted action gets 200.
-`{ "dryRun": true }` returns a `previewHash` that applying requires.
+Action states are `pending`, `applied`, `failed`, `revert_pending` and
+`reverted`. `pending` and `revert_pending` are the two WAITING states: an apply
+or an undo the pipeline has not finished. Both are swept by the 30 s tick and by
+every pass, and both are re-driven on boot.
+
+Every action carries `direction: "apply" | "revert"`, written when it is created
+and when a Revert claims it. The direction is NOT derived from the state,
+because a retryable failure sends an action back to a waiting state and reading
+the direction out of that state turned the retry of an undo into a redo.
+
+`POST /api/meeting-actions/:id/retry` answers `{ ok, state, direction }`. It
+takes only a `failed` action: a waiting one gets 409 `apply_in_flight`, any other
+state 409 `action_not_failed`, a missing one 404 `action_not_found`, a run in
+flight 409 `run_in_progress`, and a drain 409 `maintenance_drain_active`. A retry
+resets the attempt budget, because the bounded automatic retry exists to stop a
+broken decision burning a spawn every thirty seconds and a person asking for one
+is not that.
+
+A failed action carries `diagnostics`: `{ code, signal, timedOut, elapsedMs,
+stderr?, decisionInvalid?, spawnError? }`. `Command failed` with an empty stderr
+is three different bugs - a non-zero exit, a timeout kill and a failed fork - and
+each is its own field here. `decisionInvalid` is the pipeline's own
+`COS_MERGE_DECISION_INVALID=` line from exit 4.
+
+Revert is compare-and-set: `applied` becomes `revert_pending` atomically, a
+second call gets 409 `revert_in_progress`, and a call on an already-reverted
+action gets 200. `{ "dryRun": true }` returns a `previewHash` that applying
+requires.
 
 Suggestion states are `open`, `confirmed`, `accepted` and `dismissed`. Accepting
 in imports mode compares fingerprints and returns 409 `suggestion_stale` on a
 mismatch.
+
+### Suggestion sides
+
+Every row from `GET /api/meeting-suggestions` carries `sides`, resolved by the
+SERVER:
+
+```json
+{ "kind": "g2" | "fireflies", "id": "<canonical id>", "recordId": "<row that holds it>",
+  "title": "...", "startMs": 1755700000000, "durationMinutes": 47,
+  "source": "imported" | "cos_operations" | "standalone_recordings", "resolved": true }
+```
+
+Captures first, then transcripts, one side per canonical id. A client must not
+re-derive `imported:fireflies:<h16>` from a vendor id: on a pipeline Mac the
+Fireflies side is a scribe in the operations tree at a path only the server
+knows, and that is exactly where suggestions are reviewed. `resolved: false` is a
+real state - a deleted recording, a transcript the vendor removed - and carries
+no `recordId`.
+
+Imported list rows also carry `vendorId`, the Fireflies transcript id, so nothing
+downstream has to re-implement the record-id hash.
+
+### Engine status
+
+`mismatch` is true only when the server and the pipeline genuinely disagree.
+Advise mode with an ACTIVE pipeline is NOT a disagreement: `merge_engine_active()`
+stays true while any applied action exists, precisely so the old blend path does
+not restart over merged scribes after a rollback. That state is reported as
+`mergesRemainApplied: true`. When the pipeline cannot be asked, `pipelineSees` is
+null and both flags are false: not known is not disagrees.
+
+The status probe (`sync_meetings.py --merge-engine-status`, at most once every
+five minutes) runs with the INHERITED environment. Injecting the server's own
+`COS_DATA_DIR` made the child resolve the server's own mode file, so the answer
+was the server reading itself back and a real disagreement could not be observed.
+
+`counts` carries `pending` and `revertPending` separately: an undo that cannot
+finish is the state `POST /api/meeting-engine/mode` refuses on, and folding it
+into `pending` hid it.
+
+`lastRun` carries `skippedReason` when a pass did nothing - `maintenance_deferred`,
+`capture_active`, `inputs_unchanged`, `inputs_unreadable`, `too_many_inputs` -
+plus `inputsSkipped` (refused inputs by reason) and `clockBand` statistics.
+
+## The pipeline half
+
+The server spawns `sync_meetings.py` for apply-mode work. The child is the only
+writer of the operations tree; the server is the only writer of the decision.
+
+| Command | Purpose |
+|---|---|
+| `--apply-merge-decision <actionId>` | splice the decision's patch into the Fireflies scribe |
+| `--revert-merge-decision <actionId>` | restore the archived original and the retired captures |
+| `--revert-all-merge-decisions` | applied actions newest first, under the same rules |
+| `--merge-engine-status` | print `{ "mode", "active", "applied_actions" }` and exit 0 |
+
+Environment, passed explicitly by the server for every command except the status
+probe:
+
+| Variable | Meaning |
+|---|---|
+| `COS_DATA_DIR` | where the mode file, the stores and `decisions/` live |
+| `COS_MERGE_DECISION_FILE` | absolute path of this action's decision file |
+| `PATH` | prepends `/opt/homebrew/bin`; a launchd-started server does not inherit a login shell's PATH |
+| `PYTHONUNBUFFERED=1` | so streamed progress arrives before the child exits |
+
+Exit codes:
+
+| Code | Meaning | What the server does |
+|---|---|---|
+| 0 | the report line is authoritative | record `applied` or `reverted` |
+| 3 | another pipeline process holds the sync lock | NOT a failure: the action stays waiting and is retried in two minutes |
+| 4 | the decision does not match the files on disk | terminal; retrying cannot make it match |
+| 5 | a step failed part way, or the whole apply failed | retried once, then failed until a person retries it |
+
+The child prints exactly ONE result line, prefixed `COS_MERGE_RESULT=`:
+
+```json
+{ "schema": 1, "action_id": "a_...", "status": "applied" | "reverted" | "partial" | "failed",
+  "outputs": [{ "path", "sha256" }], "archived": [{ "original", "archive", "sha256" }],
+  "retired": [{ "original", "archive", "sha256" }], "stamps": [{ "sidecar", "blended_into" }],
+  "transcript_map": "applied" | "skipped", "transcript_map_reason": "...",
+  "step": "...", "error_code": "..." }
+```
+
+`transcript_map` says whether the meeting-level speaker map was applied to the
+transcript's speaker prefixes. `skipped` with a `transcript_map_reason` means the
+prefix format did not match enough lines to be safe (under 90%), which is a
+successful apply with one part deliberately not done - not a failure. Missing,
+malformed or DUPLICATED result lines are all `result_unreadable`, and the reason
+says which: a command that printed nothing died before its report, and one that
+printed twice reported twice and neither can be trusted.
 
 ## Import routes and states
 

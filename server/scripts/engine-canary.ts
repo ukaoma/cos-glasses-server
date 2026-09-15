@@ -113,8 +113,12 @@ function main(): number {
   let primaryMismatches = 0
   let candidateMismatches = 0
   let offsetRejections = 0
-  const disputed: Array<{ session: ExportedSession; primary: string }> = []
-  const agreed: Array<{ session: ExportedSession; primary: string }> = []
+  // k1, k2 and the measured offset travel with the pick, so a RENDERED sample carries the
+  // evidence the merge was actually made on. A sample whose sidecar says K1 = K2 = 0 tells
+  // the person reviewing it that a merge happened with no evidence behind it.
+  interface Pick { session: ExportedSession; primary: string; k1: number; k2: number; offsetMs: number | null }
+  const disputed: Pick[] = []
+  const agreed: Pick[] = []
 
   const started = Date.now()
   for (const session of inputs.sessions) {
@@ -131,7 +135,15 @@ function main(): number {
       const cluster = [result.primaryFirefliesId, ...result.duplicateFirefliesIds]
       const agrees = cluster.some(id => truth.has(id))
       agreement[`${result.tier}:${agrees ? 'agree' : 'differ'}`] = (agreement[`${result.tier}:${agrees ? 'agree' : 'differ'}`] ?? 0) + 1
-      if (result.tier === 'auto_merge') (agrees ? agreed : disputed).push({ session, primary: result.primaryFirefliesId })
+      if (result.tier === 'auto_merge') {
+        (agrees ? agreed : disputed).push({
+          session,
+          primary: result.primaryFirefliesId,
+          k1: result.k1,
+          k2: result.k2,
+          offsetMs: result.offsetMs,
+        })
+      }
     }
   }
 
@@ -179,12 +191,17 @@ function main(): number {
     for (const [index, pick] of picks.entries()) {
       const meeting = meetingsById.get(pick.primary)
       if (!meeting) continue
+      const capture = loadRecording(pick.session)
       const rendered = renderMergedRecord({
         actionId: `sample_${index + 1}`,
         tier: 'auto',
         primary: meeting,
-        captures: [loadRecording(pick.session)],
-        evidence: { k1: 0, k2: 0 },
+        captures: [capture],
+        evidence: { k1: pick.k1, k2: pick.k2 },
+        // The offset pairing MEASURED, not the difference between the two clocks. The
+        // clock fallback puts the alignment band off the real anchors on every winner whose
+        // clocks disagree by more than ALIGN_BAND_S, and the sample then renders unaligned.
+        ...(pick.offsetMs != null ? { coarseOffsetMsBySession: { [capture.sessionId]: pick.offsetMs } } : {}),
       })
       if (!rendered.ok) continue
       // Numbered, not named after the session: G2 session ids share a long prefix, so a

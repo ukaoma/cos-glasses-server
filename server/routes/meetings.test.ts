@@ -22,9 +22,12 @@ import {
   importHash,
   importedFilename,
   mergedHash,
-  pieceHash,
 } from '../lib/imported-meeting-library.js'
 import { MeetingStore } from '../lib/meeting-store.js'
+import { MeetingActionsStore } from '../lib/meeting-actions-store.js'
+import { MeetingMergeRunner } from '../lib/meeting-actions.js'
+import { runEngine } from '../lib/meeting-engine/worker.js'
+import { firefliesMeeting, g2Capture, phrase } from '../lib/meeting-engine/__fixtures__/synthetic.js'
 import { createMeetingsRouter } from './meetings.js'
 
 const MONTH = '2026-07'
@@ -189,6 +192,58 @@ function writeImportAndMerge(
 
 const dateMs = new Date(2026, 6, 15, 14, 5).getTime()
 
+/**
+ * Split one long recording through the REAL runner, and hand back what it wrote.
+ *
+ * The pieces this list renders are the runner's own output — the worker's `derive_piece`,
+ * the library's `writeRecord({kind:'piece'})`, the `.derived.json` the runner chose to
+ * write. A hand-written sidecar pins the shape a test author believed the runner produces.
+ */
+async function runSplit(library: ImportedMeetingLibrary, importsMonthDir: string): Promise<string[]> {
+  const store = new MeetingActionsStore({ root: join(importsMonthDir, '..') })
+  const source = firefliesMeeting({
+    id: FIREFLIES_ID,
+    startMs: dateMs,
+    durationS: 10_800,
+    phrases: [phrase('alphaw', 60, 60), phrase('betaw', 60, 4_000), phrase('gammaw', 60, 8_000)],
+    title: 'Long recording',
+  })
+  const captures = ['alphaw', 'betaw', 'gammaw'].map((prefix, index) => g2Capture({
+    sessionId: `split_session_${prefix}`,
+    startMs: dateMs + [60, 4_000, 8_000][index] * 1000,
+    durationMs: 600_000,
+    phrases: [source.sentences[index]].map(sentence => ({
+      tokens: String(sentence.text).split(' '),
+      startS: [60, 4_000, 8_000][index],
+      endS: [60, 4_000, 8_000][index] + 12,
+    })),
+    offsetMs: 0,
+  }))
+  const runner = new MeetingMergeRunner({
+    store,
+    library,
+    mode: () => 'imports',
+    isPipelineMac: () => false,
+    collectInputs: () => ({
+      g2: captures.map(capture => ({ ...capture, finalizedAtMs: capture.startMs + 600_000 })),
+      fireflies: [source],
+      g2Meta: Object.fromEntries(captures.map(capture => [capture.sessionId, { finalizedAtMs: capture.startMs + 600_000 }])),
+      firefliesMeta: { [FIREFLIES_ID]: {} },
+    }),
+    runEngine: async request => runEngine(request),
+    acquireLease: () => ({ id: 'l', setPhase: () => undefined, release: () => undefined }),
+    admissionsOpen: () => true,
+    captureActive: () => false,
+    spawnPipeline: null,
+    now: () => dateMs - 1,
+    log: () => undefined,
+  })
+  await runner.run('test')
+  const action = store.read().actions.find(row => row.kind === 'split')
+  if (!action) throw new Error('the runner took no split action')
+  return action.outputs.map(output => output.path)
+}
+
 describe('meetings list with imports and derived records', () => {
   for (const layout of ['direct', 'multi_domain', 'standalone'] as const) {
     for (const pipeline of layout === 'multi_domain' ? [false, true] : [false]) {
@@ -232,22 +287,10 @@ describe('meetings list with imports and derived records', () => {
 
       it(`keeps two split pieces as two rows (${name})`, async () => {
         const h = setup({ layout, pipeline })
-        for (const index of [0, 1]) {
-          h.library.writeRecord({
-            kind: 'piece',
-            hash: pieceHash(`imported:fireflies:${importHash(FIREFLIES_ID)}`, index),
-            dateMs: dateMs + index * 3_600_000,
-            markdown: meetingMarkdown(`Long recording (part ${index + 1} of 2)`, 'imported', 'Fireflies (split)'),
-            sidecar: {
-              version: 1,
-              actionId: 'a_fedcba9876543210',
-              kind: 'split',
-              inputs: [{ kind: 'fireflies', id: FIREFLIES_ID, sha256: null }],
-              tier: 'auto',
-              pieces: [{ index, startS: index * 3600, endS: (index + 1) * 3600, kind: 'matched', sessionIds: [SESSION] }],
-            },
-          })
-        }
+        // THE RUNNER WRITES THESE, not this test. A hand-written sidecar pins the shape a
+        // test author believed the runner produces; the runner is the thing shipping.
+        const written = await runSplit(h.library, h.importsMonthDir)
+        expect(written.length).toBeGreaterThanOrEqual(2)
 
         const api = await serve(h.store, h.library)
         const list = await api('/api/meetings?limit=50&domain=all')
@@ -259,14 +302,20 @@ describe('meetings list with imports and derived records', () => {
           expect(list.json.meetings).toHaveLength(0)
           return
         }
-        expect(list.json.meetings).toHaveLength(2)
-        expect(list.json.meetings.map((row: any) => row.pieceIndex).sort()).toEqual([0, 1])
-        expect(new Set(list.json.meetings.map((row: any) => row.recordId)).size).toBe(2)
+        expect(list.json.meetings).toHaveLength(written.length)
+        expect(list.json.meetings.map((row: any) => row.pieceIndex).sort())
+          .toEqual(written.map((_, index) => index))
+        expect(new Set(list.json.meetings.map((row: any) => row.recordId)).size).toBe(written.length)
         for (const row of list.json.meetings) {
           expect(row).toMatchObject({ librarySource: 'blended', derivedKind: 'split', mutable: false })
+          // A piece is a SPAN, not a capture: a sessionId here would make two pieces of one
+          // recording collapse onto each other in `mergeMeetingSources`.
           expect(row.sessionId).toBeUndefined()
-          expect(row.sourceSessionId).toBe(SESSION)
         }
+        // And the calendar agrees with the list it counts.
+        const month = await api(`/api/meetings?month=${MONTH}`)
+        const total = month.json.days.reduce((sum: number, day: any) => sum + day.count, 0)
+        expect(total).toBe(written.length)
       })
 
       it(`gives one merged row for two captures of one meeting (${name})`, async () => {

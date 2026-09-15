@@ -182,6 +182,31 @@ describe('grouping captures of one meeting', () => {
     expect(groups[0].primaryFirefliesId).toBe('f1')
     expect(groups[0].sessionIds).toEqual(Array.from({ length: count }, (_, i) => `s${i}`))
   })
+
+  /**
+   * The group carries the offset PAIRING measured, for EVERY capture it holds.
+   *
+   * Alignment needs a coarse offset to search around, and without one it falls back to the
+   * difference between the two CLOCKS. Pairing already knows better — it found the offset the
+   * shared phrases imply, which is the whole point of the evidence step. On the winners whose
+   * clocks disagree by more than the alignment band (`ALIGN_BAND_S = 300`), the clock fallback
+   * puts that band entirely off the real anchors, alignment fails, and the capture is attached
+   * without relabelling. Silently: "unaligned" is a legitimate outcome.
+   */
+  it.each([2, 3])('carries the measured offset for each of %i captures', count => {
+    const { meeting, captures } = meetingWithCaptures(count)
+    const results = captures.map(capture => scoreRecording(capture, [meeting]))
+    const [group] = groupAutoMerges(results, captures)
+    expect(Object.keys(group.offsetMsBySession).sort())
+      .toEqual(Array.from({ length: count }, (_, i) => `s${i}`))
+    for (const result of results) {
+      expect(group.offsetMsBySession[result.sessionId]).toBe(result.offsetMs)
+      expect(typeof group.offsetMsBySession[result.sessionId]).toBe('number')
+    }
+    // Not all the same number: each capture sits at its own place in the recording, which is
+    // exactly what a single clock-derived fallback cannot express.
+    expect(new Set(Object.values(group.offsetMsBySession)).size).toBe(count)
+  })
 })
 
 describe('contamination', () => {

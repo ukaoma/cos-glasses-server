@@ -561,22 +561,7 @@ export function supersededDayCounts(
   const domain = options.domain ?? 'all'
   const store = options.store ?? getMeetingStore()
   const library = options.library ?? getImportedMeetingLibrary()
-  const derivedRecords = readDerivedRecords(library)
-  const superseded = supersededInputsOf(derivedRecords)
-
-  // NOTHING IMPORTED AND NOTHING DERIVED: answer exactly as 6.46.1 did.
-  //
-  // This helper replaced three different per-layout day counts with one union, and on a
-  // plain upgrade — no Fireflies key, no imports, no merges — that union was a behaviour
-  // change nobody asked for: `direct` and `multi_domain` started adding the standalone
-  // recordings store to counts that had never included it, so a domain-filtered calendar
-  // grew dots the list could not explain. Supersession has nothing to subtract here, so
-  // there is nothing this union buys.
-  if (derivedRecords.length === 0 && importedLibraryMonths(library).length === 0) {
-    if (layout === 'direct') return listDirectLibraryMeetingDays(month)
-    if (layout === 'multi_domain') return listCosOperationsMeetingDays(month, domain)
-    return store.listDayCounts(month, domain)
-  }
+  const superseded = supersededInputsOf(readDerivedRecords(library))
 
   if (layout === 'multi_domain' && (options.pipeline ?? g2RecordingsReachOperations())) {
     // Operations rows only, as the list shows them. The imports root is not read

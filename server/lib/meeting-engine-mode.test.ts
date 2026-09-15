@@ -9,7 +9,11 @@ import {
   MERGE_MODE_SCHEMA,
   meetingEngineIsPipelineMac,
   meetingEngineMode,
+  meetingEngineModeDetail,
+  mergeModeFilePath,
   readMergeModeFile,
+  readMergeModeRecord,
+  resetRememberedMacClass,
   writeMergeModeFile,
 } from './meeting-engine-mode.js'
 import * as handoff from './g2-ops-handoff.js'
@@ -110,5 +114,87 @@ describe('the predicate', () => {
     // The data home is the vitest-isolated one and has no mode file, so this is the
     // absent-file default rather than a leftover from another test.
     expect(meetingEngineMode()).toBe('advise')
+  })
+})
+
+/**
+ * QA round 1: a transient missing venv must not flip a pipeline Mac to imports.
+ *
+ * `g2RecordingsReachOperations()` is a LIVE probe — it stats the COS venv's python and
+ * `sync_meetings.py`. Those go missing for reasons that have nothing to do with this Mac's
+ * identity: iCloud evicting the checkout, a pip rebuild, COS Control changing
+ * `COS_SCRIPTS_DIR` between two reads. Every one of them answered `imports`, and `imports` is
+ * the one mode that lets the server import Fireflies meetings the pipeline already files.
+ *
+ * A LIVE POSITIVE STILL WINS, always. The asymmetry is the point: being wrong towards advise
+ * writes nothing, and being wrong towards imports writes a second copy of every meeting.
+ */
+describe('remembering the Mac class', () => {
+  beforeEach(() => {
+    resetRememberedMacClass()
+    try { rmSync(mergeModeFilePath()) } catch { /* nothing to clear */ }
+  })
+
+  afterEach(() => {
+    resetRememberedMacClass()
+    try { rmSync(mergeModeFilePath()) } catch { /* nothing to clear */ }
+  })
+
+  it('records pipeline on a Mac that reaches operations', () => {
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(true)
+    expect(meetingEngineModeDetail()).toMatchObject({ mode: 'advise', observedMacClass: 'pipeline', macClassChanged: false })
+    expect(readMergeModeRecord()!.macClass).toBe('pipeline')
+    expect(readMergeModeRecord()!.changedBy).toBe('server')
+  })
+
+  it('keeps the recorded mode, and raises the alarm, on a transient negative', () => {
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(true)
+    meetingEngineModeDetail()
+    writeMergeModeFile('apply', { macClass: 'pipeline' })
+    resetRememberedMacClass()
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(false)
+    const detail = meetingEngineModeDetail()
+    expect(detail.mode).toBe('apply')
+    expect(detail.observedMacClass).toBe('standalone')
+    expect(detail.recordedMacClass).toBe('pipeline')
+    expect(detail.macClassChanged).toBe(true)
+    // And the mode file is NOT rewritten to standalone by a probe that may be wrong.
+    expect(readMergeModeRecord()!.macClass).toBe('pipeline')
+  })
+
+  it('is still imports on a Mac that has never seen a pipeline', () => {
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(false)
+    const detail = meetingEngineModeDetail()
+    expect(detail.mode).toBe('imports')
+    expect(detail.observedMacClass).toBe('standalone')
+    expect(detail.macClassChanged).toBe(false)
+    expect(readMergeModeRecord()!.macClass).toBe('standalone')
+  })
+
+  it('a live positive overrides a recorded standalone, and says the class changed', () => {
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(false)
+    meetingEngineModeDetail()
+    resetRememberedMacClass()
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(true)
+    const detail = meetingEngineModeDetail()
+    expect(detail.mode).toBe('advise')
+    expect(detail.macClassChanged).toBe(true)
+    expect(readMergeModeRecord()!.macClass).toBe('pipeline')
+  })
+
+  it('writes the class at most once per process, not once per call', () => {
+    // `meetingEngineMode()` runs on every list, detail, status poll and import refusal.
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(true)
+    meetingEngineModeDetail()
+    const first = readFileSync(mergeModeFilePath(), 'utf8')
+    for (let i = 0; i < 20; i++) meetingEngineModeDetail()
+    expect(readFileSync(mergeModeFilePath(), 'utf8')).toBe(first)
+  })
+
+  it('keeps the class through a mode change written by Control', () => {
+    vi.spyOn(handoff, 'g2RecordingsReachOperations').mockReturnValue(true)
+    meetingEngineModeDetail()
+    writeMergeModeFile('apply')
+    expect(readMergeModeRecord()).toMatchObject({ mode: 'apply', macClass: 'pipeline', changedBy: 'control' })
   })
 })

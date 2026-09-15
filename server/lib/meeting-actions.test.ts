@@ -28,6 +28,7 @@ import {
   MAX_AUTO_ACTIONS_PER_RUN,
   MeetingMergeRunner,
   PIPELINE_LOCK_RETRY_MS,
+  PIPELINE_STATUS_ARG,
   PIPELINE_MAX_ATTEMPTS,
   type EngineInputs,
   type RevertPreview,
@@ -759,6 +760,42 @@ describe('a deferred or failed revert', () => {
     expect(status.counts.pending).toBe(0)
   })
 
+  it('reads the direction off the STATE for a row written before 6.47.0 QA1', async () => {
+    // Rows already on disk carry no `direction`. `revert_pending` could only have been
+    // reached through a Revert, so that is what the fallback says — and it has to, or the
+    // first drive after an upgrade re-applies a merge somebody had undone.
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    await h.runner.run('test')
+    const actionId = h.store.read().actions[0].id
+    await h.store.update(store => {
+      const row = store.actions.find(item => item.id === actionId)!
+      row.state = 'revert_pending'
+      delete row.direction
+    })
+    expect(h.store.read().actions[0].direction).toBeUndefined()
+    h.spawns.length = 0
+    h.setSpawn(args => applied(String(args[1]), { status: 'reverted' }))
+    await h.runner.driveWaitingAction(actionId)
+    expect(h.spawns.map(row => row.args[0])).toEqual(['--revert-merge-decision'])
+    expect(h.store.read().actions[0].state).toBe('reverted')
+  })
+
+  it('reads a legacy row with no direction and no revert as an apply', async () => {
+    const h = harness({ inputs: pairedInputs(), mode: 'apply' })
+    h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
+    await h.runner.run('test')
+    const actionId = h.store.read().actions[0].id
+    await h.store.update(store => {
+      const row = store.actions.find(item => item.id === actionId)!
+      row.state = 'pending'
+      delete row.direction
+    })
+    h.spawns.length = 0
+    h.setSpawn(args => applied(String(args[1])))
+    await h.runner.driveWaitingAction(actionId)
+    expect(h.spawns.map(row => row.args[0])).toEqual(['--apply-merge-decision'])
+  })
+
   it('is re-driven on boot through the waiting driver', async () => {
     const { h, actionId } = await appliedApplyAction()
     h.setSpawn(() => attempt({ code: PIPELINE_EXIT_LOCK_BUSY }))
@@ -1381,6 +1418,114 @@ describe('splits', () => {
     await h.runner.run('test')
     expect(h.store.read().actions.filter(row => row.kind === 'split')).toEqual([])
     expect(h.store.read().suggestions.find(row => row.kind === 'split')).toBeTruthy()
+  })
+})
+
+/**
+ * `pipelineSees` and `mismatch`: the one failure a person cannot see for themselves.
+ *
+ * WHAT WAS WRONG. Advise mode plus an ACTIVE pipeline was reported as a disagreement. It is
+ * not: `merge_engine_active()` stays true while any applied action exists, precisely so the
+ * old blend path does not restart over merged scribes after the mode is rolled back. That is
+ * the documented rollback state, and calling it a mismatch told a person their two halves
+ * disagreed when they agreed.
+ */
+describe('what the pipeline sees', () => {
+  function statusHarness(pipeline: { mode: string; active: boolean; appliedActions?: number } | null): Harness {
+    const h = harness({ inputs: pairedInputs(), mode: 'advise' })
+    h.setSpawn(() => attempt({
+      code: 0,
+      stdout: pipeline
+        ? `${JSON.stringify({ mode: pipeline.mode, active: pipeline.active, applied_actions: pipeline.appliedActions ?? 0 })}\n`
+        : 'not json\n',
+    }))
+    return h
+  }
+
+  it('reports advise plus an active pipeline as mergesRemainApplied, not a mismatch', async () => {
+    const h = statusHarness({ mode: 'advise', active: true, appliedActions: 3 })
+    const status = await h.runner.status()
+    expect(status.mergesRemainApplied).toBe(true)
+    expect(status.mismatch).toBe(false)
+  })
+
+  it('reports a real disagreement when the server says apply and the pipeline does not', async () => {
+    const h = statusHarness({ mode: 'advise', active: false })
+    h.setMode('apply')
+    const status = await h.runner.status()
+    expect(status.mismatch).toBe(true)
+    expect(status.mergesRemainApplied).toBe(false)
+  })
+
+  it('agrees when both say apply', async () => {
+    const h = statusHarness({ mode: 'apply', active: true })
+    h.setMode('apply')
+    const status = await h.runner.status()
+    expect(status.mismatch).toBe(false)
+    expect(status.mergesRemainApplied).toBe(false)
+  })
+
+  it('agrees when the server says apply and the pipeline is ACTIVE without its file saying so', async () => {
+    // `merge_engine_active()` is true whenever an applied action exists, whatever the mode
+    // file says — that is how the old blend path stays off. A pipeline that is honouring
+    // merges is not disagreeing with a server that is making them.
+    const h = statusHarness({ mode: 'advise', active: true, appliedActions: 2 })
+    h.setMode('apply')
+    const status = await h.runner.status()
+    expect(status.mismatch).toBe(false)
+    expect(status.mergesRemainApplied).toBe(false)
+  })
+
+  it('says not known rather than disagrees when the pipeline cannot be asked', async () => {
+    const h = statusHarness(null)
+    const status = await h.runner.status()
+    expect(status.pipelineSees).toBeNull()
+    expect(status.mismatch).toBe(false)
+    expect(status.mergesRemainApplied).toBe(false)
+  })
+
+  it('carries WHY a run did nothing into the status a person reads', async () => {
+    // A skipped run used to report nothing at all, so a pass that deferred every time
+    // looked identical to one that had nothing to do.
+    const h = statusHarness(null)
+    h.setCapture(true)
+    await h.runner.run('during-capture')
+    const status = await h.runner.status()
+    expect(status.lastRun?.skippedReason).toBe('capture_active')
+    h.setCapture(false)
+    h.setAdmissions(false)
+    await h.runner.run('during-drain')
+    expect((await h.runner.status()).lastRun?.skippedReason).toBe('maintenance_deferred')
+  })
+
+  it('carries the inputs it refused, by reason, into the run summary', async () => {
+    const inputs = pairedInputs()
+    const h = harness({ inputs: { ...inputs, skipped: { fireflies_sidecar_clipped: 2 } }, mode: 'advise' })
+    await h.runner.run('test')
+    expect((await h.runner.status()).lastRun?.inputsSkipped).toEqual({ fireflies_sidecar_clipped: 2 })
+  })
+
+  it('carries what the clock band did this run', async () => {
+    // The band was chosen from one Mac's 198 scored recordings and nothing made its effect
+    // observable anywhere else.
+    const h = harness({ inputs: pairedInputs(), mode: 'advise' })
+    await h.runner.run('test')
+    const band = (await h.runner.status()).lastRun?.clockBand
+    expect(band).toBeDefined()
+    expect(band).toMatchObject({ candidates: expect.any(Number), anchorsDropped: expect.any(Number), candidatesZeroed: expect.any(Number) })
+    // A pair whose clocks agree exactly has a zero winner skew, and that is a measurement.
+    expect(band!.maxWinnerSkewS).toBe(0)
+    expect(band!.medianWinnerSkewS).toBe(0)
+  })
+
+  it('asks with the INHERITED environment, so the answer is not the server reading itself', async () => {
+    // Injecting the server's own COS_DATA_DIR made the child resolve the SERVER's mode file.
+    // `defaultPipelineSpawn` is the production path; this pins the argument it keys on.
+    expect(PIPELINE_STATUS_ARG).toBe('--merge-engine-status')
+    const h = statusHarness({ mode: 'advise', active: false })
+    await h.runner.status()
+    expect(h.spawns.map(row => row.args[0])).toEqual([PIPELINE_STATUS_ARG])
+    expect(h.spawns[0].actionId).toBeUndefined()
   })
 })
 

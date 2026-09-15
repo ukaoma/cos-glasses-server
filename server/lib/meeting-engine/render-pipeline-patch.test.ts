@@ -120,6 +120,67 @@ describe('what the patch adds', () => {
     expect(patch.markers).toContain('<!-- g2-source: 2026-08-20_Q3- -review.g2-chunks.json -->')
   })
 
+  /**
+   * The property the escape EXISTS for, asserted rather than assumed.
+   *
+   * The four cases above pin the exact string, which is the right pin against the pipeline.
+   * They do not say what makes that string correct: `--` cannot appear inside an HTML
+   * comment. `plutil` accepts one, Python's `plistlib` and every strict parser reject the
+   * whole document, and a scribe is read by more than one parser. This checks the COMMENT,
+   * not the string: body between `<!--` and `-->`, no `--` anywhere in it, and exactly one
+   * opener and one terminator.
+   */
+  it.each([
+    ['a plain name', 'personal/meetings/2026-08/a.g2-chunks.json'],
+    ['one double hyphen', 'quilt/meetings/2026-08/2026-08-20_Q3--review.g2-chunks.json'],
+    ['a leading double hyphen', '--weekly.g2-chunks.json'],
+    ['a trailing double hyphen before the close', 'weekly--.g2-chunks.json'],
+    ['two separated double hyphens', 'a--b--c.g2-chunks.json'],
+    ['a single hyphen, which needs no escape', '2026-08-20_Weekly.g2-chunks.json'],
+  ])('emits a well-formed HTML comment for %s', (_label, relPath) => {
+    const marker = g2SourceMarker(relPath)
+    expect(marker.startsWith('<!--')).toBe(true)
+    expect(marker.endsWith('-->')).toBe(true)
+    const body = marker.slice('<!--'.length, -'-->'.length)
+    expect(body).not.toContain('--')
+    // Exactly one terminator, so nothing after the marker is swallowed into the comment
+    // and nothing before it closes the comment early.
+    expect(marker.split('-->')).toHaveLength(2)
+    expect(marker.split('<!--')).toHaveLength(2)
+  })
+
+  /**
+   * A KNOWN LIMIT of the shared escape, pinned so it is visible rather than assumed fixed.
+   *
+   * `str.replace('--', '- -')` is NON-OVERLAPPING, on both sides of the boundary. Over a run
+   * of three or more hyphens it therefore leaves a `--` behind: `x----y` becomes `x- -- -y`,
+   * which still cannot appear inside an HTML comment.
+   *
+   * THE SERVER MUST NOT FIX THIS ALONE. The pipeline compares the marker it READS against
+   * the marker it would WRITE (`sync_meetings.g2_source_marker()`), so a server that escaped
+   * more thoroughly would write a marker the pipeline reads as another tool's — which is the
+   * exact failure the basename change was made to end. Closing it means changing both sides
+   * in one step, and a committed fixture on the pipeline side pins one of these strings.
+   *
+   * Not reachable in practice today: a meeting filename comes from
+   * `SAFE_FILENAME_PATTERN`-shaped titles, and a triple hyphen in one has not been observed.
+   * This test exists so that if it ever is, the next reader finds the limit written down
+   * instead of a comment claiming a guarantee the code does not give.
+   */
+  it.each([
+    ['three hyphens', 'x---y.g2-chunks.json', '<!-- g2-source: x- --y.g2-chunks.json -->'],
+    ['four hyphens', 'x----y.g2-chunks.json', '<!-- g2-source: x- -- -y.g2-chunks.json -->'],
+    ['five hyphens', 'x-----y.g2-chunks.json', '<!-- g2-source: x- -- --y.g2-chunks.json -->'],
+  ])('matches the pipeline byte for byte on %s, and still leaves a -- in the body', (_label, relPath, expected) => {
+    const marker = g2SourceMarker(relPath)
+    // Parity with the pipeline is the contract, and it holds.
+    expect(marker).toBe(expected)
+    // The comment is NOT well formed, and saying so is the point of this test.
+    expect(marker.slice('<!--'.length, -'-->'.length)).toContain('--')
+    // It still cannot terminate the comment early, which is the damage that would matter.
+    expect(marker.split('-->')).toHaveLength(2)
+  })
+
   it('still declares every session when no sidecar path is known', () => {
     // The `g2-session` marker is what WS5's list and `findCosOperationsMeetingBySessionId`
     // read to resolve speaker review on a merged scribe. Losing it because a sidecar path

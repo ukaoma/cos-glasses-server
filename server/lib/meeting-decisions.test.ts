@@ -1,6 +1,6 @@
 // Decision files: the one thing the pipeline reads, and the one file the server writes back.
 
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -20,6 +20,7 @@ import {
   listDecisionIds,
   readDecision,
   sha256OfFile,
+  patchIsEmpty,
   writeDecision,
   writeDecisionResult,
 } from './meeting-decisions.js'
@@ -126,6 +127,57 @@ describe('writing and reading one decision', () => {
     writeDecision(decision(), dir)
     writeFileSync(decisionPath(ACTION, dir), '{not json')
     expect(readDecision(ACTION, dir)).toBeNull()
+  })
+})
+
+/**
+ * QA round 1, blocker 9: a patch that adds nothing must never be written.
+ *
+ * WHY IT MATTERS. The pipeline applies such a decision SUCCESSFULLY: it archives the
+ * Fireflies scribe, retires the G2 standalone, writes the same bytes back, and reports
+ * `applied`. The capture disappears from the list and nothing takes its place. An additive
+ * design must not be able to produce that outcome, and the writer is the one place every
+ * apply and every re-drive passes through.
+ */
+describe('refusing an empty patch', () => {
+  it('names the empty patch for what it is', () => {
+    expect(patchIsEmpty({ sections: [], rows: [], markers: [] })).toBe(true)
+    expect(patchIsEmpty(null)).toBe(true)
+    expect(patchIsEmpty(undefined)).toBe(true)
+  })
+
+  it.each([
+    ['a section', { sections: ['## G2 Capture\n'], rows: [], markers: [] }],
+    ['a metadata row', { sections: [], rows: ['| **Sources** | Fireflies + G2 Glasses |'], markers: [] }],
+    ['a marker', { sections: [], rows: [], markers: ['<!-- g2-transcript-blended -->'] }],
+  ])('is satisfied by %s alone', (_label, patch) => {
+    expect(patchIsEmpty(patch)).toBe(false)
+  })
+
+  it('throws a typed error and writes no file', () => {
+    const dir = root()
+    const empty = decision({
+      patch: { sections: [], rows: [], markers: [], speakerMap: {}, verification: [] },
+    })
+    expect(() => writeDecision(empty, dir)).toThrow(DecisionError)
+    try {
+      writeDecision(empty, dir)
+      throw new Error('writeDecision should have refused')
+    } catch (error) {
+      expect((error as DecisionError).code).toBe('patch_empty')
+    }
+    expect(existsSync(decisionPath(ACTION, dir))).toBe(false)
+  })
+
+  it('refuses to REPLACE a good decision with an empty one', () => {
+    // `writeDecisionResult` rewrites the whole decision, so the guard has to hold on the
+    // second write as well as the first.
+    const dir = root()
+    writeDecision(decision(), dir)
+    expect(() => writeDecision(decision({
+      patch: { sections: [], rows: [], markers: [], speakerMap: {}, verification: [] },
+    }), dir)).toThrow(DecisionError)
+    expect(readDecision(ACTION, dir)!.patch.sections).toEqual(['## G2 Capture\n'])
   })
 })
 

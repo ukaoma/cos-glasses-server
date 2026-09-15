@@ -12,7 +12,8 @@
     "start": "node bin/cli.cjs",
     "start:server": "node --import tsx/esm server/index.ts",
     "test": "vitest run --maxWorkers=1",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "mutation:gate": "node server/scripts/mutation-gate.mjs"
   },
   "keywords": [
     "even-g2",
@@ -37,6 +38,7 @@
     "shared",
     "!server/**/*.test.ts",
     "!server/scripts/engine-canary.ts",
+    "!server/scripts/mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!shared/**/*.test.ts",
     ".env.example",
