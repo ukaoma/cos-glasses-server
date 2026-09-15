@@ -60,7 +60,7 @@ export interface SessionSignal {
   turnOpen: boolean
   turnStartedAt: number | null
   promptId: string | null
-  /** Stamped by the newest Stop; the B6 occupancy clause compares it to the transcript. */
+  /** Stamped by the newest Stop: `state_since` for an idle row. (6.48.1's B6 occupancy clause will compare it to the transcript.) */
   stopAt: number | null
   waiting: WaitingSignal | null
   failure: FailureSignal | null

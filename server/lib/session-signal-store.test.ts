@@ -3,8 +3,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { HOOK_EVENT_NAMES, parseHookEnvelope, toolFingerprint, type HookEnvelope } from './session-hook-events.js'
-import { applyHookEvent, SessionSignalStore, type SessionSignal } from './session-signal-store.js'
-import { DEAD_GRACE_MS, deriveSessionState } from './session-state-derive.js'
+import { applyHookEvent, SessionSignalStore, SIGNAL_PRUNE_AFTER_END_MS, type SessionSignal } from './session-signal-store.js'
+import { DEAD_GRACE_MS, HOOK_SILENCE_MS, OPEN_TURN_CEILING_MS, deriveSessionState } from './session-state-derive.js'
+import { HOOK_SUBSCRIPTIONS } from './claude-hooks-installer.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'session-hooks-6.48.0')
 const noSpawn = { isCosSpawnedPid: () => false }
@@ -99,6 +100,11 @@ describe('recorded 2.1.272 sequences replay into the expected phases', () => {
     // And the interactive-only list shrinks as recordings arrive: a recorded event must not stay on it.
     for (const name of interactiveOnly) expect(recorded.has(name), `${name} is recorded; drop it from interactiveOnly`).toBe(false)
   })
+
+  it('the installer subscribes exactly the events the reducer understands (one list, two homes, pinned)', () => {
+    expect([...HOOK_SUBSCRIPTIONS.map(s => s.event)].sort()).toEqual([...HOOK_EVENT_NAMES].sort())
+    expect(new Set(HOOK_SUBSCRIPTIONS.map(s => s.event)).size).toBe(HOOK_SUBSCRIPTIONS.length)
+  })
 })
 
 describe('the reducer rules the validation rounds added', () => {
@@ -184,7 +190,7 @@ describe('the store', () => {
     const states = recording('p-mode-run.hooks.jsonl')
     for (const env of states) store.apply(env)
     expect(store.prune(states[3].ts + 1000)).toBe(0)
-    expect(store.prune(states[3].ts + 7 * 60 * 60_000)).toBe(1)
+    expect(store.prune(states[3].ts + SIGNAL_PRUNE_AFTER_END_MS + 1)).toBe(1)
     expect(store.size()).toBe(0)
   })
 })
@@ -209,11 +215,20 @@ describe('deriveSessionState ranks hook, registry and transcript', () => {
     expect(gone.agent_state).toBe('ended')
   })
 
-  it('the registry decides when the hooks have been silent and its status moved later', () => {
+  it('the registry decides only when the hooks have been silent AND its status moved later', () => {
     const stale = signalAt(1) // running, but from long ago
-    const late = stale.lastEventAt + 45 * 60_000
+    const late = stale.lastEventAt + HOOK_SILENCE_MS + 15 * 60_000
     const d = deriveSessionState({ signal: stale, registry: { alive: true, status: 'idle', waitingFor: null, statusUpdatedAt: late - 60_000, lastActiveAt: late - 60_000 }, transcript: undefined, now: late })
     expect(d).toMatchObject({ agent_state: 'idle', state_source: 'registry' })
+    // Silent, but the registry did NOT move after the last hook event: the hooks still speak.
+    // (A pending prompt, since an open TURN past its ceiling yields on its own rule.)
+    const pending = signalAt(2)
+    const unmoved = deriveSessionState({ signal: pending, registry: { alive: true, status: 'busy', waitingFor: null, statusUpdatedAt: pending.lastEventAt - 1, lastActiveAt: pending.lastEventAt - 1 }, transcript: undefined, now: pending.lastEventAt + HOOK_SILENCE_MS + 60_000 })
+    expect(unmoved).toMatchObject({ agent_state: 'waiting', state_source: 'hook' })
+    // Moved later, but the hooks are NOT silent: the hook's detail stands over the registry's
+    // bare `waiting` (which would read as a question with no detail).
+    const moved = deriveSessionState({ signal: pending, registry: { alive: true, status: 'waiting', waitingFor: null, statusUpdatedAt: pending.lastEventAt + 200, lastActiveAt: pending.lastEventAt + 200 }, transcript: undefined, now: pending.lastEventAt + 5_000 })
+    expect(moved).toMatchObject({ agent_state: 'waiting', state_source: 'hook', waiting_kind: 'permission', waiting_detail: 'Bash touch par-a' })
   })
 
   it('registry waiting maps a dialog to waiting/permission and anything else to a question; busy and idle map through', () => {
@@ -242,7 +257,7 @@ describe('deriveSessionState ranks hook, registry and transcript', () => {
 
   it('an open turn with no event for half an hour is no longer trusted as running', () => {
     const running = signalAt(1)
-    const d = deriveSessionState({ signal: running, registry: undefined, transcript: { inFlight: false, lastActivityAt: running.lastEventAt }, now: running.lastEventAt + 31 * 60_000 })
+    const d = deriveSessionState({ signal: running, registry: undefined, transcript: { inFlight: false, lastActivityAt: running.lastEventAt }, now: running.lastEventAt + OPEN_TURN_CEILING_MS + 60_000 })
     expect(d).toMatchObject({ agent_state: 'idle', state_source: 'transcript' })
   })
 })

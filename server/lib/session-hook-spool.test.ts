@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -226,5 +226,24 @@ describe('the ledger', () => {
     let reply = ''
     ledger.replay(envs[2].ts, env => { if (env.event === 'Stop') reply = String(env.payload.last_assistant_message) })
     expect(reply).toBe('canary')
+  })
+
+  it('reads the rotated .1 when the current file does not reach back to the window, and unions its keys', () => {
+    const dir = spoolDir()
+    const path = ledgerPath(dir)
+    const envs = lines('p-mode-run.hooks.jsonl').map(l => parseHookEnvelope(l)).map(p => { if (!p.ok) throw new Error(p.reason); return p.envelope })
+    // The rotated file holds the first two events, the current file the last two: a rotation inside the window.
+    const older = new SessionHookLedger(path)
+    older.append('k0', envs[0]); older.append('k1', envs[1])
+    renameSync(path, path + '.1')
+    const current = new SessionHookLedger(path)
+    current.append('k2', envs[2]); current.append('k3', envs[3])
+    const seen: string[] = []
+    const result = current.replay(envs[0].ts - 1, env => seen.push(env.event))
+    expect(seen).toEqual(['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd'])
+    expect([...result.keys]).toEqual(['k0', 'k1', 'k2', 'k3'])
+    // A window that the current file already covers never opens the rotated file.
+    const narrow = current.replay(envs[2].ts, () => {})
+    expect([...narrow.keys]).toEqual(['k2', 'k3'])
   })
 })

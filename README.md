@@ -183,7 +183,7 @@ event into `~/.cos-glasses/data/hook-spool` and never contacts the server (a per
 request may, only after the desk has been idle for 90 s, for the approval feature that ships
 next). Sessions started after the install report `state_source: hook` on
 `/api/agent-sessions` and `/api/claude-sessions`; tabs already open keep their startup
-hook snapshot until restarted. The next COS Control (0.5.231) offers the same install from
+hook snapshot until restarted, and may show Claude's "hooks modified externally" notice once (expected: the user-level file changed under them). The next COS Control (0.5.231) offers the same install from
 its Sessions tab. Rows change only while the server runs with `COS_CLAUDE_SESSIONS_ENABLED=1`
 (`--hooks status` prints `serverApplies`). Turn the ingestion off with `COS_SESSION_HOOKS=0`
 (the spool is still drained and stamped, rows are exactly as before). Removing the package

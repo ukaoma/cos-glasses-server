@@ -287,6 +287,56 @@ const CASES = [
     replace: '    if (!options.rederiveOnly && !this.collectInjected) {',
     tests: ['server/lib/meeting-actions-collect.test.ts'],
   },
+  // 6.48.0 session hooks: the guards the /qa round added.
+  {
+    name: 'hooks-boot-drain-progress',
+    file: 'server/lib/session-hook-spool.ts',
+    find: '    if (sweep() === 0) break',
+    replace: '    sweep()',
+    tests: ['server/lib/session-hook-spool.test.ts'],
+  },
+  {
+    name: 'hooks-permission-denied-by-name',
+    file: 'server/lib/session-signal-store.ts',
+    find: "  return event === 'PermissionDenied' && waiting.toolName === toolName",
+    replace: '  return false',
+    tests: ['server/lib/session-signal-store.test.ts'],
+  },
+  {
+    name: 'hooks-post-tool-use-not-by-name',
+    file: 'server/lib/session-signal-store.ts',
+    find: "  return event === 'PermissionDenied' && waiting.toolName === toolName",
+    replace: '  return waiting.toolName === toolName',
+    tests: ['server/lib/session-signal-store.test.ts'],
+  },
+  {
+    name: 'hooks-dead-grace',
+    file: 'server/lib/session-state-derive.ts',
+    find: '  const deadLongEnough = dead && deadScans >= MISS_LIMIT && deadSince !== null && now - deadSince >= DEAD_GRACE_MS',
+    replace: '  const deadLongEnough = dead && deadScans >= MISS_LIMIT',
+    tests: ['server/lib/session-signal-store.test.ts', 'server/lib/session-hooks-runtime.test.ts'],
+  },
+  {
+    name: 'hooks-registry-yields-only-when-silent',
+    file: 'server/lib/session-state-derive.ts',
+    find: '  if (signal && !(registryMovedLater && hooksSilent)) {',
+    replace: '  if (signal && !(registryMovedLater || hooksSilent)) {',
+    tests: ['server/lib/session-signal-store.test.ts'],
+  },
+  {
+    name: 'hooks-empty-token-no-request',
+    file: 'bin/hooks/cos-session-hook',
+    find: '; [ -n "$TOK" ] || { cleanup; exit 0; }   # no token, no request',
+    replace: '',
+    tests: ['server/lib/cos-session-hook.script.test.ts'],
+  },
+  {
+    name: 'hooks-off-means-off',
+    file: 'server/lib/session-hooks-runtime.ts',
+    find: '  if (!sessionHooksEnabled()) return undefined\n  const signal = signalFor(input.sessionId)',
+    replace: '  const signal = signalFor(input.sessionId)',
+    tests: ['server/routes/session-hooks-wire.test.ts', 'server/lib/session-hooks-runtime.test.ts'],
+  },
 ]
 
 function sha256(text) {
