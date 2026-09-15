@@ -116,11 +116,14 @@ import {
 } from './transcribe-stream.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import {
+  type MeetingLibraryRecord,
   cosOperationsMeetingsConfigured,
   findDirectLibraryMeetingBySessionId,
   findCosOperationsMeetingBySessionId,
   resolveCosOperationsDir,
 } from '../lib/cos-operations-meetings.js'
+import { derivedSourcesFor, findDerivedRecord } from '../lib/imported-library-rows.js'
+import { assertVoiceEvidenceSource } from '../lib/voice-evidence-guard.js'
 import { domainForMeeting, resolveDomains } from '../lib/domains.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import {
@@ -714,6 +717,71 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
   })
 
+  // ── Record identity for the speaker surfaces (6.47.0) ─────────────────
+  //
+  // One resolver, because the speakers and content routes each carried their own
+  // copy of the same three literals and the two had already drifted apart once.
+  // `source` and `mutable` always describe the CAPTURE — the file that holds the
+  // chunks and the one a correction would rewrite — even when the caller reached
+  // it through a merged record's row. `blendedRecordId` is what says "you opened
+  // the merged row", so Control can label the panel without pretending the merge
+  // is the thing being edited.
+  function speakerRecordIdentity(
+    sessionId: string,
+    operations: { domain: string; month: string; filename: string } | null,
+    direct: MeetingLibraryRecord | null,
+    blendedRecordId?: string,
+  ): {
+    source: 'cos_operations' | 'direct_library' | 'standalone_recordings'
+    recordId: string
+    mutable: boolean
+    blendedRecordId?: string
+  } {
+    return {
+      source: operations ? 'cos_operations' : direct ? 'direct_library' : 'standalone_recordings',
+      recordId: operations
+        ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
+        : direct?.recordId ?? `standalone:${sessionId}`,
+      mutable: direct == null,
+      ...(blendedRecordId ? { blendedRecordId } : {}),
+    }
+  }
+
+  /**
+   * `?recordId=blended:<h16>` on a read: the caller opened the merged row.
+   *
+   * Confirmed against the record's OWN inputs rather than trusted, so a wrong or
+   * stale id is simply ignored instead of labelling an unrelated capture as part
+   * of a merge. Any capture the merge holds is accepted, not only the earliest,
+   * because a merge of two captures has two ways in and both are legitimate.
+   */
+  function blendedRecordFor(value: unknown, sessionId: string): string | undefined {
+    if (typeof value !== 'string' || !value.startsWith('blended:')) return undefined
+    const record = findDerivedRecord(value)
+    if (!record || record.kind !== 'merge') return undefined
+    return record.g2SessionIds.includes(sessionId) ? record.recordId : undefined
+  }
+
+  /**
+   * Refuse a mutation aimed at an imported or derived record.
+   *
+   * A derived record is a FUNCTION of its inputs: the next re-derive rewrites it,
+   * so an edit here would be silently discarded. The refusal names the capture to
+   * correct instead, which is the whole point of answering 409 rather than 404.
+   */
+  function refuseDerivedMutation(recordId: unknown): { status: number; body: Record<string, unknown> } | null {
+    const refusal = assertVoiceEvidenceSource([recordId])
+    if (!refusal) return null
+    const record = typeof recordId === 'string' ? findDerivedRecord(recordId) : null
+    const sourceRecordId = record
+      ? derivedSourcesFor(record, store).find(source => source.kind === 'g2')?.recordId
+      : undefined
+    return {
+      status: refusal.status,
+      body: { ...refusal.body, mutable: false, ...(sourceRecordId ? { sourceRecordId } : {}) },
+    }
+  }
+
   // ── Speaker review (6.21.12) ──────────────────────────────────────────
   // Backs COS Control's naming panel. Read-only: it reports what a saved
   // meeting's sidecar already contains and never writes. Naming, merging, and
@@ -726,6 +794,15 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    // BEFORE the lookup. The sessionId pattern allows colons, so `blended:<h16>`
+    // and `imported:fireflies:<h16>` are shaped like sessions and would otherwise
+    // fall through to a store scan that answers 404 — the wrong answer, because
+    // the record exists and simply is not a capture.
+    const identityRefusal = assertVoiceEvidenceSource([sessionId])
+    if (identityRefusal) {
+      res.status(identityRefusal.status).json(identityRefusal.body)
       return
     }
     // Prefer the COS operations copy when configured. The same session exists in
@@ -796,11 +873,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       title,
       domain,
       filename,
-      source: operations ? 'cos_operations' : direct ? 'direct_library' : 'standalone_recordings',
-      recordId: operations
-        ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
-        : direct?.recordId ?? `standalone:${sessionId}`,
-      mutable: direct == null,
+      ...speakerRecordIdentity(sessionId, operations, direct, blendedRecordFor(req.query.recordId, sessionId)),
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
     })
@@ -837,6 +910,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const identityRefusal = assertVoiceEvidenceSource([sessionId])
+    if (identityRefusal) {
+      res.status(identityRefusal.status).json(identityRefusal.body)
       return
     }
     const operations = cosOperationsMeetingsConfigured()
@@ -975,11 +1053,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // no write-up yet.
       capturedChars: clip.capturedChars,
       domain: clip.domain,
-      source: operations ? 'cos_operations' : direct ? 'direct_library' : 'standalone_recordings',
-      recordId: operations
-        ? `ops:${operations.domain}:${operations.month}:${operations.filename}`
-        : direct?.recordId ?? `standalone:${sessionId}`,
-      mutable: direct == null,
+      ...speakerRecordIdentity(sessionId, operations, direct, blendedRecordFor(req.query.recordId, sessionId)),
       // So the panel can warn above the write-up, not just the clipboard.
       removedNames: clip.removed,
       coverage,
@@ -1031,6 +1105,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const speaker = typeof req.body?.speaker === 'string' ? req.body.speaker.trim() : ''
     if (!speaker) {
       res.status(400).json({ error: 'speaker is required', reason: 'invalid_label' })
+      return
+    }
+    // Enrolment writes to the voice store, so the same two gates as the other
+    // corrections: the session must be a capture, and the record aimed at must
+    // not be a derived one.
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    if (evidenceRefusal) {
+      res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
     }
 
@@ -1089,6 +1171,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    // A merged G2 session is NOT refused here: it is a real capture with real
+    // audio, and relabelling it is how its profile gets better. Only an imported
+    // or derived IDENTITY is refused.
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    if (evidenceRefusal) {
+      res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
     }
 
@@ -1329,6 +1419,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    if (evidenceRefusal) {
+      res.status(evidenceRefusal.status).json(evidenceRefusal.body)
+      return
+    }
     const label = typeof req.body?.label === 'string' ? req.body.label : ''
     const bad = invalidLabelReason(label)
     if (bad) {
@@ -1413,6 +1508,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    if (evidenceRefusal) {
+      res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
     }
     const from = typeof req.body?.from === 'string' ? req.body.from : ''

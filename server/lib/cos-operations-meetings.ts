@@ -182,6 +182,37 @@ export function sidecarSessionId(monthDir: string, meetingFilename: string): str
   return sidecarListHints(monthDir, meetingFilename).sessionId
 }
 
+// ── Merged-scribe markers (6.47.0, apply mode) ───────────────────────────────
+//
+// On a Mac with the COS pipeline the merge is spliced INTO the existing Fireflies
+// scribe rather than written as a new record, so there is no `.derived.json` to
+// read and the scribe itself has to say what it holds. The pipeline writes four
+// markers (WS8 step 4); these two are the ones a row identity needs.
+//
+// WHY THE SCRIBE AND NOT A SIDECAR. A merged scribe replaced a Fireflies scribe,
+// which never had a `.g2-chunks.json`. Its G2 sidecar stays beside the retired
+// standalone capture, so the only place that says "this file holds session X" is
+// the file.
+
+/** `<!-- g2-session: <sessionId> -->`, once per G2 capture the scribe holds. */
+export const G2_SESSION_MARKER = /<!--\s*g2-session:\s*([A-Za-z0-9:_-]{3,96})\s*-->/g
+/** `<!-- merge-action: <actionId> -->`, so Control can offer the merge's Undo. */
+export const MERGE_ACTION_MARKER = /<!--\s*merge-action:\s*([A-Za-z0-9_-]{1,64})\s*-->/
+
+/** Every session a merged scribe declares, in the order it declares them. */
+export function mergedScribeSessions(content: string): string[] {
+  const sessions: string[] = []
+  for (const match of content.matchAll(G2_SESSION_MARKER)) {
+    if (!sessions.includes(match[1])) sessions.push(match[1])
+  }
+  return sessions
+}
+
+/** The action a merged scribe was written by, when it declares one. */
+export function mergedScribeActionId(content: string): string | undefined {
+  return content.match(MERGE_ACTION_MARKER)?.[1]
+}
+
 function envPath(name: string): string | null {
   const raw = process.env[name]?.trim()
   if (!raw) return null
@@ -439,6 +470,14 @@ function withMeetingListInsights(meta: CosOperationsMeetingMeta, content: string
  *
  * Scans sidecar heads rather than parsing them, so the cost is a 4 KB read per
  * candidate and not the transcript.
+ *
+ * A MERGED SCRIBE OUTRANKS AN ORPHAN SIDECAR (6.47.0). Applying a merge splices
+ * the capture into the Fireflies scribe and then RETIRES the G2 standalone
+ * scribe, leaving its `.g2-chunks.json` behind with no markdown beside it. The
+ * chunks are still the evidence — that sidecar is what the speaker review reads —
+ * but the readable meeting is now the merged scribe, so this returns the orphan's
+ * sidecar path with the merged scribe's path, filename and title. Without that,
+ * naming a voice on a merged meeting opened a file that no longer existed.
  */
 export function findCosOperationsMeetingBySessionId(sessionId: string): {
   sidecarPath: string
@@ -468,23 +507,61 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
       for (const sidecarName of sidecars) {
         const meetingFilename = sidecarName.replace(/\.g2-chunks\.json$/, '.md')
         if (sidecarSessionId(monthDir, meetingFilename) !== sessionId) continue
-        const meetingPath = join(monthDir, meetingFilename)
-        let title = meetingFilename.replace(/\.md$/, '')
+        const sidecarPath = join(monthDir, sidecarName)
+        let meetingPath = join(monthDir, meetingFilename)
+        let resolvedFilename = meetingFilename
+        let content: string | null = null
         try {
-          const head = readFileSync(meetingPath, 'utf-8').slice(0, 4000)
-          const heading = head.match(/^#\s+(.+)$/m)?.[1]?.trim()
-          if (heading) title = heading
-        } catch { /* fall back to the filename stem */ }
+          content = readFileSync(meetingPath, 'utf-8')
+        } catch {
+          // The capture's own scribe is gone. Only now is it worth reading the
+          // month's other scribes to find the one that declares this session.
+          const merged = findMergedScribeForSession(monthDir, sessionId)
+          if (merged) {
+            resolvedFilename = merged.filename
+            meetingPath = join(monthDir, merged.filename)
+            content = merged.content
+          }
+        }
+        let title = resolvedFilename.replace(/\.md$/, '')
+        const heading = content?.slice(0, 4000).match(/^#\s+(.+)$/m)?.[1]?.trim()
+        if (heading) title = heading
         return {
-          sidecarPath: join(monthDir, sidecarName),
+          sidecarPath,
           meetingPath,
-          filename: meetingFilename,
+          filename: resolvedFilename,
           domain,
           month,
           title,
         }
       }
     }
+  }
+  return null
+}
+
+/**
+ * The scribe in this month that declares `sessionId` through `<!-- g2-session -->`.
+ *
+ * Only ever called when a capture's own scribe is missing, so the full-content
+ * read it costs lands on a path that was about to answer with a dead file.
+ */
+function findMergedScribeForSession(
+  monthDir: string,
+  sessionId: string,
+): { filename: string; content: string } | null {
+  let names: string[]
+  try {
+    names = readdirSync(monthDir).filter(name => name.endsWith('.md')).sort().reverse()
+  } catch {
+    return null
+  }
+  for (const filename of names.slice(0, MAX_LIST_CANDIDATES)) {
+    let content: string
+    try {
+      content = readFileSync(join(monthDir, filename), 'utf-8')
+    } catch { continue }
+    if (mergedScribeSessions(content).includes(sessionId)) return { filename, content }
   }
   return null
 }
@@ -587,6 +664,20 @@ export function listCosOperationsMeetings(options: {
               if (hints.sessionId) meta.sessionId = hints.sessionId
               if (hints.speakers.length > 0) {
                 meta.voiceReview = meetingVoiceReview(hints.speakers, hints.sessionId)
+              }
+              // A scribe the pipeline merged says so in its own body: it holds
+              // captures whose standalone rows this list must then drop, and it
+              // names the action Control offers Undo for. The content is already
+              // in memory, so this costs no extra read. The sidecar wins for
+              // `sessionId` when both are present — the sidecar is the file the
+              // speaker system keys on.
+              const declared = mergedScribeSessions(content)
+              if (declared.length > 0) {
+                meta.derivedKind = 'merge'
+                meta.g2SessionIds = declared
+                if (!meta.sessionId) meta.sessionId = declared[0]
+                const actionId = mergedScribeActionId(content)
+                if (actionId) meta.actionId = actionId
               }
               if (options.day && meta.date !== options.day) continue
               allMeetings.push(meta)

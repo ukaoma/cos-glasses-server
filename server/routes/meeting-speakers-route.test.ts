@@ -374,6 +374,10 @@ describe('direct read-only meeting library', () => {
     expect(review.json.source).toBe('direct_library')
     expect(review.json.mutable).toBe(false)
     expect(review.json.recordId).toBe(`direct:${MONTH}:${filename}`)
+    // 6.47.0 replaced these three literals with one shared resolver, and added a
+    // fourth field. A direct-library meeting is not a merge, so it stays absent
+    // rather than becoming null: the companion reads presence, not value.
+    expect(review.json.blendedRecordId).toBeUndefined()
 
     const recordId = review.json.recordId
     const attempts = [

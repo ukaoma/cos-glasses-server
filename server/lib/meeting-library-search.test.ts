@@ -35,16 +35,36 @@ describe('meeting library search helpers', () => {
     expect(body.score).toBeGreaterThan(0)
   })
 
-  it('parses ops, standalone, and direct library paths', () => {
+  it('parses ops, standalone, imports, and direct library paths', () => {
     expect(libraryRefFromPath('/Users/x/operations/quilt/meetings/2026-08/2026-08-12_Toast_(G2).md')).toEqual({
       domain: 'quilt', month: '2026-08', filename: '2026-08-12_Toast_(G2).md',
     })
     expect(libraryRefFromPath('/Users/x/.cos-glasses/data/recordings/2026-07/2026-07-15_Route.md')).toEqual({
       domain: 'personal', month: '2026-07', filename: '2026-07-15_Route.md',
     })
+    // The imports shape is checked BEFORE the direct-library one, which is the
+    // bare `<month>/<file>.md` tail every path here ends with.
+    expect(libraryRefFromPath('/Users/x/.cos-glasses/data/imports/2026-09/2026-09-10_merged_00112233445566aa.md')).toEqual({
+      domain: 'imported', month: '2026-09', filename: '2026-09-10_merged_00112233445566aa.md',
+    })
     expect(libraryRefFromPath('/meetings/2026-03/2026-03-10_Existing_Review.md')).toEqual({
       domain: 'library', month: '2026-03', filename: '2026-03-10_Existing_Review.md',
     })
+  })
+
+  it('merges a keyword and a semantic hit for one merged record', () => {
+    // The record id is what joins them, and for an imported or derived record it
+    // comes from the filename's hash on both sides — the keyword scan has a row,
+    // the semantic scan has only a path.
+    const recordId = 'blended:00112233445566aa'
+    const merged = mergeMeetingSearchHits(
+      [hit({ recordId, filename: '2026-08-12_merged_00112233445566aa.md', librarySource: 'blended', keywordScore: 0.8, snippet: 'keyword snippet' })],
+      [hit({ recordId, filename: '2026-08-12_merged_00112233445566aa.md', librarySource: 'blended', semanticScore: 0.6, match: 'semantic', snippet: 'meaning snippet' })],
+      10,
+    )
+    expect(merged).toHaveLength(1)
+    expect(merged[0].librarySource).toBe('blended')
+    expect(merged[0].match).toBe('both')
   })
 
   it('merges keyword and semantic hits for the same record', () => {
