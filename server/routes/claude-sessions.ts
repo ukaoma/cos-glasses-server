@@ -34,6 +34,7 @@ import {
 } from '../lib/claude-session-registry.js'
 import { deriveForRow } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type RegistryFacts } from '../lib/session-state-derive.js'
+import { queuedTurnsFields, queuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
 
 export const claudeSessionsRouter = Router()
 
@@ -158,13 +159,17 @@ claudeSessionsRouter.get('/claude-sessions', async (req, res) => {
     const limit = boundedInteger(req.query.limit, 30, 1, 100)
     const records = await readClaudePeerRecords(claudeSessionsDir())
     const peers = records.map(toWirePeer)
+    const queuedOf = queuedWaitingLookup(Date.now())
     // 6.48.0: the same derived state every surface reads, stamped ADDITIVELY on the wire
     // peer. `toPeer` stays byte-identical (its key set is pinned); the eight extra keys
     // come from the signal store and the registry facts an older client never sees.
+    // 6.48.1: queued_turns joins here too so a peer-only row (no agent-sessions hit)
+    // still shows a follow-up waiting.
     res.json({
       peers: records.slice(0, limit).map(record => ({
         ...toWirePeer(record),
         ...derivedRowFields(deriveForRow({ sessionId: record.sessionId, registry: registryFacts(record) })),
+        ...queuedTurnsFields(queuedOf('claude', record.sessionId)),
       })),
       counts: countPeers(peers),
       enabled: true,

@@ -62,6 +62,46 @@ export function writeQueue(provider: string, threadId: string, queue: readonly Q
   atomicWriteFileSync(queuePath(provider, threadId), `${JSON.stringify(queue, null, 2)}\n`)
 }
 
+/**
+ * How many WAITING follow-ups a list/detail row should show (6.48.1).
+ *
+ * Queue files are named with the native thread id (often a full UUID). Claude
+ * list rows stay on the registry's 8-character form until a transcript match
+ * expands them. An exact match always wins; an 8-character id is allowed to
+ * count a unique prefix among waiting queues of that provider, and an
+ * ambiguous prefix counts as zero rather than guessing.
+ *
+ * PURE: the store builds the input from disk; this decides the number.
+ */
+export function queuedWaitingForSession(
+  queues: ReadonlyArray<{ provider: string; threadId: string; waiting: number }>,
+  provider: string, sessionId: string,
+): number {
+  const id = sessionId.toLowerCase()
+  const rows = queues.filter(q => q.provider === provider && q.waiting > 0)
+  const exact = rows.find(q => q.threadId.toLowerCase() === id)
+  if (exact) return exact.waiting
+  if (id.length !== 8) return 0
+  const prefixed = rows.filter(q => q.threadId.toLowerCase().startsWith(id))
+  const owners = new Set(prefixed.map(q => q.threadId.toLowerCase()))
+  if (owners.size !== 1) return 0
+  return prefixed[0]!.waiting
+}
+
+/** One lookup for a whole list/search request: one directory read, then O(1) per row. */
+export function queuedWaitingLookup(now: number): (provider: string, sessionId: string) => number {
+  const queues = queuedThreadKeys().map(({ provider, threadId }) => ({
+    provider,
+    threadId,
+    waiting: readQueue(provider, threadId, now).filter(t => t.status === 'waiting').length,
+  }))
+  return (provider, sessionId) => queuedWaitingForSession(queues, provider, sessionId)
+}
+
+export function queuedTurnsFields(count: number): { queued_turns?: number } {
+  return count > 0 ? { queued_turns: count } : {}
+}
+
 /** Every thread with a queue file, for the drain sweep. */
 export function queuedThreadKeys(): Array<{ provider: string; threadId: string }> {
   try {

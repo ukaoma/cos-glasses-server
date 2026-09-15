@@ -79,7 +79,7 @@ describe('derived state on the claude-sessions wire', () => {
     })
     // The wire keeps the thirteen pinned peer keys; the eight extras are the only additions.
     const keys = Object.keys(during.peers[0]).sort()
-    expect(keys.filter(k => !['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id'].includes(k))).toEqual([
+    expect(keys.filter(k => !['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id', 'queued_turns'].includes(k))).toEqual([
       'alive', 'entrypoint', 'id', 'kind', 'lastActiveAt', 'name', 'nameRedacted', 'reachable', 'startedAt', 'status', 'version', 'waitingFor', 'workspace',
     ])
 

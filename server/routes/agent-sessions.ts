@@ -41,6 +41,7 @@ import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, re
 import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
 import { deriveForRow } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
+import { queuedTurnsFields, queuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 import {
   occupiedThreads,
@@ -78,9 +79,9 @@ function asSort(value: unknown): AgentSessionSort {
   return String(value ?? '').toLowerCase() === 'opened' ? 'opened' : 'updated'
 }
 
-function toSearchHit(row: AgentSessionSearchHit) {
+function toSearchHit(row: AgentSessionSearchHit, queuedTurns = 0) {
   return {
-    ...toEntry(row),
+    ...toEntry(row, undefined, undefined, queuedTurns),
     snippet: row.snippet,
     keywordScore: row.keywordScore,
     semanticScore: row.semanticScore,
@@ -264,7 +265,7 @@ function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: nu
   }
 }
 
-function toEntry(row: AgentSessionRow, activity?: SessionActivity | null, derived?: DerivedSessionState) {
+function toEntry(row: AgentSessionRow, activity?: SessionActivity | null, derived?: DerivedSessionState, queuedTurns = 0) {
   return {
     session_id: row.session_id,
     provider: row.provider,
@@ -293,6 +294,9 @@ function toEntry(row: AgentSessionRow, activity?: SessionActivity | null, derive
     // Under a NEW key: `state` above is `running|recent` and Control renders any other
     // value there as "Running". Omitted entirely when nothing is known, like the two above.
     ...derivedRowFields(derived),
+    // 6.48.1: waiting follow-ups on this thread. Omitted at 0 so an older client
+    // and a quiet row look the same as 6.48.0.
+    ...queuedTurnsFields(queuedTurns),
   }
 }
 
@@ -380,8 +384,9 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
         now,
       }))
     }
+    const queuedOf = queuedWaitingLookup(now)
     res.json({
-      sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index], derivedById.get(row.session_id)), running)),
+      sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running)),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
@@ -410,9 +415,10 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
   try {
     const limit = boundedInteger(req.query.limit, 20, 1, 50)
     const result = await searchAgentSessions({ query, limit })
+    const queuedOf = queuedWaitingLookup(Date.now())
     res.json({
       ...result,
-      hits: result.hits.map(toSearchHit),
+      hits: result.hits.map(hit => toSearchHit(hit, queuedOf(hit.provider, hit.session_id))),
     })
   } catch (error) {
     console.error(`[agent-sessions] search failed: ${error instanceof Error ? error.message : error}`)
@@ -469,6 +475,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     res.json({
       ...withRunning({ session_id: parsed.session_id }, running),
       ...derivedRowFields(derived),
+      ...queuedTurnsFields(queuedWaitingLookup(Date.now())(provider, parsed.session_id)),
       // The client must be able to tell "this server stamped nothing" from "this
       // server stamped false", because the two demand opposite behaviour: an old
       // server's silence means keep using the hint borrowed from the list row, and
