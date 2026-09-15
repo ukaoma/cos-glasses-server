@@ -7,6 +7,7 @@ import {
   SPLIT_SOURCE_LABEL,
   fingerprintKey,
   renderMergedRecord,
+  renderPipelinePatch,
   renderSplitPiece,
 } from './render.js'
 import { firefliesMeeting, g2Capture, phrase } from './__fixtures__/synthetic.js'
@@ -207,5 +208,80 @@ describe('a split piece', () => {
     expect(markdown).not.toContain(String(primary.sentences[0].text))
     expect(result.record.sidecar.kind).toBe('split')
     expect(result.record.sidecar.pieces).toHaveLength(1)
+  })
+})
+
+/**
+ * Miles's house copy rule, on the bytes that reach a permanent file.
+ *
+ * WHY IT IS HERE AND NOT ONLY ON REFUSAL COPY. 6.47.0 shipped `/[—→]/` against refusal
+ * strings, which are transient. The renderer's output is not: in imports mode it IS the
+ * meeting record, and in apply mode the pipeline splices it into an operations scribe that
+ * survives the release. The capture heading carried an em dash through both (QA round 2,
+ * blocker 7), and no refusal-copy guard could ever have seen it.
+ *
+ * The assertions run over the WHOLE output of all three renderers: markdown, the sidecar
+ * serialised, and every field of the pipeline patch. Anything a renderer writes is covered by
+ * construction rather than by remembering to add a case.
+ */
+describe('no em dash and no arrow in anything a renderer writes', () => {
+  const BANNED = /[—→]/
+
+  it('is a guard that can fail: the banned characters are the ones named', () => {
+    expect(BANNED.test('a — b')).toBe(true)
+    expect(BANNED.test('a → b')).toBe(true)
+    expect(BANNED.test('a - b, c')).toBe(false)
+  })
+
+  it('holds for renderMergedRecord, markdown and sidecar alike', () => {
+    const result = render()
+    if (!result.ok) throw new Error('expected a record')
+    expect(result.record.markdown).not.toMatch(BANNED)
+    expect(JSON.stringify(result.record.sidecar)).not.toMatch(BANNED)
+    // The heading the em dash lived on is still there, in its dash-free form.
+    expect(result.record.markdown).toMatch(/### Capture 1, \d{2}:\d{2}, 30 min/)
+  })
+
+  it('holds for renderMergedRecord when the transcripts overflow into the sidecar', () => {
+    const full = render()
+    if (!full.ok) throw new Error('expected a record')
+    const overflowed = render({ markdownMaxBytes: Buffer.byteLength(full.record.markdown, 'utf8') - 100 })
+    if (!overflowed.ok) throw new Error('expected a record')
+    expect(overflowed.record.markdown).not.toMatch(BANNED)
+    expect(JSON.stringify(overflowed.record.sidecar)).not.toMatch(BANNED)
+    // The overflow path is the one that moves the capture section into the sidecar, so this
+    // is where a dashed heading would hide from a markdown-only assertion.
+    expect(overflowed.record.sidecar.overflow?.sections.join('')).toContain('### Capture 1,')
+  })
+
+  it('holds for renderSplitPiece', () => {
+    const { primary, capture } = scene()
+    const result = renderSplitPiece({
+      actionId: 'a_piece',
+      tier: 'auto',
+      source: primary,
+      piece: { index: 1, startS: 100, endS: 400, kind: 'matched', sessionIds: ['g2-session'] },
+      pieceCount: 3,
+      captures: [capture],
+    })
+    if (!result.ok) throw new Error('expected a record')
+    expect(result.record.markdown).not.toMatch(BANNED)
+    expect(JSON.stringify(result.record.sidecar)).not.toMatch(BANNED)
+    expect(result.record.markdown).toMatch(/### Capture 1, \d{2}:\d{2}, 30 min/)
+  })
+
+  it('holds for renderPipelinePatch, every field of it', () => {
+    const { primary, alternate, capture } = scene()
+    const patch = renderPipelinePatch({
+      actionId: 'a_0123456789abcdef',
+      tier: 'auto',
+      primary,
+      alternates: [alternate],
+      captures: [capture],
+      evidence: { k1: 120, k2: 4 },
+      sidecarRelPathBySession: { 'g2-session': 'personal/meetings/2026-08/2026-08-20_Quarterly.g2-chunks.json' },
+    })
+    expect(JSON.stringify(patch)).not.toMatch(BANNED)
+    expect(patch.sections.join('\n')).toMatch(/### Capture 1, \d{2}:\d{2}, 30 min/)
   })
 })

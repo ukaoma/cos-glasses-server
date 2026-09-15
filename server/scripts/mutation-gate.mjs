@@ -253,6 +253,20 @@ const CASES = [
     tests: ['server/lib/meeting-engine/render-pipeline-patch.test.ts'],
   },
   {
+    name: 'capture-heading-dash-free',
+    file: 'server/lib/meeting-engine/render.ts',
+    find: '  return `### Capture ${index + 1}, ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`',
+    replace: '  return `### Capture ${index + 1} — ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`',
+    tests: ['server/lib/meeting-engine/render.test.ts'],
+  },
+  {
+    name: 'pipeline-patch-golden-drift',
+    file: 'server/lib/meeting-engine/render.ts',
+    find: "export const PIPELINE_SOURCES_LABEL = 'Fireflies + G2 Glasses'",
+    replace: "export const PIPELINE_SOURCES_LABEL = 'Fireflies and G2 Glasses'",
+    tests: ['server/lib/meeting-engine/render-pipeline-patch-golden.test.ts'],
+  },
+  {
     name: 'retry-imports-stays-failed',
     file: 'server/lib/meeting-actions.ts',
     find: "      const state: MergeActionRecord['state'] = current.mode === 'apply' ? pendingStateFor(direction) : 'failed'",

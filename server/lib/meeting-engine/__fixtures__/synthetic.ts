@@ -149,6 +149,72 @@ export function g2Capture(options: {
   }
 }
 
+// The scene behind the committed pipeline-patch golden (QA round 2, blocker 7).
+//
+// WHY A SCENE AND NOT AN INLINE FIXTURE. `pipeline-patch.golden.json` is regenerated on BOTH
+// sides: this repo's golden test compares the renderer against it byte for byte, and the COS
+// pipeline's own validator reads the same file as the shape it must splice. One scene, named
+// once, is what makes "the pipeline's fixture came from this renderer" a checkable claim
+// rather than a convention.
+//
+// It deliberately exercises every branch of `renderPipelinePatch` that can put bytes on disk:
+// a capture section, an alternate-transcript section, both metadata rows, all four marker
+// forms including `g2-source`, and a speaker map that clears both of its floors.
+
+/** The clock the golden is rendered under. `formatClock` reads LOCAL time. */
+export const GOLDEN_PATCH_TZ = 'UTC'
+
+export const GOLDEN_PATCH_ACTION_ID = 'a_0123456789abcdef'
+
+export const GOLDEN_PATCH_START_MS = Date.UTC(2026, 7, 20, 15, 0, 0)
+
+export function goldenPatchScene(): {
+  primary: FirefliesMeetingInput
+  alternate: FirefliesMeetingInput
+  capture: G2RecordingInput
+  sidecarRelPathBySession: Record<string, string>
+  coarseOffsetMsBySession: Record<string, number>
+} {
+  const phrases = Array.from({ length: 8 }, (_, i) => ({ ...phrase(`g${i}`, 6, 120 + i * 20, 15), speaker: 'Speaker 1' }))
+  return {
+    primary: firefliesMeeting({
+      id: 'ff-golden-primary',
+      startMs: GOLDEN_PATCH_START_MS,
+      durationS: 1800,
+      phrases,
+      title: 'Golden synthetic review',
+      participants: ['nadia@example.test'],
+      summary: 'A synthetic summary.',
+      actionItems: ['Send the synthetic follow-up'],
+      sha256: 'ff-golden-primary-sha',
+    }),
+    alternate: firefliesMeeting({
+      id: 'ff-golden-alternate',
+      startMs: GOLDEN_PATCH_START_MS + 60_000,
+      durationS: 1800,
+      phrases: [{ ...phrase('galt', 6, 120, 15), speaker: 'Marcus Bell' }],
+      title: 'Golden synthetic review',
+      sha256: 'ff-golden-alternate-sha',
+    }),
+    capture: g2Capture({
+      sessionId: 'g2-golden-session',
+      startMs: GOLDEN_PATCH_START_MS,
+      durationMs: 1_800_000,
+      phrases,
+      offsetMs: 0,
+      // TWO labels, deliberately. `labelIntervals` closes the last one after a short tail, so
+      // a single label would not reach the phrases and the golden would pin an empty speaker
+      // map and an empty verification list: a fixture that pins nothing anybody reads.
+      labels: [{ speaker: 'Nadia Okonkwo', startS: 0, similarity: 0.72 }, { speaker: 'Closing Speaker', startS: 900 }],
+      sha256: 'g2-golden-sha',
+      correctionRevision: 4,
+      batchApplied: true,
+    }),
+    sidecarRelPathBySession: { 'g2-golden-session': 'personal/meetings/2026-08/2026-08-20_Golden.g2-chunks.json' },
+    coarseOffsetMsBySession: { 'g2-golden-session': 0 },
+  }
+}
+
 /** A capture and the meeting it belongs to, sharing `k` trigrams at a zero offset. */
 export function matchingPair(options: {
   k: number

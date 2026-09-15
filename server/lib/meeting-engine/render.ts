@@ -180,6 +180,19 @@ function firefliesLines(sentences: readonly FirefliesSentenceInput[], labels?: r
   })
 }
 
+/**
+ * The heading above one capture's transcript.
+ *
+ * NO EM DASH, NO ARROW (QA round 2, blocker 7). This line is not chrome: in apply mode the
+ * pipeline splices it verbatim into a permanent operations scribe, and in imports mode it is
+ * written into a permanent record. Miles's house rule bans both characters from anything COS
+ * generates for a person to read, and there is no later pass that would strip them. One
+ * writer, so the guard in `render.test.ts` has exactly one place to fail.
+ */
+function captureHeading(index: number, capture: G2RecordingInput): string {
+  return `### Capture ${index + 1}, ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`
+}
+
 function captureLines(capture: G2RecordingInput): string[] {
   const chunks = (capture.chunks ?? []).filter(chunk => typeof chunk.elapsed === 'number' && Number.isFinite(chunk.elapsed))
   if (chunks.length > 0) return chunks.map(chunk => transcriptLine(chunk.elapsed as number, String(chunk.speaker ?? ''), String(chunk.text ?? '')))
@@ -303,7 +316,7 @@ export function renderMergedRecord(input: MergeDeriveInput): DeriveResult {
 
   const captureSection = input.captures.length > 0
     ? ['## G2 Capture', '', ...input.captures.flatMap((capture, index) => [
-        `### Capture ${index + 1} — ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`,
+        captureHeading(index, capture),
         '',
         ...captureLines(capture),
         '',
@@ -416,7 +429,7 @@ export function renderSplitPiece(input: PieceDeriveInput): DeriveResult {
   ]
   const captureSection = input.captures.length > 0
     ? ['## G2 Capture', '', ...input.captures.flatMap((capture, index) => [
-        `### Capture ${index + 1} — ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`,
+        captureHeading(index, capture),
         '',
         ...captureLines(capture),
         '',
@@ -564,7 +577,7 @@ export function renderPipelinePatch(input: PipelinePatchInput): PipelinePatch {
   const sections: string[] = []
   if (input.captures.length > 0) {
     sections.push(sectionsOf(['## G2 Capture', '', ...input.captures.flatMap((capture, index) => [
-      `### Capture ${index + 1} — ${formatClock(capture.startMs)}, ${minutesOf(capture.durationMs / 1000)} min`,
+      captureHeading(index, capture),
       '',
       ...captureLines(capture),
       '',

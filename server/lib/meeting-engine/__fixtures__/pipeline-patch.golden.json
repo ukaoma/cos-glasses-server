@@ -1,0 +1,31 @@
+{
+  "sections": [
+    "## G2 Capture\n\n### Capture 1, 15:00, 30 min\n\n[00:00:00] Nadia Okonkwo: chunk Nadia Okonkwo\n[00:15:00] Closing Speaker: chunk Closing Speaker\n",
+    "## Alternate Transcript\n\n### Fireflies ff-golden-alternate\n\n[00:02:00] Marcus Bell: galt0 galt1 galt2 galt3 galt4 galt5 galt6 galt7\n"
+  ],
+  "rows": [
+    "| **Sources** | Fireflies + G2 Glasses |",
+    "| **Speaker Verification** | Nadia Okonkwo (voice match 0.72, 8 sentences) |"
+  ],
+  "markers": [
+    "<!-- g2-transcript-blended -->",
+    "<!-- g2-source: 2026-08-20_Golden.g2-chunks.json -->",
+    "<!-- g2-session: g2-golden-session -->",
+    "<!-- merge-action: a_0123456789abcdef -->"
+  ],
+  "speakerMap": {
+    "Speaker 1": {
+      "name": "Nadia Okonkwo",
+      "similarity": 0.72,
+      "sentences": 8
+    }
+  },
+  "verification": [
+    {
+      "name": "Nadia Okonkwo",
+      "medianSimilarity": 0.72,
+      "sentences": 8,
+      "humanConfirmed": false
+    }
+  ]
+}
