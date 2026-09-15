@@ -787,6 +787,44 @@ export function buildOccupancyProbes(
  * adapter's pre-spawn preflight REFUSES a thenable rather than awaiting one —
  * awaiting there would reopen the very race the check exists to close.
  */
+/**
+ * Add the hook turn clock (the B6 clause, 6.48.1) to a probe set.
+ *
+ * `signalFor` is the signal store's reader, taking a full session id or the registry's
+ * 8-character form. The probe answers a Stop time only when the store can VOUCH for it:
+ * the session's newest hook event is that Stop, the turn is closed, no sub-agent is
+ * open and the session has not ended. Codex never asks (its ids are not Claude
+ * sessions, and a Codex thread id sharing a Claude prefix must not read a Claude
+ * signal); `readHolderActivity` guards the provider too, so both layers refuse.
+ *
+ * Wired at the composition root only when `COS_SESSION_HOOKS` is on. Absent, the
+ * gate is byte-for-byte 6.48.0.
+ */
+export function withHookTurnClock(
+  probes: OccupancyProbes,
+  signalFor: (sessionId: string) => HookTurnSignal | undefined,
+): OccupancyProbes {
+  return {
+    ...probes,
+    holderTurnEndedAtMs: (provider, threadId) => {
+      if (provider !== 'claude') return null
+      if (!NATIVE_THREAD_ID_RE.test(threadId)) return null
+      const signal = signalFor(threadId)
+      if (!signal || signal.lastEvent !== 'Stop' || signal.turnOpen || signal.subagentsOpen > 0 || signal.ended !== null) return null
+      return typeof signal.stopAt === 'number' ? signal.stopAt : null
+    },
+  }
+}
+
+/** The facts the hook turn clock reads off a session signal. */
+export interface HookTurnSignal {
+  lastEvent: string
+  turnOpen: boolean
+  subagentsOpen: number
+  ended: unknown
+  stopAt: number | null
+}
+
 export function withTranscriptClock(
   probes: OccupancyProbes,
   headDeps: NativeHeadDeps,

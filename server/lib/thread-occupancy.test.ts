@@ -10,6 +10,7 @@ import {
   threadOccupancy,
   ACTIVE_RECENTLY_WINDOW_MS,
   holderActivity,
+  STOP_BOOKKEEPING_GRACE_MS,
   isActiveRecently,
   type OccupancyProbes,
   type OccupancyReason,
@@ -450,5 +451,52 @@ describe('a foreign holder blocks on WORKING, not on merely held', () => {
     const free = threadOccupancy('claude', SID, empty, DIRS)
     expect({ attachable: free.attachable, idleHolder: free.idleHolder })
       .toEqual({ attachable: true, idleHolder: undefined })
+  })
+})
+
+// ===========================================================================
+// THE B6 CLAUSE (6.48.1): a hook Stop turns a working foreign holder idle
+// ===========================================================================
+//
+// Executed through the real `threadOccupancy`, like the relaxation above. The
+// clause is one conditional; every branch of it has a verdict here.
+
+describe('the hook turn clock (B6) narrows WORKING to idle, and nothing else', () => {
+  const now = () => Date.now()
+  const working = (stop: (p: string, t: string) => number | null): Partial<OccupancyProbes> => ({
+    transcriptMtimeMs: () => now(),        // written inside the 30 s window: working without the clause
+    holderTurnEndedAtMs: stop,
+  })
+
+  it('a Stop within the bookkeeping grace of the newest write reads idle: the turn ended', () => {
+    const o = threadOccupancy('claude', SID, probes(working(() => now() - 150)), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason, idleHolder: o.idleHolder }).toEqual({ attachable: true, reason: null, idleHolder: true })
+  })
+
+  it('a Stop older than the grace stays WORKING: something was written after the turn ended', () => {
+    const o = threadOccupancy('claude', SID, probes(working(() => now() - STOP_BOOKKEEPING_GRACE_MS - 5_000)), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: false, reason: 'native_thread_working' })
+  })
+
+  it('a null probe is strict, and a throwing probe is strict', () => {
+    for (const stop of [() => null, () => { throw new Error('boom') }]) {
+      const o = threadOccupancy('claude', SID, probes(working(stop as (p: string, t: string) => number | null)), DIRS)
+      expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: false, reason: 'native_thread_working' })
+    }
+  })
+
+  it('an unmeasurable transcript stays UNKNOWN even with a vouching Stop: the clause never lifts a doubt', () => {
+    const o = threadOccupancy('claude', SID, probes({ transcriptMtimeMs: () => null, holderTurnEndedAtMs: () => now() }), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: false, reason: 'live_desktop_process' })
+  })
+
+  it('a far-future Stop is refused like a far-future transcript', () => {
+    const o = threadOccupancy('claude', SID, probes(working(() => now() + 7 * 24 * 3_600_000)), DIRS)
+    expect(o.attachable).toBe(false)
+  })
+
+  it('without the probe the gate is byte-for-byte the relaxation: working holds', () => {
+    const o = threadOccupancy('claude', SID, probes({ transcriptMtimeMs: () => now() }), DIRS)
+    expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: false, reason: 'native_thread_working' })
   })
 })

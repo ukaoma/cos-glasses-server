@@ -457,6 +457,84 @@ export function draftsFromLine(provider: SessionStreamProvider, line: string): S
   return draftsFromRecord(provider, parsed)
 }
 
+/**
+ * Did the newest turn in this transcript tail END? (6.48.1)
+ *
+ * THE RULE THE HARNESS USES, read against real Desktop transcripts on this Mac
+ * (2026-09-15): a Desktop session writes no `type:'result'` row at all (0 of 30 newest
+ * transcripts), so the status-draft rule above can only ever say "ended" for a
+ * `claude -p` run. What every Claude transcript DOES carry is `message.stop_reason` on
+ * each assistant record: `tool_use` while tools run, `end_turn` when the reply is done.
+ *
+ *   ended     the newest assistant record's stop_reason is terminal (end_turn,
+ *             stop_sequence, max_tokens, refusal) and no tool_use it issued is still
+ *             waiting for its tool_result; or a `result` row; or the user interrupted
+ *             (`[Request interrupted by user`), which ends the turn without a reply.
+ *   open      a user prompt newer than the last terminal reply (a `<task-notification>`
+ *             included: the model answers it), or a tool_use with no result yet.
+ *
+ * Skipped: `isMeta` and `isCompactSummary` rows (injected context, not a prompt), tool
+ * results, and the bookkeeping rows (`system`, `last-prompt`, `attachment`, `mode`...).
+ * Codex keeps its event rule (task_complete / turn_complete end, task_started opens).
+ *
+ * PURE, like everything else here. The queue store reads the tail; this decides.
+ */
+export const TERMINAL_STOP_REASONS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence', 'max_tokens', 'refusal'])
+
+export type TurnFromTail = { ended: boolean; reason: 'terminal_stop' | 'result_row' | 'interrupted' | 'codex_complete' | 'prompt_open' | 'tool_pending' | 'no_evidence' }
+
+export function turnFromTail(provider: SessionStreamProvider, lines: readonly string[]): TurnFromTail {
+  let verdict: TurnFromTail = { ended: false, reason: 'no_evidence' }
+  const pendingToolUses = new Set<string>()
+  for (const line of lines) {
+    const trimmed = typeof line === 'string' ? line.trim() : ''
+    if (!trimmed || trimmed[0] !== '{') continue
+    let record: unknown
+    try { record = JSON.parse(trimmed) } catch { continue }
+    const r = asRecord(record)
+    if (!r) continue
+
+    if (provider === 'codex') {
+      for (const draft of draftsFromRecord('codex', r)) {
+        if (draft.kind === 'status') verdict = draft.state === 'done' ? { ended: true, reason: 'codex_complete' } : { ended: false, reason: 'prompt_open' }
+      }
+      continue
+    }
+
+    const type = typeof r.type === 'string' ? r.type : ''
+    if (type === 'result') { verdict = { ended: true, reason: 'result_row' }; pendingToolUses.clear(); continue }
+    if (r.isMeta === true || r.isCompactSummary === true) continue
+    const message = asRecord(r.message)
+    if (!message) continue
+    const content = Array.isArray(message.content) ? message.content : typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : []
+    const blocks = content.map(asRecord).filter((b): b is Record<string, unknown> => b !== null)
+
+    if (type === 'user' || message.role === 'user') {
+      const results = blocks.filter(b => b.type === 'tool_result')
+      if (results.length > 0) {
+        for (const b of results) if (typeof b.tool_use_id === 'string') pendingToolUses.delete(b.tool_use_id)
+        continue
+      }
+      const text = blocks.filter(b => b.type === 'text' || b.type === undefined).map(b => (typeof b.text === 'string' ? b.text : '')).join(' ')
+      if (/\[Request interrupted by user/.test(text)) { verdict = { ended: true, reason: 'interrupted' }; pendingToolUses.clear(); continue }
+      if (text.trim().length === 0) continue
+      verdict = { ended: false, reason: 'prompt_open' }
+      continue
+    }
+
+    if (type === 'assistant' || message.role === 'assistant') {
+      for (const b of blocks) if (b.type === 'tool_use' && typeof b.id === 'string') pendingToolUses.add(b.id)
+      const stop = typeof message.stop_reason === 'string' ? message.stop_reason : ''
+      if (TERMINAL_STOP_REASONS.has(stop)) {
+        verdict = pendingToolUses.size === 0 ? { ended: true, reason: 'terminal_stop' } : { ended: false, reason: 'tool_pending' }
+      } else if (stop === 'tool_use' || pendingToolUses.size > 0) {
+        verdict = { ended: false, reason: 'tool_pending' }
+      }
+    }
+  }
+  return verdict
+}
+
 /** Draft plus transport stamps, in the field order the contract shows. */
 export function stampSessionEvent(draft: SessionStreamDraft, seq: number, at: number): SessionStreamEvent {
   return { seq, at, ...draft }

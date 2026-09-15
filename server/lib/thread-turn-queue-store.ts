@@ -13,7 +13,7 @@ import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readd
 import { join } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
-import { draftsFromLine, type SessionStreamProvider } from './session-stream-events.js'
+import { turnFromTail, type SessionStreamProvider } from './session-stream-events.js'
 import { pruneQueue, type QueuedThreadTurn } from './thread-turn-queue.js'
 
 /** Bytes of transcript tail read to decide whether the last turn ended. */
@@ -83,9 +83,13 @@ export function queuedThreadKeys(): Array<{ provider: string; threadId: string }
 /**
  * Did the holder's last turn END?
  *
- * REUSES `draftsFromLine`, the same parser the live stream uses, so "the turn ended"
- * means exactly here what it means there. Hand-rolling a second `type === 'result'`
- * check is how two definitions of done drift apart.
+ * 6.48.1: decided by `turnFromTail`, the transcript's own rule (a terminal
+ * `stop_reason` with no tool_use awaiting its result, a `result` row, or a user
+ * interrupt). It replaced the status-draft loop here because a Desktop transcript
+ * writes no `result` row, so the old rule could only ever say "ended" for a
+ * `claude -p` run and every Desktop Continue waited the 30 s idle backstop (measured
+ * 2026-09-15: 0 of 30 newest transcripts carry one). The live feed still narrates
+ * from `draftsFromLine`; the two are pinned to agree on recorded tails.
  *
  * Reads a bounded tail, newest record wins. Returns false on any doubt -- an
  * unreadable transcript is not evidence a turn finished, and false only means the
@@ -110,14 +114,7 @@ export function transcriptTurnEnded(provider: SessionStreamProvider, path: strin
       const lines = buf.toString('utf-8').split('\n')
       // The first line of a tail read is almost always a fragment.
       if (start > 0) lines.shift()
-      let ended = false
-      for (const line of lines) {
-        if (!line.trim()) continue
-        for (const draft of draftsFromLine(provider, line)) {
-          if (draft.kind === 'status') ended = draft.state === 'done'
-        }
-      }
-      return ended
+      return turnFromTail(provider, lines).ended
     } finally {
       closeSync(fd)
     }

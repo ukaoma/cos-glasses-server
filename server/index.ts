@@ -23,7 +23,7 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -33,7 +33,7 @@ import {
 import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
 import { targetKey } from './lib/agent-session-binding-store.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
-import { buildOccupancyProbes, realOccupancyDirs } from './lib/occupancy-probes.js'
+import { buildOccupancyProbes, realOccupancyDirs, withHookTurnClock } from './lib/occupancy-probes.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
@@ -129,7 +129,8 @@ import {
 
 const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
-import { transcriptTurnEnded } from './lib/thread-turn-queue-store.js'
+import { queuedThreadKeys, transcriptTurnEnded } from './lib/thread-turn-queue-store.js'
+import { createDrainKick } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
 import { deliverQueuedTurnOverLoopback } from './lib/thread-turn-queue-deliver.js'
 import { readFences, writeFences } from './lib/thread-fence-store.js'
@@ -382,7 +383,12 @@ const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
  * Read the canary evidence in `thread-occupancy.ts` under THE IDLE-HOLDER
  * RELAXATION before changing this line.
  */
-const occupancyProbes = buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())
+const occupancyProbes = sessionHooksEnabled()
+  // 6.48.1, the B6 clause: with the hooks on, a foreign Desktop holder whose newest hook
+  // event is a Stop reads idle at once instead of after the 30 s transcript window. The
+  // wrapper only adds a probe; the gate's precedence is unchanged. Off is 6.48.0.
+  ? withHookTurnClock(buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled()), signalFor)
+  : buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())
 
 // 6.48.0: the hook spool ingester and the one signal store every session row reads. Starts
 // before any router is registered so the first list request already sees the replayed
@@ -622,6 +628,14 @@ if (threadAttachEnabled()) {
     turnEnded: (provider: string, threadId: string) => {
       if (provider !== 'claude' && provider !== 'codex') return false
       try {
+        // 6.48.1: a Stop hook newer than the turn's own prompt is the turn's end, said by
+        // the engine itself; the transcript tail (`turnFromTail`) answers for everything
+        // the hooks did not see. Either is enough; both refuse on doubt.
+        if (provider === 'claude') {
+          const signal = signalFor(threadId)
+          if (signal && !signal.turnOpen && signal.lastEvent === 'Stop' && typeof signal.stopAt === 'number'
+            && signal.stopAt >= (signal.turnStartedAt ?? 0) && signal.subagentsOpen === 0) return true
+        }
         return transcriptTurnEnded(provider, transcriptPathFor(provider, threadId, nativeHeadDeps))
       } catch {
         return false
@@ -645,10 +659,24 @@ if (threadAttachEnabled()) {
   // Every 20s. Fast enough that a freed thread drains while the user is still looking
   // at the pending row, slow enough to be nothing: the sweep does no work at all when
   // no queue file exists. Unref'd so it never holds the process open.
-  const queueDrainTimer = setInterval(() => {
-    void drainAllThreads(queueDeps).catch(() => { /* the next sweep retries */ })
-  }, 20_000)
+  //
+  // 6.48.1: the timer and the hooks' Stop share ONE in-flight guard (`thread-drain-kick`),
+  // so a Stop landing mid-sweep folds into exactly one follow-up pass and a sentence is
+  // never delivered twice. A Stop kicks only when a queue file names that session (full
+  // id or the registry's 8-char form); a SubagentStop that closes the last sub-agent of a
+  // finished turn kicks the same way, so sub-agent turns drain as fast as plain ones.
+  const drainKick = createDrainKick({
+    drain: () => drainAllThreads(queueDeps),
+    queuedThreadIds: () => queuedThreadKeys().map(k => k.threadId),
+  })
+  const queueDrainTimer = setInterval(() => { void drainKick.sweep() }, 20_000)
   queueDrainTimer.unref()
+  if (sessionHooksEnabled()) {
+    sessionSignalStore.subscribe((signal, env) => {
+      if (signal.turnOpen || signal.subagentsOpen > 0 || signal.ended) return
+      if (env.event === 'Stop' || env.event === 'SubagentStop') drainKick.kick(signal.sessionId)
+    })
+  }
 }
 
 app.use('/api', createAgentSessionBindingsRouter({

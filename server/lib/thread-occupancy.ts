@@ -151,6 +151,19 @@ export interface OccupancyProbes {
    */
   transcriptMtimeMs?: (provider: OccupancyProvider, threadId: string) => number | null
   /**
+   * THE B6 CLAUSE (6.48.1). Epoch ms of the holder's newest hook `Stop`, ONLY when that
+   * Stop is the session's newest hook event, the turn is closed and no sub-agent is open;
+   * null otherwise, and always null for Codex (the hooks are Claude's). OPTIONAL, and its
+   * absence is the default: attached by `withHookTurnClock` at the composition root only
+   * when `COS_SESSION_HOOKS` is on, so the pure gate never reads the environment.
+   *
+   * What it buys: a foreign Desktop holder whose turn just ended reads `idle` at once
+   * instead of after the 30 s transcript window, so a queued follow-up lands seconds
+   * after the Stop. What it cannot do: a Stop older than the transcript's newest write
+   * (by more than the bookkeeping grace) is not idle; a new prompt was typed since.
+   */
+  holderTurnEndedAtMs?: (provider: OccupancyProvider, threadId: string) => number | null
+  /**
    * Cursor Agent CLI session at `~/.cursor/chats/<hash>/<id>/`, or null when
    * that id is not exactly one continuable chats dir. Occupancy MUST NOT import
    * fs; this is the only Cursor evidence this detector is allowed to see.
@@ -237,6 +250,15 @@ export function isActiveRecently(mtimeMs: number | null | undefined, nowMs: numb
  */
 export type HolderActivity = 'working' | 'idle' | 'unknown'
 
+/**
+ * Claude writes bookkeeping rows (`system`, `last-prompt`, `mode`) into the transcript
+ * AFTER the Stop hook fires: measured 146 ms on 2026-09-15 (canary 13). A Stop this much
+ * older than the file's mtime is still the end of that turn. A new prompt typed at the
+ * desk would ALSO be newer than the Stop, but it fires UserPromptSubmit, so the Stop is
+ * no longer the newest hook event and the probe answers null before this grace is read.
+ */
+export const STOP_BOOKKEEPING_GRACE_MS = 2_000
+
 export function holderActivity(mtimeMs: number | null | undefined, nowMs: number): HolderActivity {
   if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return 'unknown'
   if (!Number.isFinite(nowMs)) return 'unknown'
@@ -261,11 +283,27 @@ function readHolderActivity(
   nowMs: number,
 ): HolderActivity {
   if (typeof probes.transcriptMtimeMs !== 'function') return 'unknown'
+  let mtime: number | null
   try {
-    return holderActivity(probes.transcriptMtimeMs(provider, threadId), nowMs)
+    mtime = probes.transcriptMtimeMs(provider, threadId)
   } catch {
     return 'unknown'
   }
+  const activity = holderActivity(mtime, nowMs)
+  if (activity !== 'working') return activity
+  // THE B6 CLAUSE. Only a `working` verdict is revisited, only for Claude, only with a
+  // real clock to compare against, and only when the hook probe VOUCHES for a Stop
+  // (null is strict). `unknown` stays unknown: the clause narrows a refusal, never a doubt.
+  if (provider !== 'claude' || typeof probes.holderTurnEndedAtMs !== 'function' || typeof mtime !== 'number') return activity
+  let stopAt: number | null
+  try {
+    stopAt = probes.holderTurnEndedAtMs(provider, threadId)
+  } catch {
+    return activity
+  }
+  if (typeof stopAt !== 'number' || !Number.isFinite(stopAt)) return activity
+  if (stopAt > nowMs + ACTIVE_RECENTLY_WINDOW_MS) return activity
+  return stopAt + STOP_BOOKKEEPING_GRACE_MS >= mtime ? 'idle' : activity
 }
 
 /** A Claude registry filename is exactly `<pid>.json`. Not `*.json`. */
