@@ -91,13 +91,23 @@ scribe itself, spliced in place. It declares what it holds in its own body:
 
 ```
 <!-- g2-transcript-blended -->
-<!-- g2-source: <sidecar rel path> -->
+<!-- g2-source: <sidecar basename, with -- escaped to - -> -->
 <!-- g2-session: <sessionId> -->
 <!-- merge-action: <actionId> -->
 ```
 
 The operations lister reads the last two and sets `derivedKind: "merge"`,
 `g2SessionIds[]` and `actionId` on that row.
+
+`g2-source` carries the sidecar's BASENAME, not its operations-relative path,
+and escapes `--` to `- -`. That is the form the COS pipeline's own
+`g2_source_marker()` writes, and the pipeline compares the marker it reads
+against the marker it would write: any other form reads as "another tool wrote
+this", `blend_verified` fails, and a later refresh can append a second
+`## G2 Capture` section to a scribe that already has one. The
+operations-relative path is not lost - it stays in the decision's
+`inputs[].sidecarRelPath` and in the derived sidecar, which is where a reader
+that needs to OPEN the file looks.
 
 ## Supersession
 

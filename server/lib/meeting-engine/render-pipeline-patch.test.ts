@@ -12,6 +12,7 @@ import {
   PIPELINE_SOURCES_LABEL,
   SPEAKER_MAP_MIN_SENTENCES,
   SPEAKER_MAP_MIN_SHARE,
+  g2SourceMarker,
   renderMergedRecord,
   renderPipelinePatch,
   speakerMapFrom,
@@ -82,10 +83,41 @@ describe('what the patch adds', () => {
       sidecarRelPathBySession: { s1: 'personal/meetings/2026-08/a.g2-chunks.json', s2: 'personal/meetings/2026-08/b.g2-chunks.json' },
     })
     expect(patch.markers[0]).toBe(MARKER_BLENDED)
-    expect(patch.markers).toContain(`${MARKER_G2_SOURCE_PREFIX}personal/meetings/2026-08/a.g2-chunks.json -->`)
+    // The BASENAME, not the relative path: the pipeline writes the basename and compares
+    // what it finds against what it would write.
+    expect(patch.markers).toContain(`${MARKER_G2_SOURCE_PREFIX}a.g2-chunks.json -->`)
+    expect(patch.markers).not.toContain(`${MARKER_G2_SOURCE_PREFIX}personal/meetings/2026-08/a.g2-chunks.json -->`)
     expect(patch.markers).toContain(`${MARKER_G2_SESSION_PREFIX}s1 -->`)
     expect(patch.markers).toContain(`${MARKER_G2_SESSION_PREFIX}s2 -->`)
     expect(patch.markers[patch.markers.length - 1]).toBe(`${MARKER_MERGE_ACTION_PREFIX}${ACTION} -->`)
+  })
+
+  // The pipeline's `g2_source_marker()` is `sidecar_path.name.replace('--', '- -')` wrapped
+  // in a comment. These cases are the whole of that contract, byte for byte, because the
+  // pipeline compares the marker it READS against the marker it would WRITE: a form that
+  // differs by one character reads as "another tool wrote this" and `blend_verified` fails.
+  it.each([
+    ['personal/meetings/2026-08/a.g2-chunks.json', '<!-- g2-source: a.g2-chunks.json -->'],
+    ['a.g2-chunks.json', '<!-- g2-source: a.g2-chunks.json -->'],
+    // `--` cannot appear inside an HTML comment; the pipeline escapes it to hyphen-space-hyphen.
+    ['quilt/meetings/2026-08/2026-08-20_Q3--review.g2-chunks.json', '<!-- g2-source: 2026-08-20_Q3- -review.g2-chunks.json -->'],
+    // `str.replace` is non-overlapping on both sides, so four hyphens give exactly two escapes.
+    ['x----y.g2-chunks.json', '<!-- g2-source: x- -- -y.g2-chunks.json -->'],
+  ])('writes %s as the pipeline writes it', (relPath, expected) => {
+    expect(g2SourceMarker(relPath)).toBe(expected)
+    expect(g2SourceMarker(relPath)).not.toContain('-->'.repeat(2))
+  })
+
+  it('carries the basename through renderPipelinePatch, not just the helper', () => {
+    const patch = renderPipelinePatch({
+      actionId: ACTION,
+      tier: 'auto',
+      primary: pair.meeting,
+      captures: [pair.capture],
+      evidence: { k1: 40, k2: 0 },
+      sidecarRelPathBySession: { s1: 'quilt/meetings/2026-08/2026-08-20_Q3--review.g2-chunks.json' },
+    })
+    expect(patch.markers).toContain('<!-- g2-source: 2026-08-20_Q3- -review.g2-chunks.json -->')
   })
 
   it('still declares every session when no sidecar path is known', () => {

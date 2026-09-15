@@ -480,6 +480,30 @@ export const MARKER_G2_SESSION_PREFIX = '<!-- g2-session: '
 export const MARKER_G2_SOURCE_PREFIX = '<!-- g2-source: '
 
 /**
+ * The `g2-source` marker, in the form the COS pipeline already writes
+ * (`sync_meetings.py`, `g2_source_marker()`): the sidecar's BASENAME, with any `--` escaped
+ * to `- -`.
+ *
+ * WHY THE BASENAME AND NOT THE OPERATIONS-RELATIVE PATH. The pipeline's own blend
+ * verification compares the marker it finds against the marker it would write, and it writes
+ * the basename. A server-written marker carrying a full relative path is therefore a marker
+ * the pipeline reads as "not mine", which makes `blend_verified` fail and lets a later
+ * refresh append a second G2 Capture section to a scribe that already has one.
+ *
+ * WHY `--` HAS TO GO. `--` cannot appear inside an HTML comment: a strict parser rejects the
+ * whole document, and an iCloud-conflict name (`x 2.g2-chunks.json`) is not the only way a
+ * meeting filename acquires one. The pipeline escapes it, so this does too, byte for byte.
+ *
+ * The operations-relative path is NOT lost: it stays in the decision's inputs
+ * (`sidecarRelPath`) and in the derived sidecar, which is where a reader that needs to open
+ * the file looks.
+ */
+export function g2SourceMarker(sidecarRelPath: string): string {
+  const base = sidecarRelPath.split('/').pop() ?? sidecarRelPath
+  return `${MARKER_G2_SOURCE_PREFIX}${base.replace(/--/g, '- -')} -->`
+}
+
+/**
  * A generic Fireflies label is mapped to a G2 name only when that name holds the label
  * nearly outright.
  *
@@ -565,7 +589,7 @@ export function renderPipelinePatch(input: PipelinePatchInput): PipelinePatch {
     ...input.captures.flatMap(capture => {
       const relPath = input.sidecarRelPathBySession?.[capture.sessionId]
       return [
-        ...(relPath ? [`${MARKER_G2_SOURCE_PREFIX}${relPath} -->`] : []),
+        ...(relPath ? [g2SourceMarker(relPath)] : []),
         `${MARKER_G2_SESSION_PREFIX}${capture.sessionId} -->`,
       ]
     }),
