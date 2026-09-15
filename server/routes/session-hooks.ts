@@ -11,6 +11,11 @@ import { installClaudeHooks, uninstallClaudeHooks } from '../lib/claude-hooks-in
 import { deskIdleSeconds, invalidateHookStatus, sessionHooksHealthFields, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 
+/** The registry entrypoints a person sits at; everything else (`sdk-cli`, unknown) may be a job. */
+export function isInteractiveEntrypoint(entrypoint: string | null): boolean {
+  return entrypoint === 'claude-desktop' || entrypoint === 'cli'
+}
+
 export function createSessionHooksRouter(options: { port: number }): Router {
   const router = Router()
 
@@ -47,11 +52,16 @@ export function createSessionHooksRouter(options: { port: number }): Router {
     res.set('Cache-Control', 'private, no-store')
     const since = Number(req.query.since)
     const sinceMs = Number.isFinite(since) && since > 0 ? since : Date.now() - 24 * 60 * 60_000
+    // A Desktop tab or a terminal session is not a run (6.48.1): the ledger wants the
+    // `claude -p` jobs (`sdk-cli`). `?all=1` lists every session the hooks saw.
+    const all = req.query.all === '1'
     const runs: Array<Record<string, unknown>> = []
     for (const signal of sessionSignalStore.snapshot()) {
       if (signal.firstSeenAt < sinceMs && !(signal.ended && signal.ended.at >= sinceMs)) continue
+      if (!all && isInteractiveEntrypoint(signal.entrypoint)) continue
       runs.push({
         session_id: signal.sessionId,
+        entrypoint: signal.entrypoint,
         started_at: new Date(signal.firstSeenAt).toISOString(),
         ended_at: signal.ended ? new Date(signal.ended.at).toISOString() : null,
         end_reason: signal.ended?.reason ?? null,

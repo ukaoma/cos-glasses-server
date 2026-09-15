@@ -106,7 +106,17 @@ describe('derived state on the claude-sessions wire', () => {
     }
     const runs = (await (await fetch(`${base}/api/session-hooks/runs?since=${recorded[0].ts - 1}`)).json()) as { runs: Array<Record<string, unknown>> }
     expect(runs.runs).toHaveLength(1)
-    expect(runs.runs[0]).toMatchObject({ session_id: sessionId, end_reason: 'other', keep_warm: false, last_reply: 'done', workspace: 'project' })
+    expect(runs.runs[0]).toMatchObject({ session_id: sessionId, end_reason: 'other', keep_warm: false, last_reply: 'done', workspace: 'project', entrypoint: null })
+    // 6.48.1: a Desktop tab or a terminal is not a run; `?all=1` lists everything.
+    sessionSignalStore.setEntrypoint(sessionId, 'claude-desktop')
+    const tabs = (await (await fetch(`${base}/api/session-hooks/runs?since=${recorded[0].ts - 1}`)).json()) as { runs: unknown[] }
+    expect(tabs.runs).toHaveLength(0)
+    const all = (await (await fetch(`${base}/api/session-hooks/runs?since=${recorded[0].ts - 1}&all=1`)).json()) as { runs: Array<Record<string, unknown>> }
+    expect(all.runs).toHaveLength(1)
+    expect(all.runs[0].entrypoint).toBe('claude-desktop')
+    sessionSignalStore.setEntrypoint(sessionId, 'sdk-cli')
+    const jobs = (await (await fetch(`${base}/api/session-hooks/runs?since=${recorded[0].ts - 1}`)).json()) as { runs: Array<Record<string, unknown>> }
+    expect(jobs.runs.map(r => r.entrypoint)).toEqual(['sdk-cli'])
   })
 
   it('off means off: with COS_SESSION_HOOKS=0 the peer carries none of the eight fields', async () => {

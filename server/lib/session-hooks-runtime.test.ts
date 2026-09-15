@@ -3,7 +3,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
-import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, deriveForRow, isCosSpawnedPid, sessionHooksEnabled } from './session-hooks-runtime.js'
+import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, deriveForRow, isCosSpawnedPid, registryEntrypointSync, sessionHooksEnabled } from './session-hooks-runtime.js'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DEAD_GRACE_MS, MISS_LIMIT } from './session-state-derive.js'
 
 const saved: Record<string, string | undefined> = {}
@@ -73,5 +76,19 @@ describe('isCosSpawnedPid', () => {
     expect(isCosSpawnedPid(pid, t0 + COS_PID_TOMBSTONE_MS)).toBe(true)
     expect(isCosSpawnedPid(pid, t0 + COS_PID_TOMBSTONE_MS + 1)).toBe(false)
     expect(isCosSpawnedPid(null, t0)).toBe(false)
+  })
+})
+
+describe('registryEntrypointSync', () => {
+  it('reads the entrypoint off the record that names the session, ignoring torn files and foreign names', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    writeFileSync(join(dir, '100.json'), JSON.stringify({ pid: 100, sessionId: 'A1B2C3D4-0000-4000-8000-000000000001', entrypoint: 'sdk-cli', kind: 'interactive' }))
+    writeFileSync(join(dir, '101.json'), '{ torn')
+    writeFileSync(join(dir, 'notes.json'), JSON.stringify({ sessionId: 'a1b2c3d4-0000-4000-8000-000000000002', entrypoint: 'cli' }))
+    mkdirSync(join(dir, '102.json'))
+    expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000001', dir)).toBe('sdk-cli')
+    expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000002', dir)).toBeNull()
+    expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000003', dir)).toBeNull()
+    expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000001', join(dir, 'missing'))).toBeNull()
   })
 })

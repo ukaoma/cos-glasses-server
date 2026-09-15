@@ -74,6 +74,12 @@ export interface SessionSignal {
   compactions: number
   /** Events from a COS-spawned child on this id, kept out of the phase. */
   childEvents: number
+  /**
+   * The registry's `entrypoint` for this session (`claude-desktop`, `cli`, `sdk-cli`), read
+   * from `~/.claude/sessions` while the process is alive; null until seen. A `claude -p` job
+   * registers as `sdk-cli` (measured 2026-09-15), which is how `/runs` tells a job from a tab.
+   */
+  entrypoint: string | null
   /** Hooks have been seen for this session: the row may say `state_source: hook`. */
   hooksSeen: true
 }
@@ -120,11 +126,25 @@ function fresh(env: HookEnvelope): SessionSignal {
     keepWarm: false,
     compactions: 0,
     childEvents: 0,
+    entrypoint: null,
     hooksSeen: true,
   }
 }
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null)
+
+/**
+ * 6.48.1. A tool runs only inside a turn, so a MAIN-THREAD tool event (no `agent_id`) is
+ * evidence the turn is open even when its UserPromptSubmit was never seen: a tab adopted
+ * mid-turn when the hooks were installed (2.1.272 reloads hooks on the settings change,
+ * measured 2026-09-15 16:16) read `idle` from the hooks while the registry said busy. A
+ * sub-agent's tool events carry `agent_id` and say nothing about the main thread, and a
+ * tool event after SessionEnd is a child's, never the tab's.
+ */
+function turnOpenedByTool(prev: SessionSignal, p: Record<string, unknown>, at: number): Partial<SessionSignal> {
+  if (prev.turnOpen || prev.ended || str(p.agent_id)) return {}
+  return { turnOpen: true, turnStartedAt: prev.turnStartedAt ?? at }
+}
 
 /** Waiting kinds a PostToolUse of the same tool resolves without a fingerprint match. */
 const TOOL_WAITING: Record<string, WaitingKind> = { AskUserQuestion: 'question', ExitPlanMode: 'plan' }
@@ -193,7 +213,7 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
           waiting: { kind, detail: tool.target, toolName: tool.name, fingerprint: tool.fingerprint, since: env.ts, requestId: null },
         }
       }
-      return { ...next, lastTool: tool.name || next.lastTool, lastToolAt: env.ts }
+      return { ...next, ...turnOpenedByTool(next, p, env.ts), lastTool: tool.name || next.lastTool, lastToolAt: env.ts }
     }
     case 'PermissionRequest': {
       const tool = toolFacts(p)
@@ -216,7 +236,7 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
       const tool = toolFacts(p)
       const waiting = next.waiting && resolvesWaiting(next.waiting, env.event, tool.name, tool.fingerprint) ? null : next.waiting
       const ran = env.event !== 'PermissionDenied'
-      return { ...next, waiting, ...(ran ? { lastTool: tool.name || next.lastTool, lastToolAt: env.ts } : {}) }
+      return { ...next, ...turnOpenedByTool(next, p, env.ts), waiting, ...(ran ? { lastTool: tool.name || next.lastTool, lastToolAt: env.ts } : {}) }
     }
     case 'Notification': {
       const type = str(p.notification_type) ?? ''
@@ -284,6 +304,13 @@ export class SessionSignalStore {
       }
     }
     return next
+  }
+
+  /** The registry's entrypoint, once the runtime has read it; a no-op for an unknown session. */
+  setEntrypoint(sessionId: string, entrypoint: string | null): void {
+    const current = this.signals.get(sessionId)
+    if (!current || !entrypoint || current.entrypoint === entrypoint) return
+    this.signals.set(sessionId, { ...current, entrypoint })
   }
 
   /** RESERVED FOR 6.48.2 (the permission broker); no caller in 6.48.0. Attach the broker's

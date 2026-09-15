@@ -167,6 +167,41 @@ describe('the reducer rules the validation rounds added', () => {
     expect(s.turnOpen).toBe(false)
   })
 
+  it('6.48.1: a main-thread tool event opens the turn a mid-turn adoption never saw start; a sub-agent tool does not; nothing reopens after SessionEnd', () => {
+    // A tab that was mid-turn when the hooks were installed sends PostToolUse with no
+    // UserPromptSubmit before it (measured 2026-09-15 16:16 on this session).
+    let s = applyHookEvent(undefined, at(base[0].ts + 1, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } }), noSpawn)
+    expect(s.turnOpen).toBe(true)
+    expect(s.turnStartedAt).toBe(base[0].ts + 1)
+    s = applyHookEvent(s, at(base[0].ts + 2, 'Stop', { last_assistant_message: 'ok' }), noSpawn)
+    expect(s.turnOpen).toBe(false)
+    // A sub-agent's tool event carries agent_id and says nothing about the main thread.
+    s = applyHookEvent(s, at(base[0].ts + 3, 'PostToolUse', { tool_name: 'Read', tool_input: { file_path: '/x' }, agent_id: 'agent-1' }), noSpawn)
+    expect(s.turnOpen).toBe(false)
+    // PreToolUse of a plain tool opens it too; ended sessions never reopen.
+    s = applyHookEvent(s, at(base[0].ts + 4, 'PreToolUse', { tool_name: 'Bash', tool_input: { command: 'pwd' } }), noSpawn)
+    expect(s.turnOpen).toBe(true)
+    s = applyHookEvent(s, at(base[0].ts + 5, 'SessionEnd', { reason: 'other' }), noSpawn)
+    s = applyHookEvent(s, at(base[0].ts + 6, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } }), noSpawn)
+    expect(s.turnOpen).toBe(false)
+    // The turn's start is kept once known: a later tool event does not move it.
+    let t = applyHookEvent(undefined, base[1], noSpawn)
+    t = applyHookEvent(t, at(base[1].ts + 10, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } }), noSpawn)
+    expect(t.turnStartedAt).toBe(base[1].ts)
+  })
+
+  it('6.48.1: the store records an entrypoint once, for a known session only', () => {
+    const store = new SessionSignalStore(noSpawn)
+    store.setEntrypoint('a1b2c3d4-0000-4000-8000-000000000001', 'sdk-cli')
+    expect(store.size()).toBe(0)
+    store.apply(base[0])
+    expect(store.get(base[0].sessionId)?.entrypoint).toBeNull()
+    store.setEntrypoint(base[0].sessionId, 'sdk-cli')
+    expect(store.get(base[0].sessionId)?.entrypoint).toBe('sdk-cli')
+    store.setEntrypoint(base[0].sessionId, null)
+    expect(store.get(base[0].sessionId)?.entrypoint).toBe('sdk-cli')
+  })
+
   it('the keep-warm readiness prompt is flagged from the recorded prompt prefix', () => {
     const s = applyHookEvent(undefined, at(1, 'UserPromptSubmit', { prompt: 'This is an automated local readiness check. Reply ready.' }), noSpawn)
     expect(s.keepWarm).toBe(true)

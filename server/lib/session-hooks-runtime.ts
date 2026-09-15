@@ -7,8 +7,11 @@
 // Update Server (main.swift `providerEnvironmentKeys`).
 
 import { execFileSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { cosSpawnedPids } from './agent-session-ownership-store.js'
+import { REGISTRY_FILENAME, claudeSessionsDir } from './claude-session-registry.js'
+import { MAX_REGISTRY_FILES } from './thread-occupancy.js'
 import { dataPath } from './data-dir.js'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { startSpoolIngester, type SpoolIngester, type SpoolStats } from './session-hook-spool.js'
@@ -78,6 +81,37 @@ export function isCosSpawnedPid(pid: number | null, nowMs = Date.now()): boolean
 
 export const sessionSignalStore = new SessionSignalStore({ isCosSpawnedPid })
 
+// 6.48.1: which kind of process a session is, read off its registry record while it is alive.
+// `claude -p` registers as `entrypoint: sdk-cli`; a Desktop tab as `claude-desktop`; a terminal
+// as `cli`. The record may land a beat after the SessionStart hook, so the read is retried on
+// the session's next few events and then given up, never awaited on the ingest path.
+const ENTRYPOINT_ATTEMPTS = 6
+const entrypointAttempts = new Map<string, number>()
+
+function noteEntrypoint(sessionId: string): void {
+  const tried = entrypointAttempts.get(sessionId) ?? 0
+  if (tried >= ENTRYPOINT_ATTEMPTS) return
+  entrypointAttempts.set(sessionId, tried + 1)
+  if (entrypointAttempts.size > 512) entrypointAttempts.clear()
+  const entrypoint = registryEntrypointSync(sessionId)
+  if (entrypoint) sessionSignalStore.setEntrypoint(sessionId, entrypoint)
+}
+
+/** One synchronous pass over `~/.claude/sessions/<pid>.json`; null when no record names the session. */
+export function registryEntrypointSync(sessionId: string, dir = claudeSessionsDir()): string | null {
+  let names: string[]
+  try { names = readdirSync(dir).filter(n => REGISTRY_FILENAME.test(n)).slice(0, MAX_REGISTRY_FILES) } catch { return null }
+  for (const name of names) {
+    try {
+      const raw = JSON.parse(readFileSync(join(dir, name), 'utf-8')) as { sessionId?: unknown; entrypoint?: unknown }
+      if (typeof raw.sessionId === 'string' && raw.sessionId.toLowerCase() === sessionId && typeof raw.entrypoint === 'string' && raw.entrypoint) {
+        return raw.entrypoint
+      }
+    } catch { /* a torn write; the next event retries */ }
+  }
+  return null
+}
+
 let ledger: SessionHookLedger | null = null
 let ingester: SpoolIngester | null = null
 let replayed: { rows: number; applied: number } | null = null
@@ -103,7 +137,10 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
     ledger,
     seenKeys: replay.keys,
     isChild: env => isCosSpawnedPid(env.ppid),
-    apply: enabled ? (env, child) => { sessionSignalStore.apply(env, child) } : undefined,
+    apply: enabled ? (env, child) => {
+      const signal = sessionSignalStore.apply(env, child)
+      if (!signal.entrypoint && !child) noteEntrypoint(env.sessionId)
+    } : undefined,
   })
   // Runtime files the script reads. The port can change per install; the token never does.
   // The script is copied only when MISSING here: a boot must never downgrade what a newer
@@ -225,5 +262,6 @@ export function __resetSessionHooksForTests(): void {
   deadById.clear()
   parentCache.clear()
   recentCosPids.clear()
+  entrypointAttempts.clear()
   statusCache = null
 }

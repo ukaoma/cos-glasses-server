@@ -29,6 +29,9 @@
 //     nameSource entirely. Only `derived` is a function of the folder name.
 
 /** Fields this module will read. Everything else in the file is ignored. */
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+
 export interface RawClaudeSession {
   pid?: unknown
   sessionId?: unknown
@@ -97,6 +100,22 @@ export interface PeerProbes {
 
 /** A registry filename is exactly `<pid>.json`. Not `*.json`. */
 export const REGISTRY_FILENAME = /^\d+\.json$/
+
+/**
+ * Where the registry lives.
+ *
+ * `COS_CLAUDE_SESSIONS_DIR` first because it is both the override for a non-standard
+ * install AND the test seam: `homedir()` is not mockable, so without an env hook the
+ * only testable path would be the real one. Then CLAUDE_CONFIG_DIR, which real
+ * installs do set; hardcoding ~/.claude breaks those. (Moved here from the route in
+ * 6.48.1 so the hooks runtime can read it without importing a router.)
+ */
+export function claudeSessionsDir(): string {
+  const explicit = process.env.COS_CLAUDE_SESSIONS_DIR
+  if (explicit) return resolve(explicit)
+  const configDir = process.env.CLAUDE_CONFIG_DIR
+  return join(configDir ? resolve(configDir) : join(homedir(), '.claude'), 'sessions')
+}
 
 function str(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null

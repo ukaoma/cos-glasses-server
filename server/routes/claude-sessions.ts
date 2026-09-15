@@ -18,7 +18,6 @@
 import { Router } from 'express'
 import { existsSync } from 'node:fs'
 import { lstat, readdir, readFile, stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   REGISTRY_FILENAME,
@@ -31,6 +30,7 @@ import {
   type ClaudePeerRecord,
   peerRecordFacts,
   toWirePeer,
+  claudeSessionsDir,
 } from '../lib/claude-session-registry.js'
 import { deriveForRow } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type RegistryFacts } from '../lib/session-state-derive.js'
@@ -61,20 +61,8 @@ export function claudeSessionNamesVisible(): boolean {
   return process.env.COS_CLAUDE_SESSIONS_SHOW_NAMES === '1'
 }
 
-/**
- * Where the registry lives.
- *
- * `COS_CLAUDE_SESSIONS_DIR` first because it is both the override for a non-standard
- * install AND the test seam — `homedir()` is not mockable, so without an env hook the
- * only testable path would be the real one. Then CLAUDE_CONFIG_DIR, which real
- * installs do set; hardcoding ~/.claude breaks those.
- */
-export function claudeSessionsDir(): string {
-  const explicit = process.env.COS_CLAUDE_SESSIONS_DIR
-  if (explicit) return resolve(explicit)
-  const configDir = process.env.CLAUDE_CONFIG_DIR
-  return join(configDir ? resolve(configDir) : join(homedir(), '.claude'), 'sessions')
-}
+/** Where the registry lives; the definition moved to the registry lib in 6.48.1. */
+export { claudeSessionsDir }
 
 const realProbes: PeerProbes = {
   isAlive: pid => {
