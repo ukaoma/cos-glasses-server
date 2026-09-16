@@ -1,3 +1,10 @@
+## 6.49.1
+
+Where a turn's time goes, on every exit.
+
+- Miles's first three sends from the lens on 2026-09-16 read "lost track of that turn" (the phone's 10 s clock ran out) and left no server-side trace at all: the route logs refusals and fences, not requests. The turn route now prints one `[agent-session-bindings] turn timing` line at every exit, with the outcome (`completed/live`, `queued`, `refused/<reason>`) and the milliseconds spent in the gate, the head read, the pin and the live hop, plus the total. A slow gate, a slow head, a slow live hop and a request that never arrived are four different lines now, rather than one absence. Never the prompt.
+- No behaviour change. Tests: the route suite (277) unchanged; the timing line is exercised by every case in it.
+
 ## 6.49.0
 
 A Continue lands in the session you left open, and the live feed says what every step produced.

@@ -1908,6 +1908,22 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     res.set('Cache-Control', 'private, no-store')
 
     const turnId = mintId()
+    // 6.49.1: where a turn's time goes, BEFORE the client's clock runs out. Miles's
+    // first three sends on 2026-09-16 read "lost track" on the lens with no server-side
+    // trace at all; this line is the trace. One `[turn timing]` per request at every
+    // exit, with the stage ms and the first-byte-to-answer total, so a slow gate, a
+    // slow head read, a slow live hop and a request that never arrived are four
+    // different lines rather than one absence. Never the prompt.
+    const stageClock = process.hrtime.bigint()
+    const stages: string[] = []
+    let lastStage = stageClock
+    const stage = (name: string): void => {
+      const now = process.hrtime.bigint()
+      stages.push(`${name}=${Number((now - lastStage) / 1_000_000n)}ms`)
+      lastStage = now
+    }
+    const turnTiming = (outcome: string): string =>
+      `[agent-session-bindings] turn timing turnId=${turnId} outcome=${outcome} total=${Number((process.hrtime.bigint() - stageClock) / 1_000_000n)}ms ${stages.join(' ')}`
     /** The target we hold a claim on, released in the finally. */
     let claimedKey: string | null = null
     // Hoisted so the CATCH site can fence with evidence. `binding` and `head` are
@@ -1950,7 +1966,13 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     let queued = false
 
     const respond = (status: number, payload: Record<string, unknown>): void => {
-      if (!res.headersSent) res.status(status).json(payload)
+      if (!res.headersSent) {
+        res.status(status).json(payload)
+        const outcome = typeof payload.outcome === 'string' ? payload.outcome : String(status)
+        const reason = typeof payload.reason === 'string' ? `/${payload.reason}` : ''
+        const via = typeof payload.via === 'string' ? `/${payload.via}` : ''
+        console.log(turnTiming(`${outcome}${reason}${via}`))
+      }
       // Remembered ONLY when the prompt may have reached the provider. A
       // pre-delivery refusal (stale epoch, malformed body, busy target) must stay
       // re-evaluatable: the binding may be fine by the time the client retries, and
@@ -2124,9 +2146,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // open, and it is terminal here rather than a warning because COS has no
       // cross-process lock that could fence a live desktop writer.
       const verdict = runOccupancy(binding.provider, binding.nativeThreadId)
+      stage('gate')
       if (!verdict.attachable) return refuseTurn(verdict.reason ?? 'probe_failed')
 
       const head = await readHead(binding.provider, binding.nativeThreadId)
+      stage('head')
       if (head === null) return refuseTurn('native_head_unavailable')
       preTurnHeadDigest = head.digest
 
@@ -2150,6 +2174,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // A failed pin is FATAL, per the registry's own caller contract: an unpinned
       // binding can expire or be detached mid-turn, which defeats the lease.
       const pinned = deps.bindings.pin!(bindingId, turnId, now)
+      stage('pin')
       if (!pinned?.binding) return refuseTurn(registryRefusal(pinned?.reason))
       pinnedBindingId = bindingId
 
@@ -2180,6 +2205,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           console.error(`[agent-session-bindings] live delivery threw: ${error instanceof Error ? error.message : error}`)
           live = null
         }
+        stage(`live(${live?.reason ?? 'threw'})`)
         if (live?.ok) {
           console.log(`[agent-session-bindings] turn delivered live provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} pid=${live.pid ?? 'null'}`)
           respond(200, {
