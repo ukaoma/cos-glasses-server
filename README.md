@@ -181,19 +181,24 @@ The install keeps every hook you already had, backs the file up, and copies a sm
 POSIX sh script to `~/.cos-glasses/bin/cos-session-hook`. The script writes one file per
 event into `~/.cos-glasses/data/hook-spool` and never contacts the server (a permission
 request may, only after the desk has been idle for 90 s, for the approval feature that ships
-next). Sessions started after the install report `state_source: hook` on
-`/api/agent-sessions` and `/api/claude-sessions`; tabs already open keep their startup
-hook snapshot until restarted, and may show Claude's "hooks modified externally" notice once (expected: the user-level file changed under them). The next COS Control (0.5.231) offers the same install from
-its Sessions tab. Rows change only while the server runs with `COS_CLAUDE_SESSIONS_ENABLED=1`
+next). Sessions report `state_source: hook` on `/api/agent-sessions` and
+`/api/claude-sessions` from their next event on (Claude Code 2.1.272 reloads its hooks
+when the settings file changes, so open tabs need no restart; they may show Claude's
+"hooks modified externally" notice once, which is expected: the user-level file changed
+under them). A later COS Control offers the same install from its Sessions tab. Rows
+change only while the server runs with `COS_CLAUDE_SESSIONS_ENABLED=1`
 (`--hooks status` prints `serverApplies`). Turn the ingestion off with `COS_SESSION_HOOKS=0`
 (the spool is still drained and stamped, rows are exactly as before). Removing the package
 does not remove the hooks: run `--hooks uninstall` first.
 
 Since 6.48.1 the hooks also drive the follow-up queue (a queued Continue lands when the
-engine's `Stop` fires, not on the next sweep), the attach gate (a Desktop holder whose
+engine closes the turn: its `Stop` hook followed by its registry record flipping idle,
+which is when every Stop hook has returned), the attach gate (a Desktop holder whose
 turn just ended reads idle at once), and the live session stream (every `status` draft
-carries `agent_state` and friends; `?after=<cursor>` replays a reconnect, `?seed=turn`
-opens at the current prompt). `COS_SESSION_HOOK_SSE=0` keeps the stream's frames as 6.48.0.
+carries `agent_state` and friends; `?after=<epoch>.<cursor>` replays what the ring holds
+after a reconnect and seeds afresh when it holds nothing, `?seed=turn` opens at the
+current prompt). `COS_SESSION_HOOK_SSE=0` omits the extra status fields and the live
+state drafts; the `cursor`, `epoch` and `id:` line stay.
 
 ## Configuration
 

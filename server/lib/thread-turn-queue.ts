@@ -53,11 +53,15 @@
 // ---------------------------------------------------------------------------
 // Thirty seconds of transcript silence is the wrong trigger on its own: a long tool
 // call goes quiet mid-turn, and draining there would inject a message into the middle
-// of someone's reasoning. The precise signal is the turn ENDING, which is observable in
-// the transcript itself -- Claude writes a `result` record, Codex a `task_complete` /
+// of someone's reasoning. The precise signal is the turn ENDING. For Claude that is the
+// engine's own Stop hook followed by the registry flipping `idle` (6.48.1; a Desktop
+// transcript carries no `result` record, and the Stop alone is 12-38 s early while the
+// Stop hooks run), else the transcript's newest assistant record with a terminal
+// `stop_reason` and no pending tool (`turnFromTail`); Codex writes `task_complete` /
 // `turn_complete`. The idle clock stays as a BACKSTOP for a holder that dies or a
 // provider that writes no terminal record, so a queue cannot wedge forever on a missing
-// event. Same reasoning as the session-trail handoff, one layer down.
+// event, and positive evidence of an OPEN turn outranks it. Same reasoning as the
+// session-trail handoff, one layer down.
 
 /** Terminal-ish states a queued turn can reach. `waiting` is the only live one. */
 export type QueuedTurnStatus =
@@ -226,8 +230,11 @@ export function drainDecision(
   // Turn-ended is the precise signal; idle is the backstop for a holder that wrote no
   // terminal record. `working` holds even when attachable, because attachable only says
   // no one else owns it -- it does not say a turn is not mid-flight.
-  if (seen.turnEnded) return 'deliver'
+  // Positive evidence the turn is OPEN outranks a terminal record older than it: a prompt
+  // queued at the desk during the Stop hooks dequeues after them, and the tail's newest
+  // terminal record cannot see it (QA, 2026-09-15).
   if (seen.turnOpen === true) return 'hold'
+  if (seen.turnEnded) return 'deliver'
   return seen.activity === 'idle' ? 'deliver' : 'hold'
 }
 

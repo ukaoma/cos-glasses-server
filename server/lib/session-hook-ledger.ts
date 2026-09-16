@@ -20,6 +20,8 @@ export interface LedgerRow {
   session_id: string
   /** Classified at ingest, while the pid was alive: a COS-spawned child's event. */
   child?: boolean
+  /** The registry's `entrypoint` for the session, once read (6.48.1); a replay restores it. */
+  entrypoint?: string
   payload: Record<string, unknown>
 }
 
@@ -54,7 +56,7 @@ export class SessionHookLedger {
   }
 
   /** Append one row. Returns false (and remembers why) when the disk refused. */
-  append(key: string, env: HookEnvelope, child = false): boolean {
+  append(key: string, env: HookEnvelope, child = false, entrypoint: string | null = null): boolean {
     let row: LedgerRow
     try {
       row = {
@@ -64,6 +66,7 @@ export class SessionHookLedger {
         event: env.event,
         session_id: env.sessionId,
         ...(child ? { child: true } : {}),
+        ...(entrypoint ? { entrypoint } : {}),
         payload: projectHookPayload(env.event, env.payload),
       }
     } catch (error) {
@@ -96,7 +99,7 @@ export class SessionHookLedger {
    * hide the rows that matter most, and forget their keys). Malformed lines are skipped;
    * a boot must never fail on a torn last line.
    */
-  replay(sinceMs: number, apply: (env: HookEnvelope, key: string, child: boolean) => void): { rows: number; applied: number; keys: Set<string> } {
+  replay(sinceMs: number, apply: (env: HookEnvelope, key: string, child: boolean, entrypoint: string | null) => void): { rows: number; applied: number; keys: Set<string> } {
     const keys = new Set<string>()
     let rows = 0
     let applied = 0
@@ -115,7 +118,8 @@ export class SessionHookLedger {
       keys.add(r.key)
       if (r.ts < sinceMs) continue
       const payload = r.payload && typeof r.payload === 'object' ? r.payload as Record<string, unknown> : {}
-      apply({ ts: r.ts, ppid: typeof r.ppid === 'number' ? r.ppid : null, event: r.event, sessionId: r.session_id.toLowerCase(), payload: { session_id: r.session_id, ...payload } }, r.key, r.child === true)
+      const entrypoint = typeof r.entrypoint === 'string' && r.entrypoint ? r.entrypoint : null
+      apply({ ts: r.ts, ppid: typeof r.ppid === 'number' ? r.ppid : null, event: r.event, sessionId: r.session_id.toLowerCase(), payload: { session_id: r.session_id, ...payload } }, r.key, r.child === true, entrypoint)
       applied++
     }
     return { rows, applied, keys }

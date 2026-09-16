@@ -60,7 +60,7 @@ export interface SessionSignal {
   turnOpen: boolean
   turnStartedAt: number | null
   promptId: string | null
-  /** Stamped by the newest Stop: `state_since` for an idle row. (6.48.1's B6 occupancy clause will compare it to the transcript.) */
+  /** Stamped by the newest Stop: `state_since` for an idle row, and the instant the B6 occupancy clause and the drain gate compare with the registry's `statusUpdatedAt` (6.48.1). */
   stopAt: number | null
   waiting: WaitingSignal | null
   failure: FailureSignal | null
@@ -279,7 +279,7 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
   }
 }
 
-export type SignalListener = (signal: SessionSignal, env: HookEnvelope) => void
+export type SignalListener = (signal: SessionSignal, env: HookEnvelope, child: boolean) => void
 
 /** Records older than this after a SessionEnd are dropped; Control keeps its own ledger. */
 export const SIGNAL_PRUNE_AFTER_END_MS = 6 * 60 * 60_000
@@ -298,8 +298,9 @@ export class SessionSignalStore {
   apply(env: HookEnvelope, child?: boolean): SessionSignal {
     const next = applyHookEvent(this.signals.get(env.sessionId), env, this.ctx, child)
     this.signals.set(env.sessionId, next)
+    const isChild = child ?? this.ctx.isCosSpawnedPid(env.ppid)
     for (const listener of this.listeners) {
-      try { listener(next, env) } catch (error) {
+      try { listener(next, env, isChild) } catch (error) {
         console.error(`[session-signals] listener failed: ${error instanceof Error ? error.message : error}`)
       }
     }

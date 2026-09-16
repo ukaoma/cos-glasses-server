@@ -16,8 +16,14 @@ import { dataPath } from './data-dir.js'
 import { turnFromTail, type SessionStreamProvider, type TurnFromTail } from './session-stream-events.js'
 import { pruneQueue, type QueuedThreadTurn } from './thread-turn-queue.js'
 
-/** Bytes of transcript tail read to decide whether the last turn ended. */
-export const TURN_END_TAIL_BYTES = 64 * 1024
+/**
+ * Bytes of transcript tail read to decide whether the last turn ended. 512 KiB, not 64:
+ * on the release Mac 3 of the 10 newest Desktop transcripts end in a ~76 KB bookkeeping
+ * row (a `prompt_snapshot` attachment) AFTER the terminal record, and a 64 KiB tail read
+ * only that row, saw no conversation record, and held the queue for the 30 s backstop
+ * (QA, 2026-09-15). The read is one `pread` per decision; nothing here streams.
+ */
+export const TURN_END_TAIL_BYTES = 512 * 1024
 
 function queueDir(): string {
   const dir = dataPath('thread-turn-queue')

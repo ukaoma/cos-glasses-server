@@ -3,14 +3,15 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
-import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, deriveForRow, isCosSpawnedPid, registryEntrypointSync, sessionHooksEnabled } from './session-hooks-runtime.js'
+import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, deriveForRow, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
+import { dataPath } from './data-dir.js'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEAD_GRACE_MS, MISS_LIMIT } from './session-state-derive.js'
 
 const saved: Record<string, string | undefined> = {}
-const KEYS = ['COS_CLAUDE_SESSIONS_ENABLED', 'COS_SESSION_HOOKS'] as const
+const KEYS = ['COS_CLAUDE_SESSIONS_ENABLED', 'COS_SESSION_HOOKS', 'COS_GLASSES_HOME', 'COS_SESSION_HOOKS_SPOOL_DIR', 'COS_CLAUDE_SESSIONS_DIR'] as const
 
 beforeEach(() => {
   for (const k of KEYS) saved[k] = process.env[k]
@@ -79,6 +80,44 @@ describe('isCosSpawnedPid', () => {
   })
 })
 
+describe('registryIdleAfterStop (the engine\'s end of turn, 6.48.1)', () => {
+  const SID = 'a1b2c3d4-0000-4000-8000-000000000001'
+  const record = (dir: string, pid: number, over: Record<string, unknown>) =>
+    writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: SID, entrypoint: 'claude-desktop', ...over }))
+
+  it('is true only for a record that says idle AT OR AFTER the Stop; busy, idle-before, and no record are not', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    expect(registryIdleAfterStop(SID, 5_000, dir)).toBeNull()
+    record(dir, 100, { status: 'idle', statusUpdatedAt: 4_999 })
+    expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(false)     // idle from BEFORE this Stop: the hooks have not returned
+    record(dir, 100, { status: 'idle', statusUpdatedAt: 5_000 })
+    expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(true)
+    record(dir, 100, { status: 'idle', statusUpdatedAt: 5_030 })
+    expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(true)
+    record(dir, 100, { status: 'busy', statusUpdatedAt: 5_030 })     // a prompt typed after the hooks returned
+    expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(false)
+    record(dir, 100, { status: 'idle' })                             // no stamp: not vouched
+    expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(false)
+  })
+
+  it('reads the TAB\'s record when a COS child shares the session id, and the child\'s only when it is alone', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    // The child's file sorts FIRST in the directory (a naive first-match would return it).
+    const child = 100 + Math.floor(Math.random() * 100)
+    const tab = 90_000 + Math.floor(Math.random() * 9_000)
+    record(dir, child, { entrypoint: 'sdk-cli', status: 'busy', statusUpdatedAt: 6_000 })
+    expect(recordCosSpawn(child, Date.now())).toBe('recorded')
+    try {
+      expect(registryRecordSync(SID, dir)).toMatchObject({ pid: child, entrypoint: 'sdk-cli' })  // alone: the child answers
+      record(dir, tab, { status: 'idle', statusUpdatedAt: 5_000 })
+      expect(registryRecordSync(SID, dir)).toMatchObject({ pid: tab, entrypoint: 'claude-desktop' })
+      expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(true)     // the child's `busy` does not veto the tab's idle
+    } finally {
+      releaseCosSpawn(child)
+    }
+  })
+})
+
 describe('registryEntrypointSync', () => {
   it('reads the entrypoint off the record that names the session, ignoring torn files and foreign names', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
@@ -90,5 +129,38 @@ describe('registryEntrypointSync', () => {
     expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000002', dir)).toBeNull()
     expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000003', dir)).toBeNull()
     expect(registryEntrypointSync('a1b2c3d4-0000-4000-8000-000000000001', join(dir, 'missing'))).toBeNull()
+  })
+})
+
+describe('the boot replay', () => {
+  it('restores the entrypoint the ledger row carries, so a print run that ended inside the window is still a run after a restart (QA W1)', () => {
+    // A scratch home for the runtime files, spool and registry; the ledger lives at the
+    // (already isolated) data path, where this test seeds it BEFORE the boot.
+    const home = mkdtempSync(join(tmpdir(), 'cos-runtime-'))
+    process.env.COS_GLASSES_HOME = home
+    process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
+    process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')   // empty: the registry has been reaped
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    const job = 'a1b2c3d4-0000-4000-8000-00000000f00d'
+    const tab = 'b2c3d4e5-0000-4000-8000-00000000cafe'
+    const now = Date.now()
+    const row = (ts: number, event: string, session_id: string, extra: Record<string, unknown>, entrypoint?: string) =>
+      JSON.stringify({ key: `${ts}-1-${event}.json`, ts, ppid: 1, event, session_id, ...(entrypoint ? { entrypoint } : {}), payload: { session_id, ...extra } })
+    writeFileSync(dataPath('session-hook-events.jsonl'), [
+      row(now - 5_000, 'SessionStart', job, { source: 'startup' }),
+      row(now - 4_000, 'UserPromptSubmit', job, { prompt: 'hi' }, 'sdk-cli'),
+      row(now - 3_000, 'Stop', job, { last_assistant_message: 'done' }, 'sdk-cli'),
+      row(now - 2_000, 'SessionEnd', job, { reason: 'other' }, 'sdk-cli'),
+      row(now - 1_500, 'SessionStart', tab, { source: 'startup' }),
+      row(now - 1_000, 'UserPromptSubmit', tab, { prompt: 'hello' }, 'claude-desktop'),
+    ].join('\n') + '\n')
+    const runtime = startSessionHooksRuntime({ port: 3141 })
+    try {
+      expect(sessionSignalStore.get(job)?.entrypoint).toBe('sdk-cli')
+      expect(sessionSignalStore.get(job)?.ended).not.toBeNull()
+      expect(sessionSignalStore.get(tab)?.entrypoint).toBe('claude-desktop')
+    } finally {
+      runtime.stop()
+    }
   })
 })

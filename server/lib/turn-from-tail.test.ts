@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { draftsFromLine, turnFromTail } from './session-stream-events.js'
-import { withHookTurnClock } from './occupancy-probes.js'
+import { withHookTurnClock, type HookTurnSignal } from './occupancy-probes.js'
 import type { OccupancyProbes } from './thread-occupancy.js'
 
 const j = (o: unknown) => JSON.stringify(o)
@@ -35,6 +35,17 @@ describe('turnFromTail', () => {
     expect(turnFromTail('claude', [user('hi'), endTurn(), user('<task-notification><task-id>x</task-id></task-notification>')])).toEqual({ ended: false, reason: 'prompt_open' })
     expect(turnFromTail('claude', [user('hi'), endTurn(), user('<system-reminder>ctx</system-reminder>', { isMeta: true })])).toEqual({ ended: true, reason: 'terminal_stop' })
     expect(turnFromTail('claude', [user('hi'), endTurn(), user('summary', { isCompactSummary: true })])).toEqual({ ended: true, reason: 'terminal_stop' })
+  })
+
+  it('a prompt QUEUED during the Stop hooks keeps the turn open; a cross-session message (isMeta, promptSource system) is a prompt', () => {
+    // QA 2026-09-15: Claude writes a `queue-operation` row for a prompt typed while the
+    // Stop hooks run, dequeues it when they return, then writes the user row.
+    const enqueue = j({ type: 'queue-operation', operation: 'enqueue', timestamp: 'x' })
+    const dequeue = j({ type: 'queue-operation', operation: 'dequeue', timestamp: 'y' })
+    expect(turnFromTail('claude', [user('hi'), endTurn(), enqueue])).toEqual({ ended: false, reason: 'prompt_queued' })
+    expect(turnFromTail('claude', [user('hi'), endTurn(), enqueue, dequeue, user('queued one')])).toEqual({ ended: false, reason: 'prompt_open' })
+    expect(turnFromTail('claude', [user('hi'), endTurn(), user('Another Claude session sent a message: hello', { isMeta: true, promptSource: 'system' })])).toEqual({ ended: false, reason: 'prompt_open' })
+    expect(turnFromTail('claude', [user('hi'), endTurn(), user('ctx', { isMeta: true, promptSource: 'user' })])).toEqual({ ended: true, reason: 'terminal_stop' })
   })
 
   it('an interrupt ends the turn without a reply; a print-mode result row ends it too', () => {
@@ -70,23 +81,38 @@ describe('withHookTurnClock', () => {
     readDir: () => [], readFile: () => null, lockHolders: () => [], cosSpawnedPids: () => new Map(),
   }
   const FULL = 'a1b2c3d4-0000-4000-8000-000000000001'
-  const signal = (over: Partial<{ lastEvent: string; turnOpen: boolean; subagentsOpen: number; ended: unknown; stopAt: number | null }> = {}) => ({
+  const signal = (over: Partial<HookTurnSignal> = {}): HookTurnSignal => ({
     lastEvent: 'Stop', turnOpen: false, subagentsOpen: 0, ended: null, stopAt: 1_000, ...over,
   })
+  const idle = () => true
 
   it('answers the Stop time only when the store vouches: newest event Stop, turn closed, no sub-agent, not ended', () => {
-    const probe = withHookTurnClock(base, () => signal()).holderTurnEndedAtMs!
+    const probe = withHookTurnClock(base, () => signal(), idle).holderTurnEndedAtMs!
     expect(probe('claude', FULL)).toBe(1_000)
-    expect(withHookTurnClock(base, () => signal({ lastEvent: 'PostToolUse' })).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
-    expect(withHookTurnClock(base, () => signal({ turnOpen: true })).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
-    expect(withHookTurnClock(base, () => signal({ subagentsOpen: 1 })).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
-    expect(withHookTurnClock(base, () => signal({ ended: { at: 1, reason: 'other' } })).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
-    expect(withHookTurnClock(base, () => undefined).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ lastEvent: 'PostToolUse' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ lastEvent: 'SubagentStop' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ turnOpen: true }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ subagentsOpen: 1 }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ ended: { at: 1, reason: 'other' } }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => undefined, idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+  })
+
+  it('and only when the REGISTRY vouches too: idle at or after the Stop is the engine\'s end of turn; busy, or no record, is strict', () => {
+    // The Stop hook is not the end of the turn: the COS repo's Stop hooks run 12-38 s
+    // and the engine flips the registry idle only when they have returned. A prompt
+    // typed during them flips it busy instead. QA round, 2026-09-15.
+    const asked: Array<[string, number]> = []
+    const vouch = (answer: boolean | null) => withHookTurnClock(base, () => signal({ stopAt: 5_000 }), (id, at) => { asked.push([id, at]); return answer }).holderTurnEndedAtMs!
+    expect(vouch(true)('claude', FULL)).toBe(5_000)
+    expect(vouch(false)('claude', FULL)).toBeNull()
+    expect(vouch(null)('claude', FULL)).toBeNull()
+    // Asked with the session AND the Stop instant, so the record must have moved after it.
+    expect(asked).toEqual([[FULL, 5_000], [FULL, 5_000], [FULL, 5_000]])
   })
 
   it('never answers for codex, nor for an id that is not a full Claude session id', () => {
     const asked: string[] = []
-    const probe = withHookTurnClock(base, id => { asked.push(id); return signal() }).holderTurnEndedAtMs!
+    const probe = withHookTurnClock(base, id => { asked.push(id); return signal() }, idle).holderTurnEndedAtMs!
     expect(probe('codex', FULL)).toBeNull()
     expect(probe('claude', FULL.slice(0, 8))).toBeNull()
     expect(asked).toEqual([])

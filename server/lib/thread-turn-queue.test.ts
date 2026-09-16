@@ -192,8 +192,16 @@ describe('drainDecision with positive turn-open evidence (6.48.1)', () => {
   it('an OPEN turn holds even when the transcript clock reads idle (a long tool leaves the file untouched)', () => {
     expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'idle', turnOpen: true }, now)).toBe('hold')
   })
-  it('turnEnded still delivers ahead of it, and no evidence keeps the idle backstop', () => {
-    expect(drainDecision(turn, { attachable: true, turnEnded: true, activity: 'idle', turnOpen: true }, now)).toBe('deliver')
+  it('an OPEN turn holds even over turnEnded: a tail whose newest terminal record predates a prompt it cannot see must not outvote the hooks', () => {
+    // QA 2026-09-15 (W4): with the transcript rule alone, a session whose hooks say the
+    // turn is open (UserPromptSubmit seen, no Stop) still read ended when the tail's
+    // newest terminal record predated a prompt past the tail window. The hooks' positive
+    // evidence wins; the 30 min ceiling on `turnOpen` keeps a crashed session draining.
+    expect(drainDecision(turn, { attachable: true, turnEnded: true, activity: 'idle', turnOpen: true }, now)).toBe('hold')
+  })
+  it('turnEnded delivers when nothing says open, and no evidence keeps the idle backstop', () => {
+    expect(drainDecision(turn, { attachable: true, turnEnded: true, activity: 'working', turnOpen: false }, now)).toBe('deliver')
+    expect(drainDecision(turn, { attachable: true, turnEnded: true, activity: 'working' }, now)).toBe('deliver')
     expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'idle', turnOpen: false }, now)).toBe('deliver')
     expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'idle' }, now)).toBe('deliver')
     expect(drainDecision(turn, { attachable: true, turnEnded: false, activity: 'working', turnOpen: false }, now)).toBe('hold')

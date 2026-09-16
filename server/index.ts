@@ -23,7 +23,7 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { registerDrainKickStats, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -131,7 +131,7 @@ const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
 import { queuedThreadKeys, transcriptTurnEnded, transcriptTurnVerdict } from './lib/thread-turn-queue-store.js'
 import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
-import { createDrainKick } from './lib/thread-drain-kick.js'
+import { createDrainKick, kickPlanFor } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
 import { deliverQueuedTurnOverLoopback } from './lib/thread-turn-queue-deliver.js'
 import { readFences, writeFences } from './lib/thread-fence-store.js'
@@ -388,7 +388,7 @@ const occupancyProbes = sessionHooksEnabled()
   // 6.48.1, the B6 clause: with the hooks on, a foreign Desktop holder whose newest hook
   // event is a Stop reads idle at once instead of after the 30 s transcript window. The
   // wrapper only adds a probe; the gate's precedence is unchanged. Off is 6.48.0.
-  ? withHookTurnClock(buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled()), signalFor)
+  ? withHookTurnClock(buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled()), signalFor, registryIdleAfterStop)
   : buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())
 
 // 6.48.0: the hook spool ingester and the one signal store every session row reads. Starts
@@ -629,13 +629,15 @@ if (threadAttachEnabled()) {
     turnEnded: (provider: string, threadId: string) => {
       if (provider !== 'claude' && provider !== 'codex') return false
       try {
-        // 6.48.1: a Stop hook newer than the turn's own prompt is the turn's end, said by
-        // the engine itself; the transcript tail (`turnFromTail`) answers for everything
-        // the hooks did not see. Either is enough; both refuse on doubt.
+        // 6.48.1: the engine's own end of turn: a Stop hook newer than the turn's prompt
+        // AND the registry flipped idle after it (the Stop hooks have returned; a prompt
+        // typed during them is queued and dequeues only then). The transcript tail
+        // (`turnFromTail`) answers for everything the hooks did not see. Both refuse on doubt.
         if (provider === 'claude') {
           const signal = signalFor(threadId)
           if (signal && !signal.turnOpen && signal.lastEvent === 'Stop' && typeof signal.stopAt === 'number'
-            && signal.stopAt >= (signal.turnStartedAt ?? 0) && signal.subagentsOpen === 0) return true
+            && signal.stopAt >= (signal.turnStartedAt ?? 0) && signal.subagentsOpen === 0
+            && registryIdleAfterStop(threadId, signal.stopAt) === true) return true
         }
         return transcriptTurnEnded(provider, transcriptPathFor(provider, threadId, nativeHeadDeps))
       } catch {
@@ -686,9 +688,11 @@ if (threadAttachEnabled()) {
   //
   // 6.48.1: the timer and the hooks' Stop share ONE in-flight guard (`thread-drain-kick`),
   // so a Stop landing mid-sweep folds into exactly one follow-up pass and a sentence is
-  // never delivered twice. A Stop kicks only when a queue file names that session (full
-  // id or the registry's 8-char form); a SubagentStop that closes the last sub-agent of a
-  // finished turn kicks the same way, so sub-agent turns drain as fast as plain ones.
+  // never delivered twice. A Stop kicks only when a queue file names that session. A
+  // SubagentStop does NOT kick (QA, 2026-09-15): a background sub-agent finishing after
+  // the tab's Stop is answered by the model in a turn of its own, whose Stop kicks; and
+  // neither the hook short-circuit nor the B6 clause vouches for a session whose newest
+  // event is a SubagentStop, so a kick there could only fall through to the 30 s backstop.
   const drainKick = createDrainKick({
     drain: () => drainAllThreads(queueDeps),
     queuedThreadIds: () => queuedThreadKeys().map(k => k.threadId),
@@ -697,9 +701,15 @@ if (threadAttachEnabled()) {
   const queueDrainTimer = setInterval(() => { void drainKick.sweep() }, 20_000)
   queueDrainTimer.unref()
   if (sessionHooksEnabled()) {
-    sessionSignalStore.subscribe((signal, env) => {
-      if (signal.turnOpen || signal.subagentsOpen > 0 || signal.ended) return
-      if (env.event === 'Stop' || env.event === 'SubagentStop') drainKick.kick(signal.sessionId)
+    sessionSignalStore.subscribe((signal, env, child) => {
+      // The rule is `kickPlanFor` (pure, pinned in thread-drain-kick.test.ts). The Stop is
+      // not the engine's end of turn: that is the registry flipping idle once every Stop
+      // hook has returned (12-38 s on this Mac). Wait for it, then sweep; a session with
+      // no registry record (a print run that exited) is ready at once.
+      const plan = kickPlanFor(signal, env.event, env.ts, child)
+      if (!plan) return
+      if (plan.kind === 'kick') drainKick.kick(signal.sessionId)
+      else drainKick.kickWhen(signal.sessionId, () => registryIdleAfterStop(signal.sessionId, plan.stopAt) !== false)
     })
   }
 }

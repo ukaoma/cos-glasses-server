@@ -2,14 +2,23 @@
 //
 // Server-sent events for ONE agent session. Each `data:` line is one JSON object:
 //
-//   {"seq":1,"at":1786890000000,"kind":"tool","verb":"read","target":"x.ts","detail":""}
-//   {"seq":2,"at":1786890001000,"kind":"prose","text":"..."}
-//   {"seq":3,"at":1786890002000,"kind":"status","state":"working"}
+//   {"seq":1,"at":1786890000000,"kind":"tool","verb":"read","target":"x.ts","detail":"","cursor":41,"epoch":1789...}
+//   {"seq":2,"at":1786890001000,"kind":"prose","text":"...","cursor":42,"epoch":1789...}
+//   {"seq":3,"at":1786890002000,"kind":"status","state":"working","agent_state":"running",...}
 //   {"seq":4,"at":1786890003000,"kind":"heartbeat"}
 //
 // `seq` is monotonic PER CONNECTION from 1, so a client detects loss from a gap. There
 // are no named SSE events and no comment keepalives: one shape, so a client needs one
 // handler and can never miss a keepalive it was not parsing.
+//
+// 6.48.1 adds, all ignorable by a client that reads `data:` lines and known fields:
+//   - `cursor` and `epoch` on every event the per-session ring remembers, and an SSE
+//     `id: <epoch>.<cursor>` line before it. `?after=<epoch>.<cursor>` (or the standard
+//     `Last-Event-ID` header) replays what that ring holds after the cursor, from the
+//     same server life only; anything else, and an empty replay, seeds as a fresh open.
+//   - `?seed=turn` seeds from the current turn's prompt instead of the last 7 steps.
+//   - the derived state fields on every `status` draft (`COS_SESSION_HOOK_SSE=0` omits
+//     them), and a `status` line on every change of that state.
 //
 // ---------------------------------------------------------------------------
 // A DEAD STREAM MUST DEGRADE TO THE POLL, NEVER TO A FROZEN SCREEN
@@ -72,9 +81,11 @@ import {
 } from '../lib/session-transcript-watcher.js'
 import { draftsFromLine, statusDraftWithDerived, type DerivedStatusFields } from '../lib/session-stream-events.js'
 import type { SessionStreamState } from '../lib/session-stream-events.js'
-import { replaySessionStream, ringBounds } from '../lib/session-stream-bus.js'
+import { RING_EPOCH, replaySessionStream, ringBounds } from '../lib/session-stream-bus.js'
+import { claudeSessionsDir, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
+import type { RegistryFacts } from '../lib/session-state-derive.js'
 import { deriveForRow, sessionHooksEnabled, sessionSignalStore } from '../lib/session-hooks-runtime.js'
-import { derivedRowFields } from '../lib/session-state-derive.js'
+import { derivedStatusFields } from '../lib/session-state-derive.js'
 
 export const agentSessionStreamRouter = Router()
 
@@ -97,15 +108,64 @@ export function sessionHookSseEnabled(env: NodeJS.ProcessEnv = process.env): boo
   return env.COS_SESSION_HOOK_SSE !== '0' && sessionHooksEnabled()
 }
 
-/** The hook-derived state for a Claude session the stream is showing, or nothing. */
-function derivedForStream(provider: AgentProvider, sessionId: string): DerivedStatusFields | undefined {
+/**
+ * The derived state for a Claude session the stream is showing, or nothing.
+ *
+ * SAME INPUTS AS THE ROWS (QA, 2026-09-15): the registry facts (so an Esc-interrupted
+ * turn and a stray SessionEnd are read the way the list reads them) and whether a COS
+ * turn is attached (which is `running`, whatever the tab's hooks last said). The
+ * registry is read once per connection and again at most every REGISTRY_REFRESH_MS.
+ */
+export const REGISTRY_REFRESH_MS = 5_000
+
+type RegistryReader = () => Promise<RegistryFacts | undefined>
+
+function derivedForStream(provider: AgentProvider, sessionId: string, key: string, registry: RegistryFacts | undefined): DerivedStatusFields | undefined {
   if (provider !== 'claude' || !sessionHookSseEnabled()) return undefined
   try {
-    const derived = deriveForRow({ sessionId, remember: false })
-    return derived ? derivedRowFields(derived) as unknown as DerivedStatusFields : undefined
+    const derived = deriveForRow({ sessionId, registry, remember: false, attachedTurn: isAttachedTurnActive(key) })
+    return derived ? derivedStatusFields(derived) : undefined
   } catch {
     return undefined
   }
+}
+
+/** The registry record for a session, cached briefly; undefined when none names it. */
+function registryReaderFor(sessionId: string): RegistryReader {
+  const wanted = sessionId.toLowerCase()
+  let cached: { at: number; facts: RegistryFacts | undefined } | null = null
+  return async () => {
+    if (cached && Date.now() - cached.at < REGISTRY_REFRESH_MS) return cached.facts
+    let facts: RegistryFacts | undefined
+    try {
+      const record = (await readClaudePeerRecords(claudeSessionsDir())).find(p => p.sessionId === wanted || p.sessionId.startsWith(wanted))
+      facts = record ? registryFacts(record) : undefined
+    } catch {
+      facts = undefined
+    }
+    cached = { at: Date.now(), facts }
+    return facts
+  }
+}
+
+/**
+ * Whether a cursor can be replayed from a ring with these bounds: only when the ring
+ * still holds the event right after it (an evicted cursor would replay the whole ring
+ * with the gap unnoticed) and there IS one (a cursor at the newest has nothing to
+ * replay, and an empty replay must seed, never open an empty screen).
+ */
+export function cursorReplayable(after: number | null, bounds: { oldest: number; newest: number } | null): boolean {
+  if (after === null || bounds === null) return false
+  return bounds.oldest <= after + 1 && after < bounds.newest
+}
+
+/** `?after=<epoch>.<cursor>` (the `id:` line's shape) or a bare cursor from this epoch; null when absent or unusable. */
+export function parseAfterCursor(raw: unknown, epoch: number = RING_EPOCH): number | null {
+  if (typeof raw !== 'string') return null
+  const m = /^(?:(\d{1,16})\.)?(\d{1,12})$/.exec(raw.trim())
+  if (!m) return null
+  if (m[1] !== undefined && Number(m[1]) !== epoch) return null
+  return Number(m[2])
 }
 
 /** A turn-anchored seed (`?seed=turn`): the newest prompt and EVERY step after it, bounded. */
@@ -117,12 +177,14 @@ function asProvider(value: string): AgentProvider | null {
 }
 
 /**
- * The state to open with.
+ * The TRANSPORT's opening state, before the derived state is stamped over it.
  *
  * `working` when a COS turn is writing right now, or when the transcript was touched
  * inside the same 30s window the session list already uses to call a thread active.
- * Otherwise `idle`. Never `done`: this route cannot observe the end of a turn it did
- * not start, and claiming one would be an invention.
+ * Otherwise `idle`. Never `done` from HERE: this function cannot observe the end of a
+ * turn it did not start. Since 6.48.1 `write()` restates `state` from the deriver when
+ * the hooks are on, and an engine that said SessionEnd (with no live registry record
+ * behind the session) opens as `done`, which is the client's digest body and intended.
  */
 export async function openingState(
   key: string,
@@ -212,6 +274,12 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
 
   const state = await openingState(key, path, Date.now())
 
+  // The registry facts the feed derives with: read in the same pre-header window as the
+  // opening state (nothing awaits once the headers are out, so a close can never slip
+  // between a write and the `close` listener), refreshed at most every REGISTRY_REFRESH_MS.
+  const readRegistry = registryReaderFor(sessionId)
+  let registry: RegistryFacts | undefined = await readRegistry()
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -243,13 +311,21 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
     try { res.end() } catch { /* already gone */ }
   }
 
+  let lastStamp = ''
+  const stampOf = (d: DerivedStatusFields | undefined) => d ? `${d.agent_state}|${d.waiting_kind ?? ''}|${d.waiting_detail ?? ''}|${d.failure ?? ''}` : ''
+
   const write = (event: PublishedSessionEvent): void => {
     if (closed) return
     try {
       // ONE stamping point for the derived state: every status draft this connection
       // writes, opening or live, seeded or published, carries the same extra fields.
-      const out = event.kind === 'status' ? { ...event, ...statusDraftWithDerived(event, derivedForStream(provider, sessionId)) } : event
-      const idLine = typeof out.cursor === 'number' ? `id: ${out.cursor}\n` : ''
+      let out: PublishedSessionEvent = event
+      if (event.kind === 'status') {
+        const derived = derivedForStream(provider, sessionId, key, registry)
+        lastStamp = stampOf(derived)
+        out = { ...event, ...statusDraftWithDerived(event, derived) }
+      }
+      const idLine = typeof out.cursor === 'number' ? `id: ${out.epoch ?? RING_EPOCH}.${out.cursor}\n` : ''
       res.write(`${idLine}data: ${JSON.stringify({ seq: ++seq, ...out })}\n\n`)
     } catch {
       // A failed write means the socket is gone. Close rather than swallow, so the
@@ -294,14 +370,18 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // seeding, when the ring still reaches back that far. A ring that does not (server
   // restarted, linger expired) falls through to the seed, and the client sees a cursor
   // jump it treats as a reseed.
-  const after = Number(req.query.after)
+  // The standard SSE header is honoured as the fallback for `?after=`; the shipped lens
+  // and Control both pass the query and read `data:` lines only.
+  const after = parseAfterCursor(req.query.after) ?? parseAfterCursor(req.get('last-event-id'))
   const bounds = ringBounds(key)
-  // Replayable only when the ring reaches back to the cursor AND the cursor is not past
-  // the ring (a client ahead of a restarted server's fresh ring must reseed).
-  const replayable = Number.isFinite(after) && after >= 0 && bounds !== null && bounds.oldest <= after + 1 && after <= bounds.newest
-  if (replayable) {
-    for (const event of replaySessionStream(key, after)) write(event)
-  }
+  // Replayable only when the cursor is from THIS epoch, the ring reaches back to it, it
+  // is not past the ring, and the ring actually holds something after it. A ring that
+  // holds nothing after the cursor (the sole client was away, so nothing was published
+  // while it was gone) seeds instead: an empty replay must never be an empty screen
+  // (QA, 2026-09-15).
+  const replay = after !== null && cursorReplayable(after, bounds) ? replaySessionStream(key, after) : []
+  const replayable = replay.length > 0
+  for (const event of replay) write(event)
   const seedMode = String(req.query.seed ?? '') === 'turn' ? 'turn' : 'window'
 
   if (!replayable && path !== null && startOffset > 0) {
@@ -355,22 +435,21 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // client's state line moves on the engine's own events (prompt, permission prompt,
   // Stop, end) rather than on the transcript clock. Filtered to this session (the
   // client may have addressed it by the registry's 8-character form).
-  if (provider === 'claude' && sessionHookSseEnabled()) {
+  if (provider === 'claude' && sessionHookSseEnabled() && !closed) {
     const wanted = sessionId.toLowerCase()
-    const stampOf = (d: DerivedStatusFields | undefined) => d ? `${d.agent_state}|${d.waiting_kind ?? ''}|${d.waiting_detail ?? ''}|${d.failure ?? ''}` : ''
-    // Seeded from the state the opening status carried, so the first live event is a
-    // line only if it CHANGED something.
-    let lastStamp = stampOf(derivedForStream(provider, sessionId))
+    // `lastStamp` is whatever the OPENING status actually wrote (set inside `write`), so a
+    // change during the seed read is emitted as the first live line, not lost.
     releaseSignals = sessionSignalStore.subscribe(signal => {
       if (closed) return
       if (signal.sessionId !== wanted && !signal.sessionId.startsWith(wanted)) return
-      const derived = derivedForStream(provider, sessionId)
+      // The registry may have moved with the hooks (an Esc flips it idle); refresh it
+      // off the hot path and let the next event read the new facts.
+      void readRegistry().then(facts => { registry = facts })
+      const derived = derivedForStream(provider, sessionId, key, registry)
       if (!derived) return
       // Only a CHANGE of state is a line; tool events inside a running turn are narrated
       // by the transcript tail and must not each repaint the state.
-      const stamp = stampOf(derived)
-      if (stamp === lastStamp) return
-      lastStamp = stamp
+      if (stampOf(derived) === lastStamp) return
       write({ kind: 'status', state: 'working', at: Date.now() })
     })
   }
@@ -383,6 +462,8 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   if (closed) {
     releaseWatcher?.()
     releaseWatcher = null
+    releaseSignals?.()
+    releaseSignals = null
     return
   }
 

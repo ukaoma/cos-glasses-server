@@ -45,9 +45,15 @@ export interface SpoolIngesterOptions {
   dir: string
   ledger: SessionHookLedger
   /** Apply a parsed envelope to the store. Absent when the feature is off. */
-  apply?: (env: HookEnvelope, child: boolean) => void
+  apply?: (env: HookEnvelope, child: boolean, entrypoint: string | null) => void
   /** Classify the envelope's ppid at INGEST time, while the pid is still alive. */
   isChild?: (env: HookEnvelope) => boolean
+  /**
+   * The session's registry `entrypoint`, read at INGEST time while the record is alive
+   * (6.48.1). Written onto the ledger row so a replay after a restart knows a print run
+   * from a tab without a registry that has since been reaped.
+   */
+  entrypointOf?: (env: HookEnvelope, child: boolean) => string | null
   /** Keys already in the ledger at boot, so a replayed file is not applied twice. */
   seenKeys?: Set<string>
   sweepMs?: number
@@ -175,15 +181,17 @@ export function startSpoolIngester(options: SpoolIngesterOptions): SpoolIngester
     // replay after a restart (when the spawn ledger is empty) applies the same rule.
     let child = false
     try { child = options.isChild?.(env) ?? false } catch { child = false }
+    let entrypoint: string | null = null
+    try { entrypoint = options.entrypointOf?.(env, child) ?? null } catch { entrypoint = null }
     let appended = false
-    try { appended = ledger.append(name, env, child) } catch (error) { stats.lastError = errorCode(error) }
+    try { appended = ledger.append(name, env, child, entrypoint) } catch (error) { stats.lastError = errorCode(error) }
     if (!appended) {
       // Keep the file: the ledger is the durable record and it refused. Health shows why.
       stats.lastError = ledger.stats().lastError ?? stats.lastError
       return false
     }
     seen.add(name)
-    try { options.apply?.(env, child) } catch (error) {
+    try { options.apply?.(env, child, entrypoint) } catch (error) {
       stats.applyErrors++
       console.error(`[hook-spool] apply failed for ${name}: ${error instanceof Error ? error.message : error}`)
     }

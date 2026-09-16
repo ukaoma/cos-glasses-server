@@ -1,7 +1,9 @@
 // The SSE route with the 6.48.1 additions, executed end to end over a real socket:
 // the derived state rides every status draft, a hook signal change becomes a live
-// status draft, `COS_SESSION_HOOK_SSE=0` keeps 6.48.0's frames, `?after=` replays from
-// the ring, `?seed=turn` seeds the whole current turn, and a frame carries `id:`.
+// status draft, `COS_SESSION_HOOK_SSE=0` keeps 6.48.0's status fields, `?after=` replays
+// from the ring within one server life, `?seed=turn` seeds the whole current turn, a
+// frame carries `id: <epoch>.<cursor>`, an attached COS turn outranks the hooks, and
+// the registry vetoes a hook state the way the rows' derive does (QA round, 2026-09-15).
 //
 // The 6.9.478 parser is REPLICATED here by its documented behaviour (canary 8): unknown
 // fields stripped, `seq` kept, unknown kinds dropped before seq accounting. Zero gap
@@ -13,8 +15,8 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { agentSessionStreamRouter } from './agent-session-stream.js'
-import { __resetSessionStreamBusForTests, publishSessionStream, sessionStreamKey } from '../lib/session-stream-bus.js'
+import { agentSessionStreamRouter, cursorReplayable, parseAfterCursor } from './agent-session-stream.js'
+import { __resetSessionStreamBusForTests, beginAttachedTurn, publishSessionStream, RING_EPOCH, sessionStreamKey } from '../lib/session-stream-bus.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
 
@@ -35,11 +37,11 @@ function shippedParse(data: string): { seq: number; kind: string; state?: string
   return { seq: Number(o.seq), kind: String(o.kind), ...(o.kind === 'status' ? { state: String(o.state) } : {}) }
 }
 
-interface Frame { id: number | null; data: Record<string, unknown> }
+interface Frame { id: string | null; data: Record<string, unknown> }
 
-async function readFrames(url: string, count: number, timeoutMs = 4_000): Promise<Frame[]> {
+async function readFrames(url: string, count: number, timeoutMs = 4_000, headers: Record<string, string> = {}): Promise<Frame[]> {
   const controller = new AbortController()
-  const res = await fetch(url, { signal: controller.signal })
+  const res = await fetch(url, { signal: controller.signal, headers })
   expect(res.status).toBe(200)
   const reader = res.body!.getReader()
   const decoder = new TextDecoder()
@@ -53,10 +55,10 @@ async function readFrames(url: string, count: number, timeoutMs = 4_000): Promis
     const parts = buffer.split('\n\n')
     buffer = parts.pop() ?? ''
     for (const part of parts) {
-      let id: number | null = null
+      let id: string | null = null
       let data: string | null = null
       for (const line of part.split('\n')) {
-        if (line.startsWith('id: ')) id = Number(line.slice(4))
+        if (line.startsWith('id: ')) id = line.slice(4)
         if (line.startsWith('data: ')) data = line.slice(6)
       }
       if (data !== null) frames.push({ id, data: JSON.parse(data) })
@@ -68,7 +70,7 @@ async function readFrames(url: string, count: number, timeoutMs = 4_000): Promis
 
 describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
   const saved: Record<string, string | undefined> = {}
-  const KEYS = ['COS_AGENT_SESSIONS_HOME', 'COS_CLAUDE_SESSIONS_ENABLED', 'COS_SESSION_HOOKS', 'COS_SESSION_HOOK_SSE', 'COS_SESSION_STREAM_ENABLED'] as const
+  const KEYS = ['COS_AGENT_SESSIONS_HOME', 'COS_CLAUDE_SESSIONS_ENABLED', 'COS_SESSION_HOOKS', 'COS_SESSION_HOOK_SSE', 'COS_SESSION_STREAM_ENABLED', 'COS_CLAUDE_SESSIONS_DIR'] as const
   const closers: Array<() => Promise<void>> = []
   let home: string
   let transcript: string
@@ -81,6 +83,9 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     transcript = join(dir, `${SID}.jsonl`)
     writeFileSync(transcript, [user('first question'), tool('ls'), endTurn('done one'), user('second question'), tool('pwd'), tool('whoami')].join('\n') + '\n')
     process.env.COS_AGENT_SESSIONS_HOME = home
+    // An isolated, empty registry: the stream's derive reads the SAME registry the rows do.
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')
     process.env.COS_CLAUDE_SESSIONS_ENABLED = '1'
     process.env.COS_SESSION_HOOKS = '1'
     delete process.env.COS_SESSION_HOOK_SSE
@@ -134,8 +139,48 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     expect(statuses).toEqual([
       { agent_state: 'running', state: 'working', waiting_kind: undefined, last: undefined },
       { agent_state: 'waiting', state: 'working', waiting_kind: 'permission', last: undefined },
-      { agent_state: 'idle', state: 'idle', waiting_kind: undefined, last: undefined },
+      // `last_reply` rides an idle state only: the feed's "Idle, last reply: …" line.
+      { agent_state: 'idle', state: 'idle', waiting_kind: undefined, last: 'done two' },
     ])
+  })
+
+  it('an ATTACHED COS turn outranks the hooks on the wire: working while the child writes, the engine state again once it ends', async () => {
+    // QA blocker B1 (2026-09-15): a Continue child shares the tab's session id; the tab's
+    // older Stop read the wire `idle`, and the child's own SessionEnd erased its trail as
+    // `done`. The deriver is told the turn is attached and answers running until it is not.
+    sessionSignalStore.apply(env(T0 + 1_000, 'SessionStart', { source: 'startup' }))
+    sessionSignalStore.apply(env(T0 + 2_000, 'UserPromptSubmit', { prompt: 'second question' }))
+    sessionSignalStore.apply(env(T0 + 3_000, 'Stop', { last_assistant_message: 'done two' }))
+    const key = sessionStreamKey('claude', SID)
+    const end = beginAttachedTurn(key)
+    const url = await start()
+    const framesPromise = readFrames(url, 7) // 6 seeded + the one state change after the detach
+    await new Promise(r => setTimeout(r, 150))
+    // The child's SessionEnd lands while the turn is attached: no `done`, no line at all.
+    sessionSignalStore.apply(env(T0 + 4_000, 'SessionEnd', { reason: 'other' }), true)
+    await new Promise(r => setTimeout(r, 100))
+    end()
+    // Detaching fires no hook; the next signals re-derive without the attached override:
+    // a new prompt is running again (same wire state, no line), its Stop is idle (a line).
+    sessionSignalStore.apply(env(T0 + 5_000, 'UserPromptSubmit', { prompt: 'third question' }))
+    sessionSignalStore.apply(env(T0 + 6_000, 'Stop', { last_assistant_message: 'done three' }))
+    const frames = await framesPromise
+    const statuses = frames.filter(f => f.data.kind === 'status').map(f => [f.data.state, f.data.agent_state, f.data.state_source])
+    expect(statuses).toEqual([['working', 'running', 'transcript'], ['idle', 'idle', 'hook']])
+    expect(frames.some(f => f.data.state === 'done')).toBe(false)
+  })
+
+  it('the registry vetoes a hook state exactly as the rows do: an Esc-interrupted turn (registry idle after the last hook) reads idle, not running', async () => {
+    // QA W6: the stream used to derive with no registry facts, so the lens header said
+    // Working for up to 30 min while the list row said idle.
+    sessionSignalStore.apply(env(T0 + 1_000, 'SessionStart', { source: 'startup' }))
+    sessionSignalStore.apply(env(T0 + 2_000, 'UserPromptSubmit', { prompt: 'second question' }))
+    writeFileSync(join(home, 'sessions', `${process.pid}.json`), JSON.stringify({
+      pid: process.pid, sessionId: SID, entrypoint: 'claude-desktop', kind: 'desktop', cwd: '/tmp',
+      status: 'idle', statusUpdatedAt: T0 + 2_500, lastActiveAt: T0 + 2_500, startedAt: T0,
+    }))
+    const frames = await readFrames(await start(), 1)
+    expect(frames[0].data).toMatchObject({ kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'registry' })
   })
 
   it('COS_SESSION_HOOK_SSE=0 writes 6.48.0 frames: no extra fields, no live state drafts', async () => {
@@ -170,12 +215,41 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     publishSessionStream(key, { kind: 'tool', verb: 'bash', target: 'three', detail: '' })
     const frames = await first
     const live = frames.filter(f => f.id !== null)
-    expect(live.map(f => [f.id, f.data.cursor, f.data.target])).toEqual([[1, 1, 'one'], [2, 2, 'two'], [3, 3, 'three']])
-    // A reconnect after cursor 1 gets two and three, and no seed.
-    const again = await readFrames(`${url}?after=1`, 3)
+    const E = RING_EPOCH
+    expect(live.map(f => [f.id, f.data.cursor, f.data.epoch, f.data.target])).toEqual([[`${E}.1`, 1, E, 'one'], [`${E}.2`, 2, E, 'two'], [`${E}.3`, 3, E, 'three']])
+    // A reconnect after cursor 1 (the id: line's form) gets two and three, and no seed.
+    const again = await readFrames(`${url}?after=${E}.1`, 3)
     expect(again.map(f => [f.data.kind, f.data.target ?? f.data.state])).toEqual([['status', 'working'], ['tool', 'two'], ['tool', 'three']])
+    // The standard SSE header is the fallback for the query.
+    const header = await readFrames(url, 3, 4_000, { 'last-event-id': `${E}.1` })
+    expect(header.map(f => [f.data.kind, f.data.target ?? f.data.state])).toEqual([['status', 'working'], ['tool', 'two'], ['tool', 'three']])
     // A cursor past the ring (a restarted server's fresh ring) falls back to the seed.
-    const stale = await readFrames(`${url}?after=9`, 2)
+    const stale = await readFrames(`${url}?after=${E}.9`, 2)
     expect(stale[1].data.kind).toBe('prompt')
+    // A cursor from another server life falls back to the seed, whatever its number.
+    const other = await readFrames(`${url}?after=${E - 1}.1`, 2)
+    expect(other[1].data.kind).toBe('prompt')
+    // A cursor AT the newest event has nothing to replay: that is a seed, never an
+    // opening status and an empty screen (QA W3: the sole client's own gap is not in the ring).
+    const caughtUp = await readFrames(`${url}?after=${E}.3`, 2)
+    expect(caughtUp[1].data.kind).toBe('prompt')
+  })
+
+  it('cursorReplayable: only a cursor whose successor the ring still holds, and that has one', () => {
+    const bounds = { oldest: 3, newest: 7 }
+    expect(cursorReplayable(2, bounds)).toBe(true)     // the event after it (3) is the oldest kept
+    expect(cursorReplayable(6, bounds)).toBe(true)
+    expect(cursorReplayable(1, bounds)).toBe(false)    // evicted: a replay would hide the gap
+    expect(cursorReplayable(7, bounds)).toBe(false)    // at the newest: nothing to replay, so seed
+    expect(cursorReplayable(9, bounds)).toBe(false)
+    expect(cursorReplayable(null, bounds)).toBe(false)
+    expect(cursorReplayable(2, null)).toBe(false)
+  })
+
+  it('parseAfterCursor: the id: form from this epoch, a bare cursor, and nothing else', () => {
+    expect(parseAfterCursor(`${RING_EPOCH}.7`)).toBe(7)
+    expect(parseAfterCursor('7')).toBe(7)
+    expect(parseAfterCursor(`${RING_EPOCH - 1}.7`)).toBeNull()
+    for (const bad of ['', ' ', 'x', '-1', '1.5.2', `${RING_EPOCH}.`, `${RING_EPOCH}.-1`, undefined, 3]) expect(parseAfterCursor(bad)).toBeNull()
   })
 })

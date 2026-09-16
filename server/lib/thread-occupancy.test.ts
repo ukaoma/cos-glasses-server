@@ -10,7 +10,6 @@ import {
   threadOccupancy,
   ACTIVE_RECENTLY_WINDOW_MS,
   holderActivity,
-  STOP_BOOKKEEPING_GRACE_MS,
   isActiveRecently,
   type OccupancyProbes,
   type OccupancyReason,
@@ -458,8 +457,12 @@ describe('a foreign holder blocks on WORKING, not on merely held', () => {
 // THE B6 CLAUSE (6.48.1): a hook Stop turns a working foreign holder idle
 // ===========================================================================
 //
-// Executed through the real `threadOccupancy`, like the relaxation above. The
-// clause is one conditional; every branch of it has a verdict here.
+// Executed through the real `threadOccupancy`, like the relaxation above. The clause
+// revisits exactly one verdict (`working`), for exactly one provider, and only on a
+// probe that VOUCHES; the vouch itself (newest event Stop, turn closed, registry idle
+// after it) lives in `withHookTurnClock` and is pinned in `turn-from-tail.test.ts`.
+// Branches here: vouching probe, null probe, throwing probe, unmeasurable transcript,
+// far-future Stop, no probe.
 
 describe('the hook turn clock (B6) narrows WORKING to idle, and nothing else', () => {
   const now = () => Date.now()
@@ -468,14 +471,15 @@ describe('the hook turn clock (B6) narrows WORKING to idle, and nothing else', (
     holderTurnEndedAtMs: stop,
   })
 
-  it('a Stop within the bookkeeping grace of the newest write reads idle: the turn ended', () => {
-    const o = threadOccupancy('claude', SID, probes(working(() => now() - 150)), DIRS)
-    expect({ attachable: o.attachable, reason: o.reason, idleHolder: o.idleHolder }).toEqual({ attachable: true, reason: null, idleHolder: true })
-  })
-
-  it('a Stop older than the grace stays WORKING: something was written after the turn ended', () => {
-    const o = threadOccupancy('claude', SID, probes(working(() => now() - STOP_BOOKKEEPING_GRACE_MS - 5_000)), DIRS)
-    expect({ attachable: o.attachable, reason: o.reason }).toEqual({ attachable: false, reason: 'native_thread_working' })
+  it('a vouching Stop reads idle whatever the transcript clock says: the vouch is the registry idle flip, which the engine writes after its last row for the turn', () => {
+    // A Stop 150 ms ago and a Stop 40 s ago (the Stop hooks ran that long, then the
+    // registry flipped idle) both read idle against a transcript written just now:
+    // the writes after a Stop are the hooks' own bookkeeping, and a NEW prompt flips
+    // the registry busy, which makes the probe answer null (pinned in turn-from-tail).
+    for (const stop of [() => now() - 150, () => now() - 40_000]) {
+      const o = threadOccupancy('claude', SID, probes(working(stop)), DIRS)
+      expect({ attachable: o.attachable, reason: o.reason, idleHolder: o.idleHolder }).toEqual({ attachable: true, reason: null, idleHolder: true })
+    }
   })
 
   it('a null probe is strict, and a throwing probe is strict', () => {

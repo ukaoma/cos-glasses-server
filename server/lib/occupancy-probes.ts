@@ -791,11 +791,12 @@ export function buildOccupancyProbes(
  * Add the hook turn clock (the B6 clause, 6.48.1) to a probe set.
  *
  * `signalFor` is the signal store's reader, taking a full session id or the registry's
- * 8-character form. The probe answers a Stop time only when the store can VOUCH for it:
- * the session's newest hook event is that Stop, the turn is closed, no sub-agent is
- * open and the session has not ended. Codex never asks (its ids are not Claude
- * sessions, and a Codex thread id sharing a Claude prefix must not read a Claude
- * signal); `readHolderActivity` guards the provider too, so both layers refuse.
+ * 8-character form; `registryIdleAfterStop` reads the registry record for the session.
+ * The probe answers a Stop time only when BOTH vouch: the session's newest hook event is
+ * that Stop, the turn is closed, no sub-agent is open, the session has not ended, and
+ * the registry says idle at or after the Stop (the hooks have returned). Codex never
+ * asks (its ids are not Claude sessions, and a Codex thread id sharing a Claude prefix
+ * must not read a Claude signal); `readHolderActivity` guards the provider too.
  *
  * Wired at the composition root only when `COS_SESSION_HOOKS` is on. Absent, the
  * gate is byte-for-byte 6.48.0.
@@ -803,6 +804,7 @@ export function buildOccupancyProbes(
 export function withHookTurnClock(
   probes: OccupancyProbes,
   signalFor: (sessionId: string) => HookTurnSignal | undefined,
+  registryIdleAfterStop: (sessionId: string, stopAt: number) => boolean | null,
 ): OccupancyProbes {
   return {
     ...probes,
@@ -811,7 +813,10 @@ export function withHookTurnClock(
       if (!NATIVE_THREAD_ID_RE.test(threadId)) return null
       const signal = signalFor(threadId)
       if (!signal || signal.lastEvent !== 'Stop' || signal.turnOpen || signal.subagentsOpen > 0 || signal.ended !== null) return null
-      return typeof signal.stopAt === 'number' ? signal.stopAt : null
+      if (typeof signal.stopAt !== 'number') return null
+      // The engine's own end of turn: the registry flipped idle AFTER this Stop, which
+      // happens only once every Stop hook has returned. Anything else is strict.
+      return registryIdleAfterStop(threadId, signal.stopAt) === true ? signal.stopAt : null
     },
   }
 }
@@ -821,7 +826,7 @@ export interface HookTurnSignal {
   lastEvent: string
   turnOpen: boolean
   subagentsOpen: number
-  ended: unknown
+  ended: { at: number; reason: string } | null
   stopAt: number | null
 }
 

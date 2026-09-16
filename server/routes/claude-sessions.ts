@@ -18,7 +18,7 @@
 import { Router } from 'express'
 import { existsSync } from 'node:fs'
 import { lstat, readdir, readFile, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import {
   REGISTRY_FILENAME,
   countPeers,
@@ -35,6 +35,7 @@ import {
 import { deriveForRow } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type RegistryFacts } from '../lib/session-state-derive.js'
 import { queuedTurnsFields, queuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
+import { isAttachedTurnActive, sessionStreamKey } from '../lib/session-stream-bus.js'
 
 export const claudeSessionsRouter = Router()
 
@@ -168,7 +169,7 @@ claudeSessionsRouter.get('/claude-sessions', async (req, res) => {
     res.json({
       peers: records.slice(0, limit).map(record => ({
         ...toWirePeer(record),
-        ...derivedRowFields(deriveForRow({ sessionId: record.sessionId, registry: registryFacts(record) })),
+        ...derivedRowFields(deriveForRow({ sessionId: record.sessionId, registry: registryFacts(record), attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', record.sessionId)) })),
         ...queuedTurnsFields(queuedOf('claude', record.sessionId)),
       })),
       counts: countPeers(peers),

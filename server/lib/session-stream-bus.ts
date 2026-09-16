@@ -33,8 +33,16 @@
 
 import type { SessionStreamDraft } from './session-stream-events.js'
 
-/** A draft with the publish instant stamped. `seq` stays per connection; `cursor` is per session. */
-export type PublishedSessionEvent = SessionStreamDraft & { at: number; cursor?: number }
+/** A draft with the publish instant stamped. `seq` stays per connection; `cursor` is per session within `epoch`. */
+export type PublishedSessionEvent = SessionStreamDraft & { at: number; cursor?: number; epoch?: number }
+
+/**
+ * Cursors are meaningful only within one server life: a client holding a cursor from
+ * before a restart would otherwise be handed the wrong events from a fresh ring with no
+ * gap to notice (QA, 2026-09-15). Every event carries the epoch, and the SSE `id:` line
+ * is `<epoch>.<cursor>`; the route refuses to replay across epochs.
+ */
+export const RING_EPOCH = Date.now()
 
 /** Events the ring keeps per session. */
 export const RING_MAX = 500
@@ -64,7 +72,7 @@ function ringFor(key: string): Ring {
 
 function remember(key: string, event: PublishedSessionEvent): PublishedSessionEvent & { cursor: number } {
   const ring = ringFor(key)
-  const stamped = { ...event, cursor: ring.nextCursor++ }
+  const stamped = { ...event, cursor: ring.nextCursor++, epoch: RING_EPOCH }
   ring.events.push(stamped)
   if (stamped.kind === 'prompt') ring.turnStart = ring.events.length - 1
   // Trim the oldest, but never into the active turn until the hard cap.
@@ -73,7 +81,6 @@ function remember(key: string, event: PublishedSessionEvent): PublishedSessionEv
     ring.events.shift()
     if (ring.turnStart >= 0) ring.turnStart--
   }
-  if (ring.turnStart < -1) ring.turnStart = -1
   return stamped
 }
 

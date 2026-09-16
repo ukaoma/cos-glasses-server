@@ -182,6 +182,11 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
         tool_target: toolTarget(payload.tool_input),
         tool_fingerprint: toolFingerprint(toolName, payload.tool_input ?? null),
         ...(str('tool_use_id') ? { tool_use_id: str('tool_use_id') } : {}),
+        // A sub-agent's tool events carry these (docs; unrecorded as of 2026-09-15). The
+        // store reads `agent_id` to keep them from reopening the main turn, so the ledger
+        // must keep it or a replay reopens what the live path did not.
+        ...(str('agent_id') ? { agent_id: str('agent_id') } : {}),
+        ...(str('agent_type') ? { agent_type: str('agent_type') } : {}),
         ...(event === 'PermissionRequest' && Array.isArray(payload.permission_suggestions)
           ? { permission_suggestions: payload.permission_suggestions.slice(0, 4) }
           : {}),

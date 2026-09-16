@@ -64,6 +64,14 @@ export interface DeriveInput {
   registry: RegistryFacts | undefined
   transcript: TranscriptFacts | undefined
   now: number
+  /**
+   * A COS-spawned turn (Continue, a queued follow-up, a job) is writing this session
+   * RIGHT NOW (`isAttachedTurnActive`). Its hook events are classified as a child's and
+   * kept out of the phase, so without this the tab's last state (idle after its Stop)
+   * would be reported while COS itself is generating (QA, 2026-09-15: the shipped lens
+   * drops the trail on `idle`). Running, source `transcript`: it is our own write.
+   */
+  attachedTurn?: boolean
   /** The previous derive's `deadScans`, so the two-scan rule survives between polls. */
   prevDeadScans?: number
   /** The previous derive's `deadSince`. */
@@ -99,6 +107,10 @@ export function deriveSessionState(input: DeriveInput): DerivedSessionState {
   const registryMovedLater = !!(registry?.statusUpdatedAt && signal && registry.statusUpdatedAt > signal.lastEventAt)
   const hooksSilent = !!signal && now - signal.lastEventAt > HOOK_SILENCE_MS
   const carry = { deadScans, deadSince }
+
+  if (input.attachedTurn === true) {
+    return { agent_state: 'running', state_source: 'transcript', state_since: iso(transcript?.lastActivityAt ?? signal?.lastEventAt ?? now), ...carry, ...replyOf(signal) }
+  }
 
   // A dead pid on two scans at least DEAD_GRACE_MS apart ends the row whatever the hooks
   // last said, unless a hook event is newer than the registry's last movement (a resumed
@@ -193,6 +205,32 @@ function waitStillStands(since: number, registry: RegistryFacts | undefined, tra
   if (transcript?.lastActivityAt && transcript.lastActivityAt > since + WAITING_TRANSCRIPT_VETO_MS) return false
   if (!(registry?.alive) && now - since > WAITING_CEILING_MS) return false
   return true
+}
+
+/**
+ * The fields a `status` draft carries (6.48.1): the row fields minus the permission id
+ * (slice 4's, never on the stream) and with `last_reply` only on an idle state, where a
+ * feed renders "Idle, last reply: …". A typed projection, so a new row field cannot reach
+ * the wire by accident.
+ */
+export function derivedStatusFields(derived: DerivedSessionState): {
+  agent_state: AgentState
+  state_source: StateSource
+  state_since: string
+  waiting_kind?: WaitingKind
+  waiting_detail?: string
+  failure?: string
+  last_reply?: string
+} {
+  return {
+    agent_state: derived.agent_state,
+    state_source: derived.state_source,
+    state_since: derived.state_since,
+    ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
+    ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
+    ...(derived.failure ? { failure: derived.failure } : {}),
+    ...(derived.agent_state === 'idle' && derived.last_reply ? { last_reply: derived.last_reply } : {}),
+  }
 }
 
 /** The additive row fields, ready to spread onto a list or detail entry. */

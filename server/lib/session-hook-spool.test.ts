@@ -166,6 +166,26 @@ describe('the spool ingester under the QA blockers', () => {
     expect(replayed).toEqual(seen)
   })
 
+  it('writes the entrypoint on the ledger row once known, and a replay hands it back (a reaped registry cannot un-know a print run)', () => {
+    const dir = spoolDir()
+    seed(dir, 'p-mode-run.hooks.jsonl')
+    const ledger = new SessionHookLedger(ledgerPath(dir))
+    const known = new Map<string, string>()
+    const seen: Array<[string, string | null]> = []
+    running = startSpoolIngester({
+      dir, ledger, sweepMs: 60_000,
+      // The registry "lands" after the first event, as it does in production.
+      entrypointOf: env => (env.event === 'SessionStart' ? null : (known.get(env.sessionId) ?? null)),
+      apply: (env, _child, entrypoint) => { seen.push([env.event, entrypoint]); known.set(env.sessionId, 'sdk-cli') },
+    })
+    expect(seen).toEqual([['SessionStart', null], ['UserPromptSubmit', 'sdk-cli'], ['Stop', 'sdk-cli'], ['SessionEnd', 'sdk-cli']])
+    const rows = readFileSync(ledgerPath(dir), 'utf-8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+    expect(rows.map(r => r.entrypoint ?? null)).toEqual([null, 'sdk-cli', 'sdk-cli', 'sdk-cli'])
+    const replayed: Array<[string, string | null]> = []
+    ledger.replay(0, (env, _key, _child, entrypoint) => replayed.push([env.event, entrypoint]))
+    expect(replayed).toEqual(seen)
+  })
+
   it('a replayed PermissionRequest carries the same target and fingerprint the live event did', () => {
     const dir = spoolDir()
     const ledger = new SessionHookLedger(ledgerPath(dir))

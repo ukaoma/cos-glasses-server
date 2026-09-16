@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import {
+import { RING_EPOCH,
   MAX_STREAMED_SESSIONS,
   MAX_SUBSCRIBERS_PER_SESSION,
   __resetSessionStreamBusForTests,
@@ -33,7 +33,7 @@ describe('one session is not another session', () => {
 
     publishSessionStream(A, { kind: 'status', state: 'working' }, 1000)
 
-    expect(a).toEqual([{ kind: 'status', state: 'working', at: 1000, cursor: 1 }])
+    expect(a).toEqual([{ kind: 'status', state: 'working', at: 1000, cursor: 1, epoch: RING_EPOCH }])
     expect(b).toEqual([])
   })
 

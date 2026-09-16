@@ -42,6 +42,7 @@ import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
 import { deriveForRow } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
 import { queuedTurnsFields, queuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
+import { isAttachedTurnActive, sessionStreamKey } from '../lib/session-stream-bus.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 import {
   occupiedThreads,
@@ -79,9 +80,9 @@ function asSort(value: unknown): AgentSessionSort {
   return String(value ?? '').toLowerCase() === 'opened' ? 'opened' : 'updated'
 }
 
-function toSearchHit(row: AgentSessionSearchHit, queuedTurns = 0) {
+function toSearchHit(row: AgentSessionSearchHit, queuedTurns = 0, derived?: DerivedSessionState) {
   return {
-    ...toEntry(row, undefined, undefined, queuedTurns),
+    ...toEntry(row, undefined, derived, queuedTurns),
     snippet: row.snippet,
     keywordScore: row.keywordScore,
     semanticScore: row.semanticScore,
@@ -382,6 +383,7 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
           lastActivityAt: activityById.get(row.session_id)?.lastActivityAt ? Date.parse(activityById.get(row.session_id)!.lastActivityAt!) : null,
         },
         now,
+        attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', row.session_id)),
       }))
     }
     const queuedOf = queuedWaitingLookup(now)
@@ -416,9 +418,28 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
     const limit = boundedInteger(req.query.limit, 20, 1, 50)
     const result = await searchAgentSessions({ query, limit })
     const queuedOf = queuedWaitingLookup(Date.now())
+    // 6.48.1: search hits carry the same derived state as list rows (no list/search shape
+    // drift), from the registry and the hook signal; a hit has no transcript walk.
+    const peers = await liveClaudePeerRecords()
+    const peersByPrefix = new Map<string, ClaudePeerRecord>()
+    for (const peer of peers) {
+      const prefix = peer.sessionId.slice(0, 8)
+      if (!peersByPrefix.has(prefix)) peersByPrefix.set(prefix, peer)
+    }
+    const derivedFor = (hit: AgentSessionSearchHit): DerivedSessionState | undefined => {
+      if (hit.provider !== 'claude') return undefined
+      const peer = peersByPrefix.get(hit.session_id.slice(0, 8).toLowerCase())
+      return deriveForRow({
+        sessionId: hit.session_id,
+        registry: peer ? registryFacts(peer) : undefined,
+        transcript: hit.modified ? { inFlight: false, lastActivityAt: Date.parse(hit.modified) } : undefined,
+        attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', hit.session_id)),
+        remember: false,
+      })
+    }
     res.json({
       ...result,
-      hits: result.hits.map(hit => toSearchHit(hit, queuedOf(hit.provider, hit.session_id))),
+      hits: result.hits.map(hit => toSearchHit(hit, queuedOf(hit.provider, hit.session_id), derivedFor(hit))),
     })
   } catch (error) {
     console.error(`[agent-sessions] search failed: ${error instanceof Error ? error.message : error}`)
@@ -470,6 +491,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
         sessionId: parsed.session_id,
         registry: peer ? registryFacts(peer) : undefined,
         transcript: { inFlight: running.occupied.get(parsed.session_id)?.activeRecently === true, lastActivityAt: activity.lastActivityAt ? Date.parse(activity.lastActivityAt) : null },
+        attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', parsed.session_id)),
       })
     }
     res.json({

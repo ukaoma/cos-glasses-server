@@ -481,7 +481,7 @@ export function draftsFromLine(provider: SessionStreamProvider, line: string): S
  */
 export const TERMINAL_STOP_REASONS: ReadonlySet<string> = new Set(['end_turn', 'stop_sequence', 'max_tokens', 'refusal'])
 
-export type TurnFromTail = { ended: boolean; reason: 'terminal_stop' | 'result_row' | 'interrupted' | 'codex_complete' | 'prompt_open' | 'tool_pending' | 'no_evidence' }
+export type TurnFromTail = { ended: boolean; reason: 'terminal_stop' | 'result_row' | 'interrupted' | 'codex_complete' | 'prompt_open' | 'prompt_queued' | 'tool_pending' | 'no_evidence' }
 
 export function turnFromTail(provider: SessionStreamProvider, lines: readonly string[]): TurnFromTail {
   let verdict: TurnFromTail = { ended: false, reason: 'no_evidence' }
@@ -503,7 +503,18 @@ export function turnFromTail(provider: SessionStreamProvider, lines: readonly st
 
     const type = typeof r.type === 'string' ? r.type : ''
     if (type === 'result') { verdict = { ended: true, reason: 'result_row' }; pendingToolUses.clear(); continue }
-    if (r.isMeta === true || r.isCompactSummary === true) continue
+    // A prompt typed while the Stop hooks run is QUEUED, not submitted (Claude writes a
+    // `queue-operation` row); it dequeues once the hooks return and the model answers it.
+    // The turn is not over until then (QA, 2026-09-15). The dequeue is followed by the
+    // user row itself, which the next branch reads.
+    if (type === 'queue-operation') {
+      if (r.operation === 'enqueue') verdict = { ended: false, reason: 'prompt_queued' }
+      continue
+    }
+    // Injected context is not a prompt, except a cross-session message (`promptSource:
+    // 'system'`), which the model answers as a turn.
+    if (r.isCompactSummary === true) continue
+    if (r.isMeta === true && r.promptSource !== 'system') continue
     const message = asRecord(r.message)
     if (!message) continue
     const content = Array.isArray(message.content) ? message.content : typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : []
@@ -549,9 +560,12 @@ export function turnFromTail(provider: SessionStreamProvider, lines: readonly st
  *   idle    -> idle         failed  -> idle (+ failure)      ended -> done
  *
  * `done` on open flips the client to its digest body, which is intended for a session
- * whose engine said SessionEnd. Precedence with an attached COS turn is decided by the
- * caller: the derived state is stamped over whatever the transport chose, because the
- * engine's own Stop is better evidence than "our child is still writing".
+ * whose engine said SessionEnd. An ATTACHED COS TURN WINS (QA, 2026-09-15): the deriver
+ * is told `attachedTurn` and answers `running` for as long as the child is writing, so
+ * a Continue's trail is never handed off mid-stream by the tab's older Stop or by a
+ * child's own SessionEnd; the engine's state resumes the moment the turn detaches.
+ *
+ * `last_reply` rides only an idle state (the feed's "Idle, last reply: …" line).
  */
 export interface DerivedStatusFields {
   agent_state: 'running' | 'waiting' | 'idle' | 'failed' | 'ended'
@@ -560,6 +574,7 @@ export interface DerivedStatusFields {
   waiting_kind?: string
   waiting_detail?: string
   failure?: string
+  last_reply?: string
 }
 
 export type StatusDraftWithDerived = { kind: 'status'; state: SessionStreamState } & Partial<DerivedStatusFields>
@@ -582,6 +597,7 @@ export function statusDraftWithDerived(
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
+    ...(state === 'idle' && derived.last_reply ? { last_reply: derived.last_reply } : {}),
   }
 }
 
