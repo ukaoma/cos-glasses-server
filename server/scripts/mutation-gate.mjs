@@ -508,6 +508,20 @@ const CASES = [
     tests: ['server/lib/session-hook-spool.test.ts'],
   },
   {
+    name: 'attach-widens-past-a-giant-row',
+    file: 'server/lib/attached-workspace.ts',
+    find: "      window = Math.min(window * 4, WORKSPACE_SCAN_BYTES_MAX)",
+    replace: "      break",
+    tests: ['server/lib/attached-workspace.test.ts'],
+  },
+  {
+    name: 'attach-first-cwd-is-the-workspace',
+    file: 'server/lib/attached-workspace.ts',
+    find: "    if (typeof direct === 'string' && direct.length > 0) return { cwd: direct, endedMidRow: false, rows }",
+    replace: "    if (typeof direct === 'string' && direct.length > 0 && rows > 3) return { cwd: direct, endedMidRow: false, rows }",
+    tests: ['server/lib/attached-workspace.test.ts'],
+  },
+  {
     name: 'turns-deliver-sends-epoch-and-target',
     file: 'server/lib/thread-turn-queue-deliver.ts',
     find: "        epoch,\n        targetKey: targetKey(turn.provider, turn.threadId),",

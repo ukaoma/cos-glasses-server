@@ -61,8 +61,19 @@ export interface AttachedWorkspaceDeps {
   cursorSpawnWorkspace?: (threadId: string) => string | null
 }
 
-/** Enough to reach a Claude message row or the Codex session meta row. */
+/**
+ * The first window read for the cwd: enough to reach a Claude message row or the Codex
+ * session meta row in the common case. NOT enough on its own (6.48.2): a session whose
+ * first prompt carries pasted screenshots opens with a single row of ~1 MB, so 512 KiB
+ * held four bookkeeping rows and a torn fifth, no cwd, and every Continue on that
+ * session was refused `target_unresolvable` (Miles, 2026-09-15, from the lens; 55 of
+ * 758 transcripts on the release Mac). When a window ends inside a row before any cwd
+ * was seen, the read widens up to WORKSPACE_SCAN_BYTES_MAX.
+ */
 export const WORKSPACE_SCAN_BYTES = 512 * 1024
+
+/** The widest head read: a first prompt with ten screenshots fits; a 13 GB rollout does not get read. */
+export const WORKSPACE_SCAN_BYTES_MAX = 16 * 1024 * 1024
 
 /** Rows to inspect before giving up. Bounds a pathological single-line file. */
 export const WORKSPACE_SCAN_ROWS = 400
@@ -72,19 +83,37 @@ export function fingerprint(value: string): string {
 }
 
 /**
- * Pull the recorded cwd out of transcript text.
+ * Pull the recorded cwd out of transcript text: the FIRST row that records one.
  *
  * Claude puts it at the row's top level; Codex puts it in the session meta row's
  * `payload`. A torn trailing line is NORMAL — these files are appended to — so a
  * parse failure on any single row is skipped rather than fatal.
  *
- * Returns null when no row records one, and DISAGREEMENT is also null: a transcript
- * whose rows claim two different working directories is not something to guess at.
+ * THE FIRST cwd IS THE WORKSPACE (6.48.2). Until 6.48.1 two different values in the
+ * window refused the attach as a disagreement. On the release Mac every such
+ * transcript was one session whose shell `cd`-ed inside a turn (`operations/scripts`,
+ * a weekly folder): Claude stamps each row with the process cwd of the moment, all
+ * under the directory the session was started in. That starting directory is the
+ * workspace: it keys the transcript's project folder, it is the only place
+ * `claude --resume` finds the session, and it is what the first row records.
+ *
+ * Returns null only when no row in the window records one.
  */
 export function cwdFromTranscript(text: string): string | null {
-  const seen = new Set<string>()
+  return scanForCwd(text).cwd
+}
+
+/**
+ * The scan with its outcome: the cwd, or whether the window ended INSIDE a row before
+ * any cwd was seen (a first prompt of pasted screenshots is one row of ~1 MB), which
+ * tells the resolver that a wider read can still answer.
+ */
+export function scanForCwd(text: string): { cwd: string | null; endedMidRow: boolean; rows: number } {
   let rows = 0
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n')
+  // A window that does not end with a newline ended inside whatever row came last.
+  const endedMidRow = text.length > 0 && !text.endsWith('\n')
+  for (const line of lines) {
     if (rows >= WORKSPACE_SCAN_ROWS) break
     const trimmed = line.trim()
     if (!trimmed) continue
@@ -94,18 +123,14 @@ export function cwdFromTranscript(text: string): string | null {
     if (!row || typeof row !== 'object' || Array.isArray(row)) continue
     const record = row as Record<string, unknown>
     const direct = record.cwd
-    if (typeof direct === 'string' && direct.length > 0) seen.add(direct)
+    if (typeof direct === 'string' && direct.length > 0) return { cwd: direct, endedMidRow: false, rows }
     const payload = record.payload
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
       const nested = (payload as Record<string, unknown>).cwd
-      if (typeof nested === 'string' && nested.length > 0) seen.add(nested)
+      if (typeof nested === 'string' && nested.length > 0) return { cwd: nested, endedMidRow: false, rows }
     }
-    // One consistent answer found early is enough; keep scanning only while it is
-    // still the only one, so a disagreement is detected rather than short-circuited.
-    if (seen.size > 1) return null
   }
-  if (seen.size !== 1) return null
-  return [...seen][0]!
+  return { cwd: null, endedMidRow, rows }
 }
 
 /**
@@ -145,17 +170,27 @@ export function resolveAttachedWorkspace(
   }
   if (provider !== 'claude' && provider !== 'codex') return null
   let path: string | null
-  let text: string | null
+  let cwd: string | null = null
   try {
     path = deps.transcriptPath(provider, threadId)
     if (path === null) return null
-    text = deps.readHead(path, WORKSPACE_SCAN_BYTES)
+    // Widen the head read while the window keeps ending inside a row with no cwd seen:
+    // 512 KiB, 2 MiB, 8 MiB, then the cap. A window that ended on a row boundary with
+    // no cwd is a transcript that records none, and widening would not change that.
+    let window = WORKSPACE_SCAN_BYTES
+    for (;;) {
+      const text = deps.readHead(path, window)
+      if (text === null) return null
+      const scan = scanForCwd(text)
+      cwd = scan.cwd
+      // The whole file came back (shorter than the window): there is nothing wider to read.
+      const wholeFile = Buffer.byteLength(text, 'utf8') < window
+      if (cwd !== null || wholeFile || !scan.endedMidRow || scan.rows >= WORKSPACE_SCAN_ROWS || window >= WORKSPACE_SCAN_BYTES_MAX) break
+      window = Math.min(window * 4, WORKSPACE_SCAN_BYTES_MAX)
+    }
   } catch {
     return null
   }
-  if (text === null) return null
-
-  const cwd = cwdFromTranscript(text)
   if (cwd === null) return null
   // A relative cwd would resolve against the SERVER's working directory, which is
   // not a location we control and is never what the user meant.

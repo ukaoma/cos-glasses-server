@@ -1,3 +1,11 @@
+## 6.48.2
+
+Continue and Fork work again on a session whose transcript opens with a big row. Reported from the lens on 6.9.482 (Miles, 2026-09-15): Continue on a Claude session answered "Can't continue. Fork thread instead" while the row said the session was attachable.
+
+- The attach route reads the session's working directory out of the transcript's first rows. It read a fixed 512 KiB, and a session whose first prompt carried pasted screenshots opens with one row of about 1 MB, so the window held four bookkeeping rows and a torn fifth, no `cwd`, and every Continue and Fork on that session was refused `target_unresolvable`. The read now widens (512 KiB, 2 MiB, 8 MiB, 16 MiB) while the window keeps ending inside a row with no `cwd` seen, and stops as soon as the whole file has been read or a row boundary shows the transcript records none.
+- The first `cwd` in the transcript is the workspace. Two different values used to refuse the attach as a disagreement; on the release Mac every such transcript was one session whose shell had `cd`-ed into a subfolder inside a turn, and Claude stamps each row with the process cwd of the moment. The directory the session started in keys its project folder and is the only place `--resume` finds it, so it is the answer. On the release Mac 738 of 758 transcripts resolve (before: 703); the 20 that do not are scratch sessions whose temporary directory has since been deleted, which is a refusal by design.
+- Tests: the first-cwd rule for Claude and Codex, the torn-window signal, the widening sequence against the production shape (four bookkeeping rows, a 950 KB image row, then the cwd), a short file read once, a first row past the cap refused at the cap. Mutation gate: the widening and the first-cwd rule.
+
 ## 6.48.1
 
 One derivation everywhere, a Desktop turn ends when the engine says it ended, a queued follow-up drains then instead of on the 30 s idle window, and the live feed carries the same state every row does. No client change is required: the next Control and EHPK builds read the new keys, and today's consumers ignore them.

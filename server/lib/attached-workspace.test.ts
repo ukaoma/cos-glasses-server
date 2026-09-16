@@ -4,10 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
+  WORKSPACE_SCAN_BYTES,
+  WORKSPACE_SCAN_BYTES_MAX,
   realAttachedWorkspaceDeps,
   cwdFromTranscript,
   fingerprint,
   resolveAttachedWorkspace,
+  scanForCwd,
   type AttachedWorkspaceDeps,
 } from './attached-workspace'
 
@@ -62,10 +65,29 @@ describe('reading the cwd out of a transcript', () => {
     expect(cwdFromTranscript(JSON.stringify({ type: 'user', message: {} }))).toBeNull()
   })
 
-  it('returns null when rows DISAGREE rather than picking one', () => {
-    // Two working directories in one transcript is not something to guess at.
-    const conflicted = [claudeRows('/a'), claudeRows('/b')].join('\n')
-    expect(cwdFromTranscript(conflicted)).toBeNull()
+  it('the FIRST cwd is the workspace when later rows moved (a cd inside a turn), 6.48.2', () => {
+    // Until 6.48.1 this refused as a disagreement. On the release Mac every such
+    // transcript was one session whose shell cd-ed into a subfolder mid-turn; the
+    // directory the session started in keys its project folder and is the only place
+    // --resume finds it.
+    const moved = [claudeRows(REAL_CWD), claudeRows(`${REAL_CWD}/operations/scripts`)].join('\n')
+    expect(cwdFromTranscript(moved)).toBe(REAL_CWD)
+    const codexMoved = [codexRows('/private/tmp'), codexRows('/private/tmp/sub')].join('\n')
+    expect(cwdFromTranscript(codexMoved)).toBe('/private/tmp')
+  })
+
+  it('reports whether the window ended inside a row before any cwd, so the resolver can widen (6.48.2)', () => {
+    const bookkeeping = [
+      JSON.stringify({ type: 'mode', sessionId: THREAD }),
+      JSON.stringify({ type: 'permission-mode', sessionId: THREAD }),
+    ].join('\n')
+    // A 952 KB first prompt (three pasted screenshots) cut by a 512 KiB window: no cwd, torn.
+    const torn = `${bookkeeping}\n{"type":"user","cwd":"${REAL_CWD}","message":{"content":[{"type":"image","data":"${'A'.repeat(200)}`
+    expect(scanForCwd(torn)).toMatchObject({ cwd: null, endedMidRow: true })
+    // The same rows ending on a row boundary: nothing wider would help.
+    expect(scanForCwd(`${bookkeeping}\n`)).toMatchObject({ cwd: null, endedMidRow: false })
+    expect(scanForCwd('')).toMatchObject({ cwd: null, endedMidRow: false })
+    expect(scanForCwd(claudeRows())).toMatchObject({ cwd: REAL_CWD, endedMidRow: false })
   })
 
   it('returns null for empty input', () => {
@@ -94,6 +116,30 @@ describe('resolveAttachedWorkspace refuses rather than guessing', () => {
 
   it('refuses when the transcript cannot be read', () => {
     expect(resolveAttachedWorkspace('claude', THREAD, deps({ readHead: () => null }))).toBeNull()
+  })
+
+  it('widens the head read past a giant first row until the cwd appears, and stops at the cap (6.48.2)', () => {
+    // The production shape: four tiny bookkeeping rows, then one ~1 MB user row that
+    // carries the cwd. A fixed 512 KiB window sees no cwd; the second read does.
+    const bookkeeping = ['{"type":"mode"}', '{"type":"permission-mode"}', '{"type":"atis-latch"}', '{"type":"file-history-snapshot"}'].join('\n') + '\n'
+    const giant = JSON.stringify({ type: 'user', cwd: REAL_CWD, message: { content: [{ type: 'image', data: 'A'.repeat(950 * 1024) }] } }) + '\n'
+    const file = Buffer.from(bookkeeping + giant + claudeRows() + '\n', 'utf8')
+    const windows: number[] = []
+    const readHead = (_p: string, max: number) => { windows.push(max); return file.subarray(0, max).toString('utf8') }
+    const r = resolveAttachedWorkspace('claude', THREAD, deps({ readHead }))
+    expect(r?.path).toBe(REAL_CWD)
+    expect(windows).toEqual([WORKSPACE_SCAN_BYTES, WORKSPACE_SCAN_BYTES * 4])
+    // A file that is shorter than the window is read once: nothing wider exists.
+    const shortWindows: number[] = []
+    const short = Buffer.from(bookkeeping, 'utf8')
+    expect(resolveAttachedWorkspace('claude', THREAD, deps({ readHead: (_p, max) => { shortWindows.push(max); return short.subarray(0, max).toString('utf8') } }))).toBeNull()
+    expect(shortWindows).toEqual([WORKSPACE_SCAN_BYTES])
+    // A first row wider than the cap is still a refusal, after the cap and not before.
+    const tooBig = Buffer.from(bookkeeping + '{"type":"user","message":{"content":[{"type":"image","data":"' + 'A'.repeat(WORKSPACE_SCAN_BYTES_MAX + 1024), 'utf8')
+    const bigWindows: number[] = []
+    expect(resolveAttachedWorkspace('claude', THREAD, deps({ readHead: (_p, max) => { bigWindows.push(max); return tooBig.subarray(0, max).toString('utf8') } }))).toBeNull()
+    expect(bigWindows.at(-1)).toBe(WORKSPACE_SCAN_BYTES_MAX)
+    expect(bigWindows.length).toBeLessThanOrEqual(4)
   })
 
   it('refuses a RELATIVE cwd instead of resolving it against the server', () => {
