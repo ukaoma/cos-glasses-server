@@ -528,6 +528,93 @@ const CASES = [
     replace: '',
     tests: ['server/lib/thread-turn-queue-deliver.test.ts'],
   },
+  // ------------------------------------------------------------ 6.49.0: live Continue
+  // Each of these is a guard the changelog names. A survivor here means the property
+  // is asserted in prose and nowhere else.
+  {
+    name: 'live-full-id-not-prefix',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: '    r.sessionId === id',
+    replace: '    r.sessionId.startsWith(id)',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-skips-cos-child',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: '  const theirs = matches.filter(r => !isCosOwnedPid(r.pid))',
+    replace: '  const theirs = matches',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-frame-pins-session',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: "    session_id: sessionId,\n    message:",
+    replace: '    message:',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-acceptance-floor',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: '    if (at !== null && at < floor) continue',
+    replace: '    if (false) continue',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-unverified-is-not-delivered',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: "  suspects.set(key, { marker, sentAtMs: sentAt })\n  return done(false, 'unverified', null, target.pid)",
+    replace: "  return done(true, 'delivered', 'enqueue', target.pid)",
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-suspect-never-resent',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: "    if (now() - suspect.sentAtMs < SUSPECT_TTL_MS) return done(false, 'unverified', null, target.pid)\n    suspects.delete(key)",
+    replace: '    suspects.delete(key)',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-suspect-checks-from-original-send',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: '    const seen = peerAcceptanceIn(rows, marker, suspect.sentAtMs)',
+    replace: '    const seen = peerAcceptanceIn(rows, marker, now())',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-route-unverified-never-spawns',
+    file: 'server/routes/agent-session-bindings.ts',
+    find: "        if (live && (live.reason === 'unverified' || live.reason === 'write_failed')) {\n          // Something may be in the session. Hold, never spawn over it.\n          return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })\n        }",
+    replace: '',
+    tests: ['server/routes/agent-session-bindings.test.ts'],
+  },
+  {
+    name: 'live-route-branch-reachable',
+    file: 'server/routes/agent-session-bindings.ts',
+    find: "      if (typeof deps.deliverLiveTurn === 'function' && binding.provider === 'claude') {",
+    replace: '      if (false) {',
+    tests: ['server/routes/agent-session-bindings.test.ts'],
+  },
+  {
+    name: 'outcome-rides-status-not-prompt',
+    file: 'server/lib/session-stream-events.ts',
+    find: '    return outcomes.length > 0 ? outcomes : promptDrafts(message)',
+    replace: '    return promptDrafts(message)',
+    tests: ['server/lib/session-stream-events.test.ts', 'server/lib/session-stream-prompt.test.ts'],
+  },
+  {
+    name: 'outcome-survives-derived-stamp',
+    file: 'server/lib/session-stream-events.ts',
+    find: "    ...(draft.tool_outcome ? { tool_outcome: draft.tool_outcome } : {}),\n    agent_state: derived.agent_state,",
+    replace: '    agent_state: derived.agent_state,',
+    tests: ['server/lib/session-stream-events.test.ts'],
+  },
+  {
+    name: 'outcome-error-is-not-ok',
+    file: 'server/lib/session-stream-events.ts',
+    find: "    return { ok: false, detail: rejected ? 'denied' : oneLine(text, DETAIL_MAX_CHARS) || 'error' }",
+    replace: "    return { ok: true, detail: rejected ? 'denied' : oneLine(text, DETAIL_MAX_CHARS) || 'error' }",
+    tests: ['server/lib/session-stream-events.test.ts'],
+  },
 ]
 
 function sha256(text) {

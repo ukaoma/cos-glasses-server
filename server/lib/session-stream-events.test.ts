@@ -26,6 +26,8 @@ import {
   verbForToolName,
   type SessionStreamDraft,
   statusDraftWithDerived,
+  outcomeForToolResult,
+  type ToolOutcome,
 } from './session-stream-events'
 
 function claudeAssistant(...content: unknown[]) {
@@ -185,11 +187,57 @@ describe('Claude records', () => {
     expect(drafts).toEqual([{ kind: 'prose', text: 'Done.' }])
   })
 
-  it('drops user rows, which are tool results or our own prompt echoed back', () => {
+  it('6.49.0: a tool result is the outcome of the call, on a status draft, never a prompt', () => {
+    // A bare result with nothing countable: the outcome is present, ok, and empty,
+    // and it rides a `status: working` -- the frame a shipped client takes as a no-op.
     expect(draftsFromRecord('claude', {
       type: 'user',
       message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] },
-    })).toEqual([])
+    })).toEqual([{ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '' } }])
+  })
+
+  describe('6.49.0: outcome tokens from the transcript\'s own result shapes', () => {
+    // Every shape below was copied from this Mac's transcripts on 2026-09-16.
+    const cases: Array<[string, Parameters<typeof outcomeForToolResult>, ToolOutcome]> = [
+      ['read', [false, '1\t...', { type: 'text', file: { filePath: '/x', content: '', numLines: 235, startLine: 1, totalLines: 235 } }], { ok: true, detail: '235 lines' }],
+      ['read window', [false, '', { type: 'text', file: { numLines: 40, startLine: 100, totalLines: 900 } }], { ok: true, detail: '40 of 900 lines' }],
+      ['image', [false, '', { type: 'image', file: { base64: 'x' } }], { ok: true, detail: 'image' }],
+      ['write create', [false, 'File created successfully', { type: 'create', filePath: '/x', content: 'a\nb', structuredPatch: [] }], { ok: true, detail: 'created' }],
+      ['write update', [false, '', { type: 'update', filePath: '/x', content: 'a', structuredPatch: [] }], { ok: true, detail: 'written' }],
+      ['edit', [false, 'The file has been updated', { filePath: '/x', oldString: 'a\nb', newString: 'a\nb\nc\nd', structuredPatch: [{}], userModified: false }], { ok: true, detail: '+4 -2' }],
+      ['bash lines', [false, 'x', { stdout: 'a\nb\nc', stderr: '', interrupted: false, isImage: false }], { ok: true, detail: '3 lines' }],
+      ['bash silent', [false, '', { stdout: '', stderr: '', interrupted: false }], { ok: true, detail: 'no output' }],
+      ['bash stderr only', [false, '', { stdout: '', stderr: 'warn', interrupted: false }], { ok: true, detail: 'stderr 1 line' }],
+      ['bash interrupted', [false, '', { stdout: 'a', stderr: '', interrupted: true }], { ok: false, detail: 'interrupted' }],
+      ['bash exit code', [true, 'Exit code 1\n/bin/sh: x: not found', 'Exit code 1'], { ok: false, detail: 'exit 1' }],
+      ['tool_use_error', [true, '<tool_use_error>Blocked: sleep 120</tool_use_error>', 'x'], { ok: false, detail: 'Blocked: sleep 120' }],
+      ['denied', [true, "The user doesn't want to proceed with this tool use.", 'x'], { ok: false, detail: 'denied' }],
+      ['glob', [false, '', { numFiles: 3, filenames: ['a', 'b', 'c'], durationMs: 5 }], { ok: true, detail: '3 files' }],
+      ['grep text', [false, 'Found 17 matches', undefined], { ok: true, detail: '17 hits' }],
+      ['grep none', [false, 'No files found', undefined], { ok: true, detail: 'none' }],
+      ['webfetch', [false, '# Doc', { bytes: 12800, code: 200, codeText: 'OK', durationMs: 900, result: '', url: 'u' }], { ok: true, detail: '200 · 13 KB' }],
+      ['webfetch 404', [false, '', { bytes: 100, code: 404, codeText: 'Not Found', durationMs: 1, result: '', url: 'u' }], { ok: false, detail: '404 · 1 KB' }],
+      ['websearch', [false, '', { durationSeconds: 2, query: 'q', results: [{}, {}], searchCount: 1 }], { ok: true, detail: '2 results' }],
+      ['agent', [false, 'Spawned successfully', { status: 'teammate_spawned', agent_id: 'a', name: 'n' }], { ok: true, detail: 'spawned' }],
+      ['unknown ok', [false, 'Launching skill: qa', { commandName: 'qa', success: true }], { ok: true, detail: '' }],
+    ]
+    for (const [name, args, expected] of cases) {
+      it(name, () => { expect(outcomeForToolResult(...args)).toEqual(expected) })
+    }
+
+    it('never carries content: a 30 KB stdout is a count, not text', () => {
+      const out = outcomeForToolResult(false, 'x'.repeat(30_000), { stdout: 'line\n'.repeat(600), stderr: '', interrupted: false })
+      expect(out.detail).toBe('601 lines')
+      expect(out.detail.length).toBeLessThanOrEqual(DETAIL_MAX_CHARS)
+    })
+
+    it('keeps the outcome when the derived state is stamped on the same draft', () => {
+      const stamped = statusDraftWithDerived(
+        { kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '3 lines' } },
+        { agent_state: 'running', state_source: 'hook', state_since: '2026-09-16T20:00:00.000Z' },
+      )
+      expect(stamped).toMatchObject({ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '3 lines' }, agent_state: 'running' })
+    })
   })
 
   it('reads the stream-json lifecycle rows as status', () => {

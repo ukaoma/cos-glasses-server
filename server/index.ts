@@ -36,6 +36,7 @@ import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
 import { buildOccupancyProbes, realOccupancyDirs, withHookTurnClock } from './lib/occupancy-probes.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
+import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
@@ -749,6 +750,10 @@ app.use('/api', createAgentSessionBindingsRouter({
   },
   nativeHead: (provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps),
   deliverAttachedTurn: deliverAttachedTurnForRoute as never,
+  // 6.49.0: the running session first (Desktop tab or iTerm, same registry record),
+  // the resume child second. Reads `COS_CONTINUE_LIVE` per call, so the flag reports
+  // on /api/health without a restart and every refusal falls back to the 6.48.2 path.
+  deliverLiveTurn: makeLiveTurnDeliverer(nativeHeadDeps),
   forkThread: forkThreadForRoute,
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path

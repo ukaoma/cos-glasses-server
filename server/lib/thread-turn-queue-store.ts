@@ -153,12 +153,22 @@ export function transcriptTurnEnded(provider: SessionStreamProvider, path: strin
 
 /** The bounded tail as lines, with the same two open flags; null when it cannot be read. */
 function readTail(path: string | null): string[] | null {
+  return readTranscriptTailLines(path, TURN_END_TAIL_BYTES)
+}
+
+/**
+ * The last `maxBytes` of a transcript as lines, null when unreadable. Exported (6.49.0)
+ * so the live-delivery verifier reads the transcript the same way the drain does: the
+ * same open flags, the same fragment rule. Two readers with different rules would
+ * disagree about the same file on the day it mattered.
+ */
+export function readTranscriptTailLines(path: string | null, maxBytes: number): string[] | null {
   if (!path || !existsSync(path)) return null
   try {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     try {
       const size = fstatSync(fd).size
-      const start = Math.max(0, size - TURN_END_TAIL_BYTES)
+      const start = Math.max(0, size - maxBytes)
       const buf = Buffer.alloc(size - start)
       readSync(fd, buf, 0, buf.length, start)
       const lines = buf.toString('utf-8').split('\n')

@@ -34,8 +34,28 @@ export type SessionStreamDraft =
   // predates this renders exactly as it did before rather than breaking.
   | { kind: 'prompt'; text: string }
   | { kind: 'prose'; text: string }
-  | { kind: 'status'; state: SessionStreamState }
+  // 6.49.0: `tool_outcome` rides on a status draft, never on a new kind. A shipped
+  // client drops an unknown kind BEFORE seq accounting and paints a gap row for it
+  // (the B2 finding); the same client takes a repeated `status: working` as a no-op
+  // (`event.state !== status` is false, nothing appended, no step counted). So the
+  // result of a tool arrives on the one channel every client already survives.
+  | { kind: 'status'; state: SessionStreamState; tool_outcome?: ToolOutcome }
   | { kind: 'heartbeat' }
+
+/**
+ * What a finished tool produced, in the words a lens line has room for.
+ *
+ * `ok` says whether the tool itself reported failure; `detail` is the token the
+ * client shows at the end of the step line (`+14 -2`, `41 passed`, `17 hits`,
+ * `exit 1`). Derived from the transcript's own `toolUseResult`, which is shape-keyed
+ * (a Read result carries `file.numLines`, a Bash result `stdout`), so no tool name
+ * and no hook is needed: the same row that announces the call carries its answer a
+ * few lines later, in order. Nothing here is prompt text or file content.
+ */
+export interface ToolOutcome {
+  ok: boolean
+  detail: string
+}
 
 /** A draft plus the transport's stamps. This is the JSON on the wire. */
 export type SessionStreamEvent = SessionStreamDraft & { seq: number; at: number }
@@ -243,6 +263,103 @@ export function detailForTool(name: unknown, input: unknown): string {
   return ''
 }
 
+/**
+ * The outcome token for one tool result, from the transcript row that carries it.
+ *
+ * SHAPE-KEYED, because the user row that holds a result names no tool: only the
+ * `tool_use_id` it answers. The structured `toolUseResult` is distinctive enough per
+ * tool (measured across this Mac's transcripts, 2026-09-16) that the shape is the
+ * name. Every branch yields a token from a COUNT or a STATUS, never from content:
+ * the client has 40 characters for it and the ledger keeps no output.
+ *
+ * Nothing worth saying yields `ok` with an empty detail, which the client renders
+ * as nothing. A result the model marked `is_error` is `ok: false` with the first
+ * words of the error, since `exit 1` or `not found` is the whole point of looking.
+ */
+export function outcomeForToolResult(
+  isError: boolean,
+  resultText: string,
+  structured: unknown,
+): ToolOutcome {
+  const text = typeof resultText === 'string' ? resultText : ''
+  if (isError) {
+    const exit = /^\s*Exit code (\d+)/.exec(text)
+    if (exit) return { ok: false, detail: `exit ${exit[1]}` }
+    const tag = /<tool_use_error>\s*([^<\n]{1,40})/.exec(text)
+    if (tag) return { ok: false, detail: oneLine(tag[1], DETAIL_MAX_CHARS) }
+    const rejected = /rejected|doesn't want to proceed|denied/i.test(text)
+    return { ok: false, detail: rejected ? 'denied' : oneLine(text, DETAIL_MAX_CHARS) || 'error' }
+  }
+  const r = asRecord(structured)
+  if (r) {
+    // Read: `{ type: 'text', file: { numLines, totalLines } }`; an image `{ type: 'image' }`.
+    const file = asRecord(r.file)
+    if (file && typeof file.numLines === 'number') {
+      const total = typeof file.totalLines === 'number' && file.totalLines > file.numLines ? ` of ${file.totalLines}` : ''
+      return { ok: true, detail: `${file.numLines}${total} lines` }
+    }
+    if (r.type === 'image') return { ok: true, detail: 'image' }
+    // Write: `{ type: 'create' | 'update', filePath }`.
+    if (r.type === 'create') return { ok: true, detail: 'created' }
+    if (r.type === 'update' && typeof r.filePath === 'string') return { ok: true, detail: 'written' }
+    // Edit: `{ oldString, newString, structuredPatch }` and no `type`.
+    if (Array.isArray(r.structuredPatch) && typeof r.oldString === 'string') {
+      const removed = countLines(r.oldString)
+      const added = countLines(r.newString)
+      return { ok: true, detail: removed === 0 && added === 0 ? 'edited' : `+${added} -${removed}` }
+    }
+    // Bash: `{ stdout, stderr, interrupted }`.
+    if (typeof r.stdout === 'string' && typeof r.stderr === 'string') {
+      if (r.interrupted === true) return { ok: false, detail: 'interrupted' }
+      const out = countLines(r.stdout)
+      const err = countLines(r.stderr)
+      if (out === 0 && err === 0) return { ok: true, detail: 'no output' }
+      if (out === 0) return { ok: true, detail: `stderr ${err} line${err === 1 ? '' : 's'}` }
+      return { ok: true, detail: `${out} line${out === 1 ? '' : 's'}` }
+    }
+    // Grep / Glob: counts when the tool gives them.
+    if (typeof r.numFiles === 'number') return { ok: true, detail: `${r.numFiles} file${r.numFiles === 1 ? '' : 's'}` }
+    if (typeof r.numMatches === 'number') return { ok: true, detail: `${r.numMatches} hit${r.numMatches === 1 ? '' : 's'}` }
+    if (Array.isArray(r.filenames)) return { ok: true, detail: `${r.filenames.length} file${r.filenames.length === 1 ? '' : 's'}` }
+    // WebFetch: `{ code, bytes, durationMs }`. WebSearch: `{ searchCount, results }`.
+    if (typeof r.code === 'number' && typeof r.bytes === 'number') {
+      return { ok: r.code < 400, detail: `${r.code} · ${Math.max(1, Math.round(r.bytes / 1024))} KB` }
+    }
+    if (Array.isArray(r.results) && typeof r.searchCount === 'number') {
+      return { ok: true, detail: `${r.results.length} result${r.results.length === 1 ? '' : 's'}` }
+    }
+    // Agent / teammate spawn.
+    if (r.status === 'teammate_spawned' || typeof r.agent_id === 'string') return { ok: true, detail: 'spawned' }
+  }
+  // Grep's plain-text answer, when the structured form did not carry the count.
+  const found = /Found (\d+) (files?|matches?)/i.exec(text)
+  if (found) return { ok: true, detail: `${found[1]} ${found[2].startsWith('file') ? 'file' : 'hit'}${found[1] === '1' ? '' : 's'}` }
+  if (/^No (files|matches) found/i.test(text)) return { ok: true, detail: 'none' }
+  return { ok: true, detail: '' }
+}
+
+/** The result blocks of a user record, paired with the row's structured result. */
+export function outcomeDrafts(record: Record<string, unknown>, message: Record<string, unknown>): SessionStreamDraft[] {
+  const content = message.content
+  if (!Array.isArray(content)) return []
+  const out: SessionStreamDraft[] = []
+  for (const raw of content) {
+    const block = asRecord(raw)
+    if (!block || block.type !== 'tool_result') continue
+    const inner = block.content
+    const text = typeof inner === 'string'
+      ? inner
+      : Array.isArray(inner)
+        ? inner.map(part => (asRecord(part)?.text as string | undefined) ?? '').join(' ')
+        : ''
+    const outcome = outcomeForToolResult(block.is_error === true, text, record.toolUseResult)
+    // A tool result means the turn is working by definition: the model called a
+    // tool and is about to read what came back.
+    out.push({ kind: 'status', state: 'working', tool_outcome: outcome })
+  }
+  return out
+}
+
 function toolDraft(name: unknown, input: unknown): SessionStreamDraft {
   const verb = verbForToolName(name)
   const target = targetForTool(name, input)
@@ -351,10 +468,14 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
   // the glasses have never seen it. Dropping it is what made the live view a blank
   // slate that said WORKING and nothing else.
   //
-  // Tool results stay dropped -- the call was already announced.
+  // A tool result is not a prompt, but since 6.49.0 it is not dropped either: it
+  // becomes the OUTCOME of the call announced a few rows earlier, on a status draft
+  // (see `ToolOutcome`). The prompt path still sees nothing for it.
   if (type === 'user') {
     const message = asRecord(record.message)
-    return message ? promptDrafts(message) : []
+    if (!message) return []
+    const outcomes = outcomeDrafts(record, message)
+    return outcomes.length > 0 ? outcomes : promptDrafts(message)
   }
 
   const role = typeof record.role === 'string' ? record.role : ''
@@ -577,10 +698,10 @@ export interface DerivedStatusFields {
   last_reply?: string
 }
 
-export type StatusDraftWithDerived = { kind: 'status'; state: SessionStreamState } & Partial<DerivedStatusFields>
+export type StatusDraftWithDerived = { kind: 'status'; state: SessionStreamState; tool_outcome?: ToolOutcome } & Partial<DerivedStatusFields>
 
 export function statusDraftWithDerived(
-  draft: { kind: 'status'; state: SessionStreamState },
+  draft: { kind: 'status'; state: SessionStreamState; tool_outcome?: ToolOutcome },
   derived: DerivedStatusFields | undefined,
 ): StatusDraftWithDerived {
   if (!derived) return draft
@@ -591,6 +712,8 @@ export function statusDraftWithDerived(
   return {
     kind: 'status',
     state,
+    // 6.49.0: the outcome is the draft's own fact, not the deriver's; it rides through.
+    ...(draft.tool_outcome ? { tool_outcome: draft.tool_outcome } : {}),
     agent_state: derived.agent_state,
     state_source: derived.state_source,
     state_since: derived.state_since,

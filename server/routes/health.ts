@@ -80,6 +80,29 @@ import {
   threadAttachHealthFields,
 } from '../lib/thread-attach-capability.js'
 import { sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
+import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
+
+/**
+ * 6.49.0: which last hop a Continue takes, and how often each fell back.
+ *
+ * `enabled` is the flag as read RIGHT NOW; the counters are this process's. A
+ * reader who sees `enabled: true` and `delivered: 0` with fallbacks under
+ * `no_record` has a session registry the server cannot see; under `unverified`,
+ * a session that is holding or dying. Both are diagnoses, not guesses.
+ */
+export function continueLiveHealthFields(): Record<string, unknown> {
+  const stats = liveDeliveryStats()
+  return {
+    continueLive: {
+      enabled: continueLiveEnabled(),
+      attempts: stats.attempts,
+      delivered: stats.delivered,
+      fallbacks: stats.fallbacks,
+      lastReason: stats.lastReason,
+      lastAt: stats.lastAt,
+    },
+  }
+}
 
 export const healthRouter = Router()
 
@@ -351,6 +374,7 @@ healthRouter.get('/health', async (_req, res) => {
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
     ...sessionHooksHealthFields(),
+    ...continueLiveHealthFields(),
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),

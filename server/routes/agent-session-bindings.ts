@@ -334,6 +334,16 @@ export interface AgentSessionBindingsDeps {
   deliverAttachedTurn?: (request: AttachedTurnRequest) => Promise<unknown> | unknown
 
   /**
+   * 6.49.0: put the turn INTO the running session before spawning a child for it.
+   *
+   * `makeLiveTurnDeliverer` from `server/lib/session-peer-inbox-deps.ts`. Optional so
+   * every existing test and every older wiring is byte-for-byte the 6.48.2 route; when
+   * absent, or when it answers anything but `ok`, the spawn path below runs unchanged.
+   * Only `reason` is read here; the vocabulary is the pure module's.
+   */
+  deliverLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number }) => Promise<{ ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null }>
+
+  /**
    * The self-recursion ledger. Defaults to the real process-wide one.
    *
    * `record` takes a MEASURED process start, never a wall clock. See rule 2 in
@@ -483,6 +493,10 @@ export type WriteRefusal =
   | 'provider_never_opened'
   | 'delivery_ambiguous'
   | 'turn_failed'
+  // 6.49.0: the live transport wrote a frame it could not see accepted. The turn is
+  // held as retryable and the retry re-reads before doing anything (see
+  // `session-peer-inbox.ts`); it is never a fence, because nothing here ran a child.
+  | 'live_unverified'
   // ------------------------------------------------------------------- fork
   //
   // Fork gets its OWN members rather than reusing the ones above, and the reason
@@ -555,6 +569,8 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'The assistant never opened the thread, so nothing was sent. You can try again.',
   delivery_ambiguous:
     'COS lost track of this turn after sending it. Open the thread on your Mac and check before sending again.',
+  live_unverified:
+    'Sent to the open session, but not yet confirmed. COS will check again in a moment.',
   turn_failed:
     'COS could not run this turn. Nothing was sent. You can try again.',
 
@@ -1265,6 +1281,18 @@ function plainBody(req: Request): Record<string, unknown> | null {
 
 export const ATTACHED_COPY = 'Attached. COS is driving the original thread.'
 export const TURN_SENT_COPY = 'Sent to the original thread.'
+/** 6.49.0: the turn went into the running session, where the desk will see it. */
+export const TURN_SENT_LIVE_COPY = 'Sent to the open session. It will show where you left it.'
+/**
+ * How long the route waits for the session's transcript to show acceptance.
+ *
+ * FOUR SECONDS, INSIDE THE CLIENT'S TEN. The phone's `fetchJSON` aborts at 10 s; the
+ * gate ahead of this point costs about a second, the connect up to 1.5 s, so four
+ * leaves margin. Measured acceptance on an idle session was under one second, so the
+ * budget only bites when the receiver is holding or dying, and those end as
+ * `live_unverified`, which the client may retry.
+ */
+export const LIVE_VERIFY_BUDGET_MS = 4_000
 
 /**
  * The 202 copy. Says QUEUED and not sent, because at this instant the provider has
@@ -2124,6 +2152,56 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       const pinned = deps.bindings.pin!(bindingId, turnId, now)
       if (!pinned?.binding) return refuseTurn(registryRefusal(pinned?.reason))
       pinnedBindingId = bindingId
+
+      // 6.49.0: LIVE FIRST. If the session's own process is running -- a Desktop tab,
+      // a `claude` in iTerm, the same registry record either way -- the turn goes into
+      // it and paints where the user left the window, instead of into a resume child
+      // whose reply that window never shows. Before the 202 on purpose: a live delivery
+      // is a `completed` turn (terminal, ledgered, replay-safe), and a frame that could
+      // not be verified is a PRE-202 refusal, which the ledger does not record, so the
+      // client's retry re-evaluates rather than replaying a stale "no". The gate above
+      // still ran in full: this is the same admission, with a different last hop.
+      //
+      // The head is NOT acknowledged here. The session will move it when it answers,
+      // on its own clock; the next interactive turn reads that as a change and asks,
+      // which is the conservative side. Queued turns attach fresh and never notice.
+      if (typeof deps.deliverLiveTurn === 'function' && binding.provider === 'claude') {
+        let live: { ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null } | null = null
+        try {
+          live = await deps.deliverLiveTurn({
+            provider: binding.provider,
+            sessionId: binding.nativeThreadId,
+            prompt,
+            verifyTimeoutMs: LIVE_VERIFY_BUDGET_MS,
+          })
+        } catch (error) {
+          // A throw is a bug in the transport, not a fact about the session; the
+          // spawn path is the answer to both.
+          console.error(`[agent-session-bindings] live delivery threw: ${error instanceof Error ? error.message : error}`)
+          live = null
+        }
+        if (live?.ok) {
+          console.log(`[agent-session-bindings] turn delivered live provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} pid=${live.pid ?? 'null'}`)
+          respond(200, {
+            turnId,
+            outcome: 'completed',
+            deliveryState: 'delivered',
+            via: 'live',
+            retryable: false,
+            changed: false,
+            revision: null,
+            reason: null,
+            reasonCopy: TURN_SENT_LIVE_COPY,
+          })
+          return
+        }
+        if (live && (live.reason === 'unverified' || live.reason === 'write_failed')) {
+          // Something may be in the session. Hold, never spawn over it.
+          return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })
+        }
+        // disabled / not_claude / no_record / no_socket / protocol_unsupported /
+        // connect_failed / suspect_expired: nothing reached a session. Spawn as always.
+      }
 
       // THE QUEUE POINT. Every gate is now behind us — body, replay, queued-prompt,
       // lease, target, epoch, fence, claim, occupancy, head baseline, pin — so a

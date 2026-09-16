@@ -17,11 +17,13 @@ describe("the user's query reaches the lens", () => {
       .toEqual([{ kind: 'prompt', text: 'fix the footer' }])
   })
 
-  it('still says NOTHING for a tool result', () => {
-    // The call was announced when it was made. This is the half of the old behaviour
-    // that was correct and had to survive the change.
+  it('still says NOTHING AS A PROMPT for a tool result', () => {
+    // The call was announced when it was made, and a result is never the user
+    // speaking. Since 6.49.0 the row carries the call's OUTCOME on a status draft
+    // instead of vanishing; what must survive is that no `prompt` comes out of it.
     const drafts = draftsFromLine('claude', userLine([{ type: 'tool_result', content: 'ok' }]))
-    expect(drafts).toEqual([])
+    expect(drafts.some(d => d.kind === 'prompt')).toBe(false)
+    expect(drafts).toEqual([{ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '' } }])
   })
 
   it('drops a harness wrapper rather than passing it off as the user speaking', () => {

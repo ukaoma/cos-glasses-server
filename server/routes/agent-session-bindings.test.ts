@@ -2232,6 +2232,8 @@ describe('every way a write can be refused reaches the wire with words', () => {
     { reason: 'adapter_unwired', run: () => oneTurn({ deliverAttachedTurn: undefined }) },
     { reason: 'provider_never_opened', run: () => oneTurn({ deliverAttachedTurn: async () => ({ status: 'aborted' }) }) },
     { reason: 'delivery_ambiguous', run: () => oneTurn({ deliverAttachedTurn: async () => ({ status: '?' }) }) },
+    // 6.49.0: the live transport wrote a frame it could not see accepted.
+    { reason: 'live_unverified', run: () => oneTurn({ deliverLiveTurn: async () => ({ ok: false, reason: 'unverified' }) }) },
     {
       reason: 'turn_failed',
       run: () => turnOnFake(fakeReg(fakeBinding(), { get: () => { throw new Error('EIO') } })),
@@ -3161,5 +3163,124 @@ describe('fence evidence', () => {
     const res = await post(base, attachPath(), { cosSessionId: 'cos-legacy' })
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('native_target_fenced')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6.49.0: the live last hop
+// ---------------------------------------------------------------------------
+
+describe('6.49.0: a turn goes into the running session before a child is spawned for it', () => {
+  it('reports completed via live and never spawns when the live transport verifies', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const live: Array<{ provider: string; sessionId: string; prompt: string }> = []
+    const base = await start(writeDeps({
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 82615 } },
+    }))
+    const a = await attached(base)
+    const res = await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, clientTurnId: 'ct-live-0001', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+    })
+    // 200 and terminal: the session took it, there is nothing to poll.
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ outcome: 'completed', deliveryState: 'delivered', via: 'live', retryable: false })
+    expect(live).toHaveLength(1)
+    expect(live[0]).toMatchObject({ provider: 'claude', sessionId: SID, prompt: PROMPT })
+    expect(spawns).toHaveLength(0)
+    // Replay-safe: the same clientTurnId hands back the live completion, no second send.
+    const again = await post(base, turnsPath(a.bindingId), {
+      prompt: PROMPT, clientTurnId: 'ct-live-0001', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+    })
+    expect(again.body).toMatchObject({ outcome: 'completed', via: 'live', replayed: true })
+    expect(live).toHaveLength(1)
+  })
+
+  // One server per case: the registry and the guard are per-`start`, and a second
+  // attach on the same thread inside one test reads as an already-bound target.
+  it.each(['disabled', 'not_claude', 'no_record', 'no_socket', 'protocol_unsupported', 'connect_failed', 'suspect_expired'])(
+    'spawns exactly as 6.48.2 when nothing reached a session (%s)', async (reason) => {
+    {
+      const spawns: AttachedTurnRequest[] = []
+      const base = await start(writeDeps({
+        deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } },
+        deliverLiveTurn: async () => ({ ok: false, reason }),
+      }))
+      const a = await attached(base)
+      const out = await turnOutcome(base, a, {
+        prompt: PROMPT, clientTurnId: 'ct-live-0002', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+      })
+      expect(out, reason + ' ' + JSON.stringify(out)).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
+      expect(out.via, reason).toBeUndefined()
+      expect(spawns, reason).toHaveLength(1)
+    }
+  })
+
+  it.each(['unverified', 'write_failed'])(
+    'holds, and never spawns over, a frame it could not see accepted (%s)', async (reason) => {
+    {
+      const spawns: AttachedTurnRequest[] = []
+      const base = await start(writeDeps({
+        deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+        deliverLiveTurn: async () => ({ ok: false, reason }),
+      }))
+      const a = await attached(base)
+      const res = await post(base, turnsPath(a.bindingId), {
+        prompt: PROMPT, clientTurnId: 'ct-live-0003', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+      })
+      // A pre-202 refusal: retryable, not ledgered, so the retry re-evaluates.
+      expect(res.status, reason + ' ' + JSON.stringify(res.body)).toBe(409)
+      expect(res.body, reason).toMatchObject({ outcome: 'refused', reason: 'live_unverified', retryable: true, deliveryState: 'unknown' })
+      expect(spawns, reason).toHaveLength(0)
+      const retry = await post(base, turnsPath(a.bindingId), {
+        prompt: PROMPT, clientTurnId: 'ct-live-0003', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+      })
+      expect(retry.body.replayed, reason).toBeUndefined()
+      expect(retry.body.reason, reason).toBe('live_unverified')
+    }
+  })
+
+  it('treats a throwing live transport as nothing sent', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } },
+      deliverLiveTurn: async () => { throw new Error('transport bug') },
+    }))
+    const a = await attached(base)
+    const out = await turnOutcome(base, a, {
+      prompt: PROMPT, clientTurnId: 'ct-live-0004', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+    })
+    expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
+    expect(spawns).toHaveLength(1)
+  })
+
+  it('runs the live hop only after the gate: a busy desktop holder is still refused first', async () => {
+    let free = true
+    const live: unknown[] = []
+    const base = await start(writeDeps({
+      probes: probes({ readFile: () => (free ? FREE_THREAD_RECORD() : JSON.stringify(record())) }),
+      deliverAttachedTurn: async () => ({ status: 'completed' }),
+      deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } },
+    }))
+    const a = await attached(base)
+    free = false
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-live-0005' })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('live_desktop_process')
+    expect(live).toHaveLength(0)
+  })
+
+  it('is byte-for-byte the 6.48.2 route when the dep is absent', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } },
+    }))
+    const a = await attached(base)
+    const out = await turnOutcome(base, a, {
+      prompt: PROMPT, clientTurnId: 'ct-live-0006', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo,
+    })
+    expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
+    expect(out.via).toBeUndefined()
+    expect(spawns).toHaveLength(1)
   })
 })

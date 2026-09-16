@@ -200,6 +200,20 @@ after a reconnect and seeds afresh when it holds nothing, `?seed=turn` opens at 
 current prompt). `COS_SESSION_HOOK_SSE=0` omits the extra status fields and the live
 state drafts; the `cursor`, `epoch` and `id:` line stay.
 
+Since 6.49.0 a Continue can land in the running session itself, so the Desktop tab or
+the `claude` in a terminal that you left open shows the turn and answers it with its own
+context, instead of a resume child writing to the transcript behind that window. It is
+off until `COS_CONTINUE_LIVE=1`. The server writes the turn to the session's own inbox
+(the socket Claude Code publishes in `~/.claude/sessions/<pid>.json`, in the line format
+its help text documents), pinned to the full session id, and calls it delivered only
+when the session's transcript shows the message accepted; every other outcome takes the
+6.48.2 path unchanged. A frame written but not seen accepted holds the turn as
+`live_unverified` (retryable) and is never written twice; only after 60 s without an
+acceptance row does the resume child run. `/api/health` reports `continueLive`
+(enabled, attempts, delivered, fallbacks by reason). The live stream also carries a
+`tool_outcome` on the status draft that follows each tool result (`+14 -2`,
+`235 lines`, `41 passed`, `exit 1`), which a client that predates it takes as a no-op.
+
 ## Configuration
 
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
