@@ -610,11 +610,15 @@ if (threadAttachEnabled()) {
       try {
         const v = threadOccupancy(provider, threadId, occupancyProbes, occupancyDirs)
         if (v.attachable !== true) return { attachable: false, reason: v.reason ?? null }
-        // Occupancy is happy; ask the registry the question it cannot answer.
-        // `getByThread` returns the binding ONLY when it actually blocks the target
-        // (`blocksTarget`), so an expired or terminal one correctly reads as free.
-        const holder = agentSessionBindingRegistry.getByThread(provider, threadId, Date.now())
-        if (holder !== null) return { attachable: false, reason: 'native_target_busy' }
+        // Occupancy is happy; ask the registry the question it cannot answer, with
+        // the SAME predicate the attach route's `create` applies (6.49.1): a pinned
+        // holder, or one touched within `IDLE_LEASE_YIELD_MS`, is busy; an idle lease
+        // past that is one the attach will supersede, so the drainer must not hold
+        // behind it. Until 6.49.0 this read `getByThread` (any live lease blocks), and a
+        // follow-up queued after a completed Continue waited out the full 30 min TTL.
+        if (agentSessionBindingRegistry.attachBlocked(provider, threadId, Date.now())) {
+          return { attachable: false, reason: 'native_target_busy' }
+        }
         // THE FENCE, for the same reason the binding is here and not one layer down.
         // This is ADVISORY: the attach route stays the authority that refuses. Saying
         // it here only means the drainer holds instead of spending an attempt, and a

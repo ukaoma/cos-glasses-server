@@ -1,5 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { createServer, type Server } from 'node:net'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  PEER_ACCEPTANCE_BACKDATE_MS,
+  PEER_ACCEPTANCE_READ_SLACK_BYTES,
   PEER_INBOX_PROTOCOL,
   PEER_VERIFY_POLL_MS,
   SUSPECT_TTL_MS,
@@ -9,8 +15,10 @@ import {
   peerAcceptanceMarker,
   peerInboxFrames,
   selectPeerInbox,
+  sendOverPeerSocket,
   type PeerInboxRecord,
   type PeerInboxDeps,
+  type PeerSendError,
   type TranscriptRowLike,
 } from './session-peer-inbox'
 
@@ -128,6 +136,18 @@ describe('peerAcceptanceIn', () => {
     expect(peerAcceptanceIn(stale, marker, sentAt)).toBeNull()
   })
 
+  it('the floor is exactly two seconds before the send', () => {
+    // Pinned at the boundary AND as a literal: QA moved the constant to ten minutes
+    // and nothing failed, and a boundary derived from the import moves with it. Two
+    // seconds is a product choice (the window in which a same-words desk prompt could
+    // be mistaken for ours), so the literal is the assertion.
+    expect(PEER_ACCEPTANCE_BACKDATE_MS).toBe(2_000)
+    const at = (ms: number) => new Date(sentAt - 2_000 + ms).toISOString()
+    expect(peerAcceptanceIn([enqueueRow(marker, at(-1))], marker, sentAt)).toBeNull()
+    expect(peerAcceptanceIn([enqueueRow(marker, at(0))], marker, sentAt)).toBe('enqueue')
+    expect(peerAcceptanceIn([enqueueRow(marker, at(+1))], marker, sentAt)).toBe('enqueue')
+  })
+
   it('ignores rows that do not carry the text, and an empty marker', () => {
     expect(peerAcceptanceIn([enqueueRow('something else', '2026-09-16T05:24:18.000Z')], marker, sentAt)).toBeNull()
     expect(peerAcceptanceIn([enqueueRow(marker, '2026-09-16T05:24:18.000Z')], '', sentAt)).toBeNull()
@@ -187,6 +207,72 @@ describe('deliverOverPeerInbox', () => {
   it('classifies a write failure apart from a connect failure', async () => {
     const result = await deliverOverPeerInbox(req, deps({ send: async () => { throw new Error('EPIPE') } }))
     expect(result.reason).toBe('write_failed')
+  })
+
+  it('6.49.1: anything that failed BEFORE connect is nothing sent, whatever its code', async () => {
+    // `connect_timeout` (no code), ENOTSOCK, EACCES: the timer and the socket error
+    // all fire before `connect`, so no byte left. QA found these held as suspects for
+    // the whole SUSPECT_TTL_MS with the spawn path blocked behind them.
+    for (const message of ['connect_timeout', 'connect ENOTSOCK', 'connect EACCES']) {
+      __resetPeerInboxSuspects()
+      const error = Object.assign(new Error(message), { phase: 'connect' as const })
+      const result = await deliverOverPeerInbox(req, deps({ transcriptTail: () => [], send: async () => { throw error } }))
+      expect(result.reason, message).toBe('connect_failed')
+      // No memo: the next attempt sends again rather than answering `unverified`.
+      let sends = 0
+      expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, deps({ transcriptTail: () => [], send: async () => { sends += 1 } }))).reason).toBe('unverified')
+      expect(sends).toBe(1)
+    }
+    __resetPeerInboxSuspects()
+    const late = Object.assign(new Error('EPIPE'), { phase: 'write' as const })
+    expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, deps({ transcriptTail: () => [], send: async () => { throw late } }))).reason).toBe('write_failed')
+  })
+
+  it('6.49.1: reads the transcript from its size at the send, however much lands after', async () => {
+    // The threat is the rows written AFTER acceptance: one tool result can exceed a
+    // megabyte, and a fixed 256 KiB tail lost the enqueue row behind it on the retry.
+    const asked: Array<number | undefined> = []
+    let size = 1_000
+    const marker = peerAcceptanceMarker('ship it')
+    const d = deps({
+      transcriptSize: () => size,
+      // 5 MB of tool output lands between the send and the first look.
+      send: async () => { size = 5_000_000 },
+      transcriptTail: (_id, minBytes) => {
+        asked.push(minBytes)
+        // The acceptance row is visible only when the read reaches back far enough.
+        return typeof minBytes === 'number' && minBytes >= size - 1_000 ? [enqueueRow(marker, new Date().toISOString())] : []
+      },
+    })
+    const result = await deliverOverPeerInbox(req, d)
+    expect(result).toMatchObject({ ok: true, reason: 'delivered', verifiedBy: 'enqueue' })
+    expect(asked[0]).toBe(5_000_000 - 1_000 + PEER_ACCEPTANCE_READ_SLACK_BYTES)
+  })
+
+  it('6.49.1: the memo re-check reads from the ORIGINAL send size too', async () => {
+    const asked: Array<number | undefined> = []
+    let size = 2_000
+    let t = 0
+    const marker = peerAcceptanceMarker('ship it')
+    let rows: TranscriptRowLike[] = []
+    const d = deps({
+      transcriptSize: () => size,
+      transcriptTail: (_id, minBytes) => { asked.push(minBytes); return rows },
+      now: () => t,
+    })
+    expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+    size = 3_000_000
+    rows = [enqueueRow(marker, new Date(1).toISOString())]
+    t = 10
+    expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, d)).reason).toBe('delivered')
+    expect(asked.at(-1)).toBe(3_000_000 - 2_000 + PEER_ACCEPTANCE_READ_SLACK_BYTES)
+  })
+
+  it('6.49.1: without a size reader every read is the plain tail', async () => {
+    const asked: Array<number | undefined> = []
+    const d = deps({ transcriptTail: (_id, minBytes) => { asked.push(minBytes); return [] } })
+    await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, d)
+    expect(asked).toEqual([undefined])
   })
 
   it('refuses when the flag is off, for a non-Claude provider, and with no live record', async () => {
@@ -292,5 +378,43 @@ describe('deliverOverPeerInbox', () => {
       expect((await deliverOverPeerInbox(req, dead)).reason).toBe('connect_failed')
       expect(sends).toBe(3)
     })
+  })
+})
+
+describe('sendOverPeerSocket against a real unix socket', () => {
+  // Every other test injects `send`. This is the one place the wire itself is asserted.
+  let dir = ''
+  let server: Server | null = null
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cos-peer-')) })
+  afterEach(async () => {
+    if (server) await new Promise<void>(resolve => server!.close(() => resolve()))
+    server = null
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('writes exactly the two NDJSON lines, newline-terminated, then closes', async () => {
+    const path = join(dir, 'p.sock')
+    const received: Buffer[] = []
+    const closed = new Promise<void>(resolve => {
+      server = createServer(socket => {
+        socket.on('data', chunk => received.push(chunk))
+        socket.on('close', () => resolve())
+      })
+    })
+    await new Promise<void>(resolve => server!.listen(path, resolve))
+    const frames = peerInboxFrames(SESSION, 'hello there', 'tok')
+    await sendOverPeerSocket(path, frames)
+    await closed
+    expect(Buffer.concat(received).toString('utf-8')).toBe(`${frames[0]}\n${frames[1]}\n`)
+  })
+
+  it('tags a missing path and a non-socket as the connect phase', async () => {
+    const missing = await sendOverPeerSocket(join(dir, 'gone.sock'), ['{}']).catch(e => e as PeerSendError)
+    expect(missing).toMatchObject({ phase: 'connect', code: 'ENOENT' })
+    const file = join(dir, 'file.sock')
+    writeFileSync(file, '')
+    const notsock = await sendOverPeerSocket(file, ['{}']).catch(e => e as PeerSendError)
+    expect(notsock).toMatchObject({ phase: 'connect' })
+    expect(typeof (notsock as PeerSendError).code).toBe('string')
   })
 })

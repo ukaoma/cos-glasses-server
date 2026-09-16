@@ -27,8 +27,9 @@ const env = (ts: number, event: HookEnvelope['event'], payload: Record<string, u
   ({ ts, ppid: 4242, event, sessionId: SID, payload: { session_id: SID, ...payload } })
 const j = (o: unknown) => JSON.stringify(o)
 const user = (text: string) => j({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } })
-const tool = (cmd: string) => j({ type: 'assistant', message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't' + cmd, name: 'Bash', input: { command: cmd } }] } })
+const tool = (cmd: string) => j({ type: 'assistant', message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_' + cmd, name: 'Bash', input: { command: cmd } }] } })
 const endTurn = (text: string) => j({ type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } })
+const result = (cmd: string, stdout: string) => j({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_' + cmd, content: stdout }] }, toolUseResult: { stdout, stderr: '', interrupted: false } })
 
 /** What the shipped 6.9.478 lens does with a frame: keep seq, drop unknown kinds, strip extras. */
 function shippedParse(data: string): { seq: number; kind: string; state?: string } | null {
@@ -81,7 +82,8 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     const dir = join(home, '.claude', 'projects', '-Users-example-project')
     mkdirSync(dir, { recursive: true })
     transcript = join(dir, `${SID}.jsonl`)
-    writeFileSync(transcript, [user('first question'), tool('ls'), endTurn('done one'), user('second question'), tool('pwd'), tool('whoami')].join('\n') + '\n')
+    // `ls` has its result in the transcript; `pwd` and `whoami` are still running.
+    writeFileSync(transcript, [user('first question'), tool('ls'), result('ls', 'a\nb\nc'), endTurn('done one'), user('second question'), tool('pwd'), tool('whoami')].join('\n') + '\n')
     process.env.COS_AGENT_SESSIONS_HOME = home
     // An isolated, empty registry: the stream's derive reads the SAME registry the rows do.
     mkdirSync(join(home, 'sessions'), { recursive: true })
@@ -119,6 +121,13 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     expect(frames[1].data).toMatchObject({ seq: 2, kind: 'prompt', text: 'second question' })
     // The default seed is the last SEED_EVENTS steps whatever the turn (what shipped lenses expect).
     expect(frames.slice(2).map(f => f.data.kind)).toEqual(['tool', 'prose', 'tool', 'tool'])
+    // 6.49.1: a seeded step whose result is already in the transcript carries it, with
+    // the call id; the two still running carry neither. The outcome status draft
+    // itself is NOT seeded (it would read as a stale state).
+    expect(frames[2].data).toMatchObject({ kind: 'tool', target: 'ls', call: 'toolu_ls', outcome: { ok: true, detail: '3 lines' } })
+    expect(frames[4].data).toMatchObject({ kind: 'tool', target: 'pwd', call: 'toolu_pwd' })
+    expect(frames[4].data).not.toHaveProperty('outcome')
+    expect(frames.some(f => f.data.kind === 'status' && 'tool_outcome' in f.data)).toBe(false)
     const parsed = frames.map(f => shippedParse(JSON.stringify(f.data)))
     expect(parsed.every(p => p !== null)).toBe(true)
     expect(parsed.map(p => p!.seq)).toEqual([1, 2, 3, 4, 5, 6])

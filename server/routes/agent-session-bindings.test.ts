@@ -24,9 +24,10 @@ import { mkdirSync, mkdtempSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ATTACHABLE_COPY,
+  LIVE_VERIFY_BUDGET_MS,
   REASON_COPY,
   UNKNOWN_REASON_COPY,
   WRITE_REASON_COPY,
@@ -3187,6 +3188,9 @@ describe('6.49.0: a turn goes into the running session before a child is spawned
     expect(res.body).toMatchObject({ outcome: 'completed', deliveryState: 'delivered', via: 'live', retryable: false })
     expect(live).toHaveLength(1)
     expect(live[0]).toMatchObject({ provider: 'claude', sessionId: SID, prompt: PROMPT })
+    // The route's budget reaches the transport (6.49.1: a QA mutation deleting the
+    // field left the suite green while the module default took over).
+    expect((live[0] as { verifyTimeoutMs?: unknown }).verifyTimeoutMs).toBe(LIVE_VERIFY_BUDGET_MS)
     expect(spawns).toHaveLength(0)
     // Replay-safe: the same clientTurnId hands back the live completion, no second send.
     const again = await post(base, turnsPath(a.bindingId), {
@@ -3198,7 +3202,7 @@ describe('6.49.0: a turn goes into the running session before a child is spawned
 
   // One server per case: the registry and the guard are per-`start`, and a second
   // attach on the same thread inside one test reads as an already-bound target.
-  it.each(['disabled', 'not_claude', 'no_record', 'no_socket', 'protocol_unsupported', 'connect_failed', 'suspect_expired'])(
+  it.each(['disabled', 'not_claude', 'no_record', 'protocol_unsupported', 'connect_failed', 'suspect_expired'])(
     'spawns exactly as 6.48.2 when nothing reached a session (%s)', async (reason) => {
     {
       const spawns: AttachedTurnRequest[] = []
@@ -3282,5 +3286,59 @@ describe('6.49.0: a turn goes into the running session before a child is spawned
     expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
     expect(out.via).toBeUndefined()
     expect(spawns).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6.49.1: the turn timing line is written on EVERY exit that answers the client
+// ---------------------------------------------------------------------------
+
+describe('6.49.1: one turn timing line per answered request', () => {
+  const timingLines = (spy: ReturnType<typeof vi.spyOn>): string[] =>
+    spy.mock.calls.map(call => String(call[0])).filter(line => line.includes('turn timing'))
+
+  it('writes the line on the 202 (queued), the ledger replay, the live 200 and a refusal', async () => {
+    // QA ran the suite and tallied the lines: 68, none of them `queued` or `replayed`,
+    // the two exits Miles's sends actually take. The 202 and the replay answer with
+    // their own `res.status().json()`, outside `respond`, so they need their own line.
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      let liveOk = false
+      const base = await start(writeDeps({
+        deliverAttachedTurn: async () => ({ status: 'completed' }),
+        deliverLiveTurn: async () => liveOk
+          ? { ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 1 }
+          : { ok: false, reason: 'connect_failed', verifiedBy: null, pid: null },
+      }))
+      const a = await attached(base)
+      const body = { prompt: PROMPT, clientTurnId: 'ct-timing-0001', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo }
+
+      // `post` settles a 202 into the ledger's outcome; the line is written at the 202.
+      const queued = await post(base, turnsPath(a.bindingId), body)
+      expect(queued.body).toMatchObject({ outcome: 'completed' })
+      expect(timingLines(spy).filter(l => l.includes('outcome=queued'))).toHaveLength(1)
+
+      const replay = await post(base, turnsPath(a.bindingId), body)
+      expect(replay.body).toMatchObject({ replayed: true })
+      expect(timingLines(spy).filter(l => l.includes('outcome=replayed/'))).toHaveLength(1)
+
+      liveOk = true
+      const live = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-timing-0002' })
+      expect(live.body).toMatchObject({ via: 'live' })
+      expect(timingLines(spy).filter(l => l.includes('outcome=completed/live'))).toHaveLength(1)
+
+      const refused = await post(base, turnsPath(a.bindingId), { ...body, clientTurnId: 'ct-timing-0003', epoch: 99 })
+      expect(refused.status).toBe(409)
+      expect(timingLines(spy).filter(l => l.includes('outcome=refused/stale_epoch'))).toHaveLength(1)
+
+      // One line per request, each carrying its own turnId and a total.
+      const lines = timingLines(spy)
+      expect(lines).toHaveLength(4)
+      for (const line of lines) expect(line).toMatch(/turnId=\S+ outcome=\S+ total=\d+ms/)
+      // Never the prompt.
+      for (const line of lines) expect(line).not.toContain(PROMPT.slice(0, 12))
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

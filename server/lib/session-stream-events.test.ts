@@ -27,6 +27,7 @@ import {
   type SessionStreamDraft,
   statusDraftWithDerived,
   outcomeForToolResult,
+  foldSeedOutcomes,
   type ToolOutcome,
 } from './session-stream-events'
 
@@ -161,7 +162,7 @@ describe('Claude records', () => {
       name: 'Read',
       input: { file_path: '/Users/ukaoma/x/occupied-threads.ts' },
     }))
-    expect(drafts).toEqual([{ kind: 'tool', verb: 'read', target: 'occupied-threads.ts', detail: '' }])
+    expect(drafts).toEqual([{ kind: 'tool', verb: 'read', target: 'occupied-threads.ts', detail: '', call: 'toolu_012S3x4LDgJGRwta3LCWMFXj' }])
   })
 
   it('turns a text block into one prose event', () => {
@@ -193,7 +194,50 @@ describe('Claude records', () => {
     expect(draftsFromRecord('claude', {
       type: 'user',
       message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] },
-    })).toEqual([{ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '' } }])
+    })).toEqual([{ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '', call: 'toolu_1' } }])
+  })
+
+  it('6.49.1: the call id rides both sides of the pair, and only when it is well-formed', () => {
+    const [call] = draftsFromRecord('claude', claudeAssistant({ type: 'tool_use', id: 'toolu_01AbC', name: 'Read', input: { file_path: '/x/a.ts' } }))
+    expect(call).toMatchObject({ kind: 'tool', verb: 'read', call: 'toolu_01AbC' })
+    const [nameless] = draftsFromRecord('claude', claudeAssistant({ type: 'tool_use', id: 'bad id!', name: 'Read', input: { file_path: '/x/a.ts' } }))
+    expect(nameless).not.toHaveProperty('call')
+    const [result] = draftsFromRecord('claude', {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'bad id!', content: 'ok' }] },
+    })
+    expect(result).toEqual({ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '' } })
+  })
+
+  describe('6.49.1: foldSeedOutcomes pairs each result with its own step', () => {
+    const tool = (target: string, call?: string): SessionStreamDraft => ({ kind: 'tool', verb: 'read', target, detail: '', ...(call ? { call } : {}) })
+    const result = (detail: string, call?: string): SessionStreamDraft => ({ kind: 'status', state: 'working', tool_outcome: { ok: true, detail, ...(call ? { call } : {}) } })
+
+    it('by call id, so two parallel calls finishing out of order keep their own results', () => {
+      const folded = foldSeedOutcomes([tool('a.ts', 'toolu_a'), tool('b.ts', 'toolu_b'), result('12 lines', 'toolu_b'), result('318 lines', 'toolu_a'), { kind: 'prose', text: 'Done.' }])
+      expect(folded).toEqual([
+        { kind: 'tool', verb: 'read', target: 'a.ts', detail: '', call: 'toolu_a', outcome: { ok: true, detail: '318 lines' } },
+        { kind: 'tool', verb: 'read', target: 'b.ts', detail: '', call: 'toolu_b', outcome: { ok: true, detail: '12 lines' } },
+        { kind: 'prose', text: 'Done.' },
+      ])
+    })
+
+    it('by order when no id is carried, and never twice onto one step', () => {
+      const folded = foldSeedOutcomes([tool('a.ts'), tool('b.ts'), result('1 lines'), result('2 lines'), result('3 lines')])
+      expect(folded.map(d => d.kind === 'tool' ? d.outcome?.detail : d.kind)).toEqual(['1 lines', '2 lines'])
+    })
+
+    it('keeps plain status drafts and leaves an unanswered step without an outcome', () => {
+      const folded = foldSeedOutcomes([{ kind: 'status', state: 'working' }, tool('a.ts', 'toolu_a'), { kind: 'status', state: 'done' }])
+      expect(folded).toEqual([{ kind: 'status', state: 'working' }, tool('a.ts', 'toolu_a'), { kind: 'status', state: 'done' }])
+    })
+
+    it('a result naming a call no seeded step carries falls to order only among nameless steps', () => {
+      // A named result must not land on a DIFFERENT named step.
+      const folded = foldSeedOutcomes([tool('a.ts', 'toolu_a'), tool('b.ts'), result('9 lines', 'toolu_zzz')])
+      expect(folded[0]).not.toHaveProperty('outcome')
+      expect(folded[1]).toMatchObject({ outcome: { detail: '9 lines' } })
+    })
   })
 
   describe('6.49.0: outcome tokens from the transcript\'s own result shapes', () => {
@@ -296,7 +340,7 @@ describe('Codex records', () => {
         arguments: '{"command":"ls -la /tmp"}',
         call_id: 'call_tk8hWpE5vnNpFK4yQsUdxIqa',
       },
-    })).toEqual([{ kind: 'tool', verb: 'bash', target: 'ls -la /tmp', detail: '' }])
+    })).toEqual([{ kind: 'tool', verb: 'bash', target: 'ls -la /tmp', detail: '', call: 'call_tk8hWpE5vnNpFK4yQsUdxIqa' }])
   })
 
   it('survives an arguments string that is not JSON', () => {

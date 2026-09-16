@@ -212,7 +212,18 @@ when the session's transcript shows the message accepted; every other outcome ta
 acceptance row does the resume child run. `/api/health` reports `continueLive`
 (enabled, attempts, delivered, fallbacks by reason). The live stream also carries a
 `tool_outcome` on the status draft that follows each tool result (`+14 -2`,
-`235 lines`, `41 passed`, `exit 1`), which a client that predates it takes as a no-op.
+`235 lines`, `41 lines`, `exit 1`), which a client that predates it takes as a no-op.
+**Where to set the flag:** `~/.cos-glasses/.env` (read at boot; the plist wins when
+both carry it). COS Control's allowlist does not carry `COS_CONTINUE_LIVE` through
+0.5.233, so a value set only in the LaunchAgent plist is dropped by the next
+Install/Repair/Update Server; Control 0.5.234 is to add it.
+Since 6.49.1 a lease yields: a completed, unpinned Continue binding stops holding its
+thread 90 s after its turn ends (it held it for the whole 30 min TTL before), so a
+follow-up from another surface, or the queue drainer, attaches at once instead of
+waiting out the lease; a binding with a turn in flight still refuses `native_target_busy`.
+The turn ledger is read across every binding of a thread, so a draft re-sent through a
+new binding (the phone attaches per send; a parked draft drains through the drainer's
+own) replays rather than repeats.
 
 ## Configuration
 

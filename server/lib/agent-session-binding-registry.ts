@@ -147,6 +147,26 @@ export const DEFAULT_STALE_PIN_MS = 24 * 60 * 60 * 1000
  */
 export const PIN_JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/
 
+/**
+ * How long an UNPINNED lease keeps its target against a new attach (6.49.1).
+ *
+ * Until 6.49.0 a binding held its target for the whole TTL (30 min) after its turn
+ * completed, and every client attaches per send: the phone on every Send, the queue
+ * drainer on every drain, the lens on every hold. So the SECOND follow-up on a thread
+ * within half an hour was parked behind a binding nobody was using. Measured
+ * 2026-09-16: three phone follow-ups queued 17:19-17:28 landed at 17:52, the minute
+ * after the lens's binding expired, with the session idle the whole time.
+ *
+ * A PINNED holder (a turn in flight) still refuses: that is the two-writer hazard the
+ * lease exists for. An unpinned holder younger than this still refuses too, because
+ * the lens attaches BEFORE the wearer dictates and posts the turn after; superseding
+ * it mid-dictation would turn the send into `binding_detached`. Past this age the
+ * holder yields: it is detached in the same mutation that creates its successor, so
+ * the target never has two live bindings, a late turn on it reads `binding_detached`,
+ * and its turn ledger stays readable for a replay (see `findTurn`).
+ */
+export const IDLE_LEASE_YIELD_MS = 90_000
+
 export type RegistryRejection =
   | BindingRejection
   | 'store_unavailable'
@@ -735,7 +755,10 @@ export class AgentSessionBindingRegistry {
 
       const holderId = this.targets.get(key)
       const holder = holderId === undefined ? undefined : this.records.get(holderId)
-      if (holder && blocksTarget(holder.binding, now)) return reject('target_busy')
+      if (holder && holderBlocksAttach(holder, now)) return reject('target_busy')
+      // An idle lease past `IDLE_LEASE_YIELD_MS` yields (6.49.1): detached below, in
+      // this same mutation, so the target never carries two live bindings.
+      const superseded = holder && blocksTarget(holder.binding, now) ? holder : null
 
       const floor = this.floors.get(key) ?? 0
       if (!this.floors.has(key) && this.floors.size >= this.maxEpochTargets) {
@@ -766,6 +789,14 @@ export class AgentSessionBindingRegistry {
       // `binding_expired` / `binding_detached` rather than `unknown_binding`) but
       // gives up the target.
       if (holderId !== undefined) targets.delete(key)
+      if (superseded) {
+        records.set(superseded.binding.bindingId, {
+          ...superseded,
+          binding: freezeBinding(forceDetachBinding(superseded.binding)),
+          updatedAt: now,
+          terminalAt: superseded.terminalAt ?? now,
+        })
+      }
 
       if (records.size >= this.maxRetainedBindings) {
         const freed = evictOldestDisposable(records, targets, now, records.size - this.maxRetainedBindings + 1)
@@ -917,9 +948,41 @@ export class AgentSessionBindingRegistry {
   findTurn(bindingId: unknown, turnId: unknown): TurnRecord | null {
     if (typeof bindingId !== 'string' || typeof turnId !== 'string') return null
     if (!TURN_ID_RE.test(turnId)) return null
-    const rows = this.turns.get(bindingId)
-    if (!rows) return null
-    return rows.find(row => row.turnId === turnId) ?? null
+    const own = this.turns.get(bindingId)?.find(row => row.turnId === turnId) ?? null
+    if (own) return own
+    // 6.49.1: the key is per DRAFT (app 6.9.487/488), and a re-sent draft can arrive
+    // through a NEW binding on the same target: the phone attaches on every Send, and
+    // a draft parked after `target_busy` is drained through a binding of the drainer's
+    // own. A ledger scoped to one binding answered null there and the prompt was
+    // delivered a second time (QA, 2026-09-16, reproduced against this registry). The
+    // target is the unit the human sees, so the ledger is read across every binding
+    // that ever held it.
+    const record = this.records.get(bindingId)
+    if (!record) return null
+    const key = record.binding.targetKey
+    for (const [id, other] of this.records) {
+      if (id === bindingId || other.binding.targetKey !== key) continue
+      const hit = this.turns.get(id)?.find(row => row.turnId === turnId)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  /**
+   * Would a new attach to this thread be refused `target_busy` right now?
+   *
+   * ONE predicate for the attach path and for the queue drainer's `attachable`
+   * probe, so the drainer never holds a turn behind a lease that `create` would
+   * supersede, and never attempts one that `create` would refuse. See
+   * `IDLE_LEASE_YIELD_MS`.
+   */
+  attachBlocked(provider: unknown, nativeThreadId: unknown, now: number): boolean {
+    if (!this.available()) return false
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return false
+    const id = this.targets.get(makeTargetKey(provider, nativeThreadId))
+    if (id === undefined) return false
+    const record = this.records.get(id)
+    return record ? holderBlocksAttach(record, now) : false
   }
 
   /**
@@ -1199,6 +1262,17 @@ function blocksTarget(binding: NativeBinding, now: number): boolean {
   if (isPinned(binding)) return true
   if (isTerminal(binding)) return false
   return !isExpired(binding, now)
+}
+
+/**
+ * Does this holder refuse a new attach? Pinned: always. Unpinned and alive: only
+ * while younger than `IDLE_LEASE_YIELD_MS` (`updatedAt` moves on every pin and
+ * unpin, so this is "since its last turn ended, or since it attached").
+ */
+function holderBlocksAttach(record: BindingRecord, now: number): boolean {
+  if (!blocksTarget(record.binding, now)) return false
+  if (isPinned(record.binding)) return true
+  return !(Number.isFinite(now) && now - record.updatedAt >= IDLE_LEASE_YIELD_MS)
 }
 
 /** Evict retained-but-dead records, oldest first. Never touches a blocking one. */

@@ -79,7 +79,7 @@ import {
   transcriptWatcherDegraded,
   readTranscriptSeedLines,
 } from '../lib/session-transcript-watcher.js'
-import { draftsFromLine, statusDraftWithDerived, type DerivedStatusFields } from '../lib/session-stream-events.js'
+import { foldSeedOutcomes, draftsFromLine, statusDraftWithDerived, type DerivedStatusFields } from '../lib/session-stream-events.js'
 import type { SessionStreamState } from '../lib/session-stream-events.js'
 import { RING_EPOCH, replaySessionStream, ringBounds } from '../lib/session-stream-bus.js'
 import { claudeSessionsDir, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
@@ -387,7 +387,9 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   if (!replayable && path !== null && startOffset > 0) {
     try {
       const lines = await readTranscriptSeedLines(path, startOffset)
-      const drafts = lines.flatMap(line => draftsFromLine(provider, line))
+      // 6.49.1: each seeded step carries its own outcome (`foldSeedOutcomes`), since
+      // the status drafts that carried them live are dropped from the seed below.
+      const drafts = foldSeedOutcomes(lines.flatMap(line => draftsFromLine(provider, line)))
       // Status drafts are dropped from the seed: they describe the state at some past
       // moment and the opening status above is the CURRENT one. Replaying an old
       // `done` after it would tell the client the live session had finished.

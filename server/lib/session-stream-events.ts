@@ -24,7 +24,12 @@ export type SessionStreamVerb = 'read' | 'edit' | 'write' | 'bash' | 'search' | 
 export type SessionStreamState = 'working' | 'idle' | 'done'
 
 export type SessionStreamDraft =
-  | { kind: 'tool'; verb: SessionStreamVerb; target: string; detail: string }
+  // `call` (6.49.1) is the provider's own id for the call (`toolu_…`), so a result
+  // can be paired with exactly the step that produced it; `outcome` is set only on a
+  // SEEDED step, whose result is already in the transcript when the client opens.
+  // Both are extra fields on an existing kind: a shipped client strips what it does
+  // not know and renders the step as before.
+  | { kind: 'tool'; verb: SessionStreamVerb; target: string; detail: string; call?: string; outcome?: ToolOutcome }
   // The user's own words for the turn being worked on. the user: "we should see the query
   // that the user has versus it just being a blank slate where it says working. That
   // way, the user at least knows what the agent is actively working on."
@@ -46,7 +51,7 @@ export type SessionStreamDraft =
  * What a finished tool produced, in the words a lens line has room for.
  *
  * `ok` says whether the tool itself reported failure; `detail` is the token the
- * client shows at the end of the step line (`+14 -2`, `41 passed`, `17 hits`,
+ * client shows at the end of the step line (`+14 -2`, `41 lines`, `17 hits`,
  * `exit 1`). Derived from the transcript's own `toolUseResult`, which is shape-keyed
  * (a Read result carries `file.numLines`, a Bash result `stdout`), so no tool name
  * and no hook is needed: the same row that announces the call carries its answer a
@@ -55,6 +60,17 @@ export type SessionStreamDraft =
 export interface ToolOutcome {
   ok: boolean
   detail: string
+  /** The `tool_use_id` this answers (6.49.1), when the provider names one. Without
+   *  it a client pairs by order (oldest step still waiting), which is right for a
+   *  single call and wrong for two parallel calls that finish out of order. */
+  call?: string
+}
+
+/** A tool-call id as the providers write them; anything else is not carried. */
+const CALL_ID_RE = /^[A-Za-z0-9_-]{4,96}$/
+
+function callId(value: unknown): string | undefined {
+  return typeof value === 'string' && CALL_ID_RE.test(value) ? value : undefined
 }
 
 /** A draft plus the transport's stamps. This is the JSON on the wire. */
@@ -353,17 +369,19 @@ export function outcomeDrafts(record: Record<string, unknown>, message: Record<s
         ? inner.map(part => (asRecord(part)?.text as string | undefined) ?? '').join(' ')
         : ''
     const outcome = outcomeForToolResult(block.is_error === true, text, record.toolUseResult)
+    const call = callId(block.tool_use_id)
     // A tool result means the turn is working by definition: the model called a
     // tool and is about to read what came back.
-    out.push({ kind: 'status', state: 'working', tool_outcome: outcome })
+    out.push({ kind: 'status', state: 'working', tool_outcome: call ? { ...outcome, call } : outcome })
   }
   return out
 }
 
-function toolDraft(name: unknown, input: unknown): SessionStreamDraft {
+function toolDraft(name: unknown, input: unknown, id?: unknown): SessionStreamDraft {
   const verb = verbForToolName(name)
   const target = targetForTool(name, input)
   const readable = typeof name === 'string' ? oneLine(name, TARGET_MAX_CHARS) : ''
+  const call = callId(id)
   return {
     kind: 'tool',
     verb,
@@ -372,7 +390,34 @@ function toolDraft(name: unknown, input: unknown): SessionStreamDraft {
     // empty line the reader cannot interpret.
     target: verb === 'other' || target === '' ? (readable || target) : target,
     detail: detailForTool(name, input),
+    ...(call ? { call } : {}),
   }
+}
+
+/**
+ * Fold each outcome onto the seeded step it answers (6.49.1).
+ *
+ * The seed drops status drafts (they describe a past moment), which through 6.49.0
+ * dropped the OUTCOMES with them: seven steps arrived with no result, the client's
+ * order-based pairing then hung every LIVE result on the oldest seeded step, and the
+ * newest tool read as running forever (QA, 2026-09-16, reproduced through the real
+ * parser and reducer). Pairs by `call` when both sides carry it, else by order; the
+ * outcome status drafts are removed since their content now rides on the step.
+ */
+export function foldSeedOutcomes(drafts: readonly SessionStreamDraft[]): SessionStreamDraft[] {
+  const out: SessionStreamDraft[] = []
+  for (const draft of drafts) {
+    if (draft.kind !== 'status' || !draft.tool_outcome) { out.push(draft); continue }
+    const { call, ...outcome } = draft.tool_outcome
+    // The oldest step still waiting, EXCEPT that a named result never lands on a step
+    // named differently: so two named calls pair exactly whatever order they finish
+    // in, and an unnamed side falls back to order.
+    const index = out.findIndex(d => d.kind === 'tool' && !d.outcome && (!call || !d.call || d.call === call))
+    if (index < 0) continue
+    const step = out[index]
+    if (step.kind === 'tool') out[index] = { ...step, outcome: { ok: outcome.ok, detail: outcome.detail } }
+  }
+  return out
 }
 
 function proseDraft(text: unknown): SessionStreamDraft | null {
@@ -411,7 +456,7 @@ function draftsFromContentBlocks(message: Record<string, unknown>): SessionStrea
       const prose = proseDraft(block.text)
       if (prose) out.push(prose)
     } else if (block.type === 'tool_use') {
-      out.push(toolDraft(block.name, block.input))
+      out.push(toolDraft(block.name, block.input, block.id))
     }
   }
   return out
@@ -526,7 +571,7 @@ function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDr
     } else if (typeof input === 'string') {
       input = { command: input }
     }
-    return [toolDraft(payload.name, input)]
+    return [toolDraft(payload.name, input, payload.call_id)]
   }
   return []
 }

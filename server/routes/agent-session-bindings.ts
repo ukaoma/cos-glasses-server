@@ -124,6 +124,7 @@ import {
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
+import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 
 /**
  * Read side of the binding lease store.
@@ -570,7 +571,7 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
   delivery_ambiguous:
     'COS lost track of this turn after sending it. Open the thread on your Mac and check before sending again.',
   live_unverified:
-    'Sent to the open session, but not yet confirmed. COS will check again in a moment.',
+    'Sent, not yet confirmed. Send again: COS checks before sending twice.',
   turn_failed:
     'COS could not run this turn. Nothing was sent. You can try again.',
 
@@ -1291,8 +1292,11 @@ export const TURN_SENT_LIVE_COPY = 'Sent to the open session. It will show where
  * leaves margin. Measured acceptance on an idle session was under one second, so the
  * budget only bites when the receiver is holding or dying, and those end as
  * `live_unverified`, which the client may retry.
+ *
+ * THE SAME CONSTANT the transport defaults to (6.49.1): two numbers for one window
+ * meant a mutation deleting the route's field silently changed the budget.
  */
-export const LIVE_VERIFY_BUDGET_MS = 4_000
+export const LIVE_VERIFY_BUDGET_MS = PEER_VERIFY_TIMEOUT_MS
 
 /**
  * The 202 copy. Says QUEUED and not sent, because at this instant the provider has
@@ -1911,9 +1915,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // 6.49.1: where a turn's time goes, BEFORE the client's clock runs out. Miles's
     // first three sends on 2026-09-16 read "lost track" on the lens with no server-side
     // trace at all; this line is the trace. One `[turn timing]` per request at every
-    // exit, with the stage ms and the first-byte-to-answer total, so a slow gate, a
-    // slow head read, a slow live hop and a request that never arrived are four
-    // different lines rather than one absence. Never the prompt.
+    // exit that ANSWERS the client (the refusals and the live 200 through `respond`,
+    // the ledger replay and the 202 at their own `res.status` calls), with the stage
+    // ms and the first-byte-to-answer total, so a slow gate, a slow head read, a slow
+    // live hop and a request that never arrived are four different lines rather than
+    // one absence. Never the prompt.
     const stageClock = process.hrtime.bigint()
     const stages: string[] = []
     let lastStage = stageClock
@@ -2103,6 +2109,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         const { status, ...rest } = already.result as Record<string, unknown>
         if (!res.headersSent) {
           res.status(typeof status === 'number' ? status : 200).json({ ...rest, replayed: true })
+          console.log(turnTiming(`replayed/${typeof rest.outcome === 'string' ? rest.outcome : String(status)}`))
         }
         return
       }
@@ -2225,8 +2232,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // Something may be in the session. Hold, never spawn over it.
           return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })
         }
-        // disabled / not_claude / no_record / no_socket / protocol_unsupported /
-        // connect_failed / suspect_expired: nothing reached a session. Spawn as always.
+        // disabled / not_claude / no_record / protocol_unsupported / connect_failed /
+        // suspect_expired: nothing reached a session. Spawn as always.
       }
 
       // THE QUEUE POINT. Every gate is now behind us — body, replay, queued-prompt,
@@ -2250,6 +2257,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         reason: null,
         reasonCopy: TURN_QUEUED_COPY,
       })
+      // The request's own timing line (6.49.1). `respond` cannot write it after this:
+      // its `headersSent` guard is what keeps the ledger-only outcome below from
+      // answering twice. QA found the two exits Miles actually hits (this 202 and the
+      // replay above) were the two with no line.
+      console.log(turnTiming('queued'))
 
       let delivery: Delivery
       deliveryAttempted = true

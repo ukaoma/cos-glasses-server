@@ -68,23 +68,42 @@ export const PEER_CONNECT_TIMEOUT_MS = 1_500
 
 /** How long to wait for the session's transcript to show acceptance.
  *
- *  SIX SECONDS IS THE ACCEPTANCE WINDOW, NOT THE REPLY WINDOW. The enqueue row is
- *  written when the message is taken, not when the turn finishes, and the measured
- *  latency for that row was under a second on an idle session. Six leaves room for a
- *  session busy enough to be slow at its own bookkeeping without leaving the queue
- *  blocked on a socket that is never going to answer. */
-export const PEER_VERIFY_TIMEOUT_MS = 6_000
+ *  THE ACCEPTANCE WINDOW, NOT THE REPLY WINDOW. The enqueue row is written when the
+ *  message is taken, not when the turn finishes, and the measured latency for that
+ *  row was under a second on an idle session (257 ms on the first device delivery).
+ *  Four seconds leaves room for a session busy at its own bookkeeping and still
+ *  sits inside the phone's 10 s request budget with the gate, the head read and a
+ *  1.5 s connect in front of it. THE ONE SOURCE: the turn route passes this same
+ *  constant (6.49.1; it used to carry its own 4 s while this file defaulted to 6 s,
+ *  and a QA mutation deleting the route's field went unnoticed). */
+export const PEER_VERIFY_TIMEOUT_MS = 4_000
 
 /** Transcript poll interval while waiting for acceptance. */
 export const PEER_VERIFY_POLL_MS = 250
 
-/** Rows older than this before the send cannot be evidence of it. Covers clock skew
- *  between the transcript's ISO stamps and our own clock. */
+/** Rows older than this before the send cannot be evidence of it.
+ *
+ *  The transcript's ISO stamps and our clock are the SAME clock (one Mac, one
+ *  kernel), so this is not skew cover. It is the width of the window in which a
+ *  prompt typed at the desk with the same first 120 characters would be mistaken for
+ *  ours, traded against a row stamped a beat before our `now()` by a writer that
+ *  timestamps before it appends. Two seconds keeps the second and makes the first
+ *  need a same-words prompt inside two seconds of the lens send. */
 export const PEER_ACCEPTANCE_BACKDATE_MS = 2_000
 
 /** Enough of the prompt to identify the row without depending on the whole of it
  *  surviving verbatim (a long paste may be elided in some writers). */
 export const PEER_MARKER_CHARS = 120
+
+/** Bytes read PAST the transcript's size at send time when looking for acceptance.
+ *
+ *  The acceptance rows are small and land within a second of the send, but the rows
+ *  written AFTER them are not: a single tool result can be over a megabyte (18 rows
+ *  above 256 KiB in one real session, max 1.1 MB), and a fixed tail read would lose
+ *  the evidence behind one of them on the memo's re-check. So the caller notes the
+ *  file size before the send and every read covers from there to the end, plus this
+ *  slack for a row already mid-write at the moment of the size read. */
+export const PEER_ACCEPTANCE_READ_SLACK_BYTES = 64 * 1024
 
 /** One live session as the registry describes it. */
 export interface PeerInboxRecord {
@@ -102,7 +121,6 @@ export type PeerDeliveryReason =
   | 'disabled'
   | 'not_claude'
   | 'no_record'
-  | 'no_socket'
   | 'protocol_unsupported'
   | 'connect_failed'
   | 'write_failed'
@@ -192,14 +210,17 @@ export function peerAcceptanceMarker(prompt: string): string {
  * permission policy, lost with a dying process, or accepted with the transcript row
  * still on its way. Three of those must not get a second copy, and the fourth turns
  * into `delivered` on the next look. So the caller refuses the turn as retryable, and
- * the retry comes back HERE first: the transcript is checked from the ORIGINAL send
- * time (a late row counts), nothing is written to the socket again, and only once the
- * memo is older than `SUSPECT_TTL_MS` does the turn go to the spawn path -- the one
- * place a duplicate remains possible, and it is named in the health row when it does.
+ * when the retry reaches this module (the route's occupancy gate runs first, so a
+ * session busy with the turn we sent answers `native_thread_working` until it is
+ * done) the transcript is checked from the ORIGINAL send time AND from the file size
+ * at the original send (a late row counts, however much was written after it),
+ * nothing is written to the socket again, and only once the memo is older than
+ * `SUSPECT_TTL_MS` does the turn go to the spawn path -- the one place a duplicate
+ * remains possible, and it is named in the health row when it does.
  */
 export const SUSPECT_TTL_MS = 60_000
 
-interface SuspectSend { marker: string; sentAtMs: number }
+interface SuspectSend { marker: string; sentAtMs: number; sizeAtSend: number | null }
 const suspects = new Map<string, SuspectSend>()
 
 function suspectKey(sessionId: string, marker: string): string {
@@ -276,8 +297,13 @@ export interface PeerInboxDeps {
   records: () => readonly PeerInboxRecord[] | Promise<readonly PeerInboxRecord[]>
   /** The session's peer token, or null when unreadable. Absence is not a failure. */
   token: (record: PeerInboxRecord) => string | null | Promise<string | null>
-  /** The tail of the session's transcript, newest last. */
-  transcriptTail: (sessionId: string) => readonly TranscriptRowLike[] | Promise<readonly TranscriptRowLike[]>
+  /** The tail of the session's transcript, newest last. `minBytes`, when given, is
+   *  how far back the read must reach (the bytes appended since the send plus slack);
+   *  the reader may read more, never less. */
+  transcriptTail: (sessionId: string, minBytes?: number) => readonly TranscriptRowLike[] | Promise<readonly TranscriptRowLike[]>
+  /** The transcript's size in bytes right now, or null when unknown. Optional: without
+   *  it every read is the reader's default tail. */
+  transcriptSize?: (sessionId: string) => number | null | Promise<number | null>
   /** Pids COS itself spawned, so a resume child never receives the turn meant for the window. */
   isCosOwnedPid?: (pid: number) => boolean
   now?: () => number
@@ -299,15 +325,34 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-/** Open the socket, write the frames, close. Rejects on anything that is not a clean write. */
+/** Where a send failed. Before `connect` fired nothing was written, whatever the code. */
+export type PeerSendPhase = 'connect' | 'write'
+
+/** A rejection from `sendOverPeerSocket`, tagged with the phase it failed in. */
+export interface PeerSendError extends Error {
+  phase: PeerSendPhase
+  code?: string
+}
+
+function tagPhase(error: Error, phase: PeerSendPhase): PeerSendError {
+  const tagged = error as PeerSendError
+  tagged.phase = phase
+  return tagged
+}
+
+/** Open the socket, write the frames, close. Rejects on anything that is not a clean
+ *  write, and every rejection carries `phase`: `connect` means no byte left this
+ *  process (a missing path, a refused or hung socket, a file that is not a socket, a
+ *  permission refusal), `write` means some may have. */
 export function sendOverPeerSocket(socketPath: string, frames: readonly string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false
+    let phase: PeerSendPhase = 'connect'
     const finish = (error?: Error): void => {
       if (settled) return
       settled = true
       try { socket.destroy() } catch { /* already gone */ }
-      if (error) reject(error)
+      if (error) reject(tagPhase(error, phase))
       else resolve()
     }
     const socket = connect(socketPath)
@@ -316,6 +361,7 @@ export function sendOverPeerSocket(socketPath: string, frames: readonly string[]
     socket.on('error', error => { clearTimeout(timer); finish(error instanceof Error ? error : new Error('socket_error')) })
     socket.on('connect', () => {
       clearTimeout(timer)
+      phase = 'write'
       try {
         // One write, so a half-written pair cannot leave an auth line without its
         // message on a connection the receiver closes for silence.
@@ -368,7 +414,6 @@ export async function deliverOverPeerInbox(
   }
   const target = selectPeerInbox(request.sessionId, records, deps.isCosOwnedPid)
   if (!target) return done(false, 'no_record', null, null)
-  if (!target.socketPath) return done(false, 'no_socket', null, target.pid)
   // An unknown protocol is refused rather than attempted: the frames below are the
   // ones protocol 1 documents, and guessing at a successor is how a turn gets eaten.
   if (target.peerProtocol !== null && target.peerProtocol !== PEER_INBOX_PROTOCOL) {
@@ -381,8 +426,7 @@ export async function deliverOverPeerInbox(
   // A retry of a send that was never verified: look before writing anything.
   const suspect = suspects.get(key)
   if (suspect) {
-    let rows: readonly TranscriptRowLike[] = []
-    try { rows = await deps.transcriptTail(request.sessionId) } catch { rows = [] }
+    const rows = await readSince(request.sessionId, suspect.sizeAtSend)
     const seen = peerAcceptanceIn(rows, marker, suspect.sentAtMs)
     if (seen) {
       suspects.delete(key)
@@ -396,28 +440,45 @@ export async function deliverOverPeerInbox(
   let token: string | null = null
   try { token = await deps.token(target) } catch { token = null }
 
+  // The file size BEFORE the frame goes out, so every later read can start there.
+  let sizeAtSend: number | null = null
+  try { sizeAtSend = (await deps.transcriptSize?.(request.sessionId)) ?? null } catch { sizeAtSend = null }
   const sentAt = now()
   try {
-    await send(target.socketPath, peerInboxFrames(target.sessionId, request.prompt, token))
+    await send(target.socketPath!, peerInboxFrames(target.sessionId, request.prompt, token))
   } catch (error) {
+    const phase = (error as Partial<PeerSendError> | undefined)?.phase
     const code = (error as NodeJS.ErrnoException | undefined)?.code
-    // ENOENT and ECONNREFUSED are the stale-socket shapes: the pid is gone and the
-    // file outlived it. Both are ordinary, nothing was written, and both mean "spawn
-    // the child". Anything else may have written a partial frame, so it is a suspect.
-    if (code === 'ENOENT' || code === 'ECONNREFUSED') return done(false, 'connect_failed', null, target.pid)
-    suspects.set(key, { marker, sentAtMs: sentAt })
+    // Before `connect` fired nothing was written: a stale path (ENOENT), a dead
+    // listener (ECONNREFUSED), a hung one (connect_timeout), a file that is not a
+    // socket, a permission refusal. All ordinary, all mean "spawn the child" now. A
+    // failure AFTER connect may have written a partial frame, so it is a suspect.
+    // (The code check stays for a `send` seam that does not tag the phase.)
+    if (phase === 'connect' || code === 'ENOENT' || code === 'ECONNREFUSED') return done(false, 'connect_failed', null, target.pid)
+    suspects.set(key, { marker, sentAtMs: sentAt, sizeAtSend })
     return done(false, 'write_failed', null, target.pid)
   }
 
   const deadline = sentAt + Math.max(0, request.verifyTimeoutMs ?? PEER_VERIFY_TIMEOUT_MS)
   for (;;) {
-    let rows: readonly TranscriptRowLike[] = []
-    try { rows = await deps.transcriptTail(request.sessionId) } catch { rows = [] }
+    const rows = await readSince(request.sessionId, sizeAtSend)
     const seen = peerAcceptanceIn(rows, marker, sentAt)
     if (seen) return done(true, 'delivered', seen, target.pid)
     if (now() >= deadline) break
     await sleep(PEER_VERIFY_POLL_MS)
   }
-  suspects.set(key, { marker, sentAtMs: sentAt })
+  suspects.set(key, { marker, sentAtMs: sentAt, sizeAtSend })
   return done(false, 'unverified', null, target.pid)
+
+  /** The rows appended since the send (plus the reader's own default tail). Never throws. */
+  async function readSince(sessionId: string, since: number | null): Promise<readonly TranscriptRowLike[]> {
+    let minBytes: number | undefined
+    if (since !== null) {
+      try {
+        const size = (await deps.transcriptSize?.(sessionId)) ?? null
+        if (size !== null && size >= since) minBytes = size - since + PEER_ACCEPTANCE_READ_SLACK_BYTES
+      } catch { minBytes = undefined }
+    }
+    try { return await deps.transcriptTail(sessionId, minBytes) } catch { return [] }
+  }
 }

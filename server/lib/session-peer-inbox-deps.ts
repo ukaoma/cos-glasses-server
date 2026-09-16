@@ -5,7 +5,7 @@
 // this file is the ONE place that knows where Claude Code keeps these things. All of
 // it is read-only: nothing here writes to `~/.claude`.
 
-import { lstatSync, readdirSync, readFileSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { claudeSessionsDir, REGISTRY_FILENAME } from './claude-session-registry.js'
 import { transcriptPathFor, type NativeHeadDeps } from './native-head.js'
@@ -24,7 +24,12 @@ import {
  * The transport rides a protocol Claude Code documents in a help string, not a
  * contract, and the first days are for reading the health row on one Mac. A literal
  * '1' turns it on; anything else, including absence, keeps every Continue on the
- * 6.48.2 path. Control's env allowlist carries the key so Update Server keeps it.
+ * 6.48.2 path.
+ *
+ * WHERE TO SET IT. `~/.cos-glasses/.env` (read at boot by `env.ts`, the plist wins
+ * when both carry it). Control's `providerEnvironmentKeys` allowlist does NOT carry
+ * this key through 0.5.233, so a value set only in the LaunchAgent plist is dropped
+ * by the next Install/Repair/Update Server; Control 0.5.234 is to add it.
  */
 export function continueLiveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.COS_CONTINUE_LIVE === '1'
@@ -34,8 +39,13 @@ export function continueLiveEnabled(env: NodeJS.ProcessEnv = process.env): boole
 const MAX_RECORD_BYTES = 64 * 1024
 /** `<pid>.<64 hex>.key`, the sibling of `<pid>.json`. */
 const KEY_FILENAME = /^(\d+)\.[0-9a-f]{64}\.key$/
-/** Enough of the tail to hold the acceptance row for any prompt we could have sent. */
+/** The default tail when the caller cannot say how much was appended since its send.
+ *  The caller normally can (`transcriptSize` below), and then asks for at least the
+ *  bytes written since plus slack, so a megabyte tool result landing after the
+ *  acceptance row cannot push the row out of the read. */
 const ACCEPTANCE_TAIL_BYTES = 256 * 1024
+/** Never read more than this in one verification, whatever was appended. */
+const ACCEPTANCE_TAIL_MAX_BYTES = 16 * 1024 * 1024
 
 /** One pass over `~/.claude/sessions`, records only. Never throws. */
 export function readPeerInboxRecords(dir: string = claudeSessionsDir()): PeerInboxRecord[] {
@@ -95,10 +105,19 @@ export function readPeerToken(record: PeerInboxRecord, dir: string = claudeSessi
   return null
 }
 
-/** The newest rows of the session's transcript, parsed; [] when there is no file. */
-export function readAcceptanceTail(sessionId: string, nativeHeadDeps: NativeHeadDeps): TranscriptRowLike[] {
+/** The transcript's size in bytes, or null when there is no file. */
+export function readTranscriptSize(sessionId: string, nativeHeadDeps: NativeHeadDeps): number | null {
   const path = transcriptPathFor('claude', sessionId, nativeHeadDeps)
-  const lines = readTranscriptTailLines(path, ACCEPTANCE_TAIL_BYTES)
+  if (!path) return null
+  try { return statSync(path).size } catch { return null }
+}
+
+/** The newest rows of the session's transcript, parsed; [] when there is no file.
+ *  `minBytes` widens the read past the default tail (never narrows it). */
+export function readAcceptanceTail(sessionId: string, nativeHeadDeps: NativeHeadDeps, minBytes?: number): TranscriptRowLike[] {
+  const path = transcriptPathFor('claude', sessionId, nativeHeadDeps)
+  const want = typeof minBytes === 'number' && Number.isFinite(minBytes) ? Math.ceil(minBytes) : 0
+  const lines = readTranscriptTailLines(path, Math.min(ACCEPTANCE_TAIL_MAX_BYTES, Math.max(ACCEPTANCE_TAIL_BYTES, want)))
   if (!lines) return []
   const rows: TranscriptRowLike[] = []
   for (const line of lines) {
@@ -135,7 +154,8 @@ export function makeLiveTurnDeliverer(nativeHeadDeps: NativeHeadDeps) {
       {
         records: () => readPeerInboxRecords(),
         token: record => readPeerToken(record),
-        transcriptTail: id => readAcceptanceTail(id, nativeHeadDeps),
+        transcriptTail: (id, minBytes) => readAcceptanceTail(id, nativeHeadDeps, minBytes),
+        transcriptSize: id => readTranscriptSize(id, nativeHeadDeps),
         isCosOwnedPid: pid => cosSpawnedPids().has(pid),
         log: (level, event, detail) => {
           const line = `[${event}] ${JSON.stringify(detail)}`

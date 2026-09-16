@@ -25,6 +25,7 @@ import {
   parseTargetKey,
   type BindingRegistryOptions,
   type CreateBindingRequest,
+  IDLE_LEASE_YIELD_MS,
   MAX_TURNS_PER_BINDING,
 } from './agent-session-binding-registry.js'
 import { targetKey } from './agent-session-binding-store.js'
@@ -380,6 +381,53 @@ describe('a target has at most one live binding', () => {
     attachLive(reg)
     expect(reg.create(attachRequest({ bindingId: 'bind-2' }))).toEqual({ binding: null, reason: 'target_busy' })
     expect(reg.create(attachRequest({ bindingId: 'bind-2', nativeThreadId: OTHER })).binding?.epoch).toBe(1)
+  })
+
+  it('6.49.1: an UNPINNED lease idle past IDLE_LEASE_YIELD_MS yields to the next attach', () => {
+    // Measured 2026-09-16: three phone follow-ups waited from 17:19 to 17:52 behind a
+    // lens binding whose only turn had completed at 17:18, because every client
+    // attaches per send and the lease held the target for its whole 30 min TTL.
+    const reg = open()
+    const first = attachLive(reg)
+    reg.pin(first.bindingId, 'job-a', T0 + 1_000)
+    reg.unpin(first.bindingId, 'job-a', T0 + 2_000) // the turn completed here
+    const later = T0 + 2_000 + IDLE_LEASE_YIELD_MS
+    expect(reg.attachBlocked('claude', THREAD, later)).toBe(false)
+
+    const next = reg.create(attachRequest({ bindingId: 'bind-2', cosSessionId: 'cos-phone', now: later }))
+    expect(next.binding?.epoch).toBe(2)
+    expect(reg.getByTarget(KEY, later)?.bindingId).toBe('bind-2')
+    // The superseded holder is DETACHED in the same mutation: a late turn on it is
+    // `binding_detached`, never a second live writer.
+    expect(reg.get(first.bindingId)?.state).toBe('detached')
+    expect(reg.checkQueuedPrompt({ bindingId: first.bindingId, epoch: 1, targetKey: KEY }, later).reason).toBe('binding_detached')
+    // And it survives a restart as detached.
+    expect(open().get(first.bindingId)?.state).toBe('detached')
+  })
+
+  it('6.49.1: an unpinned lease YOUNGER than IDLE_LEASE_YIELD_MS still refuses (the wearer may be dictating)', () => {
+    const reg = open()
+    const first = attachLive(reg)
+    reg.pin(first.bindingId, 'job-a', T0 + 1_000)
+    reg.unpin(first.bindingId, 'job-a', T0 + 2_000)
+    const early = T0 + 2_000 + IDLE_LEASE_YIELD_MS - 1
+    expect(reg.attachBlocked('claude', THREAD, early)).toBe(true)
+    expect(reg.create(attachRequest({ bindingId: 'bind-2', now: early })).reason).toBe('target_busy')
+    expect(reg.get(first.bindingId)?.state).toBe('active')
+    // A fresh attach with no turn yet is young by its createdAt/updatedAt, too.
+    const reg2 = open({ now: T0 })
+    attachLive(reg2, { bindingId: 'bind-9', nativeThreadId: OTHER })
+    expect(reg2.create(attachRequest({ bindingId: 'bind-10', nativeThreadId: OTHER, now: T0 + IDLE_LEASE_YIELD_MS - 1 })).reason).toBe('target_busy')
+  })
+
+  it('6.49.1: a PINNED lease never yields, however old', () => {
+    const reg = open()
+    const first = attachLive(reg)
+    reg.pin(first.bindingId, 'job-a', T0)
+    const old = T0 + 365 * 24 * HOUR
+    expect(reg.attachBlocked('claude', THREAD, old)).toBe(true)
+    expect(reg.create(attachRequest({ bindingId: 'bind-2', now: old })).reason).toBe('target_busy')
+    expect(reg.get(first.bindingId)?.state).toBe('active')
   })
 
   it('refuses a second attach while the first is DRAINING with a live job', () => {
@@ -849,6 +897,24 @@ describe('the turn ledger makes a repeated POST safe', () => {
     reg.recordTurn(a.bindingId, TURN, { which: 'a' }, T0)
     expect(reg.findTurn(c.bindingId, TURN)).toBeNull()
     expect(reg.findTurn(a.bindingId, 'turn-9999-cccc-dddd')).toBeNull()
+  })
+
+  it('6.49.1: replays a key recorded on an EARLIER binding of the same target', () => {
+    // The phone attaches on every Send and a parked draft drains through the
+    // drainer's own binding, so the same draft key can arrive on binding 2 after
+    // binding 1 delivered it. Reproduced by QA against this registry: null here was a
+    // second copy in the transcript.
+    const reg = open()
+    const first = attachLive(reg)
+    reg.recordTurn(first.bindingId, TURN, { outcome: 'completed', via: 'live' }, T0)
+    const later = T0 + IDLE_LEASE_YIELD_MS
+    const second = reg.create(attachRequest({ bindingId: 'bind-2', cosSessionId: 'cos-drainer', now: later })).binding!
+    expect(reg.findTurn(second.bindingId, TURN)?.result).toEqual({ outcome: 'completed', via: 'live' })
+    // Still per target: the same key on another thread is a different draft.
+    const elsewhere = attachLive(reg, { bindingId: 'bind-3', nativeThreadId: OTHER, now: later })
+    expect(reg.findTurn(elsewhere.bindingId, TURN)).toBeNull()
+    // And across a restart, since the ledger and the records are both on disk.
+    expect(open({ now: later }).findTurn(second.bindingId, TURN)?.result).toEqual({ outcome: 'completed', via: 'live' })
   })
 
   it('refuses an unknown binding and a malformed turn id', () => {

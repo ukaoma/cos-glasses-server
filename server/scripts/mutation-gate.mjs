@@ -615,6 +615,78 @@ const CASES = [
     replace: "    return { ok: true, detail: rejected ? 'denied' : oneLine(text, DETAIL_MAX_CHARS) || 'error' }",
     tests: ['server/lib/session-stream-events.test.ts'],
   },
+  // 6.49.1 (/qa on 6.49.0: a lease that never yielded, a ledger scoped to one binding,
+  // a fixed-tail acceptance read, a budget that could vanish, two exits with no line).
+  {
+    name: 'lease-idle-yield-exists',
+    file: 'server/lib/agent-session-binding-registry.ts',
+    find: '  if (isPinned(record.binding)) return true\n  return !(Number.isFinite(now) && now - record.updatedAt >= IDLE_LEASE_YIELD_MS)',
+    replace: '  return true',
+    tests: ['server/lib/agent-session-binding-registry.test.ts'],
+  },
+  {
+    name: 'lease-young-still-refuses',
+    file: 'server/lib/agent-session-binding-registry.ts',
+    find: 'now - record.updatedAt >= IDLE_LEASE_YIELD_MS)',
+    replace: 'now - record.updatedAt >= 0)',
+    tests: ['server/lib/agent-session-binding-registry.test.ts'],
+  },
+  {
+    name: 'lease-superseded-is-detached',
+    file: 'server/lib/agent-session-binding-registry.ts',
+    find: '          binding: freezeBinding(forceDetachBinding(superseded.binding)),',
+    replace: '          binding: superseded.binding,',
+    tests: ['server/lib/agent-session-binding-registry.test.ts'],
+  },
+  {
+    name: 'ledger-read-across-bindings',
+    file: 'server/lib/agent-session-binding-registry.ts',
+    find: '      if (id === bindingId || other.binding.targetKey !== key) continue',
+    replace: '      if (true) continue',
+    tests: ['server/lib/agent-session-binding-registry.test.ts'],
+  },
+  {
+    name: 'live-connect-phase-is-nothing-sent',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: "    if (phase === 'connect' || code === 'ENOENT' || code === 'ECONNREFUSED') return done(false, 'connect_failed', null, target.pid)",
+    replace: "    if (code === 'ENOENT' || code === 'ECONNREFUSED') return done(false, 'connect_failed', null, target.pid)",
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-reads-from-send-offset',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: '        if (size !== null && size >= since) minBytes = size - since + PEER_ACCEPTANCE_READ_SLACK_BYTES',
+    replace: '        if (false) minBytes = size - since + PEER_ACCEPTANCE_READ_SLACK_BYTES',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-backdate-floor-is-two-seconds',
+    file: 'server/lib/session-peer-inbox.ts',
+    find: 'export const PEER_ACCEPTANCE_BACKDATE_MS = 2_000',
+    replace: 'export const PEER_ACCEPTANCE_BACKDATE_MS = 600_000',
+    tests: ['server/lib/session-peer-inbox.test.ts'],
+  },
+  {
+    name: 'live-route-budget-reaches-transport',
+    file: 'server/routes/agent-session-bindings.ts',
+    find: '            verifyTimeoutMs: LIVE_VERIFY_BUDGET_MS,',
+    replace: '',
+    tests: ['server/routes/agent-session-bindings.test.ts'],
+  },
+  {
+    name: 'timing-line-on-the-202',
+    file: 'server/routes/agent-session-bindings.ts',
+    find: "      console.log(turnTiming('queued'))",
+    replace: '',
+    tests: ['server/routes/agent-session-bindings.test.ts'],
+  },
+  {
+    name: 'seed-outcome-pairs-by-call',
+    file: 'server/lib/session-stream-events.ts',
+    find: "    const index = out.findIndex(d => d.kind === 'tool' && !d.outcome && (!call || !d.call || d.call === call))",
+    replace: "    const index = out.findIndex(d => d.kind === 'tool' && !d.outcome)",
+    tests: ['server/lib/session-stream-events.test.ts'],
+  },
 ]
 
 function sha256(text) {
