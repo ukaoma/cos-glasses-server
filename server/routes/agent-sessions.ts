@@ -61,6 +61,7 @@ import {
   type LockHolderSnapshot,
 } from '../lib/occupancy-probes.js'
 import type { OccupancyDirs } from '../lib/thread-occupancy.js'
+import { parseTurnsParam, readRecentSessionTurns } from '../lib/agent-session-turns.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 
 export const agentSessionsRouter = Router()
@@ -474,6 +475,18 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // READ. Presenting a partial count as the session total would be the same
     // dishonesty as a silent cap, so the digest omits the number entirely instead.
     const parsed = await parseAgentSession(provider, found)
+    // 6.50.0 `?turns=N`: the recent conversation, for the lens's scroll-up history. Only
+    // when asked, so the detail poll and every older client get the same bytes as before.
+    // A failure here costs the history, never the detail page.
+    const turnsWanted = parseTurnsParam(req.query.turns)
+    let recentTurns: Awaited<ReturnType<typeof readRecentSessionTurns>> | null = null
+    if (turnsWanted !== null) {
+      try {
+        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted)
+      } catch (error) {
+        console.warn(`[agent-sessions] recent turns failed provider=${provider}: ${error instanceof Error ? error.message : error}`)
+      }
+    }
     if (provider === 'cursor') {
       const names = await loadCursorComposerNames(agentSessionRoots().cursorComposerDb)
       const named = names.get(parsed.session_id) || names.get(sessionId)
@@ -545,6 +558,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       omitted_tools: parsed.omitted_tools,
       ...(activity.lastActivityAt ? { last_activity_at: activity.lastActivityAt } : {}),
       ...(activity.lastTool ? { last_tool: activity.lastTool } : {}),
+      ...(recentTurns ? { recent_turns: recentTurns.turns, recent_turns_more: recentTurns.more } : {}),
     })
   } catch (error) {
     console.error(`[agent-sessions] detail failed: ${error instanceof Error ? error.message : error}`)

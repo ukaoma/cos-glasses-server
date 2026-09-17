@@ -224,6 +224,11 @@ waiting out the lease; a binding with a turn in flight still refuses `native_tar
 The turn ledger is read across every binding of a thread, so a draft re-sent through a
 new binding (the phone attaches per send; a parked draft drains through the drainer's
 own) replays rather than repeats.
+`GET /api/agent-sessions/:provider/:id?turns=N` (6.50.0, N from 1 to 40) adds
+`recent_turns` (oldest first, `{ role: 'user' | 'assistant', text, at? }`, tools and
+sub-agents omitted) and `recent_turns_more` to the detail payload, read backward from
+the end of the transcript; without `turns` the payload is unchanged. The glasses use it
+to scroll back through a running session's conversation.
 
 ## Configuration
 

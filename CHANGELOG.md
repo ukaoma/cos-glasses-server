@@ -1,3 +1,11 @@
+## 6.50.0
+
+Scroll back through a running session's conversation on the glasses.
+
+- **The recent conversation, served.** Miles, 2026-09-16: "if I come into a session that's been running, I can scroll up and see what was happening, what was the original prompt." COS Control already shows it (its helper parses the transcript on the Mac: last 120 turns, tools omitted); the lens cannot read the Mac's files and had only the live stream, which starts at the current turn. The detail route now answers `?turns=N` (1 to 40) with `recent_turns: [{ role, text, at? }]` and `recent_turns_more`, oldest first: who said what, tool calls, tool results, sub-agents and injected rows left out, a live Continue from the glasses shown as the user's own words, the text shaped exactly as `latest_reply` is. Without the parameter the payload is byte-for-byte what it was, so the detail poll and every older client are untouched; a failure reading the history costs the history, never the page.
+- **Read backward from the end, not from the digest's windows.** The digest reads an oversized transcript as a 256 KiB head plus a 768 KiB tail; on the 42 MB session this was built in, that tail held two prompts, because tool output dominates the bytes (twenty transcripts on this Mac are over 32 MB). The history reads 2, then 8, then at most 24 MiB from the end until it has the messages asked for. Measured on that session: 40 messages, nine prompts back, 8 MB read, 40 ms. A window is read from one byte before its start, so a record that begins exactly at the window's edge is kept (the first cut dropped it; its own test found that).
+- Tests: every row shape for Claude (text, tool call, tool result, sub-agent, thinking, slash-command body, compaction, peer Continue, wrappers, fences, the 4,000 cap), Codex (messages vs developer, calls and events) and Cursor (`<user_query>`); the growing windows, the ceiling, the torn first record, the boundary record; the route (absent unless asked, same fields when asked, oldest first, `more`, a malformed ask ignored). Mutation gate: six new cases.
+
 ## 6.49.1
 
 Where a turn's time goes, and the two things the /qa pass on 6.49.0 found that made a follow-up wait or repeat.

@@ -608,3 +608,61 @@ describe('working now on a held Claude thread follows the last real record (6.45
     expect(detail).toMatchObject({ running: true, running_active: true })
   }, 20_000)
 })
+
+describe('6.50.0: ?turns=N on the detail route, the recent conversation for the lens', () => {
+  const detailId = 'aaaaaaaa-bbbb-cccc-dddd-888888888888'
+  const rows = [
+    JSON.stringify({ type: 'user', timestamp: '2026-09-16T20:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'The prompt that started the run.' }] } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-09-16T20:00:05.000Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } }] } }),
+    JSON.stringify({ type: 'user', toolUseResult: { stdout: 'a' }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'a' }] } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-09-16T20:00:09.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Found it. Fixing now.' }] } }),
+  ]
+
+  async function detail(query: string): Promise<{ status: number; body: Record<string, unknown> }> {
+    const { home, roots } = fixtureHome()
+    writeJsonl(join(roots.claudeProjects, '-repo', `${detailId}.jsonl`), rows)
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    try {
+      const base = await startSearchServer()
+      const res = await fetch(`${base}/api/agent-sessions/claude/${detailId}${query}`)
+      return { status: res.status, body: await res.json() as Record<string, unknown> }
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+    }
+  }
+
+  it('is absent unless asked, so the detail poll and every older client get the same payload', async () => {
+    const plain = await detail('')
+    expect(plain.status).toBe(200)
+    expect(plain.body).not.toHaveProperty('recent_turns')
+    expect(plain.body).not.toHaveProperty('recent_turns_more')
+    const asked = await detail('?turns=20')
+    // Every field the plain payload carries, unchanged (timestamps and live state aside).
+    for (const key of Object.keys(plain.body)) {
+      if (['created', 'modified', 'state_since', 'last_activity_at'].includes(key)) continue
+      expect(asked.body[key], key).toEqual(plain.body[key])
+    }
+  })
+
+  it('returns who spoke and what they said, tools left out, oldest first', async () => {
+    const asked = await detail('?turns=20')
+    expect(asked.body.recent_turns).toEqual([
+      { role: 'user', text: 'The prompt that started the run.', at: '2026-09-16T20:00:00.000Z' },
+      { role: 'assistant', text: 'Found it. Fixing now.', at: '2026-09-16T20:00:09.000Z' },
+    ])
+    expect(asked.body.recent_turns_more).toBe(false)
+    const one = await detail('?turns=1')
+    expect(one.body.recent_turns).toEqual([{ role: 'assistant', text: 'Found it. Fixing now.', at: '2026-09-16T20:00:09.000Z' }])
+    expect(one.body.recent_turns_more).toBe(true)
+  })
+
+  it('ignores a malformed ask rather than refusing the detail page', async () => {
+    for (const q of ['?turns=0', '?turns=abc', '?turns=999', '?turns=']) {
+      const res = await detail(q)
+      expect(res.status, q).toBe(200)
+      expect(res.body, q).not.toHaveProperty('recent_turns')
+    }
+  })
+})
