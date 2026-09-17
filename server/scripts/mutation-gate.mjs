@@ -681,6 +681,20 @@ const CASES = [
     tests: ['server/routes/agent-session-bindings.test.ts'],
   },
   {
+    name: 'live-prompt-unwraps-peer-frame',
+    file: 'server/lib/session-stream-events.ts',
+    find: '  text = unwrapPeerMessage(text) ?? text\n',
+    replace: '',
+    tests: ['server/lib/session-stream-events.test.ts'],
+  },
+  {
+    name: 'list-peer-row-is-the-prompt',
+    file: 'server/lib/agent-session-store.ts',
+    find: '        collectTurn(query, tail, peer === null && (obj.isMeta === true || obj.isCompactSummary === true))',
+    replace: '        collectTurn(query, tail, obj.isMeta === true || obj.isCompactSummary === true)',
+    tests: ['server/lib/agent-session-store.test.ts'],
+  },
+  {
     name: 'seed-outcome-pairs-by-call',
     file: 'server/lib/session-stream-events.ts',
     find: "    const index = out.findIndex(d => d.kind === 'tool' && !d.outcome && (!call || !d.call || d.call === call))",

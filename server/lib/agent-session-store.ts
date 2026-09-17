@@ -11,6 +11,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
+import { unwrapPeerMessage } from './session-stream-events.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -1740,9 +1741,15 @@ export async function parseAgentSession(
       }
       if (obj.type === 'user') {
         userCount += 1
-        collectTurn(text, tail, obj.isMeta === true || obj.isCompactSummary === true)
-        if (!firstPrompt) firstPrompt = firstLineTitle(text)
-        if (!title) title = firstLineTitle(text)
+        // 6.49.1: a live Continue arrives as a peer-inbox row (`isMeta`, `origin.kind`
+        // 'peer') wrapped in Claude Code's "Another Claude session sent a message"
+        // frame. It IS the user's prompt (dictated on the glasses), so it is the
+        // turn's query and never an injected row; the frame is stripped.
+        const peer = (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? unwrapPeerMessage(text) : null
+        const query = peer ?? text
+        collectTurn(query, tail, peer === null && (obj.isMeta === true || obj.isCompactSummary === true))
+        if (!firstPrompt) firstPrompt = firstLineTitle(query)
+        if (!title) title = firstLineTitle(query)
       } else {
         assistantCount += 1
         rememberAssistant(text, tail)

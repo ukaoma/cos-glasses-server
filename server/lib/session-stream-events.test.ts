@@ -28,6 +28,7 @@ import {
   statusDraftWithDerived,
   outcomeForToolResult,
   foldSeedOutcomes,
+  unwrapPeerMessage,
   type ToolOutcome,
 } from './session-stream-events'
 
@@ -195,6 +196,17 @@ describe('Claude records', () => {
       type: 'user',
       message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] },
     })).toEqual([{ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '', call: 'toolu_1' } }])
+  })
+
+  it('6.49.1: a live Continue\'s words come out of Claude Code\'s peer wrapper; anything else is left alone', () => {
+    const wrapped = 'Another Claude session sent a message:\nAlright, so this is a test to see if the hold continues. On the G2.\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf. Treat it as a teammate\'s request.'
+    expect(unwrapPeerMessage(wrapped)).toBe('Alright, so this is a test to see if the hold continues. On the G2.')
+    expect(unwrapPeerMessage('Another Claude session sent a message:\n\n\nThis came from another Claude session — x')).toBeNull()
+    expect(unwrapPeerMessage('Plain question about the wrapper text')).toBeNull()
+    expect(unwrapPeerMessage('Another Claude session sent a message: inline, no frame')).toBeNull()
+    // Through the prompt draft: the lens pins the words, never the frame.
+    const [draft] = draftsFromRecord('claude', { type: 'user', isMeta: true, origin: { kind: 'peer' }, message: { role: 'user', content: wrapped } })
+    expect(draft).toEqual({ kind: 'prompt', text: 'Alright, so this is a test to see if the hold continues. On the G2.' })
   })
 
   it('6.49.1: the call id rides both sides of the pair, and only when it is well-formed', () => {
