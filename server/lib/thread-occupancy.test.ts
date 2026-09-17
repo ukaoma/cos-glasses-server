@@ -459,7 +459,7 @@ describe('a foreign holder blocks on WORKING, not on merely held', () => {
 //
 // Executed through the real `threadOccupancy`, like the relaxation above. The clause
 // revisits exactly one verdict (`working`), for exactly one provider, and only on a
-// probe that VOUCHES; the vouch itself (newest event Stop, turn closed, registry idle
+// probe that VOUCHES; the vouch itself (no turn since the Stop, turn closed, registry idle
 // after it) lives in `withHookTurnClock` and is pinned in `turn-from-tail.test.ts`.
 // Branches here: vouching probe, null probe, throwing probe, unmeasurable transcript,
 // far-future Stop, no probe.

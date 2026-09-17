@@ -1,3 +1,8 @@
+## 6.50.2
+
+- **Coming back to a Desktop tab no longer blocks a Continue for 30 seconds.** Miles, 2026-09-17 07:00: five sends from the glasses refused "Your Mac is writing to this thread right now" until he clicked away from the tab. Claude Desktop had written its away summary (the note it drops when you return to a tab you left) to the transcript 11 s earlier, and the sub-agent that wrote it fired `SubagentStop`. The attach gate reads a transcript written inside 30 s as working unless the hooks vouch that the turn ended, and the vouch required the newest hook event to be the `Stop` itself, so the desk's own bookkeeping after it made the gate strict. The vouch now reads "no turn since the Stop": a `SubagentStop` with no sub-agent open, or a notification, keeps it; anything that opens a turn (a prompt, a tool, a sub-agent starting) still refuses, and a newer Stop still moves the clock.
+- Tests: the two bookkeeping events keep the vouch and each other guard still holds behind them; a tool, a prompt, a sub-agent start and a permission request stay strict. Gate: `turns-b6-desk-bookkeeping-is-strict-again` and `turns-b6-any-event-vouches` added; the four B6 cases killed.
+
 ## 6.50.1
 
 What the QA pass on 6.50.0 found in the history it serves (6.50.0 was published before the pass finished; nothing it changed regressed, and a client that does not ask for `?turns` sees no difference).

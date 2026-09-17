@@ -86,15 +86,32 @@ describe('withHookTurnClock', () => {
   })
   const idle = () => true
 
-  it('answers the Stop time only when the store vouches: newest event Stop, turn closed, no sub-agent, not ended', () => {
+  it('answers the Stop time only when the store vouches: no turn since the Stop, no sub-agent open, not ended', () => {
     const probe = withHookTurnClock(base, () => signal(), idle).holderTurnEndedAtMs!
     expect(probe('claude', FULL)).toBe(1_000)
     expect(withHookTurnClock(base, () => signal({ lastEvent: 'PostToolUse' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
-    expect(withHookTurnClock(base, () => signal({ lastEvent: 'SubagentStop' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ lastEvent: 'UserPromptSubmit' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ lastEvent: 'SubagentStart' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    expect(withHookTurnClock(base, () => signal({ lastEvent: 'PermissionRequest' }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
     expect(withHookTurnClock(base, () => signal({ turnOpen: true }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
     expect(withHookTurnClock(base, () => signal({ subagentsOpen: 1 }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
     expect(withHookTurnClock(base, () => signal({ ended: { at: 1, reason: 'other' } }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
     expect(withHookTurnClock(base, () => undefined, idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+  })
+
+  it("the desk's own bookkeeping after a Stop is not a turn (6.50.2): an away-summary sub-agent stopping, or an idle notification, keeps the vouch", () => {
+    // Miles, 2026-09-17 07:00:47: five sends refused native_thread_working. Claude
+    // Desktop had written an `away_summary` system row to the transcript 11 s earlier
+    // (the note it drops when you come back to a tab) and its sub-agent fired
+    // SubagentStop; the newest event was no longer 'Stop', so the probe went strict and
+    // the 30 s transcript window held. Clicking away and waiting was the only way out.
+    for (const lastEvent of ['SubagentStop', 'Notification'] as const) {
+      expect(withHookTurnClock(base, () => signal({ lastEvent }), idle).holderTurnEndedAtMs!('claude', FULL)).toBe(1_000)
+      // The other guards still hold behind it.
+      expect(withHookTurnClock(base, () => signal({ lastEvent, turnOpen: true }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+      expect(withHookTurnClock(base, () => signal({ lastEvent, subagentsOpen: 1 }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+      expect(withHookTurnClock(base, () => signal({ lastEvent, stopAt: null }), idle).holderTurnEndedAtMs!('claude', FULL)).toBeNull()
+    }
   })
 
   it('and only when the REGISTRY vouches too: idle at or after the Stop is the engine\'s end of turn; busy, or no record, is strict', () => {

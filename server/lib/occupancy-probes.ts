@@ -792,15 +792,28 @@ export function buildOccupancyProbes(
  *
  * `signalFor` is the signal store's reader, taking a full session id or the registry's
  * 8-character form; `registryIdleAfterStop` reads the registry record for the session.
- * The probe answers a Stop time only when BOTH vouch: the session's newest hook event is
- * that Stop, the turn is closed, no sub-agent is open, the session has not ended, and
- * the registry says idle at or after the Stop (the hooks have returned). Codex never
+ * The probe answers a Stop time only when BOTH vouch: nothing since the Stop has opened
+ * a turn (the desk's own bookkeeping after it does not count: the sub-agent that writes
+ * Claude Desktop's away summary, an idle notification), the turn is closed, no sub-agent
+ * is open, the session has not ended, and the registry says idle at or after the Stop
+ * (the hooks have returned). Codex never
  * asks (its ids are not Claude sessions, and a Codex thread id sharing a Claude prefix
  * must not read a Claude signal); `readHolderActivity` guards the provider too.
  *
  * Wired at the composition root only when `COS_SESSION_HOOKS` is on. Absent, the
  * gate is byte-for-byte 6.48.0.
  */
+/**
+ * Hook events that can follow a Stop without a turn having started (6.50.2). Miles,
+ * 2026-09-17 07:00: five sends refused `native_thread_working` because Claude Desktop
+ * wrote its `away_summary` system row to the transcript 11 s earlier and the sub-agent
+ * that wrote it fired SubagentStop, so the newest event was not 'Stop' and the 30 s
+ * transcript window held. Every event that DOES mean a turn sets `turnOpen`
+ * (UserPromptSubmit, a tool) or `subagentsOpen` (SubagentStart), which the guards
+ * behind this set still read; a newer Stop replaces `stopAt`.
+ */
+const AFTER_THE_TURN: ReadonlySet<string> = new Set(['Stop', 'SubagentStop', 'Notification'])
+
 export function withHookTurnClock(
   probes: OccupancyProbes,
   signalFor: (sessionId: string) => HookTurnSignal | undefined,
@@ -812,7 +825,7 @@ export function withHookTurnClock(
       if (provider !== 'claude') return null
       if (!NATIVE_THREAD_ID_RE.test(threadId)) return null
       const signal = signalFor(threadId)
-      if (!signal || signal.lastEvent !== 'Stop' || signal.turnOpen || signal.subagentsOpen > 0 || signal.ended !== null) return null
+      if (!signal || !AFTER_THE_TURN.has(signal.lastEvent) || signal.turnOpen || signal.subagentsOpen > 0 || signal.ended !== null) return null
       if (typeof signal.stopAt !== 'number') return null
       // The engine's own end of turn: the registry flipped idle AFTER this Stop, which
       // happens only once every Stop hook has returned. Anything else is strict.

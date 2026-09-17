@@ -353,6 +353,20 @@ const CASES = [
     tests: ['server/lib/session-signal-store.test.ts'],
   },
   {
+    name: 'turns-b6-desk-bookkeeping-is-strict-again',
+    file: 'server/lib/occupancy-probes.ts',
+    find: "      if (!signal || !AFTER_THE_TURN.has(signal.lastEvent) || signal.turnOpen",
+    replace: "      if (!signal || signal.lastEvent !== 'Stop' || signal.turnOpen",
+    tests: ['server/lib/turn-from-tail.test.ts'],
+  },
+  {
+    name: 'turns-b6-any-event-vouches',
+    file: 'server/lib/occupancy-probes.ts',
+    find: "const AFTER_THE_TURN: ReadonlySet<string> = new Set(['Stop', 'SubagentStop', 'Notification'])",
+    replace: "const AFTER_THE_TURN: ReadonlySet<string> = new Set(['Stop', 'SubagentStop', 'Notification', 'PostToolUse', 'UserPromptSubmit', 'SubagentStart', 'PermissionRequest'])",
+    tests: ['server/lib/turn-from-tail.test.ts'],
+  },
+  {
     name: 'turns-b6-registry-vouches',
     file: 'server/lib/occupancy-probes.ts',
     find: "      return registryIdleAfterStop(threadId, signal.stopAt) === true ? signal.stopAt : null",
