@@ -198,6 +198,16 @@ describe('Claude records', () => {
     })).toEqual([{ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '', call: 'toolu_1' } }])
   })
 
+  it('6.50.0: an injected user row (image source, skill body, compaction) never replaces the prompt; a live Continue still does', () => {
+    const row = (text: string, extra: Record<string, unknown>) => ({ type: 'user', ...extra, message: { role: 'user', content: text } })
+    expect(draftsFromRecord('claude', row('[Image: source: /Users/x/Desktop/Screenshot 2026-09-16 at 9.28.37 PM.png]', { isMeta: true }))).toEqual([])
+    expect(draftsFromRecord('claude', row('Base directory for this skill: /x/.claude/skills/qa', { isMeta: true }))).toEqual([])
+    expect(draftsFromRecord('claude', row('This session is being continued from a previous conversation. Summary: x', { isCompactSummary: true }))).toEqual([])
+    expect(draftsFromRecord('claude', row('The real prompt the user typed.', {}))).toEqual([{ kind: 'prompt', text: 'The real prompt the user typed.' }])
+    const peer = row('Another Claude session sent a message:\nHold continues on the G2.\n\nThis came from another Claude session — not typed by your user.', { isMeta: true, origin: { kind: 'peer' } })
+    expect(draftsFromRecord('claude', peer)).toEqual([{ kind: 'prompt', text: 'Hold continues on the G2.' }])
+  })
+
   it('6.49.1: a live Continue\'s words come out of Claude Code\'s peer wrapper; anything else is left alone', () => {
     const wrapped = 'Another Claude session sent a message:\nAlright, so this is a test to see if the hold continues. On the G2.\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf. Treat it as a teammate\'s request.'
     expect(unwrapPeerMessage(wrapped)).toBe('Alright, so this is a test to see if the hold continues. On the G2.')

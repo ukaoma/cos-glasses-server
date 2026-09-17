@@ -766,6 +766,27 @@ const CASES = [
     tests: ['server/lib/agent-session-turns.test.ts'],
   },
   {
+    name: 'turns-teammate-is-not-the-user',
+    file: 'server/lib/agent-session-turns.ts',
+    find: "    if (peer !== null) return (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? shaped('user', peer, at) : null",
+    replace: "    if (peer !== null) return shaped('user', peer, at)",
+    tests: ['server/lib/agent-session-turns.test.ts'],
+  },
+  {
+    name: 'stream-injected-row-not-a-prompt',
+    file: 'server/lib/session-stream-events.ts',
+    find: '    if ((record.isMeta === true || record.isCompactSummary === true) && !liveContinue) return []',
+    replace: '',
+    tests: ['server/lib/session-stream-events.test.ts'],
+  },
+  {
+    name: 'turns-history-failure-keeps-the-page',
+    file: 'server/routes/agent-sessions.ts',
+    find: "        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted)\n      } catch (error) {\n",
+    replace: "        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted)\n      } catch (error) {\n        throw error\n",
+    tests: ['server/routes/agent-sessions.turns-failure.test.ts'],
+  },
+  {
     name: 'turns-only-when-asked',
     file: 'server/routes/agent-sessions.ts',
     find: '    if (turnsWanted !== null) {',

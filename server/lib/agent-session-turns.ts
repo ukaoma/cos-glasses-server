@@ -88,8 +88,13 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
     if (!text) return null
     const at = iso(obj.timestamp)
     if (obj.type === 'assistant') return shaped('assistant', text, at)
-    const peer = (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? unwrapPeerMessage(text) : null
-    if (peer !== null) return shaped('user', peer, at)
+    // A peer-inbox message. Only a live Continue (`origin.kind: 'peer'`, 6.49.x) is the
+    // user's own words; every other message in that frame is another agent talking
+    // (a teammate's report, an idle notification, another session's SendMessage),
+    // written as a plain user row with no origin. QA found 20 of those in one session
+    // rendering as "YOU".
+    const peer = unwrapPeerMessage(text)
+    if (peer !== null) return (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? shaped('user', peer, at) : null
     if (obj.isMeta === true || obj.isCompactSummary === true) return null
     return shaped('user', text, at)
   }
@@ -125,7 +130,7 @@ export interface RecentTurnsRead {
   turns: SessionTurn[]
   /** True when the transcript holds messages before the first one returned. */
   more: boolean
-  /** Bytes of the transcript this read covered, for the log. */
+  /** Bytes of the transcript this read covered (tests assert the window growth by it). */
   bytesRead: number
 }
 
@@ -170,9 +175,12 @@ export async function readRecentSessionTurns(
   }
 }
 
-/** `?turns=N`: an integer 1..SESSION_TURNS_MAX, or null (absent or malformed). */
+/** `?turns=N`: an integer, clamped to 1..SESSION_TURNS_MAX; null when absent, zero or
+ *  malformed. Clamped rather than refused above the max, so a client asking for more
+ *  than this server serves gets the most it can have instead of looking like an older
+ *  server with no history at all. */
 export function parseTurnsParam(value: unknown): number | null {
   if (typeof value !== 'string' || !/^\d{1,3}$/.test(value)) return null
   const n = Number(value)
-  return n >= 1 && n <= SESSION_TURNS_MAX ? n : null
+  return n >= 1 ? Math.min(n, SESSION_TURNS_MAX) : null
 }

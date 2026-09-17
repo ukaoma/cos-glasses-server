@@ -43,6 +43,20 @@ describe('sessionTurnFromRecord: claude', () => {
     expect(sessionTurnFromRecord('claude', peer)).toEqual({ role: 'user', text: 'Alright, so this is a test to see if the hold continues. On the G2.', at: AT })
   })
 
+  it('drops another agent\'s message in the same frame: a teammate report is not the user', () => {
+    // The row shape as written in this session's transcript: a plain user row, no
+    // origin, no isMeta, the peer frame around a teammate message (QA found 20).
+    const teammate = user('Another Claude session sent a message:\n<teammate-message teammate_id="qa3-user" color="cyan">\n{"type":"idle_notification"}\n</teammate-message>\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf.')
+    expect(sessionTurnFromRecord('claude', teammate)).toBeNull()
+    const plainWords = user('Another Claude session sent a message:\nPlease run the gate.\n\nThis came from another Claude session — not typed by your user.')
+    expect(sessionTurnFromRecord('claude', plainWords)).toBeNull()
+  })
+
+  it('keeps the words of an interrupted tool row out too (a tool result that also carries text)', () => {
+    const interrupted = { type: 'user', toolUseResult: { interrupted: true }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x' }, { type: 'text', text: '[Request interrupted by user for tool use]' }] } }
+    expect(sessionTurnFromRecord('claude', interrupted)).toBeNull()
+  })
+
   it('drops wrapper prompts and harness tags, keeps lines, and caps with a visible ellipsis', () => {
     expect(sessionTurnFromRecord('claude', user('<command-message>cos-glasses</command-message>'))).toBeNull()
     expect(sessionTurnFromRecord('claude', user('<system-reminder>ctx</system-reminder>'))).toBeNull()
@@ -160,7 +174,10 @@ describe('parseTurnsParam', () => {
     expect(parseTurnsParam('20')).toBe(20)
     expect(parseTurnsParam('1')).toBe(1)
     expect(parseTurnsParam(String(SESSION_TURNS_MAX))).toBe(SESSION_TURNS_MAX)
-    for (const bad of [undefined, '', '0', String(SESSION_TURNS_MAX + 1), '-3', '2.5', '20abc', ['20'], '1000']) {
+    // Above the max is clamped, not refused: the client gets the most this server serves.
+    expect(parseTurnsParam(String(SESSION_TURNS_MAX + 1))).toBe(SESSION_TURNS_MAX)
+    expect(parseTurnsParam('999')).toBe(SESSION_TURNS_MAX)
+    for (const bad of [undefined, '', '0', '-3', '2.5', '20abc', ['20'], '1000']) {
       expect(parseTurnsParam(bad), String(bad)).toBeNull()
     }
   })

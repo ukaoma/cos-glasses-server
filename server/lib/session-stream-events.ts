@@ -559,7 +559,16 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
     const message = asRecord(record.message)
     if (!message) return []
     const outcomes = outcomeDrafts(record, message)
-    return outcomes.length > 0 ? outcomes : promptDrafts(message)
+    if (outcomes.length > 0) return outcomes
+    // An INJECTED user row is not the query (6.50.0): an image attachment's
+    // "[Image: source: …]", a skill's "Base directory for this skill", a compaction
+    // summary. Each is written as `isMeta` / `isCompactSummary` right after the real
+    // prompt and used to replace it on the lens's context line (23 of 91 prompt changes
+    // in one real session). A live Continue is the exception: it is `isMeta` and IS
+    // the user's words.
+    const liveContinue = (record.origin as { kind?: unknown } | undefined)?.kind === 'peer'
+    if ((record.isMeta === true || record.isCompactSummary === true) && !liveContinue) return []
+    return promptDrafts(message)
   }
 
   const role = typeof record.role === 'string' ? record.role : ''

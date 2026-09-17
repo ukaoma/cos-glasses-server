@@ -61,7 +61,7 @@ import {
   type LockHolderSnapshot,
 } from '../lib/occupancy-probes.js'
 import type { OccupancyDirs } from '../lib/thread-occupancy.js'
-import { parseTurnsParam, readRecentSessionTurns } from '../lib/agent-session-turns.js'
+import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead } from '../lib/agent-session-turns.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 
 export const agentSessionsRouter = Router()
@@ -479,7 +479,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // when asked, so the detail poll and every older client get the same bytes as before.
     // A failure here costs the history, never the detail page.
     const turnsWanted = parseTurnsParam(req.query.turns)
-    let recentTurns: Awaited<ReturnType<typeof readRecentSessionTurns>> | null = null
+    let recentTurns: RecentTurnsRead | null = null
     if (turnsWanted !== null) {
       try {
         recentTurns = await readRecentSessionTurns(provider, found, turnsWanted)

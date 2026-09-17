@@ -659,7 +659,7 @@ describe('6.50.0: ?turns=N on the detail route, the recent conversation for the 
   })
 
   it('ignores a malformed ask rather than refusing the detail page', async () => {
-    for (const q of ['?turns=0', '?turns=abc', '?turns=999', '?turns=']) {
+    for (const q of ['?turns=0', '?turns=abc', '?turns=1000', '?turns=']) {
       const res = await detail(q)
       expect(res.status, q).toBe(200)
       expect(res.body, q).not.toHaveProperty('recent_turns')
