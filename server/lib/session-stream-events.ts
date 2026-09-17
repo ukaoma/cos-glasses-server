@@ -333,6 +333,13 @@ export function outcomeForToolResult(
       if (out === 0) return { ok: true, detail: `stderr ${err} line${err === 1 ? '' : 's'}` }
       return { ok: true, detail: `${out} line${out === 1 ? '' : 's'}` }
     }
+    // Grep in CONTENT mode (6.49.1): the real row is `{ mode: 'content', numFiles: 0,
+    // filenames: [], content, numLines, totalLines }`, numFiles ALWAYS 0 there, so the
+    // file count below read "0 files" for a grep with hits (18 of 18 rows measured).
+    // The hits are the lines.
+    if (r.mode === 'content' && typeof r.numLines === 'number') {
+      return { ok: true, detail: r.numLines === 0 ? 'none' : `${r.numLines} hit${r.numLines === 1 ? '' : 's'}` }
+    }
     // Grep / Glob: counts when the tool gives them.
     if (typeof r.numFiles === 'number') return { ok: true, detail: `${r.numFiles} file${r.numFiles === 1 ? '' : 's'}` }
     if (typeof r.numMatches === 'number') return { ok: true, detail: `${r.numMatches} hit${r.numMatches === 1 ? '' : 's'}` }
@@ -368,7 +375,11 @@ export function outcomeDrafts(record: Record<string, unknown>, message: Record<s
       : Array.isArray(inner)
         ? inner.map(part => (asRecord(part)?.text as string | undefined) ?? '').join(' ')
         : ''
-    const outcome = outcomeForToolResult(block.is_error === true, text, record.toolUseResult)
+    // `toolUseResult` in the transcript, `tool_use_result` on `claude -p`'s stream-json
+    // stdout, which the producer feeds through this same parser for every COS-spawned
+    // turn (6.49.1: only the first was read, so every spawn-path Continue and every
+    // drained follow-up showed an empty outcome for Read/Bash/Edit/Write).
+    const outcome = outcomeForToolResult(block.is_error === true, text, record.toolUseResult ?? record.tool_use_result)
     const call = callId(block.tool_use_id)
     // A tool result means the turn is working by definition: the model called a
     // tool and is about to read what came back.

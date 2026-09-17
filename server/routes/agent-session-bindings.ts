@@ -342,7 +342,7 @@ export interface AgentSessionBindingsDeps {
    * absent, or when it answers anything but `ok`, the spawn path below runs unchanged.
    * Only `reason` is read here; the vocabulary is the pure module's.
    */
-  deliverLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number }) => Promise<{ ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null }>
+  deliverLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number; clientTurnId?: string }) => Promise<{ ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null }>
 
   /**
    * The self-recursion ledger. Defaults to the real process-wide one.
@@ -1287,9 +1287,10 @@ export const TURN_SENT_LIVE_COPY = 'Sent to the open session. It will show where
 /**
  * How long the route waits for the session's transcript to show acceptance.
  *
- * FOUR SECONDS, INSIDE THE CLIENT'S TEN. The phone's `fetchJSON` aborts at 10 s; the
- * gate ahead of this point costs about a second, the connect up to 1.5 s, so four
- * leaves margin. Measured acceptance on an idle session was under one second, so the
+ * FOUR SECONDS, INSIDE THE CLIENT'S BUDGET. The lens's turn POST allows 25 s since app
+ * 6.9.487 (every other call keeps `fetchJSON`'s 10 s); the gate ahead of this point
+ * costs about a second, the connect up to 1.5 s, so four leaves margin even for the
+ * older ten. Measured acceptance on an idle session was under one second, so the
  * budget only bites when the receiver is holding or dying, and those end as
  * `live_unverified`, which the client may retry.
  *
@@ -2205,6 +2206,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             sessionId: binding.nativeThreadId,
             prompt,
             verifyTimeoutMs: LIVE_VERIFY_BUDGET_MS,
+            clientTurnId,
           })
         } catch (error) {
           // A throw is a bug in the transport, not a fact about the session; the

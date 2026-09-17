@@ -209,6 +209,26 @@ describe('Claude records', () => {
     expect(draft).toEqual({ kind: 'prompt', text: 'Alright, so this is a test to see if the hold continues. On the G2.' })
   })
 
+  it('6.49.1: the stream-json spelling `tool_use_result` is read too (every COS-spawned turn)', () => {
+    // A `claude -p --output-format stream-json` user row, keys as captured on this Mac:
+    // message, parent_tool_use_id, session_id, timestamp, tool_use_result, type, uuid.
+    const [draft] = draftsFromRecord('claude', {
+      type: 'user', session_id: 'x', parent_tool_use_id: null,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_9', content: 'a\nb\nc' }] },
+      tool_use_result: { stdout: 'a\nb\nc', stderr: '', interrupted: false },
+    })
+    expect(draft).toEqual({ kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '3 lines', call: 'toolu_9' } })
+  })
+
+  it('6.49.1: Grep in content mode counts its hits, never its always-zero numFiles', () => {
+    // The real row (18 of 18 content-mode rows measured on this Mac).
+    expect(outcomeForToolResult(false, '', { mode: 'content', numFiles: 0, filenames: [], content: 'x', numLines: 4, totalLines: 4 })).toEqual({ ok: true, detail: '4 hits' })
+    expect(outcomeForToolResult(false, '', { mode: 'content', numFiles: 0, filenames: [], content: '', numLines: 0, totalLines: 0 })).toEqual({ ok: true, detail: 'none' })
+    expect(outcomeForToolResult(false, '', { mode: 'content', numFiles: 0, filenames: [], content: 'x', numLines: 1, totalLines: 1 })).toEqual({ ok: true, detail: '1 hit' })
+    // files_with_matches keeps the file count.
+    expect(outcomeForToolResult(false, '', { mode: 'files_with_matches', numFiles: 3, filenames: ['a', 'b', 'c'] })).toEqual({ ok: true, detail: '3 files' })
+  })
+
   it('6.49.1: the call id rides both sides of the pair, and only when it is well-formed', () => {
     const [call] = draftsFromRecord('claude', claudeAssistant({ type: 'tool_use', id: 'toolu_01AbC', name: 'Read', input: { file_path: '/x/a.ts' } }))
     expect(call).toMatchObject({ kind: 'tool', verb: 'read', call: 'toolu_01AbC' })

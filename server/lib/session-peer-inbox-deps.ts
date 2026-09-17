@@ -47,8 +47,15 @@ const ACCEPTANCE_TAIL_BYTES = 256 * 1024
 /** Never read more than this in one verification, whatever was appended. */
 const ACCEPTANCE_TAIL_MAX_BYTES = 16 * 1024 * 1024
 
-/** One pass over `~/.claude/sessions`, records only. Never throws. */
-export function readPeerInboxRecords(dir: string = claudeSessionsDir()): PeerInboxRecord[] {
+/** Is a process with this pid alive (signal 0)? EPERM counts as alive: it exists, it is not ours. */
+export function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === 'EPERM'
+  }
+}
+
+/** One pass over `~/.claude/sessions`, live records only. Never throws. */
+export function readPeerInboxRecords(dir: string = claudeSessionsDir(), alive: (pid: number) => boolean = pidAlive): PeerInboxRecord[] {
   let names: string[]
   try { names = readdirSync(dir) } catch { return [] }
   const out: PeerInboxRecord[] = []
@@ -63,6 +70,10 @@ export function readPeerInboxRecords(dir: string = claudeSessionsDir()): PeerInb
       const pid = Number(raw.pid)
       const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId.trim().toLowerCase() : ''
       if (!Number.isInteger(pid) || pid <= 0 || !sessionId) continue
+      // Liveness (6.49.1): a record whose pid is gone is a stale file the reaper has not
+      // reached; choosing it would send the turn to a dead socket and then to the spawn
+      // path, silently, on a session that may have a live window under another pid.
+      if (!alive(pid)) continue
       out.push({
         pid,
         sessionId,
@@ -70,6 +81,7 @@ export function readPeerInboxRecords(dir: string = claudeSessionsDir()): PeerInb
         peerProtocol: typeof raw.peerProtocol === 'number' && Number.isInteger(raw.peerProtocol) ? raw.peerProtocol : null,
         entrypoint: typeof raw.entrypoint === 'string' ? raw.entrypoint : null,
         status: typeof raw.status === 'string' ? raw.status : null,
+        startedAt: typeof raw.startedAt === 'number' && Number.isFinite(raw.startedAt) ? raw.startedAt : null,
       })
     } catch {
       // A torn read or a record the reaper just unlinked. Ordinary.
@@ -148,7 +160,7 @@ export function liveDeliveryStats(): LiveDeliveryStats {
  * counted as an attempt, so the health row stays quiet while the flag is off.
  */
 export function makeLiveTurnDeliverer(nativeHeadDeps: NativeHeadDeps) {
-  return async (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number }): Promise<PeerDeliveryResult> => {
+  return async (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number; clientTurnId?: string }): Promise<PeerDeliveryResult> => {
     const result = await deliverOverPeerInbox(
       { ...request, enabled: continueLiveEnabled() },
       {

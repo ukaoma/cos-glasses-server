@@ -114,6 +114,8 @@ export interface PeerInboxRecord {
   peerProtocol: number | null
   entrypoint: string | null
   status: string | null
+  /** Epoch ms the process started (registry `startedAt`), for the newest-window rule (6.49.1). */
+  startedAt?: number | null
 }
 
 export type PeerDeliveryReason =
@@ -171,9 +173,16 @@ export function selectPeerInbox(
   const theirs = matches.filter(r => !isCosOwnedPid(r.pid))
   const pool = theirs.length > 0 ? theirs : []
   if (pool.length === 0) return null
-  // Newest record wins when the user somehow has two windows on one session: the
-  // higher pid is the one started most recently, which is the one they are looking at.
-  const chosen = [...pool].sort((a, b) => b.pid - a.pid)[0]
+  // Newest record wins when the user somehow has two windows on one session: the one
+  // started most recently is the one they are looking at. BY START TIME, not pid
+  // (6.49.1): macOS recycles pids, and this Mac's counter wrapped twice in one day
+  // (registry on 2026-09-16: 82615 started before 45962 before 10487). A record with
+  // no start time sorts last, then by pid as before.
+  const chosen = [...pool].sort((a, b) => {
+    const sa = typeof a.startedAt === 'number' && Number.isFinite(a.startedAt) ? a.startedAt : -1
+    const sb = typeof b.startedAt === 'number' && Number.isFinite(b.startedAt) ? b.startedAt : -1
+    return sb !== sa ? sb - sa : b.pid - a.pid
+  })[0]
   return chosen ?? null
 }
 
@@ -319,6 +328,11 @@ export interface PeerInboxRequest {
   prompt: string
   enabled: boolean
   verifyTimeoutMs?: number
+  /** The client's idempotency key for this draft (6.49.1). When given, the suspect memo
+   *  is keyed by it, so two drafts sharing their first 120 characters cannot collide and
+   *  the same words under a NEW key are a new send, not a retry. The marker is still
+   *  what is searched for in the transcript. */
+  clientTurnId?: string
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -421,7 +435,7 @@ export async function deliverOverPeerInbox(
   }
 
   const marker = peerAcceptanceMarker(request.prompt)
-  const key = suspectKey(request.sessionId, marker)
+  const key = suspectKey(request.sessionId, request.clientTurnId ? `id:${request.clientTurnId}` : marker)
 
   // A retry of a send that was never verified: look before writing anything.
   const suspect = suspects.get(key)

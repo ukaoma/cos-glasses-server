@@ -81,6 +81,14 @@ describe('selectPeerInbox', () => {
     expect(selectPeerInbox(SESSION, [record({ pid: 100 }), record({ pid: 900 }), record({ pid: 500 })])?.pid).toBe(900)
   })
 
+  it('6.49.1: newest is by START TIME, not pid; the pid counter wrapped twice on this Mac in one day', () => {
+    // Registry on 2026-09-16: pid 82615 started Sep 15 08:30, 45962 at 13:26, 10487 at 21:29.
+    const rows = [record({ pid: 82615, startedAt: 1_789_479_000_000 }), record({ pid: 45962, startedAt: 1_789_496_802_117 }), record({ pid: 10487, startedAt: 1_789_525_763_791 })]
+    expect(selectPeerInbox(SESSION, rows)?.pid).toBe(10487)
+    // A record with no start time sorts after every dated one; among undated, pid as before.
+    expect(selectPeerInbox(SESSION, [record({ pid: 99999 }), record({ pid: 10487, startedAt: 1 })])?.pid).toBe(10487)
+  })
+
   it('treats a Desktop tab and a terminal identically', () => {
     const desktop = record({ pid: 55443, entrypoint: 'claude-desktop', socketPath: '/tmp/cc-socks/55443.sock' })
     expect(selectPeerInbox(SESSION, [desktop])?.entrypoint).toBe('claude-desktop')
@@ -362,6 +370,28 @@ describe('deliverOverPeerInbox', () => {
       // The memo is gone: the next attempt is a new send.
       expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
       expect(sends).toBe(2)
+    })
+
+    it('6.49.1: the memo is keyed by the draft key when the route gives one, else by the words', async () => {
+      // Two drafts sharing their first 120 characters must not collide; the same words
+      // under a NEW key are a new send, not a retry of the suspect.
+      let sends = 0
+      const long = 'x'.repeat(200)
+      const d = deps({ transcriptTail: () => [], send: async () => { sends += 1 } })
+      expect((await deliverOverPeerInbox({ ...req, prompt: `${long} A`, clientTurnId: 'ct-a', verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+      expect((await deliverOverPeerInbox({ ...req, prompt: `${long} B`, clientTurnId: 'ct-b', verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+      expect(sends).toBe(2)
+      // Same key: a retry, nothing re-sent.
+      expect((await deliverOverPeerInbox({ ...req, prompt: `${long} A`, clientTurnId: 'ct-a', verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+      expect(sends).toBe(2)
+      // Same words, new key: a new send.
+      expect((await deliverOverPeerInbox({ ...req, prompt: `${long} A`, clientTurnId: 'ct-c', verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+      expect(sends).toBe(3)
+      // No key at all: the words are the key, as in 6.49.0.
+      __resetPeerInboxSuspects()
+      expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+      expect((await deliverOverPeerInbox({ ...req, verifyTimeoutMs: 0 }, d)).reason).toBe('unverified')
+      expect(sends).toBe(4)
     })
 
     it('treats a write failure as a suspect, and a connect failure as nothing sent', async () => {
