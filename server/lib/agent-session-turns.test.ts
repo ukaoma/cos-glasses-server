@@ -52,6 +52,15 @@ describe('sessionTurnFromRecord: claude', () => {
     expect(sessionTurnFromRecord('claude', plainWords)).toBeNull()
   })
 
+  it('drops user rows no person typed: the interrupt marker and a Codex AGENTS.md block', () => {
+    expect(sessionTurnFromRecord('claude', user('[Request interrupted by user]'))).toBeNull()
+    expect(sessionTurnFromRecord('claude', user('[Request interrupted by user for tool use]'))).toBeNull()
+    const agents = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions for /Users/x/repo\n\n<INSTRUCTIONS>…' }] } }
+    expect(sessionTurnFromRecord('codex', agents)).toBeNull()
+    // A person writing about those things is still a person.
+    expect(sessionTurnFromRecord('claude', user('Why did the [Request interrupted by user] marker show up?'))?.text).toContain('marker show up')
+  })
+
   it('keeps the words of an interrupted tool row out too (a tool result that also carries text)', () => {
     const interrupted = { type: 'user', toolUseResult: { interrupted: true }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x' }, { type: 'text', text: '[Request interrupted by user for tool use]' }] } }
     expect(sessionTurnFromRecord('claude', interrupted)).toBeNull()

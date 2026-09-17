@@ -787,6 +787,13 @@ const CASES = [
     tests: ['server/routes/agent-sessions.turns-failure.test.ts'],
   },
   {
+    name: 'turns-not-typed-by-the-user',
+    file: 'server/lib/agent-session-turns.ts',
+    find: "  if (role === 'user' && NOT_TYPED_BY_THE_USER.test(raw)) return null\n",
+    replace: '',
+    tests: ['server/lib/agent-session-turns.test.ts'],
+  },
+  {
     name: 'turns-only-when-asked',
     file: 'server/routes/agent-sessions.ts',
     find: '    if (turnsWanted !== null) {',

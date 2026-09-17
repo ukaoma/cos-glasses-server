@@ -4,8 +4,9 @@ What the QA pass on 6.50.0 found in the history it serves (6.50.0 was published 
 
 - **Another agent's message is not the user.** A peer-inbox frame ("Another Claude session sent a message: …") is the user's words only when it is a live Continue (`origin.kind: 'peer'`). Teammate reports, idle notifications and other sessions' messages use the same frame on a plain user row with no origin; 20 of them in one real session were served as `role: 'user'` and would have read "YOU" on the lens. They are left out now.
 - **An injected user row never replaces the prompt on the live stream.** An image attachment's `[Image: source: …]`, a skill's "Base directory for this skill" and a compaction summary are written as `isMeta` / `isCompactSummary` user rows right after the real prompt, and each replaced it on the lens's context line (23 of 91 prompt changes in one session). They emit no prompt now; a live Continue (also `isMeta`) still does. This is a fix to the stream's prompt line since 6.48.x, and it lets the glasses match the current turn when they cut the history.
+- **User rows no person typed are left out too:** Claude's `[Request interrupted by user]` marker and the `# AGENTS.md instructions for …` block Codex writes as a user message.
 - **`?turns` above the maximum is clamped to 40**, not refused: a client asking for more gets the most this server serves instead of looking like an older server.
-- Tests: the teammate frame and a plain other-session frame dropped, an interrupted tool row with text dropped, the injected rows emit no prompt while a Continue and a real prompt do, the clamp, and a route test where the history read throws (the page answers 200 without the fields; QA found that promise untested). Mutation gate: three new cases.
+- Tests: the teammate frame and a plain other-session frame dropped, an interrupted tool row with text dropped, the injected rows emit no prompt while a Continue and a real prompt do, the clamp, and a route test where the history read throws (the page answers 200 without the fields; QA found that promise untested). Mutation gate: four new cases.
 
 ## 6.50.0
 

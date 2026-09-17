@@ -66,8 +66,17 @@ function cursorQuery(text: string): string {
   return start >= 0 && end > start ? text.slice(start + '<user_query>'.length, end) : text
 }
 
+/**
+ * User rows that no person typed (6.50.1, QA on 6.50.0): Claude's interrupt marker
+ * ("[Request interrupted by user]", 7 in one session) and the AGENTS.md block Codex
+ * writes as a user message (a 4,000-character "# AGENTS.md instructions for …" row in
+ * 3 of the last 60 rollouts). Each read as "YOU" on the lens.
+ */
+const NOT_TYPED_BY_THE_USER = /^\s*(?:\[Request interrupted by user|# AGENTS\.md instructions\b)/
+
 function shaped(role: SessionTurn['role'], raw: string, at: string | undefined): SessionTurn | null {
   if (isWrapperPrompt(raw)) return null
+  if (role === 'user' && NOT_TYPED_BY_THE_USER.test(raw)) return null
   const text = latestAssistantReply(raw)
   if (!text) return null
   return at ? { role, text, at } : { role, text }
