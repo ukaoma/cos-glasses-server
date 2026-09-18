@@ -353,6 +353,13 @@ const CASES = [
     tests: ['server/lib/session-signal-store.test.ts'],
   },
   {
+    name: 'referee-check-takes-the-ring',
+    file: 'server/routes/client-instance.ts',
+    find: "    if (req.body?.check === true) {\n",
+    replace: "    if (false) {\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
     name: 'referee-dead-owner-never-released',
     file: 'server/lib/client-instance-claim.ts',
     find: "  if (now - owner.seenAt > CLIENT_INSTANCE_LIVE_MS) return { owner: fresh, verdict: 'owner', took: true }\n",

@@ -76,6 +76,18 @@ describe('POST /api/client-instance/claim', () => {
     expect(z.body).toMatchObject({ verdict: 'yield', owner: { id: newer.id } })
   })
 
+  it('check answers without taking, even when the owner looks quiet', async () => {
+    clock += 1_000
+    expect((await post(newer)).body.verdict).toBe('owner')
+    // The owner goes quiet past the live window (a locked phone froze its timers too).
+    clock += CLIENT_INSTANCE_LIVE_MS + 1
+    const checked = await post({ ...older, check: true })
+    expect(checked.body).toMatchObject({ verdict: 'owner', check: true, owner: { id: newer.id } })
+    // It did not take: the newer copy's next post is still the owner, the older still yields.
+    expect((await post(newer)).body).toMatchObject({ verdict: 'owner', owner: { id: newer.id } })
+    expect((await post({ ...older, check: true })).body.verdict).toBe('yield')
+  })
+
   it('a malformed claim is a 400 and changes nothing', async () => {
     expect((await post({ id: 'nope' })).status).toBe(400)
     expect((await post(newer)).body.verdict).toBe('owner')
