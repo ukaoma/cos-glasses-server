@@ -353,6 +353,20 @@ const CASES = [
     tests: ['server/lib/session-signal-store.test.ts'],
   },
   {
+    name: 'preview-revives-after-shutdown',
+    file: 'server/lib/whisper-preview.ts',
+    find: "  if (previewShutdown || previewAvailable || previewStarting) return\n",
+    replace: "  if (previewAvailable || previewStarting) return\n",
+    tests: ['server/lib/whisper-preview.test.ts'],
+  },
+  {
+    name: 'preview-starts-after-shutdown',
+    file: 'server/lib/whisper-preview.ts',
+    find: "  if (previewShutdown) return\n",
+    replace: "\n",
+    tests: ['server/lib/whisper-preview.test.ts'],
+  },
+  {
     name: 'preview-latch-restored',
     file: 'server/lib/whisper-preview.ts',
     find: "  if (previewSidecarAlive() && previewConsecutiveFailures < PREVIEW_RECYCLE_AFTER_FAILURES) {",

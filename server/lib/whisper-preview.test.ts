@@ -434,6 +434,26 @@ describe('the meeting preview recovers from a failed request (6.50.2)', () => {
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(4))
   })
 
+  it('after the server\'s shutdown stop, no request revives the sidecar', async () => {
+    const { preview, spawn, children } = await bootTurbo(async () => ok('text'))
+    // The skeptic's case: the sidecar had ALREADY failed when shutdown began, so a request
+    // would otherwise revive it right before the process exits.
+    children[0].exitCode = 1
+    children[0].emit('close', 1)
+    await preview.stopWhisperPreviewServer({ final: true })
+    // Two layers refuse after shutdown: the revive (never even announces a restart) and
+    // the start (covers a shutdown landing mid-revive). Each is checked on its own.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    // Long past every backoff: a revive would normally fire here.
+    vi.setSystemTime(Date.now() + preview.PREVIEW_RESTART_MAX_MS + 1)
+    for (let i = 0; i < 3; i++) await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toBeNull()
+    expect(log.mock.calls.some(c => String(c[0]).includes('restarting the preview sidecar'))).toBe(false)
+    log.mockRestore()
+    await preview.startWhisperPreviewServer()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
   it('a foreign listener on the port is never re-probed from the request path', async () => {
     // The start refuses a port someone else owns (reason preview_port_busy). A restart could
     // not change that, so requests must not re-run the lsof/ps probe each time.

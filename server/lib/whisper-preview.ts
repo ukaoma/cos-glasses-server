@@ -91,6 +91,8 @@ let previewCooldownUntil = 0
 let previewConsecutiveFailures = 0
 let previewLastRestartAt = 0
 let previewRestartBackoffMs = PREVIEW_RESTART_BASE_MS
+/** Set by the server's shutdown: no request may revive the sidecar after it (QA, 6.50.2). */
+let previewShutdown = false
 
 function previewSidecarAlive(): boolean {
   const child = previewProcess
@@ -127,7 +129,7 @@ function notePreviewRequestFailure(error: unknown, label: string): void {
  * cannot be fixed by a restart and stay as they are.
  */
 function maybeRevivePreviewSidecar(): void {
-  if (previewAvailable || previewStarting) return
+  if (previewShutdown || previewAvailable || previewStarting) return
   if (previewFailure !== 'preview_sidecar_unavailable' && previewFailure !== 'preview_start_failed') return
   const now = Date.now()
   if (previewLastRestartAt && now - previewLastRestartAt < previewRestartBackoffMs) return
@@ -334,6 +336,9 @@ async function endpointReady(path: '/health' | '/inference', init?: RequestInit,
  * uses Turbo while its canonical live worker remains Large-v3. Failure is
  * cosmetic: every recovery/finalization path stays untouched. */
 export async function startWhisperPreviewServer(): Promise<void> {
+  // A revive already past its stop when shutdown landed must not spawn an orphan that
+  // outlives the server.
+  if (previewShutdown) return
   const requested = requestedPreviewModel()
   const selected = selectedPreviewModel(requested)
   if (!needsPreviewSidecar(selected) || previewProcess || previewAvailable || previewStarting) return
@@ -433,7 +438,8 @@ function waitForPreviewClose(child: ChildProcess, timeoutMs: number): Promise<bo
   })
 }
 
-export async function stopWhisperPreviewServer(): Promise<void> {
+export async function stopWhisperPreviewServer(options: { final?: boolean } = {}): Promise<void> {
+  if (options.final) previewShutdown = true
   const child = previewProcess
   previewProcess = null
   previewAvailable = false
