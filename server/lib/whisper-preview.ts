@@ -69,6 +69,80 @@ let previewFailure: WhisperPreviewReason = null
 let previewWorkerModel: WhisperPreviewSidecarModel | null = null
 let warnedInvalidChoice = false
 
+/**
+ * 6.50.2: a request that fails against a sidecar that is STILL RUNNING is a miss, not a
+ * death. Before this, one timeout (the Mac under load) or one refused fetch set
+ * `previewAvailable = false`, and its only writer back to true is the sidecar's own start,
+ * which runs once per server boot, so the meeting preview lane stayed silent for the rest
+ * of the process: 2026-09-17 16:00 to 2026-09-18 08:48 (34 h), 5,719 requests answered 204
+ * in under a millisecond while Turbo itself answered the same audio in 0.27 s.
+ *
+ * Now: a failure against a live sidecar starts a short cooldown and the next request after
+ * it tries again. PREVIEW_RECYCLE_AFTER_FAILURES in a row recycles the sidecar (stop, then
+ * start). A sidecar that is gone is restarted from the request path, backing off from
+ * PREVIEW_RESTART_BASE_MS to PREVIEW_RESTART_MAX_MS so a model that cannot load is not
+ * reloaded every minute. Any successful answer resets both counters.
+ */
+export const PREVIEW_FAILURE_COOLDOWN_MS = 10_000
+export const PREVIEW_RECYCLE_AFTER_FAILURES = 5
+export const PREVIEW_RESTART_BASE_MS = 60_000
+export const PREVIEW_RESTART_MAX_MS = 15 * 60_000
+let previewCooldownUntil = 0
+let previewConsecutiveFailures = 0
+let previewLastRestartAt = 0
+let previewRestartBackoffMs = PREVIEW_RESTART_BASE_MS
+
+function previewSidecarAlive(): boolean {
+  const child = previewProcess
+  return !!child && child.exitCode === null && child.signalCode === null
+}
+
+function notePreviewRequestSuccess(): void {
+  previewConsecutiveFailures = 0
+  previewCooldownUntil = 0
+  previewRestartBackoffMs = PREVIEW_RESTART_BASE_MS
+}
+
+/** A request to the sidecar failed (not a preemption). Cooldown, recycle, or mark it gone. */
+function notePreviewRequestFailure(error: unknown, label: string): void {
+  previewConsecutiveFailures++
+  const message = error instanceof Error ? error.message : String(error)
+  const at = new Date().toISOString()
+  if (previewSidecarAlive() && previewConsecutiveFailures < PREVIEW_RECYCLE_AFTER_FAILURES) {
+    previewCooldownUntil = Date.now() + PREVIEW_FAILURE_COOLDOWN_MS
+    console.warn(`[whisper-preview] ${at} ${label} failed (${previewConsecutiveFailures} in a row); next try in ${PREVIEW_FAILURE_COOLDOWN_MS / 1000} s: ${message}`)
+    return
+  }
+  const alive = previewSidecarAlive()
+  previewAvailable = false
+  previewWorkerModel = null
+  previewFailure = 'preview_sidecar_unavailable'
+  console.warn(`[whisper-preview] ${at} ${label} failed (${previewConsecutiveFailures} in a row); ${alive ? 'recycling the sidecar' : 'the sidecar is gone'}: ${message}`)
+  maybeRevivePreviewSidecar()
+}
+
+/**
+ * Bring a failed sidecar back, from the request path. Only for a sidecar that ran and then
+ * failed or exited: a missing model, a missing binary or a foreign listener on the port
+ * cannot be fixed by a restart and stay as they are.
+ */
+function maybeRevivePreviewSidecar(): void {
+  if (previewAvailable || previewStarting) return
+  if (previewFailure !== 'preview_sidecar_unavailable' && previewFailure !== 'preview_start_failed') return
+  const now = Date.now()
+  if (previewLastRestartAt && now - previewLastRestartAt < previewRestartBackoffMs) return
+  if (previewLastRestartAt) previewRestartBackoffMs = Math.min(previewRestartBackoffMs * 2, PREVIEW_RESTART_MAX_MS)
+  previewLastRestartAt = now
+  previewConsecutiveFailures = 0
+  console.log(`[whisper-preview] ${new Date(now).toISOString()} restarting the preview sidecar (${previewFailure}); next restart no sooner than ${Math.round(previewRestartBackoffMs / 1000)} s`)
+  void (async () => {
+    if (previewProcess) await stopWhisperPreviewServer()
+    await startWhisperPreviewServer()
+  })().catch(error => {
+    console.warn(`[whisper-preview] restart failed: ${error instanceof Error ? error.message : error}`)
+  })
+}
+
 interface ProcessEntry {
   pid: number
   ppid: number
@@ -395,27 +469,23 @@ export async function transcribeWhisperPreview(audioBuffer: Buffer): Promise<{
   model: 'small.en' | WhisperCommitModel
   backend: 'whisper-preview-server' | 'whisper-server'
   }> {
-  if (previewAvailable && previewWorkerModel) {
+  if (!previewAvailable) maybeRevivePreviewSidecar()
+  if (previewAvailable && previewWorkerModel && Date.now() >= previewCooldownUntil) {
     const workerModel = previewWorkerModel
     const previewLease = tryAcquireMetalPreview()
     if (!previewLease) {
       return { text: '', model: workerModel, backend: 'whisper-preview-server' }
     }
     try {
-      return {
-        text: await transcribeViaPreviewServer(audioBuffer, previewLease.signal),
-        model: workerModel,
-        backend: 'whisper-preview-server',
-      }
+      const text = await transcribeViaPreviewServer(audioBuffer, previewLease.signal)
+      notePreviewRequestSuccess()
+      return { text, model: workerModel, backend: 'whisper-preview-server' }
     } catch (error) {
       if (previewLease.signal.aborted) {
         return { text: '', model: workerModel, backend: 'whisper-preview-server' }
       }
-      const failedModel = previewWorkerModel
-      previewAvailable = false
-      previewWorkerModel = null
-      previewFailure = 'preview_sidecar_unavailable'
-      console.warn(`[whisper-preview] ${failedModel} preview failed; falling back to canonical worker: ${error instanceof Error ? error.message : error}`)
+      // Falls through to the canonical worker below for THIS request either way.
+      notePreviewRequestFailure(error, `${workerModel} preview`)
     } finally {
       previewLease.release()
     }
@@ -448,21 +518,20 @@ export async function transcribeWhisperMeetingPreview(audioBuffer: Buffer): Prom
   model: 'large-v3-turbo'
   backend: 'whisper-preview-server'
 } | null> {
+  if (!previewAvailable) maybeRevivePreviewSidecar()
   if (!previewAvailable || previewWorkerModel !== 'large-v3-turbo') return null
+  // A cooldown after a failed request is a quiet miss, never a latch (see above).
+  if (Date.now() < previewCooldownUntil) return null
   const previewLease = tryAcquireMetalPreview()
   if (!previewLease) return null
   try {
-    return {
-      text: await transcribeViaPreviewServer(audioBuffer, previewLease.signal),
-      model: 'large-v3-turbo',
-      backend: 'whisper-preview-server',
-    }
+    const text = await transcribeViaPreviewServer(audioBuffer, previewLease.signal)
+    notePreviewRequestSuccess()
+    return { text, model: 'large-v3-turbo', backend: 'whisper-preview-server' }
   } catch (error) {
     if (previewLease.signal.aborted) return null
-    previewAvailable = false
-    previewWorkerModel = null
-    previewFailure = 'preview_sidecar_unavailable'
-    console.warn(`[whisper-preview] meeting Turbo preview failed; canonical meeting ASR was not affected: ${error instanceof Error ? error.message : error}`)
+    // Canonical meeting ASR is not affected by any of this: the preview is cosmetic.
+    notePreviewRequestFailure(error, 'meeting Turbo preview')
     return null
   } finally {
     previewLease.release()

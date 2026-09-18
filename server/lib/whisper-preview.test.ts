@@ -297,3 +297,173 @@ describe('adaptive Whisper preview selection', () => {
     expect(spawn).not.toHaveBeenCalled()
   })
 })
+
+// 6.50.2: one failed request against a LIVE Turbo sidecar used to switch the meeting preview
+// off until the server restarted (34 h on 2026-09-17/18). Every test here drives the real
+// module through spawn and fetch fakes and a fake clock.
+describe('the meeting preview recovers from a failed request (6.50.2)', () => {
+  afterEach(() => {
+    delete process.env.COS_WHISPER_TRANSCRIPTION_TIER
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.doUnmock('node:fs')
+    vi.doUnmock('node:child_process')
+    vi.doUnmock('./whisper-local.js')
+    vi.resetModules()
+  })
+
+  async function bootTurbo(inference: (call: number) => Promise<unknown>) {
+    process.env.COS_WHISPER_TRANSCRIPTION_TIER = 'max'
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_789_700_000_000)
+    const children: Array<EventEmitter & { exitCode: number | null; signalCode: string | null; kill: ReturnType<typeof vi.fn> }> = []
+    const spawn = vi.fn(() => {
+      const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null as string | null, kill: vi.fn() })
+      child.kill.mockImplementation(() => { child.signalCode = 'SIGTERM'; queueMicrotask(() => child.emit('close', null)); return true })
+      children.push(child)
+      return child
+    })
+    const execFile = vi.fn((_f: string, _a: string[], _o: unknown, cb: (e: any, out: string) => void) => cb(Object.assign(new Error('no listeners'), { code: 1 }), ''))
+    vi.doMock('node:child_process', () => ({ spawn, execFile }))
+    vi.doMock('node:fs', async importOriginal => ({ ...(await importOriginal<typeof import('node:fs')>()), existsSync: () => true }))
+    vi.doMock('./whisper-local.js', () => ({
+      applyCorrections: (text: string) => text,
+      getWhisperCommitCapability: () => ({
+        requestedTier: 'max', effectiveTier: 'max', requestedModel: 'large-v3', effectiveModel: 'large-v3',
+        ready: true, configured: true, degraded: false, reason: null, promptPolicy: 'full-vocabulary',
+      }),
+      getWhisperHealth: () => ({ server: true }),
+      transcribeLocal: vi.fn(),
+    }))
+    let inferenceCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).endsWith('/health')) return { ok: true }
+      inferenceCalls++
+      return inference(inferenceCalls)
+    }))
+    const preview = await import('./whisper-preview.js')
+    await preview.startWhisperPreviewServer()
+    return { preview, spawn, children, calls: () => inferenceCalls }
+  }
+  const ok = (text: string) => ({ ok: true, json: async () => ({ text }) })
+  const audio = () => Buffer.alloc(3200, 1)
+
+  it('a timeout against a live sidecar is a cooldown, and the next request after it gets text', async () => {
+    const { preview, calls, spawn } = await bootTurbo(async n => {
+      if (n === 1) throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
+      return ok('back again')
+    })
+    await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toBeNull()
+    // Inside the cooldown: a quiet miss that does not even reach the sidecar.
+    vi.setSystemTime(Date.now() + preview.PREVIEW_FAILURE_COOLDOWN_MS - 1)
+    await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toBeNull()
+    expect(calls()).toBe(1)
+    // After it: the lane is live again. Before 6.50.2 this stayed null until a restart.
+    vi.setSystemTime(Date.now() + 2)
+    await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toEqual({
+      text: 'back again', model: 'large-v3-turbo', backend: 'whisper-preview-server',
+    })
+    expect(calls()).toBe(2)
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('a success resets the failure count, so scattered misses never add up to a recycle', async () => {
+    const { preview, spawn, children } = await bootTurbo(async n => {
+      if (n % 2 === 1) throw new Error('fetch failed')
+      return ok('fine')
+    })
+    for (let i = 0; i < 12; i++) {
+      await preview.transcribeWhisperMeetingPreview(audio())
+      vi.setSystemTime(Date.now() + preview.PREVIEW_FAILURE_COOLDOWN_MS + 1)
+    }
+    // A recycle kills the child SYNCHRONOUSLY inside the failing request; the respawn is
+    // async, so the kill is the observation that cannot race the assertion.
+    expect(children[0].kill).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('PREVIEW_RECYCLE_AFTER_FAILURES in a row recycles a live but broken sidecar, and it answers again', async () => {
+    let broken = true
+    const { preview, spawn, children } = await bootTurbo(async () => {
+      if (broken) throw new Error('fetch failed')
+      return ok('recycled')
+    })
+    for (let i = 0; i < preview.PREVIEW_RECYCLE_AFTER_FAILURES; i++) {
+      await preview.transcribeWhisperMeetingPreview(audio())
+      vi.setSystemTime(Date.now() + preview.PREVIEW_FAILURE_COOLDOWN_MS + 1)
+    }
+    // The recycle stops the old child and starts a new one.
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2))
+    expect(children[0].kill).toHaveBeenCalled()
+    broken = false
+    await vi.waitFor(async () => {
+      await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toMatchObject({ text: 'recycled' })
+    })
+  })
+
+  it('a sidecar that exited is restarted from the request path, backing off, never more than once per window', async () => {
+    const { preview, spawn, children } = await bootTurbo(async () => ok('restarted'))
+    // It exits on its own (crash, kill): the close handler marks it gone.
+    children[0].exitCode = 1
+    children[0].emit('close', 1)
+    await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toBeNull()
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2))
+    await vi.waitFor(async () => {
+      await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toMatchObject({ text: 'restarted' })
+    })
+    // A success reset the backoff. Now it dies and keeps dying with no success between.
+    const kill = (i: number) => { children[i].exitCode = 1; children[i].emit('close', 1) }
+    kill(1)
+    for (let i = 0; i < 5; i++) await preview.transcribeWhisperMeetingPreview(audio())
+    expect(spawn).toHaveBeenCalledTimes(2)
+    // One base window later: restart #2, and the window doubles.
+    vi.setSystemTime(Date.now() + preview.PREVIEW_RESTART_BASE_MS + 1)
+    await preview.transcribeWhisperMeetingPreview(audio())
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(3))
+    kill(2)
+    // Another base window is NOT enough any more: the model is not reloaded every minute.
+    vi.setSystemTime(Date.now() + preview.PREVIEW_RESTART_BASE_MS + 1)
+    await preview.transcribeWhisperMeetingPreview(audio())
+    // A restart spawns asynchronously (port probe first), so a NEGATIVE needs the loop to
+    // settle before it is read, or a wrongful spawn lands after the assertion.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(spawn).toHaveBeenCalledTimes(3)
+    // The doubled window is.
+    vi.setSystemTime(Date.now() + preview.PREVIEW_RESTART_BASE_MS)
+    await preview.transcribeWhisperMeetingPreview(audio())
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(4))
+  })
+
+  it('a foreign listener on the port is never re-probed from the request path', async () => {
+    // The start refuses a port someone else owns (reason preview_port_busy). A restart could
+    // not change that, so requests must not re-run the lsof/ps probe each time.
+    process.env.COS_WHISPER_TRANSCRIPTION_TIER = 'max'
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_789_700_000_000)
+    vi.doMock('node:fs', async importOriginal => ({ ...(await importOriginal<typeof import('node:fs')>()), existsSync: () => true }))
+    const spawn = vi.fn()
+    const execFile = vi.fn((file: string, _a: string[], _o: unknown, cb: (e: any, out: string) => void) => {
+      cb(null, file.endsWith('lsof') ? '9876\n' : '9876 1 /usr/local/bin/unrelated-health-service --port 8177\n')
+    })
+    vi.doMock('node:child_process', () => ({ spawn, execFile }))
+    vi.stubGlobal('fetch', vi.fn())
+    vi.doMock('./whisper-local.js', () => ({
+      applyCorrections: (t: string) => t,
+      getWhisperCommitCapability: () => ({ requestedTier: 'max', effectiveTier: 'max', requestedModel: 'large-v3', effectiveModel: 'large-v3', ready: true, configured: true, degraded: false, reason: null, promptPolicy: 'full-vocabulary' }),
+      getWhisperHealth: () => ({ server: true }),
+      transcribeLocal: vi.fn(),
+    }))
+    const preview = await import('./whisper-preview.js')
+    await preview.startWhisperPreviewServer()
+    expect(preview.getWhisperPreviewCapability()).toMatchObject({ reason: 'preview_port_busy' })
+    const probesAtBoot = execFile.mock.calls.length
+    expect(probesAtBoot).toBeGreaterThan(0)
+    for (let i = 0; i < 3; i++) {
+      await expect(preview.transcribeWhisperMeetingPreview(audio())).resolves.toBeNull()
+      vi.setSystemTime(Date.now() + preview.PREVIEW_RESTART_MAX_MS + 1)
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(execFile.mock.calls.length).toBe(probesAtBoot)
+    expect(spawn).not.toHaveBeenCalled()
+  })
+})
