@@ -353,6 +353,34 @@ const CASES = [
     tests: ['server/lib/session-signal-store.test.ts'],
   },
   {
+    name: 'referee-hands-over-mid-meeting',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  if (captureLive) return { owner, verdict: 'yield', took: false }\n",
+    replace: "\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-future-boot-accepted',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  if (o.bootAt > now + CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS) return null\n",
+    replace: "\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-one-owner-for-all-devices',
+    file: 'server/routes/client-instance.ts',
+    find: "    const device = deviceKey(req.socket?.remoteAddress ?? req.ip)\n",
+    replace: "    const device = 'all'\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-capture-probe-unwired',
+    file: 'server/index.ts',
+    find: "app.use('/api', createClientInstanceRouter({ lastRecordingChunkAt }))\n",
+    replace: "app.use('/api', createClientInstanceRouter())\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
     name: 'referee-check-takes-the-ring',
     file: 'server/routes/client-instance.ts',
     find: "    if (req.body?.check === true) {\n",
@@ -376,7 +404,7 @@ const CASES = [
   {
     name: 'referee-not-mounted',
     file: 'server/index.ts',
-    find: "app.use('/api', createClientInstanceRouter())\n",
+    find: "app.use('/api', createClientInstanceRouter({ lastRecordingChunkAt }))\n",
     replace: "\n",
     tests: ['server/routes/client-instance.test.ts'],
   },

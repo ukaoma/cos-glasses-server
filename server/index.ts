@@ -42,7 +42,7 @@ import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
-import { transcribeStreamRouter } from './routes/transcribe-stream.js'
+import { transcribeStreamRouter, lastRecordingChunkAt } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
@@ -532,7 +532,7 @@ const forkThreadForRoute = (request: {
 app.use('/api', healthRouter)
 app.use('/api', diagRouter)
 // 6.50.3: the referee between copies of the COS Glasses app (routes/client-instance.ts).
-app.use('/api', createClientInstanceRouter())
+app.use('/api', createClientInstanceRouter({ lastRecordingChunkAt }))
 app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))

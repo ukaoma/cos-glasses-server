@@ -16,6 +16,13 @@
 export const CLIENT_INSTANCE_TICK_MS = 15_000
 /** Three missed ticks: the owner is gone. */
 export const CLIENT_INSTANCE_LIVE_MS = 3 * CLIENT_INSTANCE_TICK_MS
+/**
+ * 6.50.4: a meeting chunk inside this window means a recording is live. Five chunk
+ * intervals (~6 s each), so a stretch of silence or a slow upload does not end the hold.
+ */
+export const CLIENT_INSTANCE_CAPTURE_LIVE_MS = 30_000
+/** A boot time this far past the server clock is a phone clock set wrong, not a newer copy. */
+export const CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS = 60 * 60_000
 
 export interface ClientInstanceClaim {
   id: string
@@ -32,11 +39,14 @@ export type ClientInstanceVerdict = 'owner' | 'yield'
 const ID_PATTERN = /^[a-z0-9]{1,16}-[a-z0-9]{1,8}$/
 
 /** A body the route may act on, or null. Never throws. */
-export function parseClientInstanceClaim(body: unknown): ClientInstanceClaim | null {
+export function parseClientInstanceClaim(body: unknown, now = Date.now()): ClientInstanceClaim | null {
   if (!body || typeof body !== 'object') return null
   const o = body as Record<string, unknown>
   if (typeof o.id !== 'string' || !ID_PATTERN.test(o.id)) return null
   if (typeof o.bootAt !== 'number' || !Number.isFinite(o.bootAt) || o.bootAt <= 0) return null
+  // A copy that booted with the phone clock set ahead would outrank every later copy for
+  // as long as the clock stayed wrong (QA, 6.50.3).
+  if (o.bootAt > now + CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS) return null
   const version = typeof o.version === 'string' ? o.version.slice(0, 32) : ''
   return { id: o.id, bootAt: o.bootAt, version }
 }
@@ -50,10 +60,18 @@ export function arbitrateClientInstance(
   owner: ClientInstanceOwner | null,
   claim: ClientInstanceClaim,
   now: number,
+  captureLive = false,
 ): { owner: ClientInstanceOwner; verdict: ClientInstanceVerdict; took: boolean } {
   const fresh: ClientInstanceOwner = { ...claim, seenAt: now }
   if (!owner) return { owner: fresh, verdict: 'owner', took: true }
   if (owner.id === claim.id) return { owner: { ...owner, seenAt: now }, verdict: 'owner', took: false }
+  // 6.50.4: NEVER hand the ring over mid-meeting. The yielding copy stops its recording
+  // (that is how a duplicate ends), so a transfer during a live meeting ended the
+  // meeting whenever Miles reopened COS on a blank phone page (QA, 6.50.3). A chunk in
+  // the last CLIENT_INSTANCE_CAPTURE_LIVE_MS proves the recording copy is alive, however
+  // quiet its claims (a hidden WebView throttles its timers). The newer copy waits; the
+  // ring moves on its first claim after the meeting stops.
+  if (captureLive) return { owner, verdict: 'yield', took: false }
   if (isNewer(claim, owner)) return { owner: fresh, verdict: 'owner', took: true }
   if (now - owner.seenAt > CLIENT_INSTANCE_LIVE_MS) return { owner: fresh, verdict: 'owner', took: true }
   return { owner, verdict: 'yield', took: false }
