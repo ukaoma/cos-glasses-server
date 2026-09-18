@@ -353,6 +353,27 @@ const CASES = [
     tests: ['server/lib/session-signal-store.test.ts'],
   },
   {
+    name: 'referee-dead-owner-never-released',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  if (now - owner.seenAt > CLIENT_INSTANCE_LIVE_MS) return { owner: fresh, verdict: 'owner', took: true }\n",
+    replace: "\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-older-boot-wins',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  return a.bootAt > b.bootAt || (a.bootAt === b.bootAt && a.id > b.id)\n",
+    replace: "  return a.bootAt < b.bootAt || (a.bootAt === b.bootAt && a.id > b.id)\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-not-mounted',
+    file: 'server/index.ts',
+    find: "app.use('/api', createClientInstanceRouter())\n",
+    replace: "\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
     name: 'preview-revives-after-shutdown',
     file: 'server/lib/whisper-preview.ts',
     find: "  if (previewShutdown || previewAvailable || previewStarting) return\n",

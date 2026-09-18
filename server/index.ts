@@ -14,6 +14,7 @@ import { execSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { diagRouter } from './routes/diag.js'
+import { createClientInstanceRouter } from './routes/client-instance.js'
 import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
@@ -530,6 +531,8 @@ const forkThreadForRoute = (request: {
 // API routes
 app.use('/api', healthRouter)
 app.use('/api', diagRouter)
+// 6.50.3: the referee between copies of the COS Glasses app (routes/client-instance.ts).
+app.use('/api', createClientInstanceRouter())
 app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
