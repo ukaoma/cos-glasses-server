@@ -9,13 +9,19 @@
 //
 // 6.50.4: one owner PER DEVICE (the request's address), so an Even simulator on this Mac or
 // a second phone on the same token cannot take the ring from the glasses (QA, 6.50.3); and
-// no handover while a meeting chunk arrived in the last 30 s (`captureLive`).
+// the ring never moves in a way that stops the only recording. The router notes every
+// meeting-chunk POST as it passes (it is mounted BEFORE the transcribe-stream router, and
+// only notes, never answers): whose chunk it was (`?clientInstance=`, glasses 6.9.509+) or,
+// untagged, which device sent it. `captureLive` in the answer: the owner is recording.
 
 import { Router } from 'express'
 import {
   arbitrateClientInstance,
+  ownerIsRecording,
   parseClientInstanceClaim,
-  CLIENT_INSTANCE_CAPTURE_LIVE_MS,
+  parseInstanceTag,
+  ClientChunkLedger,
+  NO_CAPTURE,
   type ClientInstanceOwner,
 } from '../lib/client-instance-claim.js'
 
@@ -24,8 +30,11 @@ export const CLIENT_INSTANCE_MAX_DEVICES = 16
 
 export interface ClientInstanceRouterDeps {
   now?: () => number
-  /** Newest meeting-chunk arrival (ms since epoch), or 0 when none. */
-  lastRecordingChunkAt?: () => number
+}
+
+/** A POST that carries a meeting chunk: a live one, or an iPhone offline chunk replayed. The preview is not one. */
+export function isMeetingChunkPost(method: string, path: string): boolean {
+  return method === 'POST' && (path === '/transcribe-stream' || /^\/transcribe-stream\/offline-sessions\/[^/]+\/chunks$/.test(path))
 }
 
 /** `::ffff:100.64.1.2` and `100.64.1.2` are one device. */
@@ -37,17 +46,22 @@ export function deviceKey(address: string | undefined): string {
 export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() => number) = {}): Router {
   const opts: ClientInstanceRouterDeps = typeof deps === 'function' ? { now: deps } : deps
   const now = opts.now ?? Date.now
-  const lastChunkAt = opts.lastRecordingChunkAt ?? (() => 0)
   const router = Router()
   const owners = new Map<string, ClientInstanceOwner>()
+  const chunks = new ClientChunkLedger()
+  router.use((req, _res, next) => {
+    if (isMeetingChunkPost(req.method, req.path)) chunks.note(deviceKey(req.socket?.remoteAddress ?? req.ip), parseInstanceTag(req.query?.clientInstance), now())
+    next()
+  })
   router.post('/client-instance/claim', (req, res) => {
     const at = now()
     const claim = parseClientInstanceClaim(req.body, at)
     if (!claim) return void res.status(400).json({ error: 'invalid_claim' })
     const device = deviceKey(req.socket?.remoteAddress ?? req.ip)
     const previous = owners.get(device) ?? null
-    const captureLive = at - lastChunkAt() < CLIENT_INSTANCE_CAPTURE_LIVE_MS
-    const result = arbitrateClientInstance(previous, claim, at, captureLive)
+    const evidence = previous ? chunks.evidence(device, previous.id, claim.id, at) : NO_CAPTURE
+    const captureLive = previous ? ownerIsRecording(previous, evidence, at) : false
+    const result = arbitrateClientInstance(previous, claim, at, evidence)
     if (req.body?.check === true) {
       const shown = previous ?? result.owner
       return void res.json({ verdict: result.verdict, owner: { id: shown.id, bootAt: shown.bootAt, version: shown.version, seenAt: shown.seenAt }, check: true, captureLive })

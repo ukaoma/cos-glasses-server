@@ -356,19 +356,6 @@ export function getActiveTranscriptionSessionCount(): number {
 }
 
 /**
- * 6.50.4: the newest chunk ARRIVAL across open sessions (ms), or 0. `lastActivityAt` is
- * stamped on arrival, before any filtering, so a live recording in a silent room still
- * moves it. The client-instance referee reads it to never hand the ring over mid-meeting.
- */
-export function lastRecordingChunkAt(): number {
-  let newest = 0
-  for (const session of sessions.values()) {
-    if (typeof session.lastActivityAt === 'number' && session.lastActivityAt > newest) newest = session.lastActivityAt
-  }
-  return newest
-}
-
-/**
  * How long a session may go silent before it stops BLOCKING a restart.
  *
  * Not a retention policy and not a reap: the session, its chunks and its
