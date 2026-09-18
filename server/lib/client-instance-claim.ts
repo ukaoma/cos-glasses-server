@@ -30,6 +30,12 @@ export interface ClientInstanceClaim {
   id: string
   bootAt: number
   version: string
+  /**
+   * The copy says it is recording (glasses 6.9.509+; false when absent). Chunk arrival
+   * alone lags: after an outage the uploader backs off up to 60 s, and only a visible page
+   * or a display reconnect resets it, which a hidden recording copy never gets (QA round 3).
+   */
+  recording: boolean
 }
 
 export interface ClientInstanceOwner extends ClientInstanceClaim {
@@ -86,15 +92,15 @@ export class ClientChunkLedger {
 }
 
 /**
- * Whether the owner is recording, as far as the chunks can tell. Its own tagged chunks are
- * proof however quiet its claims (a hidden or locked WebView throttles its timers; chunk
- * uploads follow the audio, not the timers). Untagged chunks prove only that SOMEONE on the
- * device records, so they count for the owner only while it is still claiming: a dead
- * owner must never be pinned by the chunks of the copy that replaced it (QA round 2).
+ * Whether the owner is recording. Its own tagged chunks are proof however quiet its claims
+ * (a hidden or locked WebView throttles its timers; chunk uploads follow the audio). Its
+ * own last claim saying `recording`, and untagged chunks from the device (which could be
+ * anyone's), count only while it is still claiming: a dead owner must never be pinned by
+ * a stale flag or by the chunks of the copy that replaced it (QA round 2).
  */
 export function ownerIsRecording(owner: ClientInstanceOwner, evidence: CaptureEvidence, now: number): boolean {
   if (evidence.owner) return true
-  return evidence.untagged && now - owner.seenAt <= CLIENT_INSTANCE_LIVE_MS
+  return (owner.recording || evidence.untagged) && now - owner.seenAt <= CLIENT_INSTANCE_LIVE_MS
 }
 
 /** A body the route may act on, or null. Never throws. */
@@ -107,7 +113,7 @@ export function parseClientInstanceClaim(body: unknown, now = Date.now()): Clien
   // as long as the clock stayed wrong (QA, 6.50.3).
   if (o.bootAt > now + CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS) return null
   const version = typeof o.version === 'string' ? o.version.slice(0, 32) : ''
-  return { id: o.id, bootAt: o.bootAt, version }
+  return { id: o.id, bootAt: o.bootAt, version, recording: o.recording === true }
 }
 
 function isNewer(a: ClientInstanceClaim, b: ClientInstanceClaim): boolean {
@@ -123,13 +129,14 @@ export function arbitrateClientInstance(
 ): { owner: ClientInstanceOwner; verdict: ClientInstanceVerdict; took: boolean } {
   const fresh: ClientInstanceOwner = { ...claim, seenAt: now }
   if (!owner) return { owner: fresh, verdict: 'owner', took: true }
-  if (owner.id === claim.id) return { owner: { ...owner, seenAt: now }, verdict: 'owner', took: false }
+  if (owner.id === claim.id) return { owner: { ...owner, seenAt: now, recording: claim.recording }, verdict: 'owner', took: false }
   // 6.50.4: the yielding copy stops its recording (that is how a duplicate ends), so the
   // ring must never move in a way that stops the only recording.
   // (1) The claimant is recording and the owner is not: the claimant is the meeting.
   // Reopened offline, the Mac still names the dead copy from before; when signal returns,
   // the new copy's chunks land first and its claim must not be told to stop (QA round 2).
-  if (evidence.claimant && !evidence.owner) return { owner: fresh, verdict: 'owner', took: true }
+  // Its chunks or its own word: after an outage the uploads lag the claims (QA round 3).
+  if ((evidence.claimant || claim.recording) && !ownerIsRecording(owner, evidence, now)) return { owner: fresh, verdict: 'owner', took: true }
   // (2) The owner is recording: a newer copy waits, however quiet the owner's claims.
   // Reopening COS on a blank phone page mid-meeting ended the meeting on 6.50.3 (QA).
   // The ring moves on the newer copy's first claim after the meeting stops.
