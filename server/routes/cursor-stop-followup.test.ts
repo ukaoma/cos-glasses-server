@@ -160,6 +160,22 @@ describe(`POST ${CURSOR_STOP_FOLLOWUP_PATH}`, () => {
     expect(readQueue('cursor', CONV, 9_000)[0]!.status).toBe('waiting')
   })
 
+  it('6.52.0: checks the hook token BEFORE the body is parsed (the route now sits ahead of the global parser)', async () => {
+    writeQueue('cursor', CONV, [turn('one')])
+    const raw = (headers: Record<string, string>, body: string) => fetch(`${base}${CURSOR_STOP_FOLLOWUP_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body })
+    // Not JSON, and over the route's own 2 MB limit: without the token the answer is 401,
+    // which a parser that ran first could never have produced.
+    for (const body of ['{not json', `{"pad":"${'x'.repeat(2_200_000)}"}`]) {
+      expect((await raw({}, body)).status).toBe(401)
+      expect((await raw({ 'x-cos-hook-token': 'nope' }, body)).status).toBe(401)
+    }
+    // With the token the parser runs, and refuses.
+    expect((await raw({ 'x-cos-hook-token': 'hook-tok' }, '{not json')).status).toBe(400)
+    expect((await raw({ 'x-cos-hook-token': 'hook-tok' }, `{"pad":"${'x'.repeat(2_200_000)}"}`)).status).toBe(413)
+    expect(writes).toEqual([])
+    expect(readQueue('cursor', CONV, 9_000)[0]!.status).toBe('waiting')
+  })
+
   it('never claims for a hook that already hung up (the reply would go nowhere)', () => {
     writeQueue('cursor', CONV, [turn('one')])
     const router = createCursorStopFollowupRouter({ hookToken: () => 'hook-tok', readQueue, writeQueue: () => { throw new Error('must not write') }, now: () => 9_000 })

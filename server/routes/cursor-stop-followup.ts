@@ -4,11 +4,13 @@
 // NOT under /api, on purpose. The hook holds the per-install HOOK token
 // (`~/.cos-glasses/hook-token`, 0600), never the pairing token the /api gate checks, and
 // widening that gate for one caller would be the larger change. This route checks the
-// hook token itself, in constant time, before it reads anything. It answers only `{}` or
-// `{"followup_message": ...}` so the hook can print it verbatim, and it never answers
-// with anything a Claude Stop could act on: a body that is not a Cursor Stop is `{}`.
+// hook token itself, in constant time, BEFORE its body is read or parsed (6.52.0: it is
+// mounted ahead of the global 10 MB parser, and its own 2 MB parser runs only after the
+// token check). It answers only `{}` or `{"followup_message": ...}` so the hook can print
+// it verbatim, and it never answers with anything a Claude Stop could act on: a body that
+// is not a Cursor Stop is `{}`.
 
-import express, { Router, type Request, type Response } from 'express'
+import express, { Router, type NextFunction, type Request, type Response } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { claimNextCursorTurn, cursorStopAcceptsFollowup, cursorStopIsFresh, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
 import { MAX_QUEUED_PER_THREAD, type QueuedThreadTurn } from '../lib/thread-turn-queue.js'
@@ -25,14 +27,19 @@ export const CURSOR_STOP_FOLLOWUP_PATH = '/hooks/cursor/stop-followup'
 
 export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Router {
   const router = Router()
-  // The hook posts its spool envelope, capped at 1 MiB by the script itself.
-  router.post(CURSOR_STOP_FOLLOWUP_PATH, express.json({ limit: '2mb' }), (req: Request, res: Response) => {
+  // The token first, then the body: the hook posts its spool envelope, capped at 1 MiB by
+  // the script itself.
+  const requireHookToken = (req: Request, res: Response, next: NextFunction): void => {
     res.set('Cache-Control', 'private, no-store')
     let expected: string | null = null
     try { expected = deps.hookToken() } catch { expected = null }
     if (!expected || !timingSafeTokenEqual(req.headers['x-cos-hook-token'], expected)) {
-      return res.status(401).json({})
+      res.status(401).json({})
+      return
     }
+    next()
+  }
+  router.post(CURSOR_STOP_FOLLOWUP_PATH, requireHookToken, express.json({ limit: '2mb' }), (req: Request, res: Response) => {
     const facts = parseCursorStopEnvelope(req.body)
     if (!facts || !cursorStopAcceptsFollowup(facts, MAX_QUEUED_PER_THREAD)) return res.json({})
     // The hook waits three seconds and then moves on. A claim made after it stopped

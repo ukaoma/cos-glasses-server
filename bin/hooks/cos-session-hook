@@ -1,17 +1,10 @@
 #!/bin/sh
-# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; permission route 6.52.0). Installed into ~/.claude/settings.json by
+# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0). Installed into ~/.claude/settings.json by
 # `--hooks install`; Claude Code runs it with the hook event name as $1 and the event
 # payload on stdin. It spools one JSON file per event into the hook spool and exits 0
 # on every path. Only PermissionRequest ever talks to the server, and only when the
 # desk has been idle. Everything else is a file write, so the server being down or
 # restarting never delays a Claude session.
-#
-# 6.52.0: a PermissionRequest posts to /hooks/permission-requests/ask (outside /api,
-# hook-token auth; the old /api/permission-requests/ask was never served and the /api
-# gate answered it 401). The server parks a question or an approval only while the desk
-# stays idle and a COS lens or phone client is live, and answers {} otherwise. Anything
-# but a {"hookSpecificOutput" body (a 401, a 404 from an older server, a timeout) prints
-# nothing, so the native dialog shows, as before.
 #
 # The installer bakes COS_GLASSES_HOME and COS_HOOK_SPOOL into the command, so this
 # script and the server can never disagree about where the token or the spool is.
@@ -67,7 +60,7 @@ DESK_S=$(cat "$GH/hook-desk-idle-s" 2>/dev/null || echo 90)
 TOK=$(cat "$GH/hook-token" 2>/dev/null); [ -n "$TOK" ] || { cleanup; exit 0; }   # no token, no request
 PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
 OUT=$(curl -s --connect-timeout 2 --max-time 125 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
-  --data-binary @"$T.req" "http://127.0.0.1:$PORT/hooks/permission-requests/ask") || { cleanup; exit 0; }
+  --data-binary @"$T.req" "http://127.0.0.1:$PORT/api/permission-requests/ask") || { cleanup; exit 0; }
 cleanup
 case "$OUT" in '{"hookSpecificOutput"'*) printf '%s' "$OUT" ;; esac
 exit 0

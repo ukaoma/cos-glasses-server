@@ -220,6 +220,45 @@ app.use(cors({
   // reader to conclude the server had stopped sending Range headers.
   exposedHeaders: ['Content-Range', 'Accept-Ranges'],
 }))
+// 6.52.0: the permission broker. A session question (AskUserQuestion) or a tool approval,
+// answered from the lens or the phone while the desk is idle and a client that can answer
+// has polled `GET /api/session-questions?client=glasses|phone` in the last 30 s
+// (lib/permission-broker.ts). An app without the question UI never polls, so for it every
+// request is `{}`. `COS_PERMISSION_BROKER=0` is the switch, read per request, and every
+// request outside the gate is answered `{}` at once.
+const permissionBroker = new PermissionBroker({
+  now: () => Date.now(),
+  mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
+  admissionsOpen: maintenanceAdmissionsOpen,
+  lastQuestionsPollAt,
+  readDeskIdleSeconds: readHidIdleSeconds,
+  deskIdleSeconds,
+  timeoutMs: () => permissionBrokerTimeoutMs(process.env),
+  signals: brokerSignalSink(sessionSignalStore),
+})
+registerPermissionBroker(permissionBroker)
+wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)
+
+// THE TWO HOOK-TOKEN DOORS, deliberately BEFORE the /api gate and the global body parser.
+// Each checks the per-install hook token (never the pairing token) in constant time before
+// it reads a byte of the body, then parses at most 2 MB itself. The broker's door is
+// `POST /api/permission-requests/ask`: the URL the 6.51.0 hook script already calls, so no
+// Mac reinstalls the hook. Only that method and path are exempt from the /api gate; any
+// other method there still needs the API token. The Cursor Stop door is outside /api and is
+// registered exactly when it always was (`threadAttachEnabled()`), only earlier, so a
+// request without the hook token no longer costs a 10 MB parse.
+app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))
+if (threadAttachEnabled()) {
+  // 6.51.0: a queued Cursor turn leaves ONLY through the composer's own Stop hook (the
+  // drainer skips Cursor, see `drainThread`).
+  app.use(createCursorStopFollowupRouter({
+    hookToken: readHookToken,
+    readQueue,
+    writeQueue,
+    now: () => Date.now(),
+  }))
+}
+
 // Auth middleware — always active (token is auto-generated if not set).
 // Mounted before body parsers so rejected uploads cannot consume parse memory.
 // Two capability-URL exceptions: a canonical /tts/play/<UUID> GET/HEAD (minted by
@@ -585,25 +624,9 @@ app.use('/api', agentSessionStreamRouter)
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)
 app.use('/api', createSessionHooksRouter({ port: PORT }))
-// 6.52.0: the permission broker. A session question (AskUserQuestion) or a tool approval,
-// answered from the lens or the phone while the desk is idle and a client that can answer
-// has polled `GET /api/session-questions` in the last 60 s (lib/permission-broker.ts).
-// An app without the question UI never polls, so for it every request is `{}`. The hook's door is OUTSIDE /api with hook-token auth, like
-// the Cursor Stop route, and mounted unconditionally: `COS_PERMISSION_BROKER=0` is the
-// switch, read per request, and every request outside the gate is answered `{}` at once.
-const permissionBroker = new PermissionBroker({
-  now: () => Date.now(),
-  mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
-  admissionsOpen: maintenanceAdmissionsOpen,
-  lastQuestionsPollAt,
-  readDeskIdleSeconds: readHidIdleSeconds,
-  deskIdleSeconds,
-  timeoutMs: () => permissionBrokerTimeoutMs(process.env),
-  signals: brokerSignalSink(sessionSignalStore),
-})
-registerPermissionBroker(permissionBroker)
-wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)
-app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))
+// 6.52.0: the permission broker's client API (the hook's door is mounted before the /api
+// gate, above). Behind the API token; a poll counts as a live answerer only with
+// `?client=glasses|phone`.
 app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN }))
 // Phase 0 of Continue Original Agent Thread: can COS write into a desktop thread
 // without colliding with a live writer? Read-only — it answers, it never attaches.
@@ -738,14 +761,7 @@ if (threadAttachEnabled()) {
     now: () => Date.now(),
   }
   app.use('/api', createThreadTurnQueueRouter(queueDeps))
-  // 6.51.0: a queued Cursor turn leaves ONLY through the composer's own Stop hook (the
-  // drainer skips Cursor, see `drainThread`). Hook-token auth, outside /api.
-  app.use(createCursorStopFollowupRouter({
-    hookToken: readHookToken,
-    readQueue,
-    writeQueue,
-    now: () => Date.now(),
-  }))
+  // The Cursor Stop door is mounted before the /api gate and the body parser (see there).
 
   // Every 20s. Fast enough that a freed thread drains while the user is still looking
   // at the pending row, slow enough to be nothing: the sweep does no work at all when

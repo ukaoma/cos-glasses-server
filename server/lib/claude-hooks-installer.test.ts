@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -10,6 +11,7 @@ import {
   hookStatus,
   installClaudeHooks,
   mergeHookSettings,
+  packagedHookScriptPath,
   shellQuote,
   stripHookSettings,
   subscribedEvents,
@@ -200,6 +202,25 @@ describe('install and uninstall on disk', () => {
       const gone = hookStatus({ settingsPath, packageScriptPath, scriptPath })
       expect(gone.state).toBe('missing')
       expect(gone.installed).toBe(false)
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('6.52.0: an existing 6.51.0 install reads installed, never script_outdated (no reinstall)', () => {
+    const { settingsPath, scriptPath, root } = sandbox()
+    process.env.COS_GLASSES_HOME = join(root, 'home')
+    try {
+      // The script this package ships IS the 6.51.0 script (b58af26), byte for byte.
+      const shipped = packagedHookScriptPath()
+      expect(createHash('sha256').update(readFileSync(shipped)).digest('hex')).toBe('0a55756de9c88d7dc7a37fadb1ab627d55bb37ba27965178797423656d1df20a')
+      // A Mac that ran 6.51.0's `--hooks install`: its settings entries (the subscriptions
+      // did not change) and that script in ~/.cos-glasses/bin.
+      installClaudeHooks({ settingsPath, packageScriptPath: shipped, scriptPath, port: 3141 })
+      copyFileSync(shipped, scriptPath)
+      const status = hookStatus({ settingsPath, packageScriptPath: shipped, scriptPath })
+      expect(status.state).toBe('installed')
+      expect(status.installed).toBe(true)
     } finally {
       delete process.env.COS_GLASSES_HOME
     }
