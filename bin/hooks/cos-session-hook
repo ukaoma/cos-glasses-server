@@ -1,5 +1,5 @@
 #!/bin/sh
-# COS session hook (glasses-server 6.48.0). Installed into ~/.claude/settings.json by
+# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0). Installed into ~/.claude/settings.json by
 # `--hooks install`; Claude Code runs it with the hook event name as $1 and the event
 # payload on stdin. It spools one JSON file per event into the hook spool and exits 0
 # on every path. Only PermissionRequest ever talks to the server, and only when the
@@ -23,6 +23,21 @@ T="$SPOOL/.tmp.$$.$TS"; head -c 1048576 > "$T.in"                    # stdin to 
 case "$(head -c 1 "$T.in")" in '{') ;; *) EVENT=rejected ;; esac
 { printf '{"ts":%s,"ppid":%s,"event":"%s","payload":' "$TS" "$PPID" "$EVENT"; cat "$T.in"; printf '}\n'; } > "$T"
 rm -f "$T.in"
+# 6.51.0, CURSOR ONLY. Cursor runs this hook from ~/.claude/settings.json for its own
+# composers, and submits a Stop hook's {"followup_message":...} as that composer's next
+# message. A turn COS queued for the composer is handed over here, at the end of its turn.
+# Claude Code sets no CURSOR_VERSION and sends no cursor_version, so a Claude Stop takes
+# the line below this block exactly as before and never touches the network.
+if [ "$EVENT" = Stop ] && [ -n "${CURSOR_VERSION:-}" ] && grep -q '"cursor_version":"' "$T" 2>/dev/null; then
+  cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
+  TOK=$(cat "$GH/hook-token" 2>/dev/null); PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
+  if [ -n "$TOK" ] && [ -f "$T.req" ]; then
+    OUT=$(curl -s --connect-timeout 1 --max-time 3 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
+      --data-binary @"$T.req" "http://127.0.0.1:$PORT/hooks/cursor/stop-followup") || OUT=''
+    case "$OUT" in '{"followup_message"'*) printf '%s' "$OUT" ;; esac
+  fi
+  rm -f "$T.req"; exit 0
+fi
 if [ "$EVENT" != PermissionRequest ]; then mv "$T" "$SPOOL/$TS-$$-$EVENT.json"; exit 0; fi   # rename = publish
 # A permission request keeps its own copy: the server unlinks the published file within
 # milliseconds of the rename, and the request body below must outlive that.

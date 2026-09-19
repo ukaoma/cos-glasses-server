@@ -112,13 +112,49 @@ describe('parking a turn at a busy thread', () => {
     expect(res.json).toMatchObject({ error: 'unsupported_provider', queueable: false })
   })
 
-  it('refuses cursor even when occupancy would otherwise look busy', async () => {
+  // 6.51.0: Cursor queues ONLY a composer its own hooks show mid-turn (occupancy says
+  // `native_thread_working` for exactly that), because its Stop hook is the only way in.
+  // Every other reason refuses as before, including ones that are queueable for Claude
+  // and Codex: for Cursor nothing but a Stop hook can ever deliver.
+  it('refuses cursor for every reason but a hook-proven turn in progress', async () => {
+    await start()
+    for (const reason of ['unsupported_provider', 'probe_failed', 'live_desktop_process', 'native_target_busy', null]) {
+      gate = { attachable: reason === null, reason }
+      const res = await http('POST', `/api/agent-sessions/cursor/${threadId}/queued-turns`, {
+        clientTurnId: `ct-cursor-${String(reason)}`, cosSessionId: 'cos-1', prompt: 'x',
+      })
+      expect(res.status, String(reason)).toBe(423)
+      expect(res.json, String(reason)).toMatchObject({ error: 'unsupported_provider', queueable: false })
+    }
+    expect(readQueue('cursor', threadId, clock)).toEqual([])
+  })
+
+  it('parks a cursor turn when the hooks show that composer mid-turn', async () => {
+    gate = { attachable: false, reason: 'native_thread_working' }
     await start()
     const res = await http('POST', `/api/agent-sessions/cursor/${threadId}/queued-turns`, {
-      clientTurnId: 'ct-1', cosSessionId: 'cos-1', prompt: 'x',
+      clientTurnId: 'ct-cursor-1', cosSessionId: 'cos-1', prompt: 'after this turn',
     })
-    expect(res.status).toBe(423)
-    expect(res.json).toMatchObject({ error: 'unsupported_provider', queueable: false })
+    expect(res.status).toBe(202)
+    expect(res.json).toMatchObject({ queued: true, position: 0, waitingOn: 'native_thread_working' })
+    expect(readQueue('cursor', threadId, clock).map(t => t.status)).toEqual(['waiting'])
+  })
+
+  it('never drains a cursor turn itself, even when everything looks ready; the TTL still retires it', async () => {
+    gate = { attachable: true, reason: null }
+    ended = true; activity = 'idle'
+    writeQueue('cursor', threadId, [{
+      clientTurnId: 'ct-cursor-2', cosSessionId: 'cos-1', provider: 'cursor', threadId, prompt: 'x',
+      queuedAt: clock, status: 'waiting', attempts: 0,
+    }])
+    const held = await drainThread('cursor', threadId, deps())
+    expect(held).toEqual({ delivered: 0, held: 1, retired: 0 })
+    expect(delivered).toEqual([])
+    clock += QUEUED_TURN_TTL_MS
+    const later = await drainThread('cursor', threadId, deps())
+    expect(later.retired).toBe(1)
+    expect(delivered).toEqual([])
+    expect(readQueue('cursor', threadId, clock)[0]).toMatchObject({ status: 'expired', reason: 'queued_turn_expired' })
   })
 
   it('rejects a duplicate id, so a retried request cannot double-post', async () => {

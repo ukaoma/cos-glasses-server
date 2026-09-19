@@ -29,6 +29,7 @@ import {
   ATTACHABLE_COPY,
   LIVE_VERIFY_BUDGET_MS,
   REASON_COPY,
+  TURN_SENT_CODEX_QUEUE_COPY,
   UNKNOWN_REASON_COPY,
   WRITE_REASON_COPY,
   createAgentSessionBindingsRouter,
@@ -2235,6 +2236,20 @@ describe('every way a write can be refused reaches the wire with words', () => {
     { reason: 'delivery_ambiguous', run: () => oneTurn({ deliverAttachedTurn: async () => ({ status: '?' }) }) },
     // 6.49.0: the live transport wrote a frame it could not see accepted.
     { reason: 'live_unverified', run: () => oneTurn({ deliverLiveTurn: async () => ({ ok: false, reason: 'unverified' }) }) },
+    // 6.51.0: the Codex app holds the thread and `codex queue` took nothing.
+    {
+      reason: 'codex_live_unavailable',
+      run: async () => {
+        const base = await start(writeDeps({
+          probes: probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() - 10 * 60_000 }),
+          deliverCodexLiveTurn: async () => ({ ok: false, reason: 'refused' }),
+        }))
+        const res = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+        return post(base, turnsPath(res.body.bindingId), {
+          prompt: PROMPT, epoch: res.body.epoch, targetKey: targetKey('codex', CODEX_THREAD), boundTo: res.body.boundTo, clientTurnId: 'ct-auto-codex',
+        })
+      },
+    },
     {
       reason: 'turn_failed',
       run: () => turnOnFake(fakeReg(fakeBinding(), { get: () => { throw new Error('EIO') } })),
@@ -3286,6 +3301,164 @@ describe('6.49.0: a turn goes into the running session before a child is spawned
     expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
     expect(out.via).toBeUndefined()
     expect(spawns).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6.51.0: a Codex thread the Codex app holds goes into the app's own queue
+// ---------------------------------------------------------------------------
+
+describe('6.51.0: Codex Continue into a thread the Codex app holds', () => {
+  // The Codex app's app-server holds the writer lock for as long as the thread is open,
+  // idle included; ten minutes of transcript silence makes it an idle holder.
+  const heldIdle = (over: Partial<OccupancyProbes> = {}) =>
+    probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() - 10 * 60_000, ...over })
+
+  async function codexAttached(base: string) {
+    const res = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    return { bindingId: res.body.bindingId, epoch: res.body.epoch, boundTo: res.body.boundTo, targetKey: targetKey('codex', CODEX_THREAD) }
+  }
+  const turnBody = (a: { epoch: number; targetKey: string; boundTo: string }, clientTurnId: string) =>
+    ({ prompt: PROMPT, clientTurnId, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo })
+
+  it('queues into the app, answers completed via live, and never spawns a child', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const codex: Array<Record<string, unknown>> = []
+    const claude: unknown[] = []
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverLiveTurn: async req => { claude.push(req); return { ok: false, reason: 'not_claude' } },
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-1' } },
+    }))
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0001'))
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body).toMatchObject({ outcome: 'completed', deliveryState: 'delivered', via: 'live', retryable: false, reasonCopy: TURN_SENT_CODEX_QUEUE_COPY })
+    expect(codex).toEqual([{ provider: 'codex', sessionId: CODEX_THREAD, prompt: PROMPT, foreignHolder: true }])
+    expect(spawns).toHaveLength(0)
+    // Replay-safe, like the Claude live hop: the same clientTurnId never queues twice.
+    const again = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0001'))
+    expect(again.body).toMatchObject({ outcome: 'completed', via: 'live', replayed: true })
+    expect(codex).toHaveLength(1)
+  })
+
+  it.each(['unverified'])('holds, never spawns, when a row may exist (%s)', async reason => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverCodexLiveTurn: async () => ({ ok: false, reason }),
+    }))
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0002'))
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ outcome: 'refused', reason: 'live_unverified', retryable: true, deliveryState: 'unknown' })
+    expect(spawns).toHaveLength(0)
+  })
+
+  it('a throwing Codex transport is treated as a row that may exist', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverCodexLiveTurn: async () => { throw new Error('transport bug') },
+    }))
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0003'))
+    expect(res.body).toMatchObject({ outcome: 'refused', reason: 'live_unverified', deliveryState: 'unknown' })
+    expect(spawns).toHaveLength(0)
+  })
+
+  it.each(['refused', 'binary_not_found', 'spawn_failed', 'invalid_request'])(
+    'refuses without spawning when nothing was queued (%s): a child cannot open a held thread', async reason => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverCodexLiveTurn: async () => ({ ok: false, reason }),
+    }))
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0004'))
+    expect(res.status, reason).toBe(409)
+    expect(res.body, reason).toMatchObject({ outcome: 'refused', reason: 'codex_live_unavailable', retryable: false, deliveryState: 'not_delivered' })
+    expect(res.body.reasonCopy).toBe(WRITE_REASON_COPY.codex_live_unavailable)
+    expect(spawns, reason).toHaveLength(0)
+  })
+
+  it('switched off (disabled) is the 6.50 path exactly: the child spawns', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } },
+      deliverCodexLiveTurn: async () => ({ ok: false, reason: 'disabled' }),
+    }))
+    const a = await codexAttached(base)
+    const out = await turnOutcome(base, a, turnBody(a, 'ct-codex-0005'))
+    expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
+    expect(out.via).toBeUndefined()
+    expect(spawns).toHaveLength(1)
+  })
+
+  it('a Codex thread nobody holds never asks the Codex hop, and spawns as before', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const codex: unknown[] = []
+    const base = await start(writeDeps({
+      probes: probes({ lockHolders: () => [] }),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } },
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered' } },
+    }))
+    const a = await codexAttached(base)
+    const out = await turnOutcome(base, a, turnBody(a, 'ct-codex-0006'))
+    expect(out).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
+    expect(codex).toHaveLength(0)
+    expect(spawns).toHaveLength(1)
+  })
+
+  it('a Claude turn never reaches the Codex hop, whatever it holds', async () => {
+    const codex: unknown[] = []
+    const base = await start(writeDeps({
+      probes: idleHolderProbes(),
+      deliverAttachedTurn: async () => ({ status: 'completed', nativeRevisionAfter: 'native-head-1' }),
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered' } },
+    }))
+    const a = await attached(base)
+    const out = await turnOutcome(base, a, { prompt: PROMPT, clientTurnId: 'ct-codex-0007', epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo })
+    expect(out).toMatchObject({ outcome: 'completed' })
+    expect(codex).toHaveLength(0)
+  })
+
+  it('without the dep, a held Codex thread takes the 6.50 path', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } },
+    }))
+    const a = await codexAttached(base)
+    await turnOutcome(base, a, turnBody(a, 'ct-codex-0008'))
+    expect(spawns).toHaveLength(1)
+  })
+
+  it('a Codex holder mid-turn is still refused at the gate, and the turn clock opens it once the engine closed the turn', async () => {
+    let ended: number | null = null
+    const codex: unknown[] = []
+    const base = await start(writeDeps({
+      probes: probes({
+        lockHolders: () => [PID],
+        transcriptMtimeMs: () => Date.now(),
+        holderTurnEndedAtMs: (provider: string) => (provider === 'codex' ? ended : null),
+      }),
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered', verifiedBy: 'codex-queue' } },
+    }))
+    const busy = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+    expect(busy.status).toBe(409)
+    expect(busy.body.reason).toBe('native_thread_working')
+    ended = Date.now()
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0009'))
+    expect(res.body).toMatchObject({ outcome: 'completed', via: 'live' })
+    expect(codex).toHaveLength(1)
   })
 })
 

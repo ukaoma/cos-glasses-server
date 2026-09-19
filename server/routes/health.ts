@@ -81,6 +81,8 @@ import {
 } from '../lib/thread-attach-capability.js'
 import { sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
+import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
+import { codexLiveQueueEnabled } from '../lib/codex-live-queue.js'
 
 /**
  * 6.49.0: which last hop a Continue takes, and how often each fell back.
@@ -101,6 +103,18 @@ export function continueLiveHealthFields(): Record<string, unknown> {
       lastReason: stats.lastReason,
       lastAt: stats.lastAt,
     },
+    // 6.51.0: Codex's last hop, counted apart so the Claude row above keeps its meaning.
+    codexLiveQueue: (() => {
+      const codex = codexLiveStats()
+      return {
+        enabled: codexLiveQueueEnabled(),
+        attempts: codex.attempts,
+        delivered: codex.delivered,
+        fallbacks: codex.fallbacks,
+        lastReason: codex.lastReason,
+        lastAt: codex.lastAt,
+      }
+    })(),
   }
 }
 

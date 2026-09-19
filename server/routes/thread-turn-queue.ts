@@ -119,7 +119,14 @@ export async function drainThread(
     // for every queued row repeats a whole-process descriptor scan. A refusal
     // can delay delivery until the next sweep, but can never authorize a write.
     // Positive verdicts and all checks after a delivery remain fresh.
-    const gate: ReturnType<ThreadTurnQueueDeps['occupancy']> = refusedGate ?? deps.occupancy(provider, threadId)
+    //
+    // 6.51.0: a Cursor turn is NEVER delivered from here. It leaves through the
+    // composer's own Stop hook (`routes/cursor-stop-followup.ts`), which claims it the
+    // moment the turn ends; a second deliverer could hand the same sentence over twice.
+    // The pass still runs for it so the TTL retires an unclaimed turn honestly.
+    const gate: ReturnType<ThreadTurnQueueDeps['occupancy']> = provider === 'cursor'
+      ? { attachable: false, reason: 'cursor_stop_hook_delivery' }
+      : refusedGate ?? deps.occupancy(provider, threadId)
     if (!gate.attachable) refusedGate = gate
     const seen: DrainObservation = {
       attachable: gate.attachable,
@@ -228,15 +235,18 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       return res.status(400).json({ error: 'invalid_request', reason: 'invalid_cos_session_id' })
     }
 
-    if (provider === 'cursor') {
-      return res.status(423).json({ error: 'unsupported_provider', queueable: false })
-    }
-
     // THE GATE DECIDES WHETHER PARKING IS EVEN HONEST. A structural refusal can never
     // clear, and telling someone their turn is queued when it can never run is worse
     // than refusing it. An attachable thread is not queued either -- it is sent now,
     // through the ordinary route, which the client does on this 409.
     const gate = deps.occupancy(provider, threadId)
+
+    // 6.51.0: Cursor queues ONLY a composer its hooks show mid-turn, because the only way
+    // in is that turn's Stop hook. An idle composer fires no Stop, so a turn parked there
+    // could never run; that stays the 423 it always was, as does every Agent CLI chat.
+    if (provider === 'cursor' && gate.reason !== 'native_thread_working') {
+      return res.status(423).json({ error: 'unsupported_provider', queueable: false })
+    }
     if (gate.attachable) return res.status(409).json({ error: 'thread_free', hint: 'send_now' })
     if (!queueableRefusal(gate.reason)) {
       return res.status(423).json({ error: gate.reason ?? 'probe_failed', queueable: false })

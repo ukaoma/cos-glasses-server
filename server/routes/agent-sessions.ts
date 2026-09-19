@@ -39,7 +39,7 @@ import {
 import { searchAgentSessions, type AgentSessionSearchHit } from '../lib/agent-session-search.js'
 import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
 import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
-import { deriveForRow } from '../lib/session-hooks-runtime.js'
+import { deriveForRow, signalFor } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
 import { queuedTurnsFields, queuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
 import { isAttachedTurnActive, sessionStreamKey } from '../lib/session-stream-bus.js'
@@ -387,6 +387,14 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
         attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', row.session_id)),
       }))
     }
+    // 6.51.0: a Cursor composer whose OWN hook events reached the store (Cursor runs the COS
+    // session hook from ~/.claude/settings.json) gets the same one derivation, from the
+    // signal alone. Hook-grounded only: a Cursor row with no events keeps exactly the 6.50
+    // shape, and nothing is inferred from its file times here.
+    for (const row of sessions) {
+      if (row.provider !== 'cursor' || !signalFor(row.session_id)) continue
+      derivedById.set(row.session_id, deriveForRow({ sessionId: row.session_id, now, remember: false }))
+    }
     const queuedOf = queuedWaitingLookup(now)
     res.json({
       sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running)),
@@ -506,6 +514,9 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
         transcript: { inFlight: running.occupied.get(parsed.session_id)?.activeRecently === true, lastActivityAt: activity.lastActivityAt ? Date.parse(activity.lastActivityAt) : null },
         attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', parsed.session_id)),
       })
+    } else if (provider === 'cursor' && signalFor(parsed.session_id)) {
+      // 6.51.0: the detail agrees with its list row (hook-grounded Cursor state).
+      derived = deriveForRow({ sessionId: parsed.session_id, remember: false })
     }
     res.json({
       ...withRunning({ session_id: parsed.session_id }, running),

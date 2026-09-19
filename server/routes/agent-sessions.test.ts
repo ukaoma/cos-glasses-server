@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { agentSessionsRouter, withRunning } from './agent-sessions.js'
+import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { OccupiedScan } from '../lib/occupied-threads.js'
 import { lockSnapshotStats, resetLockSnapshot } from '../lib/occupancy-probes.js'
 import { ACTIVE_RECENTLY_WINDOW_MS } from '../lib/thread-occupancy.js'
@@ -465,6 +466,54 @@ describe('Cursor running_active reaches the wire', () => {
         running: false, running_active: false, running_stamped: true,
       })
     })
+  })
+})
+
+// 6.51.0: Cursor runs the COS session hook from ~/.claude/settings.json, so a composer's
+// own events reach the signal store under its conversation id. Such a row gets the one
+// derivation; a Cursor row nobody has heard from keeps the 6.50 shape.
+describe('hook-grounded Cursor state on the wire (6.51.0)', () => {
+  const saved = process.env.COS_SESSION_HOOKS
+  afterEach(() => {
+    if (saved === undefined) delete process.env.COS_SESSION_HOOKS
+    else process.env.COS_SESSION_HOOKS = saved
+    __resetSessionHooksForTests()
+  })
+  const envelope = (event: string, ts: number, payload: Record<string, unknown> = {}) =>
+    ({ ts, ppid: 1, event, sessionId: cursorId, payload: { session_id: cursorId, conversation_id: cursorId, cursor_version: '3.21.13', ...payload } }) as never
+
+  it('running while the composer\'s turn is open, idle after its Stop, and absent without events', async () => {
+    process.env.COS_SESSION_HOOKS = '1'
+    __resetSessionHooksForTests()
+    const { home, roots } = fixtureHome()
+    const file = join(roots.cursorProjects, 'Users-ukaoma-Documents-GitHub-MU-Chief-Staff', 'agent-transcripts', cursorId, `${cursorId}.jsonl`)
+    writeJsonl(file, ['{"role":"user","message":{"content":[{"type":"text","text":"<user_query>Wire the queue</user_query>"}]}}'])
+    touch(file, new Date(Date.now() - 120_000))
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    try {
+      const base = await startSearchServer()
+      const row = async () => ((await (await fetch(`${base}/api/agent-sessions?limit=20`)).json()) as { sessions: Array<Record<string, unknown>> })
+        .sessions.find(s => s.session_id === cursorId)!
+      const detail = async () => (await (await fetch(`${base}/api/agent-sessions/cursor/${cursorId}`)).json()) as Record<string, unknown>
+
+      expect(await row()).not.toHaveProperty('agent_state')
+      expect(await detail()).not.toHaveProperty('agent_state')
+
+      const now = Date.now()
+      sessionSignalStore.apply(envelope('SessionStart', now - 3_000, { model: 'composer' }))
+      sessionSignalStore.apply(envelope('UserPromptSubmit', now - 2_000, { prompt: 'Wire the queue' }))
+      sessionSignalStore.apply(envelope('PostToolUse', now - 1_000, { tool_name: 'Read', tool_input: { file_path: '/x' } }))
+      expect(await row()).toMatchObject({ agent_state: 'running', state_source: 'hook' })
+      expect(await detail()).toMatchObject({ agent_state: 'running', state_source: 'hook' })
+
+      sessionSignalStore.apply(envelope('Stop', now, { status: 'completed' }))
+      expect(await row()).toMatchObject({ agent_state: 'idle', state_source: 'hook' })
+      expect(await detail()).toMatchObject({ agent_state: 'idle', state_source: 'hook' })
+    } finally {
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+    }
   })
 })
 

@@ -834,6 +834,58 @@ export function withHookTurnClock(
   }
 }
 
+/**
+ * Add the Codex turn clock (6.51.0) to a probe set, keeping whatever the set already
+ * answers for other providers.
+ *
+ * `codexTurnEndedAtMs` reads the thread's rollout tail and answers a time only when the
+ * newest turn marker CLOSED a turn (`task_complete`/`turn_complete`); a `task_started`
+ * after it, an unreadable file, or a tail with no marker all answer null, which keeps
+ * the 30 s transcript window. Measured on codex-cli 0.155: the app starts a turn queued
+ * in its own queue 10 ms after the `task_complete`, and that `task_started` is what the
+ * next read sees.
+ */
+export function withCodexTurnClock(
+  probes: OccupancyProbes,
+  codexTurnEndedAtMs: (threadId: string) => number | null,
+): OccupancyProbes {
+  const inner = probes.holderTurnEndedAtMs
+  return {
+    ...probes,
+    holderTurnEndedAtMs: (provider, threadId) => {
+      if (provider === 'codex') {
+        if (!NATIVE_THREAD_ID_RE.test(threadId)) return null
+        return codexTurnEndedAtMs(threadId)
+      }
+      return typeof inner === 'function' ? inner(provider, threadId) : null
+    },
+  }
+}
+
+/**
+ * Add the Cursor composer turn signal (6.51.0). `signalFor` is the hook signal store's
+ * reader; Cursor's hook events land there under the composer's conversation id. Open
+ * means: a turn was opened (prompt or tool) and no Stop has closed it, nothing ended the
+ * session, and the newest event is inside the open-turn ceiling -- a composer that died
+ * mid-turn must not read working for ever.
+ */
+export function withCursorComposerTurn(
+  probes: OccupancyProbes,
+  signalFor: (sessionId: string) => { turnOpen: boolean; ended: { at: number; reason: string } | null; lastEventAt: number } | undefined,
+  now: () => number,
+  ceilingMs: number,
+): OccupancyProbes {
+  return {
+    ...probes,
+    cursorComposerTurnOpen: (threadId: string) => {
+      if (!NATIVE_THREAD_ID_RE.test(threadId)) return null
+      const signal = signalFor(threadId)
+      if (!signal) return null
+      return signal.turnOpen === true && signal.ended === null && now() - signal.lastEventAt <= ceilingMs
+    },
+  }
+}
+
 /** The facts the hook turn clock reads off a session signal. */
 export interface HookTurnSignal {
   lastEvent: string

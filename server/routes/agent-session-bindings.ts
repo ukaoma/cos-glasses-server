@@ -345,6 +345,16 @@ export interface AgentSessionBindingsDeps {
   deliverLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number; clientTurnId?: string }) => Promise<{ ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null }>
 
   /**
+   * 6.51.0: put a Codex turn into the Codex app's OWN queue when the app holds the thread.
+   *
+   * `makeCodexLiveDeliverer` from `server/lib/codex-live-queue-deps.ts`. Separate from
+   * `deliverLiveTurn` on purpose, so the Claude branch is byte-for-byte 6.50. Asked only
+   * when the gate's verdict carries a foreign writer on a Codex thread; absent, that turn
+   * spawns exactly as before.
+   */
+  deliverCodexLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; foreignHolder: boolean }) => Promise<{ ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null }>
+
+  /**
    * The self-recursion ledger. Defaults to the real process-wide one.
    *
    * `record` takes a MEASURED process start, never a wall clock. See rule 2 in
@@ -498,6 +508,11 @@ export type WriteRefusal =
   // held as retryable and the retry re-reads before doing anything (see
   // `session-peer-inbox.ts`); it is never a fence, because nothing here ran a child.
   | 'live_unverified'
+  // 6.51.0: the Codex app holds this thread and `codex queue` did not take the turn.
+  // Nothing was queued. Never answered by spawning: a resume child against a held
+  // thread dies on "already has an active writer" after the prompt is written, which
+  // is the ambiguous fence this whole branch exists to avoid.
+  | 'codex_live_unavailable'
   // ------------------------------------------------------------------- fork
   //
   // Fork gets its OWN members rather than reusing the ones above, and the reason
@@ -572,6 +587,8 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'COS lost track of this turn after sending it. Open the thread on your Mac and check before sending again.',
   live_unverified:
     'Sent, not yet confirmed. Send again: COS checks before sending twice.',
+  codex_live_unavailable:
+    'The Codex app has this thread open, and COS could not hand it the message. Nothing was sent. Send it from the Codex app, or fork it.',
   turn_failed:
     'COS could not run this turn. Nothing was sent. You can try again.',
 
@@ -1284,6 +1301,8 @@ export const ATTACHED_COPY = 'Attached. COS is driving the original thread.'
 export const TURN_SENT_COPY = 'Sent to the original thread.'
 /** 6.49.0: the turn went into the running session, where the desk will see it. */
 export const TURN_SENT_LIVE_COPY = 'Sent to the open session. It will show where you left it.'
+/** 6.51.0: a Codex turn handed to the Codex app's own queue for the thread it has open. */
+export const TURN_SENT_CODEX_QUEUE_COPY = 'Queued in the Codex app. It runs when the current turn ends, or right away if the thread is idle.'
 /**
  * How long the route waits for the session's transcript to show acceptance.
  *
@@ -1392,18 +1411,18 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
    * one place, so the write routes cannot come to a different conclusion than the
    * probe the user was shown a second earlier.
    */
-  const runOccupancy = (provider: string, threadId: string): AttachabilityBody => {
-    let verdict: Occupancy
+  const detectOccupancy = (provider: string, threadId: string): Occupancy => {
     try {
-      verdict = detect(provider, threadId, deps.probes, deps.dirs)
+      return detect(provider, threadId, deps.probes, deps.dirs)
     } catch (error) {
       // `threadOccupancy` already contains its own probe try/catch, so reaching
       // here means the detector itself threw. Logged without the thread id.
       console.error(`[agent-session-bindings] occupancy threw: ${error instanceof Error ? error.message : error}`)
-      verdict = { attachable: false, owners: [], reason: 'probe_failed' }
+      return { attachable: false, owners: [], reason: 'probe_failed' }
     }
-    return projectAttachability(verdict)
   }
+  const runOccupancy = (provider: string, threadId: string): AttachabilityBody =>
+    projectAttachability(detectOccupancy(provider, threadId))
 
   const refuseAttach = (res: Response, reason: WriteRefusal): void => {
     res.status(refusalStatus(reason)).json({
@@ -2153,9 +2172,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // session started in the gap is exactly the residual risk option B leaves
       // open, and it is terminal here rather than a warning because COS has no
       // cross-process lock that could fence a live desktop writer.
-      const verdict = runOccupancy(binding.provider, binding.nativeThreadId)
+      const detected = detectOccupancy(binding.provider, binding.nativeThreadId)
+      const verdict = projectAttachability(detected)
       stage('gate')
       if (!verdict.attachable) return refuseTurn(verdict.reason ?? 'probe_failed')
+      // 6.51.0: the SAME verdict says whether a live process that is not ours holds the
+      // thread. Only the declared idle-holder exemption can carry one on an attachable
+      // verdict (`projectAttachability` refuses anything else), so this is that fact.
+      const foreignHolder = detected.idleHolder === true
+        && Array.isArray(detected.owners)
+        && detected.owners.some(owner => owner?.selfOwned !== true)
 
       const head = await readHead(binding.provider, binding.nativeThreadId)
       stage('head')
@@ -2236,6 +2262,56 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         }
         // disabled / not_claude / no_record / protocol_unsupported / connect_failed /
         // suspect_expired: nothing reached a session. Spawn as always.
+      }
+
+      // 6.51.0: CODEX, WHEN THE CODEX APP HOLDS THE THREAD. Its app-server keeps the
+      // writer lock for as long as the thread is open, so the resume child below cannot
+      // run (it exits on "already has an active writer" after the prompt is written, and
+      // that fence is what August's two Codex Continues left behind). `codex queue`
+      // hands the turn to that app-server's own queue instead: it runs at the end of the
+      // current turn, or within seconds if the thread is idle (canary in
+      // `codex-live-queue.ts`). A thread nobody holds never gets here.
+      if (binding.provider === 'codex' && foreignHolder && typeof deps.deliverCodexLiveTurn === 'function') {
+        let live: { ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null } | null = null
+        try {
+          live = await deps.deliverCodexLiveTurn({
+            provider: binding.provider,
+            sessionId: binding.nativeThreadId,
+            prompt,
+            foreignHolder: true,
+          })
+        } catch (error) {
+          console.error(`[agent-session-bindings] codex live delivery threw: ${error instanceof Error ? error.message : error}`)
+          live = null
+        }
+        stage(`codex-live(${live?.reason ?? 'threw'})`)
+        if (live?.ok) {
+          console.log(`[agent-session-bindings] turn delivered live provider=codex turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} queuedId=${live.queuedId ?? 'null'}`)
+          respond(200, {
+            turnId,
+            outcome: 'completed',
+            deliveryState: 'delivered',
+            via: 'live',
+            retryable: false,
+            changed: false,
+            revision: null,
+            reason: null,
+            reasonCopy: TURN_SENT_CODEX_QUEUE_COPY,
+          })
+          return
+        }
+        // The operator switched this off: the 6.50 path, unchanged, whatever it does.
+        if (live?.reason !== 'disabled') {
+          // A throw, a timeout, or a confirmation we could not read: a row may exist.
+          if (live === null || live.reason === 'unverified') {
+            return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })
+          }
+          // Nothing was queued, and the child cannot run against a held thread. Not
+          // retryable: a missing binary or a CLI that refused does not heal on a 20 s
+          // sweep, and a retryable reason would have the queue drainer re-run it for the
+          // whole TTL (`isRetryableDelivery` trusts the route's own verdict).
+          return refuseTurn('codex_live_unavailable', { retryable: false })
+        }
       }
 
       // THE QUEUE POINT. Every gate is now behind us — body, replay, queued-prompt,

@@ -34,10 +34,12 @@ import {
 import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
 import { targetKey } from './lib/agent-session-binding-store.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
-import { buildOccupancyProbes, realOccupancyDirs, withHookTurnClock } from './lib/occupancy-probes.js'
+import { buildOccupancyProbes, realOccupancyDirs, withCodexTurnClock, withCursorComposerTurn, withHookTurnClock } from './lib/occupancy-probes.js'
+import { readCodexTurnEndedAtMs } from './lib/codex-turn-clock.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
+import { makeCodexLiveDeliverer } from './lib/codex-live-queue-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
@@ -131,7 +133,9 @@ import {
 
 const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
-import { queuedThreadKeys, transcriptTurnEnded, transcriptTurnVerdict } from './lib/thread-turn-queue-store.js'
+import { createCursorStopFollowupRouter } from './routes/cursor-stop-followup.js'
+import { queuedThreadKeys, readQueue, transcriptTurnEnded, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
+import { readHookToken } from './lib/claude-hooks-installer.js'
 import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
 import { createDrainKick, kickPlanFor } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
@@ -386,12 +390,22 @@ const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
  * Read the canary evidence in `thread-occupancy.ts` under THE IDLE-HOLDER
  * RELAXATION before changing this line.
  */
-const occupancyProbes = sessionHooksEnabled()
+const occupancyProbes = withCursorComposerTurn(withCodexTurnClock(sessionHooksEnabled()
   // 6.48.1, the B6 clause: with the hooks on, a foreign Desktop holder whose newest hook
   // event is a Stop reads idle at once instead of after the 30 s transcript window. The
   // wrapper only adds a probe; the gate's precedence is unchanged. Off is 6.48.0.
   ? withHookTurnClock(buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled()), signalFor, registryIdleAfterStop)
-  : buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled())
+  : buildOccupancyProbes(cosSpawnedPids, nativeHeadDeps, threadAttachEnabled()),
+  // 6.51.0: the Codex counterpart, from the rollout's own turn markers. A queued COS turn
+  // on a Codex thread then drains at the engine's `task_complete` instead of 30 s later,
+  // and goes out through the app's own queue (`codex-live-queue.ts`).
+  (threadId: string) => readCodexTurnEndedAtMs(threadId, nativeHeadDeps)),
+  // 6.51.0: a Cursor composer its own hooks show mid-turn reads `native_thread_working`,
+  // so a turn can queue for its Stop hook. Without the hooks feature there is no signal
+  // and every composer keeps the 6.50 verdict.
+  (sessionId: string) => (sessionHooksEnabled() ? signalFor(sessionId) : undefined),
+  () => Date.now(),
+  OPEN_TURN_CEILING_MS)
 
 // 6.48.0: the hook spool ingester and the one signal store every session row reads. Starts
 // before any router is registered so the first list request already sees the replayed
@@ -690,6 +704,14 @@ if (threadAttachEnabled()) {
     now: () => Date.now(),
   }
   app.use('/api', createThreadTurnQueueRouter(queueDeps))
+  // 6.51.0: a queued Cursor turn leaves ONLY through the composer's own Stop hook (the
+  // drainer skips Cursor, see `drainThread`). Hook-token auth, outside /api.
+  app.use(createCursorStopFollowupRouter({
+    hookToken: readHookToken,
+    readQueue,
+    writeQueue,
+    now: () => Date.now(),
+  }))
 
   // Every 20s. Fast enough that a freed thread drains while the user is still looking
   // at the pending row, slow enough to be nothing: the sweep does no work at all when
@@ -762,6 +784,10 @@ app.use('/api', createAgentSessionBindingsRouter({
   // the resume child second. Reads `COS_CONTINUE_LIVE` per call, so the flag reports
   // on /api/health without a restart and every refusal falls back to the 6.48.2 path.
   deliverLiveTurn: makeLiveTurnDeliverer(nativeHeadDeps),
+  // 6.51.0: a Codex thread the Codex app holds goes into that app's own queue
+  // (`codex queue`), never into a resume child that cannot open a held thread.
+  // `COS_CODEX_LIVE_QUEUE=0` restores the 6.50 path.
+  deliverCodexLiveTurn: makeCodexLiveDeliverer(),
   forkThread: forkThreadForRoute,
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path

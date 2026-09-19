@@ -163,6 +163,105 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
     expect(seen).toBeNull()
   })
 
+  // 6.51.0: the Cursor-only Stop branch. Cursor runs this same hook (from
+  // ~/.claude/settings.json) with CURSOR_VERSION in the environment and its own payload.
+  describe('Cursor Stop follow-up (6.51.0)', () => {
+    const CONVERSATION = 'c0ffee00-0000-4000-8000-0000000000cc'
+    const cursorStop = (extra: Record<string, unknown> = {}) => JSON.stringify({
+      conversation_id: CONVERSATION, session_id: CONVERSATION, hook_event_name: 'stop',
+      status: 'completed', loop_count: 0, cursor_version: '3.21.13', workspace_roots: ['/Users/example/project'], ...extra,
+    })
+    const runWithEnv = (event: string, stdin: string, paths: { home: string; spool: string }, extraEnv: Record<string, string>) =>
+      new Promise<{ status: number | null; stdout: string }>(resolvePromise => {
+        const child = spawn('/bin/sh', [SCRIPT, event], {
+          env: { HOME: dirname(paths.home), COS_GLASSES_HOME: paths.home, COS_HOOK_SPOOL: paths.spool, PATH: '/usr/bin:/bin', ...extraEnv },
+        })
+        let stdout = ''
+        child.stdout.on('data', c => { stdout += c })
+        child.on('close', status => resolvePromise({ status, stdout }))
+        child.stdin.end(stdin)
+      })
+    async function listen(reply: () => string): Promise<{ paths: { home: string; spool: string }; seen: Array<{ url: string | undefined; token: string | undefined; body: string }> }> {
+      const paths = home()
+      writeFileSync(join(paths.home, 'hook-token'), 'hook-tok')
+      const seen: Array<{ url: string | undefined; token: string | undefined; body: string }> = []
+      listener = createServer((req, res) => {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', () => {
+          seen.push({ url: req.url, token: req.headers['x-cos-hook-token'] as string | undefined, body })
+          res.setHeader('content-type', 'application/json')
+          res.end(reply())
+        })
+      })
+      await new Promise<void>(r => listener!.listen(0, '127.0.0.1', () => r()))
+      writeFileSync(join(paths.home, 'hook-port'), String((listener.address() as AddressInfo).port))
+      return { paths, seen }
+    }
+
+    it('a Cursor Stop posts its envelope to the follow-up route and prints exactly the follow-up', async () => {
+      const reply = JSON.stringify({ followup_message: 'Queued from the phone' })
+      const { paths, seen } = await listen(() => reply)
+      const r = await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe(reply)
+      expect(seen).toHaveLength(1)
+      expect(seen[0]!.url).toBe('/hooks/cursor/stop-followup')
+      expect(seen[0]!.token).toBe('hook-tok')
+      const posted = parseHookEnvelope(seen[0]!.body)
+      expect(posted.ok).toBe(true)
+      if (posted.ok) {
+        expect(posted.envelope.event).toBe('Stop')
+        expect(posted.envelope.payload.conversation_id).toBe(CONVERSATION)
+      }
+      // The Stop is still spooled for the signal store, and no request copy is left.
+      expect(spooled(paths.spool)).toHaveLength(1)
+      expect(readdirSync(paths.spool).filter(n => n.endsWith('.req') || n.startsWith('.tmp'))).toEqual([])
+    })
+
+    it('an answer that is not a follow-up prints nothing', async () => {
+      const { paths, seen } = await listen(() => '{}')
+      const r = await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe('')
+      expect(seen).toHaveLength(1)
+    })
+
+    it('a Claude Stop never reaches the network, even when its text mentions cursor_version', async () => {
+      const { paths, seen } = await listen(() => JSON.stringify({ followup_message: 'must not print' }))
+      const claude = payload({ last_assistant_message: 'the payload has "cursor_version":"3.21" in it' })
+      const r = await runWithEnv('Stop', claude, paths, {})
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe('')
+      expect(seen).toEqual([])
+      expect(spooled(paths.spool)).toHaveLength(1)
+    })
+
+    it('CURSOR_VERSION without a Cursor payload, or a Cursor payload on another event, sends nothing', async () => {
+      const { paths, seen } = await listen(() => JSON.stringify({ followup_message: 'must not print' }))
+      expect((await runWithEnv('Stop', payload(), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe('')
+      expect((await runWithEnv('PostToolUse', cursorStop({ hook_event_name: 'postToolUse' }), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe('')
+      expect((await runWithEnv('Stop', cursorStop(), paths, {})).stdout).toBe('')
+      expect(seen).toEqual([])
+      expect(spooled(paths.spool)).toHaveLength(3)
+    })
+
+    it('no hook token means no request, and a closed port fails fast and silently', async () => {
+      const { paths, seen } = await listen(() => JSON.stringify({ followup_message: 'x' }))
+      writeFileSync(join(paths.home, 'hook-token'), '')
+      expect((await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe('')
+      expect(seen).toEqual([])
+      writeFileSync(join(paths.home, 'hook-token'), 'hook-tok')
+      writeFileSync(join(paths.home, 'hook-port'), '1')
+      const started = Date.now()
+      const r = await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe('')
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(spooled(paths.spool)).toHaveLength(2)
+    })
+  })
+
   it('a closed port fails fast and silently', () => {
     const paths = home()
     writeFileSync(join(paths.home, 'hook-desk-idle-s'), '0')

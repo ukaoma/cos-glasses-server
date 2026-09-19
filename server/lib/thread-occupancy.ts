@@ -156,10 +156,17 @@ export interface OccupancyProbes {
    * sub-agent is open, the session has not ended, AND the registry record says `idle`
    * with `statusUpdatedAt` at or after the Stop (Claude flips it only when every Stop
    * hook has returned, 12-38 s after the Stop on the release Mac, which is when a prompt
-   * queued at the desk would dequeue). Null otherwise, and always null for Codex.
+   * queued at the desk would dequeue). Null otherwise.
    * OPTIONAL, and its absence is the default: attached by `withHookTurnClock` at the
    * composition root only when `COS_SESSION_HOOKS` is on, so the pure gate never reads
    * the environment.
+   *
+   * 6.51.0, CODEX: `withCodexTurnClock` answers for Codex threads from the rollout's own
+   * turn markers: the newest is `task_complete`/`turn_complete`, so the engine closed the
+   * turn. Safe to read idle at once for Codex in a way it never was for a Claude Stop,
+   * because every write into a held Codex thread goes through the app's own queue
+   * (`codex-live-queue.ts`), which the engine itself serialises behind any turn it starts
+   * next; nothing is ever written beside the holder.
    *
    * What it buys: a foreign Desktop holder whose turn the engine has closed reads `idle`
    * at once instead of after the 30 s transcript window. The transcript's mtime is not
@@ -177,6 +184,13 @@ export interface OccupancyProbes {
     cwd: string
     hasConversation: boolean
   } | null
+  /**
+   * 6.51.0: is this Cursor IDE composer mid-turn, by its own hook events (Cursor runs the
+   * COS session hook from `~/.claude/settings.json`)? True only on positive evidence: a
+   * prompt or tool event newer than the last Stop, inside the open-turn ceiling. OPTIONAL;
+   * absent, null, or a throw keeps the 6.50 verdict (`unsupported_provider`).
+   */
+  cursorComposerTurnOpen?: (threadId: string) => boolean | null
 }
 
 /**
@@ -287,11 +301,11 @@ function readHolderActivity(
   }
   const activity = holderActivity(mtime, nowMs)
   if (activity !== 'working') return activity
-  // THE B6 CLAUSE. Only a `working` verdict is revisited, only for Claude, only with a
-  // real clock behind it, and only when the hook probe VOUCHES that the engine closed
-  // the turn (null is strict). `unknown` stays unknown: the clause narrows a refusal,
-  // never a doubt.
-  if (provider !== 'claude' || typeof probes.holderTurnEndedAtMs !== 'function' || typeof mtime !== 'number') return activity
+  // THE B6 CLAUSE. Only a `working` verdict is revisited, only for Claude (6.51.0: and
+  // Codex, from its rollout's turn markers), only with a real clock behind it, and only
+  // when the probe VOUCHES that the engine closed the turn (null is strict). `unknown`
+  // stays unknown: the clause narrows a refusal, never a doubt.
+  if ((provider !== 'claude' && provider !== 'codex') || typeof probes.holderTurnEndedAtMs !== 'function' || typeof mtime !== 'number') return activity
   let stopAt: number | null
   try {
     stopAt = probes.holderTurnEndedAtMs(provider, threadId)
@@ -612,7 +626,16 @@ export function threadOccupancy(
       return { attachable: false, owners: [], reason: 'probe_failed' }
     }
     if (!session || session.hasConversation !== true) {
-      return { attachable: false, owners: [], reason: 'unsupported_provider' }
+      // 6.51.0: still never attachable (Gate 0: an IDE composer is not resumed from
+      // outside), but a composer the hooks show MID-TURN is working, not unsupported, so
+      // a turn spoken at it can wait for its Stop hook. The reason is the only change.
+      let open: boolean | null = null
+      try {
+        open = typeof probes.cursorComposerTurnOpen === 'function' ? probes.cursorComposerTurnOpen(threadId) : null
+      } catch {
+        open = null
+      }
+      return { attachable: false, owners: [], reason: open === true ? 'native_thread_working' : 'unsupported_provider' }
     }
     return { attachable: true, owners: [], reason: null }
   }
