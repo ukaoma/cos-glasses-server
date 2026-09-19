@@ -180,8 +180,7 @@ npx --yes @gotcos/glasses-server@latest --hooks uninstall
 The install keeps every hook you already had, backs the file up, and copies a small
 POSIX sh script to `~/.cos-glasses/bin/cos-session-hook`. The script writes one file per
 event into `~/.cos-glasses/data/hook-spool` and never contacts the server (a permission
-request may, only after the desk has been idle for 90 s, for the approval feature that ships
-next). Sessions report `state_source: hook` on `/api/agent-sessions` and
+request may, only after the desk has been idle for 90 s: see the 6.52.0 note below). Sessions report `state_source: hook` on `/api/agent-sessions` and
 `/api/claude-sessions` from their next event on (Claude Code 2.1.272 reloads its hooks
 when the settings file changes, so open tabs need no restart; they may show Claude's
 "hooks modified externally" notice once, which is expected: the user-level file changed
@@ -229,6 +228,21 @@ own) replays rather than repeats.
 sub-agents omitted) and `recent_turns_more` to the detail payload, read backward from
 the end of the transcript; without `turns` the payload is unchanged. The glasses use it
 to scroll back through a running session's conversation.
+Since 6.52.0 a session question (the AskUserQuestion card) or a tool approval can be
+answered from the glasses or the phone while you are away from the Mac. The hook posts
+a permission request to `POST /hooks/permission-requests/ask` (outside `/api`, hook-token
+auth) only after the desk has been idle 90 s; the server holds it only while the desk
+stays idle and a client has polled `GET /api/session-questions` (with X-Cos-Token) in the
+last 60 s, and answers `{}` (the Mac's own dialog) to everything else at once. A client
+that never polls (COS Glasses 6.9.511 and earlier) changes nothing. Clients read `GET /api/session-questions`
+and answer with `POST /api/session-questions/:id/answer` (`{clientAnswerId, answers}` for
+a question, one `{labels, other}` per question; `{clientAnswerId, decision}` for an
+approval, `allow` or `deny`). Touching the Mac hands a held request back to its dialog
+at once; the deadline is 110 s. Allow once or deny only: no permission rule is ever
+written. `COS_PERMISSION_BROKER=0` turns it off with no reinstall, `=questions` keeps
+approvals at the Mac. Rows carry `pending_question_id` or `pending_permission_id` while
+a request is held; `/api/health` reports `permissionBroker`. The new script reaches
+`~/.cos-glasses/bin` through `--hooks install`.
 
 ## Configuration
 

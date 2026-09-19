@@ -80,6 +80,7 @@ import {
   threadAttachHealthFields,
 } from '../lib/thread-attach-capability.js'
 import { sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
+import { permissionBrokerHealthFields } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
 import { codexLiveQueueEnabled } from '../lib/codex-live-queue.js'
@@ -388,6 +389,8 @@ healthRouter.get('/health', async (_req, res) => {
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
     ...sessionHooksHealthFields(),
+    // 6.52.0: counts and the mode only; never an id, a question or a command.
+    ...permissionBrokerHealthFields(),
     ...continueLiveHealthFields(),
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,

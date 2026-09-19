@@ -149,6 +149,18 @@ function turnOpenedByTool(prev: SessionSignal, p: Record<string, unknown>, at: n
 /** Waiting kinds a PostToolUse of the same tool resolves without a fingerprint match. */
 const TOOL_WAITING: Record<string, WaitingKind> = { AskUserQuestion: 'question', ExitPlanMode: 'plan' }
 
+/** The tool whose PermissionRequest is a question card, not an approval (6.52.0). */
+export const ASK_USER_QUESTION_TOOL = 'AskUserQuestion'
+
+/**
+ * 6.52.0: the permission broker's id survives a re-announcement of the SAME request. The
+ * async PreToolUse can land after the PermissionRequest (and the spool after the broker
+ * parked it), and either rewrite of `waiting` would otherwise drop the id the rows carry.
+ */
+function keptRequestId(prev: WaitingSignal | null, fingerprint: string): string | null {
+  return prev?.requestId && fingerprint && prev.fingerprint === fingerprint ? prev.requestId : null
+}
+
 function resolvesWaiting(waiting: WaitingSignal, event: HookEventName, toolName: string, fingerprint: string): boolean {
   if (waiting.fingerprint && waiting.fingerprint === fingerprint) return true
   // Question/plan tools carry no meaningful input to fingerprint; the tool name is the key.
@@ -210,7 +222,7 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
         return {
           ...next,
           turnOpen: true,
-          waiting: { kind, detail: tool.target, toolName: tool.name, fingerprint: tool.fingerprint, since: env.ts, requestId: null },
+          waiting: { kind, detail: tool.target, toolName: tool.name, fingerprint: tool.fingerprint, since: env.ts, requestId: keptRequestId(next.waiting, tool.fingerprint) },
         }
       }
       return { ...next, ...turnOpenedByTool(next, p, env.ts), lastTool: tool.name || next.lastTool, lastToolAt: env.ts }
@@ -221,12 +233,15 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
         ...next,
         turnOpen: true,
         waiting: {
-          kind: 'permission',
+          // 6.52.0: an AskUserQuestion stays a QUESTION through its PermissionRequest. As
+          // `permission` it cleared only on a fingerprint match, and the answered tool's
+          // PostToolUse carries `answers` in its input, so the row could stay waiting.
+          kind: tool.name === ASK_USER_QUESTION_TOOL ? 'question' : 'permission',
           detail: tool.target ? `${tool.name} ${tool.target}` : tool.name,
           toolName: tool.name,
           fingerprint: tool.fingerprint,
           since: env.ts,
-          requestId: null,
+          requestId: keptRequestId(next.waiting, tool.fingerprint),
         },
       }
     }
@@ -314,19 +329,36 @@ export class SessionSignalStore {
     this.signals.set(sessionId, { ...current, entrypoint })
   }
 
-  /** RESERVED FOR 6.48.2 (the permission broker); no caller in 6.48.0. Attach the broker's
-   *  minted id so rows can carry `pending_permission_id`. */
-  attachPermissionRequestId(sessionId: string, requestId: string | null): void {
+  /**
+   * The permission broker (6.52.0) attaches its item id so rows can carry
+   * `pending_permission_id` (an approval) or `pending_question_id` (an AskUserQuestion).
+   * Widened to `question` in 6.52.0. With a fingerprint, only the wait for THAT request
+   * takes the id: a different dialog now standing must never advertise it. True when set.
+   */
+  attachPermissionRequestId(sessionId: string, requestId: string | null, fingerprint?: string): boolean {
     const current = this.signals.get(sessionId)
-    if (!current?.waiting || current.waiting.kind !== 'permission') return
+    if (!current?.waiting || (current.waiting.kind !== 'permission' && current.waiting.kind !== 'question')) return false
+    if (fingerprint !== undefined && current.waiting.fingerprint !== fingerprint) return false
     this.signals.set(sessionId, { ...current, waiting: { ...current.waiting, requestId } })
+    return true
   }
 
-  /** RESERVED FOR 6.48.2 (the permission broker); no caller in 6.48.0. The broker decided
-   *  (allow or deny): that is resolution evidence. */
-  resolveWaiting(sessionId: string): void {
+  /** The broker let go of a request without deciding it: drop its id, keep the wait. */
+  detachPermissionRequestId(sessionId: string, requestId: string): void {
+    const current = this.signals.get(sessionId)
+    if (!current?.waiting || current.waiting.requestId !== requestId) return
+    this.signals.set(sessionId, { ...current, waiting: { ...current.waiting, requestId: null } })
+  }
+
+  /**
+   * The broker decided (allow or deny): that is resolution evidence. With `match` (6.52.0),
+   * only the wait that carries the broker's id, or that is the same request by fingerprint,
+   * is cleared; a different dialog standing now is left alone.
+   */
+  resolveWaiting(sessionId: string, match?: { requestId: string; fingerprint: string }): void {
     const current = this.signals.get(sessionId)
     if (!current?.waiting) return
+    if (match && current.waiting.requestId !== match.requestId && current.waiting.fingerprint !== match.fingerprint) return
     this.signals.set(sessionId, { ...current, waiting: null })
   }
 

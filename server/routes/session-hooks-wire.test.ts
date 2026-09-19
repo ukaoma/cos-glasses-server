@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { claudeSessionsRouter } from './claude-sessions.js'
 import { createSessionHooksRouter } from './session-hooks.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
-import { parseHookEnvelope } from '../lib/session-hook-events.js'
+import { parseHookEnvelope, toolFingerprint } from '../lib/session-hook-events.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', '__fixtures__', 'session-hooks-6.48.0')
 const envelopes = (name: string) => readFileSync(join(FIXTURES, name), 'utf-8').split('\n').filter(Boolean).map(l => {
@@ -79,7 +79,7 @@ describe('derived state on the claude-sessions wire', () => {
     })
     // The wire keeps the thirteen pinned peer keys; the eight extras are the only additions.
     const keys = Object.keys(during.peers[0]).sort()
-    expect(keys.filter(k => !['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id', 'queued_turns'].includes(k))).toEqual([
+    expect(keys.filter(k => !['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id', 'pending_question_id', 'queued_turns'].includes(k))).toEqual([
       'alive', 'entrypoint', 'id', 'kind', 'lastActiveAt', 'name', 'nameRedacted', 'reachable', 'startedAt', 'status', 'version', 'waitingFor', 'workspace',
     ])
 
@@ -124,8 +124,26 @@ describe('derived state on the claude-sessions wire', () => {
     const base = await start()
     for (const env of recorded.slice(0, 3)) sessionSignalStore.apply(env)
     const peers = ((await (await fetch(`${base}/api/claude-sessions`)).json()) as { peers: Array<Record<string, unknown>> }).peers
-    for (const k of ['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id']) {
+    for (const k of ['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id', 'pending_question_id']) {
       expect(peers[0]).not.toHaveProperty(k)
     }
+  })
+
+  it('6.52.0: a request the permission broker holds rides the peer as pending_permission_id or pending_question_id', async () => {
+    const base = await start()
+    for (const env of recorded.slice(0, 3)) sessionSignalStore.apply(env) // start, prompt, a Bash permission request
+    const bash = recorded[2]
+    const fingerprint = toolFingerprint(String(bash.payload.tool_name), bash.payload.tool_input)
+    expect(sessionSignalStore.attachPermissionRequestId(sessionId, 'pq_00000000000000000000000a', fingerprint)).toBe(true)
+    const approval = ((await (await fetch(`${base}/api/claude-sessions`)).json()) as { peers: Array<Record<string, unknown>> }).peers[0]
+    expect(approval).toMatchObject({ agent_state: 'waiting', waiting_kind: 'permission', pending_permission_id: 'pq_00000000000000000000000a' })
+    expect(approval).not.toHaveProperty('pending_question_id')
+
+    const questionInput = { questions: [{ question: 'Ship it?', header: 'Ship', multiSelect: false, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] }] }
+    sessionSignalStore.apply({ ...bash, ts: bash.ts + 1_000, event: 'PermissionRequest', payload: { ...bash.payload, tool_name: 'AskUserQuestion', tool_input: questionInput } })
+    expect(sessionSignalStore.attachPermissionRequestId(sessionId, 'pq_00000000000000000000000b', toolFingerprint('AskUserQuestion', questionInput))).toBe(true)
+    const question = ((await (await fetch(`${base}/api/claude-sessions`)).json()) as { peers: Array<Record<string, unknown>> }).peers[0]
+    expect(question).toMatchObject({ agent_state: 'waiting', waiting_kind: 'question', pending_question_id: 'pq_00000000000000000000000b' })
+    expect(question).not.toHaveProperty('pending_permission_id')
   })
 })

@@ -10,7 +10,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import express from 'express'
 import { parseHookEnvelope } from './session-hook-events.js'
+import { requireApiToken } from './api-auth.js'
+import { PermissionBroker, questionHookOutput, type BrokerMode } from './permission-broker.js'
+import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from '../routes/permission-broker.js'
+import { createClientInstanceRouter } from '../routes/client-instance.js'
+import { __resetClientLivenessForTests, lastQuestionsPollAt } from './client-liveness.js'
+import { ASK_INPUT, Q1, Q2 } from './__fixtures__/permission-broker.js'
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hooks', 'cos-session-hook')
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
@@ -124,13 +131,13 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
     const paths = home()
     writeFileSync(join(paths.home, 'hook-desk-idle-s'), '0') // idle enough at once
     writeFileSync(join(paths.home, 'hook-token'), 'tok-123')
-    let seen: { token: string | undefined; body: string } | null = null
+    let seen: { url: string | undefined; token: string | undefined; body: string } | null = null
     let reply = JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } })
     listener = createServer((req, res) => {
       let body = ''
       req.on('data', c => { body += c })
       req.on('end', () => {
-        seen = { token: req.headers['x-cos-hook-token'] as string | undefined, body }
+        seen = { url: req.url, token: req.headers['x-cos-hook-token'] as string | undefined, body }
         res.setHeader('content-type', 'application/json')
         res.end(reply)
       })
@@ -142,10 +149,17 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
     expect(r.status).toBe(0)
     expect(r.stdout).toBe(reply)
     expect(seen).not.toBeNull()
+    // 6.52.0: the hook's own door, outside /api (the /api gate answers a hook token 401).
+    expect(seen!.url).toBe('/hooks/permission-requests/ask')
     expect(seen!.token).toBe('tok-123')
     const posted = parseHookEnvelope(seen!.body)
     expect(posted.ok).toBe(true)
-    if (posted.ok) expect(posted.envelope.payload.tool_name).toBe('Bash')
+    if (posted.ok) {
+      expect(posted.envelope.event).toBe('PermissionRequest')
+      expect(posted.envelope.payload.tool_name).toBe('Bash')
+      // The spool wrapper around Claude's own payload, unwrapped: the input verbatim.
+      expect(posted.envelope.payload.tool_input).toEqual({ command: 'touch x' })
+    }
     // The spooled file is published too, and the request copy is gone afterwards.
     expect(spooled(paths.spool)).toHaveLength(1)
     expect(readdirSync(paths.spool).filter(n => n.endsWith('.req'))).toEqual([])
@@ -308,6 +322,149 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect(r.stdout).toBe('')
       expect(Date.now() - started).toBeLessThan(5_000)
       expect(spooled(paths.spool)).toHaveLength(2)
+    })
+  })
+
+  // 6.52.0: the real script against the real broker doors, and both mixed-version pairs.
+  describe('the permission broker (6.52.0)', () => {
+    const API = 'api-tok'
+    const HOOK = 'tok-123'
+    const askPayload = (extra: Record<string, unknown> = {}) => payload({ hook_event_name: 'PermissionRequest', tool_name: 'AskUserQuestion', tool_input: ASK_INPUT, ...extra })
+    const brokers: PermissionBroker[] = []
+    afterEach(() => { for (const b of brokers.splice(0)) b.stop() })
+
+    /**
+     * A server wired as index.ts wires it; `withBroker: false` is a 6.51 server (no such
+     * route). The broker reads the real liveness module: `live` (default) is one real
+     * authenticated questions poll, as a client with the question UI makes; `claim` is a
+     * client-instance claim, as every COS Glasses copy since 6.9.505 makes.
+     */
+    async function server(opts: { withBroker?: boolean; mode?: BrokerMode; live?: boolean; claim?: boolean } = {}) {
+      __resetClientLivenessForTests()
+      const paths = home()
+      writeFileSync(join(paths.home, 'hook-desk-idle-s'), '0') // the script's own gate passes at once
+      writeFileSync(join(paths.home, 'hook-token'), HOOK)
+      const hits: Array<{ url: string; status: number }> = []
+      const broker = new PermissionBroker({
+        now: () => Date.now(),
+        mode: () => opts.mode ?? 'all',
+        admissionsOpen: () => true,
+        lastQuestionsPollAt,
+        readDeskIdleSeconds: async () => 1_000,
+        deskIdleSeconds: () => 90,
+        timeoutMs: () => 20_000,
+        pollMs: 50,
+        log: () => {},
+      })
+      brokers.push(broker)
+      const app = express()
+      app.use((req, res, next) => { const url = req.originalUrl; res.on('finish', () => hits.push({ url, status: res.statusCode })); next() })
+      app.use('/api', requireApiToken(API))
+      app.use(express.json({ limit: '10mb' }))
+      app.use('/api', createClientInstanceRouter())
+      if (opts.withBroker !== false) {
+        app.use(createPermissionBrokerHookRouter({ hookToken: () => HOOK, broker }))
+        app.use('/api', createSessionQuestionsRouter({ broker, apiToken: () => API }))
+      }
+      await new Promise<void>(r => { listener = app.listen(0, '127.0.0.1', () => r()) })
+      const port = (listener!.address() as AddressInfo).port
+      writeFileSync(join(paths.home, 'hook-port'), String(port))
+      const base = `http://127.0.0.1:${port}`
+      if (opts.claim) {
+        const claimed = await fetch(`${base}/api/client-instance/claim`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-token': API },
+          body: JSON.stringify({ id: 'aaaa0001-lens', bootAt: Date.now() - 1_000, version: '6.9.511' }),
+        })
+        expect(claimed.status).toBe(200)
+      }
+      if (opts.live !== false && opts.withBroker !== false) {
+        expect((await fetch(`${base}/api/session-questions`, { headers: { 'x-cos-token': API } })).status).toBe(200)
+      }
+      hits.length = 0 // only the hook's own requests are asserted below
+      return { paths, broker, hits, base }
+    }
+
+    async function firstPending(broker: PermissionBroker) {
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        const [item] = broker.list()
+        if (item) return item
+        await new Promise(r => setTimeout(r, 20))
+      }
+      throw new Error('nothing was parked')
+    }
+
+    it('a question answered on the glasses: the script prints exactly the updatedInput decision', async () => {
+      const s = await server()
+      const run = runAsync('PermissionRequest', askPayload(), s.paths)
+      const item = await firstPending(s.broker)
+      expect(item.questions?.[0]?.question).toBe(Q1)
+      const res = await fetch(`${s.base}/api/session-questions/${item.id}/answer`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-token': API },
+        body: JSON.stringify({ clientAnswerId: 'lens-1', answers: [{ labels: ['Tag', 'Bump'] }, { other: 'Teal, like the logo' }] }),
+      })
+      expect(res.status).toBe(200)
+      const r = await run
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe(JSON.stringify(questionHookOutput(ASK_INPUT, { [Q1]: ['Bump', 'Tag'], [Q2]: ['Teal, like the logo'] })))
+      expect(JSON.parse(r.stdout)).toEqual({
+        hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...ASK_INPUT, answers: { [Q1]: ['Bump', 'Tag'], [Q2]: ['Teal, like the logo'] } } } },
+      })
+      expect(s.hits.find(h => h.url === '/hooks/permission-requests/ask')?.status).toBe(200)
+      expect(readdirSync(s.paths.spool).filter(n => n.endsWith('.req'))).toEqual([])
+    })
+
+    it('an approval denied on the glasses: the script prints the deny with its message', async () => {
+      const s = await server()
+      const run = runAsync('PermissionRequest', payload({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } }), s.paths)
+      const item = await firstPending(s.broker)
+      expect(s.broker.answer(item.id, { clientAnswerId: 'lens-2', decision: 'deny' }).status).toBe(200)
+      expect((await run).stdout).toBe('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from COS glasses"}}}')
+    })
+
+    it('no questions poll (even with a live 6.9.511 claim), or the kill switch: {} at once and the script prints nothing (the native dialog, as today)', async () => {
+      for (const opts of [{ live: false }, { live: false, claim: true }, { mode: 'off' as BrokerMode }]) {
+        const s = await server(opts)
+        const started = Date.now()
+        const r = await runAsync('PermissionRequest', askPayload(), s.paths)
+        expect(r.status).toBe(0)
+        expect(r.stdout).toBe('')
+        expect(Date.now() - started).toBeLessThan(3_000)
+        expect(s.hits).toEqual([{ url: '/hooks/permission-requests/ask', status: 200 }])
+        expect(s.broker.health().counters.parked).toBe(0)
+        expect(s.broker.health().lastFastPath).toBe(opts.mode === 'off' ? 'broker_off' : 'no_client')
+        if (opts.live === false) expect(lastQuestionsPollAt()).toBeNull()
+        listener?.close(); listener = null
+      }
+    })
+
+    it('mixed versions fail safe: a 6.51 script against this server gets 401 and prints nothing', async () => {
+      const s = await server()
+      const current = readFileSync(SCRIPT, 'utf-8')
+      // The one functional difference from 6.51.0 is the URL the curl line posts to.
+      const url = '"http://127.0.0.1:$PORT/hooks/permission-requests/ask"'
+      expect(current.split(url).length - 1).toBe(1)
+      const oldScript = join(s.paths.home, 'cos-session-hook-6.51')
+      writeFileSync(oldScript, current.replace(url, '"http://127.0.0.1:$PORT/api/permission-requests/ask"'))
+      const r = await new Promise<{ status: number | null; stdout: string }>(resolvePromise => {
+        const child = spawn('/bin/sh', [oldScript, 'PermissionRequest'], {
+          env: { HOME: dirname(s.paths.home), COS_GLASSES_HOME: s.paths.home, COS_HOOK_SPOOL: s.paths.spool, PATH: '/usr/bin:/bin' },
+        })
+        let stdout = ''
+        child.stdout.on('data', c => { stdout += c })
+        child.on('close', status => resolvePromise({ status, stdout }))
+        child.stdin.end(askPayload())
+      })
+      expect(r).toEqual({ status: 0, stdout: '' })
+      expect(s.hits).toEqual([{ url: '/api/permission-requests/ask', status: 401 }])
+      expect(s.broker.health().counters.parked).toBe(0)
+    })
+
+    it('mixed versions fail safe: this script against a 6.51 server gets 404 and prints nothing', async () => {
+      const s = await server({ withBroker: false })
+      const r = await runAsync('PermissionRequest', askPayload(), s.paths)
+      expect(r).toEqual({ status: 0, stdout: '' })
+      expect(s.hits).toEqual([{ url: '/hooks/permission-requests/ask', status: 404 }])
     })
   })
 
