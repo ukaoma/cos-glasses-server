@@ -579,19 +579,32 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
 }
 
 /**
- * Codex, with ONE CHANNEL PER KIND, which is the point.
+ * Codex: three input shapes, and within a ROLLOUT one channel per kind.
  *
- * Codex writes the same assistant text more than once: as a TurnItem
- * (`event_msg/item_completed`, item `AgentMessage`) or, in an older rollout, as the
- * legacy `event_msg/agent_message`, AND as `response_item/message` with
- * `role:'assistant'`. It writes each command twice too: as the `response_item` call
- * AND, in some builds, as an `item_completed` `CommandExecution` / `FileChange`.
- * Mapping two channels would double every line on the lens. So:
+ * 1. A rollout (`~/.codex/sessions/.../rollout-*.jsonl`, what the transcript watcher
+ *    tails). It writes the same assistant text on more than one channel: as a TurnItem
+ *    (`event_msg/item_completed`, item `AgentMessage`) or, in an older rollout, as the
+ *    legacy `event_msg/agent_message`, AND as `response_item/message` with
+ *    `role:'assistant'` (and, on 0.155, a `response_item/agent_message` as well). It
+ *    writes each command twice too: as the `response_item` call AND as an
+ *    `item_completed` `CommandExecution` / `FileChange` (a 0.155 rollout here: 41 of
+ *    each). Mapping two channels would double every line on the lens. So, for a rollout:
  *
  *   prose      event channel only: `item_completed/AgentMessage`, else the legacy
- *              `agent_message`. Never `response_item/message`.
+ *              `agent_message`. Never `response_item/message` or `/agent_message`.
  *   tools      response-item channel only. Never `CommandExecution` / `FileChange`.
  *   status     event channel only (task_started / task_complete / turn_aborted).
+ *
+ * 2. The live `codex exec --json` stream (what a COS-driven Continue turn prints, read by
+ *    the attached-turn stream). MEASURED on codex-cli 0.155.0 (2026-09-19, fixture
+ *    `__fixtures__/codex-exec-json-0.155.0.jsonl`): `{type:'thread.started'}`,
+ *    `{type:'turn.started'}`, then `item.started` / `item.completed` wrapping
+ *    `{id, type, ...}` with snake_case item types (`agent_message`, `command_execution`,
+ *    ...), then `{type:'turn.completed', usage}`. Each item appears once per event, keyed
+ *    by its id; there is no second channel. See `draftsFromCodexExecEvent`.
+ *
+ * 3. The `{id, msg:{type,...}}` envelope of older `codex exec` builds, read exactly as
+ *    6.51.0 read it: the legacy events only (task_started, agent_message, task_complete).
  *
  * WHY THE TWO PROSE SOURCES CANNOT BOTH FIRE IN ONE ROLLOUT (6.52.0). Codex's rollout
  * writer (`should_persist_event_msg`, codex-rs/rollout/src/policy.rs) persists the
@@ -606,16 +619,17 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
  * Until 6.52.0 prose came from `agent_message` alone, so on every rollout above the
  * lens said "Working. Nothing written yet." while the Codex app showed paragraphs.
  *
- * The live `codex exec --json` envelope, `{id, msg:{type,...}}`, is different: Codex
- * EMITS both the legacy event and the item for one message on its live stream (the
- * policy above only filters what is written to disk). So that envelope reads the
- * legacy events alone, exactly as before, and never an item.
+ * The older `{id, msg:{type,...}}` exec envelope reads the legacy events alone, exactly as
+ * 6.51.0 did, and never an item: no build on this Mac still writes it, so there is nothing
+ * measured to change that reader against. Today's exec stream is shape 2 above.
  */
 function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDraft[] {
   const msg = asRecord(record.msg)
   if (msg && typeof msg.type === 'string') return draftsFromCodexEvent(msg)
 
   const type = typeof record.type === 'string' ? record.type : ''
+  // Shape 2: a live `codex exec --json` event. No rollout row type contains a dot.
+  if (type === 'thread.started' || type.startsWith('turn.') || type.startsWith('item.')) return draftsFromCodexExecEvent(record)
   const payload = asRecord(record.payload)
   if (!payload) return []
   if (type === 'event_msg') {
@@ -651,6 +665,124 @@ function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDr
     return [toolDraft(payload.name, input, payload.call_id)]
   }
   return []
+}
+
+/** `codex exec` wraps each command in a login shell: `/bin/zsh -lc 'npm test'`. The
+ * command is what ran; the wrapper is how. Shared with the Messages trail's Codex reader. */
+const CODEX_SHELL_WRAPPER_RE = /^\s*(?:\S*\/)?(?:ba|z|da)?sh\s+-l?c\s+(?:'([\s\S]*)'|"([\s\S]*)")\s*$/
+
+export function codexExecCommandText(value: unknown): string {
+  if (Array.isArray(value)) {
+    const parts = value.filter((part): part is string => typeof part === 'string')
+    if (parts.length >= 3 && /(?:^|\/)(?:ba|z|da)?sh$/.test(parts[0]) && /^-l?c$/.test(parts[1])) return parts.slice(2).join(' ')
+    return parts.join(' ')
+  }
+  const text = typeof value === 'string' ? value : ''
+  const match = CODEX_SHELL_WRAPPER_RE.exec(text)
+  return match ? (match[1] ?? match[2] ?? text) : text
+}
+
+function execLineCount(value: unknown): number {
+  if (typeof value !== 'string') return 0
+  const text = value.replace(/\n+$/, '')
+  return text.length === 0 ? 0 : text.split('\n').length
+}
+
+/** A finished `command_execution` item to a derived outcome token. Never output text.
+ * Shared with the Messages trail's Codex reader. */
+export function codexExecCommandOutcome(item: Record<string, unknown>): Omit<ToolOutcome, 'call'> {
+  const exit = item.exit_code
+  if (typeof exit === 'number') {
+    if (exit !== 0) return { ok: false, detail: `exit ${exit}` }
+    const lines = execLineCount(item.aggregated_output)
+    return { ok: true, detail: lines === 0 ? 'no output' : `${lines} line${lines === 1 ? '' : 's'}` }
+  }
+  if (item.status === 'declined') return { ok: false, detail: 'denied' }
+  if (item.status === 'failed') return { ok: false, detail: 'failed' }
+  return { ok: true, detail: '' }
+}
+
+function execOutcome(outcome: Omit<ToolOutcome, 'call'>, call?: string): SessionStreamDraft {
+  return { kind: 'status', state: 'working', tool_outcome: call ? { ...outcome, call } : outcome }
+}
+
+/**
+ * One live `codex exec --json` event (6.52.0 QA round 1: a Continue that runs through
+ * `codex exec` streamed only working and done, because nothing read this shape).
+ *
+ * STATELESS, so each step is emitted exactly once by rule rather than by memory:
+ *   turn.started            status working. turn.completed / turn.failed: status done.
+ *   agent_message           prose, at completion (it arrives complete).
+ *   reasoning               the reasoning headline on a status, at completion; never prose.
+ *   command_execution       the step at START (it has one, measured), its outcome at
+ *                           completion, paired by the item id.
+ *   mcp_tool_call           the same.
+ *   web_search, file_change the step and its outcome at COMPLETION only: a search's query
+ *                           is not known at start, and a file change is reported done.
+ *   thread.started, item.updated, anything newer: nothing.
+ */
+function draftsFromCodexExecEvent(record: Record<string, unknown>): SessionStreamDraft[] {
+  const type = typeof record.type === 'string' ? record.type : ''
+  if (type === 'turn.started') return [{ kind: 'status', state: 'working' }]
+  if (type === 'turn.completed' || type === 'turn.failed') return [{ kind: 'status', state: 'done' }]
+  if (type !== 'item.started' && type !== 'item.completed') return []
+  const item = asRecord(record.item)
+  if (!item) return []
+  const done = type === 'item.completed'
+  const call = callId(item.id)
+  switch (item.type) {
+    case 'agent_message': {
+      if (!done) return []
+      const prose = proseDraft(item.text)
+      return prose ? [prose] : []
+    }
+    case 'reasoning': {
+      if (!done) return []
+      const reasoning = codexReasoningHeadline([item.text])
+      if (!reasoning) return []
+      const draft: CodexReasoningStatus = { kind: 'status', state: 'working', reasoning }
+      return [draft]
+    }
+    case 'command_execution':
+      return done
+        ? [execOutcome(codexExecCommandOutcome(item), call)]
+        : [toolDraft('Bash', { command: codexExecCommandText(item.command) }, item.id)]
+    case 'mcp_tool_call': {
+      if (done) {
+        const failed = item.status === 'failed' || (item.error != null && item.error !== '')
+        return [execOutcome({ ok: !failed, detail: failed ? 'failed' : '' }, call)]
+      }
+      const name = [item.server, item.tool].filter((part): part is string => typeof part === 'string' && part.length > 0).join('.')
+      return [{ kind: 'tool', verb: 'other', target: oneLine(name, TARGET_MAX_CHARS) || 'mcp tool', detail: '', ...(call ? { call } : {}) }]
+    }
+    case 'web_search': {
+      if (!done) return []
+      const query = oneLine(item.query, TARGET_MAX_CHARS)
+      return [
+        { kind: 'tool', verb: 'search', target: query || 'web search', detail: '', ...(call ? { call } : {}) },
+        execOutcome({ ok: true, detail: '' }, call),
+      ]
+    }
+    case 'file_change': {
+      if (!done) return []
+      const failed = item.status === 'failed'
+      const changes = (Array.isArray(item.changes) ? item.changes : [])
+        .map(asRecord)
+        .filter((change): change is Record<string, unknown> => change !== null)
+        .slice(0, 5)
+      const out: SessionStreamDraft[] = []
+      for (const change of changes) {
+        const name = oneLine(basename(change.path), TARGET_MAX_CHARS) || 'file'
+        if (change.kind === 'add') out.push({ kind: 'tool', verb: 'write', target: name, detail: '' })
+        else if (change.kind === 'delete') out.push({ kind: 'tool', verb: 'other', target: oneLine(`delete ${name}`, TARGET_MAX_CHARS), detail: '' })
+        else out.push({ kind: 'tool', verb: 'edit', target: name, detail: '' })
+        out.push(execOutcome({ ok: !failed, detail: failed ? 'failed' : change.kind === 'add' ? 'created' : change.kind === 'delete' ? 'deleted' : 'edited' }))
+      }
+      return out
+    }
+    default:
+      return []
+  }
 }
 
 function draftsFromCodexEvent(payload: Record<string, unknown>): SessionStreamDraft[] {

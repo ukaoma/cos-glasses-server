@@ -41,6 +41,8 @@ import {
   TARGET_MAX_CHARS,
   TRUNCATION_MARK,
   basename,
+  codexExecCommandOutcome,
+  codexExecCommandText,
   commandSummary,
   draftsFromRecord,
   oneLine,
@@ -403,31 +405,10 @@ function createClaudeReader(emit: (draft: JobTrailDraft) => void): JobTrailReade
   }
 }
 
-/** `codex exec` wraps each command in a login shell: `/bin/zsh -lc 'npm test'`. The
- * command is what ran; the wrapper is how. */
-const SHELL_WRAPPER_RE = /^\s*(?:\S*\/)?(?:ba|z|da)?sh\s+-l?c\s+(?:'([\s\S]*)'|"([\s\S]*)")\s*$/
-
-function codexCommandText(value: unknown): string {
-  if (Array.isArray(value)) {
-    const parts = value.filter((part): part is string => typeof part === 'string')
-    if (parts.length >= 3 && /(?:^|\/)(?:ba|z|da)?sh$/.test(parts[0]) && /^-l?c$/.test(parts[1])) return parts.slice(2).join(' ')
-    return parts.join(' ')
-  }
-  const text = str(value)
-  const match = SHELL_WRAPPER_RE.exec(text)
-  return match ? (match[1] ?? match[2] ?? text) : text
-}
-
-function codexCommandOutcome(item: Record<string, unknown>): Omit<ToolOutcome, 'call'> {
-  const exit = item.exit_code
-  if (typeof exit === 'number') {
-    if (exit !== 0) return { ok: false, detail: `exit ${exit}` }
-    return { ok: true, detail: linesDetail(item.aggregated_output) }
-  }
-  if (item.status === 'declined') return { ok: false, detail: 'denied' }
-  if (item.status === 'failed') return { ok: false, detail: 'failed' }
-  return { ok: true, detail: '' }
-}
+// The shell-wrapper and outcome rules are the Sessions grammar's (it reads the same live
+// `codex exec --json` stream for a Continue turn), shared rather than copied.
+const codexCommandText = codexExecCommandText
+const codexCommandOutcome = codexExecCommandOutcome
 
 function outcomeDraft(outcome: Omit<ToolOutcome, 'call'>, call?: string): JobTrailDraft {
   return { kind: 'status', state: 'working', tool_outcome: { ...outcome, ...(call ? { call } : {}) } }
@@ -437,7 +418,9 @@ function outcomeDraft(outcome: Omit<ToolOutcome, 'call'>, call?: string): JobTra
  * Codex (`codex exec --json`).
  *
  * Field names measured from the shipped binary's serde strings (ChatGPT.app's `codex`,
- * 2026-09-19): events `item.started|updated|completed`, items `agent_message`, `reasoning`,
+ * 2026-09-19), and for the lifecycle events, `agent_message` and `command_execution`
+ * confirmed by a real 0.155.0 run (`__fixtures__/codex-exec-json-0.155.0.jsonl`; the other
+ * item kinds are still the serde-string reading): events `item.started|updated|completed`, items `agent_message`, `reasoning`,
  * `command_execution` (`command`, `aggregated_output`, `exit_code`, `status`), `file_change`
  * (`changes[{path,kind: add|delete|update}]`, `status`), `mcp_tool_call` (`server`, `tool`,
  * `status`, `error`), `web_search` (`query`), `todo_list`. The `{type, item:{...}}` nesting is

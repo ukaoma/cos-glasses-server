@@ -8,8 +8,9 @@
 //    (code-mode `exec` cells since 0.144) plus CommandExecution / FileChange items.
 //  - legacy rollouts: prose as `event_msg/agent_message`. None remain on this Mac; the
 //    shape is the one the 6.51.0 grammar was written against and still reads.
-//  - the live `codex exec --json` envelope `{id, msg}`, which carries BOTH the legacy
-//    event and the item for one message.
+//  - the older `codex exec --json` envelope `{id, msg}`, read as 6.51.0 read it (legacy
+//    events only). Today's exec stream (`thread.started`, `item.*`) is measured and tested
+//    in session-stream-codex-exec.test.ts.
 
 import { describe, expect, it } from 'vitest'
 import {
@@ -147,7 +148,7 @@ describe('a legacy rollout reads exactly as 6.51.0 read it', () => {
   })
 })
 
-describe('the live {id, msg} envelope carries both channels, so it reads the legacy one only', () => {
+describe('the older {id, msg} exec envelope reads the legacy events only, as 6.51.0 did', () => {
   it('maps agent_message and ignores the item for the same message', () => {
     const live = [
       { id: '0', msg: { type: 'task_started' } },
