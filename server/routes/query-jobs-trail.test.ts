@@ -192,6 +192,31 @@ describe('a client that opts in (?trail=1)', () => {
     expect(gapSnapshot?.data.job.trail).toHaveLength(QUERY_JOB_LIMITS.trailEntries)
   }, 30_000)
 
+  it('a trail frame both replayed and delivered live is written once', async () => {
+    const jobId = '0f0e0d0c-0b0a-4908-8706-050403020100'
+    const snapshot = { jobId, clientJobId: CLIENT_JOB_ID, generation: 1, status: 'running', eventSeq: 1, updatedAt: FIXED.toISOString() }
+    const entry = (trailSeq: number) => ({ kind: 'prose', text: `entry ${trailSeq}`, trailSeq, at: FIXED.toISOString() })
+    const fake = {
+      subscribe: async (_j: string, _g: number, _a: number, listener: (event: Record<string, unknown>) => void, trail?: { after: number; listener: (frame: Record<string, unknown>) => void }) => {
+        // Entry 2 lands between the listener's registration and the replay snapshot.
+        trail?.listener({ type: 'trail', trailSeq: 2, jobId, clientJobId: CLIENT_JOB_ID, generation: 1, at: FIXED.toISOString(), data: { kind: 'prose', text: 'entry 2' } })
+        listener({ type: 'completed', eventSeq: 2, jobId, clientJobId: CLIENT_JOB_ID, generation: 1, status: 'completed', at: FIXED.toISOString(), data: {} })
+        return {
+          replay: { events: [], gap: false, oldestEventSeq: 1, latestEventSeq: 1, snapshot },
+          trailReplay: { entries: [entry(1), entry(2)], gap: false, oldestTrailSeq: 1, latestTrailSeq: 2 },
+          unsubscribe: () => {},
+        }
+      },
+    } as unknown as QueryJobCoordinator
+    const app = express()
+    app.use('/api', createQueryJobsRouter(fake, { enabled: () => true }))
+    const server = await new Promise<Server>(r => { const s2 = app.listen(0, '127.0.0.1', () => r(s2)) })
+    servers.push(server)
+    const text = await sse(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, jobId, 'after=1&trail=1&trailAfter=0')
+    expect(framesOf(text, 'trail').map(f => f.trailSeq)).toEqual([1, 2])
+    expect(text).toContain('event: completed')
+  })
+
   it('a bad trailAfter is refused like a bad event cursor', async () => {
     const { store, base } = await harness()
     const admitted = await store.admit({ clientJobId: CLIENT_JOB_ID, generation: 1, query: 'q', sessionId: 'session-trail' })

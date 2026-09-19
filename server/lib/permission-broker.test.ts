@@ -1,7 +1,13 @@
 // 6.52.0: the permission broker's rules, executed. The HTTP doors and the real hook script
 // are in routes/permission-broker.test.ts and cos-session-hook.script.test.ts.
 import { readFileSync } from 'node:fs'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// The real redaction, observed: which text reached a regex, and how much of it.
+vi.mock('./activity-preview.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./activity-preview.js')>()
+  return { ...actual, redactSecretText: vi.fn(actual.redactSecretText) }
+})
 import {
   APPROVAL_DETAIL_MAX,
   APPROVAL_SUMMARY_MAX,
@@ -36,7 +42,7 @@ import { SessionSignalStore } from './session-signal-store.js'
 import { deriveSessionState, derivedRowFields } from './session-state-derive.js'
 import { toolFingerprint, type HookEnvelope } from './session-hook-events.js'
 import { __resetClientLivenessForTests, lastQuestionsPollAt, noteQuestionsPoll } from './client-liveness.js'
-import { REDACTION_SCAN_MAX_CHARS } from './activity-preview.js'
+import { REDACTION_SCAN_MAX_CHARS, redactSecretText } from './activity-preview.js'
 import { HOOK_SUBSCRIPTIONS } from './claude-hooks-installer.js'
 import { PERMISSION_BROKER_HOOK_PATH } from '../routes/permission-broker.js'
 
@@ -394,10 +400,24 @@ describe('the broker, driven directly', () => {
     brokers.push(broker)
     s.seenAt = null
     const content = 'const x = 1\n'.repeat(75_000) // ~900 KB
+    vi.mocked(redactSecretText).mockClear()
     const started = performance.now()
     expect(await broker.admit(permissionEnvelope('Write', { file_path: '/Users/example/big.ts', content }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
     expect(performance.now() - started).toBeLessThan(20)
     expect(s.idleReads).toBe(0)
+    // No card was built: not one redaction ran.
+    expect(vi.mocked(redactSecretText)).not.toHaveBeenCalled()
+  })
+
+  it('no regex is ever handed more than the scan bound, whatever the input', () => {
+    vi.mocked(redactSecretText).mockClear()
+    const huge = `curl https://x.test/ ${'data '.repeat(200_000)}`
+    approvalCard('Bash', { command: huge })
+    approvalCard('mcp__x__y', { blob: 'q '.repeat(300_000), nested: { deep: 'z '.repeat(300_000) } })
+    approvalCard('Write', { file_path: `/tmp/${'d/'.repeat(10_000)}f.ts`, content: 'x' })
+    const lengths = vi.mocked(redactSecretText).mock.calls.map(([text]) => text.length)
+    expect(lengths.length).toBeGreaterThan(0)
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(REDACTION_SCAN_MAX_CHARS)
   })
 
   it('capacity holds after the desk read: requests admitted during it count', async () => {
@@ -456,6 +476,15 @@ describe('the broker, driven directly', () => {
     s.admissions = false
     release(1_000)
     expect(await second).toEqual({ ok: false, reason: 'draining' })
+    // Approvals turned off during the read: a question would still be held, a tool is not.
+    s.admissions = true
+    const third = broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))
+    s.mode = 'questions'
+    release(1_000)
+    expect(await third).toEqual({ ok: false, reason: 'approvals_off' })
+    const question = broker.admit(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, clock.now))
+    release(1_000)
+    expect((await question).ok).toBe(true)
   })
 
   it('the deadline counts from the hook\'s own start, and a timer settles it', async () => {

@@ -425,12 +425,8 @@ export function approvalCard(toolName: string, toolInput: Record<string, unknown
   }
   if (lower === 'webfetch' && str('url') !== null) return both(str('url')!)
   if (lower === 'websearch' && str('query') !== null) return both(str('query')!)
-  // Bounded before it is joined: a huge value never reaches a regex, only its head does.
-  const pairs = Object.entries(toolInput).map(([key, value]) => {
-    const { head, omitted } = boundForRedaction(valueText(value))
-    return `${key}=${head}${omitted > 0 ? approvalCutMarker(omitted) : ''}`
-  })
-  return both(pairs.join(' '))
+  // `approvalLine` bounds what reaches a regex, so a huge value costs a join, not a scan.
+  return both(Object.entries(toolInput).map(([key, value]) => `${key}=${valueText(value)}`).join(' '))
 }
 
 // ---------------------------------------------------------------------------

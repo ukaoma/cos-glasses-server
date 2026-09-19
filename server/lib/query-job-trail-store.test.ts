@@ -1,6 +1,6 @@
 // The Messages trail in the durable journal (6.52.0), against real partition files.
 
-import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -109,6 +109,11 @@ describe('trail rows in the durable journal', () => {
     expect(frames[0]).not.toHaveProperty('eventSeq')
     plain.unsubscribe()
     opted.unsubscribe()
+    // A replay holds exactly the entries after the cursor, in order.
+    const later = await store.subscribe(jobId, 1, 0, () => {}, { after: 1, listener: () => {} })
+    expect(later.trailReplay).toMatchObject({ gap: false, oldestTrailSeq: 1, latestTrailSeq: 3 })
+    expect(later.trailReplay?.entries.map(e => e.trailSeq)).toEqual([2, 3])
+    later.unsubscribe()
   })
 
   it('keeps snapshot.trail across a restart with malformedRows 0, and the next row continues the count', async () => {
@@ -214,6 +219,29 @@ describe('trail rows in the durable journal', () => {
     expect(rolledBack).toEqual(withoutTrail)
     // And its event stream is the one this build serves an old client.
     expect((await old.replay(jobId, 1, 0)).events).toEqual(currentReplay.events)
+  })
+
+  it('a trail row is applied only to its own generation, and never after the job is terminal', async () => {
+    const root = await tempRoot()
+    const store = new QueryJobStore({ root, bootId: 'boot-a' })
+    await store.init()
+    const jobId = await runningJob(store)
+    await store.appendTrail(jobId, { kind: 'prose', text: 'one' })
+    await store.complete(jobId, { text: 'done' })
+    const partition = (await readdir(root)).find(name => name.endsWith('.jsonl'))!
+    const rows = (await readFile(join(root, partition), 'utf8')).split('\n').filter(Boolean)
+    const at = rows.findIndex(line => JSON.parse(line).type === 'trail')
+    const row = JSON.parse(rows[at]!)
+    // Crafted rows a journal could hold: another generation's while the job runs, and one
+    // of this generation after the terminal.
+    rows.splice(at + 1, 0, JSON.stringify({ ...row, recordId: randomUUID(), generation: 2, eventData: { kind: 'prose', text: 'other generation', trailSeq: 2 } }))
+    rows.push(JSON.stringify({ ...row, recordId: randomUUID(), eventData: { kind: 'prose', text: 'after the end', trailSeq: 2 } }))
+    await writeFile(join(root, partition), `${rows.join('\n')}\n`)
+    const reader = new QueryJobStore({ root, bootId: 'boot-b' })
+    await reader.init()
+    const snapshot = await reader.getSnapshot(jobId)
+    expect(snapshot.status).toBe('completed')
+    expect(snapshot.trail?.map(entry => (entry as { text: string }).text)).toEqual(['one'])
   })
 
   it('applies trail rows idempotently by trailSeq: a duplicated row changes nothing', async () => {

@@ -4,8 +4,15 @@
 // the shipped binary's serde strings, and the Cursor 2026.09.15 bundle's stream-json writer.
 
 import { EventEmitter } from 'node:events'
-import { describe, expect, it } from 'vitest'
-import { redactSecretText } from './activity-preview.js'
+import { describe, expect, it, vi } from 'vitest'
+
+// The real redaction, observed: how much text reached a regex.
+vi.mock('./activity-preview.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./activity-preview.js')>()
+  return { ...actual, redactSecretText: vi.fn(actual.redactSecretText) }
+})
+
+import { REDACTION_SCAN_MAX_CHARS, redactSecretText } from './activity-preview.js'
 import {
   TRAIL_PROSE_MAX_CHARS,
   __resetJobTrailStatsForTests,
@@ -166,6 +173,18 @@ describe('Cursor reader', () => {
 })
 
 describe('redact before cut, through the real readers (QA round 1)', () => {
+  it('no regex is handed more than the scan bound, through the readers and the journal boundary', () => {
+    vi.mocked(redactSecretText).mockClear()
+    const long = `${'word '.repeat(100_000)}end`
+    read('claude', [{ type: 'assistant', message: { id: 'm', content: [{ type: 'text', text: long }, { type: 'tool_use', id: 'toolu_b1', name: 'Bash', input: { command: long } }] } }])
+    read('codex', [{ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: long } }])
+    read('cursor', [{ type: 'tool_call', subtype: 'started', call_id: 'toolu_c1', tool_call: { shellToolCall: { args: { command: long } } }, model_call_id: 'mc', timestamp_ms: 1 }])
+    sanitizeJobTrailDraft({ kind: 'prose', text: long })
+    const lengths = vi.mocked(redactSecretText).mock.calls.map(([text]) => text.length)
+    expect(lengths.length).toBeGreaterThan(3)
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(REDACTION_SCAN_MAX_CHARS)
+  })
+
   const AKIA = 'AKIAIOSFODNN7EXAMPLE'
   const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
   /** Text whose secret STARTS before `cap` and ends after it. */
@@ -195,7 +214,8 @@ describe('redact before cut, through the real readers (QA round 1)', () => {
     it(`Codex: command (80), MCP name (80), search (80), file name (80), and a message past the 8,000 scan bound: ${which}`, () => {
       const item = (body: Record<string, unknown>) => ({ type: 'item.completed', item: { id: 'item_1', status: 'completed', ...body } })
       clean(read('codex', [item({ type: 'command_execution', command: `/bin/zsh -lc '${straddle(80, secret, 'echo ')}'`, exit_code: 0, aggregated_output: '' })]), secret, 'command')
-      clean(read('codex', [item({ type: 'mcp_tool_call', server: 'srv', tool: straddle(80, secret) })]), secret, 'mcp')
+      // The name is `server.tool`: the tool's secret starts before the cap once `srv.` is added.
+      clean(read('codex', [item({ type: 'mcp_tool_call', server: 'srv', tool: straddle(76, secret) })]), secret, 'mcp')
       clean(read('codex', [item({ type: 'web_search', query: straddle(80, secret) })]), secret, 'search')
       clean(read('codex', [item({ type: 'file_change', changes: [{ path: `/repo/${'x'.repeat(70)}-${secret}.txt`, kind: 'update' }] })]), secret, 'file')
       clean(read('codex', [item({ type: 'agent_message', text: straddle(8_000, secret) })]), secret, 'message')
