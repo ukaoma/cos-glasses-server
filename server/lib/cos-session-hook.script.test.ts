@@ -244,6 +244,30 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect(readdirSync(paths.spool).filter(n => n.endsWith('.req') || n.startsWith('.tmp'))).toEqual([])
     })
 
+    it('a payload with only session_id still asks when that composer has a queue (QA W2)', async () => {
+      const reply = JSON.stringify({ followup_message: 'Queued from the phone' })
+      const { paths, seen } = await listen(() => reply)
+      const qdir = join(dirname(paths.spool), 'thread-turn-queue')
+      mkdirSync(qdir, { recursive: true })
+      const onlySession = cursorStop({ conversation_id: undefined })
+      expect(onlySession).not.toContain('conversation_id')
+      expect((await runWithEnv('Stop', onlySession, paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe('')
+      expect(seen).toEqual([])
+      writeFileSync(join(qdir, `cursor-${CONVERSATION}.json`), '{}')
+      expect((await runWithEnv('Stop', onlySession, paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe(reply)
+      expect(seen).toHaveLength(1)
+      // Both ids present and different: conversation_id decides, as it does on the server.
+      const other = 'c0ffee00-0000-4000-8000-0000000000dd'
+      expect((await runWithEnv('Stop', cursorStop({ session_id: other }), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe(reply)
+      expect(seen).toHaveLength(2)
+      expect((await runWithEnv('Stop', cursorStop({ conversation_id: other, session_id: CONVERSATION }), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe('')
+      expect(seen).toHaveLength(2)
+      // No id the hook can read: it asks, and the server (which reads ids the same way) decides.
+      const noId = cursorStop({ conversation_id: undefined, session_id: undefined })
+      expect((await runWithEnv('Stop', noId, paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe(reply)
+      expect(seen).toHaveLength(3)
+    })
+
     it('an answer that is not a follow-up prints nothing', async () => {
       const { paths, seen } = await listen(() => '{}')
       const r = await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })

@@ -12,14 +12,19 @@ vi.hoisted(() => {
 })
 import express from 'express'
 import type { Server } from 'node:http'
-import { claimNextCursorTurn, cursorStopAcceptsFollowup, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
+import { spawn } from 'node:child_process'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { claimNextCursorTurn, cursorStopAcceptsFollowup, cursorStopIsFresh, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
 import { CURSOR_STOP_FOLLOWUP_PATH, createCursorStopFollowupRouter } from './cursor-stop-followup.js'
 import { readQueue, writeQueue } from '../lib/thread-turn-queue-store.js'
 import type { QueuedThreadTurn } from '../lib/thread-turn-queue.js'
 
 const CONV = 'd1728e99-1007-4957-b36b-34df7d525e14'
-const envelope = (payload: Record<string, unknown> = {}, event = 'Stop') => ({
-  ts: 1, ppid: 2, event,
+// The route's clock reads 9_000; a hook that started half a second earlier is fresh.
+const envelope = (payload: Record<string, unknown> = {}, event = 'Stop', ts: unknown = 8_500) => ({
+  ts, ppid: 2, event,
   payload: { conversation_id: CONV, session_id: CONV, hook_event_name: 'stop', status: 'completed', loop_count: 0, cursor_version: '3.21.13', ...payload },
 })
 const turn = (id: string, over: Partial<QueuedThreadTurn> = {}): QueuedThreadTurn => ({
@@ -29,7 +34,15 @@ const turn = (id: string, over: Partial<QueuedThreadTurn> = {}): QueuedThreadTur
 
 describe('parseCursorStopEnvelope', () => {
   it('reads a Cursor Stop', () => {
-    expect(parseCursorStopEnvelope(envelope())).toEqual({ conversationId: CONV, status: 'completed', loopCount: 0, cursorVersion: '3.21.13' })
+    expect(parseCursorStopEnvelope(envelope())).toEqual({ conversationId: CONV, status: 'completed', loopCount: 0, cursorVersion: '3.21.13', hookStartedAtMs: 8_500 })
+  })
+  it('a missing or non-numeric stamp reads null, never a number', () => {
+    for (const ts of [null, '8500', Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(parseCursorStopEnvelope(envelope({}, 'Stop', ts))?.hookStartedAtMs).toBeNull()
+    }
+    // (An undefined argument would take the fresh default; drop the key instead.)
+    const { ts: _dropped, ...unstamped } = envelope()
+    expect(parseCursorStopEnvelope(unstamped)?.hookStartedAtMs).toBeNull()
   })
   it('falls back to session_id, and lowercases the id', () => {
     expect(parseCursorStopEnvelope(envelope({ conversation_id: undefined, session_id: CONV.toUpperCase() }))?.conversationId).toBe(CONV)
@@ -45,8 +58,21 @@ describe('parseCursorStopEnvelope', () => {
   })
 })
 
+describe('cursorStopIsFresh', () => {
+  it('only within 2 s of the hook starting, and never from a clock that ran ahead', () => {
+    expect(cursorStopIsFresh(10_000, 10_000)).toBe(true)
+    expect(cursorStopIsFresh(10_000, 12_000)).toBe(true)
+    expect(cursorStopIsFresh(10_000, 12_001)).toBe(false)
+    expect(cursorStopIsFresh(10_000, 5_000)).toBe(true)
+    expect(cursorStopIsFresh(10_000, 4_999)).toBe(false)
+    expect(cursorStopIsFresh(null, 10_000)).toBe(false)
+    expect(cursorStopIsFresh(Number.NaN, 10_000)).toBe(false)
+    expect(cursorStopIsFresh(10_000, Number.NaN)).toBe(false)
+  })
+})
+
 describe('cursorStopAcceptsFollowup', () => {
-  const facts = (over: Record<string, unknown> = {}) => ({ conversationId: CONV, status: 'completed', loopCount: 0, cursorVersion: '3', ...over })
+  const facts = (over: Record<string, unknown> = {}) => ({ conversationId: CONV, status: 'completed', loopCount: 0, cursorVersion: '3', hookStartedAtMs: 1, ...over })
   it('only a completed turn, under the loop cap', () => {
     expect(cursorStopAcceptsFollowup(facts(), 8)).toBe(true)
     expect(cursorStopAcceptsFollowup(facts({ loopCount: null }), 8)).toBe(true)
@@ -146,6 +172,48 @@ describe(`POST ${CURSOR_STOP_FOLLOWUP_PATH}`, () => {
     expect(replied).toBe('nothing')
     expect(readQueue('cursor', CONV, 9_000)[0]!.status).toBe('waiting')
   })
+
+  it('a Stop more than 2 s old, or unstamped, claims nothing and leaves the turn waiting', async () => {
+    writeQueue('cursor', CONV, [turn('one')])
+    expect(await post(envelope({}, 'Stop', 6_999))).toEqual({ status: 200, body: {} })
+    const { ts: _dropped, ...unstamped } = envelope()
+    expect(await post(unstamped)).toEqual({ status: 200, body: {} })
+    expect(await post(envelope({}, 'Stop', null))).toEqual({ status: 200, body: {} })
+    expect(await post(envelope({}, 'Stop', 15_000))).toEqual({ status: 200, body: {} })
+    expect(writes).toEqual([])
+    expect(readQueue('cursor', CONV, 9_000)[0]!.status).toBe('waiting')
+    // The boundary itself still claims.
+    expect(await post(envelope({}, 'Stop', 7_000))).toEqual({ status: 200, body: { followup_message: 'prompt one' } })
+  })
+
+  it('a Stop that reaches a blocked server after the hook gave up is never claimed (real curl, QA B2)', async () => {
+    const started = Date.now()
+    writeQueue('cursor', CONV, [turn('one', { queuedAt: started })])
+    const app = express()
+    app.use(createCursorStopFollowupRouter({ hookToken: () => 'hook-tok', readQueue, writeQueue, now: () => Date.now() }))
+    const live = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
+    try {
+      const addr = live.address()
+      const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}${CURSOR_STOP_FOLLOWUP_PATH}`
+      const file = join(mkdtempSync(join(tmpdir(), 'cos-cursor-b2-')), 'envelope.json')
+      writeFileSync(file, JSON.stringify(envelope({}, 'Stop', started)))
+      // The hook's own curl, with a 1 s wait standing in for its 3 s.
+      const curl = spawn('/usr/bin/curl', ['-s', '--connect-timeout', '1', '--max-time', '1',
+        '-H', 'X-Cos-Hook-Token: hook-tok', '-H', 'content-type: application/json', '--data-binary', `@${file}`, url])
+      let out = ''
+      curl.stdout.on('data', c => { out += c })
+      const exited = new Promise<number | null>(r => curl.on('close', r))
+      // A busy server: nothing runs on this loop until well after curl has given up.
+      const until = Date.now() + 2_600
+      while (Date.now() < until) { /* blocked */ }
+      expect(await exited).not.toBe(0)
+      await new Promise(r => setTimeout(r, 400))
+      expect(out).toBe('')
+      expect(readQueue('cursor', CONV, Date.now())[0]!.status).toBe('waiting')
+    } finally {
+      live.close()
+    }
+  }, 15_000)
 
   it('only ever reads the cursor queue: a Claude queue under the same id is never handed over', async () => {
     writeQueue('claude', CONV, [turn('claude-one', { provider: 'claude' })])

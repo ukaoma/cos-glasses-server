@@ -10,7 +10,7 @@
 
 import express, { Router, type Request, type Response } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
-import { claimNextCursorTurn, cursorStopAcceptsFollowup, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
+import { claimNextCursorTurn, cursorStopAcceptsFollowup, cursorStopIsFresh, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
 import { MAX_QUEUED_PER_THREAD, type QueuedThreadTurn } from '../lib/thread-turn-queue.js'
 
 export interface CursorStopFollowupDeps {
@@ -35,10 +35,11 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
     }
     const facts = parseCursorStopEnvelope(req.body)
     if (!facts || !cursorStopAcceptsFollowup(facts, MAX_QUEUED_PER_THREAD)) return res.json({})
-    // The hook waits a few seconds and then moves on. A claim made after it hung up would
-    // mark a turn delivered that Cursor never received (QA, 6.51.0: a Stop that lands
-    // while the event loop is busy). Everything from here to the reply is synchronous, so
-    // a socket that is open now is open when the reply is written.
+    // The hook waits three seconds and then moves on. A claim made after it stopped
+    // listening marks a turn delivered that Cursor never received (QA, 6.51.0: a Stop that
+    // lands while the event loop is busy). A socket that already reads closed is one sign;
+    // the reliable one is the hook's own start stamp (see cursorStopIsFresh). Everything
+    // from here to the reply is synchronous.
     if (req.socket?.destroyed === true || res.writableEnded) {
       console.warn('[cursor-stop-followup] the hook hung up before the claim; nothing claimed')
       return undefined
@@ -46,6 +47,10 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
     let claimed: ReturnType<typeof claimNextCursorTurn> = null
     try {
       const now = deps.now()
+      if (!cursorStopIsFresh(facts.hookStartedAtMs, now)) {
+        console.warn(`[cursor-stop-followup] the Stop is ${facts.hookStartedAtMs === null ? 'unstamped' : `${now - facts.hookStartedAtMs} ms old`}; the hook may have stopped listening, so nothing is claimed and the turn waits for the next Stop`)
+        return res.json({})
+      }
       claimed = claimNextCursorTurn(deps.readQueue('cursor', facts.conversationId, now), now)
       if (!claimed) return res.json({})
       // Written BEFORE the text leaves: the row must never read `waiting` after the

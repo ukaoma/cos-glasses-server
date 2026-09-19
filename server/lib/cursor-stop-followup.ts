@@ -46,6 +46,34 @@ export interface CursorStopFacts {
   status: string
   loopCount: number | null
   cursorVersion: string
+  /** The envelope's `ts`: when the hook started, epoch ms from the same Mac clock. */
+  hookStartedAtMs: number | null
+}
+
+/** The hook's curl gives up this long after it starts (`--max-time 3`). */
+export const CURSOR_HOOK_WAIT_MS = 3_000
+/**
+ * A claim is made only this soon after the hook started, so its reply is written with at
+ * least a second to spare before the hook stops listening. Past it the turn stays
+ * `waiting` for the next Stop.
+ */
+export const CURSOR_STOP_MAX_AGE_MS = 2_000
+/** A stamp this far in the future is a clock that moved, not a hook; no claim. */
+export const CURSOR_STOP_MAX_SKEW_MS = 5_000
+
+/**
+ * Is the hook that sent this still listening? A socket check cannot answer that (QA,
+ * 6.51.0): when the event loop is blocked past the hook's 3 s, curl gives up and closes,
+ * but Node reads the request bytes before the close, so the handler sees an open socket,
+ * claims the turn, and writes the reply to nobody -- the row reads `delivered` and Cursor
+ * never got it. The hook's own start stamp can answer it: everything from this check to
+ * the reply is synchronous, so a claim made within 2 s of the hook starting is answered
+ * before the hook's 3 s are up.
+ */
+export function cursorStopIsFresh(hookStartedAtMs: number | null, now: number, maxAgeMs = CURSOR_STOP_MAX_AGE_MS): boolean {
+  if (hookStartedAtMs === null || !Number.isFinite(hookStartedAtMs) || !Number.isFinite(now)) return false
+  const age = now - hookStartedAtMs
+  return age <= maxAgeMs && age >= -CURSOR_STOP_MAX_SKEW_MS
 }
 
 /**
@@ -67,7 +95,8 @@ export function parseCursorStopEnvelope(body: unknown): CursorStopFacts | null {
   if (!isValidNativeThreadId(conversationId)) return null
   const status = typeof p.status === 'string' ? p.status : ''
   const loopCount = typeof p.loop_count === 'number' && Number.isFinite(p.loop_count) ? p.loop_count : null
-  return { conversationId, status, loopCount, cursorVersion: p.cursor_version.trim() }
+  const hookStartedAtMs = typeof envelope.ts === 'number' && Number.isFinite(envelope.ts) ? envelope.ts : null
+  return { conversationId, status, loopCount, cursorVersion: p.cursor_version.trim(), hookStartedAtMs }
 }
 
 /**

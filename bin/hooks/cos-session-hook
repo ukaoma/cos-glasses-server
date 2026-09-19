@@ -31,10 +31,13 @@ rm -f "$T.in"
 if [ "$EVENT" = Stop ] && [ -n "${CURSOR_VERSION:-}" ] && grep -Eq '"cursor_version"[[:space:]]*:[[:space:]]*"' "$T" 2>/dev/null; then
   cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
   # Nothing queued for this composer (almost every Stop): no request at all. The queue
-  # folder sits beside the spool; if it is not there, ask anyway rather than guess.
+  # folder sits beside the spool. If it is not there, or the id cannot be read here,
+  # ask anyway rather than guess; the server reads the id the same way (conversation_id,
+  # then session_id).
   QDIR="$(dirname "$SPOOL")/thread-turn-queue"
   CONV=$(grep -Eo '"conversation_id"[[:space:]]*:[[:space:]]*"[0-9A-Fa-f-]{36}"' "$T.req" 2>/dev/null | grep -Eo '[0-9A-Fa-f-]{36}' | head -1 | tr 'A-F' 'a-f')
-  if [ -d "$QDIR" ] && { [ -z "$CONV" ] || [ ! -f "$QDIR/cursor-$CONV.json" ]; }; then rm -f "$T.req"; exit 0; fi
+  [ -n "$CONV" ] || CONV=$(grep -Eo '"session_id"[[:space:]]*:[[:space:]]*"[0-9A-Fa-f-]{36}"' "$T.req" 2>/dev/null | grep -Eo '[0-9A-Fa-f-]{36}' | head -1 | tr 'A-F' 'a-f')
+  if [ -d "$QDIR" ] && [ -n "$CONV" ] && [ ! -f "$QDIR/cursor-$CONV.json" ]; then rm -f "$T.req"; exit 0; fi
   TOK=$(cat "$GH/hook-token" 2>/dev/null); PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
   if [ -n "$TOK" ] && [ -f "$T.req" ]; then
     OUT=$(curl -s --connect-timeout 1 --max-time 3 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
