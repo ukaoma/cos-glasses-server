@@ -321,6 +321,32 @@ describe('trail rows in the durable journal', () => {
     ahead.unsubscribe()
   })
 
+  it('after a rebuild the live cursor is the one the rebuild set: a retried run\'s stale trailAfter misses nothing (app QA)', async () => {
+    // A retry keeps the queue row, bumps the generation and starts a NEW job whose trail
+    // restarts at 1. The app may still subscribe with the failed attempt's cursor.
+    const store = new QueryJobStore({ root: await tempRoot(), bootId: 'boot-a' })
+    await store.init()
+    const jobId = await runningJob(store)
+    for (const text of ['one', 'two']) await store.appendTrail(jobId, { kind: 'prose', text })
+    const live: QueryJobTrailFrame[] = []
+    const stale = await store.subscribe(jobId, 1, 0, () => {}, { after: 5, listener: frame => { live.push(frame) } })
+    expect(stale.trailReplay).toMatchObject({ gap: true, reason: 'cursor_ahead', latestTrailSeq: 2 })
+    expect(stale.trailReplay?.entries.map(e => e.trailSeq)).toEqual([1, 2])
+    for (const text of ['three', 'four', 'five', 'six']) await store.appendTrail(jobId, { kind: 'prose', text })
+    expect(live.map(frame => frame.trailSeq)).toEqual([3, 4, 5, 6])
+    expect(live.map(frame => (frame.data as { text?: string }).text)).toEqual(['three', 'four', 'five', 'six'])
+    stale.unsubscribe()
+
+    // A cursor inside the held window is unchanged: exactly what comes after it, once.
+    const near: QueryJobTrailFrame[] = []
+    const inside = await store.subscribe(jobId, 1, 0, () => {}, { after: 4, listener: frame => { near.push(frame) } })
+    expect(inside.trailReplay).toMatchObject({ gap: false, latestTrailSeq: 6 })
+    expect(inside.trailReplay?.entries.map(e => e.trailSeq)).toEqual([5, 6])
+    await store.appendTrail(jobId, { kind: 'prose', text: 'seven' })
+    expect(near.map(frame => frame.trailSeq)).toEqual([7])
+    inside.unsubscribe()
+  })
+
   it('the real bounds: 200 entries and 32,000 characters by default', async () => {
     expect(QUERY_JOB_LIMITS.trailEntries).toBe(200)
     expect(QUERY_JOB_LIMITS.trailChars).toBe(32_000)

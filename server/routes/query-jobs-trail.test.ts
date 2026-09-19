@@ -217,6 +217,34 @@ describe('a client that opts in (?trail=1)', () => {
     expect(text).toContain('event: completed')
   })
 
+  it('a retried run subscribed with the failed attempt\'s trailAfter gets the rebuild, then every new entry (app QA)', async () => {
+    // The retry is a new job whose trail restarts at 1; the app still holds trailAfter=5.
+    const { store, base } = await harness()
+    const admitted = await store.admit({ clientJobId: CLIENT_JOB_ID, generation: 2, query: 'q', sessionId: 'session-trail', activityToolMode: 'preview' })
+    const jobId = admitted.job.jobId
+    await store.markStarting(jobId)
+    await store.markRunning(jobId, { provider: 'claude', resolvedModel: 'opus' })
+    for (const text of ['Step 1.', 'Step 2.']) await store.appendTrail(jobId, { kind: 'prose', text })
+    // Headers back means the store has registered the live listener and taken the replay.
+    const res = await fetch(`${base}/api/query-jobs/${jobId}/events?generation=2&after=3&trail=1&trailAfter=5`)
+    expect(res.status).toBe(200)
+    const body = res.text()
+    for (const text of ['Step 3.', 'Step 4.', 'Step 5.', 'Step 6.']) await store.appendTrail(jobId, { kind: 'prose', text })
+    await store.markAnswerReady(jobId, 'done')
+    await store.complete(jobId, { text: 'done', provider: 'claude', resolvedModel: 'opus' })
+    const text = await body
+    const [snap, ...more] = framesOf(text, 'trail_snapshot')
+    expect(more).toEqual([])
+    expect(snap).toMatchObject({ reason: 'cursor_ahead', latestTrailSeq: 2 })
+    expect((snap!.trail as Array<{ trailSeq: number }>).map(e => e.trailSeq)).toEqual([1, 2])
+    const frames = framesOf(text, 'trail')
+    expect(frames.map(f => f.trailSeq)).toEqual([3, 4, 5, 6])
+    expect(frames.map(f => f.data.text)).toEqual(['Step 3.', 'Step 4.', 'Step 5.', 'Step 6.'])
+    // The rebuild comes before the entries after it.
+    expect(text.indexOf('event: trail_snapshot')).toBeLessThan(text.indexOf('event: trail\n'))
+    expect(text).toContain('event: completed')
+  })
+
   it('a bad trailAfter is refused like a bad event cursor', async () => {
     const { store, base } = await harness()
     const admitted = await store.admit({ clientJobId: CLIENT_JOB_ID, generation: 1, query: 'q', sessionId: 'session-trail' })

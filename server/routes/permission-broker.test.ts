@@ -172,6 +172,17 @@ describe('POST /api/permission-requests/ask: everything outside the gate is {} a
     expect(h.broker.health().counters.fastPath.deskActive).toBe(2)
   })
 
+  it('a question whose options share a label is {} at once and never listed (unsupported_input, counted)', async () => {
+    const h = await start()
+    const twins = { questions: [{ question: 'Deploy where?', header: 'Target', multiSelect: false, options: [{ label: 'Prod', description: 'us-east' }, { label: 'Prod', description: 'eu-west' }] }] }
+    const r = await ask(h, permissionEnvelope('AskUserQuestion', twins))
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({})
+    expect(r.ms).toBeLessThan(FAST_MS)
+    expect(h.broker.health()).toMatchObject({ lastFastPath: 'unsupported_input', counters: { parked: 0, fastPath: { unsupportedInput: 1 } } })
+    expect((await list(h)).body.items).toEqual([])
+  })
+
   it('a 900 KB Write with no client answers {} in under 100 ms through the real route', async () => {
     const h = await start({}, { live: false })
     const content = 'export const line = "0123456789abcdef"\n'.repeat(23_000)
@@ -360,6 +371,44 @@ describe('a parked question or approval', () => {
     const winnerId = winner === one ? 'lens' : 'phone'
     expect(await answer(h, item.id, { clientAnswerId: winnerId, decision: 'allow' })).toEqual({ status: 200, body: { ...winner.body, replay: true } })
     expect(h.broker.health().counters).toMatchObject({ answered: 1, hookGone: 0 })
+  })
+
+  it('"Leave for the Mac" (handBack): the hook gets {} at once, a later answer is 409 handed_to_desk, the retry replays, counted', async () => {
+    const h = await start()
+    const { reply, item } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
+    const sent = Date.now()
+    expect(await answer(h, item.id, { clientAnswerId: 'phone-leave-1', handBack: true })).toEqual({ status: 200, body: { ok: true, id: item.id, kind: 'question', handedBack: true } })
+    const hook = await within(reply)
+    expect(hook.status).toBe(200)
+    // `{}` is no decision: Claude Code shows the Mac's own dialog.
+    expect(hook.body).toEqual({})
+    expect(Date.now() - sent).toBeLessThan(1_000)
+    expect(await answer(h, item.id, { clientAnswerId: 'lens-1', answers: [{ labels: ['Bump'] }, { labels: ['Blue'] }] })).toEqual({ status: 409, body: { error: 'handed_to_desk', reason: 'handed_to_desk' } })
+    expect(await answer(h, item.id, { clientAnswerId: 'phone-leave-1', handBack: true })).toEqual({ status: 200, body: { ok: true, id: item.id, kind: 'question', handedBack: true, replay: true } })
+    const after = await list(h)
+    expect(after.body.items).toEqual([])
+    expect((after.body as unknown as { stats: { counters: Record<string, number> } }).stats.counters).toMatchObject({ handedBack: 1, handedToDesk: 1, answered: 0, hookGone: 0 })
+
+    // An answer first: a hand-back after it is 409 already_answered, with the answer.
+    const approval = await held(h, permissionEnvelope('Bash', { command: 'git push' }))
+    expect((await answer(h, approval.item.id, { clientAnswerId: 'lens-2', decision: 'deny' })).status).toBe(200)
+    expect(await answer(h, approval.item.id, { clientAnswerId: 'phone-leave-2', handBack: true })).toEqual({ status: 409, body: { error: 'already_answered', decision: 'deny' } })
+    expect((await approval.reply).body).toEqual(approvalHookOutput('deny'))
+  })
+
+  it('handed back, the row still waits on the question (now the Mac\'s dialog) and no longer carries the held id', async () => {
+    const h = await start()
+    const t = Date.now()
+    h.store.apply({ ts: t - 30, ppid: 4242, event: 'UserPromptSubmit', sessionId: SESSION, payload: { session_id: SESSION, prompt: 'ship it' } })
+    h.store.apply({ ts: t - 20, ppid: 4242, event: 'PreToolUse', sessionId: SESSION, payload: { session_id: SESSION, tool_name: 'AskUserQuestion', tool_input: ASK_INPUT } })
+    h.store.apply({ ts: t - 10, ppid: 4242, event: 'PermissionRequest', sessionId: SESSION, payload: { session_id: SESSION, tool_name: 'AskUserQuestion', tool_input: ASK_INPUT } })
+    const row = () => derivedRowFields(deriveSessionState({ signal: h.store.get(SESSION), registry: undefined, transcript: undefined, now: Date.now() }))
+    const { reply, item } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, t - 10))
+    expect(row()).toMatchObject({ agent_state: 'waiting', waiting_kind: 'question', pending_question_id: item.id })
+    expect((await answer(h, item.id, { clientAnswerId: 'leave', handBack: true })).status).toBe(200)
+    expect((await within(reply)).body).toEqual({})
+    expect(row()).toMatchObject({ agent_state: 'waiting', waiting_kind: 'question' })
+    expect(row()).not.toHaveProperty('pending_question_id')
   })
 
   it('retracted when its own tool runs (the desk answered): {} to the hook, 409 to a late answer', async () => {

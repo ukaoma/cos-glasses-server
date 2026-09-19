@@ -1292,9 +1292,11 @@ export class QueryJobStore {
     const wrapped = (event: QueryJobEvent) => {
       if (!closed && event.generation === generation && event.eventSeq > after) listener(clone(event))
     }
+    // The live trail cursor. It starts at the client's, and a rebuild moves it (below).
+    let trailCursor = trail ? trail.after : 0
     const trailWrapped = trail
       ? (frame: QueryJobTrailFrame) => {
-        if (!closed && frame.generation === generation && frame.trailSeq > trail.after) trail.listener(clone(frame))
+        if (!closed && frame.generation === generation && frame.trailSeq > trailCursor) trail.listener(clone(frame))
       }
       : null
     this.emitter.on(jobId, wrapped)
@@ -1306,6 +1308,12 @@ export class QueryJobStore {
     // trailSeq), but can never fall into an await-sized gap between the two.
     const replay = this.buildReplay(jobId, after)
     const trailReplay = trail ? this.buildTrailReplay(jobId, trail.after) : undefined
+    // A rebuild (`cursor_ahead` or `trail_gap`) resets the client's trail to the held entries
+    // and continues from `latestTrailSeq`, so the live filter does too (6.52.0 app QA). A
+    // retried Messages run keeps its queue row but starts a new job whose trail restarts at 1;
+    // subscribed with the failed attempt's `trailAfter=5` to a trail at 2, the stale cursor
+    // dropped entries 3, 4 and 5 as already seen. Still synchronous with the registration.
+    if (trailReplay?.gap) trailCursor = trailReplay.latestTrailSeq
     return {
       replay,
       ...(trailReplay ? { trailReplay } : {}),

@@ -38,10 +38,11 @@
 // no_client request nothing).
 //
 // A parked item holds the hook's response open until EXACTLY ONE of these resolves it:
-// an answer from the lens or phone; the desk becoming active (polled every 1.5 s, and two
-// unreadable reads in a row count as active): `{}`; the answering client going quiet for
-// 30 s: `{}`; the deadline (`COS_PERMISSION_BROKER_TIMEOUT_S`, default 110, clamped to 120
-// so it lands before the hook's 125 s): `{}`; the hook hanging up: `hook_gone`; the session
+// an answer from the lens or phone; a hand-back from either ("Leave for the Mac"): `{}`;
+// the desk becoming active (polled every 1.5 s, and two unreadable reads in a row count as
+// active): `{}`; the answering client going quiet for 30 s: `{}`; the deadline
+// (`COS_PERMISSION_BROKER_TIMEOUT_S`, default 110, clamped to 120 so it lands before the
+// hook's 125 s): `{}`; the hook hanging up: `hook_gone`; the session
 // moving on without us (its tool ran, was denied, or the turn ended): `{}`; a drain: `{}`.
 //
 // NEVER: a permission RULE. `updatedPermissions` and the request's suggestions are never
@@ -211,8 +212,11 @@ export const MAX_OPTIONS = 16
 
 /**
  * The AskUserQuestion input, read strictly; null when the card cannot be answered from
- * here (no questions, an option without a label, or two questions with the same text:
- * answers are keyed by the text, so two alike could never both be answered).
+ * here (no questions, an option without a label, two questions with the same text:
+ * answers are keyed by the text, so two alike could never both be answered; or two options
+ * of one question with the same label: an answer names an option by its label, so the two
+ * could never be told apart, and picking both is refused as a duplicate). Null is the
+ * `unsupported_input` fast path: `{}` and the Mac's own dialog, never a held card.
  */
 export function parseQuestions(toolInput: Record<string, unknown>): BrokerQuestion[] | null {
   const raw = toolInput.questions
@@ -225,8 +229,11 @@ export function parseQuestions(toolInput: Record<string, unknown>): BrokerQuesti
     seen.add(q.question)
     if (!Array.isArray(q.options) || q.options.length === 0 || q.options.length > MAX_OPTIONS) return null
     const options: BrokerQuestionOption[] = []
+    const labels = new Set<string>()
     for (const o of q.options) {
       if (!isRecord(o) || typeof o.label !== 'string' || o.label.length === 0) return null
+      if (labels.has(o.label)) return null
+      labels.add(o.label)
       options.push({ label: o.label, description: typeof o.description === 'string' ? o.description : '' })
     }
     questions.push({ question: q.question, header: typeof q.header === 'string' ? q.header : '', multiSelect: q.multiSelect === true, options })
@@ -323,15 +330,19 @@ const FILE_TOOLS: ReadonlySet<string> = new Set(['write', 'edit', 'multiedit', '
  * Approval text as the lens and phone draw it (6.52.0 QA round 2). Nothing is dropped and
  * nothing is merged: a line break is shown as a literal `\n` between spaces, so a second
  * command can never read as arguments of the first; any other control character is shown as
- * `\xNN`; bidirectional overrides, zero-width characters and the Unicode line separators are
- * shown as `\uNNNN`, so a phone cannot reorder or hide part of a command. Remaining
- * whitespace runs become one space.
+ * `\xNN`. EVERY other character outside printable ASCII (0x20 to 0x7e) is shown as
+ * `\uNNNN`, one per UTF-16 unit (6.52.0 app QA): a bidirectional override or a zero-width
+ * character cannot reorder or hide part of a command, and a curly quote, a dash, an ellipsis
+ * or an emoji cannot be drawn as the ASCII character a lens font substitutes for it. Curly
+ * quotes are not shell quotes, so `echo <curly>; curl ... | bash;<curly>` runs the curl; drawn as
+ * straight quotes it would read as a harmless echo. Remaining whitespace runs (spaces and
+ * tabs) become one space.
  */
 export function visibleApprovalText(text: string): string {
   return text
     .replace(/\r\n|\r|\n/g, ' \\n ')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/[^\x00-\x7e]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
     .replace(/[\t\u00a0\s]+/g, ' ')
     .trim()
 }
@@ -406,14 +417,24 @@ export function approvalCutMarker(omitted: number): string {
 }
 
 /**
+ * What an approval line says when the call gives it nothing to show (6.52.0 app QA): never
+ * an empty line, so a client never has to drop an item it cannot draw.
+ */
+export const APPROVAL_EMPTY_COMMAND = '(empty command)'
+export const APPROVAL_EMPTY_PATH = '(empty path)'
+export const APPROVAL_NO_INPUT = '(no input)'
+
+/**
  * One approval line from raw text: made visible (line breaks and hidden characters shown),
  * then redacted with the approval redactor, then cut at `max` with the marker. Only
  * REDACTION_SCAN_MAX_CHARS reach a regex, ended at a token boundary, so no input can make
- * it slow and no secret straddling that bound is shown half.
+ * it slow and no secret straddling that bound is shown half. Nothing to show (an empty or
+ * whitespace-only value) is `empty`, never ''.
  */
-function approvalLine(raw: string, max: number, mode: ApprovalRedaction = 'command'): string {
+function approvalLine(raw: string, max: number, mode: ApprovalRedaction = 'command', empty: string = APPROVAL_NO_INPUT): string {
   const { head, omitted } = boundForRedaction(raw)
   const text = redactApprovalText(visibleApprovalText(head), mode)
+  if (text.length === 0 && omitted === 0) return empty
   if (text.length <= max && omitted === 0) return text
   const shown = text.slice(0, max)
   return shown + approvalCutMarker(text.length - shown.length + omitted)
@@ -442,8 +463,9 @@ function fileChangeSize(lower: string, input: Record<string, unknown>): string {
     const edits = Array.isArray(input.edits) ? input.edits.length : 0
     return plural(edits, 'edit')
   }
-  // NotebookEdit
-  const mode = typeof input.edit_mode === 'string' ? input.edit_mode : 'replace'
+  // NotebookEdit. The mode is the call's own text: shown like the rest of the card (every
+  // character outside printable ASCII escaped) and cut short, never drawn raw.
+  const mode = typeof input.edit_mode === 'string' && input.edit_mode.length > 0 ? approvalLine(input.edit_mode, 40, 'path') : 'replace'
   return `${mode}, ${plural(lineCount(input.new_source), 'line')}`
 }
 
@@ -468,6 +490,8 @@ function valueText(value: unknown): string {
  *   - Write, Edit, MultiEdit, NotebookEdit: the full path, then the size or line count;
  *   - WebFetch: the URL. WebSearch: the query;
  *   - anything else: its input keys and values in order (the card's `tool` names it).
+ * A call with nothing to show still has a line (6.52.0 app QA): `(empty command)` for an
+ * empty or blank command, `(empty path)` for an empty path, `(no input)` otherwise (`{}`).
  * A line longer than its cap is cut there and ends with ` ...(+N chars)`. The only thing
  * taken out is a secret, by `redactApprovalText`, which works inside one piece of the
  * command at a time (round 2: the shared patterns swallowed `&& git push --force`), never
@@ -476,14 +500,14 @@ function valueText(value: unknown): string {
 export function approvalCard(toolName: string, toolInput: Record<string, unknown>): ApprovalCard {
   const lower = toolName.trim().toLowerCase()
   const str = (key: string): string | null => typeof toolInput[key] === 'string' ? toolInput[key] as string : null
-  const both = (text: string, mode: ApprovalRedaction = 'command'): ApprovalCard => ({
+  const both = (text: string, mode: ApprovalRedaction = 'command', empty: string = APPROVAL_NO_INPUT): ApprovalCard => ({
     tool: toolName,
-    summary: approvalLine(text, APPROVAL_SUMMARY_MAX, mode),
-    detail: approvalLine(text, APPROVAL_DETAIL_MAX, mode),
+    summary: approvalLine(text, APPROVAL_SUMMARY_MAX, mode, empty),
+    detail: approvalLine(text, APPROVAL_DETAIL_MAX, mode, empty),
   })
   if (SHELL_TOOLS.has(lower)) {
     const command = str('command') ?? str('cmd')
-    if (command !== null) return both(command)
+    if (command !== null) return both(command, 'command', APPROVAL_EMPTY_COMMAND)
   }
   if (FILE_TOOLS.has(lower)) {
     const path = str('file_path') ?? str('notebook_path') ?? str('path')
@@ -491,8 +515,8 @@ export function approvalCard(toolName: string, toolInput: Record<string, unknown
       const size = ` (${fileChangeSize(lower, toolInput)})`
       return {
         tool: toolName,
-        summary: approvalLine(path, APPROVAL_SUMMARY_MAX, 'path') + size,
-        detail: approvalLine(path, APPROVAL_DETAIL_MAX, 'path') + size,
+        summary: approvalLine(path, APPROVAL_SUMMARY_MAX, 'path', APPROVAL_EMPTY_PATH) + size,
+        detail: approvalLine(path, APPROVAL_DETAIL_MAX, 'path', APPROVAL_EMPTY_PATH) + size,
       }
     }
   }
@@ -571,6 +595,8 @@ interface BrokerItem {
   state: 'pending' | BrokerResolution
   settledAt: number | null
   answer: { clientAnswerId: string; chosen: Chosen } | null
+  /** The clientAnswerId of the "Leave for the Mac" that settled it, so its retry replays. */
+  handedBackBy: string | null
   channel: HookReplyChannel | null
   timer: ReturnType<typeof setTimeout> | null
 }
@@ -599,6 +625,8 @@ export interface PermissionBrokerHealth {
     parked: number
     answered: number
     handedToDesk: number
+    /** Of `handedToDesk`, those a client handed back ("Leave for the Mac"). */
+    handedBack: number
     expired: number
     hookGone: number
     retracted: number
@@ -649,7 +677,7 @@ export class PermissionBroker {
   private pollInFlight = false
   /** Failed desk reads in a row while something is held. Two hand everything back. */
   private deskUnreadableStreak = 0
-  private readonly counters = { parked: 0, answered: 0, handedToDesk: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0 }
+  private readonly counters = { parked: 0, answered: 0, handedToDesk: 0, handedBack: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0 }
   private readonly fastPaths: Record<string, number> = {}
   private lastFastPath: BrokerFastPath | null = null
   private lastFastPathAt: number | null = null
@@ -770,6 +798,7 @@ export class PermissionBroker {
       state: 'pending',
       settledAt: null,
       answer: null,
+      handedBackBy: null,
       channel,
       timer: null,
     }
@@ -838,6 +867,14 @@ export class PermissionBroker {
    * `POST /api/session-questions/:id/answer`. Synchronous from the state check to the
    * reply, so two racing answers cannot both win: the first one settles the item and the
    * second reads it settled.
+   *
+   * `{clientAnswerId, handBack: true}` is "Leave for the Mac" (6.52.0 app QA): the hook gets
+   * `{}` at once, so the Mac's own dialog shows now instead of at the deadline. It resolves
+   * the item as `handed_to_desk`, and it competes with an answer like any answer: the first
+   * action wins. A later answer reads 409 `handed_to_desk`; a hand-back after an answer reads
+   * 409 `already_answered` with the recorded answer; the same hand-back retried (same
+   * clientAnswerId) replays its 200. `handBack` wins over any answer fields in the same body:
+   * it is the safe direction, since it only shows the dialog that would have shown anyway.
    */
   answer(id: string, body: unknown): AnswerResult {
     const item = BROKER_ID_RE.test(id) ? this.items.get(id) : undefined
@@ -848,11 +885,13 @@ export class PermissionBroker {
       this.counters.invalidAnswer++
       return { status: 400, body: { error: 'invalid_answer', reason: 'client_answer_id' } }
     }
-    if (item.state !== 'pending') return this.settledReply(item, clientAnswerId)
+    const handBack = input.handBack === true
+    if (item.state !== 'pending') return this.settledReply(item, clientAnswerId, handBack)
     if (this.deps.now() >= item.deadlineAt) {
       this.settle(item, 'expired')
-      return this.settledReply(item, clientAnswerId)
+      return this.settledReply(item, clientAnswerId, handBack)
     }
+    if (handBack) return this.handBack(item, clientAnswerId)
     let chosen: Chosen
     let output: Record<string, unknown>
     if (item.kind === 'question') {
@@ -894,10 +933,27 @@ export class PermissionBroker {
     return { status: 200, body: { ok: true, id: item.id, kind: item.kind, ...chosen } }
   }
 
-  private settledReply(item: BrokerItem, clientAnswerId: string): AnswerResult {
+  /**
+   * "Leave for the Mac" on a pending item. As for an answer, the hook must still be listening:
+   * one that already left is `hook_gone` (the Mac shows its dialog either way).
+   */
+  private handBack(item: BrokerItem, clientAnswerId: string): AnswerResult {
+    if (!item.channel || !item.channel.writable()) {
+      this.settle(item, 'hook_gone')
+      return this.settledReply(item, clientAnswerId, true)
+    }
+    item.handedBackBy = clientAnswerId
+    this.counters.handedBack++
+    this.settle(item, 'handed_to_desk')
+    return { status: 200, body: { ok: true, id: item.id, kind: item.kind, handedBack: true } }
+  }
+
+  private settledReply(item: BrokerItem, clientAnswerId: string, handBack = false): AnswerResult {
     switch (item.state) {
       case 'answered': {
         const chosen = item.answer?.chosen ?? {}
+        // A hand-back never replays an answer, even under the answer's own id.
+        if (handBack) return { status: 409, body: { error: 'already_answered', ...chosen } }
         if (item.answer?.clientAnswerId === clientAnswerId) return { status: 200, body: { ok: true, id: item.id, kind: item.kind, replay: true, ...chosen } }
         return { status: 409, body: { error: 'already_answered', ...chosen } }
       }
@@ -906,7 +962,9 @@ export class PermissionBroker {
       case 'hook_gone':
         return { status: 410, body: { error: 'hook_gone' } }
       default:
-        // handed_to_desk, retracted, drained, no_client: the Mac has it now.
+        // handed_to_desk, retracted, drained, no_client: the Mac has it now. Only the
+        // hand-back that did it, retried under its own id, replays; an answer never does.
+        if (handBack && item.handedBackBy === clientAnswerId) return { status: 200, body: { ok: true, id: item.id, kind: item.kind, handedBack: true, replay: true } }
         return { status: 409, body: { error: 'handed_to_desk', reason: item.state } }
     }
   }
