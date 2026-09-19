@@ -218,9 +218,8 @@ describe('public durable-query capability health', () => {
       const health = await (await fetch(`${base}/api/health`)).json() as any
       expect(health.permissionBroker).toMatchObject({ enabled: true, mode: 'questions', lastFastPath: null, lastQuestionsPollAt: null })
       expect(health.permissionBroker).not.toHaveProperty('pending')
-      expect(Object.keys(health.permissionBroker.counters).sort()).toEqual([
-        'answered', 'deskUnreadable', 'drained', 'expired', 'fastPath', 'handedToDesk', 'hookGone', 'invalidAnswer', 'noClient', 'parked', 'retracted',
-      ])
+      // Counts are on the authenticated questions route only (QA round 2).
+      expect(health.permissionBroker).not.toHaveProperty('counters')
     } finally {
       broker.stop()
       registerPermissionBroker(null)

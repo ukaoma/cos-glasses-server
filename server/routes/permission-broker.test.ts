@@ -290,7 +290,7 @@ describe('a parked question or approval', () => {
     const allow = await held(h, permissionEnvelope('Bash', secret))
     expect(allow.item).toMatchObject({ kind: 'approval', tool: 'Bash', approval: { tool: 'Bash' } })
     // The whole command, `cd ... &&` included (B1): only the credential is taken out.
-    expect(allow.item.approval.summary).toBe('cd /Users/example/repo && curl -H "Authorization: [redacted] https://x.test')
+    expect(allow.item.approval.summary).toBe('cd /Users/example/repo && curl -H "Authorization: Bearer [redacted]" https://x.test')
     expect(JSON.stringify(allow.item)).not.toContain('abcdefghijklmnopqrst')
     expect(allow.item).not.toHaveProperty('questions')
     expect(await answer(h, allow.item.id, { clientAnswerId: 'a', decision: 'allow' })).toEqual({ status: 200, body: { ok: true, id: allow.item.id, kind: 'approval', decision: 'allow' } })

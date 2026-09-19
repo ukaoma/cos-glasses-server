@@ -163,6 +163,7 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS,
       liveWindowMs: CLIENT_LIVE_WINDOW_MS,
       pending: deps.broker.pendingCount(),
+      stats: deps.broker.stats(),
       items,
     })
   })

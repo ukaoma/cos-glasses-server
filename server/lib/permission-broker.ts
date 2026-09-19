@@ -52,7 +52,7 @@
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { boundForRedaction, redactSecretText } from './activity-preview.js'
+import { boundForRedaction } from './activity-preview.js'
 import { toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
 import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signal-store.js'
 
@@ -319,13 +319,85 @@ export interface ApprovalCard {
 const SHELL_TOOLS: ReadonlySet<string> = new Set(['bash', 'shell', 'exec', 'exec_command'])
 const FILE_TOOLS: ReadonlySet<string> = new Set(['write', 'edit', 'multiedit', 'notebookedit'])
 
-/** Whitespace runs become one space. Any other control character is shown as `\xNN`, so a
- * byte the lens cannot draw is neither dropped nor misread. Nothing else changes. */
-function normalizeApprovalText(text: string): string {
+/**
+ * Approval text as the lens and phone draw it (6.52.0 QA round 2). Nothing is dropped and
+ * nothing is merged: a line break is shown as a literal `\n` between spaces, so a second
+ * command can never read as arguments of the first; any other control character is shown as
+ * `\xNN`; bidirectional overrides, zero-width characters and the Unicode line separators are
+ * shown as `\uNNNN`, so a phone cannot reorder or hide part of a command. Remaining
+ * whitespace runs become one space.
+ */
+export function visibleApprovalText(text: string): string {
   return text
-    .replace(/\s+/g, ' ')
-    .replace(/[\u0000-\u001f\u007f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+    .replace(/\r\n|\r|\n/g, ' \\n ')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/[\t\u00a0\s]+/g, ' ')
     .trim()
+}
+
+type ApprovalRedaction = 'command' | 'path' | 'url'
+
+const PROVIDER_TOKEN_RE = /\b(?:sk-(?:proj-|live-|test-|ant-)?|sk_(?:live|test)_|sess-|pat-|gh[pousr]_|github_pat_|glpat-|npm_|pypi-|shpat_|xox[baprs]-)[A-Za-z0-9._-]{8,}\b/gi
+const AWS_KEY_RE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g
+const GOOGLE_KEY_RE = /\bAIza[A-Za-z0-9_-]{30,}\b/g
+const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g
+const PEM_MARKER_RE = /-----(?:BEGIN|END) [A-Z0-9 ]{0,40}(?:PRIVATE KEY|CREDENTIALS?)-----/gi
+const SECRET_KEY = '(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|refresh[_-]?token|session[_-]?token|token|credential|auth(?:orization)?|password|passwd|pwd|secret|client[_-]?secret|private[_-]?key|database[_-]?url|connection[_-]?string|dsn|session(?:[_-]?id)?|cookie|phpsessid|jsessionid|sid)'
+// Inside ONE piece only. The value stops at a quote, a slash or a comma, so a match can
+// never reach past the piece it sits in (6.52.0 QA round 2: the shared patterns' quoted
+// values ran across `&&`, `;` and `|` and swallowed whole commands).
+const PIECE_ASSIGN_RE = new RegExp(`\\b((?:[a-z0-9]+[_-])*${SECRET_KEY}(?:[_-][a-z0-9]+)*["']?[:=])(["']?)([^"'/,]+)`, 'gi')
+const URL_USERINFO_RE = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]*:[^\s/@]+@/gi
+const URL_QUERY_SECRET_RE = /([?&](?:api[_-]?key|access[_-]?token|token|auth|password|secret)=)[^&#\s]+/gi
+// A flag or scheme word whose NEXT piece is the credential.
+const SECRET_NEXT_PIECE_RE = /^(?:--?(?:api-key|token|access-token|refresh-token|password|passwd|secret|client-secret)|-u|--user|["']?(?:bearer|basic|digest)|["']?(?:set-)?cookie:)$/i
+const BASE64ISH_RE = /^["']?[A-Za-z0-9+/=]{24,}["']?$/
+
+function redactProviderTokens(text: string): string {
+  return text
+    .replace(PROVIDER_TOKEN_RE, '[redacted-token]')
+    .replace(AWS_KEY_RE, '[redacted-aws-key]')
+    .replace(GOOGLE_KEY_RE, '[redacted-google-key]')
+    .replace(JWT_RE, '[redacted-jwt]')
+}
+
+/** Keep a piece's own quotes and hide what they hold. */
+function redactWholePiece(piece: string): string {
+  const m = /^(["']?)(.*?)(["']?)$/.exec(piece)
+  return m && m[2] ? `${m[1]}[redacted]${m[3]}` : piece
+}
+
+/**
+ * Secrets out of approval text, and never anything else (6.52.0 QA round 2). A command is
+ * split into pieces at whitespace and at `;`, `&` and `|`, which are kept as written; every
+ * redaction happens INSIDE one piece, so it can hide a credential but never a command,
+ * a pipe or an argument after it. A path keeps everything but provider tokens. A URL also
+ * loses its userinfo and secret query values.
+ */
+export function redactApprovalText(text: string, mode: ApprovalRedaction): string {
+  if (mode === 'path') return redactProviderTokens(text)
+  if (mode === 'url') return redactProviderTokens(text.replace(URL_USERINFO_RE, '$1[redacted]@').replace(URL_QUERY_SECRET_RE, '$1[redacted]'))
+  const sawPem = PEM_MARKER_RE.test(text)
+  PEM_MARKER_RE.lastIndex = 0
+  const marked = text.replace(PEM_MARKER_RE, '[redacted-private-material]')
+  const parts = marked.split(/(\s+|&&|\|\||[;&|])/)
+  let previous = ''
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!
+    if (i % 2 === 1 || part === '') continue
+    let piece = part
+    if (SECRET_NEXT_PIECE_RE.test(previous)) piece = redactWholePiece(piece)
+    else if (sawPem && BASE64ISH_RE.test(piece)) piece = redactWholePiece(piece)
+    else {
+      piece = piece.replace(URL_USERINFO_RE, '$1[redacted]@')
+      piece = piece.replace(PIECE_ASSIGN_RE, (_m, key: string, quote: string) => `${key}${quote}[redacted]`)
+      piece = redactProviderTokens(piece)
+    }
+    parts[i] = piece
+    previous = part
+  }
+  return parts.join('')
 }
 
 /** The marker a cut line ends with, naming how much is not shown. */
@@ -334,14 +406,14 @@ export function approvalCutMarker(omitted: number): string {
 }
 
 /**
- * One approval line from raw text: redacted (secrets and private-material blocks only),
- * then whitespace-normalized, then cut at `max` with the marker. Redaction reads at most
- * REDACTION_SCAN_MAX_CHARS, ended at a token boundary, so no input can make it slow and no
- * secret straddling that bound is shown half.
+ * One approval line from raw text: made visible (line breaks and hidden characters shown),
+ * then redacted with the approval redactor, then cut at `max` with the marker. Only
+ * REDACTION_SCAN_MAX_CHARS reach a regex, ended at a token boundary, so no input can make
+ * it slow and no secret straddling that bound is shown half.
  */
-function approvalLine(raw: string, max: number): string {
+function approvalLine(raw: string, max: number, mode: ApprovalRedaction = 'command'): string {
   const { head, omitted } = boundForRedaction(raw)
-  const text = normalizeApprovalText(redactSecretText(head))
+  const text = redactApprovalText(visibleApprovalText(head), mode)
   if (text.length <= max && omitted === 0) return text
   const shown = text.slice(0, max)
   return shown + approvalCutMarker(text.length - shown.length + omitted)
@@ -397,16 +469,17 @@ function valueText(value: unknown): string {
  *   - WebFetch: the URL. WebSearch: the query;
  *   - anything else: its input keys and values in order (the card's `tool` names it).
  * A line longer than its cap is cut there and ends with ` ...(+N chars)`. The only thing
- * taken out is a secret: `redactSecretText` (secret patterns and private-material blocks),
- * never the opaque-output heuristic, which hid ordinary paths.
+ * taken out is a secret, by `redactApprovalText`, which works inside one piece of the
+ * command at a time (round 2: the shared patterns swallowed `&& git push --force`), never
+ * the opaque-output heuristic, which hid ordinary paths.
  */
 export function approvalCard(toolName: string, toolInput: Record<string, unknown>): ApprovalCard {
   const lower = toolName.trim().toLowerCase()
   const str = (key: string): string | null => typeof toolInput[key] === 'string' ? toolInput[key] as string : null
-  const both = (text: string): ApprovalCard => ({
+  const both = (text: string, mode: ApprovalRedaction = 'command'): ApprovalCard => ({
     tool: toolName,
-    summary: approvalLine(text, APPROVAL_SUMMARY_MAX),
-    detail: approvalLine(text, APPROVAL_DETAIL_MAX),
+    summary: approvalLine(text, APPROVAL_SUMMARY_MAX, mode),
+    detail: approvalLine(text, APPROVAL_DETAIL_MAX, mode),
   })
   if (SHELL_TOOLS.has(lower)) {
     const command = str('command') ?? str('cmd')
@@ -418,12 +491,12 @@ export function approvalCard(toolName: string, toolInput: Record<string, unknown
       const size = ` (${fileChangeSize(lower, toolInput)})`
       return {
         tool: toolName,
-        summary: approvalLine(path, APPROVAL_SUMMARY_MAX) + size,
-        detail: approvalLine(path, APPROVAL_DETAIL_MAX) + size,
+        summary: approvalLine(path, APPROVAL_SUMMARY_MAX, 'path') + size,
+        detail: approvalLine(path, APPROVAL_DETAIL_MAX, 'path') + size,
       }
     }
   }
-  if (lower === 'webfetch' && str('url') !== null) return both(str('url')!)
+  if (lower === 'webfetch' && str('url') !== null) return both(str('url')!, 'url')
   if (lower === 'websearch' && str('query') !== null) return both(str('query')!)
   // `approvalLine` bounds what reaches a regex, so a huge value costs a join, not a scan.
   return both(Object.entries(toolInput).map(([key, value]) => `${key}=${valueText(value)}`).join(' '))
@@ -945,6 +1018,15 @@ export class PermissionBroker {
     }
   }
 
+  /**
+   * Counts, for the AUTHENTICATED questions route only (6.52.0 QA round 2): pending was
+   * derivable from the public counters (parked minus every resolution), so none of them are
+   * on the public `/api/health`.
+   */
+  stats(): { counters: Record<string, number>; fastPath: Record<string, number> } {
+    return { counters: { ...this.counters }, fastPath: { ...this.fastPaths } }
+  }
+
   /** Shutdown: every held hook is answered `{}` (the native dialog) before the process goes. */
   stop(): void {
     this.settleAll('drained')
@@ -979,8 +1061,15 @@ export function registerPermissionBroker(broker: PermissionBroker | null): void 
 }
 
 /** `/api/health`: counts, the mode and timestamps only; never an id, a question or a command. */
-export function permissionBrokerHealthFields(): { permissionBroker: PermissionBrokerHealth | null } {
-  return { permissionBroker: registered ? registered.health() : null }
+/** What the PUBLIC `/api/health` may show about the broker: the mode and two timestamps.
+ * No counters (6.52.0 QA round 2): how many are held was derivable from them (parked minus
+ * every resolution). The counts are on the authenticated `/api/session-questions` route. */
+export type PublicPermissionBrokerHealth = Omit<PermissionBrokerHealth, 'counters'>
+
+export function permissionBrokerHealthFields(): { permissionBroker: PublicPermissionBrokerHealth | null } {
+  if (!registered) return { permissionBroker: null }
+  const { counters: _counters, ...visible } = registered.health()
+  return { permissionBroker: visible }
 }
 
 export interface SessionQuestionsCapability {

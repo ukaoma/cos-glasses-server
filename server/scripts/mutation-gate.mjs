@@ -2679,6 +2679,63 @@ const CASES = [
     replace: "\n## 6.51.0\n\nNot published.\n",
     tests: ["server/lib/package-manifest.test.ts"],
   },
+  // ─── 6.52.0 QA round 2: the approval redactor and public health ───
+  {
+    name: "approval-redaction-crosses-separator",
+    file: "server/lib/permission-broker.ts",
+    find: "  const parts = marked.split(/(\\s+|&&|\\|\\||[;&|])/)\n",
+    replace: "  const parts = marked.split(/(\\s+)/)\n",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "approval-newline-flattened",
+    file: "server/lib/permission-broker.ts",
+    find: "    .replace(/\\r\\n|\\r|\\n/g, ' \\\\n ')\n",
+    replace: "",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "approval-hidden-chars-obeyed",
+    file: "server/lib/permission-broker.ts",
+    find: "    .replace(/[\\u200b-\\u200f\\u202a-\\u202e\\u2028\\u2029\\u2066-\\u2069\\ufeff]/g, c => `\\\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)\n",
+    replace: "",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "approval-assign-value-crosses-slash",
+    file: "server/lib/permission-broker.ts",
+    find: "([\"']?)([^\"'/,]+)",
+    replace: "([\"']?)([^\"',]+)",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "approval-path-gets-command-rules",
+    file: "server/lib/permission-broker.ts",
+    find: "  if (mode === 'path') return redactProviderTokens(text)\n",
+    replace: "",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "approval-next-piece-rule-gone",
+    file: "server/lib/permission-broker.ts",
+    find: "    if (SECRET_NEXT_PIECE_RE.test(previous)) piece = redactWholePiece(piece)\n    else if",
+    replace: "    if",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "approval-pem-body-shown",
+    file: "server/lib/permission-broker.ts",
+    find: "    else if (sawPem && BASE64ISH_RE.test(piece)) piece = redactWholePiece(piece)\n",
+    replace: "",
+    tests: ["server/lib/permission-broker.test.ts"],
+  },
+  {
+    name: "public-health-shows-counters",
+    file: "server/lib/permission-broker.ts",
+    find: "  const { counters: _counters, ...visible } = registered.health()\n  return { permissionBroker: visible }\n",
+    replace: "  return { permissionBroker: registered.health() }\n",
+    tests: ["server/lib/permission-broker.test.ts", "server/routes/health-query-jobs.test.ts"],
+  },
 ]
 
 function sha256(text) {
