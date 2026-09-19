@@ -22,6 +22,7 @@ import {
   type SessionStreamProvider,
 } from './session-stream-events.js'
 import { beginAttachedTurn, publishSessionStream, sessionStreamKey } from './session-stream-bus.js'
+import { releaseAfterTranscriptCatchUp } from './session-transcript-watcher.js'
 
 /**
  * Ceiling on the incomplete trailing line held between chunks.
@@ -68,8 +69,15 @@ export function createLineAssembler(maxCarry: number = MAX_LINE_CARRY_CHARS): Li
 export interface AttachedTurnStream {
   /** Wire this as the adapter's `observeStdout`. Never throws. */
   observeStdout(chunk: string): void
-  /** Call exactly once when the turn settles, whatever its outcome. Never throws. */
-  finish(outcome: 'done' | 'idle'): void
+  /**
+   * Call exactly once when the turn settles, whatever its outcome. Never throws.
+   *
+   * The terminal status is published before this returns. The hold-off lifts once the
+   * session's transcript watcher is at end of file (6.52.0 QA round 2): at once when no
+   * watcher tails the session, within `CATCH_UP_TIMEOUT_MS` otherwise. The promise
+   * settles then and never rejects; callers need not await it.
+   */
+  finish(outcome: 'done' | 'idle'): Promise<void>
 }
 
 export interface AttachedTurnStreamOptions {
@@ -96,6 +104,7 @@ export function createAttachedTurnStream(options: AttachedTurnStreamOptions): At
   const assembler = createLineAssembler()
   const endTurn = beginAttachedTurn(key)
   let finished = false
+  let released: Promise<void> = Promise.resolve()
 
   const emit = (draft: SessionStreamDraft) => {
     try {
@@ -117,8 +126,8 @@ export function createAttachedTurnStream(options: AttachedTurnStreamOptions): At
         /* a malformed chunk costs its own events and nothing else */
       }
     },
-    finish(outcome: 'done' | 'idle'): void {
-      if (finished) return
+    finish(outcome: 'done' | 'idle'): Promise<void> {
+      if (finished) return released
       finished = true
       try {
         for (const line of assembler.flush()) {
@@ -128,11 +137,21 @@ export function createAttachedTurnStream(options: AttachedTurnStreamOptions): At
         /* fall through: the terminal status and the gate release matter more */
       }
       emit({ kind: 'status', state: outcome })
+      // NOT released here. The CLI wrote this turn's records to the transcript as well,
+      // and the watcher reads the hold-off only when it reads: released now, its next
+      // check would show the last lines again and put `working` after this `done`
+      // (6.52.0 QA round 2). The watcher module brings every watcher on this session to
+      // end of file while the hold still applies, then releases, within a bound.
       try {
-        endTurn()
+        released = releaseAfterTranscriptCatchUp(key, endTurn)
       } catch {
-        /* the gate is a Map delete; there is no failure mode to report */
+        try {
+          endTurn()
+        } catch {
+          /* the gate is a Map delete; there is no failure mode to report */
+        }
       }
+      return released
     },
   }
 }

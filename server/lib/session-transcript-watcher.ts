@@ -141,6 +141,12 @@ export interface TranscriptTailer {
   state(): 'working' | 'idle' | 'done' | null
   /** True once this tailer has handed off to the poll. Terminal; never clears. */
   degraded(): boolean
+  /**
+   * One HELD pass (6.52.0 QA round 2): move the cursor to end of file and emit nothing.
+   * Only `releaseAfterTranscriptCatchUp` calls it, while a Continue turn still holds the
+   * session. Resolves; never rejects.
+   */
+  skipToEnd(): Promise<void>
 }
 
 /**
@@ -319,6 +325,18 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
         /* a tick that throws is a tick that produced nothing; the next one retries */
       }
     },
+    async skipToEnd(): Promise<void> {
+      if (degraded) return
+      try {
+        const st = await stat(options.path)
+        if (!st.isFile()) return
+        // The RAW end, not the last newline: see `releaseAfterTranscriptCatchUp`. Moving
+        // backward on a truncated file is what `tick` does too.
+        cursor = { offset: st.size }
+      } catch {
+        /* unreadable right now: the cursor stays, and the caller's bound still releases */
+      }
+    },
   }
 }
 
@@ -330,6 +348,8 @@ interface WatcherEntry {
   refs: number
   timer: ReturnType<typeof setInterval>
   ticking: boolean
+  /** The pass `ticking` guards, so a catch-up can wait for it. Null when none runs. */
+  inflight: Promise<void> | null
   tailer: TranscriptTailer
 }
 
@@ -342,6 +362,8 @@ export interface AcquireWatcherOptions {
   /** Where to start. Production passes the file's current size. */
   offset: number
   intervalMs?: number
+  /** Injected for tests: the tail this entry drives. Production builds it from the fields above. */
+  tailer?: TranscriptTailer
 }
 
 /**
@@ -358,7 +380,7 @@ export function acquireTranscriptWatcher(options: AcquireWatcherOptions): () => 
     return releaseOnce(options.key)
   }
 
-  const tailer = createTranscriptTailer(options)
+  const tailer = options.tailer ?? createTranscriptTailer(options)
   const timer = setInterval(() => {
     const entry = watchers.get(options.key)
     if (!entry) return
@@ -367,12 +389,16 @@ export function acquireTranscriptWatcher(options: AcquireWatcherOptions): () => 
     // next tick sees everything the skipped one would have.
     if (entry.ticking) return
     entry.ticking = true
-    void tailer.tick().finally(() => { entry.ticking = false })
+    // Kept on the entry rather than voided, so a catch-up can wait for it (below).
+    entry.inflight = tailer.tick().catch(() => {}).finally(() => {
+      entry.ticking = false
+      entry.inflight = null
+    })
   }, options.intervalMs ?? POLL_INTERVAL_MS)
   // Never hold the process open. A tail is a view, not work.
   if (typeof (timer as any).unref === 'function') (timer as any).unref()
 
-  watchers.set(options.key, { refs: 1, timer, ticking: false, tailer })
+  watchers.set(options.key, { refs: 1, timer, ticking: false, inflight: null, tailer })
   return releaseOnce(options.key)
 }
 
@@ -408,6 +434,97 @@ export function watchedTranscriptCount(): number {
  */
 export function transcriptWatcherDegraded(key: string): boolean {
   return watchers.get(key)?.tailer.degraded() ?? false
+}
+
+// ---------------------------------------------------------------------------
+// Catch-up before a Continue turn's hold-off lifts (6.52.0 QA round 2)
+// ---------------------------------------------------------------------------
+// The hold-off is read when a tick READS, and a tick runs once a second. The CLI
+// (`claude -p`, `codex exec resume`) writes each record to the transcript tailed here
+// AND prints it on stdout, which the producer maps. Records written after the watcher's
+// last check of the turn were therefore read by its first check AFTER the release, when
+// nothing held them off: the final reply appeared twice on the lens, and the watcher's
+// resume put `working` after `done`. QA reproduced it with the real tailer and producer
+// on the real codex exec sample.
+//
+// So the producer hands its release to `releaseAfterTranscriptCatchUp`, which, while the
+// hold still applies:
+//   1. waits for a tick already in flight, so it reads the hold-off while it holds;
+//   2. runs one held pass that moves the cursor to END OF FILE and emits nothing;
+//   3. only then releases.
+//
+// RAW END OF FILE, not the last newline. On an ordinary exit the child has closed, so
+// every byte there is the turn's. A record cut mid-write left BEHIND the cursor would
+// join the next real record into one unparseable line and lose it; a fragment AHEAD of
+// it is the tail of a record, which never parses (the outer record's closing brace
+// follows it), so the grammar drops it.
+//
+// BOUNDED. The pass is one stat, but a wedged volume or a tick that never settles must
+// not keep the hold-off: that would silence the session for good, which the producer
+// already names as worse than a duplicated line. After `CATCH_UP_TIMEOUT_MS` the release
+// happens anyway and is counted, as is a pass that throws.
+
+/** Ceiling on the catch-up. The pass is one stat; this is for a wedged disk, not an expected wait. */
+export const CATCH_UP_TIMEOUT_MS = 500
+
+const catchUpCounts = { timedOut: 0, failed: 0 }
+
+/** Catch-ups that released on the bound, or on a pass that threw, since this server started. */
+export function transcriptCatchUpCounts(): { timedOut: number; failed: number } {
+  return { ...catchUpCounts }
+}
+
+async function catchUpToEnd(entry: WatcherEntry): Promise<void> {
+  // 1. A check already reading: let it read the hold-off while it still holds.
+  while (entry.ticking && entry.inflight) await entry.inflight
+  // 2. One held pass, guarded like a tick so the timer cannot run another beside it.
+  entry.ticking = true
+  const pass = Promise.resolve().then(() => entry.tailer.skipToEnd())
+  entry.inflight = pass.catch(() => {}).finally(() => {
+    entry.ticking = false
+    entry.inflight = null
+  })
+  await pass
+}
+
+/**
+ * Bring every watcher on this session to end of file, THEN call `release`.
+ *
+ * `release` runs exactly once: at once when nothing tails the session, otherwise after
+ * the catch-up or after `timeoutMs`, whichever is first. The promise settles when it has
+ * run and never rejects.
+ */
+export function releaseAfterTranscriptCatchUp(
+  key: string,
+  release: () => void,
+  timeoutMs: number = CATCH_UP_TIMEOUT_MS,
+): Promise<void> {
+  const releaseSafely = () => {
+    try {
+      release()
+    } catch {
+      /* the release is a Map delete; there is no failure mode to report */
+    }
+  }
+  const entry = watchers.get(key)
+  if (!entry) {
+    // Nothing tails this session, so nothing can read the turn's records late.
+    releaseSafely()
+    return Promise.resolve()
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const bound = new Promise<'timed_out'>(resolve => {
+    timer = setTimeout(() => resolve('timed_out'), Math.max(0, timeoutMs))
+    if (typeof (timer as any).unref === 'function') (timer as any).unref()
+  })
+  const work = catchUpToEnd(entry).then(() => 'caught_up' as const, () => 'failed' as const)
+  return Promise.race([work, bound]).then(outcome => {
+    clearTimeout(timer)
+    if (outcome === 'timed_out') catchUpCounts.timedOut++
+    else if (outcome === 'failed') catchUpCounts.failed++
+    releaseSafely()
+  })
 }
 
 export function __resetTranscriptWatchersForTests(): void {
