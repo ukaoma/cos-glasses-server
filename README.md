@@ -179,8 +179,11 @@ npx --yes @gotcos/glasses-server@latest --hooks uninstall
 
 The install keeps every hook you already had, backs the file up, and copies a small
 POSIX sh script to `~/.cos-glasses/bin/cos-session-hook`. The script writes one file per
-event into `~/.cos-glasses/data/hook-spool` and never contacts the server (a permission
-request may, only after the desk has been idle for 90 s: see the 6.52.0 note below). Sessions report `state_source: hook` on `/api/agent-sessions` and
+event into `~/.cos-glasses/data/hook-spool`. It contacts the server in exactly two cases:
+a permission request, only after the desk has been idle for 90 s (see the 6.52.0 note
+below), and a Cursor composer's Stop, only when a turn is queued for it (6.51.0). Every
+other event is a file write, so a server that is down or restarting never delays a
+session. Sessions report `state_source: hook` on `/api/agent-sessions` and
 `/api/claude-sessions` from their next event on (Claude Code 2.1.272 reloads its hooks
 when the settings file changes, so open tabs need no restart; they may show Claude's
 "hooks modified externally" notice once, which is expected: the user-level file changed
@@ -229,20 +232,38 @@ sub-agents omitted) and `recent_turns_more` to the detail payload, read backward
 the end of the transcript; without `turns` the payload is unchanged. The glasses use it
 to scroll back through a running session's conversation.
 Since 6.52.0 a session question (the AskUserQuestion card) or a tool approval can be
-answered from the glasses or the phone while you are away from the Mac. The hook posts
-a permission request to `POST /hooks/permission-requests/ask` (outside `/api`, hook-token
-auth) only after the desk has been idle 90 s; the server holds it only while the desk
-stays idle and a client has polled `GET /api/session-questions` (with X-Cos-Token) in the
-last 60 s, and answers `{}` (the Mac's own dialog) to everything else at once. A client
-that never polls (COS Glasses 6.9.511 and earlier) changes nothing. Clients read `GET /api/session-questions`
-and answer with `POST /api/session-questions/:id/answer` (`{clientAnswerId, answers}` for
-a question, one `{labels, other}` per question; `{clientAnswerId, decision}` for an
-approval, `allow` or `deny`). Touching the Mac hands a held request back to its dialog
-at once; the deadline is 110 s. Allow once or deny only: no permission rule is ever
-written. `COS_PERMISSION_BROKER=0` turns it off with no reinstall, `=questions` keeps
-approvals at the Mac. Rows carry `pending_question_id` or `pending_permission_id` while
-a request is held; `/api/health` reports `permissionBroker`. The new script reaches
-`~/.cos-glasses/bin` through `--hooks install`.
+answered from the glasses or the phone while you are away from the Mac. There is nothing
+to reinstall: the hook script is the 6.51.0 one, and the server now answers the URL it
+already calls, `POST /api/permission-requests/ask` (hook-token auth, checked before the
+body is read; that one method and path is exempt from the API token, nothing else is).
+The hook posts only after the desk has been idle 90 s; the server holds the request only
+while the desk stays idle and a client that can answer keeps polling, and answers `{}`
+(the Mac's own dialog) to everything else at once. A client that never polls (COS
+Glasses 6.9.511 and earlier, COS Control) changes nothing.
+
+The client contract (also at `/api/models` `capabilities.sessionQuestions`):
+
+- Poll `GET /api/session-questions?client=glasses` (or `client=phone`) with X-Cos-Token
+  every `pollIntervalMs` (10,000). Only those two `client` values count as a live
+  answerer; a poll without `client`, or with any other value, is answered but never
+  counts. A client quiet for `liveWindowMs` (30,000) hands every held request back.
+- The response carries `enabled`, `mode`, `protocolVersion` (1), `pollIntervalMs`,
+  `liveWindowMs`, `pending` and `items` (a question's `questions`, or an approval's
+  `approval`: `{tool, summary, detail}`, the command, path or URL exactly as it will run,
+  cut at 160 and 4,000 characters with ` ...(+N chars)`, with only secrets redacted).
+- Answer with `POST /api/session-questions/:id/answer`: `{clientAnswerId, answers}` for
+  a question (one `{labels, other}` per question; free text with a comma is sent quoted),
+  `{clientAnswerId, decision}` for an approval (`allow` or `deny`). The first answer
+  wins; a retry with the same `clientAnswerId` replays it. 409 `already_answered`,
+  `handed_to_desk` or `expired`, and 410 `hook_gone`, say why an answer came too late;
+  404 `not_found` after a server restart or once a settled item is pruned (10 minutes);
+  503 during a maintenance drain, when every held item has already gone back to the Mac.
+
+Touching the Mac hands a held request back to its dialog at once; the deadline is 110 s.
+Allow once or deny only: no permission rule is ever written. Rows carry
+`pending_question_id` or `pending_permission_id` while a request is held, and a question
+row reads `waiting_kind: question` whatever the switch says; `/api/health` reports
+`permissionBroker` (counters and timestamps, no ids or text).
 
 ## Configuration
 
@@ -273,6 +294,11 @@ No inline `#` on the EXTRA_ARGS line.),
 `COS_WEATHER_DEFAULT_CITY` (optional home fallback when phone GPS is denied),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=0` (optional
 machine-wide rollback for build 204+ server-owned query recovery),
+`COS_MESSAGES_TRAIL=0` (6.52.0: no Messages trail; every job stream and snapshot is the
+6.51.0 one), `COS_PERMISSION_BROKER` (6.52.0: `0` answers every permission request with
+the Mac's own dialog, `questions` holds questions but not tool approvals; unset holds
+both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30) and
+`COS_PERMISSION_BROKER_TIMEOUT_S` (default 110, clamped to 5 through 120),
 `COS_MEDIA_ROOT` (optional image/video store location; default
 `~/.cos-glasses/data/media`), and `COS_VIDEO_UPLOAD_V2=1` (private 6.27.3+
 resumable-video canary, managed by COS Control 0.5.20). The V2 canary retains
@@ -286,6 +312,9 @@ instead of biasing Whisper toward placeholder text.
 Telegram activity export is disabled by default even when a private COS
 pipeline contains `.telegram_config.json`; enable it only with the explicit
 `COS_TELEGRAM_NOTIFICATIONS=1` opt-in.
+Put rollback switches such as `COS_MESSAGES_TRAIL=0` and `COS_PERMISSION_BROKER=0` in
+`~/.cos-glasses/.env`: that file survives Update Server. COS Control 0.5.239 also keeps
+them in the LaunchAgent environment; 0.5.238 drops a value set only in the plist.
 
 ## Morning brief (6.43.0)
 
@@ -590,6 +619,16 @@ BIND_HOST=0.0.0.0 npm run start:server
   Restart once, then confirm `/api/health` reports
   `features.durableQueryJobs: true`, protocol `1`, and state `ready`. To roll
   back, set `COS_DURABLE_QUERY_JOBS=0`; accepted jobs still drain while new prompts use legacy streaming.
+- *Session questions never reach the glasses?* The server holds one only when every
+  gate passes. `/api/health` `permissionBroker.lastFastPath` names the last reason a
+  request went straight to the Mac's dialog: `no_client` (no poll with
+  `client=glasses|phone` in the last 30 s: the app build has no question cards, or its
+  timers are frozen), `desk_active` (the Mac saw input), `approvals_off`
+  (`COS_PERMISSION_BROKER=questions`), `broker_off`, `cursor`, `unsupported_tool`
+  (ExitPlanMode is never held). `lastQuestionsPollAt` says when a client last counted.
+  `--hooks status` must read `installed`. To turn it off with no reinstall, set
+  `COS_PERMISSION_BROKER=0` in `~/.cos-glasses/.env` and restart. For the Messages
+  trail, `/api/health` `messages_trail.readerErrors` counts lines a reader could not map.
 - *Offline meeting recovery unavailable?* — build 209+ requires server 6.11.0+.
   Restart once, then confirm `/api/health` reports
   `features.localFirstMeetings: true` and

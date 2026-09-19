@@ -77,7 +77,8 @@ describe('derived state on the claude-sessions wire', () => {
       waiting_detail: 'Bash touch par-a',
       state_since: new Date(recorded[2].ts).toISOString(),
     })
-    // The wire keeps the thirteen pinned peer keys; the eight extras are the only additions.
+    // The wire keeps the thirteen pinned peer keys; the ten additive fields listed here
+    // (the hook state, 6.48.x; queued_turns; the broker ids, 6.52.0) are the only additions.
     const keys = Object.keys(during.peers[0]).sort()
     expect(keys.filter(k => !['agent_state', 'state_source', 'state_since', 'waiting_kind', 'waiting_detail', 'failure', 'last_reply', 'pending_permission_id', 'pending_question_id', 'queued_turns'].includes(k))).toEqual([
       'alive', 'entrypoint', 'id', 'kind', 'lastActiveAt', 'name', 'nameRedacted', 'reachable', 'startedAt', 'status', 'version', 'waitingFor', 'workspace',
@@ -119,7 +120,7 @@ describe('derived state on the claude-sessions wire', () => {
     expect(jobs.runs.map(r => r.entrypoint)).toEqual(['sdk-cli'])
   })
 
-  it('off means off: with COS_SESSION_HOOKS=0 the peer carries none of the eight fields', async () => {
+  it('off means off: with COS_SESSION_HOOKS=0 the peer carries none of the hook-derived fields, the broker ids included', async () => {
     process.env.COS_SESSION_HOOKS = '0'
     const base = await start()
     for (const env of recorded.slice(0, 3)) sessionSignalStore.apply(env)

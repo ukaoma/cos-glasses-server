@@ -62,6 +62,28 @@ describe('package manifest', () => {
     for (const h of headings.slice(0, firstReleased)) expect(h[1], 'an unreleased section cannot carry the published version').not.toBe(pkg.version)
     expect(headings.slice(firstReleased).some(h => unreleased(h[2] ?? '')), 'an (unreleased) section below a released one').toBe(false)
   })
+
+  // 6.52.0 QA round 1. The lockfile carries the version twice, and a bump that misses
+  // either ships a tarball whose lock disagrees with its manifest.
+  it('the package-lock version and packages[""].version equal package.json', () => {
+    const pkg = JSON.parse(readFileSync(PKG, 'utf8'))
+    const lock = JSON.parse(readFileSync(new URL('../../package-lock.json', import.meta.url).pathname, 'utf8'))
+    expect(lock.version).toBe(pkg.version)
+    expect(lock.packages?.['']?.version).toBe(pkg.version)
+  })
+
+  // An unreleased section says "Not published"; the release bump drops the marker, and a
+  // section that shipped with that line still in it would tell readers it never did.
+  it('a released section never says "Not published"', () => {
+    const changelog = readFileSync(new URL('../../CHANGELOG.md', import.meta.url).pathname, 'utf8')
+    const sections = changelog.split(/^(?=##\s*\[?\d+\.\d+\.\d+)/m).filter(section => /^##\s*\[?\d+\.\d+\.\d+/.test(section))
+    expect(sections.length).toBeGreaterThan(10)
+    for (const section of sections) {
+      const heading = section.split('\n')[0]!
+      if (/\(unreleased\)/i.test(heading)) continue
+      expect(section, heading).not.toMatch(/not published/i)
+    }
+  })
 })
 
 describe('package.json ships the security surface', () => {
