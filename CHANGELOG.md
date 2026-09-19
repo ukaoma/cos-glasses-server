@@ -1,6 +1,4 @@
-## 6.52.0 (unreleased)
-
-Not published. The release drops "(unreleased)" from this heading together with the package.json bump.
+## 6.52.0
 
 ### Messages trail
 
