@@ -26,6 +26,7 @@
 
 import { open, stat } from 'node:fs/promises'
 import {
+  codexUserText,
   latestAssistantReply,
   isWrapperPrompt,
   parseJsonLine,
@@ -112,7 +113,9 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
     const payload = obj.payload as Record<string, unknown>
     if (String(payload.type ?? '') !== 'message') return null
     if (payload.role !== 'user' && payload.role !== 'assistant') return null
-    const text = payloadText(payload)
+    // 6.52.0: a user row block by block, so typed words after an `<image>` block are kept
+    // and an attached-file message reads as the request that was typed.
+    const text = payload.role === 'user' ? codexUserText(payload) : payloadText(payload)
     if (!text) return null
     return shaped(payload.role, text, iso(obj.timestamp))
   }

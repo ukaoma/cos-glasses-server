@@ -11,7 +11,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
-import { unwrapPeerMessage } from './session-stream-events.js'
+import { codexUserAsk, unwrapPeerMessage } from './session-stream-events.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -484,6 +484,30 @@ export function payloadText(payload: Record<string, unknown>): string | null {
   return joined || null
 }
 
+/**
+ * What the person typed, out of one Codex `response_item/message` user row, or null
+ * (6.52.0).
+ *
+ * `payloadText` joins every block, so the AGENTS.md block Codex writes as a user message
+ * ("# AGENTS.md instructions for /Users/…", the FIRST user row in 469 rollouts on this
+ * Mac) became the session's title, first prompt and opening DISCUSSION line, and typed
+ * words after an `<image>` block were dropped with the wrapper. `codexUserAsk` reads the
+ * row block by block; the stream's `prompt` line uses the same function, so the two
+ * cannot disagree about what was asked.
+ */
+export function codexUserText(payload: Record<string, unknown>): string | null {
+  const content = payload.content
+  if (typeof content === 'string') return codexUserAsk([content])
+  if (!Array.isArray(content)) return null
+  return codexUserAsk(content.map(block => {
+    if (!block || typeof block !== 'object') return null
+    const type = String((block as { type?: unknown }).type ?? '')
+    if (type !== 'text' && type !== 'input_text') return null
+    const text = (block as { text?: unknown }).text
+    return typeof text === 'string' ? text : null
+  }))
+}
+
 export function isoFromMtime(mtimeMs: number): string {
   return new Date(mtimeMs).toISOString()
 }
@@ -912,7 +936,7 @@ export async function peekCodexMeta(path: string): Promise<{ id: string; cwd: st
     if (!title && obj.type === 'response_item' && obj.payload && typeof obj.payload === 'object') {
       const payload = obj.payload as Record<string, unknown>
       if (payload.type === 'message' && payload.role === 'user') {
-        const textBody = payloadText(payload)
+        const textBody = codexUserText(payload)
         if (textBody && !isWrapperPrompt(textBody)) title = firstLineTitle(textBody)
       }
     }
@@ -1624,12 +1648,15 @@ export interface AgentSessionDetail {
 export async function parseAgentSession(
   provider: AgentProvider,
   path: string,
-  opts: { maxBytes?: number; headBytes?: number; tailBytes?: number } = {},
+  opts: { maxBytes?: number; headBytes?: number; tailBytes?: number; codexThreadName?: string } = {},
 ): Promise<AgentSessionDetail> {
   const st = await stat(path)
   const maxBytes = opts.maxBytes ?? AGENT_SESSION_MAX_FILE_BYTES
   const truncated = st.size > maxBytes
-  let title = ''
+  // 6.52.0: a Codex thread's own name (`session_index.jsonl`, what the Codex app shows)
+  // titles the detail the way it already titles the list row. The first ask is still
+  // read below and published as `first_prompt`.
+  let title = provider === 'codex' ? (opts.codexThreadName ?? '').trim() : ''
   let project = ''
   let gitBranch = ''
   let sessionId = path.split('/').pop()?.replace(/\.jsonl$/, '') || ''
@@ -1771,7 +1798,10 @@ export async function parseAgentSession(
         continue
       }
       if (kind !== 'message' || payload.role === 'developer') continue
-      const text = payloadText(payload)
+      // 6.52.0: a user row is read block by block (`codexUserText`), so the AGENTS.md
+      // block Codex writes as a user message is not the title, the first prompt or a
+      // DISCUSSION turn. The assistant path is unchanged.
+      const text = payload.role === 'assistant' ? payloadText(payload) : codexUserText(payload)
       if (!text || isWrapperPrompt(text)) continue
       if (payload.role === 'assistant') {
         assistantCount += 1

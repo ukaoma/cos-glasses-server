@@ -29,6 +29,8 @@ import {
   emptySessionListDropped,
   loadClaudeDesktopAliases,
   loadCursorComposerNames,
+  loadCodexThreadNames,
+  idFromCodexFilename,
   parseAgentSession,
   type AgentProvider,
   type AgentSessionRoots,
@@ -482,7 +484,16 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // `parsed.truncated` says so out loud, and the counts are then counts of what was
     // READ. Presenting a partial count as the session total would be the same
     // dishonesty as a silent cap, so the digest omits the number entirely instead.
-    const parsed = await parseAgentSession(provider, found)
+    // 6.52.0: a Codex thread is titled by its own name, as its list row already is. Keyed
+    // by the rollout's FILENAME id first: a cloned thread's `session_meta` carries its
+    // parent's id (see `listCodexSessions`), and the parent's name would be the wrong one.
+    let codexThreadName: string | undefined
+    if (provider === 'codex') {
+      const names = await loadCodexThreadNames(agentSessionRoots().codexSessions)
+      const fileId = idFromCodexFilename(found.split('/').pop() || '')
+      codexThreadName = (fileId ? names.get(fileId) : undefined) || names.get(sessionId) || undefined
+    }
+    const parsed = await parseAgentSession(provider, found, codexThreadName ? { codexThreadName } : {})
     // 6.50.0 `?turns=N`: the recent conversation, for the lens's scroll-up history. Only
     // when asked, so the detail poll and every older client get the same bytes as before.
     // A failure here costs the history, never the detail page.
