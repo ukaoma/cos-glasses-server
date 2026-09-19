@@ -36,6 +36,7 @@ import { targetKey } from './lib/agent-session-binding-store.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
 import { buildOccupancyProbes, realOccupancyDirs, withCodexTurnClock, withCursorComposerTurn, withHookTurnClock } from './lib/occupancy-probes.js'
 import { readCodexTurnEndedAtMs } from './lib/codex-turn-clock.js'
+import { codexLiveQueueEnabled } from './lib/codex-live-queue.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
@@ -399,7 +400,9 @@ const occupancyProbes = withCursorComposerTurn(withCodexTurnClock(sessionHooksEn
   // 6.51.0: the Codex counterpart, from the rollout's own turn markers. A queued COS turn
   // on a Codex thread then drains at the engine's `task_complete` instead of 30 s later,
   // and goes out through the app's own queue (`codex-live-queue.ts`).
-  (threadId: string) => readCodexTurnEndedAtMs(threadId, nativeHeadDeps)),
+  // Off with `COS_CODEX_LIVE_QUEUE=0`: the clock only opens the gate because every write
+  // into a held thread goes through the app's queue, so without that hop it must not.
+  (threadId: string) => (codexLiveQueueEnabled() ? readCodexTurnEndedAtMs(threadId, nativeHeadDeps) : null)),
   // 6.51.0: a Cursor composer its own hooks show mid-turn reads `native_thread_working`,
   // so a turn can queue for its Stop hook. Without the hooks feature there is no signal
   // and every composer keeps the 6.50 verdict.

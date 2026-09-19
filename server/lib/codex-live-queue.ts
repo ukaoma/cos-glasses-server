@@ -49,8 +49,9 @@
 // Exit 0 AND the CLI's confirmation line naming OUR thread id. That line is printed from
 // the insert's own RETURNING row, so it is positive evidence the row exists. Anything
 // else that might have inserted -- exit 0 without the line, a timeout, a kill, a nonzero
-// exit we cannot place -- is `unverified`, and the route HOLDS rather than retrying,
-// because a retried queue write puts the same sentence into the thread twice.
+// exit we cannot place -- is `unverified`, and the route fences the thread as an
+// ambiguous delivery rather than retrying, because a retried queue write puts the same
+// sentence into the thread twice. A clap usage error (exit 2) queued nothing.
 
 import { isValidNativeThreadId } from './native-thread-id.js'
 
@@ -126,6 +127,12 @@ const CONFIRMATION = /^Queued message (\S+) for thread (\S+)\.\s*$/m
 const NOTHING_QUEUED = /failed to queue session message/i
 
 /**
+ * clap's argument errors (exit 2): a `codex` without the `queue` subcommand, or one that
+ * renamed a flag. The parser refuses before any command runs, so nothing was queued.
+ */
+const USAGE_ERROR = /^error: (unrecognized subcommand|unexpected argument|invalid value|the following required arguments)/m
+
+/**
  * The argv, in the `--flag=value` form on purpose: clap reads `--message -h` as a flag
  * and `--message=-h` as text (measured). The thread id is validated by the caller, and
  * this refuses anything that is not a native thread id anyway, because it is about to
@@ -157,7 +164,9 @@ export function classifyCodexQueueRun(run: CodexQueueRun, threadId: string): { r
     const queuedId = parseCodexQueueConfirmation(run.stdout, threadId)
     return queuedId ? { reason: 'delivered', queuedId } : { reason: 'unverified', queuedId: null }
   }
-  return NOTHING_QUEUED.test(run.stderr) ? { reason: 'refused', queuedId: null } : { reason: 'unverified', queuedId: null }
+  if (NOTHING_QUEUED.test(run.stderr)) return { reason: 'refused', queuedId: null }
+  if (run.code === 2 && USAGE_ERROR.test(run.stderr)) return { reason: 'refused', queuedId: null }
+  return { reason: 'unverified', queuedId: null }
 }
 
 /** Put the turn into the Codex app's own queue for this thread, and say honestly what happened. */

@@ -28,8 +28,13 @@ rm -f "$T.in"
 # message. A turn COS queued for the composer is handed over here, at the end of its turn.
 # Claude Code sets no CURSOR_VERSION and sends no cursor_version, so a Claude Stop takes
 # the line below this block exactly as before and never touches the network.
-if [ "$EVENT" = Stop ] && [ -n "${CURSOR_VERSION:-}" ] && grep -q '"cursor_version":"' "$T" 2>/dev/null; then
+if [ "$EVENT" = Stop ] && [ -n "${CURSOR_VERSION:-}" ] && grep -Eq '"cursor_version"[[:space:]]*:[[:space:]]*"' "$T" 2>/dev/null; then
   cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
+  # Nothing queued for this composer (almost every Stop): no request at all. The queue
+  # folder sits beside the spool; if it is not there, ask anyway rather than guess.
+  QDIR="$(dirname "$SPOOL")/thread-turn-queue"
+  CONV=$(grep -Eo '"conversation_id"[[:space:]]*:[[:space:]]*"[0-9A-Fa-f-]{36}"' "$T.req" 2>/dev/null | grep -Eo '[0-9A-Fa-f-]{36}' | head -1 | tr 'A-F' 'a-f')
+  if [ -d "$QDIR" ] && { [ -z "$CONV" ] || [ ! -f "$QDIR/cursor-$CONV.json" ]; }; then rm -f "$T.req"; exit 0; fi
   TOK=$(cat "$GH/hook-token" 2>/dev/null); PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
   if [ -n "$TOK" ] && [ -f "$T.req" ]; then
     OUT=$(curl -s --connect-timeout 1 --max-time 3 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \

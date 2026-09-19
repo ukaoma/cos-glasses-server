@@ -3344,31 +3344,33 @@ describe('6.51.0: Codex Continue into a thread the Codex app holds', () => {
     expect(codex).toHaveLength(1)
   })
 
-  it.each(['unverified'])('holds, never spawns, when a row may exist (%s)', async reason => {
+  // QA (6.51.0): nothing can re-check a Codex queue row before a resend, so a hand-off
+  // that might have inserted is AMBIGUOUS, ledgered and fenced, never retryable: a
+  // retryable answer had the drainer insert the same sentence at every turn end.
+  it.each([
+    ['unverified', async () => ({ ok: false, reason: 'unverified' })],
+    ['a throw', async () => { throw new Error('transport bug') }],
+  ] as const)('a hand-off that may have queued (%s) is ambiguous, fenced and never re-sent', async (_label, transport) => {
     const spawns: AttachedTurnRequest[] = []
+    let calls = 0
     const base = await start(writeDeps({
       probes: heldIdle(),
       deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
-      deliverCodexLiveTurn: async () => ({ ok: false, reason }),
+      deliverCodexLiveTurn: async () => { calls += 1; return transport() as never },
     }))
     const a = await codexAttached(base)
     const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0002'))
     expect(res.status).toBe(409)
-    expect(res.body).toMatchObject({ outcome: 'refused', reason: 'live_unverified', retryable: true, deliveryState: 'unknown' })
+    expect(res.body).toMatchObject({ outcome: 'ambiguous', reason: 'delivery_ambiguous', retryable: false, deliveryState: 'unknown' })
     expect(spawns).toHaveLength(0)
-  })
-
-  it('a throwing Codex transport is treated as a row that may exist', async () => {
-    const spawns: AttachedTurnRequest[] = []
-    const base = await start(writeDeps({
-      probes: heldIdle(),
-      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
-      deliverCodexLiveTurn: async () => { throw new Error('transport bug') },
-    }))
-    const a = await codexAttached(base)
-    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0003'))
-    expect(res.body).toMatchObject({ outcome: 'refused', reason: 'live_unverified', deliveryState: 'unknown' })
-    expect(spawns).toHaveLength(0)
+    // Ledgered: the same key answers the same, and the transport is not asked again.
+    const replay = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0002'))
+    expect(replay.body).toMatchObject({ outcome: 'ambiguous', replayed: true })
+    expect(calls).toBe(1)
+    // Fenced: a fresh key on the same thread is refused until a person releases it.
+    const next = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-codex-0002b'))
+    expect(next.body.reason).toBe('native_target_fenced')
+    expect(calls).toBe(1)
   })
 
   it.each(['refused', 'binary_not_found', 'spawn_failed', 'invalid_request'])(

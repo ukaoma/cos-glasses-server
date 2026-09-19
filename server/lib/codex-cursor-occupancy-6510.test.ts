@@ -80,6 +80,10 @@ describe('readCodexTurnEndedAtMs against real rollout lines', () => {
   it('a task_started after it (the app started its own queued turn) is open again', () => {
     expect(read(rollout('next.jsonl', ['task_started', 'task_complete', 'task_started']))).toBeNull()
   })
+  it('an aborted turn is closed too (6.51.0, QA W1), and a new turn after it is open', () => {
+    expect(read(rollout('aborted.jsonl', ['task_started', 'turn_aborted']))).toBe(1234)
+    expect(read(rollout('aborted-then.jsonl', ['task_started', 'turn_aborted', 'task_started']))).toBeNull()
+  })
   it('no marker, no file, or no path is null', () => {
     expect(read(rollout('none.jsonl', ['token_count', 'item_completed']))).toBeNull()
     expect(read(join(dir, 'missing.jsonl'))).toBeNull()

@@ -2302,9 +2302,25 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         }
         // The operator switched this off: the 6.50 path, unchanged, whatever it does.
         if (live?.reason !== 'disabled') {
-          // A throw, a timeout, or a confirmation we could not read: a row may exist.
+          // A throw, a timeout, or a confirmation we could not read: a row MAY be in the
+          // app's queue. Unlike the Claude hop, nothing can re-check that before a resend
+          // (QA, 6.51.0), and a retryable answer would have the drainer insert the same
+          // sentence at every turn end until the TTL. So it is what every other unproven
+          // delivery is: ambiguous, ledgered (a replay answers the same), and fenced until
+          // a person looks at the Codex app's queue and releases it.
           if (live === null || live.reason === 'unverified') {
-            return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })
+            guard.fence(key, 'native_target_fenced', {
+              provider: binding.provider,
+              headBefore: head.digest,
+              turnId,
+              bindingId,
+              now: Date.now(),
+              adapterReason: 'codex_queue_unverified',
+              fenceSite: 'ambiguous',
+              spawns: [],
+            })
+            console.warn(`[agent-session-bindings] fence set site=codex_live provider=codex target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest} adapterReason=codex_queue_unverified`)
+            return reportAmbiguous()
           }
           // Nothing was queued, and the child cannot run against a held thread. Not
           // retryable: a missing binary or a CLI that refused does not heal on a 20 s

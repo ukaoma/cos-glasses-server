@@ -134,6 +134,19 @@ describe(`POST ${CURSOR_STOP_FOLLOWUP_PATH}`, () => {
     expect(readQueue('cursor', CONV, 9_000)[0]!.status).toBe('waiting')
   })
 
+  it('never claims for a hook that already hung up (the reply would go nowhere)', () => {
+    writeQueue('cursor', CONV, [turn('one')])
+    const router = createCursorStopFollowupRouter({ hookToken: () => 'hook-tok', readQueue, writeQueue: () => { throw new Error('must not write') }, now: () => 9_000 })
+    const layer = (router as unknown as { stack: Array<{ route?: { path: string; stack: Array<{ handle: Function }> } }> }).stack
+      .find(l => l.route?.path === CURSOR_STOP_FOLLOWUP_PATH)!
+    const handler = layer.route!.stack[layer.route!.stack.length - 1]!.handle
+    let replied: unknown = 'nothing'
+    const res = { set: () => res, status: () => res, json: (b: unknown) => { replied = b; return res }, writableEnded: false }
+    handler({ headers: { 'x-cos-hook-token': 'hook-tok' }, body: envelope(), socket: { destroyed: true } }, res)
+    expect(replied).toBe('nothing')
+    expect(readQueue('cursor', CONV, 9_000)[0]!.status).toBe('waiting')
+  })
+
   it('only ever reads the cursor queue: a Claude queue under the same id is never handed over', async () => {
     writeQueue('claude', CONV, [turn('claude-one', { provider: 'claude' })])
     expect((await post(envelope())).body).toEqual({})

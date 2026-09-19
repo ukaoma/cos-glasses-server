@@ -627,7 +627,9 @@ function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDr
 function draftsFromCodexEvent(payload: Record<string, unknown>): SessionStreamDraft[] {
   const kind = typeof payload.type === 'string' ? payload.type : ''
   if (kind === 'task_started') return [{ kind: 'status', state: 'working' }]
-  if (kind === 'task_complete' || kind === 'turn_complete') return [{ kind: 'status', state: 'done' }]
+  // 6.51.0: an interrupted turn is over too (`turn_aborted`). Without it a follow-up parked
+  // behind an aborted Codex turn waited out the 30 min open-turn ceiling.
+  if (kind === 'task_complete' || kind === 'turn_complete' || kind === 'turn_aborted') return [{ kind: 'status', state: 'done' }]
   if (kind === 'agent_message') {
     const prose = proseDraft(payload.message ?? payload.text)
     return prose ? [prose] : []

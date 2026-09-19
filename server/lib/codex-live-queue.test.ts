@@ -62,6 +62,13 @@ describe('classifyCodexQueueRun', () => {
     expect(classifyCodexQueueRun(ok({ code: 1, stdout: '', stderr: 'panicked at somewhere' }), THREAD).reason).toBe('unverified')
     expect(classifyCodexQueueRun(ok({ code: 2, stdout: CONFIRM, stderr: '' }), THREAD).reason).toBe('unverified')
   })
+  it('a clap usage error (exit 2) queued nothing: a codex without `queue`, or a renamed flag', () => {
+    const noQueue = "error: unrecognized subcommand 'queue'\n\nUsage: codex [OPTIONS] [PROMPT]\n"
+    expect(classifyCodexQueueRun(ok({ code: 2, stdout: '', stderr: noQueue }), THREAD).reason).toBe('refused')
+    expect(classifyCodexQueueRun(ok({ code: 2, stdout: '', stderr: "error: unexpected argument '--message' found\n" }), THREAD).reason).toBe('refused')
+    // The same words on another exit code are not clap's refusal.
+    expect(classifyCodexQueueRun(ok({ code: 1, stdout: '', stderr: noQueue }), THREAD).reason).toBe('unverified')
+  })
 })
 
 describe('deliverOverCodexQueue', () => {

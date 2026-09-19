@@ -35,6 +35,14 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
     }
     const facts = parseCursorStopEnvelope(req.body)
     if (!facts || !cursorStopAcceptsFollowup(facts, MAX_QUEUED_PER_THREAD)) return res.json({})
+    // The hook waits a few seconds and then moves on. A claim made after it hung up would
+    // mark a turn delivered that Cursor never received (QA, 6.51.0: a Stop that lands
+    // while the event loop is busy). Everything from here to the reply is synchronous, so
+    // a socket that is open now is open when the reply is written.
+    if (req.socket?.destroyed === true || res.writableEnded) {
+      console.warn('[cursor-stop-followup] the hook hung up before the claim; nothing claimed')
+      return undefined
+    }
     let claimed: ReturnType<typeof claimNextCursorTurn> = null
     try {
       const now = deps.now()

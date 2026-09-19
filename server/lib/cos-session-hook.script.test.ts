@@ -219,6 +219,31 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect(readdirSync(paths.spool).filter(n => n.endsWith('.req') || n.startsWith('.tmp'))).toEqual([])
     })
 
+    it('reads a payload with spaces after the colons too (any JSON writer)', async () => {
+      const reply = JSON.stringify({ followup_message: 'Queued from the phone' })
+      const { paths, seen } = await listen(() => reply)
+      const spaced = cursorStop().replace(/":/g, '": ')
+      const r = await runWithEnv('Stop', spaced, paths, { CURSOR_VERSION: '3.21.13' })
+      expect(r.stdout).toBe(reply)
+      expect(seen).toHaveLength(1)
+    })
+
+    it('skips the request when the queue folder has nothing for this composer, and asks when it does', async () => {
+      const reply = JSON.stringify({ followup_message: 'Queued from the phone' })
+      const { paths, seen } = await listen(() => reply)
+      const qdir = join(dirname(paths.spool), 'thread-turn-queue')
+      mkdirSync(qdir, { recursive: true })
+      writeFileSync(join(qdir, 'claude-a1b2c3d4-0000-4000-8000-00000000abcd.json'), '{}')
+      expect((await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe('')
+      expect(seen).toEqual([])
+      writeFileSync(join(qdir, `cursor-${CONVERSATION}.json`), '{}')
+      expect((await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })).stdout).toBe(reply)
+      expect(seen).toHaveLength(1)
+      // Both Stops are still spooled for the signal store, and nothing is left behind.
+      expect(spooled(paths.spool)).toHaveLength(2)
+      expect(readdirSync(paths.spool).filter(n => n.endsWith('.req') || n.startsWith('.tmp'))).toEqual([])
+    })
+
     it('an answer that is not a follow-up prints nothing', async () => {
       const { paths, seen } = await listen(() => '{}')
       const r = await runWithEnv('Stop', cursorStop(), paths, { CURSOR_VERSION: '3.21.13' })
