@@ -50,10 +50,10 @@ export type QueryJobEventType =
   | 'tool_status'
   | 'activity_line'
   | 'acknowledged'
-  // 6.52.0: one readable step of a Messages run (see lib/job-trail.ts). Its data is
-  // one draft plus `trailSeq`, a dense 1..n per job that is NOT the job eventSeq:
-  // chunks and activity share eventSeq, and a trail reducer fed eventSeq would paint
-  // a gap row between every two steps.
+  // 6.52.0: one readable step of a Messages run (see lib/job-trail.ts), a JOURNAL row
+  // type only: it is never a job event, never takes an eventSeq or a replay-ring slot,
+  // and reaches only a subscriber that asked for the trail. Its data is one draft plus
+  // `trailSeq`, a dense 1..n per job.
   | 'trail'
 
 export type QueryJobActivityMode = 'off' | 'status' | 'preview'
@@ -159,11 +159,10 @@ export interface QueryJobActivity {
   repeatCount?: number
 }
 
-/** One entry of `snapshot.trail`: the journaled draft plus where it sits. `trailSeq`
- * is the dense trail order; `eventSeq` and `at` say which job event carried it. */
+/** One entry of `snapshot.trail`: the journaled draft, its dense `trailSeq` (the trail's
+ * own cursor, never the job eventSeq) and when it was written. */
 export type QueryJobTrailEntry = JobTrailDraft & {
   trailSeq: number
-  eventSeq: number
   at: string
 }
 
@@ -194,7 +193,8 @@ export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   activity: QueryJobActivity[]
   /** The readable trail (6.52.0), bounded by `QUERY_JOB_LIMITS.trailEntries` and
    * `trailChars`, rebuilt from the journal on restart. ABSENT, never `[]`, on a job
-   * with no trail rows, so a run with the trail off has exactly the 6.51.0 shape. */
+   * with no trail rows, and stripped from every snapshot sent to a client that did not
+   * ask for the trail (`?trail=1`), so such a client sees exactly the 6.51.0 shape. */
   trail?: QueryJobTrailEntry[]
   acceptedAt: string
   startedAt?: string

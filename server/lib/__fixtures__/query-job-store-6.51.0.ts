@@ -1,3 +1,9 @@
+// query-job-store.ts EXACTLY as 6.51.0 shipped it (git show b58af26:server/lib/query-job-store.ts),
+// vendored as a test fixture for the 6.52.0 rollback contract: a 6.51.0 server reading a
+// journal this build wrote. The ONLY edits are these header lines and the two relative
+// import paths below (one directory deeper). Never shipped: package.json excludes
+// server/lib/__fixtures__. Do not edit the body; re-vendor from the tag instead.
+
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { chmod, mkdir, open, readFile, readdir, rm } from 'node:fs/promises'
@@ -5,7 +11,7 @@ import { join } from 'node:path'
 import {
   mergeMediaAttachmentRefs,
   parseMediaAttachmentRefs,
-} from '../../shared/media-attachment.js'
+} from '../../../shared/media-attachment.js'
 import {
   QUERY_JOB_LIMITS,
   QUERY_JOB_SCHEMA_VERSION,
@@ -28,36 +34,7 @@ import {
   type QueryJobSnapshot,
   type QueryJobStatus,
   type QueryJobStoreHealth,
-  type QueryJobTrailEntry,
-} from './query-job-types.js'
-import {
-  jobTrailTextChars,
-  parseJobTrailEventData,
-  sanitizeJobTrailDraft,
-  type JobTrailDraft,
-} from './job-trail.js'
-
-const QUERY_JOB_STATUSES: readonly QueryJobStatus[] = [
-  'accepted', 'starting', 'running', 'answer_ready', 'completed', 'failed', 'canceled', 'interrupted',
-]
-
-/**
- * Every event type hydration accepts. A row of any other type counts as malformed and is
- * skipped, which is exactly what a 6.51.0 server does with the `trail` rows this build
- * writes: those jobs still load and only `malformedRows` rises (the rollback contract, so
- * QUERY_JOB_SCHEMA_VERSION stays 1; a bump would drop every row on rollback). THIS build
- * must list `trail`, or it would count its own rows as malformed on every restart and the
- * trail would vanish after a reboot.
- *
- * A `trail` row is NOT a job event (QA round 1). It carries the job's CURRENT eventSeq and
- * never advances it, takes no replay-ring slot, never moves `updatedAt`, and is applied
- * idempotently by its own dense `trailSeq`. So an old client's stream is exactly the
- * 6.51.0 one, and a rolled-back 6.51.0 server, which skips these rows, numbers its next
- * event after the last event it CAN read without colliding with anything written here.
- */
-export const QUERY_JOB_JOURNAL_EVENT_TYPES: readonly QueryJobEventType[] = [
-  ...QUERY_JOB_STATUSES, 'chunk', 'tool_status', 'activity_line', 'acknowledged', 'trail',
-]
+} from '../query-job-types.js'
 
 const PARTITION_RE = /^\d{4}-\d{2}-\d{2}\.jsonl$/
 const MAX_JOURNAL_RECORD_BYTES = 512 * 1024
@@ -88,9 +65,6 @@ interface HydratedQueryJob {
   snapshot: QueryJobSnapshot
   events: QueryJobEvent[]
   lastBootId: string
-  /** The last `trailSeq` this job journaled. The next trail row is this plus one,
-   * assigned inside the serialized append, so the persisted order is dense 1..n. */
-  trailSeq: number
 }
 
 interface QueryJobIdentity {
@@ -127,39 +101,7 @@ export interface QueryJobExecutionRecord {
 
 export interface QueryJobSubscription {
   replay: QueryJobReplay
-  /** Present only when the subscriber asked for the trail. */
-  trailReplay?: QueryJobTrailReplay
   unsubscribe: () => void
-}
-
-/** One trail entry as a subscriber receives it: its own cursor, never the job eventSeq. */
-export interface QueryJobTrailFrame {
-  type: 'trail'
-  trailSeq: number
-  jobId: string
-  clientJobId: string
-  generation: number
-  at: string
-  data: JobTrailDraft
-}
-
-/**
- * What a trail subscriber missed. `gap` means entries after its cursor are no longer held
- * (`snapshot.trail` is bounded) or the cursor is ahead: the client resets its trail to
- * `entries` and continues from `latestTrailSeq`. Otherwise `entries` are exactly those
- * after the cursor, in order.
- */
-export interface QueryJobTrailReplay {
-  entries: QueryJobTrailEntry[]
-  gap: boolean
-  reason?: 'trail_gap' | 'cursor_ahead'
-  oldestTrailSeq: number
-  latestTrailSeq: number
-}
-
-export interface QueryJobTrailSubscribe {
-  after: number
-  listener: (frame: QueryJobTrailFrame) => void
 }
 
 export interface QueryJobJournalStorage {
@@ -226,14 +168,6 @@ export interface QueryJobStoreOptions {
   maxHydratedJobs?: number
   maxReplayEvents?: number
   maxActivityEntries?: number
-  maxTrailEntries?: number
-  maxTrailChars?: number
-  /**
-   * Replaces the hydration allowlist. Production never passes it. It exists so a test
-   * can hydrate a journal through the exact 6.51.0 list (no `trail`) and prove the
-   * rollback contract on real bytes without shipping a second copy of this class.
-   */
-  journalEventTypes?: readonly QueryJobEventType[]
 }
 
 export class QueryJobStoreError extends Error {
@@ -362,15 +296,10 @@ export class QueryJobStore {
   private readonly maxHydratedJobs: number
   private readonly maxReplayEvents: number
   private readonly maxActivityEntries: number
-  private readonly maxTrailEntries: number
-  private readonly maxTrailChars: number
-  private readonly journalEventTypes: readonly QueryJobEventType[]
   private readonly jobs = new Map<string, HydratedQueryJob>()
   private readonly identitiesByJobId = new Map<string, QueryJobIdentity>()
   private readonly identitiesByKey = new Map<string, QueryJobIdentity>()
   private readonly emitter = new EventEmitter()
-  /** Trail frames, apart from job events: only a subscriber that asked for them listens. */
-  private readonly trailEmitter = new EventEmitter()
   private appendTail: Promise<void> = Promise.resolve()
   private initPromise: Promise<QueryJobStoreHealth> | null = null
   private partitions: string[] = []
@@ -384,11 +313,7 @@ export class QueryJobStore {
     this.maxHydratedJobs = Math.max(1, options.maxHydratedJobs ?? QUERY_JOB_LIMITS.hydratedJobs)
     this.maxReplayEvents = Math.max(1, options.maxReplayEvents ?? QUERY_JOB_LIMITS.replayEvents)
     this.maxActivityEntries = Math.max(1, options.maxActivityEntries ?? QUERY_JOB_LIMITS.activityEntries)
-    this.maxTrailEntries = Math.max(1, options.maxTrailEntries ?? QUERY_JOB_LIMITS.trailEntries)
-    this.maxTrailChars = Math.max(1, options.maxTrailChars ?? QUERY_JOB_LIMITS.trailChars)
-    this.journalEventTypes = options.journalEventTypes ?? QUERY_JOB_JOURNAL_EVENT_TYPES
     this.emitter.setMaxListeners(1_000)
-    this.trailEmitter.setMaxListeners(1_000)
     this.health = {
       state: 'new',
       bootId: options.bootId,
@@ -510,10 +435,9 @@ export class QueryJobStore {
       || typeof r.status !== 'string'
       || !r.patch || typeof r.patch !== 'object'
       || !r.eventData || typeof r.eventData !== 'object') return null
-    if (!QUERY_JOB_STATUSES.includes(r.status as QueryJobStatus)
-      || !this.journalEventTypes.includes(r.type as QueryJobEventType)) return null
-    // A trail row whose data is not a trail entry is malformed, not a hole in the trail.
-    if (r.type === 'trail' && !parseJobTrailEventData(r.eventData)) return null
+    const statuses: QueryJobStatus[] = ['accepted', 'starting', 'running', 'answer_ready', 'completed', 'failed', 'canceled', 'interrupted']
+    const eventTypes: QueryJobEventType[] = [...statuses, 'chunk', 'tool_status', 'activity_line', 'acknowledged']
+    if (!statuses.includes(r.status as QueryJobStatus) || !eventTypes.includes(r.type as QueryJobEventType)) return null
     return r as unknown as QueryJobJournalRecord
   }
 
@@ -548,7 +472,6 @@ export class QueryJobStore {
         request,
         events: [],
         lastBootId: record.bootId,
-        trailSeq: 0,
         snapshot: {
           schemaVersion: QUERY_JOB_SCHEMA_VERSION,
           jobId: record.jobId,
@@ -576,11 +499,6 @@ export class QueryJobStore {
         },
       }
       this.jobs.set(record.jobId, hydrated)
-    }
-    // A trail row is not a job event: its own cursor, nothing else of the job moves.
-    if (record.type === 'trail') {
-      this.applyTrail(hydrated, record, publish)
-      return undefined
     }
     if (record.eventSeq <= hydrated.snapshot.eventSeq) return undefined
     if (record.type !== 'accepted'
@@ -690,45 +608,6 @@ export class QueryJobStore {
     }
     snapshot.activity.push({ eventSeq: record.eventSeq, at: record.persistedAt, kind, text: safe.text })
     if (snapshot.activity.length > this.maxActivityEntries) snapshot.activity.shift()
-  }
-
-  /**
-   * One trail row into `snapshot.trail`, the page a client rebuilds from. Idempotent by
-   * `trailSeq` (a row at or below the job's last one is history, whichever boot wrote it),
-   * never on a terminal job, and it touches NOTHING else of the job: not eventSeq, not the
-   * replay ring, not `updatedAt`, not the identity. Bounded twice: the newest
-   * `maxTrailEntries` entries, and no more than `maxTrailChars` characters of text across
-   * them (the oldest go first; the newest entry always stays). The array exists only once a
-   * row does. A live append is published on the trail channel, which only a subscriber that
-   * asked for the trail listens to.
-   */
-  private applyTrail(hydrated: HydratedQueryJob, record: QueryJobJournalRecord, publish: boolean): void {
-    const parsed = parseJobTrailEventData(record.eventData)
-    if (!parsed) return
-    if (record.generation !== hydrated.snapshot.generation) return
-    if (isTerminalQueryJobStatus(hydrated.snapshot.status)) return
-    if (parsed.trailSeq <= hydrated.trailSeq) return
-    hydrated.trailSeq = parsed.trailSeq
-    const trail = hydrated.snapshot.trail ?? (hydrated.snapshot.trail = [])
-    const entry: QueryJobTrailEntry = { ...parsed.draft, trailSeq: parsed.trailSeq, at: record.persistedAt }
-    trail.push(entry)
-    let chars = trail.reduce((sum, e) => sum + jobTrailTextChars(e), 0)
-    while (trail.length > 1 && (trail.length > this.maxTrailEntries || chars > this.maxTrailChars)) {
-      chars -= jobTrailTextChars(trail.shift()!)
-    }
-    if (publish) {
-      const { trailSeq: _seq, at: _at, ...draft } = entry
-      const frame: QueryJobTrailFrame = {
-        type: 'trail',
-        trailSeq: entry.trailSeq,
-        jobId: hydrated.snapshot.jobId,
-        clientJobId: hydrated.snapshot.clientJobId,
-        generation: hydrated.snapshot.generation,
-        at: entry.at,
-        data: draft as JobTrailDraft,
-      }
-      this.trailEmitter.emit(hydrated.snapshot.jobId, frame)
-    }
   }
 
   private async appendRecord(record: QueryJobJournalRecord): Promise<void> {
@@ -896,55 +775,6 @@ export class QueryJobStore {
     const safe = sanitizeQueryJobActivity(text)
     const type: QueryJobEventType = kind === 'status' ? 'tool_status' : 'activity_line'
     return this.mutateSameStatus(jobId, type, {}, { kind, text: safe.text, truncated: safe.truncated })
-  }
-
-  /**
-   * One trail draft into the journal (6.52.0).
-   *
-   * Redacted and bounded here, at the journal boundary, whatever the caller already did
-   * (`sanitizeJobTrailDraft`). `trailSeq` is assigned INSIDE the serialized append from the
-   * job's own last one, so the persisted trail is dense 1..n no matter how trail, chunk and
-   * activity writes interleave. A draft with nothing to say, or a job already terminal,
-   * writes nothing and is never an error: a trail row must not be able to fail a run.
-   *
-   * NOT A JOB EVENT (QA round 1). The row carries the job's current eventSeq without
-   * advancing it and goes to the trail channel only: job subscribers, the replay ring and
-   * every snapshot field but `trail` are exactly what they would be without it.
-   */
-  async appendTrail(jobId: string, raw: unknown): Promise<QueryJobMutationResult> {
-    const draft = sanitizeJobTrailDraft(raw)
-    await this.ensureInitialized()
-    await this.ensureHydrated(jobId)
-    return this.enqueue(async () => {
-      this.assertWritable()
-      const hydrated = this.jobs.get(jobId)
-      if (!hydrated) throw new QueryJobNotFoundError(jobId)
-      if (!draft || isTerminalQueryJobStatus(hydrated.snapshot.status)) {
-        return { applied: false, job: clone(hydrated.snapshot) }
-      }
-      const snapshot = hydrated.snapshot
-      const record: QueryJobJournalRecord = {
-        schemaVersion: QUERY_JOB_SCHEMA_VERSION,
-        recordId: randomUUID(),
-        partitionDay: localPartitionDay(this.now()),
-        persistedAt: this.now().toISOString(),
-        bootId: this.options.bootId,
-        jobId: snapshot.jobId,
-        clientJobId: snapshot.clientJobId,
-        generation: snapshot.generation,
-        turnId: snapshot.turnId,
-        requestFingerprint: snapshot.requestFingerprint,
-        // The event this row follows. Never `+ 1`: the job cursor is not the trail's.
-        eventSeq: snapshot.eventSeq,
-        type: 'trail',
-        status: snapshot.status,
-        patch: {},
-        eventData: { ...draft, trailSeq: hydrated.trailSeq + 1 },
-      }
-      await this.appendRecord(record)
-      this.applyTrail(hydrated, record, true)
-      return { applied: true, job: clone(hydrated.snapshot) }
-    })
   }
 
   async markAnswerReady(
@@ -1285,54 +1115,29 @@ export class QueryJobStore {
     generation: number,
     after: number,
     listener: (event: QueryJobEvent) => void,
-    trail?: QueryJobTrailSubscribe,
   ): Promise<QueryJobSubscription> {
     await this.getSnapshot(jobId, generation)
     let closed = false
     const wrapped = (event: QueryJobEvent) => {
       if (!closed && event.generation === generation && event.eventSeq > after) listener(clone(event))
     }
-    const trailWrapped = trail
-      ? (frame: QueryJobTrailFrame) => {
-        if (!closed && frame.generation === generation && frame.trailSeq > trail.after) trail.listener(clone(frame))
-      }
-      : null
     this.emitter.on(jobId, wrapped)
-    if (trailWrapped) this.trailEmitter.on(jobId, trailWrapped)
     this.subscriberCount++
     this.refreshHealth()
     // Register first, then take the synchronous replay snapshot. An append can
-    // therefore be in replay OR arrive live (and clients dedupe by eventSeq, or by
-    // trailSeq), but can never fall into an await-sized gap between the two.
+    // therefore be in replay OR arrive live (and clients dedupe by eventSeq),
+    // but can never fall into an await-sized gap between the two.
     const replay = this.buildReplay(jobId, after)
-    const trailReplay = trail ? this.buildTrailReplay(jobId, trail.after) : undefined
     return {
       replay,
-      ...(trailReplay ? { trailReplay } : {}),
       unsubscribe: () => {
         if (closed) return
         closed = true
         this.emitter.off(jobId, wrapped)
-        if (trailWrapped) this.trailEmitter.off(jobId, trailWrapped)
         this.subscriberCount = Math.max(0, this.subscriberCount - 1)
         this.refreshHealth()
       },
     }
-  }
-
-  /** The trail entries after `after`, or the whole held trail when some are gone. */
-  private buildTrailReplay(jobId: string, after: number): QueryJobTrailReplay {
-    const hydrated = this.jobs.get(jobId)!
-    const trail = hydrated.snapshot.trail ?? []
-    const latestTrailSeq = hydrated.trailSeq
-    const oldestTrailSeq = trail[0]?.trailSeq ?? latestTrailSeq + 1
-    if (after > latestTrailSeq) {
-      return { entries: clone(trail), gap: true, reason: 'cursor_ahead', oldestTrailSeq, latestTrailSeq }
-    }
-    if (after < oldestTrailSeq - 1) {
-      return { entries: clone(trail), gap: true, reason: 'trail_gap', oldestTrailSeq, latestTrailSeq }
-    }
-    return { entries: clone(trail.filter(entry => entry.trailSeq > after)), gap: false, oldestTrailSeq, latestTrailSeq }
   }
 
   private trimHydratedJobs(protectedJobId?: string): void {

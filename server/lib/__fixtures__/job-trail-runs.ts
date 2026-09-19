@@ -110,7 +110,9 @@ export const CURSOR_RUN: unknown[] = [
 
 export const CURSOR_RUN_TRAIL: JobTrailDraft[] = [
   { kind: 'prose', text: 'Let me look.' },
-  { kind: 'tool', verb: 'bash', target: 'ls -la /Users/someone/repo', detail: '', call: 'toolu_cursor1' },
+  // Redacted by the reader BEFORE it shortens the command (6.52.0 QA round 1), which is
+  // what the journal always held for it.
+  { kind: 'tool', verb: 'bash', target: 'ls -la [path]', detail: '', call: 'toolu_cursor1' },
   { kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '3 lines', call: 'toolu_cursor1' } },
   { kind: 'tool', verb: 'edit', target: 'app.ts', detail: '', call: 'toolu_cursor2' },
   { kind: 'status', state: 'working', tool_outcome: { ok: true, detail: '', call: 'toolu_cursor2' } },

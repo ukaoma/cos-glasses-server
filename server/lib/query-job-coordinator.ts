@@ -553,8 +553,11 @@ export class QueryJobCoordinator {
     generation: number,
     after: number,
     listener: Parameters<QueryJobStore['subscribe']>[3],
+    trail?: Parameters<QueryJobStore['subscribe']>[4],
   ): Promise<QueryJobSubscription> {
-    return this.store.subscribe(jobId, generation, after, listener)
+    return trail
+      ? this.store.subscribe(jobId, generation, after, listener, trail)
+      : this.store.subscribe(jobId, generation, after, listener)
   }
 
   async shutdown(reason = 'server_shutdown'): Promise<void> {

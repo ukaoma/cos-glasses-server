@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express'
+import { Router, type Request, type Response } from 'express'
 import { durableQueryJobsEnabled } from '../lib/query-job-feature.js'
 import {
   QueryJobCoordinator,
@@ -16,6 +16,7 @@ import {
   QueryJobPersistenceError,
   QueryJobProviderOrphanFenceError,
   QueryJobStoreError,
+  type QueryJobTrailFrame,
 } from '../lib/query-job-store.js'
 import {
   isTerminalQueryJobStatus,
@@ -89,7 +90,25 @@ function writeSse(res: Response, type: string, event: Record<string, unknown>): 
   res.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`)
 }
 
-function snapshotEvent(job: QueryJobSnapshot, reason: string): Record<string, unknown> {
+/**
+ * THE TRAIL IS OPT-IN (6.52.0 QA round 1). A client that does not send `?trail=1` gets
+ * exactly the 6.51.0 bytes: no `trail` frames on the stream, and no `trail` field on any
+ * snapshot, in any response. A client that does gets `trail` frames (their own dense
+ * `trailSeq`, no `id:` line, so Last-Event-ID stays the job eventSeq) and, on subscribe or
+ * reconnect, every entry after its `trailAfter` from `snapshot.trail`, or one
+ * `trail_snapshot` frame to rebuild from when entries it missed are no longer held.
+ */
+function wantsTrail(req: Request): boolean {
+  return req.query.trail === '1'
+}
+
+function forClient(job: QueryJobSnapshot, trail: boolean): QueryJobSnapshot {
+  if (trail || !('trail' in job)) return job
+  const { trail: _trail, ...rest } = job
+  return rest as QueryJobSnapshot
+}
+
+function snapshotEvent(job: QueryJobSnapshot, reason: string, trail: boolean): Record<string, unknown> {
   return {
     type: 'snapshot',
     eventSeq: job.eventSeq,
@@ -98,7 +117,7 @@ function snapshotEvent(job: QueryJobSnapshot, reason: string): Record<string, un
     generation: job.generation,
     status: job.status,
     at: job.updatedAt,
-    data: { reason, job },
+    data: { reason, job: forClient(job, trail) },
   }
 }
 
@@ -122,7 +141,7 @@ export function createQueryJobsRouter(
     try {
       const prepared = options.prepareAdmission ? await options.prepareAdmission(req.body) : req.body
       const admission = await coordinator.submit(prepared)
-      return res.status(202).json({ job: admission.job })
+      return res.status(202).json({ job: forClient(admission.job, wantsTrail(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -138,7 +157,7 @@ export function createQueryJobsRouter(
       const generation = requiredGeneration(req.query.generation)
       const job = await coordinator.getByClientGeneration(clientJobId, generation)
       if (!job) throw new QueryJobNotFoundError(`${clientJobId}:${generation}`)
-      return res.json({ job })
+      return res.json({ job: forClient(job, wantsTrail(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -150,7 +169,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.query.generation)
       const job = await coordinator.getSnapshot(jobId, generation)
-      return res.json({ job })
+      return res.json({ job: forClient(job, wantsTrail(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -163,7 +182,15 @@ export function createQueryJobsRouter(
     let closed = false
     let streamReady = false
     let sentSeq = -1
+    let sentTrailSeq = 0
     const pendingLive: QueryJobEvent[] = []
+    const pendingTrail: QueryJobTrailFrame[] = []
+    const trail = wantsTrail(req)
+    const writeTrail = (frame: QueryJobTrailFrame) => {
+      if (closed || frame.trailSeq <= sentTrailSeq) return
+      sentTrailSeq = frame.trailSeq
+      writeSse(res, 'trail', frame as unknown as Record<string, unknown>)
+    }
     const cleanup = () => {
       if (closed) return
       closed = true
@@ -184,8 +211,22 @@ export function createQueryJobsRouter(
       const generation = requiredGeneration(req.query.generation)
       const after = cursor(req.query.after)
       sentSeq = after
+      const trailAfter = trail ? cursor(req.query.trailAfter) : 0
+      sentTrailSeq = trailAfter
+      const trailSubscription = trail
+        ? {
+          after: trailAfter,
+          listener: (frame: QueryJobTrailFrame) => {
+            if (!streamReady) {
+              pendingTrail.push(frame)
+              return
+            }
+            writeTrail(frame)
+          },
+        }
+        : undefined
 
-      const subscription = await coordinator.subscribe(jobId, generation, after, (event: QueryJobEvent) => {
+      const onEvent = (event: QueryJobEvent) => {
         // subscribe() registers its live listener before returning the replay
         // snapshot so no append can fall into a gap. A very fast provider may
         // therefore publish while this route is still installing SSE headers.
@@ -199,7 +240,11 @@ export function createQueryJobsRouter(
         sentSeq = event.eventSeq
         writeSse(res, event.type, event as unknown as Record<string, unknown>)
         if (isTerminalQueryJobStatus(event.status)) finish()
-      })
+      }
+      // Without `?trail=1` the call is exactly the 6.51.0 one.
+      const subscription = trailSubscription
+        ? await coordinator.subscribe(jobId, generation, after, onEvent, trailSubscription)
+        : await coordinator.subscribe(jobId, generation, after, onEvent)
       unsubscribe = subscription.unsubscribe
       if (closed) {
         unsubscribe()
@@ -216,9 +261,33 @@ export function createQueryJobsRouter(
       res.flushHeaders()
       res.write(': keepalive\n\n')
 
-      const { replay } = subscription
+      const { replay, trailReplay } = subscription
+      // The trail first: every entry precedes the terminal event that may end this stream.
+      if (trail && trailReplay) {
+        if (trailReplay.gap) {
+          writeSse(res, 'trail_snapshot', {
+            type: 'trail_snapshot',
+            reason: trailReplay.reason ?? 'trail_gap',
+            jobId: replay.snapshot.jobId,
+            clientJobId: replay.snapshot.clientJobId,
+            generation: replay.snapshot.generation,
+            oldestTrailSeq: trailReplay.oldestTrailSeq,
+            latestTrailSeq: trailReplay.latestTrailSeq,
+            trail: trailReplay.entries,
+          })
+          sentTrailSeq = trailReplay.latestTrailSeq
+        } else {
+          for (const entry of trailReplay.entries) {
+            const { trailSeq, at, ...data } = entry
+            writeTrail({
+              type: 'trail', trailSeq, at, data,
+              jobId: replay.snapshot.jobId, clientJobId: replay.snapshot.clientJobId, generation: replay.snapshot.generation,
+            } as QueryJobTrailFrame)
+          }
+        }
+      }
       if (replay.gap) {
-        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, replay.reason ?? 'replay_gap'))
+        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, replay.reason ?? 'replay_gap', trail))
         sentSeq = replay.snapshot.eventSeq
       } else {
         for (const event of replay.events) {
@@ -230,7 +299,7 @@ export function createQueryJobsRouter(
 
       const replayTerminal = replay.events.some(event => isTerminalQueryJobStatus(event.status))
       if (isTerminalQueryJobStatus(replay.snapshot.status) && !replayTerminal && !replay.gap) {
-        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, 'terminal_snapshot'))
+        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, 'terminal_snapshot', trail))
         sentSeq = replay.snapshot.eventSeq
       }
       if (isTerminalQueryJobStatus(replay.snapshot.status)) {
@@ -239,6 +308,8 @@ export function createQueryJobsRouter(
       }
 
       streamReady = true
+      for (const frame of pendingTrail) writeTrail(frame)
+      pendingTrail.length = 0
       for (const event of pendingLive) {
         if (closed || event.eventSeq <= sentSeq) continue
         sentSeq = event.eventSeq
@@ -271,7 +342,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
       const { job } = await coordinator.cancel(jobId, generation)
-      return res.json({ job })
+      return res.json({ job: forClient(job, wantsTrail(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -283,7 +354,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
       const job = await coordinator.acknowledge(jobId, generation)
-      return res.json({ job })
+      return res.json({ job: forClient(job, wantsTrail(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)

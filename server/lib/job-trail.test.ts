@@ -8,7 +8,9 @@ import { describe, expect, it } from 'vitest'
 import { redactSecretText } from './activity-preview.js'
 import {
   TRAIL_PROSE_MAX_CHARS,
+  __resetJobTrailStatsForTests,
   applyTrailToolMode,
+  jobTrailStats,
   createJobTrailReader,
   jobTrailTextChars,
   ollamaTrailOutcome,
@@ -163,6 +165,53 @@ describe('Cursor reader', () => {
   })
 })
 
+describe('redact before cut, through the real readers (QA round 1)', () => {
+  const AKIA = 'AKIAIOSFODNN7EXAMPLE'
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
+  /** Text whose secret STARTS before `cap` and ends after it. */
+  const straddle = (cap: number, secret: string, lead = '') => `${lead}${'x'.repeat(Math.max(0, cap - 10 - lead.length))} ${secret} tail`
+  /** Neither the secret nor a recognisable prefix of it, anywhere in what the reader said. */
+  const clean = (drafts: JobTrailDraft[], secret: string, label: string) => {
+    expect(drafts.length, label).toBeGreaterThan(0)
+    // Four characters: a cut keeps only the first few of a straddling secret.
+    const text = JSON.stringify(drafts)
+    expect(text, label).not.toContain(secret.slice(0, 4))
+    // And the journal boundary keeps it that way.
+    expect(JSON.stringify(drafts.map(sanitizeJobTrailDraft)), label).not.toContain(secret.slice(0, 4))
+  }
+
+  for (const secret of [AKIA, JWT]) {
+    const which = secret === AKIA ? 'AKIA' : 'JWT'
+    it(`Claude: step line (160), summary and needs_action (160), a Bash target (80), prose (4,000), an error result (40): ${which}`, () => {
+      clean(read('claude', [{ type: 'system', subtype: 'task_summary', detail: straddle(160, secret) }]), secret, 'task_summary')
+      clean(read('claude', [{ type: 'system', subtype: 'post_turn_summary', status_detail: straddle(160, secret), needs_action: straddle(160, secret) }]), secret, 'post_turn_summary')
+      clean(read('claude', [{ type: 'assistant', message: { id: 'm1', content: [{ type: 'tool_use', id: 'toolu_x1', name: 'Bash', input: { command: straddle(80, secret, 'echo ') } }] } }]), secret, 'bash target')
+      clean(read('claude', [{ type: 'assistant', message: { id: 'm1', content: [{ type: 'tool_use', id: 'toolu_x2', name: 'Grep', input: { pattern: straddle(80, secret) } }] } }]), secret, 'grep target')
+      clean(read('claude', [{ type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: straddle(4_000, secret) }] } }]), secret, 'prose')
+      clean(read('claude', [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x1', is_error: true, content: straddle(40, secret) }] } }]), secret, 'error result')
+      clean(read('claude', [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x1', is_error: true, content: [{ type: 'text', text: straddle(40, secret) }] }] } }]), secret, 'error result blocks')
+    })
+
+    it(`Codex: command (80), MCP name (80), search (80), file name (80), and a message past the 8,000 scan bound: ${which}`, () => {
+      const item = (body: Record<string, unknown>) => ({ type: 'item.completed', item: { id: 'item_1', status: 'completed', ...body } })
+      clean(read('codex', [item({ type: 'command_execution', command: `/bin/zsh -lc '${straddle(80, secret, 'echo ')}'`, exit_code: 0, aggregated_output: '' })]), secret, 'command')
+      clean(read('codex', [item({ type: 'mcp_tool_call', server: 'srv', tool: straddle(80, secret) })]), secret, 'mcp')
+      clean(read('codex', [item({ type: 'web_search', query: straddle(80, secret) })]), secret, 'search')
+      clean(read('codex', [item({ type: 'file_change', changes: [{ path: `/repo/${'x'.repeat(70)}-${secret}.txt`, kind: 'update' }] })]), secret, 'file')
+      clean(read('codex', [item({ type: 'agent_message', text: straddle(8_000, secret) })]), secret, 'message')
+    })
+
+    it(`Cursor and Ollama: a shell target, a search pattern, an MCP name, prose, a search query: ${which}`, () => {
+      const started = (key: string, args: Record<string, unknown>) => ({ type: 'tool_call', subtype: 'started', call_id: 'toolu_c1', tool_call: { [key]: { args } }, model_call_id: 'mc', timestamp_ms: 1 })
+      clean(read('cursor', [started('shellToolCall', { command: straddle(80, secret, 'echo ') })]), secret, 'shell')
+      clean(read('cursor', [started('grepToolCall', { pattern: straddle(80, secret) })]), secret, 'grep')
+      clean(read('cursor', [started('mcpToolCall', { toolName: straddle(80, secret) })]), secret, 'mcp')
+      clean(read('cursor', [{ type: 'assistant', model_call_id: 'mc', message: { role: 'assistant', content: [{ type: 'text', text: straddle(4_000, secret) }] } }]), secret, 'prose')
+      clean([ollamaTrailStep('search_meetings', { query: straddle(80, secret) })], secret, 'ollama')
+    })
+  }
+})
+
 describe('the journal boundary: redaction', () => {
   const narration = 'I will read the config file and then run the tests.'
 
@@ -254,12 +303,17 @@ describe("the user's opt-out (activityToolMode)", () => {
   const prose: JobTrailDraft = { kind: 'prose', text: 'Running the tests.' }
   const stepLine: JobTrailDraft = { kind: 'status', state: 'working', detail: 'Running the test suite' }
 
-  it('off: no tool steps and no step outcomes; prose and plain status stay', () => {
+  it('off: prose only; no steps, no outcomes, and no step line or needs_action either (QA round 1)', () => {
     expect(applyTrailToolMode(step, 'off')).toBeNull()
     expect(applyTrailToolMode(okOutcome, 'off')).toBeNull()
     expect(applyTrailToolMode(exitFailure, 'off')).toBeNull()
     expect(applyTrailToolMode(prose, 'off')).toEqual(prose)
-    expect(applyTrailToolMode(stepLine, 'off')).toEqual(stepLine)
+    // Claude Code's own step line names the step ("Running npm test"): off drops it.
+    expect(applyTrailToolMode(stepLine, 'off')).toBeNull()
+    expect(applyTrailToolMode({ kind: 'status', state: 'working', needs_action: 'Approve the deploy' }, 'off')).toBeNull()
+    // The other modes keep both.
+    expect(applyTrailToolMode(stepLine, 'status')).toEqual(stepLine)
+    expect(applyTrailToolMode(stepLine, 'preview')).toEqual(stepLine)
   })
 
   it('status: steps with verb and short target; a failure shows a derived token, never the raw text', () => {
@@ -311,6 +365,26 @@ describe('the tee', () => {
       stream.emit('end')
     }).not.toThrow()
     expect(seen).toEqual(['prose', 'tool'])
+  })
+
+  it('counts for health: lines read, entries emitted, and every failure it swallowed, with when', () => {
+    __resetJobTrailStatsForTests()
+    expect(jobTrailStats()).toEqual({ linesRead: 0, entriesEmitted: 0, readerErrors: 0, lastErrorAt: null })
+    const stream = new EventEmitter()
+    let calls = 0
+    teeJobTrail(stream, 'claude', () => { calls++; if (calls === 2) throw new Error('consumer exploded') })
+    const line = (record: unknown) => stream.emit('data', Buffer.from(`${JSON.stringify(record)}\n`))
+    line({ type: 'assistant', message: { id: 'm', content: [{ type: 'text', text: 'One.' }] } })
+    line({ type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', id: 'toolu_01X', name: 'Read', input: { file_path: 'a.ts' } }] } })
+    line({ type: 'system', subtype: 'task_summary', detail: 'Reading a.ts' })
+    stream.emit('data', Buffer.from('not json\n'))
+    stream.emit('end')
+    const stats = jobTrailStats()
+    // Four lines; prose, step and step line offered; the second consumer call threw.
+    expect(stats).toMatchObject({ linesRead: 4, entriesEmitted: 2, readerErrors: 1 })
+    expect(Date.parse(stats.lastErrorAt!)).toBeGreaterThan(Date.now() - 60_000)
+    expect(JSON.stringify(stats)).not.toContain('a.ts')
+    __resetJobTrailStatsForTests()
   })
 })
 

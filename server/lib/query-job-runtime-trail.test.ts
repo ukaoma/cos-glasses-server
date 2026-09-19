@@ -115,12 +115,10 @@ describe('the Messages trail through the durable job runtime', () => {
     await runtime.initQueryJobRuntime()
     const { snapshot, events } = await runJob(runtime, 'preview')
 
-    const trail = events.filter(event => event.type === 'trail')
-    expect(trail.map(event => event.data.trailSeq)).toEqual([1, 2, 3, 4, 5])
-    const seqs = events.map(event => event.eventSeq)
-    const trailPositions = trail.map(event => seqs.indexOf(event.eventSeq))
-    // Interleaved for real: other job events sit between trail rows.
-    expect(trailPositions.some((position, index) => index > 0 && position !== trailPositions[index - 1] + 1)).toBe(true)
+    // QA round 1: the trail is not a job event. The job's own events stay dense 1..n and
+    // trail-free; the trail lives in snapshot.trail with its own dense trailSeq.
+    expect(events.some(event => event.type === 'trail')).toBe(false)
+    expect(events.map(event => event.eventSeq)).toEqual(events.map((_event, index) => index + 1))
     expect(snapshot.trail?.map(entry => entry.trailSeq)).toEqual([1, 2, 3, 4, 5])
     expect(snapshot.trail?.map(entry => entry.kind)).toEqual(['prose', 'tool', 'status', 'status', 'prose'])
 
@@ -131,14 +129,13 @@ describe('the Messages trail through the durable job runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
-  it("applies the job's own activityToolMode: off keeps no steps, status keeps steps but hides raw failure text", async () => {
+  it("applies the job's own activityToolMode: off keeps prose only, status keeps steps but hides raw failure text", async () => {
     const runtime = await import('./query-job-runtime.js')
     await runtime.initQueryJobRuntime()
 
     const off = await runJob(runtime, 'off')
-    expect(off.snapshot.trail?.map(entry => entry.kind === 'status' && 'detail' in entry ? 'step-line' : entry.kind))
-      .toEqual(['prose', 'step-line', 'prose'])
-    expect(off.snapshot.trail?.map(entry => entry.trailSeq)).toEqual([1, 2, 3])
+    expect(off.snapshot.trail?.map(entry => entry.kind)).toEqual(['prose', 'prose'])
+    expect(off.snapshot.trail?.map(entry => entry.trailSeq)).toEqual([1, 2])
 
     const status = await runJob(runtime, 'status')
     expect(status.snapshot.trail?.map(entry => entry.kind)).toEqual(['prose', 'tool', 'status', 'status', 'prose'])
@@ -183,6 +180,8 @@ describe('the Messages trail through the durable job runtime', () => {
       .filter(event => event.type !== 'trail')
       .map(event => ({ type: event.type, status: event.status, data: event.data })))
     expect(nonTrail(withTrail.events)).toEqual(nonTrail(withoutTrail.events))
+    // The job cursor itself is identical: no trail row takes an eventSeq.
+    expect(withTrail.events.map(event => `${event.eventSeq}:${event.type}`)).toEqual(withoutTrail.events.map(event => `${event.eventSeq}:${event.type}`))
     expect(scrub(withTrailBus)).toEqual(scrub(withoutTrailBus))
     expect(scrub(withTrailHistory)).toEqual(scrub(withoutTrailHistory))
     await runtime.shutdownQueryJobRuntime('test_shutdown')

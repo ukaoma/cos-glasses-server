@@ -6,8 +6,10 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { QueryJobStore } from './query-job-store.js'
-import type { QueryJobEventType } from './query-job-types.js'
+import { QueryJobStore, type QueryJobTrailFrame } from './query-job-store.js'
+import { QUERY_JOB_LIMITS, type QueryJobEventType } from './query-job-types.js'
+// The 6.51.0 store itself, byte for byte but for two import paths (see the fixture header).
+import { QueryJobStore as QueryJobStore6510 } from './__fixtures__/query-job-store-6.51.0.js'
 
 /** The hydration allowlist exactly as 6.51.0 shipped it (query-job-store.ts at b58af26):
  * no `trail`. A store built with it reads a journal the way a rolled-back server does. */
@@ -56,8 +58,9 @@ async function journalLines(root: string): Promise<Array<Record<string, any>>> {
 }
 
 describe('trail rows in the durable journal', () => {
-  it('numbers the trail densely however it interleaves with chunks and activity; eventSeq stays the shared job cursor', async () => {
-    const store = new QueryJobStore({ root: await tempRoot(), bootId: 'boot-a' })
+  it('numbers the trail densely however it interleaves with chunks and activity, and never takes a job eventSeq', async () => {
+    const root = await tempRoot()
+    const store = new QueryJobStore({ root, bootId: 'boot-a' })
     await store.init()
     const jobId = await runningJob(store)
     await store.appendPartial(jobId, 'I will ', 'I will ')
@@ -71,16 +74,41 @@ describe('trail rows in the durable journal', () => {
     await store.appendPartial(jobId, ' Done', 'I will check. Done')
     await store.appendTrail(jobId, { kind: 'prose', text: 'Port 3141.' })
 
+    // The job's own events are dense and trail-free: the replay ring holds no trail row.
     const replay = await store.replay(jobId, 1, 0)
-    const trail = replay.events.filter(event => event.type === 'trail')
-    expect(trail.map(event => event.data.trailSeq)).toEqual([1, 2, 3, 4])
-    // The job cursor is NOT dense across trail rows: a reducer fed eventSeq would paint gaps.
-    const eventSeqs = trail.map(event => event.eventSeq)
-    expect(eventSeqs.some((seq, index) => index > 0 && seq !== eventSeqs[index - 1] + 1)).toBe(true)
+    expect(replay.events.map(event => event.type)).not.toContain('trail')
+    expect(replay.events.map(event => event.eventSeq)).toEqual(replay.events.map((_e, i) => i + 1))
+    expect(replay.snapshot.eventSeq).toBe(9)
     expect(replay.snapshot.trail?.map(entry => entry.trailSeq)).toEqual([1, 2, 3, 4])
-    expect(replay.snapshot.trail?.map(entry => entry.eventSeq)).toEqual(eventSeqs)
     expect(replay.snapshot.trail?.[1]).toMatchObject({ kind: 'tool', verb: 'read', target: 'config.json', call: 'toolu_01Read' })
-    expect(trail[0].data).toEqual({ kind: 'prose', text: 'I will check the config.', trailSeq: 1 })
+    expect(replay.snapshot.trail?.[0]).not.toHaveProperty('eventSeq')
+    // In the journal each trail row carries the eventSeq of the event it follows.
+    const rows = (await journalLines(root)).map(line => `${line.eventSeq}:${line.type}`)
+    expect(rows).toEqual(['1:accepted', '2:starting', '3:running', '4:chunk', '4:trail', '5:tool_status', '5:trail', '6:activity_line', '7:chunk', '8:activity_line', '8:trail', '9:chunk', '9:trail'])
+    const firstTrail = (await journalLines(root)).find(line => line.type === 'trail')!
+    expect(firstTrail.eventData).toEqual({ kind: 'prose', text: 'I will check the config.', trailSeq: 1 })
+  })
+
+  it('a job subscriber never sees a trail row; a trail subscriber sees each once, by trailSeq', async () => {
+    const store = new QueryJobStore({ root: await tempRoot(), bootId: 'boot-a' })
+    await store.init()
+    const jobId = await runningJob(store)
+    await store.appendTrail(jobId, { kind: 'prose', text: 'before' })
+    const events: string[] = []
+    const plain = await store.subscribe(jobId, 1, 3, event => { events.push(event.type) })
+    const frames: QueryJobTrailFrame[] = []
+    const opted = await store.subscribe(jobId, 1, 3, () => {}, { after: 0, listener: frame => { frames.push(frame) } })
+    expect(plain.trailReplay).toBeUndefined()
+    expect(opted.trailReplay).toMatchObject({ gap: false, oldestTrailSeq: 1, latestTrailSeq: 1 })
+    expect(opted.trailReplay?.entries.map(e => e.trailSeq)).toEqual([1])
+    await store.appendTrail(jobId, { kind: 'tool', verb: 'bash', target: 'ls', detail: '' })
+    await store.appendPartial(jobId, 'x', 'x')
+    await store.appendTrail(jobId, { kind: 'prose', text: 'after' })
+    expect(events).toEqual(['chunk'])
+    expect(frames.map(f => [f.type, f.trailSeq, f.data.kind])).toEqual([['trail', 2, 'tool'], ['trail', 3, 'prose']])
+    expect(frames[0]).not.toHaveProperty('eventSeq')
+    plain.unsubscribe()
+    opted.unsubscribe()
   })
 
   it('keeps snapshot.trail across a restart with malformedRows 0, and the next row continues the count', async () => {
@@ -132,29 +160,78 @@ describe('trail rows in the durable journal', () => {
     expect((await old.getSnapshot(plainJob)).status).toBe('interrupted')
   })
 
-  it('rollback mid-run then roll forward: the job still ends terminal and the trail survives', async () => {
+  it('rollback mid-run then roll forward: no eventSeq is ever reused, the job ends terminal once, and the trail survives', async () => {
     const root = await tempRoot()
     const writer = new QueryJobStore({ root, bootId: 'boot-a' })
     await writer.init()
     const jobId = await runningJob(writer)
     await writer.appendTrail(jobId, { kind: 'prose', text: 'working on it' })
+    await writer.appendPartial(jobId, 'part', 'part')
     await writer.appendTrail(jobId, { kind: 'tool', verb: 'read', target: 'a.ts', detail: '' })
     // The server dies here, mid-run, with trail rows as the journal's newest records.
 
-    const rolledBack = new QueryJobStore({ root, bootId: 'boot-b', journalEventTypes: ALLOWLIST_6_51_0 })
-    await rolledBack.init()
+    // The REAL 6.51.0 store boots on this journal (the rollback).
+    const rolledBack = new QueryJobStore6510({ root, bootId: 'boot-b' })
+    const oldHealth = await rolledBack.init()
+    expect(oldHealth.malformedRows).toBe(2)
     expect((await rolledBack.getSnapshot(jobId)).status).toBe('interrupted')
 
-    // The rolled-back boot numbered its interrupt after the last row IT could read, so it
-    // reuses a trail row's eventSeq; this build skips that duplicate and interrupts again.
+    // Roll forward: every job eventSeq in the journal is unique, so nothing is skipped as
+    // a duplicate and nothing is interrupted twice.
     const forward = new QueryJobStore({ root, bootId: 'boot-c' })
     const health = await forward.init()
     expect(health.malformedRows).toBe(0)
     const snapshot = await forward.getSnapshot(jobId)
     expect(snapshot.status).toBe('interrupted')
+    expect(snapshot.eventSeq).toBe(5)
     expect(snapshot.trail?.map(entry => entry.kind)).toEqual(['prose', 'tool'])
-    const types = (await journalLines(root)).filter(line => line.jobId === jobId).map(line => `${line.eventSeq}:${line.type}`)
-    expect(types).toEqual(['1:accepted', '2:starting', '3:running', '4:trail', '5:trail', '4:interrupted', '6:interrupted'])
+    const lines = (await journalLines(root)).filter(line => line.jobId === jobId)
+    expect(lines.map(line => `${line.eventSeq}:${line.type}`)).toEqual(['1:accepted', '2:starting', '3:running', '3:trail', '4:chunk', '4:trail', '5:interrupted'])
+    const jobEventSeqs = lines.filter(line => line.type !== 'trail').map(line => line.eventSeq)
+    expect(new Set(jobEventSeqs).size).toBe(jobEventSeqs.length)
+    // The next trail row continues the dense count.
+    expect((await forward.replay(jobId, 1, 0)).events.map(event => event.eventSeq)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('the real 6.51.0 store reads a completed 6.52.0 job whole: only malformedRows rises', async () => {
+    const root = await tempRoot()
+    const writer = new QueryJobStore({ root, bootId: 'boot-a' })
+    await writer.init()
+    const jobId = await runningJob(writer)
+    await writer.appendTrail(jobId, { kind: 'prose', text: 'looking' })
+    await writer.appendPartial(jobId, 'The answer', 'The answer')
+    await writer.appendTrail(jobId, { kind: 'tool', verb: 'bash', target: 'ls', detail: '' })
+    await writer.markAnswerReady(jobId, 'The answer')
+    await writer.complete(jobId, { text: 'The answer', provider: 'claude', resolvedModel: 'opus' })
+    const current = await writer.getSnapshot(jobId)
+    const currentReplay = await writer.replay(jobId, 1, 0)
+
+    const old = new QueryJobStore6510({ root, bootId: 'boot-b' })
+    const health = await old.init()
+    expect(health.malformedRows).toBe(2)
+    const rolledBack = await old.getSnapshot(jobId)
+    const { trail: _trail, ...withoutTrail } = current
+    expect(rolledBack).toEqual(withoutTrail)
+    // And its event stream is the one this build serves an old client.
+    expect((await old.replay(jobId, 1, 0)).events).toEqual(currentReplay.events)
+  })
+
+  it('applies trail rows idempotently by trailSeq: a duplicated row changes nothing', async () => {
+    const root = await tempRoot()
+    const store = new QueryJobStore({ root, bootId: 'boot-a' })
+    await store.init()
+    const jobId = await runningJob(store)
+    await store.appendTrail(jobId, { kind: 'prose', text: 'one' })
+    await store.appendTrail(jobId, { kind: 'prose', text: 'two' })
+    const lines = await journalLines(root)
+    const partition = (await readdir(root)).find(name => name.endsWith('.jsonl'))!
+    const dup = lines.find(line => line.type === 'trail' && line.eventData.trailSeq === 1)!
+    await appendFile(join(root, partition), `${JSON.stringify({ ...dup, recordId: randomUUID() })}\n`)
+    const reader = new QueryJobStore({ root, bootId: 'boot-b' })
+    const health = await reader.init()
+    expect(health.malformedRows).toBe(0)
+    const snapshot = await reader.getSnapshot(jobId)
+    expect(snapshot.trail?.map(entry => [entry.trailSeq, (entry as { text: string }).text])).toEqual([[1, 'one'], [2, 'two']])
   })
 
   it('a job with no trail rows keeps the exact 6.51.0 snapshot and journal shape', async () => {
@@ -206,10 +283,33 @@ describe('trail rows in the durable journal', () => {
     expect((await store.getSnapshot(jobId)).trail?.map(entry => entry.trailSeq)).toEqual([3, 4, 5])
     await store.appendTrail(jobId, { kind: 'prose', text: 'x'.repeat(22) })
     expect((await store.getSnapshot(jobId)).trail?.map(entry => entry.trailSeq)).toEqual([6])
-    // The replay ring still holds every row; only the snapshot page is bounded.
-    const replay = await store.replay(jobId, 1, 0)
-    expect(replay.events.filter(event => event.type === 'trail')).toHaveLength(6)
+    // A subscriber behind the held window gets the whole held trail to rebuild from.
+    const behind = await store.subscribe(jobId, 1, 0, () => {}, { after: 2, listener: () => {} })
+    expect(behind.trailReplay).toMatchObject({ gap: true, reason: 'trail_gap', oldestTrailSeq: 6, latestTrailSeq: 6 })
+    expect(behind.trailReplay?.entries.map(e => e.trailSeq)).toEqual([6])
+    behind.unsubscribe()
+    const ahead = await store.subscribe(jobId, 1, 0, () => {}, { after: 9, listener: () => {} })
+    expect(ahead.trailReplay).toMatchObject({ gap: true, reason: 'cursor_ahead' })
+    ahead.unsubscribe()
   })
+
+  it('the real bounds: 200 entries and 32,000 characters by default', async () => {
+    expect(QUERY_JOB_LIMITS.trailEntries).toBe(200)
+    expect(QUERY_JOB_LIMITS.trailChars).toBe(32_000)
+    const store = new QueryJobStore({ root: await tempRoot(), bootId: 'boot-a' })
+    await store.init()
+    const jobId = await runningJob(store)
+    for (let i = 0; i < QUERY_JOB_LIMITS.trailEntries + 5; i++) await store.appendTrail(jobId, { kind: 'prose', text: `step ${i}` })
+    let trail = (await store.getSnapshot(jobId)).trail!
+    expect(trail).toHaveLength(QUERY_JOB_LIMITS.trailEntries)
+    expect(trail[0]!.trailSeq).toBe(6)
+    // 20 entries of 2,000 characters is 40,000: the character bound bites first.
+    for (let i = 0; i < 20; i++) await store.appendTrail(jobId, { kind: 'prose', text: 'y'.repeat(2_000) })
+    trail = (await store.getSnapshot(jobId)).trail!
+    const chars = trail.reduce((sum, entry) => sum + ((entry as { text?: string }).text?.length ?? 0), 0)
+    expect(chars).toBeLessThanOrEqual(QUERY_JOB_LIMITS.trailChars)
+    expect(chars).toBeGreaterThan(QUERY_JOB_LIMITS.trailChars - 2_000)
+  }, 30_000)
 
   it('writes nothing, and never throws, for an empty draft or a job that is already terminal', async () => {
     const store = new QueryJobStore({ root: await tempRoot(), bootId: 'boot-a' })

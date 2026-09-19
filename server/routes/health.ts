@@ -50,6 +50,7 @@ import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 // whether they are actually registered.
 import { MEDIA_CHUNKED_UPLOAD_ENABLED } from './media.js'
 import { durableQueryJobsCapability, messagesTrailEnabled } from '../lib/query-job-feature.js'
+import { jobTrailStats } from '../lib/job-trail.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { getMorningBriefScheduler } from '../lib/morning-brief-runtime.js'
 import { getTranscriptionPolicySnapshot } from '../lib/transcription-policy.js'
@@ -482,6 +483,12 @@ healthRouter.get('/health', async (_req, res) => {
       enabled: durableJobs.enabled,
       protocolVersion: durableJobs.protocolVersion,
       state: durableJobs.store.state,
+    },
+    // 6.52.0: the Messages trail's readers, process-wide since boot. Counts and a
+    // timestamp only: stdout lines read, entries emitted, failures swallowed.
+    messages_trail: {
+      enabled: durableJobs.enabled && messagesTrailEnabled(),
+      ...jobTrailStats(),
     },
   })
 })

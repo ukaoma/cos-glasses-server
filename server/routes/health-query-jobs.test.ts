@@ -78,6 +78,14 @@ describe('public durable-query capability health', () => {
     expect(body.meeting_library).toEqual({ layout: 'direct', ready: true, warningCount: 0 })
     expect(JSON.stringify(body)).not.toContain(meetingLibrary)
     expect(body.durable_query_jobs).not.toHaveProperty('store')
+    // 6.52.0: the trail readers' counters, counts and a timestamp only.
+    expect(body.messages_trail).toEqual({
+      enabled: true,
+      linesRead: expect.any(Number),
+      entriesEmitted: expect.any(Number),
+      readerErrors: expect.any(Number),
+      lastErrorAt: expect.toSatisfy((value: unknown) => value === null || typeof value === 'string'),
+    })
     expect(body.durable_query_jobs).not.toHaveProperty('retainedIdentities')
     expect(body.features.localFirstMeetings).toBe(true)
     expect(body.features.transcriptionPolicy).toBe('local-only')
