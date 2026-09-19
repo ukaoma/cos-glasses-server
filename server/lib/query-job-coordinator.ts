@@ -18,6 +18,7 @@ import {
   type QueryJobStoreHealth,
 } from './query-job-types.js'
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
+import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -41,6 +42,9 @@ export interface QueryJobRunnerCallbacks {
   onChunk: (text: string) => void
   onToolStatus: (text: string) => void
   onActivityLine: (line: { kind: 'input' | 'output'; text: string }) => void
+  /** One readable step of the run (6.52.0). Filtered by the job's `activityToolMode`
+   * here, redacted by the store, journaled as a `trail` event. Never on the display bus. */
+  onTrail: (draft: JobTrailDraft) => void
   /** True only when this callback durably won the answer-ready transition. */
   onAnswerReady: (text: string, linkage?: QueryJobProviderLinkage) => boolean | Promise<boolean>
   /** True only when this callback won and durably projected the terminal. */
@@ -347,6 +351,15 @@ export class QueryJobCoordinator {
         if (active.request.activityToolMode !== 'preview') return
         void this.enqueueCallback(active, async () => {
           await this.store.appendActivity(active.jobId, line.kind, line.text)
+        })
+      },
+      onTrail: (draft) => {
+        // The user's opt-out is decided HERE, from the job's own request: `off` keeps no
+        // tool steps, `status` keeps steps without raw output (see applyTrailToolMode).
+        const allowed = applyTrailToolMode(draft, active.request.activityToolMode)
+        if (!allowed) return
+        void this.enqueueCallback(active, async () => {
+          await this.store.appendTrail(active.jobId, allowed)
         })
       },
       onAnswerReady: (text, linkage = {}) => this.answerReady(active, text, linkage),

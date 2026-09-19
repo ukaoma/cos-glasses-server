@@ -4,6 +4,7 @@ import {
   parseMediaIdList,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
+import type { JobTrailDraft } from './job-trail.js'
 
 export const QUERY_JOB_SCHEMA_VERSION = 1 as const
 export const QUERY_JOB_PROTOCOL_VERSION = 1 as const
@@ -17,6 +18,12 @@ export const QUERY_JOB_LIMITS = Object.freeze({
   errorChars: 2_000,
   activityChars: 2_000,
   activityEntries: 64,
+  /** `snapshot.trail` keeps the newest 200 entries (6.52.0)... */
+  trailEntries: 200,
+  /** ...and at most this many characters of text across them, whichever bound
+   * bites first, so a replay-gap snapshot stays small on a phone. Each field is
+   * capped on its own too (see `sanitizeJobTrailDraft`). */
+  trailChars: 32_000,
   replayEvents: 256,
   retainedDays: 7,
   hydratedJobs: 500,
@@ -43,6 +50,11 @@ export type QueryJobEventType =
   | 'tool_status'
   | 'activity_line'
   | 'acknowledged'
+  // 6.52.0: one readable step of a Messages run (see lib/job-trail.ts). Its data is
+  // one draft plus `trailSeq`, a dense 1..n per job that is NOT the job eventSeq:
+  // chunks and activity share eventSeq, and a trail reducer fed eventSeq would paint
+  // a gap row between every two steps.
+  | 'trail'
 
 export type QueryJobActivityMode = 'off' | 'status' | 'preview'
 export type QueryJobActivityKind = 'status' | 'input' | 'output' | 'gap'
@@ -147,6 +159,14 @@ export interface QueryJobActivity {
   repeatCount?: number
 }
 
+/** One entry of `snapshot.trail`: the journaled draft plus where it sits. `trailSeq`
+ * is the dense trail order; `eventSeq` and `at` say which job event carried it. */
+export type QueryJobTrailEntry = JobTrailDraft & {
+  trailSeq: number
+  eventSeq: number
+  at: string
+}
+
 export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   schemaVersion: typeof QUERY_JOB_SCHEMA_VERSION
   jobId: string
@@ -172,6 +192,10 @@ export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   outputImageStats?: QueryJobOutputImageStats
   error?: QueryJobError
   activity: QueryJobActivity[]
+  /** The readable trail (6.52.0), bounded by `QUERY_JOB_LIMITS.trailEntries` and
+   * `trailChars`, rebuilt from the journal on restart. ABSENT, never `[]`, on a job
+   * with no trail rows, so a run with the trail off has exactly the 6.51.0 shape. */
+  trail?: QueryJobTrailEntry[]
   acceptedAt: string
   startedAt?: string
   answerReadyAt?: string
@@ -475,6 +499,18 @@ export function parseQueryJobOutputImageStats(raw: unknown): QueryJobOutputImage
   const [published, attached, rejected] = counts as number[]
   if (attached > published || rejected > published || attached + rejected > published) return undefined
   return { published, attached, rejected }
+}
+
+/** The store's own credential and local-path patterns, applied to free text with
+ * nothing else changed: no whitespace collapsing, no bound, newlines kept. The trail
+ * sanitizer (lib/job-trail.ts) runs this after `redactSecretText`, so a trail field
+ * passes BOTH redaction layers before it reaches the journal. */
+export function redactQueryJobText(value: string): string {
+  if (typeof value !== 'string' || value.length === 0) return ''
+  let text = value
+  for (const pattern of SECRET_PATTERNS) text = text.replace(pattern, '[redacted]')
+  for (const pattern of PATH_PATTERNS) text = text.replace(pattern, '[path]')
+  return text
 }
 
 /** Second-line redaction even for bridge-produced "safe" activity. This is

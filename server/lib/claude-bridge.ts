@@ -59,6 +59,7 @@ import {
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
+import { teeJobTrail, type JobTrailDraft } from './job-trail.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -336,6 +337,9 @@ export interface StreamCallbacks {
   onActivityLine?: (line: ActivityPreviewLine) => void
   onStart?: (model: ModelPreference, sessionId: string, cliSessionId?: string, metadata?: ModelRunMetadata) => void
   onProviderProcess?: (metadata: ProviderProcessMetadata) => boolean | void | Promise<boolean | void>
+  /** 6.52.0: readable steps of a durable Messages job (lib/job-trail.ts). Optional, and
+   * absent on every path that is not a durable job with the trail on. */
+  onTrail?: (draft: JobTrailDraft) => void
 }
 
 /** Claude CLI can emit `subtype: success` with `is_error: true`; the boolean
@@ -963,6 +967,11 @@ export async function callClaudeStreaming(
       }
     }
   })
+
+  // 6.52.0: the Messages trail, a SECOND stdout reader registered after the one above, so
+  // that handler sees every chunk first and nothing it decides can change. Without an
+  // `onTrail` (legacy /api/query, openai-compat, COS_MESSAGES_TRAIL=0) this attaches nothing.
+  teeJobTrail(proc.stdout, 'claude', callbacks.onTrail)
 
   proc.stderr.on('data', (chunk: Buffer) => {
     // stderr activity also counts — Claude CLI logs progress there

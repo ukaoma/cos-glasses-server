@@ -7,7 +7,7 @@ import { resolveQueryAttachments } from './query-attachments.js'
 import { getMediaStore } from './media-store.js'
 import { dataPath } from './data-dir.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from './message-era.js'
-import { durableQueryJobsEnabled } from './query-job-feature.js'
+import { durableQueryJobsEnabled, messagesTrailEnabled } from './query-job-feature.js'
 import { QueryJobCoordinator, type QueryJobRunner } from './query-job-coordinator.js'
 import { QueryJobStore } from './query-job-store.js'
 import {
@@ -33,6 +33,7 @@ import {
   type QueryJobSnapshot,
 } from './query-job-types.js'
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
+import type { JobTrailDraft } from './job-trail.js'
 import { registerMessageReservationSource } from './message-reservations.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
@@ -242,6 +243,13 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       },
       ...(request.activityToolMode === 'preview' ? {
         onActivityLine: (line: { kind: 'input' | 'output'; text: string }) => callbacks.onActivityLine(line),
+      } : {}),
+      // 6.52.0, the Messages trail. Journaled only (the coordinator applies the user's
+      // tool-activity mode and the store redacts); it NEVER goes on the display bus, which
+      // any paired display may read. Absent entirely with COS_MESSAGES_TRAIL=0, so the
+      // bridges attach no second stdout reader at all.
+      ...(messagesTrailEnabled() ? {
+        onTrail: (draft: JobTrailDraft) => callbacks.onTrail(draft),
       } : {}),
       onAnswerReady: text => callbacks.onAnswerReady(text, {
         ...(activeModel ? { provider: providerFor(activeModel), resolvedModel: activeModel } : {}),

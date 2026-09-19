@@ -56,6 +56,23 @@ function looksOpaqueSecret(text: string): boolean {
   return classes >= 3
 }
 
+/**
+ * Credentials out of free text, and nothing else (6.52.0, the Messages trail).
+ *
+ * The trail carries the agent's own words between steps. `sanitizeActivityPreview`
+ * cannot be used for that: it flattens every newline and, through `looksOpaqueSecret`,
+ * hides ordinary narration outright ("I will read the config file and then run the
+ * tests." reads as an opaque secret to it). This applies ONLY the private-material
+ * block and the secret patterns, keeps newlines, and imposes no length: the caller
+ * caps after redacting, so a secret is never half-cut into a visible prefix.
+ */
+export function redactSecretText(raw: string): string {
+  if (typeof raw !== 'string' || raw.length === 0) return ''
+  let text = raw.replace(PRIVATE_MATERIAL_BLOCK_RE, '[private material hidden]')
+  for (const [pattern, replacement] of SECRET_PATTERNS) text = text.replace(pattern, replacement)
+  return text
+}
+
 export function sanitizeActivityPreview(raw: unknown, max = 180): string | null {
   if (typeof raw !== 'string') return null
   let text = raw.replace(ANSI_RE, '').replace(PRIVATE_MATERIAL_BLOCK_RE, '[private material hidden]')

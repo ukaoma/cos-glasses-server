@@ -29,6 +29,27 @@ import {
   type QueryJobStatus,
   type QueryJobStoreHealth,
 } from './query-job-types.js'
+import {
+  jobTrailTextChars,
+  parseJobTrailEventData,
+  sanitizeJobTrailDraft,
+} from './job-trail.js'
+
+const QUERY_JOB_STATUSES: readonly QueryJobStatus[] = [
+  'accepted', 'starting', 'running', 'answer_ready', 'completed', 'failed', 'canceled', 'interrupted',
+]
+
+/**
+ * Every event type hydration accepts. A row of any other type counts as malformed and is
+ * skipped, which is exactly what a 6.51.0 server does with the `trail` rows this build
+ * writes: those jobs still load and only `malformedRows` rises (the rollback contract, so
+ * QUERY_JOB_SCHEMA_VERSION stays 1; a bump would drop every row on rollback). THIS build
+ * must list `trail`, or it would count its own rows as malformed on every restart and the
+ * trail would vanish after a reboot.
+ */
+export const QUERY_JOB_JOURNAL_EVENT_TYPES: readonly QueryJobEventType[] = [
+  ...QUERY_JOB_STATUSES, 'chunk', 'tool_status', 'activity_line', 'acknowledged', 'trail',
+]
 
 const PARTITION_RE = /^\d{4}-\d{2}-\d{2}\.jsonl$/
 const MAX_JOURNAL_RECORD_BYTES = 512 * 1024
@@ -59,6 +80,9 @@ interface HydratedQueryJob {
   snapshot: QueryJobSnapshot
   events: QueryJobEvent[]
   lastBootId: string
+  /** The last `trailSeq` this job journaled. The next trail row is this plus one,
+   * assigned inside the serialized append, so the persisted order is dense 1..n. */
+  trailSeq: number
 }
 
 interface QueryJobIdentity {
@@ -162,6 +186,14 @@ export interface QueryJobStoreOptions {
   maxHydratedJobs?: number
   maxReplayEvents?: number
   maxActivityEntries?: number
+  maxTrailEntries?: number
+  maxTrailChars?: number
+  /**
+   * Replaces the hydration allowlist. Production never passes it. It exists so a test
+   * can hydrate a journal through the exact 6.51.0 list (no `trail`) and prove the
+   * rollback contract on real bytes without shipping a second copy of this class.
+   */
+  journalEventTypes?: readonly QueryJobEventType[]
 }
 
 export class QueryJobStoreError extends Error {
@@ -290,6 +322,9 @@ export class QueryJobStore {
   private readonly maxHydratedJobs: number
   private readonly maxReplayEvents: number
   private readonly maxActivityEntries: number
+  private readonly maxTrailEntries: number
+  private readonly maxTrailChars: number
+  private readonly journalEventTypes: readonly QueryJobEventType[]
   private readonly jobs = new Map<string, HydratedQueryJob>()
   private readonly identitiesByJobId = new Map<string, QueryJobIdentity>()
   private readonly identitiesByKey = new Map<string, QueryJobIdentity>()
@@ -307,6 +342,9 @@ export class QueryJobStore {
     this.maxHydratedJobs = Math.max(1, options.maxHydratedJobs ?? QUERY_JOB_LIMITS.hydratedJobs)
     this.maxReplayEvents = Math.max(1, options.maxReplayEvents ?? QUERY_JOB_LIMITS.replayEvents)
     this.maxActivityEntries = Math.max(1, options.maxActivityEntries ?? QUERY_JOB_LIMITS.activityEntries)
+    this.maxTrailEntries = Math.max(1, options.maxTrailEntries ?? QUERY_JOB_LIMITS.trailEntries)
+    this.maxTrailChars = Math.max(1, options.maxTrailChars ?? QUERY_JOB_LIMITS.trailChars)
+    this.journalEventTypes = options.journalEventTypes ?? QUERY_JOB_JOURNAL_EVENT_TYPES
     this.emitter.setMaxListeners(1_000)
     this.health = {
       state: 'new',
@@ -429,9 +467,10 @@ export class QueryJobStore {
       || typeof r.status !== 'string'
       || !r.patch || typeof r.patch !== 'object'
       || !r.eventData || typeof r.eventData !== 'object') return null
-    const statuses: QueryJobStatus[] = ['accepted', 'starting', 'running', 'answer_ready', 'completed', 'failed', 'canceled', 'interrupted']
-    const eventTypes: QueryJobEventType[] = [...statuses, 'chunk', 'tool_status', 'activity_line', 'acknowledged']
-    if (!statuses.includes(r.status as QueryJobStatus) || !eventTypes.includes(r.type as QueryJobEventType)) return null
+    if (!QUERY_JOB_STATUSES.includes(r.status as QueryJobStatus)
+      || !this.journalEventTypes.includes(r.type as QueryJobEventType)) return null
+    // A trail row whose data is not a trail entry is malformed, not a hole in the trail.
+    if (r.type === 'trail' && !parseJobTrailEventData(r.eventData)) return null
     return r as unknown as QueryJobJournalRecord
   }
 
@@ -466,6 +505,7 @@ export class QueryJobStore {
         request,
         events: [],
         lastBootId: record.bootId,
+        trailSeq: 0,
         snapshot: {
           schemaVersion: QUERY_JOB_SCHEMA_VERSION,
           jobId: record.jobId,
@@ -516,6 +556,8 @@ export class QueryJobStore {
       snapshot.partialTruncated = patch.partialTruncated === true
     } else if (record.type === 'tool_status' || record.type === 'activity_line') {
       this.applyActivity(snapshot, record)
+    } else if (record.type === 'trail') {
+      this.applyTrail(hydrated, record)
     } else if (record.type === 'answer_ready') {
       snapshot.answerReadyAt = typeof patch.answerReadyAt === 'string' ? patch.answerReadyAt : record.persistedAt
       if (typeof patch.partialText === 'string') snapshot.partialText = patch.partialText
@@ -602,6 +644,24 @@ export class QueryJobStore {
     }
     snapshot.activity.push({ eventSeq: record.eventSeq, at: record.persistedAt, kind, text: safe.text })
     if (snapshot.activity.length > this.maxActivityEntries) snapshot.activity.shift()
+  }
+
+  /**
+   * One trail row into `snapshot.trail`, the page a client rebuilds from after a replay
+   * gap. Bounded twice: the newest `maxTrailEntries` entries, and no more than
+   * `maxTrailChars` characters of text across them (the oldest go first; the newest entry
+   * always stays). The array exists only once a row does.
+   */
+  private applyTrail(hydrated: HydratedQueryJob, record: QueryJobJournalRecord): void {
+    const parsed = parseJobTrailEventData(record.eventData)
+    if (!parsed) return
+    hydrated.trailSeq = Math.max(hydrated.trailSeq, parsed.trailSeq)
+    const trail = hydrated.snapshot.trail ?? (hydrated.snapshot.trail = [])
+    trail.push({ ...parsed.draft, trailSeq: parsed.trailSeq, eventSeq: record.eventSeq, at: record.persistedAt })
+    let chars = trail.reduce((sum, entry) => sum + jobTrailTextChars(entry), 0)
+    while (trail.length > 1 && (trail.length > this.maxTrailEntries || chars > this.maxTrailChars)) {
+      chars -= jobTrailTextChars(trail.shift()!)
+    }
   }
 
   private async appendRecord(record: QueryJobJournalRecord): Promise<void> {
@@ -769,6 +829,31 @@ export class QueryJobStore {
     const safe = sanitizeQueryJobActivity(text)
     const type: QueryJobEventType = kind === 'status' ? 'tool_status' : 'activity_line'
     return this.mutateSameStatus(jobId, type, {}, { kind, text: safe.text, truncated: safe.truncated })
+  }
+
+  /**
+   * One trail draft into the journal (6.52.0).
+   *
+   * Redacted and bounded here, at the journal boundary, whatever the caller already did
+   * (`sanitizeJobTrailDraft`). `trailSeq` is assigned INSIDE the serialized append from the
+   * job's own last one, so the persisted trail is dense 1..n no matter how trail, chunk and
+   * activity writes interleave. A draft with nothing to say, or a job already terminal,
+   * writes nothing and is never an error: a trail row must not be able to fail a run.
+   */
+  async appendTrail(jobId: string, raw: unknown): Promise<QueryJobMutationResult> {
+    const draft = sanitizeJobTrailDraft(raw)
+    await this.ensureInitialized()
+    await this.ensureHydrated(jobId)
+    return this.enqueue(async () => {
+      this.assertWritable()
+      const hydrated = this.jobs.get(jobId)
+      if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      if (!draft || isTerminalQueryJobStatus(hydrated.snapshot.status)) {
+        return { applied: false, job: clone(hydrated.snapshot) }
+      }
+      const trailSeq = hydrated.trailSeq + 1
+      return this.persistMutation(hydrated, hydrated.snapshot.status, 'trail', {}, { ...draft, trailSeq })
+    })
   }
 
   async markAnswerReady(

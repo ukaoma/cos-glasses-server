@@ -134,9 +134,11 @@ describe('public durable-query capability health', () => {
       expect.objectContaining({ preference: 'cursor-grok' }),
       expect.objectContaining({ preference: 'cursor-composer' }),
     ])
+    // 6.52.0 adds `trail` deliberately: the app reads it here to choose the trail view.
     expect(body.capabilities?.durableQueryJobs).toEqual({
       enabled: true,
       protocolVersion: 1,
+      trail: true,
     })
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
       protocolVersion: 1,
@@ -173,6 +175,17 @@ describe('public durable-query capability health', () => {
     })
   }, 20_000)
 
+  it('advertises the trail as off when COS_MESSAGES_TRAIL=0, jobs still on', async () => {
+    process.env.COS_MESSAGES_TRAIL = '0'
+    try {
+      const response = await fetch(`${base}/api/models`)
+      const body = await response.json() as any
+      expect(body.capabilities?.durableQueryJobs).toEqual({ enabled: true, protocolVersion: 1, trail: false })
+    } finally {
+      delete process.env.COS_MESSAGES_TRAIL
+    }
+  }, 20_000)
+
   it('fails closed on both capability surfaces once shutdown begins', async () => {
     await shutdown?.()
 
@@ -189,9 +202,11 @@ describe('public durable-query capability health', () => {
     const modelResponse = await fetch(`${base}/api/models`)
     expect(modelResponse.status).toBe(200)
     const models = await modelResponse.json() as any
+    // A server that cannot take jobs cannot offer their trail either.
     expect(models.capabilities?.durableQueryJobs).toEqual({
       enabled: false,
       protocolVersion: 1,
+      trail: false,
     })
   }, 20_000)
 })

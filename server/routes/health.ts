@@ -49,7 +49,7 @@ import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 // The flag lives beside the endpoints it describes, so it cannot drift from
 // whether they are actually registered.
 import { MEDIA_CHUNKED_UPLOAD_ENABLED } from './media.js'
-import { durableQueryJobsCapability } from '../lib/query-job-feature.js'
+import { durableQueryJobsCapability, messagesTrailEnabled } from '../lib/query-job-feature.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { getMorningBriefScheduler } from '../lib/morning-brief-runtime.js'
 import { getTranscriptionPolicySnapshot } from '../lib/transcription-policy.js'
@@ -568,6 +568,10 @@ healthRouter.get('/models', async (req, res) => {
       durableQueryJobs: {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,
+        // 6.52.0: jobs journal `trail` events and carry `snapshot.trail`. The app reads
+        // THIS surface (not /api/health) and falls back to the activity log without it.
+        // False whenever jobs themselves are off or COS_MESSAGES_TRAIL=0.
+        trail: durableJobs.enabled && messagesTrailEnabled(),
       },
       transcription: {
         ...transcription,

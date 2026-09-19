@@ -63,6 +63,7 @@ import {
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
+import { teeJobTrail } from './job-trail.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -665,6 +666,11 @@ export async function callCursorStreaming(
       }
     }
   })
+
+  // 6.52.0: the Messages trail, a SECOND stdout reader registered after the one above, so
+  // that handler sees every chunk first and nothing it decides can change. Without an
+  // `onTrail` (legacy /api/query, openai-compat, COS_MESSAGES_TRAIL=0) this attaches nothing.
+  teeJobTrail(proc.stdout, 'cursor', callbacks.onTrail)
 
   proc.stderr.on('data', (chunk: Buffer) => {
     resetInactivity()

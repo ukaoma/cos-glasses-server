@@ -37,6 +37,7 @@ import {
   ollamaToolStatusLabel,
   parseToolArguments,
 } from './ollama-tools.js'
+import { ollamaTrailOutcome, ollamaTrailStep, type JobTrailDraft } from './job-trail.js'
 
 const INACTIVITY_MS = 60_000
 const WALL_MAX_MS = 180_000
@@ -347,6 +348,14 @@ export async function callOllamaStreaming(
   let postCount = 0
   let toolsRetried = false
 
+  // 6.52.0, the Messages trail. This bridge owns its loop, so it reports each round's words
+  // and each tool call itself (there is no stdout to tee). A no-op without `onTrail`, and
+  // it never throws into the loop.
+  const trail = (draft: JobTrailDraft) => {
+    if (!callbacks.onTrail) return
+    try { callbacks.onTrail(draft) } catch { /* observation only */ }
+  }
+
   /** One POST + its stream. Returns what the round produced. */
   const runChatPost = async (sendTools: boolean): Promise<
     | { kind: 'text' }
@@ -446,8 +455,14 @@ export async function callOllamaStreaming(
 
   try {
     for (;;) {
+      const roundStart = fullText.length
       const round = await runChatPost(toolDefs.length > 0)
       if (round.kind === 'handled') return sid
+      // One prose entry per round: what the model wrote before its calls, or its answer.
+      if (callbacks.onTrail && (round.kind === 'text' || round.kind === 'tools')) {
+        const roundText = fullText.slice(roundStart)
+        if (roundText.trim()) trail({ kind: 'prose', text: roundText })
+      }
       if (round.kind === 'text') { await finalizeDone(); return sid }
 
       if (round.kind === 'empty') {
@@ -472,6 +487,7 @@ export async function callOllamaStreaming(
         if (finalized || abort.signal.aborted) break
         const name = call.function.name
         callbacks.onToolStatus?.(name)
+        if (callbacks.onTrail) trail(ollamaTrailStep(name, parseToolArguments(call.function.arguments)))
         toolHeartbeat = setInterval(bumpInactivity, TOOL_HEARTBEAT_MS)
         let result: string
         try {
@@ -483,6 +499,7 @@ export async function callOllamaStreaming(
           await finalizeError('ollama-bridge: tool call aborted.')
           return sid
         }
+        if (callbacks.onTrail) trail(ollamaTrailOutcome(result))
         messages.push({
           role: 'tool',
           content: result,
