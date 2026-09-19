@@ -27,6 +27,7 @@ import {
 import { SessionSignalStore } from './session-signal-store.js'
 import { deriveSessionState, derivedRowFields } from './session-state-derive.js'
 import { toolFingerprint, type HookEnvelope } from './session-hook-events.js'
+import { __resetClientLivenessForTests, lastQuestionsPollAt, noteQuestionsPoll } from './client-liveness.js'
 
 import { ASK_INPUT, Q1, Q2, QUESTIONS, SESSION, permissionEnvelope } from './__fixtures__/permission-broker.js'
 
@@ -54,7 +55,7 @@ function brokerWith(over: Partial<PermissionBrokerDeps> = {}, state: { now?: num
     now: () => clock.now,
     mode: () => s.mode,
     admissionsOpen: () => s.admissions,
-    lastClientSeenAt: () => s.seenAt,
+    lastQuestionsPollAt: () => s.seenAt,
     readDeskIdleSeconds: async () => { s.idleReads++; return s.idle },
     deskIdleSeconds: () => 90,
     timeoutMs: () => 110_000,
@@ -88,6 +89,32 @@ describe('configuration', () => {
       expect(ms).toBe(BROKER_TIMEOUT_MAX_S * 1000)
       expect(ms).toBeLessThan(HOOK_CURL_MAX_S * 1000)
     }
+  })
+})
+
+describe('the liveness signal (lib/client-liveness)', () => {
+  it('records the newest questions poll and never moves backwards', () => {
+    __resetClientLivenessForTests()
+    expect(lastQuestionsPollAt()).toBeNull()
+    noteQuestionsPoll(Number.NaN)
+    expect(lastQuestionsPollAt()).toBeNull()
+    noteQuestionsPoll(5_000)
+    noteQuestionsPoll(4_000) // a slower request answered later with an older stamp
+    expect(lastQuestionsPollAt()).toBe(5_000)
+    noteQuestionsPoll(6_000)
+    expect(lastQuestionsPollAt()).toBe(6_000)
+    __resetClientLivenessForTests()
+  })
+
+  it('a poll exactly 60 s old still counts; one millisecond more does not', async () => {
+    const { broker, s, clock } = brokerWith()
+    brokers.push(broker)
+    s.seenAt = clock.now - CLIENT_LIVE_WINDOW_MS
+    expect((await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).ok).toBe(true)
+    s.seenAt = clock.now - CLIENT_LIVE_WINDOW_MS - 1
+    expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    s.seenAt = null
+    expect(await broker.admit(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
   })
 })
 

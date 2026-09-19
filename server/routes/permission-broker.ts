@@ -15,11 +15,15 @@
 //
 // GET /api/session-questions and POST /api/session-questions/:id/answer -- the lens and the
 // phone, behind the API token like every other /api route. Question and command text only
-// ever travels here, never on the display bus.
+// ever travels here, never on the display bus. The GET is ALSO the broker's liveness
+// signal (lib/client-liveness.ts): only a client that asks for questions can answer one.
+// So it checks X-Cos-Token itself as well, in constant time, and a request without it is
+// refused and never counted, whatever sits in front of this router.
 
 import express, { Router, type Request, type Response } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import type { BrokerAdmission, HookReplyChannel, PermissionBroker } from '../lib/permission-broker.js'
+import { noteQuestionsPoll } from '../lib/client-liveness.js'
 
 export const PERMISSION_BROKER_HOOK_PATH = '/hooks/permission-requests/ask'
 
@@ -89,12 +93,27 @@ export function createPermissionBrokerHookRouter(deps: PermissionBrokerHookRoute
 
 export interface SessionQuestionsRouterDeps {
   broker: PermissionBroker
+  /** The pairing token (X-Cos-Token). A poll counts as a live client only with it. */
+  apiToken: () => string
+  /** Where a counted poll is recorded; `noteQuestionsPoll` in production. */
+  notePoll?: (at: number) => void
+  now?: () => number
 }
 
 export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): Router {
   const router = Router()
-  router.get('/session-questions', (_req: Request, res: Response) => {
+  const notePoll = deps.notePoll ?? noteQuestionsPoll
+  const now = deps.now ?? Date.now
+  router.get('/session-questions', (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
+    let expected = ''
+    try { expected = deps.apiToken() } catch { expected = '' }
+    // A hook token, or nothing: refused, and never a live client.
+    if (!timingSafeTokenEqual(req.headers['x-cos-token'], expected)) {
+      res.status(401).json({ error: 'unauthorized' })
+      return
+    }
+    notePoll(now())
     const health = deps.broker.health()
     res.json({ enabled: health.enabled, mode: health.mode, items: deps.broker.list() })
   })

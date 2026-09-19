@@ -232,8 +232,9 @@ Since 6.52.0 a session question (the AskUserQuestion card) or a tool approval ca
 answered from the glasses or the phone while you are away from the Mac. The hook posts
 a permission request to `POST /hooks/permission-requests/ask` (outside `/api`, hook-token
 auth) only after the desk has been idle 90 s; the server holds it only while the desk
-stays idle and a COS Glasses copy has claimed in the last 60 s, and answers `{}` (the
-Mac's own dialog) to everything else at once. Clients read `GET /api/session-questions`
+stays idle and a client has polled `GET /api/session-questions` (with X-Cos-Token) in the
+last 60 s, and answers `{}` (the Mac's own dialog) to everything else at once. A client
+that never polls (COS Glasses 6.9.511 and earlier) changes nothing. Clients read `GET /api/session-questions`
 and answer with `POST /api/session-questions/:id/answer` (`{clientAnswerId, answers}` for
 a question, one `{labels, other}` per question; `{clientAnswerId, decision}` for an
 approval, `allow` or `deny`). Touching the Mac hands a held request back to its dialog

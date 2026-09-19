@@ -28,7 +28,9 @@
 //   - the tool is AskUserQuestion, or approvals are on (`COS_PERMISSION_BROKER=questions`
 //     turns approvals off; the default brokers both). ExitPlanMode is never brokered: its
 //     dialog chooses a permission MODE, and "allow once" is not a plan approval;
-//   - a COS lens or phone client proved it is alive in the last 60 s (lib/client-liveness);
+//   - a client that can answer asked for the questions in the last 60 s: an authenticated
+//     `GET /api/session-questions` (lib/client-liveness). An app without the question UI
+//     never calls it, so for it the broker is inert and every request is `{}`;
 //   - the desk has been idle `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90), read here with
 //     a bounded `ioreg`, not trusted from the script.
 //
@@ -82,7 +84,7 @@ export function permissionBrokerTimeoutMs(env: NodeJS.ProcessEnv): number {
   return Math.round(Math.min(BROKER_TIMEOUT_MAX_S, Math.max(BROKER_TIMEOUT_MIN_S, seconds)) * 1000)
 }
 
-/** A lens or phone client must have proved it is alive this recently. */
+/** A client must have polled `GET /api/session-questions` this recently. */
 export const CLIENT_LIVE_WINDOW_MS = 60_000
 /** How often a parked item re-reads the desk. */
 export const DESK_POLL_MS = 1_500
@@ -339,7 +341,8 @@ export interface PermissionBrokerDeps {
   now(): number
   mode(): BrokerMode
   admissionsOpen(): boolean
-  lastClientSeenAt(): number | null
+  /** The newest authenticated `GET /api/session-questions`, or null (lib/client-liveness). */
+  lastQuestionsPollAt(): number | null
   readDeskIdleSeconds(): Promise<number | null>
   deskIdleSeconds(): number
   timeoutMs(): number
@@ -473,8 +476,8 @@ export class PermissionBroker {
       approval = approvalCard(facts.toolName, facts.toolInput)
     }
     const now = this.deps.now()
-    const seenAt = this.deps.lastClientSeenAt()
-    if (seenAt === null || now - seenAt > CLIENT_LIVE_WINDOW_MS) return this.noteFastPath('no_client')
+    const polledAt = this.deps.lastQuestionsPollAt()
+    if (polledAt === null || now - polledAt > CLIENT_LIVE_WINDOW_MS) return this.noteFastPath('no_client')
     // The deadline counts from when the HOOK started, when its stamp is sane: a request the
     // server read late must still be answered before the hook's curl gives up.
     const requestedAt = facts.hookStartedAtMs !== null && facts.hookStartedAtMs <= now ? facts.hookStartedAtMs : now

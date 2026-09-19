@@ -15,6 +15,8 @@ import { parseHookEnvelope } from './session-hook-events.js'
 import { requireApiToken } from './api-auth.js'
 import { PermissionBroker, questionHookOutput, type BrokerMode } from './permission-broker.js'
 import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from '../routes/permission-broker.js'
+import { createClientInstanceRouter } from '../routes/client-instance.js'
+import { __resetClientLivenessForTests, lastQuestionsPollAt } from './client-liveness.js'
 import { ASK_INPUT, Q1, Q2 } from './__fixtures__/permission-broker.js'
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hooks', 'cos-session-hook')
@@ -331,8 +333,14 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
     const brokers: PermissionBroker[] = []
     afterEach(() => { for (const b of brokers.splice(0)) b.stop() })
 
-    /** A server wired as index.ts wires it; `withBroker: false` is a 6.51 server (no such route). */
-    async function server(opts: { withBroker?: boolean; mode?: BrokerMode; seenAt?: number | null } = {}) {
+    /**
+     * A server wired as index.ts wires it; `withBroker: false` is a 6.51 server (no such
+     * route). The broker reads the real liveness module: `live` (default) is one real
+     * authenticated questions poll, as a client with the question UI makes; `claim` is a
+     * client-instance claim, as every COS Glasses copy since 6.9.505 makes.
+     */
+    async function server(opts: { withBroker?: boolean; mode?: BrokerMode; live?: boolean; claim?: boolean } = {}) {
+      __resetClientLivenessForTests()
       const paths = home()
       writeFileSync(join(paths.home, 'hook-desk-idle-s'), '0') // the script's own gate passes at once
       writeFileSync(join(paths.home, 'hook-token'), HOOK)
@@ -341,7 +349,7 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
         now: () => Date.now(),
         mode: () => opts.mode ?? 'all',
         admissionsOpen: () => true,
-        lastClientSeenAt: () => (opts.seenAt === undefined ? Date.now() : opts.seenAt),
+        lastQuestionsPollAt,
         readDeskIdleSeconds: async () => 1_000,
         deskIdleSeconds: () => 90,
         timeoutMs: () => 20_000,
@@ -353,14 +361,27 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       app.use((req, res, next) => { const url = req.originalUrl; res.on('finish', () => hits.push({ url, status: res.statusCode })); next() })
       app.use('/api', requireApiToken(API))
       app.use(express.json({ limit: '10mb' }))
+      app.use('/api', createClientInstanceRouter())
       if (opts.withBroker !== false) {
         app.use(createPermissionBrokerHookRouter({ hookToken: () => HOOK, broker }))
-        app.use('/api', createSessionQuestionsRouter({ broker }))
+        app.use('/api', createSessionQuestionsRouter({ broker, apiToken: () => API }))
       }
       await new Promise<void>(r => { listener = app.listen(0, '127.0.0.1', () => r()) })
       const port = (listener!.address() as AddressInfo).port
       writeFileSync(join(paths.home, 'hook-port'), String(port))
-      return { paths, broker, hits, base: `http://127.0.0.1:${port}` }
+      const base = `http://127.0.0.1:${port}`
+      if (opts.claim) {
+        const claimed = await fetch(`${base}/api/client-instance/claim`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-token': API },
+          body: JSON.stringify({ id: 'aaaa0001-lens', bootAt: Date.now() - 1_000, version: '6.9.511' }),
+        })
+        expect(claimed.status).toBe(200)
+      }
+      if (opts.live !== false && opts.withBroker !== false) {
+        expect((await fetch(`${base}/api/session-questions`, { headers: { 'x-cos-token': API } })).status).toBe(200)
+      }
+      hits.length = 0 // only the hook's own requests are asserted below
+      return { paths, broker, hits, base }
     }
 
     async function firstPending(broker: PermissionBroker) {
@@ -401,8 +422,8 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect((await run).stdout).toBe('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from COS glasses"}}}')
     })
 
-    it('no lens live, or the kill switch: {} at once and the script prints nothing (the native dialog, as today)', async () => {
-      for (const opts of [{ seenAt: null }, { mode: 'off' as BrokerMode }]) {
+    it('no questions poll (even with a live 6.9.511 claim), or the kill switch: {} at once and the script prints nothing (the native dialog, as today)', async () => {
+      for (const opts of [{ live: false }, { live: false, claim: true }, { mode: 'off' as BrokerMode }]) {
         const s = await server(opts)
         const started = Date.now()
         const r = await runAsync('PermissionRequest', askPayload(), s.paths)
@@ -411,6 +432,8 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
         expect(Date.now() - started).toBeLessThan(3_000)
         expect(s.hits).toEqual([{ url: '/hooks/permission-requests/ask', status: 200 }])
         expect(s.broker.health().counters.parked).toBe(0)
+        expect(s.broker.health().lastFastPath).toBe(opts.mode === 'off' ? 'broker_off' : 'no_client')
+        if (opts.live === false) expect(lastQuestionsPollAt()).toBeNull()
         listener?.close(); listener = null
       }
     })

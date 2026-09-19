@@ -27,7 +27,7 @@ import {
 } from '../lib/permission-broker.js'
 import { SessionSignalStore } from '../lib/session-signal-store.js'
 import { deriveSessionState, derivedRowFields } from '../lib/session-state-derive.js'
-import { __resetClientLivenessForTests, lastClientClaimAt } from '../lib/client-liveness.js'
+import { __resetClientLivenessForTests, lastQuestionsPollAt } from '../lib/client-liveness.js'
 import { createClientInstanceRouter } from './client-instance.js'
 import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './permission-broker.js'
 import { ASK_INPUT, Q1, Q2, QUESTIONS, SESSION, permissionEnvelope } from '../lib/__fixtures__/permission-broker.js'
@@ -40,7 +40,7 @@ interface Harness {
   base: string
   broker: PermissionBroker
   store: SessionSignalStore
-  state: { mode: BrokerMode; admissions: boolean; seenAt: number | null; idle: number | null; timeoutMs: number; idleReads: number; hookToken: string | null }
+  state: { mode: BrokerMode; admissions: boolean; idle: number | null; timeoutMs: number; idleReads: number; hookToken: string | null; pollAgeMs: number }
 }
 
 const servers: Server[] = []
@@ -50,14 +50,21 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(r => { s.closeAllConnections?.(); s.close(() => r()) })))
 })
 
-async function start(over: Partial<PermissionBrokerDeps> = {}): Promise<Harness> {
-  const state: Harness['state'] = { mode: 'all', admissions: true, seenAt: Date.now(), idle: 1_000, timeoutMs: 4_000, idleReads: 0, hookToken: HOOK_TOKEN }
+/**
+ * A server wired as index.ts wires it. The broker reads the REAL liveness module, so a
+ * client is live only after a real authenticated `GET /api/session-questions`; `live`
+ * (default) makes one such poll once the server is up. `gate: false` leaves the /api
+ * token gate out, to prove the questions route checks the token itself.
+ */
+async function start(over: Partial<PermissionBrokerDeps> = {}, opts: { live?: boolean; gate?: boolean; claims?: boolean } = {}): Promise<Harness> {
+  __resetClientLivenessForTests()
+  const state: Harness['state'] = { mode: 'all', admissions: true, idle: 1_000, timeoutMs: 4_000, idleReads: 0, hookToken: HOOK_TOKEN, pollAgeMs: 0 }
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const broker = new PermissionBroker({
     now: () => Date.now(),
     mode: () => state.mode,
     admissionsOpen: () => state.admissions,
-    lastClientSeenAt: () => state.seenAt,
+    lastQuestionsPollAt,
     readDeskIdleSeconds: async () => { state.idleReads++; return state.idle },
     deskIdleSeconds: () => 90,
     timeoutMs: () => state.timeoutMs,
@@ -69,14 +76,18 @@ async function start(over: Partial<PermissionBrokerDeps> = {}): Promise<Harness>
   brokers.push(broker)
   wirePermissionBrokerToSignals(broker, store)
   const app = express()
-  // As index.ts: the /api gate, the global body parser, then the doors.
-  app.use('/api', requireApiToken(API_TOKEN))
+  // As index.ts: the /api gate, the global body parser, the claim referee, then the doors.
+  if (opts.gate !== false) app.use('/api', requireApiToken(API_TOKEN))
   app.use(express.json({ limit: '10mb' }))
+  if (opts.claims) app.use('/api', createClientInstanceRouter())
   app.use(createPermissionBrokerHookRouter({ hookToken: () => state.hookToken, broker }))
-  app.use('/api', createSessionQuestionsRouter({ broker }))
+  // The poll clock can be set back to make a poll look old without waiting for it.
+  app.use('/api', createSessionQuestionsRouter({ broker, apiToken: () => API_TOKEN, now: () => Date.now() - state.pollAgeMs }))
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   servers.push(server)
-  return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, broker, store, state }
+  const h: Harness = { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, broker, store, state }
+  if (opts.live !== false) expect((await list(h)).status).toBe(200)
+  return h
 }
 
 async function ask(h: Harness, body: unknown, headers: Record<string, string> = { 'x-cos-hook-token': HOOK_TOKEN }, signal?: AbortSignal) {
@@ -86,8 +97,8 @@ async function ask(h: Harness, body: unknown, headers: Record<string, string> = 
   return { status: res.status, text, body: text ? JSON.parse(text) as Record<string, unknown> : null, ms: performance.now() - started }
 }
 
-async function list(h: Harness) {
-  const res = await fetch(`${h.base}/api/session-questions`, { headers: { 'x-cos-token': API_TOKEN } })
+async function list(h: Harness, headers: Record<string, string> = { 'x-cos-token': API_TOKEN }) {
+  const res = await fetch(`${h.base}/api/session-questions`, { headers })
   return { status: res.status, body: await res.json() as { enabled: boolean; mode: string; items: Array<Record<string, any>> } }
 }
 
@@ -131,20 +142,20 @@ describe('POST /hooks/permission-requests/ask: everything outside the gate is {}
       ['not a PermissionRequest', () => {}, { hello: 'world' }, 'malformed'],
       ['approvals off', () => { h.state.mode = 'questions' }, bash(), 'approvals_off'],
       ['a plan approval', () => { h.state.mode = 'all' }, permissionEnvelope('ExitPlanMode', { plan: '# plan' }), 'unsupported_tool'],
-      ['the lens not live', () => { h.state.seenAt = null }, bash(), 'no_client'],
-      ['the lens silent 61 s', () => { h.state.seenAt = Date.now() - 61_000 }, bash(), 'no_client'],
-      ['a Bash request with the desk active', () => { h.state.seenAt = Date.now(); h.state.idle = 4 }, bash(), 'desk_active'],
+      ['no client has polled for questions', () => { __resetClientLivenessForTests() }, bash(), 'no_client'],
+      ['a Bash request with the desk active', () => { h.state.idle = 4 }, bash(), 'desk_active'],
       ['the desk unreadable', () => { h.state.idle = null }, bash(), 'desk_unknown'],
     ]
     for (const [name, arrange, body, reason] of cases) {
       arrange()
+      if (reason === 'desk_active') await list(h) // live again
       const r = await ask(h, body)
       expect(r.status, name).toBe(200)
       expect(r.body, name).toEqual({})
       expect(r.ms, name).toBeLessThan(FAST_MS)
       expect(h.broker.health().lastFastPath, name).toBe(reason)
     }
-    expect(h.broker.health().counters).toMatchObject({ parked: 0, fast_path: { broker_off: 1, draining: 1, cursor: 1, malformed: 1, approvals_off: 1, unsupported_tool: 1, no_client: 2, desk_active: 1, desk_unknown: 1 } })
+    expect(h.broker.health().counters).toMatchObject({ parked: 0, fast_path: { broker_off: 1, draining: 1, cursor: 1, malformed: 1, approvals_off: 1, unsupported_tool: 1, no_client: 1, desk_active: 1, desk_unknown: 1 } })
     // The switch and the drain are answered without reading the desk at all.
     expect(h.state.idleReads).toBe(2)
     expect((await list(h)).body.items).toEqual([])
@@ -355,29 +366,69 @@ describe('a parked question or approval', () => {
 })
 
 describe('liveness and the mount', () => {
-  it('a client-instance claim is the liveness signal', async () => {
-    __resetClientLivenessForTests()
-    const app = express()
-    app.use(express.json())
-    app.use('/api', createClientInstanceRouter({ now: () => 7_000_000 }))
-    const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
-    servers.push(server)
-    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-    const claim = (body: unknown) => fetch(`${base}/api/client-instance/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    expect((await claim({ id: 'bad' })).status).toBe(400)
-    expect(lastClientClaimAt()).toBeNull()
-    expect((await claim({ id: 'aaaa0001-lens', bootAt: 6_000_000, version: '6.9.512' })).status).toBe(200)
-    expect(lastClientClaimAt()).toBe(7_000_000)
-    __resetClientLivenessForTests()
-    expect((await claim({ id: 'bbbb0001-zomb', bootAt: 5_000_000, version: '6.9.511', check: true })).status).toBe(200)
-    expect(lastClientClaimAt()).toBe(7_000_000)
+  it('a live client-instance claim with NO questions poll takes the fast path (a 6.9.511 app: nothing held)', async () => {
+    const h = await start({}, { live: false, claims: true })
+    const claim = await fetch(`${h.base}/api/client-instance/claim`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-token': API_TOKEN },
+      body: JSON.stringify({ id: 'aaaa0001-lens', bootAt: Date.now() - 1_000, version: '6.9.511' }),
+    })
+    expect(claim.status).toBe(200)
+    // Everything else about the request would park it: away, a question, the broker on.
+    for (const body of [permissionEnvelope('AskUserQuestion', ASK_INPUT), permissionEnvelope('Bash', { command: 'touch x' })]) {
+      const r = await ask(h, body)
+      expect(r.body).toEqual({})
+      expect(r.ms).toBeLessThan(FAST_MS)
+      expect(h.broker.health().lastFastPath).toBe('no_client')
+    }
+    expect(lastQuestionsPollAt()).toBeNull()
+    expect(h.broker.health().counters.parked).toBe(0)
+  })
+
+  it('a questions poll at most 60 s old parks', async () => {
+    const h = await start({}, { live: false })
+    h.state.pollAgeMs = 59_000
+    expect((await list(h)).status).toBe(200)
+    const { reply, item } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
+    expect(item.kind).toBe('question')
+    expect(h.broker.health().counters.parked).toBe(1)
+    h.state.idle = 0 // back at the desk: released
+    expect((await within(reply)).body).toEqual({})
+  })
+
+  it('a poll older than 60 s takes the fast path; a fresh one parks again', async () => {
+    const h = await start({}, { live: false })
+    h.state.pollAgeMs = 61_000
+    expect((await list(h)).status).toBe(200)
+    const r = await ask(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
+    expect(r.body).toEqual({})
+    expect(h.broker.health().lastFastPath).toBe('no_client')
+    h.state.pollAgeMs = 0
+    const { reply } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
+    h.state.idle = 0
+    expect((await within(reply)).body).toEqual({})
+  })
+
+  it('a poll with the hook token never counts, even with no /api gate in front of the route', async () => {
+    for (const gate of [true, false]) {
+      const h = await start({}, { live: false, gate })
+      expect((await list(h, { 'x-cos-hook-token': HOOK_TOKEN })).status, `gate=${gate}`).toBe(401)
+      expect((await list(h, { 'x-cos-token': HOOK_TOKEN })).status, `gate=${gate}`).toBe(401)
+      expect((await list(h, {})).status, `gate=${gate}`).toBe(401)
+      expect(lastQuestionsPollAt(), `gate=${gate}`).toBeNull()
+      const r = await ask(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
+      expect(r.body, `gate=${gate}`).toEqual({})
+      expect(h.broker.health().lastFastPath, `gate=${gate}`).toBe('no_client')
+      // The pairing token on the same route does count.
+      expect((await list(h)).status).toBe(200)
+      expect(lastQuestionsPollAt()).not.toBeNull()
+    }
   })
 
   it('index.ts mounts the hook door outside /api and outside the thread-attach gate, and the client API behind the token', () => {
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN))")
     const hook = index.indexOf('app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))')
-    const api = index.indexOf("app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker }))")
+    const api = index.indexOf("app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN }))")
     const gate = index.indexOf('if (threadAttachEnabled()) {')
     for (const at of [auth, hook, api, gate]) expect(at).toBeGreaterThan(-1)
     expect(auth).toBeLessThan(api)
@@ -386,6 +437,9 @@ describe('liveness and the mount', () => {
     expect(api).toBeLessThan(gate)
     expect(index).toContain('wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)')
     expect(index).toContain('permissionBroker.stop()')
+    // The broker's liveness is the questions poll, never the claim referee.
+    expect(index).toContain('  lastQuestionsPollAt,\n')
+    expect(readFileSync(new URL('./client-instance.ts', import.meta.url), 'utf8')).not.toContain('client-liveness')
     const apiAuth = readFileSync(new URL('../lib/api-auth.ts', import.meta.url), 'utf8')
     expect(apiAuth).not.toContain('session-questions')
   })
