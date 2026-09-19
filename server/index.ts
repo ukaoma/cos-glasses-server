@@ -24,7 +24,18 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { deskIdleSeconds, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import {
+  PermissionBroker,
+  brokerSignalSink,
+  permissionBrokerMode,
+  permissionBrokerTimeoutMs,
+  readHidIdleSeconds,
+  registerPermissionBroker,
+  wirePermissionBrokerToSignals,
+} from './lib/permission-broker.js'
+import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './routes/permission-broker.js'
+import { lastClientClaimAt } from './lib/client-liveness.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -574,6 +585,25 @@ app.use('/api', agentSessionStreamRouter)
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)
 app.use('/api', createSessionHooksRouter({ port: PORT }))
+// 6.52.0: the permission broker. A session question (AskUserQuestion) or a tool approval,
+// answered from the lens or the phone while the desk is idle and a COS client is live
+// (lib/permission-broker.ts). The hook's door is OUTSIDE /api with hook-token auth, like
+// the Cursor Stop route, and mounted unconditionally: `COS_PERMISSION_BROKER=0` is the
+// switch, read per request, and every request outside the gate is answered `{}` at once.
+const permissionBroker = new PermissionBroker({
+  now: () => Date.now(),
+  mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
+  admissionsOpen: maintenanceAdmissionsOpen,
+  lastClientSeenAt: lastClientClaimAt,
+  readDeskIdleSeconds: readHidIdleSeconds,
+  deskIdleSeconds,
+  timeoutMs: () => permissionBrokerTimeoutMs(process.env),
+  signals: brokerSignalSink(sessionSignalStore),
+})
+registerPermissionBroker(permissionBroker)
+wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)
+app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))
+app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker }))
 // Phase 0 of Continue Original Agent Thread: can COS write into a desktop thread
 // without colliding with a live writer? Read-only — it answers, it never attaches.
 // Registered AFTER agentSessionsRouter deliberately: its paths are 2 and 4 segments
@@ -874,6 +904,8 @@ async function gracefulShutdown(): Promise<void> {
   stopMeetingImportScheduler()
   stopMeetingMergeScheduler()
   sessionHooksRuntime.stop()
+  // Every held hook gets `{}` (the native dialog) before the process goes.
+  permissionBroker.stop()
   try {
     await shutdownQueryJobRuntime('server_shutdown')
   } catch (error) {

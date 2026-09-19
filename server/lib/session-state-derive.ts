@@ -36,7 +36,10 @@ export interface DerivedSessionState {
   waiting_detail?: string
   failure?: string
   last_reply?: string
+  /** 6.52.0: the permission broker holds this approval; `GET /api/session-questions` has it. */
   pending_permission_id?: string
+  /** 6.52.0: the permission broker holds this AskUserQuestion; `GET /api/session-questions` has it. */
+  pending_question_id?: string
   /** Consecutive derives that saw a dead registry pid; carried by the caller between polls. */
   deadScans: number
   /** When the pid was first seen dead, so two observations must also be DEAD_GRACE_MS apart. */
@@ -160,14 +163,20 @@ function deriveFromSignal(signal: SessionSignal, registry: RegistryFacts | undef
   if (signal.ended && !(registry?.alive)) {
     return { agent_state: 'ended', state_source: 'hook', state_since: iso(signal.ended.at), ...reply }
   }
-  if (signal.waiting && waitStillStands(signal.waiting.since, registry, transcript, now)) {
+  // 6.52.0: a wait the permission broker still holds stands whatever the registry or the
+  // transcript say. The broker is positive evidence the hook is blocked on it right now,
+  // and it drops the id on every way the request ends (answer, desk, deadline, hook gone),
+  // all bounded by its deadline.
+  if (signal.waiting && (signal.waiting.requestId || waitStillStands(signal.waiting.since, registry, transcript, now))) {
+    const requestId = signal.waiting.requestId
     return {
       agent_state: 'waiting',
       state_source: 'hook',
       state_since: iso(signal.waiting.since),
       waiting_kind: signal.waiting.kind,
       waiting_detail: signal.waiting.detail,
-      ...(signal.waiting.requestId ? { pending_permission_id: signal.waiting.requestId } : {}),
+      ...(requestId && signal.waiting.kind === 'question' ? { pending_question_id: requestId } : {}),
+      ...(requestId && signal.waiting.kind !== 'question' ? { pending_permission_id: requestId } : {}),
       ...reply,
     }
   }
@@ -208,8 +217,8 @@ function waitStillStands(since: number, registry: RegistryFacts | undefined, tra
 }
 
 /**
- * The fields a `status` draft carries (6.48.1): the row fields minus the permission id
- * (slice 4's, never on the stream) and with `last_reply` only on an idle state, where a
+ * The fields a `status` draft carries (6.48.1): the row fields minus the broker ids
+ * (`pending_permission_id`, `pending_question_id`: never on the stream) and with `last_reply` only on an idle state, where a
  * feed renders "Idle, last reply: …". A typed projection, so a new row field cannot reach
  * the wire by accident.
  */
@@ -245,5 +254,6 @@ export function derivedRowFields(derived: DerivedSessionState | undefined): Reco
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(derived.last_reply ? { last_reply: derived.last_reply } : {}),
     ...(derived.pending_permission_id ? { pending_permission_id: derived.pending_permission_id } : {}),
+    ...(derived.pending_question_id ? { pending_question_id: derived.pending_question_id } : {}),
   }
 }

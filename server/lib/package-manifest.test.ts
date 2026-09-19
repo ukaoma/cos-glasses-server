@@ -50,9 +50,17 @@ describe('package manifest', () => {
   it('matches the newest changelog heading', () => {
     const pkg = JSON.parse(readFileSync(PKG, 'utf8'))
     const changelog = readFileSync(new URL('../../CHANGELOG.md', import.meta.url).pathname, 'utf8')
-    const first = changelog.match(/^##\s*\[?(\d+\.\d+\.\d+)\]?/m)
-    expect(first, 'no version heading found in CHANGELOG.md').not.toBeNull()
-    expect(first?.[1]).toBe(pkg.version)
+    // 6.52.0: a section written ahead of its release sits on top as `## X.Y.Z (unreleased)`
+    // while the package keeps the published version. Only such sections, and only above
+    // the newest released heading, are skipped; the release bump drops the marker, and a
+    // bump that leaves it (or a marked version equal to the package's) still fails here.
+    const headings = [...changelog.matchAll(/^##\s*\[?(\d+\.\d+\.\d+)\]?(.*)$/gm)]
+    const unreleased = (rest: string) => /\(unreleased\)/i.test(rest)
+    const firstReleased = headings.findIndex(h => !unreleased(h[2] ?? ''))
+    expect(firstReleased, 'no version heading found in CHANGELOG.md').toBeGreaterThanOrEqual(0)
+    expect(headings[firstReleased]?.[1]).toBe(pkg.version)
+    for (const h of headings.slice(0, firstReleased)) expect(h[1], 'an unreleased section cannot carry the published version').not.toBe(pkg.version)
+    expect(headings.slice(firstReleased).some(h => unreleased(h[2] ?? '')), 'an (unreleased) section below a released one').toBe(false)
   })
 })
 

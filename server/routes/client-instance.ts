@@ -24,6 +24,7 @@ import {
   NO_CAPTURE,
   type ClientInstanceOwner,
 } from '../lib/client-instance-claim.js'
+import { noteClientClaim } from '../lib/client-liveness.js'
 
 /** Owners kept at once; the least recently seen device is dropped past this. */
 export const CLIENT_INSTANCE_MAX_DEVICES = 16
@@ -57,6 +58,9 @@ export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() 
     const at = now()
     const claim = parseClientInstanceClaim(req.body, at)
     if (!claim) return void res.status(400).json({ error: 'invalid_claim' })
+    // 6.52.0: a live app copy, for the permission broker's "a lens or phone client is
+    // there" gate (lib/client-liveness.ts). A check counts: it is a live copy too.
+    noteClientClaim(at)
     const device = deviceKey(req.socket?.remoteAddress ?? req.ip)
     const previous = owners.get(device) ?? null
     const evidence = previous ? chunks.evidence(device, previous.id, claim.id, at) : NO_CAPTURE
