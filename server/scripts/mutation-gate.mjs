@@ -758,7 +758,7 @@ const CASES = [
   {
     name: 'live-unverified-is-not-delivered',
     file: 'server/lib/session-peer-inbox.ts',
-    find: "  suspects.set(key, { marker, sentAtMs: sentAt })\n  return done(false, 'unverified', null, target.pid)",
+    find: "  suspects.set(key, { marker, sentAtMs: sentAt, sizeAtSend })\n  return done(false, 'unverified', null, target.pid)",
     replace: "  return done(true, 'delivered', 'enqueue', target.pid)",
     tests: ['server/lib/session-peer-inbox.test.ts'],
   },
@@ -793,8 +793,8 @@ const CASES = [
   {
     name: 'outcome-rides-status-not-prompt',
     file: 'server/lib/session-stream-events.ts',
-    find: '    return outcomes.length > 0 ? outcomes : promptDrafts(message)',
-    replace: '    return promptDrafts(message)',
+    find: '    if (outcomes.length > 0) return outcomes\n',
+    replace: '',
     tests: ['server/lib/session-stream-events.test.ts', 'server/lib/session-stream-prompt.test.ts'],
   },
   {
@@ -943,7 +943,7 @@ const CASES = [
   {
     name: 'turns-peer-is-the-user',
     file: 'server/lib/agent-session-turns.ts',
-    find: "    if (peer !== null) return shaped('user', peer, at)\n",
+    find: "    if (peer !== null) return (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? shaped('user', peer, at) : null\n",
     replace: '',
     tests: ['server/lib/agent-session-turns.test.ts'],
   },
@@ -1021,7 +1021,7 @@ const CASES = [
   {
     name: "codex-live-every-failure-is-refused",
     file: "server/lib/codex-live-queue.ts",
-    find: "  return NOTHING_QUEUED.test(run.stderr) ? { reason: 'refused', queuedId: null } : { reason: 'unverified', queuedId: null }\n",
+    find: "  if (run.code === 2 && USAGE_ERROR.test(run.stderr)) return { reason: 'refused', queuedId: null }\n  return { reason: 'unverified', queuedId: null }\n",
     replace: "  return { reason: 'refused', queuedId: null }\n",
     tests: ["server/lib/codex-live-queue.test.ts"],
   },
