@@ -581,19 +581,35 @@ function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamD
 /**
  * Codex, with ONE CHANNEL PER KIND, which is the point.
  *
- * Codex writes the same assistant text twice, as `event_msg/agent_message` AND as
- * `response_item/message` with `role:'assistant'` (measured on this Mac: 6 of each in
- * one rollout, plus 8 `response_item/agent_message`). Mapping both would double every
- * reply on the lens. So prose comes from the event channel only and tools from the
- * response-item channel only, and the duplication is unrepresentable rather than
- * deduplicated after the fact.
+ * Codex writes the same assistant text more than once: as a TurnItem
+ * (`event_msg/item_completed`, item `AgentMessage`) or, in an older rollout, as the
+ * legacy `event_msg/agent_message`, AND as `response_item/message` with
+ * `role:'assistant'`. It writes each command twice too: as the `response_item` call
+ * AND, in some builds, as an `item_completed` `CommandExecution` / `FileChange`.
+ * Mapping two channels would double every line on the lens. So:
  *
- * The honest cost: if a Codex build stops emitting `event_msg/agent_message`, prose
- * goes quiet and the poll fallback carries the text. Quiet is the safe direction;
- * doubled text is not.
+ *   prose      event channel only: `item_completed/AgentMessage`, else the legacy
+ *              `agent_message`. Never `response_item/message`.
+ *   tools      response-item channel only. Never `CommandExecution` / `FileChange`.
+ *   status     event channel only (task_started / task_complete / turn_aborted).
  *
- * `codex exec --json` has also historically wrapped events as `{id, msg:{type,...}}`
- * rather than `{type:'event_msg', payload:{...}}`. Both are accepted.
+ * WHY THE TWO PROSE SOURCES CANNOT BOTH FIRE IN ONE ROLLOUT (6.52.0). Codex's rollout
+ * writer (`should_persist_event_msg`, codex-rs/rollout/src/policy.rs) persists the
+ * legacy `AgentMessage` event ONLY when the thread's `history_mode` is `legacy`, and an
+ * `ItemCompleted` AgentMessage ONLY when it is `paginated`; every earlier version of
+ * that policy persisted `ItemCompleted` for plan items alone. `history_mode` is a
+ * property of the thread, stamped on its `session_meta`. Measured on this Mac on
+ * 2026-09-19: 912 rollouts from codex-cli 0.128 to 0.155, 949 of 949 `session_meta`
+ * records say `paginated`, 0 legacy `agent_message` events, 171,606 `item_completed`
+ * events, 0 rollouts with both, and no AgentMessage item id written twice.
+ *
+ * Until 6.52.0 prose came from `agent_message` alone, so on every rollout above the
+ * lens said "Working. Nothing written yet." while the Codex app showed paragraphs.
+ *
+ * The live `codex exec --json` envelope, `{id, msg:{type,...}}`, is different: Codex
+ * EMITS both the legacy event and the item for one message on its live stream (the
+ * policy above only filters what is written to disk). So that envelope reads the
+ * legacy events alone, exactly as before, and never an item.
  */
 function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDraft[] {
   const msg = asRecord(record.msg)
@@ -602,11 +618,23 @@ function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDr
   const type = typeof record.type === 'string' ? record.type : ''
   const payload = asRecord(record.payload)
   if (!payload) return []
-  if (type === 'event_msg') return draftsFromCodexEvent(payload)
+  if (type === 'event_msg') {
+    if (payload.type === 'item_completed') return draftsFromCodexItem(asRecord(payload.item))
+    return draftsFromCodexEvent(payload)
+  }
   if (type !== 'response_item') return []
 
   const kind = typeof payload.type === 'string' ? payload.type : ''
   if (kind === 'function_call' || kind === 'custom_tool_call' || kind === 'local_shell_call') {
+    const name = typeof payload.name === 'string' ? payload.name.trim() : ''
+    // A code-mode cell (6.52.0): `exec` carrying JavaScript that calls the real tools.
+    if (kind === 'custom_tool_call' && name === 'exec' && typeof payload.input === 'string' && isCodeModeCell(payload.input)) {
+      return codeModeDrafts(payload.input, payload.call_id)
+    }
+    if (name === 'apply_patch') {
+      const patch = typeof payload.input === 'string' ? payload.input : patchFromArguments(payload.arguments)
+      if (patch !== null) return [patchDraft(patch, payload.call_id)]
+    }
     // `arguments` is a JSON STRING on function_call; `input` is a raw string on
     // custom_tool_call. Only the parseable one can yield a structured target.
     let input: unknown = payload.input
@@ -619,6 +647,7 @@ function draftsFromCodexRecord(record: Record<string, unknown>): SessionStreamDr
     } else if (typeof input === 'string') {
       input = { command: input }
     }
+    if (kind === 'function_call' && isCodexPoll(name, input)) return []
     return [toolDraft(payload.name, input, payload.call_id)]
   }
   return []
@@ -635,6 +664,427 @@ function draftsFromCodexEvent(payload: Record<string, unknown>): SessionStreamDr
     return prose ? [prose] : []
   }
   return []
+}
+
+/**
+ * A `status: working` draft carrying Codex's reasoning headline (6.52.0).
+ *
+ * AN EXTRA FIELD ON AN EXISTING KIND, NEVER A NEW KIND, for the reason `tool_outcome`
+ * rides a status draft: a shipped client drops an unknown `kind` BEFORE its seq
+ * accounting and paints a gap row, while it takes a repeated `status: working` as a
+ * no-op and strips the fields it does not know. So an old lens renders exactly what
+ * it did before, and a client that learns `reasoning` can show the line. It is never
+ * prose: it is the model's summary of what it is thinking, not something it wrote.
+ */
+export type CodexReasoningStatus = { kind: 'status'; state: 'working'; reasoning: string }
+
+export function isCodexReasoningStatus(draft: SessionStreamDraft): boolean {
+  return draft.kind === 'status' && typeof (draft as { reasoning?: unknown }).reasoning === 'string'
+}
+
+/**
+ * One completed Codex TurnItem (`event_msg/item_completed`, paginated rollouts).
+ *
+ * Measured item types on this Mac: AgentMessage, Reasoning, UserMessage,
+ * CommandExecution, FileChange, WebSearch, McpToolCall, ContextCompaction, Plan,
+ * SubAgentActivity, ImageView. Only the first three map; the tool items are the
+ * response-item channel's job (see `draftsFromCodexRecord`).
+ */
+function draftsFromCodexItem(item: Record<string, unknown> | null): SessionStreamDraft[] {
+  if (!item) return []
+  if (item.type === 'AgentMessage') {
+    // `content: [{type:'Text', text}]`, `phase: 'commentary' | 'final_answer'`. Both are
+    // what Codex wrote to the person, so both are prose.
+    const prose = proseDraft(codexItemText(item.content))
+    return prose ? [prose] : []
+  }
+  if (item.type === 'Reasoning') {
+    const reasoning = codexReasoningHeadline(item.summary_text)
+    if (!reasoning) return []
+    const draft: CodexReasoningStatus = { kind: 'status', state: 'working', reasoning }
+    return [draft]
+  }
+  if (item.type === 'UserMessage') {
+    // Codex already leaves AGENTS.md, `<environment_context>` and skill bodies out of
+    // this item (they are response_item rows only), so what is left is what the person
+    // sent, less automation wrappers and attached-file scaffolding.
+    const blocks = Array.isArray(item.content)
+      ? item.content.map(block => asRecord(block)?.text)
+      : []
+    const ask = codexUserAsk(blocks)
+    const text = ask === null ? '' : oneLine(ask, PROMPT_MAX_CHARS)
+    return text ? [{ kind: 'prompt', text }] : []
+  }
+  return []
+}
+
+function codexItemText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(block => asRecord(block)?.text)
+    .filter((text): text is string => typeof text === 'string' && text.trim().length > 0)
+    .join('\n\n')
+}
+
+/**
+ * The reasoning line: the headline of the newest summary section, markdown bold out.
+ *
+ * `summary_text` is a list of sections, each `**Title**` or `**Title**\n\nbody`
+ * (415,343 sections measured, no other form). The newest is what the model is
+ * thinking about now; its title is the glanceable part. An empty list (reasoning that
+ * was encrypted, 4,988 items) yields nothing rather than a placeholder.
+ */
+export function codexReasoningHeadline(summary: unknown): string {
+  if (!Array.isArray(summary)) return ''
+  for (let k = summary.length - 1; k >= 0; k--) {
+    const section = summary[k]
+    if (typeof section !== 'string' || section.trim().length === 0) continue
+    // The first line IS the title (`**Title**`); a body, when there is one, follows a
+    // blank line.
+    const plain = oneLine(section.trim().split('\n')[0].replace(/\*\*/g, ''), TARGET_MAX_CHARS)
+    if (plain) return plain
+  }
+  return ''
+}
+
+/**
+ * What the person asked, out of the text blocks of one Codex user message, or null.
+ *
+ * Shared by the stream (the `prompt` line) and the session detail (title, first
+ * prompt, DISCUSSION, recent turns), so the two can never disagree about what a user
+ * said. Per BLOCK, because a Codex user message is a list of blocks and one record can
+ * hold a wrapper block next to typed text (`<image>` then the words; 5 records here).
+ *
+ * DROPPED, measured over this Mac's rollouts on 2026-09-19:
+ *  - `# AGENTS.md instructions for <dir>`: Codex writes the repo's AGENTS.md as a user
+ *    message. It is the FIRST user row in 469 rollouts, so it became the session's
+ *    title and opening DISCUSSION line.
+ *  - any block that opens with a tag: `<environment_context>`, `<skill>`,
+ *    `<subagent_notification>`, `<recommended_plugins>`, `<heartbeat>`, `<image ...>`,
+ *    `</image>`, `<turn_aborted>` and the rest. The same rule `isWrapperPrompt` uses.
+ *
+ * KEPT, because it is real: an attached-file message (`# Files mentioned by the user:`,
+ * `# Files pasted by the user:`, `# In app browser:`) is reduced to the words after its
+ * `## My request for Codex:` / `## My request:` heading, which is what was typed
+ * (1,648 of 1,760 such messages). One without that heading is kept whole.
+ */
+export function codexUserAsk(blocks: readonly unknown[]): string | null {
+  const kept: string[] = []
+  for (const block of blocks) {
+    if (typeof block !== 'string') continue
+    let text = block.trim()
+    if (!text || text.startsWith('<') || CODEX_AGENTS_MD.test(text)) continue
+    if (CODEX_ATTACHMENT_HEADER.test(text)) {
+      const request = CODEX_REQUEST_HEADING.exec(text)
+      if (request) text = text.slice(request.index + request[0].length).trim()
+    }
+    if (text) kept.push(text)
+  }
+  return kept.length > 0 ? kept.join('\n\n') : null
+}
+
+const CODEX_AGENTS_MD = /^#\s*AGENTS\.md instructions\b/
+const CODEX_ATTACHMENT_HEADER = /^#\s*(?:Files mentioned by the user|Files pasted by the user|In app browser)\b/
+const CODEX_REQUEST_HEADING = /^##\s*My request(?: for Codex)?:/m
+
+/**
+ * A poll, which is not a step (6.52.0).
+ *
+ * Code mode runs a command in a cell and then WAITS on it: `wait` with a `cell_id`, or
+ * `write_stdin` with no characters to read more output (10,828 of 11,041 `write_stdin`
+ * calls measured). Each rendered as a step ("other wait", "other write_stdin"), so the
+ * lens counted and listed waiting as work. A `write_stdin` that TYPES something is an
+ * action and stays a step.
+ */
+function isCodexPoll(name: string, input: unknown): boolean {
+  if (name === 'wait') return true
+  if (name !== 'write_stdin') return false
+  const chars = asRecord(input)?.chars
+  return chars === undefined || chars === null || chars === ''
+}
+
+/** Steps one code-mode cell may add. A cell that loops over calls is still one glance. */
+export const CODE_MODE_MAX_STEPS = 3
+
+/**
+ * Is this `exec` input a code-mode JavaScript cell rather than a shell command?
+ *
+ * Every `exec` custom tool call on this Mac (48,706, codex-cli 0.129 to 0.155) is
+ * JavaScript: it calls `tools.<fn>(...)`, or opens with a declaration, `text(`,
+ * `ALL_TOOLS`, a loop, a comment or an array. Anything else keeps the old reading,
+ * a shell command, so an older build's plain `exec` renders exactly as before.
+ */
+function isCodeModeCell(input: string): boolean {
+  if (/^\s*(?:(?:const|let|var|await)\b|text\s*\(|ALL_TOOLS\b|for\s*\(|\/\/|\/\*|\[\s*["'`\d[{])/.test(input)) return true
+  return lexCodeModeCell(input).calls.length > 0
+}
+
+interface CodeModeCall { fn: string; args: string | null }
+
+function isIdentChar(ch: string | undefined): boolean {
+  return ch !== undefined && /[\w$]/.test(ch)
+}
+
+function skipSpace(src: string, i: number): number {
+  while (i < src.length && /\s/.test(src[i])) i++
+  return i
+}
+
+/** Index just past the string literal opening at `i` (or the end, if it never closes). */
+function skipStringLiteral(src: string, i: number): number {
+  const quote = src[i]
+  let j = i + 1
+  while (j < src.length) {
+    const ch = src[j]
+    if (ch === '\\') { j += 2; continue }
+    if (ch === quote) return j + 1
+    j++
+  }
+  return src.length
+}
+
+/** Index of the bracket closing the one at `open`, skipping strings; the end if none. */
+function matchBracket(src: string, open: number): number {
+  let depth = 0
+  let j = open
+  while (j < src.length) {
+    const ch = src[j]
+    if (ch === '"' || ch === "'" || ch === '`') { j = skipStringLiteral(src, j); continue }
+    if (ch === '(' || ch === '[' || ch === '{') depth++
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      depth--
+      if (depth === 0) return j
+    }
+    j++
+  }
+  return src.length
+}
+
+const JS_SIMPLE_ESCAPES: Readonly<Record<string, string>> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' }
+
+/** The value of a JS string literal (quotes included in `literal`), or null. */
+function decodeJsString(literal: string): string | null {
+  if (literal.length < 2) return null
+  const quote = literal[0]
+  if ((quote !== '"' && quote !== "'" && quote !== '`') || literal[literal.length - 1] !== quote) return null
+  // One reading for all three quote styles (JSON's escapes are a subset of these).
+  return literal.slice(1, -1).replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (_, esc: string) => {
+    const simple = JS_SIMPLE_ESCAPES[esc]
+    if (simple !== undefined) return simple
+    if (esc.startsWith('u{')) return String.fromCodePoint(parseInt(esc.slice(2, -1), 16))
+    if (esc.length > 1) return String.fromCharCode(parseInt(esc.slice(1), 16))
+    return esc
+  })
+}
+
+/**
+ * The tool calls and string literals of a code-mode cell.
+ *
+ * A small lexer rather than a pattern over the source: a command string that itself
+ * mentions `tools.apply_patch(` (a search for it, say) must not count as a call, and a
+ * call's arguments end at ITS closing parenthesis, not at the first one in a string.
+ */
+function lexCodeModeCell(src: string): { calls: CodeModeCall[]; literals: string[] } {
+  const calls: CodeModeCall[] = []
+  const literals: string[] = []
+  let i = 0
+  while (i < src.length) {
+    const ch = src[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const end = skipStringLiteral(src, i)
+      const value = decodeJsString(src.slice(i, end))
+      if (value !== null) literals.push(value)
+      i = end
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i)
+      i = nl < 0 ? src.length : nl + 1
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2)
+      i = close < 0 ? src.length : close + 2
+      continue
+    }
+    if (src.startsWith('tools', i) && !isIdentChar(src[i - 1]) && src[i - 1] !== '.' && !isIdentChar(src[i + 5])) {
+      let j = skipSpace(src, i + 5)
+      let fn: string | null = null
+      if (src[j] === '.') {
+        j = skipSpace(src, j + 1)
+        const name = /^[A-Za-z_$][\w$]*/.exec(src.slice(j))
+        if (name) { fn = name[0]; j += name[0].length }
+      } else if (src[j] === '[') {
+        j = skipSpace(src, j + 1)
+        if (src[j] === '"' || src[j] === "'" || src[j] === '`') {
+          const end = skipStringLiteral(src, j)
+          const name = decodeJsString(src.slice(j, end))
+          j = skipSpace(src, end)
+          if (name && src[j] === ']') { fn = name; j += 1 }
+        }
+      }
+      if (fn !== null) {
+        j = skipSpace(src, j)
+        let args: string | null = null
+        if (src[j] === '(') {
+          const close = matchBracket(src, j)
+          args = src.slice(j + 1, close)
+          // The argument literals are scanned by the main loop too, so a patch passed
+          // inline is found the same way as one passed through a variable.
+          i = j + 1
+        } else {
+          i = j
+        }
+        calls.push({ fn, args })
+        continue
+      }
+    }
+    i++
+  }
+  return { calls, literals }
+}
+
+/**
+ * The string-valued top-level properties of an object literal (`{cmd:"ls", ...}` or
+ * `{"cmd":"ls"}`), or null when the argument is not one (a variable, a call).
+ */
+function objectLiteralStrings(args: string): Record<string, string> | null {
+  const src = args.trim()
+  if (!src.startsWith('{')) return null
+  const out: Record<string, string> = {}
+  const end = matchBracket(src, 0)
+  let i = 1
+  while (i < end) {
+    i = skipSpace(src, i)
+    if (src[i] === ',') { i++; continue }
+    if (i >= end) break
+    let key = ''
+    if (src[i] === '"' || src[i] === "'" || src[i] === '`') {
+      const close = skipStringLiteral(src, i)
+      key = decodeJsString(src.slice(i, close)) ?? ''
+      i = close
+    } else {
+      const name = /^[A-Za-z_$][\w$]*/.exec(src.slice(i))
+      if (name) { key = name[0]; i += key.length }
+    }
+    i = skipSpace(src, i)
+    if (key && src[i] === ':') {
+      i = skipSpace(src, i + 1)
+      if (src[i] === '"' || src[i] === "'" || src[i] === '`') {
+        const close = skipStringLiteral(src, i)
+        const value = decodeJsString(src.slice(i, close))
+        if (value !== null) out[key] = value
+        i = close
+        continue
+      }
+    }
+    // Any other value (a number, a nested object, an expression): skip to the next
+    // top-level comma.
+    while (i < end && src[i] !== ',') {
+      const ch = src[i]
+      if (ch === '"' || ch === "'" || ch === '`') i = skipStringLiteral(src, i)
+      else if (ch === '(' || ch === '[' || ch === '{') i = matchBracket(src, i) + 1
+      else i++
+    }
+  }
+  return out
+}
+
+function isCodeModePoll(call: CodeModeCall): boolean {
+  if (call.fn === 'wait') return true
+  if (call.fn !== 'write_stdin') return false
+  // Only a provable poll is dropped: an argument that is not a literal might type.
+  const args = call.args === null ? null : objectLiteralStrings(call.args)
+  if (args === null) return false
+  return args.chars === undefined || args.chars === ''
+}
+
+/** The patch text a code-mode `apply_patch` call applied, from the cell's literals. */
+function patchFromLiterals(literals: readonly string[]): string | null {
+  return literals.find(value => CODEX_PATCH_FILE.test(value)) ?? null
+}
+
+function patchFromArguments(argumentsJson: unknown): string | null {
+  if (typeof argumentsJson !== 'string') return null
+  try {
+    const parsed = asRecord(JSON.parse(argumentsJson))
+    const patch = parsed?.input ?? parsed?.patch
+    return typeof patch === 'string' ? patch : null
+  } catch {
+    return null
+  }
+}
+
+const CODEX_PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: /m
+
+/**
+ * One `apply_patch` as a step: `write` when it only adds files, else `edit`; the
+ * basenames it touched; `+added -removed` counted from the hunks, the same arithmetic
+ * an Edit step shows.
+ */
+function patchDraft(patch: string, id?: unknown): SessionStreamDraft {
+  const names: string[] = []
+  let onlyAdds = true
+  let added = 0
+  let removed = 0
+  for (const line of patch.split('\n')) {
+    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line.trimEnd())
+    if (header) {
+      if (header[1] !== 'Add') onlyAdds = false
+      const name = basename(header[2].trim())
+      if (name && !names.includes(name)) names.push(name)
+      continue
+    }
+    // Hunk lines. Every other line of the format (`*** Begin Patch`, `@@`, context)
+    // starts with something else.
+    if (line.startsWith('+')) added++
+    else if (line.startsWith('-')) removed++
+  }
+  const call = callId(id)
+  return {
+    kind: 'tool',
+    verb: names.length > 0 && onlyAdds ? 'write' : 'edit',
+    target: names.length > 0 ? oneLine(names.join(', '), TARGET_MAX_CHARS) : 'apply_patch',
+    detail: added + removed > 0 ? oneLine(`+${added} -${removed}`, DETAIL_MAX_CHARS) : '',
+    ...(call ? { call } : {}),
+  }
+}
+
+/**
+ * A code-mode cell as the steps it took (6.52.0).
+ *
+ * Code mode wraps every tool in JavaScript: `const r = await
+ * tools.exec_command({"cmd":"sed -n '1,55p' ..."}); text(r.output);`. Until 6.52.0 the
+ * whole cell was the "command", so the lens printed `bash let{output,...rest}=awai...`.
+ * Now each real call is a step: `exec_command` is `bash` with its `cmd`, `apply_patch`
+ * is `edit`/`write` with the file, anything else names itself. Polls are not steps. A
+ * cell that calls no tool is `other exec`. The call id rides the first step only, so it
+ * still names exactly one step.
+ */
+function codeModeDrafts(input: string, id?: unknown): SessionStreamDraft[] {
+  const { calls, literals } = lexCodeModeCell(input)
+  const call = callId(id)
+  if (calls.length === 0) {
+    return [{ kind: 'tool', verb: 'other', target: 'exec', detail: '', ...(call ? { call } : {}) }]
+  }
+  const steps: SessionStreamDraft[] = []
+  for (const c of calls) {
+    if (isCodeModePoll(c)) continue
+    steps.push(codeModeStep(c, literals))
+    if (steps.length >= CODE_MODE_MAX_STEPS) break
+  }
+  return steps.map((step, index) => (index === 0 && call && step.kind === 'tool' ? { ...step, call } : step))
+}
+
+function codeModeStep(call: CodeModeCall, literals: readonly string[]): SessionStreamDraft {
+  if (call.fn === 'apply_patch') {
+    const inline = call.args === null ? null : decodeJsString(call.args.trim())
+    const patch = inline !== null && CODEX_PATCH_FILE.test(inline) ? inline : patchFromLiterals(literals)
+    if (patch !== null) return patchDraft(patch)
+    return { kind: 'tool', verb: 'edit', target: 'apply_patch', detail: '' }
+  }
+  const args = call.args === null ? null : objectLiteralStrings(call.args)
+  return toolDraft(call.fn, args ?? {})
 }
 
 /**
@@ -712,7 +1162,8 @@ export function turnFromTail(provider: SessionStreamProvider, lines: readonly st
 
     if (provider === 'codex') {
       for (const draft of draftsFromRecord('codex', r)) {
-        if (draft.kind === 'status') verdict = draft.state === 'done' ? { ended: true, reason: 'codex_complete' } : { ended: false, reason: 'prompt_open' }
+        // 6.52.0: a reasoning line is narration, not a turn event. It never moves the verdict.
+        if (draft.kind === 'status' && !isCodexReasoningStatus(draft)) verdict = draft.state === 'done' ? { ended: true, reason: 'codex_complete' } : { ended: false, reason: 'prompt_open' }
       }
       continue
     }

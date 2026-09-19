@@ -37,6 +37,7 @@ import {
   isWrapperPrompt,
   isoFromMtime,
   lastCustomTitle,
+  codexUserText,
   listCodexJsonlFiles,
   loadClaudeStarredIds,
   loadCodexPinnedIds,
@@ -149,7 +150,8 @@ function extractUserText(provider: AgentProvider, raw: string): string {
       if (obj.type !== 'response_item' || !obj.payload || typeof obj.payload !== 'object') continue
       const payload = obj.payload as Record<string, unknown>
       if (payload.type !== 'message' || payload.role === 'developer' || payload.role === 'assistant') continue
-      const body = payloadText(payload)
+      // 6.52.0: without the AGENTS.md block, which every session shares and nobody typed.
+      const body = codexUserText(payload)
       if (body && !isWrapperPrompt(body)) parts.push(firstLineTitle(body) || body)
     } else {
       if (obj.role !== 'user') continue
