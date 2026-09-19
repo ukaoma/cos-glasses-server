@@ -23,8 +23,10 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // Command-line flags commonly used for credentials.
   [/(\s--?(?:api-key|token|access-token|refresh-token|password|passwd|secret|client-secret)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi, '$1[redacted]'],
   [/(\s(?:-u|--user)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi, '$1[redacted]'],
-  // URL userinfo and secret-bearing query parameters.
-  [/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, '$1[redacted]@'],
+  // URL userinfo and secret-bearing query parameters. The scheme is BOUNDED (6.52.0 QA):
+  // unbounded, it was tried from every position of a long run of letters and digits and
+  // each try scanned to the end of the run, so a 100 KB hex blob took seconds.
+  [/([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]*:[^\s/@]+@/gi, '$1[redacted]@'],
   [/([?&](?:api[_-]?key|access[_-]?token|token|auth|password|secret)=)[^&#\s]+/gi, '$1[redacted]'],
   // Common provider token formats.
   [/\b(?:sk-(?:proj-|live-|test-)?|sk_(?:live|test)_|sess-|pat-|gh[pousr]_|github_pat_|glpat-|npm_|pypi-|shpat_|xox[baprs]-)[A-Za-z0-9._-]{8,}\b/gi, '[redacted-token]'],
@@ -54,6 +56,30 @@ function looksOpaqueSecret(text: string): boolean {
   if (/\d/.test(compact)) classes++
   if (/[+/=_:.-]/.test(compact)) classes++
   return classes >= 3
+}
+
+/**
+ * How much free text any redaction here is handed (6.52.0 QA). Every caller that redacts
+ * text of unbounded length (the trail, the approval card) cuts it to this BEFORE a regex
+ * runs, so no input can make a pattern run long, whatever the patterns become.
+ */
+export const REDACTION_SCAN_MAX_CHARS = 8_000
+
+/**
+ * The part of `text` a redaction may scan: at most `max` characters, ending where a token
+ * ends, so a secret that straddles the cut is left out whole rather than kept as a prefix
+ * no pattern can recognise any more. `omitted` is how many characters were left out. A
+ * head with no whitespace at all is empty: one unbroken run that long is nothing to show.
+ */
+export function boundForRedaction(text: string, max = REDACTION_SCAN_MAX_CHARS): { head: string; omitted: number } {
+  if (typeof text !== 'string') return { head: '', omitted: 0 }
+  if (text.length <= max) return { head: text, omitted: 0 }
+  let cut = max
+  // The first character left out is whitespace: nothing straddles the cut.
+  if (!/\s/.test(text[cut]!)) {
+    while (cut > 0 && !/\s/.test(text[cut - 1]!)) cut--
+  }
+  return { head: text.slice(0, cut), omitted: text.length - cut }
 }
 
 /**

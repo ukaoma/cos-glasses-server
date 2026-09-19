@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  REDACTION_SCAN_MAX_CHARS,
+  boundForRedaction,
   claudeToolInputPreview,
   claudeToolResultPreviewLines,
   codexActivityPreviewLines,
+  redactSecretText,
   sanitizeActivityPreview,
   textPreviewLines,
 } from './activity-preview.js'
@@ -113,5 +116,31 @@ describe('observable tool activity only', () => {
       type: 'assistant',
       message: { content: [{ type: 'thinking', text: 'hidden reasoning' }] },
     })).toEqual([])
+  })
+})
+
+describe('redaction cost and bounds (6.52.0 QA round 1)', () => {
+  it('a 100 KB run of hex redacts in under 50 ms (the unbounded URL scheme took about 2 s)', () => {
+    const hex = Array.from({ length: 100_000 }, (_, i) => '0123456789abcdef'[(i * 7 + 3) % 16]).join('')
+    redactSecretText('warm up https://user:pw@x.test/')
+    for (const run of [() => redactSecretText(hex), () => sanitizeActivityPreview(hex, 4_000)]) {
+      const started = performance.now()
+      run()
+      expect(performance.now() - started).toBeLessThan(50)
+    }
+    // The bounded scheme still catches every real one.
+    expect(redactSecretText('git clone https://user:pw@example.com/x.git')).toBe('git clone https://[redacted]@example.com/x.git')
+    expect(redactSecretText('svn+ssh://me:pw@host/repo')).toBe('svn+ssh://[redacted]@host/repo')
+  })
+
+  it('boundForRedaction keeps the head up to a token boundary and counts the rest', () => {
+    expect(boundForRedaction('short')).toEqual({ head: 'short', omitted: 0 })
+    const straddle = `${'a '.repeat(3)}AKIAABCDEFGHIJKLMNOP tail`
+    // The key straddles a cut at 10: it is left out whole, never kept as a prefix.
+    expect(boundForRedaction(straddle, 10)).toEqual({ head: 'a a a ', omitted: straddle.length - 6 })
+    // A cut that lands on whitespace keeps everything before it.
+    expect(boundForRedaction('abc def', 3)).toEqual({ head: 'abc', omitted: 4 })
+    // One unbroken run longer than the bound shows nothing.
+    expect(boundForRedaction('x'.repeat(REDACTION_SCAN_MAX_CHARS + 1))).toEqual({ head: '', omitted: REDACTION_SCAN_MAX_CHARS + 1 })
   })
 })

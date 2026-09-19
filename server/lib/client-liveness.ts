@@ -3,7 +3,8 @@
 // THE SIGNAL, AND WHY THIS ONE. The permission broker holds a session question or a tool
 // approval only while a lens or phone client could show it and send the answer back. The
 // only proof of that is a client asking for the questions: an authenticated
-// `GET /api/session-questions` (X-Cos-Token, never the hook token) within the last 60 s.
+// `GET /api/session-questions?client=glasses|phone` (X-Cos-Token, never the hook token)
+// within the last 30 s, checked at admission and again while anything is held.
 //
 // Rejected, and why:
 //   - the client-instance claim (`POST /api/client-instance/claim`): every COS Glasses copy
@@ -25,10 +26,18 @@
 
 let lastPollAt: number | null = null
 
-/** An authenticated questions poll answered at `at` (server clock). Never moves backwards. */
+/** A stored stamp this far ahead of a new poll means the clock stepped back. */
+const CLOCK_STEP_BACK_MS = 5_000
+
+/**
+ * A counting questions poll answered at `at` (server clock). Never moves backwards for a
+ * slower request answered later, but a clock that stepped back is followed: a stamp left in
+ * the future would read stale to the broker, and ignoring every poll until the clock caught
+ * up would leave no live client for that long.
+ */
 export function noteQuestionsPoll(at: number): void {
   if (!Number.isFinite(at)) return
-  if (lastPollAt === null || at > lastPollAt) lastPollAt = at
+  if (lastPollAt === null || at > lastPollAt || lastPollAt - at > CLOCK_STEP_BACK_MS) lastPollAt = at
 }
 
 /** When the newest authenticated questions poll arrived, or null when none has since boot. */

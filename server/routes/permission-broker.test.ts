@@ -1,5 +1,6 @@
 // 6.52.0: the permission broker's doors, against a real express server and real sockets,
-// wired the way index.ts wires them (the /api token gate first, the hook's door outside it).
+// wired the way index.ts wires them: the hook's door first (it checks the hook token before
+// any body is parsed), then the /api token gate, the global body parser, and the client API.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // The hook token must go through the constant-time comparison, not merely be compared:
@@ -52,8 +53,8 @@ afterEach(async () => {
 
 /**
  * A server wired as index.ts wires it. The broker reads the REAL liveness module, so a
- * client is live only after a real authenticated `GET /api/session-questions`; `live`
- * (default) makes one such poll once the server is up. `gate: false` leaves the /api
+ * client is live only after a real authenticated `GET /api/session-questions?client=glasses`;
+ * `live` (default) makes one such poll once the server is up. `gate: false` leaves the /api
  * token gate out, to prove the questions route checks the token itself.
  */
 async function start(over: Partial<PermissionBrokerDeps> = {}, opts: { live?: boolean; gate?: boolean; claims?: boolean } = {}): Promise<Harness> {
@@ -76,11 +77,12 @@ async function start(over: Partial<PermissionBrokerDeps> = {}, opts: { live?: bo
   brokers.push(broker)
   wirePermissionBrokerToSignals(broker, store)
   const app = express()
-  // As index.ts: the /api gate, the global body parser, the claim referee, then the doors.
+  // As index.ts: the hook's door, the /api gate, the global body parser, the claim referee,
+  // then the client API.
+  app.use(createPermissionBrokerHookRouter({ hookToken: () => state.hookToken, broker }))
   if (opts.gate !== false) app.use('/api', requireApiToken(API_TOKEN))
   app.use(express.json({ limit: '10mb' }))
   if (opts.claims) app.use('/api', createClientInstanceRouter())
-  app.use(createPermissionBrokerHookRouter({ hookToken: () => state.hookToken, broker }))
   // The poll clock can be set back to make a poll look old without waiting for it.
   app.use('/api', createSessionQuestionsRouter({ broker, apiToken: () => API_TOKEN, now: () => Date.now() - state.pollAgeMs }))
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
@@ -97,9 +99,9 @@ async function ask(h: Harness, body: unknown, headers: Record<string, string> = 
   return { status: res.status, text, body: text ? JSON.parse(text) as Record<string, unknown> : null, ms: performance.now() - started }
 }
 
-async function list(h: Harness, headers: Record<string, string> = { 'x-cos-token': API_TOKEN }) {
-  const res = await fetch(`${h.base}/api/session-questions`, { headers })
-  return { status: res.status, body: await res.json() as { enabled: boolean; mode: string; items: Array<Record<string, any>> } }
+async function list(h: Harness, headers: Record<string, string> = { 'x-cos-token': API_TOKEN }, client: string | null = 'glasses') {
+  const res = await fetch(`${h.base}/api/session-questions${client === null ? '' : `?client=${client}`}`, { headers })
+  return { status: res.status, body: await res.json() as { enabled: boolean; mode: string; items: Array<Record<string, any>>; pending: number; pollIntervalMs: number; liveWindowMs: number; protocolVersion: number } }
 }
 
 async function answer(h: Harness, id: string, body: unknown) {
@@ -131,7 +133,7 @@ async function held(h: Harness, body: unknown, signal?: AbortSignal) {
   return { reply, item: items[items.length - 1]! }
 }
 
-describe('POST /hooks/permission-requests/ask: everything outside the gate is {} at once', () => {
+describe('POST /api/permission-requests/ask: everything outside the gate is {} at once', () => {
   it('every fast-path reason answers {} in under 100 ms, and nothing is parked', async () => {
     const h = await start()
     const bash = () => permissionEnvelope('Bash', { command: 'touch x' })
@@ -155,7 +157,7 @@ describe('POST /hooks/permission-requests/ask: everything outside the gate is {}
       expect(r.ms, name).toBeLessThan(FAST_MS)
       expect(h.broker.health().lastFastPath, name).toBe(reason)
     }
-    expect(h.broker.health().counters).toMatchObject({ parked: 0, fast_path: { broker_off: 1, draining: 1, cursor: 1, malformed: 1, approvals_off: 1, unsupported_tool: 1, no_client: 1, desk_active: 1, desk_unknown: 1 } })
+    expect(h.broker.health().counters).toMatchObject({ parked: 0, fastPath: { brokerOff: 1, draining: 1, cursor: 1, malformed: 1, approvalsOff: 1, unsupportedTool: 1, noClient: 1, deskActive: 1, deskUnknown: 1 } })
     // The switch and the drain are answered without reading the desk at all.
     expect(h.state.idleReads).toBe(2)
     expect((await list(h)).body.items).toEqual([])
@@ -167,7 +169,31 @@ describe('POST /hooks/permission-requests/ask: everything outside the gate is {}
     const r = await ask(h, permissionEnvelope('Bash', { command: 'touch x' }))
     expect(r.body).toEqual({})
     expect(r.ms).toBeLessThan(FAST_MS)
-    expect(h.broker.health().counters.fast_path.desk_active).toBe(2)
+    expect(h.broker.health().counters.fastPath.deskActive).toBe(2)
+  })
+
+  it('a 900 KB Write with no client answers {} in under 100 ms through the real route', async () => {
+    const h = await start({}, { live: false })
+    const content = 'export const line = "0123456789abcdef"\n'.repeat(23_000)
+    expect(content.length).toBeGreaterThan(880_000)
+    await ask(h, permissionEnvelope('Bash', { command: 'ls' })) // warm the connection
+    const r = await ask(h, permissionEnvelope('Write', { file_path: '/Users/example/big.ts', content }))
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({})
+    expect(r.ms).toBeLessThan(FAST_MS)
+    expect(h.broker.health().lastFastPath).toBe('no_client')
+    expect(h.state.idleReads).toBe(0)
+  })
+
+  it('a body the parser refuses (not JSON, over 2 MB) is {} with a 4xx, never parked', async () => {
+    const h = await start()
+    const bad = await fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN }, body: '{not json' })
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toEqual({})
+    const big = await fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN }, body: JSON.stringify({ pad: 'x'.repeat(2_200_000) }) })
+    expect(big.status).toBe(413)
+    expect(await big.json()).toEqual({})
+    expect(h.broker.health().counters.parked).toBe(0)
   })
 
   it('refuses without the hook token, with a wrong one, with the API token, and when none is minted', async () => {
@@ -181,6 +207,35 @@ describe('POST /hooks/permission-requests/ask: everything outside the gate is {}
     expect(h.broker.health().counters.parked).toBe(0)
     // The client API is behind the API token like every /api route.
     expect((await fetch(`${h.base}/api/session-questions`)).status).toBe(401)
+  })
+
+  it('checks the hook token BEFORE it parses: a refused request never reaches the parser', async () => {
+    const h = await start()
+    // Not JSON and over the 2 MB limit: with the token it is a parser refusal (4xx), without
+    // it the answer is 401, which the parser could never have produced.
+    const post = (headers: Record<string, string>, body: string) => fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body })
+    for (const body of ['{not json', `{"pad":"${'x'.repeat(2_200_000)}"}`]) {
+      expect((await post({}, body)).status).toBe(401)
+      expect((await post({ 'x-cos-hook-token': 'nope' }, body)).status).toBe(401)
+      expect((await post({ 'x-cos-token': API_TOKEN }, body)).status).toBe(401)
+    }
+    expect(h.broker.health().counters.fastPath).toEqual({})
+  })
+
+  it('only POST on that path is exempt from the /api gate; every other method still needs the API token', async () => {
+    const h = await start()
+    for (const method of ['GET', 'PUT', 'DELETE', 'PATCH']) {
+      const bare = await fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method, headers: { 'x-cos-hook-token': HOOK_TOKEN } })
+      expect(bare.status, method).toBe(401)
+      expect(await bare.json(), method).toMatchObject({ error: expect.any(String) })
+      // With the API token it reaches the router and finds no such route.
+      const authed = await fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method, headers: { 'x-cos-token': API_TOKEN } })
+      expect(authed.status, method).toBe(404)
+    }
+    // The 6.52.0 draft's separate door is gone.
+    const old = await fetch(`${h.base}/hooks/permission-requests/ask`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN }, body: JSON.stringify(permissionEnvelope('Bash', { command: 'ls' })) })
+    expect(old.status).toBe(404)
+    expect(h.broker.health().counters.parked).toBe(0)
   })
 
   it('checks the hook token through the constant-time comparison', async () => {
@@ -234,7 +289,8 @@ describe('a parked question or approval', () => {
     const secret = { command: 'cd /Users/example/repo && curl -H "Authorization: Bearer abcdefghijklmnopqrst" https://x.test', description: 'call the api' }
     const allow = await held(h, permissionEnvelope('Bash', secret))
     expect(allow.item).toMatchObject({ kind: 'approval', tool: 'Bash', approval: { tool: 'Bash' } })
-    expect(allow.item.approval.summary.startsWith('curl -H')).toBe(true)
+    // The whole command, `cd ... &&` included (B1): only the credential is taken out.
+    expect(allow.item.approval.summary).toBe('cd /Users/example/repo && curl -H "Authorization: [redacted] https://x.test')
     expect(JSON.stringify(allow.item)).not.toContain('abcdefghijklmnopqrst')
     expect(allow.item).not.toHaveProperty('questions')
     expect(await answer(h, allow.item.id, { clientAnswerId: 'a', decision: 'allow' })).toEqual({ status: 200, body: { ok: true, id: allow.item.id, kind: 'approval', decision: 'allow' } })
@@ -257,7 +313,7 @@ describe('a parked question or approval', () => {
     expect(hook.body).toEqual({})
     expect(Date.now() - touched).toBeLessThan(1_000)
     expect(await answer(h, item.id, { clientAnswerId: 'late', answers: [{ labels: ['Tag'] }, { labels: ['Red'] }] })).toEqual({ status: 409, body: { error: 'handed_to_desk', reason: 'handed_to_desk' } })
-    expect(h.broker.health().counters.handed_to_desk).toBe(1)
+    expect(h.broker.health().counters.handedToDesk).toBe(1)
   })
 
   it('a drain that starts while it is held hands it back too', async () => {
@@ -285,7 +341,7 @@ describe('a parked question or approval', () => {
     const { item } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT), controller.signal)
     controller.abort()
     await until(() => list(h), l => l.body.items.length === 0, 1_000)
-    expect(h.broker.health().counters).toMatchObject({ hook_gone: 1, answered: 0 })
+    expect(h.broker.health().counters).toMatchObject({ hookGone: 1, answered: 0 })
     expect(await answer(h, item.id, { clientAnswerId: 'late', answers: [{ labels: ['Tag'] }, { labels: ['Red'] }] })).toEqual({ status: 410, body: { error: 'hook_gone' } })
   })
 
@@ -303,7 +359,7 @@ describe('a parked question or approval', () => {
     expect((await reply).body).toEqual(approvalHookOutput(winner.body.decision as 'allow' | 'deny'))
     const winnerId = winner === one ? 'lens' : 'phone'
     expect(await answer(h, item.id, { clientAnswerId: winnerId, decision: 'allow' })).toEqual({ status: 200, body: { ...winner.body, replay: true } })
-    expect(h.broker.health().counters).toMatchObject({ answered: 1, hook_gone: 0 })
+    expect(h.broker.health().counters).toMatchObject({ answered: 1, hookGone: 0 })
   })
 
   it('retracted when its own tool runs (the desk answered): {} to the hook, 409 to a late answer', async () => {
@@ -384,9 +440,9 @@ describe('liveness and the mount', () => {
     expect(h.broker.health().counters.parked).toBe(0)
   })
 
-  it('a questions poll at most 60 s old parks', async () => {
+  it('a questions poll at most 30 s old parks', async () => {
     const h = await start({}, { live: false })
-    h.state.pollAgeMs = 59_000
+    h.state.pollAgeMs = 29_000
     expect((await list(h)).status).toBe(200)
     const { reply, item } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
     expect(item.kind).toBe('question')
@@ -395,15 +451,38 @@ describe('liveness and the mount', () => {
     expect((await within(reply)).body).toEqual({})
   })
 
-  it('a poll older than 60 s takes the fast path; a fresh one parks again', async () => {
+  it('a poll older than 30 s takes the fast path; a fresh one parks again', async () => {
     const h = await start({}, { live: false })
-    h.state.pollAgeMs = 61_000
+    h.state.pollAgeMs = 31_000
     expect((await list(h)).status).toBe(200)
     const r = await ask(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
     expect(r.body).toEqual({})
     expect(h.broker.health().lastFastPath).toBe('no_client')
     h.state.pollAgeMs = 0
     const { reply } = await held(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))
+    h.state.idle = 0
+    expect((await within(reply)).body).toEqual({})
+  })
+
+  it('only a poll that names an answering client counts: client=glasses or client=phone', async () => {
+    const h = await start({}, { live: false })
+    for (const client of [null, 'control', 'Glasses', 'pet', '']) {
+      const r = await list(h, undefined, client)
+      expect(r.status, String(client)).toBe(200)
+      expect(lastQuestionsPollAt(), String(client)).toBeNull()
+    }
+    expect((await ask(h, permissionEnvelope('AskUserQuestion', ASK_INPUT))).body).toEqual({})
+    expect(h.broker.health().lastFastPath).toBe('no_client')
+    for (const client of ['glasses', 'phone']) {
+      __resetClientLivenessForTests()
+      expect((await list(h, undefined, client)).status).toBe(200)
+      expect(lastQuestionsPollAt(), client).not.toBeNull()
+    }
+    // The contract rides every answer.
+    const r = await list(h, undefined, null)
+    expect(r.body).toMatchObject({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, pending: 0, items: [] })
+    const { reply } = await held(h, permissionEnvelope('Bash', { command: 'ls' }))
+    expect((await list(h, undefined, 'control')).body.pending).toBe(1)
     h.state.idle = 0
     expect((await within(reply)).body).toEqual({})
   })
@@ -424,17 +503,27 @@ describe('liveness and the mount', () => {
     }
   })
 
-  it('index.ts mounts the hook door outside /api and outside the thread-attach gate, and the client API behind the token', () => {
+  it('index.ts mounts both hook doors BEFORE the /api gate and the global parser, outside the thread-attach block, and the client API behind the token', () => {
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
-    const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN))")
     const hook = index.indexOf('app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))')
+    const cursor = index.indexOf('  app.use(createCursorStopFollowupRouter({')
+    const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN))")
+    const parser = index.indexOf("app.use(express.json({ limit: '10mb' }))")
     const api = index.indexOf("app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN }))")
-    const gate = index.indexOf('if (threadAttachEnabled()) {')
-    for (const at of [auth, hook, api, gate]) expect(at).toBeGreaterThan(-1)
+    const gate = index.indexOf('if (threadAttachEnabled()) {\n  // 6.51.0: a queued Cursor turn')
+    const attach = index.lastIndexOf('if (threadAttachEnabled()) {')
+    for (const at of [hook, cursor, auth, parser, api, gate, attach]) expect(at).toBeGreaterThan(-1)
+    // Each door once, both ahead of the gate and the parser.
+    expect(index.split('createPermissionBrokerHookRouter(').length - 1).toBe(1)
+    expect(index.split('createCursorStopFollowupRouter(').length - 1).toBe(1)
+    expect(hook).toBeLessThan(auth)
+    expect(cursor).toBeLessThan(auth)
+    expect(auth).toBeLessThan(parser)
     expect(auth).toBeLessThan(api)
-    // Before the gate's block opens, so it is registered whatever COS_THREAD_ATTACH_ENABLED says.
+    // The Cursor door keeps its own condition; the broker's door has none.
+    expect(gate).toBeLessThan(cursor)
     expect(hook).toBeLessThan(gate)
-    expect(api).toBeLessThan(gate)
+    expect(api).toBeLessThan(attach)
     expect(index).toContain('wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)')
     expect(index).toContain('permissionBroker.stop()')
     // The broker's liveness is the questions poll, never the claim referee.
@@ -442,5 +531,6 @@ describe('liveness and the mount', () => {
     expect(readFileSync(new URL('./client-instance.ts', import.meta.url), 'utf8')).not.toContain('client-liveness')
     const apiAuth = readFileSync(new URL('../lib/api-auth.ts', import.meta.url), 'utf8')
     expect(apiAuth).not.toContain('session-questions')
+    expect(apiAuth).not.toContain('permission-requests')
   })
 })

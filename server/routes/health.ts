@@ -80,7 +80,7 @@ import {
   threadAttachHealthFields,
 } from '../lib/thread-attach-capability.js'
 import { sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
-import { permissionBrokerHealthFields } from '../lib/permission-broker.js'
+import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
 import { codexLiveQueueEnabled } from '../lib/codex-live-queue.js'
@@ -389,7 +389,8 @@ healthRouter.get('/health', async (_req, res) => {
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
     ...sessionHooksHealthFields(),
-    // 6.52.0: counts and the mode only; never an id, a question or a command.
+    // 6.52.0: counts, the mode and two timestamps; never an id, a question, a command, or
+    // how many are held (that is on the authenticated questions route).
     ...permissionBrokerHealthFields(),
     ...continueLiveHealthFields(),
     server_instance_id: getServerInstanceId(),
@@ -576,6 +577,10 @@ healthRouter.get('/models', async (req, res) => {
         // False whenever jobs themselves are off or COS_MESSAGES_TRAIL=0.
         trail: durableJobs.enabled && messagesTrailEnabled(),
       },
+      // 6.52.0: the session questions API and its client contract. A client polls
+      // `GET /api/session-questions?client=glasses|phone` every `pollIntervalMs`; one
+      // quiet for `liveWindowMs` hands every held request back to the Mac.
+      sessionQuestions: sessionQuestionsCapability(),
       transcription: {
         ...transcription,
         live: transcriptionLive,

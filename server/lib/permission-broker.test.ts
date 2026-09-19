@@ -1,13 +1,20 @@
 // 6.52.0: the permission broker's rules, executed. The HTTP doors and the real hook script
 // are in routes/permission-broker.test.ts and cos-session-hook.script.test.ts.
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  APPROVAL_DETAIL_MAX,
+  APPROVAL_SUMMARY_MAX,
   BROKER_TIMEOUT_MAX_S,
   CLIENT_LIVE_WINDOW_MS,
   DENY_MESSAGE,
+  DESK_IDLE_MIN_S,
   HOOK_CURL_MAX_S,
+  MAX_PENDING,
+  POLL_FUTURE_SKEW_MS,
   PermissionBroker,
   approvalCard,
+  approvalCutMarker,
   approvalHookOutput,
   brokerSignalSink,
   parsePermissionRequestEnvelope,
@@ -18,6 +25,7 @@ import {
   questionHookOutput,
   readHidIdleSeconds,
   registerPermissionBroker,
+  sessionQuestionsCapability,
   validateQuestionAnswers,
   wirePermissionBrokerToSignals,
   type BrokerMode,
@@ -28,6 +36,9 @@ import { SessionSignalStore } from './session-signal-store.js'
 import { deriveSessionState, derivedRowFields } from './session-state-derive.js'
 import { toolFingerprint, type HookEnvelope } from './session-hook-events.js'
 import { __resetClientLivenessForTests, lastQuestionsPollAt, noteQuestionsPoll } from './client-liveness.js'
+import { REDACTION_SCAN_MAX_CHARS } from './activity-preview.js'
+import { HOOK_SUBSCRIPTIONS } from './claude-hooks-installer.js'
+import { PERMISSION_BROKER_HOOK_PATH } from '../routes/permission-broker.js'
 
 import { ASK_INPUT, Q1, Q2, QUESTIONS, SESSION, permissionEnvelope } from './__fixtures__/permission-broker.js'
 
@@ -92,6 +103,29 @@ describe('configuration', () => {
   })
 })
 
+describe('timeout parity: broker deadline < the script\'s curl < Claude Code\'s hook timeout', () => {
+  it('reads the real script and the real installer, and orders the three', () => {
+    const script = readFileSync(new URL('../../bin/hooks/cos-session-hook', import.meta.url), 'utf8')
+    // The curl that posts the PermissionRequest to the broker (the script's other curl is
+    // the Cursor Stop one, with its own 3 s).
+    const curl = new RegExp(String.raw`--max-time (\d+)[^\n]*\\\n[^\n]*"http://127\.0\.0\.1:\$PORT` + PERMISSION_BROKER_HOOK_PATH.replace(/\//g, '\\/') + '"').exec(script)
+    expect(curl, 'the PermissionRequest curl line').not.toBeNull()
+    const curlMaxS = Number(curl![1])
+    expect(curlMaxS).toBe(HOOK_CURL_MAX_S)
+
+    const installer = readFileSync(new URL('./claude-hooks-installer.ts', import.meta.url), 'utf8')
+    const entry = /\{ event: 'PermissionRequest', async: false, timeout: (\d+) \}/.exec(installer)
+    expect(entry, 'the PermissionRequest subscription').not.toBeNull()
+    const installerS = Number(entry![1])
+    expect(installerS).toBe(HOOK_SUBSCRIPTIONS.find(sub => sub.event === 'PermissionRequest')!.timeout)
+
+    // The broker always answers before curl gives up, and curl before Claude Code does.
+    expect(permissionBrokerTimeoutMs({ COS_PERMISSION_BROKER_TIMEOUT_S: '1e9' })).toBe(BROKER_TIMEOUT_MAX_S * 1000)
+    expect(BROKER_TIMEOUT_MAX_S).toBeLessThan(curlMaxS)
+    expect(curlMaxS).toBeLessThan(installerS)
+  })
+})
+
 describe('the liveness signal (lib/client-liveness)', () => {
   it('records the newest questions poll and never moves backwards', () => {
     __resetClientLivenessForTests()
@@ -103,10 +137,23 @@ describe('the liveness signal (lib/client-liveness)', () => {
     expect(lastQuestionsPollAt()).toBe(5_000)
     noteQuestionsPoll(6_000)
     expect(lastQuestionsPollAt()).toBe(6_000)
+    // A clock that stepped back is followed, or no poll would count until it caught up.
+    noteQuestionsPoll(6_000 - 5_001)
+    expect(lastQuestionsPollAt()).toBe(999)
     __resetClientLivenessForTests()
   })
 
-  it('a poll exactly 60 s old still counts; one millisecond more does not', async () => {
+  it('a stamp more than 5 s in the future is stale, not live forever', async () => {
+    const { broker, s, clock } = brokerWith()
+    brokers.push(broker)
+    s.seenAt = clock.now + POLL_FUTURE_SKEW_MS
+    expect((await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).ok).toBe(true)
+    s.seenAt = clock.now + POLL_FUTURE_SKEW_MS + 1
+    expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+  })
+
+  it('a poll exactly 30 s old still counts; one millisecond more does not', async () => {
+    expect(CLIENT_LIVE_WINDOW_MS).toBe(30_000)
     const { broker, s, clock } = brokerWith()
     brokers.push(broker)
     s.seenAt = clock.now - CLIENT_LIVE_WINDOW_MS
@@ -162,6 +209,16 @@ describe('answers', () => {
     expect(validateQuestionAnswers(QUESTIONS, [{ labels: ['Tag'] }, { other: 'Green' }])).toEqual({ ok: true, answers: { [Q1]: ['Tag'], [Q2]: ['Green'] } })
   })
 
+  it('free text with a comma is quoted, so the model reads it as ONE answer (canary 2026-09-19)', () => {
+    const colors = [{ question: 'Colors?', header: 'Colors', multiSelect: true, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }, { label: 'Green, dark', description: '' }] }]
+    // Claude Code joins the list with commas: "Red,Blue,Purple, but only on weekends" lost its clause.
+    expect(validateQuestionAnswers(colors, [{ labels: ['Red', 'Blue'], other: 'Purple, but only on weekends' }]))
+      .toEqual({ ok: true, answers: { 'Colors?': ['Red', 'Blue', '"Purple, but only on weekends"'] } })
+    // A label is never touched, even one with a comma; free text without a comma is as written.
+    expect(validateQuestionAnswers(colors, [{ labels: ['Green, dark'], other: 'Purple' }]))
+      .toEqual({ ok: true, answers: { 'Colors?': ['Green, dark', 'Purple'] } })
+  })
+
   it('refuses what cannot be sent', () => {
     const cases: Array<[unknown, string, number | undefined]> = [
       [undefined, 'answers_shape', undefined],
@@ -195,23 +252,75 @@ describe('answers', () => {
   })
 })
 
-describe('the approval card', () => {
-  it('uses the Sessions grammar (cd and plumbing dropped) and redacts before it cuts', () => {
-    const card = approvalCard('Bash', { command: 'cd /Users/example/repo && curl -H "Authorization: Bearer abcdefghijklmnop" https://x.test/api?token=s3cr3tvalue | head -5', description: 'fetch' })
-    expect(card.tool).toBe('Bash')
-    expect(card.summary.startsWith('curl -H')).toBe(true)
-    expect(card.summary).not.toContain('abcdefghijklmnop')
-    expect(card.detail).toContain('cd /Users/example/repo')
-    expect(card.detail).not.toContain('abcdefghijklmnop')
-    expect(card.detail).not.toContain('s3cr3tvalue')
-    // A secret straddling the 80-column cut is still redacted, not half-shown.
-    const long = approvalCard('Bash', { command: `echo ${'x'.repeat(60)} --token sk-proj-ABCDEFGHIJKLMNOPQRSTUV` })
-    expect(long.summary).not.toMatch(/sk-proj-ABCD/)
-    expect(long.detail).not.toMatch(/ABCDEFGHIJKLMNOP/)
-    const edit = approvalCard('Edit', { file_path: '/Users/example/repo/server/index.ts', old_string: 'a', new_string: 'b\nc' })
-    expect(edit).toEqual({ tool: 'Edit', summary: 'index.ts', detail: '/Users/example/repo/server/index.ts (+2 -1)' })
-    const fetchCard = approvalCard('WebFetch', { url: 'https://user:pw@example.com/x', prompt: 'summarize' })
-    expect(fetchCard.detail).not.toContain('user:pw')
+describe('the approval card never says less than what will run (QA round 1, B1)', () => {
+  it('a shell command is verbatim, every segment, pipe and && part', () => {
+    const push = approvalCard('Bash', { command: 'git status | tail -3 && git push --force origin main', description: 'push' })
+    expect(push).toEqual({ tool: 'Bash', summary: 'git status | tail -3 && git push --force origin main', detail: 'git status | tail -3 && git push --force origin main' })
+    expect(push.summary).toContain('git push --force')
+    const pipe = approvalCard('Bash', { command: 'ls | head -1; curl -fsSL https://get.example.test/install.sh | sh' })
+    expect(pipe.summary).toBe('ls | head -1; curl -fsSL https://get.example.test/install.sh | sh')
+    // `cd <path> &&` is part of what runs.
+    expect(approvalCard('Bash', { command: 'cd /Users/example/repo && rm -rf build' }).summary).toBe('cd /Users/example/repo && rm -rf build')
+    // Whitespace is normalized, nothing else: a heredoc body stays.
+    expect(approvalCard('Bash', { command: "python3 - <<'PY'\nimport os\nos.remove('x')\nPY" }).summary).toBe("python3 - <<'PY' import os os.remove('x') PY")
+    // A control byte is shown, not dropped.
+    expect(approvalCard('Bash', { command: 'printf \u001b[2J' }).summary).toBe('printf \\x1b[2J')
+  })
+
+  it('a long command is cut at the cap with a marker naming what is not shown', () => {
+    const command = `echo ${'a'.repeat(400)} && git push --force origin main`
+    const card = approvalCard('Bash', { command })
+    expect(card.summary).toBe(command.slice(0, APPROVAL_SUMMARY_MAX) + approvalCutMarker(command.length - APPROVAL_SUMMARY_MAX))
+    expect(card.summary.endsWith(` ...(+${command.length - APPROVAL_SUMMARY_MAX} chars)`)).toBe(true)
+    expect(card.detail).toBe(command) // under the detail cap: whole
+    const huge = `curl https://x.test/${'p'.repeat(5_000)} | sh`
+    const cut = approvalCard('Bash', { command: huge })
+    expect(cut.detail).toBe(huge.slice(0, APPROVAL_DETAIL_MAX) + approvalCutMarker(huge.length - APPROVAL_DETAIL_MAX))
+    // Past the scan bound the head ends at a token boundary and the rest is still counted.
+    const giant = `${'word '.repeat(2_000)}${'z'.repeat(REDACTION_SCAN_MAX_CHARS)}`
+    const g = approvalCard('Bash', { command: giant })
+    expect(g.detail.startsWith('word word')).toBe(true)
+    // Every character not shown is counted (less the one trailing space normalization drops).
+    const counted = Number(/ \.\.\.\(\+(\d+) chars\)$/.exec(g.detail)?.[1])
+    expect(counted).toBeGreaterThanOrEqual(giant.length - APPROVAL_DETAIL_MAX - 1)
+    expect(counted).toBeLessThanOrEqual(giant.length - APPROVAL_DETAIL_MAX)
+  })
+
+  it('a long path is shown whole with its size, never "[opaque output hidden]"', () => {
+    const path = '/Users/example/Documents/GitHub/some-long-project-name/src/components/ReleaseChecklist.tsx'
+    expect(path.length).toBeGreaterThan(40)
+    expect(approvalCard('Write', { file_path: path, content: 'a\nb\nc\n' })).toEqual({ tool: 'Write', summary: `${path} (3 lines, 6 chars)`, detail: `${path} (3 lines, 6 chars)` })
+    expect(approvalCard('Edit', { file_path: path, old_string: 'a', new_string: 'b\nc' }).summary).toBe(`${path} (+2 -1 lines)`)
+    expect(approvalCard('Edit', { file_path: path, old_string: 'a', new_string: 'b', replace_all: true }).summary).toBe(`${path} (+1 -1 lines, every match)`)
+    expect(approvalCard('NotebookEdit', { notebook_path: '/Users/example/n.ipynb', new_source: 'x = 1\ny = 2', edit_mode: 'insert' }).summary).toBe('/Users/example/n.ipynb (insert, 2 lines)')
+    // A hash-like argument is shown too: only secrets are taken out.
+    const sha = '3f1c9a7e5b2d4c6a8e0f1b3d5c7a9e2f4b6d8c0a'
+    expect(approvalCard('Bash', { command: `git checkout ${sha}` }).summary).toBe(`git checkout ${sha}`)
+  })
+
+  it('WebFetch shows the URL, WebSearch the query, anything else its keys and values', () => {
+    expect(approvalCard('WebFetch', { url: 'https://docs.example.test/page', prompt: 'summarize it' })).toMatchObject({ summary: 'https://docs.example.test/page' })
+    expect(approvalCard('WebFetch', { url: 'https://user:pw@example.com/x', prompt: 'x' }).summary).not.toContain('user:pw')
+    expect(approvalCard('WebSearch', { query: 'claude code hooks' }).summary).toBe('claude code hooks')
+    const mcp = approvalCard('mcp__slack__send_message', { channel: 'C0123', text: 'Ship it', thread: { ts: '1.2' } })
+    expect(mcp).toEqual({ tool: 'mcp__slack__send_message', summary: 'channel=C0123 text=Ship it thread={"ts":"1.2"}', detail: 'channel=C0123 text=Ship it thread={"ts":"1.2"}' })
+    const many = approvalCard('SomeTool', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`key${i}`, 'v'.repeat(20)])))
+    expect(many.summary.startsWith('key0=vvvv')).toBe(true)
+    expect(many.summary).toMatch(/ \.\.\.\(\+\d+ chars\)$/)
+  })
+
+  it('redacts secrets (and only secrets) before it cuts: never half shown', () => {
+    const card = approvalCard('Bash', { command: 'curl -H "Authorization: Bearer abcdefghijklmnop" https://x.test/api?token=s3cr3tvalue | head -5' })
+    expect(card.summary).toContain('curl -H')
+    expect(card.summary).toContain('| head -5')
+    for (const secret of ['abcdefghijklmnop', 's3cr3tvalue']) {
+      expect(card.summary).not.toContain(secret)
+      expect(card.detail).not.toContain(secret)
+    }
+    // A key straddling the summary cap is redacted whole, not cut into a prefix.
+    const straddle = approvalCard('Bash', { command: `echo ${'x'.repeat(APPROVAL_SUMMARY_MAX - 10)} AKIAABCDEFGHIJKLMNOP` })
+    expect(straddle.summary).not.toMatch(/AKIA[A-Z]/)
+    expect(straddle.detail).toContain('[redacted-aws-key]')
   })
 })
 
@@ -227,7 +336,7 @@ describe('the broker, driven directly', () => {
     channel.open = false // the hook left; the close has not been processed yet
     expect(broker.answer(id, { clientAnswerId: 'a1', decision: 'allow' })).toEqual({ status: 410, body: { error: 'hook_gone' } })
     expect(sent).toEqual([])
-    expect(broker.health().counters).toMatchObject({ answered: 0, hook_gone: 1 })
+    expect(broker.health().counters).toMatchObject({ answered: 0, hookGone: 1 })
   })
 
   it('first answer wins; the same clientAnswerId replays; a close after the answer changes nothing', async () => {
@@ -242,7 +351,7 @@ describe('the broker, driven directly', () => {
     expect(broker.answer(id, { clientAnswerId: 'second', decision: 'allow' })).toEqual({ status: 409, body: { error: 'already_answered', decision: 'deny' } })
     expect(broker.answer(id, { clientAnswerId: 'first', decision: 'allow' })).toEqual({ status: 200, body: { ok: true, id, kind: 'approval', replay: true, decision: 'deny' } })
     expect(sent).toEqual([approvalHookOutput('deny')])
-    expect(broker.health().counters).toMatchObject({ parked: 1, answered: 1, hook_gone: 0 })
+    expect(broker.health().counters).toMatchObject({ parked: 1, answered: 1, hookGone: 0 })
   })
 
   it('every gate is counted by why, and the cheap ones never read the desk', async () => {
@@ -259,23 +368,79 @@ describe('the broker, driven directly', () => {
     expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'approvals_off' })
     s.mode = 'all'
     expect(await broker.admit(permissionEnvelope('ExitPlanMode', { plan: 'x' }, {}, clock.now))).toEqual({ ok: false, reason: 'unsupported_tool' })
-    expect(await broker.admit(permissionEnvelope('AskUserQuestion', { questions: [] }, {}, clock.now))).toEqual({ ok: false, reason: 'unsupported_input' })
     s.seenAt = null
     expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    // Unparseable questions are only looked at once every cheap gate passed.
+    expect(await broker.admit(permissionEnvelope('AskUserQuestion', { questions: [] }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
     s.seenAt = clock.now - CLIENT_LIVE_WINDOW_MS - 1
     expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
     s.seenAt = clock.now - CLIENT_LIVE_WINDOW_MS
-    expect(s.idleReads).toBe(0)
     // A hook that started a deadline ago is about to give up: nothing to hold.
     expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now - 110_000))).toEqual({ ok: false, reason: 'stale_hook' })
+    expect(s.idleReads).toBe(0)
     s.idle = null
     expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'desk_unknown' })
     s.idle = 89
     expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'desk_active' })
     s.idle = 90
+    expect(await broker.admit(permissionEnvelope('AskUserQuestion', { questions: [] }, {}, clock.now))).toEqual({ ok: false, reason: 'unsupported_input' })
     expect((await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).ok).toBe(true)
-    expect(broker.health().counters.fast_path).toEqual({ broker_off: 1, draining: 1, cursor: 1, approvals_off: 1, unsupported_tool: 1, unsupported_input: 1, no_client: 2, stale_hook: 1, desk_unknown: 1, desk_active: 1 })
+    expect(broker.health().counters.fastPath).toEqual({ brokerOff: 1, draining: 1, cursor: 1, approvalsOff: 1, unsupportedTool: 1, noClient: 3, staleHook: 1, deskUnknown: 1, deskActive: 1, unsupportedInput: 1 })
     expect(broker.health().counters.parked).toBe(0)
+  })
+
+  it('builds nothing from the input before the cheap gates pass: a 900 KB Write with no client is {} fast', async () => {
+    const { broker, s, clock } = brokerWith()
+    brokers.push(broker)
+    s.seenAt = null
+    const content = 'const x = 1\n'.repeat(75_000) // ~900 KB
+    const started = performance.now()
+    expect(await broker.admit(permissionEnvelope('Write', { file_path: '/Users/example/big.ts', content }, {}, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    expect(performance.now() - started).toBeLessThan(20)
+    expect(s.idleReads).toBe(0)
+  })
+
+  it('capacity holds after the desk read: requests admitted during it count', async () => {
+    const releases: Array<(v: number) => void> = []
+    const { broker, clock } = brokerWith({ readDeskIdleSeconds: () => new Promise<number>(r => { releases.push(r) }) })
+    brokers.push(broker)
+    // MAX_PENDING - 1 already held.
+    for (let i = 0; i < MAX_PENDING - 1; i++) {
+      const pending = broker.admit(permissionEnvelope('Bash', { command: `echo ${i}` }, {}, clock.now))
+      releases.shift()!(1_000)
+      const a = await pending
+      if (!a.ok) throw new Error(a.reason)
+      broker.park(a.request, fakeChannel(true).channel)
+    }
+    // Two requests pass the first capacity check together, then read the desk.
+    const one = broker.admit(permissionEnvelope('Bash', { command: 'echo one' }, {}, clock.now))
+    const two = broker.admit(permissionEnvelope('Bash', { command: 'echo two' }, {}, clock.now))
+    await new Promise(r => setTimeout(r, 0))
+    expect(releases).toHaveLength(2)
+    releases.shift()!(1_000)
+    const first = await one
+    if (!first.ok) throw new Error(first.reason)
+    broker.park(first.request, fakeChannel(true).channel)
+    releases.shift()!(1_000)
+    expect(await two).toEqual({ ok: false, reason: 'capacity' })
+    expect(broker.pendingCount()).toBe(MAX_PENDING)
+  })
+
+  it('the desk-idle setting never goes below 30 s', async () => {
+    const { broker, s, clock } = brokerWith({ deskIdleSeconds: () => 5 })
+    brokers.push(broker)
+    expect(DESK_IDLE_MIN_S).toBe(30)
+    s.idle = 29
+    expect(await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))).toEqual({ ok: false, reason: 'desk_active' })
+    s.idle = 30
+    const a = await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))
+    if (!a.ok) throw new Error(a.reason)
+    const { channel, sent } = fakeChannel(true)
+    broker.park(a.request, channel)
+    // Held: 20 s idle is below the floor, so it reads as the desk.
+    s.idle = 20
+    await broker.tick()
+    expect(sent).toEqual([{}])
   })
 
   it('the switch or a drain arriving DURING the desk read still answers {}', async () => {
@@ -351,7 +516,7 @@ describe('the broker, driven directly', () => {
     expect(broker.pendingCount()).toBe(0)
   })
 
-  it('desk return and a drain hand every held item back, and an unreadable desk counts as the desk', async () => {
+  it('desk return and a drain hand every held item back, and a desk unreadable TWICE in a row counts as the desk', async () => {
     const { broker, s, clock } = brokerWith()
     brokers.push(broker)
     const park = async () => {
@@ -374,10 +539,80 @@ describe('the broker, driven directly', () => {
     expect(broker.answer(two.id, { clientAnswerId: 'x', decision: 'allow' })).toEqual({ status: 409, body: { error: 'handed_to_desk', reason: 'drained' } })
     s.admissions = true
     const three = await park()
+    // One failed read is not the desk: a single ioreg that timed out under load.
     s.idle = null
     await broker.tick()
+    expect(three.sent).toEqual([])
+    // A good read in between resets the count.
+    s.idle = 1_000
+    await broker.tick()
+    s.idle = null
+    await broker.tick()
+    expect(three.sent).toEqual([])
+    // The second failure IN A ROW hands it back.
+    await broker.tick()
     expect(three.sent).toEqual([{}])
-    expect(broker.health().counters).toMatchObject({ handed_to_desk: 2, drained: 1 })
+    expect(broker.health().counters).toMatchObject({ handedToDesk: 2, drained: 1, deskUnreadable: 3 })
+  })
+
+  it('the answering client going quiet hands every held item back (no_client, its own counter)', async () => {
+    const { broker, s, clock } = brokerWith()
+    brokers.push(broker)
+    const a = await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))
+    if (!a.ok) throw new Error(a.reason)
+    const { channel, sent } = fakeChannel(true)
+    const id = broker.park(a.request, channel)
+    clock.now += CLIENT_LIVE_WINDOW_MS // exactly the window: still live
+    await broker.tick()
+    expect(sent).toEqual([])
+    clock.now += 1
+    await broker.tick()
+    expect(sent).toEqual([{}])
+    expect(broker.answer(id, { clientAnswerId: 'late', decision: 'allow' })).toEqual({ status: 409, body: { error: 'handed_to_desk', reason: 'no_client' } })
+    // A stamp from the future is stale while held, too.
+    s.seenAt = clock.now + POLL_FUTURE_SKEW_MS + 1
+    const b = await (async () => { s.seenAt = clock.now; return broker.admit(permissionEnvelope('Bash', { command: 'ls -a' }, {}, clock.now)) })()
+    if (!b.ok) throw new Error(b.reason)
+    const second = fakeChannel(true)
+    broker.park(b.request, second.channel)
+    s.seenAt = clock.now + POLL_FUTURE_SKEW_MS + 1
+    await broker.tick()
+    expect(second.sent).toEqual([{}])
+    expect(broker.health().counters).toMatchObject({ noClient: 2, handedToDesk: 0 })
+  })
+
+  it('a settled item keeps codes and what was chosen, never the questions or the card', async () => {
+    const { broker, clock } = brokerWith()
+    brokers.push(broker)
+    const internals = (id: string) => (broker as unknown as { items: Map<string, { questions: unknown; approval: unknown; toolInput: unknown; answer: unknown }> }).items.get(id)!
+    const q = await broker.admit(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, clock.now))
+    if (!q.ok) throw new Error(q.reason)
+    const qid = broker.park(q.request, fakeChannel(true).channel)
+    expect(internals(qid).questions).not.toBeNull()
+    expect(broker.answer(qid, { clientAnswerId: 'c1', answers: [{ labels: ['Bump'] }, { labels: ['Blue'] }] }).status).toBe(200)
+    expect(internals(qid)).toMatchObject({ questions: null, approval: null, toolInput: {}, answer: { clientAnswerId: 'c1', chosen: { answers: { [Q1]: ['Bump'], [Q2]: ['Blue'] } } } })
+    const b = await broker.admit(permissionEnvelope('Bash', { command: 'echo secret-plan' }, {}, clock.now))
+    if (!b.ok) throw new Error(b.reason)
+    const bid = broker.park(b.request, fakeChannel(true).channel)
+    expect(internals(bid).approval).not.toBeNull()
+    broker.hookClosed(bid)
+    expect(internals(bid)).toMatchObject({ questions: null, approval: null, toolInput: {} })
+    expect(JSON.stringify(internals(bid))).not.toContain('secret-plan')
+  })
+
+  it('counts every refused answer', async () => {
+    const { broker, clock } = brokerWith()
+    brokers.push(broker)
+    const a = await broker.admit(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, clock.now))
+    if (!a.ok) throw new Error(a.reason)
+    const id = broker.park(a.request, fakeChannel(true).channel)
+    expect(broker.answer(id, { answers: [] }).status).toBe(400)
+    expect(broker.answer(id, { clientAnswerId: 'c', answers: [{ labels: ['Nope'] }, { labels: ['Blue'] }] }).status).toBe(400)
+    const b = await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))
+    if (!b.ok) throw new Error(b.reason)
+    const bid = broker.park(b.request, fakeChannel(true).channel)
+    expect(broker.answer(bid, { clientAnswerId: 'c', decision: 'maybe' }).status).toBe(400)
+    expect(broker.health().counters.invalidAnswer).toBe(3)
   })
 })
 
@@ -498,14 +733,24 @@ describe('the rows (session signal store seams)', () => {
     const id = broker.park(a.request, fakeChannel(true).channel)
     const { permissionBroker } = permissionBrokerHealthFields()
     expect(permissionBroker).toEqual({
-      enabled: true, mode: 'all', pending: 1, lastFastPath: null,
-      counters: { parked: 1, answered: 0, handed_to_desk: 0, expired: 0, hook_gone: 0, retracted: 0, drained: 0, fast_path: {} },
+      enabled: true, mode: 'all', lastFastPath: null, lastFastPathAt: null,
+      lastQuestionsPollAt: new Date(clock.now).toISOString(),
+      counters: { parked: 1, answered: 0, handedToDesk: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0, fastPath: {} },
     })
+    // How many are held is on the authenticated questions route, never the public health.
+    expect(permissionBroker).not.toHaveProperty('pending')
     const text = JSON.stringify(permissionBroker)
     expect(text).not.toContain(id)
     expect(text).not.toContain('release')
+    // One key style across the block, the reason codes included.
+    const keys = (value: unknown): string[] => value && typeof value === 'object' ? Object.entries(value).flatMap(([k, v]) => [k, ...keys(v)]) : []
+    await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, { cursor_version: '1' }, clock.now))
+    for (const key of keys(broker.health())) expect(key, key).toMatch(/^[a-z][A-Za-z]*$/)
+    expect(broker.health()).toMatchObject({ lastFastPath: 'cursor', lastFastPathAt: new Date(clock.now).toISOString() })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000 })
     registerPermissionBroker(null)
     expect(permissionBrokerHealthFields()).toEqual({ permissionBroker: null })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000 })
   })
 })
 

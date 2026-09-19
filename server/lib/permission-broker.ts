@@ -28,29 +28,33 @@
 //   - the tool is AskUserQuestion, or approvals are on (`COS_PERMISSION_BROKER=questions`
 //     turns approvals off; the default brokers both). ExitPlanMode is never brokered: its
 //     dialog chooses a permission MODE, and "allow once" is not a plan approval;
-//   - a client that can answer asked for the questions in the last 60 s: an authenticated
-//     `GET /api/session-questions` (lib/client-liveness). An app without the question UI
-//     never calls it, so for it the broker is inert and every request is `{}`;
-//   - the desk has been idle `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90), read here with
-//     a bounded `ioreg`, not trusted from the script.
+//   - a client that can answer asked for the questions in the last 30 s: an authenticated
+//     `GET /api/session-questions?client=glasses|phone` (lib/client-liveness). An app without
+//     the question UI never calls it, so for it the broker is inert and every request is `{}`;
+//   - the desk has been idle `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
+//     read here with a bounded `ioreg`, not trusted from the script.
+// The cheap gates run first and the desk read last; the question card or the approval card
+// is built only for a request that will be parked (QA round 1: a 900 KB Write input costs a
+// no_client request nothing).
 //
 // A parked item holds the hook's response open until EXACTLY ONE of these resolves it:
-// an answer from the lens or phone; the desk becoming active (polled every 1.5 s): `{}`;
-// the deadline (`COS_PERMISSION_BROKER_TIMEOUT_S`, default 110, clamped to 120 so it lands
-// before the hook's 125 s): `{}`; the hook hanging up: `hook_gone`; the session moving on
-// without us (its tool ran, was denied, or the turn ended): `{}`; a drain: `{}`.
+// an answer from the lens or phone; the desk becoming active (polled every 1.5 s, and two
+// unreadable reads in a row count as active): `{}`; the answering client going quiet for
+// 30 s: `{}`; the deadline (`COS_PERMISSION_BROKER_TIMEOUT_S`, default 110, clamped to 120
+// so it lands before the hook's 125 s): `{}`; the hook hanging up: `hook_gone`; the session
+// moving on without us (its tool ran, was denied, or the turn ended): `{}`; a drain: `{}`.
 //
 // NEVER: a permission RULE. `updatedPermissions` and the request's suggestions are never
 // returned; the decision objects below are built from nothing but constants and the
 // original input. Question and command text is never logged and never goes on the display
-// bus; the client API is behind the API token.
+// bus; the client API is behind the API token. A settled item keeps its codes and what was
+// chosen, never the questions or the card.
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { sanitizeActivityPreview } from './activity-preview.js'
+import { boundForRedaction, redactSecretText } from './activity-preview.js'
 import { toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
 import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signal-store.js'
-import { TARGET_MAX_CHARS, commandSummary, detailForTool, targetForTool } from './session-stream-events.js'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -84,19 +88,35 @@ export function permissionBrokerTimeoutMs(env: NodeJS.ProcessEnv): number {
   return Math.round(Math.min(BROKER_TIMEOUT_MAX_S, Math.max(BROKER_TIMEOUT_MIN_S, seconds)) * 1000)
 }
 
-/** A client must have polled `GET /api/session-questions` this recently. */
-export const CLIENT_LIVE_WINDOW_MS = 60_000
+/**
+ * A client must have polled `GET /api/session-questions?client=glasses|phone` this recently,
+ * at admission AND while anything is held (QA round 1: 60 s let a phone that locked hold a
+ * question nobody could see for a minute). Three polls at the advertised interval.
+ */
+export const CLIENT_LIVE_WINDOW_MS = 30_000
+/** The poll interval the questions route advertises to clients. */
+export const QUESTIONS_POLL_INTERVAL_MS = 10_000
+/** A poll stamp this far AHEAD of the server clock (the clock stepped back) is not trusted. */
+export const POLL_FUTURE_SKEW_MS = 5_000
+/** The `client` values of a questions poll that count as a live answerer. */
+export const ANSWERING_CLIENTS: ReadonlySet<string> = new Set(['glasses', 'phone'])
+/** The questions API's own version, advertised at /api/models. */
+export const SESSION_QUESTIONS_PROTOCOL_VERSION = 1
 /** How often a parked item re-reads the desk. */
 export const DESK_POLL_MS = 1_500
-/** Parked items at once; past it, `{}`. */
+/** Never hold a request for a desk idle less than this, whatever the setting says. */
+export const DESK_IDLE_MIN_S = 30
+/** Parked items at once; past it, `{}`. Checked again after the desk read. */
 export const MAX_PENDING = 32
 /** A settled item is kept this long so a late answer gets the right code and a retry its replay. */
 export const SETTLED_RETENTION_MS = 10 * 60_000
 export const MAX_SETTLED = 256
 /** Free text for "Other". */
 export const OTHER_TEXT_MAX = 2_000
+/** The approval card's short line: the command (or path, URL, query) as the lens shows it. */
+export const APPROVAL_SUMMARY_MAX = 160
 /** The full command, one page back on the lens. */
-export const APPROVAL_DETAIL_MAX = 1_000
+export const APPROVAL_DETAIL_MAX = 4_000
 export const DENY_MESSAGE = 'Denied from COS glasses'
 /** Tools whose dialog is not a yes/no: never brokered. */
 export const UNBROKERED_TOOLS: ReadonlySet<string> = new Set(['ExitPlanMode'])
@@ -148,12 +168,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-/**
- * The spool envelope the hook posts (`{"ts","ppid","event","payload"}`), read strictly.
- * Cursor stamps every hook payload with `cursor_version` and Claude Code never does, so
- * the key's presence, in any form, is a Cursor request.
- */
-export function parsePermissionRequestEnvelope(body: unknown): EnvelopeVerdict {
+type EnvelopeRead =
+  | { ok: true; facts: Omit<PermissionRequestFacts, 'fingerprint'> }
+  | { ok: false; reason: 'malformed' | 'cursor' }
+
+/** The envelope's structure only: no hashing, no regex over the input. */
+function readPermissionRequestEnvelope(body: unknown): EnvelopeRead {
   if (!isRecord(body) || body.event !== 'PermissionRequest' || !isRecord(body.payload)) return { ok: false, reason: 'malformed' }
   const p = body.payload
   if ('cursor_version' in p) return { ok: false, reason: 'cursor' }
@@ -163,14 +183,20 @@ export function parsePermissionRequestEnvelope(body: unknown): EnvelopeVerdict {
   const ts = typeof body.ts === 'number' && Number.isFinite(body.ts) ? body.ts : null
   return {
     ok: true,
-    facts: {
-      sessionId: p.session_id.toLowerCase(),
-      toolName: p.tool_name,
-      toolInput: p.tool_input,
-      fingerprint: toolFingerprint(p.tool_name, p.tool_input),
-      hookStartedAtMs: ts,
-    },
+    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts },
   }
+}
+
+/**
+ * The spool envelope the hook posts (`{"ts","ppid","event","payload"}`), read strictly.
+ * Cursor stamps every hook payload with `cursor_version` and Claude Code never does, so
+ * the key's presence, in any form, is a Cursor request. The broker itself reads the
+ * structure first and fingerprints only a request it will park.
+ */
+export function parsePermissionRequestEnvelope(body: unknown): EnvelopeVerdict {
+  const read = readPermissionRequestEnvelope(body)
+  if (!read.ok) return read
+  return { ok: true, facts: { ...read.facts, fingerprint: toolFingerprint(read.facts.toolName, read.facts.toolInput) } }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +234,17 @@ export function parseQuestions(toolInput: Record<string, unknown>): BrokerQuesti
   return questions
 }
 
+/**
+ * The one change made to "Other" free text, measured (canary, 2026-09-19): Claude Code
+ * joins a list answer with commas in the text the model reads, so `["Red","Blue","Purple,
+ * but only on weekends"]` reached the model as `Red,Blue,Purple, but only on weekends` and
+ * the model dropped "but only on weekends". Free text that contains a comma is wrapped in
+ * double quotes, which keeps it one answer in that text. Option labels are never touched.
+ */
+export function quoteFreeTextAnswer(text: string): string {
+  return text.includes(',') ? `"${text}"` : text
+}
+
 export type AnswerValidation =
   | { ok: true; answers: Record<string, string[]> }
   | { ok: false; reason: 'answers_shape' | 'unanswered' | 'unknown_label' | 'duplicate_label' | 'too_many' | 'other_too_long'; index?: number }
@@ -216,9 +253,10 @@ export type AnswerValidation =
  * A client's answers, one entry per question in order: `{ labels?: string[], other?: string }`.
  * Every question must be answered. Labels must match one of that question's options
  * EXACTLY (the client shows a sanitized copy and sends the original back). `other` is the
- * free text of the card's "Other" choice, sent verbatim as its own entry. Single-select
- * takes exactly one entry. The result is keyed by each question's ORIGINAL text, labels
- * in option order, "Other" last: the shape Claude Desktop sends.
+ * free text of the card's "Other" choice, sent as its own entry. Single-select takes
+ * exactly one entry. The result is keyed by each question's ORIGINAL text, labels in option
+ * order, "Other" last: the shape Claude Desktop sends.
+ * Free text goes through `quoteFreeTextAnswer`.
  */
 export function validateQuestionAnswers(questions: readonly BrokerQuestion[], raw: unknown): AnswerValidation {
   if (!Array.isArray(raw) || raw.length !== questions.length) return { ok: false, reason: 'answers_shape' }
@@ -243,7 +281,7 @@ export function validateQuestionAnswers(questions: readonly BrokerQuestion[], ra
     for (const option of q.options) {
       if (picked.has(option.label) && !list.includes(option.label)) list.push(option.label)
     }
-    if (other.trim().length > 0) list.push(other)
+    if (other.trim().length > 0) list.push(quoteFreeTextAnswer(other))
     if (list.length === 0) return { ok: false, reason: 'unanswered', index }
     if (!q.multiSelect && list.length > 1) return { ok: false, reason: 'too_many', index }
     answers[q.question] = list
@@ -272,43 +310,127 @@ export function approvalHookOutput(decision: 'allow' | 'deny'): Record<string, u
 
 export interface ApprovalCard {
   tool: string
-  /** The Sessions grammar's short target (a command's `commandSummary`, a file's basename), redacted. */
+  /** What will run, as the lens shows it: the command verbatim, the full path, the URL. */
   summary: string
-  /** The full command or target, redacted, one line, capped. The lens puts it one page back. */
+  /** The same, longer (up to APPROVAL_DETAIL_MAX). The lens puts it one page back. */
   detail: string
 }
 
 const SHELL_TOOLS: ReadonlySet<string> = new Set(['bash', 'shell', 'exec', 'exec_command'])
+const FILE_TOOLS: ReadonlySet<string> = new Set(['write', 'edit', 'multiedit', 'notebookedit'])
+
+/** Whitespace runs become one space. Any other control character is shown as `\xNN`, so a
+ * byte the lens cannot draw is neither dropped nor misread. Nothing else changes. */
+function normalizeApprovalText(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+    .trim()
+}
+
+/** The marker a cut line ends with, naming how much is not shown. */
+export function approvalCutMarker(omitted: number): string {
+  return ` ...(+${omitted} chars)`
+}
 
 /**
- * What the lens and phone show for an approval. Redaction runs on the FULL text before
- * anything is cut, so a secret is never half-shown: the shell summary is taken first (its
- * heredoc rule needs the original lines) and then redacted; every other field is redacted
- * and then handed to the Sessions grammar's target helper.
+ * One approval line from raw text: redacted (secrets and private-material blocks only),
+ * then whitespace-normalized, then cut at `max` with the marker. Redaction reads at most
+ * REDACTION_SCAN_MAX_CHARS, ended at a token boundary, so no input can make it slow and no
+ * secret straddling that bound is shown half.
+ */
+function approvalLine(raw: string, max: number): string {
+  const { head, omitted } = boundForRedaction(raw)
+  const text = normalizeApprovalText(redactSecretText(head))
+  if (text.length <= max && omitted === 0) return text
+  const shown = text.slice(0, max)
+  return shown + approvalCutMarker(text.length - shown.length + omitted)
+}
+
+function lineCount(value: unknown): number {
+  if (typeof value !== 'string' || value.length === 0) return 0
+  return value.replace(/\n$/, '').split('\n').length
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
+/** How big a file change is, from the call itself. */
+function fileChangeSize(lower: string, input: Record<string, unknown>): string {
+  if (lower === 'write') {
+    const content = typeof input.content === 'string' ? input.content : ''
+    return `${plural(lineCount(content), 'line')}, ${plural(content.length, 'char')}`
+  }
+  if (lower === 'edit') {
+    const all = input.replace_all === true ? ', every match' : ''
+    return `+${lineCount(input.new_string)} -${lineCount(input.old_string)} lines${all}`
+  }
+  if (lower === 'multiedit') {
+    const edits = Array.isArray(input.edits) ? input.edits.length : 0
+    return plural(edits, 'edit')
+  }
+  // NotebookEdit
+  const mode = typeof input.edit_mode === 'string' ? input.edit_mode : 'replace'
+  return `${mode}, ${plural(lineCount(input.new_source), 'line')}`
+}
+
+/** A value as the card shows it: a string as written, anything else as JSON. */
+function valueText(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * What the lens and phone show for an approval (6.52.0 QA round 1).
+ *
+ * THE RULE: the card never says less than what will run. Round 1 reused the Sessions
+ * display shorteners and they misstated it: `git status | tail -3 && git push --force
+ * origin main` read "git status", `ls | head -1; curl ... | sh` read "ls| sh", any path of
+ * 40+ characters read "[opaque output hidden]", and WebFetch showed its prompt. So:
+ *   - a shell command: verbatim, whitespace-normalized, every segment, pipe and `&&` part;
+ *   - Write, Edit, MultiEdit, NotebookEdit: the full path, then the size or line count;
+ *   - WebFetch: the URL. WebSearch: the query;
+ *   - anything else: its input keys and values in order (the card's `tool` names it).
+ * A line longer than its cap is cut there and ends with ` ...(+N chars)`. The only thing
+ * taken out is a secret: `redactSecretText` (secret patterns and private-material blocks),
+ * never the opaque-output heuristic, which hid ordinary paths.
  */
 export function approvalCard(toolName: string, toolInput: Record<string, unknown>): ApprovalCard {
-  const redacted: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(toolInput)) {
-    if (typeof value === 'string') redacted[key] = sanitizeActivityPreview(value, 4_000) ?? ''
+  const lower = toolName.trim().toLowerCase()
+  const str = (key: string): string | null => typeof toolInput[key] === 'string' ? toolInput[key] as string : null
+  const both = (text: string): ApprovalCard => ({
+    tool: toolName,
+    summary: approvalLine(text, APPROVAL_SUMMARY_MAX),
+    detail: approvalLine(text, APPROVAL_DETAIL_MAX),
+  })
+  if (SHELL_TOOLS.has(lower)) {
+    const command = str('command') ?? str('cmd')
+    if (command !== null) return both(command)
   }
-  const command = typeof toolInput.command === 'string' ? toolInput.command : typeof toolInput.cmd === 'string' ? toolInput.cmd : null
-  if (SHELL_TOOLS.has(toolName.trim().toLowerCase()) && command !== null) {
-    return {
-      tool: toolName,
-      summary: sanitizeActivityPreview(commandSummary(command), TARGET_MAX_CHARS) ?? '',
-      detail: sanitizeActivityPreview(command, APPROVAL_DETAIL_MAX) ?? '',
+  if (FILE_TOOLS.has(lower)) {
+    const path = str('file_path') ?? str('notebook_path') ?? str('path')
+    if (path !== null) {
+      const size = ` (${fileChangeSize(lower, toolInput)})`
+      return {
+        tool: toolName,
+        summary: approvalLine(path, APPROVAL_SUMMARY_MAX) + size,
+        detail: approvalLine(path, APPROVAL_DETAIL_MAX) + size,
+      }
     }
   }
-  const summary = targetForTool(toolName, redacted)
-  const path = redacted.file_path ?? redacted.path ?? redacted.notebook_path
-  let detail: string
-  if (typeof path === 'string' && path.length > 0) {
-    const delta = detailForTool(toolName, toolInput)
-    detail = delta ? `${path} (${delta})` : path
-  } else {
-    detail = sanitizeActivityPreview(JSON.stringify(toolInput), APPROVAL_DETAIL_MAX) ?? ''
-  }
-  return { tool: toolName, summary, detail }
+  if (lower === 'webfetch' && str('url') !== null) return both(str('url')!)
+  if (lower === 'websearch' && str('query') !== null) return both(str('query')!)
+  // Bounded before it is joined: a huge value never reaches a regex, only its head does.
+  const pairs = Object.entries(toolInput).map(([key, value]) => {
+    const { head, omitted } = boundForRedaction(valueText(value))
+    return `${key}=${head}${omitted > 0 ? approvalCutMarker(omitted) : ''}`
+  })
+  return both(pairs.join(' '))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +438,7 @@ export function approvalCard(toolName: string, toolInput: Record<string, unknown
 // ---------------------------------------------------------------------------
 
 export type BrokerItemKind = 'question' | 'approval'
-export type BrokerResolution = 'answered' | 'handed_to_desk' | 'expired' | 'hook_gone' | 'retracted' | 'drained'
+export type BrokerResolution = 'answered' | 'handed_to_desk' | 'expired' | 'hook_gone' | 'retracted' | 'drained' | 'no_client'
 export type BrokerFastPath =
   | 'broker_off' | 'draining' | 'malformed' | 'cursor' | 'approvals_off' | 'unsupported_tool'
   | 'unsupported_input' | 'no_client' | 'stale_hook' | 'capacity' | 'desk_unknown' | 'desk_active'
@@ -341,7 +463,7 @@ export interface PermissionBrokerDeps {
   now(): number
   mode(): BrokerMode
   admissionsOpen(): boolean
-  /** The newest authenticated `GET /api/session-questions`, or null (lib/client-liveness). */
+  /** The newest counting `GET /api/session-questions`, or null (lib/client-liveness). */
   lastQuestionsPollAt(): number | null
   readDeskIdleSeconds(): Promise<number | null>
   deskIdleSeconds(): number
@@ -396,21 +518,51 @@ export interface SessionQuestionView {
   approval?: ApprovalCard
 }
 
+/**
+ * `/api/health`'s `permissionBroker`. Counts, the mode and two timestamps: never an id,
+ * a question, a command, or how many are held right now (that is on the authenticated
+ * questions route). Every key is camelCase; the reason CODES keep their wire spelling.
+ */
 export interface PermissionBrokerHealth {
   enabled: boolean
   mode: BrokerMode
-  pending: number
   counters: {
     parked: number
     answered: number
-    handed_to_desk: number
+    handedToDesk: number
     expired: number
-    hook_gone: number
+    hookGone: number
     retracted: number
     drained: number
-    fast_path: Partial<Record<BrokerFastPath, number>>
+    noClient: number
+    /** An answer refused 400 `invalid_answer`. */
+    invalidAnswer: number
+    /** A desk read that failed while something was held. */
+    deskUnreadable: number
+    /** Requests answered `{}` without being parked, keyed by the camelCase of the reason. */
+    fastPath: Record<string, number>
   }
   lastFastPath: BrokerFastPath | null
+  lastFastPathAt: string | null
+  lastQuestionsPollAt: string | null
+}
+
+type ResolutionCounter = 'handedToDesk' | 'expired' | 'hookGone' | 'retracted' | 'drained' | 'noClient'
+const RESOLUTION_COUNTER: Record<Exclude<BrokerResolution, 'answered'>, ResolutionCounter> = {
+  handed_to_desk: 'handedToDesk',
+  expired: 'expired',
+  hook_gone: 'hookGone',
+  retracted: 'retracted',
+  drained: 'drained',
+  no_client: 'noClient',
+}
+
+function camelKey(code: string): string {
+  return code.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase())
+}
+
+function isoOrNull(ms: number | null): string | null {
+  return ms !== null && Number.isFinite(ms) ? new Date(ms).toISOString() : null
 }
 
 export interface AnswerResult { status: number; body: Record<string, unknown> }
@@ -426,9 +578,12 @@ export class PermissionBroker {
   private readonly items = new Map<string, BrokerItem>()
   private poll: ReturnType<typeof setInterval> | null = null
   private pollInFlight = false
-  private readonly counters = { parked: 0, answered: 0, handed_to_desk: 0, expired: 0, hook_gone: 0, retracted: 0, drained: 0 }
-  private readonly fastPaths: Partial<Record<BrokerFastPath, number>> = {}
+  /** Failed desk reads in a row while something is held. Two hand everything back. */
+  private deskUnreadableStreak = 0
+  private readonly counters = { parked: 0, answered: 0, handedToDesk: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0 }
+  private readonly fastPaths: Record<string, number> = {}
   private lastFastPath: BrokerFastPath | null = null
+  private lastFastPathAt: number | null = null
 
   constructor(deps: PermissionBrokerDeps) {
     this.deps = deps
@@ -440,9 +595,29 @@ export class PermissionBroker {
 
   /** A request answered `{}` without being parked, counted by why. */
   noteFastPath(reason: BrokerFastPath): { ok: false; reason: BrokerFastPath } {
-    this.fastPaths[reason] = (this.fastPaths[reason] ?? 0) + 1
+    const key = camelKey(reason)
+    this.fastPaths[key] = (this.fastPaths[key] ?? 0) + 1
     this.lastFastPath = reason
+    this.lastFastPathAt = this.deps.now()
     return { ok: false, reason }
+  }
+
+  /**
+   * A client that can answer has polled within the window. A stamp more than
+   * POLL_FUTURE_SKEW_MS ahead of the clock (the clock stepped back) is stale, not live
+   * forever.
+   */
+  private clientLive(now: number): boolean {
+    const polledAt = this.deps.lastQuestionsPollAt()
+    if (polledAt === null || !Number.isFinite(polledAt)) return false
+    if (polledAt - now > POLL_FUTURE_SKEW_MS) return false
+    return now - polledAt <= CLIENT_LIVE_WINDOW_MS
+  }
+
+  /** The desk-idle threshold, never below DESK_IDLE_MIN_S. */
+  private deskIdleThreshold(): number {
+    const configured = Number(this.deps.deskIdleSeconds())
+    return Math.max(DESK_IDLE_MIN_S, Number.isFinite(configured) ? configured : DESK_IDLE_MIN_S)
   }
 
   pendingCount(): number {
@@ -453,31 +628,26 @@ export class PermissionBroker {
 
   /**
    * Every gate, cheapest first, so a request outside them is answered without spawning
-   * anything. The desk is read last (one `ioreg`), and the switch and the drain are read
-   * again after it, since the world may have moved during the read.
+   * anything or reading its input: the switch, the drain, the envelope's structure (a
+   * Cursor payload), the tool policy, a live client, the hook's own deadline, capacity, and
+   * only then the desk (one `ioreg`). The switch, the drain, the approvals policy and
+   * capacity are read again after it, since the world may have moved during the read. The
+   * question card, the approval card and the fingerprint are built only for a request that
+   * will be parked.
    */
   async admit(body: unknown): Promise<BrokerAdmission> {
     if (this.deps.mode() === 'off') return this.noteFastPath('broker_off')
     if (!this.deps.admissionsOpen()) return this.noteFastPath('draining')
-    const parsed = parsePermissionRequestEnvelope(body)
-    if (!parsed.ok) return this.noteFastPath(parsed.reason)
-    const { facts } = parsed
-    let kind: BrokerItemKind
-    let questions: BrokerQuestion[] | null = null
-    let approval: ApprovalCard | null = null
-    if (facts.toolName === ASK_USER_QUESTION_TOOL) {
-      questions = parseQuestions(facts.toolInput)
-      if (!questions) return this.noteFastPath('unsupported_input')
-      kind = 'question'
-    } else {
+    const read = readPermissionRequestEnvelope(body)
+    if (!read.ok) return this.noteFastPath(read.reason)
+    const { facts } = read
+    const isQuestion = facts.toolName === ASK_USER_QUESTION_TOOL
+    if (!isQuestion) {
       if (this.deps.mode() !== 'all') return this.noteFastPath('approvals_off')
       if (UNBROKERED_TOOLS.has(facts.toolName)) return this.noteFastPath('unsupported_tool')
-      kind = 'approval'
-      approval = approvalCard(facts.toolName, facts.toolInput)
     }
     const now = this.deps.now()
-    const polledAt = this.deps.lastQuestionsPollAt()
-    if (polledAt === null || now - polledAt > CLIENT_LIVE_WINDOW_MS) return this.noteFastPath('no_client')
+    if (!this.clientLive(now)) return this.noteFastPath('no_client')
     // The deadline counts from when the HOOK started, when its stamp is sane: a request the
     // server read late must still be answered before the hook's curl gives up.
     const requestedAt = facts.hookStartedAtMs !== null && facts.hookStartedAtMs <= now ? facts.hookStartedAtMs : now
@@ -487,10 +657,26 @@ export class PermissionBroker {
     let idle: number | null = null
     try { idle = await this.deps.readDeskIdleSeconds() } catch { idle = null }
     if (idle === null) return this.noteFastPath('desk_unknown')
-    if (idle < this.deps.deskIdleSeconds()) return this.noteFastPath('desk_active')
-    if (this.deps.mode() === 'off') return this.noteFastPath('broker_off')
+    if (idle < this.deskIdleThreshold()) return this.noteFastPath('desk_active')
+    const mode = this.deps.mode()
+    if (mode === 'off') return this.noteFastPath('broker_off')
     if (!this.deps.admissionsOpen()) return this.noteFastPath('draining')
-    return { ok: true, request: { facts, kind, questions, approval, deadlineAt } }
+    if (!isQuestion && mode !== 'all') return this.noteFastPath('approvals_off')
+    // Others were admitted during the read: the cap holds at the moment of parking.
+    if (this.pendingCount() >= MAX_PENDING) return this.noteFastPath('capacity')
+    let kind: BrokerItemKind
+    let questions: BrokerQuestion[] | null = null
+    let approval: ApprovalCard | null = null
+    if (isQuestion) {
+      questions = parseQuestions(facts.toolInput)
+      if (!questions) return this.noteFastPath('unsupported_input')
+      kind = 'question'
+    } else {
+      kind = 'approval'
+      approval = approvalCard(facts.toolName, facts.toolInput)
+    }
+    const fingerprint = toolFingerprint(facts.toolName, facts.toolInput)
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -545,8 +731,11 @@ export class PermissionBroker {
       try { item.channel?.reply({}) } catch { /* the hook is gone anyway */ }
     }
     item.channel = null
-    item.toolInput = {} // a settled item is kept for its codes, not its content
-    this.counters[resolution]++
+    // A settled item is kept for its codes, not its content.
+    item.toolInput = {}
+    item.questions = null
+    item.approval = null
+    this.counters[RESOLUTION_COUNTER[resolution]]++
     try { this.deps.signals?.detach(item.sessionId, item.id) } catch { /* rows are advisory */ }
     this.log(`${resolution} ${item.id} kind=${item.kind} pending=${this.pendingCount()}`)
     this.prune()
@@ -587,6 +776,7 @@ export class PermissionBroker {
     const input = isRecord(body) ? body : {}
     const clientAnswerId = input.clientAnswerId
     if (typeof clientAnswerId !== 'string' || !CLIENT_ANSWER_ID_RE.test(clientAnswerId)) {
+      this.counters.invalidAnswer++
       return { status: 400, body: { error: 'invalid_answer', reason: 'client_answer_id' } }
     }
     if (item.state !== 'pending') return this.settledReply(item, clientAnswerId)
@@ -599,12 +789,16 @@ export class PermissionBroker {
     if (item.kind === 'question') {
       const validation = validateQuestionAnswers(item.questions ?? [], input.answers)
       if (!validation.ok) {
+        this.counters.invalidAnswer++
         return { status: 400, body: { error: 'invalid_answer', reason: validation.reason, ...(validation.index !== undefined ? { index: validation.index } : {}) } }
       }
       chosen = { answers: validation.answers }
       output = questionHookOutput(item.toolInput, validation.answers)
     } else {
-      if (input.decision !== 'allow' && input.decision !== 'deny') return { status: 400, body: { error: 'invalid_answer', reason: 'decision' } }
+      if (input.decision !== 'allow' && input.decision !== 'deny') {
+        this.counters.invalidAnswer++
+        return { status: 400, body: { error: 'invalid_answer', reason: 'decision' } }
+      }
       chosen = { decision: input.decision }
       output = approvalHookOutput(input.decision)
     }
@@ -620,6 +814,8 @@ export class PermissionBroker {
     item.answer = { clientAnswerId, chosen }
     item.channel = null
     item.toolInput = {}
+    item.questions = null
+    item.approval = null
     if (item.timer) clearTimeout(item.timer)
     item.timer = null
     this.counters.answered++
@@ -641,7 +837,7 @@ export class PermissionBroker {
       case 'hook_gone':
         return { status: 410, body: { error: 'hook_gone' } }
       default:
-        // handed_to_desk, retracted, drained: the Mac has it now.
+        // handed_to_desk, retracted, drained, no_client: the Mac has it now.
         return { status: 409, body: { error: 'handed_to_desk', reason: item.state } }
     }
   }
@@ -692,22 +888,35 @@ export class PermissionBroker {
   private stopPolling(): void {
     if (this.poll) clearInterval(this.poll)
     this.poll = null
+    this.deskUnreadableStreak = 0
   }
 
-  /** One desk check while anything is held. Returning to the Mac hands everything back. */
+  /**
+   * One check while anything is held. A drain, the answering client going quiet, or
+   * returning to the Mac hands everything back. An unreadable desk counts as the desk only
+   * on the SECOND failed read in a row: one `ioreg` that times out under load must not
+   * throw away a question someone is reading (QA round 1).
+   */
   async tick(): Promise<void> {
     if (this.pendingCount() === 0) { this.stopPolling(); return }
     if (!this.deps.admissionsOpen()) { this.settleAll('drained'); return }
+    if (!this.clientLive(this.deps.now())) { this.settleAll('no_client'); return }
     if (this.pollInFlight) return
     this.pollInFlight = true
     let idle: number | null = null
     try { idle = await this.deps.readDeskIdleSeconds() } catch { idle = null } finally { this.pollInFlight = false }
-    // Unreadable is treated as the desk: the native dialog is the safe side.
-    if (idle !== null && idle >= this.deps.deskIdleSeconds()) return
+    if (idle === null) {
+      this.counters.deskUnreadable++
+      this.deskUnreadableStreak++
+      if (this.deskUnreadableStreak >= 2) this.settleAll('handed_to_desk')
+      return
+    }
+    this.deskUnreadableStreak = 0
+    if (idle >= this.deskIdleThreshold()) return
     this.settleAll('handed_to_desk')
   }
 
-  private settleAll(resolution: 'handed_to_desk' | 'drained'): void {
+  private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client'): void {
     for (const item of [...this.items.values()]) if (item.state === 'pending') this.settle(item, resolution)
     if (this.pendingCount() === 0) this.stopPolling()
   }
@@ -728,12 +937,15 @@ export class PermissionBroker {
 
   health(): PermissionBrokerHealth {
     const mode = this.deps.mode()
+    let polledAt: number | null = null
+    try { polledAt = this.deps.lastQuestionsPollAt() } catch { polledAt = null }
     return {
       enabled: mode !== 'off',
       mode,
-      pending: this.pendingCount(),
-      counters: { ...this.counters, fast_path: { ...this.fastPaths } },
+      counters: { ...this.counters, fastPath: { ...this.fastPaths } },
       lastFastPath: this.lastFastPath,
+      lastFastPathAt: isoOrNull(this.lastFastPathAt),
+      lastQuestionsPollAt: isoOrNull(polledAt),
     }
   }
 
@@ -770,7 +982,32 @@ export function registerPermissionBroker(broker: PermissionBroker | null): void 
   registered = broker
 }
 
-/** `/api/health`: counts and the mode only; never an id, a question or a command. */
+/** `/api/health`: counts, the mode and timestamps only; never an id, a question or a command. */
 export function permissionBrokerHealthFields(): { permissionBroker: PermissionBrokerHealth | null } {
   return { permissionBroker: registered ? registered.health() : null }
+}
+
+export interface SessionQuestionsCapability {
+  enabled: boolean
+  mode: BrokerMode
+  protocolVersion: number
+  pollIntervalMs: number
+  liveWindowMs: number
+}
+
+/**
+ * `/api/models` `capabilities.sessionQuestions`: whether the questions API is there and
+ * holding, and the client contract (poll `GET /api/session-questions?client=glasses|phone`
+ * every `pollIntervalMs`; a client quiet for `liveWindowMs` hands everything back).
+ */
+export function sessionQuestionsCapability(): SessionQuestionsCapability {
+  let mode: BrokerMode = 'off'
+  try { mode = registered ? registered.health().mode : 'off' } catch { mode = 'off' }
+  return {
+    enabled: mode !== 'off',
+    mode,
+    protocolVersion: SESSION_QUESTIONS_PROTOCOL_VERSION,
+    pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS,
+    liveWindowMs: CLIENT_LIVE_WINDOW_MS,
+  }
 }

@@ -140,6 +140,15 @@ describe('public durable-query capability health', () => {
       protocolVersion: 1,
       trail: true,
     })
+    // 6.52.0: the session questions contract, beside the trail. No broker is registered in
+    // this harness, so it reads off; the numbers are the client contract.
+    expect(body.capabilities?.sessionQuestions).toEqual({
+      enabled: false,
+      mode: 'off',
+      protocolVersion: 1,
+      pollIntervalMs: 10_000,
+      liveWindowMs: 30_000,
+    })
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
       protocolVersion: 1,
       idempotentSave: true,
@@ -183,6 +192,30 @@ describe('public durable-query capability health', () => {
       expect(body.capabilities?.durableQueryJobs).toEqual({ enabled: true, protocolVersion: 1, trail: false })
     } finally {
       delete process.env.COS_MESSAGES_TRAIL
+    }
+  }, 20_000)
+
+  it('advertises session questions from the registered broker, and public health never says how many are held', async () => {
+    const { PermissionBroker, registerPermissionBroker, CLIENT_LIVE_WINDOW_MS, QUESTIONS_POLL_INTERVAL_MS } = await import('../lib/permission-broker.js')
+    const broker = new PermissionBroker({
+      now: () => Date.now(), mode: () => 'questions', admissionsOpen: () => true, lastQuestionsPollAt: () => null,
+      readDeskIdleSeconds: async () => 1_000, deskIdleSeconds: () => 90, timeoutMs: () => 110_000, log: () => {},
+    })
+    registerPermissionBroker(broker)
+    try {
+      const models = await (await fetch(`${base}/api/models`)).json() as any
+      expect(models.capabilities?.sessionQuestions).toEqual({
+        enabled: true, mode: 'questions', protocolVersion: 1, pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS, liveWindowMs: CLIENT_LIVE_WINDOW_MS,
+      })
+      const health = await (await fetch(`${base}/api/health`)).json() as any
+      expect(health.permissionBroker).toMatchObject({ enabled: true, mode: 'questions', lastFastPath: null, lastQuestionsPollAt: null })
+      expect(health.permissionBroker).not.toHaveProperty('pending')
+      expect(Object.keys(health.permissionBroker.counters).sort()).toEqual([
+        'answered', 'deskUnreadable', 'drained', 'expired', 'fastPath', 'handedToDesk', 'hookGone', 'invalidAnswer', 'noClient', 'parked', 'retracted',
+      ])
+    } finally {
+      broker.stop()
+      registerPermissionBroker(null)
     }
   }, 20_000)
 
