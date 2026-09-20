@@ -46,6 +46,25 @@ describe("the user's query reaches the lens", () => {
     expect(drafts).toEqual([{ kind: 'prompt', text: 'Are we ready to test?' }])
   })
 
+  it('stamps turn_started_at from the user record, not from Date.now()', () => {
+    const at = '2026-09-20T12:00:00.000Z'
+    const drafts = draftsFromLine('claude', JSON.stringify({
+      type: 'user',
+      timestamp: at,
+      message: { role: 'user', content: [{ type: 'text', text: 'how long has this been running' }] },
+    }))
+    expect(drafts).toEqual([{
+      kind: 'prompt',
+      text: 'how long has this been running',
+      turn_started_at: at,
+    }])
+  })
+
+  it('omits turn_started_at when the record has no timestamp, so 6.52.0 clients still parse it', () => {
+    expect(draftsFromLine('claude', userLine([{ type: 'text', text: 'no clock' }])))
+      .toEqual([{ kind: 'prompt', text: 'no clock' }])
+  })
+
   it('emits nothing for empty or whitespace-only content', () => {
     expect(promptDrafts({ content: [{ type: 'text', text: '   ' }] })).toEqual([])
     expect(promptDrafts({ content: [] })).toEqual([])

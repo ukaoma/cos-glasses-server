@@ -1,3 +1,11 @@
+## 6.52.1
+
+### Session turn clock
+
+Sessions prompt events now carry additive `turn_started_at` (ISO), the timestamp on the user record that started the turn. Seed, reconnect, and live frames keep that value; transport `at` is still `Date.now()` at emit time, so a reconnect no longer resets the glasses elapsed clock. `/api/models` advertises `capabilities.runningTurnMeta.protocolVersion = 1`. A 6.52.0 client strips the unknown field and renders as before. Messages jobs already have durable `startedAt`; this is Sessions only.
+
+- Tests: a Claude user row with `timestamp` stamps the prompt draft; a row without one is byte-identical to 6.52.0; the models capability is present beside `sessionQuestions`.
+
 ## 6.52.0
 
 ### Messages trail

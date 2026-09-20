@@ -157,6 +157,7 @@ describe('public durable-query capability health', () => {
       pollIntervalMs: 10_000,
       liveWindowMs: 30_000,
     })
+    expect(body.capabilities?.runningTurnMeta).toEqual({ protocolVersion: 1 })
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
       protocolVersion: 1,
       idempotentSave: true,

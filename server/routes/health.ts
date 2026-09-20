@@ -588,6 +588,10 @@ healthRouter.get('/models', async (req, res) => {
       // `GET /api/session-questions?client=glasses|phone` every `pollIntervalMs`; one
       // quiet for `liveWindowMs` hands every held request back to the Mac.
       sessionQuestions: sessionQuestionsCapability(),
+      // 6.52.1: Sessions prompt events carry additive `turn_started_at` (ISO), the
+      // real user-record time. Transport `at` stays the seed/live stamp. Absent on
+      // 6.52.0, the client falls back to a local pin.
+      runningTurnMeta: { protocolVersion: 1 },
       transcription: {
         ...transcription,
         live: transcriptionLive,

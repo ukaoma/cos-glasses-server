@@ -37,7 +37,7 @@ export type SessionStreamDraft =
   // ADDITIVE TO A CLOSED SET, AND SAFE BY CONSTRUCTION: the client validates `kind`
   // against its own table and ignores anything it does not know, so a build that
   // predates this renders exactly as it did before rather than breaking.
-  | { kind: 'prompt'; text: string }
+  | { kind: 'prompt'; text: string; turn_started_at?: string }
   | { kind: 'prose'; text: string }
   // 6.49.0: `tool_outcome` rides on a status draft, never on a new kind. A shipped
   // client drops an unknown kind BEFORE seq accounting and paints a gap row for it
@@ -171,6 +171,35 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
+}
+
+/** ISO time the current turn actually started, from the transcript record. */
+export function recordTimestampIso(record: Record<string, unknown>): string | undefined {
+  const nested = asRecord(record.payload)
+  const item = asRecord(record.item)
+  const candidates = [record.timestamp, record.ts, nested?.timestamp, nested?.ts, item?.timestamp]
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) {
+      const t = Date.parse(c)
+      if (Number.isFinite(t) && t > 0) return new Date(t).toISOString()
+    }
+    if (typeof c === 'number' && Number.isFinite(c) && c > 0) {
+      const ms = c < 1e12 ? c * 1000 : c
+      if (Number.isFinite(ms) && ms > 0) return new Date(ms).toISOString()
+    }
+  }
+  return undefined
+}
+
+function stampPromptTurnStart(drafts: SessionStreamDraft[], record: Record<string, unknown>): SessionStreamDraft[] {
+  const iso = recordTimestampIso(record)
+  if (!iso) return drafts
+  let stamped = false
+  return drafts.map((draft) => {
+    if (draft.kind !== 'prompt' || stamped) return draft
+    stamped = true
+    return { ...draft, turn_started_at: iso }
+  })
 }
 
 function countLines(value: unknown): number {
@@ -1233,9 +1262,8 @@ export function draftsFromRecord(
   const obj = asRecord(record)
   if (!obj) return []
   try {
-    if (provider === 'codex') return draftsFromCodexRecord(obj)
-    // Cursor shares Claude's content-block shape, keyed off `role` instead of `type`.
-    return draftsFromClaudeRecord(obj)
+    const drafts = provider === 'codex' ? draftsFromCodexRecord(obj) : draftsFromClaudeRecord(obj)
+    return stampPromptTurnStart(drafts, obj)
   } catch {
     // A malformed record costs one line of the trail. It must never cost the stream.
     return []

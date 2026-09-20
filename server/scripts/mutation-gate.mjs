@@ -2902,6 +2902,20 @@ const CASES = [
     replace: "",
     tests: ["server/lib/query-job-trail-store.test.ts", "server/routes/query-jobs-trail.test.ts"],
   },
+  {
+    name: "turn-clock-stamped-from-record",
+    file: "server/lib/session-stream-events.ts",
+    find: "    return { ...draft, turn_started_at: iso }\n",
+    replace: "    return draft\n",
+    tests: ["server/lib/session-stream-prompt.test.ts"],
+  },
+  {
+    name: "turn-clock-capability-dropped",
+    file: "server/routes/health.ts",
+    find: "      runningTurnMeta: { protocolVersion: 1 },\n",
+    replace: "",
+    tests: ["server/routes/health-query-jobs.test.ts"],
+  },
 ]
 
 function sha256(text) {
