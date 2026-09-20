@@ -27,6 +27,8 @@ import {
 
 /** Owners kept at once; the least recently seen device is dropped past this. */
 export const CLIENT_INSTANCE_MAX_DEVICES = 16
+/** Copies whose last claim time is remembered (6.52.3); the least recent is dropped past this. */
+export const CLIENT_INSTANCE_MAX_SEEN = 64
 
 export interface ClientInstanceRouterDeps {
   now?: () => number
@@ -49,6 +51,13 @@ export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() 
   const router = Router()
   const owners = new Map<string, ClientInstanceOwner>()
   const chunks = new ClientChunkLedger()
+  // 6.52.3: when each copy last claimed, so an older boot proves it was awake before it
+  // may take a quiet ring back. Bounded like the chunk ledger.
+  const lastSeen = new Map<string, number>()
+  const noteSeen = (id: string, at: number) => {
+    lastSeen.delete(id); lastSeen.set(id, at)
+    while (lastSeen.size > CLIENT_INSTANCE_MAX_SEEN) lastSeen.delete(lastSeen.keys().next().value as string)
+  }
   router.use((req, _res, next) => {
     if (isMeetingChunkPost(req.method, req.path)) chunks.note(deviceKey(req.socket?.remoteAddress ?? req.ip), parseInstanceTag(req.query?.clientInstance), now())
     next()
@@ -61,7 +70,9 @@ export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() 
     const previous = owners.get(device) ?? null
     const evidence = previous ? chunks.evidence(device, previous.id, claim.id, at) : NO_CAPTURE
     const captureLive = previous ? ownerIsRecording(previous, evidence, at) : false
-    const result = arbitrateClientInstance(previous, claim, at, evidence)
+    const claimantLastSeenAt = lastSeen.get(claim.id)
+    noteSeen(claim.id, at)
+    const result = arbitrateClientInstance(previous, claim, at, evidence, claimantLastSeenAt)
     if (req.body?.check === true) {
       const shown = previous ?? result.owner
       return void res.json({ verdict: result.verdict, owner: { id: shown.id, bootAt: shown.bootAt, version: shown.version, seenAt: shown.seenAt }, check: true, captureLive })

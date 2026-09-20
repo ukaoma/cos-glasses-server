@@ -1,7 +1,7 @@
 import express from 'express'
 import type { Server } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { CLIENT_INSTANCE_CAPTURE_LIVE_MS, CLIENT_INSTANCE_LIVE_MS, CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS, CLIENT_INSTANCE_MAX_TAGGED, ClientChunkLedger, NO_CAPTURE, arbitrateClientInstance, parseClientInstanceClaim, parseInstanceTag, type CaptureEvidence } from '../lib/client-instance-claim.js'
+import { CLIENT_INSTANCE_AWAKE_MS, CLIENT_INSTANCE_CAPTURE_LIVE_MS, CLIENT_INSTANCE_LIVE_MS, CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS, CLIENT_INSTANCE_RECLAIM_MS, CLIENT_INSTANCE_TICK_MS, CLIENT_INSTANCE_MAX_TAGGED, ClientChunkLedger, NO_CAPTURE, arbitrateClientInstance, parseClientInstanceClaim, parseInstanceTag, type CaptureEvidence } from '../lib/client-instance-claim.js'
 import { createClientInstanceRouter, deviceKey, isMeetingChunkPost } from './client-instance.js'
 
 const T0 = 1_789_744_000_000
@@ -21,11 +21,29 @@ describe('the client-instance referee (6.50.3)', () => {
     // The newer copy keeps posting: still the owner.
     r = arbitrateClientInstance(r.owner, newer, T0 + 16_000)
     expect(r.verdict).toBe('owner')
-    // Right at the live edge the older still yields; one ms past, the newer is gone and it takes over.
-    expect(arbitrateClientInstance(r.owner, older, T0 + 16_000 + CLIENT_INSTANCE_LIVE_MS).verdict).toBe('yield')
-    const back = arbitrateClientInstance(r.owner, older, T0 + 16_000 + CLIENT_INSTANCE_LIVE_MS + 1)
+    // 6.52.3: past the live edge the older STILL yields (a locked phone is quiet for 45 s).
+    // Only after CLIENT_INSTANCE_RECLAIM_MS, and only while it has itself been claiming, does it take over.
+    const quiet = T0 + 16_000
+    expect(arbitrateClientInstance(r.owner, older, quiet + CLIENT_INSTANCE_LIVE_MS + 1, NO_CAPTURE, quiet + CLIENT_INSTANCE_LIVE_MS + 1 - CLIENT_INSTANCE_TICK_MS).verdict).toBe('yield')
+    expect(arbitrateClientInstance(r.owner, older, quiet + CLIENT_INSTANCE_RECLAIM_MS, NO_CAPTURE, quiet + CLIENT_INSTANCE_RECLAIM_MS - CLIENT_INSTANCE_TICK_MS).verdict).toBe('yield')
+    const back = arbitrateClientInstance(r.owner, older, quiet + CLIENT_INSTANCE_RECLAIM_MS + 1, NO_CAPTURE, quiet + CLIENT_INSTANCE_RECLAIM_MS + 1 - CLIENT_INSTANCE_TICK_MS)
     expect(back).toMatchObject({ verdict: 'owner', took: true })
     expect(back.owner.id).toBe(older.id)
+  })
+
+  it('6.52.3: the 2026-09-20 zombie: a copy that slept with the phone never takes the ring on waking', () => {
+    const owner = arbitrateClientInstance(null, newer, T0).owner
+    const wake = T0 + 8 * 60 * 60_000
+    // Both copies were suspended overnight. The zombie's own last claim is hours old.
+    expect(arbitrateClientInstance(owner, older, wake, NO_CAPTURE, T0 + 5_000).verdict).toBe('yield')
+    // Never seen at all: the same.
+    expect(arbitrateClientInstance(owner, older, wake, NO_CAPTURE, undefined).verdict).toBe('yield')
+    // Right at the awake edge it counts; one ms past, it does not.
+    expect(arbitrateClientInstance(owner, older, wake, NO_CAPTURE, wake - CLIENT_INSTANCE_AWAKE_MS).verdict).toBe('owner')
+    expect(arbitrateClientInstance(owner, older, wake, NO_CAPTURE, wake - CLIENT_INSTANCE_AWAKE_MS - 1).verdict).toBe('yield')
+    // A NEWER boot still takes at once, however quiet it was (reopening COS is the fix for a dead copy).
+    const newest = { ...newer, id: 'mu7newest-boot', bootAt: newer.bootAt + 1 }
+    expect(arbitrateClientInstance(owner, newest, wake, NO_CAPTURE, undefined)).toMatchObject({ verdict: 'owner', took: true })
   })
 
   it('two boots in the same millisecond: exactly one owns', () => {
@@ -79,13 +97,31 @@ describe('POST /api/client-instance/claim', () => {
   it('check answers without taking, even when the owner looks quiet', async () => {
     clock += 1_000
     expect((await post(newer)).body.verdict).toBe('owner')
-    // The owner goes quiet past the live window (a locked phone froze its timers too).
+    // The older copy keeps checking every tick while the owner goes quiet.
+    expect((await post({ ...older, check: true })).body.verdict).toBe('yield')
     clock += CLIENT_INSTANCE_LIVE_MS + 1
+    // 6.52.3: 45 s quiet is not enough (a locked phone).
+    expect((await post({ ...older, check: true })).body.verdict).toBe('yield')
+    // Past the reclaim window, still claiming every tick: the check says owner, without taking.
+    while (clock <= T0 + 1_000 + CLIENT_INSTANCE_RECLAIM_MS) { clock += CLIENT_INSTANCE_TICK_MS; await post({ ...older, check: true }) }
+    clock += CLIENT_INSTANCE_TICK_MS
     const checked = await post({ ...older, check: true })
     expect(checked.body).toMatchObject({ verdict: 'owner', check: true, owner: { id: newer.id } })
     // It did not take: the newer copy's next post is still the owner, the older still yields.
     expect((await post(newer)).body).toMatchObject({ verdict: 'owner', owner: { id: newer.id } })
     expect((await post({ ...older, check: true })).body.verdict).toBe('yield')
+  })
+
+  it('6.52.3 over HTTP: a copy that has not claimed for a tick cannot take a quiet ring; the next tick, it can', async () => {
+    clock += 1_000
+    expect((await post(newer)).body.verdict).toBe('owner')
+    expect((await post({ ...older, check: true })).body.verdict).toBe('yield')
+    // Both slept. The zombie's first claim on waking: refused, whatever the owner's silence.
+    clock += CLIENT_INSTANCE_RECLAIM_MS + 60_000
+    expect((await post(older)).body).toMatchObject({ verdict: 'yield', owner: { id: newer.id } })
+    // A tick later, still nothing from the newer copy: it is dead, and the older takes over.
+    clock += CLIENT_INSTANCE_TICK_MS
+    expect((await post(older)).body).toMatchObject({ verdict: 'owner', owner: { id: older.id } })
   })
 
   it('a malformed claim is a 400 and changes nothing', async () => {

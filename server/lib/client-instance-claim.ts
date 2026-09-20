@@ -17,6 +17,20 @@ export const CLIENT_INSTANCE_TICK_MS = 15_000
 /** Three missed ticks: the owner is gone. */
 export const CLIENT_INSTANCE_LIVE_MS = 3 * CLIENT_INSTANCE_TICK_MS
 /**
+ * 6.52.3: how long the owner must be quiet before an OLDER boot may take the ring back.
+ * On 2026-09-20 a hidden copy from the night before took the ring after the live copy
+ * went quiet (a locked phone throttles its timers) and answered a hold-to-talk 27 minutes
+ * later with a stale session. 45 s is a normal quiet spell for a locked phone; a dead
+ * copy stays dead, so waiting ten minutes costs nothing.
+ */
+export const CLIENT_INSTANCE_RECLAIM_MS = 10 * 60_000
+/**
+ * 6.52.3: an older boot may take the ring back only when ITS OWN previous claim is this
+ * recent. Both copies sleep when the phone does; a zombie that woke up alongside the live
+ * copy has a gap of its own, and the live copy's refresh lands within a tick.
+ */
+export const CLIENT_INSTANCE_AWAKE_MS = CLIENT_INSTANCE_LIVE_MS
+/**
  * 6.50.4: a meeting chunk inside this window means that copy is recording. Five chunk
  * intervals (~6 s each), so a stretch of silence or a slow upload does not end the hold.
  */
@@ -126,6 +140,8 @@ export function arbitrateClientInstance(
   claim: ClientInstanceClaim,
   now: number,
   evidence: CaptureEvidence = NO_CAPTURE,
+  /** When this claimant last claimed (any verdict), or undefined: never seen. */
+  claimantLastSeenAt?: number,
 ): { owner: ClientInstanceOwner; verdict: ClientInstanceVerdict; took: boolean } {
   const fresh: ClientInstanceOwner = { ...claim, seenAt: now }
   if (!owner) return { owner: fresh, verdict: 'owner', took: true }
@@ -142,6 +158,11 @@ export function arbitrateClientInstance(
   // The ring moves on the newer copy's first claim after the meeting stops.
   if (ownerIsRecording(owner, evidence, now)) return { owner, verdict: 'yield', took: false }
   if (isNewer(claim, owner)) return { owner: fresh, verdict: 'owner', took: true }
-  if (now - owner.seenAt > CLIENT_INSTANCE_LIVE_MS) return { owner: fresh, verdict: 'owner', took: true }
+  // 6.52.3: an older boot takes a quiet ring back only after CLIENT_INSTANCE_RECLAIM_MS,
+  // and only while it has itself been claiming (awake), never on the first tick after a
+  // gap of its own. A dead newer copy is replaced when the user reopens COS (a newer boot
+  // still takes at once); this rule is for the copy that is merely quiet.
+  const claimantAwake = claimantLastSeenAt !== undefined && now - claimantLastSeenAt <= CLIENT_INSTANCE_AWAKE_MS
+  if (now - owner.seenAt > CLIENT_INSTANCE_RECLAIM_MS && claimantAwake) return { owner: fresh, verdict: 'owner', took: true }
   return { owner, verdict: 'yield', took: false }
 }

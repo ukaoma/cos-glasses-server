@@ -353,6 +353,34 @@ const CASES = [
     tests: ['server/lib/session-signal-store.test.ts'],
   },
   {
+    name: 'referee-zombie-reclaims-after-45s',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  if (now - owner.seenAt > CLIENT_INSTANCE_RECLAIM_MS && claimantAwake) return { owner: fresh, verdict: 'owner', took: true }\n",
+    replace: "  if (now - owner.seenAt > CLIENT_INSTANCE_LIVE_MS && claimantAwake) return { owner: fresh, verdict: 'owner', took: true }\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-asleep-zombie-reclaims',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  if (now - owner.seenAt > CLIENT_INSTANCE_RECLAIM_MS && claimantAwake) return",
+    replace: "  if (now - owner.seenAt > CLIENT_INSTANCE_RECLAIM_MS) return",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-never-seen-counts-as-awake',
+    file: 'server/lib/client-instance-claim.ts',
+    find: "  const claimantAwake = claimantLastSeenAt !== undefined && now - claimantLastSeenAt <= CLIENT_INSTANCE_AWAKE_MS\n",
+    replace: "  const claimantAwake = claimantLastSeenAt === undefined || now - claimantLastSeenAt <= CLIENT_INSTANCE_AWAKE_MS\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
+    name: 'referee-last-seen-unnoted',
+    file: 'server/routes/client-instance.ts',
+    find: "    const claimantLastSeenAt = lastSeen.get(claim.id)\n",
+    replace: "    const claimantLastSeenAt = at\n",
+    tests: ['server/routes/client-instance.test.ts'],
+  },
+  {
     name: 'referee-hands-over-mid-meeting',
     file: 'server/lib/client-instance-claim.ts',
     find: "  if (ownerIsRecording(owner, evidence, now)) return { owner, verdict: 'yield', took: false }\n",
@@ -460,7 +488,7 @@ const CASES = [
   {
     name: 'referee-dead-owner-never-released',
     file: 'server/lib/client-instance-claim.ts',
-    find: "  if (now - owner.seenAt > CLIENT_INSTANCE_LIVE_MS) return { owner: fresh, verdict: 'owner', took: true }\n",
+    find: "  if (now - owner.seenAt > CLIENT_INSTANCE_RECLAIM_MS && claimantAwake) return { owner: fresh, verdict: 'owner', took: true }\n",
     replace: "\n",
     tests: ['server/routes/client-instance.test.ts'],
   },

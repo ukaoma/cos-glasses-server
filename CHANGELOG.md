@@ -1,3 +1,14 @@
+## 6.52.3
+
+### A quiet ring stays with its owner; a zombie never takes it on waking
+
+2026-09-20: a hidden copy of the glasses app from the night before took the ring after the live copy went quiet, and answered a hold-to-talk 27 minutes later with a stale session. Under 6.50.4 an older boot could take a ring whose owner had been quiet for 45 s, and a locked phone is quiet for longer than that.
+
+- **An older boot takes a quiet ring back only after ten minutes** (`CLIENT_INSTANCE_RECLAIM_MS`), **and only while it has itself been claiming** (`CLIENT_INSTANCE_AWAKE_MS`, 45 s: its own previous claim must be that recent). Both copies sleep when the phone does, so a zombie that wakes beside the live copy has a gap of its own and is refused; the live copy's refresh then lands within a tick. A copy never seen before is not awake. A NEWER boot still takes at once, however quiet the owner: reopening COS remains the fix for a dead copy. The route remembers each copy's last claim time (`CLIENT_INSTANCE_MAX_SEEN` 64, least recent dropped).
+- Everything else in the referee is 6.50.4: one owner per device, the recording holds (own tagged chunks, `recording` in the claim), `check: true` never takes, no protocol change. Glasses 6.9.510 and 6.9.516 see only the longer takeover window. No new client is required; glasses 6.9.518 adds the matching client-side check.
+- **The 6.52.1 Codex fixtures now expect `turn_started_at`.** 6.52.1 stamped the prompt line with the user record's timestamp and left three `session-stream-codex` expectations on the old shape, so the suite was red. The behaviour is unchanged; the expectations were updated.
+- Tests: the reclaim edge (10 min, awake), the overnight zombie (hours-old own claim, never seen), the awake edge to the millisecond, the newer boot still taking, and over HTTP: checks past the window say owner without taking, a first claim after sleep is refused and the next tick takes. Gate: `referee-zombie-reclaims-after-45s`, `referee-asleep-zombie-reclaims`, `referee-never-seen-counts-as-awake`, `referee-last-seen-unnoted`.
+
 ## 6.52.1
 
 ### Session turn clock

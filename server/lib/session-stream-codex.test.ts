@@ -98,7 +98,7 @@ describe('a paginated rollout (every build on this Mac)', () => {
   it('maps one turn to exactly the steps, lines and paragraphs Codex took, once each', () => {
     expect(drafts(PAGINATED_TURN)).toEqual([
       { kind: 'status', state: 'working' },
-      { kind: 'prompt', text: 'Prep the index update' },
+      { kind: 'prompt', text: 'Prep the index update', turn_started_at: at(0) },
       { kind: 'status', state: 'working', reasoning: 'Planning the index update' },
       { kind: 'tool', verb: 'bash', target: "sed -n '1,55p' notes.md", detail: '', call: 'call_Exec0001Sed' },
       { kind: 'prose', text: 'Chunk 3 of 4 is complete. Waiting on the last one.' },
@@ -335,7 +335,7 @@ describe('the reasoning line', () => {
 describe('the prompt line', () => {
   it('is what the person sent, capped, from the UserMessage item only', () => {
     expect(draftsFromRecord('codex', itemCompleted({ type: 'UserMessage', content: [{ type: 'text', text: 'Ship it', text_elements: [] }] })))
-      .toEqual([{ kind: 'prompt', text: 'Ship it' }])
+      .toEqual([{ kind: 'prompt', text: 'Ship it', turn_started_at: at(0) }])
     const long = draftsFromRecord('codex', itemCompleted({ type: 'UserMessage', content: [{ type: 'text', text: 'word '.repeat(100) }] }))
     expect((long[0] as { text: string }).text).toHaveLength(PROMPT_MAX_CHARS)
     // The response_item copy of the same ask is not a second prompt.
@@ -350,7 +350,7 @@ describe('the prompt line', () => {
         { type: 'local_image', path: '/Users/example/Desktop/shot.png' },
       ],
     })
-    expect(draftsFromRecord('codex', item)).toEqual([{ kind: 'prompt', text: 'Fix the header spacing' }])
+    expect(draftsFromRecord('codex', item)).toEqual([{ kind: 'prompt', text: 'Fix the header spacing', turn_started_at: at(0) }])
   })
 
   it('an automation wrapper alone is not a prompt', () => {
