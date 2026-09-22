@@ -3070,6 +3070,27 @@ const CASES = [
     tests: ["server/lib/attached-provider-adapter.process-tree.test.ts"],
   },
   {
+    name: "adapter-process-table-captures-start-atomically",
+    file: "server/lib/attached-provider-adapter.ts",
+    find: "['-axo', 'pid=,ppid=,pgid=,lstart=']",
+    replace: "['-axo', 'pid=,ppid=,pgid=']",
+    tests: ["server/lib/attached-provider-adapter.process-tree.test.ts"],
+  },
+  {
+    name: "adapter-tree-identity-does-not-reprobe-per-pid",
+    file: "server/lib/attached-provider-adapter.ts",
+    find: "  for (const row of tree) {\n    if (row.startMs !== null) remembered.set(row.pid, row.startMs)\n",
+    replace: "  for (const row of tree) {\n    const startedAt = realProcessStartMs(row.pid)\n    if (startedAt !== null) remembered.set(row.pid, startedAt)\n",
+    tests: ["server/lib/attached-provider-adapter.process-tree.test.ts"],
+  },
+  {
+    name: "adapter-malformed-table-start-is-doubt",
+    file: "server/lib/attached-provider-adapter.ts",
+    find: "      if (startMs === null) return null\n      rows.push({ pid, ppid, pgid, startMs })",
+    replace: "      if (startMs === null) continue\n      rows.push({ pid, ppid, pgid, startMs })",
+    tests: ["server/lib/attached-provider-adapter.process-tree.test.ts"],
+  },
+  {
     name: "cancel-unreaped-must-fence",
     file: "server/routes/agent-session-bindings.ts",
     find: "((delivery === 'cancelled' && reaped === true)\n        || delivery === 'not_attempted'\n        || (delivery === 'aborted' && reaped === true))",

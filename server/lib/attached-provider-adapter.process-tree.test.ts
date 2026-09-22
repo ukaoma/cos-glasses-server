@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 const probeFaults = vi.hoisted(() => ({
   processTableFailures: 0,
-  startFailures: new Set<number>(),
+  malformedTableStarts: new Set<number>(),
+  perPidStartFailures: new Set<number>(),
 }))
 
 vi.mock('node:child_process', async () => {
@@ -16,10 +17,18 @@ vi.mock('node:child_process', async () => {
         throw Object.assign(new Error('injected process-table failure'), { code: 'EIO' })
       }
       const pid = Number(args.at(-1))
-      if (file === '/bin/ps' && args.includes('lstart=') && probeFaults.startFailures.has(pid)) {
+      if (file === '/bin/ps' && args[0] !== '-axo' && args.includes('lstart=') && probeFaults.perPidStartFailures.has(pid)) {
         throw Object.assign(new Error('injected process-start failure'), { code: 'EIO' })
       }
-      return actual.execFileSync(file, args as string[], options as any)
+      const output = actual.execFileSync(file, args as string[], options as any)
+      if (file === '/bin/ps' && args[0] === '-axo' && probeFaults.malformedTableStarts.size > 0) {
+        return String(output).split('\n').map(line => {
+          const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+/)
+          if (!match || !probeFaults.malformedTableStarts.has(Number(match[1]))) return line
+          return `${match[1]} ${match[2]} ${match[3]} not-a-process-start`
+        }).join('\n')
+      }
+      return output
     },
   }
 })
@@ -119,7 +128,7 @@ describe.skipIf(process.platform === 'win32')('attached provider production proc
     }
   })
 
-  it('treats a live pid with an unreadable start time as doubt, never as death', async () => {
+  it('uses the atomic table identity when a later per-pid start probe would race with death', async () => {
     const child = spawn(process.execPath, [
       '-e',
       [
@@ -135,22 +144,50 @@ describe.skipIf(process.platform === 'win32')('attached provider production proc
     })
     const deps = realAttachedTurnDeps(() => ({ attachable: false, reason: 'test' }))
     try {
-      probeFaults.startFailures.add(toolPid)
+      // The old implementation took ancestry from one table snapshot, then
+      // launched a separate ps process per descendant for its start time. A
+      // short-lived process could disappear between those probes and poison
+      // this root as permanently unreaped. Atomic rows never make that call.
+      probeFaults.perPidStartFailures.add(toolPid)
       deps.terminate(child as unknown as AttachedChildProcess, 'SIGTERM')
-      probeFaults.startFailures.delete(toolPid)
       expect(await waitUntilDead(child.pid!)).toBe(true)
       deps.terminate(child as unknown as AttachedChildProcess, 'SIGKILL')
-      // Its unreadable start prevented an unsafe remembered-PID signal. The
-      // adapter must therefore admit it cannot prove reaping.
-      expect(alive(toolPid)).toBe(true)
+      expect(await waitUntilDead(toolPid)).toBe(true)
+      expect(deps.processTreeAlive(child as unknown as AttachedChildProcess)).toBe(false)
+    } finally {
+      probeFaults.perPidStartFailures.delete(toolPid)
       try { process.kill(-toolPid, 'SIGKILL') } catch { /* already dead */ }
       try { process.kill(toolPid, 'SIGKILL') } catch { /* already dead */ }
-      expect(await waitUntilDead(toolPid)).toBe(true)
-      // The later absence is real, but the earlier identity check was not. It
-      // must remain unreaped so the route fences rather than inventing safety.
+      try { process.kill(-child.pid!, 'SIGKILL') } catch { /* already dead */ }
+    }
+  })
+
+  it('treats a malformed start in the atomic process table as permanent doubt', async () => {
+    const child = spawn(process.execPath, [
+      '-e',
+      [
+        "const { spawn } = require('node:child_process')",
+        "const tool = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { detached: true, stdio: ['ignore', 'ignore', 'ignore'] })",
+        "process.stdout.write(String(tool.pid) + '\\n')",
+        "setInterval(() => {}, 1000)",
+      ].join(';'),
+    ], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    const toolPid = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject)
+      child.stdout!.once('data', chunk => resolve(Number(String(chunk).trim())))
+    })
+    const deps = realAttachedTurnDeps(() => ({ attachable: false, reason: 'test' }))
+    try {
+      probeFaults.malformedTableStarts.add(toolPid)
+      deps.terminate(child as unknown as AttachedChildProcess, 'SIGTERM')
+      probeFaults.malformedTableStarts.delete(toolPid)
+      expect(await waitUntilDead(child.pid!)).toBe(true)
+      expect(alive(toolPid)).toBe(true)
+      // The malformed whole snapshot may have hidden an escaping child. Later
+      // clean absence cannot reconstruct ancestry, so cancellation stays fenced.
       expect(deps.processTreeAlive(child as unknown as AttachedChildProcess)).toBe(true)
     } finally {
-      probeFaults.startFailures.delete(toolPid)
+      probeFaults.malformedTableStarts.delete(toolPid)
       try { process.kill(-toolPid, 'SIGKILL') } catch { /* already dead */ }
       try { process.kill(toolPid, 'SIGKILL') } catch { /* already dead */ }
       try { process.kill(-child.pid!, 'SIGKILL') } catch { /* already dead */ }

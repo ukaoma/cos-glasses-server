@@ -1,3 +1,11 @@
+## 6.53.2
+
+### Cancel verification no longer races a dying Codex tree
+
+The installed 6.53.1 live canary successfully stopped the Codex wrapper and its detached tool, but then falsely fenced the session as `unreaped`. The verifier captured ancestry in one process-table snapshot and queried each process start time in later subprocesses. A short-lived descendant could disappear between those reads, permanently converting a successful cancellation into doubt.
+
+Process identity and ancestry now come from one stable `ps` snapshot (`pid`, `ppid`, `pgid`, and `lstart`) under a fixed UTC/C locale. There are no per-PID identity probes in the cancellation walk, so ordinary process death cannot poison reaping proof. A failed snapshot or any malformed identity still fails closed. Real detached-process tests cover the disappearing-PID race, unreadable whole snapshots, malformed atomic identities, re-parenting, and SIGKILL escalation; three new mutation cases independently remove the atomic capture, restore the racy per-PID probe, and ignore malformed identity data.
+
 ## 6.53.1
 
 ### Cancel the whole Codex process tree

@@ -98,7 +98,7 @@ import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { isValidNativeThreadId } from './native-thread-id.js'
 import { isBindableProvider, type BindableProvider } from './agent-session-binding-store.js'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
-import { processStartMs as realProcessStartMs } from './occupancy-probes.js'
+import { interpretPsLstart, processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import { getCodexTrustMode } from './codex-run-ledger.js'
 import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
 
@@ -1224,6 +1224,7 @@ interface AttachedProcessRow {
   pid: number
   ppid: number
   pgid: number
+  startMs: number | null
 }
 
 /**
@@ -1239,20 +1240,27 @@ interface AttachedProcessRow {
 function readAttachedProcessRows(): AttachedProcessRow[] | null {
   if (process.platform === 'win32') return []
   try {
-    const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid='], {
+    const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart='], {
       encoding: 'utf8',
       timeout: 1_000,
       maxBuffer: 2 * 1024 * 1024,
+      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C', LANG: 'C' },
     })
-    return output.split('\n').flatMap(line => {
-      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/)
-      if (!match) return []
+    const now = Date.now()
+    const rows: AttachedProcessRow[] = []
+    for (const line of output.split('\n')) {
+      if (line.trim().length === 0) continue
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s+(.*?))?\s*$/)
+      if (!match) return null
       const pid = Number(match[1])
       const ppid = Number(match[2])
       const pgid = Number(match[3])
-      if (![pid, ppid, pgid].every(Number.isSafeInteger) || pid <= 0 || ppid < 0 || pgid <= 0) return []
-      return [{ pid, ppid, pgid }]
-    })
+      if (![pid, ppid, pgid].every(Number.isSafeInteger) || pid <= 0 || ppid < 0 || pgid <= 0) return null
+      const startMs = interpretPsLstart(match[4] ?? '', now)
+      if (startMs === null) return null
+      rows.push({ pid, ppid, pgid, startMs })
+    }
+    return rows
   } catch {
     return null
   }
@@ -1304,28 +1312,32 @@ function terminateAttachedProcessTree(
   const remembered = rememberedByRoot.get(rootPid) ?? new Map<number, number>()
   rememberedByRoot.set(rootPid, remembered)
 
+  const rows = readAttachedProcessRows()
+  if (rows === null) uncertainRoots.add(rootPid)
+  const rowsByPid = new Map((rows ?? []).map(row => [row.pid, row]))
+
   // Only identities that still name the same kernel process may seed a fresh
   // descendant scan. This is what makes the five-second SIGKILL safe after the
   // provider leader has already disappeared.
   const rememberedRoots: number[] = []
   for (const [pid, startedAt] of remembered) {
-    if (realProcessStartMs(pid) === startedAt) rememberedRoots.push(pid)
+    const row = rowsByPid.get(pid)
+    if (row?.startMs === startedAt) rememberedRoots.push(pid)
+    else if (row && row.startMs === null) uncertainRoots.add(rootPid)
   }
 
-  const rows = readAttachedProcessRows()
-  if (rows === null) uncertainRoots.add(rootPid)
   const knownRootStart = remembered.get(rootPid)
-  const currentRootStart = realProcessStartMs(rootPid)
+  const rootRow = rowsByPid.get(rootPid)
+  const currentRootStart = rootRow?.startMs ?? null
   const rootVerified = currentRootStart !== null
     && (knownRootStart === undefined || currentRootStart === knownRootStart)
-  if (currentRootStart === null && rows?.some(row => row.pid === rootPid)) uncertainRoots.add(rootPid)
+  if (currentRootStart === null && rootRow) uncertainRoots.add(rootPid)
   if (knownRootStart === undefined && currentRootStart !== null) remembered.set(rootPid, currentRootStart)
   const roots = [...rememberedRoots]
   if (rootVerified && !roots.includes(rootPid)) roots.push(rootPid)
   const tree = rows === null ? [] : attachedProcessTree(rows, roots)
   for (const row of tree) {
-    const startedAt = realProcessStartMs(row.pid)
-    if (startedAt !== null) remembered.set(row.pid, startedAt)
+    if (row.startMs !== null) remembered.set(row.pid, row.startMs)
     else uncertainRoots.add(rootPid)
   }
 
@@ -1361,19 +1373,20 @@ function attachedProcessTreeAlive(
   // A failed global process-table read cannot prove closure. Keep the record so
   // the SIGKILL escalation can still target identities captured before TERM.
   if (rows === null) return true
+  const rowsByPid = new Map(rows.map(row => [row.pid, row]))
 
   let anyLive = false
   if (remembered) {
     const verifiedRoots: number[] = []
     for (const [pid, startedAt] of remembered) {
-      const rowExists = rows.some(row => row.pid === pid)
-      if (!rowExists) {
+      const row = rowsByPid.get(pid)
+      if (!row) {
         // Absence from a successful full process-table snapshot is the only
         // positive proof this identity is gone.
         remembered.delete(pid)
         continue
       }
-      const currentStart = realProcessStartMs(pid)
+      const currentStart = row.startMs
       if (currentStart === startedAt) {
         anyLive = true
         verifiedRoots.push(pid)
@@ -1391,9 +1404,8 @@ function attachedProcessTreeAlive(
     }
     const fresh = attachedProcessTree(rows, verifiedRoots)
     for (const row of fresh) {
-      const startedAt = realProcessStartMs(row.pid)
-      if (startedAt !== null) {
-        remembered.set(row.pid, startedAt)
+      if (row.startMs !== null) {
+        remembered.set(row.pid, row.startMs)
         anyLive = true
       } else {
         anyLive = true
