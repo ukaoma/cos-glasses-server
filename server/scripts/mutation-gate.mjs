@@ -3286,6 +3286,35 @@ const CASES = [
     replace: "    } else if (false) {",
     tests: ["server/routes/thread-turn-queue.test.ts"],
   },
+  // 6.53.0: Grok 4.7 ids (no cursor- prefix) in the Cursor Grok slot.
+  {
+    name: "grok-new-id-scheme-matched",
+    file: "server/lib/cursor-model-catalog.ts",
+    find: "const GROK_HIGH_FAST_RE = /^(?:cursor-)?grok-",
+    replace: "const GROK_HIGH_FAST_RE = /^cursor-grok-",
+    tests: ["server/lib/cursor-model-catalog.test.ts"],
+  },
+  {
+    name: "grok-tie-prefers-unprefixed",
+    file: "server/lib/cursor-model-catalog.ts",
+    find: "    if (!best || order > 0 || (order === 0 && best.prefixed && !prefixed)) {",
+    replace: "    if (!best || order > 0) {",
+    tests: ["server/lib/cursor-model-catalog.test.ts"],
+  },
+  {
+    name: "grok-display-name-normalized",
+    file: "server/lib/cursor-model-catalog.ts",
+    find: "    const displayName = normalizeCursorDisplayName(match[2])",
+    replace: "    const displayName = match[2].trim()",
+    tests: ["server/lib/cursor-model-catalog.test.ts"],
+  },
+  {
+    name: "grok-fallback-is-4-7",
+    file: "server/lib/cursor-model-catalog.ts",
+    find: "  'cursor-grok': 'grok-4.7-high-fast',",
+    replace: "  'cursor-grok': 'cursor-grok-4.5-high-fast',",
+    tests: ["server/lib/cursor-model-catalog.test.ts"],
+  },
 ]
 
 function sha256(text) {

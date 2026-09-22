@@ -20,12 +20,19 @@ const DEFAULT_REFRESH_TIMEOUT_MS = 7_000
 /**
  * Stable slot → CLI model id mapping.
  * Composer stays pinned (no versioned high-fast family). Grok high-fast is
- * chosen at catalog build: newest `cursor-grok-<ver>-high-fast` in `agent
- * models`. This grok id is only the fallback when the live list has none.
- * `xhigh-fast` is a different SKU and is never selected here.
+ * chosen at catalog build: newest `grok-<ver>-high-fast` or
+ * `cursor-grok-<ver>-high-fast` in `agent models`. This grok id is only the
+ * fallback when the live list has none. `xhigh-fast` is a different SKU and is
+ * never selected here.
+ *
+ * 2026-09-21 (6.53.0): Grok 4.7 shipped under a NEW id scheme with no `cursor-`
+ * prefix (`grok-4.7-high-fast`, per `cursor-agent models` on CLI 2026.09.18,
+ * which still lists the old `cursor-grok-4.6-high-fast` and 4.5 ids). The ask:
+ * "make sure we're running the latest and greatest on the grok front". The
+ * fallback moves to the new id; the live list decides whenever it answers.
  */
 export const CURSOR_SLOT_MODEL_IDS = {
-  'cursor-grok': 'cursor-grok-4.5-high-fast',
+  'cursor-grok': 'grok-4.7-high-fast',
   'cursor-composer': 'composer-2.5-fast',
 } as const satisfies Record<CursorModelPreference, string>
 
@@ -34,12 +41,28 @@ const SLOT_DISPLAY_FALLBACK = {
   'cursor-composer': 'Composer 2.5 Fast',
 } as const satisfies Record<CursorModelPreference, string>
 
-const GROK_HIGH_FAST_RE = /^cursor-grok-(\d+(?:\.\d+)*)-high-fast$/i
+/**
+ * Both id schemes: `cursor-grok-4.6-high-fast` (through 4.6) and `grok-4.7-high-fast`
+ * (4.7 on). Anchored at both ends, so `-xhigh-fast`, `-medium-fast`, `-low-fast` and the
+ * non-fast `-high` never match.
+ */
+const GROK_HIGH_FAST_RE = /^(?:cursor-)?grok-(\d+(?:\.\d+)*)-high-fast$/i
 
 export function parseCursorGrokHighFastVersion(id: string): number[] | null {
   const match = GROK_HIGH_FAST_RE.exec(id.trim())
   if (!match) return null
   return match[1].split('.').map(part => Number(part))
+}
+
+/**
+ * A display name as the CLI prints it, made printable. CLI 2026.09.18 writes
+ * "Grok 4.7  High Fast" with a double space and trailing zero-width characters; the lens
+ * would draw neither correctly. Format characters (`\p{Cf}`: zero-width space and joiners,
+ * direction marks, BOM) are removed, runs of whitespace become one space, and the ends
+ * are trimmed.
+ */
+export function normalizeCursorDisplayName(name: string): string {
+  return name.replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim()
 }
 
 export function compareVersionTuples(a: number[], b: number[]): number {
@@ -52,16 +75,22 @@ export function compareVersionTuples(a: number[], b: number[]): number {
   return 0
 }
 
-/** Newest `cursor-grok-*-high-fast`. Ignores low/medium/xhigh and non-fast. */
+/**
+ * Newest Grok high-fast, either id scheme, compared numerically. Ignores low/medium/xhigh
+ * and non-fast. On an exact version tie the unprefixed id (the new scheme) wins, whatever
+ * order the CLI lists them in.
+ */
 export function selectNewestCursorGrokHighFast(
   models: CursorCatalogModel[],
 ): CursorCatalogModel | undefined {
-  let best: { model: CursorCatalogModel; version: number[] } | undefined
+  let best: { model: CursorCatalogModel; version: number[]; prefixed: boolean } | undefined
   for (const model of models) {
     const version = parseCursorGrokHighFastVersion(model.id)
     if (!version) continue
-    if (!best || compareVersionTuples(version, best.version) > 0) {
-      best = { model, version }
+    const prefixed = /^cursor-/i.test(model.id.trim())
+    const order = best ? compareVersionTuples(version, best.version) : 1
+    if (!best || order > 0 || (order === 0 && best.prefixed && !prefixed)) {
+      best = { model, version, prefixed }
     }
   }
   return best?.model
@@ -109,7 +138,7 @@ export function parseAgentModelsText(text: string): CursorCatalogModel[] {
     const match = /^([a-z0-9][a-z0-9._\[\]-]*)\s+-\s+(.+)$/i.exec(line)
     if (!match) continue
     const id = match[1]
-    const displayName = match[2].trim()
+    const displayName = normalizeCursorDisplayName(match[2])
     if (!id || !displayName || seen.has(id)) continue
     seen.add(id)
     models.push({ id, displayName })
@@ -168,7 +197,12 @@ function readDiskCatalog(): CursorModelCatalog | null {
       refreshedAt?: string
       agentBinary?: string
     }
-    const models = Array.isArray(parsed.models) ? parsed.models.filter(m => typeof m?.id === 'string' && m.id) : []
+    // A cache written before 6.53.0 kept the CLI's raw display names; normalize on read.
+    const models = Array.isArray(parsed.models)
+      ? parsed.models
+        .filter(m => typeof m?.id === 'string' && m.id)
+        .map(m => ({ ...m, displayName: normalizeCursorDisplayName(typeof m.displayName === 'string' ? m.displayName : '') }))
+      : []
     if (models.length === 0) return null
     return buildCursorModelCatalog(
       models,
