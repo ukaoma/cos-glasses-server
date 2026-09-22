@@ -65,8 +65,8 @@
 //                  nothing may be sent again by COS on its own.
 //
 // Only the first two are provably safe to report as a clean failure. `cancelled` is not
-// a clean failure either, but it is not a fence: a fence exists to stop COS resending a
-// turn nobody knows the fate of, and a cancelled turn is one the user chose to end.
+// a clean failure either. It avoids a fence only when the whole spawned process tree was
+// positively reaped; doubt or a surviving member is ambiguous and fences fail-closed.
 // `attachedDeliveryAmbiguous` makes that mapping total, and treats any state it
 // does not recognise as ambiguous, so adding a state later cannot silently open
 // the replay path.
@@ -93,7 +93,7 @@
 import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
-import { spawn as nodeSpawn } from 'node:child_process'
+import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 
 import { isValidNativeThreadId } from './native-thread-id.js'
 import { isBindableProvider, type BindableProvider } from './agent-session-binding-store.js'
@@ -316,6 +316,12 @@ export interface AttachedTurnDeps {
    * process group on the developer's machine.
    */
   terminate: (child: AttachedChildProcess, signal: NodeJS.Signals) => void
+  /**
+   * True while any verified member of the provider process tree is still live.
+   * Unknown/probe failure MUST read as true: a cancellation may only be reported
+   * reaped after the whole tree is positively gone.
+   */
+  processTreeAlive: (child: AttachedChildProcess) => boolean
   /**
    * Argv builder. Optional, defaults to the real one.
    *
@@ -878,6 +884,15 @@ function safeTerminate(deps: AttachedTurnDeps, child: AttachedChildProcess, sign
   }
 }
 
+function safeProcessTreeAlive(deps: AttachedTurnDeps, child: AttachedChildProcess): boolean {
+  try {
+    return deps.processTreeAlive(child) === true
+  } catch {
+    // A failed ownership probe is not proof that the process tree is gone.
+    return true
+  }
+}
+
 function safeRelease(deps: AttachedTurnDeps, pid: number): void {
   try {
     deps.releaseSpawn(pid)
@@ -919,11 +934,14 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     let deadline: ReturnType<typeof setTimeout> | null = null
     let graceTimer: ReturnType<typeof setTimeout> | null = null
     let forceTimer: ReturnType<typeof setTimeout> | null = null
+    let treePollTimer: ReturnType<typeof setTimeout> | null = null
+    let terminalObserved = false
 
     const clearTimers = () => {
       if (deadline) { clearTimeout(deadline); deadline = null }
       if (graceTimer) { clearTimeout(graceTimer); graceTimer = null }
       if (forceTimer) { clearTimeout(forceTimer); forceTimer = null }
+      if (treePollTimer) { clearTimeout(treePollTimer); treePollTimer = null }
     }
 
     const duration = () => readDuration(deps, startedAt)
@@ -994,6 +1012,10 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     }
 
     const finishTerminal = () => {
+      // The CLI wrapper may close before a tool in a separate process group.
+      // Keep the escalation timers alive until the verified whole tree is gone.
+      if ((cancelled || timedOut) && safeProcessTreeAlive(deps, child)) return
+
       // Drain whatever sat in the trailing partial line before judging.
       if (stdoutTail.length > 0) {
         for (const id of extractNativeIdsFromLine(stdoutTail)) {
@@ -1064,6 +1086,7 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
       })
       child.on('close', (code: number | null) => {
         if (typeof code === 'number') exitCode = code
+        terminalObserved = true
         finishTerminal()
       })
     } catch {
@@ -1097,14 +1120,22 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
       safeTerminate(deps, child, 'SIGTERM')
       graceTimer = setTimeout(() => {
         safeTerminate(deps, child, 'SIGKILL')
-        forceTimer = setTimeout(() => {
+        const forceAt = Date.now() + FORCE_SETTLE_MS
+        const pollForTreeExit = () => {
+          if (settled) return
+          if (terminalObserved && !safeProcessTreeAlive(deps, child)) return finishTerminal()
+          if (Date.now() < forceAt) {
+            treePollTimer = setTimeout(pollForTreeExit, 25)
+            return
+          }
           // A child that survived SIGKILL cannot be reached from here, and
           // blocking forever would wedge the coordinator and any Control drain
           // behind it. A cancel that landed during this escalation still reads
           // as the user's (6.53.0).
           if (cancelled) settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
           else settleFailure('timeout', { detail: 'unreaped', reaped: false })
-        }, FORCE_SETTLE_MS)
+        }
+        forceTimer = setTimeout(pollForTreeExit, 25)
       }, KILL_GRACE_MS)
     }, timeoutMs)
 
@@ -1123,9 +1154,17 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
         safeTerminate(deps, child, 'SIGTERM')
         graceTimer = setTimeout(() => {
           safeTerminate(deps, child, 'SIGKILL')
-          forceTimer = setTimeout(() => {
+          const forceAt = Date.now() + FORCE_SETTLE_MS
+          const pollForTreeExit = () => {
+            if (settled) return
+            if (terminalObserved && !safeProcessTreeAlive(deps, child)) return finishTerminal()
+            if (Date.now() < forceAt) {
+              treePollTimer = setTimeout(pollForTreeExit, 25)
+              return
+            }
             settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
-          }, FORCE_SETTLE_MS)
+          }
+          forceTimer = setTimeout(pollForTreeExit, 25)
         }, CANCEL_KILL_GRACE_MS)
       }
       try {
@@ -1181,6 +1220,207 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
 // Production wiring
 // ---------------------------------------------------------------------------
 
+interface AttachedProcessRow {
+  pid: number
+  ppid: number
+  pgid: number
+}
+
+/**
+ * Read the live parent and process-group graph for an attached provider.
+ *
+ * Codex may put a shell tool in its OWN process group. Signalling only the
+ * detached CLI group then kills Codex while the tool is re-parented to pid 1.
+ * This probe is synchronous because termination is a one-shot ownership
+ * boundary: the parent graph must be captured before the CLI can exit and erase
+ * it. A failed probe still signals the original root group below, but latches
+ * uncertainty so the adapter cannot later report a false whole-tree reap.
+ */
+function readAttachedProcessRows(): AttachedProcessRow[] | null {
+  if (process.platform === 'win32') return []
+  try {
+    const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid='], {
+      encoding: 'utf8',
+      timeout: 1_000,
+      maxBuffer: 2 * 1024 * 1024,
+    })
+    return output.split('\n').flatMap(line => {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/)
+      if (!match) return []
+      const pid = Number(match[1])
+      const ppid = Number(match[2])
+      const pgid = Number(match[3])
+      if (![pid, ppid, pgid].every(Number.isSafeInteger) || pid <= 0 || ppid < 0 || pgid <= 0) return []
+      return [{ pid, ppid, pgid }]
+    })
+  } catch {
+    return null
+  }
+}
+
+function attachedProcessTree(rows: AttachedProcessRow[], roots: Iterable<number>): AttachedProcessRow[] {
+  const owned = new Set<number>(roots)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const row of rows) {
+      if (!owned.has(row.pid) && owned.has(row.ppid)) {
+        owned.add(row.pid)
+        changed = true
+      }
+    }
+  }
+  return rows.filter(row => owned.has(row.pid))
+}
+
+function signalPid(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(pid, signal) } catch { /* already terminal or unavailable */ }
+}
+
+function signalGroup(pgid: number, signal: NodeJS.Signals): void {
+  if (process.platform === 'win32') return
+  try { process.kill(-pgid, signal) } catch { /* already terminal or unavailable */ }
+}
+
+/**
+ * Stop the provider plus every descendant visible before its parent link is
+ * lost. Captured pid/start identities survive the SIGTERM grace, so SIGKILL can
+ * still reach an uncooperative tool after the CLI has exited and the tool has
+ * been re-parented to launchd. Identities are re-checked before reuse; a recycled
+ * pid is never signalled from remembered state.
+ */
+function terminateAttachedProcessTree(
+  child: AttachedChildProcess,
+  signal: NodeJS.Signals,
+  rememberedByRoot: Map<number, Map<number, number>>,
+  uncertainRoots: Set<number>,
+): void {
+  const rootPid = child.pid
+  if (typeof rootPid !== 'number' || !Number.isSafeInteger(rootPid) || rootPid <= 0) {
+    try { ;(child as any).kill?.(signal) } catch { /* nothing further is available */ }
+    return
+  }
+
+  const remembered = rememberedByRoot.get(rootPid) ?? new Map<number, number>()
+  rememberedByRoot.set(rootPid, remembered)
+
+  // Only identities that still name the same kernel process may seed a fresh
+  // descendant scan. This is what makes the five-second SIGKILL safe after the
+  // provider leader has already disappeared.
+  const rememberedRoots: number[] = []
+  for (const [pid, startedAt] of remembered) {
+    if (realProcessStartMs(pid) === startedAt) rememberedRoots.push(pid)
+  }
+
+  const rows = readAttachedProcessRows()
+  if (rows === null) uncertainRoots.add(rootPid)
+  const knownRootStart = remembered.get(rootPid)
+  const currentRootStart = realProcessStartMs(rootPid)
+  const rootVerified = currentRootStart !== null
+    && (knownRootStart === undefined || currentRootStart === knownRootStart)
+  if (currentRootStart === null && rows?.some(row => row.pid === rootPid)) uncertainRoots.add(rootPid)
+  if (knownRootStart === undefined && currentRootStart !== null) remembered.set(rootPid, currentRootStart)
+  const roots = [...rememberedRoots]
+  if (rootVerified && !roots.includes(rootPid)) roots.push(rootPid)
+  const tree = rows === null ? [] : attachedProcessTree(rows, roots)
+  for (const row of tree) {
+    const startedAt = realProcessStartMs(row.pid)
+    if (startedAt !== null) remembered.set(row.pid, startedAt)
+    else uncertainRoots.add(rootPid)
+  }
+
+  // A child in a separate group must be signalled BEFORE the CLI group. If the
+  // CLI exits first, macOS reparents that child to pid 1 and the relationship is
+  // no longer discoverable.
+  const descendantGroups = new Set(
+    tree.filter(row => row.pid !== rootPid && row.pgid !== rootPid).map(row => row.pgid),
+  )
+  for (const pgid of descendantGroups) signalGroup(pgid, signal)
+  for (const row of tree) {
+    if (row.pid !== rootPid) signalPid(row.pid, signal)
+  }
+
+  const rootGroupStillOwned = rootVerified || tree.some(row => row.pgid === rootPid)
+  if (rootGroupStillOwned) signalGroup(rootPid, signal)
+
+  // Direct-child fallback covers a spawn that failed before setsid established
+  // the detached group, and is harmless after a successful group signal.
+  try { ;(child as any).kill?.(signal) } catch { /* already terminal */ }
+
+}
+
+function attachedProcessTreeAlive(
+  child: AttachedChildProcess,
+  rememberedByRoot: Map<number, Map<number, number>>,
+  uncertainRoots: Set<number>,
+): boolean {
+  const rootPid = child.pid
+  if (typeof rootPid !== 'number' || !Number.isSafeInteger(rootPid) || rootPid <= 0) return false
+  const remembered = rememberedByRoot.get(rootPid)
+  const rows = readAttachedProcessRows()
+  // A failed global process-table read cannot prove closure. Keep the record so
+  // the SIGKILL escalation can still target identities captured before TERM.
+  if (rows === null) return true
+
+  let anyLive = false
+  if (remembered) {
+    const verifiedRoots: number[] = []
+    for (const [pid, startedAt] of remembered) {
+      const rowExists = rows.some(row => row.pid === pid)
+      if (!rowExists) {
+        // Absence from a successful full process-table snapshot is the only
+        // positive proof this identity is gone.
+        remembered.delete(pid)
+        continue
+      }
+      const currentStart = realProcessStartMs(pid)
+      if (currentStart === startedAt) {
+        anyLive = true
+        verifiedRoots.push(pid)
+      } else if (currentStart === null) {
+        // The pid still exists but its start could not be read. That is doubt,
+        // not death; retain the identity and permanently fail this cancellation
+        // toward the route's ambiguity fence.
+        anyLive = true
+        uncertainRoots.add(rootPid)
+      } else {
+        // A different start means PID reuse. The original identity is gone and
+        // the replacement may never be signalled from remembered state.
+        remembered.delete(pid)
+      }
+    }
+    const fresh = attachedProcessTree(rows, verifiedRoots)
+    for (const row of fresh) {
+      const startedAt = realProcessStartMs(row.pid)
+      if (startedAt !== null) {
+        remembered.set(row.pid, startedAt)
+        anyLive = true
+      } else {
+        anyLive = true
+        uncertainRoots.add(rootPid)
+      }
+    }
+  }
+
+  // Once a snapshot/start probe missed part of the tree, later ancestry cannot
+  // reconstruct a process that may already have been re-parented. Never convert
+  // that uncertainty into reaped:true; the route will fence after force-settle.
+  if (uncertainRoots.has(rootPid)) anyLive = true
+
+  try {
+    process.kill(-rootPid, 0)
+    anyLive = true
+  } catch (error: any) {
+    if (error?.code !== 'ESRCH') anyLive = true
+  }
+
+  if (!anyLive) {
+    rememberedByRoot.delete(rootPid)
+    uncertainRoots.delete(rootPid)
+  }
+  return anyLive
+}
+
 /**
  * The real dependency set.
  *
@@ -1190,6 +1430,8 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
  * which is the one answer this module must never invent.
  */
 export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict): AttachedTurnDeps {
+  const rememberedProcesses = new Map<number, Map<number, number>>()
+  const uncertainProcessTrees = new Set<number>()
   return {
     now: () => Date.now(),
     preflight,
@@ -1205,23 +1447,7 @@ export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict):
     processStartMs: pid => realProcessStartMs(pid),
     recordSpawn: (pid, startMs) => recordCosSpawn(pid, startMs),
     releaseSpawn: pid => releaseCosSpawn(pid),
-    terminate: (child, signal) => {
-      const pid = child.pid
-      if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
-        try {
-          // Negative pid = process group, reachable because we spawned
-          // detached. Kills the CLI's own children too.
-          process.kill(-pid, signal)
-          return
-        } catch {
-          /* fall through to the direct signal */
-        }
-      }
-      try {
-        ;(child as any).kill?.(signal)
-      } catch {
-        /* nothing further is available */
-      }
-    },
+    terminate: (child, signal) => terminateAttachedProcessTree(child, signal, rememberedProcesses, uncertainProcessTrees),
+    processTreeAlive: child => attachedProcessTreeAlive(child, rememberedProcesses, uncertainProcessTrees),
   }
 }

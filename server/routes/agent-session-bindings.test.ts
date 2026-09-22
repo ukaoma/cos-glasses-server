@@ -3580,13 +3580,13 @@ describe('6.49.1: one turn timing line per answered request', () => {
  * An adapter that runs until its abort signal fires, then answers as the real adapter
  * does for a cancel. `completeOnAbort` models a child whose clean exit 0 raced the stop.
  */
-function abortableAdapter(opts: { completeOnAbort?: boolean } = {}) {
+function abortableAdapter(opts: { completeOnAbort?: boolean; reaped?: boolean } = {}) {
   const seen: AttachedTurnRequest[] = []
   const deliver = (req: AttachedTurnRequest): Promise<unknown> => new Promise(resolve => {
     seen.push(req)
     const answer = () => resolve(opts.completeOnAbort
       ? { status: 'completed', nativeRevisionAfter: null }
-      : { ok: false, delivery: 'cancelled', reason: 'cancelled', detail: null, exitCode: null, reaped: true, durationMs: 5 })
+      : { ok: false, delivery: 'cancelled', reason: 'cancelled', detail: null, exitCode: null, reaped: opts.reaped ?? true, durationMs: 5 })
     if (req.abortSignal?.aborted) return answer()
     req.abortSignal?.addEventListener('abort', answer, { once: true })
   })
@@ -3787,6 +3787,41 @@ describe('cancel a COS turn (6.53.0)', () => {
     expect(fences.fences).toHaveLength(1)
   })
 
+  it('a requested cancel whose spawned process tree was not reaped is ambiguous and fenced', async () => {
+    const adapter = abortableAdapter({ reaped: false })
+    const base = await start(writeDeps({
+      deliverAttachedTurn: adapter.deliver,
+      cancel: recordingCancel({ deskRunning: () => false }).cancel,
+    }))
+    const a = await attached(base)
+    expect((await fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-unreaped' }),
+    })).status).toBe(202)
+    expect((await cancelWhenInFlight(base)).status).toBe(202)
+    expect(await settled(base, a.bindingId, 'ct-cancel-unreaped')).toMatchObject({ outcome: 'ambiguous', reason: 'delivery_ambiguous' })
+    expect((await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences).toHaveLength(1)
+  })
+
+  it('a spawned pre-write cancellation is fenced unless the child was positively reaped', async () => {
+    const base = await start(writeDeps({
+      deliverAttachedTurn: req => new Promise(resolve => {
+        const answer = () => resolve({ ok: false, delivery: 'aborted', reason: 'cancelled', detail: 'before_write', reaped: false })
+        if (req.abortSignal?.aborted) return answer()
+        req.abortSignal?.addEventListener('abort', answer, { once: true })
+      }),
+      cancel: recordingCancel({ deskRunning: () => false }).cancel,
+    }))
+    const a = await attached(base)
+    expect((await fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-aborted-unreaped' }),
+    })).status).toBe(202)
+    expect((await cancelWhenInFlight(base)).status).toBe(202)
+    expect(await settled(base, a.bindingId, 'ct-cancel-aborted-unreaped')).toMatchObject({ outcome: 'ambiguous', reason: 'delivery_ambiguous' })
+    expect((await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences).toHaveLength(1)
+  })
+
   it('a clean completion that raced the cancel stays completed', async () => {
     const adapter = abortableAdapter({ completeOnAbort: true })
     const base = await start(writeDeps({ deliverAttachedTurn: adapter.deliver, cancel: recordingCancel({ deskRunning: () => false }).cancel }))
@@ -3819,6 +3854,7 @@ describe('cancel a COS turn (6.53.0)', () => {
         releaseSpawn: pid => ledger.release(pid),
         // The child exits on the first signal, as `claude -p` did in canary C3.
         terminate: (child, signal) => { signals.push(signal); setTimeout(() => (child as unknown as Child).emit('close', null), 5) },
+        processTreeAlive: () => false,
       },
     })
     const base = await start(writeDeps({

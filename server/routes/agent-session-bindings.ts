@@ -1196,7 +1196,7 @@ type Delivery =
   | { kind: 'completed'; after: string | null }
   | { kind: 'aborted' }
   | { kind: 'ambiguous' }
-  /** 6.53.0: stopped by a cancel this route requested. Never fenced. */
+  /** Stopped by a cancel this route requested and positively reaped. */
   | { kind: 'cancelled' }
 
 /**
@@ -1214,11 +1214,17 @@ type Delivery =
 export function classifyDelivery(result: unknown, cancelRequested = false): Delivery {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return { kind: 'ambiguous' }
   if (cancelRequested === true) {
-    const { ok, reason, delivery } = result as { ok?: unknown; reason?: unknown; delivery?: unknown }
+    const { ok, reason, delivery, reaped } = result as { ok?: unknown; reason?: unknown; delivery?: unknown; reaped?: unknown }
     if (ok === false && reason === 'cancelled'
-      && (delivery === 'cancelled' || delivery === 'not_attempted' || delivery === 'aborted')) {
+      && ((delivery === 'cancelled' && reaped === true)
+        || delivery === 'not_attempted'
+        || (delivery === 'aborted' && reaped === true))) {
       return { kind: 'cancelled' }
     }
+    // A cancel result that names a spawned-but-unreaped child must not fall
+    // through to the generic `aborted` classifier below. The route requested
+    // the stop, but it cannot claim the process tree is gone, so fence it.
+    if (ok === false && reason === 'cancelled') return { kind: 'ambiguous' }
   }
   const status = (result as { status?: unknown }).status
   if (status === 'completed') {

@@ -1,3 +1,13 @@
+## 6.53.1
+
+### Cancel the whole Codex process tree
+
+The 6.53.0 live Codex canary found that `codex exec resume` can launch a tool in its own process group. Cancelling the wrapper group stopped the COS turn, but an in-flight tool could be re-parented to launchd and continue running. This hotfix snapshots verified descendant identities before signalling the wrapper, reaches separate descendant groups, retains PID/start-time identities across re-parenting, and escalates those retained processes to SIGKILL after the five-second cancel grace. A wrapper `close` no longer clears the escalation while any verified tree member remains. Probe failure fails closed, and PID reuse is never signalled.
+
+A spawned cancellation is now reported as ordinary `turn_cancelled` only after the adapter confirms the entire tree was reaped. An unverified or surviving tree takes the existing ambiguous-delivery fence path. A pre-spawn cancellation remains provably process-free; a spawned pre-write cancellation still requires reaping proof even though no prompt byte was sent.
+
+- Tests: a real detached Node wrapper launches a SIGTERM-resistant tool in a second process group; the wrapper dies, the retained tool survives TERM, SIGKILL reaches it after re-parenting, and the tree is confirmed gone. Fault-injected process-table and start-time probes stay uncertain instead of inventing death. Adapter coverage proves wrapper close cannot settle early; route coverage proves both post-write and pre-write unreaped cancellations fence. The mutation gate removes each of those protections independently.
+
 ## 6.53.0
 
 ### Cancel a session run from the glasses

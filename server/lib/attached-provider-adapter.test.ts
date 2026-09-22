@@ -132,6 +132,7 @@ interface HarnessOptions {
   preflight?: () => any
   spawn?: (request: AttachedSpawnRequest) => AttachedChildProcess
   mutateChild?: (child: FakeChild) => void
+  processTreeAlive?: (child: AttachedChildProcess) => boolean
 }
 
 interface HarnessContext {
@@ -203,6 +204,7 @@ function harness(options: HarnessOptions = {}): HarnessContext {
     terminate: (child, signal) => {
       ctx.terminations.push({ signal, pid: child.pid })
     },
+    processTreeAlive: child => options.processTreeAlive?.(child) ?? false,
   }
 
   return ctx
@@ -1346,6 +1348,35 @@ describe('cancel (6.53.0): the caller\'s abort signal', () => {
       expect(result.reason).toBe('cancelled')
       expect(result.delivery).toBe('cancelled')
     }
+  })
+
+  it('does not settle when the wrapper closes while a detached tool is still alive', async () => {
+    vi.useFakeTimers()
+    let treeAlive = true
+    const ctx = harness({
+      script: () => {},
+      processTreeAlive: () => treeAlive,
+    })
+    const originalTerminate = ctx.deps.terminate
+    ctx.deps.terminate = (child, signal) => {
+      originalTerminate(child, signal)
+      if (signal === 'SIGKILL') treeAlive = false
+    }
+    const controller = new AbortController()
+    let resolved = false
+    const pending = deliver(ctx, { abortSignal: controller.signal }).then(result => {
+      resolved = true
+      return result
+    })
+    await vi.advanceTimersByTimeAsync(10)
+    controller.abort()
+    ctx.children[0]!.close(null)
+    await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS - 1)
+    expect(resolved).toBe(false)
+    await vi.advanceTimersByTimeAsync(26)
+    const result = expectFailure(await pending)
+    expect(result).toMatchObject({ reason: 'cancelled', delivery: 'cancelled', reaped: true })
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM', 'SIGKILL'])
   })
 
   it('a child that survives SIGKILL is force-settled as cancelled, unreaped, and released', async () => {
