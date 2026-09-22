@@ -3157,6 +3157,13 @@ const CASES = [
     tests: ["server/routes/agent-session-bindings.test.ts"],
   },
   {
+    name: "cancel-202-carries-hold-ms",
+    file: "server/routes/agent-session-bindings.ts",
+    find: "        effective: 'next_tool_call',\n        queuedHeld: queuedHeld(),\n        queuedHoldMs: CANCEL_QUEUE_HOLD_MS,\n",
+    replace: "        effective: 'next_tool_call',\n        queuedHeld: queuedHeld(),\n",
+    tests: ["server/routes/agent-session-bindings.test.ts"],
+  },
+  {
     name: "cancel-target-cos-turn-first",
     file: "server/lib/session-cancel.ts",
     find: "  if (facts.cosTurnInFlight === true) return 'cos_turn'\n",

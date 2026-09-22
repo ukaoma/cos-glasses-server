@@ -127,6 +127,7 @@ import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import {
+  CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
   cancelRefusalCopy,
   cancelTargetFor,
@@ -1721,13 +1722,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   //
   // WHAT IT CAN DO is decided by `cancelTargetFor`, the function the attachability
   // `cancel` field uses, so the row the lens showed and the answer to the tap agree:
-  //   cos_turn     202 {target, state: 'stopping', turnId, queuedHeld}: our own child's
+  //   cos_turn     202 {target, state: 'stopping', turnId, queuedHeld, queuedHoldMs}: our own child's
   //                controller is aborted, and the turn route records `turn_cancelled`.
-  //   desk_run     202 {target, effective: 'next_tool_call', queuedHeld}: a halt marker
+  //   desk_run     202 {target, effective: 'next_tool_call', queuedHeld, queuedHoldMs}: a halt marker
   //                the hook reads before the session's next tool call, and any permission
   //                prompt the broker holds for that session is denied with interrupt.
   //   refusals     409 {reason, reasonCopy}: not_running, cancel_unsupported (Codex app,
   //                Cursor), hooks_outdated (Install hooks), hooks_disabled.
+  //
+  // `queuedHoldMs` is how long the parked turns wait (CANCEL_QUEUE_HOLD_MS), so a client
+  // never hard-codes the two minutes.
   //
   // IDEMPOTENT PER clientCancelId: the same tap retried gets the same status and body
   // (plus `replayed: true`), and does not arm or abort anything twice.
@@ -1801,6 +1805,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         state: 'stopping',
         turnId: entry.turnId,
         queuedHeld: queuedHeld(),
+        queuedHoldMs: CANCEL_QUEUE_HOLD_MS,
       })
     }
     if (target === 'desk_run') {
@@ -1817,6 +1822,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         target,
         effective: 'next_tool_call',
         queuedHeld: queuedHeld(),
+        queuedHoldMs: CANCEL_QUEUE_HOLD_MS,
         settledPermissions: Number.isInteger(settledPermissions) && settledPermissions > 0 ? settledPermissions : 0,
       })
     }

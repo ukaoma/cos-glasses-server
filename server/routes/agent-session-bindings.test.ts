@@ -3617,7 +3617,7 @@ describe('cancel a COS turn (6.53.0)', () => {
 
     const res = await cancelWhenInFlight(base)
     expect(res.status).toBe(202)
-    expect(res.body).toEqual({ cancelled: true, target: 'cos_turn', state: 'stopping', turnId, queuedHeld: 2 })
+    expect(res.body).toEqual({ cancelled: true, target: 'cos_turn', state: 'stopping', turnId, queuedHeld: 2, queuedHoldMs: 120_000 })
     expect(adapter.seen).toHaveLength(1)
     expect(adapter.seen[0]!.abortSignal?.aborted).toBe(true)
 
@@ -3680,6 +3680,8 @@ describe('cancel a COS turn (6.53.0)', () => {
     const again = await postCancel(base, 'cc-idem-0001')
     expect(again.status).toBe(first.status)
     expect(again.body).toEqual({ ...first.body, replayed: true })
+    // The replay of a 202 carries the hold as well, so the app never hard-codes it.
+    expect(again.body.queuedHoldMs).toBe(120_000)
     expect((await postCancel(base, 'cc-idem-0002')).body.reason).toBe('not_running')
     expect(calls.ledger.map(r => r.clientCancelId)).toEqual(['cc-idem-0001', 'cc-idem-0002'])
     expect(calls.noted).toHaveLength(1)
@@ -3789,7 +3791,7 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     const base = await start(deps({ cancel }))
     const res = await postCancel(base, 'cc-desk-0001')
     expect(res.status).toBe(202)
-    expect(res.body).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', queuedHeld: 2, settledPermissions: 1 })
+    expect(res.body).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1 })
     expect(calls.halt).toEqual([{ sessionId: SID, at: NOW, clientCancelId: 'cc-desk-0001' }])
     expect(calls.settle).toEqual([SID])
     expect(calls.noted).toEqual([['claude', SID, NOW]])
@@ -3837,7 +3839,7 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     const { cancel, calls } = recordingCancel({ writeHalt: () => false })
     const res = await postCancel(await start(deps({ cancel })))
     expect(res.status).toBe(500)
-    expect(res.body).toMatchObject({ cancelled: false, reason: 'cancel_failed', reasonCopy: 'Could not cancel. Check the Mac.' })
+    expect(res.body).toEqual({ cancelled: false, reason: 'cancel_failed', reasonCopy: 'Could not cancel. Check the Mac.' })
     expect(calls.settle).toEqual([])
     expect(calls.noted).toEqual([])
   })
@@ -3901,7 +3903,8 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     })
     expect(res.status).toBe(400)
-    expect((await res.json()).reason).toBe('invalid_request')
+    // The exact body: a client reads any 4xx or 5xx JSON with a `reason` as a refusal.
+    expect(await res.json()).toEqual({ cancelled: false, reason: 'invalid_request', reasonCopy: 'That cancel was not something COS could read. Nothing was stopped.' })
     expect(calls.halt).toEqual([])
     expect(calls.ledger).toEqual([])
   })
