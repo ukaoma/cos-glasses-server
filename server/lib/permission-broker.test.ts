@@ -22,6 +22,7 @@ import {
   approvalCutMarker,
   approvalHookOutput,
   brokerSignalSink,
+  cancelHookOutput,
   parsePermissionRequestEnvelope,
   parseQuestions,
   permissionBrokerHealthFields,
@@ -382,6 +383,46 @@ describe('the broker, driven directly', () => {
     expect(broker.answer(id, { clientAnswerId: 'first', decision: 'allow' })).toEqual({ status: 200, body: { ok: true, id, kind: 'approval', replay: true, decision: 'deny' } })
     expect(sent).toEqual([approvalHookOutput('deny')])
     expect(broker.health().counters).toMatchObject({ parked: 1, answered: 1, hookGone: 0 })
+  })
+
+  describe('6.53.0: a cancel from COS settles the session\'s held prompts', () => {
+    const park = async (broker: PermissionBroker, now: number, tool: string, input: Record<string, unknown>, session = SESSION) => {
+      const a = await broker.admit(permissionEnvelope(tool, input, { session_id: session }, now))
+      if (!a.ok) throw new Error(a.reason)
+      const c = fakeChannel(true)
+      return { id: broker.park(a.request, c.channel), ...c }
+    }
+
+    it('denies every held prompt of THAT session with interrupt, leaves other sessions, and records an answer', async () => {
+      const { broker, clock } = brokerWith()
+      brokers.push(broker)
+      const other = 'b2c3d4e5-0000-4000-8000-00000000beef'
+      const approval = await park(broker, clock.now, 'Bash', { command: 'rm -rf build' })
+      const question = await park(broker, clock.now, 'AskUserQuestion', ASK_INPUT)
+      const elsewhere = await park(broker, clock.now, 'Bash', { command: 'ls' }, other)
+      expect(broker.cancelSession(SESSION.toUpperCase())).toBe(2)
+      expect(approval.sent).toEqual([cancelHookOutput()])
+      expect(question.sent).toEqual([cancelHookOutput()])
+      expect(cancelHookOutput()).toEqual({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Cancelled from COS', interrupt: true } } })
+      expect(elsewhere.sent).toEqual([])
+      expect(broker.list().map(v => v.id)).toEqual([elsewhere.id])
+      // A lens answering the card afterwards is told it was decided.
+      expect(broker.answer(approval.id, { clientAnswerId: 'late-1', decision: 'allow' })).toEqual({ status: 409, body: { error: 'already_answered', decision: 'deny' } })
+      expect(broker.health().counters).toMatchObject({ answered: 2 })
+      // Nothing left to cancel for the session: zero, and nothing sent twice.
+      expect(broker.cancelSession(SESSION)).toBe(0)
+      expect(approval.sent).toHaveLength(1)
+    })
+
+    it('a hook that already left is hook_gone, not counted as denied', async () => {
+      const { broker, clock } = brokerWith()
+      brokers.push(broker)
+      const gone = await park(broker, clock.now, 'Bash', { command: 'touch x' })
+      gone.channel.open = false
+      expect(broker.cancelSession(SESSION)).toBe(0)
+      expect(gone.sent).toEqual([])
+      expect(broker.health().counters).toMatchObject({ answered: 0, hookGone: 1 })
+    })
   })
 
   describe('app QA: "Leave for the Mac" (handBack)', () => {

@@ -305,6 +305,18 @@ export function questionHookOutput(toolInput: Record<string, unknown>, answers: 
   return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput: { ...toolInput, answers } } } }
 }
 
+/** 6.53.0: the message a held prompt gets when its session's run is cancelled from COS. */
+export const CANCEL_DENY_MESSAGE = 'Cancelled from COS'
+
+/**
+ * 6.53.0: a held prompt whose run was cancelled from the lens. Deny with `interrupt: true`,
+ * so Claude ends the RUN rather than trying something else in place of this tool. The one
+ * case where a broker reply interrupts, and only ever from `cancelSession`.
+ */
+export function cancelHookOutput(): Record<string, unknown> {
+  return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: CANCEL_DENY_MESSAGE, interrupt: true } } }
+}
+
 /** A tool approval: allow once, or deny with the one message. Never a rule. */
 export function approvalHookOutput(decision: 'allow' | 'deny'): Record<string, unknown> {
   const body = decision === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: DENY_MESSAGE }
@@ -931,6 +943,42 @@ export class PermissionBroker {
     this.log(`answered ${item.id} kind=${item.kind} pending=${this.pendingCount()}`)
     this.prune()
     return { status: 200, body: { ok: true, id: item.id, kind: item.kind, ...chosen } }
+  }
+
+  /**
+   * 6.53.0: a desk run of this session was cancelled from COS. Every prompt the broker holds
+   * for it is answered deny with `interrupt: true` (the away-from-desk case: without this the
+   * run waits out the deadline and then shows the Mac's dialog, and a cancel "at the next
+   * tool call" never arrives, because the next tool is the one being asked about). Recorded
+   * as an answer, so a lens answering the same card afterwards reads 409 already_answered.
+   * A hook that already left is `hook_gone`, as for any answer. Returns how many it denied.
+   */
+  cancelSession(sessionId: string): number {
+    const wanted = typeof sessionId === 'string' ? sessionId.toLowerCase() : ''
+    if (!wanted) return 0
+    let denied = 0
+    for (const item of [...this.items.values()]) {
+      if (item.state !== 'pending' || item.sessionId !== wanted) continue
+      if (!item.channel || !item.channel.writable() || !item.channel.reply(cancelHookOutput())) {
+        this.settle(item, 'hook_gone')
+        continue
+      }
+      item.state = 'answered'
+      item.settledAt = this.deps.now()
+      item.answer = { clientAnswerId: 'cos-cancel', chosen: { decision: 'deny' } }
+      item.channel = null
+      item.toolInput = {}
+      item.questions = null
+      item.approval = null
+      if (item.timer) clearTimeout(item.timer)
+      item.timer = null
+      this.counters.answered++
+      try { this.deps.signals?.decided(item.sessionId, item.id, item.fingerprint) } catch { /* rows are advisory */ }
+      this.log(`cancelled ${item.id} kind=${item.kind} pending=${this.pendingCount()}`)
+      denied++
+    }
+    this.prune()
+    return denied
   }
 
   /**
