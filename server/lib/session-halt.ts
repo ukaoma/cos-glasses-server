@@ -24,7 +24,7 @@
 //   - the hook deletes it itself on UserPromptSubmit (a new desk prompt, a Continue
 //     delivered into the open session, and a COS `-p` turn all fire it), so a new prompt
 //     is never stopped;
-//   - the server deletes it on that session's SessionEnd (index.ts);
+//   - the server deletes it on that session's SessionEnd (session-hooks-runtime.ts);
 //   - a sweep deletes anything older than HALT_MARKER_TTL_MS.
 // It is NOT deleted on Stop: a background subagent reports its parent's session id (C8),
 // and it is exactly the work a cancel must also stop.
@@ -79,6 +79,24 @@ export function writeHaltMarker(sessionId: string, marker: HaltMarker, dir = hal
 export function clearHaltMarker(sessionId: string, dir = haltDir()): boolean {
   const path = haltMarkerPath(sessionId, dir)
   if (path === null) return false
+  try {
+    unlinkSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Clear the marker because the SESSION ended, but only a marker written at or before the
+ * event. A SessionEnd drained late from the spool must not remove a cancel written after
+ * it for the same session id (a resumed tab reuses its id).
+ */
+export function clearHaltMarkerOnSessionEnd(sessionId: string, endedAt: number, dir = haltDir()): boolean {
+  const path = haltMarkerPath(sessionId, dir)
+  if (path === null) return false
+  const at = markerAt(path)
+  if (at === null || !Number.isFinite(endedAt) || at > endedAt) return false
   try {
     unlinkSync(path)
     return true

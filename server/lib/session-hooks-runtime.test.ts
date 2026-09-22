@@ -2,8 +2,12 @@
 // deriver), a COS child's pid is remembered past its exit, and off means off.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { spawn } from 'node:child_process'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
-import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, deriveForRow, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
+import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
+import { HALT_MARKER_TTL_MS, hasHaltMarker, writeHaltMarker } from './session-halt.js'
+import { OPEN_TURN_CEILING_MS } from './session-state-derive.js'
+import type { HookEnvelope } from './session-hook-events.js'
 import { dataPath } from './data-dir.js'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -162,5 +166,103 @@ describe('the boot replay', () => {
     } finally {
       runtime.stop()
     }
+  })
+})
+
+describe('claudeDeskRunning (6.53.0, the cancel route\'s desk probe)', () => {
+  const SID = 'a1b2c3d4-0000-4000-8000-0000000cafe1'
+  const env = (event: HookEnvelope['event'], ts: number, payload: Record<string, unknown> = {}): HookEnvelope =>
+    ({ ts, ppid: 1, event, sessionId: SID, payload: { session_id: SID, ...payload } })
+  const record = (dir: string, pid: number, status: string) =>
+    writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: SID, entrypoint: 'claude-desktop', status, statusUpdatedAt: 1 }))
+
+  it('the hooks: an open turn inside the ceiling is running; a Stop, a SessionEnd or silence past the ceiling is not', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const t0 = 1_000_000
+    expect(claudeDeskRunning(SID, t0, dir)).toBe(false)
+    sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
+    expect(claudeDeskRunning(SID, t0 + 1, dir)).toBe(true)
+    expect(claudeDeskRunning(SID, t0 + OPEN_TURN_CEILING_MS, dir)).toBe(true)
+    expect(claudeDeskRunning(SID, t0 + OPEN_TURN_CEILING_MS + 1, dir)).toBe(false)
+    sessionSignalStore.apply(env('Stop', t0 + 10), false)
+    expect(claudeDeskRunning(SID, t0 + 11, dir)).toBe(false)
+    sessionSignalStore.apply(env('UserPromptSubmit', t0 + 20, { prompt: 'again' }), false)
+    expect(claudeDeskRunning(SID, t0 + 21, dir)).toBe(true)
+    sessionSignalStore.apply(env('SessionEnd', t0 + 30, { reason: 'other' }), false)
+    expect(claudeDeskRunning(SID, t0 + 31, dir)).toBe(false)
+  })
+
+  it('the registry: the session\'s own busy record with a live pid; idle, dead, or a COS child is not', () => {
+    process.env.COS_SESSION_HOOKS = '0' // no hook signal at all: the registry alone answers
+    // A real live process that is not this one (the spawn ledger refuses its own pid).
+    const live = spawn('/bin/sleep', ['30'], { stdio: 'ignore' })
+    const pid = live.pid!
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+      record(dir, pid, 'busy')
+      expect(claudeDeskRunning(SID, Date.now(), dir)).toBe(true)
+      record(dir, pid, 'idle')
+      expect(claudeDeskRunning(SID, Date.now(), dir)).toBe(false)
+      const deadDir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+      record(deadDir, 2_147_483_000, 'busy') // no such process
+      expect(claudeDeskRunning(SID, Date.now(), deadDir)).toBe(false)
+      // A COS child's record is the route's own in-flight turn, never a desk run.
+      const childDir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+      record(childDir, pid, 'busy')
+      expect(recordCosSpawn(pid, Date.now())).toBe('recorded')
+      try {
+        expect(claudeDeskRunning(SID, Date.now(), childDir)).toBe(false)
+      } finally {
+        releaseCosSpawn(pid)
+      }
+    } finally {
+      live.kill('SIGKILL')
+    }
+  })
+})
+
+describe('halt markers die with their session (6.53.0)', () => {
+  const SID = 'a1b2c3d4-0000-4000-8000-0000000cafe2'
+  const env = (event: HookEnvelope['event'], ts: number): HookEnvelope =>
+    ({ ts, ppid: 1, event, sessionId: SID, payload: { session_id: SID, reason: 'other' } })
+
+  function boot() {
+    const home = mkdtempSync(join(tmpdir(), 'cos-runtime-'))
+    process.env.COS_GLASSES_HOME = home
+    process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
+    process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    return startSessionHooksRuntime({ port: 3141 })
+  }
+
+  it('SessionEnd clears the marker; Stop, a child\'s SessionEnd, and a SessionEnd older than the cancel do not', () => {
+    const at = Date.now()
+    writeHaltMarker(SID, { at, clientCancelId: 'cc-end-1' })
+    const runtime = boot()
+    try {
+      sessionSignalStore.apply(env('Stop', at + 10), false)
+      expect(hasHaltMarker(SID)).toBe(true)
+      sessionSignalStore.apply(env('SessionEnd', at + 20), true) // a COS child ending
+      expect(hasHaltMarker(SID)).toBe(true)
+      sessionSignalStore.apply(env('SessionEnd', at - 5_000), false) // drained late, from before the cancel
+      expect(hasHaltMarker(SID)).toBe(true)
+      sessionSignalStore.apply(env('SessionEnd', at + 30), false)
+      expect(hasHaltMarker(SID)).toBe(false)
+    } finally {
+      runtime.stop()
+    }
+  })
+
+  it('the boot sweeps markers past their hour, and stop() unsubscribes', () => {
+    const now = Date.now()
+    const old = 'a1b2c3d4-0000-4000-8000-0000000cafe3'
+    writeHaltMarker(old, { at: now - HALT_MARKER_TTL_MS - 1, clientCancelId: 'cc-old' })
+    writeHaltMarker(SID, { at: now, clientCancelId: 'cc-new' })
+    const runtime = boot()
+    expect(hasHaltMarker(old)).toBe(false)
+    expect(hasHaltMarker(SID)).toBe(true)
+    runtime.stop()
+    sessionSignalStore.apply(env('SessionEnd', now + 10), false)
+    expect(hasHaltMarker(SID)).toBe(true)
   })
 })

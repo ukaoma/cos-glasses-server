@@ -24,7 +24,9 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { deskIdleSeconds, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { cachedHookStatus, claudeDeskRunning, deskIdleSeconds, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { writeHaltMarker } from './lib/session-halt.js'
+import { appendSessionCancelLedger, cancelEndsTurn, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancelledAt } from './lib/session-cancel.js'
 import {
   PermissionBroker,
   brokerSignalSink,
@@ -712,6 +714,14 @@ if (threadAttachEnabled()) {
     turnEnded: (provider: string, threadId: string) => {
       if (provider !== 'claude' && provider !== 'codex') return false
       try {
+        // 6.53.0: a cancel with nothing written since it ENDED the turn. A killed COS child
+        // leaves its last tool_use unanswered, and no Stop or terminal record ever follows.
+        const cancelledAt = threadCancelledAt(provider, threadId)
+        if (cancelledAt !== null) {
+          const readMtime = occupancyProbes.transcriptMtimeMs
+          const lastRow = typeof readMtime === 'function' ? readMtime(provider, threadId) : null
+          if (cancelEndsTurn(cancelledAt, typeof lastRow === 'number' ? lastRow : null)) return true
+        }
         // 6.48.1: the engine's own end of turn: a Stop hook newer than the turn's prompt
         // AND the registry flipped idle after it (the Stop hooks have returned; a prompt
         // typed during them is queued and dequeues only then). The transcript tail
@@ -735,9 +745,14 @@ if (threadAttachEnabled()) {
       if (provider !== 'claude' && provider !== 'codex') return false
       try {
         const now = Date.now()
+        // 6.53.0: evidence older than a cancel on this thread is the cancelled run's, not a
+        // live turn (plan R1: a killed child's dangling tool_use read `tool_pending` for the
+        // whole 30-minute ceiling and held every parked turn behind it).
+        const cancelledAt = threadCancelledAt(provider, threadId)
         if (provider === 'claude') {
           const signal = signalFor(threadId)
-          if (signal && signal.turnOpen && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS) return true
+          if (signal && signal.turnOpen && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS
+            && !cancelEndsTurn(cancelledAt, signal.lastEventAt)) return true
         }
         const path = transcriptPathFor(provider, threadId, nativeHeadDeps)
         const verdict = transcriptTurnVerdict(provider, path)
@@ -745,6 +760,7 @@ if (threadAttachEnabled()) {
         if (verdict.reason !== 'tool_pending' && verdict.reason !== 'prompt_open') return false
         const read = occupancyProbes.transcriptMtimeMs
         const mtime = typeof read === 'function' ? read(provider, threadId) : null
+        if (cancelEndsTurn(cancelledAt, typeof mtime === 'number' ? mtime : null)) return false
         return typeof mtime === 'number' && now - mtime <= OPEN_TURN_CEILING_MS
       } catch {
         return false
@@ -761,6 +777,8 @@ if (threadAttachEnabled()) {
       }
     },
     deliver: (turn: QueuedThreadTurn) => deliverQueuedTurnOverLoopback(turn, PORT, API_TOKEN),
+    // 6.53.0: parked turns hold for two minutes after a cancel on their thread.
+    cancelHoldUntil: (provider: string, threadId: string) => cancelHoldUntilFor(provider, threadId),
     now: () => Date.now(),
   }
   app.use('/api', createThreadTurnQueueRouter(queueDeps))
@@ -855,6 +873,19 @@ app.use('/api', createAgentSessionBindingsRouter({
   // empty list — "nothing is bound" and "the store could not be read" must not
   // look the same.
   bindings: agentSessionBindingRegistry,
+  // 6.53.0: cancel a session run from the lens. The route's own in-flight map answers for
+  // a COS turn; these answer for a run at the desk. Read per request, so Install hooks in
+  // Control flips `hooks_outdated` to `desk_run` within the status cache's five seconds.
+  cancel: {
+    deskRunning: sessionId => claudeDeskRunning(sessionId),
+    hooksEnabled: () => sessionHooksEnabled(),
+    hooksReady: () => cachedHookStatus().installed,
+    writeHalt: (sessionId, marker) => writeHaltMarker(sessionId, marker),
+    settlePermissions: sessionId => permissionBroker.cancelSession(sessionId),
+    queuedWaiting: (provider, threadId) => readQueue(provider, threadId, Date.now()).filter(t => t.status === 'waiting').length,
+    noteCancelled: (provider, threadId, at) => noteThreadCancelled(provider, threadId, at),
+    ledger: row => appendSessionCancelLedger(row),
+  },
 }))
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)

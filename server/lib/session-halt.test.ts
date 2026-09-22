@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 import {
   HALT_MARKER_TTL_MS,
   clearHaltMarker,
+  clearHaltMarkerOnSessionEnd,
   haltDir,
   haltMarkerPath,
   hasHaltMarker,
@@ -62,6 +63,18 @@ describe('session halt markers', () => {
     expect(clearHaltMarker(SID.toUpperCase(), dir)).toBe(true)
     expect(clearHaltMarker(SID, dir)).toBe(false)
     expect(readdirSync(dir)).toEqual([OTHER])
+  })
+
+  it('a SessionEnd clears only a marker written at or before it (a late SessionEnd never clears a newer cancel)', () => {
+    const dir = folder()
+    writeHaltMarker(SID, { at: NOW, clientCancelId: 'a' }, dir)
+    expect(clearHaltMarkerOnSessionEnd(SID, NOW - 1, dir)).toBe(false)
+    expect(hasHaltMarker(SID, dir)).toBe(true)
+    expect(clearHaltMarkerOnSessionEnd(SID, Number.NaN, dir)).toBe(false)
+    expect(clearHaltMarkerOnSessionEnd(SID, NOW, dir)).toBe(true)
+    expect(hasHaltMarker(SID, dir)).toBe(false)
+    expect(clearHaltMarkerOnSessionEnd(SID, NOW, dir)).toBe(false)
+    expect(clearHaltMarkerOnSessionEnd('nope', NOW, dir)).toBe(false)
   })
 
   it('the sweep removes markers past the hour and keeps younger ones', () => {

@@ -16,7 +16,8 @@ import { dataPath } from './data-dir.js'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { startSpoolIngester, type SpoolIngester, type SpoolStats } from './session-hook-spool.js'
 import { SessionSignalStore, type SessionSignal } from './session-signal-store.js'
-import { deriveSessionState, type DerivedSessionState, type RegistryFacts, type TranscriptFacts } from './session-state-derive.js'
+import { OPEN_TURN_CEILING_MS, deriveSessionState, type DerivedSessionState, type RegistryFacts, type TranscriptFacts } from './session-state-derive.js'
+import { clearHaltMarkerOnSessionEnd, sweepHaltMarkers } from './session-halt.js'
 import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatus, type HookStatus } from './claude-hooks-installer.js'
 
 export function sessionHooksEnabled(): boolean {
@@ -162,6 +163,35 @@ export function registryIdleAfterStop(sessionId: string, stopAt: number, dir = c
   return record.status === 'idle' && typeof record.statusUpdatedAt === 'number' && record.statusUpdatedAt >= stopAt
 }
 
+/** `kill(pid, 0)`: EPERM is a live process we may not signal; only ESRCH is gone. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * 6.53.0: is Claude working on this session AT THE DESK right now (a Desktop tab, a terminal,
+ * or a Continue delivered live into either)? The cancel route's `deskRunning`: a yes offers
+ * `desk_run`, which arms a halt marker. Two witnesses, either one is enough:
+ *   - the hooks: the turn is open, the session has not ended, and the newest event is inside
+ *     the open-turn ceiling (a tab that died mid-turn must not read running for ever);
+ *   - the registry: the session's own record (never a COS child's: that run is the route's
+ *     own in-flight turn) says `busy`, and its pid is alive.
+ * Canary C9 (2026-09-21): after a hook stop the registry read idle within a second, so a
+ * cancelled desk run stops reading as running at once.
+ */
+export function claudeDeskRunning(sessionId: string, now = Date.now(), dir = claudeSessionsDir()): boolean {
+  const signal = signalFor(sessionId)
+  if (signal && signal.turnOpen && signal.ended === null && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS) return true
+  const record = registryRecordSync(sessionId, dir)
+  if (!record || record.status !== 'busy' || record.pid === null || isCosSpawnedPid(record.pid, now)) return false
+  return pidAlive(record.pid)
+}
+
 let ledger: SessionHookLedger | null = null
 let ingester: SpoolIngester | null = null
 let replayed: { rows: number; applied: number } | null = null
@@ -197,6 +227,14 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
       if (entrypoint) sessionSignalStore.setEntrypoint(env.sessionId, entrypoint)
     } : undefined,
   })
+  // 6.53.0: a halt marker dies with its session. SessionEnd only, never Stop: a background
+  // subagent reports its parent's session id (canary C8) and is work a cancel must stop.
+  // Subscribed AFTER the replay above, so an old SessionEnd in the replay window cannot
+  // clear a cancel written since; the TTL sweep covers anything this misses.
+  const unsubscribeHalt = enabled ? sessionSignalStore.subscribe((_signal, env, child) => {
+    if (env.event === 'SessionEnd' && !child) clearHaltMarkerOnSessionEnd(env.sessionId, env.ts)
+  }) : () => {}
+  sweepHaltMarkers(Date.now())
   // Runtime files the script reads. The port can change per install; the token never does.
   // The script is copied only when MISSING here: a boot must never downgrade what a newer
   // `--hooks install` put at the stable path.
@@ -206,12 +244,17 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   } catch (error) {
     console.error(`[session-hooks] runtime files: ${error instanceof Error ? error.message : error}`)
   }
-  const pruneTimer = setInterval(() => { sessionSignalStore.prune() }, 10 * 60_000)
+  // The same ten-minute tick sweeps halt markers past their hour (6.53.0).
+  const pruneTimer = setInterval(() => {
+    sessionSignalStore.prune()
+    sweepHaltMarkers(Date.now())
+  }, 10 * 60_000)
   pruneTimer.unref()
   return {
     store: sessionSignalStore,
     stop() {
       clearInterval(pruneTimer)
+      unsubscribeHalt()
       ingester?.stop()
     },
   }
