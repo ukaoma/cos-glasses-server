@@ -1317,6 +1317,22 @@ describe('cancel (6.53.0): the caller\'s abort signal', () => {
     expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM', 'SIGKILL'])
   })
 
+  it('the cancel takes over from the budget: the deadline no longer fires a second SIGTERM', async () => {
+    vi.useFakeTimers()
+    const ctx = harness({ script: () => {} })
+    const controller = new AbortController()
+    const pending = deliver(ctx, { abortSignal: controller.signal, timeoutMs: 1_000 })
+    await vi.advanceTimersByTimeAsync(10)
+    controller.abort()
+    // Past the 1 s budget, inside the 5 s cancel grace: only the cancel's SIGTERM.
+    await vi.advanceTimersByTimeAsync(1_500)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM'])
+    await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM', 'SIGKILL'])
+    ctx.children[0]!.close(null)
+    expect(expectFailure(await pending).reason).toBe('cancelled')
+  })
+
   it('a child that exits on SIGTERM settles at once, cancelled, whatever its exit code', async () => {
     for (const code of [143, 1, null]) {
       const ctx = harness({ script: () => {} })
