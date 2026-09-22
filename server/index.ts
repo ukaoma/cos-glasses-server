@@ -495,6 +495,8 @@ const deliverAttachedTurnForRoute = async (request: {
   nativeThreadId: string
   prompt: string
   onSpawn: (pid: number) => boolean
+  /** 6.53.0: the cancel from the lens, passed straight through to the adapter. */
+  abortSignal?: AbortSignal
 }): Promise<unknown> => {
   // Resolved here, not stored on the binding: the cwd is read from the transcript,
   // which records it verbatim. Decoding the project slug is lossy — this Mac's own
@@ -537,6 +539,7 @@ const deliverAttachedTurnForRoute = async (request: {
       // The only policy this build accepts. The adapter refuses anything else and
       // asserts no bypass/always-approve flag reaches the argv (plan 4.7).
       policy: 'read_only',
+      abortSignal: request.abortSignal,
       deps: {
         ...base,
         // `startMs` is deliberately unused: the adapter already probed it as a GATE

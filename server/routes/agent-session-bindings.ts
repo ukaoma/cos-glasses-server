@@ -247,6 +247,12 @@ export interface AttachedTurnRequest {
    * simply never calls it.
    */
   onSpawn: (pid: number) => boolean
+  /**
+   * 6.53.0: aborted by POST .../cancel. The adapter checks it before the spawn and
+   * before the prompt write, and stops the child's process group after. Optional so an
+   * adapter that ignores it is byte-for-byte the 6.52 route.
+   */
+  abortSignal?: AbortSignal
 }
 
 /**

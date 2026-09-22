@@ -59,8 +59,14 @@
 //   aborted        a child existed, we terminated it, no prompt byte was written
 //   ambiguous      we called write(); we cannot prove the provider did not act
 //   delivered      clean exit 0 AND the provider echoed our exact target id
+//   cancelled      (6.53.0) we called write(), then the USER asked us to stop and we
+//                  killed the child. The provider may have acted on part of the turn,
+//                  but that is the user's decision, not an unknown: nothing is lost and
+//                  nothing may be sent again by COS on its own.
 //
-// Only the first two are provably safe to report as a clean failure.
+// Only the first two are provably safe to report as a clean failure. `cancelled` is not
+// a clean failure either, but it is not a fence: a fence exists to stop COS resending a
+// turn nobody knows the fate of, and a cancelled turn is one the user chose to end.
 // `attachedDeliveryAmbiguous` makes that mapping total, and treats any state it
 // does not recognise as ambiguous, so adding a state later cannot silently open
 // the replay path.
@@ -129,9 +135,11 @@ export type AttachedTurnFailure =
   | 'no_native_id_returned'
   | 'native_id_mismatch'
   | 'adapter_internal_error'
+  /** 6.53.0: the caller's abort signal fired (a cancel from the lens). Never ambiguous. */
+  | 'cancelled'
 
 /** See the header. The boundary is the first byte handed to the child's stdin. */
-export type AttachedDeliveryState = 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered'
+export type AttachedDeliveryState = 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' | 'cancelled'
 
 /**
  * Bounded classification of a provider's stderr.
@@ -202,7 +210,10 @@ export type AttachedTurnResult = AttachedTurnSuccess | AttachedTurnFailureResult
  */
 export function attachedDeliveryAmbiguous(result: AttachedTurnResult): boolean {
   if (result.ok) return false
-  return result.delivery !== 'not_attempted' && result.delivery !== 'aborted'
+  // `cancelled` is listed by name, not inferred: a state added later still defaults to
+  // fenced. It is not ambiguous because the user ended the turn, and a fence would lock
+  // them out of the thread they just stopped (plan validation B2, 2026-09-21).
+  return result.delivery !== 'not_attempted' && result.delivery !== 'aborted' && result.delivery !== 'cancelled'
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +353,13 @@ export interface AttachedTurnRequest {
   deps: AttachedTurnDeps
   /** Wall-clock budget for the provider run. Omitted uses the default. */
   timeoutMs?: number
+  /**
+   * 6.53.0: the cancel from the lens. Checked before the spawn and before the prompt is
+   * written (a turn that never started is `cancelled` with delivery `not_attempted` or
+   * `aborted`); after the write it stops the child's process group, SIGTERM then SIGKILL
+   * after CANCEL_KILL_GRACE_MS. A natural exit 0 with our id that lands first still wins.
+   */
+  abortSignal?: AbortSignal
 }
 
 /**
@@ -357,6 +375,14 @@ export const MAX_ATTACHED_TIMEOUT_MS = 30 * 60_000
 
 /** SIGTERM first; this is how long the child gets before SIGKILL. */
 export const KILL_GRACE_MS = 2_000
+
+/**
+ * The same escalation for a CANCEL, with a longer grace. A timeout is a child that has
+ * stopped answering; a cancel lands on a child that is working and may be mid-write, and
+ * canary C3 (2026-09-21) saw `claude -p --resume` end cleanly on SIGTERM in about 4 s with
+ * a transcript that parses and resumes. Two seconds would SIGKILL it inside that window.
+ */
+export const CANCEL_KILL_GRACE_MS = 5_000
 
 /**
  * Last-resort settle after SIGKILL.
@@ -778,6 +804,11 @@ async function run(
   if (bannedArg !== null) {
     return fail('unsupported_policy', 'not_attempted', { ...base, detail: `banned_arg:${bannedArg}`, durationMs: duration() })
   }
+  // 6.53.0: a cancel that landed before the spawn. No process is created, so nothing can
+  // have been delivered; the turn ends `cancelled`, which the route never fences.
+  if (request.abortSignal?.aborted === true) {
+    return fail('cancelled', 'not_attempted', { ...base, detail: 'before_spawn', durationMs: duration() })
+  }
   let child: AttachedChildProcess
   try {
     child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv() })
@@ -830,7 +861,7 @@ async function run(
   }
 
   try {
-    return await driveChild({ child, pid, deps, provider, nativeThreadId, prompt, timeoutMs, startedAt })
+    return await driveChild({ child, pid, deps, provider, nativeThreadId, prompt, timeoutMs, startedAt, abortSignal: request.abortSignal })
   } finally {
     // Every path: success, mismatch, non-zero exit, timeout, throw. A leaked
     // entry lets a recycled pid inherit our self-ownership claim.
@@ -864,10 +895,11 @@ interface DriveInput {
   prompt: string
   timeoutMs: number
   startedAt: number
+  abortSignal?: AbortSignal
 }
 
 function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
-  const { child, deps, provider, nativeThreadId, prompt, timeoutMs, startedAt } = input
+  const { child, deps, provider, nativeThreadId, prompt, timeoutMs, startedAt, abortSignal } = input
 
   return new Promise<AttachedTurnResult>((resolve) => {
     /** Distinct ids seen. More than one means a fork happened; see the header. */
@@ -879,7 +911,10 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     let exitCode: number | null = null
     let settled = false
     let timedOut = false
+    /** 6.53.0: the caller's abort fired after the child existed. Read before `timedOut`. */
+    let cancelled = false
     let spawnErrored = false
+    let onAbort: (() => void) | null = null
 
     let deadline: ReturnType<typeof setTimeout> | null = null
     let graceTimer: ReturnType<typeof setTimeout> | null = null
@@ -897,6 +932,10 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
       if (settled) return
       settled = true
       clearTimers()
+      if (onAbort) {
+        try { abortSignal?.removeEventListener('abort', onAbort) } catch { /* nothing to release */ }
+        onAbort = null
+      }
       resolve(result)
     }
 
@@ -963,6 +1002,13 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
         stdoutTail = ''
       }
 
+      // 6.53.0: a cancel outranks every failure below, the timeout included (a cancel in
+      // the timeout's kill grace is still the user's decision). It does NOT outrank a
+      // clean exit 0 that echoed our exact id: that turn finished before the stop landed,
+      // and reporting it cancelled would hide a delivered turn.
+      if (cancelled && !(exitCode === 0 && delivery === 'ambiguous' && observedIds.length === 1 && observedIds[0] === nativeThreadId)) {
+        return settleFailure('cancelled', { delivery: 'cancelled' })
+      }
       if (timedOut) return settleFailure('timeout')
       if (spawnErrored) return settleFailure('spawn_failed', { detail: 'child_error' })
 
@@ -1054,11 +1100,40 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
         forceTimer = setTimeout(() => {
           // A child that survived SIGKILL cannot be reached from here, and
           // blocking forever would wedge the coordinator and any Control drain
-          // behind it.
-          settleFailure('timeout', { detail: 'unreaped', reaped: false })
+          // behind it. A cancel that landed during this escalation still reads
+          // as the user's (6.53.0).
+          if (cancelled) settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
+          else settleFailure('timeout', { detail: 'unreaped', reaped: false })
         }, FORCE_SETTLE_MS)
       }, KILL_GRACE_MS)
     }, timeoutMs)
+
+    // --- the cancel (6.53.0) ---------------------------------------------------
+    // Registered before the write so an abort from here on is seen. The group SIGTERM then
+    // SIGKILL is the timeout's own sequence with a longer grace; the force settle keeps a
+    // child that survives SIGKILL from wedging the route's claim.
+    if (abortSignal) {
+      onAbort = () => {
+        if (settled || cancelled) return
+        cancelled = true
+        // A timeout already escalating keeps its own timers; the result still reads
+        // cancelled (finishTerminal checks `cancelled` first).
+        if (timedOut) return
+        if (deadline) { clearTimeout(deadline); deadline = null }
+        safeTerminate(deps, child, 'SIGTERM')
+        graceTimer = setTimeout(() => {
+          safeTerminate(deps, child, 'SIGKILL')
+          forceTimer = setTimeout(() => {
+            settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
+          }, FORCE_SETTLE_MS)
+        }, CANCEL_KILL_GRACE_MS)
+      }
+      try {
+        abortSignal.addEventListener('abort', onAbort, { once: true })
+      } catch {
+        onAbort = null
+      }
+    }
 
     // --- deliver the prompt --------------------------------------------------
     const stdin = child.stdin
@@ -1076,6 +1151,15 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
       stdin.on('error', () => { /* reported through close/exit; never fatal here */ })
     } catch {
       /* an stdin that cannot take a listener still gets the write attempt below */
+    }
+
+    // 6.53.0: a cancel that landed between the spawn check and here (a dependency that
+    // yielded, or one that aborted synchronously). No prompt byte is written: the child is
+    // killed and the turn is provably undelivered.
+    if (abortSignal?.aborted === true) {
+      safeTerminate(deps, child, 'SIGKILL')
+      delivery = 'aborted'
+      return settleFailure('cancelled', { detail: 'before_write', reaped: false })
     }
 
     try {

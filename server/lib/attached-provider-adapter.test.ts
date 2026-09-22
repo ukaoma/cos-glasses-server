@@ -37,6 +37,7 @@ import {
   buildCodexAttachedArgs,
   buildCursorAttachedArgs,
   DEFAULT_ATTACHED_TIMEOUT_MS,
+  CANCEL_KILL_GRACE_MS,
   KILL_GRACE_MS,
   FORCE_SETTLE_MS,
   MAX_ATTACHED_TIMEOUT_MS,
@@ -1240,5 +1241,179 @@ describe('reaping is reported, never derived', () => {
     const result = expectFailure(await deliver(ctx, {}))
     expect(result.exitCode).toBe(3)
     expect(result.reaped).toBe(true)
+  })
+})
+
+describe('cancel (6.53.0): the caller\'s abort signal', () => {
+  // Miles, 2026-09-21: a Cancel run row on the lens. For a turn COS itself spawned, the
+  // route aborts this signal; the child's process group is stopped and the turn ends
+  // `cancelled`, which the route never fences (plan validation B2).
+  afterEach(() => { vi.useRealTimers() })
+
+  it('an abort before the spawn never creates a process', async () => {
+    const ctx = harness({ script: succeedWith(TARGET) })
+    const controller = new AbortController()
+    controller.abort()
+    const result = expectFailure(await deliver(ctx, { abortSignal: controller.signal }))
+    expect(result.reason).toBe('cancelled')
+    expect(result.delivery).toBe('not_attempted')
+    expect(result.detail).toBe('before_spawn')
+    expect(ctx.spawns).toHaveLength(0)
+    expect(ctx.calls).not.toContain('spawn')
+    expect(attachedDeliveryAmbiguous(result)).toBe(false)
+  })
+
+  it('an abort that lands while the child is being spawned kills it before a prompt byte is written', async () => {
+    const controller = new AbortController()
+    const ctx = harness({
+      script: () => { /* the child would answer, but must never be asked */ },
+      spawn: () => {
+        const child = new FakeChild()
+        ctx.children.push(child)
+        // A dependency that yields to the event loop, or aborts synchronously, lets the
+        // abort land between the spawn check and the write.
+        controller.abort()
+        return child as unknown as AttachedChildProcess
+      },
+    })
+    const result = expectFailure(await deliver(ctx, { abortSignal: controller.signal }))
+    expect(result.reason).toBe('cancelled')
+    expect(result.delivery).toBe('aborted')
+    expect(result.detail).toBe('before_write')
+    expect(ctx.children[0]!.stdin!.written).toEqual([])
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGKILL'])
+    expect(attachedDeliveryAmbiguous(result)).toBe(false)
+    // Released like every other exit.
+    expect(ctx.ledger.snapshot().size).toBe(0)
+  })
+
+  it('an abort mid-run stops the process group: SIGTERM, SIGKILL after the 5 s cancel grace, and ends cancelled', async () => {
+    vi.useFakeTimers()
+    const ctx = harness({ script: () => { /* a long tool call: no output, no exit */ } })
+    const controller = new AbortController()
+    const pending = deliver(ctx, { abortSignal: controller.signal })
+    await vi.advanceTimersByTimeAsync(10)
+    // The prompt was written: this is a live turn, not a pre-write abort.
+    expect(ctx.children[0]!.stdin!.written).toEqual([PROMPT])
+
+    controller.abort()
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM'])
+    // NOT the timeout's two seconds: a working child gets the longer cancel grace.
+    await vi.advanceTimersByTimeAsync(KILL_GRACE_MS)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM'])
+    await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS - KILL_GRACE_MS)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(CANCEL_KILL_GRACE_MS).toBe(5_000)
+
+    ctx.children[0]!.close(null)
+    const result = expectFailure(await pending)
+    expect(result.reason).toBe('cancelled')
+    expect(result.delivery).toBe('cancelled')
+    expect(result.reaped).toBe(true)
+    expect(attachedDeliveryAmbiguous(result)).toBe(false)
+    expect(ctx.ledger.snapshot().size).toBe(0)
+    // The 21-minute deadline was cleared by the cancel: nothing fires later.
+    await vi.advanceTimersByTimeAsync(DEFAULT_ATTACHED_TIMEOUT_MS)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM', 'SIGKILL'])
+  })
+
+  it('a child that exits on SIGTERM settles at once, cancelled, whatever its exit code', async () => {
+    for (const code of [143, 1, null]) {
+      const ctx = harness({ script: () => {} })
+      const controller = new AbortController()
+      const pending = deliver(ctx, { abortSignal: controller.signal })
+      await new Promise(r => setTimeout(r, 0))
+      controller.abort()
+      ctx.children[0]!.emitStdout(claudeLine(TARGET))
+      ctx.children[0]!.close(code)
+      const result = expectFailure(await pending)
+      expect(result.reason).toBe('cancelled')
+      expect(result.delivery).toBe('cancelled')
+    }
+  })
+
+  it('a child that survives SIGKILL is force-settled as cancelled, unreaped, and released', async () => {
+    vi.useFakeTimers()
+    const ctx = harness({ script: () => {} })
+    const controller = new AbortController()
+    const pending = deliver(ctx, { abortSignal: controller.signal })
+    await vi.advanceTimersByTimeAsync(10)
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS + FORCE_SETTLE_MS)
+    const result = expectFailure(await pending)
+    expect(result.reason).toBe('cancelled')
+    expect(result.detail).toBe('unreaped')
+    expect(result.reaped).toBe(false)
+    expect(attachedDeliveryAmbiguous(result)).toBe(false)
+    expect(ctx.ledger.snapshot().size).toBe(0)
+  })
+
+  it('a clean exit 0 that echoed our id wins over a late abort: the turn was delivered', async () => {
+    const ctx = harness({ script: () => {} })
+    const controller = new AbortController()
+    const pending = deliver(ctx, { abortSignal: controller.signal })
+    await new Promise(r => setTimeout(r, 0))
+    ctx.children[0]!.emitStdout(claudeLine(TARGET))
+    controller.abort()
+    ctx.children[0]!.close(0)
+    const result = await pending
+    expect(result.ok).toBe(true)
+    expect(result.delivery).toBe('delivered')
+  })
+
+  it('exit 0 after an abort without our exact id is still cancelled, not a mismatch or a missing id', async () => {
+    for (const lines of [[], [claudeLine(FORKED)], [claudeLine(TARGET), claudeLine(FORKED)]]) {
+      const ctx = harness({ script: () => {} })
+      const controller = new AbortController()
+      const pending = deliver(ctx, { abortSignal: controller.signal })
+      await new Promise(r => setTimeout(r, 0))
+      for (const line of lines) ctx.children[0]!.emitStdout(line)
+      controller.abort()
+      ctx.children[0]!.close(0)
+      const result = expectFailure(await pending)
+      expect(result.reason).toBe('cancelled')
+      expect(attachedDeliveryAmbiguous(result)).toBe(false)
+    }
+  })
+
+  it('an abort during the timeout\'s own kill grace still reads cancelled, never timeout', async () => {
+    vi.useFakeTimers()
+    const ctx = harness({ script: () => {} })
+    const controller = new AbortController()
+    const pending = deliver(ctx, { abortSignal: controller.signal, timeoutMs: 1_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM'])
+    controller.abort()
+    // The timeout's escalation continues unchanged: no second SIGTERM.
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM'])
+    ctx.children[0]!.close(null)
+    const result = expectFailure(await pending)
+    expect(result.reason).toBe('cancelled')
+    // And when the child survives both, the force settle says cancelled as well.
+    const ctx2 = harness({ script: () => {} })
+    const controller2 = new AbortController()
+    const pending2 = deliver(ctx2, { abortSignal: controller2.signal, timeoutMs: 1_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    controller2.abort()
+    await vi.advanceTimersByTimeAsync(KILL_GRACE_MS + FORCE_SETTLE_MS)
+    const forced = expectFailure(await pending2)
+    expect(forced.reason).toBe('cancelled')
+    expect(forced.reaped).toBe(false)
+  })
+
+  it('an abort after the turn settled does nothing (the listener is gone)', async () => {
+    const ctx = harness({ script: succeedWith(TARGET) })
+    const controller = new AbortController()
+    const result = await deliver(ctx, { abortSignal: controller.signal })
+    expect(result.ok).toBe(true)
+    controller.abort()
+    expect(ctx.terminations).toEqual([])
+  })
+
+  it('no signal: byte for byte the 6.52 path', async () => {
+    const ctx = harness({ script: succeedWith(TARGET) })
+    const result = await deliver(ctx)
+    expect(result.ok).toBe(true)
+    expect(ctx.terminations).toEqual([])
   })
 })
