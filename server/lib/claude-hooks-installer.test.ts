@@ -57,7 +57,11 @@ describe('mergeHookSettings is pure and preserves everything foreign', () => {
     expect(hooks.SessionEnd[0]).toEqual({ hooks: [{ type: 'command', command: cmd('SessionEnd'), timeout: 5 }] })
     expect(hooks.PostToolUse[0]).toEqual({ hooks: [{ type: 'command', command: cmd('PostToolUse'), timeout: 10, async: true }] })
     expect(hooks.PermissionRequest).toEqual([{ hooks: [{ type: 'command', command: cmd('PermissionRequest'), timeout: 130 }] }])
-    expect(hooks.PreToolUse[0]).toMatchObject({ matcher: 'AskUserQuestion|ExitPlanMode' })
+    // 6.53.0: PreToolUse is synchronous with NO matcher (was async `AskUserQuestion|ExitPlanMode`
+    // through 6.52). The script's halt check must see every tool call, and it returns in
+    // about 11 ms; the script itself still spools only those two tools. Updated on purpose.
+    expect(hooks.PreToolUse).toEqual([{ hooks: [{ type: 'command', command: cmd('PreToolUse'), timeout: 5 }] }])
+    expect(hooks.PreToolUse[0]).not.toHaveProperty('matcher')
     expect(hooks.PostToolUse[0]).not.toHaveProperty('matcher')
     expect(settings.model).toBe('opus')
     expect(settings.permissions).toEqual(REAL_SHAPE.permissions)
@@ -125,6 +129,28 @@ describe('mergeHookSettings is pure and preserves everything foreign', () => {
     const report = subscribedEvents(drifted, SCRIPT, PATHS)
     expect(report.drifted).toEqual(['Stop'])
     expect(report.missing).toEqual(['PostCompact'])
+  })
+
+  it('6.53.0: a 6.52 install (async PreToolUse with the question matcher) reads drift, and one install leaves ONE synchronous block', () => {
+    // The shape every Mac carries until Install hooks runs after the update. The cancel
+    // route reads this state and answers `hooks_outdated`, so the old block must not pass.
+    const installed = merged(REAL_SHAPE).settings
+    const hooks = installed.hooks as Record<string, unknown[]>
+    const old652 = {
+      ...installed,
+      hooks: { ...hooks, PreToolUse: [{ matcher: 'AskUserQuestion|ExitPlanMode', hooks: [{ type: 'command', command: cmd('PreToolUse'), timeout: 10, async: true }] }] },
+    }
+    const report = subscribedEvents(old652, SCRIPT, PATHS)
+    expect(report.drifted).toEqual(['PreToolUse'])
+    expect(report.missing).toEqual([])
+    // A foreign PreToolUse block survives; ours is replaced by exactly one block with no
+    // matcher, never a second one beside the old (status requires exactly one).
+    const foreign = { matcher: 'Bash', hooks: [{ type: 'command', command: '~/bin/guard.sh' }] }
+    const withForeign = { ...old652, hooks: { ...old652.hooks, PreToolUse: [foreign, ...old652.hooks.PreToolUse] } }
+    const again = merged(withForeign).settings
+    const pre = (again.hooks as Record<string, unknown[]>).PreToolUse
+    expect(pre).toEqual([foreign, { hooks: [{ type: 'command', command: cmd('PreToolUse'), timeout: 5 }] }])
+    expect(subscribedEvents(again, SCRIPT, PATHS).drifted).toEqual([])
   })
 
   it('quotes a home directory with a space and leaves a plain path alone', () => {
@@ -207,20 +233,41 @@ describe('install and uninstall on disk', () => {
     }
   })
 
-  it('6.52.0: an existing 6.51.0 install reads installed, never script_outdated (no reinstall)', () => {
+  // PREMISE CHANGED IN 6.53.0, on purpose. Through 6.52 this test pinned "an existing 6.51.0
+  // install reads installed, no reinstall": 6.52.0 served the broker at the URL the 6.51
+  // script already called. 6.53.0 changes BOTH the script (the halt check) and the
+  // PreToolUse subscription, so an existing install must NOT read installed: the cancel
+  // route keys `hooks_outdated` off exactly this, and Control's Install hooks banner too.
+  it('6.53.0: an existing 6.51/6.52 install reads drift or script_outdated until Install hooks, then installed', () => {
     const { settingsPath, scriptPath, root } = sandbox()
     process.env.COS_GLASSES_HOME = join(root, 'home')
     try {
-      // The script this package ships IS the 6.51.0 script (b58af26), byte for byte.
       const shipped = packagedHookScriptPath()
-      expect(createHash('sha256').update(readFileSync(shipped)).digest('hex')).toBe('0a55756de9c88d7dc7a37fadb1ab627d55bb37ba27965178797423656d1df20a')
-      // A Mac that ran 6.51.0's `--hooks install`: its settings entries (the subscriptions
-      // did not change) and that script in ~/.cos-glasses/bin.
+      expect(createHash('sha256').update(readFileSync(shipped)).digest('hex')).not.toBe('0a55756de9c88d7dc7a37fadb1ab627d55bb37ba27965178797423656d1df20a')
+      // A Mac that ran 6.51.0's `--hooks install`: the old async PreToolUse block and the
+      // old script (any other bytes stand in for it) at the stable path.
       installClaudeHooks({ settingsPath, packageScriptPath: shipped, scriptPath, port: 3141 })
-      copyFileSync(shipped, scriptPath)
-      const status = hookStatus({ settingsPath, packageScriptPath: shipped, scriptPath })
-      expect(status.state).toBe('installed')
-      expect(status.installed).toBe(true)
+      const current = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      const pre = current.hooks.PreToolUse as Array<{ hooks: Array<{ command: string }> }>
+      const oldCommand = pre[pre.length - 1]!.hooks[0]!.command
+      current.hooks.PreToolUse = [{ matcher: 'AskUserQuestion|ExitPlanMode', hooks: [{ type: 'command', command: oldCommand, timeout: 10, async: true }] }]
+      writeFileSync(settingsPath, JSON.stringify(current, null, 2))
+      writeFileSync(scriptPath, '#!/bin/sh\n# the 6.51.0 script\nexit 0\n')
+      const before = hookStatus({ settingsPath, packageScriptPath: shipped, scriptPath })
+      expect(before.state).toBe('drift')
+      expect(before.drifted).toEqual(['PreToolUse'])
+      expect(before.installed).toBe(false)
+      // New subscription but the old script (Update Server alone never re-copies it).
+      const fixed = installClaudeHooks({ settingsPath, packageScriptPath: shipped, scriptPath, port: 3141, dryRun: true }).merged!
+      writeFileSync(settingsPath, JSON.stringify(fixed, null, 2))
+      expect(hookStatus({ settingsPath, packageScriptPath: shipped, scriptPath }).state).toBe('script_outdated')
+      // Install hooks: installed.
+      const after = installClaudeHooks({ settingsPath, packageScriptPath: shipped, scriptPath, port: 3141 })
+      expect(after.scriptCopied).toBe(true)
+      expect(after.status.state).toBe('installed')
+      expect(after.status.installed).toBe(true)
+      copyFileSync(shipped, join(root, 'copy-check'))
+      expect(readFileSync(scriptPath)).toEqual(readFileSync(join(root, 'copy-check')))
     } finally {
       delete process.env.COS_GLASSES_HOME
     }

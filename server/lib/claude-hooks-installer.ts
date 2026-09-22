@@ -46,6 +46,15 @@ export interface HookSubscription {
  * UserPromptSubmit would leave a running turn reading idle). The write is a few
  * milliseconds. PermissionRequest must be synchronous to return a decision; the rest
  * are fire-and-forget.
+ *
+ * 6.53.0: PreToolUse is SYNCHRONOUS with NO matcher, so the script's halt check sees every
+ * tool call and can stop a desk run (cancel from the lens). Canaries, 2026-09-21: the stop
+ * needs `permissionDecision: deny` plus `continue: false` (C1b; `continue: false` alone
+ * still ran the tool), the check costs about 11 ms per call (C2), and a hook that times out
+ * (C6) or exits 1 (C7) lets the tool run, so a broken hook fails open. ONE block per event,
+ * because the merge keeps exactly one of ours per event and status requires it: the script
+ * spools only AskUserQuestion and ExitPlanMode, which is what the old async matcher block
+ * did. Changing this row makes every existing install read `drift` until Install hooks.
  */
 export const HOOK_SUBSCRIPTIONS: readonly HookSubscription[] = [
   { event: 'SessionStart', async: false, timeout: 5 },
@@ -55,7 +64,7 @@ export const HOOK_SUBSCRIPTIONS: readonly HookSubscription[] = [
   { event: 'StopFailure', async: true, timeout: 10 },
   { event: 'PermissionRequest', async: false, timeout: 130 },
   { event: 'PermissionDenied', async: true, timeout: 10 },
-  { event: 'PreToolUse', matcher: 'AskUserQuestion|ExitPlanMode', async: true, timeout: 10 },
+  { event: 'PreToolUse', async: false, timeout: 5 },
   { event: 'PostToolUse', async: true, timeout: 10 },
   { event: 'PostToolUseFailure', async: true, timeout: 10 },
   { event: 'Notification', matcher: 'permission_prompt|idle_prompt|elicitation_dialog|agent_needs_input', async: true, timeout: 10 },
