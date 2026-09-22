@@ -2946,6 +2946,10 @@ const CASES = [
   },
   // 6.53.0: cancel a session run. The hook-script cases run the halt suite, which carries no
   // sha pin (the script suite's pin would kill any edit to the script, inert or not).
+  // NOT GATED, measured: dropping the script's `tr 'A-F' 'a-f'` on the session id SURVIVED
+  // (2026-09-21), because this Mac's APFS volume is case-insensitive, so `[ -f ]` and `rm`
+  // find the lower-case marker under an upper-case name anyway. The lower-casing matters
+  // only on a case-sensitive volume, which no test here can create; it stays, unasserted.
   {
     name: "halt-deny-branch",
     file: "bin/hooks/cos-session-hook",
@@ -2979,13 +2983,6 @@ const CASES = [
     file: "bin/hooks/cos-session-hook",
     find: "\"$IN\" 2>/dev/null | head -1 | grep -Eo",
     replace: "\"$IN\" 2>/dev/null | tail -1 | grep -Eo",
-    tests: ["server/lib/cos-session-hook.halt.test.ts"],
-  },
-  {
-    name: "halt-id-lowercased",
-    file: "bin/hooks/cos-session-hook",
-    find: "| head -1 | grep -Eo '[0-9A-Fa-f-]{36}' | tr 'A-F' 'a-f')\n  if [ \"$EVENT\" = UserPromptSubmit ]",
-    replace: "| head -1 | grep -Eo '[0-9A-Fa-f-]{36}')\n  if [ \"$EVENT\" = UserPromptSubmit ]",
     tests: ["server/lib/cos-session-hook.halt.test.ts"],
   },
   {
