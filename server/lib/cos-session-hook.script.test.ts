@@ -5,7 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -28,6 +28,11 @@ const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin
  * every Mac: update this pin only together with a plan for that.
  */
 const SCRIPT_6_51_0_SHA256 = '0a55756de9c88d7dc7a37fadb1ab627d55bb37ba27965178797423656d1df20a'
+/**
+ * sha256 of the script 6.53.0 ships: the halt check ahead of everything else. Changed on
+ * purpose, with its reinstall plan (Install hooks in COS Control); see the pin test below.
+ */
+const SCRIPT_6_53_0_SHA256 = '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -447,10 +452,15 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       }
     })
 
-    it('no reinstall: the shipped script is the 6.51.0 script, byte for byte', () => {
+    it('the shipped script is the 6.53.0 script, byte for byte (a change is a reinstall on every Mac)', () => {
       const bytes = readFileSync(SCRIPT)
-      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_51_0_SHA256)
-      // And it posts to exactly the route this server serves.
+      // 6.53.0 changed the script DELIBERATELY (the halt check), and with it the PreToolUse
+      // subscription. The rollout is the plan's: Update Server, then Install hooks in COS
+      // Control. Until that reinstall the stable copy is the 6.51.0 script, `hookStatus()`
+      // reads `script_outdated` / `drift`, and a desk cancel answers `hooks_outdated`.
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_53_0_SHA256)
+      expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
+      // And it still posts to exactly the route this server serves.
       expect(bytes.toString('utf8')).toContain(`"http://127.0.0.1:$PORT${PERMISSION_BROKER_HOOK_PATH}"`)
     })
 
@@ -459,6 +469,188 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       const r = await runAsync('PermissionRequest', askPayload(), s.paths)
       expect(r).toEqual({ status: 0, stdout: '' })
       expect(s.hits).toEqual([{ url: PERMISSION_BROKER_HOOK_PATH, status: 401 }])
+    })
+  })
+
+  // 6.53.0: the halt check. PreToolUse is synchronous with no matcher, so this branch runs
+  // before every tool call on the Mac; the canaries (plan, 2026-09-21) fixed its reply.
+  describe('the halt check (6.53.0)', () => {
+    const DENY = '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
+    const OTHER = 'b2c3d4e5-0000-4000-8000-00000000beef'
+    const tool = (name: string, extra: Record<string, unknown> = {}) =>
+      payload({ hook_event_name: 'PreToolUse', tool_name: name, tool_input: { command: 'ls' }, ...extra })
+
+    /** A home plus its own TMPDIR, so a leaked temp file is visible to the assertion. */
+    function halted(sessionIds: string[] = []) {
+      const paths = home()
+      const halt = join(dirname(paths.spool), 'session-halt')
+      mkdirSync(halt, { recursive: true })
+      for (const id of sessionIds) writeFileSync(join(halt, id), JSON.stringify({ at: Date.now(), clientCancelId: 'cc-test-1' }))
+      const tmp = mkdtempSync(join(tmpdir(), 'cos-hook-tmp-'))
+      return { ...paths, halt, tmp }
+    }
+    function runIn(event: string, stdin: string, p: ReturnType<typeof halted>) {
+      return spawnSync('/bin/sh', [SCRIPT, event], {
+        input: stdin,
+        env: { HOME: dirname(p.home), COS_GLASSES_HOME: p.home, COS_HOOK_SPOOL: p.spool, PATH: '/usr/bin:/bin', TMPDIR: p.tmp },
+        timeout: 10_000,
+      })
+    }
+
+    it('a marker for this session: prints exactly the deny that stops the run, spools nothing, leaves no temp file', () => {
+      const p = halted([SESSION])
+      const r = runIn('PreToolUse', tool('Bash'), p)
+      expect(r.status).toBe(0)
+      expect(r.stdout.toString()).toBe(DENY)
+      expect(r.stderr.toString()).toBe('')
+      expect(JSON.parse(r.stdout.toString())).toEqual({
+        continue: false,
+        stopReason: 'Cancelled from COS',
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Cancelled from COS' },
+      })
+      expect(spooled(p.spool)).toEqual([])
+      expect(readdirSync(p.tmp)).toEqual([])
+      // The marker is not consumed by the stop: background subagents share the session id
+      // (C8), and the next tool call must be stopped too.
+      expect(existsSync(join(p.halt, SESSION))).toBe(true)
+      expect(runIn('PreToolUse', tool('Read'), p).stdout.toString()).toBe(DENY)
+      // It stops the two spooled tools too, before they are spooled.
+      expect(runIn('PreToolUse', tool('AskUserQuestion'), p).stdout.toString()).toBe(DENY)
+      expect(spooled(p.spool)).toEqual([])
+    })
+
+    it('no marker: an ordinary tool call prints nothing, writes no spool file and creates nothing', () => {
+      const p = halted([OTHER])
+      const r = runIn('PreToolUse', tool('Bash'), p)
+      expect(r.status).toBe(0)
+      expect(r.stdout.toString()).toBe('')
+      expect(r.stderr.toString()).toBe('')
+      expect(spooled(p.spool)).toEqual([])
+      // Nothing at all under the spool: the branch runs before the mkdir.
+      expect(existsSync(join(p.spool, 'rejected'))).toBe(false)
+      expect(readdirSync(p.tmp)).toEqual([])
+      // With no marker folder at all (the common case on every Mac), the same.
+      const bare = { ...home(), halt: '', tmp: mkdtempSync(join(tmpdir(), 'cos-hook-tmp-')) }
+      const r2 = runIn('PreToolUse', tool('Bash'), bare)
+      expect(r2.status).toBe(0)
+      expect(r2.stdout.toString()).toBe('')
+      expect(spooled(bare.spool)).toEqual([])
+      expect(readdirSync(bare.tmp)).toEqual([])
+    })
+
+    it('AskUserQuestion and ExitPlanMode are spooled with their payload, as the 6.48 matcher did', () => {
+      const p = halted([OTHER])
+      for (const name of ['AskUserQuestion', 'ExitPlanMode']) {
+        const r = runIn('PreToolUse', tool(name), p)
+        expect(r.status).toBe(0)
+        expect(r.stdout.toString()).toBe('')
+      }
+      const names = spooled(p.spool).sort()
+      expect(names).toHaveLength(2)
+      const tools = names.map(n => {
+        const parsed = parseHookEnvelope(readFileSync(join(p.spool, n), 'utf-8'))
+        expect(parsed.ok).toBe(true)
+        if (!parsed.ok) return null
+        expect(parsed.envelope).toMatchObject({ event: 'PreToolUse', sessionId: SESSION })
+        expect(parsed.envelope.payload.tool_input).toEqual({ command: 'ls' })
+        return parsed.envelope.payload.tool_name
+      })
+      expect(tools.sort()).toEqual(['AskUserQuestion', 'ExitPlanMode'])
+      expect(readdirSync(p.tmp)).toEqual([])
+      // A tool whose name merely CONTAINS one of them is not one of them.
+      expect(runIn('PreToolUse', tool('NotAskUserQuestion'), p).stdout.toString()).toBe('')
+      expect(spooled(p.spool)).toHaveLength(2)
+    })
+
+    it('UserPromptSubmit removes this session\'s marker, leaves the others, and is still spooled', () => {
+      const p = halted([SESSION, OTHER])
+      const r = runIn('UserPromptSubmit', payload({ hook_event_name: 'UserPromptSubmit', prompt: 'next thing' }), p)
+      expect(r.status).toBe(0)
+      expect(r.stdout.toString()).toBe('')
+      expect(existsSync(join(p.halt, SESSION))).toBe(false)
+      expect(existsSync(join(p.halt, OTHER))).toBe(true)
+      const names = spooled(p.spool)
+      expect(names).toHaveLength(1)
+      const parsed = parseHookEnvelope(readFileSync(join(p.spool, names[0]!), 'utf-8'))
+      expect(parsed.ok).toBe(true)
+      if (parsed.ok) {
+        expect(parsed.envelope).toMatchObject({ event: 'UserPromptSubmit', sessionId: SESSION })
+        expect(parsed.envelope.payload.prompt).toBe('next thing')
+      }
+      expect(readdirSync(p.tmp)).toEqual([])
+      // And the next tool call of the new prompt runs.
+      expect(runIn('PreToolUse', tool('Bash'), p).stdout.toString()).toBe('')
+      // With no marker anywhere the prompt spools exactly as before.
+      const q = halted()
+      expect(runIn('UserPromptSubmit', payload({ prompt: 'x' }), q).status).toBe(0)
+      expect(spooled(q.spool)).toHaveLength(1)
+    })
+
+    it('malformed stdin exits 0 with no output and no spool file, even with the marker set', () => {
+      const p = halted([SESSION])
+      for (const stdin of ['not json', '', `{"session_id":"${SESSION}"`, `{"session_id":"${SESSION.slice(0, 8)}"}`]) {
+        const r = runIn('PreToolUse', stdin, p)
+        expect(r.status).toBe(0)
+        // The truncated-JSON case still names the session in full, and a stop there is
+        // correct: the id is the whole key. Every other shape names no session.
+        expect(r.stdout.toString()).toBe(stdin.startsWith(`{"session_id":"${SESSION}"`) ? DENY : '')
+      }
+      expect(spooled(p.spool)).toEqual([])
+      expect(readdirSync(p.tmp)).toEqual([])
+    })
+
+    it('the FIRST session_id decides: one inside tool_input, after the payload\'s own, does not win', () => {
+      // The payload's own session is not halted; the tool's input names one that is.
+      const p = halted([SESSION])
+      const inner = JSON.stringify({ session_id: OTHER, hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { session_id: SESSION } })
+      expect(runIn('PreToolUse', inner, p).stdout.toString()).toBe('')
+      // And the reverse: the payload's own session is halted, the tool's input names another.
+      const q = halted([SESSION])
+      const reverse = JSON.stringify({ session_id: SESSION, hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { session_id: OTHER } })
+      expect(runIn('PreToolUse', reverse, q).stdout.toString()).toBe(DENY)
+    })
+
+    it('reads an upper-case id and spaces after the colons (any JSON writer)', () => {
+      const p = halted([SESSION])
+      const spaced = tool('Bash', { session_id: SESSION.toUpperCase() }).replace(/":/g, '": ')
+      expect(runIn('PreToolUse', spaced, p).stdout.toString()).toBe(DENY)
+      const r = runIn('UserPromptSubmit', payload({ session_id: SESSION.toUpperCase() }).replace(/":/g, '": '), p)
+      expect(r.status).toBe(0)
+      expect(existsSync(join(p.halt, SESSION))).toBe(false)
+    })
+
+    it('a full spool or a stale drain stamp never stops a cancel: the check runs before the B8 guard', () => {
+      const p = halted([SESSION])
+      for (let i = 0; i < 2000; i++) writeFileSync(join(p.spool, `${1700000000000 + i}-1-Stop.json`), '{}\n')
+      expect(runIn('PreToolUse', tool('Bash'), p).stdout.toString()).toBe(DENY)
+      const q = halted([SESSION])
+      const stamp = join(q.spool, '.last-drain')
+      writeFileSync(stamp, '')
+      const dayAgo = new Date(Date.now() - 25 * 60 * 60_000)
+      utimesSync(stamp, dayAgo, dayAgo)
+      expect(runIn('PreToolUse', tool('Bash'), q).stdout.toString()).toBe(DENY)
+    })
+
+    it('never exits 2, on any event or input (exit 2 would block the tool)', () => {
+      const p = halted([SESSION])
+      const inputs = ['', 'not json', tool('Bash'), tool('AskUserQuestion'), tool('Bash', { session_id: OTHER }), payload({ prompt: 'p' })]
+      for (const event of ['PreToolUse', 'UserPromptSubmit', 'PostToolUse', 'Stop']) {
+        for (const stdin of inputs) {
+          const r = runIn(event, stdin, p)
+          expect(r.status).toBe(0)
+        }
+      }
+      // A marker folder that is not readable is not a stop, and not an exit 2.
+      const q = halted([SESSION])
+      chmodSync(q.halt, 0o000)
+      try {
+        const r = runIn('PreToolUse', tool('Bash'), q)
+        expect(r.status).toBe(0)
+        expect(r.stdout.toString()).toBe('')
+      } finally {
+        chmodSync(q.halt, 0o700)
+      }
+      expect(readdirSync(p.tmp)).toEqual([])
     })
   })
 
