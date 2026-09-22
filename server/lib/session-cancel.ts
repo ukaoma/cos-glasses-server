@@ -53,6 +53,16 @@ export function cancelTargetFor(facts: CancelFacts): CancelTarget | null {
   return 'desk_run'
 }
 
+/**
+ * `/api/health` `features.sessionCancel` (6.53.0). `cosTurn` is true in every 6.53 build: the
+ * route aborts its own child. `deskClaude` says whether a desk Claude run can be stopped
+ * NOW: the hooks applied AND the 6.53 script and subscription installed. False until
+ * Install hooks after the update, which is the rollout step Control's banner asks for.
+ */
+export function sessionCancelFeature(hooksEnabled: boolean, hooksInstalled: boolean): { cosTurn: true; deskClaude: boolean } {
+  return { cosTurn: true, deskClaude: hooksEnabled === true && hooksInstalled === true }
+}
+
 /** Refusal codes on the cancel route, with the lens's own words (app 6.9.529 matches). */
 export type CancelRefusal = 'not_running' | 'cancel_unsupported' | 'hooks_outdated' | 'hooks_disabled' | 'cancel_failed' | 'invalid_request'
 

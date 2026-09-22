@@ -80,7 +80,8 @@ import {
   threadAttachCapability,
   threadAttachHealthFields,
 } from '../lib/thread-attach-capability.js'
-import { sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
+import { cachedHookStatus, sessionHooksEnabled, sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
+import { sessionCancelFeature } from '../lib/session-cancel.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
@@ -293,6 +294,10 @@ healthRouter.get('/health', async (_req, res) => {
     // This is a pure env read, so it costs nothing on a health poll, and health is
     // what every other toggle on that screen already reads.
     claudeSessions: claudeSessionsEnabled(),
+    // 6.53.0: cancel a session run. `cosTurn` always; `deskClaude` only once the hooks are
+    // applied and the 6.53 hook is installed (Install hooks in COS Control after updating).
+    // The status read is the same cached one `sessionHooks` below reports.
+    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), cachedHookStatus().installed),
   }
   const voice = {
     available: keyStatus.hasKey || tts_local.ready,

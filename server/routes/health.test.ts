@@ -3,6 +3,11 @@ import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { DISPLAY_TICKET_TTL_SECONDS, verifyDisplayTicket } from '../lib/display-ticket.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { installClaudeHooks } from '../lib/claude-hooks-installer.js'
+import { invalidateHookStatus } from '../lib/session-hooks-runtime.js'
 import { healthRouter } from './health.js'
 
 let server: Server | null = null
@@ -59,6 +64,35 @@ describe('morning brief capability', () => {
     expect(keys).not.toContain('sessionId')
     expect(keys).not.toContain('jobId')
     expect(keys).not.toContain('prompt')
+  }, 20_000)
+})
+
+describe('features.sessionCancel (6.53.0)', () => {
+  // The app shows Cancel run only when the server can carry it out. `deskClaude` must follow
+  // the real install state, so this drives a real install into a scratch settings file and
+  // a scratch COS home (never the real ~/.claude or ~/.cos-glasses).
+  it('cosTurn always; deskClaude only with the hooks applied and the 6.53 hook installed', async () => {
+    const keys = ['CLAUDE_CONFIG_DIR', 'COS_GLASSES_HOME', 'COS_SESSION_HOOKS'] as const
+    const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]))
+    const root = mkdtempSync(join(tmpdir(), 'cos-health-cancel-'))
+    process.env.CLAUDE_CONFIG_DIR = join(root, '.claude')
+    process.env.COS_GLASSES_HOME = join(root, '.cos-glasses')
+    process.env.COS_SESSION_HOOKS = '1'
+    try {
+      invalidateHookStatus()
+      const before = await (await fetch(`${base}/api/health`)).json()
+      expect(before.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })
+      expect(installClaudeHooks({ port: 3999 }).status.state).toBe('installed')
+      invalidateHookStatus()
+      const installed = await (await fetch(`${base}/api/health`)).json()
+      expect(installed.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true })
+      process.env.COS_SESSION_HOOKS = '0'
+      const off = await (await fetch(`${base}/api/health`)).json()
+      expect(off.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })
+    } finally {
+      for (const k of keys) { if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k] }
+      invalidateHookStatus()
+    }
   }, 20_000)
 })
 

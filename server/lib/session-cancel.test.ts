@@ -16,6 +16,7 @@ import {
   cancelRefusalCopy,
   cancelTargetFor,
   noteThreadCancelled,
+  sessionCancelFeature,
   threadCancelledAt,
   type CancelFacts,
 } from './session-cancel.js'
@@ -120,5 +121,14 @@ describe('the ledger', () => {
 
   it('a ledger that cannot be written never throws into the cancel', () => {
     expect(() => appendSessionCancelLedger({ at: 'x', provider: 'claude', threadId: SID, target: null, outcome: 'not_running', clientCancelId: 'cc-3' }, '/dev/null/nope/session-cancel.jsonl')).not.toThrow()
+  })
+})
+
+describe('features.sessionCancel', () => {
+  it('a COS turn is always cancellable; a desk run only with the hooks applied AND installed', () => {
+    expect(sessionCancelFeature(true, true)).toEqual({ cosTurn: true, deskClaude: true })
+    expect(sessionCancelFeature(true, false)).toEqual({ cosTurn: true, deskClaude: false })
+    expect(sessionCancelFeature(false, true)).toEqual({ cosTurn: true, deskClaude: false })
+    expect(sessionCancelFeature(false, false)).toEqual({ cosTurn: true, deskClaude: false })
   })
 })
