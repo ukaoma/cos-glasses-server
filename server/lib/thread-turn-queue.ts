@@ -201,6 +201,12 @@ export interface DrainObservation {
   /** The gate's reason when `attachable` is false. Carried ONLY so a fence -- the one
    *  hold a clock cannot end -- can be given a longer life than a busy thread. */
   reason?: string | null
+  /**
+   * 6.53.0: until when a cancel on this thread holds its parked turns (epoch ms), or
+   * null. The person just said stop; a follow-up parked behind the run must not start it
+   * again a second later. It holds, then sends as normal (CANCEL_QUEUE_HOLD_MS, 2 min).
+   */
+  cancelHoldUntil?: number | null
 }
 
 export type DrainDecision = 'deliver' | 'hold' | 'expire' | 'give_up'
@@ -225,6 +231,9 @@ export function drainDecision(
   const effectiveTtl = seen.reason === 'native_target_fenced' ? FENCE_HELD_TURN_TTL_MS : ttlMs
   if (now - turn.queuedAt >= effectiveTtl) return 'expire'
   if (turn.attempts >= MAX_DELIVERY_ATTEMPTS) return 'give_up'
+  // 6.53.0: AFTER the two retirements, so a hold can never keep alive a turn that ran out
+  // of time or tries; BEFORE the gate, because it is a hold whatever the gate says.
+  if (typeof seen.cancelHoldUntil === 'number' && Number.isFinite(seen.cancelHoldUntil) && now < seen.cancelHoldUntil) return 'hold'
   // THE GATE, unweakened. Everything below is about WHEN, never about whether.
   if (!seen.attachable) return 'hold'
   // Turn-ended is the precise signal; idle is the backstop for a holder that wrote no

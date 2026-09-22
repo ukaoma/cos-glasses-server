@@ -90,6 +90,20 @@ describe('a turn cannot outlive its meaning, or retry forever', () => {
   })
 })
 
+describe('a cancel holds the parked turns for two minutes, then they send (6.53.0)', () => {
+  it('holds while now is before the hold, and delivers from the moment it passes', () => {
+    expect(drainDecision(turn(), seen({ cancelHoldUntil: 2_001 }), 2_000)).toBe('hold')
+    expect(drainDecision(turn(), seen({ cancelHoldUntil: 2_000 }), 2_000)).toBe('deliver')
+    expect(drainDecision(turn(), seen({ cancelHoldUntil: null }), 2_000)).toBe('deliver')
+    expect(drainDecision(turn(), seen({ cancelHoldUntil: Number.NaN }), 2_000)).toBe('deliver')
+  })
+
+  it('never keeps alive a turn that ran out of time or tries: expiry and the ceiling come first', () => {
+    expect(drainDecision(turn({ queuedAt: 0 }), seen({ cancelHoldUntil: QUEUED_TURN_TTL_MS + 60_000 }), QUEUED_TURN_TTL_MS)).toBe('expire')
+    expect(drainDecision(turn({ attempts: MAX_DELIVERY_ATTEMPTS }), seen({ cancelHoldUntil: 9_999 }), 2_000)).toBe('give_up')
+  })
+})
+
 describe('what may be queued at all', () => {
   it('parks the occupancy reasons, which can pass', () => {
     for (const r of ['native_thread_working', 'live_desktop_process', 'thread_busy', 'probe_failed']) {

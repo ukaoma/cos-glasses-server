@@ -32,6 +32,8 @@ export interface ThreadTurnQueueDeps {
   turnOpen?: (provider: string, threadId: string) => boolean
   /** The 30s transcript clock, as a backstop. */
   activity: (provider: string, threadId: string) => 'working' | 'idle' | 'unknown'
+  /** 6.53.0, optional: until when a cancel holds this thread's parked turns (`cancelHoldUntil`). */
+  cancelHoldUntil?: (provider: string, threadId: string) => number | null
   /**
    * Deliver one turn. Production wires this to a loopback attach + turn.
    *
@@ -85,6 +87,11 @@ function safeTurnOpen(deps: ThreadTurnQueueDeps, provider: string, threadId: str
   try { return deps.turnOpen!(provider, threadId) } catch { return undefined }
 }
 
+/** A throwing cancel read is no hold: the gate still decides every delivery. */
+function safeCancelHold(deps: ThreadTurnQueueDeps, provider: string, threadId: string): number | null {
+  try { return deps.cancelHoldUntil ? deps.cancelHoldUntil(provider, threadId) : null } catch { return null }
+}
+
 function isRetryableDelivery(outcome: { reason?: string; serverRetryable?: boolean }): boolean {
   // The turn route publishes its own verdict; it outranks our inference either way.
   if (outcome.serverRetryable === false) return false
@@ -134,6 +141,7 @@ export async function drainThread(
       turnOpen: deps.turnOpen ? safeTurnOpen(deps, provider, threadId) : undefined,
       activity: deps.activity(provider, threadId),
       reason: gate.reason,
+      cancelHoldUntil: safeCancelHold(deps, provider, threadId),
     }
     const decision = drainDecision(turn, seen, deps.now())
 
@@ -167,6 +175,14 @@ export async function drainThread(
       turn.status = 'delivered'
       turn.settledAt = deps.now()
       delivered += 1
+    } else if (outcome.reason === 'turn_cancelled') {
+      // 6.53.0: the person cancelled THIS turn while it was being admitted (the turn route
+      // refuses it before the live hop). It is the run they stopped, so it is settled as
+      // cancelled here, never put back to wait and sent again after the hold.
+      turn.status = 'cancelled'
+      turn.reason = 'turn_cancelled'
+      turn.settledAt = deps.now()
+      retired += 1
     } else if (isRetryableDelivery(outcome)) {
       // A GATE REFUSAL IS NOT A FAILED DELIVERY, so it must not spend the ceiling --
       // measured cost of getting this wrong: three of the user's turns retired in about

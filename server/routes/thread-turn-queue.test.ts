@@ -247,6 +247,37 @@ describe('the drainer', () => {
     expect(seenAttempts).toBe(1)
   })
 
+  it('6.53.0: a cancel on the thread holds its parked turns until the hold passes, then delivers', async () => {
+    await start(); await park('ct-1')
+    gate = { attachable: true, reason: null }; ended = true
+    const holdUntil = clock + 120_000
+    const held = await drainThread('claude', threadId, { ...deps(), cancelHoldUntil: () => holdUntil })
+    expect(held).toEqual({ delivered: 0, held: 1, retired: 0 })
+    expect(delivered).toEqual([])
+    expect(readQueue('claude', threadId, clock)[0]).toMatchObject({ status: 'waiting', attempts: 0 })
+    clock = holdUntil
+    expect((await drainThread('claude', threadId, { ...deps(), cancelHoldUntil: () => holdUntil })).delivered).toBe(1)
+    expect(delivered).toEqual(['ct-1'])
+    // A throwing read is no hold: the gate still decides. (Parking needs a busy thread.)
+    gate = { attachable: false, reason: 'native_thread_working' }
+    await park('ct-2')
+    gate = { attachable: true, reason: null }
+    expect((await drainThread('claude', threadId, { ...deps(), cancelHoldUntil: () => { throw new Error('boom') } })).delivered).toBe(1)
+    expect(delivered).toEqual(['ct-1', 'ct-2'])
+  })
+
+  it('6.53.0: a turn cancelled while it was being admitted is settled cancelled, never re-sent', async () => {
+    await start(); await park('ct-1')
+    gate = { attachable: true, reason: null }; ended = true
+    deliverResult = { ok: false, reason: 'turn_cancelled', serverRetryable: false } as typeof deliverResult
+    const out = await drainThread('claude', threadId, deps())
+    expect(out).toEqual({ delivered: 0, held: 0, retired: 1 })
+    expect(readQueue('claude', threadId, clock)[0]).toMatchObject({ status: 'cancelled', reason: 'turn_cancelled', settledAt: clock })
+    deliverResult = { ok: true }
+    await drainThread('claude', threadId, deps())
+    expect(delivered).toEqual(['ct-1'])
+  })
+
   it('returns a failed turn to waiting rather than burning it', async () => {
     await start(); await park('ct-1')
     gate = { attachable: true, reason: null }; ended = true
