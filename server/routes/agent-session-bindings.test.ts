@@ -3423,6 +3423,35 @@ describe('6.51.0: Codex Continue into a thread the Codex app holds', () => {
     expect(spawns).toHaveLength(1)
   })
 
+  it('refuses cancel while the Codex live queue crosses its irreversible hand-off', async () => {
+    let entered!: () => void
+    let release!: (value: { ok: boolean; reason: string; verifiedBy: string; queuedId: string }) => void
+    const liveEntered = new Promise<void>(resolve => { entered = resolve })
+    const heldLive = new Promise<{ ok: boolean; reason: string; verifiedBy: string; queuedId: string }>(resolve => { release = resolve })
+    const { cancel, calls } = recordingCancel({ deskRunning: () => false })
+    const base = await start(writeDeps({
+      probes: heldIdle(),
+      cancel,
+      deliverAttachedTurn: async () => ({ status: 'completed' }),
+      deliverCodexLiveTurn: async () => { entered(); return heldLive },
+    }))
+    const a = await codexAttached(base)
+    const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(turnBody(a, 'ct-codex-cancel-race')),
+    })
+    await liveEntered
+    const attachability = await (await fetch(`${base}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
+    expect(attachability.cancel).toBeNull()
+    const stopped = await postCancel(base, 'cc-codex-live-race', 'codex', CODEX_THREAD)
+    expect(stopped).toMatchObject({ status: 409, body: { cancelled: false, reason: 'cancel_failed' } })
+    expect(calls.noted).toEqual([])
+    release({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-race' })
+    const response = await sent
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ outcome: 'completed', via: 'live' })
+  })
+
   it('a Codex thread nobody holds never asks the Codex hop, and spawns as before', async () => {
     const spawns: AttachedTurnRequest[] = []
     const codex: unknown[] = []
@@ -3716,6 +3745,35 @@ describe('cancel a COS turn (6.53.0)', () => {
     expect(await res.json()).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'not_delivered' })
     expect(live).not.toHaveBeenCalled()
     expect(adapter).not.toHaveBeenCalled()
+  })
+
+  it('refuses cancel while Claude live delivery crosses its irreversible hand-off', async () => {
+    let entered!: () => void
+    let release!: (value: { ok: boolean; reason: string; verifiedBy: string; pid: number }) => void
+    const liveEntered = new Promise<void>(resolve => { entered = resolve })
+    const heldLive = new Promise<{ ok: boolean; reason: string; verifiedBy: string; pid: number }>(resolve => { release = resolve })
+    const { cancel, calls } = recordingCancel({ deskRunning: () => true })
+    const base = await start(writeDeps({
+      cancel,
+      deliverAttachedTurn: async () => ({ status: 'completed' }),
+      deliverLiveTurn: async () => { entered(); return heldLive },
+    }))
+    const a = await attached(base)
+    const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-claude-cancel-race' }),
+    })
+    await liveEntered
+    const attachability = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+    expect(attachability.cancel).toBeNull()
+    const stopped = await postCancel(base, 'cc-claude-live-race')
+    expect(stopped).toMatchObject({ status: 409, body: { cancelled: false, reason: 'cancel_failed' } })
+    expect(calls.noted).toEqual([])
+    expect(calls.halt).toEqual([])
+    release({ ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 82615 })
+    const response = await sent
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ outcome: 'completed', via: 'live' })
   })
 
   it('an adapter that claims a cancel nobody requested is not believed: ambiguous, fenced', async () => {

@@ -21,15 +21,15 @@ const DEFAULT_REFRESH_TIMEOUT_MS = 7_000
  * Stable slot → CLI model id mapping.
  * Composer stays pinned (no versioned high-fast family). Grok high-fast is
  * chosen at catalog build: newest `grok-<ver>-high-fast` or
- * `cursor-grok-<ver>-high-fast` in `agent models`. This grok id is only the
- * fallback when the live list has none. `xhigh-fast` is a different SKU and is
- * never selected here.
+ * `cursor-grok-<ver>-high-fast` proven by `agent models`. The constant records
+ * the current canonical id; it is not returned when the live catalog does not
+ * prove that model exists. `xhigh-fast` is a different SKU and is never selected.
  *
  * 2026-09-21 (6.53.0): Grok 4.7 shipped under a NEW id scheme with no `cursor-`
  * prefix (`grok-4.7-high-fast`, per `cursor-agent models` on CLI 2026.09.18,
  * which still lists the old `cursor-grok-4.6-high-fast` and 4.5 ids). The ask:
  * "make sure we're running the latest and greatest on the grok front". The
- * fallback moves to the new id; the live list decides whenever it answers.
+ * canonical id moves to the new scheme; the live list remains authoritative.
  */
 export const CURSOR_SLOT_MODEL_IDS = {
   'cursor-grok': 'grok-4.7-high-fast',
@@ -155,7 +155,6 @@ export function buildCursorModelCatalog(
 ): CursorModelCatalog {
   const byId = new Map(models.map(model => [model.id, model]))
   const grok = selectNewestCursorGrokHighFast(models)
-    ?? byId.get(CURSOR_SLOT_MODEL_IDS[CURSOR_GROK_MODEL])
   const composer = byId.get(CURSOR_SLOT_MODEL_IDS[CURSOR_COMPOSER_MODEL])
   const options: CursorModelOption[] = [
     {

@@ -38,8 +38,8 @@ describe('buildCursorModelCatalog', () => {
       'cli',
       '2026-07-25T00:00:00.000Z',
     )
-    // 6.53.0: the FALLBACK moved to Grok 4.7's new id (used only when the live list has
-    // no Grok high-fast); this Phase 0 list still selects its own 4.5 below.
+    // 6.53.0: the canonical id moved to Grok 4.7's new scheme. The live list is still
+    // authoritative, so this Phase 0 list selects its own proven 4.5 below.
     expect(CURSOR_SLOT_MODEL_IDS).toEqual({
       'cursor-grok': 'grok-4.7-high-fast',
       'cursor-composer': 'composer-2.5-fast',

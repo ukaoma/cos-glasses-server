@@ -301,7 +301,9 @@ function cursorCliState() {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 7000,
     })
-    const grokHighFast = /cursor-grok-\d+(?:\.\d+)*-high-fast/.test(models)
+    // Cursor 2026.09 introduced `grok-4.7-high-fast` without the old
+    // `cursor-` prefix. Accept both exact high-fast families, like runtime does.
+    const grokHighFast = /(?:^|\n)(?:cursor-)?grok-\d+(?:\.\d+)*-high-fast\s+-/m.test(models)
     return {
       binary,
       version,
@@ -358,7 +360,7 @@ if (cursor.binary) {
     console.log('    Run: ' + bold('agent login'))
   } else if (cursor.auth === 'models-unresolved') {
     console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — required models unresolved`)
-    console.log('    Verify: ' + bold('agent models') + ' includes Composer 2.5 Fast and a cursor-grok-*-high-fast id')
+    console.log('    Verify: ' + bold('agent models') + ' includes Composer 2.5 Fast and a grok-*-high-fast id')
   } else {
     console.log(yellow('  ⚠') + ` Cursor Agent ${cursor.version} installed — readiness unavailable`)
     console.log('    Verify: ' + bold('agent models'))

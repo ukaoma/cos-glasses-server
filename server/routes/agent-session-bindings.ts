@@ -1188,6 +1188,8 @@ interface InFlightTurn {
   clientTurnId: string | null
   controller: AbortController
   startedAt: number
+  /** False while a live hand-off is crossing its irreversible write boundary. */
+  cancellable: boolean
 }
 
 type Delivery =
@@ -1515,9 +1517,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
    * `native_thread_working`.
    */
   const cancelFactsFor = (provider: string, threadId: string, verdictReason: string | null): CancelFacts => {
-    const cosTurnInFlight = inFlight.has(targetKey(provider, threadId))
+    const entry = inFlight.get(targetKey(provider, threadId))
+    const cosTurnInFlight = entry?.cancellable === true
     let runningOutsideCos = false
-    if (!cosTurnInFlight) {
+    // A live hand-off that has started is still ours, but cannot honestly be
+    // cancelled: do not misclassify the same run as a desk run while it commits.
+    if (!entry) {
       runningOutsideCos = provider === 'claude' && typeof cancelDeps.deskRunning === 'function'
         ? cancelProbe(() => cancelDeps.deskRunning!(threadId) === true, false)
         : verdictReason === 'native_thread_working'
@@ -1784,6 +1789,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // The occupancy verdict is read only when the decision needs it: never for a COS turn
     // (the map knows) and never for Claude with a desk probe wired (the hooks know).
     const key = targetKey(provider, threadId)
+    const activeEntry = inFlight.get(key)
+    if (activeEntry && activeEntry.cancellable !== true) {
+      return refuseCancel(null, 'cancel_failed')
+    }
     const needsVerdict = !inFlight.has(key) && !(provider === 'claude' && typeof cancelDeps.deskRunning === 'function')
     const verdictReason = needsVerdict && canDetect ? projectAttachability(detectOccupancy(provider, threadId)).reason : null
     const target = cancelTargetFor(cancelFactsFor(provider, threadId, verdictReason))
@@ -2437,7 +2446,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (!guard.tryClaim(key, turnId)) return refuseTurn('native_turn_in_progress')
       claimedKey = key
       // 6.53.0: cancellable from here, with the claim. Same key, same lifetime.
-      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now })
+      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now, cancellable: true })
 
       // Plan 4.3 step 6. The attach-time verdict is minutes old by now; a desktop
       // session started in the gap is exactly the residual risk option B leaves
@@ -2504,6 +2513,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // on its own clock; the next interactive turn reads that as a change and asks,
       // which is the conservative side. Queued turns attach fresh and never notice.
       if (typeof deps.deliverLiveTurn === 'function' && binding.provider === 'claude') {
+        const liveEntry = inFlight.get(key)
+        if (liveEntry?.turnId === turnId) liveEntry.cancellable = false
         let live: { ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null } | null = null
         try {
           live = await deps.deliverLiveTurn({
@@ -2539,6 +2550,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // Something may be in the session. Hold, never spawn over it.
           return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })
         }
+        // Every remaining result is documented as "nothing reached a session";
+        // the abortable child path is safe to expose again before it starts.
+        if (liveEntry?.turnId === turnId) liveEntry.cancellable = true
         // disabled / not_claude / no_record / protocol_unsupported / connect_failed /
         // suspect_expired: nothing reached a session. Spawn as always.
       }
@@ -2551,6 +2565,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // current turn, or within seconds if the thread is idle (canary in
       // `codex-live-queue.ts`). A thread nobody holds never gets here.
       if (binding.provider === 'codex' && foreignHolder && typeof deps.deliverCodexLiveTurn === 'function') {
+        const liveEntry = inFlight.get(key)
+        if (liveEntry?.turnId === turnId) liveEntry.cancellable = false
         let live: { ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null } | null = null
         try {
           live = await deps.deliverCodexLiveTurn({
@@ -2579,6 +2595,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           })
           return
         }
+        // The operator switched this off: nothing was queued, so the abortable
+        // 6.50 child path is cancellable again before it starts.
+        if (live?.reason === 'disabled' && liveEntry?.turnId === turnId) liveEntry.cancellable = true
         // The operator switched this off: the 6.50 path, unchanged, whatever it does.
         if (live?.reason !== 'disabled') {
           // A throw, a timeout, or a confirmation we could not read: a row MAY be in the

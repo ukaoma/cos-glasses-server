@@ -61,7 +61,7 @@ describe('public npx launcher install contract', () => {
 if [ "$1" = "about" ]; then echo "Cursor Agent CLI Version 2026.07"; exit 0; fi
 if [ "$1" = "models" ]; then
   echo "composer-2.5-fast - Composer 2.5 Fast"
-  echo "cursor-grok-4.5-high-fast - Grok 4.5 Fast"
+  echo "grok-4.7-high-fast - Grok 4.7 High Fast"
   exit 0
 fi
 exit 1

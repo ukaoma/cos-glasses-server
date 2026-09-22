@@ -3086,7 +3086,7 @@ const CASES = [
   {
     name: "cancel-inflight-registered-at-claim",
     file: "server/routes/agent-session-bindings.ts",
-    find: "      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now })\n",
+    find: "      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now, cancellable: true })\n",
     replace: "",
     tests: ["server/routes/agent-session-bindings.test.ts"],
   },
@@ -3102,6 +3102,20 @@ const CASES = [
     file: "server/routes/agent-session-bindings.ts",
     find: "      if (cancelController.signal.aborted) {\n        console.log(`[agent-session-bindings] turn cancelled before delivery",
     replace: "      if (false) {\n        console.log(`[agent-session-bindings] turn cancelled before delivery",
+    tests: ["server/routes/agent-session-bindings.test.ts"],
+  },
+  {
+    name: "cancel-claude-live-handoff-not-accepted",
+    file: "server/routes/agent-session-bindings.ts",
+    find: "        if (liveEntry?.turnId === turnId) liveEntry.cancellable = false\n        let live: { ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null } | null = null",
+    replace: "        let live: { ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null } | null = null",
+    tests: ["server/routes/agent-session-bindings.test.ts"],
+  },
+  {
+    name: "cancel-codex-live-handoff-not-accepted",
+    file: "server/routes/agent-session-bindings.ts",
+    find: "        if (liveEntry?.turnId === turnId) liveEntry.cancellable = false\n        let live: { ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null } | null = null",
+    replace: "        let live: { ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null } | null = null",
     tests: ["server/routes/agent-session-bindings.test.ts"],
   },
   {
@@ -3293,6 +3307,13 @@ const CASES = [
     find: "const GROK_HIGH_FAST_RE = /^(?:cursor-)?grok-",
     replace: "const GROK_HIGH_FAST_RE = /^cursor-grok-",
     tests: ["server/lib/cursor-model-catalog.test.ts"],
+  },
+  {
+    name: "grok-launcher-new-id-scheme-matched",
+    file: "bin/cli.cjs",
+    find: "const grokHighFast = /(?:^|\\n)(?:cursor-)?grok-",
+    replace: "const grokHighFast = /(?:^|\\n)cursor-grok-",
+    tests: ["server/lib/launcher-contract.test.ts"],
   },
   {
     name: "grok-tie-prefers-unprefixed",
