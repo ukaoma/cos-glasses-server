@@ -48,6 +48,11 @@ import {
   type ThreadOwner,
 } from '../lib/thread-occupancy.js'
 import { boundToMarker, targetKey, type NativeBinding } from '../lib/agent-session-binding-store.js'
+import { deliverAttachedTurn, CANCEL_KILL_GRACE_MS, type AttachedChildProcess } from '../lib/attached-provider-adapter.js'
+import { hasHaltMarker, writeHaltMarker } from '../lib/session-halt.js'
+import type { CancelDeps } from './agent-session-bindings.js'
+import type { SessionCancelLedgerRow } from '../lib/session-cancel.js'
+import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
 
@@ -451,6 +456,8 @@ describe('the one verdict that opens the gate', () => {
       reason: null,
       reasonCopy: ATTACHABLE_COPY,
       ownerCount: 0,
+      // 6.53.0: nothing is running here, so there is no run to cancel.
+      cancel: null,
     })
   })
 
@@ -700,7 +707,8 @@ describe('every doubt the detector can raise reaches the wire as a refusal', () 
       expect(body.reason).toBe(c.reason)
       expect(body.reasonCopy).toBe(REASON_COPY[c.reason])
       expect(body.reasonCopy.length).toBeGreaterThan(0)
-      expect(Object.keys(body).sort()).toEqual(['attachable', 'ownerCount', 'reason', 'reasonCopy'])
+      // 6.53.0 added `cancel` (what a cancel would do here; see the cancel suite).
+      expect(Object.keys(body).sort()).toEqual(['attachable', 'cancel', 'ownerCount', 'reason', 'reasonCopy'])
     })
   }
 })
@@ -851,9 +859,10 @@ describe('missing dependencies are a capability gap, not a crash and not an atta
 })
 
 describe('the response says nothing that identifies the thread, the process, or the machine', () => {
-  it('carries exactly four fields and no path, pid, or native id', async () => {
+  it('carries exactly five fields and no path, pid, or native id', async () => {
     const { body, text } = await attachability(deps())
-    expect(Object.keys(body).sort()).toEqual(['attachable', 'ownerCount', 'reason', 'reasonCopy'])
+    // Four through 6.52; 6.53.0 added `cancel`, an enum or null, which names nothing.
+    expect(Object.keys(body).sort()).toEqual(['attachable', 'cancel', 'ownerCount', 'reason', 'reasonCopy'])
     expect(text).not.toContain(String(PID))
     expect(text).not.toContain(SID)
     expect(text).not.toContain(SID.slice(0, 8))
@@ -2254,6 +2263,17 @@ describe('every way a write can be refused reaches the wire with words', () => {
       reason: 'turn_failed',
       run: () => turnOnFake(fakeReg(fakeBinding(), { get: () => { throw new Error('EIO') } })),
     },
+    {
+      // 6.53.0: a real cancel through the real route while the adapter is running.
+      reason: 'turn_cancelled',
+      run: async () => {
+        const base = await start(writeDeps({ deliverAttachedTurn: abortableAdapter().deliver }))
+        const a = await attached(base)
+        const outcome = post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-auto-0041' })
+        await cancelWhenInFlight(base)
+        return outcome
+      },
+    },
     // ------------------------------------------------------------------ fork
     { reason: 'fork_unwired', run: () => forkOnce({ forkThread: undefined }) },
     { reason: 'fork_unsupported_provider', run: () => forkOnce({}, 'cursor') },
@@ -3515,5 +3535,389 @@ describe('6.49.1: one turn timing line per answered request', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// 6.53.0: cancel a session run
+// ---------------------------------------------------------------------------
+//
+// Miles, 2026-09-21: "If there's a current run that's going, it essentially clicks the
+// cancel button". Driven through the REAL routes: the turn route's in-flight entry, the
+// cancel route, the attachability `cancel` field and the ledger-backed status poll.
+
+/**
+ * An adapter that runs until its abort signal fires, then answers as the real adapter
+ * does for a cancel. `completeOnAbort` models a child whose clean exit 0 raced the stop.
+ */
+function abortableAdapter(opts: { completeOnAbort?: boolean } = {}) {
+  const seen: AttachedTurnRequest[] = []
+  const deliver = (req: AttachedTurnRequest): Promise<unknown> => new Promise(resolve => {
+    seen.push(req)
+    const answer = () => resolve(opts.completeOnAbort
+      ? { status: 'completed', nativeRevisionAfter: null }
+      : { ok: false, delivery: 'cancelled', reason: 'cancelled', detail: null, exitCode: null, reaped: true, durationMs: 5 })
+    if (req.abortSignal?.aborted) return answer()
+    req.abortSignal?.addEventListener('abort', answer, { once: true })
+  })
+  return { deliver, seen }
+}
+
+const cancelPath = (provider = 'claude', threadId = SID) => `/api/agent-sessions/${provider}/${threadId}/cancel`
+
+async function postCancel(base: string, clientCancelId = 'cc-test-0001', provider = 'claude', threadId = SID): Promise<{ status: number; body: any; text: string }> {
+  const res = await fetch(`${base}${cancelPath(provider, threadId)}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clientCancelId }),
+  })
+  const text = await res.text()
+  return { status: res.status, body: text ? JSON.parse(text) : null, text }
+}
+
+/** Wait until the thread reads `cos_turn` on attachability, then cancel it. */
+async function cancelWhenInFlight(base: string, clientCancelId = 'cc-inflight-01'): Promise<{ status: number; body: any; text: string }> {
+  const deadline = Date.now() + 4_000
+  while (Date.now() < deadline) {
+    const body = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+    if (body.cancel === 'cos_turn') return postCancel(base, clientCancelId)
+    await new Promise(r => setTimeout(r, 5))
+  }
+  throw new Error('the turn never read in flight')
+}
+
+/** Cancel deps that record what they were asked; a desk run is running unless told otherwise. */
+function recordingCancel(over: Partial<CancelDeps> = {}) {
+  const calls = { halt: [] as Array<{ sessionId: string; at: number; clientCancelId: string }>, settle: [] as string[], noted: [] as Array<[string, string, number]>, ledger: [] as SessionCancelLedgerRow[] }
+  const cancel: CancelDeps = {
+    deskRunning: () => true,
+    hooksEnabled: () => true,
+    hooksReady: () => true,
+    writeHalt: (sessionId, marker) => { calls.halt.push({ sessionId, ...marker }); return true },
+    settlePermissions: sessionId => { calls.settle.push(sessionId); return 1 },
+    queuedWaiting: () => 2,
+    noteCancelled: (p, t, at) => { calls.noted.push([p, t, at]) },
+    ledger: row => { calls.ledger.push(row) },
+    ...over,
+  }
+  return { cancel, calls }
+}
+
+describe('cancel a COS turn (6.53.0)', () => {
+  it('a running COS turn reads cos_turn, the cancel aborts it at once, and it settles turn_cancelled with NO fence', async () => {
+    const adapter = abortableAdapter()
+    const { cancel, calls } = recordingCancel({ deskRunning: () => false })
+    const base = await start(writeDeps({ deliverAttachedTurn: adapter.deliver, cancel }))
+    const a = await attached(base)
+    const sent = await fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0001' }),
+    })
+    expect(sent.status).toBe(202)
+    const turnId = (await sent.json()).turnId
+
+    const res = await cancelWhenInFlight(base)
+    expect(res.status).toBe(202)
+    expect(res.body).toEqual({ cancelled: true, target: 'cos_turn', state: 'stopping', turnId, queuedHeld: 2 })
+    expect(adapter.seen).toHaveLength(1)
+    expect(adapter.seen[0]!.abortSignal?.aborted).toBe(true)
+
+    const final = await settled(base, a.bindingId, 'ct-cancel-0001')
+    expect(final).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'cancelled', recordedStatus: 409 })
+    expect(final.reasonCopy).toBe(WRITE_REASON_COPY.turn_cancelled)
+    // THE POINT OF B2: an aborted child exits on a signal, which used to be ambiguous and fence.
+    const fences = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    expect(fences.fences).toEqual([])
+    // Remembered for the queue hold, and ledgered.
+    expect(calls.noted).toEqual([['claude', SID, NOW]])
+    expect(calls.ledger).toEqual([{ at: new Date(NOW).toISOString(), provider: 'claude', threadId: SID, target: 'cos_turn', outcome: 'accepted', clientCancelId: 'cc-inflight-01' }])
+    // A COS cancel arms no marker and touches no permission prompt.
+    expect(calls.halt).toEqual([])
+    expect(calls.settle).toEqual([])
+    // The entry is gone with the claim: nothing to cancel now.
+    const after = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+    expect(after.cancel).toBeNull()
+  })
+
+  it('the next turn on the same binding is not refused native_thread_changed: the cancelled run\'s head is acknowledged', async () => {
+    const adapter = abortableAdapter()
+    let head = 'native-head-1'
+    let completes = false
+    const base = await start(writeDeps({
+      nativeHead: () => head,
+      deliverAttachedTurn: req => {
+        // The cancelled child wrote part of a reply: the head moved.
+        head = 'native-head-2'
+        return completes ? Promise.resolve({ status: 'completed', nativeRevisionAfter: 'native-head-3' }) : adapter.deliver(req)
+      },
+      cancel: recordingCancel({ deskRunning: () => false }).cancel,
+    }))
+    const a = await attached(base)
+    const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0002' }),
+    })
+    expect((await sent).status).toBe(202)
+    expect((await cancelWhenInFlight(base)).status).toBe(202)
+    expect(await settled(base, a.bindingId, 'ct-cancel-0002')).toMatchObject({ reason: 'turn_cancelled' })
+
+    completes = true
+    const next = await turnOutcome(base, a, { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0003' })
+    expect(next).toMatchObject({ outcome: 'completed', deliveryState: 'delivered' })
+  })
+
+  it('the same clientCancelId twice gets the same answer, replayed, and is ledgered once', async () => {
+    const adapter = abortableAdapter()
+    const { cancel, calls } = recordingCancel({ deskRunning: () => false })
+    const base = await start(writeDeps({ deliverAttachedTurn: adapter.deliver, cancel }))
+    const a = await attached(base)
+    expect((await fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0004' }),
+    })).status).toBe(202)
+    const first = await cancelWhenInFlight(base, 'cc-idem-0001')
+    await settled(base, a.bindingId, 'ct-cancel-0004')
+    // The turn is over: a NEW id now reads not_running, the SAME id replays its 202.
+    const again = await postCancel(base, 'cc-idem-0001')
+    expect(again.status).toBe(first.status)
+    expect(again.body).toEqual({ ...first.body, replayed: true })
+    expect((await postCancel(base, 'cc-idem-0002')).body.reason).toBe('not_running')
+    expect(calls.ledger.map(r => r.clientCancelId)).toEqual(['cc-idem-0001', 'cc-idem-0002'])
+    expect(calls.noted).toHaveLength(1)
+  })
+
+  it('a cancel that lands during the gate stops the turn before the live hop and before any spawn', async () => {
+    let releaseHead!: () => void
+    const headGate = new Promise<void>(r => { releaseHead = r })
+    let heads = 0
+    const live = vi.fn(async () => ({ ok: true, reason: 'delivered' }))
+    const adapter = vi.fn(async () => ({ status: 'completed' }))
+    const base = await start(writeDeps({
+      nativeHead: async () => {
+        heads += 1
+        // The attach's read answers at once; the turn's read waits for the test.
+        if (heads > 1) await headGate
+        return 'native-head-1'
+      },
+      deliverLiveTurn: live,
+      deliverAttachedTurn: adapter,
+      cancel: recordingCancel({ deskRunning: () => false }).cancel,
+    }))
+    const a = await attached(base)
+    const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0005' }),
+    })
+    expect((await cancelWhenInFlight(base)).status).toBe(202)
+    releaseHead()
+    const res = await sent
+    expect(res.status).toBe(409)
+    expect(await res.json()).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'not_delivered' })
+    expect(live).not.toHaveBeenCalled()
+    expect(adapter).not.toHaveBeenCalled()
+  })
+
+  it('an adapter that claims a cancel nobody requested is not believed: ambiguous, fenced', async () => {
+    const base = await start(writeDeps({
+      deliverAttachedTurn: async () => ({ ok: false, delivery: 'cancelled', reason: 'cancelled' }),
+    }))
+    const a = await attached(base)
+    const out = await turnOutcome(base, a, { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0006' })
+    expect(out).toMatchObject({ outcome: 'ambiguous', reason: 'delivery_ambiguous' })
+    const fences = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+    expect(fences.fences).toHaveLength(1)
+  })
+
+  it('a clean completion that raced the cancel stays completed', async () => {
+    const adapter = abortableAdapter({ completeOnAbort: true })
+    const base = await start(writeDeps({ deliverAttachedTurn: adapter.deliver, cancel: recordingCancel({ deskRunning: () => false }).cancel }))
+    const a = await attached(base)
+    expect((await fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0007' }),
+    })).status).toBe(202)
+    expect((await cancelWhenInFlight(base)).status).toBe(202)
+    expect(await settled(base, a.bindingId, 'ct-cancel-0007')).toMatchObject({ outcome: 'completed' })
+  })
+
+  it('end to end with the REAL adapter: the process group gets SIGTERM, the turn ends cancelled, no fence', async () => {
+    class Stream extends EventEmitter {}
+    class Stdin extends EventEmitter { written: string[] = []; write(c: string) { this.written.push(c); return true } end() {} }
+    class Child extends EventEmitter { pid = 91234; stdin = new Stdin(); stdout = new Stream(); stderr = new Stream() }
+    const children: Child[] = []
+    const signals: string[] = []
+    const ledger = new CosSpawnLedger({ now: () => Date.now() })
+    const real = (req: AttachedTurnRequest) => deliverAttachedTurn({
+      provider: req.provider, nativeThreadId: req.nativeThreadId, prompt: req.prompt, cwd: CWD, policy: 'read_only',
+      abortSignal: req.abortSignal,
+      deps: {
+        now: () => Date.now(),
+        preflight: () => ({ attachable: true, reason: null }),
+        resolveBinary: () => ({ ok: true, path: '/opt/homebrew/bin/claude', source: 'absolute' }) as never,
+        spawn: () => { const c = new Child(); children.push(c); return c as unknown as AttachedChildProcess },
+        processStartMs: () => Date.now() - 100,
+        recordSpawn: pid => (req.onSpawn(pid) ? 'recorded' : 'route_refused_ownership'),
+        releaseSpawn: pid => ledger.release(pid),
+        // The child exits on the first signal, as `claude -p` did in canary C3.
+        terminate: (child, signal) => { signals.push(signal); setTimeout(() => (child as unknown as Child).emit('close', null), 5) },
+      },
+    })
+    const base = await start(writeDeps({
+      deliverAttachedTurn: real,
+      ownership: { record: () => 'recorded', release: () => true },
+      probes: freeProbes({ processStartMs: () => Date.now() - 100 }),
+      cancel: recordingCancel({ deskRunning: () => false }).cancel,
+    }))
+    const a = await attached(base)
+    expect((await fetch(`${base}${turnsPath(a.bindingId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0008' }),
+    })).status).toBe(202)
+    expect((await cancelWhenInFlight(base)).status).toBe(202)
+    const final = await settled(base, a.bindingId, 'ct-cancel-0008')
+    expect(final).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false })
+    expect(children).toHaveLength(1)
+    expect(children[0]!.stdin.written).toEqual([PROMPT])
+    expect(signals).toEqual(['SIGTERM'])
+    expect(CANCEL_KILL_GRACE_MS).toBeGreaterThan(0)
+    expect((await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences).toEqual([])
+  })
+})
+
+describe('cancel a desk run, and the refusals (6.53.0)', () => {
+  it('a Claude run at the desk: the halt marker is written, held prompts are settled, 202 next_tool_call', async () => {
+    const { cancel, calls } = recordingCancel()
+    const base = await start(deps({ cancel }))
+    const res = await postCancel(base, 'cc-desk-0001')
+    expect(res.status).toBe(202)
+    expect(res.body).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', queuedHeld: 2, settledPermissions: 1 })
+    expect(calls.halt).toEqual([{ sessionId: SID, at: NOW, clientCancelId: 'cc-desk-0001' }])
+    expect(calls.settle).toEqual([SID])
+    expect(calls.noted).toEqual([['claude', SID, NOW]])
+    expect(calls.ledger).toEqual([{ at: new Date(NOW).toISOString(), provider: 'claude', threadId: SID, target: 'desk_run', outcome: 'accepted', clientCancelId: 'cc-desk-0001' }])
+    expect(res.text).not.toContain('/')
+  })
+
+  it('writes the REAL marker the hook reads, under the lower-cased id, whatever case the URL used', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'cos-cancel-')), '.cos-glasses', 'data', 'session-halt')
+    const { cancel } = recordingCancel({ writeHalt: (sid, marker) => writeHaltMarker(sid, marker, dir) })
+    const base = await start(deps({ cancel }))
+    const res = await postCancel(base, 'cc-desk-0002', 'claude', SID.toUpperCase())
+    expect(res.status).toBe(202)
+    expect(hasHaltMarker(SID, dir)).toBe(true)
+  })
+
+  it('is registered with attach switched OFF: a desk run is cancellable either way', async () => {
+    const { cancel } = recordingCancel()
+    const base = await start(deps({ attachEnabled: false, cancel }))
+    expect((await postCancel(base)).status).toBe(202)
+    const body = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+    expect(body.reason).toBe('attach_disabled')
+    expect(body.cancel).toBe('desk_run')
+  })
+
+  it('hooks off: 409 hooks_disabled, and no marker', async () => {
+    const { cancel, calls } = recordingCancel({ hooksEnabled: () => false })
+    const res = await postCancel(await start(deps({ cancel })))
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ cancelled: false, reason: 'hooks_disabled', reasonCopy: 'Session hooks are off on the Mac.' })
+    expect(calls.halt).toEqual([])
+    expect(calls.noted).toEqual([])
+    expect(calls.ledger[0]).toMatchObject({ target: 'hooks_disabled', outcome: 'hooks_disabled' })
+  })
+
+  it('hooks not reinstalled: 409 hooks_outdated with the Install hooks copy, and no marker', async () => {
+    const { cancel, calls } = recordingCancel({ hooksReady: () => false })
+    const res = await postCancel(await start(deps({ cancel })))
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ cancelled: false, reason: 'hooks_outdated', reasonCopy: 'Install hooks in COS Control, then retry.' })
+    expect(calls.halt).toEqual([])
+  })
+
+  it('a marker that could not be written is never reported accepted', async () => {
+    const { cancel, calls } = recordingCancel({ writeHalt: () => false })
+    const res = await postCancel(await start(deps({ cancel })))
+    expect(res.status).toBe(500)
+    expect(res.body).toMatchObject({ cancelled: false, reason: 'cancel_failed', reasonCopy: 'Could not cancel. Check the Mac.' })
+    expect(calls.settle).toEqual([])
+    expect(calls.noted).toEqual([])
+  })
+
+  it.each([
+    ['codex', 'Runs in Codex on your Mac. Stop it there.'],
+    ['cursor', 'Runs in Cursor on your Mac. Stop it there.'],
+  ])('a %s run outside COS: 409 cancel_unsupported, naming the app', async (provider, copy) => {
+    const { cancel, calls } = recordingCancel()
+    const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
+    const base = await start(deps({ cancel, occupancy: working }))
+    const res = await postCancel(base, 'cc-unsup-0001', provider, CODEX_THREAD)
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ cancelled: false, reason: 'cancel_unsupported', provider, reasonCopy: copy })
+    expect(calls.halt).toEqual([])
+    const body = await (await fetch(`${base}/api/agent-sessions/${provider}/${CODEX_THREAD}/attachability`)).json()
+    expect(body.cancel).toBe('unsupported')
+  })
+
+  it('nothing running: 409 not_running, for Claude and for Codex', async () => {
+    const { cancel } = recordingCancel({ deskRunning: () => false })
+    const base = await start(deps({ cancel, probes: freeProbes() }))
+    const claude = await postCancel(base, 'cc-idle-0001')
+    expect(claude.status).toBe(409)
+    expect(claude.body).toEqual({ cancelled: false, reason: 'not_running', reasonCopy: 'Nothing running now.' })
+    const codex = await postCancel(base, 'cc-idle-0002', 'codex', CODEX_THREAD)
+    expect(codex.body.reason).toBe('not_running')
+  })
+
+  it('Claude with no desk probe wired falls back to the occupancy verdict', async () => {
+    const { cancel } = recordingCancel({ deskRunning: undefined })
+    const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
+    expect((await postCancel(await start(deps({ cancel, occupancy: working })))).body.target).toBe('desk_run')
+    expect((await postCancel(await start(deps({ cancel, probes: freeProbes() })))).body.reason).toBe('not_running')
+  })
+
+  it('a throwing desk probe reads as nothing running, never a thrown route', async () => {
+    const { cancel } = recordingCancel({ deskRunning: () => { throw new Error('EIO') } })
+    const res = await postCancel(await start(deps({ cancel })))
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('not_running')
+  })
+
+  it('with no cancel deps at all (an older wiring), a desk run reads hooks_disabled, never accepted', async () => {
+    const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
+    const res = await postCancel(await start(deps({ occupancy: working })))
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('hooks_disabled')
+  })
+
+  it.each([
+    ['an unknown provider', 'gemini', SID, { clientCancelId: 'cc-bad-0001' }],
+    ['an 8-character id', 'claude', SID.slice(0, 8), { clientCancelId: 'cc-bad-0002' }],
+    ['a path', 'claude', '..%2F..%2Fetc', { clientCancelId: 'cc-bad-0003' }],
+    ['no clientCancelId', 'claude', SID, {}],
+    ['a clientCancelId with a slash', 'claude', SID, { clientCancelId: 'cc/../x' }],
+  ])('refuses %s with 400, writes nothing and ledgers nothing', async (_name, provider, threadId, body) => {
+    const { cancel, calls } = recordingCancel()
+    const base = await start(deps({ cancel }))
+    const res = await fetch(`${base}${cancelPath(provider, threadId)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    expect(res.status).toBe(400)
+    expect((await res.json()).reason).toBe('invalid_request')
+    expect(calls.halt).toEqual([])
+    expect(calls.ledger).toEqual([])
+  })
+
+  it('attachability says what a cancel would do, for every target, from the same decision', async () => {
+    const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
+    const read = async (d: AgentSessionBindingsDeps, provider = 'claude', id = SID) =>
+      (await attachability(d, provider, id)).body.cancel
+    expect(await read(deps({ cancel: recordingCancel().cancel }))).toBe('desk_run')
+    expect(await read(deps({ cancel: recordingCancel({ hooksReady: () => false }).cancel }))).toBe('hooks_outdated')
+    expect(await read(deps({ cancel: recordingCancel({ hooksEnabled: () => false }).cancel }))).toBe('hooks_disabled')
+    expect(await read(deps({ cancel: recordingCancel({ deskRunning: () => false }).cancel }))).toBeNull()
+    expect(await read(deps({ cancel: recordingCancel().cancel, occupancy: working }), 'codex', CODEX_THREAD)).toBe('unsupported')
+    expect(await read(deps({ cancel: recordingCancel().cancel, probes: freeProbes() }), 'codex', CODEX_THREAD)).toBeNull()
+    // A malformed id names no thread, so there is nothing to cancel.
+    expect(await read(deps({ cancel: recordingCancel().cancel }), 'claude', 'nope')).toBeNull()
+    expect(await read(deps({ cancel: recordingCancel().cancel }), 'gemini')).toBeNull()
   })
 })

@@ -2,6 +2,7 @@
 // GET  /api/agent-sessions/bindings
 // POST /api/agent-sessions/:provider/:threadId/attach
 // POST /api/agent-sessions/bindings/:bindingId/turns
+// POST /api/agent-sessions/:provider/:threadId/cancel   (6.53.0, see its handler)
 //
 // The client-facing half of Continue Original Agent Thread. Phase 0 resolved
 // plan 4.3 to option B: COS attaches to a native desktop thread ONLY when no
@@ -125,6 +126,15 @@ import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/ag
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import {
+  CLIENT_CANCEL_ID_RE,
+  cancelRefusalCopy,
+  cancelTargetFor,
+  type CancelFacts,
+  type CancelRefusal,
+  type CancelTarget,
+  type SessionCancelLedgerRow,
+} from '../lib/session-cancel.js'
 
 /**
  * Read side of the binding lease store.
@@ -277,7 +287,7 @@ export type AttachedTurnResult =
    * that module's own `attachedDeliveryAmbiguous`: only `not_attempted` and
    * `aborted` are proof that nothing was sent.
    */
-  | { ok: boolean; delivery: 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' }
+  | { ok: boolean; delivery: 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' | 'cancelled' }
 
 export interface AgentSessionBindingsDeps {
   /** Shared fence state. Omit and the router owns a private one, which is correct
@@ -413,6 +423,44 @@ export interface AgentSessionBindingsDeps {
   maxPromptChars?: number
   /** Injected so a test can pin the minted ids. Must return an id matching BINDING_ID_RE. */
   newId?: () => string
+
+  // ------------------------------------------------------------- cancel side
+
+  /**
+   * 6.53.0: what the cancel route and the attachability `cancel` field read about runs
+   * OUTSIDE this router. Every member is optional and an absent one reads as the cautious
+   * fact: no desk run seen, hooks off, not ready, nothing held. So an older wiring answers
+   * `not_running` or `hooks_disabled`, never a cancel it cannot carry out. A COS turn in
+   * flight is this router's own knowledge and needs none of it.
+   */
+  cancel?: CancelDeps
+}
+
+export interface CancelDeps {
+  /** A Claude session is running at the desk: its hooks say the turn is open, or its registry record says busy. */
+  deskRunning?: (sessionId: string) => boolean
+  /** `sessionHooksEnabled()`. */
+  hooksEnabled?: () => boolean
+  /** The installed hooks carry the 6.53.0 script and PreToolUse subscription. */
+  hooksReady?: () => boolean
+  /** `writeHaltMarker`. False means the cancel could not be armed. */
+  writeHalt?: (sessionId: string, marker: { at: number; clientCancelId: string }) => boolean
+  /** Settle this session's held permission prompts as deny with interrupt; returns how many. */
+  settlePermissions?: (sessionId: string) => number
+  /** Waiting turns parked on the thread (they hold for CANCEL_QUEUE_HOLD_MS). */
+  queuedWaiting?: (provider: string, threadId: string) => number
+  /** Record the cancel time the turn queue reads (`noteThreadCancelled`). */
+  noteCancelled?: (provider: string, threadId: string, at: number) => void
+  /** Append to `data/session-cancel.jsonl`. */
+  ledger?: (row: SessionCancelLedgerRow) => void
+}
+
+/**
+ * The attachability body plus what a cancel would do (6.53.0). A separate type so every
+ * other caller of `projectAttachability` keeps its four fields.
+ */
+export interface AttachabilityWithCancel extends AttachabilityBody {
+  cancel: CancelTarget | null
 }
 
 /**
@@ -519,6 +567,10 @@ export type WriteRefusal =
   // thread dies on "already has an active writer" after the prompt is written, which
   // is the ambiguous fence this whole branch exists to avoid.
   | 'codex_live_unavailable'
+  // 6.53.0: the turn was stopped by POST .../cancel. Terminal and never retried: the
+  // person said stop. Deliberately NOT a fence (plan validation B2): the next Continue
+  // must work, and it re-reads the head.
+  | 'turn_cancelled'
   // ------------------------------------------------------------------- fork
   //
   // Fork gets its OWN members rather than reusing the ones above, and the reason
@@ -597,6 +649,8 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'The Codex app has this thread open, and COS could not hand it the message. Nothing was sent. Send it from the Codex app, or fork it.',
   turn_failed:
     'COS could not run this turn. Nothing was sent. You can try again.',
+  turn_cancelled:
+    'Run cancelled.',
 
   // Fork copy. No sentence here may end with "Fork it instead" — this IS the fork,
   // and pointing a failed fork back at itself is a dead end rather than an action.
@@ -1126,10 +1180,21 @@ export class TargetGuard {
   }
 }
 
+/** A COS turn this router is running (6.53.0). */
+interface InFlightTurn {
+  turnId: string
+  bindingId: string
+  clientTurnId: string | null
+  controller: AbortController
+  startedAt: number
+}
+
 type Delivery =
   | { kind: 'completed'; after: string | null }
   | { kind: 'aborted' }
   | { kind: 'ambiguous' }
+  /** 6.53.0: stopped by a cancel this route requested. Never fenced. */
+  | { kind: 'cancelled' }
 
 /**
  * Read an adapter result without believing anything it did not say.
@@ -1137,9 +1202,21 @@ type Delivery =
  * The default is ambiguous, and every unrecognised shape lands there: null, an
  * array, a missing status, a status from a newer adapter. Only the two literals
  * this build understands are allowed to mean anything.
+ *
+ * `cancelRequested` (6.53.0) is THIS ROUTE's own knowledge that it aborted the turn. The
+ * adapter's `cancelled` is believed only then: a result claiming a cancel nobody asked for
+ * is a contradiction, and a contradiction is ambiguous, which fences. The other way round
+ * holds too: a cancel we asked for that the adapter reports as delivered was delivered.
  */
-export function classifyDelivery(result: unknown): Delivery {
+export function classifyDelivery(result: unknown, cancelRequested = false): Delivery {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return { kind: 'ambiguous' }
+  if (cancelRequested === true) {
+    const { ok, reason, delivery } = result as { ok?: unknown; reason?: unknown; delivery?: unknown }
+    if (ok === false && reason === 'cancelled'
+      && (delivery === 'cancelled' || delivery === 'not_attempted' || delivery === 'aborted')) {
+      return { kind: 'cancelled' }
+    }
+  }
   const status = (result as { status?: unknown }).status
   if (status === 'completed') {
     const after = (result as { nativeRevisionAfter?: unknown }).nativeRevisionAfter
@@ -1408,6 +1485,58 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       : DEFAULT_MAX_PROMPT_CHARS
   const mintId = typeof deps?.newId === 'function' ? deps.newId : () => randomUUID()
 
+  // ------------------------------------------------------------ in flight (6.53.0)
+  //
+  // Every COS turn this router is running, by target, from the moment its claim is taken
+  // until the `finally` that releases the claim. It sits next to `TargetGuard.claims` and
+  // has the same lifetime, so "a COS turn is in flight" here and "the target is claimed"
+  // there cannot disagree. The controller is the ONLY way a cancel reaches the child:
+  // never a stored pid, which could have been recycled by the time anyone signals it.
+  // Entries are deleted by turnId, so a late unwind cannot delete its successor's entry.
+  const inFlight = new Map<string, InFlightTurn>()
+  const cancelDeps: CancelDeps = deps?.cancel ?? {}
+  /** A throwing or absent probe reads as the cautious answer, never as a thrown route. */
+  const cancelProbe = <T>(read: (() => T) | undefined, fallback: T): T => {
+    if (typeof read !== 'function') return fallback
+    try {
+      return read()
+    } catch (error) {
+      console.error(`[agent-session-bindings] cancel probe threw: ${error instanceof Error ? error.message : error}`)
+      return fallback
+    }
+  }
+  /**
+   * The facts `cancelTargetFor` decides on, for one thread. `verdictReason` is the
+   * occupancy reason when the caller already holds a verdict (attachability) or null.
+   * For Claude, a wired `deskRunning` is the authority (the hooks and the registry know a
+   * desk turn precisely; a transcript written 20 s ago does not); without it, and for
+   * Codex and Cursor, "a foreign writer is working" is the occupancy verdict's own
+   * `native_thread_working`.
+   */
+  const cancelFactsFor = (provider: string, threadId: string, verdictReason: string | null): CancelFacts => {
+    const cosTurnInFlight = inFlight.has(targetKey(provider, threadId))
+    let runningOutsideCos = false
+    if (!cosTurnInFlight) {
+      runningOutsideCos = provider === 'claude' && typeof cancelDeps.deskRunning === 'function'
+        ? cancelProbe(() => cancelDeps.deskRunning!(threadId) === true, false)
+        : verdictReason === 'native_thread_working'
+    }
+    return {
+      provider,
+      cosTurnInFlight,
+      runningOutsideCos,
+      hooksEnabled: cancelProbe(() => cancelDeps.hooksEnabled?.() === true, false),
+      hooksReady: cancelProbe(() => cancelDeps.hooksReady?.() === true, false),
+    }
+  }
+  /** The attachability body's `cancel`, for a thread id the caller has NOT validated. */
+  const cancelFieldFor = (provider: string, threadId: string, verdictReason: string | null): CancelTarget | null => {
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(threadId)) return null
+    return cancelTargetFor(cancelFactsFor(provider, threadId, verdictReason))
+  }
+  /** Idempotency for POST .../cancel: the answer each (thread, clientCancelId) got. */
+  const cancelReplies = new Map<string, { status: number; body: Record<string, unknown>; at: number }>()
+
   /**
    * One owner for "is this thread free right now", shared by the probe and both
    * writes, including its own try/catch and the self-contradiction re-check.
@@ -1541,15 +1670,24 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // fail. It also keeps the surface self-consistent: reporting `attachable: true`
     // while the attach route is unrouted would leave a client unable to tell
     // whether the thread is free or the feature is off.
+    // 6.53.0: every answer below also says what a cancel would do (`cancelTargetFor`, the
+    // same function the cancel route decides with). Null means no run to cancel, and the
+    // lens then shows no row. Computed on the disabled paths too: a desk run can be
+    // cancelled whether or not COS may write into the thread.
+    const provider = String(req.params.provider ?? '')
+    const threadId = String(req.params.threadId ?? '')
+    const withCancel = (body: AttachabilityBody): AttachabilityWithCancel =>
+      ({ ...body, cancel: cancelFieldFor(provider, threadId, body.reason) })
+
     if (!attachEnabled) {
-      res.json(projectAttachability({ attachable: false, owners: [], reason: 'attach_disabled' }))
+      res.json(withCancel(projectAttachability({ attachable: false, owners: [], reason: 'attach_disabled' })))
       return
     }
 
     if (!canDetect) {
       // The mechanism does not exist on this install. Distinct from "it ran and
       // found nothing" by design (plan 4.3 wants the reason nameable).
-      res.json(projectAttachability({ attachable: false, owners: [], reason: 'detector_unavailable' }))
+      res.json(withCancel(projectAttachability({ attachable: false, owners: [], reason: 'detector_unavailable' })))
       return
     }
 
@@ -1567,7 +1705,124 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // truncated-id hole opened. The tests pin the ordering behaviorally instead:
     // probes that throw on every call still return `unsupported_provider` /
     // `invalid_thread_id`, which is only possible if nothing was probed.
-    res.json(runOccupancy(String(req.params.provider ?? ''), String(req.params.threadId ?? '')))
+    res.json(withCancel(runOccupancy(provider, threadId)))
+  })
+
+  // ------------------------------------------------------------------ cancel
+  //
+  // POST /api/agent-sessions/:provider/:threadId/cancel  { clientCancelId }
+  //
+  // 6.53.0. Miles, 2026-09-21: "If there's a current run that's going, it essentially
+  // clicks the cancel button ... similar to when they're at the desktop."
+  //
+  // REGISTERED UNCONDITIONALLY, not behind `attachEnabled`: a desk Claude run can be
+  // stopped whether or not COS may write into the thread, and a 404 here is how the app
+  // recognises a server older than 6.53 ("Update the server to cancel runs").
+  //
+  // WHAT IT CAN DO is decided by `cancelTargetFor`, the function the attachability
+  // `cancel` field uses, so the row the lens showed and the answer to the tap agree:
+  //   cos_turn     202 {target, state: 'stopping', turnId, queuedHeld}: our own child's
+  //                controller is aborted, and the turn route records `turn_cancelled`.
+  //   desk_run     202 {target, effective: 'next_tool_call', queuedHeld}: a halt marker
+  //                the hook reads before the session's next tool call, and any permission
+  //                prompt the broker holds for that session is denied with interrupt.
+  //   refusals     409 {reason, reasonCopy}: not_running, cancel_unsupported (Codex app,
+  //                Cursor), hooks_outdated (Install hooks), hooks_disabled.
+  //
+  // IDEMPOTENT PER clientCancelId: the same tap retried gets the same status and body
+  // (plus `replayed: true`), and does not arm or abort anything twice.
+  //
+  // The body carries no path, no pid and no native id beyond the one in the URL.
+  const CANCEL_REPLY_TTL_MS = 10 * 60_000
+  const MAX_CANCEL_REPLIES = 256
+  router.post('/agent-sessions/:provider/:threadId/cancel', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const provider = String(req.params.provider ?? '')
+    // Lower-cased BEFORE validation: it names a file and a map key, and the hook
+    // lower-cases the id it reads, so any other spelling could never match.
+    const threadId = String(req.params.threadId ?? '').toLowerCase()
+    const body = plainBody(req)
+    const clientCancelId = body?.clientCancelId
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(threadId)
+      || typeof clientCancelId !== 'string' || !CLIENT_CANCEL_ID_RE.test(clientCancelId)) {
+      res.status(400).json({ cancelled: false, reason: 'invalid_request', reasonCopy: cancelRefusalCopy('invalid_request', provider) })
+      return
+    }
+
+    const now = readNow() ?? Date.now()
+    for (const [k, v] of cancelReplies) if (now - v.at > CANCEL_REPLY_TTL_MS) cancelReplies.delete(k)
+    const replayKey = `${provider}:${threadId}:${clientCancelId}`
+    const replay = cancelReplies.get(replayKey)
+    if (replay) {
+      res.status(replay.status).json({ ...replay.body, replayed: true })
+      return
+    }
+
+    const answer = (status: number, target: CancelTarget | null, outcome: 'accepted' | CancelRefusal, payload: Record<string, unknown>): void => {
+      cancelReplies.set(replayKey, { status, body: payload, at: now })
+      while (cancelReplies.size > MAX_CANCEL_REPLIES) {
+        const oldest = cancelReplies.keys().next()
+        if (oldest.done) break
+        cancelReplies.delete(oldest.value)
+      }
+      cancelProbe(() => cancelDeps.ledger?.({ at: new Date(now).toISOString(), provider, threadId, target, outcome, clientCancelId }), undefined)
+      console.log(`[agent-session-bindings] cancel provider=${provider} target=${target ?? 'none'} outcome=${outcome} status=${status} clientCancelId=${clientCancelId}`)
+      res.status(status).json(payload)
+    }
+    const refuseCancel = (target: CancelTarget | null, reason: CancelRefusal, status = 409): void =>
+      answer(status, target, reason, {
+        cancelled: false,
+        reason,
+        ...(reason === 'cancel_unsupported' ? { provider } : {}),
+        reasonCopy: cancelRefusalCopy(reason, provider),
+      })
+
+    // The occupancy verdict is read only when the decision needs it: never for a COS turn
+    // (the map knows) and never for Claude with a desk probe wired (the hooks know).
+    const key = targetKey(provider, threadId)
+    const needsVerdict = !inFlight.has(key) && !(provider === 'claude' && typeof cancelDeps.deskRunning === 'function')
+    const verdictReason = needsVerdict && canDetect ? projectAttachability(detectOccupancy(provider, threadId)).reason : null
+    const target = cancelTargetFor(cancelFactsFor(provider, threadId, verdictReason))
+    const queuedHeld = (): number => {
+      const n = cancelProbe(() => cancelDeps.queuedWaiting?.(provider, threadId) ?? 0, 0)
+      return Number.isInteger(n) && n > 0 ? n : 0
+    }
+
+    if (target === 'cos_turn') {
+      const entry = inFlight.get(key)
+      if (!entry) return refuseCancel(null, 'not_running')
+      // The adapter stops the process group (SIGTERM, then SIGKILL after 5 s) and the turn
+      // route records the outcome; this answer does not wait for either.
+      entry.controller.abort()
+      cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now), undefined)
+      return answer(202, target, 'accepted', {
+        cancelled: true,
+        target,
+        state: 'stopping',
+        turnId: entry.turnId,
+        queuedHeld: queuedHeld(),
+      })
+    }
+    if (target === 'desk_run') {
+      const armed = cancelProbe(() => cancelDeps.writeHalt?.(threadId, { at: now, clientCancelId }) === true, false)
+      // Not armed means nothing will stop the run: never report it accepted.
+      if (!armed) return refuseCancel(target, 'cancel_failed', 500)
+      // The away-from-desk case: a prompt the broker is holding would otherwise keep the
+      // run waiting for its answer, and then show the Mac's own dialog. Deny it, with
+      // interrupt, so the run ends now rather than at a tool that never comes.
+      const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)
+      cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now), undefined)
+      return answer(202, target, 'accepted', {
+        cancelled: true,
+        target,
+        effective: 'next_tool_call',
+        queuedHeld: queuedHeld(),
+        settledPermissions: Number.isInteger(settledPermissions) && settledPermissions > 0 ? settledPermissions : 0,
+      })
+    }
+    if (target === 'unsupported') return refuseCancel(target, 'cancel_unsupported')
+    if (target === 'hooks_outdated' || target === 'hooks_disabled') return refuseCancel(target, target)
+    return refuseCancel(null, 'not_running')
   })
 
   router.get('/agent-sessions/bindings', (_req, res) => {
@@ -1958,6 +2213,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       `[agent-session-bindings] turn timing turnId=${turnId} outcome=${outcome} total=${Number((process.hrtime.bigint() - stageClock) / 1_000_000n)}ms ${stages.join(' ')}`
     /** The target we hold a claim on, released in the finally. */
     let claimedKey: string | null = null
+    /** 6.53.0: this turn's cancel. Registered in `inFlight` at the claim, deleted in the finally. */
+    const cancelController = new AbortController()
     // Hoisted so the CATCH site can fence with evidence. `binding` and `head` are
     // both declared inside the try, so neither is in scope where the route-error
     // fence is set — without these it would store a fence it can say nothing about.
@@ -2173,6 +2430,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // see a free target and both deliver.
       if (!guard.tryClaim(key, turnId)) return refuseTurn('native_turn_in_progress')
       claimedKey = key
+      // 6.53.0: cancellable from here, with the claim. Same key, same lifetime.
+      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now })
 
       // Plan 4.3 step 6. The attach-time verdict is minutes old by now; a desktop
       // session started in the gap is exactly the residual risk option B leaves
@@ -2217,6 +2476,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       stage('pin')
       if (!pinned?.binding) return refuseTurn(registryRefusal(pinned?.reason))
       pinnedBindingId = bindingId
+
+      // 6.53.0: a cancel that landed during the gate or the head read. Before the live hop,
+      // which cannot be recalled once it writes into the open session. Nothing was sent;
+      // not retryable, because the person asked for this turn to stop.
+      if (cancelController.signal.aborted) {
+        console.log(`[agent-session-bindings] turn cancelled before delivery provider=${binding.provider} turnId=${turnId} bindingId=${bindingId}`)
+        return refuseTurn('turn_cancelled', { retryable: false })
+      }
 
       // 6.49.0: LIVE FIRST. If the session's own process is running -- a Desktop tab,
       // a `claude` in iTerm, the same registry record either way -- the turn goes into
@@ -2376,6 +2643,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           sourceFingerprint: binding.sourceFingerprint,
           expectedNativeHead: head.raw,
           prompt,
+          abortSignal: cancelController.signal,
           onSpawn: (pid: number): boolean => {
             // THE SELF-RECURSION ORDER. The child registers itself against the id
             // we are targeting, so unless it is in the ledger the next occupancy
@@ -2430,10 +2698,25 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           stderrClass: typeof r.stderrClass === 'string' ? r.stderrClass : undefined,
           durationMs: typeof r.durationMs === 'number' ? r.durationMs : undefined,
         }
-        delivery = classifyDelivery(result)
+        delivery = classifyDelivery(result, cancelController.signal.aborted)
       } catch (error) {
         console.error(`[agent-session-bindings] adapter threw: ${error instanceof Error ? error.message : error}`)
         delivery = { kind: 'ambiguous' }
+      }
+
+      // 6.53.0: CANCELLED, BEFORE THE FENCE. An aborted child exits on a signal, which
+      // without this branch is `ambiguous` and fences the thread (plan validation B2):
+      // the person who pressed Cancel would find the thread they stopped locked until
+      // someone releases a fence. A cancel is not an unknown. The turn is ledgered as
+      // refused, `turn_cancelled`, not retryable, which every app since 6.9.4xx settles.
+      if (delivery.kind === 'cancelled') {
+        // The head moved if the child wrote anything before the stop. Acknowledge it the
+        // way a completed turn does, so the next Continue on this binding is not refused
+        // `native_thread_changed` for the run the person just cancelled.
+        const reread = await readHead(binding.provider, binding.nativeThreadId)
+        if (reread !== null) guard.acknowledgeHead(bindingId, reread.digest)
+        console.log(`[agent-session-bindings] turn cancelled provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} detail=${adapterEvidence.adapterDetail ?? 'none'} childReaped=${adapterEvidence.childReaped ?? 'unknown'} durationMs=${adapterEvidence.durationMs ?? 'unknown'} spawnCount=${recordedPids.length}`)
+        return refuseTurn('turn_cancelled', { retryable: false, deliveryState: 'cancelled' })
       }
 
       if (delivery.kind === 'aborted') return refuseTurn('provider_never_opened')
@@ -2542,6 +2825,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           console.error(`[agent-session-bindings] unpin failed: ${error instanceof Error ? error.message : error}`)
         }
       }
+      // By turnId: only this turn's own entry, never a successor's.
+      if (claimedKey !== null && inFlight.get(claimedKey)?.turnId === turnId) inFlight.delete(claimedKey)
       if (claimedKey !== null) guard.release(claimedKey, turnId)
     }
   })
