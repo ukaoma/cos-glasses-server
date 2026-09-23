@@ -3,9 +3,10 @@ import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { DISPLAY_TICKET_TTL_SECONDS, verifyDisplayTicket } from '../lib/display-ticket.js'
-import { mkdtempSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { installClaudeHooks } from '../lib/claude-hooks-installer.js'
 import { invalidateHookStatus } from '../lib/session-hooks-runtime.js'
 import { healthRouter } from './health.js'
@@ -86,6 +87,20 @@ describe('features.sessionCancel (6.53.0)', () => {
       invalidateHookStatus()
       const installed = await (await fetch(`${base}/api/health`)).json()
       expect(installed.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true })
+      // 6.53.3: the update changed the script. An install still on the 6.53.0 script reads
+      // script_outdated (Control's banner asks for Install hooks) but can stop desk runs,
+      // so deskClaude stays true; a script older than the halt check cannot.
+      const stable = join(root, '.cos-glasses', 'bin', 'cos-session-hook')
+      copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', '__fixtures__', 'cos-session-hook-6.53.0'), stable)
+      invalidateHookStatus()
+      const prior = await (await fetch(`${base}/api/health`)).json()
+      expect(prior.sessionHooks.state).toBe('script_outdated')
+      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true })
+      writeFileSync(stable, '#!/bin/sh\n# a 6.51 script, no halt check\nexit 0\n')
+      invalidateHookStatus()
+      const older = await (await fetch(`${base}/api/health`)).json()
+      expect(older.sessionHooks.state).toBe('script_outdated')
+      expect(older.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })
       process.env.COS_SESSION_HOOKS = '0'
       const off = await (await fetch(`${base}/api/health`)).json()
       expect(off.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })

@@ -134,6 +134,12 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: the halt check (6.53.0)', (
     // A tool whose name merely CONTAINS one of them is not one of them.
     expect(runIn('PreToolUse', tool('NotAskUserQuestion'), p).stdout.toString()).toBe('')
     expect(spooled(p.spool)).toHaveLength(2)
+    // 6.53.3: the FIRST "tool_name" is the payload's own. A Bash call whose input names
+    // AskUserQuestion is not spooled; an AskUserQuestion whose input names Bash is.
+    expect(runIn('PreToolUse', tool('Bash', { tool_input: { tool_name: 'AskUserQuestion' } }), p).status).toBe(0)
+    expect(spooled(p.spool)).toHaveLength(2)
+    expect(runIn('PreToolUse', tool('AskUserQuestion', { tool_input: { tool_name: 'Bash', questions: [] } }), p).status).toBe(0)
+    expect(spooled(p.spool)).toHaveLength(3)
   })
 
   it('UserPromptSubmit removes this session\'s marker, leaves the others, and is still spooled', () => {
@@ -162,7 +168,9 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: the halt check (6.53.0)', (
 
   it('malformed stdin exits 0 with no output and no spool file, even with the marker set', () => {
     const p = halted([SESSION])
-    for (const stdin of ['not json', '', `{"session_id":"${SESSION}"`, `{"session_id":"${SESSION.slice(0, 8)}"}`]) {
+    // 6.53.3: an id whose string never closes is not a JSON value, and never stops a run
+    // (the 6.53.0 script's grep required the closing quote; the rewrite keeps that).
+    for (const stdin of ['not json', '', `{"session_id":"${SESSION}"`, `{"session_id":"${SESSION}`, `{"session_id":"${SESSION.slice(0, 8)}"}`]) {
       const r = runIn('PreToolUse', stdin, p)
       expect(r.status).toBe(0)
       // The truncated-JSON case still names the session in full, and a stop there is

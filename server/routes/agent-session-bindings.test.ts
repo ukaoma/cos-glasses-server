@@ -4020,9 +4020,12 @@ describe('cancel a COS turn (6.53.0)', () => {
     })
   })
 
+  // 6.53.3: `reaped: true` on purpose. Since 6.53.2 an UNREAPED cancel is ambiguous either
+  // way, so a claim without it could not tell "believed only when requested" from "always
+  // believed" (the gate case survived at 6.53.2). A reaped claim nobody asked for can.
   it('an adapter that claims a cancel nobody requested is not believed: ambiguous, fenced', async () => {
     const base = await start(writeDeps({
-      deliverAttachedTurn: async () => ({ ok: false, delivery: 'cancelled', reason: 'cancelled' }),
+      deliverAttachedTurn: async () => ({ ok: false, delivery: 'cancelled', reason: 'cancelled', reaped: true }),
     }))
     const a = await attached(base)
     const out = await turnOutcome(base, a, { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-cancel-0006' })
