@@ -38,6 +38,7 @@ import { join } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
+import { unwrapPeerMessage } from './session-stream-events.js'
 
 /**
  * How long a marker may outlive its cancel. An hour, not the plan's first 15 minutes: the
@@ -45,6 +46,14 @@ import { isValidNativeThreadId } from './native-thread-id.js'
  * the only thing that ends a marker whose session neither prompted again nor ended.
  */
 export const HALT_MARKER_TTL_MS = 60 * 60_000
+
+/**
+ * 6.53.3 /qa: how long a re-arm waits when the hand-off was NOT verified (`maybe`: the frame
+ * may or may not have reached the session). A verified hand-off keeps the marker's hour; an
+ * unverified one that has not surfaced as a prompt within two minutes most likely never
+ * arrived, and holding it longer only widens the window for an identical desk prompt.
+ */
+export const HALT_REARM_UNVERIFIED_MS = 2 * 60_000
 
 export interface HaltMarker {
   at: number
@@ -121,15 +130,30 @@ export function clearHaltMarkerOnSessionEnd(sessionId: string, endedAt: number, 
 // plain write would then be deleted by the very turn it was written to stop.
 //
 // So the marker is written, and when the delivered turn has not visibly started yet, it is
-// written AGAIN, once, on the first UserPromptSubmit for that session whose prompt carries
-// the delivered text. Matching the text keeps the person's own next desk prompt from ever
-// being the one that re-arms it; the window is the marker's own hour; SessionEnd drops it.
-// In memory on purpose: a restart forgets it, like every other hold here.
+// written AGAIN, once, on the first UserPromptSubmit for that session AFTER the send, if that
+// prompt IS the delivered one. The window is the marker's own hour (two minutes for an
+// unverified hand-off); SessionEnd drops it. In memory on purpose: a restart forgets it, like
+// every other hold here.
+//
+// 6.53.3 /qa (Skeptic W1): the first cut matched `prompt.includes(<first 120 characters>)`.
+// A short COS prompt ("yes") is inside most desk prompts, so the person's own next prompt
+// re-armed the marker: THEIR run was denied "Cancelled from COS", and the delivered turn's
+// own prompt, finding nothing pending, then ran the cancelled turn. Now:
+//   - EXACT: the delivered words and the prompt's words are equal once whitespace runs are
+//     collapsed and Claude Code's peer wrapper ("Another Claude session sent a message: ...",
+//     which a live Continue arrives in) is taken off. The frame carries no id of its own and
+//     its text is not changed to add one.
+//   - FIRST PROMPT DECIDES: the first prompt after the send spends the re-arm whether or not
+//     it matches. A non-match is logged (never the prompt). This gives up the cancel when
+//     the person's own prompt reaches the session first, rather than risk halting their run:
+//     a halted desk run is the worse error, and the lens already said "at its next step".
+//   - LIMIT, stated: a desk prompt with exactly the delivered words, typed after the send and
+//     taken first, is indistinguishable from the delivered turn and re-arms.
 
 interface PendingRearm {
   marker: HaltMarker
-  /** Text the delivered prompt carries (the peer-inbox acceptance marker). */
-  promptMarker: string
+  /** The delivered prompt's words, whitespace-normalised (`normalizePromptWords`). */
+  words: string
   /** Prompts submitted before this are someone else's. */
   after: number
   until: number
@@ -147,18 +171,22 @@ const MAX_PENDING_REARMS = 64
 export function haltDeliveredTurn(
   sessionId: string,
   marker: HaltMarker,
-  turn: { promptMarker: string; after: number; rearm: boolean; now?: number },
+  turn: { prompt: string; after: number; rearm: boolean; now?: number; windowMs?: number },
   dir = haltDir(),
 ): boolean {
   if (!writeHaltMarker(sessionId, marker, dir)) return false
   const id = sessionId.toLowerCase()
-  if (!turn.rearm || typeof turn.promptMarker !== 'string' || turn.promptMarker.trim().length === 0) {
+  const words = normalizePromptWords(turn.prompt)
+  if (!turn.rearm || words.length === 0) {
     pendingRearms.delete(id)
     return true
   }
   const now = turn.now ?? Date.now()
+  const windowMs = typeof turn.windowMs === 'number' && Number.isFinite(turn.windowMs) && turn.windowMs > 0
+    ? Math.min(turn.windowMs, HALT_MARKER_TTL_MS)
+    : HALT_MARKER_TTL_MS
   pendingRearms.delete(id)
-  pendingRearms.set(id, { marker, promptMarker: turn.promptMarker, after: turn.after, until: now + HALT_MARKER_TTL_MS })
+  pendingRearms.set(id, { marker, words, after: turn.after, until: now + windowMs })
   while (pendingRearms.size > MAX_PENDING_REARMS) {
     const oldest = pendingRearms.keys().next()
     if (oldest.done) break
@@ -167,10 +195,26 @@ export function haltDeliveredTurn(
   return true
 }
 
+/** Whitespace runs collapsed to one space, ends trimmed. Non-strings are empty. */
+export function normalizePromptWords(text: unknown): string {
+  return typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : ''
+}
+
+/**
+ * Is `prompt` (a UserPromptSubmit's `prompt`) the delivered prompt? Equal words, compared
+ * whole, after taking off Claude Code's peer wrapper when the prompt arrived in one.
+ */
+export function isDeliveredPrompt(prompt: unknown, delivered: string): boolean {
+  const want = normalizePromptWords(delivered)
+  if (want.length === 0 || typeof prompt !== 'string') return false
+  return normalizePromptWords(unwrapPeerMessage(prompt) ?? prompt) === want
+}
+
 /**
  * A UserPromptSubmit from the session itself (never a COS child): the hook has just deleted
- * the session's marker. When it was the delivered turn's own prompt, write the marker back.
- * One shot. True when the marker was re-armed.
+ * the session's marker. The FIRST such prompt after the send spends the pending re-arm: when
+ * it is the delivered turn's own prompt the marker is written back, otherwise the re-arm is
+ * dropped and logged. True when the marker was re-armed.
  */
 export function rearmHaltOnPrompt(sessionId: string, promptAt: number, prompt: unknown, dir = haltDir(), now = Date.now()): boolean {
   const id = typeof sessionId === 'string' ? sessionId.toLowerCase() : ''
@@ -181,8 +225,11 @@ export function rearmHaltOnPrompt(sessionId: string, promptAt: number, prompt: u
     return false
   }
   if (!Number.isFinite(promptAt) || promptAt < pending.after) return false
-  if (typeof prompt !== 'string' || !prompt.includes(pending.promptMarker)) return false
   pendingRearms.delete(id)
+  if (!isDeliveredPrompt(prompt, pending.words)) {
+    console.warn(`[session-halt] re-arm dropped: the first prompt after the hand-off was not the delivered turn session=${id.slice(0, 8)} clientCancelId=${pending.marker.clientCancelId}`)
+    return false
+  }
   return writeHaltMarker(id, pending.marker, dir)
 }
 

@@ -1,11 +1,11 @@
 // The composition root's own rules: the two-scan memory lives here (not in the pure
 // deriver), a COS child's pid is remembered past its exit, and off means off.
 
-import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, afterAll, vi } from 'vitest'
 import { spawn } from 'node:child_process'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
 import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, deskTurnEndedAt, haltHandedOffTurn, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
-import { HALT_MARKER_TTL_MS, __resetHaltRearmsForTests, clearHaltMarker, hasHaltMarker, hasPendingHaltRearm, writeHaltMarker } from './session-halt.js'
+import { HALT_MARKER_TTL_MS, HALT_REARM_UNVERIFIED_MS, __resetHaltRearmsForTests, clearHaltMarker, hasHaltMarker, hasPendingHaltRearm, writeHaltMarker } from './session-halt.js'
 import { __resetThreadCancelsForTests, noteThreadCancelled } from './session-cancel.js'
 import { OPEN_TURN_CEILING_MS } from './session-state-derive.js'
 import type { HookEnvelope } from './session-hook-events.js'
@@ -364,7 +364,7 @@ describe('a handed-off turn\'s halt marker is re-armed through its own prompt (6
       const sentAt = Date.now()
       // The desk was mid-turn when COS handed the prompt over (its turn began earlier).
       sessionSignalStore.apply(env('UserPromptSubmit', sentAt - 60_000, { prompt: 'the desk\'s own work' }), false)
-      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-1' }, { promptMarker: PROMPT, sentAt })).toBe(true)
+      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-1' }, { prompt: PROMPT, sentAt })).toBe(true)
       expect(hasHaltMarker(SID)).toBe(true)
       expect(hasPendingHaltRearm(SID)).toBe(true)
       // The marker stops the desk run; a COS child's prompt on the id never re-arms.
@@ -385,7 +385,7 @@ describe('a handed-off turn\'s halt marker is re-armed through its own prompt (6
     try {
       const sentAt = Date.now()
       sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 5, { prompt: PROMPT }), false)
-      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-2' }, { promptMarker: PROMPT, sentAt })).toBe(true)
+      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-2' }, { prompt: PROMPT, sentAt })).toBe(true)
       expect(hasPendingHaltRearm(SID)).toBe(false)
       clearHaltMarker(SID)
       sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 50, { prompt: PROMPT }), false)
@@ -395,11 +395,55 @@ describe('a handed-off turn\'s halt marker is re-armed through its own prompt (6
     }
   })
 
+  // 6.53.3 /qa: the person's own prompt first spends the re-arm; an unverified hand-off waits
+  // two minutes, a verified one the marker's hour.
+  it('the person\'s own prompt first spends the re-arm; the delivered prompt after it is not stopped', () => {
+    const runtime = boot()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const sentAt = Date.now()
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt - 60_000, { prompt: 'the desk\'s own work' }), false)
+      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-4' }, { prompt: 'yes', sentAt })).toBe(true)
+      clearHaltMarker(SID)
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 10, { prompt: 'yes, and also check the lexer' }), false)
+      expect(hasHaltMarker(SID)).toBe(false)
+      expect(hasPendingHaltRearm(SID)).toBe(false)
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 20, { prompt: 'yes' }), false)
+      expect(hasHaltMarker(SID)).toBe(false)
+    } finally {
+      warn.mockRestore()
+      runtime.stop()
+    }
+  })
+
+  it('an unverified hand-off re-arms within two minutes and not after; a verified one still re-arms then', () => {
+    const runtime = boot()
+    const clock = vi.spyOn(Date, 'now')
+    try {
+      let sentAt = 1_800_000_000_000
+      for (const [unverified, expected] of [[true, false], [false, true]] as const) {
+        // Each hand-off after the previous one's prompt, so that prompt is not this turn's start.
+        sentAt += 10 * 60_000
+        __resetHaltRearmsForTests()
+        clock.mockReturnValue(sentAt)
+        expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-5' }, { prompt: PROMPT, sentAt, unverified }, sentAt)).toBe(true)
+        clearHaltMarker(SID)
+        const late = sentAt + HALT_REARM_UNVERIFIED_MS + 1
+        clock.mockReturnValue(late)
+        sessionSignalStore.apply(env('UserPromptSubmit', late, { prompt: PROMPT }), false)
+        expect(hasHaltMarker(SID), `unverified=${unverified}`).toBe(expected)
+      }
+    } finally {
+      clock.mockRestore()
+      runtime.stop()
+    }
+  })
+
   it('SessionEnd drops a pending re-arm', () => {
     const runtime = boot()
     try {
       const sentAt = Date.now()
-      haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-3' }, { promptMarker: PROMPT, sentAt })
+      haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-3' }, { prompt: PROMPT, sentAt })
       expect(hasPendingHaltRearm(SID)).toBe(true)
       sessionSignalStore.apply(env('SessionEnd', sentAt + 5, { reason: 'other' }), false)
       expect(hasPendingHaltRearm(SID)).toBe(false)

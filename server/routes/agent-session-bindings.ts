@@ -124,7 +124,7 @@ import {
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
-import { PEER_VERIFY_TIMEOUT_MS, peerAcceptanceMarker } from '../lib/session-peer-inbox.js'
+import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -459,7 +459,7 @@ export interface CancelDeps {
    * have reached) the open session. Writes the halt marker, and re-arms it once when that
    * turn's own UserPromptSubmit deletes it (`haltHandedOffTurn`). False: not armed.
    */
-  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { promptMarker: string; sentAt: number }) => boolean
+  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean }) => boolean
   /** Append to `data/session-cancel.jsonl`. */
   ledger?: (row: SessionCancelLedgerRow) => void
 }
@@ -1680,8 +1680,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }) ?? 'unsupported'
       if (target === 'desk_run') {
         const armed = cancelProbe(() => cancelDeps.haltHandedOffTurn?.(threadId, { at: latch.at, clientCancelId: latch.clientCancelId }, {
-          promptMarker: peerAcceptanceMarker(turn.prompt),
+          // 6.53.3 /qa: the WHOLE delivered prompt (the re-arm matches it exactly), and whether
+          // the hand-off was only possibly delivered (`maybe`: a two-minute re-arm, not an hour).
+          prompt: turn.prompt,
           sentAt: turn.sentAt,
+          unverified: reached === 'maybe',
         }) === true, false)
         if (armed) {
           const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)

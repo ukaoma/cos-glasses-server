@@ -3819,7 +3819,7 @@ function recordingCancel(over: Partial<CancelDeps> = {}) {
     settle: [] as string[],
     noted: [] as Array<[string, string, number, string]>,
     ledger: [] as SessionCancelLedgerRow[],
-    handed: [] as Array<{ sessionId: string; at: number; clientCancelId: string; promptMarker: string; sentAt: number }>,
+    handed: [] as Array<{ sessionId: string; at: number; clientCancelId: string; prompt: string; sentAt: number; unverified?: boolean }>,
   }
   const cancel: CancelDeps = {
     deskRunning: () => true,
@@ -4007,7 +4007,7 @@ describe('cancel a COS turn (6.53.0)', () => {
       expect(await response.json()).toMatchObject({ outcome: 'completed', via: 'live', deliveryState: 'delivered' })
       expect(h.spawns).toHaveLength(0)
       expect(h.calls.handed).toHaveLength(1)
-      expect(h.calls.handed[0]).toMatchObject({ sessionId: SID, at: NOW, clientCancelId: 'cc-claude-live-reached', promptMarker: PROMPT })
+      expect(h.calls.handed[0]).toMatchObject({ sessionId: SID, at: NOW, clientCancelId: 'cc-claude-live-reached', prompt: PROMPT, unverified: false })
       expect(h.calls.handed[0]!.sentAt).toBeGreaterThanOrEqual(before - 5_000)
       expect(h.calls.settle).toEqual([SID])
       for (const id of ['cc-claude-live-reached', 'cc-claude-live-reached-2']) {
@@ -4044,6 +4044,8 @@ describe('cancel a COS turn (6.53.0)', () => {
         expect(await response.json(), reason).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'unknown' })
         expect(h.spawns, reason).toHaveLength(0)
         expect(h.calls.handed, reason).toHaveLength(1)
+        // 6.53.3 /qa: the whole prompt, and flagged unverified (a two-minute re-arm, not an hour).
+        expect(h.calls.handed[0], reason).toMatchObject({ prompt: PROMPT, unverified: true })
         expect((await postCancel(h.base, `cc-maybe-${reason}`)).body.target, reason).toBe('desk_run')
       }
     })

@@ -17,7 +17,7 @@ import { SessionHookLedger } from './session-hook-ledger.js'
 import { startSpoolIngester, type SpoolIngester, type SpoolStats } from './session-hook-spool.js'
 import { SessionSignalStore, type SessionSignal } from './session-signal-store.js'
 import { OPEN_TURN_CEILING_MS, deriveSessionState, type DerivedSessionState, type RegistryFacts, type TranscriptFacts } from './session-state-derive.js'
-import { clearHaltMarkerOnSessionEnd, dropHaltRearm, haltDeliveredTurn, rearmHaltOnPrompt, sweepHaltMarkers, type HaltMarker } from './session-halt.js'
+import { HALT_MARKER_TTL_MS, HALT_REARM_UNVERIFIED_MS, clearHaltMarkerOnSessionEnd, dropHaltRearm, haltDeliveredTurn, rearmHaltOnPrompt, sweepHaltMarkers, type HaltMarker } from './session-halt.js'
 import { cancelVoidsOpenTurn, threadCancel } from './session-cancel.js'
 import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatus, type HookStatus } from './claude-hooks-installer.js'
 
@@ -235,10 +235,17 @@ export function claudeDeskRunning(sessionId: string, now = Date.now(), dir = cla
  * hooks do not yet show the turn started (its UserPromptSubmit at or after `sentAt`), it is
  * re-armed once when that prompt's own UserPromptSubmit deletes it (`haltDeliveredTurn`).
  */
-export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: { promptMarker: string; sentAt: number }, now = Date.now()): boolean {
+export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: { prompt: string; sentAt: number; unverified?: boolean }, now = Date.now()): boolean {
   const signal = signalFor(sessionId)
   const started = !!signal && typeof signal.turnStartedAt === 'number' && signal.turnStartedAt >= turn.sentAt
-  return haltDeliveredTurn(sessionId, marker, { promptMarker: turn.promptMarker, after: turn.sentAt, rearm: !started, now })
+  return haltDeliveredTurn(sessionId, marker, {
+    prompt: turn.prompt,
+    after: turn.sentAt,
+    rearm: !started,
+    now,
+    // 6.53.3 /qa: an unverified hand-off (`maybe`) holds its re-arm two minutes, not an hour.
+    windowMs: turn.unverified === true ? HALT_REARM_UNVERIFIED_MS : HALT_MARKER_TTL_MS,
+  })
 }
 
 let ledger: SessionHookLedger | null = null
