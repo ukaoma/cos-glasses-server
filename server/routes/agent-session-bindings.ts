@@ -125,7 +125,7 @@ import {
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
-import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import { PEER_VERIFY_TIMEOUT_MS, peerAcceptanceMarker } from '../lib/session-peer-inbox.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -450,8 +450,17 @@ export interface CancelDeps {
   settlePermissions?: (sessionId: string) => number
   /** Waiting turns parked on the thread (they hold for CANCEL_QUEUE_HOLD_MS). */
   queuedWaiting?: (provider: string, threadId: string) => number
-  /** Record the cancel time the turn queue reads (`noteThreadCancelled`). */
-  noteCancelled?: (provider: string, threadId: string, at: number) => void
+  /**
+   * Record the cancel the turn queue reads (`noteThreadCancelled`). 6.53.3: with its TARGET,
+   * because a killed COS child's silence ends its turn and a desk run's does not (review A1).
+   */
+  noteCancelled?: (provider: string, threadId: string, at: number, target: CancelTarget) => void
+  /**
+   * 6.53.3 (review A6): a cancel latched during a live hand-off whose turn reached (or may
+   * have reached) the open session. Writes the halt marker, and re-arms it once when that
+   * turn's own UserPromptSubmit deletes it (`haltHandedOffTurn`). False: not armed.
+   */
+  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { promptMarker: string; sentAt: number }) => boolean
   /** Append to `data/session-cancel.jsonl`. */
   ledger?: (row: SessionCancelLedgerRow) => void
 }
@@ -1190,6 +1199,21 @@ interface InFlightTurn {
   startedAt: number
   /** False while a live hand-off is crossing its irreversible write boundary. */
   cancellable: boolean
+  /**
+   * 6.53.3 (review A6): a cancel that arrived while `cancellable` was false. It is LATCHED
+   * (answered 202 `stopping`) and settled by the turn route once the hop says where the
+   * turn went: nothing reached, `turn_cancelled` and no spawn; reached, the desk halt
+   * marker. Until 6.53.2 it was refused 409 `cancel_failed`, that refusal was cached for the
+   * tap, and a hop that reached nothing went on to spawn the turn the person had stopped.
+   */
+  latched: LatchedCancel | null
+}
+
+interface LatchedCancel {
+  at: number
+  clientCancelId: string
+  /** Every tap latched onto this turn: each one's cached answer is rewritten to the outcome. */
+  replayKeys: string[]
 }
 
 type Delivery =
@@ -1524,10 +1548,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
    */
   const cancelFactsFor = (provider: string, threadId: string, verdictReason: string | null): CancelFacts => {
     const entry = inFlight.get(targetKey(provider, threadId))
-    const cosTurnInFlight = entry?.cancellable === true
+    // 6.53.3: a live hand-off in flight is still OUR turn, and a cancel on it is latched
+    // (review A6), so it reads cos_turn too, never as a desk run while it commits.
+    const cosTurnInFlight = entry !== undefined
     let runningOutsideCos = false
-    // A live hand-off that has started is still ours, but cannot honestly be
-    // cancelled: do not misclassify the same run as a desk run while it commits.
     if (!entry) {
       runningOutsideCos = provider === 'claude' && typeof cancelDeps.deskRunning === 'function'
         ? cancelProbe(() => cancelDeps.deskRunning!(threadId) === true, false)
@@ -1548,6 +1572,90 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   }
   /** Idempotency for POST .../cancel: the answer each (thread, clientCancelId) got. */
   const cancelReplies = new Map<string, { status: number; body: Record<string, unknown>; at: number }>()
+  const queuedHeldFor = (provider: string, threadId: string): number => {
+    const n = cancelProbe(() => cancelDeps.queuedWaiting?.(provider, threadId) ?? 0, 0)
+    return Number.isInteger(n) && n > 0 ? n : 0
+  }
+
+  /**
+   * 6.53.3 (review A6): settle a cancel LATCHED during a live hand-off, once the hop has said
+   * where the turn went, and rewrite the answer every latched tap replays to that outcome
+   * (never the transient 202 alone, never a refusal from before the latch).
+   *
+   *   none    nothing reached a session: the turn route answers `turn_cancelled` and never
+   *           spawns. The cached 202 `stopping` already says so.
+   *   reached the turn is in the open session (or MAY be: an unverified write). What stops it
+   *   / maybe there is what stops any desk run: the halt marker, re-armed once through the
+   *           turn's own UserPromptSubmit. Codex and Cursor have no marker, so the answer is
+   *           the ordinary `cancel_unsupported` ("Stop it there"); hooks that cannot stop a
+   *           desk run answer their own reason; a marker that could not be written is
+   *           `cancel_failed` 500, exactly as on the desk path.
+   */
+  const settleLatchedCancel = (
+    entry: InFlightTurn,
+    provider: string,
+    threadId: string,
+    reached: 'none' | 'reached' | 'maybe',
+    turn: { prompt: string; sentAt: number },
+  ): void => {
+    const latch = entry.latched
+    if (latch === null) return
+    const now = readNow() ?? Date.now()
+    const common = { turnId: entry.turnId, queuedHeld: queuedHeldFor(provider, threadId), queuedHoldMs: CANCEL_QUEUE_HOLD_MS }
+    let status = 202
+    let target: CancelTarget = 'cos_turn'
+    let outcome: 'accepted' | CancelRefusal = 'accepted'
+    let body: Record<string, unknown> = { cancelled: true, target, state: 'stopping', ...common }
+    if (reached !== 'none') {
+      target = cancelTargetFor({
+        provider,
+        cosTurnInFlight: false,
+        runningOutsideCos: true,
+        hooksEnabled: cancelProbe(() => cancelDeps.hooksEnabled?.() === true, false),
+        hooksReady: cancelProbe(() => cancelDeps.hooksReady?.() === true, false),
+      }) ?? 'unsupported'
+      if (target === 'desk_run') {
+        const armed = cancelProbe(() => cancelDeps.haltHandedOffTurn?.(threadId, { at: latch.at, clientCancelId: latch.clientCancelId }, {
+          promptMarker: peerAcceptanceMarker(turn.prompt),
+          sentAt: turn.sentAt,
+        }) === true, false)
+        if (armed) {
+          const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)
+          body = {
+            cancelled: true,
+            target,
+            effective: 'next_tool_call',
+            ...common,
+            settledPermissions: Number.isInteger(settledPermissions) && settledPermissions > 0 ? settledPermissions : 0,
+          }
+        } else {
+          status = 500
+          outcome = 'cancel_failed'
+        }
+      } else {
+        status = 409
+        outcome = target === 'hooks_outdated' || target === 'hooks_disabled' ? target : 'cancel_unsupported'
+      }
+      if (outcome !== 'accepted') {
+        body = {
+          cancelled: false,
+          reason: outcome,
+          ...(outcome === 'cancel_unsupported' ? { provider } : {}),
+          reasonCopy: cancelRefusalCopy(outcome, provider),
+        }
+      }
+    }
+    for (const replayKey of latch.replayKeys) {
+      const previous = cancelReplies.get(replayKey)
+      cancelReplies.set(replayKey, { status, body, at: previous?.at ?? now })
+    }
+    // The first answer was ledgered `accepted`; a cancel that then could not be carried out
+    // gets a line of its own, so the ledger never records a stop that did not happen.
+    if (outcome !== 'accepted') {
+      cancelProbe(() => cancelDeps.ledger?.({ at: new Date(now).toISOString(), provider, threadId, target, outcome, clientCancelId: latch.clientCancelId }), undefined)
+    }
+    console.log(`[agent-session-bindings] latched cancel settled provider=${provider} turnId=${entry.turnId} hop=${reached} target=${target} outcome=${outcome} status=${status} taps=${latch.replayKeys.length}`)
+  }
 
   /**
    * One owner for "is this thread free right now", shared by the probe and both
@@ -1795,17 +1903,33 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // The occupancy verdict is read only when the decision needs it: never for a COS turn
     // (the map knows) and never for Claude with a desk probe wired (the hooks know).
     const key = targetKey(provider, threadId)
+    const queuedHeld = (): number => queuedHeldFor(provider, threadId)
     const activeEntry = inFlight.get(key)
     if (activeEntry && activeEntry.cancellable !== true) {
-      return refuseCancel(null, 'cancel_failed')
+      // 6.53.3 (review A6): the turn is crossing a live hand-off's write boundary, where no
+      // abort can recall it. LATCH the cancel on the turn and answer as for any COS turn;
+      // the turn route settles it when the hop reports (`settleLatchedCancel`). The abort
+      // is still signalled, so nothing after the hop can start the turn either.
+      if (activeEntry.latched === null) {
+        activeEntry.latched = { at: now, clientCancelId, replayKeys: [] }
+        activeEntry.controller.abort()
+        // Noted as what the run becomes if the hop lands it: a desk run (Claude) or one only
+        // its app can stop. Either way only the engine's own end discounts its open turn.
+        cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now, provider === 'claude' ? 'desk_run' : 'unsupported'), undefined)
+      }
+      activeEntry.latched.replayKeys.push(replayKey)
+      return answer(202, 'cos_turn', 'accepted', {
+        cancelled: true,
+        target: 'cos_turn',
+        state: 'stopping',
+        turnId: activeEntry.turnId,
+        queuedHeld: queuedHeld(),
+        queuedHoldMs: CANCEL_QUEUE_HOLD_MS,
+      })
     }
     const needsVerdict = !inFlight.has(key) && !(provider === 'claude' && typeof cancelDeps.deskRunning === 'function')
     const verdictReason = needsVerdict && canDetect ? projectAttachability(detectOccupancy(provider, threadId)).reason : null
     const target = cancelTargetFor(cancelFactsFor(provider, threadId, verdictReason))
-    const queuedHeld = (): number => {
-      const n = cancelProbe(() => cancelDeps.queuedWaiting?.(provider, threadId) ?? 0, 0)
-      return Number.isInteger(n) && n > 0 ? n : 0
-    }
 
     if (target === 'cos_turn') {
       const entry = inFlight.get(key)
@@ -1813,7 +1937,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // The adapter stops the process group (SIGTERM, then SIGKILL after 5 s) and the turn
       // route records the outcome; this answer does not wait for either.
       entry.controller.abort()
-      cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now), undefined)
+      cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now, target), undefined)
       return answer(202, target, 'accepted', {
         cancelled: true,
         target,
@@ -1831,7 +1955,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // run waiting for its answer, and then show the Mac's own dialog. Deny it, with
       // interrupt, so the run ends now rather than at a tool that never comes.
       const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)
-      cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now), undefined)
+      cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now, target), undefined)
       return answer(202, target, 'accepted', {
         cancelled: true,
         target,
@@ -2452,7 +2576,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (!guard.tryClaim(key, turnId)) return refuseTurn('native_turn_in_progress')
       claimedKey = key
       // 6.53.0: cancellable from here, with the claim. Same key, same lifetime.
-      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now, cancellable: true })
+      inFlight.set(key, { turnId, bindingId, clientTurnId, controller: cancelController, startedAt: now, cancellable: true, latched: null })
 
       // Plan 4.3 step 6. The attach-time verdict is minutes old by now; a desktop
       // session started in the gap is exactly the residual risk option B leaves
@@ -2521,6 +2645,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (typeof deps.deliverLiveTurn === 'function' && binding.provider === 'claude') {
         const liveEntry = inFlight.get(key)
         if (liveEntry?.turnId === turnId) liveEntry.cancellable = false
+        /** 6.53.3: a cancel latched onto THIS turn while the hop was in flight (review A6). */
+        const latchedHere = (): InFlightTurn | null => (liveEntry?.turnId === turnId && liveEntry.latched !== null ? liveEntry : null)
+        const handOffAt = Date.now()
         let live: { ok: boolean; reason: string; verifiedBy?: string | null; pid?: number | null } | null = null
         try {
           live = await deps.deliverLiveTurn({
@@ -2538,6 +2665,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         }
         stage(`live(${live?.reason ?? 'threw'})`)
         if (live?.ok) {
+          // 6.53.3: delivered, so the turn runs in the open session now, and what stops it
+          // there is the desk halt marker. The turn itself WAS delivered and says so.
+          const latched = latchedHere()
+          if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt })
           console.log(`[agent-session-bindings] turn delivered live provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} pid=${live.pid ?? 'null'}`)
           respond(200, {
             turnId,
@@ -2553,11 +2684,27 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           return
         }
         if (live && (live.reason === 'unverified' || live.reason === 'write_failed')) {
+          // 6.53.3: something MAY be in the session and the person asked for it to stop: arm
+          // the marker as for a landed turn, and settle this turn as cancelled, never as a
+          // retryable hold that the queue would send again after the cancel's two minutes.
+          const latched = latchedHere()
+          if (latched) {
+            settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt })
+            return refuseTurn('turn_cancelled', { retryable: false, deliveryState: 'unknown' })
+          }
           // Something may be in the session. Hold, never spawn over it.
           return refuseTurn('live_unverified', { retryable: true, deliveryState: 'unknown' })
         }
-        // Every remaining result is documented as "nothing reached a session";
-        // the abortable child path is safe to expose again before it starts.
+        // Every remaining result is documented as "nothing reached a session".
+        // 6.53.3: with a cancel latched on the way, that is the whole turn: cancelled, no
+        // spawn. Until 6.53.2 the refused cancel was forgotten here and the child ran.
+        const latched = latchedHere()
+        if (latched) {
+          settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt })
+          console.log(`[agent-session-bindings] turn cancelled during live hand-off provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} hop=${live?.reason ?? 'threw'}`)
+          return refuseTurn('turn_cancelled', { retryable: false })
+        }
+        // The abortable child path is safe to expose again before it starts.
         if (liveEntry?.turnId === turnId) liveEntry.cancellable = true
         // disabled / not_claude / no_record / protocol_unsupported / connect_failed /
         // suspect_expired: nothing reached a session. Spawn as always.
@@ -2573,6 +2720,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (binding.provider === 'codex' && foreignHolder && typeof deps.deliverCodexLiveTurn === 'function') {
         const liveEntry = inFlight.get(key)
         if (liveEntry?.turnId === turnId) liveEntry.cancellable = false
+        /** 6.53.3: a cancel latched onto THIS turn while the hop was in flight (review A6). */
+        const latchedHere = (): InFlightTurn | null => (liveEntry?.turnId === turnId && liveEntry.latched !== null ? liveEntry : null)
+        const handOffAt = Date.now()
         let live: { ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null } | null = null
         try {
           live = await deps.deliverCodexLiveTurn({
@@ -2587,6 +2737,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         }
         stage(`codex-live(${live?.reason ?? 'threw'})`)
         if (live?.ok) {
+          // 6.53.3: queued in the Codex app, which only the app can stop ("Stop it there").
+          const latched = latchedHere()
+          if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt })
           console.log(`[agent-session-bindings] turn delivered live provider=codex turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} queuedId=${live.queuedId ?? 'null'}`)
           respond(200, {
             turnId,
@@ -2600,6 +2753,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             reasonCopy: TURN_SENT_CODEX_QUEUE_COPY,
           })
           return
+        }
+        // 6.53.3: anything but a proven or possible queue row reached nothing; with a cancel
+        // latched on the way that is the whole turn: cancelled, and no child.
+        const codexLatched = latchedHere()
+        if (codexLatched && live !== null && live.reason !== 'unverified') {
+          settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt })
+          console.log(`[agent-session-bindings] turn cancelled during live hand-off provider=codex turnId=${turnId} bindingId=${bindingId} hop=${live.reason}`)
+          return refuseTurn('turn_cancelled', { retryable: false })
         }
         // The operator switched this off: nothing was queued, so the abortable
         // 6.50 child path is cancellable again before it starts.
@@ -2624,6 +2785,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
               spawns: [],
             })
             console.warn(`[agent-session-bindings] fence set site=codex_live provider=codex target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest} adapterReason=codex_queue_unverified`)
+            // 6.53.3: a row MAY be in the Codex app's queue; a latched cancel says where to stop it.
+            if (codexLatched) settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt })
             return reportAmbiguous()
           }
           // Nothing was queued, and the child cannot run against a held thread. Not

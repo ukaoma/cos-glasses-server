@@ -24,9 +24,10 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { cachedHookStatus, claudeDeskRunning, deskIdleSeconds, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { cachedHookStatus, claudeDeskRunning, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { writeHaltMarker } from './lib/session-halt.js'
-import { appendSessionCancelLedger, cancelEndsTurn, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancelledAt } from './lib/session-cancel.js'
+import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancel } from './lib/session-cancel.js'
+import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
 import {
   PermissionBroker,
   brokerSignalSink,
@@ -148,7 +149,7 @@ import {
 const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
 import { createCursorStopFollowupRouter } from './routes/cursor-stop-followup.js'
-import { queuedThreadKeys, readQueue, transcriptTurnEnded, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
+import { queuedThreadKeys, readQueue, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
 import { readHookToken } from './lib/claude-hooks-installer.js'
 import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
 import { createDrainKick, kickPlanFor } from './lib/thread-drain-kick.js'
@@ -667,6 +668,22 @@ const sharedTargetGuard = new TargetGuard(
     : null,
 )
 
+const queueTurnEvidence = makeQueueTurnEvidence({
+  signalFor: threadId => signalFor(threadId),
+  registryIdleAfterStop: (threadId, stopAt) => registryIdleAfterStop(threadId, stopAt),
+  deskEndedAt: threadId => deskTurnEndedAt(threadId),
+  transcriptMtimeMs: (provider, threadId) => {
+    const read = occupancyProbes.transcriptMtimeMs
+    const value = typeof read === 'function' ? read(provider as 'claude' | 'codex', threadId) : null
+    return typeof value === 'number' ? value : null
+  },
+  transcriptVerdict: (provider, threadId) =>
+    transcriptTurnVerdict(provider as 'claude' | 'codex', transcriptPathFor(provider as 'claude' | 'codex', threadId, nativeHeadDeps)),
+  threadCancel: (provider, threadId) => threadCancel(provider, threadId),
+  openTurnCeilingMs: OPEN_TURN_CEILING_MS,
+  now: () => Date.now(),
+})
+
 if (threadAttachEnabled()) {
   const queueDeps = {
     // TWO GATES, ONE ANSWER. `threadOccupancy` sees FOREIGN holders -- another app on
@@ -711,61 +728,12 @@ if (threadAttachEnabled()) {
         return { attachable: false, reason: 'probe_failed' }
       }
     },
-    turnEnded: (provider: string, threadId: string) => {
-      if (provider !== 'claude' && provider !== 'codex') return false
-      try {
-        // 6.53.0: a cancel with nothing written since it ENDED the turn. A killed COS child
-        // leaves its last tool_use unanswered, and no Stop or terminal record ever follows.
-        const cancelledAt = threadCancelledAt(provider, threadId)
-        if (cancelledAt !== null) {
-          const readMtime = occupancyProbes.transcriptMtimeMs
-          const lastRow = typeof readMtime === 'function' ? readMtime(provider, threadId) : null
-          if (cancelEndsTurn(cancelledAt, typeof lastRow === 'number' ? lastRow : null)) return true
-        }
-        // 6.48.1: the engine's own end of turn: a Stop hook newer than the turn's prompt
-        // AND the registry flipped idle after it (the Stop hooks have returned; a prompt
-        // typed during them is queued and dequeues only then). The transcript tail
-        // (`turnFromTail`) answers for everything the hooks did not see. Both refuse on doubt.
-        if (provider === 'claude') {
-          const signal = signalFor(threadId)
-          if (signal && !signal.turnOpen && signal.lastEvent === 'Stop' && typeof signal.stopAt === 'number'
-            && signal.stopAt >= (signal.turnStartedAt ?? 0) && signal.subagentsOpen === 0
-            && registryIdleAfterStop(threadId, signal.stopAt) === true) return true
-        }
-        return transcriptTurnEnded(provider, transcriptPathFor(provider, threadId, nativeHeadDeps))
-      } catch {
-        return false
-      }
-    },
-    // 6.48.1: positive evidence the holder's turn is OPEN, which outranks the 30 s idle
-    // backstop (a long tool leaves the transcript untouched while it runs). Bounded: a
-    // signal or a tail older than OPEN_TURN_CEILING_MS is not evidence any more, so a
-    // crashed mid-tool session still drains by the backstop rather than holding for the TTL.
-    turnOpen: (provider: string, threadId: string): boolean => {
-      if (provider !== 'claude' && provider !== 'codex') return false
-      try {
-        const now = Date.now()
-        // 6.53.0: evidence older than a cancel on this thread is the cancelled run's, not a
-        // live turn (plan R1: a killed child's dangling tool_use read `tool_pending` for the
-        // whole 30-minute ceiling and held every parked turn behind it).
-        const cancelledAt = threadCancelledAt(provider, threadId)
-        if (provider === 'claude') {
-          const signal = signalFor(threadId)
-          if (signal && signal.turnOpen && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS
-            && !cancelEndsTurn(cancelledAt, signal.lastEventAt)) return true
-        }
-        const path = transcriptPathFor(provider, threadId, nativeHeadDeps)
-        const verdict = transcriptTurnVerdict(provider, path)
-        if (!verdict || verdict.ended) return false
-        if (verdict.reason !== 'tool_pending' && verdict.reason !== 'prompt_open') return false
-        const read = occupancyProbes.transcriptMtimeMs
-        const mtime = typeof read === 'function' ? read(provider, threadId) : null
-        if (cancelEndsTurn(cancelledAt, typeof mtime === 'number' ? mtime : null)) return false
-        return typeof mtime === 'number' && now - mtime <= OPEN_TURN_CEILING_MS
-      } catch {
-        return false
-      }
-    },
+    // 6.53.3: the two turn questions live in lib/queue-turn-evidence.ts, where a test drives
+    // them against the real drain decision. What a cancel on the thread may conclude now
+    // depends on what it was aimed at (review A1): a killed COS child's silence ends its
+    // turn; a desk run's silence does not, until the desk itself says the run is over.
+    turnEnded: queueTurnEvidence.turnEnded,
+    turnOpen: queueTurnEvidence.turnOpen,
     activity: (provider: string, threadId: string): 'working' | 'idle' | 'unknown' => {
       try {
         const read = occupancyProbes.transcriptMtimeMs
@@ -883,7 +851,9 @@ app.use('/api', createAgentSessionBindingsRouter({
     writeHalt: (sessionId, marker) => writeHaltMarker(sessionId, marker),
     settlePermissions: sessionId => permissionBroker.cancelSession(sessionId),
     queuedWaiting: (provider, threadId) => readQueue(provider, threadId, Date.now()).filter(t => t.status === 'waiting').length,
-    noteCancelled: (provider, threadId, at) => noteThreadCancelled(provider, threadId, at),
+    noteCancelled: (provider, threadId, at, target) => noteThreadCancelled(provider, threadId, at, target),
+    // 6.53.3 (review A6): a cancel that landed during a live hand-off whose turn reached the session.
+    haltHandedOffTurn: (sessionId, marker, turn) => haltHandedOffTurn(sessionId, marker, turn),
     ledger: row => appendSessionCancelLedger(row),
   },
 }))

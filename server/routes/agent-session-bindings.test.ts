@@ -3423,16 +3423,18 @@ describe('6.51.0: Codex Continue into a thread the Codex app holds', () => {
     expect(spawns).toHaveLength(1)
   })
 
-  it('refuses cancel while the Codex live queue crosses its irreversible hand-off', async () => {
+  // 6.53.3 (review A6): a cancel during the hand-off is LATCHED, never refused and dropped.
+  it('a cancel during the Codex hand-off is latched (202 stopping); queued in the app, it then replays cancel_unsupported', async () => {
     let entered!: () => void
     let release!: (value: { ok: boolean; reason: string; verifiedBy: string; queuedId: string }) => void
     const liveEntered = new Promise<void>(resolve => { entered = resolve })
     const heldLive = new Promise<{ ok: boolean; reason: string; verifiedBy: string; queuedId: string }>(resolve => { release = resolve })
+    const spawns: AttachedTurnRequest[] = []
     const { cancel, calls } = recordingCancel({ deskRunning: () => false })
     const base = await start(writeDeps({
       probes: heldIdle(),
       cancel,
-      deliverAttachedTurn: async () => ({ status: 'completed' }),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
       deliverCodexLiveTurn: async () => { entered(); return heldLive },
     }))
     const a = await codexAttached(base)
@@ -3441,15 +3443,55 @@ describe('6.51.0: Codex Continue into a thread the Codex app holds', () => {
       body: JSON.stringify(turnBody(a, 'ct-codex-cancel-race')),
     })
     await liveEntered
+    // The row the lens shows during the hop is a COS turn, and the tap is accepted.
     const attachability = await (await fetch(`${base}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
-    expect(attachability.cancel).toBeNull()
+    expect(attachability.cancel).toBe('cos_turn')
     const stopped = await postCancel(base, 'cc-codex-live-race', 'codex', CODEX_THREAD)
-    expect(stopped).toMatchObject({ status: 409, body: { cancelled: false, reason: 'cancel_failed' } })
-    expect(calls.noted).toEqual([])
+    expect(stopped.status).toBe(202)
+    expect(stopped.body).toMatchObject({ cancelled: true, target: 'cos_turn', state: 'stopping', queuedHoldMs: 120_000 })
+    // Held as what the run becomes if it lands: one only its app can stop.
+    expect(calls.noted).toEqual([['codex', CODEX_THREAD, NOW, 'unsupported']])
     release({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-race' })
     const response = await sent
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({ outcome: 'completed', via: 'live' })
+    expect(spawns).toHaveLength(0)
+    // The same tap now replays the FINAL answer: the turn is in the Codex app's queue.
+    const replay = await postCancel(base, 'cc-codex-live-race', 'codex', CODEX_THREAD)
+    expect(replay.status).toBe(409)
+    expect(replay.body).toEqual({ cancelled: false, reason: 'cancel_unsupported', provider: 'codex', reasonCopy: 'Runs in Codex on your Mac. Stop it there.', replayed: true })
+    expect(calls.handed).toEqual([])
+    expect(calls.ledger.map(r => r.outcome)).toEqual(['accepted', 'cancel_unsupported'])
+  })
+
+  it.each(['disabled', 'refused'])('a cancel latched during a Codex hand-off that queued nothing (%s) settles turn_cancelled and never spawns', async reason => {
+    {
+      let entered!: () => void
+      let release!: (value: { ok: boolean; reason: string }) => void
+      const liveEntered = new Promise<void>(resolve => { entered = resolve })
+      const heldLive = new Promise<{ ok: boolean; reason: string }>(resolve => { release = resolve })
+      const spawns: AttachedTurnRequest[] = []
+      const { cancel } = recordingCancel({ deskRunning: () => false })
+      const base = await start(writeDeps({
+        probes: heldIdle(),
+        cancel,
+        deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+        deliverCodexLiveTurn: async () => { entered(); return heldLive },
+      }))
+      const a = await codexAttached(base)
+      const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(turnBody(a, `ct-codex-none-${reason}`)),
+      })
+      await liveEntered
+      expect((await postCancel(base, `cc-codex-none-${reason}`, 'codex', CODEX_THREAD)).status, reason).toBe(202)
+      release({ ok: false, reason })
+      const response = await sent
+      expect(response.status, reason).toBe(409)
+      expect(await response.json(), reason).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'not_delivered' })
+      expect(spawns, reason).toHaveLength(0)
+      expect((await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences, reason).toEqual([])
+    }
   })
 
   it('a Codex thread nobody holds never asks the Codex hop, and spawns as before', async () => {
@@ -3616,7 +3658,13 @@ async function cancelWhenInFlight(base: string, clientCancelId = 'cc-inflight-01
 
 /** Cancel deps that record what they were asked; a desk run is running unless told otherwise. */
 function recordingCancel(over: Partial<CancelDeps> = {}) {
-  const calls = { halt: [] as Array<{ sessionId: string; at: number; clientCancelId: string }>, settle: [] as string[], noted: [] as Array<[string, string, number]>, ledger: [] as SessionCancelLedgerRow[] }
+  const calls = {
+    halt: [] as Array<{ sessionId: string; at: number; clientCancelId: string }>,
+    settle: [] as string[],
+    noted: [] as Array<[string, string, number, string]>,
+    ledger: [] as SessionCancelLedgerRow[],
+    handed: [] as Array<{ sessionId: string; at: number; clientCancelId: string; promptMarker: string; sentAt: number }>,
+  }
   const cancel: CancelDeps = {
     deskRunning: () => true,
     hooksEnabled: () => true,
@@ -3624,8 +3672,9 @@ function recordingCancel(over: Partial<CancelDeps> = {}) {
     writeHalt: (sessionId, marker) => { calls.halt.push({ sessionId, ...marker }); return true },
     settlePermissions: sessionId => { calls.settle.push(sessionId); return 1 },
     queuedWaiting: () => 2,
-    noteCancelled: (p, t, at) => { calls.noted.push([p, t, at]) },
+    noteCancelled: (p, t, at, target) => { calls.noted.push([p, t, at, target]) },
     ledger: row => { calls.ledger.push(row) },
+    haltHandedOffTurn: (sessionId, marker, turn) => { calls.handed.push({ sessionId, ...marker, ...turn }); return true },
     ...over,
   }
   return { cancel, calls }
@@ -3656,8 +3705,8 @@ describe('cancel a COS turn (6.53.0)', () => {
     // THE POINT OF B2: an aborted child exits on a signal, which used to be ambiguous and fence.
     const fences = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
     expect(fences.fences).toEqual([])
-    // Remembered for the queue hold, and ledgered.
-    expect(calls.noted).toEqual([['claude', SID, NOW]])
+    // Remembered for the queue hold, WITH its target (6.53.3, review A1), and ledgered.
+    expect(calls.noted).toEqual([['claude', SID, NOW, 'cos_turn']])
     expect(calls.ledger).toEqual([{ at: new Date(NOW).toISOString(), provider: 'claude', threadId: SID, target: 'cos_turn', outcome: 'accepted', clientCancelId: 'cc-inflight-01' }])
     // A COS cancel arms no marker and touches no permission prompt.
     expect(calls.halt).toEqual([])
@@ -3747,33 +3796,122 @@ describe('cancel a COS turn (6.53.0)', () => {
     expect(adapter).not.toHaveBeenCalled()
   })
 
-  it('refuses cancel while Claude live delivery crosses its irreversible hand-off', async () => {
-    let entered!: () => void
-    let release!: (value: { ok: boolean; reason: string; verifiedBy: string; pid: number }) => void
-    const liveEntered = new Promise<void>(resolve => { entered = resolve })
-    const heldLive = new Promise<{ ok: boolean; reason: string; verifiedBy: string; pid: number }>(resolve => { release = resolve })
-    const { cancel, calls } = recordingCancel({ deskRunning: () => true })
-    const base = await start(writeDeps({
-      cancel,
-      deliverAttachedTurn: async () => ({ status: 'completed' }),
-      deliverLiveTurn: async () => { entered(); return heldLive },
-    }))
-    const a = await attached(base)
-    const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-claude-cancel-race' }),
+  // 6.53.3 (review A6): until 6.53.2 a cancel during the live hand-off got 409 cancel_failed,
+  // the refusal was cached for the tap, and a hop that reached nothing spawned the turn anyway.
+  describe('a cancel during the live hand-off is latched (6.53.3)', () => {
+    type LiveResult = { ok: boolean; reason: string; verifiedBy?: string; pid?: number }
+    async function handOff(over: Partial<CancelDeps> = {}) {
+      let entered!: () => void
+      let release!: (value: LiveResult) => void
+      const liveEntered = new Promise<void>(resolve => { entered = resolve })
+      const heldLive = new Promise<LiveResult>(resolve => { release = resolve })
+      const spawns: AttachedTurnRequest[] = []
+      const { cancel, calls } = recordingCancel({ deskRunning: () => true, ...over })
+      const base = await start(writeDeps({
+        cancel,
+        deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+        deliverLiveTurn: async () => { entered(); return heldLive },
+      }))
+      const a = await attached(base)
+      const clientTurnId = `ct-handoff-${++handOffSeq}`
+      const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId }),
+      })
+      await liveEntered
+      return { base, a, sent, release, spawns, calls, clientTurnId }
+    }
+    let handOffSeq = 0
+
+    it('reads cos_turn during the hop, answers 202 stopping, and holds the queue as a desk run would', async () => {
+      const h = await handOff()
+      const attachability = await (await fetch(`${h.base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+      expect(attachability.cancel).toBe('cos_turn')
+      const stopped = await postCancel(h.base, 'cc-claude-live-race')
+      expect(stopped.status).toBe(202)
+      expect(stopped.body).toMatchObject({ cancelled: true, target: 'cos_turn', state: 'stopping', queuedHeld: 2, queuedHoldMs: 120_000 })
+      expect(typeof stopped.body.turnId).toBe('string')
+      // Noted for the queue as a desk run: only the desk's own end may discount its open turn.
+      expect(h.calls.noted).toEqual([['claude', SID, NOW, 'desk_run']])
+      // Nothing is armed before the hop says where the turn went.
+      expect(h.calls.handed).toEqual([])
+      h.release({ ok: false, reason: 'connect_failed' })
+      await h.sent
     })
-    await liveEntered
-    const attachability = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
-    expect(attachability.cancel).toBeNull()
-    const stopped = await postCancel(base, 'cc-claude-live-race')
-    expect(stopped).toMatchObject({ status: 409, body: { cancelled: false, reason: 'cancel_failed' } })
-    expect(calls.noted).toEqual([])
-    expect(calls.halt).toEqual([])
-    release({ ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 82615 })
-    const response = await sent
-    expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({ outcome: 'completed', via: 'live' })
+
+    it('delivered live: the turn says delivered, the desk marker is armed for it, and the tap replays desk_run', async () => {
+      const h = await handOff()
+      const before = Date.now()
+      expect((await postCancel(h.base, 'cc-claude-live-reached')).status).toBe(202)
+      // A second tap during the same hop latches onto the same turn.
+      expect((await postCancel(h.base, 'cc-claude-live-reached-2')).status).toBe(202)
+      h.release({ ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 82615 })
+      const response = await h.sent
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ outcome: 'completed', via: 'live', deliveryState: 'delivered' })
+      expect(h.spawns).toHaveLength(0)
+      expect(h.calls.handed).toHaveLength(1)
+      expect(h.calls.handed[0]).toMatchObject({ sessionId: SID, at: NOW, clientCancelId: 'cc-claude-live-reached', promptMarker: PROMPT })
+      expect(h.calls.handed[0]!.sentAt).toBeGreaterThanOrEqual(before - 5_000)
+      expect(h.calls.settle).toEqual([SID])
+      for (const id of ['cc-claude-live-reached', 'cc-claude-live-reached-2']) {
+        const replay = await postCancel(h.base, id)
+        expect(replay.status, id).toBe(202)
+        expect(replay.body, id).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', turnId: replay.body.turnId, queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1, replayed: true })
+      }
+    })
+
+    it.each(['connect_failed', 'no_record', 'protocol_unsupported', 'suspect_expired', 'not_claude'])(
+      'nothing reached (%s): turn_cancelled, NO spawn, no marker, and the tap replays its 202', async reason => {
+        const h = await handOff()
+        const first = await postCancel(h.base, `cc-none-${reason}`)
+        expect(first.status).toBe(202)
+        h.release({ ok: false, reason })
+        const response = await h.sent
+        expect(response.status).toBe(409)
+        expect(await response.json()).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'not_delivered' })
+        expect(h.spawns).toHaveLength(0)
+        expect(h.calls.handed).toEqual([])
+        expect(h.calls.halt).toEqual([])
+        const replay = await postCancel(h.base, `cc-none-${reason}`)
+        expect(replay).toMatchObject({ status: 202, body: { ...first.body, replayed: true } })
+        expect((await (await fetch(`${h.base}/api/agent-sessions/fences`)).json()).fences).toEqual([])
+      })
+
+    it.each(['unverified', 'write_failed'])('an unverified hop (%s) MAY have landed: the marker is armed and the turn settles turn_cancelled, never a retryable hold', async reason => {
+      {
+        const h = await handOff()
+        expect((await postCancel(h.base, `cc-maybe-${reason}`)).status).toBe(202)
+        h.release({ ok: false, reason })
+        const response = await h.sent
+        expect(response.status, reason).toBe(409)
+        expect(await response.json(), reason).toMatchObject({ outcome: 'refused', reason: 'turn_cancelled', retryable: false, deliveryState: 'unknown' })
+        expect(h.spawns, reason).toHaveLength(0)
+        expect(h.calls.handed, reason).toHaveLength(1)
+        expect((await postCancel(h.base, `cc-maybe-${reason}`)).body.target, reason).toBe('desk_run')
+      }
+    })
+
+    it('delivered, but the marker could not be written: the tap replays 500 cancel_failed, ledgered', async () => {
+      const h = await handOff({ haltHandedOffTurn: () => false })
+      expect((await postCancel(h.base, 'cc-armfail')).status).toBe(202)
+      h.release({ ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 1 })
+      expect((await h.sent).status).toBe(200)
+      const replay = await postCancel(h.base, 'cc-armfail')
+      expect(replay.status).toBe(500)
+      expect(replay.body).toEqual({ cancelled: false, reason: 'cancel_failed', reasonCopy: 'Could not cancel. Check the Mac.', replayed: true })
+      expect(h.calls.settle).toEqual([])
+      expect(h.calls.ledger.map(r => [r.target, r.outcome])).toEqual([['cos_turn', 'accepted'], ['desk_run', 'cancel_failed']])
+    })
+
+    it('delivered, but the hooks cannot stop a desk run: the tap replays their own reason', async () => {
+      const outdated = await handOff({ hooksReady: () => false })
+      expect((await postCancel(outdated.base, 'cc-outdated')).status).toBe(202)
+      outdated.release({ ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 1 })
+      await outdated.sent
+      expect((await postCancel(outdated.base, 'cc-outdated'))).toMatchObject({ status: 409, body: { cancelled: false, reason: 'hooks_outdated' } })
+      expect(outdated.calls.handed).toEqual([])
+    })
   })
 
   it('an adapter that claims a cancel nobody requested is not believed: ambiguous, fenced', async () => {
@@ -3888,7 +4026,7 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     expect(res.body).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1 })
     expect(calls.halt).toEqual([{ sessionId: SID, at: NOW, clientCancelId: 'cc-desk-0001' }])
     expect(calls.settle).toEqual([SID])
-    expect(calls.noted).toEqual([['claude', SID, NOW]])
+    expect(calls.noted).toEqual([['claude', SID, NOW, 'desk_run']])
     expect(calls.ledger).toEqual([{ at: new Date(NOW).toISOString(), provider: 'claude', threadId: SID, target: 'desk_run', outcome: 'accepted', clientCancelId: 'cc-desk-0001' }])
     expect(res.text).not.toContain('/')
   })

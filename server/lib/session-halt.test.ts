@@ -6,11 +6,16 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   HALT_MARKER_TTL_MS,
+  __resetHaltRearmsForTests,
   clearHaltMarker,
   clearHaltMarkerOnSessionEnd,
+  dropHaltRearm,
+  haltDeliveredTurn,
+  hasPendingHaltRearm,
+  rearmHaltOnPrompt,
   haltDir,
   haltMarkerPath,
   hasHaltMarker,
@@ -117,5 +122,60 @@ describe('session halt markers', () => {
     } finally {
       if (saved !== undefined) process.env.COS_SESSION_HOOKS_SPOOL_DIR = saved
     }
+  })
+})
+
+// 6.53.3 (review A6): a turn COS handed into the open session while a cancel was on its way.
+// The hook deletes the marker on UserPromptSubmit, and the delivered turn's own prompt can
+// come AFTER the write (a busy session takes it when its current run ends).
+describe('the marker for a handed-off turn survives that turn\'s own UserPromptSubmit (6.53.3)', () => {
+  afterEach(() => __resetHaltRearmsForTests())
+  const marker = { at: NOW, clientCancelId: 'cc-handoff-1' }
+  const PROMPT = 'keep going on the parser'
+
+  it('re-arms once, on the first prompt at or after the send that carries the delivered text', () => {
+    const dir = folder()
+    expect(haltDeliveredTurn(SID, marker, { promptMarker: PROMPT, after: NOW, rearm: true, now: NOW }, dir)).toBe(true)
+    expect(hasHaltMarker(SID, dir)).toBe(true)
+    // The hook's own UserPromptSubmit deletes it (modelled here), then the server re-arms.
+    clearHaltMarker(SID, dir)
+    // Someone else's prompt: never the one that re-arms (the person's own next desk prompt).
+    expect(rearmHaltOnPrompt(SID, NOW + 5, 'something else entirely', dir, NOW + 5)).toBe(false)
+    // A prompt from before the send.
+    expect(rearmHaltOnPrompt(SID, NOW - 1, PROMPT, dir, NOW + 6)).toBe(false)
+    expect(hasHaltMarker(SID, dir)).toBe(false)
+    expect(rearmHaltOnPrompt(SID.toUpperCase(), NOW + 10, `peer: ${PROMPT}`, dir, NOW + 10)).toBe(true)
+    expect(JSON.parse(readFileSync(join(dir, SID), 'utf-8'))).toEqual(marker)
+    // One shot.
+    clearHaltMarker(SID, dir)
+    expect(rearmHaltOnPrompt(SID, NOW + 20, PROMPT, dir, NOW + 20)).toBe(false)
+    expect(hasHaltMarker(SID, dir)).toBe(false)
+  })
+
+  it('no re-arm when the turn has visibly started, and none past the marker\'s hour or after SessionEnd', () => {
+    const dir = folder()
+    expect(haltDeliveredTurn(SID, marker, { promptMarker: PROMPT, after: NOW, rearm: false, now: NOW }, dir)).toBe(true)
+    expect(hasPendingHaltRearm(SID)).toBe(false)
+    clearHaltMarker(SID, dir)
+    expect(rearmHaltOnPrompt(SID, NOW + 10, PROMPT, dir, NOW + 10)).toBe(false)
+
+    haltDeliveredTurn(SID, marker, { promptMarker: PROMPT, after: NOW, rearm: true, now: NOW }, dir)
+    clearHaltMarker(SID, dir)
+    expect(rearmHaltOnPrompt(SID, NOW + HALT_MARKER_TTL_MS + 1, PROMPT, dir, NOW + HALT_MARKER_TTL_MS + 1)).toBe(false)
+    expect(hasPendingHaltRearm(SID)).toBe(false)
+
+    haltDeliveredTurn(SID, marker, { promptMarker: PROMPT, after: NOW, rearm: true, now: NOW }, dir)
+    clearHaltMarker(SID, dir)
+    dropHaltRearm(SID.toUpperCase())
+    expect(rearmHaltOnPrompt(SID, NOW + 10, PROMPT, dir, NOW + 10)).toBe(false)
+    expect(hasHaltMarker(SID, dir)).toBe(false)
+  })
+
+  it('a marker that cannot be written is reported, and nothing is left pending', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-halt-'))
+    const blocker = join(root, 'data')
+    writeFileSync(blocker, 'a file where the folder should be')
+    expect(haltDeliveredTurn(SID, marker, { promptMarker: PROMPT, after: NOW, rearm: true, now: NOW }, join(blocker, 'session-halt'))).toBe(false)
+    expect(hasPendingHaltRearm(SID)).toBe(false)
   })
 })

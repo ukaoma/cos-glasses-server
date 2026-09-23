@@ -104,30 +104,47 @@ export const CANCEL_QUEUE_HOLD_MS = 2 * 60_000
 export const CANCEL_MEMORY_MS = 60 * 60_000
 const MAX_REMEMBERED_CANCELS = 256
 
+/**
+ * One cancel on record for a thread (6.53.3): WHEN, and WHAT it was aimed at. The target
+ * decides what the cancel may conclude about a turn that still reads open (see
+ * `cancelVoidsOpenTurn`). Null is an older caller that did not say; it is read as a desk
+ * run, the reading that concludes the least.
+ */
+export interface ThreadCancel {
+  at: number
+  target: CancelTarget | null
+}
+
 // In memory on purpose: every reader is a hold of minutes, and a restart that forgets
 // one lets the queue drain by the gate's ordinary rules, which is the pre-6.53 behaviour.
-const cancelledAtByThread = new Map<string, number>()
+const cancelsByThread = new Map<string, ThreadCancel>()
 const cancelKey = (provider: string, threadId: string) => `${provider}:${threadId.toLowerCase()}`
 
-export function noteThreadCancelled(provider: string, threadId: string, at: number): void {
+export function noteThreadCancelled(provider: string, threadId: string, at: number, target: CancelTarget | null = null): void {
   if (!Number.isFinite(at)) return
   const key = cancelKey(provider, threadId)
-  cancelledAtByThread.delete(key)
-  cancelledAtByThread.set(key, at)
-  if (cancelledAtByThread.size > MAX_REMEMBERED_CANCELS) {
-    for (const [k, when] of cancelledAtByThread) {
-      if (at - when > CANCEL_MEMORY_MS) cancelledAtByThread.delete(k)
+  cancelsByThread.delete(key)
+  cancelsByThread.set(key, { at, target })
+  if (cancelsByThread.size > MAX_REMEMBERED_CANCELS) {
+    for (const [k, when] of cancelsByThread) {
+      if (at - when.at > CANCEL_MEMORY_MS) cancelsByThread.delete(k)
     }
-    while (cancelledAtByThread.size > MAX_REMEMBERED_CANCELS) {
-      const oldest = cancelledAtByThread.keys().next()
+    while (cancelsByThread.size > MAX_REMEMBERED_CANCELS) {
+      const oldest = cancelsByThread.keys().next()
       if (oldest.done) break
-      cancelledAtByThread.delete(oldest.value)
+      cancelsByThread.delete(oldest.value)
     }
   }
 }
 
 export function threadCancelledAt(provider: string, threadId: string): number | null {
-  return cancelledAtByThread.get(cancelKey(provider, threadId)) ?? null
+  return cancelsByThread.get(cancelKey(provider, threadId))?.at ?? null
+}
+
+/** 6.53.3: the cancel on record for the thread, with its target; null when none. A copy. */
+export function threadCancel(provider: string, threadId: string): ThreadCancel | null {
+  const found = cancelsByThread.get(cancelKey(provider, threadId))
+  return found ? { at: found.at, target: found.target } : null
 }
 
 /** Until when the thread's parked turns hold, or null when no cancel is on record. */
@@ -151,8 +168,49 @@ export function cancelEndsTurn(cancelledAt: number | null, lastRowAt: number | n
   return cancelledAt >= lastRowAt
 }
 
+/** What `cancelVoidsOpenTurn` weighs for one piece of open-turn evidence. */
+export interface OpenTurnEvidence {
+  /** The cancel on record for the thread (`threadCancel`), or null. */
+  cancel: ThreadCancel | null
+  /** When the evidence was last written: the hook's newest event, or the transcript mtime. */
+  lastActivityAt: number | null
+  /** When the turn the evidence belongs to STARTED (the hook's UserPromptSubmit); null when unknown. */
+  turnStartedAt: number | null
+  /**
+   * When the desk session's own engine said the run is over, as it stands NOW: the
+   * registry's `idle` flip (`statusUpdatedAt`), or the hooks' Stop / StopFailure /
+   * SessionEnd while no turn is open. Null when nothing says so.
+   */
+  deskEndedAt: number | null
+}
+
+/**
+ * 6.53.3 (review A1): may the cancel on record discount evidence that the thread's turn
+ * is still OPEN?
+ *
+ *   cos_turn   COS killed its own child. Nothing written since the cancel means the turn
+ *              is over: the dangling `tool_use` is the dead child's (6.53.0, `cancelEndsTurn`).
+ *   desk_run   A halt marker stops a desk run only at its NEXT tool call, so a run inside a
+ *              long tool writes nothing for minutes and is still running. Silence proves
+ *              nothing here. Only the engine's own end, stamped at or after the cancel and
+ *              after the turn began, closes it. Until 6.53.2 the cos_turn rule applied to
+ *              both, and a turn parked behind a cancelled desk run was delivered live into
+ *              the run the person had just stopped (and its UserPromptSubmit then deleted
+ *              the marker, so the cancel was lost).
+ *   null       An older caller that did not say: read as desk_run, which concludes least.
+ */
+export function cancelVoidsOpenTurn(evidence: OpenTurnEvidence): boolean {
+  const { cancel } = evidence
+  if (cancel === null || !Number.isFinite(cancel.at)) return false
+  if (cancel.target === 'cos_turn') return cancelEndsTurn(cancel.at, evidence.lastActivityAt)
+  const ended = evidence.deskEndedAt
+  if (ended === null || !Number.isFinite(ended) || ended < cancel.at) return false
+  const started = evidence.turnStartedAt
+  return started === null || !Number.isFinite(started) || ended >= started
+}
+
 export function __resetThreadCancelsForTests(): void {
-  cancelledAtByThread.clear()
+  cancelsByThread.clear()
 }
 
 // ---------------------------------------------------------------------------
