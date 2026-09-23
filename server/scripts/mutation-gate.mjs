@@ -29,7 +29,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -3709,8 +3710,8 @@ const CASES = [
   {
     name: "cx-6533-rearm-matches-delivered-text",
     file: "server/lib/session-halt.ts",
-    find: "  if (typeof prompt !== 'string' || !prompt.includes(pending.promptMarker)) return false\n",
-    replace: "  if (typeof prompt !== 'string') return false\n",
+    find: "  if (!isDeliveredPrompt(prompt, pending.words)) {\n",
+    replace: "  if (false) {\n",
     tests: ["server/lib/session-halt.test.ts"],
   },
   {
@@ -3723,8 +3724,8 @@ const CASES = [
   {
     name: "cx-6533-rearm-one-shot",
     file: "server/lib/session-halt.ts",
-    find: "  pendingRearms.delete(id)\n  return writeHaltMarker(id, pending.marker, dir)\n",
-    replace: "  return writeHaltMarker(id, pending.marker, dir)\n",
+    find: "  if (!Number.isFinite(promptAt) || promptAt < pending.after) return false\n  pendingRearms.delete(id)\n",
+    replace: "  if (!Number.isFinite(promptAt) || promptAt < pending.after) return false\n",
     tests: ["server/lib/session-halt.test.ts"],
   },
   {
@@ -3916,19 +3917,160 @@ const CASES = [
     replace: "  const advice = null\n",
     tests: ["server/lib/claude-hooks-installer.test.ts"],
   },
+  // ---- 6.53.3 /qa round 1 ------------------------------------------------------------
+  {
+    name: "qa-6533-rearm-unwraps-peer-frame",
+    file: "server/lib/session-halt.ts",
+    find: "  return normalizePromptWords(unwrapPeerMessage(prompt) ?? prompt) === want\n",
+    replace: "  return normalizePromptWords(prompt) === want\n",
+    tests: ["server/lib/session-halt.test.ts"],
+  },
+  {
+    name: "qa-6533-rearm-normalises-whitespace",
+    file: "server/lib/session-halt.ts",
+    find: "  return typeof text === 'string' ? text.replace(/\\s+/g, ' ').trim() : ''\n",
+    replace: "  return typeof text === 'string' ? text : ''\n",
+    tests: ["server/lib/session-halt.test.ts"],
+  },
+  {
+    name: "qa-6533-rearm-exact-not-contains",
+    file: "server/lib/session-halt.ts",
+    find: "  return normalizePromptWords(unwrapPeerMessage(prompt) ?? prompt) === want\n",
+    replace: "  return normalizePromptWords(unwrapPeerMessage(prompt) ?? prompt).includes(want)\n",
+    tests: ["server/lib/session-halt.test.ts"],
+  },
+  {
+    name: "qa-6533-rearm-drop-logged",
+    file: "server/lib/session-halt.ts",
+    find: "    console.warn(`[session-halt] re-arm dropped:",
+    replace: "    void (`[session-halt] re-arm dropped:",
+    tests: ["server/lib/session-halt.test.ts"],
+  },
+  {
+    name: "qa-6533-rearm-window-honoured",
+    file: "server/lib/session-halt.ts",
+    find: "    ? Math.min(turn.windowMs, HALT_MARKER_TTL_MS)\n",
+    replace: "    ? HALT_MARKER_TTL_MS\n",
+    tests: ["server/lib/session-halt.test.ts"],
+  },
+  {
+    name: "qa-6533-rearm-unverified-short-window",
+    file: "server/lib/session-hooks-runtime.ts",
+    find: "    windowMs: turn.unverified === true ? HALT_REARM_UNVERIFIED_MS : HALT_MARKER_TTL_MS,\n",
+    replace: "    windowMs: HALT_MARKER_TTL_MS,\n",
+    tests: ["server/lib/session-hooks-runtime.test.ts"],
+  },
+  {
+    name: "qa-6533-handoff-maybe-is-unverified",
+    file: "server/routes/agent-session-bindings.ts",
+    find: "          unverified: reached === 'maybe',\n",
+    replace: "          unverified: false,\n",
+    tests: ["server/routes/agent-session-bindings.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-failure-is-not-gone",
+    file: "server/lib/fence-liveness.ts",
+    find: "      if (psSaysNoSuchProcess(error)) return null\n",
+    replace: "      return null\n",
+    tests: ["server/lib/fence-liveness.test.ts", "server/routes/agent-session-bindings.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-gone-needs-status-1",
+    file: "server/lib/fence-liveness.ts",
+    find: "  return e.status === 1\n",
+    replace: "  return (e.status === 1 || e.status === null)\n",
+    tests: ["server/lib/fence-liveness.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-gone-needs-not-killed",
+    file: "server/lib/fence-liveness.ts",
+    find: "    && e.killed !== true\n",
+    replace: "\n",
+    tests: ["server/lib/fence-liveness.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-gone-needs-no-code",
+    file: "server/lib/fence-liveness.ts",
+    find: "    && (e.code === null || e.code === undefined)\n",
+    replace: "\n",
+    tests: ["server/lib/fence-liveness.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-gone-needs-empty-stdout",
+    file: "server/lib/fence-liveness.ts",
+    find: "    && emptyOutput(e.stdout)\n",
+    replace: "\n",
+    tests: ["server/lib/fence-liveness.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-gone-needs-empty-stderr",
+    file: "server/lib/fence-liveness.ts",
+    find: "    && emptyOutput(e.stderr)\n",
+    replace: "\n",
+    tests: ["server/lib/fence-liveness.test.ts"],
+  },
+  {
+    name: "qa-6533-ps-empty-answer-unverifiable",
+    file: "server/lib/fence-liveness.ts",
+    find: "    if (!text) throw new Error('empty process start from ps')\n",
+    replace: "    if (!text) return null\n",
+    tests: ["server/lib/fence-liveness.test.ts"],
+  },
+  {
+    name: "qa-6533-hook-other-events-drain-past-cap",
+    file: "bin/hooks/cos-session-hook",
+    find: "  { head -c 1048576 > \"$T.in\"; cat >/dev/null; }\n",
+    replace: "  head -c 1048576 > \"$T.in\"\n",
+    tests: ["server/lib/cos-session-hook.halt.test.ts"],
+  },
+  {
+    name: "qa-6533-hook-other-events-exit-trap",
+    file: "bin/hooks/cos-session-hook",
+    find: "[ -n \"$FRONT\" ] || trap 'cat >/dev/null 2>&1' EXIT\n",
+    replace: "\n",
+    tests: ["server/lib/cos-session-hook.halt.test.ts"],
+  },
 ]
 
 function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
+/**
+ * Run the suites and read vitest's JSON report. 6.53.3 /qa (Ghost 7): a kill used to be ANY
+ * non-zero vitest exit, so a mutant that broke a file's import, or a run that crashed,
+ * read as "killed" without one test having watched the behaviour. Now:
+ *   passed   exit 0, the report read, at least one test ran, none failed
+ *   killed   at least one TEST failed (named in the log)
+ *   errored  anything else: non-zero exit with no failing test (a suite that could not
+ *            load, a crash, no report). It fails the gate like a survivor.
+ */
 function runTests(files) {
-  const result = spawnSync(
-    'npx',
-    ['vitest', 'run', '--maxWorkers=1', '--testTimeout=60000', ...files],
-    { cwd: ROOT, encoding: 'utf8', env: { ...process.env } },
-  )
-  return result.status === 0
+  const dir = mkdtempSync(join(tmpdir(), 'cos-mutation-gate-'))
+  const out = join(dir, 'report.json')
+  try {
+    const result = spawnSync(
+      'npx',
+      ['vitest', 'run', '--maxWorkers=1', '--testTimeout=60000', '--reporter=json', `--outputFile=${out}`, ...files],
+      { cwd: ROOT, encoding: 'utf8', env: { ...process.env } },
+    )
+    let report = null
+    try { report = JSON.parse(readFileSync(out, 'utf8')) } catch { report = null }
+    const failedTests = []
+    let suiteErrors = 0
+    for (const suite of report?.testResults ?? []) {
+      const failed = (suite.assertionResults ?? []).filter(a => a.status === 'failed')
+      for (const a of failed) failedTests.push(a.fullName ?? a.title ?? '(unnamed test)')
+      if (suite.status === 'failed' && failed.length === 0) suiteErrors += 1
+    }
+    const total = Number.isInteger(report?.numTotalTests) ? report.numTotalTests : 0
+    let verdict = 'errored'
+    if (failedTests.length > 0) verdict = 'killed'
+    else if (result.status === 0 && report !== null && total > 0 && suiteErrors === 0) verdict = 'passed'
+    return { verdict, failedTests, total, suiteErrors, exit: result.status, signal: result.signal, reportRead: report !== null }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 const args = process.argv.slice(2)
@@ -3954,9 +4096,11 @@ if (selected.length === 0) {
  */
 const baselineSuites = [...new Set(selected.flatMap(testCase => testCase.tests))].sort()
 console.log(`baseline: ${baselineSuites.length} suite(s), unmutated`)
-if (!runTests(baselineSuites)) {
+const baseline = runTests(baselineSuites)
+if (baseline.verdict !== 'passed') {
   console.error('BASELINE NOT GREEN - refusing to run. Every mutant would read as KILLED.')
   console.error(`Suites: ${baselineSuites.join(' ')}`)
+  console.error(`verdict=${baseline.verdict} exit=${baseline.exit} tests=${baseline.total} suiteErrors=${baseline.suiteErrors} failed=${baseline.failedTests.slice(0, 5).join(' | ')}`)
   process.exit(2)
 }
 console.log('baseline green')
@@ -3985,6 +4129,7 @@ process.on('uncaughtException', error => {
 
 const killed = []
 const survived = []
+const errored = []
 const refused = []
 
 for (const testCase of selected) {
@@ -4010,7 +4155,7 @@ for (const testCase of selected) {
     refused.push(`${testCase.name}: the file on disk did not change`)
     continue
   }
-  const passed = runTests(testCase.tests)
+  const run = runTests(testCase.tests)
   writeFileSync(path, original)
   open.delete(path)
   const after = sha256(readFileSync(path, 'utf8'))
@@ -4018,12 +4163,15 @@ for (const testCase of selected) {
     console.error(`FATAL: ${testCase.file} was not restored byte for byte after ${testCase.name}`)
     process.exit(3)
   }
-  if (passed) {
+  if (run.verdict === 'passed') {
     survived.push(testCase.name)
     console.log(`SURVIVED  ${testCase.name}  (${testCase.file})`)
-  } else {
+  } else if (run.verdict === 'killed') {
     killed.push(testCase.name)
-    console.log(`killed    ${testCase.name}`)
+    console.log(`killed    ${testCase.name}  (${run.failedTests.length} failing: ${run.failedTests[0]})`)
+  } else {
+    errored.push(testCase.name)
+    console.log(`ERRORED   ${testCase.name}  (exit=${run.exit} signal=${run.signal ?? 'none'} tests=${run.total} suiteErrors=${run.suiteErrors} report=${run.reportRead}; no test failed)`)
   }
 }
 
@@ -4037,4 +4185,8 @@ if (survived.length > 0) {
   console.log('SURVIVED (that branch is unreached by its tests):')
   for (const name of survived) console.log(`  ${name}`)
 }
-process.exit(survived.length === 0 && refused.length === 0 ? 0 : 1)
+if (errored.length > 0) {
+  console.log('ERRORED (non-zero exit with no failing test; not a kill):')
+  for (const name of errored) console.log(`  ${name}`)
+}
+process.exit(survived.length === 0 && errored.length === 0 && refused.length === 0 ? 0 : 1)
