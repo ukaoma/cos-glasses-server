@@ -265,6 +265,41 @@ Allow once or deny only: no permission rule is ever written. Rows carry
 row reads `waiting_kind: question` whatever the switch says; `/api/health` reports
 `permissionBroker` (counters and timestamps, no ids or text).
 
+## Cancel a run from the glasses (6.53.x)
+
+The glasses' Cancel run row stops what a session is doing, the way the desk's own stop
+button does. It needs **server 6.53.0 or later and COS Glasses 6.9.529 or later**;
+**6.53.3 is recommended** (it owns the whole process tree, holds a desk cancel, and fixes
+the false fences 6.53.1 left).
+
+- **A turn COS started** (`cos_turn`) is stopped by the server: its whole process tree is
+  signalled and the turn settles `turn_cancelled`.
+- **A run at the desk** (`desk_run`: a Desktop tab or a terminal `claude`) is stopped by the
+  session hook at its next tool call, so a reply that is pure text finishes first. This
+  needs the hooks installed, and after every server update that changes the hook script
+  (6.53.0, 6.53.3) you must **run Install hooks once** (COS Control, or
+  `npx --yes @gotcos/glasses-server@latest --hooks install`). Until then
+  `--hooks status` reads `script_outdated` and its `advice` line says so; a script from
+  6.53.0 to 6.53.2 can still stop desk runs meanwhile, anything older answers
+  `hooks_outdated`. The PreToolUse hook runs before every tool call on the Mac and never
+  contacts the server; it writes a spool file only for AskUserQuestion, ExitPlanMode and
+  prompts, and always drains its input.
+- **Codex and Cursor** runs at the desk answer `cancel_unsupported` ("Stop it there").
+- **Fences a cancel left release themselves** once every process the cancelled turn
+  started is confirmed gone: only `ps` answering "no such process" counts, and a `ps` that
+  times out, cannot start or is missing keeps the fence. Any other fence is still released
+  by hand (`GET /api/agent-sessions/fences`, then `POST .../fences/release` with
+  `confirm: true`).
+- **A cancel that lands while COS is handing a turn to the open session** writes the desk
+  marker, and re-arms it once if the next prompt that session starts is exactly the
+  delivered one. If your own prompt reaches the session first, the re-arm is dropped (and
+  logged) rather than stop your run.
+
+Meetings: a closed meeting's record ages out after **4 hours**, after which its status
+reads `missing` and the phone stops asking to save it. Saving a known meeting that has no
+transcript answers **404 `nothing_to_save`** (with its state); only an unknown id answers
+`session_not_found`.
+
 ## Configuration
 
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
@@ -626,7 +661,8 @@ BIND_HOST=0.0.0.0 npm run start:server
   timers are frozen), `desk_active` (the Mac saw input), `approvals_off`
   (`COS_PERMISSION_BROKER=questions`), `broker_off`, `cursor`, `unsupported_tool`
   (ExitPlanMode is never held). `lastQuestionsPollAt` says when a client last counted.
-  `--hooks status` must read `installed`. To turn it off with no reinstall, set
+  `--hooks status` must read `installed` (right after updating to 6.53.3 it reads
+  `script_outdated` until Install hooks is run once; its `advice` line says so). To turn it off with no reinstall, set
   `COS_PERMISSION_BROKER=0` in `~/.cos-glasses/.env` and restart. For the Messages
   trail, `/api/health` `messages_trail.readerErrors` counts lines a reader could not map.
 - *Offline meeting recovery unavailable?* — build 209+ requires server 6.11.0+.

@@ -144,6 +144,8 @@ describe('the production ps probe: only a definitive "no such process" is gone',
     ['exit 1 with something on stdout only', nodeError('Command failed', { status: 1, signal: null, stdout: '  PID STARTED\n', stderr: '' })],
     ['exit 1 with no captured output at all', nodeError('Command failed', { status: 1, signal: null })],
     ['exit 2', nodeError('Command failed', { status: 2, signal: null, stdout: '', stderr: '' })],
+    // Not a shape Node produces for ps, but "no exit status" is still not "exit 1".
+    ['no exit status and nothing else', nodeError('Command failed', { status: null, signal: null, stdout: '', stderr: '' })],
     ['something that is not an exec error', new TypeError('exec is not a function')],
   ]
   const throwing = (error: unknown): PsExec => () => { throw error }
