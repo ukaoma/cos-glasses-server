@@ -4,8 +4,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
-import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
-import { HALT_MARKER_TTL_MS, hasHaltMarker, writeHaltMarker } from './session-halt.js'
+import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, deskTurnEndedAt, haltHandedOffTurn, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
+import { HALT_MARKER_TTL_MS, __resetHaltRearmsForTests, clearHaltMarker, hasHaltMarker, hasPendingHaltRearm, writeHaltMarker } from './session-halt.js'
+import { __resetThreadCancelsForTests, noteThreadCancelled } from './session-cancel.js'
 import { OPEN_TURN_CEILING_MS } from './session-state-derive.js'
 import type { HookEnvelope } from './session-hook-events.js'
 import { dataPath } from './data-dir.js'
@@ -264,5 +265,132 @@ describe('halt markers die with their session (6.53.0)', () => {
     runtime.stop()
     sessionSignalStore.apply(env('SessionEnd', now + 10), false)
     expect(hasHaltMarker(SID)).toBe(true)
+  })
+})
+
+// 6.53.3 (review A5): after a killed `claude -p` COS turn the hooks still show its turn open
+// (a SIGKILLed child fires no Stop or SessionEnd), and until 6.53.2 the lens offered a
+// phantom "Cancel run" (desk_run) on a thread where nothing runs.
+describe('claudeDeskRunning weighs the cancel on record (6.53.3)', () => {
+  const SID = 'a1b2c3d4-0000-4000-8000-0000000cafe7'
+  const env = (event: HookEnvelope['event'], ts: number, payload: Record<string, unknown> = {}): HookEnvelope =>
+    ({ ts, ppid: 1, event, sessionId: SID, payload: { session_id: SID, ...payload } })
+  const record = (dir: string, pid: number, status: string, statusUpdatedAt: number) =>
+    writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: SID, entrypoint: 'claude-desktop', status, statusUpdatedAt }))
+  afterEach(() => __resetThreadCancelsForTests())
+
+  it('a cos_turn cancel with nothing since: the open turn is the dead child\'s, not a desk run', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const t0 = 1_000_000
+    sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
+    sessionSignalStore.apply(env('PreToolUse', t0 + 5, { tool_name: 'Bash', tool_input: { command: 'make' } }), false)
+    expect(claudeDeskRunning(SID, t0 + 100, dir)).toBe(true)
+    noteThreadCancelled('claude', SID, t0 + 50, 'cos_turn')
+    expect(claudeDeskRunning(SID, t0 + 100, dir)).toBe(false)
+    // Anything the session does after the cancel is live again.
+    sessionSignalStore.apply(env('PostToolUse', t0 + 60, { tool_name: 'Bash', tool_input: { command: 'make' } }), false)
+    expect(claudeDeskRunning(SID, t0 + 100, dir)).toBe(true)
+  })
+
+  it('a desk_run cancel: still running until the desk itself says the run ended after the cancel', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const t0 = 2_000_000
+    sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
+    sessionSignalStore.apply(env('PreToolUse', t0 + 5, { tool_name: 'Bash', tool_input: { command: 'make' } }), false)
+    noteThreadCancelled('claude', SID, t0 + 50, 'desk_run')
+    // Inside a long tool: the run the person cancelled is still going (tap again = rearm).
+    expect(claudeDeskRunning(SID, t0 + 100, dir)).toBe(true)
+    expect(deskTurnEndedAt(SID, dir)).toBeNull()
+    // An idle flip from before the cancel is the previous turn's.
+    record(dir, 2_147_483_001, 'idle', t0 + 40)
+    expect(claudeDeskRunning(SID, t0 + 100, dir)).toBe(true)
+    // The halt took: the registry flipped idle after the cancel.
+    record(dir, 2_147_483_001, 'idle', t0 + 70)
+    expect(deskTurnEndedAt(SID, dir)).toBe(t0 + 70)
+    expect(claudeDeskRunning(SID, t0 + 100, dir)).toBe(false)
+  })
+
+  it('deskTurnEndedAt reads the hooks\' own end only while no turn is open', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const t0 = 3_000_000
+    sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
+    expect(deskTurnEndedAt(SID, dir)).toBeNull()
+    sessionSignalStore.apply(env('Stop', t0 + 10), false)
+    expect(deskTurnEndedAt(SID, dir)).toBe(t0 + 10)
+    sessionSignalStore.apply(env('UserPromptSubmit', t0 + 20, { prompt: 'again' }), false)
+    expect(deskTurnEndedAt(SID, dir)).toBeNull()
+    sessionSignalStore.apply(env('StopFailure', t0 + 30, { error_type: 'rate_limit' }), false)
+    expect(deskTurnEndedAt(SID, dir)).toBe(t0 + 30)
+    sessionSignalStore.apply(env('SessionEnd', t0 + 40, { reason: 'other' }), false)
+    expect(deskTurnEndedAt(SID, dir)).toBe(t0 + 40)
+  })
+})
+
+// 6.53.3 (review A6): the runtime re-arms a handed-off turn's marker through that turn's own
+// UserPromptSubmit, which the hook script answers by deleting the marker.
+describe('a handed-off turn\'s halt marker is re-armed through its own prompt (6.53.3)', () => {
+  const SID = 'a1b2c3d4-0000-4000-8000-0000000cafe8'
+  const PROMPT = 'keep going on the parser'
+  const env = (event: HookEnvelope['event'], ts: number, payload: Record<string, unknown> = {}): HookEnvelope =>
+    ({ ts, ppid: 1, event, sessionId: SID, payload: { session_id: SID, ...payload } })
+  afterEach(() => __resetHaltRearmsForTests())
+
+  function boot() {
+    const home = mkdtempSync(join(tmpdir(), 'cos-runtime-'))
+    process.env.COS_GLASSES_HOME = home
+    process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
+    process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    return startSessionHooksRuntime({ port: 3141 })
+  }
+
+  it('a busy session: armed now, deleted by the delivered prompt, written back by the server', () => {
+    const runtime = boot()
+    try {
+      const sentAt = Date.now()
+      // The desk was mid-turn when COS handed the prompt over (its turn began earlier).
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt - 60_000, { prompt: 'the desk\'s own work' }), false)
+      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-1' }, { promptMarker: PROMPT, sentAt })).toBe(true)
+      expect(hasHaltMarker(SID)).toBe(true)
+      expect(hasPendingHaltRearm(SID)).toBe(true)
+      // The marker stops the desk run; a COS child's prompt on the id never re-arms.
+      clearHaltMarker(SID)
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 10, { prompt: PROMPT }), true)
+      expect(hasHaltMarker(SID)).toBe(false)
+      // The delivered turn is dequeued: the hook deleted the marker, the server puts it back.
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 20, { prompt: PROMPT }), false)
+      expect(hasHaltMarker(SID)).toBe(true)
+      expect(hasPendingHaltRearm(SID)).toBe(false)
+    } finally {
+      runtime.stop()
+    }
+  })
+
+  it('an idle session that already took the turn: armed once, never re-armed by the next desk prompt', () => {
+    const runtime = boot()
+    try {
+      const sentAt = Date.now()
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 5, { prompt: PROMPT }), false)
+      expect(haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-2' }, { promptMarker: PROMPT, sentAt })).toBe(true)
+      expect(hasPendingHaltRearm(SID)).toBe(false)
+      clearHaltMarker(SID)
+      sessionSignalStore.apply(env('UserPromptSubmit', sentAt + 50, { prompt: PROMPT }), false)
+      expect(hasHaltMarker(SID)).toBe(false)
+    } finally {
+      runtime.stop()
+    }
+  })
+
+  it('SessionEnd drops a pending re-arm', () => {
+    const runtime = boot()
+    try {
+      const sentAt = Date.now()
+      haltHandedOffTurn(SID, { at: sentAt, clientCancelId: 'cc-rearm-3' }, { promptMarker: PROMPT, sentAt })
+      expect(hasPendingHaltRearm(SID)).toBe(true)
+      sessionSignalStore.apply(env('SessionEnd', sentAt + 5, { reason: 'other' }), false)
+      expect(hasPendingHaltRearm(SID)).toBe(false)
+    } finally {
+      runtime.stop()
+    }
   })
 })

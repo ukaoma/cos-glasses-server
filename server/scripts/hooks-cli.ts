@@ -8,7 +8,7 @@
 // Prints one JSON document. Exit 0 on success, 2 on a refusal (unparseable or symlinked
 // settings, a missing packaged script), 64 on a bad argument. Never prints the token.
 
-import { hookStatus, installClaudeHooks, uninstallClaudeHooks } from '../lib/claude-hooks-installer.js'
+import { hookStatus, hookStatusAdvice, installClaudeHooks, uninstallClaudeHooks } from '../lib/claude-hooks-installer.js'
 import { sessionHooksEnabled } from '../lib/session-hooks-runtime.js'
 
 const args = process.argv.slice(2)
@@ -30,7 +30,11 @@ const serverApplies = sessionHooksEnabled()
 const flagsNote = serverApplies ? undefined : 'Rows change only when the server runs with COS_CLAUDE_SESSIONS_ENABLED=1 (or COS_SESSION_HOOKS=1).'
 
 if (action === 'status') {
-  print({ action, serverApplies, ...(flagsNote ? { note: flagsNote } : {}), ...hookStatus() })
+  const status = hookStatus()
+  // 6.53.3: say in words what the state means and what fixes it (`script_outdated` after an
+  // update that changed the script, until Install hooks).
+  const advice = hookStatusAdvice(status)
+  print({ action, serverApplies, ...(flagsNote ? { note: flagsNote } : {}), ...(advice ? { advice } : {}), ...status })
   process.exit(0)
 }
 if (action === 'install') {

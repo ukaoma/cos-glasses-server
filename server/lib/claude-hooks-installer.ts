@@ -284,6 +284,58 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   return { state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, tokenPresent }
 }
 
+/**
+ * 6.53.3: sha256 of every EARLIER script that already carries the halt check: the one script
+ * 6.53.0, 6.53.1 and 6.53.2 all shipped. 6.53.3 rewrote the script for speed (review A,
+ * option a), so an install that has not run Install hooks since reads `script_outdated`
+ * and Control shows its banner. Its script still stops a desk run exactly as before,
+ * though, so a desk cancel is not refused `hooks_outdated` in the meantime
+ * (`hookHaltReady`). A script older than 6.53.0 has no halt check and never qualifies.
+ */
+export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
+  '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7',
+]
+
+/**
+ * 6.53.3: can the hooks on this Mac stop a desk Claude run now? `installed`, or the only
+ * difference is a halt-capable earlier script (above). What the cancel route's
+ * `hooksReady` and `/api/health` `features.sessionCancel.deskClaude` read.
+ */
+export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha'>): boolean {
+  if (status.installed === true) return true
+  return status.state === 'script_outdated' && typeof status.scriptSha === 'string'
+    && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)
+}
+
+const INSTALL_COMMAND = 'npx --yes @gotcos/glasses-server@latest --hooks install'
+
+/**
+ * 6.53.3: one plain sentence for `--hooks status` saying what the state means and what fixes
+ * it. Null when installed. Carries no path: the status JSON beside it already names them.
+ */
+export function hookStatusAdvice(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha' | 'packageScriptSha'>): string | null {
+  const short = (sha: string | null): string => (sha ? sha.slice(0, 12) : 'none')
+  switch (status.state) {
+    case 'installed':
+      return null
+    case 'script_outdated':
+      return `The installed hook script is older than this package's (installed ${short(status.scriptSha)}, package ${short(status.packageScriptSha)}). `
+        + 'Every Claude session keeps running the old script until the hooks are reinstalled: '
+        + `run \`${INSTALL_COMMAND}\`, or press Install hooks in COS Control. `
+        + (hookHaltReady(status)
+          ? 'Cancel from the lens still stops desk runs with the installed script meanwhile.'
+          : 'Until then a desk run cannot be cancelled from the lens.')
+    case 'drift':
+    case 'missing':
+      return `The hook subscriptions in the Claude settings file are ${status.state === 'missing' ? 'not installed' : 'not the ones this package installs'}. `
+        + `Run \`${INSTALL_COMMAND}\`, or press Install hooks in COS Control.`
+    case 'disabled_by_settings':
+      return 'The Claude settings file sets disableAllHooks: no hook runs, installed or not.'
+    default:
+      return 'The Claude settings file could not be read as it is; nothing was changed. Fix or restore the file, then install again.'
+  }
+}
+
 export interface InstallOptions {
   settingsPath?: string
   scriptPath?: string

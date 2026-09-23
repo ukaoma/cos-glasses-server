@@ -5,12 +5,12 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import express from 'express'
 import { parseHookEnvelope } from './session-hook-events.js'
 import { requireApiToken } from './api-auth.js'
@@ -19,6 +19,7 @@ import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSe
 import { createClientInstanceRouter } from '../routes/client-instance.js'
 import { __resetClientLivenessForTests, lastQuestionsPollAt } from './client-liveness.js'
 import { ASK_INPUT, Q1, Q2 } from './__fixtures__/permission-broker.js'
+import { HALT_CAPABLE_PRIOR_SCRIPT_SHAS } from './claude-hooks-installer.js'
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hooks', 'cos-session-hook')
 /**
@@ -33,11 +34,27 @@ const SCRIPT_6_51_0_SHA256 = '0a55756de9c88d7dc7a37fadb1ab627d55bb37ba2796517879
  * purpose, with its reinstall plan (Install hooks in COS Control); see the pin test below.
  */
 const SCRIPT_6_53_0_SHA256 = '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7'
+/**
+ * sha256 of the script 6.53.3 ships: the single-entry rewrite of the PreToolUse and
+ * UserPromptSubmit front (review A, option a), 29 ms to 17 ms per tool call, stdin always
+ * drained. Changed on purpose, with its reinstall plan (Install hooks in COS Control); an
+ * install still on the 6.53.0 script reads `script_outdated` but can stop desk runs
+ * meanwhile (`HALT_CAPABLE_PRIOR_SCRIPT_SHAS`).
+ */
+const SCRIPT_6_53_3_SHA256 = 'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
+// 6.53.3 (review A12): every temp root this file makes is removed when it ends (the B8 case
+// alone writes 2,000 files per run, and nothing was ever cleaned up).
+const roots: string[] = []
+afterAll(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
 function home(): { home: string; spool: string } {
   const root = mkdtempSync(join(tmpdir(), 'cos-hook-script-'))
+  roots.push(root)
   // The production home has a dot component; keep that property (gotcha: a fixture that
   // cannot reproduce the production value is not coverage).
   const h = join(root, '.cos-glasses')
@@ -452,14 +469,17 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       }
     })
 
-    it('the shipped script is the 6.53.0 script, byte for byte (a change is a reinstall on every Mac)', () => {
+    it('the shipped script is the 6.53.3 script, byte for byte (a change is a reinstall on every Mac)', () => {
       const bytes = readFileSync(SCRIPT)
       // 6.53.0 changed the script DELIBERATELY (the halt check), and with it the PreToolUse
-      // subscription. The rollout is the plan's: Update Server, then Install hooks in COS
-      // Control. Until that reinstall the stable copy is the 6.51.0 script, `hookStatus()`
-      // reads `script_outdated` / `drift`, and a desk cancel answers `hooks_outdated`.
-      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_53_0_SHA256)
+      // subscription; 6.53.3 changed it again (the single-entry rewrite), subscription as it
+      // was. The rollout is the plan's: Update Server, then Install hooks in COS Control.
+      // Until that reinstall `hookStatus()` reads `script_outdated`; a 6.51 script is not
+      // halt-capable (a desk cancel answers `hooks_outdated`), the 6.53.0 script is.
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_53_3_SHA256)
+      expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_0_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256])
       // And it still posts to exactly the route this server serves.
       expect(bytes.toString('utf8')).toContain(`"http://127.0.0.1:$PORT${PERMISSION_BROKER_HOOK_PATH}"`)
     })

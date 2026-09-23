@@ -28,6 +28,10 @@
 //   - a sweep deletes anything older than HALT_MARKER_TTL_MS.
 // It is NOT deleted on Stop: a background subagent reports its parent's session id (C8),
 // and it is exactly the work a cancel must also stop.
+//
+// 6.53.3: ONE exception to "a new prompt clears it": a turn COS itself handed into the open
+// session while a cancel was on its way (`haltDeliveredTurn`). That turn's own prompt must
+// not be the one that frees it, so the server writes the marker back, once, when it sees it.
 
 import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
@@ -103,6 +107,96 @@ export function clearHaltMarkerOnSessionEnd(sessionId: string, endedAt: number, 
   } catch {
     return false
   }
+}
+
+// ---------------------------------------------------------------------------
+// 6.53.3 (review A6): a cancel that landed while COS was HANDING a turn to the open session
+// ---------------------------------------------------------------------------
+//
+// The live hop writes the turn into the running session's inbox, where it waits its turn
+// (a busy session) or starts at once (an idle one). Once it has landed, the only stop is
+// this marker. But the hook deletes the marker on UserPromptSubmit, and the delivered
+// turn's OWN UserPromptSubmit may come after the marker is written: a busy session takes
+// the message only when its current run ends (which the marker itself brings about). A
+// plain write would then be deleted by the very turn it was written to stop.
+//
+// So the marker is written, and when the delivered turn has not visibly started yet, it is
+// written AGAIN, once, on the first UserPromptSubmit for that session whose prompt carries
+// the delivered text. Matching the text keeps the person's own next desk prompt from ever
+// being the one that re-arms it; the window is the marker's own hour; SessionEnd drops it.
+// In memory on purpose: a restart forgets it, like every other hold here.
+
+interface PendingRearm {
+  marker: HaltMarker
+  /** Text the delivered prompt carries (the peer-inbox acceptance marker). */
+  promptMarker: string
+  /** Prompts submitted before this are someone else's. */
+  after: number
+  until: number
+}
+
+const pendingRearms = new Map<string, PendingRearm>()
+const MAX_PENDING_REARMS = 64
+
+/**
+ * Write the marker for a turn COS just put into the open session. `rearm` is false when
+ * the turn has visibly started already (its UserPromptSubmit ran before this write, so
+ * nothing will delete the marker but the next prompt). False when the write failed; the
+ * caller must then not report the cancel as armed.
+ */
+export function haltDeliveredTurn(
+  sessionId: string,
+  marker: HaltMarker,
+  turn: { promptMarker: string; after: number; rearm: boolean; now?: number },
+  dir = haltDir(),
+): boolean {
+  if (!writeHaltMarker(sessionId, marker, dir)) return false
+  const id = sessionId.toLowerCase()
+  if (!turn.rearm || typeof turn.promptMarker !== 'string' || turn.promptMarker.trim().length === 0) {
+    pendingRearms.delete(id)
+    return true
+  }
+  const now = turn.now ?? Date.now()
+  pendingRearms.delete(id)
+  pendingRearms.set(id, { marker, promptMarker: turn.promptMarker, after: turn.after, until: now + HALT_MARKER_TTL_MS })
+  while (pendingRearms.size > MAX_PENDING_REARMS) {
+    const oldest = pendingRearms.keys().next()
+    if (oldest.done) break
+    pendingRearms.delete(oldest.value)
+  }
+  return true
+}
+
+/**
+ * A UserPromptSubmit from the session itself (never a COS child): the hook has just deleted
+ * the session's marker. When it was the delivered turn's own prompt, write the marker back.
+ * One shot. True when the marker was re-armed.
+ */
+export function rearmHaltOnPrompt(sessionId: string, promptAt: number, prompt: unknown, dir = haltDir(), now = Date.now()): boolean {
+  const id = typeof sessionId === 'string' ? sessionId.toLowerCase() : ''
+  const pending = pendingRearms.get(id)
+  if (!pending) return false
+  if (now > pending.until) {
+    pendingRearms.delete(id)
+    return false
+  }
+  if (!Number.isFinite(promptAt) || promptAt < pending.after) return false
+  if (typeof prompt !== 'string' || !prompt.includes(pending.promptMarker)) return false
+  pendingRearms.delete(id)
+  return writeHaltMarker(id, pending.marker, dir)
+}
+
+/** The session ended: nothing is left to stop. */
+export function dropHaltRearm(sessionId: string): void {
+  if (typeof sessionId === 'string') pendingRearms.delete(sessionId.toLowerCase())
+}
+
+export function hasPendingHaltRearm(sessionId: string): boolean {
+  return typeof sessionId === 'string' && pendingRearms.has(sessionId.toLowerCase())
+}
+
+export function __resetHaltRearmsForTests(): void {
+  pendingRearms.clear()
 }
 
 export function hasHaltMarker(sessionId: string, dir = haltDir()): boolean {

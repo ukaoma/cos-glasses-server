@@ -15,8 +15,10 @@ import {
   cancelHoldUntil,
   cancelRefusalCopy,
   cancelTargetFor,
+  cancelVoidsOpenTurn,
   noteThreadCancelled,
   sessionCancelFeature,
+  threadCancel,
   threadCancelledAt,
   type CancelFacts,
 } from './session-cancel.js'
@@ -130,5 +132,57 @@ describe('features.sessionCancel', () => {
     expect(sessionCancelFeature(true, false)).toEqual({ cosTurn: true, deskClaude: false })
     expect(sessionCancelFeature(false, true)).toEqual({ cosTurn: true, deskClaude: false })
     expect(sessionCancelFeature(false, false)).toEqual({ cosTurn: true, deskClaude: false })
+  })
+})
+
+// 6.53.3 (review A1): a cancel remembers what it was aimed at, and only a COS turn's silence
+// ends its turn. A desk run inside a long tool writes nothing for minutes and still runs.
+describe('what a cancel may conclude about a turn that still reads open (6.53.3)', () => {
+  afterEach(() => __resetThreadCancelsForTests())
+
+  it('the target is remembered with the time, per thread, case-blind', () => {
+    noteThreadCancelled('claude', SID.toUpperCase(), 5_000, 'desk_run')
+    expect(threadCancel('claude', SID)).toEqual({ at: 5_000, target: 'desk_run' })
+    expect(threadCancelledAt('claude', SID)).toBe(5_000)
+    noteThreadCancelled('claude', SID, 6_000, 'cos_turn')
+    expect(threadCancel('claude', SID)).toEqual({ at: 6_000, target: 'cos_turn' })
+    // An older caller that names no target is recorded as such.
+    noteThreadCancelled('codex', SID, 7_000)
+    expect(threadCancel('codex', SID)).toEqual({ at: 7_000, target: null })
+    expect(threadCancel('cursor', SID)).toBeNull()
+  })
+
+  it('cos_turn: 6.53.0\'s rule exactly, nothing written since the cancel ends the turn', () => {
+    const cancel = { at: 2_000, target: 'cos_turn' as const }
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: null })).toBe(true)
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 2_000, turnStartedAt: 500, deskEndedAt: null })).toBe(true)
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 2_001, turnStartedAt: 500, deskEndedAt: null })).toBe(false)
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: null, turnStartedAt: null, deskEndedAt: null })).toBe(true)
+  })
+
+  it('desk_run: silence proves nothing; only the desk\'s own end, at or after the cancel and the turn\'s start, does', () => {
+    const cancel = { at: 2_000, target: 'desk_run' as const }
+    // THE BUG: a run inside a long tool. Nothing since the cancel, and it is still running.
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: null })).toBe(false)
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: null, turnStartedAt: null, deskEndedAt: null })).toBe(false)
+    // An end from BEFORE the cancel is the previous turn's.
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: 1_999 })).toBe(false)
+    // The halt took: the registry flipped idle after the cancel.
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: 2_000 })).toBe(true)
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 2_500, turnStartedAt: 500, deskEndedAt: 3_000 })).toBe(true)
+    // A NEW prompt after that end is a live turn again.
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 4_000, turnStartedAt: 3_500, deskEndedAt: 3_000 })).toBe(false)
+    expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 4_000, turnStartedAt: null, deskEndedAt: 3_000 })).toBe(true)
+  })
+
+  it('an unnamed or unsupported target concludes as little as a desk run; no cancel concludes nothing', () => {
+    for (const target of [null, 'unsupported' as const]) {
+      const cancel = { at: 2_000, target }
+      expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: null })).toBe(false)
+      expect(cancelVoidsOpenTurn({ cancel, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: 2_500 })).toBe(true)
+    }
+    expect(cancelVoidsOpenTurn({ cancel: null, lastActivityAt: 1_000, turnStartedAt: 500, deskEndedAt: 9_000 })).toBe(false)
+    expect(cancelVoidsOpenTurn({ cancel: { at: Number.NaN, target: 'cos_turn' }, lastActivityAt: 1, turnStartedAt: 1, deskEndedAt: 9 })).toBe(false)
+    expect(cancelVoidsOpenTurn({ cancel: { at: 2_000, target: 'desk_run' }, lastActivityAt: 1, turnStartedAt: 1, deskEndedAt: Number.NaN })).toBe(false)
   })
 })

@@ -437,6 +437,9 @@ export interface TranscriptionSessionLiveness {
  */
 export const __sessionsForTests = sessions
 
+/** 6.53.3: the closed-session records, for tests only (same reasoning as above). */
+export const __closedSessionRecordsForTests = closedSessionRecords
+
 export interface StrandedCapture {
   sessionId: string
   /** Minutes since the last ACK'd chunk. */
@@ -1151,6 +1154,8 @@ setInterval(() => {
       }
     }
   } catch {}
+  // 6.53.3 (review D3): the in-memory records age out with the file's.
+  try { sweepExpiredClosedSessions(Date.now()) } catch {}
   persistClosedSessions()
 }, 60_000)
 
@@ -1455,7 +1460,30 @@ export interface MeetingSessionStatusSnapshot {
   retainedUntil: string | null
 }
 
-export function getMeetingSessionStatus(sessionId: string): MeetingSessionStatusSnapshot {
+/**
+ * 6.53.3 (review D3): forget a closed session once its retention has passed, in memory as
+ * well as on disk. Until 6.53.2 only the persisted file was pruned, so a closed session read
+ * `closed` until the next restart, and a phone whose recovery hint named it POSTed save
+ * (which can only 404) on every boot and foreground, all day. Past `retainedUntil` the
+ * server now answers exactly as it would after a restart: `missing`, which every app since
+ * 6.9.465 settles as terminal ("the server no longer retains it").
+ */
+function evictExpiredClosedSession(sessionId: string, now: number): boolean {
+  const closed = closedSessionRecords.get(sessionId)
+  if (!closed || now - closed.closedAt <= CLOSED_SESSION_TTL_MS) return false
+  closedSessionRecords.delete(sessionId)
+  deletedSessions.delete(sessionId)
+  return true
+}
+
+export function sweepExpiredClosedSessions(now = Date.now()): number {
+  let evicted = 0
+  for (const id of [...closedSessionRecords.keys()]) if (evictExpiredClosedSession(id, now)) evicted++
+  return evicted
+}
+
+export function getMeetingSessionStatus(sessionId: string, now = Date.now()): MeetingSessionStatusSnapshot {
+  evictExpiredClosedSession(sessionId, now)
   const active = sessions.get(sessionId)
   if (active) {
     const received = active.receivedIndices ?? []

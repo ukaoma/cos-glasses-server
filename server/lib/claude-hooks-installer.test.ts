@@ -1,14 +1,19 @@
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterAll, describe, expect, it } from 'vitest'
 import {
+  HALT_CAPABLE_PRIOR_SCRIPT_SHAS,
   HOOK_SUBSCRIPTIONS,
   cosGlassesHome,
   hookCommand,
+  hookHaltReady,
   hookSpoolDir,
   hookStatus,
+  hookStatusAdvice,
   installClaudeHooks,
   mergeHookSettings,
   packagedHookScriptPath,
@@ -35,7 +40,19 @@ const REAL_SHAPE = {
 const SCRIPT = '/Users/example/.cos-glasses/bin/cos-session-hook'
 const PATHS: HookPaths = { home: '/Users/example/.cos-glasses', spoolDir: '/Users/example/.cos-glasses/data/hook-spool' }
 const cmd = (event: string) => `COS_GLASSES_HOME=${PATHS.home} COS_HOOK_SPOOL=${PATHS.spoolDir} ${SCRIPT} ${event}`
-const dir = () => mkdtempSync(join(tmpdir(), 'cos-hooks-'))
+// 6.53.3 (review A12): every temp root is removed when the file ends. These `cos-hooks-`
+// folders were part of the ~7,000 `cos-hook*` the hook suites had left in $TMPDIR.
+const roots: string[] = []
+afterAll(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+const dir = () => {
+  const root = mkdtempSync(join(tmpdir(), 'cos-hooks-'))
+  roots.push(root)
+  return root
+}
+/** The script 6.53.0 to 6.53.2 shipped, byte for byte (a test fixture, never packaged). */
+const SCRIPT_6_53_0 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.0')
 
 function merged(current: unknown, paths = PATHS): { settings: Record<string, unknown>; changed: boolean } {
   const result = mergeHookSettings(current, SCRIPT, paths)
@@ -358,5 +375,96 @@ describe('install and uninstall on disk', () => {
     } finally {
       delete process.env.COS_GLASSES_HOME
     }
+  })
+})
+
+// 6.53.3: the script changed (the single-entry rewrite), so every install reads
+// `script_outdated` until Install hooks. The 6.53.0 script it replaces already stops desk
+// runs, so a desk cancel keeps working meanwhile; anything older does not.
+describe('after the 6.53.3 script change', () => {
+  function onScript(bytes: Buffer | string) {
+    const root = dir()
+    const settingsPath = join(root, 'claude', 'settings.json')
+    const scriptPath = join(root, 'stable', 'bin', 'cos-session-hook')
+    process.env.COS_GLASSES_HOME = join(root, 'home')
+    mkdirSync(join(root, 'claude'), { recursive: true })
+    writeFileSync(settingsPath, JSON.stringify(REAL_SHAPE, null, 2))
+    installClaudeHooks({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath, port: 3141 })
+    writeFileSync(scriptPath, bytes)
+    return hookStatus({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath })
+  }
+
+  it('the 6.53.0 script: script_outdated, not installed, but halt-ready; --hooks status says to reinstall', () => {
+    try {
+      const bytes = readFileSync(SCRIPT_6_53_0)
+      // The fixture IS the script the constant names.
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toContain(createHash('sha256').update(bytes).digest('hex'))
+      const status = onScript(bytes)
+      expect(status.state).toBe('script_outdated')
+      expect(status.installed).toBe(false)
+      expect(hookHaltReady(status)).toBe(true)
+      const advice = hookStatusAdvice(status)!
+      expect(advice).toContain('older than this package')
+      expect(advice).toContain('--hooks install')
+      expect(advice).toContain('Install hooks in COS Control')
+      expect(advice).toContain('still stops desk runs')
+      expect(advice).toContain(status.scriptSha!.slice(0, 12))
+      // No path: the status JSON beside it already names them.
+      expect(advice).not.toContain(status.scriptPath)
+      expect(advice).not.toContain(tmpdir())
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('an older script (no halt check): script_outdated and NOT halt-ready, and the advice says what that costs', () => {
+    try {
+      const status = onScript('#!/bin/sh\n# the 6.51.0 script\nexit 0\n')
+      expect(status.state).toBe('script_outdated')
+      expect(hookHaltReady(status)).toBe(false)
+      expect(hookStatusAdvice(status)).toContain('cannot be cancelled from the lens')
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('`--hooks status` from the CLI says so in words (every path in a temp home)', { timeout: 60_000 }, () => {
+    const root = dir()
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    const env = {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: home,
+      CLAUDE_CONFIG_DIR: join(root, 'claude'),
+      COS_GLASSES_HOME: join(root, '.cos-glasses'),
+      COS_DATA_DIR: join(root, '.cos-glasses', 'data'),
+    }
+    const cli = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'cli.cjs')
+    const run = (...args: string[]) => {
+      const r = spawnSync(process.execPath, [cli, '--hooks', ...args], { env, encoding: 'utf-8', timeout: 50_000 })
+      return { status: r.status, json: JSON.parse(r.stdout) }
+    }
+    const installed = run('install', '--port', '3999')
+    expect(installed.status).toBe(0)
+    expect(installed.json.status.state).toBe('installed')
+    expect(run('status').json.advice).toBeUndefined()
+    // The Mac updated to 6.53.3 but still runs the 6.53.0 script at the stable path.
+    copyFileSync(SCRIPT_6_53_0, join(root, '.cos-glasses', 'bin', 'cos-session-hook'))
+    const outdated = run('status')
+    expect(outdated.status).toBe(0)
+    expect(outdated.json.state).toBe('script_outdated')
+    expect(outdated.json.advice).toContain('Every Claude session keeps running the old script until the hooks are reinstalled')
+    expect(outdated.json.advice).toContain('npx --yes @gotcos/glasses-server@latest --hooks install')
+  })
+
+  it('installed is halt-ready with no advice; drift is never halt-ready, even on a halt-capable script', () => {
+    expect(hookHaltReady({ installed: true, state: 'installed', scriptSha: null })).toBe(true)
+    expect(hookStatusAdvice({ installed: true, state: 'installed', scriptSha: 'x', packageScriptSha: 'x' })).toBeNull()
+    const sha = HALT_CAPABLE_PRIOR_SCRIPT_SHAS[0]!
+    expect(hookHaltReady({ installed: false, state: 'drift', scriptSha: sha })).toBe(false)
+    expect(hookHaltReady({ installed: false, state: 'missing', scriptSha: sha })).toBe(false)
+    expect(hookHaltReady({ installed: false, state: 'disabled_by_settings', scriptSha: sha })).toBe(false)
+    expect(hookStatusAdvice({ installed: false, state: 'drift', scriptSha: sha, packageScriptSha: 'p' })).toContain('--hooks install')
+    expect(hookStatusAdvice({ installed: false, state: 'disabled_by_settings', scriptSha: sha, packageScriptSha: 'p' })).toContain('disableAllHooks')
   })
 })

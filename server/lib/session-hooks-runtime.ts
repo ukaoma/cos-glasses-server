@@ -17,7 +17,8 @@ import { SessionHookLedger } from './session-hook-ledger.js'
 import { startSpoolIngester, type SpoolIngester, type SpoolStats } from './session-hook-spool.js'
 import { SessionSignalStore, type SessionSignal } from './session-signal-store.js'
 import { OPEN_TURN_CEILING_MS, deriveSessionState, type DerivedSessionState, type RegistryFacts, type TranscriptFacts } from './session-state-derive.js'
-import { clearHaltMarkerOnSessionEnd, sweepHaltMarkers } from './session-halt.js'
+import { clearHaltMarkerOnSessionEnd, dropHaltRearm, haltDeliveredTurn, rearmHaltOnPrompt, sweepHaltMarkers, type HaltMarker } from './session-halt.js'
+import { cancelVoidsOpenTurn, threadCancel } from './session-cancel.js'
 import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatus, type HookStatus } from './claude-hooks-installer.js'
 
 export function sessionHooksEnabled(): boolean {
@@ -174,6 +175,29 @@ function pidAlive(pid: number): boolean {
 }
 
 /**
+ * 6.53.3: when the desk session's own engine said its run is over, AS IT STANDS NOW: the
+ * registry's `idle` flip (`statusUpdatedAt`), or the hooks' Stop / StopFailure / SessionEnd
+ * while no turn is open. Null when neither says so (a busy record, an open hook turn, no
+ * record at all). What a desk_run cancel waits for before it may discount the evidence
+ * that the run is still going (`cancelVoidsOpenTurn`, review A1).
+ */
+export function deskTurnEndedAt(sessionId: string, dir = claudeSessionsDir()): number | null {
+  let ended: number | null = null
+  const later = (at: unknown): void => {
+    if (typeof at === 'number' && Number.isFinite(at) && (ended === null || at > ended)) ended = at
+  }
+  const signal = signalFor(sessionId)
+  if (signal && !signal.turnOpen) {
+    later(signal.stopAt)
+    later(signal.failure?.at)
+    later(signal.ended?.at)
+  }
+  const record = registryRecordSync(sessionId, dir)
+  if (record && record.status === 'idle') later(record.statusUpdatedAt)
+  return ended
+}
+
+/**
  * 6.53.0: is Claude working on this session AT THE DESK right now (a Desktop tab, a terminal,
  * or a Continue delivered live into either)? The cancel route's `deskRunning`: a yes offers
  * `desk_run`, which arms a halt marker. Two witnesses, either one is enough:
@@ -183,13 +207,38 @@ function pidAlive(pid: number): boolean {
  *     own in-flight turn) says `busy`, and its pid is alive.
  * Canary C9 (2026-09-21): after a hook stop the registry read idle within a second, so a
  * cancelled desk run stops reading as running at once.
+ *
+ * 6.53.3 (review A5): the hooks' open turn is weighed against the cancel on record, by the
+ * rule the turn queue uses. A `claude -p` COS child killed by a cancel fires no Stop or
+ * SessionEnd; its open turn with nothing since the cancel is the dead child's, and must not
+ * put a phantom "Cancel run" (desk_run) on a thread where nothing runs.
  */
 export function claudeDeskRunning(sessionId: string, now = Date.now(), dir = claudeSessionsDir()): boolean {
   const signal = signalFor(sessionId)
-  if (signal && signal.turnOpen && signal.ended === null && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS) return true
+  if (signal && signal.turnOpen && signal.ended === null && now - signal.lastEventAt <= OPEN_TURN_CEILING_MS) {
+    const cancel = threadCancel('claude', sessionId)
+    if (cancel === null || !cancelVoidsOpenTurn({
+      cancel,
+      lastActivityAt: signal.lastEventAt,
+      turnStartedAt: signal.turnStartedAt,
+      deskEndedAt: deskTurnEndedAt(sessionId, dir),
+    })) return true
+  }
   const record = registryRecordSync(sessionId, dir)
   if (!record || record.status !== 'busy' || record.pid === null || isCosSpawnedPid(record.pid, now)) return false
   return pidAlive(record.pid)
+}
+
+/**
+ * 6.53.3 (review A6): stop a turn COS has just handed into the open session, because a
+ * cancel arrived while the hand-off was in flight. The marker is written now; when the
+ * hooks do not yet show the turn started (its UserPromptSubmit at or after `sentAt`), it is
+ * re-armed once when that prompt's own UserPromptSubmit deletes it (`haltDeliveredTurn`).
+ */
+export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: { promptMarker: string; sentAt: number }, now = Date.now()): boolean {
+  const signal = signalFor(sessionId)
+  const started = !!signal && typeof signal.turnStartedAt === 'number' && signal.turnStartedAt >= turn.sentAt
+  return haltDeliveredTurn(sessionId, marker, { promptMarker: turn.promptMarker, after: turn.sentAt, rearm: !started, now })
 }
 
 let ledger: SessionHookLedger | null = null
@@ -233,6 +282,10 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   // clear a cancel written since; the TTL sweep covers anything this misses.
   const unsubscribeHalt = enabled ? sessionSignalStore.subscribe((_signal, env, child) => {
     if (env.event === 'SessionEnd' && !child) clearHaltMarkerOnSessionEnd(env.sessionId, env.ts)
+    // 6.53.3 (review A6): a turn COS handed into the open session while a cancel was on its
+    // way. Its own UserPromptSubmit just deleted the marker; write it back (once).
+    if (env.event === 'UserPromptSubmit' && !child) rearmHaltOnPrompt(env.sessionId, env.ts, env.payload.prompt)
+    if (env.event === 'SessionEnd' && !child) dropHaltRearm(env.sessionId)
   }) : () => {}
   sweepHaltMarkers(Date.now())
   // Runtime files the script reads. The port can change per install; the token never does.
