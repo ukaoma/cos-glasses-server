@@ -269,18 +269,18 @@ row reads `waiting_kind: question` whatever the switch says; `/api/health` repor
 
 The glasses' Cancel run row stops what a session is doing, the way the desk's own stop
 button does. It needs **server 6.53.0 or later and COS Glasses 6.9.529 or later**;
-**6.53.3 is recommended** (it owns the whole process tree, holds a desk cancel, and fixes
-the false fences 6.53.1 left).
+**6.53.4 is recommended** (it owns the whole process tree, holds a desk cancel, fixes
+the false fences 6.53.1 left, and never releases a fence when `ps` cannot answer).
 
 - **A turn COS started** (`cos_turn`) is stopped by the server: its whole process tree is
   signalled and the turn settles `turn_cancelled`.
 - **A run at the desk** (`desk_run`: a Desktop tab or a terminal `claude`) is stopped by the
   session hook at its next tool call, so a reply that is pure text finishes first. This
   needs the hooks installed, and after every server update that changes the hook script
-  (6.53.0, 6.53.3) you must **run Install hooks once** (COS Control, or
+  (6.53.0, 6.53.3, 6.53.4) you must **run Install hooks once** (COS Control, or
   `npx --yes @gotcos/glasses-server@latest --hooks install`). Until then
   `--hooks status` reads `script_outdated` and its `advice` line says so; a script from
-  6.53.0 to 6.53.2 can still stop desk runs meanwhile, anything older answers
+  6.53.0 to 6.53.3 can still stop desk runs meanwhile, anything older answers
   `hooks_outdated`. The PreToolUse hook runs before every tool call on the Mac and never
   contacts the server; it writes a spool file only for AskUserQuestion, ExitPlanMode and
   prompts, and always drains its input.
@@ -661,7 +661,7 @@ BIND_HOST=0.0.0.0 npm run start:server
   timers are frozen), `desk_active` (the Mac saw input), `approvals_off`
   (`COS_PERMISSION_BROKER=questions`), `broker_off`, `cursor`, `unsupported_tool`
   (ExitPlanMode is never held). `lastQuestionsPollAt` says when a client last counted.
-  `--hooks status` must read `installed` (right after updating to 6.53.3 it reads
+  `--hooks status` must read `installed` (right after updating to 6.53.4 it reads
   `script_outdated` until Install hooks is run once; its `advice` line says so). To turn it off with no reinstall, set
   `COS_PERMISSION_BROKER=0` in `~/.cos-glasses/.env` and restart. For the Messages
   trail, `/api/health` `messages_trail.readerErrors` counts lines a reader could not map.
