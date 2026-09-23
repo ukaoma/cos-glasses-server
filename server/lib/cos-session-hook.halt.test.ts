@@ -346,6 +346,38 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: one read, and a drained std
     expect(spooled(p.spool)).toHaveLength(1)
   })
 
+  // 6.53.3 /qa (Skeptic N5): the front drained, but every other event (PermissionRequest,
+  // Stop, PostToolUse, SessionStart, SessionEnd) still read with `head -c 1048576` and left
+  // the rest of stdin unread, and the B8 guard / a failed mkdir exited before reading at all.
+  it('a 2.5 MB payload on every other event: exit 0, no EPIPE, spooled at the 1 MiB cap', { timeout: 60_000 }, async () => {
+    const p = paths()
+    const events = ['Stop', 'PostToolUse', 'PermissionRequest', 'SessionEnd'] as const
+    for (const event of events) {
+      const res = await stream(event, [big({ hook_event_name: event, tool_name: 'Bash' })], p)
+      expect(res, event).toEqual({ status: 0, stdout: '', writerError: null })
+    }
+    const names = spooled(p.spool)
+    expect(names).toHaveLength(events.length)
+    for (const name of names) expect(statSync(join(p.spool, name)).size).toBeLessThan(1_048_576 + 256)
+    // Nothing left behind but the published files (the permission request's copy is removed).
+    expect(readdirSync(p.spool).filter(n => n.startsWith('.tmp.'))).toEqual([])
+  })
+
+  it('the B8 guard and a failed spool drain every other event\'s stdin too', { timeout: 60_000 }, async () => {
+    const p = paths()
+    for (let i = 0; i < 2000; i++) writeFileSync(join(p.spool, `${1700000000000 + i}-1-Stop.json`), '{}\n')
+    for (const event of ['Stop', 'PostToolUse']) {
+      expect(await stream(event, [big({ hook_event_name: event })], p), event).toEqual({ status: 0, stdout: '', writerError: null })
+    }
+    expect(spooled(p.spool)).toHaveLength(2000)
+    const q = paths()
+    const blocked = { home: q.home, spool: join(q.home, 'not-a-dir', 'hook-spool') }
+    writeFileSync(join(q.home, 'not-a-dir'), 'x')
+    for (const event of ['Stop', 'PermissionRequest']) {
+      expect(await stream(event, [big({ hook_event_name: event })], blocked), event).toEqual({ status: 0, stdout: '', writerError: null })
+    }
+  })
+
   it('a failed spool (no folder) or the B8 guard still drains a spooled event\'s stdin', async () => {
     const p = paths()
     for (let i = 0; i < 2000; i++) writeFileSync(join(p.spool, `${1700000000000 + i}-1-Stop.json`), '{}\n')

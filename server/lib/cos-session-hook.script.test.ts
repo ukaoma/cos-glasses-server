@@ -35,13 +35,20 @@ const SCRIPT_6_51_0_SHA256 = '0a55756de9c88d7dc7a37fadb1ab627d55bb37ba2796517879
  */
 const SCRIPT_6_53_0_SHA256 = '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7'
 /**
- * sha256 of the script 6.53.3 ships: the single-entry rewrite of the PreToolUse and
- * UserPromptSubmit front (review A, option a), 29 ms to 17 ms per tool call, stdin always
- * drained. Changed on purpose, with its reinstall plan (Install hooks in COS Control); an
- * install still on the 6.53.0 script reads `script_outdated` but can stop desk runs
+ * sha256 of the script 6.53.3 first built (7433b7f): the single-entry rewrite of the
+ * PreToolUse and UserPromptSubmit front (review A, option a). Never published; it is a
+ * halt-capable prior (`HALT_CAPABLE_PRIOR_SCRIPT_SHAS`) because a local build could have
+ * installed it.
+ */
+const SCRIPT_6_53_3_PREQA_SHA256 = 'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51'
+/**
+ * sha256 of the script 6.53.3 ships: the single-entry front, 29 ms to 17 ms per tool call,
+ * and (its /qa round) stdin drained on EVERY event and exit, not only the front. Changed on
+ * purpose, with its reinstall plan (Install hooks in COS Control); an install still on the
+ * 6.53.0 script (or the pre-QA 6.53.3 one) reads `script_outdated` but can stop desk runs
  * meanwhile (`HALT_CAPABLE_PRIOR_SCRIPT_SHAS`).
  */
-const SCRIPT_6_53_3_SHA256 = 'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51'
+const SCRIPT_6_53_3_SHA256 = 'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -478,8 +485,11 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       // halt-capable (a desk cancel answers `hooks_outdated`), the 6.53.0 script is.
       expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_53_3_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_0_SHA256)
+      expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_3_PREQA_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256])
+      // The current script is never its own "prior"; both earlier halt-capable ones are.
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256])
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_53_3_SHA256)
       // And it still posts to exactly the route this server serves.
       expect(bytes.toString('utf8')).toContain(`"http://127.0.0.1:$PORT${PERMISSION_BROKER_HOOK_PATH}"`)
     })

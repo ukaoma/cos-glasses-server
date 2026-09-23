@@ -7,15 +7,11 @@
 # restarting never delays a Claude session.
 #
 # 6.53.0: PreToolUse is SYNCHRONOUS with no matcher, so the first branch below runs before
-# EVERY tool call in every Claude session on this Mac. It never contacts the server. For an
-# ordinary tool it writes nothing at all; it spools only AskUserQuestion and ExitPlanMode
-# (the two tools the reducer reads, the 6.48 matcher's set), and UserPromptSubmit, which
-# shares the branch, is always spooled. It prints nothing unless the server left a halt
-# marker for this session, when it prints the one reply that stops the run (canary C1b,
-# 2026-09-21: `continue:false` alone still ran the tool; with the deny it did not). It never
-# exits 2: exit 2 blocks the tool, while a timeout or any other code fails open (C6, C7).
-# Every path, every event, drains stdin before it exits, so Claude Code's writer never
-# EPIPEs whatever the payload's size (6.53.3; every other event since its /qa round).
+# EVERY tool call in every Claude session on this Mac. It is file-only (no curl, no spool
+# write) and prints nothing unless the server left a halt marker for this session, when it
+# prints the one reply that stops the run (canary C1b, 2026-09-21: `continue:false` alone
+# still ran the tool; with the deny it did not). It never exits 2: exit 2 blocks the tool,
+# while a timeout or any other code fails open (C6, C7).
 #
 # The installer bakes COS_GLASSES_HOME and COS_HOOK_SPOOL into the command, so this
 # script and the server can never disagree about where the token or the spool is.
@@ -93,9 +89,6 @@ case "$EVENT" in PreToolUse|UserPromptSubmit)
   trap 'cat >/dev/null 2>&1' EXIT
   ;;
 esac
-# Every other event: until the spool read below has taken stdin, any exit (a failed mkdir,
-# the B8 guard) drains it, as the front does.
-[ -n "$FRONT" ] || trap 'cat >/dev/null 2>&1' EXIT
 mkdir -p "$SPOOL/rejected" 2>/dev/null || exit 0
 TS=$(perl -MTime::HiRes -e 'printf "%.0f", Time::HiRes::time()*1000' 2>/dev/null || date +%s000)
 # B8 guard: a full spool or a stale drain stamp means nobody is reading; keep only permissions.
@@ -104,15 +97,13 @@ if [ "$EVENT" != PermissionRequest ]; then
   STAMP="$SPOOL/.last-drain"; [ ! -f "$STAMP" ] || [ -z "$(find "$STAMP" -mmin +1440 2>/dev/null)" ] || exit 0   # -mtime +1 would mean two days
 fi
 T="$SPOOL/.tmp.$$.$TS"
-# Stdin to disk with a 1 MiB cap; whatever lies past the cap is drained, never left for the
-# writer to EPIPE on.
-trap - EXIT
 if [ -n "$FRONT" ]; then
-  # 6.53.3: the 4 KiB the halt check read, then the rest of stdin.
+  # 6.53.3: the 4 KiB the halt check read, then the rest of stdin, to disk with the same
+  # 1 MiB cap; whatever lies past the cap is drained, never left for the writer to EPIPE on.
+  trap - EXIT
   { printf '%s' "$HEAD"; exec cat; } | { head -c 1048576 > "$T.in"; exec cat >/dev/null; }
 else
-  # No `exec` here: this group runs in the script's own shell.
-  { head -c 1048576 > "$T.in"; cat >/dev/null; }
+  head -c 1048576 > "$T.in"                    # stdin to disk, 1 MiB cap
 fi
 case "$(head -c 1 "$T.in")" in '{') ;; *) EVENT=rejected ;; esac
 { printf '{"ts":%s,"ppid":%s,"event":"%s","payload":' "$TS" "$PPID" "$EVENT"; cat "$T.in"; printf '}\n'; } > "$T"

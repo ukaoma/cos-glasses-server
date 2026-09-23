@@ -53,6 +53,7 @@ const dir = () => {
 }
 /** The script 6.53.0 to 6.53.2 shipped, byte for byte (a test fixture, never packaged). */
 const SCRIPT_6_53_0 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.0')
+const SCRIPT_6_53_3_PREQA = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.3-preqa')
 
 function merged(current: unknown, paths = PATHS): { settings: Record<string, unknown>; changed: boolean } {
   const result = mergeHookSettings(current, SCRIPT, paths)
@@ -412,6 +413,21 @@ describe('after the 6.53.3 script change', () => {
       // No path: the status JSON beside it already names them.
       expect(advice).not.toContain(status.scriptPath)
       expect(advice).not.toContain(tmpdir())
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('the pre-QA 6.53.3 script (7433b7f): also halt-capable, pinned against its own bytes', () => {
+    try {
+      const bytes = readFileSync(SCRIPT_6_53_3_PREQA)
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toContain(createHash('sha256').update(bytes).digest('hex'))
+      // It carries the halt check (the deny the hook prints), like the 6.53.0 one.
+      expect(bytes.toString('utf8')).toContain('"permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"')
+      const status = onScript(bytes)
+      expect(status.state).toBe('script_outdated')
+      expect(hookHaltReady(status)).toBe(true)
+      expect(hookStatusAdvice(status)).toContain('still stops desk runs')
     } finally {
       delete process.env.COS_GLASSES_HOME
     }

@@ -285,15 +285,21 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
 }
 
 /**
- * 6.53.3: sha256 of every EARLIER script that already carries the halt check: the one script
- * 6.53.0, 6.53.1 and 6.53.2 all shipped. 6.53.3 rewrote the script for speed (review A,
- * option a), so an install that has not run Install hooks since reads `script_outdated`
- * and Control shows its banner. Its script still stops a desk run exactly as before,
- * though, so a desk cancel is not refused `hooks_outdated` in the meantime
- * (`hookHaltReady`). A script older than 6.53.0 has no halt check and never qualifies.
+ * 6.53.3: sha256 of every EARLIER script that already carries the halt check. 6.53.3
+ * rewrote the script for speed (review A, option a), so an install that has not run Install
+ * hooks since reads `script_outdated` and Control shows its banner. Those scripts still stop
+ * a desk run exactly as before, though, so a desk cancel is not refused `hooks_outdated` in
+ * the meantime (`hookHaltReady`). A script older than 6.53.0 has no halt check and never
+ * qualifies.
+ *   - 1158bb06...: the one script 6.53.0, 6.53.1 and 6.53.2 all shipped.
+ *   - c0b41bf8...: the 6.53.3 script as first built, before its /qa round made every event
+ *     drain stdin. Never published, but installable from a local build of that commit
+ *     (7433b7f), and it carries the same halt check.
+ * Each is pinned against its bytes in `server/lib/__fixtures__/`.
  */
 export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
   '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7',
+  'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51',
 ]
 
 /**
