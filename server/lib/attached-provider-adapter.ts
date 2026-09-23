@@ -186,6 +186,14 @@ export interface AttachedTurnFailureResult {
   /**
    * Did `close`/`exit` actually fire, i.e. did the kernel reap the child?
    *
+   * WHAT IT DOES AND DOES NOT PROMISE (6.53.3, scoped by its /qa round). On a CANCEL or a
+   * TIMEOUT, `reaped: true` also means the whole owned process tree was read gone after
+   * `close` (the tree poll); a tree that outlives SIGKILL settles `reaped: false`. On a
+   * NATURAL exit (the provider closed without a cancel or timeout) it means only that the
+   * CLI itself was reaped: that path settles at once, with no tree probe, so a detached
+   * background job the tool left running is not looked for. A pre-spawn cancel reports
+   * `reaped: true` because no process ever existed.
+   *
    * NOT DERIVABLE FROM `exitCode`. A child killed by a signal reports
    * `code === null`, and the handlers below only assign `exitCode` for a numeric
    * code — so the dominant timeout shape (SIGTERM, then SIGKILL) is reaped while

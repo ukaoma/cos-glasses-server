@@ -16,6 +16,7 @@ import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LOCAL_FIRST_MEETING_IDLE_RETENTION_MS } from '../lib/local-first-meetings-contract.js'
 
 let dataDir = ''
 const servers: Server[] = []
@@ -34,7 +35,9 @@ afterEach(async () => {
   vi.resetModules()
 })
 
-const RETENTION_MS = 4 * 60 * 60 * 1000
+// The server's CLOSED_SESSION_TTL_MS IS this constant (transcribe-stream.ts); imported, not
+// restated, so a change to the retention moves the test with it.
+const RETENTION_MS = LOCAL_FIRST_MEETING_IDLE_RETENTION_MS
 
 /** A session the phone opened and closed with one silent chunk: known, and empty. */
 async function closedEmptySession(sessionId: string) {

@@ -10,6 +10,15 @@
 
 const { spawn } = require('node:child_process')
 
+/** 'graceful': how long its tool takes to exit after SIGTERM. Exported so the e2e bound is
+ *  derived from it rather than restating it. */
+const GRACEFUL_TOOL_STOP_MS = 1000
+module.exports = { GRACEFUL_TOOL_STOP_MS }
+
+// Required by the test for the constant above: build nothing.
+if (require.main === module) main()
+
+function main() {
 const [variant, token, sessionId] = process.argv.slice(2)
 const sh = (script, options) => spawn('/bin/sh', ['-c', script, token], options)
 
@@ -38,7 +47,7 @@ process.stdin.on('end', () => {
       // A tool in its own group that takes one second to stop after SIGTERM.
       spawn(process.execPath, [
         '-e',
-        "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 1000)); setInterval(() => {}, 1000)",
+        `process.on('SIGTERM', () => setTimeout(() => process.exit(0), ${GRACEFUL_TOOL_STOP_MS})); setInterval(() => {}, 1000)`,
         token,
       ], { detached: true, stdio: 'ignore' })
       process.on('SIGTERM', () => setTimeout(() => process.exit(143), 100))
@@ -77,3 +86,4 @@ process.stdin.on('end', () => {
   }
   setInterval(() => {}, 1000)
 })
+}

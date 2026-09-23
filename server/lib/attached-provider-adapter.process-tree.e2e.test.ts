@@ -21,8 +21,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, type TestContext } from 'vitest'
 
+import { createRequire } from 'node:module'
 import {
   CANCEL_KILL_GRACE_MS,
+  TREE_POLL_MS,
   deliverAttachedTurn,
   realAttachedTurnDeps,
   type AttachedTurnDeps,
@@ -170,8 +172,14 @@ describe.skipIf(process.platform !== 'darwin').concurrent('attached turn cancel 
     const { result, settleMs, survivors } = await run('graceful', 'cancel', context)
     expect(outcome(result)).toEqual({ reason: 'cancelled', delivery: 'cancelled', reaped: true })
     expect(survivors).toEqual([])
-    // 6.53.2 held this result ~5.3 s; the poll after `close` settles it at ~1.2 s.
-    expect(settleMs).toBeLessThan(CANCEL_KILL_GRACE_MS - 1_000)
+    // 6.53.2 held this result ~5.3 s; the poll after `close` settles it at ~1.2 s: the tool's
+    // own stop, then at most one TREE_POLL_MS poll to see it gone. The bound allows a second
+    // poll and one second of scheduling under a loaded suite (2.4 s today), and stays under
+    // the five-second grace so a regression to waiting it out still fails.
+    const { GRACEFUL_TOOL_STOP_MS } = createRequire(import.meta.url)(FIXTURE) as { GRACEFUL_TOOL_STOP_MS: number }
+    const bound = GRACEFUL_TOOL_STOP_MS + 2 * TREE_POLL_MS + 1_000
+    expect(bound).toBeLessThan(CANCEL_KILL_GRACE_MS)
+    expect(settleMs).toBeLessThan(bound)
   }, PER_TEST_TIMEOUT_MS)
 
   it('A3: the leader already exited and a same-group child holds stdout: its group is signalled (cancel)', async (context) => {
