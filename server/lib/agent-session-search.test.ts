@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterAll } from 'vitest'
 import {
   collectAgentSessionSearchDocs,
   cosineSimilarity,
@@ -13,6 +13,20 @@ import {
 } from './agent-session-search.js'
 import { isKeepWarmSessionTitle } from './agent-session-store.js'
 import { agentSessionRoots, type AgentSessionRoots } from './agent-session-store.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const jewelryId = '019dfe42-d4ba-7152-b5ae-60f600a2675a'
 const cursorId = 'bbbbbbbb-1111-2222-3333-cccccccccccc'
@@ -29,7 +43,7 @@ function touch(path: string, date: Date) {
 }
 
 function fixtureHome(): { home: string; roots: AgentSessionRoots } {
-  const home = mkdtempSync(join(tmpdir(), 'cos-agent-session-search-'))
+  const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-session-search-')))
   const roots = agentSessionRoots(home)
   mkdirSync(roots.claudeProjects, { recursive: true })
   mkdirSync(roots.codexSessions, { recursive: true })

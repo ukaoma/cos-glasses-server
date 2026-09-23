@@ -1,9 +1,9 @@
 import express from 'express'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, utimesSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from 'vitest'
 
 // A getter, not a value. The route reads COS_SCRIPTS_DIR as a live ESM binding, so
 // this lets each case decide whether the pipeline is configured — which is the whole
@@ -16,6 +16,20 @@ vi.mock('../lib/python-bridge.js', () => ({
 }))
 
 import { __resetSessionIndexCache, sessionIndexRouter } from './session-index.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const closers: Array<() => Promise<void>> = []
 
@@ -39,7 +53,7 @@ afterEach(async () => {
 // dot-directory bug against the real data home (~/.cos-glasses).
 let dir: string
 beforeEach(() => {
-  const parent = mkdtempSync(join(tmpdir(), 'cos-session-index-'))
+  const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-session-index-')))
   dir = resolve(parent, '.cos-fixture', 'scripts')
   mkdirSync(dir, { recursive: true })
   scriptsDir = dir

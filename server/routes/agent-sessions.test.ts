@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process'
-import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import express from 'express'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { agentSessionsRouter, withRunning } from './agent-sessions.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { OccupiedScan } from '../lib/occupied-threads.js'
@@ -22,6 +22,20 @@ import {
   type AgentSessionRoots,
 } from '../lib/agent-session-store.js'
 
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+
 const marktId = '019e0943-62c4-7643-bcff-1a7be9a52a4c'
 const jewelryId = '019dfe42-d4ba-7152-b5ae-60f600a2675a'
 const cursorId = 'bbbbbbbb-1111-2222-3333-cccccccccccc'
@@ -37,7 +51,7 @@ function touch(path: string, date: Date) {
 }
 
 function fixtureHome(): { home: string; roots: AgentSessionRoots } {
-  const home = mkdtempSync(join(tmpdir(), 'cos-agent-sessions-'))
+  const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-sessions-')))
   const roots: AgentSessionRoots = {
     claudeProjects: join(home, '.claude', 'projects'),
     claudeDesktopConfig: join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
@@ -229,7 +243,7 @@ afterEach(async () => {
 
 describe('agent session list route reports dropped caps', () => {
   it('puts dropped on the wire even when every count is zero', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-agent-list-drops-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-list-drops-')))
     const previous = process.env.COS_AGENT_SESSIONS_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home
     // The list now probes the locks directory up front; point it at the fixture so
@@ -257,7 +271,7 @@ describe('agent session list route reports dropped caps', () => {
 
 describe('last activity and last tool on the wire (6.45.5)', () => {
   it('reads them from the transcript records, not the file time, on the list and the detail', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-agent-activity-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-activity-')))
     const previous = process.env.COS_AGENT_SESSIONS_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home
     const previousCodexHome = process.env.CODEX_HOME
@@ -298,7 +312,7 @@ describe('last activity and last tool on the wire (6.45.5)', () => {
 
 describe('last activity for a Claude thread after a Desktop relaunch (6.45.5)', () => {
   it('ignores the relaunch bookkeeping on the list and the detail', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-agent-activity-claude-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-activity-claude-')))
     const previous = process.env.COS_AGENT_SESSIONS_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home
     const previousCodexHome = process.env.CODEX_HOME
@@ -345,7 +359,7 @@ describe('agent session search route', () => {
   })
 
   it('rejects a short query and returns an empty lookup against an empty home', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-agent-search-route-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-search-route-')))
     const previous = process.env.COS_AGENT_SESSIONS_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home
     try {

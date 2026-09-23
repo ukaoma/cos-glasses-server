@@ -1,9 +1,9 @@
 import express from 'express'
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest'
 import {
   claudeSessionNamesVisible,
   claudeSessionsDir,
@@ -20,6 +20,20 @@ import {
   workspaceFromCwd,
   type PeerProbes,
 } from '../lib/claude-session-registry.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 // Shaped from the LIVE registry on this machine, 2026-08-10: pid 36411, v2.1.226,
 // nameSource derived, name cos-glasses-server-90, status waiting, socket present.
@@ -245,7 +259,7 @@ describe('ordering puts running work first', () => {
 describe('reading a real directory', () => {
   let dir: string
   beforeEach(() => {
-    const parent = mkdtempSync(join(tmpdir(), 'cos-claude-sessions-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-claude-sessions-')))
     dir = resolve(parent, '.claude-fixture', 'sessions')
     mkdirSync(dir, { recursive: true })
   })
@@ -302,7 +316,7 @@ describe('the route', () => {
   beforeEach(() => {
     prevEnabled = process.env.COS_CLAUDE_SESSIONS_ENABLED
     prevDir = process.env.COS_CLAUDE_SESSIONS_DIR
-    const parent = mkdtempSync(join(tmpdir(), 'cos-claude-route-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-claude-route-')))
     dir = resolve(parent, '.claude-fixture', 'sessions')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, '36411.json'), JSON.stringify(raw()))

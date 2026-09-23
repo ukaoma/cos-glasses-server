@@ -2,7 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { rmSync } from 'node:fs'
+import { afterEach, describe, expect, it, vi, afterAll } from 'vitest'
 
 vi.mock('./conversation.js', () => ({
   getOrCreateSession: () => 'test-conversation',
@@ -21,6 +22,20 @@ import {
   QueryJobStore,
   type QueryJobJournalStorage,
 } from './query-job-store.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const roots: string[] = []
 
@@ -57,7 +72,7 @@ async function coordinator(
   runner: QueryJobRunner,
   options: ConstructorParameters<typeof QueryJobCoordinator>[2] = {},
 ): Promise<QueryJobCoordinator> {
-  const root = await mkdtemp(join(tmpdir(), 'cos-query-coordinator-'))
+  const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-coordinator-')))
   roots.push(root)
   const value = new QueryJobCoordinator(
     new QueryJobStore({ root, bootId: randomUUID() }),
@@ -422,7 +437,7 @@ describe('QueryJobCoordinator provider ownership', () => {
   })
 
   it('aborts and releases active state when callback persistence fails', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'cos-query-coordinator-failure-'))
+    const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-coordinator-failure-')))
     roots.push(root)
     let context: QueryJobRunnerContext | undefined
     const value = new QueryJobCoordinator(
@@ -445,7 +460,7 @@ describe('QueryJobCoordinator provider ownership', () => {
 
   it('absorbs complete and fail journal rejection without false display ownership', async () => {
     for (const terminalType of ['completed', 'failed'] as const) {
-      const root = await mkdtemp(join(tmpdir(), `cos-query-${terminalType}-failure-`))
+      const root = trackedTemp(await mkdtemp(join(tmpdir(), `cos-query-${terminalType}-failure-`)))
       roots.push(root)
       let context: QueryJobRunnerContext | undefined
       let terminalOwned: boolean | undefined

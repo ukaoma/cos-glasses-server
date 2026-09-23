@@ -12,7 +12,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   boundedMeetingSource,
   MEETING_SOURCE_MAX_BYTES,
@@ -21,10 +21,24 @@ import {
   type SaveMeetingInput,
 } from './meeting-store.js'
 
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+
 const roots: string[] = []
 
 function newRoot(prefix = 'cos-recordings-store-'): string {
-  const root = mkdtempSync(join(tmpdir(), prefix))
+  const root = trackedTemp(mkdtempSync(join(tmpdir(), prefix)))
   roots.push(root)
   return join(root, 'recordings')
 }
@@ -205,7 +219,7 @@ describe('MeetingStore', () => {
     const root = newRoot()
     const store = new MeetingStore(root)
     const saved = store.save(input())
-    const outer = mkdtempSync(join(tmpdir(), 'cos-recordings-outside-'))
+    const outer = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-recordings-outside-')))
     roots.push(outer)
     const secret = join(outer, 'secret.md')
     writeFileSync(secret, '# Secret\n\n## Transcript\n\noutside bytes\n')
@@ -228,7 +242,7 @@ describe('MeetingStore', () => {
   })
 
   it('rejects a symlinked recordings root instead of following it', () => {
-    const parent = mkdtempSync(join(tmpdir(), 'cos-recordings-root-link-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-recordings-root-link-')))
     roots.push(parent)
     const outside = join(parent, 'outside')
     mkdirSync(outside)

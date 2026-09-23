@@ -3,7 +3,21 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, afterAll } from 'vitest'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 let root = ''
 let server: Server | null = null
@@ -28,7 +42,7 @@ afterEach(async () => {
 
 describe('meeting transcription local-first failure contract', () => {
   it('persists raw audio and never fetches OpenAI when only a key exists', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-stream-local-first-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-local-first-')))
     process.env.COS_DATA_DIR = root
     delete process.env.COS_OPENAI_WHISPER_FALLBACK
     vi.resetModules()
@@ -102,7 +116,7 @@ describe('meeting transcription local-first failure contract', () => {
   })
 
   it('rejects a mismatched server pin before reading or persisting upload bytes', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-stream-pinned-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-pinned-')))
     process.env.COS_DATA_DIR = root
     vi.resetModules()
     vi.doMock('../lib/server-instance-id.js', () => ({ getServerInstanceId: () => 'test-server' }))
@@ -144,7 +158,7 @@ describe('meeting transcription local-first failure contract', () => {
   })
 
   it('durably acknowledges and replays an empty ASR completion without rerunning ASR', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-stream-empty-completion-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-empty-completion-')))
     process.env.COS_DATA_DIR = root
     delete process.env.COS_OPENAI_WHISPER_FALLBACK
     vi.resetModules()

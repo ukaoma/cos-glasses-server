@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { ImportedMeetingLibrary } from './imported-meeting-library.js'
 import {
   DECISION_SCHEMA,
@@ -39,6 +39,20 @@ import { type EngineRequest, runEngine } from './meeting-engine/worker.js'
 import { EVIDENCE_BIN_MS } from './meeting-engine/evidence.js'
 import type { PipelineAttempt } from './pipeline-runner.js'
 import { firefliesMeeting, g2Capture, matchingPair, phrase } from './meeting-engine/__fixtures__/synthetic.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const MERGE_PREFIX = 'COS_MERGE_RESULT='
 const roots: string[] = []
@@ -84,7 +98,7 @@ function applied(actionId: string, overrides: Partial<MergePipelineResult> = {})
 }
 
 function harness(options: { inputs?: EngineInputs; mode?: 'imports' | 'advise' | 'apply'; now?: number; collect?: 'real' } = {}): Harness {
-  const dir = mkdtempSync(join(tmpdir(), 'cos-runner-'))
+  const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-runner-')))
   roots.push(dir)
   const root = join(dir, 'imports')
   const library = new ImportedMeetingLibrary({ root })
@@ -311,7 +325,7 @@ describe('advise mode writes nothing outside the imports root', () => {
    * because an in-place splice changes no filename.
    */
   it('writes ONLY under the imports root, proven by a hash diff of the tree it reads', async () => {
-    const operations = mkdtempSync(join(tmpdir(), 'cos-operations-'))
+    const operations = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-operations-')))
     roots.push(operations)
     const monthDir = join(operations, 'personal', 'meetings', '2026-08')
     mkdirSync(monthDir, { recursive: true })
@@ -1099,7 +1113,7 @@ describe('an accepted merge carries its evidence', () => {
       g2Meta: { s1: { sha256: 'a'.repeat(64), finalizedAtMs: START + 1_800_000 } },
       firefliesMeta: { f1: {} },
     }
-    const dir = mkdtempSync(join(tmpdir(), 'cos-accept-evidence-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-accept-evidence-')))
     roots.push(dir)
     const root = join(dir, 'imports')
     const store = new MeetingActionsStore({ root })
@@ -1832,7 +1846,7 @@ describe('gaps the mutation gate found', () => {
   })
 
   it('reports no_pipeline rather than throwing on a Mac with no pipeline', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-nopipe-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-nopipe-')))
     roots.push(dir)
     const root = join(dir, 'imports')
     const store = new MeetingActionsStore({ root })

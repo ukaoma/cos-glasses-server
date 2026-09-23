@@ -6,13 +6,27 @@
 // forever, so the operator learns to ignore the field; don't degrade on 'error'
 // and a rejected model stays invisible behind a green status, which is how 78
 // trained profiles went unnoticed as missing across a managed cutover.
-import { describe, expect, it } from 'vitest'
-import { mkdtempSync } from 'node:fs'
+import { describe, expect, it, afterAll } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+
 // data-dir.ts mkdirs DATA_DIR at import, so redirect it before importing.
-process.env.COS_DATA_DIR = mkdtempSync(join(tmpdir(), 'cos-speaker-readiness-'))
+process.env.COS_DATA_DIR = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-speaker-readiness-')))
 const { speakerReadiness } = await import('./speaker-embeddings.js')
 
 describe('speaker readiness verdict', () => {

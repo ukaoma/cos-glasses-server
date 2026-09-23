@@ -19,7 +19,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { ImportedMeetingLibrary } from './imported-meeting-library.js'
 import {
   FIREFLIES_SIDECAR_VERSION,
@@ -32,6 +32,20 @@ import {
 import { MeetingActionsStore } from './meeting-actions-store.js'
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
 import { runEngine } from './meeting-engine/worker.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const roots: string[] = []
 const savedEnv: Record<string, string | undefined> = {}
@@ -80,7 +94,7 @@ function scribe(title: string, source: string, extra = ''): string {
 const SIDECAR_BYTES = 64 * 1024
 
 function operationsTree(count: number): { root: string; monthDir: string } {
-  const root = mkdtempSync(join(tmpdir(), 'cos-collect-ops-'))
+  const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-collect-ops-')))
   roots.push(root)
   const monthDir = join(root, 'personal', 'meetings', '2026-08')
   mkdirSync(monthDir, { recursive: true })
@@ -101,7 +115,7 @@ function operationsTree(count: number): { root: string; monthDir: string } {
 }
 
 function runnerFor(root: string): { runner: MeetingMergeRunner; store: MeetingActionsStore } {
-  const dataDir = mkdtempSync(join(tmpdir(), 'cos-collect-data-'))
+  const dataDir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-collect-data-')))
   roots.push(dataDir)
   const importsRoot = join(dataDir, 'imports')
   const library = new ImportedMeetingLibrary({ root: importsRoot })
@@ -252,7 +266,7 @@ describe('input collection does not stall the event loop', () => {
   it('scans with stats alone, opening nothing', () => {
     const { root } = operationsTree(3)
     setEnv('COS_OPERATIONS_DIR', root)
-    const dataDir = mkdtempSync(join(tmpdir(), 'cos-collect-scan-'))
+    const dataDir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-collect-scan-')))
     roots.push(dataDir)
     const library = new ImportedMeetingLibrary({ root: join(dataDir, 'imports') })
     const stamp = scanInputStamp('advise', library)
@@ -272,7 +286,7 @@ describe('input collection does not stall the event loop', () => {
  */
 describe('principle 7: the pass defers while a capture is live', () => {
   function productionGateRunner(root: string): { runner: MeetingMergeRunner; store: MeetingActionsStore } {
-    const dataDir = mkdtempSync(join(tmpdir(), 'cos-collect-gate-'))
+    const dataDir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-collect-gate-')))
     roots.push(dataDir)
     const importsRoot = join(dataDir, 'imports')
     const store = new MeetingActionsStore({ root: importsRoot })
@@ -342,7 +356,7 @@ describe('principle 7: the pass defers while a capture is live', () => {
 
 describe('the .fireflies.json reader refuses what it cannot trust', () => {
   function tree(sidecar: Record<string, unknown>): string {
-    const root = mkdtempSync(join(tmpdir(), 'cos-collect-ff-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-collect-ff-')))
     roots.push(root)
     const monthDir = join(root, 'personal', 'meetings', '2026-08')
     mkdirSync(monthDir, { recursive: true })
@@ -353,7 +367,7 @@ describe('the .fireflies.json reader refuses what it cannot trust', () => {
   }
 
   function collect(): ReturnType<typeof collectEngineInputs> {
-    const dataDir = mkdtempSync(join(tmpdir(), 'cos-collect-lib-'))
+    const dataDir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-collect-lib-')))
     roots.push(dataDir)
     return collectEngineInputs('advise', new ImportedMeetingLibrary({ root: join(dataDir, 'imports') }))
   }

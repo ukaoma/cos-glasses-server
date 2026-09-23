@@ -1,6 +1,6 @@
 // 6.51.0: a queued Cursor turn leaves through the composer's own Stop hook.
 // The pure rules, then the route against a real express server and real queue files.
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi, afterAll } from 'vitest'
 
 // Hoisted for the same reason as thread-turn-queue.test.ts: the store's data dir is read
 // at import time.
@@ -13,13 +13,29 @@ vi.hoisted(() => {
 import express from 'express'
 import type { Server } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimNextCursorTurn, cursorStopAcceptsFollowup, cursorStopIsFresh, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
 import { CURSOR_STOP_FOLLOWUP_PATH, createCursorStopFollowupRouter } from './cursor-stop-followup.js'
 import { readQueue, writeQueue } from '../lib/thread-turn-queue-store.js'
 import type { QueuedThreadTurn } from '../lib/thread-turn-queue.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+// The data home `vi.hoisted` made above, before any const here existed.
+if (process.env.COS_DATA_DIR) trackedTemp(process.env.COS_DATA_DIR)
 
 const CONV = 'd1728e99-1007-4957-b36b-34df7d525e14'
 // The route's clock reads 9_000; a hook that started half a second earlier is fresh.
@@ -211,7 +227,7 @@ describe(`POST ${CURSOR_STOP_FOLLOWUP_PATH}`, () => {
     try {
       const addr = live.address()
       const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}${CURSOR_STOP_FOLLOWUP_PATH}`
-      const file = join(mkdtempSync(join(tmpdir(), 'cos-cursor-b2-')), 'envelope.json')
+      const file = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cursor-b2-'))), 'envelope.json')
       writeFileSync(file, JSON.stringify(envelope({}, 'Stop', started)))
       // The hook's own curl, with a 1 s wait standing in for its 3 s.
       const curl = spawn('/usr/bin/curl', ['-s', '--connect-timeout', '1', '--max-time', '1',

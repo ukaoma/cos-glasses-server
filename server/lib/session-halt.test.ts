@@ -3,10 +3,10 @@
 // production value is not coverage). The hook side is executed in cos-session-hook.script.test.ts;
 // the last case here proves the two agree on the folder.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   HALT_MARKER_TTL_MS,
   __resetHaltRearmsForTests,
@@ -24,11 +24,25 @@ import {
 } from './session-halt.js'
 import { hookSpoolDir } from './claude-hooks-installer.js'
 
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+
 const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
 const OTHER = '80927570-0000-4000-8000-000000000000'
 const NOW = 1_790_000_000_000
 
-const folder = () => join(mkdtempSync(join(tmpdir(), 'cos-halt-')), '.cos-glasses', 'data', 'session-halt')
+const folder = () => join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-halt-'))), '.cos-glasses', 'data', 'session-halt')
 
 describe('session halt markers', () => {
   it('writes the lowercase id as the name, private, with the cancel it came from', () => {
@@ -55,7 +69,7 @@ describe('session halt markers', () => {
   })
 
   it('a write that cannot land reports false', () => {
-    const root = mkdtempSync(join(tmpdir(), 'cos-halt-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-halt-')))
     const blocker = join(root, 'data')
     writeFileSync(blocker, 'a file where the folder should be')
     expect(writeHaltMarker(SID, { at: NOW, clientCancelId: 'cc' }, join(blocker, 'session-halt'))).toBe(false)
@@ -172,7 +186,7 @@ describe('the marker for a handed-off turn survives that turn\'s own UserPromptS
   })
 
   it('a marker that cannot be written is reported, and nothing is left pending', () => {
-    const root = mkdtempSync(join(tmpdir(), 'cos-halt-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-halt-')))
     const blocker = join(root, 'data')
     writeFileSync(blocker, 'a file where the folder should be')
     expect(haltDeliveredTurn(SID, marker, { promptMarker: PROMPT, after: NOW, rearm: true, now: NOW }, join(blocker, 'session-halt'))).toBe(false)

@@ -10,15 +10,29 @@
 // rows is the property that lets an old lens read the new frames.
 
 import express from 'express'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest'
 import { agentSessionStreamRouter, cursorReplayable, parseAfterCursor } from './agent-session-stream.js'
 import { __resetSessionStreamBusForTests, beginAttachedTurn, publishSessionStream, RING_EPOCH, sessionStreamKey } from '../lib/session-stream-bus.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const SID = 'a1b2c3d4-0000-4000-8000-00000000c0de'
 // Real clocks: the deriver expires a hook-derived wait older than its ceiling.
@@ -78,7 +92,7 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
 
   beforeEach(() => {
     for (const k of KEYS) saved[k] = process.env[k]
-    home = mkdtempSync(join(tmpdir(), 'cos-stream-'))
+    home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-')))
     const dir = join(home, '.claude', 'projects', '-Users-example-project')
     mkdirSync(dir, { recursive: true })
     transcript = join(dir, `${SID}.jsonl`)

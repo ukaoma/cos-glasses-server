@@ -3,13 +3,27 @@ import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { DISPLAY_TICKET_TTL_SECONDS, verifyDisplayTicket } from '../lib/display-ticket.js'
-import { copyFileSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installClaudeHooks } from '../lib/claude-hooks-installer.js'
 import { invalidateHookStatus } from '../lib/session-hooks-runtime.js'
 import { healthRouter } from './health.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 let server: Server | null = null
 let base = ''
@@ -75,7 +89,7 @@ describe('features.sessionCancel (6.53.0)', () => {
   it('cosTurn always; deskClaude only with the hooks applied and the 6.53 hook installed', async () => {
     const keys = ['CLAUDE_CONFIG_DIR', 'COS_GLASSES_HOME', 'COS_SESSION_HOOKS'] as const
     const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]))
-    const root = mkdtempSync(join(tmpdir(), 'cos-health-cancel-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-health-cancel-')))
     process.env.CLAUDE_CONFIG_DIR = join(root, '.claude')
     process.env.COS_GLASSES_HOME = join(root, '.cos-glasses')
     process.env.COS_SESSION_HOOKS = '1'

@@ -5,14 +5,28 @@
 // working instead of unsupported. Neither can make a Claude verdict, an Agent CLI chat,
 // or a thread with a doubt read differently.
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterAll } from 'vitest'
 import { threadOccupancy, type OccupancyProbes } from './thread-occupancy.js'
 import { withCodexTurnClock, withCursorComposerTurn } from './occupancy-probes.js'
 import { readCodexTurnEndedAtMs } from './codex-turn-clock.js'
 import { transcriptTurnVerdict } from './thread-turn-queue-store.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const CODEX = '01a00da5-8026-7bf3-a9cb-47e61f06ab29'
 const CLAUDE = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
@@ -66,7 +80,7 @@ describe('Codex turn clock in the gate', () => {
 })
 
 describe('readCodexTurnEndedAtMs against real rollout lines', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cos-codex-rollout-'))
+  const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-rollout-')))
   const rollout = (name: string, kinds: string[]) => {
     const path = join(dir, name)
     writeFileSync(path, kinds.map(k => JSON.stringify({ timestamp: '2026-09-19T13:24:10.422Z', type: 'event_msg', payload: { type: k } })).join('\n') + '\n')

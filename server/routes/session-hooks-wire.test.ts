@@ -4,16 +4,30 @@
 // beyond what the registry alone can say.
 
 import express from 'express'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest'
 import { claudeSessionsRouter } from './claude-sessions.js'
 import { createSessionHooksRouter } from './session-hooks.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import { parseHookEnvelope, toolFingerprint } from '../lib/session-hook-events.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', '__fixtures__', 'session-hooks-6.48.0')
 const envelopes = (name: string) => readFileSync(join(FIXTURES, name), 'utf-8').split('\n').filter(Boolean).map(l => {
@@ -31,7 +45,7 @@ describe('derived state on the claude-sessions wire', () => {
 
   beforeEach(() => {
     for (const k of ['COS_CLAUDE_SESSIONS_ENABLED', 'COS_CLAUDE_SESSIONS_DIR', 'COS_SESSION_HOOKS']) saved[k] = process.env[k]
-    const parent = mkdtempSync(join(tmpdir(), 'cos-hooks-wire-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-hooks-wire-')))
     dir = resolve(parent, 'sessions')
     mkdirSync(dir, { recursive: true })
     // The registry record for the recorded session: alive, busy, moved before the hooks did.

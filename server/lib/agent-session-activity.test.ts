@@ -1,7 +1,7 @@
-import { appendFileSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, statSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, afterAll } from 'vitest'
 import {
   ACTIVITY_TAIL_BYTES,
   ACTIVITY_TAIL_MAX_BYTES,
@@ -13,12 +13,26 @@ import {
   sessionActivityFileReads,
 } from './agent-session-activity.js'
 
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+
 const jsonl = (...records: unknown[]) => records.map(r => JSON.stringify(r)).join('\n') + '\n'
 const bookkeeping = (bytes: number) => {
   const line = JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: '2026-09-13T00:11:15.000Z', pad: 'x'.repeat(200) }) + '\n'
   return line.repeat(Math.ceil(bytes / line.length))
 }
-const dir = () => mkdtempSync(join(tmpdir(), 'cos-activity-'))
+const dir = () => trackedTemp(mkdtempSync(join(tmpdir(), 'cos-activity-')))
 
 describe('last activity from a Claude transcript', () => {
   it('ignores the bookkeeping a Desktop relaunch appends', () => {

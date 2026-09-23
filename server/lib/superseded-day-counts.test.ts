@@ -18,11 +18,25 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { ImportedMeetingLibrary, importHash } from './imported-meeting-library.js'
 import { MeetingStore } from './meeting-store.js'
 import { supersededDayCounts } from './imported-library-rows.js'
 import { probeMeetings } from './morning-brief-runtime.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const MONTH = '2026-07'
 const DATE = '2026-07-15'
@@ -77,7 +91,7 @@ function writeRecording(monthDir: string, filename: string, sessionId: string, d
 
 /** A multi_domain tree with one `quilt` and one `personal` recording in the store. */
 function upgradeMac(): { store: MeetingStore; library: ImportedMeetingLibrary; operations: string } {
-  const parent = mkdtempSync(join(tmpdir(), 'cos-day-counts-'))
+  const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-day-counts-')))
   roots.push(parent)
   const recordingsRoot = join(parent, 'data', 'recordings')
   const importsRoot = join(parent, 'data', 'imports')
@@ -112,7 +126,7 @@ describe('the standalone store count honours the domain filter', () => {
   it('counts the whole month, not one capped page', () => {
     // `list()` caps a scoped query at 200 rows, and a day count that silently stops
     // counting is worse than one that costs a read.
-    const parent = mkdtempSync(join(tmpdir(), 'cos-day-counts-cap-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-day-counts-cap-')))
     roots.push(parent)
     const monthDir = join(parent, MONTH)
     mkdirSync(monthDir, { recursive: true })
@@ -244,7 +258,7 @@ describe('with imports present, the union still honours the domain', () => {
  */
 describe('a scribe whose sidecar is only under the recordings root', () => {
   it('is still dropped from the count when a merged scribe declares its session', () => {
-    const parent = mkdtempSync(join(tmpdir(), 'cos-day-counts-fallback-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-day-counts-fallback-')))
     roots.push(parent)
     const operations = join(parent, 'operations')
     const opsMonth = join(operations, 'quilt', 'meetings', MONTH)
@@ -285,7 +299,7 @@ describe('a scribe whose sidecar is only under the recordings root', () => {
   it('accepts the sessions the caller already declared instead of re-reading the month', () => {
     // `/api/meetings` has just read every scribe in this month and knows which sessions the
     // merged ones hold. The count must agree with what it was handed.
-    const parent = mkdtempSync(join(tmpdir(), 'cos-day-counts-declared-'))
+    const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-day-counts-declared-')))
     roots.push(parent)
     const operations = join(parent, 'operations')
     const opsMonth = join(operations, 'quilt', 'meetings', MONTH)

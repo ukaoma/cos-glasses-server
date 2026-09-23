@@ -1,8 +1,22 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { MeetingFinalizationJobStore } from './meeting-finalization-jobs.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const roots: string[] = []
 
@@ -12,7 +26,7 @@ afterEach(() => {
 
 describe('durable meeting finalization jobs', () => {
   it('persists, advances, lists, and removes a restart-replay job', () => {
-    const root = mkdtempSync(join(tmpdir(), 'cos-finalization-jobs-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-finalization-jobs-')))
     roots.push(root)
     const jobsRoot = join(root, 'data', 'meeting-finalization-jobs')
     const store = new MeetingFinalizationJobStore(jobsRoot)
@@ -49,14 +63,14 @@ describe('durable meeting finalization jobs', () => {
   })
 
   it('ignores malformed durable records instead of executing them', () => {
-    const root = mkdtempSync(join(tmpdir(), 'cos-finalization-jobs-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-finalization-jobs-')))
     roots.push(root)
     const store = new MeetingFinalizationJobStore(root)
     expect(() => store.get('../escape')).toThrow(/Invalid finalization sessionId/)
   })
 
   it('reconstructs a missing replay job from canonical two-phase intent', () => {
-    const root = mkdtempSync(join(tmpdir(), 'cos-finalization-jobs-'))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-finalization-jobs-')))
     roots.push(root)
     const store = new MeetingFinalizationJobStore(join(root, 'data', 'meeting-finalization-jobs'))
     const month = join(root, 'data', 'recordings', '2026-08')

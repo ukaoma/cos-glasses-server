@@ -6,12 +6,12 @@
 // every Codex reader took the first user row as the ask. Content below is invented;
 // the record and block shapes are real.
 
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import express from 'express'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   codexUserText,
   listCodexSessions,
@@ -22,6 +22,20 @@ import {
 import { recentSessionTurns, sessionTurnFromRecord } from './agent-session-turns.js'
 import { searchAgentSessions } from './agent-session-search.js'
 import { agentSessionsRouter } from '../routes/agent-sessions.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const THREAD = '019e1111-2222-7333-8444-555566667777'
 const AGENTS_BLOCK = '# AGENTS.md instructions for /Users/example/repo\n\n<INSTRUCTIONS>\nUse zebrafish naming everywhere.\n</INSTRUCTIONS>'
@@ -81,7 +95,7 @@ describe('codexUserText', () => {
 
 describe('parseAgentSession for Codex', () => {
   it('never titles, first-prompts or discusses the AGENTS.md block', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-codex-ask-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-ask-')))
     const file = writeRollout(home, ROLLOUT)
     const detail = await parseAgentSession('codex', file)
     expect(detail.display_label).toBe('Prep the LightRAG index update')
@@ -95,7 +109,7 @@ describe('parseAgentSession for Codex', () => {
   })
 
   it('takes the Codex thread name as the title when it has one, and keeps the ask as first_prompt', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-codex-ask-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-ask-')))
     const file = writeRollout(home, ROLLOUT)
     const detail = await parseAgentSession('codex', file, { codexThreadName: '  Prep LightRAG index update ' })
     expect(detail.display_label).toBe('Prep LightRAG index update')
@@ -104,7 +118,7 @@ describe('parseAgentSession for Codex', () => {
   })
 
   it('a thread name never reaches a Claude or Cursor detail', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-codex-ask-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-ask-')))
     const file = join(home, 'claude.jsonl')
     writeFileSync(file, `${JSON.stringify({ type: 'user', sessionId: 's1', message: { role: 'user', content: 'Real Claude ask' } })}\n`)
     const detail = await parseAgentSession('claude', file, { codexThreadName: 'Wrong name' })
@@ -114,7 +128,7 @@ describe('parseAgentSession for Codex', () => {
 
 describe('the Codex list row and search', () => {
   it('peekCodexMeta titles by the ask, so the list row DISCUSSION does not open with AGENTS.md', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-codex-ask-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-ask-')))
     const file = writeRollout(home, ROLLOUT)
     expect((await peekCodexMeta(file))?.title).toBe('Prep the LightRAG index update')
     const rows = await listCodexSessions(roots(home).codexSessions, new Date())
@@ -125,7 +139,7 @@ describe('the Codex list row and search', () => {
   })
 
   it('search does not match the AGENTS.md text nobody typed, and still matches the ask', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-codex-ask-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-ask-')))
     writeRollout(home, ROLLOUT)
     const noEmbed = async () => ({ reason: 'no_session_embeddings' as const })
     // The haystack keeps the FIRST line of each user row, so the line that leaked was the
@@ -158,7 +172,7 @@ afterEach(async () => {
 
 describe('the detail route titles a Codex thread by its own name (6.52.0)', () => {
   it('uses session_index.jsonl keyed by the rollout filename, and falls back to the ask', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'cos-codex-ask-route-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-codex-ask-route-')))
     const previous = process.env.COS_AGENT_SESSIONS_HOME
     const previousCodexHome = process.env.CODEX_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home

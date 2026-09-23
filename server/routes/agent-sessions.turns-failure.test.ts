@@ -3,10 +3,24 @@
 // reader is mocked to throw; the detail page must still answer 200 without the fields.
 import express from 'express'
 import type { AddressInfo } from 'node:net'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, afterAll } from 'vitest'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 vi.mock('../lib/agent-session-turns.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/agent-session-turns.js')>()
@@ -19,7 +33,7 @@ afterEach(async () => { for (const close of closers.splice(0)) await close() })
 describe('6.50.0: a failed history read', () => {
   it('answers the detail page anyway, without the history fields', async () => {
     const { agentSessionsRouter } = await import('./agent-sessions.js')
-    const home = mkdtempSync(join(tmpdir(), 'cos-turns-failure-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-turns-failure-')))
     const id = 'aaaaaaaa-bbbb-cccc-dddd-999999999999'
     const file = join(home, '.claude', 'projects', '-repo', `${id}.jsonl`)
     mkdirSync(dirname(file), { recursive: true })

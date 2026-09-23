@@ -10,7 +10,21 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, afterAll } from 'vitest'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 let root = ''
 let server: Server | null = null
@@ -101,7 +115,7 @@ function storedRows(sessionId: string): Array<Record<string, unknown>> {
 
 describe('a chunk upload banks its voiceprint', () => {
   it('persists the embedding the identifier actually used', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-chunk-emb-wire-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-chunk-emb-wire-')))
     process.env.COS_DATA_DIR = root
     const embedding = fingerprint(7)
     const { base, stream } = await mountRoute({
@@ -126,7 +140,7 @@ describe('a chunk upload banks its voiceprint', () => {
   })
 
   it('stores the chunk index the client sent, so a correction can name segments', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-chunk-emb-idx-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-chunk-emb-idx-')))
     process.env.COS_DATA_DIR = root
     const { base, stream } = await mountRoute({
       identify: vi.fn().mockImplementation(() => ({ speaker: 'MU', similarity: 0.9, embedding: fingerprint(1) })),
@@ -142,7 +156,7 @@ describe('a chunk upload banks its voiceprint', () => {
   })
 
   it('records Ext, whose only route to a name IS a correction', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-chunk-emb-ext-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-chunk-emb-ext-')))
     process.env.COS_DATA_DIR = root
     const { base, stream } = await mountRoute({
       identify: vi.fn().mockReturnValue({ speaker: 'Ext', similarity: 0, embedding: fingerprint(3) }),
@@ -156,7 +170,7 @@ describe('a chunk upload banks its voiceprint', () => {
   })
 
   it('writes nothing when identification produced no embedding', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-chunk-emb-none-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-chunk-emb-none-')))
     process.env.COS_DATA_DIR = root
     const { base, stream } = await mountRoute({ identify: vi.fn().mockReturnValue(null) })
 
@@ -168,7 +182,7 @@ describe('a chunk upload banks its voiceprint', () => {
 
   it('still transcribes when the embedding store is switched off', async () => {
     // The capture path must never depend on this feature succeeding.
-    root = mkdtempSync(join(tmpdir(), 'cos-chunk-emb-off-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-chunk-emb-off-')))
     process.env.COS_DATA_DIR = root
     process.env.COS_CHUNK_EMBEDDINGS = '0'
     const { base, stream } = await mountRoute({

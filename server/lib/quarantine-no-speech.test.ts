@@ -1,8 +1,22 @@
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterAll } from 'vitest'
 import { RECOVERED_RECEIPT, markRecoveredNoSpeech } from './unsaved-audio-quarantine.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 /**
  * A quarantined capture that holds no speech must CLEAR, not retry forever.
@@ -17,7 +31,7 @@ import { RECOVERED_RECEIPT, markRecoveredNoSpeech } from './unsaved-audio-quaran
  */
 
 function scratchDir(): string {
-  const d = mkdtempSync(join(tmpdir(), 'cos-quarantine-'))
+  const d = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-quarantine-')))
   mkdirSync(d, { recursive: true })
   return d
 }

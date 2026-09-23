@@ -1,8 +1,22 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { listWorkspaceSkills, parseSkillFrontmatter } from './workspace-skills.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const roots: string[] = []
 afterEach(() => {
@@ -32,8 +46,8 @@ description: >-
 
 describe('listWorkspaceSkills', () => {
   it('prefers canonical .agents skills, flattens nested names, and skips generated duplicates', () => {
-    const work = mkdtempSync(join(tmpdir(), 'cos-skills-work-'))
-    const home = mkdtempSync(join(tmpdir(), 'cos-skills-home-'))
+    const work = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-skills-work-')))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-skills-home-')))
     roots.push(work, home)
 
     skillDir(work, '.agents/skills/cos', `---
@@ -90,8 +104,8 @@ description: Personal capture
   })
 
   it('returns an empty list when nothing is installed', () => {
-    const work = mkdtempSync(join(tmpdir(), 'cos-skills-empty-'))
-    const home = mkdtempSync(join(tmpdir(), 'cos-skills-empty-home-'))
+    const work = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-skills-empty-')))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-skills-empty-home-')))
     roots.push(work, home)
     expect(listWorkspaceSkills({ workDir: work, home })).toEqual([])
   })

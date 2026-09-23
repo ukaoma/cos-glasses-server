@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defineConfig } from 'vitest/config'
@@ -45,6 +45,11 @@ import { defineConfig } from 'vitest/config'
  *     the checkout on every run. Migrating it belongs with that fix.
  */
 const isolatedDataDir = mkdtempSync(join(tmpdir(), 'cos-server-test-data-'))
+// Removed when the run ends (6.53.3 /qa W3): the mutation gate starts one vitest run per
+// mutant, and every run used to leave its data home behind.
+process.once('exit', () => {
+  try { rmSync(isolatedDataDir, { recursive: true, force: true }) } catch { /* best effort */ }
+})
 
 export default defineConfig({
   test: {

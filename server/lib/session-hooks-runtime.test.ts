@@ -1,7 +1,7 @@
 // The composition root's own rules: the two-scan memory lives here (not in the pure
 // deriver), a COS child's pid is remembered past its exit, and off means off.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest'
 import { spawn } from 'node:child_process'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
 import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, deskTurnEndedAt, haltHandedOffTurn, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
@@ -10,10 +10,24 @@ import { __resetThreadCancelsForTests, noteThreadCancelled } from './session-can
 import { OPEN_TURN_CEILING_MS } from './session-state-derive.js'
 import type { HookEnvelope } from './session-hook-events.js'
 import { dataPath } from './data-dir.js'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEAD_GRACE_MS, MISS_LIMIT } from './session-state-derive.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const saved: Record<string, string | undefined> = {}
 const KEYS = ['COS_CLAUDE_SESSIONS_ENABLED', 'COS_SESSION_HOOKS', 'COS_GLASSES_HOME', 'COS_SESSION_HOOKS_SPOOL_DIR', 'COS_CLAUDE_SESSIONS_DIR'] as const
@@ -91,7 +105,7 @@ describe('registryIdleAfterStop (the engine\'s end of turn, 6.48.1)', () => {
     writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: SID, entrypoint: 'claude-desktop', ...over }))
 
   it('is true only for a record that says idle AT OR AFTER the Stop; busy, idle-before, and no record are not', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     expect(registryIdleAfterStop(SID, 5_000, dir)).toBeNull()
     record(dir, 100, { status: 'idle', statusUpdatedAt: 4_999 })
     expect(registryIdleAfterStop(SID, 5_000, dir)).toBe(false)     // idle from BEFORE this Stop: the hooks have not returned
@@ -106,7 +120,7 @@ describe('registryIdleAfterStop (the engine\'s end of turn, 6.48.1)', () => {
   })
 
   it('reads the TAB\'s record when a COS child shares the session id, and the child\'s only when it is alone', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     // The child's file sorts FIRST in the directory (a naive first-match would return it).
     const child = 100 + Math.floor(Math.random() * 100)
     const tab = 90_000 + Math.floor(Math.random() * 9_000)
@@ -125,7 +139,7 @@ describe('registryIdleAfterStop (the engine\'s end of turn, 6.48.1)', () => {
 
 describe('registryEntrypointSync', () => {
   it('reads the entrypoint off the record that names the session, ignoring torn files and foreign names', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     writeFileSync(join(dir, '100.json'), JSON.stringify({ pid: 100, sessionId: 'A1B2C3D4-0000-4000-8000-000000000001', entrypoint: 'sdk-cli', kind: 'interactive' }))
     writeFileSync(join(dir, '101.json'), '{ torn')
     writeFileSync(join(dir, 'notes.json'), JSON.stringify({ sessionId: 'a1b2c3d4-0000-4000-8000-000000000002', entrypoint: 'cli' }))
@@ -141,7 +155,7 @@ describe('the boot replay', () => {
   it('restores the entrypoint the ledger row carries, so a print run that ended inside the window is still a run after a restart (QA W1)', () => {
     // A scratch home for the runtime files, spool and registry; the ledger lives at the
     // (already isolated) data path, where this test seeds it BEFORE the boot.
-    const home = mkdtempSync(join(tmpdir(), 'cos-runtime-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-runtime-')))
     process.env.COS_GLASSES_HOME = home
     process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
     process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')   // empty: the registry has been reaped
@@ -178,7 +192,7 @@ describe('claudeDeskRunning (6.53.0, the cancel route\'s desk probe)', () => {
     writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId: SID, entrypoint: 'claude-desktop', status, statusUpdatedAt: 1 }))
 
   it('the hooks: an open turn inside the ceiling is running; a Stop, a SessionEnd or silence past the ceiling is not', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     const t0 = 1_000_000
     expect(claudeDeskRunning(SID, t0, dir)).toBe(false)
     sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
@@ -199,16 +213,16 @@ describe('claudeDeskRunning (6.53.0, the cancel route\'s desk probe)', () => {
     const live = spawn('/bin/sleep', ['30'], { stdio: 'ignore' })
     const pid = live.pid!
     try {
-      const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+      const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
       record(dir, pid, 'busy')
       expect(claudeDeskRunning(SID, Date.now(), dir)).toBe(true)
       record(dir, pid, 'idle')
       expect(claudeDeskRunning(SID, Date.now(), dir)).toBe(false)
-      const deadDir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+      const deadDir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
       record(deadDir, 2_147_483_000, 'busy') // no such process
       expect(claudeDeskRunning(SID, Date.now(), deadDir)).toBe(false)
       // A COS child's record is the route's own in-flight turn, never a desk run.
-      const childDir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+      const childDir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
       record(childDir, pid, 'busy')
       expect(recordCosSpawn(pid, Date.now())).toBe('recorded')
       try {
@@ -228,7 +242,7 @@ describe('halt markers die with their session (6.53.0)', () => {
     ({ ts, ppid: 1, event, sessionId: SID, payload: { session_id: SID, reason: 'other' } })
 
   function boot() {
-    const home = mkdtempSync(join(tmpdir(), 'cos-runtime-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-runtime-')))
     process.env.COS_GLASSES_HOME = home
     process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
     process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')
@@ -280,7 +294,7 @@ describe('claudeDeskRunning weighs the cancel on record (6.53.3)', () => {
   afterEach(() => __resetThreadCancelsForTests())
 
   it('a cos_turn cancel with nothing since: the open turn is the dead child\'s, not a desk run', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     const t0 = 1_000_000
     sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
     sessionSignalStore.apply(env('PreToolUse', t0 + 5, { tool_name: 'Bash', tool_input: { command: 'make' } }), false)
@@ -293,7 +307,7 @@ describe('claudeDeskRunning weighs the cancel on record (6.53.3)', () => {
   })
 
   it('a desk_run cancel: still running until the desk itself says the run ended after the cancel', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     const t0 = 2_000_000
     sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
     sessionSignalStore.apply(env('PreToolUse', t0 + 5, { tool_name: 'Bash', tool_input: { command: 'make' } }), false)
@@ -311,7 +325,7 @@ describe('claudeDeskRunning weighs the cancel on record (6.53.3)', () => {
   })
 
   it('deskTurnEndedAt reads the hooks\' own end only while no turn is open', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-registry-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-registry-')))
     const t0 = 3_000_000
     sessionSignalStore.apply(env('UserPromptSubmit', t0, { prompt: 'go' }), false)
     expect(deskTurnEndedAt(SID, dir)).toBeNull()
@@ -336,7 +350,7 @@ describe('a handed-off turn\'s halt marker is re-armed through its own prompt (6
   afterEach(() => __resetHaltRearmsForTests())
 
   function boot() {
-    const home = mkdtempSync(join(tmpdir(), 'cos-runtime-'))
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-runtime-')))
     process.env.COS_GLASSES_HOME = home
     process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
     process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')

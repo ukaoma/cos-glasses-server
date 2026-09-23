@@ -2,7 +2,21 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, tr
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 let root = ''
 
@@ -13,7 +27,7 @@ describe('public adaptive transcription setup', () => {
   })
 
   it('persists the adaptive choice and a safe profile without starting a listener', () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-cli-transcription-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cli-transcription-')))
     const fakeBin = join(root, 'bin')
     mkdirSync(fakeBin)
     const codex = join(fakeBin, 'codex')
@@ -50,7 +64,7 @@ describe('public adaptive transcription setup', () => {
   })
 
   it('retains a timed-out partial download, reports incomplete setup, and promotes a completed retry', () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-cli-transcription-resume-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cli-transcription-resume-')))
     const fakeBin = join(root, 'bin')
     const modelDir = join(root, '.local/share/whisper-models')
     mkdirSync(fakeBin)
@@ -112,7 +126,7 @@ truncate -s 487614201 "$output"
   })
 
   it('persists Max without provisioning a redundant Small.en worker', () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-cli-transcription-max-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cli-transcription-max-')))
     const fakeBin = join(root, 'bin')
     mkdirSync(fakeBin)
     for (const binary of ['codex', 'whisper-cli', 'whisper-server']) {
@@ -147,7 +161,7 @@ truncate -s 487614201 "$output"
   })
 
   it('rejects an unknown transcription tier before mutating configuration', () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-cli-transcription-invalid-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cli-transcription-invalid-')))
     const result = spawnSync(process.execPath, [
       resolve('bin/cli.cjs'), '--setup-transcription', '--transcription-tier', 'fastest', '--prepare-only',
     ], {
@@ -159,7 +173,7 @@ truncate -s 487614201 "$output"
   })
 
   it('rejects a missing transcription tier value before mutating configuration', () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-cli-transcription-missing-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cli-transcription-missing-')))
     const result = spawnSync(process.execPath, [
       resolve('bin/cli.cjs'), '--setup-transcription', '--transcription-tier',
     ], {

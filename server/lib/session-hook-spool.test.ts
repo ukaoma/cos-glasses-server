@@ -1,11 +1,25 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { LAST_DRAIN_STAMP, SPOOL_BATCH, STARTUP_MAX_PASSES, startSpoolIngester, type SpoolIngester } from './session-hook-spool.js'
 import { parseHookEnvelope, type HookEnvelope } from './session-hook-events.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'session-hooks-6.48.0')
 const lines = (name: string) => readFileSync(join(FIXTURES, name), 'utf-8').split('\n').filter(Boolean)
@@ -15,7 +29,7 @@ afterEach(() => { running?.stop(); running = null })
 
 /** The spool proper, with the ledger BESIDE it as in production (`data/hook-spool/` vs `data/…jsonl`). */
 function spoolDir(): string {
-  const root = mkdtempSync(join(tmpdir(), 'cos-spool-'))
+  const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-spool-')))
   const dir = join(root, 'hook-spool')
   mkdirSync(dir)
   return dir

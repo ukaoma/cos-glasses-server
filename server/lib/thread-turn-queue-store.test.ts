@@ -4,11 +4,25 @@
 // the 30 s backstop. The fixture reproduces the production shape: a real-sized
 // bookkeeping row past a real terminal record.
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, afterAll } from 'vitest'
 import { TURN_END_TAIL_BYTES, transcriptTurnEnded, transcriptTurnVerdict } from './thread-turn-queue-store.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const j = (o: unknown) => JSON.stringify(o)
 const user = (text: string) => j({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } })
@@ -18,7 +32,7 @@ const toolUse = () => j({ type: 'assistant', message: { role: 'assistant', stop_
 const attachment = (bytes: number) => j({ type: 'attachment', attachment: { type: 'prompt_snapshot', text: 'x'.repeat(bytes) } })
 
 function transcript(lines: string[]): string {
-  const path = join(mkdtempSync(join(tmpdir(), 'cos-tail-')), 'session.jsonl')
+  const path = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-tail-'))), 'session.jsonl')
   writeFileSync(path, lines.join('\n') + '\n')
   return path
 }

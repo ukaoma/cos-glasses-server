@@ -1,10 +1,10 @@
 // 6.51.0: Codex Continue through the Codex app's own queue. Every verdict rule is
 // executed here, and `runCodexQueueCli` is executed against a real child process.
 
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, afterAll } from 'vitest'
 import {
   CODEX_QUEUE_TIMEOUT_MS,
   buildCodexQueueArgs,
@@ -16,6 +16,20 @@ import {
   type CodexQueueRun,
 } from './codex-live-queue.js'
 import { __resetCodexLiveStatsForTests, codexLiveStats, makeCodexLiveDeliverer, runCodexQueueCli } from './codex-live-queue-deps.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const THREAD = '01a00da5-8026-7bf3-a9cb-47e61f06ab29'
 const QUEUED = '01a0b9d6-5dcb-7453-b0b3-54180516fa4f'
@@ -132,7 +146,7 @@ describe('codexLiveQueueEnabled', () => {
 })
 
 describe('runCodexQueueCli, executed against a real child', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cos codex cli ')) // a space, like "Application Support"
+  const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos codex cli '))) // a space, like "Application Support"
   const script = (name: string, body: string) => {
     const path = join(dir, name)
     writeFileSync(path, `#!/bin/sh\n${body}\n`)

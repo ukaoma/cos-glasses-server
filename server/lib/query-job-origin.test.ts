@@ -3,7 +3,7 @@ import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFile
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   FINGERPRINT_EXCLUDED,
   FINGERPRINT_KEYS,
@@ -16,6 +16,20 @@ import {
   type QueryJobRequest,
 } from './query-job-types.js'
 import { QueryJobStore } from './query-job-store.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const minimal = {
   clientJobId: '11111111-1111-4111-8111-111111111111',
@@ -184,7 +198,7 @@ describe('journal hydration with an origin', () => {
   afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = '' })
 
   it('hydrates a job admitted with an origin on a second boot, origin intact', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const first = new QueryJobStore({ root, bootId: randomUUID() })
     await first.init()
     const admitted = await first.admit({
@@ -202,7 +216,7 @@ describe('journal hydration with an origin', () => {
   })
 
   it('counts a bare-string origin at admission without rejecting the job', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const store = new QueryJobStore({ root, bootId: randomUUID() })
     await store.init()
     const admitted = await store.admit({ ...minimal, clientJobId: randomUUID(), origin: 'g2' })
@@ -213,7 +227,7 @@ describe('journal hydration with an origin', () => {
   })
 
   it('rejects a known kind with a bad id at admission with invalid_origin', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const store = new QueryJobStore({ root, bootId: randomUUID() })
     await store.init()
     await expect(store.admit({ ...minimal, clientJobId: randomUUID(), origin: { kind: 'routine', id: 'Has Upper' } }))
@@ -221,7 +235,7 @@ describe('journal hydration with an origin', () => {
   })
 
   it('admits an unknown kind, dropped and counted once per job created (not per retry)', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const store = new QueryJobStore({ root, bootId: randomUUID() })
     await store.init()
     const clientJobId = randomUUID()
@@ -248,7 +262,7 @@ describe('journal hydration with an origin', () => {
   }
 
   it('does not hydrate a record whose stored fingerprint disagrees, and counts it', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const first = new QueryJobStore({ root, bootId: randomUUID() })
     await first.init()
     const admitted = await first.admit({ ...minimal, clientJobId: randomUUID() })
@@ -261,7 +275,7 @@ describe('journal hydration with an origin', () => {
   })
 
   it('hydrates a record carrying a kind this build does not know, dropped and counted exactly once across an eviction replay', async () => {
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const writer = new QueryJobStore({ root, bootId: randomUUID() })
     await writer.init()
     const admitted = await writer.admit({ ...minimal, clientJobId: randomUUID() })
@@ -286,7 +300,7 @@ describe('journal hydration with an origin', () => {
     // a minimal one, with the clock pinned to 2099 so retention never expires
     // it. A test that hydrates real bytes cannot be repaired by editing an
     // oracle; only by keeping the fingerprint byte-compatible.
-    root = mkdtempSync(join(tmpdir(), 'cos-origin-store-'))
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-origin-store-')))
     const fixtureDir = new URL('./__fixtures__/query-jobs-6.43.3/', import.meta.url)
     const files = readdirSync(fixtureDir).filter(name => name.endsWith('.jsonl'))
     expect(files.length).toBeGreaterThan(0)

@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterAll } from 'vitest'
 import {
   WORKSPACE_SCAN_BYTES,
   WORKSPACE_SCAN_BYTES_MAX,
@@ -13,6 +13,20 @@ import {
   scanForCwd,
   type AttachedWorkspaceDeps,
 } from './attached-workspace'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 // The real path on this machine, kept verbatim because it is the fixture that
 // matters: it contains BOTH a space and hyphens, which is what makes decoding the
@@ -203,7 +217,7 @@ describe('realAttachedWorkspaceDeps touches the real filesystem safely', () => {
   // relevant tests green, so the guards in the function whose own header says
   // "one planted path would wedge the whole server" were entirely unexercised.
   // That asymmetry is exactly why the identical bug shipped in native-head.
-  const root = () => mkdtempSync(join(tmpdir(), 'aw-real-'))
+  const root = () => trackedTemp(mkdtempSync(join(tmpdir(), 'aw-real-')))
 
   it('reads the HEAD of a real transcript, not the tail', () => {
     // The cwd is in the EARLY rows; a tail read of a 13 GB rollout would miss it.

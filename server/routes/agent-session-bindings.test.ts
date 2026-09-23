@@ -20,11 +20,11 @@
 // sanitized fixture proves nothing.
 
 import express from 'express'
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from 'vitest'
 import {
   ATTACHABLE_COPY,
   CANCEL_FENCE_RECHECK_MS,
@@ -57,6 +57,20 @@ import type { SessionCancelLedgerRow } from '../lib/session-cancel.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
 const OTHER_SID = '80927570-0000-4000-8000-000000000000'
@@ -430,7 +444,7 @@ async function bindings(
 }
 
 beforeEach(() => {
-  const parent = mkdtempSync(join(tmpdir(), 'cos-attachability-'))
+  const parent = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-attachability-')))
   claudeDir = resolve(parent, '.claude-fixture', 'sessions')
   codexDir = resolve(parent, '.codex-fixture', 'thread-writer-locks')
   mkdirSync(claudeDir, { recursive: true })
@@ -4141,7 +4155,7 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
   })
 
   it('writes the REAL marker the hook reads, under the lower-cased id, whatever case the URL used', async () => {
-    const dir = join(mkdtempSync(join(tmpdir(), 'cos-cancel-')), '.cos-glasses', 'data', 'session-halt')
+    const dir = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cancel-'))), '.cos-glasses', 'data', 'session-halt')
     const { cancel } = recordingCancel({ writeHalt: (sid, marker) => writeHaltMarker(sid, marker, dir) })
     const base = await start(deps({ cancel }))
     const res = await postCancel(base, 'cc-desk-0002', 'claude', SID.toUpperCase())

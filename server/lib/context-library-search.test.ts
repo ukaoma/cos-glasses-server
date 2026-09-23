@@ -1,7 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   keywordHitsFromRecords,
   keywordHitsFromThreadCache,
@@ -12,6 +12,20 @@ import {
   type ContextSearchHit,
 } from './context-library-search.js'
 import { tokenizeMeetingQuery } from './meeting-library-search.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const envKeys = ['COS_CONTEXT_DIR', 'COS_SCRIPTS_DIR', 'COS_OPERATIONS_DIR'] as const
 const previous: Partial<Record<typeof envKeys[number], string | undefined>> = {}
@@ -76,7 +90,7 @@ describe('context library search helpers', () => {
   })
 
   it('keyword-scans thread cache JSON without touching meeting Qdrant', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cos-thread-search-'))
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-thread-search-')))
     previous.COS_SCRIPTS_DIR = process.env.COS_SCRIPTS_DIR
     process.env.COS_SCRIPTS_DIR = dir
     writeFileSync(join(dir, '.threads_cache.json'), JSON.stringify({

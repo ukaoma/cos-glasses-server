@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, afterAll } from 'vitest'
 import { getSessionHeartbeat, recordSessionHeartbeat } from './session-heartbeats.js'
 import {
   STRANDED_PROMOTE_TITLE,
@@ -14,11 +14,25 @@ import {
   writeStrandedDraft,
 } from './stranded-session-actions.js'
 
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
+
 const NOW = 1_786_320_000_000
 const mins = (n: number) => n * 60_000
 
 let dir: string
-beforeEach(() => { dir = mkdtempSync(resolve(tmpdir(), 'stranded-')) })
+beforeEach(() => { dir = trackedTemp(mkdtempSync(resolve(tmpdir(), 'stranded-'))) })
 
 const input = (over: Partial<Parameters<typeof writeStrandedDraft>[1]> = {}) => ({
   sessionId: 'meeting_1786305380784_30mzjn',

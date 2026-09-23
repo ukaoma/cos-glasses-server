@@ -2,10 +2,10 @@
 // and the attachability field are exercised through HTTP in agent-session-bindings.test.ts;
 // this file pins the pure rules both of them call.
 
-import { mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -22,6 +22,20 @@ import {
   threadCancelledAt,
   type CancelFacts,
 } from './session-cancel.js'
+
+// Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
+// had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
+// cannot forget it.
+const trackedTempRoots: string[] = []
+function trackedTemp<T extends string>(root: T): T {
+  trackedTempRoots.push(root)
+  return root
+}
+afterAll(() => {
+  for (const root of trackedTempRoots.splice(0)) {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* a chmod'ed tree: best effort */ }
+  }
+})
 
 const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
 const base: CancelFacts = { provider: 'claude', cosTurnInFlight: false, runningOutsideCos: true, hooksEnabled: true, hooksReady: true }
@@ -112,7 +126,7 @@ describe('the queue hold a cancel leaves behind', () => {
 
 describe('the ledger', () => {
   it('appends one private JSON line per cancel', () => {
-    const path = join(mkdtempSync(join(tmpdir(), 'cos-cancel-ledger-')), '.cos-glasses', 'data', 'session-cancel.jsonl')
+    const path = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-cancel-ledger-'))), '.cos-glasses', 'data', 'session-cancel.jsonl')
     appendSessionCancelLedger({ at: '2026-09-21T23:00:00.000Z', provider: 'claude', threadId: SID, target: 'desk_run', outcome: 'accepted', clientCancelId: 'cc-1' }, path)
     appendSessionCancelLedger({ at: '2026-09-21T23:00:01.000Z', provider: 'codex', threadId: SID, target: null, outcome: 'not_running', clientCancelId: 'cc-2' }, path)
     const rows = readFileSync(path, 'utf-8').trim().split('\n').map(line => JSON.parse(line))
