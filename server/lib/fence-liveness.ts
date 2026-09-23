@@ -27,6 +27,9 @@
 // human deciding whether to release; an over-confident `none_running` is worse than
 // admitting the probe could not see.
 
+import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+
 /** Recorded spawn: a pid and the start COS measured when it created the child. */
 export interface RecordedSpawn {
   pid: number
@@ -55,7 +58,7 @@ export interface FenceLiveness {
 }
 
 export interface FenceLivenessDeps {
-  /** Epoch ms at which `pid` started, or null when it is not running.
+  /** Epoch ms at which `pid` started, or null ONLY when it is provably not running.
    *  MAY THROW; a throwing probe is not an answer and resolves to `unknown`. */
   pidStartMs: (pid: number) => number | null
 }
@@ -116,11 +119,82 @@ export function makePidStartProbe(
     const raw = run(pid)
     if (raw === null) return null
     const text = raw.trim()
-    if (!text) return null
+    // A clean exit that printed nothing is not "not running" (only the runner's null is):
+    // throw, so it is counted unverifiable.
+    if (!text) throw new Error('empty process start from ps')
     const parsed = Date.parse(text)
     // Unparseable is NOT "not running" -- throw so the caller counts it
     // unverifiable rather than silently reading a live child as gone.
     if (!Number.isFinite(parsed)) throw new Error(`unparseable process start: ${text}`)
     return parsed
   }
+}
+
+/** What this module reads off the error `execFileSync` throws. */
+export interface ExecFailureLike {
+  status?: unknown
+  signal?: unknown
+  killed?: unknown
+  code?: unknown
+  error?: unknown
+  stdout?: unknown
+  stderr?: unknown
+}
+
+/** The slice of `execFileSync` the probe calls. Injectable so a test can throw every error
+ *  shape Node produces without spawning anything. */
+export type PsExec = (file: string, args: readonly string[], options: { encoding: 'utf8'; timeout: number }) => string
+
+/** How long one `ps` may take before Node kills it (the kill is NOT an answer). */
+export const PS_PROBE_TIMEOUT_MS = 2_000
+
+const PS_BIN = existsSync('/bin/ps') ? '/bin/ps' : 'ps'
+
+const emptyOutput = (value: unknown): boolean =>
+  (typeof value === 'string' && value.trim() === '') || (Buffer.isBuffer(value) && value.length === 0)
+
+/**
+ * 6.53.3 /qa BLOCKER: is this `execFileSync` failure `ps -p` saying "no such process"?
+ *
+ * THE ONE ANSWER THAT MEANS GONE. `ps -p <pid>` for a pid that is not running exits 1 on its
+ * own and prints nothing on either stream (measured, macOS 26 and node 24: `{status: 1,
+ * signal: null, stdout: '', stderr: ''}` with no `code` and no `error`). Everything else is
+ * ps failing to answer, and says nothing about the child: a kill at the timeout (`ETIMEDOUT`,
+ * SIGTERM), a fork that failed (`EAGAIN`), no binary (`ENOENT`), a signal, output on stdout or
+ * a complaint on stderr, any other status. Until 6.53.3's QA every one of those read as gone,
+ * and gone is `none_running`, which releases a cancel fence (`releaseSettledCancelFences`) on a
+ * child that may still be writing.
+ */
+export function psSaysNoSuchProcess(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false
+  const e = error as ExecFailureLike
+  return e.status === 1
+    && (e.signal === null || e.signal === undefined)
+    && e.killed !== true
+    && (e.code === null || e.code === undefined)
+    && (e.error === null || e.error === undefined)
+    && emptyOutput(e.stdout)
+    && emptyOutput(e.stderr)
+}
+
+/**
+ * The production runner: `ps -p <pid> -o lstart=`'s stdout, or null ONLY when ps said the
+ * process does not exist (`psSaysNoSuchProcess`). Any other failure THROWS, which
+ * `fenceLiveness` counts unverifiable, so the fence stays.
+ */
+export function psLstartRunner(exec: PsExec = execFileSync as unknown as PsExec): (pid: number) => string | null {
+  return (pid: number) => {
+    try {
+      return exec(PS_BIN, ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: PS_PROBE_TIMEOUT_MS })
+    } catch (error) {
+      if (psSaysNoSuchProcess(error)) return null
+      const e = (error ?? {}) as ExecFailureLike
+      throw new Error(`ps could not answer for pid ${pid} (status=${String(e.status ?? null)} signal=${String(e.signal ?? null)} code=${String(e.code ?? 'none')})`)
+    }
+  }
+}
+
+/** The probe the fence routes use in production. */
+export function defaultPidStartProbe(exec?: PsExec): (pid: number) => number | null {
+  return makePidStartProbe(psLstartRunner(exec))
 }

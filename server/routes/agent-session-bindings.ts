@@ -96,8 +96,7 @@
 // and answer 400. They never treat an unparsed body as an empty one.
 
 import type { FenceRecord } from '../lib/thread-fence-store.js'
-import { execFileSync } from 'node:child_process'
-import { fenceLiveness, makePidStartProbe, type FenceLiveness, type FenceLivenessDeps } from '../lib/fence-liveness.js'
+import { defaultPidStartProbe, fenceLiveness, type FenceLiveness, type FenceLivenessDeps } from '../lib/fence-liveness.js'
 import { Router, type Request, type Response } from 'express'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -1560,17 +1559,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   const guard = deps.guard ?? new TargetGuard(deps.fencePersistence ?? null)
   // `ps -o lstart=` is the only start-time keyword macOS ps offers. Injectable so a
   // test drives recycled and unreadable pids without spawning real processes.
-  const livenessDeps: FenceLivenessDeps = deps.liveness ?? {
-    pidStartMs: makePidStartProbe((pid) => {
-      try {
-        return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
-          encoding: 'utf8', timeout: 2_000,
-        })
-      } catch {
-        return null   // not running, or ps refused the pid
-      }
-    }),
-  }
+  const livenessDeps: FenceLivenessDeps = deps.liveness ?? { pidStartMs: defaultPidStartProbe() }
   // 6.53.3 (review A4): at boot, release the fences a cancel left whose children are all
   // gone (6.53.1's false "unreaped" among them), then keep re-checking on every fence read.
   guard.adoptCancelLiveness(livenessDeps)

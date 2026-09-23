@@ -25,6 +25,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from 'vitest'
+import { defaultPidStartProbe } from '../lib/fence-liveness.js'
 import {
   ATTACHABLE_COPY,
   CANCEL_FENCE_RECHECK_MS,
@@ -2933,6 +2934,41 @@ describe('durable fences', () => {
       expect(again.status).toBe(409)
       expect(again.body.reason).toBe('native_target_fenced')
       expect(store.rows()).toHaveLength(1)
+    })
+
+    // 6.53.3 /qa BLOCKER: the PRODUCTION probe (defaultPidStartProbe), fed the errors Node's
+    // execFileSync really throws. Only `ps` saying "no such process" may release; a ps that was
+    // killed at its timeout, could not be forked, or was not found says nothing about the child.
+    const psThrows = (fields: Record<string, unknown>) => ({
+      pidStartMs: defaultPidStartProbe(() => { throw Object.assign(new Error('Command failed: /bin/ps -p 3670 -o lstart='), fields) }),
+    })
+    it.each([
+      ['ps killed at its timeout', { status: null, signal: 'SIGTERM', code: 'ETIMEDOUT', error: new Error('spawnSync /bin/ps ETIMEDOUT'), stdout: '', stderr: '' }],
+      ['ps could not be forked', { status: null, signal: null, code: 'EAGAIN', error: new Error('spawnSync /bin/ps EAGAIN') }],
+      ['no ps binary', { status: null, signal: null, code: 'ENOENT', error: new Error('spawnSync ps ENOENT') }],
+      ['ps killed by a signal', { status: null, signal: 'SIGKILL', stdout: '', stderr: '' }],
+    ])('never released through the real probe: %s', async (_label, fields) => {
+      const store = seeded([cancelFence()])
+      const base = await start(writeDeps({ fencePersistence: store.persistence, liveness: psThrows(fields) }))
+      expect(store.rows()).toHaveLength(1)
+      const listed = (await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences
+      expect(listed).toHaveLength(1)
+      expect(listed[0].liveness.state).toBe('unknown')
+      const again = await post(base, attachPath(), { cosSessionId: 'cos-still-fenced' })
+      expect(again.status).toBe(409)
+      expect(again.body.reason).toBe('native_target_fenced')
+      expect(store.rows()).toHaveLength(1)
+    })
+
+    it('released through the real probe when ps says no such process (exit 1, nothing printed)', async () => {
+      const store = seeded([cancelFence()])
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        await start(writeDeps({ fencePersistence: store.persistence, liveness: psThrows({ status: 1, signal: null, stdout: '', stderr: '' }) }))
+        expect(store.rows()).toEqual([])
+      } finally {
+        warn.mockRestore()
+      }
     })
 
     it('on a fence read: a child that was alive at boot and has since exited is released then', async () => {
