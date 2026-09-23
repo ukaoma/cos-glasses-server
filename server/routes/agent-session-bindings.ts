@@ -1007,6 +1007,14 @@ export interface TargetFenceView {
   fencedReason(targetKey: string): WriteRefusal | null
 }
 
+/** 6.53.3: how often a read may re-probe a settled-cancel fence's children (`ps` per child). */
+export const CANCEL_FENCE_RECHECK_MS = 30_000
+
+/** A fence a cancel left at the delivery-ambiguous site: the only kind `releaseSettledCancelFences` may touch. */
+function isSettledCancelCandidate(row: FenceRecord): boolean {
+  return row.adapterReason === 'cancelled' && row.fenceSite === 'ambiguous'
+}
+
 export class TargetGuard {
   /** targetKey -> turnId of the single COS turn allowed to be in flight. */
   private readonly claims = new Map<string, string>()
@@ -1015,6 +1023,9 @@ export class TargetGuard {
   private readonly fences = new Map<string, FenceRecord>()
   private readonly persistence: FencePersistence | null
   private persistDegraded = false
+  /** 6.53.3: set by the router; null keeps `fencedReason` a pure read (tests, older wiring). */
+  private cancelLiveness: FenceLivenessDeps | null = null
+  private cancelSweepAt = Number.NEGATIVE_INFINITY
 
   constructor(persistence: FencePersistence | null = null) {
     this.persistence = persistence
@@ -1108,7 +1119,63 @@ export class TargetGuard {
 
   fencedReason(targetKey: string): WriteRefusal | null {
     const row = this.fences.get(targetKey)
-    return row === undefined ? null : (row.reason as WriteRefusal)
+    if (row === undefined) return null
+    // 6.53.3: a settled-cancel fence is re-checked here too, throttled, so a thread whose
+    // cancelled child has since exited opens on its next use, not only on a restart or when
+    // someone opens the Fences card.
+    if (this.cancelLiveness !== null && isSettledCancelCandidate(row)) {
+      const now = Date.now()
+      if (now - this.cancelSweepAt >= CANCEL_FENCE_RECHECK_MS) {
+        this.cancelSweepAt = now
+        this.releaseSettledCancelFences(this.cancelLiveness)
+        if (!this.fences.has(targetKey)) return null
+      }
+    }
+    return row.reason as WriteRefusal
+  }
+
+  /**
+   * 6.53.3 (review A4): release every fence a CANCEL left behind whose recorded children
+   * are all provably gone (`fenceLiveness` says `none_running`), and log each one with its
+   * whole evidence record, as the operator release does.
+   *
+   * WHY THIS ONE CLASS, AND ONLY IT. A fence exists because a turn's delivery is unknowable
+   * and a second copy could reach a real conversation. For a cancel that question is moot:
+   * the person asked for the turn to stop, and the route settles it cancelled, never
+   * retried. What remains is a second WRITER, and only the recorded child (the CLI, the one
+   * process that writes the transcript) can be one. 6.53.1 fenced every Claude, Codex and
+   * Cursor cancel whose tool was churning subprocesses (review A4: 10/10 false fences per
+   * variant), and those fences are durable across restarts and upgrades.
+   *
+   * NEVER: a fence whose adapter reason is not `cancelled` (a timeout had 21 minutes of
+   * tool calls; that is still a person's call), one set at the route-error site (a route
+   * bug around a delivery), one whose children were never recorded or could not be probed
+   * (`unknown`), or one with a child still alive (`running`). Returns what was released.
+   */
+  releaseSettledCancelFences(deps: FenceLivenessDeps, log: (line: string) => void = line => console.warn(line)): FenceRecord[] {
+    const released: FenceRecord[] = []
+    for (const row of [...this.fences.values()]) {
+      if (!isSettledCancelCandidate(row)) continue
+      let state: string
+      try {
+        state = fenceLiveness(row.spawns, deps).state
+      } catch {
+        continue
+      }
+      if (state !== 'none_running') continue
+      const target = opaqueRevision(row.targetKey)
+      const outcome = this.releaseFence(target)
+      if (!outcome.ok) continue
+      const ev = outcome.row
+      released.push(ev)
+      log(`[agent-session-bindings] fence RELEASED automatically (cancelled turn, every recorded child gone) target=${target} provider=${ev.provider} fencedAt=${ev.fencedAt} fenceSite=${ev.fenceSite ?? 'unknown'} adapterReason=${ev.adapterReason ?? 'unknown'} detail=${ev.adapterDetail ?? 'none'} exitCode=${ev.exitCode ?? 'null'} childReaped=${ev.childReaped ?? 'unknown'} stderrClass=${ev.stderrClass ?? 'none'} durationMs=${ev.durationMs ?? 'unknown'} spawnCount=${ev.spawns?.length ?? 0}`)
+    }
+    return released
+  }
+
+  /** 6.53.3: the probe the lazy re-check in `fencedReason` uses; the router adopts its own. */
+  adoptCancelLiveness(deps: FenceLivenessDeps): void {
+    this.cancelLiveness = deps
   }
 
   /** Every fence, REDACTED for the wire: the raw targetKey embeds the private
@@ -1504,6 +1571,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
     }),
   }
+  // 6.53.3 (review A4): at boot, release the fences a cancel left whose children are all
+  // gone (6.53.1's false "unreaped" among them), then keep re-checking on every fence read.
+  guard.adoptCancelLiveness(livenessDeps)
+  try {
+    guard.releaseSettledCancelFences(livenessDeps)
+  } catch (error) {
+    console.error(`[agent-session-bindings] settled-cancel fence sweep failed: ${error instanceof Error ? error.message : error}`)
+  }
   const ownership = deps?.ownership ?? { record: recordCosSpawn, release: releaseCosSpawn }
   // One per router. Injectable so the follow-on (attach accepting a `forkRef`)
   // shares this instance rather than standing up a second, disconnected one.
@@ -1738,6 +1813,13 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // `degraded` is reported, never inferred: a memory-only fence set behaves
     // identically to a durable one until the process restarts, so a silent
     // fallback would be indistinguishable from working.
+    // 6.53.3: a read releases the settled-cancel fences first (logged), so the card never
+    // offers a person a fence the server can prove is safe to lift.
+    try {
+      guard.releaseSettledCancelFences(livenessDeps)
+    } catch (error) {
+      console.error(`[agent-session-bindings] settled-cancel fence sweep failed: ${error instanceof Error ? error.message : error}`)
+    }
     res.json({ fences: guard.listFences(livenessDeps), degraded: guard.degraded() })
   })
 

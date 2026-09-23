@@ -27,6 +27,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ATTACHABLE_COPY,
+  CANCEL_FENCE_RECHECK_MS,
   LIVE_VERIFY_BUDGET_MS,
   REASON_COPY,
   TURN_SENT_CODEX_QUEUE_COPY,
@@ -34,6 +35,7 @@ import {
   WRITE_REASON_COPY,
   createAgentSessionBindingsRouter,
   opaqueRevision,
+  TargetGuard,
   type AgentSessionBindingsDeps,
   type AttachedTurnRequest,
   type BindingRegistry,
@@ -2851,6 +2853,110 @@ describe('durable fences', () => {
     // `unknown`, and with one alive it is `running`. Both are correct, neither is
     // `none_running`, which is the assertion that matters.
     expect(l.state).not.toBe('none_running')
+  })
+
+  // 6.53.3 (review A4): 6.53.1 fenced every cancel whose tool churned subprocesses (a false
+  // "unreaped"), durably. A fence a CANCEL left whose recorded children are all provably gone
+  // is released at boot and on every fence read, logged with its whole evidence record.
+  describe('settled-cancel fences (6.53.3)', () => {
+    const CHILD = { pid: 3670, startMs: NOW - 60_000 }
+    const cancelFence = (over: Record<string, unknown> = {}) => ({
+      targetKey: targetKey('claude', SID),
+      provider: 'claude',
+      reason: 'native_target_fenced',
+      headBefore: 'nh1:before',
+      turnId: 'turn-canary',
+      bindingId: 'b-canary',
+      fencedAt: NOW - 30_000,
+      adapterReason: 'cancelled',
+      fenceSite: 'ambiguous',
+      adapterDetail: 'unreaped',
+      exitCode: null,
+      childReaped: false,
+      durationMs: 7_200,
+      spawns: [CHILD],
+      ...over,
+    })
+    const seeded = (rows: any[]) => {
+      let stored = [...rows]
+      return { persistence: { load: () => stored, save: (r: any[]) => { stored = [...r] } }, rows: () => stored }
+    }
+    const gone = { pidStartMs: () => null }
+    const alive = { pidStartMs: () => CHILD.startMs }
+
+    it('at boot: a cancelled fence whose every recorded child is gone is released, logged, and the thread attaches', async () => {
+      const store = seeded([cancelFence()])
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const base = await start(writeDeps({ fencePersistence: store.persistence, liveness: gone }))
+        expect(store.rows()).toEqual([])
+        const line = warn.mock.calls.map(c => String(c[0])).find(l => l.includes('fence RELEASED automatically'))
+        expect(line).toBeDefined()
+        expect(line).toContain('adapterReason=cancelled')
+        expect(line).toContain('detail=unreaped')
+        expect(line).toContain('spawnCount=1')
+        expect(line).not.toContain(SID)
+        expect((await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences).toEqual([])
+        expect((await post(base, attachPath(), { cosSessionId: 'cos-after-release' })).status).toBe(201)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    it.each([
+      ['a child still alive', cancelFence(), alive],
+      ['no child recorded (unknown, never none_running)', cancelFence({ spawns: [] }), gone],
+      ['a probe that cannot answer', cancelFence(), { pidStartMs: () => { throw new Error('ps unavailable') } }],
+      ['a timeout, children gone', cancelFence({ adapterReason: 'timeout' }), gone],
+      ['an ambiguous delivery, children gone', cancelFence({ adapterReason: 'provider_exit_nonzero' }), gone],
+      ['a cancel fenced at the route-error site', cancelFence({ fenceSite: 'route_error' }), gone],
+    ])('never released: %s', async (_label, row, liveness) => {
+      const store = seeded([row])
+      const base = await start(writeDeps({ fencePersistence: store.persistence, liveness }))
+      expect(store.rows()).toHaveLength(1)
+      expect((await (await fetch(`${base}/api/agent-sessions/fences`)).json()).fences).toHaveLength(1)
+      const again = await post(base, attachPath(), { cosSessionId: 'cos-still-fenced' })
+      expect(again.status).toBe(409)
+      expect(again.body.reason).toBe('native_target_fenced')
+      expect(store.rows()).toHaveLength(1)
+    })
+
+    it('on a fence read: a child that was alive at boot and has since exited is released then', async () => {
+      const store = seeded([cancelFence()])
+      let running = true
+      const base = await start(writeDeps({ fencePersistence: store.persistence, liveness: { pidStartMs: () => (running ? CHILD.startMs : null) } }))
+      expect(store.rows()).toHaveLength(1)
+      running = false
+      const body = await (await fetch(`${base}/api/agent-sessions/fences`)).json()
+      expect(body.fences).toEqual([])
+      expect(store.rows()).toEqual([])
+    })
+
+    it('the fence check re-probes a settled-cancel fence, throttled, and never touches any other fence', () => {
+      const store = seeded([cancelFence(), cancelFence({ targetKey: targetKey('claude', OTHER_SID), adapterReason: 'timeout' })])
+      const guard = new TargetGuard(store.persistence)
+      let running = true
+      guard.adoptCancelLiveness({ pidStartMs: () => (running ? CHILD.startMs : null) })
+      const clock = vi.spyOn(Date, 'now')
+      try {
+        clock.mockReturnValue(NOW)
+        expect(guard.fencedReason(targetKey('claude', SID))).toBe('native_target_fenced')
+        running = false
+        // Inside the throttle: not re-probed yet.
+        clock.mockReturnValue(NOW + CANCEL_FENCE_RECHECK_MS - 1)
+        expect(guard.fencedReason(targetKey('claude', SID))).toBe('native_target_fenced')
+        clock.mockReturnValue(NOW + CANCEL_FENCE_RECHECK_MS)
+        expect(guard.fencedReason(targetKey('claude', SID))).toBeNull()
+        // The timeout fence beside it stays, whatever its children do.
+        expect(guard.fencedReason(targetKey('claude', OTHER_SID))).toBe('native_target_fenced')
+        expect(store.rows().map((r: any) => r.adapterReason)).toEqual(['timeout'])
+      } finally {
+        clock.mockRestore()
+      }
+      // Without an adopted probe the check stays a pure read.
+      const plain = new TargetGuard(seeded([cancelFence()]).persistence)
+      expect(plain.fencedReason(targetKey('claude', SID))).toBe('native_target_fenced')
+    })
   })
 
   it('refuses to release without an explicit confirmation, and previews it', async () => {
