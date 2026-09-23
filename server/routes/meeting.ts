@@ -182,7 +182,11 @@ interface MeetingSessionSource {
   hasAudio(sessionId: string): boolean
   moveAudioToPending(sessionId: string): string | null
   delete(sessionId: string, options?: { preserveAudio?: boolean }): void
+  /** 6.53.3: live, closed within its retention, or unknown (`getMeetingSessionStatus`). */
+  getState?(sessionId: string): 'active' | 'closed' | 'missing'
 }
+
+const defaultSessionState = (sessionId: string): 'active' | 'closed' | 'missing' => getMeetingSessionStatus(sessionId).state
 
 export interface MeetingRouteDependencies {
   store?: MeetingStore
@@ -404,6 +408,7 @@ const defaultSessionSource: MeetingSessionSource = {
   hasAudio: hasSessionAudio,
   moveAudioToPending: moveSessionAudioToPending,
   delete: deleteSession,
+  getState: defaultSessionState,
 }
 
 function countWords(text: string): number {
@@ -566,10 +571,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
       const transcript = sessions.getTranscript(sessionId)
       if (!transcript?.trim()) {
-        res.status(404).json({
-          error: `No transcript found for session ${sessionId}`,
-          reason: 'session_not_found',
-        })
+        // 6.53.3 (review D3): a session the server KNOWS (live, or closed within its
+        // retention) that holds no transcript is not one it never heard of. Its own reason
+        // lets a client stop asking ("nothing to save") instead of retrying a 404 all day.
+        // Still 404, so every existing client reads it exactly as before.
+        const known = (sessions.getState ?? defaultSessionState)(sessionId)
+        res.status(404).json(known === 'active' || known === 'closed'
+          ? { error: `Nothing to save for session ${sessionId}`, reason: 'nothing_to_save', state: known }
+          : { error: `No transcript found for session ${sessionId}`, reason: 'session_not_found' })
         return
       }
 
