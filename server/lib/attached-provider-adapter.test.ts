@@ -40,6 +40,8 @@ import {
   CANCEL_KILL_GRACE_MS,
   KILL_GRACE_MS,
   FORCE_SETTLE_MS,
+  FINAL_PROBE_CAP_MS,
+  TREE_POLL_MS,
   MAX_ATTACHED_TIMEOUT_MS,
   MAX_PROMPT_CHARS,
   attachedDeliveryAmbiguous,
@@ -58,6 +60,9 @@ import {
   type BinaryResolution,
 } from './attached-provider-adapter'
 import { CosSpawnLedger } from './agent-session-ownership-store'
+// 6.53.3 (review A8): the route's reading of an adapter result, asserted next to the result
+// itself, so the two contracts cannot drift apart again.
+import { classifyDelivery } from '../routes/agent-session-bindings'
 import { isSelfOwned } from './thread-occupancy'
 
 // Real values, observed on this machine 2026-08-15.
@@ -132,7 +137,7 @@ interface HarnessOptions {
   preflight?: () => any
   spawn?: (request: AttachedSpawnRequest) => AttachedChildProcess
   mutateChild?: (child: FakeChild) => void
-  processTreeAlive?: (child: AttachedChildProcess) => boolean
+  processTreeAlive?: (child: AttachedChildProcess) => boolean | PromiseLike<boolean>
 }
 
 interface HarnessContext {
@@ -1260,9 +1265,12 @@ describe('cancel (6.53.0): the caller\'s abort signal', () => {
     expect(result.reason).toBe('cancelled')
     expect(result.delivery).toBe('not_attempted')
     expect(result.detail).toBe('before_spawn')
+    // 6.53.3: nothing exists to survive, and the result says so.
+    expect(result.reaped).toBe(true)
     expect(ctx.spawns).toHaveLength(0)
     expect(ctx.calls).not.toContain('spawn')
     expect(attachedDeliveryAmbiguous(result)).toBe(false)
+    expect(classifyDelivery(result, true)).toEqual({ kind: 'cancelled' })
   })
 
   it('an abort that lands while the child is being spawned kills it before a prompt byte is written', async () => {
@@ -1278,13 +1286,24 @@ describe('cancel (6.53.0): the caller\'s abort signal', () => {
         return child as unknown as AttachedChildProcess
       },
     })
+    // The SIGKILL lands and the child closes, as a killed process does.
+    const record = ctx.deps.terminate
+    ctx.deps.terminate = (child, signal) => {
+      record(child, signal)
+      if (signal === 'SIGKILL') setTimeout(() => (child as unknown as FakeChild).close(null), 5)
+    }
     const result = expectFailure(await deliver(ctx, { abortSignal: controller.signal }))
     expect(result.reason).toBe('cancelled')
     expect(result.delivery).toBe('aborted')
     expect(result.detail).toBe('before_write')
+    // 6.53.3: reaped before it settles, so it is not ambiguous here AND not fenced by the
+    // route. 6.53.2 settled at once with `reaped: false`: this test said "not ambiguous"
+    // while the route fenced the thread (review A8).
+    expect(result.reaped).toBe(true)
     expect(ctx.children[0]!.stdin!.written).toEqual([])
     expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGKILL'])
     expect(attachedDeliveryAmbiguous(result)).toBe(false)
+    expect(classifyDelivery(result, true)).toEqual({ kind: 'cancelled' })
     // Released like every other exit.
     expect(ctx.ledger.snapshot().size).toBe(0)
   })
@@ -1462,5 +1481,144 @@ describe('cancel (6.53.0): the caller\'s abort signal', () => {
     const result = await deliver(ctx)
     expect(result.ok).toBe(true)
     expect(ctx.terminations).toEqual([])
+  })
+})
+
+describe('6.53.3: a stopped turn waits for its whole tree by polling, and reports it honestly', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  /** A live turn (prompt written) that the caller then cancels. */
+  async function cancelledTurn(options: HarnessOptions = {}) {
+    const ctx = harness({ script: () => { /* a long tool call */ }, ...options })
+    const controller = new AbortController()
+    let settled = false
+    const pending = deliver(ctx, { abortSignal: controller.signal }).then(result => {
+      settled = true
+      return result
+    })
+    await vi.advanceTimersByTimeAsync(10)
+    expect(ctx.children[0]!.stdin!.written).toEqual([PROMPT])
+    controller.abort()
+    return { ctx, pending, isSettled: () => settled }
+  }
+
+  /** A cancel that lands between the spawn and the write. */
+  function cancelledBeforeWrite(options: HarnessOptions = {}) {
+    const controller = new AbortController()
+    const ctx = harness({
+      ...options,
+      spawn: () => {
+        const child = new FakeChild()
+        ctx.children.push(child)
+        controller.abort()
+        return child as unknown as AttachedChildProcess
+      },
+    })
+    let settled = false
+    const pending = deliver(ctx, { abortSignal: controller.signal }).then(result => {
+      settled = true
+      return result
+    })
+    return { ctx, pending, isSettled: () => settled }
+  }
+
+  it('A7: after close it polls, and settles within one poll of the tree going, long before the SIGKILL grace', async () => {
+    vi.useFakeTimers()
+    let treeAlive = true
+    let probes = 0
+    const { ctx, pending, isSettled } = await cancelledTurn({
+      processTreeAlive: () => { probes += 1; return treeAlive },
+    })
+    // The CLI exits 100 ms after SIGTERM; its detached tool takes a second.
+    await vi.advanceTimersByTimeAsync(100)
+    ctx.children[0]!.close(143)
+    await vi.advanceTimersByTimeAsync(900)
+    expect(isSettled()).toBe(false)
+    treeAlive = false
+    await vi.advanceTimersByTimeAsync(TREE_POLL_MS)
+    expect(isSettled()).toBe(true)
+    expect(expectFailure(await pending)).toMatchObject({ reason: 'cancelled', delivery: 'cancelled', reaped: true })
+    // Settled on a poll: the tool stopped by itself, so no SIGKILL was ever sent.
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM'])
+    // About one read per 200 ms over those 1.1 s, not 6.53.2's one per 25 ms (~44).
+    expect(probes).toBeGreaterThanOrEqual(3)
+    expect(probes).toBeLessThanOrEqual(8)
+  })
+
+  it('A7: reads the table once when the tree is already gone at close, and judges without a second read', async () => {
+    vi.useFakeTimers()
+    let probes = 0
+    const { ctx, pending } = await cancelledTurn({ processTreeAlive: () => { probes += 1; return false } })
+    ctx.children[0]!.close(143)
+    expect(expectFailure(await pending)).toMatchObject({ reason: 'cancelled', delivery: 'cancelled', reaped: true })
+    expect(probes).toBe(1)
+  })
+
+  it('reads once more at the force deadline, so a tree that died since the last poll is not reported unreaped', async () => {
+    vi.useFakeTimers()
+    let treeAlive = true
+    const { ctx, pending, isSettled } = await cancelledTurn({ processTreeAlive: () => treeAlive })
+    ctx.children[0]!.close(null)
+    await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS + FORCE_SETTLE_MS - 10)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(isSettled()).toBe(false)
+    treeAlive = false
+    await vi.advanceTimersByTimeAsync(10)
+    expect(expectFailure(await pending)).toMatchObject({ reason: 'cancelled', delivery: 'cancelled', reaped: true })
+  })
+
+  it('a final read that never answers cannot wedge the claim: capped, then unreaped', async () => {
+    vi.useFakeTimers()
+    let hang = false
+    const { ctx, pending, isSettled } = await cancelledTurn({
+      processTreeAlive: () => (hang ? new Promise<boolean>(() => { /* never */ }) : true),
+    })
+    ctx.children[0]!.close(null)
+    await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS + FORCE_SETTLE_MS - 50)
+    hang = true
+    await vi.advanceTimersByTimeAsync(50 + FINAL_PROBE_CAP_MS + 1)
+    expect(isSettled()).toBe(true)
+    expect(expectFailure(await pending)).toMatchObject({ reason: 'cancelled', delivery: 'cancelled', reaped: false, detail: 'unreaped' })
+  })
+
+  it('an answer that is not exactly false reads alive: undefined and a rejection both end unreaped', async () => {
+    vi.useFakeTimers()
+    const answers = [() => undefined, () => Promise.reject(new Error('probe failed'))]
+    for (const answer of answers) {
+      const { ctx, pending } = await cancelledTurn()
+      ctx.deps.processTreeAlive = answer as never
+      ctx.children[0]!.close(null)
+      await vi.advanceTimersByTimeAsync(CANCEL_KILL_GRACE_MS + FORCE_SETTLE_MS + FINAL_PROBE_CAP_MS)
+      expect(expectFailure(await pending)).toMatchObject({ reason: 'cancelled', reaped: false, detail: 'unreaped' })
+    }
+  })
+
+  it('A8: a cancel before the write waits for the tree like any other, then reads cancelled / aborted / reaped', async () => {
+    vi.useFakeTimers()
+    let treeAlive = true
+    const { ctx, pending, isSettled } = cancelledBeforeWrite({ processTreeAlive: () => treeAlive })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(ctx.terminations.map(t => t.signal)).toEqual(['SIGKILL'])
+    ctx.children[0]!.close(null)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(isSettled()).toBe(false)
+    treeAlive = false
+    await vi.advanceTimersByTimeAsync(TREE_POLL_MS)
+    const result = expectFailure(await pending)
+    expect(result).toMatchObject({ reason: 'cancelled', delivery: 'aborted', detail: 'before_write', reaped: true })
+    expect(ctx.children[0]!.stdin!.written).toEqual([])
+    // What the route sees: a stop it requested, fully reaped, no byte written. No fence.
+    expect(classifyDelivery(result, true)).toEqual({ kind: 'cancelled' })
+  })
+
+  it('A8: a child killed before the write that never closes is force-settled unreaped, and the route fences it', async () => {
+    vi.useFakeTimers()
+    const { ctx, pending } = cancelledBeforeWrite()
+    await vi.advanceTimersByTimeAsync(FORCE_SETTLE_MS)
+    const result = expectFailure(await pending)
+    expect(result).toMatchObject({ reason: 'cancelled', delivery: 'aborted', detail: 'unreaped', reaped: false })
+    // No byte was written, but a process of ours may be alive: fail closed.
+    expect(classifyDelivery(result, true)).toEqual({ kind: 'ambiguous' })
+    expect(ctx.ledger.snapshot().size).toBe(0)
   })
 })

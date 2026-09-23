@@ -93,7 +93,7 @@
 import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
-import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
+import { execFile, execFileSync, spawn as nodeSpawn } from 'node:child_process'
 
 import { isValidNativeThreadId } from './native-thread-id.js'
 import { isBindableProvider, type BindableProvider } from './agent-session-binding-store.js'
@@ -320,8 +320,13 @@ export interface AttachedTurnDeps {
    * True while any verified member of the provider process tree is still live.
    * Unknown/probe failure MUST read as true: a cancellation may only be reported
    * reaped after the whole tree is positively gone.
+   *
+   * 6.53.3: may answer with a promise, and the production one does: it reads the process
+   * table with an async `ps`, so the poll that waits for a cancelled tree no longer stalls
+   * the event loop ~43 ms per read. A plain boolean is still accepted. Anything but an
+   * exact `false` (a rejection, `undefined`, a throw) reads as alive.
    */
-  processTreeAlive: (child: AttachedChildProcess) => boolean
+  processTreeAlive: (child: AttachedChildProcess) => boolean | PromiseLike<boolean>
   /**
    * Argv builder. Optional, defaults to the real one.
    *
@@ -400,6 +405,26 @@ export const CANCEL_KILL_GRACE_MS = 5_000
  * the safe direction.
  */
 export const FORCE_SETTLE_MS = 2_000
+
+/**
+ * 6.53.3: how often a cancelled or timed-out turn re-reads the process table after the CLI
+ * closed while part of its tree still lives.
+ *
+ * Polling, not waiting out the grace, is the point: a tool that exits one second after
+ * SIGTERM used to hold the result for the whole five-second cancel grace (measured 5.3 s).
+ * 200 ms keeps that to about one second while costing one async `ps` per tick; 6.53.2 ran
+ * a blocking `ps` every 25 ms, up to ~29 reads in the two seconds after SIGKILL.
+ */
+export const TREE_POLL_MS = 200
+
+/** 6.53.3: the first re-read after SIGKILL. The kernel needs a moment to tear the tree down. */
+const TREE_POLL_AFTER_KILL_MS = 25
+
+/**
+ * 6.53.3: the last read at the force-settle deadline gets this long to answer. A probe that
+ * never answers must not wedge the route's claim, so the cap settles unreaped instead.
+ */
+export const FINAL_PROBE_CAP_MS = 1_500
 
 /**
  * Prompt ceiling. Generous — this is a guard against a pathological or
@@ -812,8 +837,10 @@ async function run(
   }
   // 6.53.0: a cancel that landed before the spawn. No process is created, so nothing can
   // have been delivered; the turn ends `cancelled`, which the route never fences.
+  // 6.53.3: and `reaped: true`, because no process exists to survive. A reader that asks
+  // "is anything of this turn still running?" gets the true answer, not the fail() default.
   if (request.abortSignal?.aborted === true) {
-    return fail('cancelled', 'not_attempted', { ...base, detail: 'before_spawn', durationMs: duration() })
+    return fail('cancelled', 'not_attempted', { ...base, detail: 'before_spawn', reaped: true, durationMs: duration() })
   }
   let child: AttachedChildProcess
   try {
@@ -884,12 +911,22 @@ function safeTerminate(deps: AttachedTurnDeps, child: AttachedChildProcess, sign
   }
 }
 
-function safeProcessTreeAlive(deps: AttachedTurnDeps, child: AttachedChildProcess): boolean {
+/**
+ * 6.53.3: resolves true unless the probe positively answered `false`.
+ *
+ * Never rejects. A failed ownership probe is not proof that the process tree is gone, and
+ * neither is a malformed answer: 6.53.2 read anything but `true` as dead, so a probe that
+ * returned `undefined` would have reported a reaped tree.
+ */
+function probeProcessTree(deps: AttachedTurnDeps, child: AttachedChildProcess): Promise<boolean> {
   try {
-    return deps.processTreeAlive(child) === true
+    const answer = deps.processTreeAlive(child)
+    if (answer !== null && typeof answer === 'object' && typeof (answer as PromiseLike<boolean>).then === 'function') {
+      return Promise.resolve(answer).then(alive => alive !== false, () => true)
+    }
+    return Promise.resolve(answer !== false)
   } catch {
-    // A failed ownership probe is not proof that the process tree is gone.
-    return true
+    return Promise.resolve(true)
   }
 }
 
@@ -928,8 +965,16 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     let timedOut = false
     /** 6.53.0: the caller's abort fired after the child existed. Read before `timedOut`. */
     let cancelled = false
+    /**
+     * 6.53.3: that abort landed before the prompt write. The result keeps `delivery:
+     * 'aborted'` (no byte exists) but still waits for the tree like any other cancel.
+     */
+    let abortedBeforeWrite = false
     let spawnErrored = false
     let onAbort: (() => void) | null = null
+    /** 6.53.3: one async process-table read at a time; a request during one reruns after it. */
+    let probeInFlight = false
+    let probeAgain = false
 
     let deadline: ReturnType<typeof setTimeout> | null = null
     let graceTimer: ReturnType<typeof setTimeout> | null = null
@@ -966,8 +1011,9 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
         nativeThreadId,
         returnedNativeId: observedIds.length === 1 ? observedIds[0]! : null,
         exitCode,
-        // Every settle but the force-settle below is reached from `finishTerminal`,
-        // which only runs from the `close`/`error` handlers — so the child was
+        // Every settle but the force-settle below is reached from `settleTerminal`,
+        // which only runs after the `close`/`error` handlers (directly, or from the
+        // 6.53.3 tree poll once a read shows nothing owned) — so the child was
         // reaped. The one exception overrides this explicitly.
         reaped: true,
         stderrClass: classifyStderr(stderrSample),
@@ -1011,11 +1057,79 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
       }
     }
 
+    // A child that survived SIGKILL cannot be reached from here, and blocking forever
+    // would wedge the coordinator and any Control drain behind it. A cancel that landed
+    // during the timeout's escalation still reads as the user's (6.53.0).
+    const settleUnreaped = () => {
+      // 6.53.3: no prompt byte was written, so the delivery stays `aborted`; `reaped: false`
+      // is what tells the route a process of ours may still be alive.
+      if (abortedBeforeWrite) return settleFailure('cancelled', { detail: 'unreaped', reaped: false })
+      if (cancelled) settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
+      else settleFailure('timeout', { detail: 'unreaped', reaped: false })
+    }
+
+    // --- 6.53.3: wait for the WHOLE tree, by polling ------------------------------
+    // The CLI wrapper may close before a tool in a separate process group. 6.53.2 then
+    // parked the result until the SIGKILL grace ran out and only polled after it, so a
+    // tool that stopped one second after SIGTERM still held the turn ~5.3 s. Now the
+    // table is re-read from `close` on, and the turn settles on the first read that
+    // positively shows no owned process. The grace timers stay armed throughout: this
+    // only ever settles EARLIER, never skips the SIGKILL a stubborn tool needs.
+    const runTreeProbe = () => {
+      treePollTimer = null
+      if (settled) return
+      if (probeInFlight) {
+        probeAgain = true
+        return
+      }
+      probeInFlight = true
+      void probeProcessTree(deps, child).then(alive => {
+        probeInFlight = false
+        if (settled) return
+        // The probe already proved the tree gone. Judge the outcome without a second read.
+        if (!alive) return settleTerminal()
+        if (probeAgain) {
+          probeAgain = false
+          return runTreeProbe()
+        }
+        if (!treePollTimer) treePollTimer = setTimeout(runTreeProbe, TREE_POLL_MS)
+      })
+    }
+
+    // The force deadline after SIGKILL. One last read first, so a tree that died since
+    // the previous poll is not reported unreaped; the cap keeps a probe that never
+    // answers from wedging the claim.
+    const forceSettle = () => {
+      forceTimer = null
+      if (settled) return
+      if (!terminalObserved) return settleUnreaped()
+      forceTimer = setTimeout(settleUnreaped, FINAL_PROBE_CAP_MS)
+      void probeProcessTree(deps, child).then(alive => {
+        if (settled) return
+        if (alive) settleUnreaped()
+        else settleTerminal()
+      })
+    }
+
+    const escalateToKill = () => {
+      graceTimer = null
+      if (settled) return
+      safeTerminate(deps, child, 'SIGKILL')
+      if (terminalObserved) {
+        if (treePollTimer) clearTimeout(treePollTimer)
+        treePollTimer = setTimeout(runTreeProbe, TREE_POLL_AFTER_KILL_MS)
+      }
+      forceTimer = setTimeout(forceSettle, FORCE_SETTLE_MS)
+    }
+
     const finishTerminal = () => {
       // The CLI wrapper may close before a tool in a separate process group.
       // Keep the escalation timers alive until the verified whole tree is gone.
-      if ((cancelled || timedOut) && safeProcessTreeAlive(deps, child)) return
+      if (cancelled || timedOut) return runTreeProbe()
+      settleTerminal()
+    }
 
+    const settleTerminal = () => {
       // Drain whatever sat in the trailing partial line before judging.
       if (stdoutTail.length > 0) {
         for (const id of extractNativeIdsFromLine(stdoutTail)) {
@@ -1029,6 +1143,10 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
       // clean exit 0 that echoed our exact id: that turn finished before the stop landed,
       // and reporting it cancelled would hide a delivered turn.
       if (cancelled && !(exitCode === 0 && delivery === 'ambiguous' && observedIds.length === 1 && observedIds[0] === nativeThreadId)) {
+        // 6.53.3: stopped before the write, and the tree is gone. `delivery` is still
+        // `aborted` here, and with `reaped: true` the route ends the turn cancelled
+        // with no fence, which is what "not one byte was written" means.
+        if (abortedBeforeWrite) return settleFailure('cancelled', { detail: 'before_write' })
         return settleFailure('cancelled', { delivery: 'cancelled' })
       }
       if (timedOut) return settleFailure('timeout')
@@ -1118,25 +1236,7 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     deadline = setTimeout(() => {
       timedOut = true
       safeTerminate(deps, child, 'SIGTERM')
-      graceTimer = setTimeout(() => {
-        safeTerminate(deps, child, 'SIGKILL')
-        const forceAt = Date.now() + FORCE_SETTLE_MS
-        const pollForTreeExit = () => {
-          if (settled) return
-          if (terminalObserved && !safeProcessTreeAlive(deps, child)) return finishTerminal()
-          if (Date.now() < forceAt) {
-            treePollTimer = setTimeout(pollForTreeExit, 25)
-            return
-          }
-          // A child that survived SIGKILL cannot be reached from here, and
-          // blocking forever would wedge the coordinator and any Control drain
-          // behind it. A cancel that landed during this escalation still reads
-          // as the user's (6.53.0).
-          if (cancelled) settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
-          else settleFailure('timeout', { detail: 'unreaped', reaped: false })
-        }
-        forceTimer = setTimeout(pollForTreeExit, 25)
-      }, KILL_GRACE_MS)
+      graceTimer = setTimeout(escalateToKill, KILL_GRACE_MS)
     }, timeoutMs)
 
     // --- the cancel (6.53.0) ---------------------------------------------------
@@ -1153,18 +1253,7 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
         if (deadline) { clearTimeout(deadline); deadline = null }
         safeTerminate(deps, child, 'SIGTERM')
         graceTimer = setTimeout(() => {
-          safeTerminate(deps, child, 'SIGKILL')
-          const forceAt = Date.now() + FORCE_SETTLE_MS
-          const pollForTreeExit = () => {
-            if (settled) return
-            if (terminalObserved && !safeProcessTreeAlive(deps, child)) return finishTerminal()
-            if (Date.now() < forceAt) {
-              treePollTimer = setTimeout(pollForTreeExit, 25)
-              return
-            }
-            settleFailure('cancelled', { delivery: 'cancelled', detail: 'unreaped', reaped: false })
-          }
-          forceTimer = setTimeout(pollForTreeExit, 25)
+          escalateToKill()
         }, CANCEL_KILL_GRACE_MS)
       }
       try {
@@ -1195,10 +1284,21 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
     // 6.53.0: a cancel that landed between the spawn check and here (a dependency that
     // yielded, or one that aborted synchronously). No prompt byte is written: the child is
     // killed and the turn is provably undelivered.
+    //
+    // 6.53.3: and REAPED like any other cancel before it settles. 6.53.2 returned at once
+    // with `reaped: false`, so the route fenced a thread no byte had reached while an
+    // adapter test called the same result unambiguous. Now `close` plus a tree read that
+    // shows nothing owned settles `cancelled / aborted / reaped: true` (no fence), and
+    // only a tree that outlives SIGKILL by FORCE_SETTLE_MS settles `reaped: false`.
     if (abortSignal?.aborted === true) {
       safeTerminate(deps, child, 'SIGKILL')
       delivery = 'aborted'
-      return settleFailure('cancelled', { detail: 'before_write', reaped: false })
+      cancelled = true
+      abortedBeforeWrite = true
+      if (deadline) { clearTimeout(deadline); deadline = null }
+      if (graceTimer) { clearTimeout(graceTimer); graceTimer = null }
+      forceTimer = setTimeout(forceSettle, FORCE_SETTLE_MS)
+      return
     }
 
     try {
@@ -1220,7 +1320,8 @@ function driveChild(input: DriveInput): Promise<AttachedTurnResult> {
 // Production wiring
 // ---------------------------------------------------------------------------
 
-interface AttachedProcessRow {
+/** One row of ONE atomic `ps` table read. */
+export interface AttachedProcessRow {
   pid: number
   ppid: number
   pgid: number
@@ -1228,26 +1329,84 @@ interface AttachedProcessRow {
 }
 
 /**
- * Read the live parent and process-group graph for an attached provider.
+ * 6.53.3: is Node still holding the provider leader?
  *
- * Codex may put a shell tool in its OWN process group. Signalling only the
- * detached CLI group then kills Codex while the tool is re-parented to pid 1.
- * This probe is synchronous because termination is a one-shot ownership
- * boundary: the parent graph must be captured before the CLI can exit and erase
- * it. A failed probe still signals the original root group below, but latches
- * uncertainty so the adapter cannot later report a false whole-tree reap.
+ *   unreaped  `exit` has not fired, so the pid is alive or a zombie and CANNOT have been
+ *             recycled. Its process group is ours whatever a table read says.
+ *   reaped    Node collected it. The pid is free, and a row carrying it is a stranger.
+ *   unknown   a test double without the ChildProcess fields. Judged by remembered
+ *             identity, as 6.53.2 judged every leader.
  */
-function readAttachedProcessRows(): AttachedProcessRow[] | null {
-  if (process.platform === 'win32') return []
+export type AttachedLeaderState = 'unreaped' | 'reaped' | 'unknown'
+
+export function attachedLeaderState(child: AttachedChildProcess): AttachedLeaderState {
+  const status = child as { exitCode?: unknown; signalCode?: unknown }
+  if (status.exitCode === null && status.signalCode === null) return 'unreaped'
+  if (typeof status.exitCode === 'number' || typeof status.signalCode === 'string') return 'reaped'
+  return 'unknown'
+}
+
+/**
+ * What one turn has learned about its own process tree, keyed by the leader pid.
+ * `realAttachedTurnDeps` builds one per turn, so nothing crosses turns.
+ */
+export interface AttachedTreeMemory {
+  /** pid -> start of every process seen in the tree. Absent from a complete read = gone. */
+  rememberedByRoot: Map<number, Map<number, number>>
+  /**
+   * 6.53.3: pgid -> leader start (null until the leader row is seen) of every process
+   * group a member of the tree has sat in. The leader's own group is in it from the spawn.
+   */
+  groupsByRoot: Map<number, Map<number, number | null>>
+  /**
+   * 6.53.3: lower bound on the start of anything the turn owns: the wall clock just
+   * before the spawn call, less OWNED_START_SLACK_MS.
+   */
+  floorByRoot: Map<number, number>
+  /** Roots whose tree a failed or malformed read may have hidden. Latched for the turn. */
+  uncertainRoots: Set<number>
+  /**
+   * 6.53.3: bumped by every `terminate`. A liveness read that was already in flight when
+   * a terminate re-read the table is older than what memory now holds, so it answers
+   * "alive" and changes nothing rather than forgetting what the newer read learned.
+   */
+  terminationsByRoot: Map<number, number>
+}
+
+export function createAttachedTreeMemory(): AttachedTreeMemory {
+  return {
+    rememberedByRoot: new Map(),
+    groupsByRoot: new Map(),
+    floorByRoot: new Map(),
+    uncertainRoots: new Set(),
+    terminationsByRoot: new Map(),
+  }
+}
+
+/**
+ * 6.53.3: `lstart` is truncated to the second, so a process started in the spawn's own
+ * second reads up to 999 ms before the spawn call. Nothing of this turn can start earlier.
+ */
+const OWNED_START_SLACK_MS = 1_000
+
+const ATTACHED_PS_ARGS: readonly string[] = ['-axo', 'pid=,ppid=,pgid=,lstart=']
+
+function attachedPsOptions() {
+  return {
+    encoding: 'utf8' as const,
+    timeout: 1_000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: { ...process.env, TZ: 'UTC', LC_ALL: 'C', LANG: 'C' },
+  }
+}
+
+/**
+ * One malformed row voids the whole read (null). The row we cannot parse might be the
+ * member that escaped, and a partial table cannot prove anything is absent.
+ */
+function parseAttachedProcessRows(output: string, now: number): AttachedProcessRow[] | null {
+  const rows: AttachedProcessRow[] = []
   try {
-    const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart='], {
-      encoding: 'utf8',
-      timeout: 1_000,
-      maxBuffer: 2 * 1024 * 1024,
-      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C', LANG: 'C' },
-    })
-    const now = Date.now()
-    const rows: AttachedProcessRow[] = []
     for (const line of output.split('\n')) {
       if (line.trim().length === 0) continue
       const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s+(.*?))?\s*$/)
@@ -1260,25 +1419,244 @@ function readAttachedProcessRows(): AttachedProcessRow[] | null {
       if (startMs === null) return null
       rows.push({ pid, ppid, pgid, startMs })
     }
-    return rows
+  } catch {
+    return null
+  }
+  return rows
+}
+
+/**
+ * Read the live parent and process-group graph for an attached provider, SYNCHRONOUSLY.
+ *
+ * Codex may put a shell tool in its OWN process group. Signalling only the
+ * detached CLI group then kills Codex while the tool is re-parented to pid 1.
+ * This read is synchronous because termination is a one-shot ownership
+ * boundary: the parent graph must be captured before the CLI can exit and erase
+ * it. A failed read still signals the root group while Node holds the leader, but
+ * latches uncertainty so the adapter cannot later report a false whole-tree reap.
+ *
+ * 6.53.3: only `terminate` uses this (twice per cancel at most: SIGTERM, SIGKILL). The
+ * liveness poll reads through `readAttachedProcessRowsAsync`.
+ */
+function readAttachedProcessRows(): AttachedProcessRow[] | null {
+  if (process.platform === 'win32') return []
+  try {
+    const output = execFileSync('/bin/ps', [...ATTACHED_PS_ARGS], attachedPsOptions())
+    return parseAttachedProcessRows(output, Date.now())
   } catch {
     return null
   }
 }
 
-function attachedProcessTree(rows: AttachedProcessRow[], roots: Iterable<number>): AttachedProcessRow[] {
+/**
+ * 6.53.3: the same read without blocking the event loop.
+ *
+ * One `ps -axo` over ~1,400 processes takes ~43 ms. 6.53.2 ran it synchronously every
+ * 25 ms while it waited out a cancelled tree, stalling every request on the server
+ * (review A7). A liveness answer is only ever acted on after it arrives, so nothing is
+ * lost by waiting for it. Every failure (spawn, timeout, non-zero exit, oversized or
+ * malformed output) resolves null, never a partial table.
+ */
+function readAttachedProcessRowsAsync(): Promise<AttachedProcessRow[] | null> {
+  if (process.platform === 'win32') return Promise.resolve([])
+  return new Promise(resolve => {
+    try {
+      execFile('/bin/ps', [...ATTACHED_PS_ARGS], attachedPsOptions(), (error, stdout) => {
+        if (error) return resolve(null)
+        resolve(parseAttachedProcessRows(String(stdout), Date.now()))
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+/**
+ * Which rows of ONE atomic table read belong to this turn. Updates `memory`.
+ *
+ * A row is owned when it is
+ *   1. a remembered identity (pid AND start) that still names the same kernel process;
+ *   2. the leader, while Node has not reaped it (the pid cannot be recycled before that);
+ *   3. a descendant, by ppid, of anything owned; or
+ *   4. (6.53.3) a member of a remembered process group that started no earlier than the
+ *      spawn floor. The leader's own group counts from the spawn; a tool's group counts
+ *      from the first read that saw one of our processes in it. Either stops counting the
+ *      first time a complete read shows it empty (its id may be recycled from then on) or
+ *      shows its leader pid carrying a different start.
+ *
+ * Rule 4 is the 6.53.3 change. A background job already re-parented to launchd keeps its
+ * process group but has no ppid path back to us: 6.53.2 sent that group one SIGTERM,
+ * never tracked it, and reported `reaped: true` 3/3 while the job lived (review A2). And
+ * once the leader had exited, a same-group process holding the CLI's stdout was owned by
+ * nothing, so it was never signalled at all (review A3, a regression from 6.52.3).
+ *
+ * WHY GROUP MEMBERSHIP CAN BE TRUSTED. The leader is spawned `detached`, i.e. through
+ * `setsid`, so the provider runs in its own session, and a process can only join a group
+ * inside its own session. Every group a member of the tree sits in was therefore made
+ * inside the tree. The exceptions, the group this server runs in (a leader spawned
+ * without `setsid`) and launchd's, are refused outright.
+ */
+export function ownedAttachedProcessRows(
+  rows: readonly AttachedProcessRow[],
+  rootPid: number,
+  leader: AttachedLeaderState,
+  memory: AttachedTreeMemory,
+): AttachedProcessRow[] {
+  const { uncertainRoots } = memory
+  const remembered = memory.rememberedByRoot.get(rootPid) ?? new Map<number, number>()
+  memory.rememberedByRoot.set(rootPid, remembered)
+  const groups = memory.groupsByRoot.get(rootPid) ?? new Map<number, number | null>([[rootPid, null]])
+  memory.groupsByRoot.set(rootPid, groups)
+
+  const rowsByPid = new Map(rows.map(row => [row.pid, row]))
+  const membersByGroup = new Map<number, AttachedProcessRow[]>()
+  for (const row of rows) {
+    const members = membersByGroup.get(row.pgid)
+    if (members) members.push(row)
+    else membersByGroup.set(row.pgid, [row])
+  }
+  const serverGroup = rowsByPid.get(process.pid)?.pgid ?? null
+  const foreignGroup = (pgid: number) => pgid <= 1 || pgid === serverGroup
+
+  // Only identities that still name the same kernel process may seed a fresh
+  // descendant scan. This is what makes the five-second SIGKILL safe after the
+  // provider leader has already disappeared. The leader itself is judged below,
+  // by Node's own reap state, never by a remembered identity.
+  const knownRootStart = remembered.get(rootPid)
+  const rememberedRoots: number[] = []
+  for (const [pid, startedAt] of remembered) {
+    if (pid === rootPid) continue
+    const row = rowsByPid.get(pid)
+    if (!row) {
+      // Absence from a successful full process-table snapshot is the only
+      // positive proof this identity is gone.
+      remembered.delete(pid)
+    } else if (row.startMs === startedAt) {
+      rememberedRoots.push(pid)
+    } else if (row.startMs === null) {
+      // The pid still exists but its start could not be read. That is doubt,
+      // not death; retain the identity and fail this turn toward the fence.
+      uncertainRoots.add(rootPid)
+    } else {
+      // A different start means PID reuse. The original identity is gone and
+      // the replacement may never be signalled from remembered state.
+      remembered.delete(pid)
+    }
+  }
+
+  const rootRow = rowsByPid.get(rootPid)
+  let rootOwned = false
+  if (rootRow && leader !== 'reaped') {
+    if (rootRow.startMs === null) uncertainRoots.add(rootPid)
+    else if (leader === 'unreaped' || knownRootStart === undefined || knownRootStart === rootRow.startMs) rootOwned = true
+  }
+  if (rootOwned && rootRow && rootRow.startMs !== null) {
+    if (knownRootStart === undefined) remembered.set(rootPid, rootRow.startMs)
+    // Only for a leader spawned outside realAttachedTurnDeps: the kernel start is a
+    // floor for everything the leader went on to create.
+    if (!memory.floorByRoot.has(rootPid)) memory.floorByRoot.set(rootPid, rootRow.startMs - OWNED_START_SLACK_MS)
+  }
+  const floor = memory.floorByRoot.get(rootPid)
+
+  for (const [pgid, leaderStart] of groups) {
+    const leaderRow = rowsByPid.get(pgid)
+    if (!membersByGroup.has(pgid)) {
+      // Empty in a complete read: gone, and its id may be recycled from here on. Only
+      // the leader's group cannot be empty while Node still holds the leader.
+      if (!(pgid === rootPid && leader === 'unreaped')) groups.delete(pgid)
+      continue
+    }
+    if (pgid === rootPid && leader === 'reaped' && leaderRow) {
+      // The leader pid is back in the table after Node reaped it. POSIX does not reuse
+      // a pid that is still a live group id, so the root group emptied in between.
+      groups.delete(pgid)
+      continue
+    }
+    if (leaderRow && leaderStart !== null && leaderRow.startMs !== leaderStart) {
+      // A tool group's leader pid carrying another start: the same inference.
+      groups.delete(pgid)
+      continue
+    }
+    if (leaderStart === null && leaderRow && leaderRow.pgid === pgid && leaderRow.startMs !== null
+      && !(pgid === rootPid && leader === 'reaped')) {
+      groups.set(pgid, leaderRow.startMs)
+    }
+  }
+
+  const groupOwns = (row: AttachedProcessRow): boolean => {
+    if (foreignGroup(row.pgid)) return false
+    // While Node holds the leader, its group cannot have been recycled: all of it is ours.
+    if (row.pgid === rootPid && leader === 'unreaped') return true
+    if (!groups.has(row.pgid)) return false
+    return floor !== undefined && row.startMs !== null && row.startMs >= floor
+  }
+
+  const roots = [...rememberedRoots]
+  if (rootOwned && !roots.includes(rootPid)) roots.push(rootPid)
   const owned = new Set<number>(roots)
   let changed = true
   while (changed) {
     changed = false
     for (const row of rows) {
-      if (!owned.has(row.pid) && owned.has(row.ppid)) {
+      if (owned.has(row.pid)) continue
+      if (owned.has(row.ppid) || groupOwns(row)) {
         owned.add(row.pid)
         changed = true
       }
     }
+    // Any group an owned process sits in was made inside the tree (see above). Remember
+    // it from this read on; its other members join in the next pass of this same read.
+    for (const pid of owned) {
+      const row = rowsByPid.get(pid)
+      if (!row || foreignGroup(row.pgid) || groups.has(row.pgid)) continue
+      const groupLeader = rowsByPid.get(row.pgid)
+      groups.set(row.pgid, groupLeader && groupLeader.pgid === row.pgid ? groupLeader.startMs : null)
+      changed = true
+    }
   }
-  return rows.filter(row => owned.has(row.pid))
+
+  const tree = rows.filter(row => owned.has(row.pid))
+  for (const row of tree) {
+    if (row.startMs !== null) remembered.set(row.pid, row.startMs)
+    else uncertainRoots.add(rootPid)
+  }
+  return tree
+}
+
+/** Which signals one `terminate` sends. Pure, so every rule is testable without a kill. */
+export interface AttachedTerminationPlan {
+  /** Tool process groups, signalled whole and FIRST. Only groups with no member we do not own. */
+  groups: number[]
+  /** Every owned pid but the leader, signalled one by one. */
+  pids: number[]
+  /** Whether the leader's own group is signalled. */
+  rootGroup: boolean
+}
+
+export function planAttachedTermination(
+  rows: readonly AttachedProcessRow[] | null,
+  rootPid: number,
+  leader: AttachedLeaderState,
+  memory: AttachedTreeMemory,
+): AttachedTerminationPlan {
+  if (rows === null) {
+    memory.uncertainRoots.add(rootPid)
+    // 6.53.3 (A3): a failed read no longer skips the root group. While Node holds the
+    // leader, `-rootPid` names our group and nothing else, exactly as 6.52.3 assumed.
+    return { groups: [], pids: [], rootGroup: leader === 'unreaped' }
+  }
+  const tree = ownedAttachedProcessRows(rows, rootPid, leader, memory)
+  const ownedPids = new Set(tree.map(row => row.pid))
+  // A group holding any process we do not own is signalled member by member instead.
+  const wholeGroupOwned = (pgid: number) => rows.every(row => row.pgid !== pgid || ownedPids.has(row.pid))
+  const toolGroups = new Set(tree.filter(row => row.pgid !== rootPid).map(row => row.pgid))
+  return {
+    groups: [...toolGroups].filter(wholeGroupOwned),
+    pids: tree.filter(row => row.pid !== rootPid).map(row => row.pid),
+    // 6.53.3 (A3): unconditional while Node holds the leader. After that, only while the
+    // group still holds processes we own and none we do not.
+    rootGroup: leader === 'unreaped' || (tree.some(row => row.pgid === rootPid) && wholeGroupOwned(rootPid)),
+  }
 }
 
 function signalPid(pid: number, signal: NodeJS.Signals): void {
@@ -1291,128 +1669,59 @@ function signalGroup(pgid: number, signal: NodeJS.Signals): void {
 }
 
 /**
- * Stop the provider plus every descendant visible before its parent link is
- * lost. Captured pid/start identities survive the SIGTERM grace, so SIGKILL can
- * still reach an uncooperative tool after the CLI has exited and the tool has
- * been re-parented to launchd. Identities are re-checked before reuse; a recycled
- * pid is never signalled from remembered state.
+ * Stop the provider plus every process this turn owns (see `ownedAttachedProcessRows`).
+ * Captured pid/start identities and group ids survive the SIGTERM grace, so SIGKILL can
+ * still reach an uncooperative tool after the CLI has exited and the tool has been
+ * re-parented to launchd. Identities are re-checked before reuse; a recycled pid or
+ * group id is never signalled from remembered state.
  */
 function terminateAttachedProcessTree(
   child: AttachedChildProcess,
   signal: NodeJS.Signals,
-  rememberedByRoot: Map<number, Map<number, number>>,
-  uncertainRoots: Set<number>,
+  memory: AttachedTreeMemory,
 ): void {
   const rootPid = child.pid
   if (typeof rootPid !== 'number' || !Number.isSafeInteger(rootPid) || rootPid <= 0) {
     try { ;(child as any).kill?.(signal) } catch { /* nothing further is available */ }
     return
   }
-
-  const remembered = rememberedByRoot.get(rootPid) ?? new Map<number, number>()
-  rememberedByRoot.set(rootPid, remembered)
-
-  const rows = readAttachedProcessRows()
-  if (rows === null) uncertainRoots.add(rootPid)
-  const rowsByPid = new Map((rows ?? []).map(row => [row.pid, row]))
-
-  // Only identities that still name the same kernel process may seed a fresh
-  // descendant scan. This is what makes the five-second SIGKILL safe after the
-  // provider leader has already disappeared.
-  const rememberedRoots: number[] = []
-  for (const [pid, startedAt] of remembered) {
-    const row = rowsByPid.get(pid)
-    if (row?.startMs === startedAt) rememberedRoots.push(pid)
-    else if (row && row.startMs === null) uncertainRoots.add(rootPid)
-  }
-
-  const knownRootStart = remembered.get(rootPid)
-  const rootRow = rowsByPid.get(rootPid)
-  const currentRootStart = rootRow?.startMs ?? null
-  const rootVerified = currentRootStart !== null
-    && (knownRootStart === undefined || currentRootStart === knownRootStart)
-  if (currentRootStart === null && rootRow) uncertainRoots.add(rootPid)
-  if (knownRootStart === undefined && currentRootStart !== null) remembered.set(rootPid, currentRootStart)
-  const roots = [...rememberedRoots]
-  if (rootVerified && !roots.includes(rootPid)) roots.push(rootPid)
-  const tree = rows === null ? [] : attachedProcessTree(rows, roots)
-  for (const row of tree) {
-    if (row.startMs !== null) remembered.set(row.pid, row.startMs)
-    else uncertainRoots.add(rootPid)
-  }
+  memory.terminationsByRoot.set(rootPid, (memory.terminationsByRoot.get(rootPid) ?? 0) + 1)
+  // Read before the table: Node cannot reap while this synchronous call holds the loop,
+  // so the leader state and the read agree.
+  const plan = planAttachedTermination(readAttachedProcessRows(), rootPid, attachedLeaderState(child), memory)
 
   // A child in a separate group must be signalled BEFORE the CLI group. If the
   // CLI exits first, macOS reparents that child to pid 1 and the relationship is
-  // no longer discoverable.
-  const descendantGroups = new Set(
-    tree.filter(row => row.pid !== rootPid && row.pgid !== rootPid).map(row => row.pgid),
-  )
-  for (const pgid of descendantGroups) signalGroup(pgid, signal)
-  for (const row of tree) {
-    if (row.pid !== rootPid) signalPid(row.pid, signal)
-  }
-
-  const rootGroupStillOwned = rootVerified || tree.some(row => row.pgid === rootPid)
-  if (rootGroupStillOwned) signalGroup(rootPid, signal)
+  // no longer discoverable by ppid.
+  for (const pgid of plan.groups) signalGroup(pgid, signal)
+  for (const pid of plan.pids) signalPid(pid, signal)
+  if (plan.rootGroup) signalGroup(rootPid, signal)
 
   // Direct-child fallback covers a spawn that failed before setsid established
   // the detached group, and is harmless after a successful group signal.
   try { ;(child as any).kill?.(signal) } catch { /* already terminal */ }
-
 }
 
-function attachedProcessTreeAlive(
+async function attachedProcessTreeAlive(
   child: AttachedChildProcess,
-  rememberedByRoot: Map<number, Map<number, number>>,
-  uncertainRoots: Set<number>,
-): boolean {
+  memory: AttachedTreeMemory,
+): Promise<boolean> {
+  const { uncertainRoots } = memory
   const rootPid = child.pid
   if (typeof rootPid !== 'number' || !Number.isSafeInteger(rootPid) || rootPid <= 0) return false
-  const remembered = rememberedByRoot.get(rootPid)
-  const rows = readAttachedProcessRows()
+  const terminationsBefore = memory.terminationsByRoot.get(rootPid) ?? 0
+  // 6.53.3 (A7): once doubt is latched the answer is "alive" whatever the table says, so
+  // the table is not read again. 6.53.2 kept reading it every 25 ms until force-settle.
+  const rows = uncertainRoots.has(rootPid) ? null : await readAttachedProcessRowsAsync()
   // A failed global process-table read cannot prove closure. Keep the record so
   // the SIGKILL escalation can still target identities captured before TERM.
-  if (rows === null) return true
-  const rowsByPid = new Map(rows.map(row => [row.pid, row]))
-
-  let anyLive = false
-  if (remembered) {
-    const verifiedRoots: number[] = []
-    for (const [pid, startedAt] of remembered) {
-      const row = rowsByPid.get(pid)
-      if (!row) {
-        // Absence from a successful full process-table snapshot is the only
-        // positive proof this identity is gone.
-        remembered.delete(pid)
-        continue
-      }
-      const currentStart = row.startMs
-      if (currentStart === startedAt) {
-        anyLive = true
-        verifiedRoots.push(pid)
-      } else if (currentStart === null) {
-        // The pid still exists but its start could not be read. That is doubt,
-        // not death; retain the identity and permanently fail this cancellation
-        // toward the route's ambiguity fence.
-        anyLive = true
-        uncertainRoots.add(rootPid)
-      } else {
-        // A different start means PID reuse. The original identity is gone and
-        // the replacement may never be signalled from remembered state.
-        remembered.delete(pid)
-      }
-    }
-    const fresh = attachedProcessTree(rows, verifiedRoots)
-    for (const row of fresh) {
-      if (row.startMs !== null) {
-        remembered.set(row.pid, row.startMs)
-        anyLive = true
-      } else {
-        anyLive = true
-        uncertainRoots.add(rootPid)
-      }
-    }
-  }
+  if (rows === null) uncertainRoots.add(rootPid)
+  // A terminate re-read the table while this one was in flight: this read is the older
+  // one. Inconclusive, and it must not overwrite what the newer read remembered.
+  if (rows !== null && (memory.terminationsByRoot.get(rootPid) ?? 0) !== terminationsBefore) return true
+  // The leader state is read AFTER the await: Node may have reaped it while `ps` ran.
+  const live = rows === null ? [] : ownedAttachedProcessRows(rows, rootPid, attachedLeaderState(child), memory)
+  let anyLive = live.length > 0
 
   // Once a snapshot/start probe missed part of the tree, later ancestry cannot
   // reconstruct a process that may already have been re-parented. Never convert
@@ -1424,11 +1733,6 @@ function attachedProcessTreeAlive(
     anyLive = true
   } catch (error: any) {
     if (error?.code !== 'ESRCH') anyLive = true
-  }
-
-  if (!anyLive) {
-    rememberedByRoot.delete(rootPid)
-    uncertainRoots.delete(rootPid)
   }
   return anyLive
 }
@@ -1442,24 +1746,32 @@ function attachedProcessTreeAlive(
  * which is the one answer this module must never invent.
  */
 export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict): AttachedTurnDeps {
-  const rememberedProcesses = new Map<number, Map<number, number>>()
-  const uncertainProcessTrees = new Set<number>()
+  const treeMemory = createAttachedTreeMemory()
   return {
     now: () => Date.now(),
     preflight,
     resolveBinary: provider => resolveProviderBinary(provider),
-    spawn: request => nodeSpawn(request.binaryPath, [...request.args], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: request.cwd,
-      env: request.env,
-      // Group leader, so the whole provider tree can be signalled on timeout —
-      // matching what both ordinary bridges do.
-      detached: true,
-    }) as unknown as AttachedChildProcess,
+    spawn: request => {
+      // 6.53.3: read BEFORE the spawn call, so every process of this turn starts at or
+      // after it. This is the floor that keeps group ownership (rule 4 above) from ever
+      // claiming a process that predates the turn.
+      const floor = Date.now() - OWNED_START_SLACK_MS
+      const child = nodeSpawn(request.binaryPath, [...request.args], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: request.cwd,
+        env: request.env,
+        // Group leader, so the whole provider tree can be signalled on timeout —
+        // matching what both ordinary bridges do.
+        detached: true,
+      })
+      const pid = child.pid
+      if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) treeMemory.floorByRoot.set(pid, floor)
+      return child as unknown as AttachedChildProcess
+    },
     processStartMs: pid => realProcessStartMs(pid),
     recordSpawn: (pid, startMs) => recordCosSpawn(pid, startMs),
     releaseSpawn: pid => releaseCosSpawn(pid),
-    terminate: (child, signal) => terminateAttachedProcessTree(child, signal, rememberedProcesses, uncertainProcessTrees),
-    processTreeAlive: child => attachedProcessTreeAlive(child, rememberedProcesses, uncertainProcessTrees),
+    terminate: (child, signal) => terminateAttachedProcessTree(child, signal, treeMemory),
+    processTreeAlive: child => attachedProcessTreeAlive(child, treeMemory),
   }
 }
