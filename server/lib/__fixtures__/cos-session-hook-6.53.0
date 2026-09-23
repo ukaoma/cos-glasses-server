@@ -1,5 +1,5 @@
 #!/bin/sh
-# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0; single entry 6.53.3). Installed into ~/.claude/settings.json by
+# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0). Installed into ~/.claude/settings.json by
 # `--hooks install`; Claude Code runs it with the hook event name as $1 and the event
 # payload on stdin. It spools one JSON file per event into the hook spool and exits 0
 # on every path. Only PermissionRequest ever talks to the server, and only when the
@@ -19,76 +19,48 @@ PATH=/usr/bin:/bin:/usr/sbin; umask 077; trap '' PIPE
 HOME=${HOME:-$(cd ~ 2>/dev/null && pwd)}; [ -n "$HOME" ] || exit 0
 GH=${COS_GLASSES_HOME:-$HOME/.cos-glasses}
 SPOOL=${COS_HOOK_SPOOL:-$GH/data/hook-spool}; EVENT="$1"
-# 6.53.0, the halt check; 6.53.3, one entry for both synchronous events (review A, option a).
-# FIRST, before mkdir, perl and the B8 guard below: a full spool or a stale drain stamp must
-# never stop a cancel. The marker folder sits beside the spool, like the Cursor queue
-# folder; the server writes `<folder>/<session id>` (lib/session-halt.ts).
-#
-# The common path, a tool call with no marker anywhere on the Mac, is one glob, one 4 KiB
-# read, a shell `case`, and `exec cat` to drain the rest of stdin: no temp file, no grep,
-# no dirname, no mkdir (median 29 ms to 17 ms per tool call on the release Mac, 40 runs
-# each). Draining, not leaving stdin unread, keeps Claude Code's writer from EPIPE at any
-# payload size (a 2.5 MB tool input did EPIPE against the 6.53.0 script).
-FRONT=''
+# 6.53.0, the halt check. FIRST, before mkdir, perl and the B8 guard below: a full spool or
+# a stale drain stamp must never stop a cancel, and an ordinary tool call must cost nothing
+# but this. The marker folder sits beside the spool, like the Cursor queue folder; the server
+# writes `<folder>/<session id>` (lib/session-halt.ts). stdin is read ONCE, to a temp file,
+# and handed to the spool path below when the event still needs spooling.
+IN=''
 case "$EVENT" in PreToolUse|UserPromptSubmit)
-  HALT="${SPOOL%/*}/session-halt"
-  # Any marker at all? A glob is a builtin, and it runs before stdin is touched.
-  ANY=''; for F in "$HALT"/*; do [ -e "$F" ] && ANY=1; break; done
-  # The FIRST session_id is the payload's own: Claude writes it first, and a tool's input
-  # that happens to carry one comes later. Any JSON spacing; 36 hex-and-dash characters
-  # inside a closed string, or nothing.
-  sid_of() {
-    SID=''
-    case "$HEAD" in *'"session_id"'*)
-      SID=${HEAD#*'"session_id"'}; SID=${SID#"${SID%%[!:[:space:]]*}"}
-      case "$SID" in '"'*'"'*) SID=${SID#?}; SID=${SID%%'"'*} ;; *) SID='' ;; esac ;;
-    esac
-    case "$SID" in *[!0-9A-Fa-f-]*) SID='' ;; esac
-    [ ${#SID} -eq 36 ] || SID=''
-  }
-  # dd, never head: macOS head fills a 16 KiB buffer from a pipe and keeps only what -c
-  # asks for, so the bytes after 4 KiB would be lost to the spool below. dd does ONE
-  # read(2) of at most 4 KiB, and the `cat` after it starts at exactly the next byte.
-  HEAD=$(dd bs=4096 count=1 2>/dev/null)
-  SID=''; [ -z "$ANY" ] || sid_of
-  # Claude writes the session id first and a tool call's name within a few hundred bytes.
-  # If this read came back without what the event needs, the writer's bytes arrived in
-  # pieces: read once more rather than guess.
-  MORE=''; case "$EVENT$HEAD" in PreToolUse*'"tool_name"'*|UserPromptSubmit*) ;; *) MORE=1 ;; esac
-  if [ -n "$MORE" ] || { [ -n "$ANY" ] && [ -z "$SID" ]; }; then
-    HEAD="$HEAD$(dd bs=4096 count=1 2>/dev/null)"
-    [ -z "$ANY" ] || sid_of
-  fi
-  NEED=''
-  if [ "$EVENT" = UserPromptSubmit ]; then NEED=1
-  else
-    # Only the two tools the reducer reads are spooled (the 6.48 matcher). The FIRST
-    # "tool_name" is the payload's own; a tool's input that carries one comes later.
-    case "$HEAD" in *'"AskUserQuestion"'*|*'"ExitPlanMode"'*)
-      TN=${HEAD#*'"tool_name"'}; TN=${TN#"${TN%%[!:[:space:]]*}"}
-      case "$TN" in '"AskUserQuestion"'*|'"ExitPlanMode"'*) NEED=1 ;; esac ;;
-    esac
-  fi
-  case "$SID" in *[A-F]*) SID=$(printf '%s' "$SID" | tr 'A-F' 'a-f') ;; esac
-  if [ -z "$SID" ]; then :
-  elif [ "$EVENT" = UserPromptSubmit ]; then
-    # A new prompt is never stopped: the marker lives only within the run it was written
-    # for. This covers a prompt typed at the desk, a Continue delivered into the open
-    # session, and a COS `-p` turn. Nothing (no temp file, 6.53.3 review A10) stands between
-    # reading the id and clearing it. Then the prompt is spooled as before.
-    rm -f "$HALT/$SID" 2>/dev/null
-  elif [ -f "$HALT/$SID" ]; then
-    printf '%s' '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
-    exec cat >/dev/null
-  fi
-  # Every other tool call ends here with nothing written and nothing printed.
-  [ -n "$NEED" ] || exec cat >/dev/null
-  FRONT=1
-  # Until the spool read below has taken stdin, any exit (a failed mkdir, the B8 guard)
-  # still drains it.
-  trap 'cat >/dev/null 2>&1' EXIT
+  IN=$(mktemp "${TMPDIR:-/tmp}/cos-hook.XXXXXX" 2>/dev/null || mktemp /tmp/cos-hook.XXXXXX 2>/dev/null) || IN=''
+  # No temp file: a tool call goes ahead unchecked (fail open), and a prompt is spooled
+  # below exactly as before, its stdin untouched.
+  [ -n "$IN" ] || [ "$EVENT" = UserPromptSubmit ] || exit 0
   ;;
 esac
+[ -z "$IN" ] || {
+  HALT="$(dirname "$SPOOL")/session-halt"
+  trap 'rm -f "$IN"; exit 0' HUP INT TERM
+  head -c 1048576 > "$IN" 2>/dev/null
+  # Any marker at all? A glob is a builtin, so the common case (no cancel anywhere on the
+  # Mac) reads no session id and forks nothing for it.
+  SID=''; for F in "$HALT"/*; do [ -e "$F" ] && SID=x; break; done
+  # The FIRST session_id is the payload's own: Claude writes it first, and a tool's input
+  # that happens to carry one comes later.
+  [ -z "$SID" ] || SID=$(grep -Eo '"session_id"[[:space:]]*:[[:space:]]*"[0-9A-Fa-f-]{36}"' "$IN" 2>/dev/null | head -1 | grep -Eo '[0-9A-Fa-f-]{36}' | tr 'A-F' 'a-f')
+  if [ "$EVENT" = UserPromptSubmit ]; then
+    # A new prompt is never stopped: the marker lives only within the run it was written
+    # for. This covers a prompt typed at the desk, a Continue delivered into the open
+    # session, and a COS `-p` turn. Then the prompt is spooled exactly as before.
+    [ -z "$SID" ] || rm -f "$HALT/$SID" 2>/dev/null
+  elif [ -n "$SID" ] && [ -f "$HALT/$SID" ]; then
+    rm -f "$IN"
+    printf '%s' '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
+    exit 0
+  else
+    # Only the two tools the reducer reads were ever spooled (the 6.48 matcher); every
+    # other tool call ends here with nothing written and nothing printed.
+    TOOL=$(grep -Eo '"tool_name"[[:space:]]*:[[:space:]]*"[A-Za-z]+"' "$IN" 2>/dev/null | head -1)
+    case "$TOOL" in *'"AskUserQuestion"'|*'"ExitPlanMode"') ;; *) rm -f "$IN"; exit 0 ;; esac
+  fi
+  # The spool path below reads stdin: hand it the saved bytes. The open descriptor keeps
+  # them readable after the unlink, so no temp file outlives this line.
+  exec < "$IN"; rm -f "$IN"; trap - HUP INT TERM
+}
 mkdir -p "$SPOOL/rejected" 2>/dev/null || exit 0
 TS=$(perl -MTime::HiRes -e 'printf "%.0f", Time::HiRes::time()*1000' 2>/dev/null || date +%s000)
 # B8 guard: a full spool or a stale drain stamp means nobody is reading; keep only permissions.
@@ -96,15 +68,7 @@ if [ "$EVENT" != PermissionRequest ]; then
   N=$(ls "$SPOOL" 2>/dev/null | wc -l | tr -d ' '); [ "${N:-0}" -lt 2000 ] || exit 0
   STAMP="$SPOOL/.last-drain"; [ ! -f "$STAMP" ] || [ -z "$(find "$STAMP" -mmin +1440 2>/dev/null)" ] || exit 0   # -mtime +1 would mean two days
 fi
-T="$SPOOL/.tmp.$$.$TS"
-if [ -n "$FRONT" ]; then
-  # 6.53.3: the 4 KiB the halt check read, then the rest of stdin, to disk with the same
-  # 1 MiB cap; whatever lies past the cap is drained, never left for the writer to EPIPE on.
-  trap - EXIT
-  { printf '%s' "$HEAD"; exec cat; } | { head -c 1048576 > "$T.in"; exec cat >/dev/null; }
-else
-  head -c 1048576 > "$T.in"                    # stdin to disk, 1 MiB cap
-fi
+T="$SPOOL/.tmp.$$.$TS"; head -c 1048576 > "$T.in"                    # stdin to disk, 1 MiB cap
 case "$(head -c 1 "$T.in")" in '{') ;; *) EVENT=rejected ;; esac
 { printf '{"ts":%s,"ppid":%s,"event":"%s","payload":' "$TS" "$PPID" "$EVENT"; cat "$T.in"; printf '}\n'; } > "$T"
 rm -f "$T.in"

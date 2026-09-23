@@ -82,6 +82,7 @@ import {
 } from '../lib/thread-attach-capability.js'
 import { cachedHookStatus, sessionHooksEnabled, sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
 import { sessionCancelFeature } from '../lib/session-cancel.js'
+import { hookHaltReady } from '../lib/claude-hooks-installer.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
@@ -297,7 +298,7 @@ healthRouter.get('/health', async (_req, res) => {
     // 6.53.0: cancel a session run. `cosTurn` always; `deskClaude` only once the hooks are
     // applied and the 6.53 hook is installed (Install hooks in COS Control after updating).
     // The status read is the same cached one `sessionHooks` below reports.
-    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), cachedHookStatus().installed),
+    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus())),
   }
   const voice = {
     available: keyStatus.hasKey || tts_local.ready,

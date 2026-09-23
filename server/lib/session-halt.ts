@@ -28,6 +28,10 @@
 //   - a sweep deletes anything older than HALT_MARKER_TTL_MS.
 // It is NOT deleted on Stop: a background subagent reports its parent's session id (C8),
 // and it is exactly the work a cancel must also stop.
+//
+// 6.53.3: ONE exception to "a new prompt clears it": a turn COS itself handed into the open
+// session while a cancel was on its way (`haltDeliveredTurn`). That turn's own prompt must
+// not be the one that frees it, so the server writes the marker back, once, when it sees it.
 
 import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'

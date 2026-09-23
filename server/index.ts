@@ -150,7 +150,7 @@ const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
 import { createCursorStopFollowupRouter } from './routes/cursor-stop-followup.js'
 import { queuedThreadKeys, readQueue, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
-import { readHookToken } from './lib/claude-hooks-installer.js'
+import { hookHaltReady, readHookToken } from './lib/claude-hooks-installer.js'
 import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
 import { createDrainKick, kickPlanFor } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
@@ -847,7 +847,8 @@ app.use('/api', createAgentSessionBindingsRouter({
   cancel: {
     deskRunning: sessionId => claudeDeskRunning(sessionId),
     hooksEnabled: () => sessionHooksEnabled(),
-    hooksReady: () => cachedHookStatus().installed,
+    // 6.53.3: installed, or a halt-capable earlier script still in place (`hookHaltReady`).
+    hooksReady: () => hookHaltReady(cachedHookStatus()),
     writeHalt: (sessionId, marker) => writeHaltMarker(sessionId, marker),
     settlePermissions: sessionId => permissionBroker.cancelSession(sessionId),
     queuedWaiting: (provider, threadId) => readQueue(provider, threadId, Date.now()).filter(t => t.status === 'waiting').length,
