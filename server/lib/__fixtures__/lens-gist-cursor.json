@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"duration_ms":2565,"duration_api_ms":2565,"result":"Outcome: fixture ok","session_id":"00000000-0000-0000-0000-000000000000","request_id":"00000000-0000-0000-0000-000000000000","usage":{"inputTokens":17014,"outputTokens":99,"cacheReadTokens":0,"cacheWriteTokens":0}}

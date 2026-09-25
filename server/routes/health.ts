@@ -22,6 +22,7 @@ import {
 } from '../lib/whisper-local.js'
 import { getOpenAIWhisperBudgetState } from '../lib/openai-whisper-budget.js'
 import { getMeetingSummaryBudgetState } from '../lib/meeting-summary-budget.js'
+import { lensGistPublicHealth } from '../lib/lens-gist.js'
 import { meetingSummaryLLMEnabled } from '../lib/meeting-summary.js'
 import { getKeyStatus } from '../lib/openai-key.js'
 import {
@@ -410,6 +411,8 @@ healthRouter.get('/health', async (_req, res) => {
     whisper_health,
     openai_whisper_budget,
     meeting_summary,
+    // 6.54.0: the lens gist engine (lib/lens-gist.ts); detail on /api/lens-gist/config.
+    lens_gist: lensGistPublicHealth(),
     tts_local,
     codex_models,
     cursor_models,

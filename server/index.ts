@@ -92,6 +92,7 @@ import { glossaryRouter } from './routes/glossary.js'
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
+import { lensGistRouter } from './routes/lens-gist.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
 import { welcomeContextRouter } from './routes/welcome-context.js'
 import { liveCuesRouter } from './routes/live-cues.js'
@@ -889,6 +890,7 @@ app.use('/api', glossaryRouter)
 app.use('/api', handoffsRouter)
 app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
+app.use('/api', lensGistRouter)
 app.use('/api', bookmarksRouter)
 app.use('/api', welcomeContextRouter)
 app.use('/api', liveCuesRouter)
