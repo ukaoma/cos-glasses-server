@@ -1,21 +1,29 @@
-// The engines behind the lens gist (lens-gist.ts): one text-in, text-out call each, with
-// no session, no history, no tools and no MCP servers. Every runner rejects on any failure
-// so the caller can count it against that engine's breaker and the phone keeps its
-// verbatim card.
+// The engines behind the lens gist (lens-gist.ts): one text-in, text-out call each, with no
+// session, no history and no MCP servers, in an empty workspace made for the call and
+// removed after it. Every runner rejects on any failure so the caller can count it against
+// that engine's breaker and the phone keeps its verbatim card.
 //
-// Measured 2026-09-25 on one real session reply (operations/personal/wk39_2026 in the COS
-// repo, lens_gist_engine_measurements): Claude Sonnet with the tools off answered in 2.3 s
-// on about 1k tokens; the same call WITHOUT `--tools ""` created a 26.5k-token cache of
-// tool definitions it never used. Cursor's agent carries about 17k tokens of its own
-// harness on every call. Codex loads every MCP server in ~/.codex/config.toml unless the
-// user config is ignored (an unauthenticated one failed the call).
+// WHAT EACH ENGINE CAN STILL DO (the reply is untrusted text: a web page an agent quoted
+// can carry instructions, /qa round 1 B1):
+//   claude  no tools at all (`--tools ""`), no hooks (`disableAllHooks`).
+//   codex   its shell, browser, computer-use, app and plugin tools disabled, web search
+//           off, no user config and no rules files.
+//   cursor  ask mode, which is read-only but keeps its read tools; the CLI has no switch to
+//           remove them. It reads an empty workspace, and what it answers is redacted.
+//   ollama  a bare completion: no tools.
+//
+// Measured 2026-09-25 (operations/personal/wk39_2026 in the COS repo): Claude Sonnet with the
+// tools off answered in 2.3 to 3.7 s on about 1.2k tokens; Claude Haiku with the flags the
+// dictation cleaner ships (no `--tools ""`) wrote a 26.5k-token cache of tool definitions.
+// Cursor's agent carries 13 to 17k tokens of its own harness on every call.
 
 import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
 import { getOllamaCatalog, ollamaFetch, resolveOllamaOrigin } from './ollama-catalog.js'
+import { logTokenAudit } from './token-audit.js'
 
 export type LensGistEngineName = 'claude' | 'codex' | 'cursor' | 'ollama'
 
@@ -41,23 +49,41 @@ export interface LensGistRunOptions {
 /** Replaces Claude Code's own system prompt, so the call carries none of it. */
 export const LENS_GIST_SYSTEM_PROMPT = 'You write three-line summaries for a smart-glasses card. Output only the lines asked for.'
 
-/** An API key never reaches a log or a response, whichever provider echoed it. */
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[private key]'],
+  [/\bsk-[A-Za-z0-9_*.-]{6,}/g, 'sk-REDACTED'],
+  [/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, '$1REDACTED'],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g, 'gh-REDACTED'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, 'gh-REDACTED'],
+  [/\bxox[abposr]-[A-Za-z0-9-]{10,}\b/g, 'xox-REDACTED'],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, 'AWS-REDACTED'],
+  [/\bpat-(?:na|eu|ap)\d-[0-9a-f-]{20,}\b/gi, 'pat-REDACTED'],
+  [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, 'jwt-REDACTED'],
+]
+
+/** A key or token never reaches a log, the cache or the lens, whichever side echoed it. */
 export function redactSecrets(text: string): string {
-  return text
-    .replace(/\bsk-[A-Za-z0-9_*.-]{6,}/g, 'sk-REDACTED')
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, '$1REDACTED')
+  let out = text
+  for (const [re, to] of SECRET_PATTERNS) out = out.replace(re, to)
+  const own = process.env.COS_API_TOKEN
+  if (own && own.length >= 12) out = out.split(own).join('COS-TOKEN-REDACTED')
+  return out
 }
 
-/** An empty directory for the agents that insist on a workspace: nothing in it to read. */
-function scratchWorkspace(): string {
-  const dir = join(tmpdir(), 'cos-lens-gist')
-  try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch { /* the spawn reports it */ }
-  return dir
+/** A fresh, private, empty directory for one call: nothing planted in it, nothing to read. */
+function withScratchWorkspace<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), 'cos-lens-gist-'))
+  return fn(dir).finally(() => {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+  })
 }
 
-function childEnv(binary: string): NodeJS.ProcessEnv {
+/** Nothing the server itself holds reaches a model's process. */
+const STRIPPED_ENV = ['CLAUDECODE', 'COS_API_TOKEN']
+
+export function lensGistChildEnv(binary: string): NodeJS.ProcessEnv {
   const env = { ...process.env }
-  delete env.CLAUDECODE
+  for (const key of STRIPPED_ENV) delete env[key]
   // A launchd- or Finder-spawned server has a minimal PATH, and `claude` is a node script:
   // resolving the binary is not enough, its interpreter must be findable too.
   const dirs = [dirname(binary), '/opt/homebrew/bin', '/usr/local/bin']
@@ -83,7 +109,7 @@ export function runProcess(
     let stderr = ''
     let settled = false
     let killTimer: NodeJS.Timeout | null = null
-    const proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv(binary), cwd: opts.cwd })
+    const proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: lensGistChildEnv(binary), cwd: opts.cwd })
     const finish = (fn: () => void) => {
       if (settled) return
       settled = true
@@ -140,10 +166,14 @@ function lastJsonObject(stdout: string): any {
 export function buildClaudeGistArgs(model: string, system: string): string[] {
   return [
     '-p', '--model', model, '--effort', 'low',
-    // The measured difference between 1k and 27.5k tokens a call.
+    // No tools: nothing to act on an instruction hidden in the reply, and ~1.2k tokens a
+    // call instead of a cache of tool definitions.
     '--tools', '',
     '--output-format', 'json', '--no-session-persistence',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    // The user's own hooks (session trackers, prompt loggers) would otherwise spool every
+    // reply this summarizes. Proven 2026-09-25: a hook set in the same call did not fire.
+    '--settings', '{"disableAllHooks":true}',
     '--system-prompt', system,
   ]
 }
@@ -173,12 +203,21 @@ export function parseClaudeGistOutput(stdout: string): LensGistEngineRun {
 
 // --- Codex ----------------------------------------------------------------------------
 
+/** Codex tools switched off for a gist (`codex features list`, CLI 0.155). */
+export const CODEX_GIST_DISABLED_FEATURES = [
+  'shell_tool', 'browser_use', 'browser_use_external', 'computer_use', 'in_app_browser', 'apps', 'plugins',
+] as const
+
 export function buildCodexGistArgs(model: string, workspace: string): string[] {
   return [
     'exec',
-    // No MCP servers, no profile, no user instructions: the one call that must not fail
-    // because an unrelated server needs a login.
+    // No config.toml (its MCP servers, profiles, model settings) and no rules files. Auth
+    // still comes from CODEX_HOME, and AGENTS.md discovery starts at the empty workspace.
     '--ignore-user-config',
+    '--ignore-rules',
+    // A read-only sandbox still lets the shell read the whole disk; the shell is off.
+    ...CODEX_GIST_DISABLED_FEATURES.flatMap(feature => ['--disable', feature]),
+    '-c', 'web_search="disabled"',
     '--sandbox', 'read-only',
     '--skip-git-repo-check',
     '--ephemeral',
@@ -245,13 +284,14 @@ function failedExit(label: string, result: ProcessResult): Error {
 
 async function runCli(
   provider: 'claude' | 'codex' | 'cursor',
-  args: string[],
+  args: (workspace: string) => string[],
   prompt: string,
   opts: LensGistRunOptions,
   parse: (stdout: string) => LensGistEngineRun,
 ): Promise<LensGistEngineRun> {
   const binary = binaryFor(provider)
-  const result = await runProcess(binary, args, { stdin: prompt, cwd: scratchWorkspace(), timeoutMs: opts.timeoutMs, label: provider })
+  const result = await withScratchWorkspace(workspace =>
+    runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider }))
   // Codex reports its failure as a JSON event AND a non-zero exit; the event says why.
   if (result.code !== 0) {
     if (provider === 'codex') parse(result.stdout)
@@ -298,20 +338,42 @@ async function runOllama(model: string, prompt: string, opts: LensGistRunOptions
   }
 }
 
+function dispatch(engine: LensGistEngineName, model: string, prompt: string, opts: LensGistRunOptions): Promise<LensGistEngineRun> {
+  switch (engine) {
+    case 'claude':
+      return runCli('claude', () => buildClaudeGistArgs(model, opts.system), prompt, opts, parseClaudeGistOutput)
+    case 'codex':
+      return runCli('codex', workspace => buildCodexGistArgs(model, workspace), prompt, opts, parseCodexGistOutput)
+    case 'cursor':
+      return runCli('cursor', workspace => buildCursorGistArgs(model, workspace), prompt, opts, parseCursorGistOutput)
+    case 'ollama':
+      return runOllama(model, prompt, opts)
+  }
+}
+
+/** One engine call, and one row in the shared token audit either way (source g2-lens-gist). */
 export async function runLensGistEngine(
   engine: LensGistEngineName,
   model: string,
   prompt: string,
   opts: LensGistRunOptions,
 ): Promise<LensGistEngineRun> {
-  switch (engine) {
-    case 'claude':
-      return runCli('claude', buildClaudeGistArgs(model, opts.system), prompt, opts, parseClaudeGistOutput)
-    case 'codex':
-      return runCli('codex', buildCodexGistArgs(model, scratchWorkspace()), prompt, opts, parseCodexGistOutput)
-    case 'cursor':
-      return runCli('cursor', buildCursorGistArgs(model, scratchWorkspace()), prompt, opts, parseCursorGistOutput)
-    case 'ollama':
-      return runOllama(model, prompt, opts)
+  const started = Date.now()
+  let outputChars = 0
+  let resolvedModel = model
+  try {
+    const run = await dispatch(engine, model, prompt, opts)
+    outputChars = run.text.length
+    resolvedModel = run.model || model
+    return run
+  } finally {
+    logTokenAudit({
+      source: 'g2-lens-gist',
+      caller: 'lens_gist',
+      model: `${engine}:${resolvedModel || 'default'}`,
+      inputChars: prompt.length + opts.system.length,
+      outputChars,
+      durationMs: Date.now() - started,
+    })
   }
 }

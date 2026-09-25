@@ -7,6 +7,7 @@ import {
   normalizeLensGistInput,
   saveLensGistConfig,
 } from '../lib/lens-gist.js'
+import { maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
 import { errMsg } from '../lib/utils.js'
 
 // Server 6.54.0. The phone asks for the three-line card behind the G2 prompt box
@@ -21,6 +22,12 @@ lensGistRouter.post('/lens-gist', async (req, res) => {
     input = normalizeLensGistInput(req.body)
   } catch (err) {
     res.status(err instanceof LensGistInputError ? err.status : 400).json({ error: errMsg(err) })
+    return
+  }
+  // Outside the request lease (index.ts lifecycleOwned): a drain for an update or restart
+  // closes admissions, and a gist is the first thing to give way.
+  if (!maintenanceAdmissionsOpen()) {
+    res.json({ status: 'unavailable', reason: 'maintenance' })
     return
   }
   // No abort on disconnect: the phone asks ahead of the hold and may not wait, and the
