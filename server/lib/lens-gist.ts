@@ -51,11 +51,12 @@ export const LENS_GIST_ENGINES: readonly LensGistEngineName[] = ['claude', 'code
 export type LensGistEngineSetting = LensGistEngineName | 'off'
 
 /**
- * The default model per engine. Claude's, Cursor's and Ollama's wrote a good card in the
- * 2026-09-25 measurement (Sonnet 3.7 s, grok 12.5 s, qwen 2.5 s warm). Codex's is its
- * "fast and affordable" tier in models_cache.json, which COS's own Codex picker leaves out;
- * its card is measured in the 6.54.0 changelog. Ollama's empty default means the local model
- * the server already uses for lens queries.
+ * The default model per engine, each measured on real replies with this prompt (2026-09-25,
+ * through runLensGistEngine): Sonnet 2.0 to 3.5 s on ~1.2k tokens; Codex gpt-6-luna 3.0 to
+ * 3.4 s (its "fast and affordable" tier, which COS's own Codex picker leaves out; gpt-6-sol
+ * wrote cards as good in the same time); Cursor grok 11.9 s; qwen3.8:27b 13.9 s cold. Haiku
+ * timed out at 30 s twice and is not a default anywhere. Ollama's empty default means the
+ * local model the server already uses for lens queries.
  */
 export const LENS_GIST_DEFAULT_MODEL: Record<LensGistEngineName, string> = {
   claude: 'sonnet',
