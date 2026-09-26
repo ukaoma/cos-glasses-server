@@ -223,6 +223,8 @@ describe('getLensGist', () => {
     expect(lensGistHealth().cap).toBe(DEFAULT_LENS_GIST_DAILY_CAP)
     saveLensGistConfig({ engine: 'claude', dailyCap: 12 })
     expect(lensGistHealth().cap).toBe(12)
+    process.env.COS_LENS_GIST_DAILY_CAP = 'abc'
+    expect(lensGistHealth().cap).toBe(12)
     process.env.COS_LENS_GIST_DAILY_CAP = '7'
     expect(lensGistHealth().cap).toBe(7)
   })
@@ -357,10 +359,16 @@ describe('/qa round 1 fixes', () => {
   afterEach(() => { vi.useRealTimers() })
 
   it('a saved config that cannot be read turns the gist OFF, never back on', () => {
-    writeFileSync(dataPath('lens-gist.json'), '{not json')
+    writeFileSync(dataPath('lens-gist.json'), '{"engine":"off"')
     const corrupt = resolveLensGistConfig({})
     expect(corrupt).toMatchObject({ engine: 'off', source: 'config' })
     expect(corrupt.error).toMatch(/corrupt/)
+    // /qa round 2 blocker: the SECOND read too (a quarantine renamed the file and the next
+    // read fell back to Claude). The file stays until a PUT replaces it.
+    expect(resolveLensGistConfig({}).engine).toBe('off')
+    expect(lensGistPublicHealth().engine).toBe('off')
+    expect(readFileSync(dataPath('lens-gist.json'), 'utf8')).toBe('{"engine":"off"')
+    expect(saveLensGistConfig({ engine: 'claude' }).engine).toBe('claude')
     rmSync(dataPath('lens-gist.json'), { recursive: true, force: true })
     mkdirSync(dataPath('lens-gist.json'))
     expect(resolveLensGistConfig({})).toMatchObject({ engine: 'off', error: 'saved config could not be read' })
@@ -448,6 +456,21 @@ describe('/qa round 1 fixes', () => {
     log.mockRestore(); err.mockRestore()
   })
 
+  it('a drain that closes admissions while a call queues stops it before the model (/qa round 2)', async () => {
+    let open = true
+    const release: Array<() => void> = []
+    const slow: LensGistRunner = () => new Promise(resolve => release.push(() => resolve({ text: CARD })))
+    const calls = [0, 1, 2].map(i => getLensGist(input(`d${i}`), { config: CLAUDE, run: slow, admissionsOpen: () => open }))
+    await new Promise(r => setTimeout(r, 0))
+    expect(release.length).toBe(2)
+    open = false
+    while (release.length) { release.shift()!(); await new Promise(r => setTimeout(r, 0)) }
+    const results = await Promise.all(calls)
+    expect(results[2]).toMatchObject({ status: 'unavailable', reason: 'maintenance' })
+    expect(release.length).toBe(0)
+    expect(await getLensGist(input('d9'), { config: CLAUDE, run: slow, admissionsOpen: () => false })).toMatchObject({ reason: 'maintenance' })
+  })
+
   it('"So what: nothing needed" is no row', () => {
     expect(parseLensGist('Outcome: Tests pass\nSo what: nothing needed\nYou asked: run tests')).toEqual({ outcome: 'Tests pass', soWhat: '', asked: 'run tests' })
     expect(parseLensGist('Outcome: x\nSo what: Nothing.')!.soWhat).toBe('')
@@ -476,7 +499,7 @@ describe('/qa round 1 fixes', () => {
 describe('engines: tools and hooks off (/qa round 1 B1)', () => {
   it('Codex runs with its shell and every browser, computer, app and plugin tool disabled, web search off, no rules', () => {
     const args = buildCodexGistArgs('gpt-6-luna', '/tmp/w')
-    for (const feature of ['shell_tool', 'browser_use', 'computer_use', 'apps', 'plugins']) {
+    for (const feature of ['shell_tool', 'unified_exec', 'view_image', 'multi_agent', 'image_generation', 'hooks', 'browser_use', 'computer_use', 'apps', 'plugins']) {
       expect(CODEX_GIST_DISABLED_FEATURES).toContain(feature)
     }
     for (const feature of CODEX_GIST_DISABLED_FEATURES) {

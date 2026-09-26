@@ -1,13 +1,18 @@
 import express from 'express'
 import type { Server } from 'node:http'
-import { rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { dataPath } from '../lib/data-dir.js'
 
 let server: Server | null = null
 let baseUrl = ''
 const engineCalls: string[] = []
 let admissionsOpen = true
+// Its own data home: the module graph is imported fresh below, so DATA_DIR is read again.
+// Sharing vitest's one data home with lens-gist.test.ts failed runs with parallel workers.
+const sharedDataDir = process.env.COS_DATA_DIR
+let ownDataDir = ''
 
 async function call(method: string, path: string, body?: unknown) {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -19,10 +24,11 @@ async function call(method: string, path: string, body?: unknown) {
 }
 
 beforeEach(async () => {
-  for (const f of ['lens-gist.json', 'lens-gist-cache.json', 'lens-gist-budget.json', 'lens-gist-runs.jsonl']) rmSync(dataPath(f), { force: true })
   delete process.env.COS_LENS_GIST_ENGINE
   engineCalls.length = 0
   admissionsOpen = true
+  ownDataDir = mkdtempSync(join(tmpdir(), 'cos-lens-gist-route-'))
+  process.env.COS_DATA_DIR = ownDataDir
   vi.resetModules()
   // Every CLI "installed", whatever this machine has (/qa round 1: the route test needed
   // Cursor's agent on the machine running it).
@@ -70,6 +76,8 @@ afterEach(async () => {
   vi.doUnmock('../lib/maintenance-lifecycle.js')
   vi.resetModules()
   delete process.env.COS_LENS_GIST_ENGINE
+  process.env.COS_DATA_DIR = sharedDataDir
+  rmSync(ownDataDir, { recursive: true, force: true })
 })
 
 describe('POST /api/lens-gist', () => {

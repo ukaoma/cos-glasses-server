@@ -33,14 +33,18 @@ describe('runProcess', () => {
 describe('the child environment', () => {
   it('carries no server token and no CLAUDECODE, and can find the binary\'s own interpreter', async () => {
     const { lensGistChildEnv } = await import('./lens-gist-engines.js')
-    process.env.COS_API_TOKEN = 'server-secret-token'
-    process.env.CLAUDECODE = '1'
-    const env = lensGistChildEnv('/opt/tools/bin/claude')
-    expect(env.COS_API_TOKEN).toBeUndefined()
-    expect(env.CLAUDECODE).toBeUndefined()
-    expect(env.PATH?.split(':')[0]).toBe('/opt/tools/bin')
-    delete process.env.COS_API_TOKEN
-    delete process.env.CLAUDECODE
+    const saved = { token: process.env.COS_API_TOKEN, cc: process.env.CLAUDECODE }
+    try {
+      process.env.COS_API_TOKEN = 'server-secret-token'
+      process.env.CLAUDECODE = '1'
+      const env = lensGistChildEnv('/opt/tools/bin/claude')
+      expect(env.COS_API_TOKEN).toBeUndefined()
+      expect(env.CLAUDECODE).toBeUndefined()
+      expect(env.PATH?.split(':')[0]).toBe('/opt/tools/bin')
+    } finally {
+      if (saved.token === undefined) delete process.env.COS_API_TOKEN; else process.env.COS_API_TOKEN = saved.token
+      if (saved.cc === undefined) delete process.env.CLAUDECODE; else process.env.CLAUDECODE = saved.cc
+    }
   })
 })
 

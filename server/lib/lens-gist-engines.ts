@@ -167,7 +167,10 @@ export function buildClaudeGistArgs(model: string, system: string): string[] {
   return [
     '-p', '--model', model, '--effort', 'low',
     // No tools: nothing to act on an instruction hidden in the reply, and ~1.2k tokens a
-    // call instead of a cache of tool definitions.
+    // call instead of a cache of tool definitions. claude-permissions.ts records an empty
+    // --tools causing a spurious compaction and a synthetic 400 on the 2026-08-26 CLI, in
+    // long bridge sessions; this one-shot call was measured clean on the 2026-09-25 CLI, and
+    // a regression lands on this engine's breaker, not on the lens.
     '--tools', '',
     '--output-format', 'json', '--no-session-persistence',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
@@ -203,9 +206,14 @@ export function parseClaudeGistOutput(stdout: string): LensGistEngineRun {
 
 // --- Codex ----------------------------------------------------------------------------
 
-/** Codex tools switched off for a gist (`codex features list`, CLI 0.155). */
+/**
+ * Codex tools switched off for a gist (`codex features list`, CLI 0.155; /qa round 2 found
+ * view_image, multi_agent, image_generation, unified_exec and hooks still on after round 1).
+ * An unknown name is an error on this CLI, so a renamed feature fails loudly on the breaker.
+ */
 export const CODEX_GIST_DISABLED_FEATURES = [
-  'shell_tool', 'browser_use', 'browser_use_external', 'computer_use', 'in_app_browser', 'apps', 'plugins',
+  'shell_tool', 'unified_exec', 'view_image', 'multi_agent', 'image_generation', 'hooks',
+  'browser_use', 'browser_use_external', 'computer_use', 'in_app_browser', 'apps', 'plugins',
 ] as const
 
 export function buildCodexGistArgs(model: string, workspace: string): string[] {

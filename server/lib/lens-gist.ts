@@ -34,6 +34,7 @@ import { resolve } from 'node:path'
 import { atomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { localDay } from './local-day.js'
+import { maintenanceAdmissionsOpen } from './maintenance-lifecycle.js'
 import { parseAgentModelsText } from './cursor-model-catalog.js'
 import { getOllamaCatalog } from './ollama-catalog.js'
 import { resolveProviderBinary } from './provider-binary.js'
@@ -151,19 +152,25 @@ interface SavedConfig { engine?: unknown; model?: unknown; dailyCap?: unknown; u
 /**
  * The saved choice. A file that exists but cannot be read or parsed is reported as
  * unreadable (/qa round 1): the saved `off` is the one switch that survives a COS Control
- * update, so losing it must not turn the feature back on.
+ * update, so losing it must not turn the feature back on. The file is LEFT IN PLACE: a
+ * quarantine renames it away, and the next read, which finds no file, fell back to the
+ * Claude default (/qa round 2 blocker). It stays unreadable until a PUT replaces it.
  */
 export function readSavedLensGistConfig(): SavedConfig | null {
   const path = configFile()
-  const result = loadJsonOrQuarantine<SavedConfig>(path)
-  if (result.status === 'ok') {
-    return result.data && typeof result.data === 'object' ? result.data : { unreadable: 'saved config is not an object' }
+  if (!existsSync(path)) return null
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    return { unreadable: 'saved config could not be read' }
   }
-  if (result.status === 'corrupt') {
-    console.error(`[lens-gist] saved config was corrupt, quarantined as ${result.quarantinedAs}; the gist is off until it is saved again`)
-    return { unreadable: 'saved config was corrupt (quarantined)' }
+  try {
+    const data = JSON.parse(raw)
+    return data && typeof data === 'object' && !Array.isArray(data) ? data as SavedConfig : { unreadable: 'saved config is not an object' }
+  } catch {
+    return { unreadable: 'saved config is corrupt; save it again with PUT /api/lens-gist/config' }
   }
-  return existsSync(path) ? { unreadable: 'saved config could not be read' } : null
 }
 
 /** True when the Claude CLI can be found; the default engine needs it. */
@@ -365,11 +372,14 @@ function budgetFile(): string {
   return dataPath('lens-gist-budget.json')
 }
 
-/** The env (read live), then the saved dailyCap, then 150. An empty env value is unset. */
+/** The env (read live), then the saved dailyCap, then 150. An empty or invalid env value is unset. */
 export function lensGistDailyCap(saved: SavedConfig | null = readSavedLensGistConfig()): number {
+  const valid = (n: number) => Number.isFinite(n) && n >= 0
   const envRaw = process.env.COS_LENS_GIST_DAILY_CAP?.trim()
-  const raw = envRaw ? Number(envRaw) : typeof saved?.dailyCap === 'number' ? saved.dailyCap : NaN
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_LENS_GIST_DAILY_CAP
+  const envCap = envRaw ? Number(envRaw) : NaN
+  if (valid(envCap)) return Math.floor(envCap)
+  const savedCap = typeof saved?.dailyCap === 'number' ? saved.dailyCap : NaN
+  return valid(savedCap) ? Math.floor(savedCap) : DEFAULT_LENS_GIST_DAILY_CAP
 }
 
 function readBudget(): BudgetState {
@@ -489,10 +499,12 @@ export type LensGistRunner = (
 
 const inflight = new Map<string, Promise<LensGistResult>>()
 
-export type LensGistRefusal = 'cap' | 'breaker' | 'busy' | 'retry-later'
+export type LensGistRefusal = 'cap' | 'breaker' | 'busy' | 'retry-later' | 'maintenance'
 
 /** Why this call may not run now, checked at admission AND again when its slot comes up. */
-function refusal(engine: LensGistEngineName, key: string, now: number, claimTrial: boolean): LensGistRefusal | null {
+function refusal(engine: LensGistEngineName, key: string, now: number, claimTrial: boolean, admissionsOpen: () => boolean): LensGistRefusal | null {
+  // A drain that closed admissions while this call queued: give way (/qa round 2).
+  if (!admissionsOpen()) return 'maintenance'
   const failed = failedKeys.get(key)
   if (failed && now < failed.until) return 'retry-later'
   const budget = readBudget()
@@ -504,9 +516,10 @@ function refusal(engine: LensGistEngineName, key: string, now: number, claimTria
 
 export async function getLensGist(
   input: LensGistInput,
-  deps: { run?: LensGistRunner; config?: LensGistConfig; now?: () => number } = {},
+  deps: { run?: LensGistRunner; config?: LensGistConfig; now?: () => number; admissionsOpen?: () => boolean } = {},
 ): Promise<LensGistResult> {
   const config = deps.config ?? resolveLensGistConfig()
+  const admissionsOpen = deps.admissionsOpen ?? maintenanceAdmissionsOpen
   if (config.engine === 'off') return { status: 'off', reason: config.error ?? 'turned off' }
   const engine = config.engine
   const model = config.model
@@ -522,7 +535,7 @@ export async function getLensGist(
   const pending = inflight.get(key)
   if (pending) return pending
 
-  const early = refusal(engine, key, now(), false)
+  const early = refusal(engine, key, now(), false, admissionsOpen)
   if (early) return { status: 'unavailable', reason: early, engine, model }
   const slot = acquire()
   if (!slot) return { status: 'unavailable', reason: 'busy', engine, model }
@@ -533,7 +546,7 @@ export async function getLensGist(
     try {
       // The queue can hold a call for a minute: the cap, the breaker and this reply's own
       // failures are read again now, and only one call takes a half-open breaker's trial.
-      const late = refusal(engine, key, now(), true)
+      const late = refusal(engine, key, now(), true, admissionsOpen)
       // The breaker is checked last, so a call refused here never holds the trial.
       if (late) return { status: 'unavailable', reason: late, engine, model }
       const started = now()
