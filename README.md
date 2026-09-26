@@ -300,6 +300,48 @@ reads `missing` and the phone stops asking to save it. Saving a known meeting th
 transcript answers **404 `nothing_to_save`** (with its state); only an unknown id answers
 `session_not_found`.
 
+## The summary behind the prompt box (6.54.0)
+
+When you hold the ring on a finished session or message, COS Glasses 6.9.545 floats your
+live words over a dimmed card of what you are replying to. From 6.54.0 the server writes
+that card: `Outcome` (`Answer` for a message), `So what` and `You asked`, one lens row
+each, instead of the reply's first lines. Older phones and older servers keep the
+6.9.544 card.
+
+**Pick the engine** the way the COS indexer does: `COS_LENS_GIST_ENGINE` wins, then the
+choice saved with `PUT /api/lens-gist/config`, then the default. An explicit engine never
+falls back to another; `off` turns the summary off.
+
+| Engine | Default model | Measured (2026-09-25, one call) | Tools it keeps |
+|---|---|---|---|
+| `claude` (default) | `sonnet` | 2 to 3.5 s, about 1.2k tokens | none (`--tools ""`, hooks off) |
+| `codex` | `gpt-6-luna` (`gpt-6-sol` works as well) | about 3 s, about 12.6k tokens | shell, browser, image, agent, app and plugin tools off; web search off |
+| `cursor` | `grok-4.7-low-fast` | about 12 s, about 12k tokens | ask mode: read-only tools in an empty workspace |
+| `ollama` | the local model lens queries use | 2.5 s warm, 14 s cold | none |
+
+With nothing chosen and no Claude CLI installed, the summary is off rather than sent to a
+provider nobody picked. Claude `haiku` timed out at 30 s in testing and is not a default.
+
+```bash
+curl -s -X PUT -H "X-COS-Token: $COS_API_TOKEN" -H 'content-type: application/json' \
+  -d '{"engine":"codex","model":"gpt-6-sol","dailyCap":100}' http://127.0.0.1:3141/api/lens-gist/config
+curl -s -H "X-COS-Token: $COS_API_TOKEN" http://127.0.0.1:3141/api/lens-gist/config
+```
+
+`GET /api/lens-gist/config` lists every engine, whether it is installed, and the models it
+can run here. The saved choice lives in `<data>/lens-gist.json` and survives Update
+Server; a file that cannot be read turns the summary off until it is saved again.
+
+**How it stops.** The phone asks once per finished reply it has open (a session that is
+still running or waiting on an approval asks for nothing). Answers are cached on disk per
+engine and model. A daily cap (`COS_LENS_GIST_DAILY_CAP` or the saved `dailyCap`, default
+150) counts answers, and attempts stop at twice that. A reply that failed is refused for 10
+minutes, then 6 hours. Three failures in a row pause that engine for 30 minutes, then one
+trial call runs. At most 2 calls run at once with 4 waiting. A drain for Update Server stops
+queued calls. Every call writes a `g2-lens-gist` row to the token audit and a line to
+`<data>/lens-gist-runs.jsonl`. `/api/health` shows `lens_gist` (engine, model, calls today,
+cap, open breakers; no error text).
+
 ## Configuration
 
 Config lives at `~/.cos-glasses/.env` (created on first run). Every key is
