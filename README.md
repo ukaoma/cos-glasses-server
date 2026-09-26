@@ -313,16 +313,18 @@ choice saved with `PUT /api/lens-gist/config`, then the default. One engine neve
 to another; `off` turns the summary off.
 
 **Or chain them, for resilience.** `claude:sonnet,codex:gpt-5.6-terra` asks Claude first and
-Codex when Claude fails, is cooling down, or answers that a usage limit is spent (that
-engine is then skipped for 30 minutes at once). Running low on one plan no longer turns the
-summary off. A chain is opted into, never the default: it sends a session's reply to every
-provider in it, and an installed CLI is not consent (ChatGPT.app ships `codex`).
+Codex when Claude fails, is cooling down, or says its session or usage limit is spent (a
+limit, read from the provider's own error and never from an answer, skips that engine for 30
+minutes at once). Running low on one plan no longer turns the summary off. A chain gets 70
+seconds in all, shared in order. It is opted into, never the default: it sends a session's
+reply to every provider in it, and an installed CLI is not consent (ChatGPT.app ships
+`codex`). `PUT` takes either `engine` or `chain`, never both, and a saved `off` wins.
 
 | Engine | Default model | Measured (2026-09-25, one call) | Tools it keeps |
 |---|---|---|---|
-| `claude` (default) | `sonnet` | 2 to 3.5 s, about 1.2k tokens | none (`--tools ""`, hooks off) |
+| `claude` (default) | `sonnet` | 2 to 5 s, about 1.2k tokens | none (`--tools ""`, hooks off) |
 | `codex` | `gpt-5.6-terra` (`gpt-6-luna`, `gpt-6-sol` work as well) | 3.2 to 3.7 s, about 11.4k tokens | shell, browser, image, agent, app and plugin tools off; web search off |
-| `cursor` | `grok-4.7-low-fast` | about 12 s, about 12k tokens | ask mode: read-only tools in an empty workspace |
+| `cursor` | `grok-4.7-low-fast` | 11 to 13 s, about 11k to 17k tokens | ask mode: read-only tools in an empty workspace |
 | `ollama` | the local model lens queries use | 2.5 s warm, 14 s cold | none |
 
 With nothing chosen and no Claude CLI installed, the summary is off rather than sent to a
@@ -344,11 +346,13 @@ Server; a file that cannot be read turns the summary off until it is saved again
 still running or waiting on an approval asks for nothing). Answers are cached on disk per
 engine and model. A daily cap (`COS_LENS_GIST_DAILY_CAP` or the saved `dailyCap`, default
 150) counts answers, and attempts stop at twice that. A reply that failed is refused for 10
-minutes, then 6 hours. Three failures in a row pause that engine for 30 minutes, then one
-trial call runs. At most 2 calls run at once with 4 waiting. A drain for Update Server stops
-queued calls. Every call writes a `g2-lens-gist` row to the token audit and a line to
-`<data>/lens-gist-runs.jsonl`. `/api/health` shows `lens_gist` (engine, model, calls today,
-cap, open breakers; no error text).
+minutes, then 6 hours (a spent provider limit does not count against the reply). Three
+failures in a row, or one limit answer, pause that engine for 30 minutes, then one trial call
+runs. At most 2 calls run at once with 4 waiting. A drain for Update Server stops queued
+calls before each engine. Every call writes a `g2-lens-gist` row to the token audit and a line
+to `<data>/lens-gist-runs.jsonl` (with `fallbackFrom` when a later engine answered).
+`/api/health` shows `lens_gist` (engine, model, calls today, cap, open breakers; no error text
+and no chain); `GET /api/lens-gist/config` shows the chain.
 
 ## Configuration
 

@@ -1,7 +1,8 @@
 // The engines behind the lens gist (lens-gist.ts): one text-in, text-out call each, with no
 // session, no history and no MCP servers, in an empty workspace made for the call and
 // removed after it. Every runner rejects on any failure so the caller can count it against
-// that engine's breaker and the phone keeps its verbatim card.
+// that engine's breaker; the next engine of a chain answers, or the phone keeps its
+// verbatim card. A provider that says its limit is spent rejects with LensGistLimitError.
 //
 // WHAT EACH ENGINE CAN STILL DO (the reply is untrusted text: a web page an agent quoted
 // can carry instructions, /qa round 1 B1):
@@ -13,9 +14,9 @@
 //   ollama  a bare completion: no tools.
 //
 // Measured 2026-09-25 (operations/personal/wk39_2026 in the COS repo): Claude Sonnet with the
-// tools off answered in 2.3 to 3.7 s on about 1.2k tokens; Claude Haiku with the flags the
+// tools off answered in 2 to 5 s on about 1.2k tokens; Claude Haiku with the flags the
 // dictation cleaner ships (no `--tools ""`) wrote a 26.5k-token cache of tool definitions.
-// Cursor's agent carries 13 to 17k tokens of its own harness on every call.
+// Codex and Cursor carry 11 to 17k tokens of their own harness on every call.
 
 import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -23,7 +24,23 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
 import { getOllamaCatalog, ollamaFetch, resolveOllamaOrigin } from './ollama-catalog.js'
+import { PROVIDER_QUOTA_RE } from './provider-proof.js'
 import { logTokenAudit } from './token-audit.js'
+
+/**
+ * The provider itself said its plan, session, rate or capacity limit is spent. Raised only
+ * from the provider's OWN output (its exit text, its JSON error, its failed-turn event),
+ * never from the words of an answer: /qa round 3 found a reply that mentioned "429s" or a
+ * "daily quota" opening a breaker. The caller opens that engine's breaker at once.
+ */
+export class LensGistLimitError extends Error {
+  readonly limit = true
+}
+
+/** An error for this failure: a limit when the provider's raw words say so. */
+export function engineFailure(message: string, providerText: string): Error {
+  return PROVIDER_QUOTA_RE.test(providerText) ? new LensGistLimitError(message) : new Error(message)
+}
 
 export type LensGistEngineName = 'claude' | 'codex' | 'cursor' | 'ollama'
 
@@ -123,7 +140,7 @@ export function runProcess(
     }
     const timer = setTimeout(() => finish(() => {
       terminate()
-      reject(new Error(`${opts.label} timed out after ${opts.timeoutMs} ms${stderr ? `: ${redactSecrets(stderr.slice(-200))}` : ''}`))
+      reject(new Error(`${opts.label} timed out after ${opts.timeoutMs} ms${stderr ? `: ${redactSecrets(stderr).slice(-200)}` : ''}`))
     }), opts.timeoutMs)
     proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
@@ -285,9 +302,12 @@ export function parseCursorGistOutput(stdout: string): LensGistEngineRun {
 
 // --- Dispatch -------------------------------------------------------------------------
 
-function failedExit(label: string, result: ProcessResult): Error {
-  const detail = redactSecrets((result.stderr.trim() || result.stdout.trim()).split('\n').slice(-3).join(' ')).slice(0, 240)
-  return new Error(`${label} exited ${result.code ?? 'by signal'}${detail ? `: ${detail}` : ''}`)
+/** The failure text of a non-zero exit, redacted BEFORE it is cut (a cut token escapes). */
+function failedExitMessage(label: string, result: ProcessResult): string {
+  // Claude Code prints a spent limit on STDOUT and exits 1; stderr may carry other noise.
+  const text = redactSecrets([result.stderr.trim(), result.stdout.trim()].filter(Boolean).join('\n'))
+  const detail = text.split('\n').slice(-3).join(' ').slice(0, 240)
+  return `${label} exited ${result.code ?? 'by signal'}${detail ? `: ${detail}` : ''}`
 }
 
 async function runCli(
@@ -300,12 +320,21 @@ async function runCli(
   const binary = binaryFor(provider)
   const result = await withScratchWorkspace(workspace =>
     runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider }))
-  // Codex reports its failure as a JSON event AND a non-zero exit; the event says why.
+  const providerText = `${result.stdout}\n${result.stderr}`
   if (result.code !== 0) {
-    if (provider === 'codex') parse(result.stdout)
-    throw failedExit(provider, result)
+    // Codex reports its failure as a JSON event AND a non-zero exit; the event says why.
+    if (provider === 'codex') {
+      try { parse(result.stdout) } catch (err) { throw engineFailure(err instanceof Error ? err.message : String(err), providerText) }
+    }
+    throw engineFailure(failedExitMessage(provider, result), providerText)
   }
-  const run = parse(result.stdout)
+  let run: LensGistEngineRun
+  try {
+    run = parse(result.stdout)
+  } catch (err) {
+    // A JSON result marked as an error (Claude, Cursor) can be a limit too.
+    throw engineFailure(err instanceof Error ? err.message : String(err), providerText)
+  }
   if (!run.text.trim()) throw new Error(`${provider} returned no text`)
   return run
 }

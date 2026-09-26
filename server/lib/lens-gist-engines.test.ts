@@ -76,3 +76,53 @@ describe('Ollama, and the token audit on every engine call', () => {
     catalog._setOllamaCatalogFetchForTests(null)
   })
 })
+
+describe('a provider limit, read from a real process the way Claude Code reports it', () => {
+  const LIMIT = "You've hit your session limit · resets 11:40am (America/Chicago)"
+
+  async function withFakeClaude(script: string, fn: () => Promise<void>) {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = mkdtempSync(join(tmpdir(), 'cos-fake-claude-'))
+    const bin = join(dir, 'claude')
+    writeFileSync(bin, `#!/bin/sh\ncat > /dev/null\n${script}\n`)
+    chmodSync(bin, 0o755)
+    const saved = process.env.COS_CLAUDE_BIN
+    process.env.COS_CLAUDE_BIN = bin
+    try {
+      await fn()
+    } finally {
+      if (saved === undefined) delete process.env.COS_CLAUDE_BIN; else process.env.COS_CLAUDE_BIN = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('the limit on STDOUT with other noise on stderr and exit 1 is a limit (Claude Code prints it there)', async () => {
+    await withFakeClaude(`echo "${LIMIT}"\necho "warning: something unrelated" >&2\nexit 1`, async () => {
+      const { runLensGistEngine, LensGistLimitError } = await import('./lens-gist-engines.js')
+      const err = await runLensGistEngine('claude', 'sonnet', 'P', { timeoutMs: 5_000, system: 'S' }).catch(e => e)
+      expect(err).toBeInstanceOf(LensGistLimitError)
+      expect(String(err.message)).toMatch(/session limit/)
+    })
+  })
+
+  it('a JSON result marked as an error that says the limit is spent is a limit too', async () => {
+    const json = JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: LIMIT })
+    await withFakeClaude(`echo '${json.replace(/'/g, "'\\''")}'\nexit 0`, async () => {
+      const { runLensGistEngine, LensGistLimitError } = await import('./lens-gist-engines.js')
+      const err = await runLensGistEngine('claude', 'sonnet', 'P', { timeoutMs: 5_000, system: 'S' }).catch(e => e)
+      expect(err).toBeInstanceOf(LensGistLimitError)
+    })
+  })
+
+  it('any other failure is an ordinary failure', async () => {
+    await withFakeClaude(`echo "Error: model not found" >&2\nexit 1`, async () => {
+      const { runLensGistEngine, LensGistLimitError } = await import('./lens-gist-engines.js')
+      const err = await runLensGistEngine('claude', 'nope', 'P', { timeoutMs: 5_000, system: 'S' }).catch(e => e)
+      expect(err).toBeInstanceOf(Error)
+      expect(err).not.toBeInstanceOf(LensGistLimitError)
+      expect(String(err.message)).toMatch(/claude exited 1: Error: model not found/)
+    })
+  })
+})

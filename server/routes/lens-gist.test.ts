@@ -9,6 +9,7 @@ let server: Server | null = null
 let baseUrl = ''
 const engineCalls: string[] = []
 let admissionsOpen = true
+let failingEngine = ''
 // Its own data home: the module graph is imported fresh below, so DATA_DIR is read again.
 // Sharing vitest's one data home with lens-gist.test.ts failed runs with parallel workers.
 const sharedDataDir = process.env.COS_DATA_DIR
@@ -27,6 +28,7 @@ beforeEach(async () => {
   delete process.env.COS_LENS_GIST_ENGINE
   engineCalls.length = 0
   admissionsOpen = true
+  failingEngine = ''
   ownDataDir = mkdtempSync(join(tmpdir(), 'cos-lens-gist-route-'))
   process.env.COS_DATA_DIR = ownDataDir
   vi.resetModules()
@@ -45,6 +47,7 @@ beforeEach(async () => {
     ...await importOriginal<typeof import('../lib/lens-gist-engines.js')>(),
     runLensGistEngine: async (engine: string) => {
       engineCalls.push(engine)
+      if (engine === failingEngine) throw new Error(`${engine} is down`)
       return { text: 'Outcome: Done\nSo what: Merge when ready\nYou asked: Check it', model: 'claude-sonnet-5' }
     },
     runProcess: async () => ({ code: 0, stdout: 'Available models\n\ngrok-4.7-low-fast - Grok 4.7 Low Fast\n', stderr: '' }),
@@ -130,12 +133,18 @@ describe('/api/lens-gist/config', () => {
     expect(engineCalls).toEqual(['cursor'])
   })
 
-  it('saves a chain, which GET reports and the next POST follows in order', async () => {
+  it('saves a chain, which GET reports and the next POST follows in order, falling back', async () => {
     const put = await call('PUT', '/api/lens-gist/config', { chain: 'cursor:grok-4.7-low-fast,claude:sonnet' })
     expect(put.json.effective.chain).toEqual([{ engine: 'cursor', model: 'grok-4.7-low-fast' }, { engine: 'claude', model: 'sonnet' }])
     expect((await call('GET', '/api/lens-gist/config')).json.chain).toEqual(['cursor:grok-4.7-low-fast', 'claude:sonnet'])
-    await call('POST', '/api/lens-gist', { kind: 'message', reply: 'y' })
-    expect(engineCalls).toEqual(['cursor'])
+    failingEngine = 'cursor'
+    const res = await call('POST', '/api/lens-gist', { kind: 'message', reply: 'y' })
+    expect(engineCalls).toEqual(['cursor', 'claude'])
+    expect(res.json).toMatchObject({ status: 'ready', engine: 'claude', fallbackFrom: 'cursor:grok-4.7-low-fast' })
+  })
+
+  it('refuses a PUT that names both an engine and a chain', async () => {
+    expect((await call('PUT', '/api/lens-gist/config', { engine: 'off', chain: 'claude,codex' })).status).toBe(400)
   })
 
   it('says when the environment overrides the saved choice, and refuses a bad engine', async () => {

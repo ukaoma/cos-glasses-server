@@ -312,9 +312,10 @@ app.use('/api', (req, res, next) => {
     || req.path.startsWith('/meeting-actions/')
     || req.path === '/meeting-engine/mode'
     || req.path.startsWith('/prompt-drafts')
-    // 6.54.0: a gist waits in a queue and then on a model for up to a minute, far past
-    // Control's 90s drain if it held the request lease. It refuses on its own while
-    // admissions are closed (routes/lens-gist.ts); the model call itself is disposable.
+    // 6.54.0: a gist can wait behind two others and then run a chain for up to 70 s
+    // (LENS_GIST_CHAIN_BUDGET_MS), which could keep Control's 90 s drain waiting if it held
+    // the request lease. It refuses on its own while admissions are closed, and a queued
+    // chain checks again before each engine (routes/lens-gist.ts, lib/lens-gist.ts).
     || req.path === '/lens-gist'
     || req.path.startsWith('/maintenance/drain')
   if (lifecycleOwned) return next()

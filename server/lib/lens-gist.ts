@@ -26,11 +26,13 @@
 //   - on open, not a sweep: the phone asks for a FINISHED reply the wearer has open (6.9.545
 //     lib/lens-gist.ts), once per reply;
 //   - one call per distinct reply, per engine and model: answers are cached on disk, and a
-//     reply that failed is refused for 10 minutes, then 6 hours;
+//     reply that failed is refused for 10 minutes, then 6 hours (a spent provider limit is
+//     not the reply's failure and does not count);
 //   - a daily cap (COS_LENS_GIST_DAILY_CAP or the saved dailyCap, default 150) on answers,
 //     and twice that on attempts, both checked again when a queued call gets its turn;
-//   - a breaker per engine: 3 failures in a row pause that engine for 30 minutes, then ONE
-//     trial call;
+//   - a breaker per engine: 3 failures in a row, or ONE answer from the provider that its
+//     limit is spent, pause that engine for 30 minutes, then ONE trial call;
+//   - a chain gets 70 seconds from its turn, shared by its engines;
 //   - at most 2 calls at once and 4 waiting; past that the phone is told `busy`.
 
 import { createHash } from 'node:crypto'
@@ -46,6 +48,7 @@ import { getOllamaCatalog } from './ollama-catalog.js'
 import { resolveProviderBinary } from './provider-binary.js'
 import {
   LENS_GIST_SYSTEM_PROMPT,
+  LensGistLimitError,
   redactSecrets,
   runLensGistEngine,
   runProcess,
@@ -93,6 +96,16 @@ export const LENS_GIST_ATTEMPTS_PER_CAP = 2
 export const LENS_GIST_FAILED_RETRY_MS = [10 * 60_000, 6 * 60 * 60_000] as const
 const LEDGER_MAX_BYTES = 2_000_000
 
+/**
+ * A chain's whole budget from the moment it gets its turn, shared by its engines in order
+ * (each gets the lesser of its own timeout and what is left). Under the phone's 75 s wait
+ * (app api-client.ts requestLensGist) so an answer can still reach the hold that asked;
+ * a phone that gave up asks again and joins the call in flight or finds it cached.
+ */
+export const LENS_GIST_CHAIN_BUDGET_MS = 70_000
+/** Less than this left and the next engine is not started. */
+export const LENS_GIST_MIN_LINK_MS = 3_000
+
 export const LENS_GIST_TIMEOUT_MS: Record<LensGistEngineName, number> = {
   claude: 30_000,
   // An auth failure spends 30 s in five reconnects before Codex gives up.
@@ -137,6 +150,7 @@ export interface LensGistConfig {
 }
 
 export type LensGistResult =
+  /** `fallbackFrom` names the chain's first engine when a later one answered (logged in the ledger). */
   | { status: 'ready'; gist: LensGist; engine: LensGistEngineName; model: string; cached: boolean; ms: number; usage?: LensGistUsage; fallbackFrom?: string }
   | { status: 'off'; reason: string }
   | { status: 'unavailable'; reason: 'cap' | 'breaker' | 'busy' | 'retry-later' | 'maintenance'; engine?: LensGistEngineName; model?: string }
@@ -252,6 +266,9 @@ export function resolveLensGistConfig(
     if ('error' in parsed) return off(source, `COS_LENS_GIST_ENGINE: ${parsed.error}`)
   } else if (saved?.unreadable) {
     return off('config', saved.unreadable)
+  } else if (typeof saved?.engine === 'string' && parseEngine(saved.engine) === 'off') {
+    // A saved off wins over anything else in the file (/qa round 3).
+    return off('config')
   } else if (Array.isArray(saved?.chain)) {
     parsed = parseLensGistChain(savedChainText(saved.chain))
     source = 'config'
@@ -277,10 +294,12 @@ export function resolveLensGistConfig(
   if (single && envModel && !isLensGistModelName(envModel)) return off(source, `model "${envModel.slice(0, 40)}" is not a model name`)
   const savedModel = (engine: LensGistEngineName) =>
     typeof saved?.model === 'string' && saved.engine === engine ? saved.model.trim() : ''
-  const chain = parsed.chain.map(link => ({
+  const filled = parsed.chain.map(link => ({
     engine: link.engine,
     model: link.model || (single ? envModel || savedModel(link.engine) : '') || LENS_GIST_DEFAULT_MODEL[link.engine],
   }))
+  // Duplicates are dropped after the defaults are filled in: `claude:sonnet,claude` is one link.
+  const chain = filled.filter((link, i) => filled.findIndex(l => l.engine === link.engine && l.model === link.model) === i)
   for (const link of chain) {
     if (link.model && !isLensGistModelName(link.model)) return off(source, `model "${link.model.slice(0, 40)}" is not a model name`)
   }
@@ -288,13 +307,20 @@ export function resolveLensGistConfig(
 }
 
 export function saveLensGistConfig(input: { engine?: unknown; model?: unknown; chain?: unknown; dailyCap?: unknown }): LensGistConfig {
+  const chainGiven = input.chain !== undefined && input.chain !== null
+  // One or the other: `{engine: "off", chain: [...]}` must never save a chain (/qa round 3).
+  if (chainGiven && input.engine !== undefined) throw new LensGistInputError('send either engine or chain, not both')
   let dailyCap: number | undefined
   if (input.dailyCap !== undefined && input.dailyCap !== null && input.dailyCap !== '') {
     dailyCap = Number(input.dailyCap)
     if (!Number.isInteger(dailyCap) || dailyCap < 0 || dailyCap > 10_000) throw new LensGistInputError('dailyCap must be a whole number from 0 to 10000')
+  } else {
+    // A save that does not mention the cap keeps the one already saved.
+    const saved = readSavedLensGistConfig()
+    if (typeof saved?.dailyCap === 'number') dailyCap = saved.dailyCap
   }
   const cap = dailyCap !== undefined ? { dailyCap } : {}
-  if (input.chain !== undefined) {
+  if (chainGiven) {
     const text = typeof input.chain === 'string' ? input.chain : Array.isArray(input.chain) ? savedChainText(input.chain) : ''
     const parsed = parseLensGistChain(text)
     if ('error' in parsed) throw new LensGistInputError(`chain: ${parsed.error}`)
@@ -513,13 +539,6 @@ function breakerAdmits(engine: LensGistEngineName, now: number): boolean {
   return true
 }
 
-/**
- * A provider saying its plan or rate limit is spent. One such answer opens that engine's
- * breaker at once (the next two calls would only hear it again); in a chain the next engine
- * answers meanwhile. Wording seen from Claude Code ("usage limit reached", "hit your limit",
- * "resets 3pm"), Codex ("usage_limit_reached", 429) and Cursor ("usage limit").
- */
-export const LENS_GIST_LIMIT_RE = /usage[ _]limit|rate[ _-]?limit|limit reached|hit your (?:usage )?limit|quota|\b429\b|resets? (?:at|in) /i
 
 function breakerRecord(engine: LensGistEngineName, ok: boolean, now: number, limit = false): void {
   const breaker = breakerFor(engine)
@@ -530,10 +549,11 @@ function breakerRecord(engine: LensGistEngineName, ok: boolean, now: number, lim
     breaker.openedAt = 0
     return
   }
+  const wasOpen = breakerState(breaker, now) === 'open'
   breaker.failures = limit ? Math.max(breaker.failures + 1, LENS_GIST_BREAKER_FAILURES) : breaker.failures + 1
   if (breaker.failures >= LENS_GIST_BREAKER_FAILURES) {
-    if (breaker.failures === LENS_GIST_BREAKER_FAILURES || breakerState(breaker, now) !== 'open') {
-      console.error(`[lens-gist] ${engine} breaker open after ${breaker.failures} failures in a row; one trial in ${LENS_GIST_BREAKER_COOLDOWN_MS / 60_000} min`)
+    if (!wasOpen) {
+      console.error(`[lens-gist] ${engine} breaker open (${limit ? 'the provider says its limit is spent' : `${breaker.failures} failures in a row`}); one trial in ${LENS_GIST_BREAKER_COOLDOWN_MS / 60_000} min`)
     }
     breaker.openedAt = now
   }
@@ -605,6 +625,19 @@ function refusal(engine: LensGistEngineName, key: string, now: number, claimTria
   return null
 }
 
+/**
+ * One reason for a chain every engine refused. The phone pauses the WHOLE feature on
+ * `breaker` and `cap`, and this reply only on `retry-later` (app lib/lens-gist.ts), so a
+ * mix must not read as a breaker (/qa round 3: Claude spent, Codex refusing one reply,
+ * paused every reply on the phone). A drain and the cap hold for every engine.
+ */
+export function combinedRefusal(reasons: LensGistRefusal[]): LensGistRefusal {
+  if (reasons.includes('maintenance')) return 'maintenance'
+  if (reasons.includes('cap')) return 'cap'
+  if (reasons.length > 0 && reasons.every(reason => reason === 'breaker')) return 'breaker'
+  return 'retry-later'
+}
+
 /** The chain a config asks, tolerating a config built before chains existed. */
 function chainOf(config: LensGistConfig): LensGistLink[] {
   if (config.engine === 'off') return []
@@ -614,7 +647,7 @@ function chainOf(config: LensGistConfig): LensGistLink[] {
 type LinkOutcome =
   | { kind: 'ready'; result: LensGistResult & { status: 'ready' } }
   | { kind: 'refused'; reason: LensGistRefusal }
-  | { kind: 'failed'; reason: string; ms: number }
+  | { kind: 'failed'; reason: string; ms: number; link: LensGistLink }
 
 /** One engine of the chain: its own refusals, its own call, its own breaker and failures. */
 async function runLink(
@@ -623,10 +656,12 @@ async function runLink(
   now: () => number,
   run: LensGistRunner,
   admissionsOpen: () => boolean,
+  timeoutMs: number,
+  fallbackFrom: string | undefined,
 ): Promise<LinkOutcome> {
   const { engine, model } = link
   const key = lensGistCacheKey(engine, model, input)
-  // The queue can hold a call for a minute: the cap, the breaker and this reply's own
+  // A queued chain can wait behind two others: the cap, the breaker and this reply's own
   // failures are read again now, and only one call takes a half-open breaker's trial.
   // The breaker is checked last, so a call refused here never holds the trial.
   const late = refusal(engine, key, now(), true, admissionsOpen)
@@ -637,9 +672,9 @@ async function runLink(
   writeBudget(budget)
   const map = loadCache()
   try {
-    const output = await run(engine, model, buildLensGistPrompt(input), { timeoutMs: LENS_GIST_TIMEOUT_MS[engine], system: LENS_GIST_SYSTEM_PROMPT })
+    const output = await run(engine, model, buildLensGistPrompt(input), { timeoutMs, system: LENS_GIST_SYSTEM_PROMPT })
     const gist = parseLensGist(output.text)
-    if (!gist) throw new Error(`${engine} answered without an Outcome line: ${redactSecrets(output.text.replace(/\s+/g, ' ').slice(0, 120))}`)
+    if (!gist) throw new Error(`${engine} answered without an Outcome line: ${redactSecrets(output.text.replace(/\s+/g, ' ')).slice(0, 120)}`)
     if (!input.ask) gist.asked = ''
     const ms = now() - started
     breakerRecord(engine, true, now())
@@ -651,12 +686,16 @@ async function runLink(
     while (map.size > LENS_GIST_CACHE_MAX) map.delete(map.keys().next().value as string)
     persistCache(map)
     lastRun = { engine, model: output.model || model, ok: true, ms, at: new Date().toISOString(), usage: output.usage }
-    appendLedger({ ...lastRun, kind: input.kind, replyChars: input.reply.length })
-    return { kind: 'ready', result: { status: 'ready', gist, engine, model: output.model || model, cached: false, ms, usage: output.usage } }
+    appendLedger({ ...lastRun, kind: input.kind, replyChars: input.reply.length, ...(fallbackFrom ? { fallbackFrom } : {}) })
+    return {
+      kind: 'ready',
+      result: { status: 'ready', gist, engine, model: output.model || model, cached: false, ms, usage: output.usage, ...(fallbackFrom ? { fallbackFrom } : {}) },
+    }
   } catch (err) {
     const ms = now() - started
     const reason = redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 240)
-    const limit = LENS_GIST_LIMIT_RE.test(reason)
+    // Only the provider's own words decide a limit (lens-gist-engines.ts), never an answer's.
+    const limit = err instanceof LensGistLimitError
     breakerRecord(engine, false, now(), limit)
     // A spent plan is not this reply's fault: it is not refused for it later.
     if (!limit) {
@@ -666,9 +705,9 @@ async function runLink(
       while (failedKeys.size > LENS_GIST_CACHE_MAX) failedKeys.delete(failedKeys.keys().next().value as string)
     }
     lastRun = { engine, model, ok: false, ms, at: new Date().toISOString(), reason }
-    appendLedger({ ...lastRun, kind: input.kind, replyChars: input.reply.length })
-    console.error(`[lens-gist] ${engine}/${model || 'default'} failed in ${ms} ms${limit ? ' (usage limit: breaker open)' : ''}: ${reason}`)
-    return { kind: 'failed', reason: `${engine}: ${reason}`, ms }
+    appendLedger({ ...lastRun, kind: input.kind, replyChars: input.reply.length, ...(limit ? { limit: true } : {}) })
+    console.error(`[lens-gist] ${engine}/${model || 'default'} failed in ${ms} ms${limit ? ' (provider limit)' : ''}: ${reason}`)
+    return { kind: 'failed', reason: `${engine}: ${reason}`, ms, link }
   }
 }
 
@@ -697,9 +736,9 @@ export async function getLensGist(
   if (pending) return pending
 
   // Admission: refused only when EVERY engine would refuse now (the cap and a drain refuse
-  // them all). The first engine's reason is the one reported.
+  // them all), reported as combinedRefusal says.
   const refusals = chain.map(link => refusal(link.engine, lensGistCacheKey(link.engine, link.model, input), now(), false, admissionsOpen))
-  if (refusals.every(Boolean)) return { status: 'unavailable', reason: refusals[0] as LensGistRefusal, engine: chain[0].engine, model: chain[0].model }
+  if (refusals.every(Boolean)) return { status: 'unavailable', reason: combinedRefusal(refusals as LensGistRefusal[]), engine: chain[0].engine, model: chain[0].model }
   const slot = acquire()
   if (!slot) return { status: 'unavailable', reason: 'busy', engine: chain[0].engine, model: chain[0].model }
 
@@ -707,26 +746,35 @@ export async function getLensGist(
   const work = (async (): Promise<LensGistResult> => {
     await slot
     try {
-      let firstRefusal: LensGistRefusal | null = null
+      const refused: LensGistRefusal[] = []
       const failures: string[] = []
       let failedMs = 0
+      let lastFailed: LensGistLink | null = null
+      const deadline = now() + LENS_GIST_CHAIN_BUDGET_MS
+      const first = `${chain[0].engine}:${chain[0].model}`
       for (const [index, link] of chain.entries()) {
-        const outcome = await runLink(link, input, now, run, admissionsOpen)
-        if (outcome.kind === 'ready') {
-          return index === 0 ? outcome.result : { ...outcome.result, fallbackFrom: `${chain[0].engine}:${chain[0].model}` }
+        const left = deadline - now()
+        // Out of time: the rest of the chain is not started (a phone that gave up asks again).
+        if (left < LENS_GIST_MIN_LINK_MS) {
+          refused.push('retry-later')
+          break
         }
+        const timeoutMs = Math.min(LENS_GIST_TIMEOUT_MS[link.engine], left)
+        const outcome = await runLink(link, input, now, run, admissionsOpen, timeoutMs, index === 0 ? undefined : first)
+        if (outcome.kind === 'ready') return outcome.result
         if (outcome.kind === 'refused') {
           // The cap and a drain refuse every engine the same way, before any breaker trial.
-          firstRefusal ??= outcome.reason
+          refused.push(outcome.reason)
           continue
         }
         failures.push(outcome.reason)
         failedMs += outcome.ms
+        lastFailed = outcome.link
       }
-      if (failures.length) {
-        return { status: 'failed', reason: failures.join(' | ').slice(0, 480), engine: chain[0].engine, model: chain[0].model, ms: failedMs }
+      if (failures.length && lastFailed) {
+        return { status: 'failed', reason: failures.join(' | ').slice(0, 480), engine: lastFailed.engine, model: lastFailed.model, ms: failedMs }
       }
-      return { status: 'unavailable', reason: firstRefusal ?? 'breaker', engine: chain[0].engine, model: chain[0].model }
+      return { status: 'unavailable', reason: combinedRefusal(refused), engine: chain[0].engine, model: chain[0].model }
     } finally {
       release()
       inflight.delete(flight)
@@ -744,7 +792,7 @@ export function lensGistHealth() {
   return {
     engine: config.engine,
     model: config.model,
-    chain: config.chain.map(link => `${link.engine}:${link.model || 'default'}`),
+    chain: config.chain.map(link => (link.model ? `${link.engine}:${link.model}` : link.engine)),
     source: config.source,
     ...(config.error ? { error: config.error } : {}),
     callsToday: budget.calls,
@@ -763,7 +811,6 @@ export function lensGistPublicHealth() {
   return {
     engine: full.engine,
     model: full.model,
-    chain: full.chain,
     source: full.source,
     callsToday: full.callsToday,
     cap: full.cap,

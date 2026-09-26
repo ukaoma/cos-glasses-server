@@ -194,7 +194,9 @@ function safeProofError(result: ProcessResult): string {
   return 'provider returned no valid proof response'
 }
 
-const QUOTA_RE = /usage limit|hit your (?:usage |session )?limit|session limit|rate.?limit|too many requests|\b429\b|\bquota\b|resets? (?:at|in) |over capacity|overloaded|\b529\b|plan limit/i
+/** A provider's own words for a spent session, usage, rate or capacity limit. Also the lens
+ * gist's (lens-gist-engines.ts), so both read a limit the same way. */
+export const PROVIDER_QUOTA_RE = /usage[ _]limit|hit your (?:usage |session )?limit|session limit|rate.?limit|too many requests|\b429\b|\bquota\b|resets? (?:at|in) |over capacity|overloaded|\b529\b|plan limit/i
 const AUTH_RE = /not logged in|please (?:log ?in|sign in)|invalid api key|authentication|unauthori[sz]ed|\b401\b|\b403\b|login required|token (?:has )?expired|no credentials/i
 const OVERFLOW_RE = /prompt is too long|context window|too many tokens|exceeds the (?:model|context)/i
 const MISSING_RE = /ENOENT|command not found|no such file/i
@@ -209,7 +211,7 @@ export function classifyProofFailure(result: ProcessResult, answer: string, expe
   const haystack = `${result.stderr}\n${result.stdout}`.slice(0, 40_000)
   if (result.code === null && MISSING_RE.test(haystack)) return 'provider_missing'
   if (OVERFLOW_RE.test(haystack)) return 'provider_context_overflow'
-  if (QUOTA_RE.test(haystack)) return 'provider_quota'
+  if (PROVIDER_QUOTA_RE.test(haystack)) return 'provider_quota'
   if (AUTH_RE.test(haystack)) return 'provider_auth'
   if (result.code === 0) return answer === expected ? 'provider_failed' : 'provider_bad_answer'
   return 'provider_failed'
