@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 let server: Server | null = null
 let baseUrl = ''
 const engineCalls: string[] = []
+const enginePrompts: string[] = []
 let admissionsOpen = true
 let failingEngine = ''
 // Its own data home: the module graph is imported fresh below, so DATA_DIR is read again.
@@ -27,6 +28,7 @@ async function call(method: string, path: string, body?: unknown) {
 beforeEach(async () => {
   delete process.env.COS_LENS_GIST_ENGINE
   engineCalls.length = 0
+  enginePrompts.length = 0
   admissionsOpen = true
   failingEngine = ''
   ownDataDir = mkdtempSync(join(tmpdir(), 'cos-lens-gist-route-'))
@@ -45,9 +47,14 @@ beforeEach(async () => {
   // No real model, no real `agent models`, no real Ollama in a test.
   vi.doMock('../lib/lens-gist-engines.js', async (importOriginal) => ({
     ...await importOriginal<typeof import('../lib/lens-gist-engines.js')>(),
-    runLensGistEngine: async (engine: string) => {
+    runLensGistEngine: async (engine: string, _model: string, prompt: string) => {
       engineCalls.push(engine)
+      enginePrompts.push(prompt)
       if (engine === failingEngine) throw new Error(`${engine} is down`)
+      // 6.55.0: a meeting's prompt gets a meeting's card, Open line and all.
+      if (prompt.includes('<meeting>')) {
+        return { text: 'Gist: Ship on Friday\nSo what: Send the notes by noon\nOpen: Who writes the launch post', model: 'claude-sonnet-5' }
+      }
       return { text: 'Outcome: Done\nSo what: Merge when ready\nYou asked: Check it', model: 'claude-sonnet-5' }
     },
     runProcess: async () => ({ code: 0, stdout: 'Available models\n\ngrok-4.7-low-fast - Grok 4.7 Low Fast\n', stderr: '' }),
@@ -110,6 +117,34 @@ describe('POST /api/lens-gist', () => {
     process.env.COS_LENS_GIST_ENGINE = 'off'
     const res = await call('POST', '/api/lens-gist', { kind: 'message', reply: 'Hi.' })
     expect(res).toEqual({ status: 200, json: { status: 'off', reason: 'turned off' } })
+    expect(engineCalls).toEqual([])
+  })
+
+  it('6.55.0: a meeting with a line budget answers a ready card with its open item', async () => {
+    const res = await call('POST', '/api/lens-gist', {
+      kind: 'meeting',
+      ask: 'this ask is dropped',
+      reply: 'Title: Weekly sync\nDecisions: Ship on Friday\nAction items: Send the notes',
+      chars: { first: 100, soWhat: 100, third: 50 },
+    })
+    expect(res.status).toBe(200)
+    expect(res.json).toMatchObject({
+      status: 'ready', engine: 'claude', cached: false,
+      gist: { outcome: 'Ship on Friday', soWhat: 'Send the notes by noon', asked: '', open: 'Who writes the launch post' },
+    })
+    // The budget reached the prompt, and the ask did not.
+    expect(enginePrompts).toHaveLength(1)
+    expect(enginePrompts[0]).toContain('Gist: <what the meeting settled or covered, 100 characters or fewer>')
+    expect(enginePrompts[0]).toContain('Open: <one question or item still unresolved, 50 characters or fewer; "nothing open" if none>')
+    expect(enginePrompts[0]).not.toContain('this ask is dropped')
+  })
+
+  it('6.55.0: chars that are not three whole numbers are a 400, and nothing runs', async () => {
+    for (const chars of ['wide', [100, 100, 50], { first: 100.5, soWhat: 100, third: 50 }, { first: 100, soWhat: 100 }]) {
+      const res = await call('POST', '/api/lens-gist', { kind: 'session', reply: 'x', chars })
+      expect(res.status, JSON.stringify(chars)).toBe(400)
+      expect(res.json.error, JSON.stringify(chars)).toMatch(/^chars/)
+    }
     expect(engineCalls).toEqual([])
   })
 })

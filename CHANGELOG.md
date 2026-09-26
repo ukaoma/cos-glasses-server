@@ -1,3 +1,14 @@
+## 6.55.0
+
+### Longer lines behind the prompt box, and a card for a meeting
+
+COS Glasses 6.9.546 docks the card behind the prompt box and gives its first two lines two rows each. The server now writes each line to the length the phone asks for, and writes a card for a meeting from the meeting's own notes. The older app is unaffected: 6.9.545 sends neither, and gets exactly what 6.54.0 gave it.
+
+- **`chars` on `POST /api/lens-gist`:** `{"first": 100, "soWhat": 100, "third": 50}` asks for lines up to that many characters. Each must be a whole number and is held to its bounds (`first` and `soWhat` 20 to 150, `third` 20 to 80, all under the 160 characters a card line may hold); anything else (a string, an array, a fraction, a missing number) is a 400. `null` is the same as leaving it out.
+- **No change for the older app.** Without `chars` the prompt is byte for byte what 6.54.0 sent (a test holds it to 6.54.0's text and passes against 6.54.0's own code), and the cache key is 6.54.0's, so cards already cached still answer. A budget is part of the key, so a long card never answers a phone that asked for a short one.
+- **`kind: "meeting"`:** the phone sends a meeting's own notes (title, time, summary, decisions and action items) as `reply`, with no `ask`. The card is `Gist` (what the meeting settled or covered, returned as `outcome`), `So what` (what it means for you; empty when nothing is needed) and `Open` (one item still unresolved, returned as the new optional `open`; "nothing open", "none" and "no open items" leave it out). An `ask` sent with a meeting is dropped, the notes are data the model is told not to follow, and text in them cannot close their `<meeting>` tag. An `Open` line a model adds to a session or message card is dropped, so those cards are unchanged.
+- Checks: 15 new tests (13 on the library, 2 on the route). 14 new mutation cases (the budget's bounds, `null` as absent, the budget reaching the prompt and the cache key, the 6.54.0 escape, and the meeting's prompt, ask, tag, `Gist` and `Open` lines), run with the 50 from 6.54.0: 64 of 64 killed from a green baseline. Full suite 5,229 passed, 2 skipped (343 files); typecheck clean; `npm audit --omit=dev` 0 vulnerabilities.
+
 ## 6.54.0
 
 ### The summary behind the G2 prompt box, from the engine you choose

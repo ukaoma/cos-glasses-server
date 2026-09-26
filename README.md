@@ -308,6 +308,22 @@ that card: `Outcome` (`Answer` for a message), `So what` and `You asked`, one le
 each, instead of the reply's first lines. Older phones and older servers keep the
 6.9.544 card.
 
+**Longer lines, and meetings (6.55.0).** A phone with more room can say how long each line
+may run, with `"chars": {"first": 100, "soWhat": 100, "third": 50}` in the request (COS
+Glasses 6.9.546 asks for these, giving the first two lines two rows each). Each number must
+be a whole number and is held to its bounds: 20 to 150 for the first line and `So what`, 20
+to 80 for the third. Anything else is a 400. Without `chars`, or with `null`, the lines keep
+their 6.54.0 lengths and the prompt is word for word what 6.54.0 sent, so 6.9.545 sees no
+change. The budget is part of the cache key, so a card written long is never handed to a
+phone that asked for a short one.
+
+`"kind": "meeting"` writes a meeting's card from the meeting's own notes (title, time,
+summary, decisions and action items), sent as `reply` with no `ask`: `Gist` (what the meeting
+settled or covered, returned as `outcome`), `So what` (your next steps, left empty when
+nothing is needed) and `Open` (one question still unresolved, returned as `open` and left out
+when nothing is open). An `ask` sent with a meeting is ignored, and the notes are data the
+model is told not to follow, the same as a reply.
+
 **Pick the engine** the way the COS indexer does: `COS_LENS_GIST_ENGINE` wins, then the
 choice saved with `PUT /api/lens-gist/config`, then the default. One engine never falls back
 to another; `off` turns the summary off.
