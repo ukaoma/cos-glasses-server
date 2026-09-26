@@ -130,6 +130,14 @@ describe('/api/lens-gist/config', () => {
     expect(engineCalls).toEqual(['cursor'])
   })
 
+  it('saves a chain, which GET reports and the next POST follows in order', async () => {
+    const put = await call('PUT', '/api/lens-gist/config', { chain: 'cursor:grok-4.7-low-fast,claude:sonnet' })
+    expect(put.json.effective.chain).toEqual([{ engine: 'cursor', model: 'grok-4.7-low-fast' }, { engine: 'claude', model: 'sonnet' }])
+    expect((await call('GET', '/api/lens-gist/config')).json.chain).toEqual(['cursor:grok-4.7-low-fast', 'claude:sonnet'])
+    await call('POST', '/api/lens-gist', { kind: 'message', reply: 'y' })
+    expect(engineCalls).toEqual(['cursor'])
+  })
+
   it('says when the environment overrides the saved choice, and refuses a bad engine', async () => {
     process.env.COS_LENS_GIST_ENGINE = 'claude'
     expect((await call('PUT', '/api/lens-gist/config', { engine: 'codex' })).json).toMatchObject({ saved: true, overriddenByEnv: 'COS_LENS_GIST_ENGINE', effective: { engine: 'claude', source: 'env' } })

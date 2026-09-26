@@ -45,6 +45,62 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const CASES = [
   // ── 6.54.0: the lens gist (lib/lens-gist.ts, lib/lens-gist-engines.ts, routes/lens-gist.ts) ──
   {
+    name: "654-chain-no-fallback",
+    file: "server/lib/lens-gist.ts",
+    find: "        failures.push(outcome.reason)\n        failedMs += outcome.ms\n",
+    replace: "        failures.push(outcome.reason)\n        failedMs += outcome.ms\n        break\n",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-chain-cache-first-link-only",
+    file: "server/lib/lens-gist.ts",
+    find: "  for (const link of chain) {\n    const key = lensGistCacheKey(link.engine, link.model, input)\n    const hit = map.get(key)",
+    replace: "  for (const link of chain.slice(0, 1)) {\n    const key = lensGistCacheKey(link.engine, link.model, input)\n    const hit = map.get(key)",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-limit-not-immediate",
+    file: "server/lib/lens-gist.ts",
+    find: "  breaker.failures = limit ? Math.max(breaker.failures + 1, LENS_GIST_BREAKER_FAILURES) : breaker.failures + 1",
+    replace: "  breaker.failures = breaker.failures + 1",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-limit-blames-reply",
+    file: "server/lib/lens-gist.ts",
+    find: "    if (!limit) {\n      const before = failedKeys.get(key)?.count ?? 0",
+    replace: "    if (true) {\n      const before = failedKeys.get(key)?.count ?? 0",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-fallback-unmarked",
+    file: "server/lib/lens-gist.ts",
+    find: "          return index === 0 ? outcome.result : { ...outcome.result, fallbackFrom: `${chain[0].engine}:${chain[0].model}` }",
+    replace: "          return outcome.result",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-env-model-applies-to-chain",
+    file: "server/lib/lens-gist.ts",
+    find: "    model: link.model || (single ? envModel || savedModel(link.engine) : '') || LENS_GIST_DEFAULT_MODEL[link.engine],",
+    replace: "    model: link.model || envModel || savedModel(link.engine) || LENS_GIST_DEFAULT_MODEL[link.engine],",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-chain-length-unbounded",
+    file: "server/lib/lens-gist.ts",
+    find: "  if (chain.length > LENS_GIST_MAX_CHAIN) return { error: `at most ${LENS_GIST_MAX_CHAIN} engines in a chain` }\n",
+    replace: "",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
+    name: "654-limit-regex-misses-429",
+    file: "server/lib/lens-gist.ts",
+    find: "|quota|\\b429\\b|",
+    replace: "|quota|",
+    tests: ["server/lib/lens-gist.test.ts"],
+  },
+  {
     name: "654-drain-queued-runs",
     file: "server/lib/lens-gist.ts",
     find: "  if (!admissionsOpen()) return 'maintenance'\n",

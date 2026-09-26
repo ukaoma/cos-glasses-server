@@ -309,13 +309,19 @@ each, instead of the reply's first lines. Older phones and older servers keep th
 6.9.544 card.
 
 **Pick the engine** the way the COS indexer does: `COS_LENS_GIST_ENGINE` wins, then the
-choice saved with `PUT /api/lens-gist/config`, then the default. An explicit engine never
-falls back to another; `off` turns the summary off.
+choice saved with `PUT /api/lens-gist/config`, then the default. One engine never falls back
+to another; `off` turns the summary off.
+
+**Or chain them, for resilience.** `claude:sonnet,codex:gpt-5.6-terra` asks Claude first and
+Codex when Claude fails, is cooling down, or answers that a usage limit is spent (that
+engine is then skipped for 30 minutes at once). Running low on one plan no longer turns the
+summary off. A chain is opted into, never the default: it sends a session's reply to every
+provider in it, and an installed CLI is not consent (ChatGPT.app ships `codex`).
 
 | Engine | Default model | Measured (2026-09-25, one call) | Tools it keeps |
 |---|---|---|---|
 | `claude` (default) | `sonnet` | 2 to 3.5 s, about 1.2k tokens | none (`--tools ""`, hooks off) |
-| `codex` | `gpt-6-luna` (`gpt-6-sol` works as well) | about 3 s, about 12.6k tokens | shell, browser, image, agent, app and plugin tools off; web search off |
+| `codex` | `gpt-5.6-terra` (`gpt-6-luna`, `gpt-6-sol` work as well) | 3.2 to 3.7 s, about 11.4k tokens | shell, browser, image, agent, app and plugin tools off; web search off |
 | `cursor` | `grok-4.7-low-fast` | about 12 s, about 12k tokens | ask mode: read-only tools in an empty workspace |
 | `ollama` | the local model lens queries use | 2.5 s warm, 14 s cold | none |
 
@@ -324,7 +330,9 @@ provider nobody picked. Claude `haiku` timed out at 30 s in testing and is not a
 
 ```bash
 curl -s -X PUT -H "X-COS-Token: $COS_API_TOKEN" -H 'content-type: application/json' \
-  -d '{"engine":"codex","model":"gpt-6-sol","dailyCap":100}' http://127.0.0.1:3141/api/lens-gist/config
+  -d '{"chain":"claude:sonnet,codex:gpt-5.6-terra","dailyCap":150}' http://127.0.0.1:3141/api/lens-gist/config
+curl -s -X PUT -H "X-COS-Token: $COS_API_TOKEN" -H 'content-type: application/json' \
+  -d '{"engine":"codex","model":"gpt-6-sol"}' http://127.0.0.1:3141/api/lens-gist/config
 curl -s -H "X-COS-Token: $COS_API_TOKEN" http://127.0.0.1:3141/api/lens-gist/config
 ```
 

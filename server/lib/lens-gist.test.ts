@@ -15,7 +15,10 @@ import {
   LENS_GIST_MAX_RUNNING,
   LENS_GIST_MAX_WAITING,
   LENS_GIST_REPLY_MAX,
+  LENS_GIST_LIMIT_RE,
+  LENS_GIST_MAX_CHAIN,
   LensGistInputError,
+  parseLensGistChain,
   _resetLensGistForTests,
   _setClaudeInstalledForTests,
   buildLensGistPrompt,
@@ -44,8 +47,12 @@ import {
 
 const fixture = (name: string) => readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), 'utf8')
 const FILES = ['lens-gist.json', 'lens-gist-cache.json', 'lens-gist-budget.json', 'lens-gist-runs.jsonl']
-const CLAUDE: LensGistConfig = { engine: 'claude', model: 'sonnet', source: 'default' }
-const CODEX: LensGistConfig = { engine: 'codex', model: 'gpt-6-luna', source: 'config' }
+const CLAUDE: LensGistConfig = { engine: 'claude', model: 'sonnet', chain: [{ engine: 'claude', model: 'sonnet' }], source: 'default' }
+const CODEX: LensGistConfig = { engine: 'codex', model: 'gpt-5.6-terra', chain: [{ engine: 'codex', model: 'gpt-5.6-terra' }], source: 'config' }
+const CHAIN: LensGistConfig = {
+  engine: 'claude', model: 'sonnet', source: 'config',
+  chain: [{ engine: 'claude', model: 'sonnet' }, { engine: 'codex', model: 'gpt-5.6-terra' }],
+}
 const input = (reply = 'Shipped the fix and pushed 6.54.0. Needs your publish.', ask = 'ship it') =>
   normalizeLensGistInput({ kind: 'session', ask, reply })
 const CARD = 'Outcome: Shipped 6.54.0\nSo what: Publish it from your Terminal\nYou asked: Ship the release'
@@ -72,18 +79,18 @@ beforeEach(() => {
 
 describe('resolveLensGistConfig: the indexer contract (env, then saved, then default)', () => {
   it('defaults to Claude Sonnet', () => {
-    expect(resolveLensGistConfig({}, null)).toEqual({ engine: 'claude', model: LENS_GIST_DEFAULT_MODEL.claude, source: 'default' })
+    expect(resolveLensGistConfig({}, null)).toEqual({ engine: 'claude', model: LENS_GIST_DEFAULT_MODEL.claude, chain: [{ engine: 'claude', model: LENS_GIST_DEFAULT_MODEL.claude }], source: 'default' })
     expect(LENS_GIST_DEFAULT_MODEL.claude).toBe('sonnet')
   })
 
   it('uses the saved engine and its model, and each engine its own default', () => {
-    expect(resolveLensGistConfig({}, { engine: 'cursor' })).toEqual({ engine: 'cursor', model: LENS_GIST_DEFAULT_MODEL.cursor, source: 'config' })
-    expect(resolveLensGistConfig({}, { engine: 'codex', model: 'gpt-6-sol' })).toEqual({ engine: 'codex', model: 'gpt-6-sol', source: 'config' })
+    expect(resolveLensGistConfig({}, { engine: 'cursor' })).toMatchObject({ engine: 'cursor', model: LENS_GIST_DEFAULT_MODEL.cursor, source: 'config' })
+    expect(resolveLensGistConfig({}, { engine: 'codex', model: 'gpt-6-sol' })).toMatchObject({ engine: 'codex', model: 'gpt-6-sol', chain: [{ engine: 'codex', model: 'gpt-6-sol' }], source: 'config' })
   })
 
   it('lets the environment win over the saved choice, and a saved model never follows a different engine', () => {
     const cfg = resolveLensGistConfig({ COS_LENS_GIST_ENGINE: 'codex' }, { engine: 'cursor', model: 'grok-4.7-low-fast' })
-    expect(cfg).toEqual({ engine: 'codex', model: LENS_GIST_DEFAULT_MODEL.codex, source: 'env' })
+    expect(cfg).toMatchObject({ engine: 'codex', model: LENS_GIST_DEFAULT_MODEL.codex, source: 'env' })
     expect(resolveLensGistConfig({ COS_LENS_GIST_ENGINE: 'claude', COS_LENS_GIST_MODEL: 'haiku' }, null).model).toBe('haiku')
   })
 
@@ -91,6 +98,7 @@ describe('resolveLensGistConfig: the indexer contract (env, then saved, then def
     const cfg = resolveLensGistConfig({ COS_LENS_GIST_ENGINE: 'gpt' }, { engine: 'claude' })
     expect(cfg.engine).toBe('off')
     expect(cfg.error).toMatch(/not one of claude, codex, cursor, ollama, off/)
+    expect(cfg.chain).toEqual([])
     expect(resolveLensGistConfig({}, { engine: 'chatgpt' }).engine).toBe('off')
   })
 
@@ -175,7 +183,7 @@ describe('parseLensGist', () => {
 describe('getLensGist', () => {
   it('is off when the engine is off, and never calls a model', async () => {
     const run = runner()
-    const result = await getLensGist(input(), { config: { engine: 'off', model: '', source: 'env', error: 'why' }, run })
+    const result = await getLensGist(input(), { config: { engine: 'off', model: '', chain: [], source: 'env', error: 'why' }, run })
     expect(result).toEqual({ status: 'off', reason: 'why' })
     expect(run.calls).toBe(0)
   })
@@ -287,7 +295,7 @@ describe('getLensGist', () => {
   it('publishes no error text on the unauthenticated health slice', async () => {
     await getLensGist(input(), { config: CODEX, run: runner([new Error('some provider detail')]) })
     const pub = lensGistPublicHealth()
-    expect(Object.keys(pub).sort()).toEqual(['breakerOpen', 'callsToday', 'cap', 'engine', 'model', 'source'])
+    expect(Object.keys(pub).sort()).toEqual(['breakerOpen', 'callsToday', 'cap', 'chain', 'engine', 'model', 'source'])
     expect(JSON.stringify(pub)).not.toMatch(/provider detail/)
     expect(JSON.stringify(lensGistHealth())).toMatch(/provider detail/)
   })
@@ -522,3 +530,106 @@ function _resetBreakersOnly(): void {
   _resetLensGistForTests()
   if (cache) writeFileSync(dataPath('lens-gist-budget.json'), cache)
 }
+
+describe('the chain: resilience across providers (Miles 2026-09-25)', () => {
+  it('parses engine[:model] lists; the model is everything after the first colon', () => {
+    expect(parseLensGistChain('claude:sonnet,codex:gpt-5.6-terra')).toEqual({ chain: [{ engine: 'claude', model: 'sonnet' }, { engine: 'codex', model: 'gpt-5.6-terra' }] })
+    expect(parseLensGistChain('claude, ollama:qwen3.8:27b')).toEqual({ chain: [{ engine: 'claude', model: '' }, { engine: 'ollama', model: 'qwen3.8:27b' }] })
+    expect(parseLensGistChain('off')).toEqual({ off: true })
+    expect(parseLensGistChain('claude,gpt')).toMatchObject({ error: expect.stringMatching(/not one of/) })
+    expect(parseLensGistChain('claude:--bad')).toMatchObject({ error: expect.stringMatching(/not a model name/) })
+    expect(parseLensGistChain(Array(LENS_GIST_MAX_CHAIN + 1).fill(0).map((_, i) => `claude:m${i}`).join(','))).toMatchObject({ error: expect.stringMatching(/at most/) })
+  })
+
+  it('an env chain resolves with each engine\'s default model; COS_LENS_GIST_MODEL applies only to one engine', () => {
+    const cfg = resolveLensGistConfig({ COS_LENS_GIST_ENGINE: 'claude,codex', COS_LENS_GIST_MODEL: 'opus' }, null)
+    expect(cfg).toMatchObject({ engine: 'claude', source: 'env', chain: [{ engine: 'claude', model: LENS_GIST_DEFAULT_MODEL.claude }, { engine: 'codex', model: LENS_GIST_DEFAULT_MODEL.codex }] })
+    expect(resolveLensGistConfig({ COS_LENS_GIST_ENGINE: 'claude,bogus' }, null)).toMatchObject({ engine: 'off', chain: [] })
+  })
+
+  it('a saved chain round-trips through PUT, and a bad one is refused', () => {
+    expect(saveLensGistConfig({ chain: [{ engine: 'claude', model: 'sonnet' }, { engine: 'codex' }], dailyCap: 80 })).toMatchObject({
+      source: 'config', chain: [{ engine: 'claude', model: 'sonnet' }, { engine: 'codex', model: LENS_GIST_DEFAULT_MODEL.codex }],
+    })
+    expect(JSON.parse(readFileSync(dataPath('lens-gist.json'), 'utf8'))).toEqual({ chain: [{ engine: 'claude', model: 'sonnet' }, { engine: 'codex' }], dailyCap: 80 })
+    expect(saveLensGistConfig({ chain: 'codex:gpt-6-sol,claude' }).chain.map(l => l.engine)).toEqual(['codex', 'claude'])
+    expect(() => saveLensGistConfig({ chain: 'claude,nope' })).toThrow(LensGistInputError)
+    expect(saveLensGistConfig({ chain: 'off' }).engine).toBe('off')
+  })
+
+  it('the default is ONE engine: a chain is opted into, never assumed', () => {
+    expect(resolveLensGistConfig({}, null).chain).toHaveLength(1)
+  })
+
+  it('when the first engine fails, the next answers, and says it was a fallback', async () => {
+    const run = runner([new Error('claude failed (1)'), CARD])
+    const result = await getLensGist(input(), { config: CHAIN, run })
+    expect(result).toMatchObject({ status: 'ready', engine: 'codex', model: 'gpt-5.6-terra', fallbackFrom: 'claude:sonnet' })
+    expect((run as any).mock.calls.map((c: any[]) => c[0])).toEqual(['claude', 'codex'])
+    // The answer is kept under the engine that wrote it and found for the chain next time.
+    expect(await getLensGist(input(), { config: CHAIN, run })).toMatchObject({ status: 'ready', cached: true, engine: 'codex' })
+    expect(run.calls).toBe(2)
+  })
+
+  it('a usage limit opens that engine at once: the next reply goes straight to the next engine', async () => {
+    const run = runner([new Error('Claude AI usage limit reached, resets 3pm'), CARD, CARD])
+    expect(await getLensGist(input('one'), { config: CHAIN, run })).toMatchObject({ status: 'ready', engine: 'codex' })
+    expect(lensGistHealth().breakerOpen).toEqual(['claude'])
+    expect(await getLensGist(input('two'), { config: CHAIN, run })).toMatchObject({ status: 'ready', engine: 'codex' })
+    expect((run as any).mock.calls.map((c: any[]) => c[0])).toEqual(['claude', 'codex', 'codex'])
+  })
+
+  it('a spent plan is not the reply\'s fault: it does not count toward that reply\'s failures', async () => {
+    let clock = 9_000_000
+    const now = () => clock
+    const run = runner([new Error('Claude AI usage limit reached, resets 3pm'), new Error('a real failure'), CARD])
+    expect(await getLensGist(input('same'), { config: CLAUDE, run, now })).toMatchObject({ status: 'failed' })
+    clock += LENS_GIST_BREAKER_COOLDOWN_MS
+    // The first REAL failure of this reply after the limit is its first: 10 minutes, not 6
+    // hours. That real failure reopens the breaker, so wait out its cooldown, which is past
+    // the 10 minutes and well short of the 6 hours a second strike would mean.
+    expect(await getLensGist(input('same'), { config: CLAUDE, run, now })).toMatchObject({ status: 'failed' })
+    expect(LENS_GIST_BREAKER_COOLDOWN_MS).toBeGreaterThan(LENS_GIST_FAILED_RETRY_MS[0])
+    expect(LENS_GIST_BREAKER_COOLDOWN_MS).toBeLessThan(LENS_GIST_FAILED_RETRY_MS[1])
+    clock += LENS_GIST_BREAKER_COOLDOWN_MS
+    expect(await getLensGist(input('same'), { config: CLAUDE, run, now })).toMatchObject({ status: 'ready', engine: 'claude' })
+  })
+
+  it('recognizes the usage-limit wording of each provider, and not ordinary failures', () => {
+    for (const text of ['Claude AI usage limit reached|1727300000', "You've hit your limit · resets 3pm", 'usage_limit_reached', 'unexpected status 429 Too Many Requests', 'Rate limit exceeded', 'You have hit your usage limit']) {
+      expect(LENS_GIST_LIMIT_RE.test(text), text).toBe(true)
+    }
+    for (const text of ['codex: 401 Unauthorized', 'claude timed out after 30000 ms', 'answered without an Outcome line']) {
+      expect(LENS_GIST_LIMIT_RE.test(text), text).toBe(false)
+    }
+  })
+
+  it('a single engine still fails closed: no second engine is ever asked', async () => {
+    const run = runner([new Error('down')])
+    expect(await getLensGist(input(), { config: CLAUDE, run })).toMatchObject({ status: 'failed' })
+    expect((run as any).mock.calls.map((c: any[]) => c[0])).toEqual(['claude'])
+  })
+
+  it('every engine failing is one failure with both reasons, each engine charged', async () => {
+    const run = runner([new Error('first down'), new Error('second down')])
+    const result = await getLensGist(input(), { config: CHAIN, run })
+    expect(result).toMatchObject({ status: 'failed' })
+    expect((result as any).reason).toMatch(/claude: first down \| codex: second down/)
+    expect(JSON.parse(readFileSync(dataPath('lens-gist-budget.json'), 'utf8'))).toMatchObject({ calls: 0, attempts: 2 })
+  })
+
+  it('the cap and a drain stop the whole chain; a breaker only its own engine', async () => {
+    process.env.COS_LENS_GIST_DAILY_CAP = '0'
+    const run = runner()
+    expect(await getLensGist(input('capped'), { config: CHAIN, run })).toMatchObject({ status: 'unavailable', reason: 'cap' })
+    delete process.env.COS_LENS_GIST_DAILY_CAP
+    expect(await getLensGist(input('drain'), { config: CHAIN, run, admissionsOpen: () => false })).toMatchObject({ status: 'unavailable', reason: 'maintenance' })
+    expect(run.calls).toBe(0)
+  })
+
+  it('health names the chain', () => {
+    saveLensGistConfig({ chain: 'claude:sonnet,codex:gpt-5.6-terra' })
+    expect(lensGistHealth().chain).toEqual(['claude:sonnet', 'codex:gpt-5.6-terra'])
+    expect(lensGistPublicHealth().chain).toEqual(['claude:sonnet', 'codex:gpt-5.6-terra'])
+  })
+})
