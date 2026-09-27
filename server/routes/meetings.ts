@@ -12,7 +12,7 @@ import {
   listCosOperationsMeetingMonths,
   resolveMeetingLibrary,
 } from '../lib/cos-operations-meetings.js'
-import type { MeetingMeta } from '../lib/meeting-store.js'
+import type { MeetingMeta, MeetingDetail } from '../lib/meeting-store.js'
 import { meetingListLimit } from '../lib/meeting-store.js'
 import { searchMeetingLibrary } from '../lib/meeting-library-search.js'
 import { g2RecordingsReachOperations } from '../lib/g2-ops-handoff.js'
@@ -164,6 +164,27 @@ function importedContribution(
     drop: rows => dropSupersededRows(rows, superseded),
     present: imports.length > 0 || derived.length > 0,
   }
+}
+
+/** Shared canonical read path for browsing and review. Never accepts a filesystem path. */
+export function resolveSavedMeetingDetail(
+  descriptor: { domain: string; month: string; filename: string },
+  store: MeetingStore = getMeetingStore(),
+  importsLibrary: ImportedMeetingLibrary = getImportedMeetingLibrary(),
+): MeetingDetail {
+  const { domain, month, filename } = descriptor
+  if (domain === 'library') {
+    const detail = getDirectLibraryMeetingDetail(month, filename)
+    if (detail) return detail
+  }
+  const imported = importedMeetingDetail(domain, month, filename, store, importsLibrary)
+  if (imported) return imported as MeetingDetail
+  if (cosOperationsMeetingsConfigured()) {
+    const detail = getCosOperationsMeetingDetail(domain, month, filename)
+    if (detail) return detail
+  }
+  const detail = store.detail(domain, month, filename)
+  return { ...detail, recordId: withStandaloneIdentity(detail).recordId }
 }
 
 export function createMeetingsRouter(
@@ -385,31 +406,7 @@ export function createMeetingsRouter(
       }
       res.set('Cache-Control', 'private, no-store')
 
-      if (domain === 'library') {
-        const detail = getDirectLibraryMeetingDetail(month, filename)
-        if (detail) {
-          res.json(detail)
-          return
-        }
-      }
-
-      const imported = importedMeetingDetail(domain, month, filename, store, importsLibrary)
-      if (imported) {
-        res.json(imported)
-        return
-      }
-
-      if (cosOperationsMeetingsConfigured()) {
-        const detail = getCosOperationsMeetingDetail(domain, month, filename)
-        if (detail) {
-          res.json(detail)
-          return
-        }
-        // Fall through to standalone store for G2-local recordings that share
-        // the same API shape when ops lookup misses.
-      }
-
-      res.json(store.detail(domain, month, filename))
+      res.json(resolveSavedMeetingDetail({ domain, month, filename }, store, importsLibrary))
     } catch (error) {
       sendMeetingStoreError(res, error)
     }
@@ -421,39 +418,7 @@ export function createMeetingsRouter(
     try {
       res.set('Cache-Control', 'private, no-store')
 
-      if (req.params.domain === 'library') {
-        const detail = getDirectLibraryMeetingDetail(req.params.month, req.params.filename)
-        if (detail) {
-          res.json(detail)
-          return
-        }
-      }
-
-      const imported = importedMeetingDetail(
-        req.params.domain,
-        req.params.month,
-        req.params.filename,
-        store,
-        importsLibrary,
-      )
-      if (imported) {
-        res.json(imported)
-        return
-      }
-
-      if (cosOperationsMeetingsConfigured()) {
-        const detail = getCosOperationsMeetingDetail(
-          req.params.domain,
-          req.params.month,
-          req.params.filename,
-        )
-        if (detail) {
-          res.json(detail)
-          return
-        }
-      }
-
-      res.json(store.detail(req.params.domain, req.params.month, req.params.filename))
+      res.json(resolveSavedMeetingDetail({ domain: String(req.params.domain), month: String(req.params.month), filename: String(req.params.filename) }, store, importsLibrary))
     } catch (error) {
       sendMeetingStoreError(res, error)
     }

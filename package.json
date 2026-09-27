@@ -41,6 +41,8 @@
     "shared",
     "!server/**/*.test.ts",
     "!server/scripts/engine-canary.ts",
+    "!server/scripts/work-review-candidate.ts",
+    "!server/scripts/work-review-mutation-gate.mjs",
     "!server/scripts/mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
@@ -58,7 +60,8 @@
     "task-runtime",
     "docs/control2-foundation.md",
     "docs/control2-sandbox.md",
-    "docs/control2-task-runtime.md"
+    "docs/control2-task-runtime.md",
+    "docs/work-reviews.md"
   ],
   "author": "COS Contributors",
   "license": "MIT",

@@ -122,6 +122,8 @@ import { initializeServerInstanceId } from './lib/server-instance-id.js'
 import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-user-config.js'
 import { getTranscriptionProfileStatus } from './lib/profile.js'
 import { createQueryJobsRouter } from './routes/query-jobs.js'
+import { createWorkReviewsRouter } from './routes/work-reviews.js'
+import { createDefaultWorkReviewRuntime } from './lib/work-review-backend.js'
 import { createMorningBriefRouter } from './routes/morning-brief.js'
 import { getMorningBriefScheduler, startMorningBriefScheduler, stopMorningBriefScheduler } from './lib/morning-brief-runtime.js'
 import {
@@ -616,6 +618,8 @@ app.use('/api', createClientInstanceRouter())
 app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
+const workReviewRuntime = createDefaultWorkReviewRuntime()
+app.use('/api', createWorkReviewsRouter(workReviewRuntime))
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.
@@ -930,6 +934,7 @@ async function gracefulShutdown(): Promise<void> {
   const forceExit = setTimeout(() => process.exit(1), 8_000)
   forceExit.unref?.()
   stopMorningBriefScheduler()
+  await workReviewRuntime?.close()
   stopMeetingImportScheduler()
   stopMeetingMergeScheduler()
   sessionHooksRuntime.stop()
@@ -1176,6 +1181,7 @@ listenRequiredServers(listeners).then(() => {
       // that store is ready. Its own tick checks the durable-jobs switch and the
       // maintenance gate, so starting it here is safe when either is off.
       startMorningBriefScheduler()
+      void workReviewRuntime?.start().catch(error => console.error('[work-reviews] reconciliation unavailable:', error))
     }).catch(error => {
       // The store remains degraded and rejects admission. Legacy /api/query is
       // still mounted, so the kill switch is an immediate rollback.
