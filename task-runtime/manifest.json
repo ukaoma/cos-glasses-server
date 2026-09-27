@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "protocol": "cos-control-task-read/1",
+  "version": "0.1.0",
+  "pythonMinimum": "3.10",
+  "readOnly": true,
+  "files": {
+    "task_runtime.py": "eec6a4fb64744bf523d0880ad45753ca75c9f34e7cf29283390989fb56e254fb",
+    "LICENSE": "591c40355e570844a4cfa0630a869ed38d86f5f0c1a3bcb47bf7ba438ec5955f"
+  },
+  "provenance": {
+    "repository": "ukaoma/MU-Chief-Staff",
+    "commit": "1dac83bd62937717e460f9a8334c054f79011128",
+    "parser": "operations/scripts/task_rows.py",
+    "parserSha256": "cee941f0bbd385b604fb77328765c830c87f78d787ab1f4deeea28585d137984",
+    "normalization": "operations/scripts/task_dedup.py:TaskDeduplicator.normalize",
+    "adaptations": [
+      "Single-file stdlib-only parser; no task_dedup import",
+      "Explicit root and operator; no personal domains or owner defaults",
+      "Read-only versioned protocol; no legacy dispatch integration",
+      "Bounded descriptor-relative reads reject symlinked domain/task files"
+    ]
+  },
+  "stdlibImports": [
+    "argparse",
+    "hashlib",
+    "json",
+    "os",
+    "re",
+    "stat",
+    "string",
+    "sys",
+    "dataclasses",
+    "pathlib",
+    "typing"
+  ]
+}

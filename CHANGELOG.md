@@ -1,3 +1,14 @@
+## 6.55.1-control2-foundation.0
+
+### Isolated COS Control 2 foundation candidate
+
+An opt-in local lab turns manually replayed synthetic meeting evidence into durable review packets. It runs on a separate loopback port with a private scratch-home token and does not install over, restart or launch the managed production service.
+
+- Durable revision receipts deduplicate unchanged replays, reject conflicting content or source aliases, and supersede old review records. Automatic meeting consumption, legacy task migration and automatic execution remain unavailable.
+- The native Foundation Lab can request one explicitly enabled, no-tool Claude text preview per backend process. A fixed renderer escapes the response into local HTML; a sandboxed readback checks the artifact. This is draft copy, not website coding or a deployed page.
+- Publication is unavailable. Source revision checks fence late draft results; the native opener verifies the local preview's path and content hash. Provider tool containment, production source adapters and a publisher remain later gates.
+- The package includes the standalone lab entrypoint, sandbox spike and portable task-read foundation. This prerelease is a test candidate; the installed Control, server and glasses baseline remain unchanged.
+
 ## 6.55.0
 
 ### Longer lines behind the prompt box, and a card for a meeting

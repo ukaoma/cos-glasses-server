@@ -31,6 +31,23 @@ import { describe, expect, it } from 'vitest'
 
 const PKG = new URL('../../package.json', import.meta.url).pathname
 
+// SemVer 2.0: numeric identifiers never have leading zeroes; prerelease
+// identifiers may contain letters/hyphens, and build metadata is preserved.
+const NUMERIC = '(?:0|[1-9]\\d*)'
+const PRE_ID = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
+const SEMVER = new RegExp(`^${NUMERIC}\\.${NUMERIC}\\.${NUMERIC}(?:-${PRE_ID}(?:\\.${PRE_ID})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`)
+function versionHeadings(changelog: string): RegExpMatchArray[] {
+  // Capture the WHOLE token. Truncating prereleases to X.Y.Z masks mismatches.
+  const headings = [...changelog.matchAll(/^##\s*\[?(\d[^\s\]]*)\]?(.*)$/gm)]
+  for (const heading of headings) {
+    if (!SEMVER.test(heading[1]!)) throw new Error(`Invalid changelog version: ${heading[1]}`)
+  }
+  return headings
+}
+function newestRelease(changelog: string): string | undefined {
+  return versionHeadings(changelog).find(h => !/\(unreleased\)/i.test(h[2] ?? ''))?.[1]
+}
+
 describe('package manifest', () => {
   it('is non-empty and parses', () => {
     const raw = readFileSync(PKG, 'utf8')
@@ -41,7 +58,7 @@ describe('package manifest', () => {
   it('carries the fields publishing depends on', () => {
     const pkg = JSON.parse(readFileSync(PKG, 'utf8'))
     expect(pkg.name).toBe('@gotcos/glasses-server')
-    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(pkg.version).toMatch(SEMVER)
     expect(pkg.bin, 'the CLI entrypoint is what users run').toBeTruthy()
   })
 
@@ -54,7 +71,7 @@ describe('package manifest', () => {
     // while the package keeps the published version. Only such sections, and only above
     // the newest released heading, are skipped; the release bump drops the marker, and a
     // bump that leaves it (or a marked version equal to the package's) still fails here.
-    const headings = [...changelog.matchAll(/^##\s*\[?(\d+\.\d+\.\d+)\]?(.*)$/gm)]
+    const headings = versionHeadings(changelog)
     const unreleased = (rest: string) => /\(unreleased\)/i.test(rest)
     const firstReleased = headings.findIndex(h => !unreleased(h[2] ?? ''))
     expect(firstReleased, 'no version heading found in CHANGELOG.md').toBeGreaterThanOrEqual(0)
@@ -91,5 +108,22 @@ describe('package.json ships the security surface', () => {
     const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { files?: string[]; bugs?: { url?: string } }
     expect(pkg.files).toContain('SECURITY.md')
     expect(pkg.bugs?.url).toMatch(/github\.com\/ukaoma\/cos-glasses-server\/issues/)
+  })
+})
+
+
+describe('release version grammar', () => {
+  it.each(['6.55.0', '6.55.1-control2-foundation.0', '1.2.3-rc.1+build.009', '0.0.0'])('accepts SemVer %s', version => {
+    expect(version).toMatch(SEMVER)
+    expect(newestRelease(`## [${version}]\nNotes`)).toBe(version)
+  })
+  it.each(['01.2.3', '1.02.3', '1.2.03', '1.2', '1.2.3-', '1.2.3-01', '1.2.3-rc..1', '1.2.3+', '1.2.3-rc_1'])('rejects invalid version %s', version => {
+    expect(version).not.toMatch(SEMVER)
+    expect(() => versionHeadings(`## ${version}\nNotes`)).toThrow('Invalid changelog version')
+  })
+  it('preserves prerelease mismatches and the existing unreleased skip', () => {
+    expect(newestRelease('## 6.55.1-control2-foundation.1\nNotes')).not.toBe('6.55.1-control2-foundation.0')
+    expect(newestRelease('## 6.55.1-control2-foundation.0 (unreleased)\nPlanned\n## 6.55.0\nNotes')).toBe('6.55.0')
+    expect(newestRelease('## 6.55.1-control2-foundation.0\nNotes')).not.toBe('6.55.1')
   })
 })
