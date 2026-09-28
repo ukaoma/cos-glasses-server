@@ -11,7 +11,7 @@ import {
 import { localClock, shiftDay, taskInstant } from './morning-brief-schedule.js'
 import { callPython, pythonBridgeAvailable } from './python-bridge.js'
 import { resolveCosOperationsDir } from './cos-operations-meetings.js'
-import { taskDomainNames } from './domains.js'
+import { taskDomainNames, isSafeDomainName } from './domains.js'
 import { isClientJobId } from './query-job-types.js'
 import { DEFAULT_MODEL, isClaudeModel } from '../../shared/model-preference.js'
 
@@ -108,6 +108,11 @@ export interface BridgeTaskRow {
   stage?: 'planning' | 'active' | 'review' | null
   /** The finish line. A dispatch is refused while this is empty. */
   done_when?: string | null
+  work_stage?: WorkStage
+  work_identity?: string
+  work_revision?: string
+  meeting_refs?: WorkMeetingRef[]
+  work_metadata_error?: string | null
 }
 
 export interface TaskFlags {
@@ -121,6 +126,9 @@ export interface TaskFlags {
 /** Board stage. Planning is the default and carries no marker in tasks.md. */
 export type TaskStage = 'planning' | 'active' | 'review'
 export const TASK_STAGES: readonly TaskStage[] = ['planning', 'active', 'review']
+export const WORK_STAGES = ['mentioned', 'planned', 'draft', 'built', 'qa', 'complete'] as const
+export type WorkStage = typeof WORK_STAGES[number]
+export interface WorkMeetingRef { recordId: string; domain: string; month: string; filename: string; title: string }
 
 export interface TaskBoardRow {
   id: string
@@ -142,6 +150,11 @@ export interface TaskBoardRow {
   section: string
   sectionDay?: string
   stage: TaskStage
+  workStage?: WorkStage
+  workIdentity?: string
+  workRevision?: string
+  meetingRefs?: WorkMeetingRef[]
+  workMetadataError?: string
   /** Absent until someone says what finished looks like. Gates `run`. */
   doneWhen?: string
   due: boolean
@@ -428,6 +441,11 @@ export function projectRow(
     section: row.section,
     ...(row.section_day ? { sectionDay: row.section_day } : {}),
     stage: row.stage ?? 'planning',
+    workStage: row.is_checked ? 'complete' : row.work_stage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'),
+    workIdentity: row.work_identity || row.id,
+    ...(row.work_revision ? { workRevision: row.work_revision } : {}),
+    meetingRefs: row.meeting_refs ?? [],
+    ...(row.work_metadata_error ? { workMetadataError: row.work_metadata_error } : {}),
     ...(row.done_when ? { doneWhen: row.done_when } : {}),
     ...mark,
   }
@@ -462,6 +480,7 @@ export async function captureTask(body: {
   runAt?: string
   captureId?: string
 }, nowMs = Date.now()): Promise<{ ok: true; replayed?: boolean; fell_to_inbox?: boolean; section?: string }> {
+  rejectReservedWorkText(body.text)
   if (!pythonBridgeAvailable()) throw new TaskRunError(503, 'cos_pipeline_not_configured', 'COS pipeline is not configured.')
   if (!body.captureId) throw new TaskRunError(400, 'capture_id_required', 'captureId is required.')
   if (!isClientJobId(body.captureId)) throw new TaskRunError(422, 'invalid_capture_id', 'captureId must be a UUID v4.')
@@ -495,10 +514,37 @@ export async function setTaskRunAt(domain: string, id: string, runAt: string | n
 
 /** Rewrite a task's words. The bridge preserves its source block and schedule. */
 export async function setTaskText(domain: string, id: string, text: string): Promise<void> {
+  rejectReservedWorkText(text)
   const clean = text.replace(/\s+/g, ' ').trim()
   if (!clean) throw new TaskRunError(400, 'text_required', 'text is required')
   if (clean.length > 2000) throw new TaskRunError(422, 'text_too_long', 'text must be 2000 characters or fewer')
   await withLockRetry(() => bridge(['task-set-text', domain, id], clean))
+}
+
+/** Freeform fields cannot introduce structured Work authority into Source. */
+export function rejectReservedWorkText(text: string): void {
+  if (/cos-work\s*:|\*\*Source:\*\*/i.test(text)) throw new TaskRunError(422, 'reserved_work_metadata', 'Use the explicit meeting link and stage controls; Source metadata is reserved.')
+}
+export async function workBoardCapabilities(): Promise<{ version: number; writable: boolean }> {
+  if (!pythonBridgeAvailable()) return { version: 0, writable: false }
+  try {
+    const value = await bridge(['task-work-capabilities']) as { version?: unknown }
+    return value?.version === 1 ? { version: 1, writable: true } : { version: 0, writable: false }
+  } catch { return { version: 0, writable: false } }
+}
+function validateWorkTarget(domain: string, id: string, expectedText: string, expectedRevision: string): void {
+  if (!isSafeDomainName(domain) || !taskDomains().includes(domain)) throw new TaskRunError(400, 'invalid_domain', 'Unknown task domain')
+  if (!/^[a-f0-9]{12}$/.test(id)) throw new TaskRunError(422, 'invalid_task_id', 'Use the exact canonical task ID')
+  if (!expectedText || expectedText.length > 8000 || !/^[a-f0-9]{64}$/.test(expectedRevision)) throw new TaskRunError(422, 'invalid_task_snapshot', 'Refresh the task before changing Work')
+}
+export async function setTaskWorkStage(domain: string, id: string, workStage: WorkStage, expectedText: string, expectedRevision: string): Promise<void> {
+  validateWorkTarget(domain, id, expectedText, expectedRevision)
+  if (!WORK_STAGES.includes(workStage)) throw new TaskRunError(422, 'invalid_work_stage', 'Unknown Work stage')
+  await withLockRetry(() => bridge(['task-set-work-stage', domain, id, workStage], JSON.stringify({ expectedText, expectedRevision })))
+}
+export async function linkTaskMeeting(domain: string, id: string, expectedText: string, expectedRevision: string, meeting: WorkMeetingRef): Promise<void> {
+  validateWorkTarget(domain, id, expectedText, expectedRevision)
+  await withLockRetry(() => bridge(['task-link-meeting', domain, id], JSON.stringify({ expectedText, expectedRevision, meeting })))
 }
 
 /** Move a task between board stages. 'planning' clears the marker. */
@@ -511,6 +557,7 @@ export async function setTaskStage(domain: string, id: string, stage: TaskStage)
 
 /** Set or clear the finish line. Empty clears it, which re-blocks `run`. */
 export async function setTaskDoneWhen(domain: string, id: string, text: string): Promise<void> {
+  rejectReservedWorkText(text)
   const clean = text.replace(/\s+/g, ' ').trim()
   if (clean.length > 500) {
     throw new TaskRunError(422, 'done_when_too_long', 'done_when must be 500 characters or fewer')

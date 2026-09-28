@@ -123,6 +123,7 @@ import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-u
 import { getTranscriptionProfileStatus } from './lib/profile.js'
 import { createQueryJobsRouter } from './routes/query-jobs.js'
 import { createWorkReviewsRouter } from './routes/work-reviews.js'
+import { createWorkBoardRouter } from './routes/work-board.js'
 import { createDefaultWorkReviewRuntime } from './lib/work-review-backend.js'
 import { createMorningBriefRouter } from './routes/morning-brief.js'
 import { getMorningBriefScheduler, startMorningBriefScheduler, stopMorningBriefScheduler } from './lib/morning-brief-runtime.js'
@@ -620,6 +621,7 @@ app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
 }))
 const workReviewRuntime = createDefaultWorkReviewRuntime()
 app.use('/api', createWorkReviewsRouter(workReviewRuntime))
+app.use('/api', createWorkBoardRouter())
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.

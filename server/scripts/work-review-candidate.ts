@@ -9,6 +9,9 @@ import { homedir } from 'node:os'
 import { WorkReviewStore } from '../lib/work-review-store.js'
 import { WorkReviewRuntime } from '../lib/work-review-runtime.js'
 import { createWorkReviewsRouter } from '../routes/work-reviews.js'
+import { createWorkBoardRouter } from '../routes/work-board.js'
+import { pythonBridgeAvailable } from '../lib/python-bridge.js'
+import { listBoard } from '../lib/task-store.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
 import type { QueryJobSnapshot } from '../lib/query-job-types.js'
 
@@ -78,5 +81,9 @@ await runtime.start()
 const app=express();app.use(express.json({limit:'16kb'}));
 app.use((req,res,next)=> { const raw=Buffer.from(req.get('X-COS-Token')||''); const expected=Buffer.from(token);if(raw.length!==expected.length || !timingSafeEqual(raw,expected))return res.status(401).json({error:'unauthorized'});next() })
 app.use('/api',createWorkReviewsRouter(runtime))
+app.use('/api',createWorkBoardRouter({list:async()=>pythonBridgeAvailable()?listBoard():(await upstream('/api/tasks')).tasks,resolveMeeting:async descriptor=> {
+  const data=await upstream('/api/meetings/detail?'+new URLSearchParams({domain:descriptor.domain,month:descriptor.month,filename:descriptor.filename}))
+  return (data.meeting ?? data.detail ?? data) as MeetingDetail
+}}))
 const server=app.listen(port,'127.0.0.1',()=>console.log(JSON.stringify({ready:true,port,tokenFile,mode:'local-candidate',provider:'ollama'})))
 for(const signal of ['SIGTERM','SIGINT'] as const)process.once(signal,()=>{server.close();void runtime.close().then(()=>process.exit(0))})
