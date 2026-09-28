@@ -4,7 +4,7 @@
 
 - New `POST /api/work-board/session-recommendation` answers Continue, Fork or New for a Work task. The client sends only the sessions it can target (at most 80); the task and its meetings come from the board. Jev answers two questions in one request: which session shares this work's context (same deliverable, page, module, codebase or client thread), and which, if any, is already doing this exact task. Continue at 0.5 or above on the second, Fork when a session covers the context at 0.6 or above, otherwise New. Answers are cached for 30 minutes per task and session set. On Miles's live sessions a 1:1 task went New, a server bug continued its server session at 0.91, and a hardware-page task forked the hardware session; about 10K input tokens per task.
 - Advice only: nothing is selected, sent or started. Without a key, over the cap, or while paused, the route answers `provider: none` and the client keeps its local word match.
-- New `POST /api/jev-key/set`, `GET /api/jev-key/status` and `DELETE /api/jev-key`, like `/api/openai-key`: the key is validated live against TypeSafe's free model listing, saved to `data/jev-key.json` (0600), and never returned. `TYPESAFE_API_KEY` in the environment wins; status says which source is active. A saved key works without a restart.
+- New `POST /api/jev-key/set`, `GET /api/jev-key/status` and `DELETE /api/jev-key`, like `/api/openai-key`: the key is validated live against TypeSafe's free model listing, saved to `data/jev-key.json` (0600), and never returned. A key saved this way wins over `TYPESAFE_API_KEY` in the environment or either `.env` file (both held one on Miles's Mac, which made a Settings key do nothing); the COS meeting producer resolves in the same order. Status says which source is active. A saved key works without a restart, and saving one clears a breaker left open by the old key.
 - Cost controls: a daily input-token cap (`COS_JEV_DAILY_TOKENS`, default 1,000,000, about $0.04), a ledger in the data directory so a restart does not reset it, a 20-second timeout, and a breaker that pauses Jev for an hour after three consecutive failures. The model is pinned to `jev-1.13.0`.
 
 ### Work intake: meeting work that is not on the board yet
@@ -21,6 +21,8 @@
 
 ### Fixed
 
+- Session advice only suggests a Fork on a Claude or Codex session, the sessions a Work handoff can fork. A Cursor session that shares the context no longer produces a Fork that Send then refuses. A Fork's confidence is now the named session's own probability, not the chance that some session shares the context (a 0.5 and 0.48 split used to read 98%). A Jev answer without its "none" option is treated as a bad answer instead of a certain Fork. The board lookup tries a task's Work identity before its row id.
+- The local Work candidate reads the installed Jev key but can no longer set or remove it, counts its own Jev spend in the candidate home, and accepts session-advice requests up to 128 KB (66 real sessions measured 20 KB, over the old 16 KB limit).
 - The Control 2 sandbox probe's loopback listener accepted connections with no error handler. The bash probes close right after writing, so the accepted socket could see a reset. Vitest reported it as an unhandled error in 2 of 3 runs on 6.56.1, and in a running server it would have been uncaught.
 
 ## 6.56.1
