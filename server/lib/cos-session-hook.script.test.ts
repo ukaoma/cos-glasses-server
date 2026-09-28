@@ -133,13 +133,39 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
     expect(readFileSync(join(paths.spool, names[0]), 'utf-8')).toContain('"event":"rejected","payload":not json}')
   })
 
-  it('caps stdin at 1 MiB', () => {
+  it('caps stdin at 1 MiB', async () => {
     const paths = home()
     const big = payload({ pad: 'x'.repeat(2 * 1024 * 1024) })
-    expect(run('PostToolUse', big, paths).status).toBe(0)
-    const [name] = spooled(paths.spool)
-    expect(statSync(join(paths.spool, name)).size).toBeLessThan(1_048_576 + 256)
-  })
+    // macOS spawnSync intermittently stalls writing this 2 MiB pipe (ETIMEDOUT).
+    // Keep real piped stdin, but use async backpressure and verify the writer also
+    // finishes without EPIPE. The deadline kills this fixture's whole process group.
+    const result = await new Promise<{ status: number | null; signal: string | null; stdout: string; stderr: string; inputError: string | null; timedOut: boolean }>((resolvePromise, reject) => {
+      const child = spawn('/bin/sh', [SCRIPT, 'PostToolUse'], {
+        detached: true,
+        env: { HOME: dirname(paths.home), COS_GLASSES_HOME: paths.home, COS_HOOK_SPOOL: paths.spool, PATH: '/usr/bin:/bin' },
+      })
+      let stdout = '', stderr = '', inputError: string | null = null, timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        if (child.pid) {
+          try { process.kill(-child.pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
+        }
+      }, 10_000)
+      child.stdout.on('data', chunk => { stdout += chunk })
+      child.stderr.on('data', chunk => { stderr += chunk })
+      child.stdin.on('error', error => { inputError = error.message })
+      child.on('error', error => { clearTimeout(timer); reject(error) })
+      child.on('close', (status, signal) => {
+        clearTimeout(timer)
+        resolvePromise({ status, signal, stdout, stderr, inputError, timedOut })
+      })
+      child.stdin.end(big)
+    })
+    expect(result).toEqual({ status: 0, signal: null, stdout: '', stderr: '', inputError: null, timedOut: false })
+    const names = spooled(paths.spool)
+    expect(names).toHaveLength(1)
+    expect(statSync(join(paths.spool, names[0])).size).toBeLessThan(1_048_576 + 256)
+  }, 15_000)
 
   it('B8: a full spool or a drain stamp older than a day drops everything but a PermissionRequest', () => {
     const paths = home()
