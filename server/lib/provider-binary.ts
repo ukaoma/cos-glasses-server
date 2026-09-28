@@ -118,8 +118,12 @@ export function providerBinarySpec(provider: string): BinarySpec | null {
       name: 'codex',
       envKeys: ['COS_ATTACHED_CODEX_BIN', 'COS_CODEX_BIN'],
       absolutes: [
-        // Verified 2026-08-15: codex-cli 0.148.0-alpha.9 lives here, and there is
-        // no `codex` on PATH at all on this machine.
+        // 6.56.1: ChatGPT.app 26.924 (2026-09-27, codex-cli 0.158.0-alpha.2.1) moved the bundled CLI
+        // here, a sh launcher that follows symlinks to CodexCLI.app. Every Codex run on an updated
+        // Mac failed with `codex binary unresolved (not_found)` until this path was listed.
+        '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
+        // Verified 2026-08-15: codex-cli 0.148.0-alpha.9 lived here (older ChatGPT builds), and
+        // there is no `codex` on PATH at all on this machine.
         '/Applications/ChatGPT.app/Contents/Resources/codex',
         home ? join(home, '.codex', 'bin', 'codex') : '',
         '/opt/homebrew/bin/codex',

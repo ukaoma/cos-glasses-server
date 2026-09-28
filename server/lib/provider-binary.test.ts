@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it, afterAll } from 'vitest'
 import {
+  providerBinarySpec,
   resolveBinaryFromSpec,
   resolveProviderBinary,
   STALE_SHIM_PREFIXES,
@@ -99,6 +100,15 @@ describe('provider binary resolution', () => {
     expect(resolved.source).toBe('absolute')
   })
 
+  it('6.56.1: looks where ChatGPT.app 26.924 keeps the CLI first, then where older builds kept it', () => {
+    // 2026-09-27: the update moved it to Resources/codex-cli/bin/codex; the old Resources/codex was
+    // gone, and every Codex run failed `not_found` on an updated Mac.
+    const spec = providerBinarySpec('codex')
+    expect(spec?.absolutes[0]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
+    expect(spec?.absolutes[1]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex')
+    expect(spec?.absolutes.some(p => p.startsWith('/Applications/Codex.app/'))).toBe(false)
+  })
+
   it('still exports the real stale-shim prefix', () => {
     expect(STALE_SHIM_PREFIXES).toContain('/Applications/Codex.app/')
   })
@@ -112,6 +122,7 @@ describe('provider binary resolution', () => {
     // the host, and a machine without ChatGPT.app installed is not a regression.
     const resolved = resolveProviderBinary('codex', { PATH: '/nonexistent-cos-probe' })
     if (!resolved.ok) {
+      expect(existsSync('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')).toBe(false)
       expect(existsSync('/Applications/ChatGPT.app/Contents/Resources/codex')).toBe(false)
       return
     }

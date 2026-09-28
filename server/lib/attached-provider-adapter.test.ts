@@ -1066,7 +1066,9 @@ describe('resolveProviderBinary', () => {
   it('tries ChatGPT.app before anything else for codex, and never lists Codex.app', () => {
     const spec = providerBinarySpec('codex')
     expect(spec).not.toBeNull()
-    expect(spec!.absolutes[0]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex')
+    // 6.56.1: the ChatGPT.app 26.924 location first, then where older builds kept it.
+    expect(spec!.absolutes[0]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
+    expect(spec!.absolutes[1]).toBe('/Applications/ChatGPT.app/Contents/Resources/codex')
     expect(spec!.absolutes.some(p => isKnownStaleShimPath(p))).toBe(false)
     // `.some(isKnownStaleShimPath)` passes the index as the second argument;
     // an unusable prefixes argument must still exclude the known shim.

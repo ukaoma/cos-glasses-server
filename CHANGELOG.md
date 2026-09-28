@@ -1,5 +1,10 @@
 ## 6.56.1
 
+### Codex runs again after the ChatGPT app update
+
+- On 2026-09-27 a ChatGPT.app update (26.924, codex-cli 0.158.0-alpha.2.1) moved its bundled Codex CLI from `Contents/Resources/codex` to `Contents/Resources/codex-cli/bin/codex`, and `/Applications/Codex.app` is gone. Every Codex run (GPT models from the glasses, Codex engines) then failed with `codex binary unresolved (not_found)`. The server now looks in the new place first and still in the old one for older ChatGPT builds. The new location is a launcher that follows its own links, so nothing else changes.
+- A test pins the order, and fails without the new location; the resolver finds it with no PATH and no `~/.codex/bin` link.
+
 ### Linking a saved meeting to Work
 
 - Linking a saved COS meeting to a Work card no longer fails with "The selected meeting changed; refresh before linking". Opening a single operations meeting now returns the same record identity the meeting list shows, so the exact-meeting check in Work passes for an unchanged meeting and still refuses a different or renamed one.
