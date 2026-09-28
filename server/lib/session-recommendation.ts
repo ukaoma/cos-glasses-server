@@ -25,6 +25,8 @@ const BEST = "Which one of the user's agent sessions is the natural place to do 
 const EXACT = "Which one of the user's agent sessions is already doing this exact task, so the work should simply continue there? "
   + 'A session on the same project doing different work does not count. Choose none if no session is doing this task.'
 
+/** Providers the Work handoff can fork (Control's destinationSupported). */
+export const FORKABLE = new Set(['claude', 'codex'])
 const clip = (text: string | undefined, max: number) => (text ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 const round = (n: number) => Math.round(n * 100) / 100
 
@@ -45,10 +47,14 @@ export function decide(best: Record<string, number>, exact: Record<string, numbe
   if (exactKey && exactP >= CONTINUE_AT) {
     return { action: 'continue', sessionId: idOf(exactKey), confidence: round(exactP), reason: 'Already doing this task.', alternatives }
   }
-  const covered = 1 - (Number(best.none) || 0)
-  const [bestKey] = bestRank[0] ?? ['']
-  if (bestKey && covered >= FORK_AT) {
-    return { action: 'fork', sessionId: idOf(bestKey), confidence: round(covered),
+  // A choice answer always carries `none`; without it "covered" would read 1 and advise a Fork at 100%.
+  if (typeof best.none !== 'number' || !Number.isFinite(best.none)) throw new JevError('jev_bad_answer', 'Jev left out none')
+  const covered = 1 - best.none
+  // Fork only where the workspace can fork (Claude and Codex); a Cursor session sharing context cannot take a Fork.
+  const [forkKey, forkP] = bestRank.find(([k, p]) => p > 0 && FORKABLE.has(sessions[Number(k.slice(1))].provider)) ?? ['', 0]
+  if (forkKey && covered >= FORK_AT) {
+    // The confidence shown is the named session's own probability, not the chance that SOME session shares context.
+    return { action: 'fork', sessionId: idOf(forkKey), confidence: round(forkP),
       reason: 'Shares this work’s context (same deliverable, page, module or thread) but is doing different work.', alternatives }
   }
   return { action: 'new', sessionId: null, confidence: round(1 - covered), reason: 'No existing session shares this work’s context.', alternatives }

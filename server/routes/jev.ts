@@ -2,8 +2,8 @@
  * Jev key management (COS Control Settings) and Work session recommendations. Auth comes from the parent /api mount.
  *
  * The key is push-only, like /api/openai-key: validated live against TypeSafe's free model listing, saved to
- * data/jev-key.json (0600), and never returned to any client. An environment TYPESAFE_API_KEY wins over the
- * saved key; /status says which source is active so Control can show it honestly.
+ * data/jev-key.json (0600), and never returned to any client. The saved key wins over TYPESAFE_API_KEY in the
+ * environment (see resolveJevKey); /status says which source is active so Control can show it honestly.
  */
 import { Router } from 'express'
 import { existsSync, unlinkSync } from 'node:fs'
@@ -42,6 +42,7 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
     try { deps.save(key) } catch {
       return res.status(500).json({ error: { code: 'jev_key_not_saved', message: 'The key was valid but could not be saved. Check the server data folder.' } })
     }
+    deps.jev.resetForNewKey()
     return res.json({ ok: true, ...deps.jev.status() })
   })
 
@@ -61,7 +62,9 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
       return res.status(400).json({ error: { code: 'invalid_recommendation_request', message: 'Select an exact task and send at most 80 sessions.' } })
     }
     try {
-      const row = (await deps.list()).find(r => r.domain === body.domain && (r.id === body.id || r.workIdentity === body.id))
+      // Work identity first: it survives a rename, while a new card's id could equal an old identity's text hash.
+      const rows = (await deps.list()).filter(r => r.domain === body.domain)
+      const row = rows.find(r => r.workIdentity === body.id) ?? rows.find(r => r.id === body.id)
       if (!row) return res.status(404).json({ error: { code: 'task_not_found', message: 'That task changed or was removed. Refresh Work.' } })
       const meetings = (row.meetingRefs ?? []).map(ref => ref.title ?? '').filter(Boolean)
       return res.json(await deps.recommender.recommend({ task: { text: row.text || row.title || '', domain: row.domain, meetings }, sessions }))

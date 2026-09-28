@@ -13,6 +13,7 @@ import { createWorkBoardRouter } from '../routes/work-board.js'
 import { createWorkIntakeRouter } from '../routes/work-intake.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from '../lib/work-intake-store.js'
 import { createJevRouter } from '../routes/jev.js'
+import { JevClient } from '../lib/jev.js'
 import { pythonBridgeAvailable } from '../lib/python-bridge.js'
 import { listBoard } from '../lib/task-store.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
@@ -84,6 +85,8 @@ await runtime.start()
 const app=express()
 // Producer intake batches (up to 200 items, ~140 KB measured) need more room than review requests; production allows 10 MB.
 app.use('/api/work-intake/items',express.json({limit:'1mb'}))
+// Session advice carries up to 80 sessions (Control keeps it under ~57 KB); 66 real sessions measured 20 KB.
+app.use('/api/work-board/session-recommendation',express.json({limit:'128kb'}))
 app.use(express.json({limit:'16kb'}));
 app.use((req,res,next)=> { const raw=Buffer.from(req.get('X-COS-Token')||''); const expected=Buffer.from(token);if(raw.length!==expected.length || !timingSafeEqual(raw,expected))return res.status(401).json({error:'unauthorized'});next() })
 app.use('/api',createWorkReviewsRouter(runtime))
@@ -98,7 +101,9 @@ app.use('/api',createWorkBoardRouter({list:boardList,resolveMeeting:savedMeeting
 const intake=createOptionalWorkIntakeStore(()=>new WorkIntakeStore(join(root,'work-intake')))  // a bad journal answers 503, the candidate stays up
 app.use('/api',createWorkIntakeRouter({store:intake,list:boardList,resolveMeeting:savedMeeting,
   ...(pythonBridgeAvailable()?{}:{capabilities:async()=>({linkWrites:false,cardCreation:false})})}))
-// Jev key status and Continue/Fork/New advice, against the same board. The key is the installed server's (env or saved).
-app.use('/api',createJevRouter({list:boardList}))
+// Jev key status and Continue/Fork/New advice, against the same board. The key is READ from the installed server
+// (saved or env); the candidate never sets or removes it, and counts its own spend in the candidate home.
+app.use('/api/jev-key',(req,res,next)=>req.method==='GET'?next():res.status(403).json({error:{code:'candidate_read_only',message:'Set the Jev key in the installed COS Control.'}}))
+app.use('/api',createJevRouter({list:boardList,jev:new JevClient(fetch,()=>new Date(),join(root,'jev-usage.json'))}))
 const server=app.listen(port,'127.0.0.1',()=>console.log(JSON.stringify({ready:true,port,tokenFile,mode:'local-candidate',provider:'ollama'})))
 for(const signal of ['SIGTERM','SIGINT'] as const)process.once(signal,()=>{server.close();intake?.close();void runtime.close().then(()=>process.exit(0))})

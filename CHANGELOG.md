@@ -19,6 +19,10 @@
 - The local Work candidate (`server/scripts/work-review-candidate.ts`) mounts Intake with its own journal in the candidate home, accepts producer-sized batches, and stays up if that journal is unreadable. It also mounts the Jev routes against the same board.
 - Tests: `node server/scripts/work-intake-mutation-gate.mjs` runs 29 mutations over intake, the Jev client and session recommendation in a private copy, after a green baseline.
 
+### Fixed
+
+- The Control 2 sandbox probe's loopback listener accepted connections with no error handler. The bash probes close right after writing, so the accepted socket could see a reset. Vitest reported it as an unhandled error in 2 of 3 runs on 6.56.1, and in a running server it would have been uncaught.
+
 ## 6.56.1
 
 ### Codex runs again after the ChatGPT app update

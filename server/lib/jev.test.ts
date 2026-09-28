@@ -15,13 +15,26 @@ function client(fetchImpl: (...a: any[]) => Promise<Response>, now = () => new D
   return new JevClient(fetchImpl as typeof fetch, now, join(dir, 'usage.json'))
 }
 
-it('resolves the environment key first, then the key saved from Control (0600), else none', () => {
+it('resolves the key saved from Control first (0600), then the environment, else none', () => {
   expect(resolveJevKey()).toBeNull()
+  process.env.TYPESAFE_API_KEY = `'env-key-${'e'.repeat(20)}'`
+  expect(resolveJevKey()).toMatchObject({ key: 'env-key-' + 'e'.repeat(20), source: 'env' })  // quotes from a .env are stripped
   saveJevKey(KEY, new Date('2026-09-28T20:00:00Z'))
   expect(statSync(JEV_KEY_FILE).mode & 0o777).toBe(0o600)
+  // An explicit Settings key wins over any .env (both .env files hold a key on Miles's Mac).
   expect(resolveJevKey()).toMatchObject({ key: KEY, source: 'config', savedAt: '2026-09-28T20:00:00.000Z' })
-  process.env.TYPESAFE_API_KEY = 'env-key-' + 'e'.repeat(20)
-  expect(resolveJevKey()).toMatchObject({ source: 'env' })
+})
+
+it('a newly saved key clears the breaker and the last error', async () => {
+  process.env.TYPESAFE_API_KEY = KEY
+  const f = vi.fn(async () => reply(503))
+  const c = client(f)
+  for (let i = 0; i < JEV_LIMITS.breakerFailures; i++) await expect(c.ask({}, {}, 1)).rejects.toMatchObject({ code: 'jev_unavailable' })
+  expect(c.status().breakerOpenUntil).not.toBeNull()
+  c.resetForNewKey()
+  expect(c.status()).toMatchObject({ breakerOpenUntil: null, lastError: null })
+  f.mockImplementation(async () => ok(10))
+  await expect(c.ask({}, { q: {} }, 1)).resolves.toMatchObject({ inputTokens: 10 })
 })
 
 it('validates a key against the free model listing and explains a refusal', async () => {

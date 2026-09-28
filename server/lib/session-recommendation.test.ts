@@ -9,13 +9,26 @@ const sessions = [{ id: 'claude:a', provider: 'claude', title: 'Bottle POS hardw
 it('continues where a session is already doing the task, forks shared context, and starts new otherwise', () => {
   // Measured 2026-09-28: server bug → continue at 0.91; hardware scenes → fork; a 1:1 → new (none 0.73).
   expect(decide({ s1: 0.95, s0: 0.05, none: 0 }, { s1: 0.91, none: 0.09 }, sessions)).toMatchObject({ action: 'continue', sessionId: 'claude:b', confidence: 0.91 })
-  expect(decide({ s0: 0.5, s1: 0.48, none: 0.02 }, { s0: 0.39, none: 0.38 }, sessions)).toMatchObject({ action: 'fork', sessionId: 'claude:a', confidence: 0.98 })
+  // QA 2026-09-28: a Fork shows the named session's own probability (a 0.5/0.48 split reads 50%, not 98%).
+  expect(decide({ s0: 0.5, s1: 0.48, none: 0.02 }, { s0: 0.39, none: 0.38 }, sessions)).toMatchObject({ action: 'fork', sessionId: 'claude:a', confidence: 0.5 })
   expect(decide({ s0: 0.17, none: 0.73 }, { none: 0.94, s0: 0.03 }, sessions)).toMatchObject({ action: 'new', sessionId: null, confidence: 0.73 })
   // The thresholds, exactly at and just under.
   expect(decide({ s0: 1 - FORK_AT, none: FORK_AT }, { none: 1 }, sessions).action).toBe('new')
   expect(decide({ s0: FORK_AT, none: 1 - FORK_AT }, { s0: CONTINUE_AT - 0.01, none: 0.51 }, sessions).action).toBe('fork')
   expect(decide({ s0: FORK_AT, none: 1 - FORK_AT }, { s2: CONTINUE_AT, none: 0.5 }, sessions)).toMatchObject({ action: 'continue', sessionId: 'codex:c' })
-  expect(decide({ s0: 0.6, s1: 0.3, s2: 0.1 }, {}, sessions).alternatives.map(a => a.sessionId)).toEqual(['claude:a', 'claude:b', 'codex:c'])
+  expect(decide({ s0: 0.6, s1: 0.3, s2: 0.1, none: 0 }, {}, sessions).alternatives.map(a => a.sessionId)).toEqual(['claude:a', 'claude:b', 'codex:c'])
+})
+
+it('forks only a session the workspace can fork, and refuses an answer without none', () => {
+  const mixed = [{ id: 'cursor:z', provider: 'cursor', title: 'Hardware page in Cursor' }, ...sessions]
+  // The likeliest session is Cursor (no Fork there): the Fork goes to the likeliest Claude or Codex session.
+  expect(decide({ s0: 0.7, s2: 0.2, none: 0.1 }, { none: 1 }, mixed)).toMatchObject({ action: 'fork', sessionId: 'claude:b', confidence: 0.2 })
+  // Only Cursor shares the context: nothing to fork, so start new.
+  expect(decide({ s0: 0.9, none: 0.1 }, { none: 1 }, mixed)).toMatchObject({ action: 'new', sessionId: null })
+  // A Cursor session already doing the task is still a Continue (Cursor supports Continue).
+  expect(decide({ s0: 0.9, none: 0.1 }, { s0: 0.8, none: 0.2 }, mixed)).toMatchObject({ action: 'continue', sessionId: 'cursor:z' })
+  expect(() => decide({ s0: 0.9 }, { none: 1 }, sessions)).toThrow(JevError)
+  expect(() => decide({ s0: 0.9, none: Number.NaN }, { none: 1 }, sessions)).toThrow(JevError)
 })
 
 it('refuses an answer that names a session that was not offered', () => {

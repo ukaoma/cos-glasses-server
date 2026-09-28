@@ -2,8 +2,11 @@
  * Jev (TypeSafe System One): a classifier that answers typed questions with calibrated probabilities. It never
  * writes text. Used for Work session matching (6.57.0); the COS meeting producer uses the same key.
  *
- * Key resolution mirrors the OpenAI key (openai-key.ts): TYPESAFE_API_KEY in the environment wins, then
- * data/jev-key.json (saved from COS Control Settings, validated live, never echoed back), then the COS scripts .env.
+ * Key resolution: data/jev-key.json (saved from COS Control Settings, validated live, never echoed back) wins, then
+ * TYPESAFE_API_KEY in the environment (which includes ~/.cos-glasses/.env, loaded at boot), then the COS scripts
+ * .env. Unlike the OpenAI key the saved key comes FIRST: Miles's Mac has TYPESAFE_API_KEY in both .env files, so an
+ * environment-first order made the Settings key inert (QA 2026-09-28). The COS producer (work_intake.py) resolves
+ * in the same order: saved, its environment, then the other .env.
  *
  * Cost controls: a daily input-token cap (COS_JEV_DAILY_TOKENS, default 1,000,000, about $0.04 at $42 per billion),
  * a breaker that opens for an hour after three consecutive failures, and a 20-second request timeout. Every call
@@ -41,10 +44,10 @@ function readKeyFile(): KeyFile | null {
 
 /** Resolved fresh on every call (a small file read), so a key saved from Control works without a restart. */
 export function resolveJevKey(): { key: string; source: Exclude<JevKeySource, 'none'>; savedAt?: string; validatedAt?: string } | null {
-  const env = process.env.TYPESAFE_API_KEY?.trim()
-  if (env) return { key: env, source: 'env' }
   const file = readKeyFile()
   if (file) return { key: file.key, source: 'config', savedAt: file.savedAt, validatedAt: file.validatedAt }
+  const env = process.env.TYPESAFE_API_KEY?.trim().replace(/^["']|["']$/g, '')
+  if (env) return { key: env, source: 'env' }
   if (COS_SCRIPTS_DIR) {
     for (const path of [resolve(COS_SCRIPTS_DIR, '.env'), resolve(COS_SCRIPTS_DIR, '../../.env')]) {
       try {
@@ -111,6 +114,9 @@ export class JevClient {
     }
     throw new JevError(code)
   }
+
+  /** A newly validated key starts clean: failures under the old key must not pause the new one for an hour. */
+  resetForNewKey(): void { this.failures = 0; this.breakerUntil = 0; this.lastError = null }
 
   status(): { configured: boolean; source: JevKeySource; savedAt?: string; validatedAt?: string; usedToday: number; dailyCap: number; breakerOpenUntil: string | null; lastError: string | null } {
     const key = resolveJevKey()

@@ -10,7 +10,7 @@ const row = { domain: 'personal', id: 'a'.repeat(12), workIdentity: 'b'.repeat(1
 const status = { configured: true, source: 'config', usedToday: 0, dailyCap: 1_000_000, breakerOpenUntil: null, lastError: null }
 
 async function setup(overrides: Record<string, unknown> = {}) {
-  const deps = { jev: { status: vi.fn(() => status) }, recommender: { recommend: vi.fn(async () => ({ provider: 'jev', action: 'new' })) },
+  const deps = { jev: { status: vi.fn(() => status), resetForNewKey: vi.fn() }, recommender: { recommend: vi.fn(async () => ({ provider: 'jev', action: 'new' })) },
     list: vi.fn(async () => [row]), validate: vi.fn(async () => ({ ok: true })), save: vi.fn(), ...overrides }
   const app = express(); app.use(express.json())
   app.use('/api', (req, res, next) => req.header('X-COS-Token') === 't' ? next() : res.sendStatus(401))
@@ -29,13 +29,14 @@ it('requires auth, validates the key live before saving, and never echoes it', a
   const text = await res.text()
   expect(text).not.toContain(KEY)
   expect(s.deps.validate).toHaveBeenCalledWith(KEY); expect(s.deps.save).toHaveBeenCalledWith(KEY)
+  expect(s.deps.jev.resetForNewKey).toHaveBeenCalledTimes(1)  // a validated key starts with a closed breaker
   for (const bad of [{}, { key: 'short' }, { key: KEY + ' x' }, { key: KEY, extra: 1 }]) {
     expect((await s.call('POST', '/jev-key/set', bad)).status).toBe(400)
   }
   const refused = await setup({ validate: vi.fn(async () => ({ ok: false, status: 401, reason: 'TypeSafe did not accept this key.' })) })
   const r = await refused.call('POST', '/jev-key/set', { key: KEY })
   expect(r.status).toBe(400); expect((await r.json()).error).toMatchObject({ code: 'jev_key_not_accepted', message: 'TypeSafe did not accept this key.' })
-  expect(refused.deps.save).not.toHaveBeenCalled()
+  expect(refused.deps.save).not.toHaveBeenCalled(); expect(refused.deps.jev.resetForNewKey).not.toHaveBeenCalled()
   expect(await (await s.call('GET', '/jev-key/status')).json()).toEqual(status)
 })
 
