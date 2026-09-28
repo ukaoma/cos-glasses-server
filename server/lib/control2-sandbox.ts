@@ -139,7 +139,9 @@ export async function probeControl2Sandbox(): Promise<Control2SandboxCapability>
   const protectedRoot = mkdtempSync(join(tmpdir(), 'cos-control2-protected-'))
   const sentinel = join(realpathSync(protectedRoot), 'sentinel.txt')
   writeFileSync(sentinel, 'protected-canary-only', { mode: 0o600 })
-  const listener = createServer(socket => socket.end('reachable'))
+  // 6.57.0: the bash probes close right after writing, so the accepted socket can see ECONNRESET.
+  // Without a listener that 'error' was unhandled (vitest reported it in 2 of 3 runs on 6.56.1).
+  const listener = createServer(socket => { socket.on('error', () => {}); socket.end('reachable') })
   let hits = 0
   listener.on('connection', () => { hits++ })
   try {
