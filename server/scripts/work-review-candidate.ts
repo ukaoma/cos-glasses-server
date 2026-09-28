@@ -10,6 +10,9 @@ import { WorkReviewStore } from '../lib/work-review-store.js'
 import { WorkReviewRuntime } from '../lib/work-review-runtime.js'
 import { createWorkReviewsRouter } from '../routes/work-reviews.js'
 import { createWorkBoardRouter } from '../routes/work-board.js'
+import { createWorkIntakeRouter } from '../routes/work-intake.js'
+import { WorkIntakeStore, createOptionalWorkIntakeStore } from '../lib/work-intake-store.js'
+import { createJevRouter } from '../routes/jev.js'
 import { pythonBridgeAvailable } from '../lib/python-bridge.js'
 import { listBoard } from '../lib/task-store.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
@@ -78,12 +81,24 @@ const runtime=new WorkReviewRuntime({
   intervalMs:2000,
 })
 await runtime.start()
-const app=express();app.use(express.json({limit:'16kb'}));
+const app=express()
+// Producer intake batches (up to 200 items, ~140 KB measured) need more room than review requests; production allows 10 MB.
+app.use('/api/work-intake/items',express.json({limit:'1mb'}))
+app.use(express.json({limit:'16kb'}));
 app.use((req,res,next)=> { const raw=Buffer.from(req.get('X-COS-Token')||''); const expected=Buffer.from(token);if(raw.length!==expected.length || !timingSafeEqual(raw,expected))return res.status(401).json({error:'unauthorized'});next() })
 app.use('/api',createWorkReviewsRouter(runtime))
-app.use('/api',createWorkBoardRouter({list:async()=>pythonBridgeAvailable()?listBoard():(await upstream('/api/tasks')).tasks,resolveMeeting:async descriptor=> {
+const boardList=async()=>pythonBridgeAvailable()?listBoard():(await upstream('/api/tasks')).tasks
+const savedMeeting=async(descriptor:{domain:string,month:string,filename:string})=> {
   const data=await upstream('/api/meetings/detail?'+new URLSearchParams({domain:descriptor.domain,month:descriptor.month,filename:descriptor.filename}))
   return (data.meeting ?? data.detail ?? data) as MeetingDetail
-}}))
+}
+app.use('/api',createWorkBoardRouter({list:boardList,resolveMeeting:savedMeeting}))
+// Work intake (6.57.0) keeps its own journal in the candidate home; the installed server's journal is never opened.
+// Without the COS bridge, accepts refuse as read-only instead of reaching for the installed task store.
+const intake=createOptionalWorkIntakeStore(()=>new WorkIntakeStore(join(root,'work-intake')))  // a bad journal answers 503, the candidate stays up
+app.use('/api',createWorkIntakeRouter({store:intake,list:boardList,resolveMeeting:savedMeeting,
+  ...(pythonBridgeAvailable()?{}:{capabilities:async()=>({linkWrites:false,cardCreation:false})})}))
+// Jev key status and Continue/Fork/New advice, against the same board. The key is the installed server's (env or saved).
+app.use('/api',createJevRouter({list:boardList}))
 const server=app.listen(port,'127.0.0.1',()=>console.log(JSON.stringify({ready:true,port,tokenFile,mode:'local-candidate',provider:'ollama'})))
-for(const signal of ['SIGTERM','SIGINT'] as const)process.once(signal,()=>{server.close();void runtime.close().then(()=>process.exit(0))})
+for(const signal of ['SIGTERM','SIGINT'] as const)process.once(signal,()=>{server.close();intake?.close();void runtime.close().then(()=>process.exit(0))})

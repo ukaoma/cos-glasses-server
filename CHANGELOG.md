@@ -1,3 +1,24 @@
+## 6.57.0
+
+### Jev in the server: session suggestions and a key you can set from COS Control
+
+- New `POST /api/work-board/session-recommendation` answers Continue, Fork or New for a Work task. The client sends only the sessions it can target (at most 80); the task and its meetings come from the board. Jev answers two questions in one request: which session shares this work's context (same deliverable, page, module, codebase or client thread), and which, if any, is already doing this exact task. Continue at 0.5 or above on the second, Fork when a session covers the context at 0.6 or above, otherwise New. Answers are cached for 30 minutes per task and session set. On Miles's live sessions a 1:1 task went New, a server bug continued its server session at 0.91, and a hardware-page task forked the hardware session; about 10K input tokens per task.
+- Advice only: nothing is selected, sent or started. Without a key, over the cap, or while paused, the route answers `provider: none` and the client keeps its local word match.
+- New `POST /api/jev-key/set`, `GET /api/jev-key/status` and `DELETE /api/jev-key`, like `/api/openai-key`: the key is validated live against TypeSafe's free model listing, saved to `data/jev-key.json` (0600), and never returned. `TYPESAFE_API_KEY` in the environment wins; status says which source is active. A saved key works without a restart.
+- Cost controls: a daily input-token cap (`COS_JEV_DAILY_TOKENS`, default 1,000,000, about $0.04), a ledger in the data directory so a restart does not reset it, a 20-second timeout, and a breaker that pauses Jev for an hour after three consecutive failures. The model is pinned to `jev-1.13.0`.
+
+### Work intake: meeting work that is not on the board yet
+
+- New authenticated routes `GET /api/work-intake`, `POST /api/work-intake/items` and `POST /api/work-intake/:id/resolve` hold what the COS meeting producer (`work_intake.py`) found but did not write to Work: meeting links it was less sure of (0.60 to 0.85, or higher for a task that already links several meetings), other people's asks, and Miles's own items that need a look (from an older meeting, not clear enough to be a task, or owner unclear). Nothing here calls a model or starts an agent.
+- Producer batches are validated per item. A bad item comes back in `rejected` with its code and never blocks the rest of the batch; only a malformed batch as a whole is refused. Unknown fields, unknown review reasons and a malformed session pull are dropped, not stored, and the item itself still arrives.
+- A decision is sticky while it is retained (60 days). Once Miles accepts or dismisses an item, or the producer records a card it already made, a later producer upsert never reopens it. Resolution is serialized per item, so a double click answers "already being saved" instead of writing twice.
+- Accepting a suggested link checks that the board can write, re-reads the task by its Work identity (it survives a rename), confirms the meeting is still the same saved record, uses the library's title, and retries up to twice on a revision race.
+- Accepting an ask creates one Mentioned card linked to its meeting through one locked write in `task_write.capture_work_item`. Someone else's item is written with "(from Name)". If the same words are already an open task, that task is linked instead of adding a second card; the same words on closed, archived or delegated work are refused.
+- Card creation needs a COS bridge that reports `captureWork`. Older bridges and the bundled task runtime report it off, and accepting an ask is refused with the code `card_creation_unavailable`. A bridge that fails or times out is reported as `bridgeUnavailable` (accept answers `task_bridge_unavailable`), never as an older server. Earlier servers read only `version === 1`, so the new capability is additive.
+- The journal lives in the server data directory under `work-intake/` with one writer. A bad record is quarantined on its own and logged, and an unreadable journal leaves the rest of the API running. Unexpected failures are logged with the route. See `docs/work-intake.md`.
+- The local Work candidate (`server/scripts/work-review-candidate.ts`) mounts Intake with its own journal in the candidate home, accepts producer-sized batches, and stays up if that journal is unreadable. It also mounts the Jev routes against the same board.
+- Tests: `node server/scripts/work-intake-mutation-gate.mjs` runs 29 mutations over intake, the Jev client and session recommendation in a private copy, after a green baseline.
+
 ## 6.56.1
 
 ### Codex runs again after the ChatGPT app update

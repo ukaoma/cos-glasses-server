@@ -560,6 +560,30 @@ export async function setTaskWorkStage(domain: string, id: string, workStage: Wo
   if (!WORK_STAGES.includes(workStage)) throw new TaskRunError(422, 'invalid_work_stage', 'Unknown Work stage')
   await withLockRetry(() => bridge(['task-set-work-stage', domain, id, workStage], JSON.stringify({ expectedText, expectedRevision })))
 }
+/**
+ * Work intake needs two bridge powers: exact meeting links (version 1) and one-write card capture. A bridge that
+ * failed or timed out is reported as `bridgeUnavailable`, so a hiccup never reads as "this server is too old".
+ */
+export async function workIntakeCapabilities(): Promise<{ linkWrites: boolean; cardCreation: boolean; bridgeUnavailable?: true }> {
+  if (!taskBridgeAvailable()) return { linkWrites: false, cardCreation: false }
+  try {
+    const value = await bridge(['task-work-capabilities']) as { version?: unknown; captureWork?: unknown }
+    // `captureWork` is additive on purpose: servers through 6.56.x read only `version === 1`.
+    return { linkWrites: value?.version === 1, cardCreation: value?.version === 1 && value?.captureWork === 1 }
+  } catch { return { linkWrites: false, cardCreation: false, bridgeUnavailable: true } }
+}
+export interface CapturedWorkItem { created: boolean; id: string; linked: boolean; checked: boolean; archived: boolean; delegated: boolean }
+/** One locked write: a Mentioned card already linked to its meeting (COS `task_write.capture_work_item`). */
+export async function captureWorkItem(domain: string, text: string, meeting: WorkMeetingRef): Promise<CapturedWorkItem> {
+  if (!isSafeDomainName(domain) || !taskDomains().includes(domain)) throw new TaskRunError(400, 'invalid_domain', 'Unknown task domain')
+  if (!text || text.length > 2000) throw new TaskRunError(422, 'invalid_task_text', 'Card text must be 1 to 2,000 characters')
+  rejectReservedWorkText(text)
+  const out = await withLockRetry(() => bridge(['task-capture-work', domain], JSON.stringify({ text, meeting }))) as Partial<CapturedWorkItem> & { ok?: unknown }
+  if (out?.ok !== true || typeof out.id !== 'string' || !/^[a-f0-9]{12}$/.test(out.id) || typeof out.created !== 'boolean' || typeof out.linked !== 'boolean') {
+    throw new TaskRunError(502, 'capture_unverified', 'The card could not be confirmed. Refresh Work before trying again.')
+  }
+  return { created: out.created, id: out.id, linked: out.linked, checked: out.checked === true, archived: out.archived === true, delegated: out.delegated === true }
+}
 export async function linkTaskMeeting(domain: string, id: string, expectedText: string, expectedRevision: string, meeting: WorkMeetingRef): Promise<void> {
   validateWorkTarget(domain, id, expectedText, expectedRevision)
   await withLockRetry(() => bridge(['task-link-meeting', domain, id], JSON.stringify({ expectedText, expectedRevision, meeting })))
