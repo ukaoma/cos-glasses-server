@@ -47,6 +47,11 @@ it('recommends from the board task, not client text, and never blocks the worksp
   expect(s.deps.recommender.recommend).toHaveBeenCalledWith({ task: { text: 'Board text of the task', domain: 'personal', meetings: ['Server QA'] }, sessions: [expect.objectContaining({ id: 'claude:a' })] })
   expect((await s.call('POST', '/work-board/session-recommendation', { domain: 'personal', id: 'b'.repeat(12), sessions })).status).toBe(200)  // by Work identity
   expect((await s.call('POST', '/work-board/session-recommendation', { domain: 'personal', id: 'c'.repeat(12), sessions })).status).toBe(404)
+  // Work identity first: a new card's row id can equal an older task's identity (both are 12-hex hashes).
+  const clash = await setup({ list: vi.fn(async () => [{ ...row, id: 'd'.repeat(12), workIdentity: 'e'.repeat(12), text: 'New card whose id collides' },
+                                                     { ...row, id: 'f'.repeat(12), workIdentity: 'd'.repeat(12), text: 'Renamed task, same identity' }]) })
+  await clash.call('POST', '/work-board/session-recommendation', { domain: 'personal', id: 'd'.repeat(12), sessions })
+  expect(clash.deps.recommender.recommend).toHaveBeenCalledWith(expect.objectContaining({ task: expect.objectContaining({ text: 'Renamed task, same identity' }) }))
   for (const bad of [{ domain: 'personal', id: 'a'.repeat(12) }, { domain: '../x', id: 'a'.repeat(12), sessions }, { domain: 'personal', id: 'a'.repeat(12), sessions, text: 'inject' }]) {
     expect((await s.call('POST', '/work-board/session-recommendation', bad)).status).toBe(400)
   }

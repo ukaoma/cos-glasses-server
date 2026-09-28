@@ -30,7 +30,15 @@ const mutations = [
   ['capture-answer-shape', TASKS, "typeof out.created !== 'boolean' || ", ''],
   ['bridge-failure-is-not-old-server', ROUTE, "if (capabilities.bridgeUnavailable) throw new WorkIntakeError('task_bridge_unavailable', 503)", ''],
   ['malformed-pull-dropped', STORE, "p && p.kind === 'session' && pid", "p && pid"],
-  ['jev-env-key-wins', JEV, "if (env) return { key: env, source: 'env' }", ''],
+  ['jev-env-key-used', JEV, "if (env) return { key: env, source: 'env' }", ''],
+  ['jev-saved-key-wins', JEV, "if (file) return { key: file.key, source: 'config'", "if (file && !process.env.TYPESAFE_API_KEY) return { key: file.key, source: 'config'"],
+  ['jev-env-quotes-stripped', JEV, "process.env.TYPESAFE_API_KEY?.trim().replace(/^[\"']|[\"']$/g, '')", 'process.env.TYPESAFE_API_KEY?.trim()'],
+  ['jev-reset-clears-breaker', JEV, 'resetForNewKey(): void { this.failures = 0; this.breakerUntil = 0; this.lastError = null }', 'resetForNewKey(): void { this.failures = 0 }'],
+  ['jev-new-key-resets-breaker', JEV_ROUTE, '    deps.jev.resetForNewKey()\n', ''],
+  ['fork-needs-none', REC, "if (typeof best.none !== 'number' || !Number.isFinite(best.none)) throw new JevError('jev_bad_answer', 'Jev left out none')", ''],
+  ['fork-forkable-only', REC, 'p > 0 && FORKABLE.has(sessions[Number(k.slice(1))].provider)', 'p > 0'],
+  ['fork-confidence-own', REC, 'confidence: round(forkP)', 'confidence: round(covered)'],
+  ['work-identity-first', JEV_ROUTE, 'rows.find(r => r.workIdentity === body.id) ?? rows.find(r => r.id === body.id)', 'rows.find(r => r.id === body.id || r.workIdentity === body.id)'],
   ['jev-cap-before-send', JEV, "if (this.usedToday() + estimate > dailyCap()) this.fail('jev_cap_reached', false)", ''],
   ['jev-breaker-opens', JEV, 'if (countsTowardBreaker && ++this.failures >= JEV_LIMITS.breakerFailures) {', 'if (false) {'],
   ['jev-rejected-not-counted', JEV, "return this.fail('jev_request_rejected', false)", "return this.fail('jev_request_rejected', true)"],
@@ -63,7 +71,9 @@ try {
     const result = run(), output = result.stdout + '\n' + result.stderr
     writeFileSync(target, original)
     // A kill must be attributed to a named failing test (an assertion, or an unexpected throw inside a named test).
-    if (result.status === 0 || result.error || !/AssertionError|expected|toThrow|rejects|FAIL\s+server\/\S+\.test\.ts > /i.test(output)) throw new Error(`Mutation survived or harness failed: ${name}\n${output}`)
+    // QA 2026-09-28: only a NAMED failing test counts ("FAIL  server/x.test.ts > name"). The old pattern also took
+    // "expected", which a transform error prints ("Expected ';'"), so a mutant that broke the build read as killed.
+    if (result.status === 0 || result.error || !/FAIL\s+server\/\S+\.test\.ts > /.test(output)) throw new Error(`Mutation survived or harness failed: ${name}\n${output}`)
     console.log(`${name} KILLED`)
   }
   console.log(`${mutations.length} of ${mutations.length} work-intake mutations killed`)
