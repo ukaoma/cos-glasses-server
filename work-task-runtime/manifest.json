@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "protocol": "cos-control-task-write/1",
+  "pythonMinimum": "3.10",
+  "sourceCommit": "177d0bd875f446f5e3d57de52983d5ab4e679915",
+  "sourceHashes": {
+    "task_rows.py": "58b568fd4081072eddc3110b4c3397f5e5048ede9e052391e1d09f919e8c2e7d",
+    "task_write.py": "4d1d4c51cf5ec6fa75f941c2ce1aee05952fde9a6bac89be4fca51b0ffd37981",
+    "task_work_metadata.py": "534c45910e2109ac1e18eeb236c6b286d8a899f96c7a153d0187aee5839854a5",
+    "task_checkout.py": "56c94c5b28282398abc1f8daea9d910e64228afb8ac8cfae89b54117a7e30b86",
+    "cos_atomic.py": "055f7d6bc3093aeec7b051f87cb68c543637603a538f383a614c1903bd1b503e",
+    "cos_api_bridge.py": "1e17960332e8b778c8e5923de355f4395c9244692cd4d988ccd944c6a30575ef",
+    "task_dedup.py": "5331fdea01c293ecd2773726acea110e9339ff26e72e5bcdce66777ab518bfe8"
+  },
+  "adaptations": [
+    "Only canonical task command handlers extracted; no private bridge imports",
+    "Exact canonical normalization extracted without LLM dependencies",
+    "Generic configured operator replaces author-specific owner match",
+    "Bounded no-follow source reads and lock opens",
+    "Descriptor-pinned domain working directory and lock opens supplied by task_bridge.py"
+  ],
+  "files": {
+    "cos_atomic.py": "0da53eecaf07331b008c10b1e06c39701ecc3291c511fd0779e35795b3b22534",
+    "runtime_io.py": "e5b191b6af3a4966f517ecd05d3dcae9f4136a9e99cf36d7102303ca55ae928d",
+    "task_bridge.py": "8ec1f6533710c3de2c51e518586d2f6b120f90f7c3773480a08d53544ac07fd4",
+    "task_checkout.py": "669af045b2f64b9879df03aacae7a4550b46291974ed2df2ba2ed0775c1be78f",
+    "task_commands.py": "7e843b9164112d610190385df8e41d6044d6546d4ece92d09a60b6e4ad33cc75",
+    "task_dedup.py": "745971722898a3de520f8bb5246d714c70f3189dbe53bf8f42feafaaf241a51b",
+    "task_rows.py": "9e48375d9d6ee5d29bf3cc1f92bdf1182a6eea40ee305ff1fe1632b9f3a9fcf7",
+    "task_work_metadata.py": "534c45910e2109ac1e18eeb236c6b286d8a899f96c7a153d0187aee5839854a5",
+    "task_write.py": "238b869fac49c8e01bca72a1f28ffab74c7f94938e2323246936aec0241bbd16"
+  }
+}

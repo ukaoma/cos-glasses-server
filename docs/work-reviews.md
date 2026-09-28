@@ -4,7 +4,7 @@ Work reviews add an optional, durable read-only review step over the existing sa
 
 ## Enablement
 
-The server defaults this capability off. A qualified candidate runtime can opt in with `COS_WORK_REVIEWS_ENABLED=1`. The existing authenticated API exposes `GET/POST /api/work-reviews` and `GET /api/work-reviews/:id`. A disabled or degraded review runtime returns 404; base APIs continue to work. The native client retains normal tasks and meetings and explains review unavailability.
+Manual review is enabled by default. Set `COS_WORK_REVIEWS_ENABLED=0` to disable it. Opening or starting the server does not submit a review; admission requires an explicit manual request. The existing authenticated API exposes `GET/POST /api/work-reviews` and `GET /api/work-reviews/:id`. A disabled or degraded review runtime returns 404; base APIs continue to work. The native client retains normal tasks and meetings and explains review unavailability.
 
 A request contains an explicit configured model slot and canonical meeting descriptor (`domain`, `month`, `filename`, optional `recordId`). It resolves full saved source through the same resolver as Meetings. Source truncation/absence is refused; long review inputs disclose excerpt coverage. Proposed links use same-domain source references or exact normalized action text. They are not semantic deduplication or authority to mutate a task.
 

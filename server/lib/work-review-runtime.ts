@@ -198,3 +198,6 @@ export function createOptionalWorkReviewRuntime(enabled: boolean, create: () => 
     return null
   }
 }
+
+/** Manual review is normally available; this never authorizes after-sync admission. */
+export function manualWorkReviewsEnabled(env: NodeJS.ProcessEnv = process.env): boolean { return env.COS_WORK_REVIEWS_ENABLED !== '0' }

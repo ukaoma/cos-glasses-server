@@ -9,8 +9,7 @@ import {
   type MorningBriefConfig,
 } from './morning-brief-config.js'
 import { localClock, shiftDay, taskInstant } from './morning-brief-schedule.js'
-import { callPython, pythonBridgeAvailable } from './python-bridge.js'
-import { resolveCosOperationsDir } from './cos-operations-meetings.js'
+import { callTaskBridge, taskBridgeAvailable, taskOperationsRoot, taskBridgeUnavailableMessage } from './task-bridge.js'
 import { taskDomainNames, isSafeDomainName } from './domains.js'
 import { isClientJobId } from './query-job-types.js'
 import { DEFAULT_MODEL, isClaudeModel } from '../../shared/model-preference.js'
@@ -38,7 +37,7 @@ export const TASK_TODAY_PURGE_HORIZON_DAYS = 7
  *  anything that worked. `taskDomainNames` unions configured domains with every
  *  directory holding a `tasks.md`. */
 export function taskDomains(): string[] {
-  return taskDomainNames(resolveCosOperationsDir())
+  return taskDomainNames(taskOperationsRoot())
 }
 
 export type TaskDomain = string
@@ -188,7 +187,7 @@ export function taskStorePaths(root?: string): TaskStorePaths {
 }
 
 export function tasksGate(): 'ready' | 'disabled' {
-  return pythonBridgeAvailable() ? 'ready' : 'disabled'
+  return taskBridgeAvailable() ? 'ready' : 'disabled'
 }
 
 export function taskDispatchModel(config: MorningBriefConfig): string {
@@ -346,7 +345,7 @@ function asBridgeError(payload: unknown): TaskBridgeError | null {
 }
 
 async function bridge(args: string[], input?: string): Promise<unknown> {
-  const payload = await callPython(args, TASK_BRIDGE_TIMEOUT_MS, input)
+  const payload = await callTaskBridge(args, TASK_BRIDGE_TIMEOUT_MS, input)
   const error = asBridgeError(payload)
   if (error) throw error
   return payload
@@ -370,7 +369,26 @@ async function withLockRetry<T>(fn: () => Promise<T>): Promise<T> {
 
 export async function loadDomainRows(domain: TaskDomain, day: string): Promise<BridgeTaskRow[]> {
   const payload = await bridge(['task-rows', domain, '--day', day])
-  return Array.isArray(payload) ? payload as BridgeTaskRow[] : []
+  if (!Array.isArray(payload) || payload.some(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return true
+    const row = value as Record<string, unknown>
+    if (row.domain !== domain || !['id','ref','description','priority','section'].every(key => typeof row[key] === 'string')
+      || !row.id || !row.ref || !['is_checked','archived','delegated','needs_review'].every(key => typeof row[key] === 'boolean')
+      || typeof row.line_number !== 'number' || !Number.isInteger(row.line_number) || row.line_number < 1) return true
+    for (const key of ['source','owner','run_at','section_day','done_when','work_identity','work_revision','work_metadata_error']) {
+      if (row[key] != null && typeof row[key] !== 'string') return true
+    }
+    if (row.stage != null && !TASK_STAGES.includes(row.stage as TaskStage)) return true
+    if (row.work_stage != null && !WORK_STAGES.includes(row.work_stage as WorkStage)) return true
+    if (row.agent_state != null && !['running','done','failed'].includes(row.agent_state as string)) return true
+    if (row.agent_no != null && (typeof row.agent_no !== 'number' || !Number.isInteger(row.agent_no))) return true
+    if (row.meeting_refs != null && (!Array.isArray(row.meeting_refs) || row.meeting_refs.some(ref => !ref || typeof ref !== 'object'
+      || !['recordId','domain','month','filename','title'].every(key => typeof ref[key] === 'string')))) return true
+    return false
+  })) throw new TaskBridgeError('invalid_task_inventory', 'The canonical task inventory is incomplete or invalid. Refresh after repairing the task bridge.')
+  const ids = payload.map(row => row.id)
+  if (new Set(ids).size !== ids.length) throw new TaskBridgeError('invalid_task_inventory', 'The canonical task inventory contains duplicate identities. Repair the task source before continuing.')
+  return payload as BridgeTaskRow[]
 }
 
 export async function loadAllRows(day: string): Promise<BridgeTaskRow[]> {
@@ -452,8 +470,8 @@ export function projectRow(
 }
 
 export async function listBoard(columnFilter?: string, nowMs = Date.now()): Promise<TaskBoardRow[]> {
-  if (!pythonBridgeAvailable()) {
-    throw new TaskRunError(503, 'cos_pipeline_not_configured', 'COS pipeline is not configured.')
+  if (!taskBridgeAvailable()) {
+    throw new TaskRunError(503, 'cos_pipeline_not_configured', taskBridgeUnavailableMessage())
   }
   const { config, clock } = briefContext(nowMs)
   const [rows, ledger] = await Promise.all([
@@ -481,7 +499,7 @@ export async function captureTask(body: {
   captureId?: string
 }, nowMs = Date.now()): Promise<{ ok: true; replayed?: boolean; fell_to_inbox?: boolean; section?: string }> {
   rejectReservedWorkText(body.text)
-  if (!pythonBridgeAvailable()) throw new TaskRunError(503, 'cos_pipeline_not_configured', 'COS pipeline is not configured.')
+  if (!taskBridgeAvailable()) throw new TaskRunError(503, 'cos_pipeline_not_configured', taskBridgeUnavailableMessage())
   if (!body.captureId) throw new TaskRunError(400, 'capture_id_required', 'captureId is required.')
   if (!isClientJobId(body.captureId)) throw new TaskRunError(422, 'invalid_capture_id', 'captureId must be a UUID v4.')
   if (!taskDomains().includes(body.domain)) {
@@ -526,7 +544,7 @@ export function rejectReservedWorkText(text: string): void {
   if (/cos-work\s*:|\*\*Source:\*\*/i.test(text)) throw new TaskRunError(422, 'reserved_work_metadata', 'Use the explicit meeting link and stage controls; Source metadata is reserved.')
 }
 export async function workBoardCapabilities(): Promise<{ version: number; writable: boolean }> {
-  if (!pythonBridgeAvailable()) return { version: 0, writable: false }
+  if (!taskBridgeAvailable()) return { version: 0, writable: false }
   try {
     const value = await bridge(['task-work-capabilities']) as { version?: unknown }
     return value?.version === 1 ? { version: 1, writable: true } : { version: 0, writable: false }

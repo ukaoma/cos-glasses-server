@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { WorkReviewRuntime, proposeReviewTaskLinks, createOptionalWorkReviewRuntime } from './work-review-runtime.js'
+import { WorkReviewRuntime, proposeReviewTaskLinks, createOptionalWorkReviewRuntime, manualWorkReviewsEnabled } from './work-review-runtime.js'
 import { WorkReviewStore, parseMeetingDescriptor } from './work-review-store.js'
 import type { MeetingDetail } from './meeting-store.js'
 import type { QueryJobSnapshot } from './query-job-types.js'
@@ -188,4 +188,9 @@ it('corrupt optional review journal degrades to disabled backend without admissi
     expect(log).toHaveBeenCalledWith('[work-reviews] optional backend unavailable; base API remains available')
     expect(s.deps.jobs.submit).not.toHaveBeenCalled()
   } finally {log.mockRestore()}
+})
+
+it('manual review defaults on, explicit zero disables, and startup never admits work',async()=>{
+ expect(manualWorkReviewsEnabled({})).toBe(true);expect(manualWorkReviewsEnabled({COS_WORK_REVIEWS_ENABLED:'1'})).toBe(true);expect(manualWorkReviewsEnabled({COS_WORK_REVIEWS_ENABLED:'0'})).toBe(false)
+ const s=setup();await s.runtime.start();await s.runtime.list();expect(s.deps.jobs.submit).not.toHaveBeenCalled();expect(await s.runtime.capabilities()).toMatchObject({automaticAfterSync:false,publication:false})
 })

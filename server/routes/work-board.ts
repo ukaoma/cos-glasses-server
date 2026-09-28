@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { readWorkActivity } from '../lib/work-activity.js'
 import { listBoard, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, TaskRunError, TaskBridgeError,
   WORK_STAGES, type WorkStage, type WorkMeetingRef } from '../lib/task-store.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
@@ -7,13 +8,14 @@ import { resolveSavedMeetingDetail } from './meetings.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
 
 export interface WorkBoardDependencies {
+  activity: typeof readWorkActivity
   list: typeof listBoard
   capabilities: typeof workBoardCapabilities
   stage: typeof setTaskWorkStage
   link: typeof linkTaskMeeting
   resolveMeeting: (descriptor: MeetingDescriptor) => MeetingDetail | Promise<MeetingDetail>
 }
-const defaults: WorkBoardDependencies = { list: listBoard, capabilities: workBoardCapabilities,
+const defaults: WorkBoardDependencies = { activity: readWorkActivity, list: listBoard, capabilities: workBoardCapabilities,
   stage: setTaskWorkStage, link: linkTaskMeeting, resolveMeeting: resolveSavedMeetingDetail }
 
 /** Auth is supplied by the parent /api mount. No provider execution occurs here. */
@@ -24,6 +26,15 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
     const status = e instanceof TaskRunError ? e.status : e instanceof TaskBridgeError ? (e.code === 'task_not_found' ? 404 : 409) : 503
     return res.status(status).json({ error: { code: e instanceof TaskRunError || e instanceof TaskBridgeError ? e.code : 'work_board_unavailable', message: e instanceof TaskRunError || e instanceof TaskBridgeError ? e.message : 'Work board is unavailable. Refresh before trying again.' } })
   }
+  router.get('/work-board/activity', (req, res) => {
+    const { domain, workIdentity } = req.query
+    if (Object.keys(req.query).some(key => !['domain', 'workIdentity'].includes(key))
+      || typeof domain !== 'string' || !isSafeDomainName(domain)
+      || typeof workIdentity !== 'string' || !/^[a-f0-9]{12}$/.test(workIdentity)) {
+      return res.status(400).json({ error: { code: 'invalid_work_identity', message: 'Select an exact task and domain.' } })
+    }
+    return res.json(deps.activity(domain, workIdentity))
+  })
   router.get('/work-board', async (_req, res) => {
     try {
       const [raw, capabilities] = await Promise.all([deps.list(), deps.capabilities()])

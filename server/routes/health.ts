@@ -1,9 +1,10 @@
+import { taskBridgeAvailable } from '../lib/task-bridge.js'
 import { Router } from 'express'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { claudeSessionsEnabled } from './claude-sessions.js'
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { COS_SCRIPTS_DIR, COS_MODE, pythonBridgeAvailable } from '../lib/python-bridge.js'
+import { COS_SCRIPTS_DIR, COS_MODE } from '../lib/python-bridge.js'
 import { serverMetrics } from '../lib/server-metrics.js'
 import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
@@ -481,7 +482,7 @@ healthRouter.get('/health', async (_req, res) => {
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
       ...(morningBrief ? { morningBrief } : {}),
       tasks: {
-        gate: pythonBridgeAvailable() ? 'ready' : 'disabled',
+        gate: taskBridgeAvailable() ? 'ready' : 'disabled',
       },
     },
     // /api/health is intentionally unauthenticated for setup diagnostics.
@@ -634,7 +635,7 @@ healthRouter.get('/models', async (req, res) => {
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
       tasks: {
-        gate: pythonBridgeAvailable() ? 'ready' : 'disabled',
+        gate: taskBridgeAvailable() ? 'ready' : 'disabled',
       },
     },
   })

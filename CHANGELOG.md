@@ -1,3 +1,14 @@
+## 6.56.0
+
+### Connected Work across COS Control and glasses
+
+- Work groups canonical tasks into Mentioned, Planned, Draft, Built, QA and Complete. Stable Work identities preserve existing task IDs. Revision checks and shared task locks refuse stale or uncertain writes.
+- Confirmed meeting references connect tasks to the saved meeting library. Exact provider-qualified native handoff receipts can be read by the phone and glasses; delivered context is not a claim that a task has finished.
+- Manual saved-meeting review is available through the authenticated Work review API, with durable deduplication and source-revision checks. Reviews propose next steps; they do not automatically create tasks, prepare work, send to sessions or publish. Set COS_WORK_REVIEWS_ENABLED=0 to disable reviews.
+- Fresh installs can use a bundled, hash-verified canonical task runtime when no full COS bridge is configured. It requires Python 3.10+ and supports the existing task API as well as Work. A broken configured bridge remains an error instead of silently changing stores.
+- Corrupt lock ownership, invalid task inventories and malformed native journals fail closed. Native activity returns bounded receipt metadata only, without prompts, drafts or result bodies.
+- COS Glasses 6.9.556 adds the domain/stage Work view. Earlier glasses clients retain their existing task routes. COS Control 0.5.240 provides the integrated Work workspace and explicit Continue, Fork and New session actions.
+
 ## 6.55.1-control2-foundation.0
 
 ### Isolated COS Control 2 foundation candidate

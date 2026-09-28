@@ -1,5 +1,5 @@
 /** Production adapter. Tests/gateways import runtime/router, never this singleton wiring. */
-import { WorkReviewRuntime, createOptionalWorkReviewRuntime } from './work-review-runtime.js'
+import { WorkReviewRuntime, createOptionalWorkReviewRuntime, manualWorkReviewsEnabled } from './work-review-runtime.js'
 import { WorkReviewStore, type ReviewModel } from './work-review-store.js'
 import { resolveSavedMeetingDetail } from '../routes/meetings.js'
 import { queryJobCoordinator } from './query-job-runtime.js'
@@ -23,6 +23,6 @@ export async function qualifiedWorkReviewModels(): Promise<ReviewModel[]> {
   ]
 }
 export function createDefaultWorkReviewRuntime(): WorkReviewRuntime | null {
-  return createOptionalWorkReviewRuntime(process.env.COS_WORK_REVIEWS_ENABLED === '1', () => new WorkReviewRuntime({ store: new WorkReviewStore(dataPath('work-reviews')), resolveMeeting: resolveSavedMeetingDetail,
+  return createOptionalWorkReviewRuntime(manualWorkReviewsEnabled(), () => new WorkReviewRuntime({ store: new WorkReviewStore(dataPath('work-reviews')), resolveMeeting: resolveSavedMeetingDetail,
     models: qualifiedWorkReviewModels, listTasks: listBoard, currentMessageEra, jobs: queryJobCoordinator }))
 }

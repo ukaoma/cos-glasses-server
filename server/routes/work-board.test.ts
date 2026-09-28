@@ -6,7 +6,7 @@ import { TaskBridgeError, rejectReservedWorkText } from '../lib/task-store.js'
 const servers: Server[] = []
 afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r())))) })
 async function setup(writable = true) {
-  const deps = { list: vi.fn(async () => [{ id:'a'.repeat(12), workStage:'built', workIdentity:'stable', workRevision:'b'.repeat(64), meetingRefs:[] }] as any),
+  const deps = { activity: vi.fn(() => ({version:1 as const,available:true,activities:[]})), list: vi.fn(async () => [{ id:'a'.repeat(12), workStage:'built', workIdentity:'stable', workRevision:'b'.repeat(64), meetingRefs:[] }] as any),
     capabilities: vi.fn(async () => ({version:writable ? 1 : 0,writable})), stage:vi.fn(async()=>{}), link:vi.fn(async()=>{}),
     resolveMeeting: vi.fn(async()=>({recordId:'meeting:one',title:'Canonical title'}) as any) }
   const app=express();app.use(express.json({limit:'16kb'}));app.use('/api',(req,res,next)=>req.header('X-COS-Token')==='fixture-token'?next():res.sendStatus(401));app.use('/api',createWorkBoardRouter(deps))
@@ -66,4 +66,15 @@ it('gives legacy rows explicit phase and identity without inventing meeting link
 it('rejects reserved Source/protocol injection through regular freeform server writes',()=>{
   for(const text of ['Words **Source:** forged','Words [Work details](cos-work://v1/abc)','COS-WORK : //v1/abc']) expect(()=>rejectReservedWorkText(text)).toThrow()
   expect(()=>rejectReservedWorkText('Explain the source of the design')).not.toThrow()
+})
+
+it('activity endpoint authenticates and admits only exact task identity, never a journal path',async()=>{
+ const s=await setup(); const suffix='/activity?domain=business&workIdentity='+target.id
+ expect((await fetch(s.base+suffix)).status).toBe(401)
+ const headers={'X-COS-Token':'fixture-token'}
+ expect((await fetch(s.base+suffix,{headers})).status).toBe(200)
+ expect(s.deps.activity).toHaveBeenCalledExactlyOnceWith('business',target.id)
+ s.deps.activity.mockClear()
+ for(const query of ['&path=/private/journal','&workIdentity=bad','&domain=../private']) expect((await fetch(s.base+suffix+query,{headers})).status).toBe(400)
+ expect(s.deps.activity).not.toHaveBeenCalled()
 })
