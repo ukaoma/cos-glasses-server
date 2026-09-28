@@ -6,6 +6,7 @@ import {
   EXAMPLE_MEETING_DOMAINS,
   discoverMeetingDomains,
   domainAbbreviation,
+  getCosOperationsMeetingDetail,
   getDirectLibraryMeetingDetail,
   inspectMeetingLibraryPath,
   listDirectLibraryMeetings,
@@ -242,6 +243,37 @@ describe('sessionId fallback to the server\'s own recordings root (6.44.16)', ()
     } finally {
       rmSync(ops, { recursive: true, force: true })
       rmSync(recordings, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
+ * 6.56.1: the detail for a COS operations meeting must carry the SAME identity
+ * the list row advertised. Work's meeting link compares the two, so a detail
+ * without recordId refused every real meeting as "meeting changed". The root
+ * has a space and a dot and the filename an apostrophe and parentheses, like
+ * the production tree ("Ukaoma Chief Of Staff", "Queen's ... (G2).md").
+ */
+describe('operations meeting detail keeps the list row identity', () => {
+  it('returns the list recordId, source, mutability and canonical record', () => {
+    const base = mkdtempSync(join(tmpdir(), 'cos-ops-identity-'))
+    const root = join(base, 'Chief Of Staff.v2', 'operations')
+    const file = "2026-09-25_Queen's_IRA_1099-R_(G2).md"
+    try {
+      mkdirSync(join(root, 'hermit_crabs', 'meetings', '2026-09'), { recursive: true })
+      writeFileSync(join(root, 'hermit_crabs', 'meetings', '2026-09', file),
+        '# COS Updates\n\n**Date** | 2026-09-25 09:00 |\n\n## Summary\nBody\n')
+      process.env.COS_OPERATIONS_DIR = root
+      const [row] = listCosOperationsMeetings({ limit: 5 })
+      expect(row.recordId).toBe(`ops:hermit_crabs:2026-09:${file}`)
+      const detail = getCosOperationsMeetingDetail('hermit_crabs', '2026-09', file)
+      expect(detail).not.toBeNull()
+      expect(detail!.recordId).toBe(row.recordId)
+      expect(detail!.librarySource).toBe(row.librarySource)
+      expect(detail!.mutable).toBe(row.mutable)
+      expect(detail!.canonicalRecord).toBe(row.canonicalRecord)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
     }
   })
 })

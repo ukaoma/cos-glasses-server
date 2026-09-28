@@ -1,3 +1,10 @@
+## 6.56.1
+
+### Linking a saved meeting to Work
+
+- Linking a saved COS meeting to a Work card no longer fails with "The selected meeting changed; refresh before linking". Opening a single operations meeting now returns the same record identity the meeting list shows, so the exact-meeting check in Work passes for an unchanged meeting and still refuses a different or renamed one.
+- The earlier tests replaced the meeting resolver with a stub that always agreed. A new test links a real operations meeting, picked from the meeting list, through the production resolver.
+
 ## 6.56.0
 
 ### Connected Work across COS Control and glasses

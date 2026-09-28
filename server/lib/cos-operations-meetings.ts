@@ -828,6 +828,13 @@ export function getCosOperationsMeetingDetail(
   const content = readFileSync(filepath, 'utf-8')
   const meta = parseMeetingMeta(content, resolvedFilename, domain)
   meta.month = month
+  // Same identity the list row advertises (listCosOperationsMeetings). Work's
+  // meeting link and review checks compare the list's recordId against this
+  // detail; without it every real COS meeting refused as "meeting changed".
+  meta.librarySource = 'cos_operations'
+  meta.recordId = `ops:${domain}:${month}:${resolvedFilename}`
+  meta.mutable = true
+  meta.canonicalRecord = `operations/${domain}/meetings/${month}/${resolvedFilename}`
   const source = boundedMeetingSource(content)
 
   return {
