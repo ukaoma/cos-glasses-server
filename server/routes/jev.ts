@@ -67,11 +67,12 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
     // 6.57.1: a meeting review is named by its id alone (`{reviewId, sessions}`), exactly.
     if (keys === 'reviewId,sessions') {
       if (typeof body.reviewId !== 'string' || !/^wr_[a-f0-9]{32}$/.test(body.reviewId) || !sessions) {
-        return res.status(400).json({ error: { code: 'invalid_recommendation_request', message: 'Select an exact meeting review and send at most 80 sessions.' } })
+        // Its own code: 6.57.0 answers a review body with invalid_recommendation_request, and Control reads THAT as an old server.
+        return res.status(400).json({ error: { code: 'invalid_review_request', message: 'Select an exact meeting review and send at most 80 sessions.' } })
       }
       if (!deps.review) return res.status(404).json({ error: { code: 'reviews_unavailable', message: 'Meeting reviews are not available on this server.' } })
       let review: ReviewForAdvice | null
-      try { review = await deps.review(body.reviewId) } catch (e) {
+      try { review = await deps.review(body.reviewId) } catch (e) {  // defensive: the stock lookup reads memory and does not throw
         console.error('[jev] review lookup failed:', e instanceof Error ? e.message : e)
         return res.status(503).json({ error: { code: 'review_store_unavailable', message: 'Meeting reviews could not be read. Try again shortly.' } })
       }

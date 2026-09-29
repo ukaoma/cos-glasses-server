@@ -7,6 +7,7 @@
  */
 import { createHash } from 'node:crypto'
 import { estimateJevTokens, JevError, type JevClient } from './jev.js'
+import { FORKABLE_PROVIDERS } from './agent-session-binding-store.js'
 
 export const CONTINUE_AT = 0.5  // P(a session is already doing this exact task)
 export const FORK_AT = 0.6      // P(some session shares the context) = 1 - P(none)
@@ -25,8 +26,9 @@ const BEST = "Which one of the user's agent sessions is the natural place to do 
 const EXACT = "Which one of the user's agent sessions is already doing this exact task, so the work should simply continue there? "
   + 'A session on the same project doing different work does not count. Choose none if no session is doing this task.'
 
-/** Providers a Work handoff can fork natively (Control 0.5.243 applies a Fork suggestion as a same-platform fork). */
-export const FORKABLE = new Set(['claude', 'codex'])
+/** Providers a Work handoff can fork natively (Control 0.5.243 applies a Fork suggestion as a same-platform fork).
+ *  One list with the fork route (agent-session-binding-store FORKABLE_PROVIDERS). */
+export const FORKABLE = new Set<string>(FORKABLE_PROVIDERS)
 const clip = (text: string | undefined, max: number) => (text ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 const round = (n: number) => Math.round(n * 100) / 100
 

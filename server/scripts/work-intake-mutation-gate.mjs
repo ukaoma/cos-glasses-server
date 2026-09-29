@@ -55,6 +55,8 @@ const mutations = [
   ['review-missing-404', JEV_ROUTE, "if (!review) return res.status(404).json({ error: { code: 'review_not_found'", "if (false) return res.status(404).json({ error: { code: 'review_not_found'"],
   ['reviews-unavailable-404', JEV_ROUTE, "if (!deps.review) return res.status(404)", "if (false) return res.status(404)"],
   ['review-store-error-is-503', JEV_ROUTE, "try { review = await deps.review(body.reviewId) } catch (e) {", "try { review = await deps.review(body.reviewId).catch(() => null) } catch (e) {"],
+  ['review-peek-reads-store', 'server/lib/work-review-runtime.ts', 'return row ? publicReview(row) : null', 'return null'],
+  ['review-own-400-code', JEV_ROUTE, "error: { code: 'invalid_review_request'", "error: { code: 'invalid_recommendation_request'"],
   ['board-text-not-client-text', JEV_ROUTE, "Object.keys(body).some(k => !['domain', 'id', 'sessions'].includes(k))", 'false'],
 ]
 try {

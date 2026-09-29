@@ -86,9 +86,13 @@ it('6.57.1: suggests for a meeting review from the server record, never from cli
     expect(down.status).toBe(503); expect((await down.json()).error.code).toBe('review_store_unavailable')
   } finally { quiet.mockRestore() }
   // Exact shapes only: no client text, no mixing the task and review forms, a real review id.
-  for (const bad of [{ reviewId, sessions, text: 'inject' }, { reviewId, sessions, domain: 'quilt', id: 'a'.repeat(12) }, { reviewId: 'wr_x', sessions },
-                     { reviewId: 'wr_' + 'A'.repeat(32), sessions }, { reviewId }, { reviewId, sessions: 'x' }]) {
+  for (const bad of [{ reviewId, sessions, text: 'inject' }, { reviewId, sessions, domain: 'quilt', id: 'a'.repeat(12) }, { reviewId }]) {
     expect((await s.call('POST', '/work-board/session-recommendation', bad)).status).toBe(400)
+  }
+  // A review-shaped request with a bad id or session list gets its own code (Control reads the task code on a review as an old server).
+  for (const bad of [{ reviewId: 'wr_x', sessions }, { reviewId: 'wr_' + 'A'.repeat(32), sessions }, { reviewId, sessions: 'x' }]) {
+    const res = await s.call('POST', '/work-board/session-recommendation', bad)
+    expect(res.status).toBe(400); expect((await res.json()).error.code).toBe('invalid_review_request')
   }
   expect(s.deps.recommender.recommend).toHaveBeenCalledTimes(1)
   const off = await setup()

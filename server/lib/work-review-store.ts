@@ -84,7 +84,8 @@ export class WorkReviewStore {
     } catch { this.close(); throw new WorkReviewError('review_store_recovery_required', 503) }
   }
   list(): StoredWorkReview[] { return structuredClone(this.rows) }
-  get(id: string): StoredWorkReview | undefined { return this.list().find(r => r.id === id) }
+  // 6.57.1: clone the one row, not the whole journal (session advice reads a review on each Work visit).
+  get(id: string): StoredWorkReview | undefined { const row = this.rows.find(r => r.id === id); return row ? structuredClone(row) : undefined }
   put(row: StoredWorkReview): void {
     if (this.closed) throw new WorkReviewError('review_store_closed', 503)
     const next = this.list(); const index = next.findIndex(r => r.id === row.id)
