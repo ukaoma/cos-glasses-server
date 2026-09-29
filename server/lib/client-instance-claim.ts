@@ -35,6 +35,24 @@ export const CLIENT_INSTANCE_AWAKE_MS = CLIENT_INSTANCE_LIVE_MS
  * intervals (~6 s each), so a stretch of silence or a slow upload does not end the hold.
  */
 export const CLIENT_INSTANCE_CAPTURE_LIVE_MS = 30_000
+/**
+ * 6.58.1: how long an owner's own `recording` word holds the ring without proof. On 2026-09-29
+ * (glasses 6.9.558) a hidden copy lost its audio at 07:38:19 and kept claiming `recording: true`
+ * for 12 minutes; two newer copies started the meeting and were each told to stop within a
+ * second, and 12.5 minutes were never captured. The word exists for upload lag (QA round 3),
+ * which is bounded: the uploader backs off 1, 2, 4 ... up to 60 s, so after a short outage the
+ * chunks resume within about 40 s of the last one, and after a longer one within 60 s of the
+ * claims coming back (the grace below). So the word holds for this long after its newest proof.
+ */
+export const CLIENT_INSTANCE_WORD_HOLD_MS = 90_000
+/**
+ * 6.58.1: a gap between an owner's claims longer than two ticks is an outage or a sleep. When the
+ * owner comes back still saying `recording`, its word gets one fresh CLIENT_INSTANCE_WORD_HOLD_MS
+ * for its chunks to catch up, but only if a chunk of its own arrived since the last such grace:
+ * the 2026-09-29 zombie's timers were throttled (gaps of 30 s to 208 s between rows), so a grace
+ * on every gap would have held the ring for it indefinitely.
+ */
+export const CLIENT_INSTANCE_GRACE_GAP_MS = 2 * CLIENT_INSTANCE_TICK_MS
 /** App copies whose newest chunk is remembered; the least recent is dropped past this. */
 export const CLIENT_INSTANCE_MAX_TAGGED = 64
 /** A boot time this far past the server clock is a phone clock set wrong, not a newer copy. */
@@ -50,10 +68,19 @@ export interface ClientInstanceClaim {
    * or a display reconnect resets it, which a hidden recording copy never gets (QA round 3).
    */
   recording: boolean
+  /**
+   * 6.58.1: the claim carried a `recording` field at all (glasses 6.9.510+). Only then is a
+   * `recording: false` a statement; from older copies it is merely absent.
+   */
+  recordingReported?: boolean
 }
 
 export interface ClientInstanceOwner extends ClientInstanceClaim {
   seenAt: number
+  /** 6.58.1: when this owner's current run of `recording: true` claims began. */
+  recordingSince?: number
+  /** 6.58.1: when this owner last got a grace for its word after a gap (see CLIENT_INSTANCE_GRACE_GAP_MS). */
+  graceAt?: number
 }
 
 export type ClientInstanceVerdict = 'owner' | 'yield'
@@ -75,6 +102,8 @@ export interface CaptureEvidence {
   owner: boolean
   claimant: boolean
   untagged: boolean
+  /** 6.58.1: when the owner's own newest tagged chunk arrived, however long ago; absent: never (or forgotten). */
+  ownerChunkAt?: number
 }
 
 export const NO_CAPTURE: CaptureEvidence = { owner: false, claimant: false, untagged: false }
@@ -97,10 +126,12 @@ export class ClientChunkLedger {
 
   evidence(device: string, ownerId: string, claimId: string, now: number): CaptureEvidence {
     const live = (at: number | undefined) => at !== undefined && now - at < CLIENT_INSTANCE_CAPTURE_LIVE_MS
+    const ownerChunkAt = this.tagged.get(ownerId)
     return {
-      owner: live(this.tagged.get(ownerId)),
+      owner: live(ownerChunkAt),
       claimant: live(this.tagged.get(claimId)),
       untagged: live(this.untagged.get(device)),
+      ...(ownerChunkAt !== undefined ? { ownerChunkAt } : {}),
     }
   }
 }
@@ -111,10 +142,24 @@ export class ClientChunkLedger {
  * own last claim saying `recording`, and untagged chunks from the device (which could be
  * anyone's), count only while it is still claiming: a dead owner must never be pinned by
  * a stale flag or by the chunks of the copy that replaced it (QA round 2).
+ *
+ * 6.58.1, two limits from the 2026-09-29 zombie (see CLIENT_INSTANCE_WORD_HOLD_MS):
+ * - An owner still claiming that SAYS it is not recording is believed over its trailing chunks.
+ *   Glasses 6.9.560 says so within seconds of its audio stopping; the chunks it had already
+ *   committed kept arriving for up to 30 s and would have held the ring for a copy that had
+ *   nothing left to record. Chunks outrank the word only when the word is stale or unspoken.
+ * - Its word alone holds for CLIENT_INSTANCE_WORD_HOLD_MS after its newest proof: its own
+ *   newest chunk, the start of its recording claims, or its one grace after a gap.
  */
 export function ownerIsRecording(owner: ClientInstanceOwner, evidence: CaptureEvidence, now: number): boolean {
-  if (evidence.owner) return true
-  return (owner.recording || evidence.untagged) && now - owner.seenAt <= CLIENT_INSTANCE_LIVE_MS
+  const claiming = now - owner.seenAt <= CLIENT_INSTANCE_LIVE_MS
+  const saysNotRecording = claiming && owner.recordingReported === true && !owner.recording
+  if (evidence.owner && !saysNotRecording) return true
+  if (!claiming) return false
+  if (evidence.untagged) return true
+  if (!owner.recording) return false
+  const provenAt = Math.max(evidence.ownerChunkAt ?? 0, owner.recordingSince ?? 0, owner.graceAt ?? 0)
+  return now - provenAt <= CLIENT_INSTANCE_WORD_HOLD_MS
 }
 
 /** A body the route may act on, or null. Never throws. */
@@ -127,7 +172,27 @@ export function parseClientInstanceClaim(body: unknown, now = Date.now()): Clien
   // as long as the clock stayed wrong (QA, 6.50.3).
   if (o.bootAt > now + CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS) return null
   const version = typeof o.version === 'string' ? o.version.slice(0, 32) : ''
-  return { id: o.id, bootAt: o.bootAt, version, recording: o.recording === true }
+  return { id: o.id, bootAt: o.bootAt, version, recording: o.recording === true, recordingReported: typeof o.recording === 'boolean' }
+}
+
+/**
+ * The owner's own claim, refreshed (6.58.1). `recordingSince` starts when its claims start saying
+ * `recording` and clears when they stop. A claim that comes back after a gap longer than
+ * CLIENT_INSTANCE_GRACE_GAP_MS, still recording, gets a grace for its uploads to catch up, once
+ * per chunk of its own: the first grace is free, and another needs a chunk newer than the last.
+ */
+function refreshOwner(owner: ClientInstanceOwner, claim: ClientInstanceClaim, now: number, evidence: CaptureEvidence): ClientInstanceOwner {
+  const next: ClientInstanceOwner = { ...owner, seenAt: now, recording: claim.recording, recordingReported: claim.recordingReported }
+  if (!claim.recording) {
+    delete next.recordingSince
+    delete next.graceAt
+    return next
+  }
+  if (!owner.recording || owner.recordingSince === undefined) next.recordingSince = now
+  const cameBack = now - owner.seenAt > CLIENT_INSTANCE_GRACE_GAP_MS
+  const chunkSinceGrace = owner.graceAt === undefined || (evidence.ownerChunkAt ?? 0) > owner.graceAt
+  if (owner.recording && cameBack && chunkSinceGrace) next.graceAt = now
+  return next
 }
 
 function isNewer(a: ClientInstanceClaim, b: ClientInstanceClaim): boolean {
@@ -143,9 +208,9 @@ export function arbitrateClientInstance(
   /** When this claimant last claimed (any verdict), or undefined: never seen. */
   claimantLastSeenAt?: number,
 ): { owner: ClientInstanceOwner; verdict: ClientInstanceVerdict; took: boolean } {
-  const fresh: ClientInstanceOwner = { ...claim, seenAt: now }
+  const fresh: ClientInstanceOwner = { ...claim, seenAt: now, ...(claim.recording ? { recordingSince: now } : {}) }
   if (!owner) return { owner: fresh, verdict: 'owner', took: true }
-  if (owner.id === claim.id) return { owner: { ...owner, seenAt: now, recording: claim.recording }, verdict: 'owner', took: false }
+  if (owner.id === claim.id) return { owner: refreshOwner(owner, claim, now, evidence), verdict: 'owner', took: false }
   // 6.50.4: the yielding copy stops its recording (that is how a duplicate ends), so the
   // ring must never move in a way that stops the only recording.
   // (1) The claimant is recording and the owner is not: the claimant is the meeting.

@@ -1,8 +1,9 @@
 import express from 'express'
 import type { Server } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { CLIENT_INSTANCE_AWAKE_MS, CLIENT_INSTANCE_CAPTURE_LIVE_MS, CLIENT_INSTANCE_LIVE_MS, CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS, CLIENT_INSTANCE_RECLAIM_MS, CLIENT_INSTANCE_TICK_MS, CLIENT_INSTANCE_MAX_TAGGED, ClientChunkLedger, NO_CAPTURE, arbitrateClientInstance, parseClientInstanceClaim, parseInstanceTag, type CaptureEvidence } from '../lib/client-instance-claim.js'
+import { CLIENT_INSTANCE_AWAKE_MS, CLIENT_INSTANCE_CAPTURE_LIVE_MS, CLIENT_INSTANCE_GRACE_GAP_MS, CLIENT_INSTANCE_LIVE_MS, CLIENT_INSTANCE_WORD_HOLD_MS, CLIENT_INSTANCE_MAX_FUTURE_BOOT_MS, CLIENT_INSTANCE_RECLAIM_MS, CLIENT_INSTANCE_TICK_MS, CLIENT_INSTANCE_MAX_TAGGED, ClientChunkLedger, NO_CAPTURE, arbitrateClientInstance, parseClientInstanceClaim, parseInstanceTag, type CaptureEvidence } from '../lib/client-instance-claim.js'
 import { createClientInstanceRouter, deviceKey, isMeetingChunkPost } from './client-instance.js'
+import type { ClientInstanceOwner } from '../lib/client-instance-claim.js'
 
 const T0 = 1_789_744_000_000
 const older = { id: 'mu707t9p-ai9g', bootAt: T0 - 5_000_000, version: '6.9.507', recording: false }
@@ -150,6 +151,12 @@ describe('mounting', () => {
 
 describe('6.50.4: the ring never moves in a way that stops the only recording', () => {
   const rec = (o: Partial<CaptureEvidence>): CaptureEvidence => ({ ...NO_CAPTURE, ...o })
+  /** 6.58.1 tests: the owner keeps claiming `recording` every tick from its seenAt up to `until`, as a live copy does. */
+  const keepClaiming = (owner: ClientInstanceOwner, until: number, evidence: CaptureEvidence = NO_CAPTURE): ClientInstanceOwner => {
+    let o = owner
+    for (let t = o.seenAt + CLIENT_INSTANCE_TICK_MS; t <= until; t += CLIENT_INSTANCE_TICK_MS) o = arbitrateClientInstance(o, parseClientInstanceClaim({ id: o.id, bootAt: o.bootAt, recording: true }, t)!, t, evidence).owner
+    return o
+  }
 
   it('while the owner records, the ring stays, however quiet its claims; after, the newer copy takes it', () => {
     const r = arbitrateClientInstance(null, older, T0)
@@ -204,6 +211,86 @@ describe('6.50.4: the ring never moves in a way that stops the only recording', 
     expect(arbitrateClientInstance(a, newer, T0 + 1_000, rec({ untagged: true, claimant: true })).verdict).toBe('yield')
   })
 
+  it('6.58.1: an owner that says it is not recording is believed over its trailing chunks, while it claims', () => {
+    const on = arbitrateClientInstance(null, parseClientInstanceClaim({ ...older, recording: true }, T0)!, T0).owner
+    const off = arbitrateClientInstance(on, parseClientInstanceClaim({ ...older, recording: false }, T0 + 12_000)!, T0 + 12_000).owner
+    const trailing = rec({ owner: true, ownerChunkAt: T0 + 14_000 })
+    // A recording newcomer takes at once, and a newer copy that is not recording takes as a newer boot does.
+    expect(arbitrateClientInstance(off, { ...newer, recording: true }, T0 + 29_000, trailing)).toMatchObject({ verdict: 'owner', took: true })
+    expect(arbitrateClientInstance(off, newer, T0 + 29_000, trailing)).toMatchObject({ verdict: 'owner', took: true })
+    // Its word goes stale after CLIENT_INSTANCE_LIVE_MS: then its chunks are proof again (a
+    // throttled recorder whose claims lag; it may have started recording since).
+    const later = rec({ owner: true, ownerChunkAt: T0 + 12_000 + CLIENT_INSTANCE_LIVE_MS })
+    expect(arbitrateClientInstance(off, { ...newer, recording: true }, T0 + 12_000 + CLIENT_INSTANCE_LIVE_MS, later).verdict).toBe('owner')
+    expect(arbitrateClientInstance(off, { ...newer, recording: true }, T0 + 12_001 + CLIENT_INSTANCE_LIVE_MS, later).verdict).toBe('yield')
+    // A copy that never reports the field (before 6.9.510) keeps the 6.50.4 rule: its chunks hold.
+    const silent = arbitrateClientInstance(null, parseClientInstanceClaim({ id: older.id, bootAt: older.bootAt }, T0)!, T0).owner
+    expect(silent.recordingReported).toBe(false)
+    expect(arbitrateClientInstance(silent, { ...newer, recording: true }, T0 + 1_000, trailing).verdict).toBe('yield')
+    // Whether the owner reports the field follows its LATEST claim.
+    const spoke = arbitrateClientInstance(silent, parseClientInstanceClaim({ ...older, recording: false }, T0 + 2_000)!, T0 + 2_000).owner
+    expect(spoke.recordingReported).toBe(true)
+    expect(arbitrateClientInstance(spoke, { ...newer, recording: true }, T0 + 3_000, trailing).verdict).toBe('owner')
+  })
+
+  it('6.58.1: the owner\'s word alone holds for CLIENT_INSTANCE_WORD_HOLD_MS after its newest proof, then a recording newcomer takes', () => {
+    const say = (recording: boolean, at: number) => parseClientInstanceClaim({ ...older, recording }, at)!
+    // The recording starts: its claims alone hold before any chunk has landed.
+    let a = arbitrateClientInstance(null, say(true, T0), T0).owner
+    expect(a.recordingSince).toBe(T0)
+    for (let t = T0 + CLIENT_INSTANCE_TICK_MS; t <= T0 + CLIENT_INSTANCE_WORD_HOLD_MS; t += CLIENT_INSTANCE_TICK_MS) a = arbitrateClientInstance(a, say(true, t), t).owner
+    // Refreshing does not restart the clock.
+    expect(a.recordingSince).toBe(T0)
+    expect(a.graceAt).toBeUndefined()
+    const b = { ...newer, recording: true }
+    expect(arbitrateClientInstance(a, b, T0 + CLIENT_INSTANCE_WORD_HOLD_MS).verdict).toBe('yield')
+    expect(arbitrateClientInstance(a, b, T0 + CLIENT_INSTANCE_WORD_HOLD_MS + 1)).toMatchObject({ verdict: 'owner', took: true })
+    // Its newest chunk is proof too: WORD_HOLD after a chunk 60 s in.
+    const chunk = rec({ ownerChunkAt: T0 + 60_000 })
+    const still = keepClaiming(a, T0 + 60_000 + CLIENT_INSTANCE_WORD_HOLD_MS, chunk)
+    expect(still.graceAt).toBeUndefined()
+    expect(arbitrateClientInstance(still, b, T0 + 60_000 + CLIENT_INSTANCE_WORD_HOLD_MS, chunk).verdict).toBe('yield')
+    expect(arbitrateClientInstance(still, b, T0 + 60_001 + CLIENT_INSTANCE_WORD_HOLD_MS, chunk).verdict).toBe('owner')
+    // A newer copy that is NOT recording also stops waiting: the owner is no longer proven to record.
+    expect(arbitrateClientInstance(a, newer, T0 + CLIENT_INSTANCE_WORD_HOLD_MS + 1)).toMatchObject({ verdict: 'owner', took: true })
+    // A recording that stops and starts again starts a new clock.
+    const stopped = arbitrateClientInstance(a, say(false, T0 + 200_000), T0 + 200_000).owner
+    expect(stopped.recordingSince).toBeUndefined()
+    const again = arbitrateClientInstance(stopped, say(true, T0 + 210_000), T0 + 210_000).owner
+    expect(again.recordingSince).toBe(T0 + 210_000)
+    const running = keepClaiming(again, T0 + 210_000 + CLIENT_INSTANCE_WORD_HOLD_MS)
+    expect(running.recordingSince).toBe(T0 + 210_000)
+    expect(arbitrateClientInstance(running, b, T0 + 210_000 + CLIENT_INSTANCE_WORD_HOLD_MS).verdict).toBe('yield')
+    expect(arbitrateClientInstance(running, b, T0 + 210_001 + CLIENT_INSTANCE_WORD_HOLD_MS).verdict).toBe('owner')
+  })
+
+  it('6.58.1: after a gap in its claims the owner gets one grace for its uploads, and another only after a chunk of its own', () => {
+    const say = (at: number) => parseClientInstanceClaim({ ...older, recording: true }, at)!
+    let a = arbitrateClientInstance(null, say(T0), T0).owner
+    // An outage: the claims stop for longer than CLIENT_INSTANCE_GRACE_GAP_MS; the last chunk came before it.
+    const back = T0 + 5 * 60_000
+    const lastChunk = rec({ ownerChunkAt: T0 + 5_000 })
+    // Exactly the gap edge is no gap.
+    expect(arbitrateClientInstance(a, say(T0 + CLIENT_INSTANCE_GRACE_GAP_MS), T0 + CLIENT_INSTANCE_GRACE_GAP_MS, lastChunk).owner.graceAt).toBeUndefined()
+    a = arbitrateClientInstance(a, say(back), back, lastChunk).owner
+    expect(a.graceAt).toBe(back)
+    const b = { ...newer, recording: true }
+    const held = keepClaiming(a, back + CLIENT_INSTANCE_WORD_HOLD_MS, lastChunk)
+    expect(held.graceAt).toBe(back)
+    expect(arbitrateClientInstance(held, b, back + CLIENT_INSTANCE_WORD_HOLD_MS, lastChunk).verdict).toBe('yield')
+    expect(arbitrateClientInstance(held, b, back + CLIENT_INSTANCE_WORD_HOLD_MS + 1, lastChunk).verdict).toBe('owner')
+    // The 2026-09-29 zombie: throttled timers, gap after gap, and never a chunk. No second grace.
+    const back2 = back + 2 * 60_000
+    const again = arbitrateClientInstance(a, say(back2), back2, lastChunk).owner
+    expect(again.graceAt).toBe(back)
+    expect(arbitrateClientInstance(again, b, back2 + 1_000, lastChunk)).toMatchObject({ verdict: 'owner', took: true })
+    // A real recorder whose chunks resumed after the grace gets the next one.
+    const resumed = rec({ ownerChunkAt: back + 30_000 })
+    expect(arbitrateClientInstance(a, say(back2), back2, resumed).owner.graceAt).toBe(back2)
+    // A copy that stopped recording keeps no grace.
+    expect(arbitrateClientInstance(a, parseClientInstanceClaim({ ...older, recording: false }, back2)!, back2, resumed).owner.graceAt).toBeUndefined()
+  })
+
   it('untagged chunks (glasses 6.9.507/508) hold only for an owner that still claims', () => {
     const a = arbitrateClientInstance(null, older, T0).owner
     expect(arbitrateClientInstance(a, newer, T0 + CLIENT_INSTANCE_LIVE_MS, rec({ untagged: true })).verdict).toBe('yield')
@@ -215,8 +302,9 @@ describe('6.50.4: the ring never moves in a way that stops the only recording', 
     l.note('100.1.1.1', older.id, T0)
     l.note('100.1.1.1', null, T0)
     const at = (dt: number) => l.evidence('100.1.1.1', older.id, newer.id, T0 + dt)
-    expect(at(CLIENT_INSTANCE_CAPTURE_LIVE_MS - 1)).toEqual({ owner: true, claimant: false, untagged: true })
-    expect(at(CLIENT_INSTANCE_CAPTURE_LIVE_MS)).toEqual(NO_CAPTURE)
+    expect(at(CLIENT_INSTANCE_CAPTURE_LIVE_MS - 1)).toEqual({ owner: true, claimant: false, untagged: true, ownerChunkAt: T0 })
+    // 6.58.1: past the window the chunk no longer proves capture, but its time is still known.
+    expect(at(CLIENT_INSTANCE_CAPTURE_LIVE_MS)).toEqual({ ...NO_CAPTURE, ownerChunkAt: T0 })
     expect(l.evidence('100.1.1.1', newer.id, older.id, T0)).toEqual({ owner: false, claimant: true, untagged: true })
     // Untagged chunks are this device's only.
     expect(l.evidence('100.2.2.2', older.id, newer.id, T0).untagged).toBe(false)
@@ -274,7 +362,9 @@ describe('6.50.4: the ring never moves in a way that stops the only recording', 
     }
     /** Each case starts with nothing live and the previous owner long gone. */
     const fresh = () => { clock += 10 * CLIENT_INSTANCE_LIVE_MS }
-    const copy = (id: string, dt: number) => ({ id, bootAt: clock + dt, version: '6.9.509', recording: false })
+    // 6.9.509 tagged its chunks but sent no `recording` field (6.9.510 added it). 6.58.1 treats an
+    // explicit `recording: false` from a claiming owner as a statement, so the fixture omits it.
+    const copy = (id: string, dt: number) => ({ id, bootAt: clock + dt, version: '6.9.509' })
 
     it('the owner\'s own chunks hold the ring; the answer says so', async () => {
       fresh()
@@ -333,6 +423,42 @@ describe('6.50.4: the ring never moves in a way that stops the only recording', 
       expect((await post('[::1]', sim)).body).toMatchObject({ verdict: 'owner', owner: { id: sim.id } })
       // The phone's owner is untouched.
       expect((await post('127.0.0.1', { ...copy('bbbb0005-phone', -1_000), check: true })).body).toMatchObject({ verdict: 'yield', owner: { id: a.id } })
+    })
+
+    it('6.58.1 over HTTP: the 2026-09-29 zombie; the copy whose audio stopped says so, and the new recording keeps the ring', async () => {
+      fresh()
+      const a = { ...copy('mumnr7cf-zomb', 0), version: '6.9.560' }, b = { ...copy('mumnx78m-new1', 60_000), version: '6.9.560' }
+      expect((await post('127.0.0.1', { ...a, recording: true })).body.verdict).toBe('owner')
+      await chunk('/transcribe-stream?sessionId=m1&chunkIndex=16', a.id)
+      // 07:38:31: twelve seconds without a frame, the probe alive and the glasses connected; A says so at once.
+      clock += 12_000
+      expect((await post('127.0.0.1', { ...a, recording: false })).body).toMatchObject({ verdict: 'owner', owner: { id: a.id } })
+      // Its last committed chunk is still uploading.
+      clock += 2_000
+      await chunk('/transcribe-stream?sessionId=m1&chunkIndex=17', a.id)
+      // 07:38:48: B starts the meeting. Before 6.58.1 A's trailing chunk made B stop within a second.
+      clock += 15_000
+      expect((await post('127.0.0.1', { ...b, recording: true })).body).toMatchObject({ verdict: 'owner', owner: { id: b.id }, captureLive: false })
+      // A's next claim is told to yield, and that B is recording, so A stops.
+      clock += 5_000
+      expect((await post('127.0.0.1', { ...a, recording: true })).body).toMatchObject({ verdict: 'yield', captureLive: true, owner: { id: b.id } })
+    })
+
+    it('6.58.1 over HTTP: an older copy that never stops saying `recording` holds for CLIENT_INSTANCE_WORD_HOLD_MS after its last chunk', async () => {
+      fresh()
+      const a = { ...copy('aaaa0007-old1', 0), version: '6.9.558' }, b = { ...copy('bbbb0007-new1', 1_000), version: '6.9.558' }
+      expect((await post('127.0.0.1', { ...a, recording: true })).body.verdict).toBe('owner')
+      await chunk('/transcribe-stream?sessionId=m2&chunkIndex=3', a.id)
+      const lastChunk = clock
+      // A keeps claiming every tick with its word, and no chunk arrives again.
+      while (clock + CLIENT_INSTANCE_TICK_MS <= lastChunk + CLIENT_INSTANCE_WORD_HOLD_MS) {
+        clock += CLIENT_INSTANCE_TICK_MS
+        expect((await post('127.0.0.1', { ...a, recording: true })).body.verdict).toBe('owner')
+      }
+      clock = lastChunk + CLIENT_INSTANCE_WORD_HOLD_MS
+      expect((await post('127.0.0.1', { ...b, recording: true, check: true })).body).toMatchObject({ verdict: 'yield', captureLive: true })
+      clock += 1
+      expect((await post('127.0.0.1', { ...b, recording: true })).body).toMatchObject({ verdict: 'owner', owner: { id: b.id }, captureLive: false })
     })
 
     it('a future boot time is a 400', async () => {
