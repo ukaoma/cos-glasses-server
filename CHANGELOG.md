@@ -1,3 +1,11 @@
+## 6.57.1
+
+### Session suggestions for meeting reviews
+
+- Miles, 2026-09-28: the meeting review "Retail Liquor Summit Campaign Launch" got no session suggestion, although a session named "Retail Liquor Summit campaign launch" existed. Suggestions only took a board task. `POST /api/work-board/session-recommendation` now also takes exactly `{reviewId, sessions}`. The server reads the review's meeting title and reviewed follow-up from its own review store; the client never supplies the work text, the same rule as for tasks. An unknown review answers 404 `review_not_found`, a server with reviews off answers 404 `reviews_unavailable`, and a mixed or unknown body answers 400. Task requests are unchanged. Needs COS Control 0.5.243 to ask for reviews.
+- The local Work candidate passes its own review runtime the same way.
+- Tests: the route test covers the review body, the missing review, reviews off, the exact-shape refusals and the failure fallback; the mutation gate adds five mutants for the new branches.
+
 ## 6.57.0
 
 ### Jev in the server: session suggestions and a key you can set from COS Control

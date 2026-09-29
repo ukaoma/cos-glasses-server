@@ -630,7 +630,7 @@ app.use('/api', createWorkBoardRouter())
 const workIntakeStore = createOptionalWorkIntakeStore(() => new WorkIntakeStore(dataPath('work-intake')))
 app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
 // Jev key (Control Settings) and Continue/Fork/New session recommendations for Work tasks (6.57.0).
-app.use('/api', createJevRouter())
+app.use('/api', createJevRouter(workReviewRuntime ? { review: id => workReviewRuntime.get(id) } : {}))
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.

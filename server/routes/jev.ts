@@ -12,12 +12,17 @@ import { SessionRecommender, parseCandidates } from '../lib/session-recommendati
 import { listBoard } from '../lib/task-store.js'
 import { isSafeDomainName } from '../lib/domains.js'
 
+/** What the route reads from a meeting review (6.57.1): the server's own record, never client text. */
+export interface ReviewForAdvice { source: { title: string; domain: string }; markdown?: string }
+
 export interface JevRouteDependencies {
   jev: JevClient
   recommender: Pick<SessionRecommender, 'recommend'>
   list: typeof listBoard
   validate: typeof validateJevKey
   save: typeof saveJevKey
+  /** Looks a meeting review up by its `wr_` id; throws or returns null when it does not exist. Absent when reviews are off. */
+  review?: (id: string) => Promise<ReviewForAdvice | null>
 }
 
 export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): Router {
@@ -53,10 +58,29 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
     return res.json({ ok: true, ...deps.jev.status() })
   })
 
-  /** Continue / Fork / New for one task. The task comes from the board; the client sends only candidate sessions. */
+  /** Continue / Fork / New for one task or meeting review. The work comes from the board or the review store; the
+   *  client sends only candidate sessions. */
   router.post('/work-board/session-recommendation', async (req, res) => {
     const body = req.body
     const sessions = parseCandidates(body?.sessions)
+    const keys = body && typeof body === 'object' ? Object.keys(body).sort().join(',') : ''
+    // 6.57.1: a meeting review is named by its id alone (`{reviewId, sessions}`), exactly.
+    if (keys === 'reviewId,sessions') {
+      if (typeof body.reviewId !== 'string' || !/^wr_[a-f0-9]{32}$/.test(body.reviewId) || !sessions) {
+        return res.status(400).json({ error: { code: 'invalid_recommendation_request', message: 'Select an exact meeting review and send at most 80 sessions.' } })
+      }
+      if (!deps.review) return res.status(404).json({ error: { code: 'reviews_unavailable', message: 'Meeting reviews are not available on this server.' } })
+      try {
+        const review = await deps.review(body.reviewId).catch(() => null)
+        if (!review) return res.status(404).json({ error: { code: 'review_not_found', message: 'That meeting review changed or was removed. Refresh Work.' } })
+        const title = review.source.title || 'Meeting follow-up'
+        return res.json(await deps.recommender.recommend({
+          task: { text: [title, review.markdown ?? ''].filter(Boolean).join('\n\n'), domain: review.source.domain, meetings: [title] }, sessions }))
+      } catch (e) {
+        console.error('[jev] session recommendation failed:', e instanceof Error ? e.message : e)
+        return res.json({ provider: 'none', reason: 'recommendation_unavailable' })
+      }
+    }
     if (!body || typeof body !== 'object' || Object.keys(body).some(k => !['domain', 'id', 'sessions'].includes(k))
       || typeof body.domain !== 'string' || !isSafeDomainName(body.domain) || typeof body.id !== 'string' || !/^[a-f0-9]{12}$/.test(body.id) || !sessions) {
       return res.status(400).json({ error: { code: 'invalid_recommendation_request', message: 'Select an exact task and send at most 80 sessions.' } })

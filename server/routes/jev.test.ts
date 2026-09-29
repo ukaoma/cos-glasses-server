@@ -63,3 +63,35 @@ it('recommends from the board task, not client text, and never blocks the worksp
     expect(logged).toHaveBeenCalledWith('[jev] session recommendation failed:', 'boom')
   } finally { logged.mockRestore() }
 })
+
+it('6.57.1: suggests for a meeting review from the server record, never from client text', async () => {
+  const reviewId = 'wr_' + 'a'.repeat(32)
+  const review = vi.fn(async (id: string) => id === reviewId
+    ? { source: { title: 'Retail Liquor Summit Campaign Launch', domain: 'quilt' }, markdown: '## Decisions\n1. Landing page with a link to checkout.' }
+    : null)
+  const s = await setup({ review })
+  const sessions = [{ id: 'claude:a', provider: 'claude', title: 'Retail Liquor Summit campaign launch' }]
+  expect((await s.call('POST', '/work-board/session-recommendation', { reviewId, sessions })).status).toBe(200)
+  expect(review).toHaveBeenCalledWith(reviewId)
+  expect(s.deps.recommender.recommend).toHaveBeenCalledWith({
+    task: { text: 'Retail Liquor Summit Campaign Launch\n\n## Decisions\n1. Landing page with a link to checkout.', domain: 'quilt', meetings: ['Retail Liquor Summit Campaign Launch'] },
+    sessions: [expect.objectContaining({ id: 'claude:a' })] })
+  const missing = await s.call('POST', '/work-board/session-recommendation', { reviewId: 'wr_' + 'b'.repeat(32), sessions })
+  expect(missing.status).toBe(404); expect((await missing.json()).error.code).toBe('review_not_found')
+  const throwing = await setup({ review: vi.fn(async () => { throw new Error('review_not_found') }) })
+  expect((await throwing.call('POST', '/work-board/session-recommendation', { reviewId, sessions })).status).toBe(404)
+  // Exact shapes only: no client text, no mixing the task and review forms, a real review id.
+  for (const bad of [{ reviewId, sessions, text: 'inject' }, { reviewId, sessions, domain: 'quilt', id: 'a'.repeat(12) }, { reviewId: 'wr_x', sessions },
+                     { reviewId: 'wr_' + 'A'.repeat(32), sessions }, { reviewId }, { reviewId, sessions: 'x' }]) {
+    expect((await s.call('POST', '/work-board/session-recommendation', bad)).status).toBe(400)
+  }
+  expect(s.deps.recommender.recommend).toHaveBeenCalledTimes(1)
+  const off = await setup()
+  const offRes = await off.call('POST', '/work-board/session-recommendation', { reviewId, sessions })
+  expect(offRes.status).toBe(404); expect((await offRes.json()).error.code).toBe('reviews_unavailable')
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    const broken = await setup({ review, recommender: { recommend: vi.fn(async () => { throw new Error('boom') }) } })
+    expect(await (await broken.call('POST', '/work-board/session-recommendation', { reviewId, sessions })).json()).toEqual({ provider: 'none', reason: 'recommendation_unavailable' })
+  } finally { logged.mockRestore() }
+})

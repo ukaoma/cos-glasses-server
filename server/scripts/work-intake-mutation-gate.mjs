@@ -49,6 +49,11 @@ const mutations = [
   ['unoffered-session-refused', REC, "if (rows.some(([k]) => !offered.has(k))) throw new JevError('jev_bad_answer', 'Jev chose a session that was not offered')", ''],
   ['recommendation-cache', REC, 'if (hit && this.now() - hit.at < RECOMMENDATION_LIMITS.cacheMs) return { ...hit.value, cached: true }', ''],
   ['key-validated-before-save', JEV_ROUTE, 'if (!check.ok) return res.status(400)', 'if (false) return res.status(400)'],
+  ['review-exact-shape', JEV_ROUTE, "if (keys === 'reviewId,sessions') {", "if (keys.includes('reviewId')) {"],
+  ['review-id-pattern', JEV_ROUTE, "!/^wr_[a-f0-9]{32}$/.test(body.reviewId)", "!/^wr_/.test(body.reviewId)"],
+  ['review-from-server-record', JEV_ROUTE, "text: [title, review.markdown ?? ''].filter(Boolean).join('\\n\\n')", 'text: title'],
+  ['review-missing-404', JEV_ROUTE, "if (!review) return res.status(404).json({ error: { code: 'review_not_found'", "if (false) return res.status(404).json({ error: { code: 'review_not_found'"],
+  ['reviews-unavailable-404', JEV_ROUTE, "if (!deps.review) return res.status(404)", "if (false) return res.status(404)"],
   ['board-text-not-client-text', JEV_ROUTE, "Object.keys(body).some(k => !['domain', 'id', 'sessions'].includes(k))", 'false'],
 ]
 try {
