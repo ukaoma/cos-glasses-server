@@ -1,3 +1,36 @@
+## 6.58.0
+
+### Work: did the session finish the task?
+
+- Miles, 2026-09-29: "If a session is responsible for completing multiple tasks and we have evidence of the session receiving the context necessary to complete that task (as well as a confirmation that it has), then we want to be moving those tasks through the Kanban as well automatically."
+  - COS Control 0.5.247 follows each Work handoff until the session reports on it.
+  - Every handoff asks the agent to make its first reply line `COS-WORK <id>: done: <evidence>`. Control reads it from the session's recent messages (`GET /api/agent-sessions/:provider/:id?turns=N`, served since 6.50.0) and moves the card itself, as far as QA and never to Complete.
+- **New `POST /api/work-board/completion-check`**, the fallback when the session's newest reply since the handoff has no status line and the session is idle.
+  - The body is exactly `{domain, id, provider, sessionId}`, plus an optional `after` (an ISO time).
+  - The task comes from the board. The replies come from this server's own transcripts: with `after`, every reply written since then, joined and kept to the newest 4,000 characters (`LATEST_REPLY_MAX`); without it, the newest reply.
+  - The client never sends work or reply text.
+  - Jev answers one choice question (done, not_done or unclear) with a probability.
+  - The task is judged against its Done when, or, when it has none, against its own text. No open task has one today. The answer says which, as `basis: "done_when" | "task"`.
+  - The answer is advice. Control moves a card only on done at 0.8 or more (`done_when`) or 0.85 (`task`). Confidence is not rounded, so 0.795 never reads as 0.8.
+- **Answers:**
+  - `{provider: "jev", verdict, confidence, basis, model, cached}`.
+  - Otherwise `{provider: "none", reason}`:
+    - `no_reply` when there is no reply;
+    - `no_task_text` when the task has no text;
+    - any Jev condition (`jev_not_configured`, `jev_cap_reached`, `jev_breaker_open` and the rest);
+    - `completion_unavailable` for an unexpected failure, which is logged and answered 200.
+  - An unknown task is 404 `task_not_found`, an unknown session 404 `session_not_found`, and any other body 400 `invalid_completion_request`.
+  - Answers are cached for 30 minutes per task text, Done when and reply.
+- **Cost:** Control asks at most twice per handoff, once per new reply, and only while the session is idle. The task text is clipped to 1,200 characters, the Done when to 500 and the replies to 4,000, so one check is at most about 2,500 input tokens, inside the shared daily Jev cap (`COS_JEV_DAILY_TOKENS`). The reply text goes to TypeSafe unredacted, as with every Jev question about Work.
+- **Other changes:**
+  - `server/routes/jev.ts` finds a task through one `findTask` (Work identity first, then row id) for both suggestions and completion checks.
+  - The local Work candidate answers completion checks with no session, so it never reads this Mac's transcripts.
+- **Tests:**
+  - The checker: policy, unrounded confidence, basis, the clipping of task, Done when and reply, cache and reasons.
+  - The replies reader, over a fixture transcript: `after` window, newest kept, unknown session.
+  - The route: board and transcripts as the only sources, `after` passed through and validated, exact bodies, 404s, a failure answered as advice.
+  - The mutation gate adds 16 mutants and runs `work-completion.test.ts`.
+
 ## 6.57.1
 
 ### Session suggestions for meeting reviews

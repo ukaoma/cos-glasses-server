@@ -104,3 +104,47 @@ it('6.57.1: suggests for a meeting review from the server record, never from cli
     expect(await (await broken.call('POST', '/work-board/session-recommendation', { reviewId, sessions })).json()).toEqual({ provider: 'none', reason: 'recommendation_unavailable' })
   } finally { logged.mockRestore() }
 })
+
+it("6.58.0: checks completion from the board task and the server's own replies, never client text", async () => {
+  const SESSION = '0f3c9a2e-1111-4222-8333-944455556666'
+  const doneRow = { ...row, doneWhen: 'Copy ready and checked on a phone' }
+  const completion = { check: vi.fn(async () => ({ provider: 'jev', model: 'jev', verdict: 'done', confidence: 0.9, basis: 'done_when', cached: false })) }
+  const replies = vi.fn(async (provider: string, id: string, _after: number | null) => provider === 'claude' && id === SESSION ? 'Updated the CTA and checked it.' : null)
+  const s = await setup({ list: vi.fn(async () => [doneRow]), completion, replies })
+  const body = { domain: 'personal', id: 'b'.repeat(12), provider: 'claude', sessionId: SESSION }
+  const res = await s.call('POST', '/work-board/completion-check', body)
+  expect(res.status).toBe(200)
+  expect(res.headers.get('cache-control')).toBe('private, no-store')
+  expect(await res.json()).toMatchObject({ provider: 'jev', verdict: 'done', confidence: 0.9 })
+  expect(replies).toHaveBeenLastCalledWith('claude', SESSION, null)
+  expect(completion.check).toHaveBeenLastCalledWith({ task: { text: 'Board text of the task', doneWhen: 'Copy ready and checked on a phone' }, reply: 'Updated the CTA and checked it.' })
+  // `after` narrows the replies to those since the handoff arrived.
+  const after = '2026-09-29T15:04:05.123Z'
+  expect((await s.call('POST', '/work-board/completion-check', { ...body, after })).status).toBe(200)
+  expect(replies).toHaveBeenLastCalledWith('claude', SESSION, Date.parse(after))
+  // A task with no Done when is still judged, against its own text (the checker reports the basis).
+  const noFinish = await setup({ list: vi.fn(async () => [row]), completion, replies })
+  expect((await noFinish.call('POST', '/work-board/completion-check', body)).status).toBe(200)
+  expect(completion.check).toHaveBeenLastCalledWith({ task: { text: 'Board text of the task', doneWhen: '' }, reply: 'Updated the CTA and checked it.' })
+  // Unknown session and unknown task are 404s with their own codes.
+  const gone = await s.call('POST', '/work-board/completion-check', { ...body, sessionId: '9f3c9a2e-1111-4222-8333-944455556666' })
+  expect(gone.status).toBe(404); expect((await gone.json()).error.code).toBe('session_not_found')
+  const missing = await s.call('POST', '/work-board/completion-check', { ...body, id: 'c'.repeat(12) })
+  expect(missing.status).toBe(404); expect((await missing.json()).error.code).toBe('task_not_found')
+  // Exact bodies only: no reply text, no unknown keys, safe names, a real time.
+  const calls = completion.check.mock.calls.length
+  for (const bad of [{ ...body, reply: 'I finished it' }, { domain: 'personal', id: 'b'.repeat(12), provider: 'claude' },
+                     { ...body, provider: 'ollama' }, { ...body, sessionId: '../../etc' }, { ...body, domain: '../x' }, { ...body, id: 'B'.repeat(12) },
+                     { ...body, after: 'yesterday' }, { ...body, after: 12 }, { ...body, after: 'x'.repeat(41) }]) {
+    expect((await s.call('POST', '/work-board/completion-check', bad)).status).toBe(400)
+  }
+  expect(completion.check.mock.calls.length).toBe(calls)
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    const broken = await setup({ list: vi.fn(async () => [doneRow]), replies, completion: { check: vi.fn(async () => { throw new Error('boom') }) } })
+    const failed = await broken.call('POST', '/work-board/completion-check', body)
+    expect(failed.status).toBe(200)  // advice: a failure is an answer, never an error the client must handle
+    expect(await failed.json()).toEqual({ provider: 'none', reason: 'completion_unavailable' })
+    expect(logged).toHaveBeenCalledWith('[jev] completion check failed:', 'boom')
+  } finally { logged.mockRestore() }
+})

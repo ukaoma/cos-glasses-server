@@ -9,9 +9,9 @@ import { spawnSync } from 'node:child_process'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const scratch = mkdtempSync(join(tmpdir(), 'work-intake-mutations-'))
 const tests = ['server/lib/work-review-runtime.test.ts', 'server/lib/work-intake-store.test.ts', 'server/routes/work-intake.test.ts', 'server/lib/task-store-intake.test.ts',
-  'server/lib/jev.test.ts', 'server/lib/session-recommendation.test.ts', 'server/routes/jev.test.ts']
+  'server/lib/jev.test.ts', 'server/lib/session-recommendation.test.ts', 'server/routes/jev.test.ts', 'server/lib/work-completion.test.ts']
 const STORE = 'server/lib/work-intake-store.ts', ROUTE = 'server/routes/work-intake.ts', TASKS = 'server/lib/task-store.ts'
-const JEV = 'server/lib/jev.ts', REC = 'server/lib/session-recommendation.ts', JEV_ROUTE = 'server/routes/jev.ts'
+const JEV = 'server/lib/jev.ts', REC = 'server/lib/session-recommendation.ts', JEV_ROUTE = 'server/routes/jev.ts', DONE = 'server/lib/work-completion.ts'
 const mutations = [
   ['per-item-rejection', STORE, "result.rejected.push({ id, code: e instanceof WorkIntakeError ? e.code : 'invalid_intake_item' })", 'throw e'],
   ['producer-cannot-decide-for-user', STORE, "if (item.resolution?.by === 'user') throw new WorkIntakeError('producer_cannot_record_user_decisions', 400)", ''],
@@ -38,7 +38,7 @@ const mutations = [
   ['fork-needs-none', REC, "if (typeof best.none !== 'number' || !Number.isFinite(best.none)) throw new JevError('jev_bad_answer', 'Jev left out none')", ''],
   ['fork-forkable-only', REC, 'p > 0 && FORKABLE.has(sessions[Number(k.slice(1))].provider)', 'p > 0'],
   ['fork-confidence-own', REC, 'confidence: round(forkP)', 'confidence: round(covered)'],
-  ['work-identity-first', JEV_ROUTE, 'rows.find(r => r.workIdentity === body.id) ?? rows.find(r => r.id === body.id)', 'rows.find(r => r.id === body.id || r.workIdentity === body.id)'],
+  ['work-identity-first', JEV_ROUTE, 'rows.find(r => r.workIdentity === id) ?? rows.find(r => r.id === id)', 'rows.find(r => r.id === id || r.workIdentity === id)'],
   ['jev-cap-before-send', JEV, "if (this.usedToday() + estimate > dailyCap()) this.fail('jev_cap_reached', false)", ''],
   ['jev-breaker-opens', JEV, 'if (countsTowardBreaker && ++this.failures >= JEV_LIMITS.breakerFailures) {', 'if (false) {'],
   ['jev-rejected-not-counted', JEV, "return this.fail('jev_request_rejected', false)", "return this.fail('jev_request_rejected', true)"],
@@ -58,6 +58,23 @@ const mutations = [
   ['review-peek-reads-store', 'server/lib/work-review-runtime.ts', 'return row ? publicReview(row) : null', 'return null'],
   ['review-own-400-code', JEV_ROUTE, "error: { code: 'invalid_review_request'", "error: { code: 'invalid_recommendation_request'"],
   ['board-text-not-client-text', JEV_ROUTE, "Object.keys(body).some(k => !['domain', 'id', 'sessions'].includes(k))", 'false'],
+  // 6.58.0 completion check (Control 0.5.247 Work tracking).
+  ['completion-exact-body', JEV_ROUTE, "Object.keys(body).filter(k => k !== 'after').sort().join(',')", "'domain,id,provider,sessionId'"],
+  ['completion-safe-session-id', JEV_ROUTE, "|| typeof body.sessionId !== 'string' || !isSafeSessionId(body.sessionId)", "|| typeof body.sessionId !== 'string'"],
+  ['completion-basis-task', DONE, "const basis = state.task.doneWhen ? 'done_when' as const : 'task' as const", "const basis = 'done_when' as const"],
+  ['completion-after-window', DONE, "Date.parse(t.at) >= afterMs", 'true'],
+  ['completion-after-validated', JEV_ROUTE, " || Number.isNaN(afterMs)", ''],
+  ['completion-task-clipped', DONE, 'text: clip(input.task.text, COMPLETION_LIMITS.task)', 'text: input.task.text'],
+  ['completion-keep-newest', DONE, 'joined.slice(joined.length - (max - 1))', 'joined.slice(0, max - 1)'],
+  ['completion-unknown-session-404', JEV_ROUTE, 'if (reply === null) return res.status(404)', 'if (false) return res.status(404)'],
+  ['completion-failure-is-advice', JEV_ROUTE, "return res.json({ provider: 'none', reason: 'completion_unavailable' })", "return res.status(500).json({ provider: 'none', reason: 'completion_unavailable' })"],
+  ['completion-argmax', DONE, 'rows.sort((a, b) => b[1] - a[1])[0]', 'rows[0]'],
+  ['completion-known-choices', DONE, '!(COMPLETION_CHOICES as readonly string[]).includes(k) || ', ''],
+  ['completion-probability-range', DONE, ' || v < 0 || v > 1', ''],
+  ['completion-cache', DONE, 'if (hit && this.now() - hit.at < COMPLETION_LIMITS.cacheMs) return { ...hit.value, cached: true }', ''],
+  ['completion-reply-clipped', DONE, 'reply: clip(input.reply, COMPLETION_LIMITS.reply)', 'reply: input.reply'],
+  ['completion-no-reply-no-call', DONE, "if (!state.reply) return { provider: 'none', reason: 'no_reply' }", ''],
+  ['completion-jev-errors-are-reasons', DONE, "if (e instanceof JevError) return { provider: 'none', reason: e.code }", ''],
 ]
 try {
   const skip = new Set(['data', 'models', 'certs', 'node_modules'])

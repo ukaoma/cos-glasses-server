@@ -629,7 +629,8 @@ app.use('/api', createWorkBoardRouter())
 // Work intake (6.57.0): meeting-derived suggestions, asks and review items. Optional: a bad journal never blocks boot.
 const workIntakeStore = createOptionalWorkIntakeStore(() => new WorkIntakeStore(dataPath('work-intake')))
 app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
-// Jev key (Control Settings) and Continue/Fork/New session recommendations for Work tasks (6.57.0) and meeting reviews (6.57.1).
+// Jev key (Control Settings), Continue/Fork/New session recommendations for Work tasks (6.57.0) and meeting reviews
+// (6.57.1), and the Work completion check (6.58.0).
 app.use('/api', createJevRouter(workReviewRuntime ? { review: async id => workReviewRuntime.peek(id) } : {}))
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
