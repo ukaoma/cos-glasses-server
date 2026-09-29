@@ -194,3 +194,15 @@ it('manual review defaults on, explicit zero disables, and startup never admits 
  expect(manualWorkReviewsEnabled({})).toBe(true);expect(manualWorkReviewsEnabled({COS_WORK_REVIEWS_ENABLED:'1'})).toBe(true);expect(manualWorkReviewsEnabled({COS_WORK_REVIEWS_ENABLED:'0'})).toBe(false)
  const s=setup();await s.runtime.start();await s.runtime.list();expect(s.deps.jobs.submit).not.toHaveBeenCalled();expect(await s.runtime.capabilities()).toMatchObject({automaticAfterSync:false,publication:false})
 })
+it('6.57.1: peek reads one stored review without reconciling or resolving meetings', async () => {
+  const s = setup()
+  const { review } = await s.runtime.request({ meeting: descriptor, model: 'ollama' })
+  const resolves = s.deps.resolveMeeting.mock.calls.length, reads = s.deps.jobs.getByClientGeneration.mock.calls.length
+  const seen = s.runtime.peek(review.id)
+  expect(seen).toMatchObject({ id: review.id, source: { title: 'Website review' } })
+  expect(seen).not.toHaveProperty('prompt')
+  expect(s.deps.resolveMeeting.mock.calls.length).toBe(resolves)
+  expect(s.deps.jobs.getByClientGeneration.mock.calls.length).toBe(reads)
+  expect(s.runtime.peek('wr_' + 'f'.repeat(32))).toBeNull()
+  for (const bad of ['wr_x', '../' + review.id, review.id.toUpperCase()]) expect(s.runtime.peek(bad)).toBeNull()
+})

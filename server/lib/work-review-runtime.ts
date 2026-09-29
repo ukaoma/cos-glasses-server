@@ -174,6 +174,12 @@ export class WorkReviewRuntime {
     await this.serial(async () => { if (this.stopping) return; for (const row of this.deps.store.list()) await this.reconcileRow(row, allowAdmission) })
   }
   async list(): Promise<WorkReview[]> { await this.reconcile(false); return this.deps.store.list().map(publicReview) }
+  /** 6.57.1: one review as stored, without reconciling every row. Session advice reads it on each Work visit.
+   *  Exact id lookup only (the route validates the `wr_` pattern first). */
+  peek(id: string): WorkReview | null {
+    const row = this.deps.store.get(id)
+    return row ? publicReview(row) : null
+  }
   async get(id: string): Promise<WorkReview> {
     if (!/^wr_[a-f0-9]{32}$/.test(id)) throw new WorkReviewError('invalid_review_id',400)
     await this.reconcile(false); const row = this.deps.store.get(id)

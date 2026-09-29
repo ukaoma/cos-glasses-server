@@ -104,6 +104,6 @@ app.use('/api',createWorkIntakeRouter({store:intake,list:boardList,resolveMeetin
 // Jev key status and Continue/Fork/New advice, against the same board. The key is READ from the installed server
 // (saved or env); the candidate never sets or removes it, and counts its own spend in the candidate home.
 app.use('/api/jev-key',(req,res,next)=>req.method==='GET'?next():res.status(403).json({error:{code:'candidate_read_only',message:'Set the Jev key in the installed COS Control.'}}))
-app.use('/api',createJevRouter({list:boardList,jev:new JevClient(fetch,()=>new Date(),join(root,'jev-usage.json')),review:id=>runtime.get(id)}))
+app.use('/api',createJevRouter({list:boardList,jev:new JevClient(fetch,()=>new Date(),join(root,'jev-usage.json')),review:async id=>runtime.peek(id)}))
 const server=app.listen(port,'127.0.0.1',()=>console.log(JSON.stringify({ready:true,port,tokenFile,mode:'local-candidate',provider:'ollama'})))
 for(const signal of ['SIGTERM','SIGINT'] as const)process.once(signal,()=>{server.close();intake?.close();void runtime.close().then(()=>process.exit(0))})

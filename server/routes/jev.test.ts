@@ -78,8 +78,13 @@ it('6.57.1: suggests for a meeting review from the server record, never from cli
     sessions: [expect.objectContaining({ id: 'claude:a' })] })
   const missing = await s.call('POST', '/work-board/session-recommendation', { reviewId: 'wr_' + 'b'.repeat(32), sessions })
   expect(missing.status).toBe(404); expect((await missing.json()).error.code).toBe('review_not_found')
-  const throwing = await setup({ review: vi.fn(async () => { throw new Error('review_not_found') }) })
-  expect((await throwing.call('POST', '/work-board/session-recommendation', { reviewId, sessions })).status).toBe(404)
+  // A store that cannot be read is not a missing review.
+  const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    const throwing = await setup({ review: vi.fn(async () => { throw new Error('store down') }) })
+    const down = await throwing.call('POST', '/work-board/session-recommendation', { reviewId, sessions })
+    expect(down.status).toBe(503); expect((await down.json()).error.code).toBe('review_store_unavailable')
+  } finally { quiet.mockRestore() }
   // Exact shapes only: no client text, no mixing the task and review forms, a real review id.
   for (const bad of [{ reviewId, sessions, text: 'inject' }, { reviewId, sessions, domain: 'quilt', id: 'a'.repeat(12) }, { reviewId: 'wr_x', sessions },
                      { reviewId: 'wr_' + 'A'.repeat(32), sessions }, { reviewId }, { reviewId, sessions: 'x' }]) {

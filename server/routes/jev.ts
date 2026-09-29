@@ -70,9 +70,13 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
         return res.status(400).json({ error: { code: 'invalid_recommendation_request', message: 'Select an exact meeting review and send at most 80 sessions.' } })
       }
       if (!deps.review) return res.status(404).json({ error: { code: 'reviews_unavailable', message: 'Meeting reviews are not available on this server.' } })
+      let review: ReviewForAdvice | null
+      try { review = await deps.review(body.reviewId) } catch (e) {
+        console.error('[jev] review lookup failed:', e instanceof Error ? e.message : e)
+        return res.status(503).json({ error: { code: 'review_store_unavailable', message: 'Meeting reviews could not be read. Try again shortly.' } })
+      }
+      if (!review) return res.status(404).json({ error: { code: 'review_not_found', message: 'That meeting review changed or was removed. Refresh Work.' } })
       try {
-        const review = await deps.review(body.reviewId).catch(() => null)
-        if (!review) return res.status(404).json({ error: { code: 'review_not_found', message: 'That meeting review changed or was removed. Refresh Work.' } })
         const title = review.source.title || 'Meeting follow-up'
         return res.json(await deps.recommender.recommend({
           task: { text: [title, review.markdown ?? ''].filter(Boolean).join('\n\n'), domain: review.source.domain, meetings: [title] }, sessions }))

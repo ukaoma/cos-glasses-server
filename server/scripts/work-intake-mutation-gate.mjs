@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const scratch = mkdtempSync(join(tmpdir(), 'work-intake-mutations-'))
-const tests = ['server/lib/work-intake-store.test.ts', 'server/routes/work-intake.test.ts', 'server/lib/task-store-intake.test.ts',
+const tests = ['server/lib/work-review-runtime.test.ts', 'server/lib/work-intake-store.test.ts', 'server/routes/work-intake.test.ts', 'server/lib/task-store-intake.test.ts',
   'server/lib/jev.test.ts', 'server/lib/session-recommendation.test.ts', 'server/routes/jev.test.ts']
 const STORE = 'server/lib/work-intake-store.ts', ROUTE = 'server/routes/work-intake.ts', TASKS = 'server/lib/task-store.ts'
 const JEV = 'server/lib/jev.ts', REC = 'server/lib/session-recommendation.ts', JEV_ROUTE = 'server/routes/jev.ts'
@@ -54,6 +54,7 @@ const mutations = [
   ['review-from-server-record', JEV_ROUTE, "text: [title, review.markdown ?? ''].filter(Boolean).join('\\n\\n')", 'text: title'],
   ['review-missing-404', JEV_ROUTE, "if (!review) return res.status(404).json({ error: { code: 'review_not_found'", "if (false) return res.status(404).json({ error: { code: 'review_not_found'"],
   ['reviews-unavailable-404', JEV_ROUTE, "if (!deps.review) return res.status(404)", "if (false) return res.status(404)"],
+  ['review-store-error-is-503', JEV_ROUTE, "try { review = await deps.review(body.reviewId) } catch (e) {", "try { review = await deps.review(body.reviewId).catch(() => null) } catch (e) {"],
   ['board-text-not-client-text', JEV_ROUTE, "Object.keys(body).some(k => !['domain', 'id', 'sessions'].includes(k))", 'false'],
 ]
 try {

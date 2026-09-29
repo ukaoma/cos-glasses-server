@@ -25,7 +25,7 @@ const BEST = "Which one of the user's agent sessions is the natural place to do 
 const EXACT = "Which one of the user's agent sessions is already doing this exact task, so the work should simply continue there? "
   + 'A session on the same project doing different work does not count. Choose none if no session is doing this task.'
 
-/** Providers the Work handoff can fork (Control's destinationSupported). */
+/** Providers a Work handoff can fork natively (Control 0.5.243 applies a Fork suggestion as a same-platform fork). */
 export const FORKABLE = new Set(['claude', 'codex'])
 const clip = (text: string | undefined, max: number) => (text ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 const round = (n: number) => Math.round(n * 100) / 100
