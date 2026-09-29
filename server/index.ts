@@ -114,6 +114,7 @@ import { skillsRouter } from './routes/skills.js'
 import { shutdownLiveCues } from './lib/live-cues-engine.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
+import { sweepStaleTurnRequests } from './lib/turn-request.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
 import {
   startCodexModelCatalogRefresh,
@@ -1339,6 +1340,11 @@ listenRequiredServers(listeners).then(() => {
         if (removed > 0) console.log(`[meeting-merge] removed ${removed} orphan decision file(s)`)
       })
       .catch(error => console.warn('[meeting-merge] pending re-drive failed', error))
+
+    // Turn-request files (lib/turn-request.ts) carry a user's words for the COS memory hook
+    // and die with their child. One left by a crash or a kill must not outlive an hour.
+    const staleTurnRequests = sweepStaleTurnRequests()
+    if (staleTurnRequests > 0) console.log(`[turn-request] removed ${staleTurnRequests} stale file(s)`)
 
     void initQueryJobRuntime().then(health => {
       if (process.env.COS_DURABLE_QUERY_JOBS !== '0') {

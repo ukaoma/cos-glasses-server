@@ -65,6 +65,7 @@ import {
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { teeJobTrail } from './job-trail.js'
 import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
+import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -356,17 +357,19 @@ export async function callCursorStreaming(
   const env = { ...process.env }
   delete env.CLAUDECODE
   if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)
+  const turnRequest = createTurnRequestBinding({ userText: query, prompt, turnId: options?.turnId })
+  applyTurnRequestEnv(env, turnRequest)
   // 6.62.0 (plan 3.4): Messages and reviews pass `--model`; the child's own config dir keeps
   // that from rewriting the person's CLI default (C9). Removed when the child exits.
   const isolation = cursorSpawnEnv({ baseEnv: env })
 
   let proc: ChildProcessWithoutNullStreams
   try {
-    proc = spawn(agentBinary, args, {
+    proc = spawnWithTurnRequest(turnRequest, () => spawn(agentBinary, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: isolation.env,
       cwd: cursorCwd,
-    })
+    }))
   } catch (error) {
     isolation.release()
     throw error

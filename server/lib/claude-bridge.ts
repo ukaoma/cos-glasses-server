@@ -61,6 +61,7 @@ import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.j
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail, type JobTrailDraft } from './job-trail.js'
 import { claudeSupportsSessionName } from './claude-cli-support.js'
+import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -220,6 +221,8 @@ export async function preWarmCLI(): Promise<void> {
   return new Promise<void>((resolve) => {
     const env = { ...process.env }
     delete env.CLAUDECODE
+    // 'ready' is not a user query: no turn-request file, and never an inherited path.
+    applyTurnRequestEnv(env, null)
 
     const proc = spawn('claude', [
       '-p',
@@ -622,12 +625,23 @@ export async function callClaudeStreaming(
     cliModelId: resolveClaudeCliModelId(resolvedModel),
   })
 
-  const proc = spawn('claude', args, {
+  // Ultracode is a CLI-only orchestration keyword; history/chat keeps the
+  // original user text so the keyword never appears on the lens.
+  const cliQuery = resolvedEffort === 'ultracode'
+    ? `${fullQuery}\n\n${ULTRACODE_KEYWORD}`
+    : fullQuery
+  // The COS UserPromptSubmit hook sees `cliQuery` (image preamble, attachment block and
+  // all). This private file hands it the user's own words, bound by the hash of exactly
+  // what goes on stdin; the file dies with the child. See lib/turn-request.ts.
+  const turnRequest = createTurnRequestBinding({ userText: query, prompt: cliQuery, turnId: options?.turnId })
+  applyTurnRequestEnv(env, turnRequest)
+
+  const proc = spawnWithTurnRequest(turnRequest, () => spawn('claude', args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
     cwd: cliCwd,
     detached: true,
-  })
+  }))
 
   let fullText = ''
   let stderr = ''
@@ -1061,11 +1075,6 @@ export async function callClaudeStreaming(
     options.abortSignal.addEventListener('abort', handleAbort, { once: true })
   }
 
-  // Ultracode is a CLI-only orchestration keyword; history/chat keeps the
-  // original user text so the keyword never appears on the lens.
-  const cliQuery = resolvedEffort === 'ultracode'
-    ? `${fullQuery}\n\n${ULTRACODE_KEYWORD}`
-    : fullQuery
   try {
     const providerOwned = await callbacks.onProviderProcess?.({
       provider: 'claude',

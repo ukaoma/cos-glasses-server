@@ -85,6 +85,7 @@ import {
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail } from './job-trail.js'
+import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -481,12 +482,19 @@ export async function callCodexStreaming(
     )
   }
 
-  const proc = spawn(resolvedCodex.path, args, {
+  // The COS UserPromptSubmit hook sees `prompt`, which is SYSTEM INSTRUCTIONS plus USER
+  // REQUEST in one text, on a fresh thread and on resume alike. This private file hands it
+  // the user's own words, bound by the hash of exactly what goes on stdin; the file dies
+  // with the child. See lib/turn-request.ts.
+  const turnRequest = createTurnRequestBinding({ userText: query, prompt, turnId: options?.turnId })
+  applyTurnRequestEnv(env, turnRequest)
+
+  const proc = spawnWithTurnRequest(turnRequest, () => spawn(resolvedCodex.path, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
     cwd: codexCwd,
     detached: true,
-  })
+  }))
 
   let fullText = ''
   let stderr = ''

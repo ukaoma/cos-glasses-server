@@ -50,6 +50,7 @@
     "!server/scripts/nemotron-mutation-gate.mjs",
     "!server/scripts/merged-scribe-mutation-gate.mjs",
     "!server/scripts/nemotron-replay.ts",
+    "!server/scripts/turn-request-mutation-gate.mjs",
     "!server/scripts/mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
