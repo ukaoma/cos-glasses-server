@@ -13,11 +13,23 @@ describe('6.58.2: a New session from Work carries its task name', () => {
     expect(sanitizeSessionName('a\u200bb\ufeffc')).toBe('a b c')
   })
 
+  it('keeps the joiners scripts and emoji need, and never cuts inside a character', () => {
+    expect(sanitizeSessionName('Family \u{1F468}\u200d\u{1F469}\u200d\u{1F467} trip')).toBe('Family \u{1F468}\u200d\u{1F469}\u200d\u{1F467} trip')
+    expect(sanitizeSessionName('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645')).toBe('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645')
+    expect(sanitizeSessionName('a\u200eb\u200fc')).toBe('a b c')
+    // One unbroken run of emoji longer than the limit: cut at the limit, in whole characters.
+    const run = '\u{1F600}'.repeat(QUERY_JOB_SESSION_NAME_MAX + 5)
+    const cut = sanitizeSessionName(run)!
+    expect(cut).toBe('\u{1F600}'.repeat(QUERY_JOB_SESSION_NAME_MAX))
+    const family = '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}'
+    expect(sanitizeSessionName(family.repeat(QUERY_JOB_SESSION_NAME_MAX + 1))).toBe(family.repeat(QUERY_JOB_SESSION_NAME_MAX))
+  })
+
   it('is no name when it is not a string or holds nothing', () => {
     for (const raw of [undefined, null, 42, {}, '', '   ', '\u0000\u202e']) expect(sanitizeSessionName(raw)).toBeUndefined()
   })
 
-  it('cuts a long name at a word boundary within the limit', () => {
+  it('cuts a long name back to its last space within the limit', () => {
     const words = Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ')
     const cut = sanitizeSessionName(words)!
     expect(cut.length).toBeLessThanOrEqual(QUERY_JOB_SESSION_NAME_MAX)

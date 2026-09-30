@@ -133,19 +133,32 @@ export interface QueryJobRequest {
 export const QUERY_JOB_SESSION_NAME_MAX = 100
 
 /**
- * 6.58.2: a display name, or undefined. Control characters (bidi overrides included) become
- * spaces, runs of whitespace collapse, and anything past QUERY_JOB_SESSION_NAME_MAX is cut on
- * a word boundary when there is one. Never throws: a bad name is no name.
+ * 6.58.2: a display name, or undefined. Control characters, zero-width spaces and direction
+ * marks and overrides become spaces (the joiners U+200C and U+200D stay: scripts and emoji need
+ * them), runs of whitespace collapse, and a name longer than QUERY_JOB_SESSION_NAME_MAX
+ * characters (grapheme clusters, as Swift counts them) is cut there, back to its last space when
+ * that space is in the second half. The cut never splits a character. Never throws: a bad name
+ * is no name. COS Control applies the same rules before it sends the name.
  */
 export function sanitizeSessionName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   // eslint-disable-next-line no-control-regex
-  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim()
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim()
   if (!flat) return undefined
-  if (flat.length <= QUERY_JOB_SESSION_NAME_MAX) return flat
-  const cut = flat.slice(0, QUERY_JOB_SESSION_NAME_MAX)
+  const chars = graphemes(flat)
+  if (chars.length <= QUERY_JOB_SESSION_NAME_MAX) return flat
+  const cut = chars.slice(0, QUERY_JOB_SESSION_NAME_MAX)
   const space = cut.lastIndexOf(' ')
-  return (space >= QUERY_JOB_SESSION_NAME_MAX / 2 ? cut.slice(0, space) : cut).trim()
+  return (space >= QUERY_JOB_SESSION_NAME_MAX / 2 ? cut.slice(0, space) : cut).join('').trim()
+}
+
+const graphemeSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null
+
+/** Grapheme clusters when the runtime can segment them, else code points (never half a pair). */
+function graphemes(text: string): string[] {
+  return graphemeSegmenter ? Array.from(graphemeSegmenter.segment(text), part => part.segment) : Array.from(text)
 }
 
 export const DISPATCH_ALLOWED_TOOLS = ['Read', 'Grep', 'Glob'] as const
@@ -351,6 +364,7 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
   const messageEra = optionalString(input.messageEra, 'message_era', 80)
   const handoffCode = optionalString(input.handoffCode, 'handoff_code', 128)
   const clientQueueItemId = optionalString(input.clientQueueItemId, 'client_queue_item_id', 120)
+  const sessionName = sanitizeSessionName(input.sessionName)
   const globalMsgNum = input.globalMsgNum == null ? undefined : Number(input.globalMsgNum)
   if (globalMsgNum != null && (!Number.isSafeInteger(globalMsgNum) || globalMsgNum < 1)) {
     throw new QueryJobValidationError('invalid_global_msg_num')
@@ -421,7 +435,7 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     ...(handoffCode ? { handoffCode } : {}),
     ...(input.handoffLatest === true ? { handoffLatest: true } : {}),
     ...(clientQueueItemId ? { clientQueueItemId } : {}),
-    ...(sanitizeSessionName(input.sessionName) ? { sessionName: sanitizeSessionName(input.sessionName) } : {}),
+    ...(sessionName ? { sessionName } : {}),
     attachmentIds,
     attachmentRefs,
     activityToolMode,

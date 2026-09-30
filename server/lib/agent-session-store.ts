@@ -580,7 +580,17 @@ export function parseJsonLine(line: string): Record<string, unknown> | null {
 }
 
 export async function lastCustomTitle(path: string): Promise<string | null> {
-  const text = await readWindow(path, true)
+  // The CLI re-writes its custom-title line as a session goes on, so the tail normally holds the
+  // newest. 6.58.2: a transcript longer than the window whose only title sits near the top (a
+  // `claude -p --name` run that wrote a long answer) falls back to the head.
+  const tail = customTitleIn(await readWindow(path, true))
+  if (tail) return tail
+  const st = await fileStat(path)
+  if (!st?.isFile || st.size <= HEAD_BYTES) return null
+  return customTitleIn(await readWindow(path, false))
+}
+
+function customTitleIn(text: string): string | null {
   let found: string | null = null
   for (const line of text.split('\n')) {
     if (!line.includes('custom-title')) continue

@@ -39,7 +39,9 @@ export interface QueryJobRunnerCallbacks {
   /** True only when provider ownership was durably fsynced for this active
    * generation. False means cancel/shutdown won; no prompt may be written. */
   onProviderProcess: (linkage: QueryJobProviderLinkage) => boolean | Promise<boolean>
-  /** 6.58.2: a link the provider names mid-run (the Claude session id). Persisted while running; never an ownership check. */
+  /** 6.58.2: a link the provider names mid-run (the Claude session id). Persisted only while
+   * the job runs (like every link update it restamps providerOwnershipConfirmedAt); unlike
+   * onProviderProcess it gates nothing, and a job that already ended keeps what it had. */
   onLinkage?: (linkage: QueryJobProviderLinkage) => Promise<void>
   onChunk: (text: string) => void
   onToolStatus: (text: string) => void
@@ -343,8 +345,7 @@ export class QueryJobCoordinator {
       },
       onProviderProcess: linkage => this.providerProcessReady(active, linkage),
       onLinkage: linkage => this.enqueueCallback(active, async () => {
-        const result = await this.store.updateLinkage(active.jobId, linkage)
-        if (isTerminalQueryJobStatus(result.job.status)) this.finishActive(active)
+        await this.store.updateLinkage(active.jobId, linkage)
       }),
       onChunk: (text) => { this.queuePartial(active, text) },
       onToolStatus: (text) => {

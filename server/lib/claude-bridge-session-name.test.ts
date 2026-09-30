@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   resolveTermination: null as null | ((value: any) => void),
   updateClaudeRun: vi.fn(),
   spawnArgs: [] as string[][],
+  nameSupported: true,
 }))
 
 vi.mock('node:child_process', async () => {
@@ -71,8 +72,11 @@ vi.mock('./run-output-images.js', () => ({
 vi.mock('./provider-process-lifecycle.js', () => ({
   terminateProviderProcess: state.terminateProviderProcess,
 }))
+vi.mock('./claude-cli-support.js', () => ({
+  claudeSupportsSessionName: vi.fn(async () => state.nameSupported),
+}))
 
-import { callClaudeStreaming, type CallOptions } from './claude-bridge.js'
+import { callClaudeStreaming, preWarmCLI, type CallOptions } from './claude-bridge.js'
 
 const SID = '8f7a53b9-b478-4d88-88e4-4a915b256da5'
 
@@ -86,8 +90,8 @@ function callbacks(overrides: Record<string, unknown> = {}) {
   } as any
 }
 
-async function run(cosSession: string, options: Partial<CallOptions>, callbackSet = callbacks()) {
-  await callClaudeStreaming('hello', cosSession, callbackSet, 'opus', undefined, undefined, undefined, { lightweight: true, ...options })
+async function run(cosSession: string, options: Partial<CallOptions>, callbackSet = callbacks(), model: 'opus' | 'sonnet' = 'opus') {
+  await callClaudeStreaming('hello', cosSession, callbackSet, model, undefined, undefined, undefined, { lightweight: true, ...options })
   expect(state.child).toBeTruthy()
   return { callbackSet, args: state.spawnArgs.at(-1)! }
 }
@@ -97,14 +101,16 @@ function emit(...events: unknown[]) {
 }
 
 function nameOf(args: string[]): string | undefined {
-  const i = args.indexOf('--name')
-  return i === -1 ? undefined : args[i + 1]
+  const flag = args.find(arg => arg === '--name' || arg.startsWith('--name='))
+  if (!flag) return undefined
+  return flag === '--name' ? args[args.indexOf(flag) + 1] : flag.slice('--name='.length)
 }
 
 afterEach(() => {
   state.child = null
   state.spawnArgs.length = 0
   state.updateClaudeRun.mockClear()
+  state.nameSupported = true
 })
 
 describe('6.58.2: a New session is named after its task, and names itself at once', () => {
@@ -114,14 +120,27 @@ describe('6.58.2: a New session is named after its task, and names itself at onc
     expect(args).not.toContain('--resume')
   })
 
+  it('passes the name as one --name=<name> argument, so a name that starts with a dash stays a name', async () => {
+    const { args } = await run('work-new-dash', { sessionName: '--help me ship' })
+    expect(args).toContain('--name=--help me ship')
+    expect(args).not.toContain('--name')
+  })
+
+  it('a Claude CLI without --name runs the session unnamed', async () => {
+    state.nameSupported = false
+    const { args } = await run('work-new-old-cli', { sessionName: 'Task title' })
+    expect(nameOf(args)).toBeUndefined()
+    expect(args.some(arg => arg.startsWith('--name'))).toBe(false)
+  })
+
   it('no name asked, no --name', async () => {
     const { args } = await run('work-new-2', {})
-    expect(args).not.toContain('--name')
+    expect(args.some(arg => arg.startsWith('--name'))).toBe(false)
   })
 
   it('a read-only dispatch is never named', async () => {
     const { args } = await run('work-new-3', { sessionName: 'x', dispatch: { restricted: true, tools: ['Read'] } })
-    expect(args).not.toContain('--name')
+    expect(args.some(arg => arg.startsWith('--name'))).toBe(false)
   })
 
   it('a Continue into the session it already has is never renamed', async () => {
@@ -132,7 +151,21 @@ describe('6.58.2: a New session is named after its task, and names itself at onc
     const second = await run('work-cont-1', { sessionName: 'Task title' })
     expect(second.args).toContain('--resume')
     expect(second.args[second.args.indexOf('--resume') + 1]).toBe(SID)
-    expect(second.args).not.toContain('--name')
+    expect(nameOf(second.args)).toBeUndefined()
+  })
+
+  it('a named New session never takes the warmed session; the next unnamed one still does', async () => {
+    const WARM = '0b7c2a4e-5d1f-4c3b-9a8e-7f6d5c4b3a21'
+    const warming = preWarmCLI()
+    state.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ready', session_id: WARM }) + '\n'))
+    state.child.emit('close', 0)
+    await warming
+    const named = await run('work-warm-1', { sessionName: 'Task title' }, callbacks(), 'sonnet')
+    expect(named.args).not.toContain('--resume')
+    expect(nameOf(named.args)).toBe('Task title')
+    const unnamed = await run('glasses-warm-2', {}, callbacks(), 'sonnet')
+    expect(unnamed.args[unnamed.args.indexOf('--resume') + 1]).toBe(WARM)
+    expect(nameOf(unnamed.args)).toBeUndefined()
   })
 
   it('the first event that names the session links it, once, long before the result', async () => {

@@ -60,6 +60,7 @@ import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail, type JobTrailDraft } from './job-trail.js'
+import { claudeSupportsSessionName } from './claude-cli-support.js'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -542,7 +543,10 @@ export async function callClaudeStreaming(
   // Check if we have a prior CLI session for this COS session.
   // If not, use the pre-warmed session (eliminates 2-15s cold start on first query).
   // Restricted dispatch never steals the pre-warmed unrestricted session.
-  if (!options?.dispatch && !existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL) {
+  // 6.58.2: nor does a named New session (COS Control Work). The warmed session opens with the
+  // boot prompt "ready" under the glasses prompt; a session someone will open in the Claude app
+  // under its task's name starts clean.
+  if (!options?.dispatch && !options?.sessionName && !existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL) {
     // Only the default model consumes the pre-warmed session.
     // Hey Even (Haiku) cold-starts its own session to avoid model contamination.
     existingCliSession = preWarmedCliSessionId
@@ -587,9 +591,10 @@ export async function callClaudeStreaming(
     // Resume prior CLI session — reuses cached context, avoids cold start
     args.push('--resume', existingCliSession)
   }
-  // 6.58.2: name the session this COS session starts (never a Continue, never a dispatch).
-  if (startsOwnCliSession && !options?.dispatch && options?.sessionName) {
-    args.push('--name', options.sessionName)
+  // 6.58.2: name the session this COS session starts (never a Continue, never a dispatch), when
+  // the installed CLI takes --name. The `=` form keeps a name that starts with a dash a value.
+  if (startsOwnCliSession && !options?.dispatch && options?.sessionName && await claudeSupportsSessionName()) {
+    args.push(`--name=${options.sessionName}`)
   }
 
   // Strip CLAUDECODE env var so claude -p doesn't think it's nested
@@ -888,8 +893,9 @@ export async function callClaudeStreaming(
       try {
         const event = JSON.parse(trimmed)
 
-        // 6.58.2: the first event that carries the session id (a hook or init line, within a
-        // second of the start) links the run and the job to it; the result still confirms it.
+        // 6.58.2: the first event that carries the session id (a hook or init line, before any
+        // answer text) links the run and the job to it. At completion the result's id is
+        // recorded as before, so the finished job names the session the result names.
         if (!nativeSessionAnnounced && !options?.dispatch && typeof event.session_id === 'string' && event.session_id) {
           nativeSessionAnnounced = true
           updateClaudeRun(run.runId, { cliSessionId: event.session_id })
