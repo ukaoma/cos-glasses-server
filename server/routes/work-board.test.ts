@@ -11,7 +11,7 @@ import { resolveSavedMeetingDetail } from './meetings.js'
 const servers: Server[] = []
 afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r())))) })
 async function setup(writable = true, overrides: Record<string, unknown> = {}) {
-  const deps = { activity: vi.fn(() => ({version:1 as const,available:true,activities:[]})), list: vi.fn(async () => [{ id:'a'.repeat(12), workStage:'built', workIdentity:'stable', workRevision:'b'.repeat(64), meetingRefs:[] }] as any),
+  const deps = { journal: vi.fn((): any => ({available:true,receipts:[],drafts:[]})), list: vi.fn(async () => [{ id:'a'.repeat(12), workStage:'built', workIdentity:'stable', workRevision:'b'.repeat(64), meetingRefs:[] }] as any),
     capabilities: vi.fn(async () => ({version:writable ? 1 : 0,writable})), stage:vi.fn(async()=>{}), link:vi.fn(async()=>{}),
     resolveMeeting: vi.fn(async()=>({recordId:'meeting:one',title:'Canonical title'}) as any) }
   const app=express();app.use(express.json({limit:'16kb'}));app.use('/api',(req,res,next)=>req.header('X-COS-Token')==='fixture-token'?next():res.sendStatus(401));Object.assign(deps,overrides);app.use('/api',createWorkBoardRouter(deps))
@@ -78,10 +78,10 @@ it('activity endpoint authenticates and admits only exact task identity, never a
  expect((await fetch(s.base+suffix)).status).toBe(401)
  const headers={'X-COS-Token':'fixture-token'}
  expect((await fetch(s.base+suffix,{headers})).status).toBe(200)
- expect(s.deps.activity).toHaveBeenCalledExactlyOnceWith('business',target.id)
- s.deps.activity.mockClear()
+ expect(s.deps.journal).toHaveBeenCalledExactlyOnceWith()
+ s.deps.journal.mockClear()
  for(const query of ['&path=/private/journal','&workIdentity=bad','&domain=../private']) expect((await fetch(s.base+suffix+query,{headers})).status).toBe(400)
- expect(s.deps.activity).not.toHaveBeenCalled()
+ expect(s.deps.journal).not.toHaveBeenCalled()
 })
 
 /**
@@ -114,4 +114,65 @@ it('links a real operations meeting chosen from the meeting list, and still refu
     if(prior==null) delete process.env.COS_OPERATIONS_DIR; else process.env.COS_OPERATIONS_DIR=prior
     rmSync(base,{recursive:true,force:true})
   }
+})
+
+// ---- 6.59.0: S1 capabilities and saved destination, S2 open list over HTTP ----
+import { realpathSync } from 'node:fs'
+import { readWorkJournal, controlSnapshotRevision, WORK_ACTIVITY_STAGES } from '../lib/work-activity.js'
+import { WORK_STAGES } from '../lib/task-store.js'
+const identity = 'a'.repeat(12)
+const secretWords = ['SECRET detail','SECRET prompt','SECRET result','Private task','SECRET event','SECRET draft prompt']
+const tmpRoots: string[] = []
+afterEach(() => tmpRoots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })))
+const receiptFor = (patch: Record<string, unknown> = {}) => ({ id:'one', workID:`task:business:${identity}`, workTitle:'Private task', sourceRevision:'r', mode:'continueSession', provider:'codex',
+  modelID:'codex-frontier', sessionID:'codex:owned', sessionTitle:'Recorded target', status:'running', detail:'SECRET detail', prompt:'SECRET prompt', result:'SECRET result',
+  createdAt:Math.floor(Date.now()/1000) - 60, progress:{ tag:identity, events:[{id:'e',at:Math.floor(Date.now()/1000) - 30,kind:'received',text:'SECRET event'}],
+  reported:'needsInput', reportedBy:'session', evidence:'Which footer?', receivedAt:Math.floor(Date.now()/1000) - 30, seenReplies:[], notified:[] }, ...patch })
+const boardRow = { id:identity, domain:'business', title:'Board title', text:'Board text', workIdentity:identity, workRevision:'b'.repeat(64), meetingRefs:[], checked:false }
+function journalFile(receipts: unknown[], drafts: unknown[] = []) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'work-board-journal-'))); tmpRoots.push(root)
+  const journalPath = join(root, 'handoffs.json'); writeFileSync(journalPath, JSON.stringify({ version:2, receipts, sessions:[], drafts }), { mode:0o600 })
+  return () => readWorkJournal({ journalPath })
+}
+const headers = { 'X-COS-Token':'fixture-token' }
+const noSecrets = (text: string) => { for (const word of secretWords) expect(text).not.toContain(word) }
+
+it('stage names in the activity projection are the board\'s Work stages', () => {
+  expect([...WORK_ACTIVITY_STAGES]).toEqual([...WORK_STAGES])
+})
+it('S1 answers capabilities with progress, and requests only when the inbox opened; an unavailable journal still says so', async () => {
+  const off = await setup(true, { journal: journalFile([receiptFor()]) })
+  const body = await (await fetch(off.base + '/activity?domain=business&workIdentity=' + identity, { headers })).json()
+  expect(body.capabilities).toEqual({ progress:1, requests:0 }); expect(body.activities[0]).toMatchObject({ status:'running', progress:{ reported:'needsInput', evidence:'Which footer?' } })
+  const on = await setup(true, { journal: () => ({ available:false, reason:'No native Work history is available on this host.' }), requestsAvailable: () => true })
+  expect(await (await fetch(on.base + '/activity?domain=business&workIdentity=' + identity, { headers })).json())
+    .toEqual({ version:1, available:false, reason:'No native Work history is available on this host.', capabilities:{ progress:1, requests:1 }, activities:[] })
+})
+it('S1 carries the saved destination at the top level, reads the board only when a draft exists, and survives a board failure', async () => {
+  const draft = { sourceID:`task:business:${identity}`, sourceRevision:controlSnapshotRevision(boardRow), mode:'fork', sessionID:'claude:parent-1', provider:'', modelID:'', prompt:'SECRET draft prompt', editVersion:2 }
+  const s = await setup(true, { journal: journalFile([receiptFor()], [draft]) }); s.deps.list.mockResolvedValue([boardRow])
+  const response = await fetch(s.base + '/activity?domain=business&workIdentity=' + identity, { headers }), text = await response.text()
+  expect(JSON.parse(text).savedDestination).toEqual({ mode:'fork', provider:'claude', sessionId:'claude:parent-1' }); noSecrets(text)
+  expect(JSON.parse(text).activities[0]).not.toHaveProperty('savedDestination')
+  const none = await setup(true, { journal: journalFile([receiptFor()]) })
+  await fetch(none.base + '/activity?domain=business&workIdentity=' + identity, { headers }); expect(none.deps.list).not.toHaveBeenCalled()
+  const down = await setup(true, { journal: journalFile([receiptFor()], [draft]) }); down.deps.list.mockRejectedValue(new Error('bridge down'))
+  const body = await (await fetch(down.base + '/activity?domain=business&workIdentity=' + identity, { headers })).json()
+  expect(body.available).toBe(true); expect(body.activities).toHaveLength(1); expect(body).not.toHaveProperty('savedDestination')
+})
+it('S2 lists open work with board titles, takes no parameters, and says when the journal or board is unavailable', async () => {
+  const s = await setup(true, { journal: journalFile([receiptFor()]), requestsAvailable: () => true }); s.deps.list.mockResolvedValue([boardRow])
+  expect((await fetch(s.base + '/activity/open')).status).toBe(401)
+  const response = await fetch(s.base + '/activity/open', { headers }), text = await response.text(), body = JSON.parse(text)
+  expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('private, no-store')
+  expect(body).toMatchObject({ version:1, available:true, capabilities:{ progress:1, requests:1 } })
+  expect(body.items).toEqual([expect.objectContaining({ id:'one', workIdentity:identity, domain:'business', title:'Board title', progress:expect.objectContaining({ reported:'needsInput' }) })])
+  noSecrets(text)
+  for (const query of ['?domain=business', '?limit=100']) expect((await fetch(s.base + '/activity/open' + query, { headers })).status).toBe(400)
+  s.deps.list.mockRejectedValue(new Error('bridge down'))
+  expect(await (await fetch(s.base + '/activity/open', { headers })).json()).toMatchObject({ available:false, items:[] })
+  const off = await setup(true, { journal: () => ({ available:false, reason:'Native Work history is not safely readable.' }) })
+  expect(await (await fetch(off.base + '/activity/open', { headers })).json())
+    .toEqual({ version:1, available:false, reason:'Native Work history is not safely readable.', capabilities:{ progress:1, requests:0 }, items:[] })
+  expect(off.deps.list).not.toHaveBeenCalled()
 })

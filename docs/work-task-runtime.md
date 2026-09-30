@@ -62,12 +62,20 @@ platforms, isolated runtimes, missing/unsafe/malformed journals report
 `available:false`, not a successful empty history. Custom data roots are treated
 as isolated for native-journal reading. There is no request-supplied file path.
 
-Only receipt identity/status/provider/session fields are projected. Prompt, detail,
-result, draft and source text are never returned. Error text is generic. Session
-ownership is never inferred from titles. `sending`/`preparing` project as unknown;
-queued/delivered receipts are not task completion. The journal has no per-receipt
-update timestamp, so no fabricated `updatedAt` is emitted. This endpoint does not
-poll providers, resend work or mutate the native journal.
+Receipt identity/status/provider/session fields are projected, and since 6.59.0
+also mode, model slot, times, acknowledgement, app and server ownership, and COS
+Control's own progress record: the report (done, needs input, blocked), who made it,
+its evidence, when the session received the work, the newest automatic move and
+whether moves are paused (`docs/work-handoff-requests.md`). Evidence is the one piece
+of session-derived text: Miles approved returning it on 2026-09-30, at most 280
+characters with control characters as spaces. Prompt, detail, result, work title,
+draft and source text and progress event text are never returned. Error text is
+generic. Session ownership is never inferred from titles. `sending`/`preparing`
+project as unknown; queued/delivered receipts are not task completion. `updatedAt` is
+the newest progress event Control recorded, else the receipt's `createdAt`; nothing
+is fabricated. A malformed progress block is dropped on its own and never makes the
+journal unavailable. This endpoint does not poll providers, resend work or mutate
+the native journal.
 
 ## Qualification
 

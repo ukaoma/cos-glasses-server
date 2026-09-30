@@ -125,9 +125,11 @@ import { createQueryJobsRouter } from './routes/query-jobs.js'
 import { createWorkReviewsRouter } from './routes/work-reviews.js'
 import { createWorkBoardRouter } from './routes/work-board.js'
 import { createWorkIntakeRouter } from './routes/work-intake.js'
+import { createWorkHandoffRequestsRouter } from './routes/work-handoff-requests.js'
 import { createJevRouter } from './routes/jev.js'
 import { dataPath } from './lib/data-dir.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
+import { WorkHandoffRequestStore, createOptionalWorkHandoffRequestStore } from './lib/work-handoff-requests.js'
 import { createDefaultWorkReviewRuntime } from './lib/work-review-backend.js'
 import { createMorningBriefRouter } from './routes/morning-brief.js'
 import { getMorningBriefScheduler, startMorningBriefScheduler, stopMorningBriefScheduler } from './lib/morning-brief-runtime.js'
@@ -625,7 +627,11 @@ app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
 }))
 const workReviewRuntime = createDefaultWorkReviewRuntime()
 app.use('/api', createWorkReviewsRouter(workReviewRuntime))
-app.use('/api', createWorkBoardRouter())
+// Work handoff requests (6.59.0): the glasses ask for Work to start and COS Control claims them. Optional: a bad
+// journal answers 503 and `capabilities.requests: 0`, never blocks boot. The server runs no provider for a request.
+const workHandoffRequestStore = createOptionalWorkHandoffRequestStore(() => new WorkHandoffRequestStore(dataPath('work-handoff-requests')))
+app.use('/api', createWorkBoardRouter({ requestsAvailable: () => workHandoffRequestStore !== null }))
+app.use('/api', createWorkHandoffRequestsRouter({ store: workHandoffRequestStore }))
 // Work intake (6.57.0): meeting-derived suggestions, asks and review items. Optional: a bad journal never blocks boot.
 const workIntakeStore = createOptionalWorkIntakeStore(() => new WorkIntakeStore(dataPath('work-intake')))
 app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
@@ -948,6 +954,7 @@ async function gracefulShutdown(): Promise<void> {
   stopMorningBriefScheduler()
   await workReviewRuntime?.close()
   workIntakeStore?.close()
+  workHandoffRequestStore?.close()
   stopMeetingImportScheduler()
   stopMeetingMergeScheduler()
   sessionHooksRuntime.stop()

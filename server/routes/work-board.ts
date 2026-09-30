@@ -1,5 +1,6 @@
 import { Router } from 'express'
-import { readWorkActivity } from '../lib/work-activity.js'
+import { readWorkJournal, projectWorkActivity, projectOpenWork, savedDestinationFor, type WorkActivityCapabilities,
+  type WorkActivityResult } from '../lib/work-activity.js'
 import { listBoard, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, TaskRunError, TaskBridgeError,
   WORK_STAGES, type WorkStage, type WorkMeetingRef } from '../lib/task-store.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
@@ -8,15 +9,19 @@ import { resolveSavedMeetingDetail } from './meetings.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
 
 export interface WorkBoardDependencies {
-  activity: typeof readWorkActivity
+  /** The native journal reader. It takes no request-derived argument: there is no request-supplied path. */
+  journal: () => ReturnType<typeof readWorkJournal>
   list: typeof listBoard
   capabilities: typeof workBoardCapabilities
   stage: typeof setTaskWorkStage
   link: typeof linkTaskMeeting
   resolveMeeting: (descriptor: MeetingDescriptor) => MeetingDetail | Promise<MeetingDetail>
+  /** 6.59.0: whether the handoff request inbox opened on this server (capabilities.requests). */
+  requestsAvailable: () => boolean
+  now: () => number
 }
-const defaults: WorkBoardDependencies = { activity: readWorkActivity, list: listBoard, capabilities: workBoardCapabilities,
-  stage: setTaskWorkStage, link: linkTaskMeeting, resolveMeeting: resolveSavedMeetingDetail }
+const defaults: WorkBoardDependencies = { journal: () => readWorkJournal(), list: listBoard, capabilities: workBoardCapabilities,
+  stage: setTaskWorkStage, link: linkTaskMeeting, resolveMeeting: resolveSavedMeetingDetail, requestsAvailable: () => false, now: () => Date.now() }
 
 /** Auth is supplied by the parent /api mount. No provider execution occurs here. */
 export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> = {}): Router {
@@ -26,14 +31,37 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
     const status = e instanceof TaskRunError ? e.status : e instanceof TaskBridgeError ? (e.code === 'task_not_found' ? 404 : 409) : 503
     return res.status(status).json({ error: { code: e instanceof TaskRunError || e instanceof TaskBridgeError ? e.code : 'work_board_unavailable', message: e instanceof TaskRunError || e instanceof TaskBridgeError ? e.message : 'Work board is unavailable. Refresh before trying again.' } })
   }
-  router.get('/work-board/activity', (req, res) => {
+  const activityCapabilities = (): WorkActivityCapabilities => ({ progress: 1, requests: deps.requestsAvailable() ? 1 : 0 })
+  router.get('/work-board/activity', async (req, res) => {
     const { domain, workIdentity } = req.query
     if (Object.keys(req.query).some(key => !['domain', 'workIdentity'].includes(key))
       || typeof domain !== 'string' || !isSafeDomainName(domain)
       || typeof workIdentity !== 'string' || !/^[a-f0-9]{12}$/.test(workIdentity)) {
       return res.status(400).json({ error: { code: 'invalid_work_identity', message: 'Select an exact task and domain.' } })
     }
-    return res.json(deps.activity(domain, workIdentity))
+    const capabilities = activityCapabilities(), journal = deps.journal()
+    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, activities: [] } satisfies WorkActivityResult)
+    const result: WorkActivityResult = { version: 1, available: true, capabilities, activities: projectWorkActivity(journal, domain, workIdentity) }
+    // S4: only when Control saved a draft for this item. The draft counts for the task's current revision, which needs
+    // its board row; without the board the activity still answers.
+    if (journal.drafts.some(draft => draft.sourceID === `task:${domain}:${workIdentity}`)) {
+      try {
+        const row = (await deps.list()).find(r => r.domain === domain && (r.workIdentity || r.id) === workIdentity)
+        const destination = row ? savedDestinationFor(journal, row) : undefined
+        if (destination) result.savedDestination = destination
+      } catch { /* no board, no saved destination */ }
+    }
+    return res.json(result)
+  })
+  // S2: every open handoff across the board, needs input first. Read-only: no provider call, no Jev.
+  router.get('/work-board/activity/open', async (req, res) => {
+    if (Object.keys(req.query).length) return res.status(400).json({ error: { code: 'invalid_open_activity_request', message: 'This list takes no parameters.' } })
+    const capabilities = activityCapabilities(), journal = deps.journal()
+    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, items: [] })
+    let rows: Awaited<ReturnType<typeof listBoard>>
+    try { rows = await deps.list() }
+    catch { return res.json({ version: 1, available: false, reason: 'Work board is unavailable. Refresh before trying again.', capabilities, items: [] }) }
+    return res.json({ version: 1, available: true, capabilities, items: projectOpenWork(journal, rows, deps.now()) })
   })
   router.get('/work-board', async (_req, res) => {
     try {
