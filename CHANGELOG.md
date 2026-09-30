@@ -1,3 +1,13 @@
+## 6.58.2
+
+### A New session from Work is named after its task, and visible from its first second
+
+- Miles, 2026-09-29 at 20:40, on the first COS Control 0.5.249 New session (job c3878966, 20:36:49 to 20:39:11): Control opened it in Claude 31 s after the run ended, and it sat at the top of the MU-Chief-Staff sidebar as "General coding session". "This is super generic. It should be based off of the same name of the task that we're sending in." And while it ran: "I don't see anything in the sidebar ... We should probably show the session behind this." The card said "session live status unavailable" and Sessions listed the run as a COS server job.
+- **A new Claude session is named.** A query job may carry `sessionName` (sanitized: control and direction characters become spaces, whitespace collapses, at most 100 characters cut on a word boundary). When the job starts a Claude session of its own, the server runs `claude --name <name>`, which writes the session's title; the Claude app shows it in the sidebar. Never on a Continue into a session the COS session already has, never on a read-only dispatch. The name is outside the request fingerprint, so a retry that renames the same job is the same job, and an older server drops the field.
+- **The job names its Claude session at once.** Claude announces its session id in its first stream event (a hook or init line, within a second of the start); before this the server recorded it only with the final result, so a New session from Work could not be linked, shown or opened while it ran. The server now records it on the run and on the job (`cliSessionId`, through the same link update as the provider process) from that first event. The result still confirms it.
+- Proven on this Mac first (claude 2.1.285): `claude -p --name` writes `{"type":"custom-title",...}` into the transcript, the same line the Claude app shows as a session's name, and every stream event, from the first hook line, carries the session id.
+- Tests: the name's sanitizing and word-boundary cut (including a name exactly at the limit), the request carrying it outside the fingerprint, `--name` only for a session the COS session starts (not a Continue, not a dispatch), the first event with an id linking once (not an event without one, not a dispatch), the job showing the session while still running and keeping it at completion, a link after the job ended changing nothing, and the runtime passing the name down and the early id up. Mutation gate: 16 of 16 killed from a green baseline (one survivor on the first run, the exact-limit boundary, found a test that could not see it; now covered).
+
 ## 6.58.1
 
 ### A copy that lost its audio no longer holds the ring

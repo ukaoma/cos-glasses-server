@@ -266,6 +266,41 @@ describe('QueryJobCoordinator provider ownership', () => {
     expect(await value.getSnapshot(admitted.job.jobId)).toMatchObject({ status: 'canceled', partialText: '' })
   })
 
+  it('6.58.2: a session the provider names mid-run is on the job while it is still running', async () => {
+    const SID = '8f7a53b9-b478-4d88-88e4-4a915b256da5'
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const value = await coordinator(async ctx => {
+      await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude', resolvedModel: 'opus' })
+      await ctx.callbacks.onProviderProcess({ provider: 'claude', claudeRunId: 'claude-run-1' })
+      await ctx.callbacks.onLinkage?.({ provider: 'claude', cliSessionId: SID })
+      await gate
+      await ctx.callbacks.onDone({ text: 'done' })
+    })
+    const admitted = await value.submit(admission())
+    const running = await waitFor(() => value.getSnapshot(admitted.job.jobId), job => job?.cliSessionId === SID)
+    expect(running).toMatchObject({ status: 'running', cliSessionId: SID, claudeRunId: 'claude-run-1' })
+    release()
+    const completed = await waitFor(() => value.getSnapshot(admitted.job.jobId), job => job?.status === 'completed')
+    expect(completed.cliSessionId).toBe(SID)
+  })
+
+  it('6.58.2: a link that arrives after the job ended changes nothing', async () => {
+    let context: QueryJobRunnerContext | undefined
+    const value = await coordinator(async ctx => {
+      context = ctx
+      await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude' })
+      return new Promise<void>(() => {})
+    })
+    const admitted = await value.submit(admission())
+    await waitFor(() => context, Boolean)
+    await value.cancel(admitted.job.jobId, 1)
+    await context!.callbacks.onLinkage?.({ provider: 'claude', cliSessionId: '8f7a53b9-b478-4d88-88e4-4a915b256da5' })
+    const job = await value.getSnapshot(admitted.job.jobId)
+    expect(job).toMatchObject({ status: 'canceled' })
+    expect(job?.cliSessionId).toBeUndefined()
+  })
+
   it('treats answer-ready as the commit point and refuses a late cancel', async () => {
     let context: QueryJobRunnerContext | undefined
     const value = await coordinator(async ctx => {

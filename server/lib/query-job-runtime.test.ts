@@ -206,6 +206,38 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
+  it('6.58.2: a New session carries its name to the provider, and the session it names mid-run lands on the job', async () => {
+    const SID = '8f7a53b9-b478-4d88-88e4-4a915b256da5'
+    mocks.callModelStreaming.mockImplementationOnce(async (
+      _query: string,
+      sessionId: string,
+      callbacks: Record<string, (...args: any[]) => unknown>,
+    ) => {
+      await callbacks.onStart?.('opus', sessionId, undefined, {})
+      await callbacks.onProviderProcess?.({ provider: 'claude', runId: 'claude-run-9' })
+      callbacks.onNativeSession?.({ cliSessionId: SID })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      // The result names no session: only the mid-run link can have put it on the job.
+      await callbacks.onDone?.('named answer', 'opus', undefined, { claudeRunId: 'claude-run-9' })
+      return sessionId
+    })
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const prepared = await runtime.preparePublicDurableQueryAdmission({
+      clientJobId: randomUUID(),
+      generation: 1,
+      query: 'Prepare the next reviewable result',
+      sessionId: 'work-session-9',
+      model: 'opus',
+      sessionName: 'Get the live Small Business Season site URL',
+    })
+    const admission = await runtime.queryJobCoordinator.submit(prepared)
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(admission.job.jobId))
+    expect(mocks.callModelStreaming.mock.calls.at(-1)![7]).toMatchObject({ sessionName: 'Get the live Small Business Season site URL' })
+    expect(await runtime.queryJobCoordinator.getSnapshot(admission.job.jobId)).toMatchObject({ status: 'completed', cliSessionId: SID })
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
   it('carries a routine origin onto the bus and both projected exchanges', async () => {
     const runtime = await import('./query-job-runtime.js')
     await runtime.initQueryJobRuntime()

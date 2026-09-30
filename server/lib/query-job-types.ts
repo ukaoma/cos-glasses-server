@@ -120,6 +120,32 @@ export interface QueryJobRequest {
   origin?: QueryJobOrigin
   /** Read-only dispatch constraint. Excluded from the fingerprint. */
   dispatch?: { restricted: true; tools: readonly string[] }
+  /**
+   * 6.58.2: the display name a NEW Claude session gets (`claude --name`), so a session COS
+   * Control starts for a Work item shows under that item's name in the Claude app instead of
+   * "General coding session". Sanitized by sanitizeSessionName. Excluded from the fingerprint:
+   * it names the session, it does not change what is asked.
+   */
+  sessionName?: string
+}
+
+/** 6.58.2: longest session name kept (the Claude sidebar shows about 40 characters). */
+export const QUERY_JOB_SESSION_NAME_MAX = 100
+
+/**
+ * 6.58.2: a display name, or undefined. Control characters (bidi overrides included) become
+ * spaces, runs of whitespace collapse, and anything past QUERY_JOB_SESSION_NAME_MAX is cut on
+ * a word boundary when there is one. Never throws: a bad name is no name.
+ */
+export function sanitizeSessionName(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  // eslint-disable-next-line no-control-regex
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!flat) return undefined
+  if (flat.length <= QUERY_JOB_SESSION_NAME_MAX) return flat
+  const cut = flat.slice(0, QUERY_JOB_SESSION_NAME_MAX)
+  const space = cut.lastIndexOf(' ')
+  return (space >= QUERY_JOB_SESSION_NAME_MAX / 2 ? cut.slice(0, space) : cut).trim()
 }
 
 export const DISPATCH_ALLOWED_TOOLS = ['Read', 'Grep', 'Glob'] as const
@@ -395,6 +421,7 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     ...(handoffCode ? { handoffCode } : {}),
     ...(input.handoffLatest === true ? { handoffLatest: true } : {}),
     ...(clientQueueItemId ? { clientQueueItemId } : {}),
+    ...(sanitizeSessionName(input.sessionName) ? { sessionName: sanitizeSessionName(input.sessionName) } : {}),
     attachmentIds,
     attachmentRefs,
     activityToolMode,
@@ -464,7 +491,7 @@ export const FINGERPRINT_KEYS = [
 /** The request keys deliberately OUTSIDE the identity. Every key of
  * `QueryJobRequest` must appear in exactly one of the two lists: adding a key
  * without naming it here or above fails to compile, so the author picks a side. */
-export const FINGERPRINT_EXCLUDED = ['origin', 'dispatch'] as const satisfies readonly (keyof QueryJobRequest)[]
+export const FINGERPRINT_EXCLUDED = ['origin', 'dispatch', 'sessionName'] as const satisfies readonly (keyof QueryJobRequest)[]
 type FingerprintUncovered = Exclude<keyof QueryJobRequest, typeof FINGERPRINT_KEYS[number] | typeof FINGERPRINT_EXCLUDED[number]>
 export const FINGERPRINT_KEYS_COVER_REQUEST: FingerprintUncovered extends never ? true : never = true
 

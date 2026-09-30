@@ -156,7 +156,8 @@ describe('the fingerprint pick', () => {
     expect(FINGERPRINT_KEYS).not.toContain('origin')
     // Every request key is in exactly one list; the type-level assertion is
     // what fails a build when a key is added without picking a side.
-    expect([...FINGERPRINT_EXCLUDED]).toEqual(['origin', 'dispatch'])
+    // 6.58.2: a session's display name does not change what is asked.
+    expect([...FINGERPRINT_EXCLUDED]).toEqual(['origin', 'dispatch', 'sessionName'])
     expect(FINGERPRINT_KEYS_COVER_REQUEST).toBe(true)
   })
 

@@ -340,6 +340,12 @@ export interface StreamCallbacks {
   /** 6.52.0: readable steps of a durable Messages job (lib/job-trail.ts). Optional, and
    * absent on every path that is not a durable job with the trail on. */
   onTrail?: (draft: JobTrailDraft) => void
+  /**
+   * 6.58.2: the provider named its own session, at the start of the run. Claude announces
+   * its session id in the first stream event; before this the id reached the job only with
+   * the result, so COS Control could not show a New session from Work while it ran.
+   */
+  onNativeSession?: (linkage: { cliSessionId: string }) => void
 }
 
 /** Claude CLI can emit `subtype: success` with `is_error: true`; the boolean
@@ -395,6 +401,8 @@ export interface CallOptions {
   sessionLockHeld?: boolean
   /** Read-only scheduled-task dispatch. Same shape as QueryJobRequest.dispatch. */
   dispatch?: { restricted: true; tools: readonly string[] }
+  /** 6.58.2: `claude --name` for a session this COS session starts fresh (QueryJobRequest.sessionName). */
+  sessionName?: string
 }
 
 export async function callClaudeStreaming(
@@ -426,6 +434,9 @@ export async function callClaudeStreaming(
   // Pass existing CLI session ID if resuming (new sessions get it after first result)
   const resolvedCliKey = cliSessionKey(sid, resolvedModel)
   let existingCliSession = options?.dispatch ? undefined : cliSessionMap.get(resolvedCliKey)
+  // 6.58.2: decided before the pre-warmed session below stands in: a COS session that has no
+  // Claude session of its own yet starts one here, and only that one may be named.
+  const startsOwnCliSession = !existingCliSession
   callbacks.onStart?.(resolvedModel, sid, existingCliSession, {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
@@ -575,6 +586,10 @@ export async function callClaudeStreaming(
   if (existingCliSession) {
     // Resume prior CLI session — reuses cached context, avoids cold start
     args.push('--resume', existingCliSession)
+  }
+  // 6.58.2: name the session this COS session starts (never a Continue, never a dispatch).
+  if (startsOwnCliSession && !options?.dispatch && options?.sessionName) {
+    args.push('--name', options.sessionName)
   }
 
   // Strip CLAUDECODE env var so claude -p doesn't think it's nested
@@ -856,6 +871,8 @@ export async function callClaudeStreaming(
 
   // ─── Process stdout ───
 
+  // 6.58.2: onNativeSession fires once per run.
+  let nativeSessionAnnounced = false
   proc.stdout.on('data', (chunk: Buffer) => {
     resetInactivity()
     buffer += chunk.toString()
@@ -870,6 +887,14 @@ export async function callClaudeStreaming(
 
       try {
         const event = JSON.parse(trimmed)
+
+        // 6.58.2: the first event that carries the session id (a hook or init line, within a
+        // second of the start) links the run and the job to it; the result still confirms it.
+        if (!nativeSessionAnnounced && !options?.dispatch && typeof event.session_id === 'string' && event.session_id) {
+          nativeSessionAnnounced = true
+          updateClaudeRun(run.runId, { cliSessionId: event.session_id })
+          callbacks.onNativeSession?.({ cliSessionId: event.session_id })
+        }
 
         if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
           updateClaudeRun(run.runId, { resolvedModelId: event.model })

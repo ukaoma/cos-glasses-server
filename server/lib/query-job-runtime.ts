@@ -234,6 +234,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
               ? { ollamaRunId: metadata.runId }
               : { codexRunId: metadata.runId }),
       }),
+      // 6.58.2: the provider's own session id, as soon as it names it (Claude: first stream event).
+      onNativeSession: linkage => { void callbacks.onLinkage?.({ provider: 'claude', cliSessionId: linkage.cliSessionId }) },
       onChunk: text => { callbacks.onChunk(text) },
       onToolStatus: toolName => {
         const message = request.activityToolMode === 'off'
@@ -349,6 +351,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       attachmentPromptBlock: resolvedAttachments.promptBlock,
       sessionLockHeld: true,
       ...(request.dispatch ? { dispatch: request.dispatch } : {}),
+      ...(request.sessionName ? { sessionName: request.sessionName } : {}),
     },
   )
 }
