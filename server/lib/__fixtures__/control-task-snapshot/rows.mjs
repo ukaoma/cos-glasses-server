@@ -1,0 +1,20 @@
+const fam='\u{1F468}‍\u{1F469}‍\u{1F467}'
+const rows=[
+ { id:'a'.repeat(12), domain:'DNP study Café', title:'Fix the café',
+ text:'Fix the café menu \u{1F377} and the éclair line', doneWhen:'Menu live on mobile', source:'Meeting 2026-09-28',
+ meetingRefs:[{recordId:'ops:quilt:2026-09:2026-09-24_Bottle_QA.md',domain:'quilt',month:'2026-09',filename:'2026-09-24_Bottle_QA.md',title:'Bottle QA'},
+  {recordId:'unreadable',domain:'../quilt',month:'2026-09',filename:'x.md',title:'Control leaves this one out'},
+  {recordId:'ops:quilt:2026-09:b.md',domain:'quilt',month:'2026-09',filename:'b.md',title:'Second '+fam}] },
+ { id:'b'.repeat(12), domain:'personal', title:'Title only', text:'' },
+ { id:'b'.repeat(12), domain:'personal', title:'Title only' },
+ {id:'cccccccccccc',domain:'quilt',title:'T',text:'body',doneWhen:'x',source:'s',meetingRefs:[{recordId:'r1',domain:'quilt\n',month:'2026-09',filename:'f.md'}]},
+ {id:'dddddddddddd',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'r1',domain:'quilt',month:'2026-09\n',filename:'f.md',title:null}]},
+ {id:'eeeeeeeeeeee',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'r­x',domain:'quilt',month:'2026-09',filename:'f.md',title:5}]},
+ {id:'ffffffffffff',domain:'quilt',title:'T',text:'é',meetingRefs:[{recordId:'r',domain:'quilt',month:'2026-09',filename:'é.md'}]},
+ {id:'111111111111',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'r ',domain:'quilt',month:'2026-09',filename:'f.md'}]},
+ {id:'222222222222',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'r',domain:'quilt',month:'2026-09',filename:'f​.md'}]},
+ {id:'333333333333',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'r',domain:'quilt',month:'2026-09',filename:'\u0085f.md'}]},
+ {id:'444444444444',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'r',domain:'quilt',month:'2026-09',filename:'e̸/.md'}]},
+ {id:'555555555555',domain:'quilt',title:'T',text:'body',meetingRefs:[{recordId:'x'.repeat(2048)+'é',domain:'quilt',month:'2026-09',filename:'f.md'}]},
+]
+process.stdout.write(JSON.stringify(rows))

@@ -142,14 +142,23 @@ export const QUERY_JOB_SESSION_NAME_MAX = 100
  */
 export function sanitizeSessionName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
-  // eslint-disable-next-line no-control-regex
-  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim()
+  const flat = flattenDisplayText(raw)
   if (!flat) return undefined
   const chars = graphemes(flat)
   if (chars.length <= QUERY_JOB_SESSION_NAME_MAX) return flat
   const cut = chars.slice(0, QUERY_JOB_SESSION_NAME_MAX)
   const space = cut.lastIndexOf(' ')
   return (space >= QUERY_JOB_SESSION_NAME_MAX / 2 ? cut.slice(0, space) : cut).join('').trim()
+}
+
+/**
+ * 6.59.0: the character rules of sanitizeSessionName, shared with Work evidence (work-activity.ts). Control
+ * characters, zero-width spaces, direction marks and overrides and the byte-order mark become spaces; the joiners
+ * U+200C and U+200D stay; runs of whitespace (U+2028 and U+2029 included) collapse to one space. No length limit.
+ */
+export function flattenDisplayText(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
 const graphemeSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'

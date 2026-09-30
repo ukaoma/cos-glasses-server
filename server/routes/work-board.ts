@@ -1,8 +1,9 @@
 import { Router } from 'express'
-import { readWorkJournal, projectWorkActivity, projectOpenWork, savedDestinationFor, type WorkActivityCapabilities,
-  type WorkActivityResult } from '../lib/work-activity.js'
+import { readWorkJournal, projectWorkActivity, projectOpenWork, savedDestinationFor, controlSnapshotRevision,
+  type WorkActivityCapabilities, type WorkActivityResult } from '../lib/work-activity.js'
 import { listBoard, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, TaskRunError, TaskBridgeError,
-  WORK_STAGES, type WorkStage, type WorkMeetingRef } from '../lib/task-store.js'
+  WORK_STAGES, type WorkStage, type WorkMeetingRef, type TaskBoardRow } from '../lib/task-store.js'
+import { createWorkBoardReader, WORK_BOARD_READ_LIMITS, WorkBoardTimeoutError, type WorkBoardReader } from '../lib/work-board-reader.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
 import { isSafeDomainName } from '../lib/domains.js'
 import { resolveSavedMeetingDetail } from './meetings.js'
@@ -16,22 +17,37 @@ export interface WorkBoardDependencies {
   stage: typeof setTaskWorkStage
   link: typeof linkTaskMeeting
   resolveMeeting: (descriptor: MeetingDescriptor) => MeetingDetail | Promise<MeetingDetail>
-  /** 6.59.0: whether the handoff request inbox opened on this server (capabilities.requests). */
-  requestsAvailable: () => boolean
+  /** 6.59.0: the handoff request inbox as the glasses should see it (lib/work-handoff-requests.ts handoffRequestCapabilities). */
+  requests: () => Pick<WorkActivityCapabilities, 'requests' | 'requestsInbox' | 'requestsConsumerSeenAt'>
+  /** 6.59.0: the bounded, shared board read (5 s). Defaults to one over `list`. */
+  readBoard?: WorkBoardReader<TaskBoardRow>
   now: () => number
 }
 const defaults: WorkBoardDependencies = { journal: () => readWorkJournal(), list: listBoard, capabilities: workBoardCapabilities,
-  stage: setTaskWorkStage, link: linkTaskMeeting, resolveMeeting: resolveSavedMeetingDetail, requestsAvailable: () => false, now: () => Date.now() }
+  stage: setTaskWorkStage, link: linkTaskMeeting, resolveMeeting: resolveSavedMeetingDetail,
+  requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), now: () => Date.now() }
+/** How old a board read the activity and open-work glances accept (the reader shares one read between them). */
+export const WORK_GLANCE_BOARD_AGE_MS = 10_000
 
 /** Auth is supplied by the parent /api mount. No provider execution occurs here. */
 export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> = {}): Router {
   const deps = { ...defaults, ...overrides }, router = Router()
+  const board = deps.readBoard ?? createWorkBoardReader(() => deps.list())
   router.use('/work-board', (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
   const fail = (res: import('express').Response, e: unknown) => {
     const status = e instanceof TaskRunError ? e.status : e instanceof TaskBridgeError ? (e.code === 'task_not_found' ? 404 : 409) : 503
     return res.status(status).json({ error: { code: e instanceof TaskRunError || e instanceof TaskBridgeError ? e.code : 'work_board_unavailable', message: e instanceof TaskRunError || e instanceof TaskBridgeError ? e.message : 'Work board is unavailable. Refresh before trying again.' } })
   }
-  const activityCapabilities = (): WorkActivityCapabilities => ({ progress: 1, requests: deps.requestsAvailable() ? 1 : 0 })
+  const activityCapabilities = (): WorkActivityCapabilities => ({ progress: 1, ...deps.requests() })
+  /** The board within its bound, or null: the glances answer without it rather than keep the glasses waiting. */
+  const glanceBoard = async (where: string, timeoutMs?: number): Promise<TaskBoardRow[] | null> => {
+    try { return await board.read(WORK_GLANCE_BOARD_AGE_MS, timeoutMs) }
+    catch (e) {
+      const cause = e instanceof WorkBoardTimeoutError ? 'work_board_timeout' : e instanceof TaskRunError || e instanceof TaskBridgeError ? e.code : 'work_board_unavailable'
+      console.warn(`[work-board] ${where}: answered without the board (${cause})`)
+      return null
+    }
+  }
   router.get('/work-board/activity', async (req, res) => {
     const { domain, workIdentity } = req.query
     if (Object.keys(req.query).some(key => !['domain', 'workIdentity'].includes(key))
@@ -40,33 +56,33 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
       return res.status(400).json({ error: { code: 'invalid_work_identity', message: 'Select an exact task and domain.' } })
     }
     const capabilities = activityCapabilities(), journal = deps.journal()
-    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, activities: [] } satisfies WorkActivityResult)
-    const result: WorkActivityResult = { version: 1, available: true, capabilities, activities: projectWorkActivity(journal, domain, workIdentity) }
-    // S4: only when Control saved a draft for this item. The draft counts for the task's current revision, which needs
-    // its board row; without the board the activity still answers.
-    if (journal.drafts.some(draft => draft.sourceID === `task:${domain}:${workIdentity}`)) {
-      try {
-        const row = (await deps.list()).find(r => r.domain === domain && (r.workIdentity || r.id) === workIdentity)
-        const destination = row ? savedDestinationFor(journal, row) : undefined
-        if (destination) result.savedDestination = destination
-      } catch { /* no board, no saved destination */ }
-    }
+    // The task's revision and saved destination need its board row. Past the 5 s bound (or with no board) the activity
+    // still answers, without them.
+    // S4's budget is 3 s: the progress answers on time with or without the board.
+    const row = (await glanceBoard('activity', WORK_BOARD_READ_LIMITS.savedDestinationMs))?.find(r => r.domain === domain && (r.workIdentity || r.id) === workIdentity)
+    const taskRevision = row ? { taskRevision: controlSnapshotRevision(row) } : {}
+    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, activities: [], ...taskRevision } satisfies WorkActivityResult)
+    const result: WorkActivityResult = { version: 1, available: true, capabilities, activities: projectWorkActivity(journal, domain, workIdentity), ...taskRevision }
+    const destination = row ? savedDestinationFor(journal, row) : undefined
+    if (destination) result.savedDestination = destination
     return res.json(result)
   })
   // S2: every open handoff across the board, needs input first. Read-only: no provider call, no Jev.
   router.get('/work-board/activity/open', async (req, res) => {
     if (Object.keys(req.query).length) return res.status(400).json({ error: { code: 'invalid_open_activity_request', message: 'This list takes no parameters.' } })
     const capabilities = activityCapabilities(), journal = deps.journal()
-    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, items: [] })
-    let rows: Awaited<ReturnType<typeof listBoard>>
-    try { rows = await deps.list() }
-    catch { return res.json({ version: 1, available: false, reason: 'Work board is unavailable. Refresh before trying again.', capabilities, items: [] }) }
-    return res.json({ version: 1, available: true, capabilities, items: projectOpenWork(journal, rows, deps.now()) })
+    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, items: [], total: 0, truncated: false })
+    const rows = await glanceBoard('open work')
+    if (!rows) return res.json({ version: 1, available: false, reason: 'Work board is unavailable. Refresh before trying again.', capabilities, items: [], total: 0, truncated: false })
+    return res.json({ version: 1, available: true, capabilities, ...projectOpenWork(journal, rows, deps.now()) })
   })
   router.get('/work-board', async (_req, res) => {
     try {
+      const readStartedAt = deps.now()
       const [raw, capabilities] = await Promise.all([deps.list(), deps.capabilities()])
-      const tasks = raw.map(row => ({ ...row, workStage: row.checked ? 'complete' : row.workStage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'), workIdentity: row.workIdentity || row.id, meetingRefs: row.meetingRefs ?? [] }))
+      board.prime(raw, readStartedAt)
+      // 6.59.0: taskRevision is this task's own revision (COS Control's taskSnapshot), what a handoff request names.
+      const tasks = raw.map(row => ({ ...row, workStage: row.checked ? 'complete' : row.workStage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'), workIdentity: row.workIdentity || row.id, meetingRefs: row.meetingRefs ?? [], taskRevision: controlSnapshotRevision(row) }))
       res.json({ tasks, capabilities, complete: true })
     }
     catch (e) { fail(res, e) }

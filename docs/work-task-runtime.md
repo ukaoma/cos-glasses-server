@@ -63,18 +63,20 @@ platforms, isolated runtimes, missing/unsafe/malformed journals report
 as isolated for native-journal reading. There is no request-supplied file path.
 
 Receipt identity/status/provider/session fields are projected, and since 6.59.0
-also mode, model slot, times, acknowledgement, app and server ownership, and COS
-Control's own progress record: the report (done, needs input, blocked), who made it,
-its evidence, when the session received the work, the newest automatic move and
-whether moves are paused (`docs/work-handoff-requests.md`). Evidence is the one piece
-of session-derived text: Miles approved returning it on 2026-09-30, at most 280
-characters with control characters as spaces. Prompt, detail, result, work title,
+also mode, model slot, channel, times, acknowledgement, the session's app and server
+ownership (per session, across every receipt that names it), the request a receipt
+answered, and COS Control's own progress record: the report (done, needs input,
+blocked), who made it, its evidence, when the session received the work, the newest
+automatic move and whether moves are paused (`docs/work-handoff-requests.md`). Two
+projected fields are session-derived text: the session title (since 6.56.0) and the
+evidence, which Miles approved returning on 2026-09-30, at most 280 characters and
+1,200 UTF-16 units, cleaned as a session name is. Prompt, detail, result, work title,
 draft and source text and progress event text are never returned. Error text is
 generic. Session ownership is never inferred from titles. `sending`/`preparing`
 project as unknown; queued/delivered receipts are not task completion. `updatedAt` is
 the newest progress event Control recorded, else the receipt's `createdAt`; nothing
-is fabricated. A malformed progress block is dropped on its own and never makes the
-journal unavailable. This endpoint does not poll providers, resend work or mutate
+is fabricated. A malformed progress block reads `{ unreadable: true }` on its own and
+never makes the journal unavailable. This endpoint does not poll providers, resend work or mutate
 the native journal.
 
 ## Qualification

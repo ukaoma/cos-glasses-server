@@ -116,16 +116,17 @@ it('links a real operations meeting chosen from the meeting list, and still refu
   }
 })
 
-// ---- 6.59.0: S1 capabilities and saved destination, S2 open list over HTTP ----
+// ---- 6.59.0: S1 capabilities, task revision and saved destination, S2 open list over HTTP ----
 import { realpathSync } from 'node:fs'
 import { readWorkJournal, controlSnapshotRevision, WORK_ACTIVITY_STAGES } from '../lib/work-activity.js'
+import { createWorkBoardReader } from '../lib/work-board-reader.js'
 import { WORK_STAGES } from '../lib/task-store.js'
-const identity = 'a'.repeat(12)
+const identity = 'a'.repeat(12), X1 = 'codex:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', C1 = 'claude:11111111-2222-4333-8444-555555555555'
 const secretWords = ['SECRET detail','SECRET prompt','SECRET result','Private task','SECRET event','SECRET draft prompt']
 const tmpRoots: string[] = []
-afterEach(() => tmpRoots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })))
+afterEach(() => { vi.restoreAllMocks(); tmpRoots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })) })
 const receiptFor = (patch: Record<string, unknown> = {}) => ({ id:'one', workID:`task:business:${identity}`, workTitle:'Private task', sourceRevision:'r', mode:'continueSession', provider:'codex',
-  modelID:'codex-frontier', sessionID:'codex:owned', sessionTitle:'Recorded target', status:'running', detail:'SECRET detail', prompt:'SECRET prompt', result:'SECRET result',
+  modelID:'codex-frontier', sessionID:X1, sessionTitle:'Recorded target', status:'running', detail:'SECRET detail', prompt:'SECRET prompt', result:'SECRET result',
   createdAt:Math.floor(Date.now()/1000) - 60, progress:{ tag:identity, events:[{id:'e',at:Math.floor(Date.now()/1000) - 30,kind:'received',text:'SECRET event'}],
   reported:'needsInput', reportedBy:'session', evidence:'Which footer?', receivedAt:Math.floor(Date.now()/1000) - 30, seenReplies:[], notified:[] }, ...patch })
 const boardRow = { id:identity, domain:'business', title:'Board title', text:'Board text', workIdentity:identity, workRevision:'b'.repeat(64), meetingRefs:[], checked:false }
@@ -136,43 +137,94 @@ function journalFile(receipts: unknown[], drafts: unknown[] = []) {
 }
 const headers = { 'X-COS-Token':'fixture-token' }
 const noSecrets = (text: string) => { for (const word of secretWords) expect(text).not.toContain(word) }
+const off = { requests:0, requestsInbox:0, requestsConsumerSeenAt:null }
+const activityUrl = (base: string) => base + '/activity?domain=business&workIdentity=' + identity
 
 it('stage names in the activity projection are the board\'s Work stages', () => {
   expect([...WORK_ACTIVITY_STAGES]).toEqual([...WORK_STAGES])
 })
-it('S1 answers capabilities with progress, and requests only when the inbox opened; an unavailable journal still says so', async () => {
-  const off = await setup(true, { journal: journalFile([receiptFor()]) })
-  const body = await (await fetch(off.base + '/activity?domain=business&workIdentity=' + identity, { headers })).json()
-  expect(body.capabilities).toEqual({ progress:1, requests:0 }); expect(body.activities[0]).toMatchObject({ status:'running', progress:{ reported:'needsInput', evidence:'Which footer?' } })
-  const on = await setup(true, { journal: () => ({ available:false, reason:'No native Work history is available on this host.' }), requestsAvailable: () => true })
-  expect(await (await fetch(on.base + '/activity?domain=business&workIdentity=' + identity, { headers })).json())
-    .toEqual({ version:1, available:false, reason:'No native Work history is available on this host.', capabilities:{ progress:1, requests:1 }, activities:[] })
+it('S1 through the production path: v1 and v2 journals, exact identity, capabilities, no private field', async () => {
+  for (const version of [1, 2]) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'work-board-journal-'))); tmpRoots.push(root)
+    const journalPath = join(root, 'handoffs.json')
+    writeFileSync(journalPath, JSON.stringify({ version, sessions:[], drafts:[], receipts:[receiptFor({ progress:undefined }), receiptFor({ id:'other', workID:`task:personal:${identity}` }),
+      receiptFor({ id:'title', workID:'task:business:'+'b'.repeat(12), workTitle:'Same title' })] }), { mode:0o600 })
+    const s = await setup(true, { journal: () => readWorkJournal({ journalPath }) }); s.deps.list.mockResolvedValue([boardRow])
+    const text = await (await fetch(activityUrl(s.base), { headers })).text(), body = JSON.parse(text)
+    expect(body).toMatchObject({ version:1, available:true, capabilities:{ progress:1, ...off }, taskRevision:controlSnapshotRevision(boardRow) })
+    expect(body.activities.map((a: { id: string }) => a.id)).toEqual(['one'])
+    noSecrets(text)
+  }
 })
-it('S1 carries the saved destination at the top level, reads the board only when a draft exists, and survives a board failure', async () => {
-  const draft = { sourceID:`task:business:${identity}`, sourceRevision:controlSnapshotRevision(boardRow), mode:'fork', sessionID:'claude:parent-1', provider:'', modelID:'', prompt:'SECRET draft prompt', editVersion:2 }
+it('S1 answers capabilities as the inbox says, and an unavailable journal still says so, with the task revision', async () => {
+  const seen = { requests:1 as const, requestsInbox:1 as const, requestsConsumerSeenAt:'2026-09-30T15:00:00.000Z' }
+  const s = await setup(true, { journal: () => ({ available:false, reason:'No native Work history is available on this host.' }), requests: () => seen })
+  s.deps.list.mockResolvedValue([boardRow])
+  expect(await (await fetch(activityUrl(s.base), { headers })).json())
+    .toEqual({ version:1, available:false, reason:'No native Work history is available on this host.', capabilities:{ progress:1, ...seen }, activities:[], taskRevision:controlSnapshotRevision(boardRow) })
+  const plain = await setup(true, { journal: journalFile([receiptFor()]) }); plain.deps.list.mockResolvedValue([boardRow])
+  const body = await (await fetch(activityUrl(plain.base), { headers })).json()
+  expect(body.capabilities).toEqual({ progress:1, ...off })
+  expect(body.activities[0]).toMatchObject({ status:'running', progress:{ reported:'needsInput', evidence:'Which footer?' } })
+})
+it('S1 carries the saved destination and task revision at the top level, and answers without them past 3 s or on a board failure', async () => {
+  const draft = { sourceID:`task:business:${identity}`, sourceRevision:controlSnapshotRevision(boardRow), mode:'fork', sessionID:C1, provider:'', modelID:'', prompt:'SECRET draft prompt', editVersion:2 }
   const s = await setup(true, { journal: journalFile([receiptFor()], [draft]) }); s.deps.list.mockResolvedValue([boardRow])
-  const response = await fetch(s.base + '/activity?domain=business&workIdentity=' + identity, { headers }), text = await response.text()
-  expect(JSON.parse(text).savedDestination).toEqual({ mode:'fork', provider:'claude', sessionId:'claude:parent-1' }); noSecrets(text)
-  expect(JSON.parse(text).activities[0]).not.toHaveProperty('savedDestination')
-  const none = await setup(true, { journal: journalFile([receiptFor()]) })
-  await fetch(none.base + '/activity?domain=business&workIdentity=' + identity, { headers }); expect(none.deps.list).not.toHaveBeenCalled()
-  const down = await setup(true, { journal: journalFile([receiptFor()], [draft]) }); down.deps.list.mockRejectedValue(new Error('bridge down'))
-  const body = await (await fetch(down.base + '/activity?domain=business&workIdentity=' + identity, { headers })).json()
-  expect(body.available).toBe(true); expect(body.activities).toHaveLength(1); expect(body).not.toHaveProperty('savedDestination')
+  const text = await (await fetch(activityUrl(s.base), { headers })).text(), body = JSON.parse(text)
+  expect(body.savedDestination).toEqual({ mode:'fork', provider:'claude', sessionId:C1 }); expect(body.taskRevision).toBe(controlSnapshotRevision(boardRow)); noSecrets(text)
+  expect(body.activities[0]).not.toHaveProperty('savedDestination')
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const down = await setup(true, { journal: journalFile([receiptFor()], [draft]) }); down.deps.list.mockRejectedValue(new TaskBridgeError('invalid_task_inventory', 'x'))
+  const failed = await (await fetch(activityUrl(down.base), { headers })).json()
+  expect(failed.available).toBe(true); expect(failed.activities).toHaveLength(1); expect(failed).not.toHaveProperty('savedDestination'); expect(failed).not.toHaveProperty('taskRevision')
+  expect(warn.mock.calls.map(call => String(call[0]))).toContain('[work-board] activity: answered without the board (invalid_task_inventory)')
+  // A board that takes longer than 3 s: the activity answers at 3 s, without the board.
+  let release!: () => void
+  const slow = await setup(true, { journal: journalFile([receiptFor()], [draft]) })
+  slow.deps.list.mockImplementation(() => new Promise(r => { release = () => r([boardRow] as any) }))
+  const started = Date.now(), late = await (await fetch(activityUrl(slow.base), { headers })).json(), waited = Date.now() - started
+  expect(waited).toBeGreaterThanOrEqual(2_900); expect(waited).toBeLessThan(4_500)
+  expect(late.available).toBe(true); expect(late).not.toHaveProperty('savedDestination')
+  expect(warn.mock.calls.map(call => String(call[0]))).toContain('[work-board] activity: answered without the board (work_board_timeout)')
+  release()
+}, 10_000)
+it('GET /work-board carries each task\'s own revision and primes the glances\' board read', async () => {
+  const s = await setup(true, { journal: journalFile([receiptFor()]) }); s.deps.list.mockResolvedValue([boardRow])
+  const board = await (await fetch(s.base, { headers })).json()
+  expect(board.tasks[0].taskRevision).toBe(controlSnapshotRevision(boardRow))
+  await fetch(activityUrl(s.base), { headers })
+  expect(s.deps.list).toHaveBeenCalledTimes(1)
 })
-it('S2 lists open work with board titles, takes no parameters, and says when the journal or board is unavailable', async () => {
-  const s = await setup(true, { journal: journalFile([receiptFor()]), requestsAvailable: () => true }); s.deps.list.mockResolvedValue([boardRow])
+it('S2 lists open work with board titles, total and truncated, takes no parameters, and says when the journal or board is unavailable', async () => {
+  const s = await setup(true, { journal: journalFile([receiptFor()]), requests: () => ({ requests:1, requestsInbox:1, requestsConsumerSeenAt:null }) }); s.deps.list.mockResolvedValue([boardRow])
   expect((await fetch(s.base + '/activity/open')).status).toBe(401)
   const response = await fetch(s.base + '/activity/open', { headers }), text = await response.text(), body = JSON.parse(text)
   expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('private, no-store')
-  expect(body).toMatchObject({ version:1, available:true, capabilities:{ progress:1, requests:1 } })
-  expect(body.items).toEqual([expect.objectContaining({ id:'one', workIdentity:identity, domain:'business', title:'Board title', progress:expect.objectContaining({ reported:'needsInput' }) })])
+  expect(body).toMatchObject({ version:1, available:true, capabilities:{ progress:1, requests:1 }, total:1, truncated:false })
+  expect(body.items).toEqual([expect.objectContaining({ id:'one', workIdentity:identity, domain:'business', title:'Board title', group:'needsInput',
+    taskRevision:controlSnapshotRevision(boardRow), progress:expect.objectContaining({ reported:'needsInput' }) })])
   noSecrets(text)
   for (const query of ['?domain=business', '?limit=100']) expect((await fetch(s.base + '/activity/open' + query, { headers })).status).toBe(400)
-  s.deps.list.mockRejectedValue(new Error('bridge down'))
-  expect(await (await fetch(s.base + '/activity/open', { headers })).json()).toMatchObject({ available:false, items:[] })
-  const off = await setup(true, { journal: () => ({ available:false, reason:'Native Work history is not safely readable.' }) })
-  expect(await (await fetch(off.base + '/activity/open', { headers })).json())
-    .toEqual({ version:1, available:false, reason:'Native Work history is not safely readable.', capabilities:{ progress:1, requests:0 }, items:[] })
-  expect(off.deps.list).not.toHaveBeenCalled()
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const down = await setup(true, { journal: journalFile([receiptFor()]) }); down.deps.list.mockRejectedValue(new Error('bridge down'))
+  expect(await (await fetch(down.base + '/activity/open', { headers })).json()).toMatchObject({ available:false, items:[], total:0, truncated:false })
+  expect(warn.mock.calls.map(call => String(call[0]))).toContain('[work-board] open work: answered without the board (work_board_unavailable)')
+  const offJournal = await setup(true, { journal: () => ({ available:false, reason:'Native Work history is not safely readable.' }) })
+  expect(await (await fetch(offJournal.base + '/activity/open', { headers })).json())
+    .toEqual({ version:1, available:false, reason:'Native Work history is not safely readable.', capabilities:{ progress:1, ...off }, items:[], total:0, truncated:false })
+  expect(offJournal.deps.list).not.toHaveBeenCalled()
+})
+it('the shared board reader joins one read, keeps it briefly, and gives up at its bound while the read finishes for the next caller', async () => {
+  let clock = 0, calls = 0, release!: (rows: number[]) => void
+  const reader = createWorkBoardReader(() => { calls++; return new Promise<number[]>(r => { release = r }) }, { timeoutMs: 50, now: () => clock })
+  const a = reader.read(10_000), b = reader.read(10_000)
+  await new Promise(r => setTimeout(r, 0)); expect(calls).toBe(1)
+  await expect(a).rejects.toThrow('work_board_timeout'); await expect(b).rejects.toThrow('work_board_timeout')
+  release([1, 2])
+  await new Promise(r => setTimeout(r, 0))
+  expect(await reader.read(10_000)).toEqual([1, 2]); expect(calls).toBe(1)
+  clock = 10_001
+  const fresh = reader.read(10_000); await new Promise(r => setTimeout(r, 0)); expect(calls).toBe(2); release([3]); expect(await fresh).toEqual([3])
+  clock = 12_000; reader.prime([9], 11_999); expect(await reader.read(2_000)).toEqual([9]); expect(calls).toBe(2)
+  expect(await reader.read(2_000, 1_000).catch(() => 'late')).toEqual([9])
 })
