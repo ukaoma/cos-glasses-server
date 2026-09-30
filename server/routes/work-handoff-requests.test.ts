@@ -34,7 +34,8 @@ async function setup(options: { withStore?: boolean; local?: boolean; journal?: 
   const clock = { ms: Date.parse('2026-09-30T15:00:00.000Z') }
   let store: WorkHandoffRequestStore | null = null
   if (options.withStore !== false) { const r = mkdtempSync(join(tmpdir(), 'handoff-route-')); roots.push(r); store = new WorkHandoffRequestStore(r, () => new Date(clock.ms)); stores.push(store) }
-  const list = vi.fn(async () => [row(), row('c'.repeat(12)), row('d'.repeat(12), { checked: true })] as any)
+  const list = vi.fn(async () => [row(identity, { domain: 'personal', text: 'Another domain, same identity' }), row(), row('c'.repeat(12)),
+    row('d'.repeat(12), { checked: true }), row('e'.repeat(12), { workStage: 'complete' })] as any)
   const readBoard = createWorkBoardReader<TaskBoardRow>(() => list(), { timeoutMs: options.boardTimeoutMs ?? 5_000, now: () => clock.ms })
   const app = express(); app.use('/api', requireApiToken(TOKEN)); app.use(express.json({ limit: '10mb' }))
   app.use('/api', createWorkHandoffRequestsRouter({ store, list, readBoard, defaultModel: () => 'sonnet', journal: options.journal ?? journalWith([]),
@@ -90,11 +91,22 @@ it('creates 201, answers a retry 200 from the store without the board, and refus
   expect(await json(await s.post('', body(1, { note: 'Different words' })))).toMatchObject({ status: 409, body: { error: { code: 'request_id_conflict' } } })
 })
 
+it('reads the task in the asked domain: a same-identity task in another domain never supplies the revision', async () => {
+  const s = await setup()
+  expect((await s.post('', body(1))).status).toBe(201)   // the personal twin is listed first, with another revision
+  const twin = controlSnapshotRevision(row(identity, { domain: 'personal', text: 'Another domain, same identity' }))
+  expect(await json(await s.post('', body(2, { expectedTaskRevision: twin })))).toMatchObject({ status: 409, body: { error: { code: 'revision_changed' } } })
+  expect((await s.post('', body(3, { domain: 'personal', expectedTaskRevision: twin }))).status).toBe(201)
+})
+
 it('checks the task itself: revision_changed only when THIS task changed, task_complete, task_not_found', async () => {
   const s = await setup()
   expect(await json(await s.post('', body(1, { expectedTaskRevision: 'c'.repeat(64) })))).toMatchObject({ status: 409, body: { error: { code: 'revision_changed' } } })
   expect(await json(await s.post('', body(2, { workIdentity: 'f'.repeat(12) })))).toMatchObject({ status: 404, body: { error: { code: 'task_not_found' } } })
   expect(await json(await s.post('', body(3, { workIdentity: 'd'.repeat(12), expectedTaskRevision: controlSnapshotRevision(row('d'.repeat(12))) }))))
+    .toMatchObject({ status: 409, body: { error: { code: 'task_complete' } } })
+  // At stage Complete but not checked: COS Control refuses it too.
+  expect(await json(await s.post('', body(6, { workIdentity: 'e'.repeat(12), expectedTaskRevision: controlSnapshotRevision(row('e'.repeat(12))) }))))
     .toMatchObject({ status: 409, body: { error: { code: 'task_complete' } } })
   // Another card (or the domain file's revision) changing does not matter: the row's own revision is the one checked.
   s.list.mockResolvedValue([row(identity, { workRevision: 'f'.repeat(64) }), row('c'.repeat(12), { text: 'Edited' })] as any)

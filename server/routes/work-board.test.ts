@@ -2,6 +2,7 @@ import express from 'express'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { Server } from 'node:http'
 import { createWorkBoardRouter } from './work-board.js'
+import { requireApiToken } from '../lib/api-auth.js'
 import { TaskBridgeError, rejectReservedWorkText } from '../lib/task-store.js'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -14,7 +15,7 @@ async function setup(writable = true, overrides: Record<string, unknown> = {}) {
   const deps = { journal: vi.fn((): any => ({available:true,receipts:[],drafts:[]})), list: vi.fn(async () => [{ id:'a'.repeat(12), workStage:'built', workIdentity:'stable', workRevision:'b'.repeat(64), meetingRefs:[] }] as any),
     capabilities: vi.fn(async () => ({version:writable ? 1 : 0,writable})), stage:vi.fn(async()=>{}), link:vi.fn(async()=>{}),
     resolveMeeting: vi.fn(async()=>({recordId:'meeting:one',title:'Canonical title'}) as any) }
-  const app=express();app.use(express.json({limit:'16kb'}));app.use('/api',(req,res,next)=>req.header('X-COS-Token')==='fixture-token'?next():res.sendStatus(401));Object.assign(deps,overrides);app.use('/api',createWorkBoardRouter(deps))
+  const app=express();app.use(express.json({limit:'16kb'}));app.use('/api',requireApiToken('fixture-token'));Object.assign(deps,overrides);app.use('/api',createWorkBoardRouter(deps))
   const server=await new Promise<Server>(r=>{const s=app.listen(0,'127.0.0.1',()=>r(s))});servers.push(server)
   const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/api/work-board`
   const post=(path:string,body:unknown)=>fetch(base+path,{method:'POST',headers:{'X-COS-Token':'fixture-token','Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -214,17 +215,67 @@ it('S2 lists open work with board titles, total and truncated, takes no paramete
     .toEqual({ version:1, available:false, reason:'Native Work history is not safely readable.', capabilities:{ progress:1, ...off }, items:[], total:0, truncated:false })
   expect(offJournal.deps.list).not.toHaveBeenCalled()
 })
-it('the shared board reader joins one read, keeps it briefly, and gives up at its bound while the read finishes for the next caller', async () => {
+it('S1 takes the revision from the task in the asked domain, never a same-identity task in another', async () => {
+  const twin = { ...boardRow, domain:'personal', text:'Another domain\'s task with the same identity' }
+  const s = await setup(true, { journal: journalFile([receiptFor()]) }); s.deps.list.mockResolvedValue([twin, boardRow])
+  const body = await (await fetch(activityUrl(s.base), { headers })).json()
+  expect(body.taskRevision).toBe(controlSnapshotRevision(boardRow)); expect(body.taskRevision).not.toBe(controlSnapshotRevision(twin))
+})
+it('the glances reuse one board read for 10 s, and a Work stage or meeting write drops it at once', async () => {
+  let clock = 1_000_000
+  const list = vi.fn(async () => [boardRow] as any)
+  const readBoard = createWorkBoardReader<any>(() => list(), { now: () => clock })
+  const s = await setup(true, { journal: journalFile([receiptFor()]), list, readBoard })
+  const glance = async () => { await fetch(activityUrl(s.base), { headers }); await fetch(s.base + '/activity/open', { headers }) }
+  await glance(); expect(list).toHaveBeenCalledTimes(1)
+  clock += 10_000; await glance(); expect(list).toHaveBeenCalledTimes(1)
+  clock += 1; await glance(); expect(list).toHaveBeenCalledTimes(2)
+  // A stage move changes the board: the next glance reads it again, however fresh the cache was.
+  expect((await s.post('/stage', { ...target, workStage:'qa' })).status).toBe(200)
+  await glance(); expect(list).toHaveBeenCalledTimes(3)
+  expect((await s.post('/meeting', { ...target, meeting })).status).toBe(200)
+  await glance(); expect(list).toHaveBeenCalledTimes(4)
+  // A write the task bridge refused may still have raced another writer: the cache goes all the same.
+  s.deps.stage.mockRejectedValueOnce(new TaskBridgeError('task_revision_changed', 'Refresh task'))
+  expect((await s.post('/stage', { ...target, workStage:'draft' })).status).toBe(409)
+  await glance(); expect(list).toHaveBeenCalledTimes(5)
+})
+it('the shared board reader joins one read, and gives up at its bound while the read finishes for the next caller', async () => {
   let clock = 0, calls = 0, release!: (rows: number[]) => void
   const reader = createWorkBoardReader(() => { calls++; return new Promise<number[]>(r => { release = r }) }, { timeoutMs: 50, now: () => clock })
   const a = reader.read(10_000), b = reader.read(10_000)
   await new Promise(r => setTimeout(r, 0)); expect(calls).toBe(1)
   await expect(a).rejects.toThrow('work_board_timeout'); await expect(b).rejects.toThrow('work_board_timeout')
-  release([1, 2])
+  clock = 20_000; release([1, 2])   // the read ends 20 s after it began
   await new Promise(r => setTimeout(r, 0))
-  expect(await reader.read(10_000)).toEqual([1, 2]); expect(calls).toBe(1)
-  clock = 10_001
+  clock = 30_000; expect(await reader.read(10_000)).toEqual([1, 2]); expect(calls).toBe(1)   // age counts from its END: 10 s
+  clock = 30_001
   const fresh = reader.read(10_000); await new Promise(r => setTimeout(r, 0)); expect(calls).toBe(2); release([3]); expect(await fresh).toEqual([3])
-  clock = 12_000; reader.prime([9], 11_999); expect(await reader.read(2_000)).toEqual([9]); expect(calls).toBe(2)
-  expect(await reader.read(2_000, 1_000).catch(() => 'late')).toEqual([9])
+})
+it('the reader serves a slow read after it ends (a running clock), keeps the newer of two reads, and forgets everything on invalidate', async () => {
+  // A real clock: the read takes 300 ms, and is served for 200 ms after it ENDS although it began more than 200 ms ago.
+  let calls = 0
+  const slow = createWorkBoardReader(() => { calls++; return new Promise<number[]>(r => setTimeout(() => r([calls]), 300)) }, { timeoutMs: 2_000 })
+  expect(await slow.read(200)).toEqual([1]); expect(await slow.read(200)).toEqual([1]); expect(calls).toBe(1)
+  await new Promise(r => setTimeout(r, 260)); expect(await slow.read(200)).toEqual([2])
+
+  // Newer wins: a read that began earlier and ends later never replaces what a later read cached.
+  let clock = 0, release!: (rows: string[]) => void
+  const reader = createWorkBoardReader(() => new Promise<string[]>(r => { release = r }), { timeoutMs: 1_000, now: () => clock })
+  const early = reader.begin()                     // GET /api/work-board starts reading at 0
+  clock = 5; const later = reader.read(0); await new Promise(r => setTimeout(r, 0)); clock = 6; release(['newer']); expect(await later).toEqual(['newer'])
+  clock = 8; reader.prime(['older'], early)        // the early read ends last
+  expect(await reader.read(10)).toEqual(['newer'])
+  clock = 9; reader.prime(['newest'], reader.begin()); expect(await reader.read(10)).toEqual(['newest'])
+
+  // Invalidate: the cache goes, and a read that began before the write is neither joined nor kept.
+  clock = 100; const before = reader.read(0); await new Promise(r => setTimeout(r, 0)); const releaseBefore = release
+  const token = reader.begin()
+  reader.invalidate()
+  const after = reader.read(1_000); await new Promise(r => setTimeout(r, 0)); const releaseAfter = release
+  expect(releaseAfter).not.toBe(releaseBefore)     // a second read started: the first was not joined
+  releaseAfter(['after the write']); expect(await after).toEqual(['after the write'])
+  releaseBefore(['before the write']); expect(await before).toEqual(['before the write'])
+  reader.prime(['also before the write'], token)
+  expect(await reader.read(1_000)).toEqual(['after the write'])
 })

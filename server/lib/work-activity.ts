@@ -41,6 +41,11 @@ export interface WorkActivity {
   requestId?: string
   /** How Control delivered it: job, fork, app, turn, queue or tab. */
   channel?: string
+  /**
+   * A send in flight: on disk it reads preparing or sending and was made in the last 10 minutes. `status` still reads
+   * `unknown` (older clients); with this flag it is "Sending", not an unresolved delivery. Absent otherwise.
+   */
+  sending?: true
 }
 /** 6.59.0 (S4): where Control's saved draft for the task's current revision sends. Never the draft's prompt. */
 export interface SavedDestination { mode: WorkHandoffMode; provider: string; model?: string; sessionId?: string }
@@ -64,7 +69,7 @@ type JournalRecord = Record<string, unknown>
 export interface WorkJournal { available: true; receipts: JournalRecord[]; drafts: JournalRecord[] }
 export type WorkJournalRead = WorkJournal | { available: false; reason: string }
 
-export const WORK_ACTIVITY_LIMITS = { evidence: 280, evidenceUnits: 1_200, openItems: 50, trackedDays: 14, progressEvents: 1_000 } as const
+export const WORK_ACTIVITY_LIMITS = { evidence: 280, evidenceUnits: 1_200, openItems: 50, trackedDays: 14, progressEvents: 1_000, sendingSeconds: 600 } as const
 /** Control's `TaskRow.workStages` (and task-store WORK_STAGES). A move naming anything else is not projected. */
 export const WORK_ACTIVITY_STAGES: readonly string[] = ['mentioned', 'planned', 'draft', 'built', 'qa', 'complete']
 const unavailableJournal = (reason: string): WorkJournalRead => ({ available: false, reason })
@@ -192,9 +197,11 @@ const ownsInApp = (r: JournalRecord) => (object(r.appOpen) && finite(r.appOpen.o
 /** Control's serverHolds: a Work New session the COS server is still running. */
 const serverHolds = (r: JournalRecord) => r.channel === 'job' && r.mode === 'newSession' && typeof r.sessionID === 'string' && !terminal.has(r.status as string)
 
-function projectReceipt(receipt: JournalRecord, domain: string, all: readonly JournalRecord[]): WorkActivity {
+function projectReceipt(receipt: JournalRecord, domain: string, all: readonly JournalRecord[], nowMs: number): WorkActivity {
   const raw = receipt.status as string, status = loadedStatus(receipt)
   const activity: WorkActivity = { id: receipt.id as string, workId: receipt.workID as string, domain, status }
+  // Control writes preparing or sending just before it sends, for a few seconds. Older than 10 minutes, it was interrupted.
+  if (['preparing', 'sending'].includes(raw) && nowMs / 1000 - (receipt.createdAt as number) < WORK_ACTIVITY_LIMITS.sendingSeconds) activity.sending = true
   // Native sessionIDs are provider-qualified. Refuse cross-provider identity;
   // missing ownership stays missing rather than being inferred from titles.
   if (providers.has(receipt.provider as string)) {
@@ -211,8 +218,9 @@ function projectReceipt(receipt: JournalRecord, domain: string, all: readonly Jo
     : 'This handoff did not complete successfully. Open COS Control for details.'
   // 6.59.0 (S1). Never prompt, detail, result or the work title.
   activity.mode = receipt.mode as WorkHandoffMode
+  // Only a New session is sent with a model. Control records the placeholder "existing-session" for Continue and Fork.
   const model = (receipt.modelID as string).replace(CONTROL, ' ').trim()
-  if (model) activity.model = model
+  if (receipt.mode === 'newSession' && model && model !== 'existing-session') activity.model = model
   const progress = parseProgress(receipt.progress)
   const createdAt = isoFromSeconds(receipt.createdAt)
   if (createdAt) {
@@ -303,10 +311,10 @@ export function readWorkJournal(options: WorkActivityOptions = {}): WorkJournalR
   } finally { if (fd !== undefined) closeSync(fd) }
 }
 
-/** Every receipt for one exact work item, in journal order. */
-export function projectWorkActivity(journal: WorkJournal, domain: string, workIdentity: string): WorkActivity[] {
+/** Every receipt for one exact work item, in journal order. `nowMs` only tells a send in flight from an interrupted one. */
+export function projectWorkActivity(journal: WorkJournal, domain: string, workIdentity: string, nowMs: number): WorkActivity[] {
   const workId = `task:${domain}:${workIdentity}`
-  return journal.receipts.filter(receipt => receipt.workID === workId).map(receipt => projectReceipt(receipt, domain, journal.receipts))
+  return journal.receipts.filter(receipt => receipt.workID === workId).map(receipt => projectReceipt(receipt, domain, journal.receipts, nowMs))
 }
 
 /** The board-row fields Control reads for a task (TaskRow), and the ones the open list needs. */
@@ -386,7 +394,8 @@ const GROUP_RANK: Record<OpenWorkGroup, number> = { needsInput: 0, attention: 1,
  * S2: every board task whose newest handoff (any revision), sent in the last 14 days, still wants something:
  * - needsInput: it reports needs input or blocked and you have not acknowledged it;
  * - attention: failed, refused, unknown, or completed with no report, and not acknowledged;
- * - running: queued, running or delivered;
+ * - running: queued, running or delivered, or a send in flight (preparing or sending, made in the last 10 minutes;
+ *   an older one was interrupted and is unknown);
  * - done: it reports done and you have not acknowledged it.
  * A report counts only on a receipt that did not fail, was not refused and not canceled (Control's WorkTracking.latest).
  * A checked task shows only while its handoff is queued or running (Control's board). Groups in that order, the most
@@ -408,16 +417,19 @@ export function projectOpenWork(journal: WorkJournal, rows: readonly WorkBoardRo
     listed.add(workId)
     const receipt = newest.get(workId)
     if (!receipt || nowSeconds - (receipt.createdAt as number) >= WORK_ACTIVITY_LIMITS.trackedDays * 86_400) continue
-    const activity = projectReceipt(receipt, row.domain, journal.receipts)
+    const activity = projectReceipt(receipt, row.domain, journal.receipts, nowMs)
     const status = activity.status, handled = activity.acknowledged === true
     const reported = ['failed', 'refused', 'canceled'].includes(status) ? null : reportOf(activity.progress)
+    // A send in flight is running, not unresolved.
+    const sending = activity.sending === true
     const group: OpenWorkGroup | null = (reported === 'needsInput' || reported === 'blocked') && !handled ? 'needsInput'
       : reported === 'done' && !handled ? 'done'
+      : sending ? 'running'
       : !handled && (['failed', 'refused', 'unknown'].includes(status) || (status === 'completed' && reported === null)) ? 'attention'
       : ['queued', 'running', 'delivered'].includes(status) ? 'running' : null
     if (!group) continue
     // Control drops a completed task's card unless its handoff is still in progress.
-    if (row.checked === true && !['queued', 'running'].includes(status)) continue
+    if (row.checked === true && !sending && !['queued', 'running'].includes(status)) continue
     const item: OpenWorkItem = { ...activity, workIdentity: identity, title: typeof row.title === 'string' ? row.title : '', taskRevision: controlSnapshotRevision(row), group }
     const destination = savedDestinationFor(journal, row)
     if (destination) item.savedDestination = destination

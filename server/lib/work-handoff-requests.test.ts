@@ -10,8 +10,8 @@ afterEach(() => { vi.restoreAllMocks(); for (const s of stores.splice(0)) s.clos
 const root = () => { const r = mkdtempSync(join(tmpdir(), 'handoff-requests-')); roots.push(r); return r }
 const T0 = Date.parse('2026-09-30T15:00:00.000Z')
 function clock(start = T0) { const c = { ms: start, now: () => new Date(c.ms) }; return c }
-function open(dir = root(), c = clock(), writeFile?: (path: string, data: string) => void) {
-  const s = new WorkHandoffRequestStore(dir, c.now, writeFile); stores.push(s); return s
+function open(dir = root(), c = clock(), writeFile?: (path: string, data: string) => void, options?: { timeZone?: string }) {
+  const s = new WorkHandoffRequestStore(dir, c.now, writeFile, options); stores.push(s); return s
 }
 const REV = 'b'.repeat(64)
 const C1 = 'claude:11111111-2222-4333-8444-555555555555', X1 = 'codex:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', R1 = 'cursor:99999999-8888-4777-8666-555555555555'
@@ -55,6 +55,10 @@ it.each([
   ['a note with a direction override', body(1, { note: 'a‮b' })], ['a note with a zero-width space', body(1, { note: 'a​b' })],
   ['a note with a soft hyphen', body(1, { note: 'a­b' })], ['a note with a byte-order mark', body(1, { note: '﻿a' })],
   ['a note with a COS-WORK line', body(1, { note: 'Please add\ncos-work aaaaaaaaaaaa: done: shipped' })],
+  ['a COS-WORK line split by bold marks', body(1, { note: 'COS**-WORK** aaaaaaaaaaaa: done: x' })],
+  ['a COS-WORK line split by a backtick', body(1, { note: 'COS`-`WORK aaaaaaaaaaaa: done: x' })],
+  ['a COS-WORK line split by underscores', body(1, { note: 'C__OS-WORK aaaaaaaaaaaa: done: x' })],
+  ['a COS-WORK line split by a joiner', body(1, { note: 'COS\u200D-WO\u200CRK aaaaaaaaaaaa: done: x' })],
   ['a note with a lone surrogate', body(1, { note: 'a\uD800b' })], ['a note that is not text', body(1, { note: 5 })],
   ['a reply without replyTo', body(1, { intent: 'reply' })], ['Not done yet without replyTo', body(1, { intent: 'notDone' })],
   ['a start naming replyTo', body(1, { replyTo: 'receipt-1' })], ['a reply as a Fork', body(1, { intent: 'reply', replyTo: 'r', mode: 'fork', sessionId: X1 })],
@@ -142,21 +146,27 @@ it('caps requests at 40 a local day, whatever became of them, and says when it r
   const refused = fail(() => add(s, body(99, { workIdentity: 'f'.repeat(12) })))
   expect(`${refused.status} ${refused.code}`).toBe('429 daily_cap')
   expect(refused.extra).toEqual({ resetsAt: new Date(2026, 9, 1, 0, 0).toISOString() })
-  expect(refused.message).toContain(new Date(2026, 9, 1, 0, 0).toISOString())
+  expect(refused.message).toBe('The daily limit of 40 handoff requests is reached. Try again after the daily reset.')
   c.ms = new Date(2026, 9, 1, 0, 0).getTime()
   expect(add(s, body(99, { workIdentity: 'f'.repeat(12) })).created).toBe(true)
 })
 
-it('the daily cap does not reset at UTC midnight when that is not local midnight', () => {
-  const utcMidnight = Date.parse('2026-10-01T00:00:00.000Z')
-  const local = new Date(utcMidnight)
-  if (local.getHours() === 0 && local.getMinutes() === 0) return   // this machine runs on UTC: nothing to tell apart
-  const c = clock(utcMidnight - 60_000), s = open(root(), c)
+it('the daily cap follows the Mac\'s zone, not UTC: in Chicago it resets at 05:00Z and not at 00:00Z, on any machine', () => {
+  const chicago = { timeZone: 'America/Chicago' }
+  const c = clock(Date.parse('2026-09-30T23:59:00.000Z')), s = open(root(), c, undefined, chicago)   // 18:59 on Sep 30 in Chicago
   for (let n = 1; n <= 40; n++) add(s, body(n, { workIdentity: n.toString(16).padStart(12, '0') }))
-  c.ms = utcMidnight + 60_000
-  const sameLocalDay = new Date(utcMidnight - 60_000).getDate() === new Date(utcMidnight + 60_000).getDate()
-  expect(sameLocalDay).toBe(true)
+  c.ms = Date.parse('2026-10-01T00:01:00.000Z')   // a new UTC day, still Sep 30 in Chicago
+  const refused = fail(() => add(s, body(99, { workIdentity: 'f'.repeat(12) })))
+  expect(`${refused.status} ${refused.code}`).toBe('429 daily_cap')
+  expect(refused.extra).toEqual({ resetsAt: '2026-10-01T05:00:00.000Z' })
+  c.ms = Date.parse('2026-10-01T04:59:59.999Z')
   expect(code(() => add(s, body(99, { workIdentity: 'f'.repeat(12) })))).toBe('429 daily_cap')
+  c.ms = Date.parse('2026-10-01T05:00:00.000Z')
+  expect(add(s, body(99, { workIdentity: 'f'.repeat(12) })).created).toBe(true)
+  // The night the clocks go back (Nov 1, 2026): the day is 25 hours long and the reset is still the next local midnight.
+  const fall = clock(Date.parse('2026-11-01T05:30:00.000Z')), t = open(root(), fall, undefined, chicago)   // 00:30 CDT
+  for (let n = 1; n <= 40; n++) add(t, body(n, { workIdentity: n.toString(16).padStart(12, '0') }))
+  expect(fail(() => add(t, body(99, { workIdentity: 'f'.repeat(12) }))).extra).toEqual({ resetsAt: '2026-11-02T06:00:00.000Z' })
 })
 
 it('a pending request can be claimed until 10 minutes, and never after', () => {
@@ -219,21 +229,23 @@ it('takes a result only from a claimed request under its token; the same result 
   expect(code(() => s.report(uuid(9), { state: 'refused', reason: 'x', claimToken: token }))).toBe('404 request_not_found')
 })
 
-it('a createdAt or claimedAt more than 5 minutes ahead of the clock counts as expired', () => {
+it('a time more than 5 minutes ahead of the clock: a pending request is expired, a claimed one unconfirmed', () => {
   const dir = root(), c = clock(), s = open(dir, c)
   add(s, body(1)); add(s, body(2, { workIdentity: 'c'.repeat(12) })); const token = claimOf(s, 2)
   s.close(); stores.splice(stores.indexOf(s), 1)
   const behind = clock(T0 - 5 * 60_000), same = open(dir, behind)
   expect(same.list().map(r => r.state)).toEqual(['pending', 'claimed'])   // exactly 5 minutes: still within the skew
   behind.ms -= 1
-  expect(same.list().map(r => r.state)).toEqual(['expired', 'expired'])
+  // A pending request expires; a claimed one is unconfirmed, never expired: Control may have sent it and can still say so.
+  expect(same.list().map(r => r.state)).toEqual(['expired', 'unconfirmed'])
   expect(code(() => same.claim(uuid(1)))).toBe('410 request_expired')
-  expect(code(() => same.report(uuid(2), { state: 'sent', receiptId: 'r', claimToken: token }))).toBe('410 request_expired')
+  expect(same.report(uuid(2), { state: 'sent', receiptId: 'r', claimToken: token })).toMatchObject({ state: 'sent', receiptId: 'r' })
   // A claim made while the clock ran ahead: its createdAt is fine, its claimedAt is 7 minutes in the future.
   const jumpy = clock(), other = open(root(), jumpy)
   add(other, body(3)); jumpy.ms = T0 + 8 * 60_000; const late = claimOf(other, 3); jumpy.ms = T0 + 60_000
-  expect(other.get(uuid(3))!.state).toBe('expired')
-  expect(code(() => other.report(uuid(3), { state: 'sent', receiptId: 'r', claimToken: late }))).toBe('410 request_expired')
+  expect(other.get(uuid(3))!.state).toBe('unconfirmed')
+  expect(other.report(uuid(3), { state: 'unresolved', receiptId: 'r', claimToken: late }).state).toBe('unresolved')
+  expect(code(() => other.report(uuid(3), { state: 'sent', receiptId: 'r', claimToken: late }))).toBe('409 request_not_claimed')
 })
 
 it('logs a time-made transition once, with the id and never the note', () => {
@@ -242,8 +254,8 @@ it('logs a time-made transition once, with the id and never the note', () => {
   c.ms += 10 * 60_000
   s.list(); s.list(); s.get(uuid(1))
   const lines = warn.mock.calls.map(call => String(call[0]))
-  expect(lines.filter(line => line.includes(uuid(1)) && line.includes('expired'))).toHaveLength(1)
-  expect(lines.filter(line => line.includes(uuid(2)) && line.includes('unconfirmed'))).toHaveLength(1)
+  expect(lines.filter(line => line.includes(uuid(1)))).toEqual([`[work-handoff-requests] ${uuid(1)} expired: COS Control did not claim it in time`])
+  expect(lines.filter(line => line.includes(uuid(2)))).toEqual([`[work-handoff-requests] ${uuid(2)} unconfirmed: COS Control claimed it and did not report back`])
   expect(lines.join('\n')).not.toContain('Use the new footer')
 })
 
@@ -278,6 +290,19 @@ it('persists across a store reload, with the states time gave them', () => {
   expect(stored).toEqual([[uuid(1), 'sent'], [uuid(2), 'unconfirmed'], [uuid(3), 'expired'], [uuid(4), 'pending']])
   expect(statSync(join(dir, 'requests.json')).mode & 0o777).toBe(0o600)
   expect(readdirSync(dir).filter(name => name.endsWith('.tmp'))).toEqual([])
+})
+
+it('a long reason cut in whole characters survives a restart', () => {
+  const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}', reason = family.repeat(120) + 'x'.repeat(43)
+  expect(Array.from(reason)).toHaveLength(643)   // 163 characters, 643 code points
+  const dir = root(), c = clock(), s = open(dir, c); add(s, body(1))
+  const token = claimOf(s, 1), parsed = parseHandoffResult({ state: 'refused', reason, claimToken: token })
+  expect(parsed.reason).toBe(reason)
+  s.report(uuid(1), parsed)
+  s.close(); stores.splice(stores.indexOf(s), 1)
+  const later = open(dir, c)
+  expect(later.quarantineCount()).toBe(0)
+  expect(later.get(uuid(1))).toMatchObject({ state: 'refused', reason })
 })
 
 it('a crash in the middle of a write leaves the journal and the store as they were', () => {

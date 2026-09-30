@@ -69,18 +69,37 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
  * the joiners U+200C and U+200D that scripts and emoji need; and a lone surrogate.
  */
 const NOTE_REFUSED = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]|(?![\u200c\u200d])\p{Cf}|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u
-/** A note must never carry a COS-WORK status line: an agent quoting it back could move the card. */
+/**
+ * A note must never carry a COS-WORK status line: an agent quoting it back could move the card. Control reads a line
+ * after dropping emphasis and code marks (WorkProgress.reports), so the note is checked the same way: `*`, `_`,
+ * backticks and the joiners a note may carry are taken out first, so COS**-WORK and its like are refused too.
+ */
 const STATUS_LINE = /COS-WORK/i
+const carriesStatusLine = (note: string) => STATUS_LINE.test(note.replace(/[*_`\u200c\u200d]/g, ''))
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const countGraphemes = (value: string): number => { let n = 0; for (const _ of graphemes.segment(value)) n++; return n }
 
 const invalid = (message: string) => new WorkHandoffRequestError('invalid_handoff_request', 400, message)
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 /** Absent, null and the empty string all mean "not given" for an optional string. */
 const given = (value: unknown): boolean => value !== undefined && value !== null && value !== ''
 const iso = (ms: number) => new Date(ms).toISOString()
-/** The Mac's local calendar day: the daily cap resets at local midnight. */
-const localDay = (ms: number) => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}` }
-const nextLocalMidnight = (ms: number) => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime() }
+/**
+ * The Mac's local calendar: the daily cap resets at local midnight. `timeZone` is for tests (an IANA name); left out,
+ * it is the system's zone.
+ */
+function localCalendar(timeZone?: string): { day: (ms: number) => string; nextMidnight: (ms: number) => number } {
+  const format = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
+  const day = (ms: number) => format.format(new Date(ms))
+  // The first instant of the next local day, to the millisecond, whatever the zone's offset does that night.
+  const nextMidnight = (ms: number) => {
+    const today = day(ms)
+    let low = ms, high = ms + 36 * 3_600_000
+    while (high - low > 1) { const mid = Math.floor((low + high) / 2); if (day(mid) === today) low = mid; else high = mid }
+    return high
+  }
+  return { day, nextMidnight }
+}
 const log = (message: string) => console.warn(`[work-handoff-requests] ${message}`)
 
 /** A request id as stored and looked up: a UUIDv4 in lowercase, or null. */
@@ -123,7 +142,7 @@ export function parseHandoffRequest(body: unknown, defaultModel: string): { inpu
   if (given(body.note)) {
     if (typeof body.note !== 'string') throw invalid('note must be text.')
     if (NOTE_REFUSED.test(body.note)) throw invalid('The note has a control or invisible character. Only newlines and tabs are allowed.')
-    if (STATUS_LINE.test(body.note)) throw invalid('A note cannot carry a COS-WORK status line.')
+    if (carriesStatusLine(body.note)) throw invalid('A note cannot carry a COS-WORK status line.')
     const trimmed = body.note.trim()
     if ([...trimmed].length > HANDOFF_REQUEST_LIMITS.note) throw invalid('The note is over 2,000 characters.')
     if (trimmed) note = trimmed
@@ -175,6 +194,7 @@ export function parseHandoffResult(body: unknown): HandoffResult {
   if (given(body.reason)) {
     if (typeof body.reason !== 'string') throw invalid('reason must be text.')
     const flat = body.reason.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim()
+    // Cut in whole characters; the loader (parseStored) counts the same way, or a long reason would not survive a restart.
     if (flat) result.reason = Array.from(graphemes.segment(flat), part => part.segment).slice(0, HANDOFF_REQUEST_LIMITS.reason).join('')
   }
   if ((result.state === 'sent' || result.state === 'unresolved') && !result.receiptId) throw invalid(`A ${result.state} result names its receipt.`)
@@ -210,7 +230,7 @@ function parseStored(raw: unknown): HandoffRequestRecord {
     || (claimedAt !== undefined && (typeof claimedAt !== 'string' || !ISO.test(claimedAt)))
     || (resultAt !== undefined && (typeof resultAt !== 'string' || !ISO.test(resultAt)))
     || (receiptId !== undefined && (typeof receiptId !== 'string' || !RECEIPT_ID.test(receiptId)))
-    || (reason !== undefined && (typeof reason !== 'string' || [...reason].length > HANDOFF_REQUEST_LIMITS.reason))
+    || (reason !== undefined && (typeof reason !== 'string' || countGraphemes(reason) > HANDOFF_REQUEST_LIMITS.reason))
     || (claimToken !== undefined && (typeof claimToken !== 'string' || !CLAIM_TOKEN.test(claimToken)))
     || ((state === 'claimed' || state === 'unconfirmed') && (claimedAt === undefined || claimToken === undefined))) throw new Error('record')
   return { ...input, state: state as HandoffRequestState, createdAt, fingerprint, ...(claimToken ? { claimToken } : {}),
@@ -230,8 +250,10 @@ export class WorkHandoffRequestStore {
   private consumerAt: number | null = null
   /** Time-made transitions already logged (once each per process). */
   private readonly noticed = new Set<string>()
+  private readonly calendar: ReturnType<typeof localCalendar>
   constructor(root: string, private readonly now: () => Date = () => new Date(),
-    private readonly writeFile: (path: string, data: string) => void = durableAtomicWriteFileSync) {
+    private readonly writeFile: (path: string, data: string) => void = durableAtomicWriteFileSync, options: { timeZone?: string } = {}) {
+    this.calendar = localCalendar(options.timeZone)
     const dir = resolve(root)
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     const stat = lstatSync(dir)
@@ -261,19 +283,21 @@ export class WorkHandoffRequestStore {
   }
 
   /**
-   * The state a stored request is in now. Time alone never needs a write. A createdAt or claimedAt more than 5 minutes
-   * in the future (a clock that jumped) counts as expired, so it can never be claimed or sent.
+   * The state a stored request is in now. Time alone never needs a write. A time more than 5 minutes ahead of the
+   * clock (a clock that jumped) ends the wait at once: a pending request is expired and can never be claimed; a
+   * claimed one is unconfirmed, never expired, because COS Control may have sent it and must still be able to say so.
    */
   private effective(r: HandoffRequestRecord, nowMs: number): HandoffRequestRecord {
     const created = Date.parse(r.createdAt), claimed = r.claimedAt ? Date.parse(r.claimedAt) : undefined
-    let state = r.state
-    if ((state === 'pending' || state === 'claimed') && (created > nowMs + HANDOFF_REQUEST_LIMITS.skewMs
-      || (claimed !== undefined && claimed > nowMs + HANDOFF_REQUEST_LIMITS.skewMs))) state = 'expired'
-    else if (state === 'pending' && nowMs >= created + HANDOFF_REQUEST_LIMITS.pendingMs) state = 'expired'
-    else if (state === 'claimed' && nowMs >= claimed! + HANDOFF_REQUEST_LIMITS.claimMs) state = 'unconfirmed'
+    const ahead = (at: number | undefined) => at !== undefined && at > nowMs + HANDOFF_REQUEST_LIMITS.skewMs
+    let state = r.state, why = ''
+    if (state === 'pending' && ahead(created)) { state = 'expired'; why = 'it was made more than 5 minutes ahead of this clock' }
+    else if (state === 'pending' && nowMs >= created + HANDOFF_REQUEST_LIMITS.pendingMs) { state = 'expired'; why = 'COS Control did not claim it in time' }
+    else if (state === 'claimed' && (ahead(created) || ahead(claimed))) { state = 'unconfirmed'; why = 'its claim is more than 5 minutes ahead of this clock' }
+    else if (state === 'claimed' && nowMs >= claimed! + HANDOFF_REQUEST_LIMITS.claimMs) { state = 'unconfirmed'; why = 'COS Control claimed it and did not report back' }
     if (state !== r.state && !this.noticed.has(r.clientRequestId + state)) {
       this.noticed.add(r.clientRequestId + state)
-      log(`${r.clientRequestId} ${state === 'expired' ? 'expired: COS Control did not claim it in time' : 'unconfirmed: COS Control claimed it and did not report back'}`)
+      log(`${r.clientRequestId} ${state}: ${why}`)
     }
     return { ...r, state }
   }
@@ -311,10 +335,10 @@ export class WorkHandoffRequestStore {
     if (rows.some(r => r.domain === input.domain && r.workIdentity === input.workIdentity && (r.state === 'pending' || r.state === 'claimed'))) {
       throw new WorkHandoffRequestError('request_pending', 409, 'This task already has a request waiting for COS Control.')
     }
-    const today = localDay(nowMs)
-    if (rows.filter(r => localDay(Date.parse(r.createdAt)) === today).length >= HANDOFF_REQUEST_LIMITS.dailyCap) {
-      const resetsAt = iso(nextLocalMidnight(nowMs))
-      throw new WorkHandoffRequestError('daily_cap', 429, `The daily limit of 40 handoff requests is reached. It resets at midnight on the Mac (${resetsAt}).`, { resetsAt })
+    const today = this.calendar.day(nowMs)
+    if (rows.filter(r => this.calendar.day(Date.parse(r.createdAt)) === today).length >= HANDOFF_REQUEST_LIMITS.dailyCap) {
+      // `resetsAt` is the Mac's next local midnight; the glasses format it. The words carry no time.
+      throw new WorkHandoffRequestError('daily_cap', 429, 'The daily limit of 40 handoff requests is reached. Try again after the daily reset.', { resetsAt: iso(this.calendar.nextMidnight(nowMs)) })
     }
     const record: HandoffRequestRecord = { ...input, state: 'pending', createdAt: iso(nowMs), fingerprint }
     this.write([...rows, record], nowMs)

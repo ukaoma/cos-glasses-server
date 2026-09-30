@@ -16,9 +16,10 @@ function fixture(receipts: unknown[] = [receipt()], version = 2) {
  return {journalPath,root}
 }
 /** The route's own path: read the journal, then project one item. */
+const NOW = 1_790_100_000_000
 function activityOf(domain: string, workIdentity: string, options: WorkActivityOptions) {
  const journal = readWorkJournal(options)
- return journal.available ? { available: true, activities: projectWorkActivity(journal, domain, workIdentity) } : { available: false, reason: journal.reason, activities: [] }
+ return journal.available ? { available: true, activities: projectWorkActivity(journal, domain, workIdentity, NOW) } : { available: false, reason: journal.reason, activities: [] }
 }
 const C1 = 'claude:11111111-2222-4333-8444-555555555555', X1 = 'codex:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const R1 = 'cursor:99999999-8888-4777-8666-555555555555', O1 = 'ollama:12345678-1234-4123-8123-123456789abc'
@@ -28,7 +29,7 @@ it('reads v1/v2 exact source identity; never infers title ownership or returns p
   const f=fixture([receipt(),receipt({id:'other',workID:`task:personal:${identity}`}),receipt({id:'title',workID:'task:business:bbbbbbbbbbbb',workTitle:'Same title'})],version)
   const result=activityOf('business',identity,f)
   expect(result).toEqual({available:true,activities:[{id:'one',workId:`task:business:${identity}`,domain:'business',status:'queued',provider:'codex',sessionId:'codex:owned',sessionTitle:'Recorded target',
-   mode:'continueSession',model:'codex-frontier',createdAt:'1970-01-01T00:00:01.000Z',updatedAt:'1970-01-01T00:00:01.000Z',acknowledged:false,appOpened:false,serverHold:false,waitingInApp:false}]})
+   mode:'continueSession',createdAt:'1970-01-01T00:00:01.000Z',updatedAt:'1970-01-01T00:00:01.000Z',acknowledged:false,appOpened:false,serverHold:false,waitingInApp:false}]})
   expect(JSON.stringify(result)).not.toContain('SECRET');expect(JSON.stringify(result)).not.toContain('Private task')
  }
 })
@@ -84,11 +85,11 @@ const progress = (patch = {}) => ({tag:identity,events:[
  seenReplies:['a'],notified:[],baseline:[],...patch})
 const at = (seconds: number) => new Date(seconds * 1000).toISOString()
 const serialized = (value: unknown) => { const json = JSON.stringify(value); for (const secret of secrets) expect(json).not.toContain(secret); return json }
-const one = (patch: Record<string, unknown>, others: unknown[] = []) => projectWorkActivity(journalOf([receipt(patch), ...others]),'business',identity)[0]
+const one = (patch: Record<string, unknown>, others: unknown[] = []) => projectWorkActivity(journalOf([receipt(patch), ...others]),'business',identity,NOW)[0]
 
 it('S1 projects progress, times, mode and model from Control\'s WorkProgress, never its text', () => {
  const activity=one({createdAt:1_790_000_000,progress:progress()})
- expect(activity).toMatchObject({mode:'continueSession',model:'codex-frontier',createdAt:at(1_790_000_000),updatedAt:at(1_790_000_300),
+ expect(activity).toMatchObject({mode:'continueSession',createdAt:at(1_790_000_000),updatedAt:at(1_790_000_300),
   acknowledged:false,appOpened:false,serverHold:false,waitingInApp:false})
  expect(activity.progress).toEqual({reported:'done',reportedBy:'session',evidence:'Footer links fixed; checked mobile and desktop.',
   receivedAt:at(1_790_000_060),lastMove:{from:'draft',to:'qa',at:at(1_790_000_120),undone:true},paused:true})
@@ -107,7 +108,7 @@ it('S1 a malformed progress block reads unreadable on its own, never silence, ne
   {events:[{at:'soon',kind:'sent'}]},{events:[{at:1,kind:3}]},{events:[{at:1,kind:'moved',fromStage:4}]},{events:[{at:1,kind:'moved',undoneAt:'x'}]},
   {events:Array.from({length:WORK_ACTIVITY_LIMITS.progressEvents+1},(_,i)=>({id:String(i),at:1,kind:'note',text:''}))}]
  for (const block of bad) {
-  const [first,second]=projectWorkActivity(journalOf([receipt({createdAt:100,progress:block}),receipt({id:'two',createdAt:100,progress:progress()})]),'business',identity)
+  const [first,second]=projectWorkActivity(journalOf([receipt({createdAt:100,progress:block}),receipt({id:'two',createdAt:100,progress:progress()})]),'business',identity,NOW)
   expect(first.progress).toEqual({unreadable:true}); expect(first.updatedAt).toBe(at(100)); expect(first.status).toBe('queued')
   expect(reportOf(first.progress)).toBeNull(); expect(reportOf(second.progress)).toBe('done')
  }
@@ -170,8 +171,23 @@ it('S1 app, server and queued-in-app ownership belong to the SESSION, across eve
  expect(one({channel:'tab',status:'queued',sessionID:null}).error).toContain('did not complete')
  expect(one({channel:'tab',status:'queued'}).status).toBe('queued')
 })
+it('S1 projects the model of a New session only, never Control\'s placeholder for Continue and Fork', () => {
+ expect(one({mode:'newSession',modelID:'codex-frontier'}).model).toBe('codex-frontier')
+ expect(one({mode:'continueSession',modelID:'existing-session'})).not.toHaveProperty('model')
+ expect(one({mode:'fork',modelID:'existing-session'})).not.toHaveProperty('model')
+ expect(one({mode:'continueSession',modelID:'codex-frontier'})).not.toHaveProperty('model')
+ expect(one({mode:'newSession',modelID:'existing-session'})).not.toHaveProperty('model')
+})
+it('S1 marks a send in flight: preparing or sending made in the last 10 minutes, never an older or a finished one', () => {
+ const s = NOW / 1000
+ expect(one({status:'sending',createdAt:s-5})).toMatchObject({status:'unknown',sending:true})
+ expect(one({status:'preparing',createdAt:s-599})).toMatchObject({status:'unknown',sending:true})
+ expect(one({status:'sending',createdAt:s-600})).not.toHaveProperty('sending')
+ expect(one({status:'unknown',createdAt:s-5})).not.toHaveProperty('sending')
+ expect(one({status:'running',createdAt:s-5})).not.toHaveProperty('sending')
+})
 it('S1 a time no Date can hold is left out instead of failing the journal, and a model id is optional', () => {
- const far=one({createdAt:1e20,modelID:''})
+ const far=one({createdAt:1e20,mode:'newSession',modelID:''})
  expect(far).not.toHaveProperty('createdAt'); expect(far).not.toHaveProperty('updatedAt'); expect(far).not.toHaveProperty('model')
  expect(one({createdAt:100,progress:progress({events:[{id:'a',at:50,kind:'sent',text:''}]})}).updatedAt).toBe(at(100))
 })
@@ -265,15 +281,21 @@ describe('S2 open list', () => {
    r(23,{status:'canceled',progress:progress({reported:'done'})}),
    r(24,{status:'completed',progress:progress({reported:'done'})}),
    r(25,{status:'completed',progress:'garbled'}),
+   r(26,{status:'preparing',createdAt:nowS - 599}),
+   r(27,{status:'sending',createdAt:nowS - 600}),
    receipt({id:'not-on-board',workID:`task:business:${id(99)}`,createdAt:nowS,status:'running'}),
    receipt({id:'review',workID:'meeting-review:wr_1',createdAt:nowS,status:'running'}),
   ]
-  const rows = Array.from({length:25},(_,i)=>boardRow(i+1, i+1===18 || i+1===19 ? {checked:true,workStage:'complete'} : i+1===24 ? {workStage:'complete'} : {}))
+  const rows = Array.from({length:27},(_,i)=>boardRow(i+1, i+1===18 || i+1===19 ? {checked:true,workStage:'complete'} : i+1===24 ? {workStage:'complete'} : {}))
   const list = projectOpenWork(journalOf(receipts), rows, now)
-  expect(ids(list)).toEqual([id(6),id(7), id(4),id(5),id(10),id(11),id(13),id(21),id(25), id(1),id(2),id(3),id(19),id(17), id(8),id(9),id(24)])
-  expect(list.items.map(item => item.group)).toEqual(['needsInput','needsInput','attention','attention','attention','attention','attention','attention','attention','running','running','running','running','running','done','done','done'])
+  // A send in flight (preparing or sending, under 10 minutes old) is running; at 10 minutes it was interrupted: attention.
+  expect(ids(list)).toEqual([id(6),id(7), id(4),id(27),id(10),id(11),id(13),id(21),id(25), id(1),id(2),id(3),id(5),id(26),id(19),id(17), id(8),id(9),id(24)])
+  expect(list.items.map(item => item.group)).toEqual(['needsInput','needsInput','attention','attention','attention','attention','attention','attention','attention',
+   'running','running','running','running','running','running','running','done','done','done'])
+  expect(list.items.find(item => item.workIdentity === id(5))).toMatchObject({status:'unknown',group:'running',sending:true})
+  expect(list.items.find(item => item.workIdentity === id(27))).not.toHaveProperty('sending')
   expect(list.items[0]).toMatchObject({workIdentity:id(6),domain:'business',title:'Board 6',status:'completed',taskRevision:controlSnapshotRevision(rows[5])})
-  expect(list).toMatchObject({total:17,truncated:false})
+  expect(list).toMatchObject({total:19,truncated:false})
   serialized(list)
  })
  it('reads only the newest receipt of an item, by time then id', () => {

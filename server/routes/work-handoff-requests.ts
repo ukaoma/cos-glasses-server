@@ -96,7 +96,8 @@ export function createWorkHandoffRequestsRouter(overrides: Partial<WorkHandoffRe
       }
       const row = rows.find(r => r.domain === input.domain && (r.workIdentity || r.id) === input.workIdentity)
       if (!row) throw new WorkHandoffRequestError('task_not_found', 404, 'This task is not on the board any more.')
-      if (row.checked) throw new WorkHandoffRequestError('task_complete', 409, 'This task is complete.')
+      // COS Control refuses a glasses request for a checked task and for one at stage Complete (0.5.252).
+      if (row.checked || row.workStage === 'complete') throw new WorkHandoffRequestError('task_complete', 409, 'This task is complete.')
       if (input.replyTo) checkReplyTarget(input)
       const { request, created } = deps.store!.create(input, fingerprint, controlSnapshotRevision(row))
       return res.status(created ? 201 : 200).json({ request: handoffFullView(request) })

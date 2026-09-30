@@ -22,7 +22,7 @@ Unchanged fields stay as they were (`id`, `workId`, `domain`, `status`, `provide
 | Field | Meaning | From COS Control's journal |
 | --- | --- | --- |
 | `mode` | `continueSession`, `fork` or `newSession` | `mode` |
-| `model` | The model slot it was sent with, when there was one | `modelID` |
+| `model` | The model slot a New session was sent with. Never on a Continue or a Fork (Control records the placeholder `existing-session` there) | `modelID` |
 | `createdAt` | ISO time the handoff was sent | `createdAt` (seconds since 1970) |
 | `updatedAt` | The newest progress event, never earlier than `createdAt` | `progress.events[].at` |
 | `progress.reported` | `done`, `needsInput`, `blocked` or `null` | `progress.reported` (an unknown kind reads as `null`, as Control reads it) |
@@ -37,6 +37,7 @@ Unchanged fields stay as they were (`id`, `workId`, `domain`, `status`, `provide
 | `serverHold` | The COS server is still running a Work New session on its SESSION | any receipt on the same session with channel `job`, mode `newSession`, not terminal |
 | `waitingInApp` | A note for its SESSION is queued in its app; nothing reached the session yet | any receipt on the same session with channel `app` and status `queued` |
 | `channel` | How Control delivered it: `job`, `fork`, `app`, `turn`, `queue` or `tab` | `channel` |
+| `sending: true` | A send in flight. Its `status` still reads `unknown` (as for older clients); with this flag say "Sending", not an unresolved delivery. Absent otherwise | status `preparing` or `sending`, made in the last 10 minutes (an older one was interrupted) |
 | `requestedFrom` | `glasses` when Control sent it from a glasses request | `requestedFrom` |
 | `requestId` | The handoff request it answered | `requestId` (Control 0.5.252) |
 
@@ -46,7 +47,7 @@ Parsing is lenient for everything new. A malformed `progress` block reads `{ unr
 
 A handoff COS Control 0.5.248 opened as a tab and never linked to a session (channel `tab`, `queued`, no session) reads as `canceled`, as Control reads it.
 
-The board row behind `taskRevision` and `savedDestination` is read within 3 s (one read shared with the other glasses routes, kept for 10 s). Past that, or with no board, the activity still answers, without those two fields.
+The board row behind `taskRevision` and `savedDestination` is read within 3 s. One read is shared with the other glasses routes and kept for 10 s after it finished; a Work stage or meeting write through this server drops it at once. Past the 3 s, or with no board, the activity still answers, without those two fields: treat a missing `taskRevision` as "refresh, no Start".
 
 ## Everything open: `GET /api/work-board/activity/open`
 
@@ -58,7 +59,7 @@ An item is a board task (`task:<domain>:<12 hex>` with a row on the board) whose
 | --- | --- |
 | `needsInput` | It reports needs input or blocked, and is not acknowledged |
 | `attention` | It failed, was refused, is unknown (delivery unresolved), or completed with no report (an unreadable one included), and is not acknowledged |
-| `running` | It is queued, running or delivered |
+| `running` | It is queued, running or delivered, or a send in flight (`sending: true`; its `status` still reads `unknown`, so label these by `group` or the flag). An older one was interrupted and is `attention` |
 | `done` | It reports done, and is not acknowledged |
 
 - A report counts only on a receipt that did not fail and was not refused or canceled, as Control's `WorkTracking.latest` reads it; such a receipt goes to `attention` (or nowhere, when canceled).
@@ -97,8 +98,8 @@ The glasses leave a request, COS Control claims it and runs its own send with ev
 
 - `clientRequestId`: a UUID v4 (either case; stored in lowercase). `domain`: a safe domain name. `workIdentity`: 12 hex. `expectedTaskRevision`: the task's `taskRevision`.
 - `intent`: `start`, `reply` (Reply by voice) or `notDone` (Not done yet). Reply and Not done yet name `replyTo`, the item's newest receipt, continue the session that receipt went to, and carry a note; Start names no `replyTo`.
-- `mode`: `continueSession`, `fork` or `newSession`. `sessionId` is exactly `provider:native`, with provider claude, codex or cursor and native a full lowercase session UUID (never a short id, a path, or another `provider:` inside). Continue works with claude, codex and cursor sessions and takes no model. Fork works from claude and codex sessions only; a model on a Fork is a Fork to the other platform and must be a slot of that platform. A New session names no session; without a model it takes the server's default (`COS_G2_DEFAULT_MODEL`, else `sonnet`), and the stored request names it. A model is a slot this server knows (`opus`, `fable`, `sonnet`, `haiku`, `codex-frontier`, `codex-balanced`, `cursor-grok`, `cursor-composer`, `ollama`).
-- `note`: at most 2,000 characters after trimming. Newlines, tabs and the joiners U+200C and U+200D are kept. Refused (400, never cleaned): any other control character, U+2028 and U+2029, any other invisible format character (direction marks and overrides, zero-width space, soft hyphen, byte-order mark), a broken surrogate, and the text `COS-WORK` in any case (an agent quoting it back could move the card).
+- `mode`: `continueSession`, `fork` or `newSession`. `sessionId` is exactly `provider:native`, with provider claude, codex or cursor and native a full lowercase session UUID (never a short id, a path, or another `provider:` inside). A live Claude session listed by its 8-character id cannot be named, so do not offer it. Continue works with claude, codex and cursor sessions and takes no model. Fork works from claude and codex sessions only; a model on a Fork is a Fork to the other platform and must be a slot of that platform. A New session names no session; without a model it takes the server's default (`COS_G2_DEFAULT_MODEL`, else `sonnet`), and the stored request names it. A model is a slot this server knows (`opus`, `fable`, `sonnet`, `haiku`, `codex-frontier`, `codex-balanced`, `cursor-grok`, `cursor-composer`, `ollama`).
+- `note`: at most 2,000 characters after trimming. Newlines, tabs and the joiners U+200C and U+200D are kept. Refused (400, never cleaned): any other control character, U+2028 and U+2029, any other invisible format character (direction marks and overrides, zero-width space, soft hyphen, byte-order mark), a broken surrogate, and the text `COS-WORK` in any case (an agent quoting it back could move the card). `COS-WORK` is looked for as COS Control reads a status line, with `*`, `_`, backticks and joiners taken out first, so `COS**-WORK` is refused too.
 - `destinationSource`: `saved`, `jev` or `user`. A hint for COS Control's copy; Control never trusts it.
 - An empty string or `null` counts as not given for `sessionId`, `model`, `note` and `replyTo`. Any other field, or a body over 16 KB, is refused.
 
@@ -110,12 +111,12 @@ Answers:
 | 200 | | The same `clientRequestId` and the same request again: the stored request, in whatever state it is now. Answered before the board is read |
 | 400 | `invalid_handoff_request` | Anything malformed |
 | 404 | `task_not_found` | No board row for that domain and work identity |
-| 409 | `task_complete` | The task is checked |
+| 409 | `task_complete` | The task is checked, or at stage Complete (COS Control refuses both) |
 | 409 | `request_id_conflict` | The same `clientRequestId` with a different request |
 | 409 | `revision_changed` | This task changed since `expectedTaskRevision` |
 | 409 | `reply_target_invalid` | `replyTo` is not this task's newest receipt, or the request continues a different session |
 | 409 | `request_pending` | The item already has a pending or claimed request |
-| 429 | `daily_cap` | 40 requests already made today, counted by the Mac's local day whatever became of them. The error carries `resetsAt` (the next local midnight) and the answer a `Retry-After` |
+| 429 | `daily_cap` | 40 requests already made today, counted by the Mac's local day whatever became of them. The error carries `resetsAt` (the Mac's next local midnight as an ISO instant, for the client to format; the message names no time) and the answer a `Retry-After` |
 | 503 | `work_board_unavailable` | The board did not answer within 5 s or failed; `cause` says why (`work_board_timeout`, `cos_pipeline_not_configured`, ...). Nothing was created |
 | 503 | `work_history_unavailable` | A reply's receipt cannot be checked: COS Control's journal cannot be read here |
 | 503 | `handoff_requests_unavailable` | The inbox did not open on this server |
@@ -153,7 +154,7 @@ After a transport failure or a timeout, GET the same `clientRequestId` before te
 
 - A pending request expires 10 minutes after `createdAt` and can never be claimed after that, so a Control that starts tomorrow never fires yesterday's tap.
 - A claimed request with no result 10 minutes after the claim becomes `unconfirmed` and still takes one late result.
-- A `createdAt` or `claimedAt` more than 5 minutes ahead of the server's clock counts as expired.
+- A time more than 5 minutes ahead of the server's clock (a clock that jumped) ends the wait at once: a pending request is `expired`; a claimed one is `unconfirmed`, never expired, and still takes its one late result.
 - These follow from the stored times on every read; the next write stores them. A read never writes. Each transition is logged once, with the request id and never the note.
 - A request survives a restart and stays claimable until `createdAt` plus 10 minutes, whatever happened in between.
 

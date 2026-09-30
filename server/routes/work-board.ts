@@ -62,7 +62,7 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
     const row = (await glanceBoard('activity', WORK_BOARD_READ_LIMITS.savedDestinationMs))?.find(r => r.domain === domain && (r.workIdentity || r.id) === workIdentity)
     const taskRevision = row ? { taskRevision: controlSnapshotRevision(row) } : {}
     if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, activities: [], ...taskRevision } satisfies WorkActivityResult)
-    const result: WorkActivityResult = { version: 1, available: true, capabilities, activities: projectWorkActivity(journal, domain, workIdentity), ...taskRevision }
+    const result: WorkActivityResult = { version: 1, available: true, capabilities, activities: projectWorkActivity(journal, domain, workIdentity, deps.now()), ...taskRevision }
     const destination = row ? savedDestinationFor(journal, row) : undefined
     if (destination) result.savedDestination = destination
     return res.json(result)
@@ -78,9 +78,9 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
   })
   router.get('/work-board', async (_req, res) => {
     try {
-      const readStartedAt = deps.now()
+      const read = board.begin()
       const [raw, capabilities] = await Promise.all([deps.list(), deps.capabilities()])
-      board.prime(raw, readStartedAt)
+      board.prime(raw, read)
       // 6.59.0: taskRevision is this task's own revision (COS Control's taskSnapshot), what a handoff request names.
       const tasks = raw.map(row => ({ ...row, workStage: row.checked ? 'complete' : row.workStage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'), workIdentity: row.workIdentity || row.id, meetingRefs: row.meetingRefs ?? [], taskRevision: controlSnapshotRevision(row) }))
       res.json({ tasks, capabilities, complete: true })
@@ -101,7 +101,8 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
       if (capability.version !== 1 || !capability.writable) throw new TaskRunError(409, 'work_board_read_only', 'The canonical task bridge needs a compatible update')
       if (action === 'stage') {
         if (!WORK_STAGES.includes(body.workStage as WorkStage)) throw new TaskRunError(422, 'invalid_work_stage', 'Choose a valid Work stage')
-        await deps.stage(body.domain, body.id, body.workStage, body.expectedText, body.expectedRevision)
+        // The glasses' shared board read must not serve the board as it was before this write.
+        try { await deps.stage(body.domain, body.id, body.workStage, body.expectedText, body.expectedRevision) } finally { board.invalidate() }
       } else {
         const input = body.meeting
         if (!input || typeof input !== 'object' || Array.isArray(input)
@@ -114,7 +115,7 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
         const resolved = await deps.resolveMeeting(descriptor)
         if (resolved.recordId !== descriptor.recordId) throw new TaskRunError(409, 'meeting_identity_changed', 'The selected meeting changed; refresh before linking')
         const meeting: WorkMeetingRef = { ...descriptor, recordId: resolved.recordId, title: resolved.title.replace(/\s+/g, ' ').trim().slice(0, 300) }
-        await deps.link(body.domain, body.id, body.expectedText, body.expectedRevision, meeting)
+        try { await deps.link(body.domain, body.id, body.expectedText, body.expectedRevision, meeting) } finally { board.invalidate() }
       }
       res.json({ ok: true })
     } catch (e) { fail(res, e) }
