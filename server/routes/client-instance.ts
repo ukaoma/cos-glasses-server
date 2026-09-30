@@ -21,8 +21,8 @@ import {
   parseClientInstanceClaim,
   parseInstanceTag,
   ClientChunkLedger,
-  NO_CAPTURE,
   type ClientInstanceOwner,
+  type CopyWord,
 } from '../lib/client-instance-claim.js'
 
 /** Owners kept at once; the least recently seen device is dropped past this. */
@@ -58,6 +58,13 @@ export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() 
     lastSeen.delete(id); lastSeen.set(id, at)
     while (lastSeen.size > CLIENT_INSTANCE_MAX_SEEN) lastSeen.delete(lastSeen.keys().next().value as string)
   }
+  // 6.58.1: what each copy has said about recording, kept across changes of owner (CopyWord).
+  // Bounded like lastSeen; a check updates it too (the copy still said it).
+  const words = new Map<string, CopyWord>()
+  const noteWord = (id: string, word: CopyWord) => {
+    words.delete(id); words.set(id, word)
+    while (words.size > CLIENT_INSTANCE_MAX_SEEN) words.delete(words.keys().next().value as string)
+  }
   router.use((req, _res, next) => {
     if (isMeetingChunkPost(req.method, req.path)) chunks.note(deviceKey(req.socket?.remoteAddress ?? req.ip), parseInstanceTag(req.query?.clientInstance), now())
     next()
@@ -68,11 +75,13 @@ export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() 
     if (!claim) return void res.status(400).json({ error: 'invalid_claim' })
     const device = deviceKey(req.socket?.remoteAddress ?? req.ip)
     const previous = owners.get(device) ?? null
-    const evidence = previous ? chunks.evidence(device, previous.id, claim.id, at) : NO_CAPTURE
+    // 6.58.1: evidence even with no owner, so a first claim still knows its own newest chunk.
+    const evidence = chunks.evidence(device, previous?.id ?? '', claim.id, at)
     const captureLive = previous ? ownerIsRecording(previous, evidence, at) : false
     const claimantLastSeenAt = lastSeen.get(claim.id)
     noteSeen(claim.id, at)
-    const result = arbitrateClientInstance(previous, claim, at, evidence, claimantLastSeenAt)
+    const result = arbitrateClientInstance(previous, claim, at, evidence, claimantLastSeenAt, words.get(claim.id))
+    noteWord(claim.id, result.word)
     if (req.body?.check === true) {
       const shown = previous ?? result.owner
       return void res.json({ verdict: result.verdict, owner: { id: shown.id, bootAt: shown.bootAt, version: shown.version, seenAt: shown.seenAt }, check: true, captureLive })
