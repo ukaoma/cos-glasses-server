@@ -507,6 +507,14 @@ describe('6.60.0: the PermissionRequest wait (the away hold)', () => {
     // A foreign PermissionRequest hook with a longer timeout is not ours to read.
     const foreign = { hooks: [{ type: 'command', command: '~/bin/approve.sh', timeout: 9_999 }] }
     expect(permissionHookTimeoutS(withPermission(installed, [foreign, priorBlock()]))).toBe(130)
+    // A block that holds a foreign hook beside ours (a hand edit): only ours is read. Each
+    // hook has its own timeout, and a foreign one stopping does not stop ours.
+    const mixed = (timeout: unknown) => withPermission(installed, [{ hooks: [
+      { type: 'command', command: '~/bin/approve.sh', timeout },
+      { type: 'command', command: `${cmd('PermissionRequest')} 630`, timeout: 630 },
+    ] }])
+    expect(permissionHookTimeoutS(mixed(60))).toBe(630)
+    expect(permissionHookTimeoutS(mixed('junk'))).toBe(630)
     // Two of ours (a hand edit): Claude runs both, the first to give up bounds the wait.
     expect(permissionHookTimeoutS(withPermission(installed, [priorBlock(), (installed.hooks as Record<string, unknown[]>).PermissionRequest[0]]))).toBe(130)
     // Ours with no usable number, none of ours, nothing at all: null, the broker's old clamp.

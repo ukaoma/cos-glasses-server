@@ -45,6 +45,7 @@
     "!server/scripts/work-review-mutation-gate.mjs",
     "!server/scripts/work-intake-mutation-gate.mjs",
     "!server/scripts/work-progress-mutation-gate.mjs",
+    "!server/scripts/away-hold-mutation-gate.mjs",
     "!server/scripts/mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
