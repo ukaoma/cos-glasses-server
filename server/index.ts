@@ -31,6 +31,7 @@ import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
 import {
   PermissionBroker,
   brokerSignalSink,
+  permissionBrokerAwayHoldMs,
   permissionBrokerMode,
   permissionBrokerTimeoutMs,
   readHidIdleSeconds,
@@ -241,6 +242,10 @@ app.use(cors({
 // (lib/permission-broker.ts). An app without the question UI never polls, so for it every
 // request is `{}`. `COS_PERMISSION_BROKER=0` is the switch, read per request, and every
 // request outside the gate is answered `{}` at once.
+// 6.60.0: the away hold. While the desk is idle a request is held up to
+// `COS_PERMISSION_BROKER_AWAY_HOLD_S` (default 600, `0` is the 6.59.0 broker) whether or not
+// a client is polling, never past the PermissionRequest timeout the Claude settings file
+// carries (read through the 5 s hook-status cache; unreadable is the old 120 s clamp).
 const permissionBroker = new PermissionBroker({
   now: () => Date.now(),
   mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
@@ -249,6 +254,8 @@ const permissionBroker = new PermissionBroker({
   readDeskIdleSeconds: readHidIdleSeconds,
   deskIdleSeconds,
   timeoutMs: () => permissionBrokerTimeoutMs(process.env),
+  awayHoldMs: () => permissionBrokerAwayHoldMs(process.env),
+  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,
   signals: brokerSignalSink(sessionSignalStore),
 })
 registerPermissionBroker(permissionBroker)

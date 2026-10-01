@@ -8,6 +8,9 @@ import { afterAll, describe, expect, it } from 'vitest'
 import {
   HALT_CAPABLE_PRIOR_SCRIPT_SHAS,
   HOOK_SUBSCRIPTIONS,
+  LEGACY_PERMISSION_HOOK_TIMEOUT_S,
+  PERMISSION_HOOK_TIMEOUT_S,
+  permissionHookTimeoutS,
   cosGlassesHome,
   hookCommand,
   hookHaltReady,
@@ -54,6 +57,8 @@ const dir = () => {
 /** The script 6.53.0 to 6.53.2 shipped, byte for byte (a test fixture, never packaged). */
 const SCRIPT_6_53_0 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.0')
 const SCRIPT_6_53_3_PREQA = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.3-preqa')
+/** The script 6.53.3 through 6.59.0 shipped, byte for byte (6.60.0 changed it for the away hold). */
+const SCRIPT_6_53_3 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.3')
 
 function merged(current: unknown, paths = PATHS): { settings: Record<string, unknown>; changed: boolean } {
   const result = mergeHookSettings(current, SCRIPT, paths)
@@ -74,7 +79,9 @@ describe('mergeHookSettings is pure and preserves everything foreign', () => {
     expect(hooks.UserPromptSubmit[0]).toEqual({ hooks: [{ type: 'command', command: cmd('UserPromptSubmit'), timeout: 5 }] })
     expect(hooks.SessionEnd[0]).toEqual({ hooks: [{ type: 'command', command: cmd('SessionEnd'), timeout: 5 }] })
     expect(hooks.PostToolUse[0]).toEqual({ hooks: [{ type: 'command', command: cmd('PostToolUse'), timeout: 10, async: true }] })
-    expect(hooks.PermissionRequest).toEqual([{ hooks: [{ type: 'command', command: cmd('PermissionRequest'), timeout: 130 }] }])
+    // 6.60.0: PermissionRequest waits 630 s (was 130) and passes that number as the script's
+    // second argument, for the away hold. Updated on purpose.
+    expect(hooks.PermissionRequest).toEqual([{ hooks: [{ type: 'command', command: `${cmd('PermissionRequest')} 630`, timeout: 630 }] }])
     // 6.53.0: PreToolUse is synchronous with NO matcher (was async `AskUserQuestion|ExitPlanMode`
     // through 6.52). The script's halt check must see every tool call, and it returns in
     // about 11 ms; the script itself still spools only those two tools. Updated on purpose.
@@ -141,7 +148,7 @@ describe('mergeHookSettings is pure and preserves everything foreign', () => {
 
   it('reports subscribed, missing and drifted events', () => {
     const installed = merged(REAL_SHAPE).settings
-    expect(subscribedEvents(installed, SCRIPT, PATHS)).toEqual({ subscribed: HOOK_SUBSCRIPTIONS.map(s => s.event), missing: [], drifted: [] })
+    expect(subscribedEvents(installed, SCRIPT, PATHS)).toEqual({ subscribed: HOOK_SUBSCRIPTIONS.map(s => s.event), missing: [], drifted: [], priorWait: [] })
     const hooks = installed.hooks as Record<string, unknown[]>
     const drifted = { ...installed, hooks: { ...hooks, Stop: [{ hooks: [{ type: 'command', command: cmd('Stop'), timeout: 99 }] }], PostCompact: [] } }
     const report = subscribedEvents(drifted, SCRIPT, PATHS)
@@ -231,7 +238,10 @@ describe('install and uninstall on disk', () => {
       const written = JSON.parse(readFileSync(settingsPath, 'utf-8'))
       expect(written.model).toBe('opus')
       const command = written.hooks.PermissionRequest[0].hooks[0].command as string
-      expect(command.endsWith(`${scriptPath} PermissionRequest`)).toBe(true)
+      expect(command.endsWith(`${scriptPath} PermissionRequest 630`)).toBe(true)
+      expect(written.hooks.PermissionRequest[0].hooks[0].timeout).toBe(630)
+      expect(result.status.permissionHookTimeoutS).toBe(630)
+      expect(result.status.priorWaitOnly).toBe(false)
       expect(command).toContain(`COS_GLASSES_HOME=${shellQuote(join(root, 'home'))} `)
       expect(command).toContain('COS_HOOK_SPOOL=')
       // A second install changes nothing and mints no second token.
@@ -482,5 +492,139 @@ describe('after the 6.53.3 script change', () => {
     expect(hookHaltReady({ installed: false, state: 'disabled_by_settings', scriptSha: sha })).toBe(false)
     expect(hookStatusAdvice({ installed: false, state: 'drift', scriptSha: sha, packageScriptSha: 'p' })).toContain('--hooks install')
     expect(hookStatusAdvice({ installed: false, state: 'disabled_by_settings', scriptSha: sha, packageScriptSha: 'p' })).toContain('disableAllHooks')
+  })
+})
+
+describe('6.60.0: the PermissionRequest wait (the away hold)', () => {
+  /** Our block as every install before 6.60.0 wrote it: 130 s, no wait argument. */
+  const priorBlock = () => ({ hooks: [{ type: 'command', command: cmd('PermissionRequest'), timeout: LEGACY_PERMISSION_HOOK_TIMEOUT_S }] })
+  const withPermission = (settings: Record<string, unknown>, blocks: unknown[]) => ({ ...settings, hooks: { ...(settings.hooks as Record<string, unknown>), PermissionRequest: blocks } })
+
+  it('reads our timeout only, the least of ours, and null when it cannot say', () => {
+    const installed = merged(REAL_SHAPE).settings
+    expect(permissionHookTimeoutS(installed)).toBe(PERMISSION_HOOK_TIMEOUT_S)
+    expect(permissionHookTimeoutS(withPermission(installed, [priorBlock()]))).toBe(130)
+    // A foreign PermissionRequest hook with a longer timeout is not ours to read.
+    const foreign = { hooks: [{ type: 'command', command: '~/bin/approve.sh', timeout: 9_999 }] }
+    expect(permissionHookTimeoutS(withPermission(installed, [foreign, priorBlock()]))).toBe(130)
+    // Two of ours (a hand edit): Claude runs both, the first to give up bounds the wait.
+    expect(permissionHookTimeoutS(withPermission(installed, [priorBlock(), (installed.hooks as Record<string, unknown[]>).PermissionRequest[0]]))).toBe(130)
+    // Ours with no usable number, none of ours, nothing at all: null, the broker's old clamp.
+    for (const timeout of [undefined, '630', 0, -5, Number.NaN]) {
+      expect(permissionHookTimeoutS(withPermission(installed, [{ hooks: [{ type: 'command', command: cmd('PermissionRequest'), timeout }] }])), String(timeout)).toBeNull()
+    }
+    expect(permissionHookTimeoutS(withPermission(installed, [foreign]))).toBeNull()
+    expect(permissionHookTimeoutS(REAL_SHAPE)).toBeNull()
+    expect(permissionHookTimeoutS(null)).toBeNull()
+    expect(permissionHookTimeoutS({ hooks: { PermissionRequest: 'x' } })).toBeNull()
+  })
+
+  it('an install from before 6.60.0 reads drift with priorWaitOnly, stays halt-ready, and says what it costs', () => {
+    const root = dir()
+    const settingsPath = join(root, 'claude', 'settings.json')
+    const scriptPath = join(root, 'stable', 'bin', 'cos-session-hook')
+    process.env.COS_GLASSES_HOME = join(root, 'home')
+    try {
+      mkdirSync(join(root, 'claude'), { recursive: true })
+      writeFileSync(settingsPath, JSON.stringify(REAL_SHAPE, null, 2))
+      installClaudeHooks({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath, port: 3141 })
+      // The settings as 6.59.0 left them: every block current but PermissionRequest's.
+      const current = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>
+      const ours = (current.hooks as Record<string, Array<{ hooks: Array<{ command: string; timeout: number }> }>>).PermissionRequest[0]!.hooks[0]!
+      expect(ours.command.endsWith(' PermissionRequest 630')).toBe(true)
+      const prior = { hooks: [{ type: 'command', command: ours.command.slice(0, -' 630'.length), timeout: LEGACY_PERMISSION_HOOK_TIMEOUT_S }] }
+      writeFileSync(settingsPath, JSON.stringify(withPermission(current, [prior]), null, 2))
+      for (const [label, bytes] of [['this package\'s script', readFileSync(packagedHookScriptPath())], ['the 6.53.3 script', readFileSync(SCRIPT_6_53_3)]] as const) {
+        writeFileSync(scriptPath, bytes)
+        const status = hookStatus({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath })
+        expect(status, label).toMatchObject({ state: 'drift', installed: false, drifted: ['PermissionRequest'], priorWait: ['PermissionRequest'], priorWaitOnly: true, permissionHookTimeoutS: 130 })
+        expect(hookHaltReady(status), label).toBe(true)
+        const advice = hookStatusAdvice(status)!
+        expect(advice).toContain('at most 2 minutes instead of 10')
+        expect(advice).toContain('Install hooks in COS Control')
+        expect(advice).toContain('still stops desk runs')
+        expect(advice).not.toMatch(/\u2014|\u2192|->/)
+      }
+      // An earlier script with no halt check: the wait drift alone does not make it halt-ready.
+      writeFileSync(scriptPath, '#!/bin/sh\n# the 6.51.0 script\nexit 0\n')
+      const old = hookStatus({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath })
+      expect(old.priorWaitOnly).toBe(true)
+      expect(hookHaltReady(old)).toBe(false)
+      expect(hookStatusAdvice(old)).toContain('cannot be cancelled from the lens')
+      // One Install hooks later: installed, 630.
+      writeFileSync(scriptPath, readFileSync(packagedHookScriptPath()))
+      installClaudeHooks({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath, port: 3141 })
+      const after = hookStatus({ settingsPath, packageScriptPath: packagedHookScriptPath(), scriptPath })
+      expect(after).toMatchObject({ state: 'installed', installed: true, priorWait: [], priorWaitOnly: false, permissionHookTimeoutS: 630 })
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('any other drift is not priorWaitOnly and not halt-ready: a different wait, a second difference, or a missing event', () => {
+    // Through hookStatus itself, on disk, with a halt-capable script at the stable path.
+    const root = dir()
+    const settingsPath = join(root, 'settings.json')
+    const scriptPath = join(root, 'cos-session-hook')
+    writeFileSync(scriptPath, readFileSync(SCRIPT_6_53_3))
+    const at = (event: string) => hookCommand(scriptPath, event, PATHS)
+    const merge = mergeHookSettings(REAL_SHAPE, scriptPath, PATHS)
+    if (!merge.ok) throw new Error(merge.reason)
+    const installed = merge.settings
+    const prior = () => ({ hooks: [{ type: 'command', command: at('PermissionRequest'), timeout: LEGACY_PERMISSION_HOOK_TIMEOUT_S }] })
+    const withPrior = withPermission(installed, [prior()])
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['130 s with an argument', withPermission(installed, [{ hooks: [{ type: 'command', command: `${at('PermissionRequest')} 130`, timeout: 130 }] }])],
+      ['another earlier wait', withPermission(installed, [{ hooks: [{ type: 'command', command: at('PermissionRequest'), timeout: 120 }] }])],
+      ['the prior wait plus a drifted Stop', { ...withPrior, hooks: { ...withPrior.hooks as Record<string, unknown>, Stop: [{ hooks: [{ type: 'command', command: at('Stop'), timeout: 99 }] }] } }],
+      ['the prior wait plus a missing event', { ...withPrior, hooks: { ...withPrior.hooks as Record<string, unknown>, PostCompact: [] } }],
+      ['the prior block twice', withPermission(installed, [prior(), prior()])],
+    ]
+    const status = () => hookStatus({ settingsPath, scriptPath, packageScriptPath: packagedHookScriptPath(), hookPaths: PATHS })
+    for (const [label, settings] of cases) {
+      writeFileSync(settingsPath, JSON.stringify(settings))
+      const read = status()
+      expect(read.state, label).toBe('drift')
+      expect(read.priorWaitOnly, label).toBe(false)
+      expect(hookHaltReady(read), label).toBe(false)
+    }
+    // The control: the prior block alone, through the same path, IS priorWaitOnly and halt-ready.
+    writeFileSync(settingsPath, JSON.stringify(withPrior))
+    const control = status()
+    expect(control).toMatchObject({ state: 'drift', drifted: ['PermissionRequest'], priorWaitOnly: true, permissionHookTimeoutS: 130 })
+    expect(hookHaltReady(control)).toBe(true)
+    // And the installed shape has no drift at all.
+    writeFileSync(settingsPath, JSON.stringify(installed))
+    expect(status()).toMatchObject({ state: 'script_outdated', priorWait: [], priorWaitOnly: false, permissionHookTimeoutS: 630 })
+    expect(hookHaltReady({ installed: false, state: 'drift', scriptSha: HALT_CAPABLE_PRIOR_SCRIPT_SHAS[0]!, priorWaitOnly: false })).toBe(false)
+  })
+
+  it('an unreadable or unparseable settings file reads no timeout (the broker keeps its old clamp)', () => {
+    const root = dir()
+    const settingsPath = join(root, 'settings.json')
+    writeFileSync(settingsPath, '{ not json')
+    expect(hookStatus({ settingsPath, scriptPath: join(root, 'none'), packageScriptPath: packagedHookScriptPath() })).toMatchObject({ state: 'settings_unparseable', permissionHookTimeoutS: null, priorWaitOnly: false })
+    expect(hookStatus({ settingsPath: join(root, 'missing.json'), scriptPath: join(root, 'none'), packageScriptPath: packagedHookScriptPath() })).toMatchObject({ state: 'missing', permissionHookTimeoutS: null })
+  })
+
+  it('the 6.53.3 script fixture is the one 6.53.3 to 6.59.0 shipped, and halt-capable', () => {
+    const bytes = readFileSync(SCRIPT_6_53_3)
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe('df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547')
+    expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toContain('df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547')
+    expect(bytes.toString('utf8')).toContain('"permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"')
+    // It posts with the earlier 125 s curl and no wait stamp: the broker clamps it to 120.
+    expect(bytes.toString('utf8')).toContain('--max-time 125 ')
+    expect(bytes.toString('utf8')).not.toContain('hookWaitS')
+  })
+
+  it('the wait argument comes only from the block: hookCommand appends it, nothing else does', () => {
+    expect(hookCommand(SCRIPT, 'PermissionRequest', PATHS, 630)).toBe(`${cmd('PermissionRequest')} 630`)
+    expect(hookCommand(SCRIPT, 'PermissionRequest', PATHS)).toBe(cmd('PermissionRequest'))
+    const installed = merged(REAL_SHAPE).settings
+    for (const sub of HOOK_SUBSCRIPTIONS) {
+      const block = (installed.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>)[sub.event]!.at(-1)!
+      expect(block.hooks[0]!.command.endsWith(sub.passTimeout ? ` ${sub.event} ${sub.timeout}` : ` ${sub.event}`), sub.event).toBe(true)
+    }
+    expect(HOOK_SUBSCRIPTIONS.filter(sub => sub.passTimeout).map(sub => sub.event)).toEqual(['PermissionRequest'])
   })
 })

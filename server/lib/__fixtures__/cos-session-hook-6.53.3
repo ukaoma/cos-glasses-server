@@ -1,5 +1,5 @@
 #!/bin/sh
-# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0; single entry 6.53.3; away hold wait 6.60.0). Installed into ~/.claude/settings.json by
+# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0; single entry 6.53.3). Installed into ~/.claude/settings.json by
 # `--hooks install`; Claude Code runs it with the hook event name as $1 and the event
 # payload on stdin. It spools one JSON file per event into the hook spool and exits 0
 # on every path. Only PermissionRequest ever talks to the server, and only when the
@@ -115,17 +115,7 @@ else
   { head -c 1048576 > "$T.in"; cat >/dev/null; }
 fi
 case "$(head -c 1 "$T.in")" in '{') ;; *) EVENT=rejected ;; esac
-# 6.60.0: the installer passes the PermissionRequest block's own timeout as $2. Claude Code
-# stops this hook at that many seconds, so curl below gives up 5 s before it, and the
-# request carries it (`hookWaitS`) so the server never holds it longer. No usable $2 (an
-# earlier block) is the earlier wait, 130, with no stamp.
-WAIT=130; STAMP_WAIT=''
-if [ "$EVENT" = PermissionRequest ]; then
-  case "${2:-}" in ''|0*|*[!0-9]*) ;; *)
-    if [ ${#2} -le 4 ] && [ "$2" -ge 20 ] && [ "$2" -le 3600 ]; then WAIT=$2; STAMP_WAIT=",\"hookWaitS\":$2"; fi ;;
-  esac
-fi
-{ printf '{"ts":%s,"ppid":%s,"event":"%s"%s,"payload":' "$TS" "$PPID" "$EVENT" "$STAMP_WAIT"; cat "$T.in"; printf '}\n'; } > "$T"
+{ printf '{"ts":%s,"ppid":%s,"event":"%s","payload":' "$TS" "$PPID" "$EVENT"; cat "$T.in"; printf '}\n'; } > "$T"
 rm -f "$T.in"
 # 6.51.0, CURSOR ONLY. Cursor runs this hook from ~/.claude/settings.json for its own
 # composers, and submits a Stop hook's {"followup_message":...} as that composer's next
@@ -163,7 +153,7 @@ DESK_S=$(cat "$GH/hook-desk-idle-s" 2>/dev/null || echo 90)
 { [ -n "$IDLE_NS" ] && [ "$(( ${IDLE_NS%.*} / 1000000000 ))" -ge "$DESK_S" ]; } || { cleanup; exit 0; }
 TOK=$(cat "$GH/hook-token" 2>/dev/null); [ -n "$TOK" ] || { cleanup; exit 0; }   # no token, no request
 PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
-OUT=$(curl -s --connect-timeout 2 --max-time $((WAIT - 5)) -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
+OUT=$(curl -s --connect-timeout 2 --max-time 125 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
   --data-binary @"$T.req" "http://127.0.0.1:$PORT/api/permission-requests/ask") || { cleanup; exit 0; }
 cleanup
 case "$OUT" in '{"hookSpecificOutput"'*) printf '%s' "$OUT" ;; esac

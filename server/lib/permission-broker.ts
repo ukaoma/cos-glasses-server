@@ -30,7 +30,9 @@
 //     dialog chooses a permission MODE, and "allow once" is not a plan approval;
 //   - a client that can answer asked for the questions in the last 30 s: an authenticated
 //     `GET /api/session-questions?client=glasses|phone` (lib/client-liveness). An app without
-//     the question UI never calls it, so for it the broker is inert and every request is `{}`;
+//     the question UI never calls it, so for it the broker is inert and every request is `{}`.
+//     6.60.0: only with the away hold off; with it on (the default) this gate is not applied
+//     (THE AWAY HOLD, below);
 //   - the desk has been idle `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 //     read here with a bounded `ioreg`, not trusted from the script.
 // The cheap gates run first and the desk read last; the question card or the approval card
@@ -40,10 +42,40 @@
 // A parked item holds the hook's response open until EXACTLY ONE of these resolves it:
 // an answer from the lens or phone; a hand-back from either ("Leave for the Mac"): `{}`;
 // the desk becoming active (polled every 1.5 s, and two unreadable reads in a row count as
-// active): `{}`; the answering client going quiet for 30 s: `{}`; the deadline
-// (`COS_PERMISSION_BROKER_TIMEOUT_S`, default 110, clamped to 120 so it lands before the
-// hook's 125 s): `{}`; the hook hanging up: `hook_gone`; the session
+// active): `{}`; the answering client going quiet for 30 s: `{}` (never an item the away
+// hold holds, 6.60.0); the deadline (`COS_PERMISSION_BROKER_TIMEOUT_S`, default 110, clamped
+// to 120 so it lands before the hook's 125 s; 6.60.0: the away hold, up to 600 s, never past
+// `holdCeilingS`): `{}`; the hook hanging up: `hook_gone`; the session
 // moving on without us (its tool ran, was denied, or the turn ended): `{}`; a drain: `{}`.
+//
+// ---------------------------------------------------------------------------
+// THE AWAY HOLD (6.60.0, Miles 2026-09-30: "Yes, up to 10 min")
+// ---------------------------------------------------------------------------
+// A question that starts while Miles is away used to be answerable from the glasses only for
+// the 110 s above, and not at all when no client was polling at that moment (`no_client`,
+// `{}` at once). Now, while the desk is idle past the SAME threshold the gate above uses
+// (`COS_PERMISSION_BROKER_DESK_IDLE_S`), a parked request is held up to the away hold
+// (`COS_PERMISSION_BROKER_AWAY_HOLD_S`, default 600, clamped to [30, 600]; `0` turns it off,
+// which is the 6.59.0 broker exactly):
+//   - whether or not a client is polling when it arrives, so a lens or phone that comes back
+//     can still answer it, and a client going quiet no longer hands it back;
+//   - desk activity still hands it to the Mac's dialog within one poll (1.5 s), and an item
+//     that arrives while Miles is at the desk is still `{}` at once (`desk_active`);
+//   - every path still ends: answered, handed to the desk, expired at the hold, hook gone,
+//     retracted, or drained.
+// NEVER past the hook's own wait. The hold is clamped to `holdCeilingS`: the PermissionRequest
+// `timeout` in the Claude settings file (read, not assumed) and the wait the hook stamped on
+// THIS request (`hookWaitS`, 6.60.0 script), whichever is less, minus 10 s. A request with no
+// stamp (the earlier script, or a session still running the earlier hook block) waited 130 s
+// and its curl 125 s, so it is clamped to 120 s as before; an unreadable settings file is the
+// same 120 s. Canary 2026-09-30 (Claude Code 2.1.286): a PermissionRequest hook configured for
+// 300 s that slept 200 s was waited for and its allow applied; one configured for 150 s was
+// stopped at 150 s and the tool did not run.
+//
+// What a client sees: `deadlineAt` is the held deadline, so "N s left" is true; each item says
+// `answerable`, `awayHold` and `waitingAtMac`, and the questions route lists recently settled
+// items (`settled`, codes only) so a client can tell the Mac is still waiting on a question it
+// handed back (its tool has not run, nor been denied, nor its turn ended since).
 //
 // NEVER: a permission RULE. `updatedPermissions` and the request's suggestions are never
 // returned; the decision objects below are built from nothing but constants and the
@@ -89,6 +121,49 @@ export function permissionBrokerTimeoutMs(env: NodeJS.ProcessEnv): number {
   return Math.round(Math.min(BROKER_TIMEOUT_MAX_S, Math.max(BROKER_TIMEOUT_MIN_S, seconds)) * 1000)
 }
 
+/** 6.60.0: the away hold. `COS_PERMISSION_BROKER_AWAY_HOLD_S`. */
+export const AWAY_HOLD_DEFAULT_S = 600
+/** Miles approved "up to 10 min" (2026-09-30). The installer's hook wait (630) is sized for it. */
+export const AWAY_HOLD_MAX_S = 600
+export const AWAY_HOLD_MIN_S = 30
+
+/**
+ * `COS_PERMISSION_BROKER_AWAY_HOLD_S`, in ms: default 600 s, clamped to [30, 600]. `0`, `off`
+ * or `false` turns the away hold off (0): the 6.59.0 broker. Junk is the default.
+ */
+export function permissionBrokerAwayHoldMs(env: NodeJS.ProcessEnv): number {
+  const raw = (env.COS_PERMISSION_BROKER_AWAY_HOLD_S ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'off' || raw === 'false') return 0
+  const parsed = Number(raw)
+  const seconds = raw !== '' && Number.isFinite(parsed) && parsed > 0 ? parsed : AWAY_HOLD_DEFAULT_S
+  return Math.round(Math.min(AWAY_HOLD_MAX_S, Math.max(AWAY_HOLD_MIN_S, seconds)) * 1000)
+}
+
+/** 6.60.0: Claude Code's wait on every PermissionRequest hook before 6.60.0 (its curl: 125). */
+export const LEGACY_HOOK_WAIT_S = 130
+/**
+ * 6.60.0: the broker answers this far inside the hook's own wait: 5 s for the script's curl
+ * to give up before Claude Code stops the hook, 5 s more so `{}` lands before curl gives up.
+ * The 130 / 125 / 120 chain every release since 6.52.0 has kept.
+ */
+export const HOOK_REPLY_MARGIN_S = 10
+/** A `hookWaitS` stamp outside this range is not one the installer writes: no stamp. */
+export const HOOK_WAIT_STAMP_MAX_S = 3_600
+
+/**
+ * 6.60.0: the longest a request may be held, in seconds, from the hook's own start.
+ * `installedHookTimeoutS` is our PermissionRequest `timeout` in the Claude settings file, or
+ * null when that cannot be read (missing, unparseable, a symlink, no block of ours): then the
+ * old safe clamp, 120. `hookWaitS` is the wait this invocation stamped (the 6.60.0 script
+ * passes its block's timeout); none means an earlier hook, 130. The lesser of the two, minus
+ * the margin. Never negative: a ceiling at or below zero is `stale_hook`.
+ */
+export function holdCeilingS(installedHookTimeoutS: number | null, hookWaitS: number | null): number {
+  if (installedHookTimeoutS === null || !Number.isFinite(installedHookTimeoutS) || installedHookTimeoutS <= 0) return BROKER_TIMEOUT_MAX_S
+  const stamped = hookWaitS !== null && Number.isFinite(hookWaitS) && hookWaitS > 0 ? hookWaitS : LEGACY_HOOK_WAIT_S
+  return Math.max(0, Math.min(installedHookTimeoutS, stamped) - HOOK_REPLY_MARGIN_S)
+}
+
 /**
  * A client must have polled `GET /api/session-questions?client=glasses|phone` this recently,
  * at admission AND while anything is held (QA round 1: 60 s let a phone that locked hold a
@@ -111,7 +186,15 @@ export const DESK_IDLE_MIN_S = 30
 export const MAX_PENDING = 32
 /** A settled item is kept this long so a late answer gets the right code and a retry its replay. */
 export const SETTLED_RETENTION_MS = 10 * 60_000
+/**
+ * 6.60.0: a settled item still waiting at the Mac (`waitingAtMac`) is kept this long, so a
+ * client can keep saying the Mac is waiting until Miles is back. Bounded: an event the spool
+ * never delivered must not leave it waiting forever.
+ */
+export const MAC_WAIT_RETENTION_MS = 60 * 60_000
 export const MAX_SETTLED = 256
+/** 6.60.0: at most this many settled items in a questions listing, newest first. */
+export const SETTLED_LIST_MAX = 32
 /** Free text for "Other". */
 export const OTHER_TEXT_MAX = 2_000
 /** The approval card's short line: the command (or path, URL, query) as the lens shows it. */
@@ -159,6 +242,11 @@ export interface PermissionRequestFacts {
   fingerprint: string
   /** The envelope's `ts`: when the hook started, epoch ms from the same Mac clock. */
   hookStartedAtMs: number | null
+  /**
+   * 6.60.0: the envelope's `hookWaitS`, the hook block's own `timeout` as the 6.60.0 script
+   * received it (its second argument). Null for an earlier script or block: `holdCeilingS`.
+   */
+  hookWaitS: number | null
 }
 
 export type EnvelopeVerdict =
@@ -182,9 +270,11 @@ function readPermissionRequestEnvelope(body: unknown): EnvelopeRead {
   if (typeof p.tool_name !== 'string' || p.tool_name.trim().length === 0) return { ok: false, reason: 'malformed' }
   if (!isRecord(p.tool_input)) return { ok: false, reason: 'malformed' }
   const ts = typeof body.ts === 'number' && Number.isFinite(body.ts) ? body.ts : null
+  const wait = body.hookWaitS
+  const hookWaitS = typeof wait === 'number' && Number.isInteger(wait) && wait > 0 && wait <= HOOK_WAIT_STAMP_MAX_S ? wait : null
   return {
     ok: true,
-    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts },
+    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts, hookWaitS },
   }
 }
 
@@ -573,10 +663,35 @@ export interface PermissionBrokerDeps {
   readDeskIdleSeconds(): Promise<number | null>
   deskIdleSeconds(): number
   timeoutMs(): number
+  /** 6.60.0: the away hold in ms, 0 for off (`permissionBrokerAwayHoldMs`). Absent: off. */
+  awayHoldMs?(): number
+  /**
+   * 6.60.0: our PermissionRequest hook's `timeout` in the Claude settings file, or null when it
+   * cannot be read. Absent: null, the old safe clamp (`holdCeilingS`).
+   */
+  installedHookTimeoutS?(): number | null
   signals?: BrokerSignalSink
   pollMs?: number
   newId?: () => string
   log?: (line: string) => void
+}
+
+/** 6.60.0: how a parked request's deadline was decided, logged once per request. Numbers only. */
+export interface HoldFacts {
+  /** Our PermissionRequest `timeout` in the Claude settings file, or null (unreadable). */
+  installedHookTimeoutS: number | null
+  /** The wait this hook invocation stamped, or null (an earlier script or block). */
+  hookWaitS: number | null
+  /** The away hold in seconds; 0 when it is off. */
+  awayHoldS: number
+  /** `holdCeilingS(installedHookTimeoutS, hookWaitS)`. */
+  ceilingS: number
+  /** The hold, from the hook's own start to the deadline, in seconds. */
+  effectiveDeadlineS: number
+  /** The desk's idle time at admission, in ms. */
+  deskIdleMs: number | null
+  /** A client that can answer had polled within the live window at admission. */
+  clientLive: boolean
 }
 
 export interface ParkRequest {
@@ -585,6 +700,12 @@ export interface ParkRequest {
   questions: BrokerQuestion[] | null
   approval: ApprovalCard | null
   deadlineAt: number
+  /**
+   * 6.60.0: held by the away hold: a client going quiet does not hand it back (desk activity
+   * still does). False with the away hold off, or for a request built without it.
+   */
+  awayHold?: boolean
+  hold?: HoldFacts
 }
 
 export type BrokerAdmission = { ok: true; request: ParkRequest } | { ok: false; reason: BrokerFastPath }
@@ -611,6 +732,14 @@ interface BrokerItem {
   handedBackBy: string | null
   channel: HookReplyChannel | null
   timer: ReturnType<typeof setTimeout> | null
+  /** 6.60.0: held by the away hold (`ParkRequest.awayHold`). */
+  awayHold: boolean
+  /**
+   * 6.60.0: settled with `{}` written to the hook (handed to the desk, expired, no client,
+   * drained), so the Mac's own dialog is showing, and the session has not moved past the
+   * request since (`sessionMovedPast`).
+   */
+  waitingAtMac: boolean
 }
 
 export interface SessionQuestionView {
@@ -620,10 +749,45 @@ export interface SessionQuestionView {
   kind: BrokerItemKind
   tool: string
   createdAt: string
+  /** When it stops being answerable from here. 6.60.0: the away hold's deadline when held by it. */
   deadlineAt: string
   questions?: BrokerQuestion[]
   approval?: ApprovalCard
+  /** 6.60.0: an answer posted now still reaches the session. Always true for a pending item. */
+  answerable: boolean
+  /** 6.60.0: held by the away hold: it stays answerable while no client polls, until `deadlineAt` or the desk. */
+  awayHold: boolean
+  /** 6.60.0: handed to the Mac's own dialog and still waiting there. Always false for a pending item. */
+  waitingAtMac: boolean
 }
+
+/**
+ * 6.60.0: a settled item as the questions route lists it (`settled`): codes and times only,
+ * never the questions, the card, or what was chosen.
+ */
+export interface SettledQuestionView {
+  id: string
+  sessionId: string
+  provider: 'claude'
+  kind: BrokerItemKind
+  tool: string
+  createdAt: string
+  deadlineAt: string
+  settledAt: string
+  resolution: BrokerResolution
+  /** Always false: a settled item takes no answer. */
+  answerable: false
+  awayHold: boolean
+  /**
+   * The broker gave the hook `{}`, so the Mac's own dialog showed, and the session has not
+   * moved past the request since: its tool has not run nor been denied, its turn has not
+   * ended. A client can say the Mac is waiting on an answer.
+   */
+  waitingAtMac: boolean
+}
+
+/** 6.60.0: the resolutions that write `{}` to a listening hook, so the Mac's dialog shows. */
+const MAC_DIALOG_RESOLUTIONS: ReadonlySet<BrokerResolution> = new Set(['handed_to_desk', 'expired', 'no_client', 'drained'])
 
 /**
  * `/api/health`'s `permissionBroker`. Counts, the mode and two timestamps: never an id,
@@ -648,6 +812,10 @@ export interface PermissionBrokerHealth {
     invalidAnswer: number
     /** A desk read that failed while something was held. */
     deskUnreadable: number
+    /** 6.60.0: of `parked`, those held by the away hold. */
+    awayHeld: number
+    /** 6.60.0: of `parked`, those parked while no client that can answer was polling. */
+    parkedWithoutClient: number
     /** Requests answered `{}` without being parked, keyed by the camelCase of the reason. */
     fastPath: Record<string, number>
   }
@@ -682,6 +850,23 @@ export const CLIENT_ANSWER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 /** Events that end the turn a request was part of: every held request of the session is moot. */
 const TURN_BOUNDARIES: ReadonlySet<string> = new Set(['Stop', 'StopFailure', 'SessionEnd', 'UserPromptSubmit'])
 
+/**
+ * The session moved past a request without the broker: its turn ended (or a new session
+ * started over it), or its own tool ran or was denied, which means the Mac's dialog was
+ * answered. For a pending item that is a retraction; for one handed to the Mac (6.60.0) it
+ * means the Mac is no longer waiting on it. A question's tool is AskUserQuestion; an
+ * approval matches by fingerprint, or by tool name for a denial.
+ */
+function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolName'>, env: HookEnvelope, toolName: string, fingerprint: string): boolean {
+  if (TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && env.payload.source !== 'compact')) return true
+  if (env.event === 'PostToolUse' || env.event === 'PostToolUseFailure' || env.event === 'PermissionDenied') {
+    return item.kind === 'question'
+      ? toolName === ASK_USER_QUESTION_TOOL
+      : fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)
+  }
+  return false
+}
+
 export class PermissionBroker {
   private readonly deps: PermissionBrokerDeps
   private readonly items = new Map<string, BrokerItem>()
@@ -689,7 +874,7 @@ export class PermissionBroker {
   private pollInFlight = false
   /** Failed desk reads in a row while something is held. Two hand everything back. */
   private deskUnreadableStreak = 0
-  private readonly counters = { parked: 0, answered: 0, handedToDesk: 0, handedBack: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0 }
+  private readonly counters = { parked: 0, answered: 0, handedToDesk: 0, handedBack: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0, awayHeld: 0, parkedWithoutClient: 0 }
   private readonly fastPaths: Record<string, number> = {}
   private lastFastPath: BrokerFastPath | null = null
   private lastFastPathAt: number | null = null
@@ -721,6 +906,45 @@ export class PermissionBroker {
     if (polledAt === null || !Number.isFinite(polledAt)) return false
     if (polledAt - now > POLL_FUTURE_SKEW_MS) return false
     return now - polledAt <= CLIENT_LIVE_WINDOW_MS
+  }
+
+  /** 6.60.0: the away hold in ms; 0 when off, absent, or unreadable. */
+  private awayHoldMs(): number {
+    let ms = 0
+    try { ms = Number(this.deps.awayHoldMs?.() ?? 0) } catch { ms = 0 }
+    return Number.isFinite(ms) && ms > 0 ? ms : 0
+  }
+
+  /** 6.60.0: the installed hook timeout, or null when absent or unreadable. */
+  private installedHookTimeoutS(): number | null {
+    let value: number | null = null
+    try { value = this.deps.installedHookTimeoutS?.() ?? null } catch { value = null }
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+  }
+
+  /**
+   * 6.60.0: how long a request arriving now, from a hook that stamped `hookWaitS`, may be held:
+   * the away hold when on (never shorter than the base timeout), else the base timeout, and
+   * never past `holdCeilingS`.
+   */
+  private holdMs(hookWaitS: number | null): { holdMs: number; awayHoldMs: number; installedHookTimeoutS: number | null; ceilingS: number } {
+    const awayHoldMs = this.awayHoldMs()
+    const installedHookTimeoutS = this.installedHookTimeoutS()
+    const ceilingS = holdCeilingS(installedHookTimeoutS, hookWaitS)
+    const baseMs = this.deps.timeoutMs()
+    const wanted = awayHoldMs > 0 ? Math.max(baseMs, awayHoldMs) : baseMs
+    return { holdMs: Math.min(wanted, ceilingS * 1000), awayHoldMs, installedHookTimeoutS, ceilingS }
+  }
+
+  /**
+   * 6.60.0: the longest a question that starts now while Miles is away is held, for a hook
+   * as the settings file has it (`awayHoldMs` on the questions route and `/api/models`). 0
+   * when the away hold is off.
+   */
+  awayHoldNowMs(): number {
+    if (this.awayHoldMs() === 0) return 0
+    const installed = this.installedHookTimeoutS()
+    return this.holdMs(installed).holdMs
   }
 
   /** The desk-idle threshold, never below DESK_IDLE_MIN_S. */
@@ -756,11 +980,15 @@ export class PermissionBroker {
       if (UNBROKERED_TOOLS.has(facts.toolName)) return this.noteFastPath('unsupported_tool')
     }
     const now = this.deps.now()
-    if (!this.clientLive(now)) return this.noteFastPath('no_client')
+    const clientLive = this.clientLive(now)
+    const hold = this.holdMs(facts.hookWaitS)
+    // 6.60.0: with the away hold on, a request is held whether or not a client is polling,
+    // so a lens or phone that comes back can still answer it. Off, no client is `{}`.
+    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')
     // The deadline counts from when the HOOK started, when its stamp is sane: a request the
     // server read late must still be answered before the hook's curl gives up.
     const requestedAt = facts.hookStartedAtMs !== null && facts.hookStartedAtMs <= now ? facts.hookStartedAtMs : now
-    const deadlineAt = requestedAt + this.deps.timeoutMs()
+    const deadlineAt = requestedAt + hold.holdMs
     if (deadlineAt <= now) return this.noteFastPath('stale_hook')
     if (this.pendingCount() >= MAX_PENDING) return this.noteFastPath('capacity')
     let idle: number | null = null
@@ -785,7 +1013,17 @@ export class PermissionBroker {
       approval = approvalCard(facts.toolName, facts.toolInput)
     }
     const fingerprint = toolFingerprint(facts.toolName, facts.toolInput)
-    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt } }
+    const awayHold = hold.awayHoldMs > 0
+    const holdFacts: HoldFacts = {
+      installedHookTimeoutS: hold.installedHookTimeoutS,
+      hookWaitS: facts.hookWaitS,
+      awayHoldS: Math.round(hold.awayHoldMs / 1000),
+      ceilingS: hold.ceilingS,
+      effectiveDeadlineS: Math.round(hold.holdMs / 1000),
+      deskIdleMs: idle * 1000,
+      clientLive,
+    }
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, hold: holdFacts } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -813,14 +1051,20 @@ export class PermissionBroker {
       handedBackBy: null,
       channel,
       timer: null,
+      awayHold: request.awayHold === true,
+      waitingAtMac: false,
     }
     this.items.set(id, item)
     this.counters.parked++
+    if (item.awayHold) this.counters.awayHeld++
+    if (request.hold && !request.hold.clientLive) this.counters.parkedWithoutClient++
     item.timer = setTimeout(() => { this.settle(item, 'expired') }, Math.max(0, request.deadlineAt - now))
     item.timer.unref?.()
     try { this.deps.signals?.attach(item.sessionId, id, item.fingerprint) } catch { /* rows are advisory */ }
     this.ensurePolling()
-    this.log(`parked ${id} kind=${item.kind} session=${item.sessionId.slice(0, 8)} deadline_s=${Math.round((request.deadlineAt - now) / 1000)} pending=${this.pendingCount()}`)
+    // 6.60.0: the numbers the deadline came from, once per request (never text).
+    const hold = request.hold ? ` hold=${JSON.stringify(request.hold)}` : ''
+    this.log(`parked ${id} kind=${item.kind} session=${item.sessionId.slice(0, 8)} deadline_s=${Math.round((request.deadlineAt - now) / 1000)} away_hold=${item.awayHold} pending=${this.pendingCount()}${hold}`)
     return id
   }
 
@@ -838,7 +1082,10 @@ export class PermissionBroker {
     if (item.timer) clearTimeout(item.timer)
     item.timer = null
     if (resolution !== 'hook_gone') {
-      try { item.channel?.reply({}) } catch { /* the hook is gone anyway */ }
+      let written = false
+      try { written = item.channel?.reply({}) === true } catch { /* the hook is gone anyway */ }
+      // 6.60.0: `{}` reached the hook, so the Mac's own dialog is up for it now.
+      item.waitingAtMac = written && MAC_DIALOG_RESOLUTIONS.has(resolution)
     }
     item.channel = null
     // A settled item is kept for its codes, not its content.
@@ -870,9 +1117,44 @@ export class PermissionBroker {
         deadlineAt: new Date(item.deadlineAt).toISOString(),
         ...(item.questions ? { questions: item.questions } : {}),
         ...(item.approval ? { approval: item.approval } : {}),
+        answerable: true,
+        awayHold: item.awayHold,
+        waitingAtMac: false,
       })
     }
     return views.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  /**
+   * 6.60.0: the settled items still kept, newest settled first, at most SETTLED_LIST_MAX:
+   * codes and times only. `waitingAtMac` says the Mac's own dialog is still waiting on one.
+   */
+  settledList(): SettledQuestionView[] {
+    this.prune()
+    const settled: BrokerItem[] = []
+    for (const item of this.items.values()) if (item.state !== 'pending' && item.settledAt !== null) settled.push(item)
+    settled.sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0))
+    return settled.slice(0, SETTLED_LIST_MAX).map(item => ({
+      id: item.id,
+      sessionId: item.sessionId,
+      provider: 'claude' as const,
+      kind: item.kind,
+      tool: item.toolName,
+      createdAt: new Date(item.createdAt).toISOString(),
+      deadlineAt: new Date(item.deadlineAt).toISOString(),
+      settledAt: new Date(item.settledAt!).toISOString(),
+      resolution: item.state as BrokerResolution,
+      answerable: false as const,
+      awayHold: item.awayHold,
+      waitingAtMac: item.waitingAtMac,
+    }))
+  }
+
+  /** 6.60.0: how many settled items are still waiting at the Mac. */
+  waitingAtMacCount(): number {
+    let n = 0
+    for (const item of this.items.values()) if (item.state !== 'pending' && item.waitingAtMac) n++
+    return n
   }
 
   /**
@@ -1040,17 +1322,13 @@ export class PermissionBroker {
         } catch { /* rows are advisory */ }
         continue
       }
-      if (item.state !== 'pending' || env.ts < item.requestedAt) continue
-      if (TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && p.source !== 'compact')) {
-        this.settle(item, 'retracted')
+      // 6.60.0: one handed to the Mac's dialog stops waiting there when the session moves past it.
+      if (item.waitingAtMac && env.ts >= item.requestedAt && sessionMovedPast(item, env, toolName, fingerprint)) {
+        item.waitingAtMac = false
         continue
       }
-      if (env.event === 'PostToolUse' || env.event === 'PostToolUseFailure' || env.event === 'PermissionDenied') {
-        const same = item.kind === 'question'
-          ? toolName === ASK_USER_QUESTION_TOOL
-          : fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)
-        if (same) this.settle(item, 'retracted')
-      }
+      if (item.state !== 'pending' || env.ts < item.requestedAt) continue
+      if (sessionMovedPast(item, env, toolName, fingerprint)) this.settle(item, 'retracted')
     }
   }
 
@@ -1075,7 +1353,12 @@ export class PermissionBroker {
   async tick(): Promise<void> {
     if (this.pendingCount() === 0) { this.stopPolling(); return }
     if (!this.deps.admissionsOpen()) { this.settleAll('drained'); return }
-    if (!this.clientLive(this.deps.now())) { this.settleAll('no_client'); return }
+    if (!this.clientLive(this.deps.now())) {
+      // 6.60.0: an item held by the away hold outlives the client going quiet; the desk below
+      // still hands it back.
+      this.settleAll('no_client', item => !item.awayHold)
+      if (this.pendingCount() === 0) return
+    }
     if (this.pollInFlight) return
     this.pollInFlight = true
     let idle: number | null = null
@@ -1091,18 +1374,22 @@ export class PermissionBroker {
     this.settleAll('handed_to_desk')
   }
 
-  private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client'): void {
-    for (const item of [...this.items.values()]) if (item.state === 'pending') this.settle(item, resolution)
+  private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client', only: (item: BrokerItem) => boolean = () => true): void {
+    for (const item of [...this.items.values()]) if (item.state === 'pending' && only(item)) this.settle(item, resolution)
     if (this.pendingCount() === 0) this.stopPolling()
   }
 
-  /** Settled items are kept for SETTLED_RETENTION_MS (late answers, replays), at most MAX_SETTLED. */
+  /**
+   * Settled items are kept for SETTLED_RETENTION_MS (late answers, replays), at most
+   * MAX_SETTLED. 6.60.0: one still waiting at the Mac is kept for MAC_WAIT_RETENTION_MS.
+   */
   private prune(): void {
     const now = this.deps.now()
     const settled: BrokerItem[] = []
     for (const item of this.items.values()) {
       if (item.state === 'pending') continue
-      if (item.settledAt !== null && now - item.settledAt > SETTLED_RETENTION_MS) this.items.delete(item.id)
+      const keep = item.waitingAtMac ? MAC_WAIT_RETENTION_MS : SETTLED_RETENTION_MS
+      if (item.settledAt !== null && now - item.settledAt > keep) this.items.delete(item.id)
       else settled.push(item)
     }
     const excess = settled.length - MAX_SETTLED
@@ -1184,6 +1471,12 @@ export interface SessionQuestionsCapability {
   protocolVersion: number
   pollIntervalMs: number
   liveWindowMs: number
+  /**
+   * 6.60.0: the longest a question that starts while you are away is held for the glasses,
+   * whether or not a client is polling (`PermissionBroker.awayHoldNowMs`); 0 when the away
+   * hold is off or the broker is.
+   */
+  awayHoldMs: number
 }
 
 /**
@@ -1194,11 +1487,14 @@ export interface SessionQuestionsCapability {
 export function sessionQuestionsCapability(): SessionQuestionsCapability {
   let mode: BrokerMode = 'off'
   try { mode = registered ? registered.health().mode : 'off' } catch { mode = 'off' }
+  let awayHoldMs = 0
+  try { awayHoldMs = registered && mode !== 'off' ? registered.awayHoldNowMs() : 0 } catch { awayHoldMs = 0 }
   return {
     enabled: mode !== 'off',
     mode,
     protocolVersion: SESSION_QUESTIONS_PROTOCOL_VERSION,
     pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS,
     liveWindowMs: CLIENT_LIVE_WINDOW_MS,
+    awayHoldMs,
   }
 }

@@ -583,3 +583,75 @@ describe('liveness and the mount', () => {
     expect(apiAuth).not.toContain('permission-requests')
   })
 })
+
+describe('6.60.0: the away hold over the real route', () => {
+  const AWAY: Partial<PermissionBrokerDeps> = { awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630 }
+  /** A list that does NOT count as a live client (no `client`). */
+  const peek = async (h: Harness) => (await list(h, undefined, null)).body as unknown as Record<string, any>
+
+  it('no client polling: parked anyway, listed with the held deadline and the new fields beside every earlier one; a client that comes back answers it', async () => {
+    const h = await start(AWAY, { live: false })
+    const hookStart = Date.now()
+    const reply = ask(h, { ...permissionEnvelope('Bash', { command: 'touch away' }, {}, hookStart), hookWaitS: 630 })
+    const body = await until(() => peek(h), b => b.items.length === 1)
+    expect(lastQuestionsPollAt()).toBeNull()
+    // Every 6.59.0 key, unchanged, and the three 6.60.0 ones.
+    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'settled', 'stats', 'waitingAtMac'])
+    expect(body).toMatchObject({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, pending: 1, awayHoldMs: 600_000, settled: [], waitingAtMac: 0 })
+    const item = body.items[0]
+    expect(item).toMatchObject({ provider: 'claude', kind: 'approval', tool: 'Bash', answerable: true, awayHold: true, waitingAtMac: false })
+    expect(Date.parse(item.deadlineAt)).toBe(hookStart + 600_000)
+    expect(body.stats.counters).toMatchObject({ parked: 1, awayHeld: 1, parkedWithoutClient: 1, noClient: 0 })
+    // The glasses come back, see it, and answer it.
+    const seen = await list(h)
+    expect(seen.body.items.map(i => i.id)).toEqual([item.id])
+    expect((await answer(h, item.id, { clientAnswerId: 'lens', decision: 'allow' })).status).toBe(200)
+    expect((await within(reply)).body).toEqual(approvalHookOutput('allow'))
+    const after = await peek(h)
+    expect(after.settled).toMatchObject([{ id: item.id, resolution: 'answered', answerable: false, awayHold: true, waitingAtMac: false }])
+    expect(after.settled[0]).not.toHaveProperty('approval')
+    expect(after.settled[0]).not.toHaveProperty('decision')
+  })
+
+  it('back at the desk: {} at once, and the listing says the Mac is waiting until its tool runs', async () => {
+    const h = await start(AWAY, { live: false })
+    const reply = ask(h, { ...permissionEnvelope('AskUserQuestion', ASK_INPUT), hookWaitS: 630 })
+    const item = (await until(() => peek(h), b => b.items.length === 1)).items[0]
+    h.state.idle = 0
+    expect((await within(reply)).body).toEqual({})
+    const body = await peek(h)
+    expect(body.items).toEqual([])
+    expect(body.waitingAtMac).toBe(1)
+    expect(body.settled).toMatchObject([{ id: item.id, resolution: 'handed_to_desk', waitingAtMac: true }])
+    // The desk answers its own dialog: the question tool runs.
+    h.store.apply({ ts: Date.now(), ppid: 4242, event: 'PostToolUse', sessionId: SESSION, payload: { session_id: SESSION, tool_name: 'AskUserQuestion', tool_input: ASK_INPUT } }, false)
+    const later = await peek(h)
+    expect(later.waitingAtMac).toBe(0)
+    expect(later.settled).toMatchObject([{ id: item.id, waitingAtMac: false }])
+  })
+
+  it('the earlier hook (no stamp, 130 s in the settings) is clamped to 120 s over the real route, and the away hold off is 6.59.0', async () => {
+    const legacy = await start({ awayHoldMs: () => 600_000, installedHookTimeoutS: () => 130 }, { live: false })
+    const hookStart = Date.now()
+    const reply = ask(legacy, permissionEnvelope('Bash', { command: 'touch old' }, {}, hookStart))
+    reply.catch(() => {})
+    const item = (await until(() => peek(legacy), b => b.items.length === 1)).items[0]
+    expect(Date.parse(item.deadlineAt)).toBe(hookStart + 120_000)
+    expect((await peek(legacy)).awayHoldMs).toBe(120_000)
+    legacy.state.idle = 0
+    expect((await within(reply)).body).toEqual({})
+
+    const off = await start({ awayHoldMs: () => 0, installedHookTimeoutS: () => 630 }, { live: false })
+    const r = await ask(off, { ...permissionEnvelope('Bash', { command: 'touch off' }), hookWaitS: 630 })
+    expect(r.body).toEqual({})
+    expect(r.ms).toBeLessThan(FAST_MS)
+    expect(off.broker.health().lastFastPath).toBe('no_client')
+    expect((await peek(off)).awayHoldMs).toBe(0)
+  })
+
+  it('index.ts wires the away hold from the environment and the installed timeout from the hook status', () => {
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    expect(index).toContain('  awayHoldMs: () => permissionBrokerAwayHoldMs(process.env),\n')
+    expect(index).toContain('  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,\n')
+  })
+})

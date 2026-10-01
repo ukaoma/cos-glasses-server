@@ -49,6 +49,13 @@ const SCRIPT_6_53_3_PREQA_SHA256 = 'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d1
  * meanwhile (`HALT_CAPABLE_PRIOR_SCRIPT_SHAS`).
  */
 const SCRIPT_6_53_3_SHA256 = 'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547'
+/**
+ * sha256 of the script 6.60.0 ships: the PermissionRequest wait arrives as $2, curl gives up
+ * 5 s before it, and the request carries it as `hookWaitS` (the away hold). Changed on
+ * purpose, with its reinstall plan (Install hooks in COS Control); until then an install keeps
+ * the 6.53.3 script, which is halt-capable and holds a question at most 120 s as before.
+ */
+const SCRIPT_6_60_0_SHA256 = '07c680f2a412ee5edeb778aed8f82dde95e538905dfaa84330777973ea40ae70'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -80,9 +87,9 @@ function run(event: string, stdin: string | Buffer, paths: { home: string; spool
 }
 
 /** The same, asynchronously: the listener the script talks to lives in THIS process. */
-function runAsync(event: string, stdin: string, paths: { home: string; spool: string }): Promise<{ status: number | null; stdout: string }> {
+function runAsync(event: string, stdin: string, paths: { home: string; spool: string }, args: string[] = []): Promise<{ status: number | null; stdout: string }> {
   return new Promise(resolvePromise => {
-    const child = spawn('/bin/sh', [SCRIPT, event], {
+    const child = spawn('/bin/sh', [SCRIPT, event, ...args], {
       env: { HOME: dirname(paths.home), COS_GLASSES_HOME: paths.home, COS_HOOK_SPOOL: paths.spool, PATH: '/usr/bin:/bin' },
     })
     let stdout = ''
@@ -239,6 +246,71 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
     writeFileSync(join(paths.home, 'hook-token'), '')
     expect((await runAsync('PermissionRequest', payload({ tool_name: 'Bash', tool_input: { command: 'touch z' } }), paths)).stdout).toBe('')
     expect(seen).toBeNull()
+  })
+
+  // 6.60.0: the PermissionRequest block passes its own timeout as $2.
+  describe('the away hold wait (6.60.0)', () => {
+    /** A broker door that records each body and answers `{}`, or never answers (`hang`). */
+    async function recorder(paths: { home: string; spool: string }, hang = false) {
+      writeFileSync(join(paths.home, 'hook-desk-idle-s'), '0')
+      writeFileSync(join(paths.home, 'hook-token'), 'tok-123')
+      const bodies: string[] = []
+      listener = createServer((req, res) => {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', () => {
+          bodies.push(body)
+          if (hang) return
+          res.setHeader('content-type', 'application/json')
+          res.end('{}')
+        })
+      })
+      await new Promise<void>(r => listener!.listen(0, '127.0.0.1', () => r()))
+      writeFileSync(join(paths.home, 'hook-port'), String((listener.address() as AddressInfo).port))
+      return bodies
+    }
+
+    it('stamps the wait on the request as hookWaitS, only for PermissionRequest and only a value the installer could write', async () => {
+      const paths = home()
+      const bodies = await recorder(paths)
+      const ask = payload({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'touch x' } })
+      const stamp = async (args: string[]) => {
+        bodies.length = 0
+        const r = await runAsync('PermissionRequest', ask, paths, args)
+        expect(r).toEqual({ status: 0, stdout: '' })
+        expect(bodies).toHaveLength(1)
+        const raw = JSON.parse(bodies[0]!) as Record<string, unknown>
+        expect(parseHookEnvelope(bodies[0]!).ok).toBe(true)
+        return raw.hookWaitS
+      }
+      expect(await stamp(['630'])).toBe(630)
+      // The spooled copy carries it as well, and still parses.
+      const latest = spooled(paths.spool).sort().at(-1)!
+      const file = readFileSync(join(paths.spool, latest), 'utf8')
+      expect(JSON.parse(file).hookWaitS).toBe(630)
+      // No argument (an earlier block), or nothing the installer writes: no stamp at all.
+      for (const args of [[], ['0630'], ['abc'], ['19'], ['3601'], ['99999999999999999999'], ['']]) {
+        expect(await stamp(args), JSON.stringify(args)).toBeUndefined()
+      }
+      // Any other event never carries it, argument or not.
+      const before = new Set(spooled(paths.spool))
+      expect(await runAsync('Stop', payload(), paths, ['630'])).toEqual({ status: 0, stdout: '' })
+      const stop = spooled(paths.spool).find(n => !before.has(n))!
+      expect(JSON.parse(readFileSync(join(paths.spool, stop), 'utf8')).event).toBe('Stop')
+      expect(JSON.parse(readFileSync(join(paths.spool, stop), 'utf8'))).not.toHaveProperty('hookWaitS')
+    })
+
+    it('curl gives up 5 s before the wait it was passed (20 s here, so 15 s), and prints nothing', { timeout: 40_000 }, async () => {
+      const paths = home()
+      const bodies = await recorder(paths, true)
+      const started = Date.now()
+      const r = await runAsync('PermissionRequest', payload({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'touch x' } }), paths, ['20'])
+      const elapsed = Date.now() - started
+      expect(r).toEqual({ status: 0, stdout: '' })
+      expect(bodies).toHaveLength(1)
+      expect(elapsed).toBeGreaterThanOrEqual(14_500)
+      expect(elapsed).toBeLessThan(18_000)
+    })
   })
 
   // 6.51.0: the Cursor-only Stop branch. Cursor runs this same hook (from
@@ -502,20 +574,22 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       }
     })
 
-    it('the shipped script is the 6.53.3 script, byte for byte (a change is a reinstall on every Mac)', () => {
+    it('the shipped script is the 6.60.0 script, byte for byte (a change is a reinstall on every Mac)', () => {
       const bytes = readFileSync(SCRIPT)
       // 6.53.0 changed the script DELIBERATELY (the halt check), and with it the PreToolUse
       // subscription; 6.53.3 changed it again (the single-entry rewrite), subscription as it
-      // was. The rollout is the plan's: Update Server, then Install hooks in COS Control.
-      // Until that reinstall `hookStatus()` reads `script_outdated`; a 6.51 script is not
-      // halt-capable (a desk cancel answers `hooks_outdated`), the 6.53.0 script is.
-      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_53_3_SHA256)
+      // was; 6.60.0 again (the PermissionRequest wait, $2), with the PermissionRequest
+      // subscription (630 s and the argument). The rollout is the plan's: Update Server, then
+      // Install hooks in COS Control. Until that reinstall `hookStatus()` reads `drift` with
+      // `priorWaitOnly`; the 6.53.3 script stays halt-capable meanwhile.
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_60_0_SHA256)
+      expect(SCRIPT_6_60_0_SHA256).not.toBe(SCRIPT_6_53_3_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_0_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_3_PREQA_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
-      // The current script is never its own "prior"; both earlier halt-capable ones are.
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256])
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_53_3_SHA256)
+      // The current script is never its own "prior"; every earlier halt-capable one is.
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256])
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_60_0_SHA256)
       // And it still posts to exactly the route this server serves.
       expect(bytes.toString('utf8')).toContain(`"http://127.0.0.1:$PORT${PERMISSION_BROKER_HOOK_PATH}"`)
     })

@@ -36,7 +36,23 @@ export interface HookSubscription {
   matcher?: string
   async: boolean
   timeout: number
+  /**
+   * 6.60.0: the command passes the block's own `timeout` to the script as its second
+   * argument. The script stops waiting 5 s before it and stamps it on the request it posts
+   * (`hookWaitS`), so the broker knows the wait of THIS invocation. The command and the
+   * timeout sit in one block, so whether or not a running Claude session re-reads its hook
+   * settings, the stamp it sends and the timeout it enforces come from the same block.
+   */
+  passTimeout?: boolean
 }
+
+/**
+ * 6.60.0: Claude Code's wait on the PermissionRequest hook: the away hold (default 600 s)
+ * plus slack. The script's curl stops at 625 and the broker answers by 620 at the latest.
+ */
+export const PERMISSION_HOOK_TIMEOUT_S = 630
+/** What every install before 6.60.0 carries for PermissionRequest, with no wait argument. */
+export const LEGACY_PERMISSION_HOOK_TIMEOUT_S = 130
 
 /**
  * Every event the reducer understands, with the timing each one needs. SessionStart,
@@ -55,6 +71,10 @@ export interface HookSubscription {
  * because the merge keeps exactly one of ours per event and status requires it: the script
  * spools only AskUserQuestion and ExitPlanMode, which is what the old async matcher block
  * did. Changing this row makes every existing install read `drift` until Install hooks.
+ *
+ * 6.60.0: PermissionRequest waits 630 s (was 130) and passes that number to the script, for
+ * the away hold. An install that differs ONLY by still carrying the earlier block (130 s, no
+ * argument) reads `drift` with `priorWaitOnly`, and stays halt-ready (`hookHaltReady`).
  */
 export const HOOK_SUBSCRIPTIONS: readonly HookSubscription[] = [
   { event: 'SessionStart', async: false, timeout: 5 },
@@ -62,7 +82,7 @@ export const HOOK_SUBSCRIPTIONS: readonly HookSubscription[] = [
   { event: 'UserPromptSubmit', async: false, timeout: 5 },
   { event: 'Stop', async: false, timeout: 5 },
   { event: 'StopFailure', async: true, timeout: 10 },
-  { event: 'PermissionRequest', async: false, timeout: 130 },
+  { event: 'PermissionRequest', async: false, timeout: PERMISSION_HOOK_TIMEOUT_S, passTimeout: true },
   { event: 'PermissionDenied', async: true, timeout: 10 },
   { event: 'PreToolUse', async: false, timeout: 5 },
   { event: 'PostToolUse', async: true, timeout: 10 },
@@ -117,9 +137,13 @@ export function shellQuote(value: string): string {
 /**
  * The installed command carries the two paths the script needs as environment, so the
  * server and the script can never disagree about where the spool or the token is.
+ * 6.60.0: `waitS`, for a subscription with `passTimeout`, follows the event name as the
+ * script's second argument (an argument, never an environment variable: a variable could
+ * be inherited from the shell that started Claude, an argument only comes from this block).
  */
-export function hookCommand(scriptPath: string, event: string, paths: HookPaths = currentHookPaths()): string {
-  return `COS_GLASSES_HOME=${shellQuote(paths.home)} COS_HOOK_SPOOL=${shellQuote(paths.spoolDir)} ${shellQuote(scriptPath)} ${event}`
+export function hookCommand(scriptPath: string, event: string, paths: HookPaths = currentHookPaths(), waitS?: number): string {
+  const base = `COS_GLASSES_HOME=${shellQuote(paths.home)} COS_HOOK_SPOOL=${shellQuote(paths.spoolDir)} ${shellQuote(scriptPath)} ${event}`
+  return waitS === undefined ? base : `${base} ${Math.trunc(waitS)}`
 }
 
 export interface HookPaths {
@@ -133,18 +157,55 @@ export function currentHookPaths(): HookPaths {
 
 type HookBlock = { matcher?: unknown; hooks?: unknown }
 
+function hookIsOurs(h: unknown): boolean {
+  return !!h && typeof h === 'object' && typeof (h as { command?: unknown }).command === 'string'
+    && ((h as { command: string }).command.includes(HOOK_SCRIPT_MARKER) || (h as { command: string }).command.includes(HOOK_SCRIPT_NAME + ' '))
+}
+
 function blockIsOurs(block: unknown): boolean {
   if (!block || typeof block !== 'object') return false
   const hooks = (block as HookBlock).hooks
   if (!Array.isArray(hooks)) return false
-  return hooks.some(h => h && typeof h === 'object' && typeof (h as { command?: unknown }).command === 'string'
-    && ((h as { command: string }).command.includes(HOOK_SCRIPT_MARKER) || (h as { command: string }).command.includes(HOOK_SCRIPT_NAME + ' ')))
+  return hooks.some(hookIsOurs)
 }
 
 function canonicalBlock(scriptPath: string, sub: HookSubscription, paths: HookPaths): Record<string, unknown> {
-  const hook: Record<string, unknown> = { type: 'command', command: hookCommand(scriptPath, sub.event, paths), timeout: sub.timeout }
+  const command = hookCommand(scriptPath, sub.event, paths, sub.passTimeout ? sub.timeout : undefined)
+  const hook: Record<string, unknown> = { type: 'command', command, timeout: sub.timeout }
   if (sub.async) hook.async = true
   return sub.matcher ? { matcher: sub.matcher, hooks: [hook] } : { hooks: [hook] }
+}
+
+/**
+ * 6.60.0: the block an install before 6.60.0 wrote for this event, when this release changed
+ * it only by the wait: PermissionRequest at 130 s with no wait argument. Null for any other.
+ */
+function priorWaitBlock(scriptPath: string, sub: HookSubscription, paths: HookPaths): Record<string, unknown> | null {
+  if (sub.event !== 'PermissionRequest') return null
+  return canonicalBlock(scriptPath, { event: sub.event, async: sub.async, timeout: LEGACY_PERMISSION_HOOK_TIMEOUT_S }, paths)
+}
+
+/**
+ * 6.60.0: how long Claude Code waits on OUR PermissionRequest hook, read from a settings
+ * object: the smallest `timeout` among our entries (Claude runs each, so the first to give up
+ * bounds the wait). Null when none of ours is there, or one of ours has no usable number:
+ * the broker then keeps the old safe clamp (`lib/permission-broker.ts` `holdCeilingS`).
+ */
+export function permissionHookTimeoutS(settings: unknown): number | null {
+  const hooks = settings && typeof settings === 'object' ? (settings as Record<string, unknown>).hooks : null
+  const blocks = hooks && typeof hooks === 'object' ? (hooks as Record<string, unknown>).PermissionRequest : null
+  if (!Array.isArray(blocks)) return null
+  let least: number | null = null
+  for (const block of blocks) {
+    if (!blockIsOurs(block)) continue
+    for (const h of (block as HookBlock).hooks as unknown[]) {
+      if (!hookIsOurs(h)) continue
+      const timeout = (h as { timeout?: unknown }).timeout
+      if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) return null
+      least = least === null ? timeout : Math.min(least, timeout)
+    }
+  }
+  return least
 }
 
 export type MergeResult =
@@ -190,22 +251,29 @@ export function stripHookSettings(current: unknown): MergeResult {
   return { ok: true, settings, changed: JSON.stringify(settings) !== before }
 }
 
-/** Which of our events a settings object carries, by exact canonical command. */
-export function subscribedEvents(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): { subscribed: string[]; missing: string[]; drifted: string[] } {
+/**
+ * Which of our events a settings object carries, by exact canonical command. `priorWait`
+ * (6.60.0) names the drifted events whose one block of ours is exactly the block an earlier
+ * release wrote, differing only by the wait (`priorWaitBlock`).
+ */
+export function subscribedEvents(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): { subscribed: string[]; missing: string[]; drifted: string[]; priorWait: string[] } {
   const hooks = current && typeof current === 'object' && (current as Record<string, unknown>).hooks
   const table = hooks && typeof hooks === 'object' ? hooks as Record<string, unknown> : {}
   const subscribed: string[] = []
   const missing: string[] = []
   const drifted: string[] = []
+  const priorWait: string[] = []
   for (const sub of HOOK_SUBSCRIPTIONS) {
     const blocks = Array.isArray(table[sub.event]) ? table[sub.event] as unknown[] : []
     const ours = blocks.filter(blockIsOurs)
     if (ours.length === 0) { missing.push(sub.event); continue }
     const canonical = JSON.stringify(canonicalBlock(scriptPath, sub, paths))
-    if (ours.length === 1 && JSON.stringify(ours[0]) === canonical) subscribed.push(sub.event)
-    else drifted.push(sub.event)
+    if (ours.length === 1 && JSON.stringify(ours[0]) === canonical) { subscribed.push(sub.event); continue }
+    drifted.push(sub.event)
+    const prior = priorWaitBlock(scriptPath, sub, paths)
+    if (prior && ours.length === 1 && JSON.stringify(ours[0]) === JSON.stringify(prior)) priorWait.push(sub.event)
   }
-  return { subscribed, missing, drifted }
+  return { subscribed, missing, drifted, priorWait }
 }
 
 export type HookInstallState =
@@ -231,6 +299,16 @@ export interface HookStatus {
   subscribed: string[]
   missing: string[]
   drifted: string[]
+  /** 6.60.0: drifted events whose block is exactly an earlier release's, but for the wait. */
+  priorWait: string[]
+  /**
+   * 6.60.0: `drift`, and the ONLY difference is that the settings still carry the earlier
+   * PermissionRequest block (130 s, no wait argument): an install from before 6.60.0 that
+   * has not run Install hooks since. Questions are then held at most 120 s, as before.
+   */
+  priorWaitOnly: boolean
+  /** 6.60.0: our PermissionRequest hook's `timeout` in the settings file, or null (`permissionHookTimeoutS`). */
+  permissionHookTimeoutS: number | null
   tokenPresent: boolean
 }
 
@@ -272,16 +350,19 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   const tokenPresent = existsSync(hookTokenPath())
   const read = readSettings(settingsPath)
   if (!read.ok) {
-    return { state: read.reason, installed: false, settingsPath, scriptPath, scriptSha, packageScriptSha, subscribed: [], missing: HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [], tokenPresent }
+    return { state: read.reason, installed: false, settingsPath, scriptPath, scriptSha, packageScriptSha, subscribed: [], missing: HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [], priorWait: [], priorWaitOnly: false, permissionHookTimeoutS: null, tokenPresent }
   }
   const events = subscribedEvents(read.settings, scriptPath, hookPaths)
+  const permissionWaitS = permissionHookTimeoutS(read.settings)
   let state: HookInstallState
   if (hooksDisabled(read.settings)) state = 'disabled_by_settings'
   else if (events.subscribed.length === 0 && events.drifted.length === 0) state = 'missing'
   else if (events.missing.length > 0 || events.drifted.length > 0) state = 'drift'
   else if (!scriptSha || (packageScriptSha && scriptSha !== packageScriptSha)) state = 'script_outdated'
   else state = 'installed'
-  return { state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, tokenPresent }
+  const priorWaitOnly = state === 'drift' && events.missing.length === 0 && events.drifted.length > 0
+    && events.drifted.every(event => events.priorWait.includes(event))
+  return { state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, tokenPresent }
 }
 
 /**
@@ -295,22 +376,35 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
  *   - c0b41bf8...: the 6.53.3 script as first built, before its /qa round made every event
  *     drain stdin. Never published, but installable from a local build of that commit
  *     (7433b7f), and it carries the same halt check.
+ *   - df54677f...: the script 6.53.3 through 6.59.0 shipped. 6.60.0 changed it only for the
+ *     away hold (the PermissionRequest wait); its halt check is the same.
  * Each is pinned against its bytes in `server/lib/__fixtures__/`.
  */
 export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
   '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7',
   'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51',
+  'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547',
 ]
 
 /**
  * 6.53.3: can the hooks on this Mac stop a desk Claude run now? `installed`, or the only
  * difference is a halt-capable earlier script (above). What the cancel route's
  * `hooksReady` and `/api/health` `features.sessionCancel.deskClaude` read.
+ *
+ * 6.60.0: or `drift` with `priorWaitOnly` (the settings still carry the earlier
+ * PermissionRequest wait, every other block is current) on this package's script or a
+ * halt-capable earlier one. The wait changes how long a question is held, not the halt
+ * check, so updating the server never turns cancel from the lens off. Any other drift
+ * still is not halt-ready.
  */
-export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha'>): boolean {
+export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha'> & Partial<Pick<HookStatus, 'priorWaitOnly' | 'packageScriptSha'>>): boolean {
   if (status.installed === true) return true
-  return status.state === 'script_outdated' && typeof status.scriptSha === 'string'
-    && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)
+  const priorScript = typeof status.scriptSha === 'string' && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)
+  if (status.state === 'script_outdated') return priorScript
+  if (status.state === 'drift' && status.priorWaitOnly === true) {
+    return priorScript || (typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha)
+  }
+  return false
 }
 
 const INSTALL_COMMAND = 'npx --yes @gotcos/glasses-server@latest --hooks install'
@@ -319,8 +413,17 @@ const INSTALL_COMMAND = 'npx --yes @gotcos/glasses-server@latest --hooks install
  * 6.53.3: one plain sentence for `--hooks status` saying what the state means and what fixes
  * it. Null when installed. Carries no path: the status JSON beside it already names them.
  */
-export function hookStatusAdvice(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha' | 'packageScriptSha'>): string | null {
+export function hookStatusAdvice(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha' | 'packageScriptSha'> & Partial<Pick<HookStatus, 'priorWaitOnly'>>): string | null {
   const short = (sha: string | null): string => (sha ? sha.slice(0, 12) : 'none')
+  // 6.60.0: the one drift an update itself causes. Say what it costs and that nothing broke.
+  if (status.state === 'drift' && status.priorWaitOnly === true) {
+    return 'The Claude settings file still carries the earlier permission hook wait (130 s), so a question that starts while you are away '
+      + 'is held for the glasses for at most 2 minutes instead of 10. '
+      + `Run \`${INSTALL_COMMAND}\`, or press Install hooks in COS Control. `
+      + (hookHaltReady(status)
+        ? 'Cancel from the lens still stops desk runs meanwhile.'
+        : 'Until then a desk run cannot be cancelled from the lens.')
+  }
   switch (status.state) {
     case 'installed':
       return null

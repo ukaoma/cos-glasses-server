@@ -335,6 +335,13 @@ export interface SessionHooksHealth {
   state: HookStatus['state']
   installed: boolean
   scriptSha: string | null
+  /**
+   * 6.60.0: our PermissionRequest hook's `timeout` in the Claude settings file (630 after
+   * Install hooks, 130 on an install from before 6.60.0), or null when it cannot be read.
+   */
+  permissionHookTimeoutS: number | null
+  /** 6.60.0: the only drift is that earlier PermissionRequest wait (`HookStatus.priorWaitOnly`). */
+  priorWaitOnly: boolean
   tokenPresent: boolean
   lastEventAt: string | null
   spoolBacklog: number
@@ -377,6 +384,8 @@ export function sessionHooksHealthFields(): { sessionHooks: SessionHooksHealth }
       state: status.state,
       installed: status.installed,
       scriptSha: status.scriptSha,
+      permissionHookTimeoutS: status.permissionHookTimeoutS,
+      priorWaitOnly: status.priorWaitOnly,
       tokenPresent: status.tokenPresent,
       lastEventAt: newest ? new Date(newest).toISOString() : null,
       spoolBacklog: spool?.backlog ?? 0,

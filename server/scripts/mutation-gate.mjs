@@ -1993,7 +1993,8 @@ const CASES = [
   {
     name: "broker-no-client-parks",
     file: "server/lib/permission-broker.ts",
-    find: "    if (!this.clientLive(now)) return this.noteFastPath('no_client')\n",
+    // 6.60.0: retargeted. With the away hold off, no client is still `no_client` at once.
+    find: "    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n",
     replace: "    if (false) return this.noteFastPath('no_client')\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
@@ -2112,22 +2113,25 @@ const CASES = [
   {
     name: "broker-retract-own-tool-ignored",
     file: "server/lib/permission-broker.ts",
-    find: "        if (same) this.settle(item, 'retracted')",
-    replace: "        if (false) this.settle(item, 'retracted')",
+    // 6.60.0: retargeted; the conditions moved into `sessionMovedPast`, shared with waitingAtMac.
+    find: "      if (sessionMovedPast(item, env, toolName, fingerprint)) this.settle(item, 'retracted')",
+    replace: "      if (false) this.settle(item, 'retracted')",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
     name: "broker-retract-any-tool",
     file: "server/lib/permission-broker.ts",
-    find: "          : fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)",
-    replace: "          : true",
+    // 6.60.0: retargeted into `sessionMovedPast`.
+    find: "      : fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)",
+    replace: "      : true",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
     name: "broker-retract-turn-end-ignored",
     file: "server/lib/permission-broker.ts",
-    find: "      if (TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && p.source !== 'compact')) {",
-    replace: "      if (false) {",
+    // 6.60.0: retargeted into `sessionMovedPast`.
+    find: "  if (TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && env.payload.source !== 'compact')) return true",
+    replace: "  if (false) return true",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
@@ -2703,8 +2707,9 @@ const CASES = [
   {
     name: "broker-card-before-liveness",
     file: "server/lib/permission-broker.ts",
-    find: "    if (!this.clientLive(now)) return this.noteFastPath('no_client')\n",
-    replace: "    approvalCard(facts.toolName, facts.toolInput)\n    if (!this.clientLive(now)) return this.noteFastPath('no_client')\n",
+    // 6.60.0: retargeted to the line the no-client gate now is.
+    find: "    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n",
+    replace: "    approvalCard(facts.toolName, facts.toolInput)\n    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
@@ -2934,7 +2939,8 @@ const CASES = [
   {
     name: "liveness-held-client-not-rechecked",
     file: "server/lib/permission-broker.ts",
-    find: "    if (!this.clientLive(this.deps.now())) { this.settleAll('no_client'); return }\n",
+    // 6.60.0: retargeted. A held item that is not away-held still goes back when the client goes quiet.
+    find: "      this.settleAll('no_client', item => !item.awayHold)\n",
     replace: "",
     tests: ["server/lib/permission-broker.test.ts"],
   },
@@ -4345,15 +4351,17 @@ const CASES = [
   {
     name: "cx-6533-halt-ready-needs-known-prior-sha",
     file: "server/lib/claude-hooks-installer.ts",
-    find: "  return status.state === 'script_outdated' && typeof status.scriptSha === 'string'\n    && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)\n",
-    replace: "  return status.state === 'script_outdated'\n",
+    // 6.60.0: retargeted to the restructured `hookHaltReady`.
+    find: "  if (status.state === 'script_outdated') return priorScript\n",
+    replace: "  if (status.state === 'script_outdated') return true\n",
     tests: ["server/lib/claude-hooks-installer.test.ts", "server/routes/health.test.ts"],
   },
   {
     name: "cx-6533-halt-ready-only-when-outdated",
     file: "server/lib/claude-hooks-installer.ts",
-    find: "  return status.state === 'script_outdated' && typeof status.scriptSha === 'string'\n    && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)\n",
-    replace: "  return typeof status.scriptSha === 'string'\n    && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)\n",
+    // 6.60.0: retargeted to the restructured `hookHaltReady`.
+    find: "  if (status.state === 'script_outdated') return priorScript\n",
+    replace: "  if (priorScript) return true\n",
     tests: ["server/lib/claude-hooks-installer.test.ts"],
   },
   {

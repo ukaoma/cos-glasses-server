@@ -246,7 +246,8 @@ The client contract (also at `/api/models` `capabilities.sessionQuestions`):
 - Poll `GET /api/session-questions?client=glasses` (or `client=phone`) with X-Cos-Token
   every `pollIntervalMs` (10,000). Only those two `client` values count as a live
   answerer; a poll without `client`, or with any other value, is answered but never
-  counts. A client quiet for `liveWindowMs` (30,000) hands every held request back.
+  counts. A client quiet for `liveWindowMs` (30,000) hands every held request back,
+  except one the away hold holds (6.60.0, below).
 - The response carries `enabled`, `mode`, `protocolVersion` (1), `pollIntervalMs`,
   `liveWindowMs`, `pending` and `items` (a question's `questions`, or an approval's
   `approval`: `{tool, summary, detail}`, the command, path or URL exactly as it will run,
@@ -259,7 +260,37 @@ The client contract (also at `/api/models` `capabilities.sessionQuestions`):
   404 `not_found` after a server restart or once a settled item is pruned (10 minutes);
   503 during a maintenance drain, when every held item has already gone back to the Mac.
 
-Touching the Mac hands a held request back to its dialog at once; the deadline is 110 s.
+Touching the Mac hands a held request back to its dialog at once; the deadline is 110 s,
+or the away hold's.
+
+**The away hold (6.60.0).** A request that starts while you are away (the desk idle 90 s,
+the same threshold as above) is held for up to 10 minutes, whether or not a client is
+polling when it arrives, so glasses or a phone that come back can still answer it; a client
+going quiet no longer hands it back. Touching the Mac still hands it to the Mac's dialog
+within 1.5 s, and a request that arrives while you are at the desk still goes straight to
+the dialog. It is never held past the hook's own wait: the PermissionRequest `timeout` in
+`~/.claude/settings.json` (630 s after Install hooks; 130 s on an install from before 6.60.0)
+and the wait the hook stamps on the request, the lesser, minus 10 s. An unreadable settings
+file, or a request from the earlier hook, is held at most 120 s, as before. After updating,
+`--hooks status` reads `drift` with `priorWaitOnly: true` until Install hooks (COS Control)
+or `npx --yes @gotcos/glasses-server@latest --hooks install` is run once; cancel from the
+lens keeps working meanwhile. `COS_PERMISSION_BROKER_AWAY_HOLD_S` sets it (default 600,
+clamped to 30 through 600; `0` is the 6.59.0 broker exactly). Additive fields, every earlier
+one unchanged:
+
+- each item: `answerable` (true while listed), `awayHold` (held by the away hold: it stays
+  answerable while no client polls, until `deadlineAt` or the desk) and `waitingAtMac`
+  (false while listed). `deadlineAt` is the held deadline, so "N s left" is true.
+- the response: `awayHoldMs` (how long a request that starts now is held at most; 0 when
+  off), `settled` (up to 32 recently settled items, newest first: `id`, `sessionId`,
+  `provider`, `kind`, `tool`, `createdAt`, `deadlineAt`, `settledAt`, `resolution`,
+  `answerable: false`, `awayHold`, `waitingAtMac`; never the questions, the card or the
+  answer) and `waitingAtMac` (how many of them the Mac's own dialog still waits on).
+  `waitingAtMac` is true when the server handed the request to the Mac's dialog (back at the
+  desk, expired, no client, drained) and the session has not moved past it since: its tool
+  has not run or been denied, its turn has not ended. It is kept up to an hour, then dropped.
+- `/api/models` `capabilities.sessionQuestions.awayHoldMs`, the same number.
+
 Allow once or deny only: no permission rule is ever written. Rows carry
 `pending_question_id` or `pending_permission_id` while a request is held, and a question
 row reads `waiting_kind: question` whatever the switch says; `/api/health` reports
@@ -402,8 +433,10 @@ machine-wide rollback for build 204+ server-owned query recovery),
 `COS_MESSAGES_TRAIL=0` (6.52.0: no Messages trail; every job stream and snapshot is the
 6.51.0 one), `COS_PERMISSION_BROKER` (6.52.0: `0` answers every permission request with
 the Mac's own dialog, `questions` holds questions but not tool approvals; unset holds
-both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30) and
+both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 `COS_PERMISSION_BROKER_TIMEOUT_S` (default 110, clamped to 5 through 120),
+`COS_PERMISSION_BROKER_AWAY_HOLD_S` (6.60.0: default 600, clamped to 30 through 600, never
+past the installed hook's wait; `0` turns the away hold off),
 `COS_MEDIA_ROOT` (optional image/video store location; default
 `~/.cos-glasses/data/media`), and `COS_VIDEO_UPLOAD_V2=1` (private 6.27.3+
 resumable-video canary, managed by COS Control 0.5.20). The V2 canary retains
@@ -732,7 +765,8 @@ BIND_HOST=0.0.0.0 npm run start:server
   (`COS_PERMISSION_BROKER=questions`), `broker_off`, `cursor`, `unsupported_tool`
   (ExitPlanMode is never held). `lastQuestionsPollAt` says when a client last counted.
   `--hooks status` must read `installed` (right after updating to 6.53.4 it reads
-  `script_outdated` until Install hooks is run once; its `advice` line says so). To turn it off with no reinstall, set
+  `script_outdated` until Install hooks is run once, and right after updating to 6.60.0
+  `drift` with `priorWaitOnly: true`; its `advice` line says so). To turn it off with no reinstall, set
   `COS_PERMISSION_BROKER=0` in `~/.cos-glasses/.env` and restart. For the Messages
   trail, `/api/health` `messages_trail.readerErrors` counts lines a reader could not map.
 - *Offline meeting recovery unavailable?* — build 209+ requires server 6.11.0+.

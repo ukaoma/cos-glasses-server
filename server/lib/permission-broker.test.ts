@@ -14,8 +14,13 @@ import {
   CLIENT_LIVE_WINDOW_MS,
   DENY_MESSAGE,
   DESK_IDLE_MIN_S,
+  AWAY_HOLD_DEFAULT_S,
   HOOK_CURL_MAX_S,
+  LEGACY_HOOK_WAIT_S,
+  MAC_WAIT_RETENTION_MS,
   MAX_PENDING,
+  SETTLED_LIST_MAX,
+  SETTLED_RETENTION_MS,
   POLL_FUTURE_SKEW_MS,
   PermissionBroker,
   approvalCard,
@@ -26,6 +31,8 @@ import {
   parsePermissionRequestEnvelope,
   parseQuestions,
   permissionBrokerHealthFields,
+  holdCeilingS,
+  permissionBrokerAwayHoldMs,
   permissionBrokerMode,
   permissionBrokerTimeoutMs,
   questionHookOutput,
@@ -43,7 +50,7 @@ import { deriveSessionState, derivedRowFields } from './session-state-derive.js'
 import { toolFingerprint, type HookEnvelope } from './session-hook-events.js'
 import { __resetClientLivenessForTests, lastQuestionsPollAt, noteQuestionsPoll } from './client-liveness.js'
 import { REDACTION_SCAN_MAX_CHARS } from './activity-preview.js'
-import { HOOK_SUBSCRIPTIONS } from './claude-hooks-installer.js'
+import { HOOK_SUBSCRIPTIONS, LEGACY_PERMISSION_HOOK_TIMEOUT_S, PERMISSION_HOOK_TIMEOUT_S } from './claude-hooks-installer.js'
 import { PERMISSION_BROKER_HOOK_PATH } from '../routes/permission-broker.js'
 
 import { ASK_INPUT, Q1, Q2, QUESTIONS, SESSION, permissionEnvelope } from './__fixtures__/permission-broker.js'
@@ -110,25 +117,34 @@ describe('configuration', () => {
 })
 
 describe('timeout parity: broker deadline < the script\'s curl < Claude Code\'s hook timeout', () => {
-  it('reads the real script and the real installer, and orders the three', () => {
+  it('reads the real script and the real installer, and orders the three, for the 6.60.0 hook and the earlier one', () => {
     const script = readFileSync(new URL('../../bin/hooks/cos-session-hook', import.meta.url), 'utf8')
     // The curl that posts the PermissionRequest to the broker (the script's other curl is
-    // the Cursor Stop one, with its own 3 s).
-    const curl = new RegExp(String.raw`--max-time (\d+)[^\n]*\\\n[^\n]*"http://127\.0\.0\.1:\$PORT` + PERMISSION_BROKER_HOOK_PATH.replace(/\//g, '\\/') + '"').exec(script)
+    // the Cursor Stop one, with its own 3 s). 6.60.0: it gives up 5 s before the wait the
+    // installer passed as $2, and an invocation with no usable $2 waits the earlier 130.
+    const curl = new RegExp(String.raw`--max-time \$\(\(WAIT - (\d+)\)\)[^\n]*\\\n[^\n]*"http://127\.0\.0\.1:\$PORT` + PERMISSION_BROKER_HOOK_PATH.replace(/\//g, '\\/') + '"').exec(script)
     expect(curl, 'the PermissionRequest curl line').not.toBeNull()
-    const curlMaxS = Number(curl![1])
-    expect(curlMaxS).toBe(HOOK_CURL_MAX_S)
+    const curlMarginS = Number(curl![1])
+    const legacyWait = /^WAIT=(\d+); STAMP_WAIT=''$/m.exec(script)
+    expect(legacyWait, 'the default wait').not.toBeNull()
+    expect(Number(legacyWait![1])).toBe(LEGACY_HOOK_WAIT_S)
+    expect(LEGACY_HOOK_WAIT_S - curlMarginS).toBe(HOOK_CURL_MAX_S)
 
-    const installer = readFileSync(new URL('./claude-hooks-installer.ts', import.meta.url), 'utf8')
-    const entry = /\{ event: 'PermissionRequest', async: false, timeout: (\d+) \}/.exec(installer)
-    expect(entry, 'the PermissionRequest subscription').not.toBeNull()
-    const installerS = Number(entry![1])
-    expect(installerS).toBe(HOOK_SUBSCRIPTIONS.find(sub => sub.event === 'PermissionRequest')!.timeout)
+    const sub = HOOK_SUBSCRIPTIONS.find(entry => entry.event === 'PermissionRequest')!
+    expect(sub).toMatchObject({ async: false, timeout: PERMISSION_HOOK_TIMEOUT_S, passTimeout: true })
+    expect(PERMISSION_HOOK_TIMEOUT_S).toBe(630)
 
-    // The broker always answers before curl gives up, and curl before Claude Code does.
+    // The 6.60.0 hook: the broker answers by 620, curl gives up at 625, Claude at 630.
+    const ceilingNew = holdCeilingS(PERMISSION_HOOK_TIMEOUT_S, PERMISSION_HOOK_TIMEOUT_S)
+    expect(ceilingNew).toBeLessThan(PERMISSION_HOOK_TIMEOUT_S - curlMarginS)
+    expect(PERMISSION_HOOK_TIMEOUT_S - curlMarginS).toBeLessThan(PERMISSION_HOOK_TIMEOUT_S)
+    // The longest away hold fits inside it.
+    expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: '1e9' })).toBeLessThanOrEqual(ceilingNew * 1000)
+    // The earlier hook: 120, 125, 130, as every release since 6.52.0.
+    expect(holdCeilingS(LEGACY_PERMISSION_HOOK_TIMEOUT_S, null)).toBe(BROKER_TIMEOUT_MAX_S)
     expect(permissionBrokerTimeoutMs({ COS_PERMISSION_BROKER_TIMEOUT_S: '1e9' })).toBe(BROKER_TIMEOUT_MAX_S * 1000)
-    expect(BROKER_TIMEOUT_MAX_S).toBeLessThan(curlMaxS)
-    expect(curlMaxS).toBeLessThan(installerS)
+    expect(BROKER_TIMEOUT_MAX_S).toBeLessThan(HOOK_CURL_MAX_S)
+    expect(HOOK_CURL_MAX_S).toBeLessThan(LEGACY_PERMISSION_HOOK_TIMEOUT_S)
   })
 })
 
@@ -176,7 +192,18 @@ describe('reading the envelope', () => {
     const verdict = parsePermissionRequestEnvelope(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, 5_000))
     expect(verdict.ok).toBe(true)
     if (!verdict.ok) return
-    expect(verdict.facts).toEqual({ sessionId: SESSION, toolName: 'AskUserQuestion', toolInput: ASK_INPUT, fingerprint: toolFingerprint('AskUserQuestion', ASK_INPUT), hookStartedAtMs: 5_000 })
+    expect(verdict.facts).toEqual({ sessionId: SESSION, toolName: 'AskUserQuestion', toolInput: ASK_INPUT, fingerprint: toolFingerprint('AskUserQuestion', ASK_INPUT), hookStartedAtMs: 5_000, hookWaitS: null })
+  })
+
+  it('6.60.0: reads the hook\'s wait stamp only as a whole number of seconds the installer could write', () => {
+    const wait = (hookWaitS: unknown) => {
+      const verdict = parsePermissionRequestEnvelope({ ...permissionEnvelope('Bash', { command: 'ls' }, {}, 5_000), hookWaitS })
+      if (!verdict.ok) throw new Error(verdict.reason)
+      return verdict.facts.hookWaitS
+    }
+    expect(wait(630)).toBe(630)
+    expect(wait(3_600)).toBe(3_600)
+    for (const junk of [undefined, null, '630', 630.5, 0, -1, 3_601, Number.NaN, Infinity, [630]]) expect(wait(junk), String(junk)).toBeNull()
   })
 
   it('a Cursor payload is Cursor in any form; junk is malformed', () => {
@@ -1132,7 +1159,7 @@ describe('the rows (session signal store seams)', () => {
     })
     // No counters on the PUBLIC health (QA round 2): pending = parked - resolutions.
     expect(permissionBroker).not.toHaveProperty('counters')
-    expect(broker.stats().counters).toEqual({ parked: 1, answered: 0, handedToDesk: 0, handedBack: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0 })
+    expect(broker.stats().counters).toEqual({ parked: 1, answered: 0, handedToDesk: 0, handedBack: 0, expired: 0, hookGone: 0, retracted: 0, drained: 0, noClient: 0, invalidAnswer: 0, deskUnreadable: 0, awayHeld: 0, parkedWithoutClient: 0 })
     // How many are held is on the authenticated questions route, never the public health.
     expect(permissionBroker).not.toHaveProperty('pending')
     const text = JSON.stringify(permissionBroker)
@@ -1143,10 +1170,265 @@ describe('the rows (session signal store seams)', () => {
     await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, { cursor_version: '1' }, clock.now))
     for (const key of keys(broker.health())) expect(key, key).toMatch(/^[a-z][A-Za-z]*$/)
     expect(broker.health()).toMatchObject({ lastFastPath: 'cursor', lastFastPathAt: new Date(clock.now).toISOString() })
-    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000 })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0 })
     registerPermissionBroker(null)
     expect(permissionBrokerHealthFields()).toEqual({ permissionBroker: null })
-    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000 })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0 })
+  })
+})
+
+describe('6.60.0: the away hold', () => {
+  /** A request the 6.60.0 script posts: the hook's own wait stamped on it. */
+  const stamped = (tool: string, input: Record<string, unknown>, ts: number, hookWaitS: number | null = 630) =>
+    hookWaitS === null ? permissionEnvelope(tool, input, {}, ts) : { ...permissionEnvelope(tool, input, {}, ts), hookWaitS }
+  /** The production wiring: a 600 s away hold, the 6.60.0 hook installed (630 s). */
+  function away(over: Partial<PermissionBrokerDeps> = {}, state: Parameters<typeof brokerWith>[1] = {}) {
+    const lines: string[] = []
+    const made = brokerWith({ awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630, log: line => { lines.push(line) }, ...over }, state)
+    brokers.push(made.broker)
+    return { ...made, lines }
+  }
+  async function parkOne(b: PermissionBroker, envelope: unknown) {
+    const a = await b.admit(envelope)
+    if (!a.ok) throw new Error(a.reason)
+    const c = fakeChannel(true)
+    return { id: b.park(a.request, c.channel), sent: c.sent, request: a.request }
+  }
+
+  it('COS_PERMISSION_BROKER_AWAY_HOLD_S: default 600, clamped to [30, 600]; 0, off or false is off; junk is the default', () => {
+    expect(AWAY_HOLD_DEFAULT_S).toBe(600)
+    expect(permissionBrokerAwayHoldMs({})).toBe(600_000)
+    for (const off of ['0', 'off', 'false', ' OFF ']) expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: off }), off).toBe(0)
+    for (const junk of ['', 'abc', '-5', 'NaN', 'Infinity']) expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: junk }), junk).toBe(600_000)
+    expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: '300' })).toBe(300_000)
+    expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: '5' })).toBe(30_000)
+    expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: '601' })).toBe(600_000)
+    expect(permissionBrokerAwayHoldMs({ COS_PERMISSION_BROKER_AWAY_HOLD_S: '1e9' })).toBe(600_000)
+  })
+
+  it('holdCeilingS: the installed timeout and this request\'s stamp, the lesser minus 10; anything it cannot read is the old clamp', () => {
+    expect(holdCeilingS(630, 630)).toBe(620)
+    // The earlier hook: 130 s in the settings, no stamp: 120, never past its 125 s curl.
+    expect(holdCeilingS(130, null)).toBe(120)
+    // Settings already 630 but this request came from the earlier script or block (no stamp).
+    expect(holdCeilingS(630, null)).toBe(120)
+    // A stamp from a newer block while the file says 130 (reinstalled, then rolled back).
+    expect(holdCeilingS(130, 630)).toBe(120)
+    // Unreadable settings: the old safe clamp whatever the stamp says.
+    expect(holdCeilingS(null, 630)).toBe(BROKER_TIMEOUT_MAX_S)
+    expect(holdCeilingS(null, null)).toBe(BROKER_TIMEOUT_MAX_S)
+    expect(holdCeilingS(Number.NaN, 630)).toBe(BROKER_TIMEOUT_MAX_S)
+    // A short hand-set hook bounds it too, and a ceiling at or below zero is never negative.
+    expect(holdCeilingS(60, null)).toBe(50)
+    expect(holdCeilingS(5, null)).toBe(0)
+    expect(LEGACY_HOOK_WAIT_S).toBe(130)
+  })
+
+  it('the away extension: a request that starts while away is held to the away hold, deadlineAt says so, and the numbers are logged', async () => {
+    const { broker, clock, lines } = away()
+    const hookStart = clock.now - 2_000
+    const { id, request } = await parkOne(broker, stamped('Bash', { command: 'ls' }, hookStart))
+    expect(request.deadlineAt).toBe(hookStart + 600_000)
+    const [item] = broker.list()
+    expect(item).toMatchObject({ id, answerable: true, awayHold: true, waitingAtMac: false, deadlineAt: new Date(hookStart + 600_000).toISOString() })
+    const parked = lines.find(line => line.includes(`parked ${id}`))!
+    const hold = JSON.parse(parked.slice(parked.lastIndexOf(' hold=') + 6))
+    expect(hold).toEqual({ installedHookTimeoutS: 630, hookWaitS: 630, awayHoldS: 600, ceilingS: 620, effectiveDeadlineS: 600, deskIdleMs: 1_000_000, clientLive: true })
+    expect(parked).not.toContain('"command"')
+    expect(broker.stats().counters).toMatchObject({ parked: 1, awayHeld: 1, parkedWithoutClient: 0 })
+    // Still answerable well past the old 110 s.
+    clock.now += 300_000
+    expect(broker.answer(id, { clientAnswerId: 'lens', decision: 'allow' }).status).toBe(200)
+  })
+
+  it('the installed-timeout clamp: an earlier hook (130 s, no stamp) is held at most 120 s and never past its 125 s', async () => {
+    const legacy = away({ installedHookTimeoutS: () => 130 })
+    const old = await parkOne(legacy.broker, stamped('Bash', { command: 'ls' }, legacy.clock.now, null))
+    expect(old.request.deadlineAt - legacy.clock.now).toBe(120_000)
+    expect(old.request.hold).toMatchObject({ installedHookTimeoutS: 130, hookWaitS: null, ceilingS: 120, effectiveDeadlineS: 120, awayHoldS: 600 })
+    // The settings say 630 but this request is from the earlier script: still 120.
+    const half = away()
+    const unstamped = await parkOne(half.broker, stamped('Bash', { command: 'ls' }, half.clock.now, null))
+    expect(unstamped.request.deadlineAt - half.clock.now).toBe(120_000)
+    // Held to its deadline and not one millisecond past: {} to the hook, 409 expired.
+    legacy.clock.now += 120_000
+    expect(legacy.broker.answer(old.id, { clientAnswerId: 'late', decision: 'allow' })).toEqual({ status: 409, body: { error: 'expired' } })
+    expect(old.sent).toEqual([{}])
+    expect(legacy.clock.now - old.request.facts.hookStartedAtMs!).toBeLessThan(HOOK_CURL_MAX_S * 1000)
+  })
+
+  it('an unreadable settings file falls back to the old clamp: a throw, NaN or null is 120 s', async () => {
+    for (const installed of [() => { throw new Error('EACCES') }, () => Number.NaN, () => null, () => -1]) {
+      const { broker, clock } = away({ installedHookTimeoutS: installed as () => number | null })
+      const { request } = await parkOne(broker, stamped('Bash', { command: 'ls' }, clock.now))
+      expect(request.deadlineAt - clock.now).toBe(BROKER_TIMEOUT_MAX_S * 1000)
+      expect(request.hold?.installedHookTimeoutS).toBeNull()
+    }
+  })
+
+  it('no_client while away: parked with no client polling, kept while the client stays quiet, reclaimed when one comes back', async () => {
+    const { broker, clock, s } = away({}, { seenAt: null })
+    const { id, sent, request } = await parkOne(broker, stamped('AskUserQuestion', ASK_INPUT, clock.now))
+    expect(request.hold?.clientLive).toBe(false)
+    expect(broker.stats().counters).toMatchObject({ parked: 1, awayHeld: 1, parkedWithoutClient: 1 })
+    expect(broker.health().counters.fastPath).toEqual({})
+    // Minutes with no client: every tick leaves it held.
+    for (let i = 0; i < 5; i++) { clock.now += 60_000; await broker.tick() }
+    expect(sent).toEqual([])
+    expect(broker.pendingCount()).toBe(1)
+    // A client comes back and answers it.
+    s.seenAt = clock.now
+    expect(broker.list().map(item => item.id)).toEqual([id])
+    expect(broker.answer(id, { clientAnswerId: 'lens', answers: [{ labels: ['Tag'] }, { labels: ['Blue'] }] }).status).toBe(200)
+    expect(sent).toHaveLength(1)
+    expect(broker.health().counters.noClient).toBe(0)
+  })
+
+  it('with the away hold off it is the 6.59.0 broker: no client is no_client at once, and a quiet client hands back', async () => {
+    const off = away({ awayHoldMs: () => 0 }, { seenAt: null })
+    expect(await off.broker.admit(stamped('Bash', { command: 'ls' }, off.clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    off.s.seenAt = off.clock.now
+    const held = await parkOne(off.broker, stamped('Bash', { command: 'ls' }, off.clock.now))
+    expect(held.request.deadlineAt - off.clock.now).toBe(110_000)
+    expect(held.request.awayHold).toBe(false)
+    off.s.seenAt = null
+    await off.broker.tick()
+    expect(held.sent).toEqual([{}])
+    expect(off.broker.health().counters.noClient).toBe(1)
+  })
+
+  it('a quiet client hands back only what is not away-held: a mixed tick', async () => {
+    let hold = 0
+    const { broker, clock, s } = away({ awayHoldMs: () => hold })
+    const plain = await parkOne(broker, stamped('Bash', { command: 'echo plain' }, clock.now))
+    hold = 600_000
+    const kept = await parkOne(broker, stamped('Bash', { command: 'echo kept' }, clock.now))
+    s.seenAt = null
+    await broker.tick()
+    expect(plain.sent).toEqual([{}])
+    expect(kept.sent).toEqual([])
+    expect(broker.list().map(item => item.id)).toEqual([kept.id])
+  })
+
+  it('the desk-return handover: desk activity hands an away-held item to the Mac within one tick, with no client', async () => {
+    const { broker, clock, s } = away({}, { seenAt: null })
+    const { id, sent } = await parkOne(broker, stamped('Bash', { command: 'touch a' }, clock.now))
+    clock.now += 200_000
+    await broker.tick()
+    expect(sent).toEqual([])
+    s.idle = 2
+    await broker.tick()
+    expect(sent).toEqual([{}])
+    expect(broker.answer(id, { clientAnswerId: 'late', decision: 'allow' })).toEqual({ status: 409, body: { error: 'handed_to_desk', reason: 'handed_to_desk' } })
+    expect(broker.settledList()).toMatchObject([{ id, resolution: 'handed_to_desk', answerable: false, awayHold: true, waitingAtMac: true }])
+  })
+
+  it('at the desk when it arrives: {} at once, as today, away hold or not', async () => {
+    const { broker, clock, s } = away({}, { seenAt: null, idle: 89 })
+    expect(await broker.admit(stamped('Bash', { command: 'ls' }, clock.now))).toEqual({ ok: false, reason: 'desk_active' })
+    s.idle = null
+    expect(await broker.admit(stamped('Bash', { command: 'ls' }, clock.now))).toEqual({ ok: false, reason: 'desk_unknown' })
+    expect(broker.stats().counters.parked).toBe(0)
+  })
+
+  it('every path still ends: expired at the away limit by the timer, and the Mac is then waiting on it', async () => {
+    const { broker, clock } = away({ pollMs: 60_000 })
+    const { id, sent, request } = await parkOne(broker, stamped('Bash', { command: 'touch b' }, clock.now))
+    clock.now = request.deadlineAt
+    expect(broker.list()).toEqual([])
+    expect(sent).toEqual([{}])
+    expect(broker.settledList()).toMatchObject([{ id, resolution: 'expired', waitingAtMac: true }])
+  })
+
+  it('waitingAtMac clears when the session moves past the request, and only then', async () => {
+    const { broker, clock, s } = away()
+    const bash = { command: 'touch c' }
+    const one = await parkOne(broker, stamped('Bash', bash, clock.now))
+    s.idle = 1
+    await broker.tick()
+    expect(broker.waitingAtMacCount()).toBe(1)
+    // Another tool, a child, history: still waiting at the Mac.
+    broker.observeHookEvent(hookEvent('PostToolUse', clock.now + 1, { tool_name: 'Bash', tool_input: { command: 'ls' } }), false)
+    broker.observeHookEvent(hookEvent('PostToolUse', clock.now + 1, { tool_name: 'Bash', tool_input: bash }), true)
+    broker.observeHookEvent(hookEvent('PostToolUse', clock.now - 5_000, { tool_name: 'Bash', tool_input: bash }), false)
+    expect(broker.settledList()[0]).toMatchObject({ id: one.id, waitingAtMac: true })
+    // Its own tool ran: the Mac's dialog was answered.
+    broker.observeHookEvent(hookEvent('PostToolUse', clock.now + 2, { tool_name: 'Bash', tool_input: bash }), false)
+    expect(broker.settledList()[0]).toMatchObject({ id: one.id, waitingAtMac: false })
+    expect(broker.waitingAtMacCount()).toBe(0)
+    // A turn end clears one too; an answered or hook_gone item never waits at the Mac.
+    s.idle = 1_000
+    const two = await parkOne(broker, stamped('Bash', { command: 'touch d' }, clock.now))
+    const three = await parkOne(broker, stamped('Bash', { command: 'touch e' }, clock.now))
+    const four = await parkOne(broker, stamped('Bash', { command: 'touch f' }, clock.now))
+    expect(broker.answer(three.id, { clientAnswerId: 'x', decision: 'deny' }).status).toBe(200)
+    broker.hookClosed(four.id)
+    s.idle = 1
+    await broker.tick()
+    broker.observeHookEvent(hookEvent('Stop', clock.now + 3), false)
+    const byId = new Map(broker.settledList().map(v => [v.id, v]))
+    expect(byId.get(two.id)).toMatchObject({ resolution: 'handed_to_desk', waitingAtMac: false })
+    expect(byId.get(three.id)).toMatchObject({ resolution: 'answered', waitingAtMac: false })
+    expect(byId.get(four.id)).toMatchObject({ resolution: 'hook_gone', waitingAtMac: false })
+  })
+
+  it('a hand-back whose {} could not be written does not claim the Mac is waiting', async () => {
+    const { broker, clock, s } = away()
+    const a = await broker.admit(stamped('Bash', { command: 'ls' }, clock.now))
+    if (!a.ok) throw new Error(a.reason)
+    const refusing: HookReplyChannel = { writable: () => true, reply: () => false }
+    const id = broker.park(a.request, refusing)
+    s.idle = 1
+    await broker.tick()
+    expect(broker.settledList()).toMatchObject([{ id, resolution: 'handed_to_desk', waitingAtMac: false }])
+  })
+
+  it('the settled listing: codes and times only, newest first, capped; waiting at the Mac is kept an hour, the rest ten minutes', async () => {
+    const { broker, clock, s } = away()
+    const waiting = await parkOne(broker, stamped('AskUserQuestion', ASK_INPUT, clock.now))
+    s.idle = 1
+    await broker.tick()
+    s.idle = 1_000
+    clock.now += 1_000
+    const answered = await parkOne(broker, stamped('Bash', { command: 'echo secret-plan' }, clock.now))
+    broker.answer(answered.id, { clientAnswerId: 'a', decision: 'allow' })
+    const views = broker.settledList()
+    expect(views.map(v => v.id)).toEqual([answered.id, waiting.id])
+    expect(Object.keys(views[1]!).sort()).toEqual(['answerable', 'awayHold', 'createdAt', 'deadlineAt', 'id', 'kind', 'provider', 'resolution', 'sessionId', 'settledAt', 'tool', 'waitingAtMac'])
+    const text = JSON.stringify(views)
+    expect(text).not.toContain('secret-plan')
+    expect(text).not.toContain(Q1)
+    expect(text).not.toContain('allow')
+    // Ten minutes on: the answered one is gone, the one the Mac still waits on is kept.
+    clock.now += SETTLED_RETENTION_MS + 1
+    expect(broker.settledList().map(v => v.id)).toEqual([waiting.id])
+    clock.now += MAC_WAIT_RETENTION_MS
+    expect(broker.settledList()).toEqual([])
+    // Capped, newest first.
+    for (let i = 0; i < SETTLED_LIST_MAX + 3; i++) {
+      const p = await parkOne(broker, stamped('Bash', { command: `echo ${i}` }, clock.now))
+      broker.hookClosed(p.id)
+      clock.now += 1
+    }
+    const capped = broker.settledList()
+    expect(capped).toHaveLength(SETTLED_LIST_MAX)
+    expect(Date.parse(capped[0]!.settledAt)).toBeGreaterThanOrEqual(Date.parse(capped.at(-1)!.settledAt))
+  })
+
+  it('awayHoldNowMs and /api/models say how long a question is held now: 600 s, 120 s on the earlier hook, 0 when off', () => {
+    let installed: number | null = 630
+    let hold = 600_000
+    const { broker } = away({ installedHookTimeoutS: () => installed, awayHoldMs: () => hold })
+    registerPermissionBroker(broker)
+    expect(broker.awayHoldNowMs()).toBe(600_000)
+    expect(sessionQuestionsCapability().awayHoldMs).toBe(600_000)
+    installed = 130
+    expect(broker.awayHoldNowMs()).toBe(120_000)
+    installed = null
+    expect(broker.awayHoldNowMs()).toBe(120_000)
+    hold = 0
+    expect(broker.awayHoldNowMs()).toBe(0)
+    expect(sessionQuestionsCapability().awayHoldMs).toBe(0)
   })
 })
 

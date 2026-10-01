@@ -165,6 +165,11 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       pending: deps.broker.pendingCount(),
       stats: deps.broker.stats(),
       items,
+      // 6.60.0, additive: the away hold now (0 when off), recently settled items (codes and
+      // times only, newest first), and how many of them the Mac's own dialog still waits on.
+      awayHoldMs: health.enabled ? deps.broker.awayHoldNowMs() : 0,
+      settled: deps.broker.settledList(),
+      waitingAtMac: deps.broker.waitingAtMacCount(),
     })
   })
   router.post('/session-questions/:id/answer', (req: Request, res: Response) => {
