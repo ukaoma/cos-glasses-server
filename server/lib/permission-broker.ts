@@ -57,10 +57,12 @@
 // `{}` at once). Now, while the desk is idle past the SAME threshold the gate above uses
 // (`COS_PERMISSION_BROKER_DESK_IDLE_S`), a parked request is held up to the away hold
 // (`COS_PERMISSION_BROKER_AWAY_HOLD_S`, default 600, clamped to [30, 600]; `0` turns it off,
-// which is the 6.59.0 broker exactly), but only when ALL of these hold:
+// which turns the away hold off; a `hold=1` client still counts as live only with recent
+// presence), but only when ALL of these hold:
 //   - the installed hook waits longer than the 6.59.0 broker could ever hold (its 120 s
-//     clamp, `AWAY_MIN_CEILING_S`). Before Install hooks it does not, and the broker is
-//     6.59.0 entirely (QA round 1, User W6);
+//     clamp, `AWAY_MIN_CEILING_S`). Before Install hooks it does not, and away semantics are
+//     off (QA round 1, User W6). A `hold=1` client still counts as live only with recent
+//     presence, so a lens untouched for 30 minutes gets no card (QA round 2, W-A);
 //   - a client that shows held questions reported its WEARER present recently (Miles,
 //     2026-09-30 19:54: "Hold only if the glasses or phone were connected in the last 30
 //     min. A Claude Remote Control session with no glasses gets its question right away,

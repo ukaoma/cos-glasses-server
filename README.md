@@ -298,7 +298,7 @@ run, the hook waits no longer than 6.59.0 could hold, so the away hold is off en
 broker is 6.59.0. After updating, `--hooks status` reads `drift` with `priorWaitOnly: true`
 until Install hooks (COS Control) or `npx --yes @gotcos/glasses-server@latest --hooks install`
 is run once; cancel from the lens keeps working meanwhile. `COS_PERMISSION_BROKER_AWAY_HOLD_S`
-sets the hold (default 600, clamped to 30 through 600; `0` is the 6.59.0 broker exactly).
+sets the hold (default 600, clamped to 30 through 600; `0` turns the away hold off; a `hold=1` lens still needs recent presence to count as live).
 Additive fields, every earlier one unchanged:
 
 - each item: `answerable` (true while listed), `awayHold` (held by the away hold) and
