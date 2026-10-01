@@ -264,11 +264,16 @@ Touching the Mac hands a held request back to its dialog at once; the deadline i
 or the away hold's.
 
 **The away hold (6.60.0).** A request that starts while you are away (the desk idle 90 s,
-the same threshold as above) is held for up to 10 minutes, whether or not a client is
-polling when it arrives, so glasses or a phone that come back can still answer it; a client
-going quiet no longer hands it back. Touching the Mac still hands it to the Mac's dialog
-within 1.5 s, and a request that arrives while you are at the desk still goes straight to
-the dialog. It is never held past the hook's own wait: the PermissionRequest `timeout` in
+the same threshold as above) is held for up to 10 minutes, but only when glasses or a phone
+polled for questions in the last 30 minutes (`COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`,
+default 1800, clamped to 0 through 86400; `0` means a client must be polling right now). That
+client need not be polling when the request arrives, so glasses or a phone that come back
+can still answer it, and a client going quiet no longer hands it back. With no recent client
+(a Claude Remote Control session with no glasses, say) nothing changes from 6.59.0: `{}` at
+once and the Mac's dialog. The poll's age is kept in memory on a monotonic clock, so after a
+server restart no client is recent until one polls again. Touching the Mac still hands a held
+request to the Mac's dialog within 1.5 s, and a request that arrives while you are at the
+desk still goes straight to the dialog. It is never held past the hook's own wait: the PermissionRequest `timeout` in
 `~/.claude/settings.json` (630 s after Install hooks; 130 s on an install from before 6.60.0)
 and the wait the hook stamps on the request, the lesser, minus 10 s. An unreadable settings
 file, or a request from the earlier hook, is held at most 120 s, as before. After updating,
@@ -281,15 +286,16 @@ one unchanged:
 - each item: `answerable` (true while listed), `awayHold` (held by the away hold: it stays
   answerable while no client polls, until `deadlineAt` or the desk) and `waitingAtMac`
   (false while listed). `deadlineAt` is the held deadline, so "N s left" is true.
-- the response: `awayHoldMs` (how long a request that starts now is held at most; 0 when
-  off), `settled` (up to 32 recently settled items, newest first: `id`, `sessionId`,
+- the response: `awayHoldMs` (how long a request that starts now is held at most when a
+  client polled recently; 0 when off), `awayRecentClientMs` (how recent that poll must be;
+  0 when the hold is off, or when it must be live), `settled` (up to 32 recently settled items, newest first: `id`, `sessionId`,
   `provider`, `kind`, `tool`, `createdAt`, `deadlineAt`, `settledAt`, `resolution`,
   `answerable: false`, `awayHold`, `waitingAtMac`; never the questions, the card or the
   answer) and `waitingAtMac` (how many of them the Mac's own dialog still waits on).
   `waitingAtMac` is true when the server handed the request to the Mac's dialog (back at the
   desk, expired, no client, drained) and the session has not moved past it since: its tool
   has not run or been denied, its turn has not ended. It is kept up to an hour, then dropped.
-- `/api/models` `capabilities.sessionQuestions.awayHoldMs`, the same number.
+- `/api/models` `capabilities.sessionQuestions.awayHoldMs` and `awayRecentClientMs`, the same numbers.
 
 Allow once or deny only: no permission rule is ever written. Rows carry
 `pending_question_id` or `pending_permission_id` while a request is held, and a question
@@ -437,6 +443,8 @@ both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 `COS_PERMISSION_BROKER_TIMEOUT_S` (default 110, clamped to 5 through 120),
 `COS_PERMISSION_BROKER_AWAY_HOLD_S` (6.60.0: default 600, clamped to 30 through 600, never
 past the installed hook's wait; `0` turns the away hold off),
+`COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (6.60.0: default 1800; the away hold applies
+only when glasses or a phone polled for questions within it; `0` means polling right now),
 `COS_MEDIA_ROOT` (optional image/video store location; default
 `~/.cos-glasses/data/media`), and `COS_VIDEO_UPLOAD_V2=1` (private 6.27.3+
 resumable-video canary, managed by COS Control 0.5.20). The V2 canary retains

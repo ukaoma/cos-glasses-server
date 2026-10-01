@@ -32,6 +32,7 @@ import {
   PermissionBroker,
   brokerSignalSink,
   permissionBrokerAwayHoldMs,
+  permissionBrokerAwayRecentClientMs,
   permissionBrokerMode,
   permissionBrokerTimeoutMs,
   readHidIdleSeconds,
@@ -39,7 +40,7 @@ import {
   wirePermissionBrokerToSignals,
 } from './lib/permission-broker.js'
 import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './routes/permission-broker.js'
-import { lastQuestionsPollAt } from './lib/client-liveness.js'
+import { lastQuestionsPollAt, questionsPollAgeMs } from './lib/client-liveness.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -242,10 +243,12 @@ app.use(cors({
 // (lib/permission-broker.ts). An app without the question UI never polls, so for it every
 // request is `{}`. `COS_PERMISSION_BROKER=0` is the switch, read per request, and every
 // request outside the gate is answered `{}` at once.
-// 6.60.0: the away hold. While the desk is idle a request is held up to
-// `COS_PERMISSION_BROKER_AWAY_HOLD_S` (default 600, `0` is the 6.59.0 broker) whether or not
-// a client is polling, never past the PermissionRequest timeout the Claude settings file
-// carries (read through the 5 s hook-status cache; unreadable is the old 120 s clamp).
+// 6.60.0: the away hold. While the desk is idle, and only when glasses or a phone polled for
+// questions within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800, monotonic,
+// in memory), a request is held up to `COS_PERMISSION_BROKER_AWAY_HOLD_S` (default 600, `0`
+// is the 6.59.0 broker) whether or not a client is polling right now, never past the
+// PermissionRequest timeout the Claude settings file carries (read through the 5 s
+// hook-status cache; unreadable is the old 120 s clamp).
 const permissionBroker = new PermissionBroker({
   now: () => Date.now(),
   mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
@@ -256,6 +259,8 @@ const permissionBroker = new PermissionBroker({
   timeoutMs: () => permissionBrokerTimeoutMs(process.env),
   awayHoldMs: () => permissionBrokerAwayHoldMs(process.env),
   installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,
+  recentClientAgeMs: () => questionsPollAgeMs(),
+  awayRecentClientMs: () => permissionBrokerAwayRecentClientMs(process.env),
   signals: brokerSignalSink(sessionSignalStore),
 })
 registerPermissionBroker(permissionBroker)

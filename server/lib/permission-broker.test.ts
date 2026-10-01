@@ -15,6 +15,7 @@ import {
   DENY_MESSAGE,
   DESK_IDLE_MIN_S,
   AWAY_HOLD_DEFAULT_S,
+  AWAY_RECENT_CLIENT_DEFAULT_S,
   HOOK_CURL_MAX_S,
   LEGACY_HOOK_WAIT_S,
   MAC_WAIT_RETENTION_MS,
@@ -33,6 +34,7 @@ import {
   permissionBrokerHealthFields,
   holdCeilingS,
   permissionBrokerAwayHoldMs,
+  permissionBrokerAwayRecentClientMs,
   permissionBrokerMode,
   permissionBrokerTimeoutMs,
   questionHookOutput,
@@ -48,7 +50,7 @@ import {
 import { SessionSignalStore } from './session-signal-store.js'
 import { deriveSessionState, derivedRowFields } from './session-state-derive.js'
 import { toolFingerprint, type HookEnvelope } from './session-hook-events.js'
-import { __resetClientLivenessForTests, lastQuestionsPollAt, noteQuestionsPoll } from './client-liveness.js'
+import { __resetClientLivenessForTests, lastQuestionsPollAt, monotonicNowMs, noteQuestionsPoll, questionsPollAgeMs } from './client-liveness.js'
 import { REDACTION_SCAN_MAX_CHARS } from './activity-preview.js'
 import { HOOK_SUBSCRIPTIONS, LEGACY_PERMISSION_HOOK_TIMEOUT_S, PERMISSION_HOOK_TIMEOUT_S } from './claude-hooks-installer.js'
 import { PERMISSION_BROKER_HOOK_PATH } from '../routes/permission-broker.js'
@@ -163,6 +165,27 @@ describe('the liveness signal (lib/client-liveness)', () => {
     noteQuestionsPoll(6_000 - 5_001)
     expect(lastQuestionsPollAt()).toBe(999)
     __resetClientLivenessForTests()
+  })
+
+  it('6.60.0: how long ago a client polled is read on a monotonic clock, and a restart forgets it', () => {
+    __resetClientLivenessForTests()
+    // A restart: no poll since boot, so nothing is recent.
+    expect(questionsPollAgeMs(10_000)).toBeNull()
+    noteQuestionsPoll(1_790_000_000_000, 1_000)
+    expect(questionsPollAgeMs(1_500)).toBe(500)
+    expect(questionsPollAgeMs(601_000)).toBe(600_000)
+    // The wall clock stepping back an hour moves the wall stamp, never the age.
+    noteQuestionsPoll(1_790_000_000_000 - 3_600_000, 2_000)
+    expect(questionsPollAgeMs(2_500)).toBe(500)
+    // A monotonic stamp never moves backwards.
+    noteQuestionsPoll(1_790_000_000_000, 1_500)
+    expect(questionsPollAgeMs(2_500)).toBe(500)
+    // The real clock: just polled is about zero.
+    noteQuestionsPoll(Date.now())
+    expect(questionsPollAgeMs()).toBeLessThan(1_000)
+    expect(monotonicNowMs()).toBeGreaterThan(0)
+    __resetClientLivenessForTests()
+    expect(questionsPollAgeMs()).toBeNull()
   })
 
   it('a stamp more than 5 s in the future is stale, not live forever', async () => {
@@ -1170,10 +1193,10 @@ describe('the rows (session signal store seams)', () => {
     await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, { cursor_version: '1' }, clock.now))
     for (const key of keys(broker.health())) expect(key, key).toMatch(/^[a-z][A-Za-z]*$/)
     expect(broker.health()).toMatchObject({ lastFastPath: 'cursor', lastFastPathAt: new Date(clock.now).toISOString() })
-    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0 })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0, awayRecentClientMs: 0 })
     registerPermissionBroker(null)
     expect(permissionBrokerHealthFields()).toEqual({ permissionBroker: null })
-    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0 })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0, awayRecentClientMs: 0 })
   })
 })
 
@@ -1182,11 +1205,23 @@ describe('6.60.0: the away hold', () => {
   const stamped = (tool: string, input: Record<string, unknown>, ts: number, hookWaitS: number | null = 630) =>
     hookWaitS === null ? permissionEnvelope(tool, input, {}, ts) : { ...permissionEnvelope(tool, input, {}, ts), hookWaitS }
   /** The production wiring: a 600 s away hold, the 6.60.0 hook installed (630 s). */
+  /**
+   * The production wiring: a 600 s away hold, the 6.60.0 hook installed (630 s), a client
+   * that last polled 10 minutes ago (`recent.ageMs`) and the 30-minute window.
+   */
   function away(over: Partial<PermissionBrokerDeps> = {}, state: Parameters<typeof brokerWith>[1] = {}) {
     const lines: string[] = []
-    const made = brokerWith({ awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630, log: line => { lines.push(line) }, ...over }, state)
+    const recent: { ageMs: number | null; windowMs: number } = { ageMs: 600_000, windowMs: 1_800_000 }
+    const made = brokerWith({
+      awayHoldMs: () => 600_000,
+      installedHookTimeoutS: () => 630,
+      recentClientAgeMs: () => recent.ageMs,
+      awayRecentClientMs: () => recent.windowMs,
+      log: line => { lines.push(line) },
+      ...over,
+    }, state)
     brokers.push(made.broker)
-    return { ...made, lines }
+    return { ...made, lines, recent }
   }
   async function parkOne(b: PermissionBroker, envelope: unknown) {
     const a = await b.admit(envelope)
@@ -1233,7 +1268,7 @@ describe('6.60.0: the away hold', () => {
     expect(item).toMatchObject({ id, answerable: true, awayHold: true, waitingAtMac: false, deadlineAt: new Date(hookStart + 600_000).toISOString() })
     const parked = lines.find(line => line.includes(`parked ${id}`))!
     const hold = JSON.parse(parked.slice(parked.lastIndexOf(' hold=') + 6))
-    expect(hold).toEqual({ installedHookTimeoutS: 630, hookWaitS: 630, awayHoldS: 600, ceilingS: 620, effectiveDeadlineS: 600, deskIdleMs: 1_000_000, clientLive: true })
+    expect(hold).toEqual({ installedHookTimeoutS: 630, hookWaitS: 630, awayHoldS: 600, ceilingS: 620, effectiveDeadlineS: 600, deskIdleMs: 1_000_000, clientLive: true, recentClientAgeMs: 600_000 })
     expect(parked).not.toContain('"command"')
     expect(broker.stats().counters).toMatchObject({ parked: 1, awayHeld: 1, parkedWithoutClient: 0 })
     // Still answerable well past the old 110 s.
@@ -1266,10 +1301,12 @@ describe('6.60.0: the away hold', () => {
     }
   })
 
-  it('no_client while away: parked with no client polling, kept while the client stays quiet, reclaimed when one comes back', async () => {
+  it('no_client while away: a client 10 minutes ago, none polling now: parked, kept while the client stays quiet, reclaimed when one comes back', async () => {
     const { broker, clock, s } = away({}, { seenAt: null })
     const { id, sent, request } = await parkOne(broker, stamped('AskUserQuestion', ASK_INPUT, clock.now))
     expect(request.hold?.clientLive).toBe(false)
+    expect(request.hold?.recentClientAgeMs).toBe(600_000)
+    expect(request.awayHold).toBe(true)
     expect(broker.stats().counters).toMatchObject({ parked: 1, awayHeld: 1, parkedWithoutClient: 1 })
     expect(broker.health().counters.fastPath).toEqual({})
     // Minutes with no client: every tick leaves it held.
@@ -1282,6 +1319,78 @@ describe('6.60.0: the away hold', () => {
     expect(broker.answer(id, { clientAnswerId: 'lens', answers: [{ labels: ['Tag'] }, { labels: ['Blue'] }] }).status).toBe(200)
     expect(sent).toHaveLength(1)
     expect(broker.health().counters.noClient).toBe(0)
+  })
+
+  it('COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: default 1800, clamped to [0, 86400], 0 is live right now, junk is the default', () => {
+    expect(AWAY_RECENT_CLIENT_DEFAULT_S).toBe(1_800)
+    expect(permissionBrokerAwayRecentClientMs({})).toBe(1_800_000)
+    expect(permissionBrokerAwayRecentClientMs({ COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: '0' })).toBe(0)
+    expect(permissionBrokerAwayRecentClientMs({ COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: '600' })).toBe(600_000)
+    expect(permissionBrokerAwayRecentClientMs({ COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: '1e9' })).toBe(86_400_000)
+    for (const junk of ['', 'abc', '-5', 'NaN', 'Infinity', ' ']) expect(permissionBrokerAwayRecentClientMs({ COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: junk }), junk).toBe(1_800_000)
+  })
+
+  it('no client ever (a Remote Control session with no glasses): no hold, {} at arrival, the Mac\'s dialog at once', async () => {
+    const { broker, clock, s, recent } = away({}, { seenAt: null })
+    recent.ageMs = null
+    expect(await broker.admit(stamped('Bash', { command: 'touch remote' }, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    expect(await broker.admit(stamped('AskUserQuestion', ASK_INPUT, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    // Answered before the desk is even read, exactly as 6.59.0.
+    expect(s.idleReads).toBe(0)
+    expect(broker.stats().counters).toMatchObject({ parked: 0, awayHeld: 0, parkedWithoutClient: 0 })
+    expect(broker.list()).toEqual([])
+  })
+
+  it('the recent window: a client 30 minutes ago is held, 30 minutes and 1 ms or 31 minutes is not; 0 needs a live client', async () => {
+    const { broker, clock, s, recent } = away({}, { seenAt: null })
+    recent.ageMs = 30 * 60_000
+    const edge = await parkOne(broker, stamped('Bash', { command: 'touch edge' }, clock.now))
+    expect(edge.request.awayHold).toBe(true)
+    expect(edge.request.deadlineAt - clock.now).toBe(600_000)
+    for (const ageMs of [30 * 60_000 + 1, 31 * 60_000]) {
+      recent.ageMs = ageMs
+      expect(await broker.admit(stamped('Bash', { command: 'touch old' }, clock.now)), String(ageMs)).toEqual({ ok: false, reason: 'no_client' })
+    }
+    // `0`: a client must be polling right now. A poll a second ago that is not live is not enough.
+    recent.windowMs = 0
+    recent.ageMs = 1_000
+    expect(await broker.admit(stamped('Bash', { command: 'touch zero' }, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    s.seenAt = clock.now
+    recent.ageMs = 0
+    const live = await parkOne(broker, stamped('Bash', { command: 'touch live' }, clock.now))
+    expect(live.request.awayHold).toBe(true)
+    // Held by the away hold, it outlives that client going quiet.
+    s.seenAt = null
+    await broker.tick()
+    expect(live.sent).toEqual([])
+  })
+
+  it('a server restart: nothing is recent until a client polls again (the real liveness module, monotonic)', async () => {
+    __resetClientLivenessForTests()
+    try {
+      const { broker, clock } = away({ lastQuestionsPollAt, recentClientAgeMs: () => questionsPollAgeMs() })
+      // Just restarted: no poll since boot. No hold, as 6.59.0.
+      expect(await broker.admit(stamped('Bash', { command: 'touch boot' }, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+      // The glasses polled 10 minutes ago (by both clocks) and are quiet now: held.
+      noteQuestionsPoll(clock.now - 600_000, monotonicNowMs() - 600_000)
+      const held = await parkOne(broker, stamped('Bash', { command: 'touch later' }, clock.now))
+      expect(held.request.awayHold).toBe(true)
+      expect(held.request.hold?.clientLive).toBe(false)
+      expect(held.request.hold?.recentClientAgeMs).toBeGreaterThanOrEqual(600_000)
+      expect(held.request.hold?.recentClientAgeMs).toBeLessThan(605_000)
+      // Restarted again: forgotten.
+      __resetClientLivenessForTests()
+      expect(await broker.admit(stamped('Bash', { command: 'touch again' }, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    } finally {
+      __resetClientLivenessForTests()
+    }
+  })
+
+  it('an unreadable recent age or window is no recent client: {} at once', async () => {
+    for (const over of [{ recentClientAgeMs: () => { throw new Error('x') } }, { recentClientAgeMs: () => Number.NaN }, { recentClientAgeMs: () => -1 }, { awayRecentClientMs: () => { throw new Error('x') } }]) {
+      const { broker, clock } = away(over as Partial<PermissionBrokerDeps>, { seenAt: null })
+      expect(await broker.admit(stamped('Bash', { command: 'touch x' }, clock.now))).toEqual({ ok: false, reason: 'no_client' })
+    }
   })
 
   it('with the away hold off it is the 6.59.0 broker: no client is no_client at once, and a quiet client hands back', async () => {
@@ -1421,14 +1530,14 @@ describe('6.60.0: the away hold', () => {
     const { broker } = away({ installedHookTimeoutS: () => installed, awayHoldMs: () => hold })
     registerPermissionBroker(broker)
     expect(broker.awayHoldNowMs()).toBe(600_000)
-    expect(sessionQuestionsCapability().awayHoldMs).toBe(600_000)
+    expect(sessionQuestionsCapability()).toMatchObject({ awayHoldMs: 600_000, awayRecentClientMs: 1_800_000 })
     installed = 130
     expect(broker.awayHoldNowMs()).toBe(120_000)
     installed = null
     expect(broker.awayHoldNowMs()).toBe(120_000)
     hold = 0
     expect(broker.awayHoldNowMs()).toBe(0)
-    expect(sessionQuestionsCapability().awayHoldMs).toBe(0)
+    expect(sessionQuestionsCapability()).toMatchObject({ awayHoldMs: 0, awayRecentClientMs: 0 })
   })
 })
 

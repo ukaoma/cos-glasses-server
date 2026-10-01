@@ -23,8 +23,22 @@
 //
 // In memory: a restart forgets it, and the next poll restores it. Until then nothing is
 // held, which is the native dialog, the safe side.
+//
+// 6.60.0: the same poll also answers "did a client that can answer poll RECENTLY", for the
+// away hold (Miles, 2026-09-30 19:54: hold only if the glasses or phone were connected in
+// the last 30 min). That age is read on a MONOTONIC clock (`performance.now()`), so a wall
+// clock that steps never makes an old poll look recent or a recent one look old. In memory
+// too: after a restart there is no poll, so nothing is recent until a client polls again,
+// which is the 6.59.0 behaviour.
 
 let lastPollAt: number | null = null
+/** 6.60.0: the monotonic time of the newest counting poll, or null since boot. */
+let lastPollMono: number | null = null
+
+/** 6.60.0: the monotonic clock the age is read on. Milliseconds since this process started. */
+export function monotonicNowMs(): number {
+  return performance.now()
+}
 
 /** A stored stamp this far ahead of a new poll means the clock stepped back. */
 const CLOCK_STEP_BACK_MS = 5_000
@@ -35,9 +49,20 @@ const CLOCK_STEP_BACK_MS = 5_000
  * the future would read stale to the broker, and ignoring every poll until the clock caught
  * up would leave no live client for that long.
  */
-export function noteQuestionsPoll(at: number): void {
+export function noteQuestionsPoll(at: number, mono: number = monotonicNowMs()): void {
   if (!Number.isFinite(at)) return
   if (lastPollAt === null || at > lastPollAt || lastPollAt - at > CLOCK_STEP_BACK_MS) lastPollAt = at
+  // 6.60.0: the monotonic stamp only moves forward.
+  if (Number.isFinite(mono) && (lastPollMono === null || mono > lastPollMono)) lastPollMono = mono
+}
+
+/**
+ * 6.60.0: how long ago, on the monotonic clock, a client that can answer last polled; null
+ * when none has since this process started (a restart forgets it).
+ */
+export function questionsPollAgeMs(mono: number = monotonicNowMs()): number | null {
+  if (lastPollMono === null || !Number.isFinite(mono)) return null
+  return Math.max(0, mono - lastPollMono)
 }
 
 /** When the newest authenticated questions poll arrived, or null when none has since boot. */
@@ -47,4 +72,5 @@ export function lastQuestionsPollAt(): number | null {
 
 export function __resetClientLivenessForTests(): void {
   lastPollAt = null
+  lastPollMono = null
 }

@@ -57,8 +57,15 @@
 // (`COS_PERMISSION_BROKER_DESK_IDLE_S`), a parked request is held up to the away hold
 // (`COS_PERMISSION_BROKER_AWAY_HOLD_S`, default 600, clamped to [30, 600]; `0` turns it off,
 // which is the 6.59.0 broker exactly):
-//   - whether or not a client is polling when it arrives, so a lens or phone that comes back
-//     can still answer it, and a client going quiet no longer hands it back;
+//   - ONLY when a client that can answer (glasses or phone) polled for questions recently:
+//     within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800, 30 min; `0` means
+//     a client must be live right now), read on a monotonic clock, in memory (Miles,
+//     2026-09-30 19:54: "Hold only if the glasses or phone were connected in the last 30
+//     min. A Claude Remote Control session with no glasses gets its question right away, as
+//     before."). With no recent client it is the 6.59.0 broker: `{}` at once, `no_client`,
+//     the Mac's dialog now. After a restart no client is recent until one polls again;
+//   - with a recent client, whether or not one is polling at that moment, so a lens or phone
+//     that comes back can still answer it, and a client going quiet no longer hands it back;
 //   - desk activity still hands it to the Mac's dialog within one poll (1.5 s), and an item
 //     that arrives while Miles is at the desk is still `{}` at once (`desk_active`);
 //   - every path still ends: answered, handed to the desk, expired at the hold, hook gone,
@@ -137,6 +144,23 @@ export function permissionBrokerAwayHoldMs(env: NodeJS.ProcessEnv): number {
   const parsed = Number(raw)
   const seconds = raw !== '' && Number.isFinite(parsed) && parsed > 0 ? parsed : AWAY_HOLD_DEFAULT_S
   return Math.round(Math.min(AWAY_HOLD_MAX_S, Math.max(AWAY_HOLD_MIN_S, seconds)) * 1000)
+}
+
+/** 6.60.0: how recently a client must have polled for the away hold. */
+export const AWAY_RECENT_CLIENT_DEFAULT_S = 1_800
+/** A day: past that, "recently connected" no longer describes anyone. */
+export const AWAY_RECENT_CLIENT_MAX_S = 86_400
+
+/**
+ * `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`, in ms: default 1800 s (30 min), clamped to
+ * [0, 86400]. `0` means a client must be live right now (polled within the 30 s window).
+ * Junk or a negative number is the default.
+ */
+export function permissionBrokerAwayRecentClientMs(env: NodeJS.ProcessEnv): number {
+  const raw = (env.COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S ?? '').trim()
+  const parsed = Number(raw)
+  const seconds = raw !== '' && Number.isFinite(parsed) && parsed >= 0 ? parsed : AWAY_RECENT_CLIENT_DEFAULT_S
+  return Math.round(Math.min(AWAY_RECENT_CLIENT_MAX_S, Math.max(0, seconds)) * 1000)
 }
 
 /** 6.60.0: Claude Code's wait on every PermissionRequest hook before 6.60.0 (its curl: 125). */
@@ -670,6 +694,16 @@ export interface PermissionBrokerDeps {
    * cannot be read. Absent: null, the old safe clamp (`holdCeilingS`).
    */
   installedHookTimeoutS?(): number | null
+  /**
+   * 6.60.0: how long ago, on a monotonic clock, a client that can answer last polled, or null
+   * when none has since boot (`questionsPollAgeMs`, lib/client-liveness). Absent: null.
+   */
+  recentClientAgeMs?(): number | null
+  /**
+   * 6.60.0: how recent that poll must be for the away hold, in ms
+   * (`permissionBrokerAwayRecentClientMs`). Absent: 0, a client must be live right now.
+   */
+  awayRecentClientMs?(): number
   signals?: BrokerSignalSink
   pollMs?: number
   newId?: () => string
@@ -692,6 +726,8 @@ export interface HoldFacts {
   deskIdleMs: number | null
   /** A client that can answer had polled within the live window at admission. */
   clientLive: boolean
+  /** 6.60.0: how long ago (monotonic) a client that can answer last polled; null for never since boot. */
+  recentClientAgeMs: number | null
 }
 
 export interface ParkRequest {
@@ -915,6 +951,28 @@ export class PermissionBroker {
     return Number.isFinite(ms) && ms > 0 ? ms : 0
   }
 
+  /** 6.60.0: the monotonic age of the newest counting poll, or null (never, absent, unreadable). */
+  private recentClientAgeMs(): number | null {
+    let value: number | null = null
+    try { value = this.deps.recentClientAgeMs?.() ?? null } catch { value = null }
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+  }
+
+  /** 6.60.0: the recent-client window in ms; 0 when absent or unreadable (live right now). */
+  private awayRecentClientMs(): number {
+    let ms = 0
+    try { ms = Number(this.deps.awayRecentClientMs?.() ?? 0) } catch { ms = 0 }
+    return Number.isFinite(ms) && ms > 0 ? ms : 0
+  }
+
+  /**
+   * 6.60.0: a client that can answer is live now, or polled within the recent window. The
+   * away hold applies only then; without one a request is `{}` at once, as in 6.59.0.
+   */
+  private recentClient(clientLive: boolean, ageMs: number | null): boolean {
+    return clientLive || (ageMs !== null && ageMs <= this.awayRecentClientMs())
+  }
+
   /** 6.60.0: the installed hook timeout, or null when absent or unreadable. */
   private installedHookTimeoutS(): number | null {
     let value: number | null = null
@@ -927,8 +985,8 @@ export class PermissionBroker {
    * the away hold when on (never shorter than the base timeout), else the base timeout, and
    * never past `holdCeilingS`.
    */
-  private holdMs(hookWaitS: number | null): { holdMs: number; awayHoldMs: number; installedHookTimeoutS: number | null; ceilingS: number } {
-    const awayHoldMs = this.awayHoldMs()
+  private holdMs(hookWaitS: number | null, away = true): { holdMs: number; awayHoldMs: number; installedHookTimeoutS: number | null; ceilingS: number } {
+    const awayHoldMs = away ? this.awayHoldMs() : 0
     const installedHookTimeoutS = this.installedHookTimeoutS()
     const ceilingS = holdCeilingS(installedHookTimeoutS, hookWaitS)
     const baseMs = this.deps.timeoutMs()
@@ -938,9 +996,14 @@ export class PermissionBroker {
 
   /**
    * 6.60.0: the longest a question that starts now while Miles is away is held, for a hook
-   * as the settings file has it (`awayHoldMs` on the questions route and `/api/models`). 0
-   * when the away hold is off.
+   * as the settings file has it, when a client polled within the recent window
+   * (`awayHoldMs` on the questions route and `/api/models`). 0 when the away hold is off.
    */
+  /** 6.60.0: the recent-client window, for the questions route and `/api/models`. */
+  awayRecentClientWindowMs(): number {
+    return this.awayRecentClientMs()
+  }
+
   awayHoldNowMs(): number {
     if (this.awayHoldMs() === 0) return 0
     const installed = this.installedHookTimeoutS()
@@ -981,10 +1044,13 @@ export class PermissionBroker {
     }
     const now = this.deps.now()
     const clientLive = this.clientLive(now)
-    const hold = this.holdMs(facts.hookWaitS)
-    // 6.60.0: with the away hold on, a request is held whether or not a client is polling,
-    // so a lens or phone that comes back can still answer it. Off, no client is `{}`.
-    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')
+    const recentClientAgeMs = this.recentClientAgeMs()
+    // 6.60.0: the away hold applies only with a client that polled recently (Miles, 19:54).
+    const away = this.awayHoldMs() > 0 && this.recentClient(clientLive, recentClientAgeMs)
+    const hold = this.holdMs(facts.hookWaitS, away)
+    // With it, a request is held whether or not a client is polling right now, so a lens or
+    // phone that comes back can still answer it. Without it, no client is `{}`, as in 6.59.0.
+    if (!clientLive && !away) return this.noteFastPath('no_client')
     // The deadline counts from when the HOOK started, when its stamp is sane: a request the
     // server read late must still be answered before the hook's curl gives up.
     const requestedAt = facts.hookStartedAtMs !== null && facts.hookStartedAtMs <= now ? facts.hookStartedAtMs : now
@@ -1013,7 +1079,7 @@ export class PermissionBroker {
       approval = approvalCard(facts.toolName, facts.toolInput)
     }
     const fingerprint = toolFingerprint(facts.toolName, facts.toolInput)
-    const awayHold = hold.awayHoldMs > 0
+    const awayHold = away
     const holdFacts: HoldFacts = {
       installedHookTimeoutS: hold.installedHookTimeoutS,
       hookWaitS: facts.hookWaitS,
@@ -1022,6 +1088,7 @@ export class PermissionBroker {
       effectiveDeadlineS: Math.round(hold.holdMs / 1000),
       deskIdleMs: idle * 1000,
       clientLive,
+      recentClientAgeMs: recentClientAgeMs === null ? null : Math.round(recentClientAgeMs),
     }
     return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, hold: holdFacts } }
   }
@@ -1477,6 +1544,11 @@ export interface SessionQuestionsCapability {
    * hold is off or the broker is.
    */
   awayHoldMs: number
+  /**
+   * 6.60.0: the away hold applies only when a client that can answer polled within this many
+   * ms (`COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`); 0 means it must be polling right now.
+   */
+  awayRecentClientMs: number
 }
 
 /**
@@ -1489,6 +1561,8 @@ export function sessionQuestionsCapability(): SessionQuestionsCapability {
   try { mode = registered ? registered.health().mode : 'off' } catch { mode = 'off' }
   let awayHoldMs = 0
   try { awayHoldMs = registered && mode !== 'off' ? registered.awayHoldNowMs() : 0 } catch { awayHoldMs = 0 }
+  let awayRecentClientMs = 0
+  try { awayRecentClientMs = registered && awayHoldMs > 0 ? registered.awayRecentClientWindowMs() : 0 } catch { awayRecentClientMs = 0 }
   return {
     enabled: mode !== 'off',
     mode,
@@ -1496,5 +1570,6 @@ export function sessionQuestionsCapability(): SessionQuestionsCapability {
     pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS,
     liveWindowMs: CLIENT_LIVE_WINDOW_MS,
     awayHoldMs,
+    awayRecentClientMs,
   }
 }

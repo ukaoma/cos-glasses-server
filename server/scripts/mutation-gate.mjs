@@ -1994,7 +1994,7 @@ const CASES = [
     name: "broker-no-client-parks",
     file: "server/lib/permission-broker.ts",
     // 6.60.0: retargeted. With the away hold off, no client is still `no_client` at once.
-    find: "    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n",
+    find: "    if (!clientLive && !away) return this.noteFastPath('no_client')\n",
     replace: "    if (false) return this.noteFastPath('no_client')\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
@@ -2708,8 +2708,8 @@ const CASES = [
     name: "broker-card-before-liveness",
     file: "server/lib/permission-broker.ts",
     // 6.60.0: retargeted to the line the no-client gate now is.
-    find: "    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n",
-    replace: "    approvalCard(facts.toolName, facts.toolInput)\n    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n",
+    find: "    if (!clientLive && !away) return this.noteFastPath('no_client')\n",
+    replace: "    approvalCard(facts.toolName, facts.toolInput)\n    if (!clientLive && !away) return this.noteFastPath('no_client')\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {

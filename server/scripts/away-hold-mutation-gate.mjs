@@ -8,7 +8,8 @@
 // Covers what the 6.60.0 brief names: the away extension, the desk-return handover, the
 // installed-timeout clamp (the earlier 130 s hook), no_client while away, and the fallback on
 // an unreadable settings file; plus the hook script's wait, the prior-wait drift and
-// waitingAtMac.
+// waitingAtMac; and Miles's 19:54 rule, the hold only with a client that polled recently
+// (the window, its setting, the monotonic in-memory age, and a restart).
 //
 // Usage: node server/scripts/away-hold-mutation-gate.mjs [--list] [name...]
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
@@ -21,6 +22,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const LIB = 'server/lib/permission-broker.ts'
 const INSTALLER = 'server/lib/claude-hooks-installer.ts'
 const SCRIPT = 'bin/hooks/cos-session-hook'
+const LIVENESS = 'server/lib/client-liveness.ts'
 const BROKER_TESTS = ['server/lib/permission-broker.test.ts', 'server/routes/permission-broker.test.ts']
 const INSTALLER_TESTS = ['server/lib/claude-hooks-installer.test.ts', 'server/lib/permission-broker.test.ts']
 const SCRIPT_TESTS = ['server/lib/cos-session-hook.script.test.ts']
@@ -45,9 +47,22 @@ const mutations = [
   ['installer-wait-130', INSTALLER, 'export const PERMISSION_HOOK_TIMEOUT_S = 630\n', 'export const PERMISSION_HOOK_TIMEOUT_S = 130\n', 'appends one canonical block per subscribed event', INSTALLER_TESTS],
   ['installer-no-wait-argument', INSTALLER, "  const command = hookCommand(scriptPath, sub.event, paths, sub.passTimeout ? sub.timeout : undefined)\n", '  const command = hookCommand(scriptPath, sub.event, paths)\n', 'appends one canonical block per subscribed event', INSTALLER_TESTS],
   // no_client while away
-  ['no-client-gate-ignores-away', LIB, "    if (!clientLive && hold.awayHoldMs === 0) return this.noteFastPath('no_client')\n", "    if (!clientLive) return this.noteFastPath('no_client')\n", 'no_client while away: parked with no client polling', BROKER_TESTS],
-  ['quiet-client-settles-away', LIB, "      this.settleAll('no_client', item => !item.awayHold)\n", "      this.settleAll('no_client')\n", 'no_client while away: parked with no client polling', BROKER_TESTS],
-  ['away-flag-never-set', LIB, '    const awayHold = hold.awayHoldMs > 0\n', '    const awayHold = false\n', 'no_client while away: parked with no client polling', BROKER_TESTS],
+  ['no-client-gate-ignores-away', LIB, "    if (!clientLive && !away) return this.noteFastPath('no_client')\n", "    if (!clientLive) return this.noteFastPath('no_client')\n", 'no_client while away: a client 10 minutes ago, none polling now', BROKER_TESTS],
+  ['quiet-client-settles-away', LIB, "      this.settleAll('no_client', item => !item.awayHold)\n", "      this.settleAll('no_client')\n", 'no_client while away: a client 10 minutes ago, none polling now', BROKER_TESTS],
+  ['away-flag-never-set', LIB, '    const awayHold = away\n', '    const awayHold = false\n', 'no_client while away: a client 10 minutes ago, none polling now', BROKER_TESTS],
+  // Only with a recent client (Miles, 2026-09-30 19:54)
+  ['recent-client-ignored', LIB, '    const away = this.awayHoldMs() > 0 && this.recentClient(clientLive, recentClientAgeMs)\n', '    const away = this.awayHoldMs() > 0\n', 'no client ever (a Remote Control session with no glasses)', BROKER_TESTS],
+  ['recent-window-ignored', LIB, '    return clientLive || (ageMs !== null && ageMs <= this.awayRecentClientMs())', '    return clientLive || ageMs !== null', 'the recent window: a client 30 minutes ago is held', BROKER_TESTS],
+  ['recent-window-exclusive', LIB, 'ageMs <= this.awayRecentClientMs()', 'ageMs < this.awayRecentClientMs()', 'the recent window: a client 30 minutes ago is held', BROKER_TESTS],
+  ['recent-default-not-1800', LIB, 'export const AWAY_RECENT_CLIENT_DEFAULT_S = 1_800\n', 'export const AWAY_RECENT_CLIENT_DEFAULT_S = 3_600\n', 'COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: default 1800', BROKER_TESTS],
+  ['recent-zero-not-live-now', LIB, '  return Math.round(Math.min(AWAY_RECENT_CLIENT_MAX_S, Math.max(0, seconds)) * 1000)', '  return Math.round(Math.min(AWAY_RECENT_CLIENT_MAX_S, Math.max(30, seconds)) * 1000)', 'COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S: default 1800', BROKER_TESTS],
+  ['recent-age-junk-kept', LIB, "    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null\n", '    return value\n', 'an unreadable recent age or window is no recent client', BROKER_TESTS],
+  ['recent-age-throw-unguarded', LIB, '    try { value = this.deps.recentClientAgeMs?.() ?? null } catch { value = null }\n', '    value = this.deps.recentClientAgeMs?.() ?? null\n', 'an unreadable recent age or window is no recent client', BROKER_TESTS],
+  ['restart-counts-as-recent', LIVENESS, '  if (lastPollMono === null || !Number.isFinite(mono)) return null\n', '  if (lastPollMono === null || !Number.isFinite(mono)) return 0\n', 'a server restart: nothing is recent until a client polls again', BROKER_TESTS],
+  ['reset-keeps-the-poll', LIVENESS, '  lastPollAt = null\n  lastPollMono = null\n', '  lastPollAt = null\n', 'a server restart: nothing is recent until a client polls again', BROKER_TESTS],
+  ['age-from-the-wall-clock', LIVENESS, ' && (lastPollMono === null || mono > lastPollMono)) lastPollMono = mono', ' && (lastPollMono === null || mono > lastPollMono)) lastPollMono = at', 'is read on a monotonic clock', BROKER_TESTS],
+  ['monotonic-stamp-moves-back', LIVENESS, ' && (lastPollMono === null || mono > lastPollMono)) lastPollMono = mono', ') lastPollMono = mono', 'is read on a monotonic clock', BROKER_TESTS],
+  ['log-recent-age-dropped', LIB, '      recentClientAgeMs: recentClientAgeMs === null ? null : Math.round(recentClientAgeMs),\n', '', 'the away extension: a request that starts while away is held to the away hold', BROKER_TESTS],
   // The fallback on an unreadable settings file
   ['fallback-null-not-old-clamp', LIB, '  if (installedHookTimeoutS === null || !Number.isFinite(installedHookTimeoutS) || installedHookTimeoutS <= 0) return BROKER_TIMEOUT_MAX_S\n', '  if (installedHookTimeoutS === null) return AWAY_HOLD_MAX_S\n', 'an unreadable settings file falls back to the old clamp', BROKER_TESTS],
   ['fallback-throw-unguarded', LIB, '    try { value = this.deps.installedHookTimeoutS?.() ?? null } catch { value = null }\n', '    value = this.deps.installedHookTimeoutS?.() ?? null\n', 'an unreadable settings file falls back to the old clamp', BROKER_TESTS],

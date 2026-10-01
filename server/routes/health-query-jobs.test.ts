@@ -158,6 +158,7 @@ describe('public durable-query capability health', () => {
       liveWindowMs: 30_000,
       // 6.60.0: the away hold, 0 with no broker.
       awayHoldMs: 0,
+      awayRecentClientMs: 0,
     })
     expect(body.capabilities?.runningTurnMeta).toEqual({ protocolVersion: 1 })
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
@@ -219,6 +220,7 @@ describe('public durable-query capability health', () => {
         enabled: true, mode: 'questions', protocolVersion: 1, pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS, liveWindowMs: CLIENT_LIVE_WINDOW_MS,
         // 6.60.0: a broker built without the away hold reports 0.
         awayHoldMs: 0,
+        awayRecentClientMs: 0,
       })
       const health = await (await fetch(`${base}/api/health`)).json() as any
       expect(health.permissionBroker).toMatchObject({ enabled: true, mode: 'questions', lastFastPath: null, lastQuestionsPollAt: null })

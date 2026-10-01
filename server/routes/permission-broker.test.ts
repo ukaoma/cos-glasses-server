@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs'
 import { requireApiToken } from '../lib/api-auth.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import {
+  DESK_POLL_MS,
   PermissionBroker,
   approvalHookOutput,
   brokerSignalSink,
@@ -28,7 +29,7 @@ import {
 } from '../lib/permission-broker.js'
 import { SessionSignalStore } from '../lib/session-signal-store.js'
 import { deriveSessionState, derivedRowFields } from '../lib/session-state-derive.js'
-import { __resetClientLivenessForTests, lastQuestionsPollAt } from '../lib/client-liveness.js'
+import { __resetClientLivenessForTests, lastQuestionsPollAt, monotonicNowMs, noteQuestionsPoll, questionsPollAgeMs } from '../lib/client-liveness.js'
 import { createClientInstanceRouter } from './client-instance.js'
 import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './permission-broker.js'
 import { ASK_INPUT, Q1, Q2, QUESTIONS, SESSION, permissionEnvelope } from '../lib/__fixtures__/permission-broker.js'
@@ -585,19 +586,22 @@ describe('liveness and the mount', () => {
 })
 
 describe('6.60.0: the away hold over the real route', () => {
-  const AWAY: Partial<PermissionBrokerDeps> = { awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630 }
+  /** The production wiring, with a client that last polled 10 minutes ago and is quiet now. */
+  const AWAY: Partial<PermissionBrokerDeps> = { awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630, recentClientAgeMs: () => 600_000, awayRecentClientMs: () => 1_800_000 }
+  /** The production wiring over the REAL liveness module (monotonic, in memory). */
+  const REAL: Partial<PermissionBrokerDeps> = { awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630, recentClientAgeMs: () => questionsPollAgeMs(), awayRecentClientMs: () => 1_800_000 }
   /** A list that does NOT count as a live client (no `client`). */
   const peek = async (h: Harness) => (await list(h, undefined, null)).body as unknown as Record<string, any>
 
-  it('no client polling: parked anyway, listed with the held deadline and the new fields beside every earlier one; a client that comes back answers it', async () => {
+  it('a client 10 minutes ago, none polling now: parked, listed with the held deadline and the new fields beside every earlier one; a client that comes back answers it', async () => {
     const h = await start(AWAY, { live: false })
     const hookStart = Date.now()
     const reply = ask(h, { ...permissionEnvelope('Bash', { command: 'touch away' }, {}, hookStart), hookWaitS: 630 })
     const body = await until(() => peek(h), b => b.items.length === 1)
     expect(lastQuestionsPollAt()).toBeNull()
     // Every 6.59.0 key, unchanged, and the three 6.60.0 ones.
-    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'settled', 'stats', 'waitingAtMac'])
-    expect(body).toMatchObject({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, pending: 1, awayHoldMs: 600_000, settled: [], waitingAtMac: 0 })
+    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'awayRecentClientMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'settled', 'stats', 'waitingAtMac'])
+    expect(body).toMatchObject({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, pending: 1, awayHoldMs: 600_000, awayRecentClientMs: 1_800_000, settled: [], waitingAtMac: 0 })
     const item = body.items[0]
     expect(item).toMatchObject({ provider: 'claude', kind: 'approval', tool: 'Bash', answerable: true, awayHold: true, waitingAtMac: false })
     expect(Date.parse(item.deadlineAt)).toBe(hookStart + 600_000)
@@ -631,7 +635,7 @@ describe('6.60.0: the away hold over the real route', () => {
   })
 
   it('the earlier hook (no stamp, 130 s in the settings) is clamped to 120 s over the real route, and the away hold off is 6.59.0', async () => {
-    const legacy = await start({ awayHoldMs: () => 600_000, installedHookTimeoutS: () => 130 }, { live: false })
+    const legacy = await start({ ...AWAY, installedHookTimeoutS: () => 130 }, { live: false })
     const hookStart = Date.now()
     const reply = ask(legacy, permissionEnvelope('Bash', { command: 'touch old' }, {}, hookStart))
     reply.catch(() => {})
@@ -641,7 +645,7 @@ describe('6.60.0: the away hold over the real route', () => {
     legacy.state.idle = 0
     expect((await within(reply)).body).toEqual({})
 
-    const off = await start({ awayHoldMs: () => 0, installedHookTimeoutS: () => 630 }, { live: false })
+    const off = await start({ ...AWAY, awayHoldMs: () => 0 }, { live: false })
     const r = await ask(off, { ...permissionEnvelope('Bash', { command: 'touch off' }), hookWaitS: 630 })
     expect(r.body).toEqual({})
     expect(r.ms).toBeLessThan(FAST_MS)
@@ -649,9 +653,58 @@ describe('6.60.0: the away hold over the real route', () => {
     expect((await peek(off)).awayHoldMs).toBe(0)
   })
 
-  it('index.ts wires the away hold from the environment and the installed timeout from the hook status', () => {
+  it('no client ever (a Remote Control session with no glasses), real liveness module: {} in under 100 ms, no_client, nothing listed', async () => {
+    const h = await start(REAL, { live: false })
+    expect(questionsPollAgeMs()).toBeNull()
+    for (const body of [{ ...permissionEnvelope('Bash', { command: 'touch remote' }), hookWaitS: 630 }, { ...permissionEnvelope('AskUserQuestion', ASK_INPUT), hookWaitS: 630 }]) {
+      const r = await ask(h, body)
+      expect(r.body).toEqual({})
+      expect(r.ms).toBeLessThan(FAST_MS)
+      expect(h.broker.health().lastFastPath).toBe('no_client')
+    }
+    expect(h.state.idleReads).toBe(0)
+    expect(h.broker.health().counters.parked).toBe(0)
+    expect((await peek(h)).items).toEqual([])
+  })
+
+  it('a server restart: no hold until a client polls again; a real glasses poll restores it, and it outlives that client going quiet', async () => {
+    // `start` resets the module: the state a restart leaves.
+    const h = await start(REAL, { live: false })
+    expect((await ask(h, { ...permissionEnvelope('Bash', { command: 'touch boot' }), hookWaitS: 630 })).body).toEqual({})
+    expect(h.broker.health().lastFastPath).toBe('no_client')
+    // A real authenticated glasses poll is what records the age.
+    expect((await list(h)).status).toBe(200)
+    expect(questionsPollAgeMs()).toBeLessThan(5_000)
+    // Then the glasses go quiet. A monotonic stamp never moves back, so to age that poll
+    // without waiting 10 minutes the module is reset and the same poll is recorded as made
+    // 10 minutes ago on both clocks.
+    __resetClientLivenessForTests()
+    noteQuestionsPoll(Date.now() - 600_000, monotonicNowMs() - 600_000)
+    const reply = ask(h, { ...permissionEnvelope('Bash', { command: 'touch later' }), hookWaitS: 630 })
+    const body = await until(() => peek(h), b => b.items.length === 1)
+    expect(body.items[0]).toMatchObject({ awayHold: true, answerable: true })
+    h.state.idle = 0
+    expect((await within(reply)).body).toEqual({})
+  })
+
+  it('a recent client and desk return: handed to the Mac within one production desk poll (1.5 s)', async () => {
+    const h = await start({ ...AWAY, pollMs: DESK_POLL_MS }, { live: false })
+    expect(DESK_POLL_MS).toBe(1_500)
+    const reply = ask(h, { ...permissionEnvelope('Bash', { command: 'touch desk' }), hookWaitS: 630 })
+    await until(() => peek(h), b => b.items.length === 1)
+    const touched = Date.now()
+    h.state.idle = 0
+    expect((await within(reply, 3_000)).body).toEqual({})
+    // One poll interval, plus a little for timers under a loaded test run.
+    expect(Date.now() - touched).toBeLessThanOrEqual(DESK_POLL_MS + 150)
+    expect((await peek(h)).settled).toMatchObject([{ resolution: 'handed_to_desk', awayHold: true, waitingAtMac: true }])
+  }, 10_000)
+
+  it('index.ts wires the away hold from the environment, the installed timeout from the hook status, and the recent client from the monotonic poll age', () => {
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     expect(index).toContain('  awayHoldMs: () => permissionBrokerAwayHoldMs(process.env),\n')
     expect(index).toContain('  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,\n')
+    expect(index).toContain('  recentClientAgeMs: () => questionsPollAgeMs(),\n')
+    expect(index).toContain('  awayRecentClientMs: () => permissionBrokerAwayRecentClientMs(process.env),\n')
   })
 })
