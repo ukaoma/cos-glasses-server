@@ -1994,8 +1994,8 @@ const CASES = [
     name: "broker-no-client-parks",
     file: "server/lib/permission-broker.ts",
     // 6.60.0: retargeted. With the away hold off, no client is still `no_client` at once.
-    find: "    if (!clientLive && !away) return this.noteFastPath('no_client')\n",
-    replace: "    if (false) return this.noteFastPath('no_client')\n",
+    find: "    if (!clientLive && !away) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })\n",
+    replace: "    if (false) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
@@ -2008,8 +2008,9 @@ const CASES = [
   {
     name: "broker-desk-active-parks",
     file: "server/lib/permission-broker.ts",
-    find: "    if (idle < this.deskIdleThreshold()) return this.noteFastPath('desk_active')",
-    replace: "    if (false) return this.noteFastPath('desk_active')",
+    // 6.60.0: retargeted (the fast path now carries its log context).
+    find: "    if (idle < this.deskIdleThreshold()) return this.noteFastPath('desk_active'",
+    replace: "    if (false) return this.noteFastPath('desk_active'",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
@@ -2122,8 +2123,8 @@ const CASES = [
     name: "broker-retract-any-tool",
     file: "server/lib/permission-broker.ts",
     // 6.60.0: retargeted into `sessionMovedPast`.
-    find: "      : fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)",
-    replace: "      : true",
+    find: "    return fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)\n",
+    replace: "    return true\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
@@ -2242,7 +2243,8 @@ const CASES = [
   {
     name: "liveness-poll-unrecorded",
     file: "server/routes/permission-broker.ts",
-    find: "    if (ANSWERING_CLIENTS.has(client)) notePoll(now())\n",
+    // 6.60.0: retargeted (the poll now carries its contract facts).
+    find: "    if (ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))\n",
     replace: "\n",
     tests: ["server/routes/permission-broker.test.ts", "server/lib/cos-session-hook.script.test.ts"],
   },
@@ -2277,8 +2279,9 @@ const CASES = [
   {
     name: "liveness-poll-moves-backwards",
     file: "server/lib/client-liveness.ts",
-    find: "  if (lastPollAt === null || at > lastPollAt || lastPollAt - at > CLOCK_STEP_BACK_MS) lastPollAt = at",
-    replace: "  lastPollAt = at",
+    // 6.60.0: retargeted into `newerStamp`, shared by the three poll stamps.
+    find: "  return stored === null || at > stored || stored - at > CLOCK_STEP_BACK_MS ? at : stored\n",
+    replace: "  return at\n",
     tests: ["server/lib/permission-broker.test.ts"],
   },
 
@@ -2708,8 +2711,8 @@ const CASES = [
     name: "broker-card-before-liveness",
     file: "server/lib/permission-broker.ts",
     // 6.60.0: retargeted to the line the no-client gate now is.
-    find: "    if (!clientLive && !away) return this.noteFastPath('no_client')\n",
-    replace: "    approvalCard(facts.toolName, facts.toolInput)\n    if (!clientLive && !away) return this.noteFastPath('no_client')\n",
+    find: "    if (!clientLive && !away) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })\n",
+    replace: "    approvalCard(facts.toolName, facts.toolInput)\n    if (!clientLive && !away) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })\n",
     tests: ["server/lib/permission-broker.test.ts", "server/routes/permission-broker.test.ts"],
   },
   {
@@ -2925,8 +2928,8 @@ const CASES = [
   {
     name: "liveness-any-client-counts",
     file: "server/routes/permission-broker.ts",
-    find: "    if (ANSWERING_CLIENTS.has(client)) notePoll(now())\n",
-    replace: "    notePoll(now())\n",
+    find: "    if (ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))\n",
+    replace: "    notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))\n",
     tests: ["server/routes/permission-broker.test.ts"],
   },
   {
@@ -2940,15 +2943,15 @@ const CASES = [
     name: "liveness-held-client-not-rechecked",
     file: "server/lib/permission-broker.ts",
     // 6.60.0: retargeted. A held item that is not away-held still goes back when the client goes quiet.
-    find: "      this.settleAll('no_client', item => !item.awayHold)\n",
+    find: "      this.settleAll('no_client', item => !item.awayHold || !presence.recent)\n",
     replace: "",
     tests: ["server/lib/permission-broker.test.ts"],
   },
   {
     name: "liveness-clock-step-back-ignored",
     file: "server/lib/client-liveness.ts",
-    find: "  if (lastPollAt === null || at > lastPollAt || lastPollAt - at > CLOCK_STEP_BACK_MS) lastPollAt = at",
-    replace: "  if (lastPollAt === null || at > lastPollAt) lastPollAt = at",
+    find: "  return stored === null || at > stored || stored - at > CLOCK_STEP_BACK_MS ? at : stored\n",
+    replace: "  return stored === null || at > stored ? at : stored\n",
     tests: ["server/lib/permission-broker.test.ts"],
   },
   {

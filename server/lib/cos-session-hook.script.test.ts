@@ -55,7 +55,7 @@ const SCRIPT_6_53_3_SHA256 = 'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16
  * purpose, with its reinstall plan (Install hooks in COS Control); until then an install keeps
  * the 6.53.3 script, which is halt-capable and holds a question at most 120 s as before.
  */
-const SCRIPT_6_60_0_SHA256 = '07c680f2a412ee5edeb778aed8f82dde95e538905dfaa84330777973ea40ae70'
+const SCRIPT_6_60_0_SHA256 = '0e1bbb9816c9475436f89f6326d5504eccc9aa6519ff5e466b949d53a73d8439'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -556,6 +556,32 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       const item = await firstPending(s.broker)
       expect(s.broker.answer(item.id, { clientAnswerId: 'lens-2', decision: 'deny' }).status).toBe(200)
       expect((await run).stdout).toBe('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from COS glasses"}}}')
+    })
+
+    it('6.60.0 (QA round 1, W7): a TERM to the script stops its curl, and the broker sees the hook leave (hook_gone)', { timeout: 30_000 }, async () => {
+      const s = await server()
+      const port = Number(readFileSync(join(s.paths.home, 'hook-port'), 'utf8'))
+      const child = spawn('/bin/sh', [SCRIPT, 'PermissionRequest', '630'], {
+        env: { HOME: dirname(s.paths.home), COS_GLASSES_HOME: s.paths.home, COS_HOOK_SPOOL: s.paths.spool, PATH: '/usr/bin:/bin' },
+      })
+      let stdout = ''
+      child.stdout.on('data', c => { stdout += c })
+      const closed = new Promise<number | null>(r => child.on('close', code => r(code)))
+      child.stdin.end(payload({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'touch term' } }))
+      const item = await firstPending(s.broker)
+      const curls = () => spawnSync('/bin/ps', ['-ax', '-o', 'pid=,command='], { encoding: 'utf8' }).stdout
+        .split('\n').filter(line => line.includes('curl') && line.includes(`127.0.0.1:${port}/api/permission-requests/ask`))
+      expect(curls()).toHaveLength(1)
+      child.kill('SIGTERM')
+      expect(await closed).toBe(0)
+      expect(stdout).toBe('')
+      // No curl left behind, and the broker saw the socket close.
+      const deadline = Date.now() + 5_000
+      while ((curls().length > 0 || s.broker.pendingCount() > 0) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50))
+      expect(curls()).toEqual([])
+      expect(s.broker.pendingCount()).toBe(0)
+      expect(s.broker.answer(item.id, { clientAnswerId: 'late', decision: 'allow' })).toEqual({ status: 410, body: { error: 'hook_gone' } })
+      expect(readdirSync(s.paths.spool).filter(n => n.endsWith('.req') || n.endsWith('.out'))).toEqual([])
     })
 
     it('no questions poll (even with a live 6.9.511 claim), or the kill switch: {} at once and the script prints nothing (the native dialog, as today)', async () => {

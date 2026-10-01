@@ -407,6 +407,14 @@ export function signalFor(sessionId: string): SessionSignal | undefined {
   return sessionId.length >= 36 ? sessionSignalStore.get(sessionId) : sessionSignalStore.getByPrefix(sessionId)
 }
 
+/** 6.60.0: told when a row derives `ended`, so the broker stops saying the Mac is waiting on it. */
+const rowEndedListeners = new Set<(sessionId: string) => void>()
+
+export function onSessionRowEnded(listener: (sessionId: string) => void): () => void {
+  rowEndedListeners.add(listener)
+  return () => { rowEndedListeners.delete(listener) }
+}
+
 /**
  * Derive with the two-scan memory kept here, keyed by full id when known. Rows the
  * caller has no facts for at all get nothing, so an older payload stays byte-identical.
@@ -428,6 +436,11 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
     prevDeadSince: prev?.since ?? null,
     attachedTurn: input.attachedTurn === true,
   })
+  if (derived.agent_state === 'ended') {
+    for (const listener of rowEndedListeners) {
+      try { listener(key) } catch { /* a listener never breaks a row */ }
+    }
+  }
   // A reader with no registry facts (the live feed derives from the signal alone) must
   // not touch the two-scan memory the row readers keep: a derive that saw no registry
   // would reset a dead pid's count between two list requests.
@@ -440,6 +453,7 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
 }
 
 export function __resetSessionHooksForTests(): void {
+  rowEndedListeners.clear()
   sessionSignalStore.__resetForTests()
   deadById.clear()
   parentCache.clear()

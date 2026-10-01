@@ -2464,6 +2464,88 @@ describe('a repeated POST replays instead of delivering twice', () => {
   })
 })
 
+describe('6.60.0 (QA round 1, Ghost Hunter W7): one client turn id against the REAL registry is delivered once', () => {
+  // The glasses' saved-turn drain (6.9.563) re-sends a turn under the SAME clientTurnId
+  // until the Mac answers. Its "sent exactly once" rests on this ledger, so these run
+  // against the real AgentSessionBindingRegistry on a real file, never a fake.
+  const turnBody = (a: { epoch: number; targetKey: string }, clientTurnId: string) => ({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId })
+  const settle = () => new Promise(r => setTimeout(r, 2))
+
+  it('sequential: the second POST replays the first result and nothing is delivered again', async () => {
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({ bindings: wire(openRegistry()), deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } } }))
+    const a = await attached(base)
+    const first = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-w7-seq-0001'))
+    const second = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-w7-seq-0001'))
+    expect(first.body.outcome).toBe('completed')
+    expect(second.body).toMatchObject({ outcome: 'completed', replayed: true })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('concurrent: two POSTs of one id while the first is in flight deliver once; the other is refused busy (not delivered); a later retry replays', async () => {
+    const held = heldDelivery()
+    const base = await start(writeDeps({ bindings: wire(openRegistry()), deliverAttachedTurn: held.deliver }))
+    const a = await attached(base)
+    const body = turnBody(a, 'ct-w7-conc-0001')
+    const both = Promise.all([post(base, turnsPath(a.bindingId), body), post(base, turnsPath(a.bindingId), body)])
+    while (held.calls.length === 0) await settle()
+    // Give the other request time to reach the gate before the first finishes.
+    await new Promise(r => setTimeout(r, 100))
+    expect(held.calls).toHaveLength(1)
+    held.open()
+    const results = await both
+    const busy = results.find(r => r.status === 409)
+    const done = results.find(r => r.body?.outcome === 'completed')
+    expect(done).toBeDefined()
+    expect(busy?.body).toMatchObject({ reason: 'native_turn_in_progress', deliveryState: 'not_delivered' })
+    const retry = await post(base, turnsPath(a.bindingId), body)
+    expect(retry.body).toMatchObject({ outcome: 'completed', replayed: true })
+    expect(held.calls).toHaveLength(1)
+  })
+
+  it('across a binding retire and re-create on the same thread: the id sent through the new binding replays', async () => {
+    const r = openRegistry()
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({ bindings: wire(r), deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } } }))
+    const a = await attached(base)
+    expect((await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-w7-retire-01'))).body.outcome).toBe('completed')
+    // The lens's binding is retired; the drain attaches a new one to the same thread.
+    expect(r.forceDetach(a.bindingId, NOW).reason).toBeNull()
+    const b = await attached(base)
+    expect(b.bindingId).toBeTruthy()
+    expect(b.bindingId).not.toBe(a.bindingId)
+    const again = await post(base, turnsPath(b.bindingId), turnBody(b, 'ct-w7-retire-01'))
+    expect(again.body).toMatchObject({ outcome: 'completed', replayed: true })
+    expect(calls).toHaveLength(1)
+    // A genuinely new id through the new binding is delivered.
+    expect((await post(base, turnsPath(b.bindingId), turnBody(b, 'ct-w7-retire-02'))).body.outcome).toBe('completed')
+    expect(calls).toHaveLength(2)
+  })
+
+  it('a thread busy with the first send: a new attach is refused busy, the same id on the busy binding is refused busy; once done, a re-attach replays it', async () => {
+    const r = openRegistry()
+    const held = heldDelivery()
+    const base = await start(writeDeps({ bindings: wire(r), deliverAttachedTurn: held.deliver }))
+    const a = await attached(base)
+    const body = turnBody(a, 'ct-w7-busy-0001')
+    const first = post(base, turnsPath(a.bindingId), body)
+    while (held.calls.length === 0) await settle()
+    const attachWhileBusy = await post(base, attachPath(), { cosSessionId: 'cos/drain:1' })
+    expect(attachWhileBusy.status).toBe(409)
+    expect(attachWhileBusy.body).toMatchObject({ reason: 'native_target_busy' })
+    const sameIdWhileBusy = await post(base, turnsPath(a.bindingId), body)
+    expect(sameIdWhileBusy.status).toBe(409)
+    expect(sameIdWhileBusy.body).toMatchObject({ reason: 'native_turn_in_progress', deliveryState: 'not_delivered' })
+    held.open()
+    expect((await first).body.outcome).toBe('completed')
+    expect(r.forceDetach(a.bindingId, NOW).reason).toBeNull()
+    const b = await attached(base)
+    const replay = await post(base, turnsPath(b.bindingId), turnBody(b, 'ct-w7-busy-0001'))
+    expect(replay.body).toMatchObject({ outcome: 'completed', replayed: true })
+    expect(held.calls).toHaveLength(1)
+  })
+})
+
 // =============================================================================
 // Fork
 //

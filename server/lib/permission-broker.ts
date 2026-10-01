@@ -31,8 +31,9 @@
 //   - a client that can answer asked for the questions in the last 30 s: an authenticated
 //     `GET /api/session-questions?client=glasses|phone` (lib/client-liveness). An app without
 //     the question UI never calls it, so for it the broker is inert and every request is `{}`.
-//     6.60.0: only with the away hold off; with it on (the default) this gate is not applied
-//     (THE AWAY HOLD, below);
+//     6.60.0: or the away hold applies (THE AWAY HOLD, below). Only a poll WITHOUT `hold=1`
+//     counts here as before; a `hold=1` poll counts only while its wearer's presence is
+//     recent;
 //   - the desk has been idle `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 //     read here with a bounded `ioreg`, not trusted from the script.
 // The cheap gates run first and the desk read last; the question card or the approval card
@@ -56,33 +57,47 @@
 // `{}` at once). Now, while the desk is idle past the SAME threshold the gate above uses
 // (`COS_PERMISSION_BROKER_DESK_IDLE_S`), a parked request is held up to the away hold
 // (`COS_PERMISSION_BROKER_AWAY_HOLD_S`, default 600, clamped to [30, 600]; `0` turns it off,
-// which is the 6.59.0 broker exactly):
-//   - ONLY when a client that can answer (glasses or phone) polled for questions recently:
-//     within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800, 30 min; `0` means
-//     a client must be live right now), read on a monotonic clock, in memory (Miles,
+// which is the 6.59.0 broker exactly), but only when ALL of these hold:
+//   - the installed hook waits longer than the 6.59.0 broker could ever hold (its 120 s
+//     clamp, `AWAY_MIN_CEILING_S`). Before Install hooks it does not, and the broker is
+//     6.59.0 entirely (QA round 1, User W6);
+//   - a client that shows held questions reported its WEARER present recently (Miles,
 //     2026-09-30 19:54: "Hold only if the glasses or phone were connected in the last 30
-//     min. A Claude Remote Control session with no glasses gets its question right away, as
-//     before."). With no recent client it is the 6.59.0 broker: `{}` at once, `no_client`,
-//     the Mac's dialog now. After a restart no client is recent until one polls again;
-//   - with a recent client, whether or not one is polling at that moment, so a lens or phone
-//     that comes back can still answer it, and a client going quiet no longer hands it back;
-//   - desk activity still hands it to the Mac's dialog within one poll (1.5 s), and an item
-//     that arrives while Miles is at the desk is still `{}` at once (`desk_active`);
-//   - every path still ends: answered, handed to the desk, expired at the hold, hook gone,
-//     retracted, or drained.
+//     min. A Claude Remote Control session with no glasses gets its question right away,
+//     as before."). The contract shared with COS Glasses 6.9.563 (lib/client-liveness): a
+//     poll `?client=glasses|phone&hold=1&presenceAgeMs=<int>`, the ms since a ring or temple
+//     input, a device status with wearing true, or a phone foreground touch. Recent means
+//     within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800; below 30 s, the 30 s
+//     live window). A connected lens nobody wears sends no presence; an older client sends
+//     no `hold=1` and keeps the 6.59.0 liveness, never the away hold. In memory: after a
+//     restart nothing is recent until such a poll.
+// Held that way, a request stays answerable while no client is polling, so a lens or phone
+// that comes back can still answer it. It is re-checked on every desk poll (QA round 1,
+// Skeptic W2): once no client is live and the wearer's latest presence is older than the
+// window, it goes to the Mac's dialog (`no_client`), so one glance never holds a question 10
+// minutes. Desk activity still hands it back within one poll (1.5 s); a request that arrives
+// while Miles is at the desk is still `{}` at once (`desk_active`); every path still ends.
+// Every request answered `{}` is logged with why, the presence age and the window.
+//
 // NEVER past the hook's own wait. The hold is clamped to `holdCeilingS`: the PermissionRequest
 // `timeout` in the Claude settings file (read, not assumed) and the wait the hook stamped on
-// THIS request (`hookWaitS`, 6.60.0 script), whichever is less, minus 10 s. A request with no
-// stamp (the earlier script, or a session still running the earlier hook block) waited 130 s
-// and its curl 125 s, so it is clamped to 120 s as before; an unreadable settings file is the
-// same 120 s. Canary 2026-09-30 (Claude Code 2.1.286): a PermissionRequest hook configured for
-// 300 s that slept 200 s was waited for and its allow applied; one configured for 150 s was
-// stopped at 150 s and the tool did not run.
+// THIS request (`hookWaitS`, 6.60.0 script), whichever is less, minus 10 s; settings that
+// cannot be read leave the stamp alone. A request with no stamp (the earlier script, or an
+// earlier hook block) waited 130 s and its curl 125 s, so it is never held past 120 s.
+// Canaries on Claude Code 2.1.286, 2026-09-30: a PermissionRequest hook configured for 630 s
+// that slept 610 s was waited for and its allow applied (and 300 s / 200 s before it); one
+// configured for 150 s was stopped at 150 s and the tool did not run. The script stops its
+// own curl when it is stopped, so the broker sees the hook leave (`hook_gone`) at once.
 //
-// What a client sees: `deadlineAt` is the held deadline, so "N s left" is true; each item says
-// `answerable`, `awayHold` and `waitingAtMac`, and the questions route lists recently settled
-// items (`settled`, codes only) so a client can tell the Mac is still waiting on a question it
-// handed back (its tool has not run, nor been denied, nor its turn ended since).
+// What a client sees: `deadlineAt` is the latest the request stays answerable (sooner if the
+// wearer's presence lapses with no client live); each item says `answerable`, `awayHold` and
+// `waitingAtMac`, and the questions route lists settled items (`settled`, codes only; every one
+// the Mac still waits on, whatever the cap), with `serverStartedAt` and
+// `waitingAtMacForgottenBefore` so a client can tell "forgot" from "moved past". `waitingAtMac`
+// stays true until that request's own tool finishes or is denied, its turn ends, or its row
+// reads ended: no hook marks the moment a dialog is approved, so an approved tool that is
+// still running reads as waiting (the safe direction: never "not waiting" while a dialog may
+// be up).
 //
 // NEVER: a permission RULE. `updatedPermissions` and the request's suggestions are never
 // returned; the decision objects below are built from nothing but constants and the
@@ -177,14 +192,21 @@ export const HOOK_WAIT_STAMP_MAX_S = 3_600
 /**
  * 6.60.0: the longest a request may be held, in seconds, from the hook's own start.
  * `installedHookTimeoutS` is our PermissionRequest `timeout` in the Claude settings file, or
- * null when that cannot be read (missing, unparseable, a symlink, no block of ours): then the
- * old safe clamp, 120. `hookWaitS` is the wait this invocation stamped (the 6.60.0 script
- * passes its block's timeout); none means an earlier hook, 130. The lesser of the two, minus
- * the margin. Never negative: a ceiling at or below zero is `stale_hook`.
+ * null when that cannot be read (missing, unparseable, a symlink, no block of ours).
+ * `hookWaitS` is the wait this invocation stamped (the 6.60.0 script passes its block's
+ * timeout); none means an earlier hook, 130. The lesser of the two, minus the margin. With
+ * the settings unreadable, the stamp alone minus the margin (QA round 1, N4), and an
+ * unstamped request the old safe clamp, 120: an unstamped request is never held past 120.
+ * Never negative: a ceiling at or below zero is `stale_hook`.
  */
 export function holdCeilingS(installedHookTimeoutS: number | null, hookWaitS: number | null): number {
-  if (installedHookTimeoutS === null || !Number.isFinite(installedHookTimeoutS) || installedHookTimeoutS <= 0) return BROKER_TIMEOUT_MAX_S
-  const stamped = hookWaitS !== null && Number.isFinite(hookWaitS) && hookWaitS > 0 ? hookWaitS : LEGACY_HOOK_WAIT_S
+  const hasStamp = hookWaitS !== null && Number.isFinite(hookWaitS) && hookWaitS > 0
+  if (installedHookTimeoutS === null || !Number.isFinite(installedHookTimeoutS) || installedHookTimeoutS <= 0) {
+    // QA round 1 (N4): unreadable settings. The stamp is this invocation's own wait, so it
+    // still bounds the hold; with no stamp, the old safe clamp, never more than 120.
+    return hasStamp ? Math.max(0, hookWaitS! - HOOK_REPLY_MARGIN_S) : BROKER_TIMEOUT_MAX_S
+  }
+  const stamped = hasStamp ? hookWaitS! : LEGACY_HOOK_WAIT_S
   return Math.max(0, Math.min(installedHookTimeoutS, stamped) - HOOK_REPLY_MARGIN_S)
 }
 
@@ -216,6 +238,11 @@ export const SETTLED_RETENTION_MS = 10 * 60_000
  * never delivered must not leave it waiting forever.
  */
 export const MAC_WAIT_RETENTION_MS = 60 * 60_000
+/**
+ * 6.60.0 (QA round 1, Ghost Hunter W1): while the session's own row still waits on that very
+ * request (`stillWaitingAtMac`), it is kept up to this long instead of the hour.
+ */
+export const MAC_WAIT_MAX_RETENTION_MS = 24 * 60 * 60_000
 export const MAX_SETTLED = 256
 /** 6.60.0: at most this many settled items in a questions listing, newest first. */
 export const SETTLED_LIST_MAX = 32
@@ -682,8 +709,18 @@ export interface PermissionBrokerDeps {
   now(): number
   mode(): BrokerMode
   admissionsOpen(): boolean
-  /** The newest counting `GET /api/session-questions`, or null (lib/client-liveness). */
+  /**
+   * The newest counting `GET /api/session-questions`, or null (lib/client-liveness). The
+   * 6.59.0 liveness reads it when `lastLegacyPollAt` is absent.
+   */
   lastQuestionsPollAt(): number | null
+  /**
+   * 6.60.0: the newest counting poll WITHOUT `hold=1`, the 6.59.0 liveness for every older
+   * client (`lastLegacyQuestionsPollAt`). Absent: `lastQuestionsPollAt`.
+   */
+  lastLegacyPollAt?(): number | null
+  /** 6.60.0: the newest counting poll WITH `hold=1` (`lastHoldQuestionsPollAt`). Absent: none. */
+  lastHoldPollAt?(): number | null
   readDeskIdleSeconds(): Promise<number | null>
   deskIdleSeconds(): number
   timeoutMs(): number
@@ -695,15 +732,22 @@ export interface PermissionBrokerDeps {
    */
   installedHookTimeoutS?(): number | null
   /**
-   * 6.60.0: how long ago, on a monotonic clock, a client that can answer last polled, or null
-   * when none has since boot (`questionsPollAgeMs`, lib/client-liveness). Absent: null.
+   * 6.60.0: how long ago the newest QUALIFYING wearer presence was (a `hold=1` poll with a
+   * valid `presenceAgeMs`), or null when there is none since boot (`presenceAgeMs`,
+   * lib/client-liveness). Absent: null.
    */
-  recentClientAgeMs?(): number | null
+  presenceAgeMs?(): number | null
   /**
-   * 6.60.0: how recent that poll must be for the away hold, in ms
-   * (`permissionBrokerAwayRecentClientMs`). Absent: 0, a client must be live right now.
+   * 6.60.0: how recent that presence must be for the away hold, in ms
+   * (`permissionBrokerAwayRecentClientMs`), never below the 30 s live window. Absent: 30 s.
    */
   awayRecentClientMs?(): number
+  /**
+   * 6.60.0: the session's row still waits on exactly this request (its hook signal is
+   * waiting, on this fingerprint, and not ended). Keeps a waiting-at-the-Mac item past the
+   * hour. Absent: false.
+   */
+  stillWaitingAtMac?(sessionId: string, fingerprint: string): boolean
   signals?: BrokerSignalSink
   pollMs?: number
   newId?: () => string
@@ -724,11 +768,31 @@ export interface HoldFacts {
   effectiveDeadlineS: number
   /** The desk's idle time at admission, in ms. */
   deskIdleMs: number | null
-  /** A client that can answer had polled within the live window at admission. */
+  /** A client that can answer was live at admission (6.59.0 liveness, or a `hold=1` client with recent presence). */
   clientLive: boolean
-  /** 6.60.0: how long ago (monotonic) a client that can answer last polled; null for never since boot. */
-  recentClientAgeMs: number | null
+  /** 6.60.0: the age of the newest qualifying wearer presence; null for none since boot. */
+  presenceAgeMs: number | null
+  /** 6.60.0: how recent that presence had to be, in seconds. */
+  recentWindowS: number
+  /** 6.60.0: why this request is not away-held, or null when it is. */
+  notAwayReason: NotAwayReason | null
 }
+
+/**
+ * 6.60.0: why a request is not held by the away hold (logged once per decision):
+ * `hold_off` the switch is 0; `ceiling_at_base` the installed hook waits no longer than the
+ * 6.59.0 broker could hold (Install hooks not run); `no_hold_client` no `hold=1` client has
+ * reported wearer presence since boot; `stale_presence` its latest presence is older than the
+ * window; `desk_active` Miles is at the Mac.
+ */
+export type NotAwayReason = 'hold_off' | 'ceiling_at_base' | 'no_hold_client' | 'stale_presence' | 'desk_active'
+
+/**
+ * 6.60.0: the away hold needs a hook that waits longer than the 6.59.0 broker could ever hold
+ * (its 120 s clamp). At or below that, before Install hooks, away semantics are off entirely
+ * and the broker is 6.59.0 (QA round 1, W6).
+ */
+export const AWAY_MIN_CEILING_S = BROKER_TIMEOUT_MAX_S
 
 export interface ParkRequest {
   facts: PermissionRequestFacts
@@ -893,12 +957,15 @@ const TURN_BOUNDARIES: ReadonlySet<string> = new Set(['Stop', 'StopFailure', 'Se
  * means the Mac is no longer waiting on it. A question's tool is AskUserQuestion; an
  * approval matches by fingerprint, or by tool name for a denial.
  */
-function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolName'>, env: HookEnvelope, toolName: string, fingerprint: string): boolean {
+function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolName'>, env: HookEnvelope, toolName: string, fingerprint: string, strict = false): boolean {
   if (TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && env.payload.source !== 'compact')) return true
   if (env.event === 'PostToolUse' || env.event === 'PostToolUseFailure' || env.event === 'PermissionDenied') {
-    return item.kind === 'question'
-      ? toolName === ASK_USER_QUESTION_TOOL
-      : fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)
+    // `strict` (QA round 1, N3), for "the Mac is no longer waiting": an approval only by its
+    // own fingerprint, never by a denial of the same tool name, which may be another dialog
+    // of the same session still on screen.
+    if (item.kind === 'question') return toolName === ASK_USER_QUESTION_TOOL
+    if (strict) return fingerprint === item.fingerprint
+    return fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)
   }
   return false
 }
@@ -915,8 +982,21 @@ export class PermissionBroker {
   private lastFastPath: BrokerFastPath | null = null
   private lastFastPathAt: number | null = null
 
+  /**
+   * 6.60.0 (QA round 1, Ghost Hunter W1): the server cannot know about a waiting-at-the-Mac
+   * item settled at or before this time: it started then, or it later dropped one that was
+   * still waiting. Never moves back.
+   */
+  private waitingForgottenBefore: number
+
   constructor(deps: PermissionBrokerDeps) {
     this.deps = deps
+    this.waitingForgottenBefore = deps.now()
+  }
+
+  /** 6.60.0: `waitingAtMacForgottenBefore` on the questions route, in ms. */
+  waitingAtMacForgottenBeforeMs(): number {
+    return this.waitingForgottenBefore
   }
 
   private log(line: string): void {
@@ -924,11 +1004,17 @@ export class PermissionBroker {
   }
 
   /** A request answered `{}` without being parked, counted by why. */
-  noteFastPath(reason: BrokerFastPath): { ok: false; reason: BrokerFastPath } {
+  noteFastPath(reason: BrokerFastPath, context: { notAway?: NotAwayReason; presence?: { ageMs: number | null; windowMs: number }; clientLive?: boolean } = {}): { ok: false; reason: BrokerFastPath } {
     const key = camelKey(reason)
     this.fastPaths[key] = (this.fastPaths[key] ?? 0) + 1
     this.lastFastPath = reason
     this.lastFastPathAt = this.deps.now()
+    // 6.60.0 (QA round 1, Completionist N9, Ghost Hunter W5): one line per request answered
+    // `{}`, with why, how old the wearer's presence is and the window. Numbers only.
+    let presence = context.presence
+    if (!presence) { try { presence = this.presence(this.deps.now()) } catch { presence = undefined } }
+    const age = presence?.ageMs === null || presence?.ageMs === undefined ? 'null' : String(Math.round(presence.ageMs))
+    this.log(`fast path ${reason}${context.notAway ? ` not_away=${context.notAway}` : ''} presenceAgeMs=${age} windowMs=${presence?.windowMs ?? 'null'}${context.clientLive === undefined ? '' : ` clientLive=${context.clientLive}`}`)
     return { ok: false, reason }
   }
 
@@ -938,8 +1024,14 @@ export class PermissionBroker {
    * forever.
    */
   private clientLive(now: number): boolean {
-    const polledAt = this.deps.lastQuestionsPollAt()
-    if (polledAt === null || !Number.isFinite(polledAt)) return false
+    // 6.60.0: the 6.59.0 liveness is a poll WITHOUT `hold=1` (every older client).
+    const legacy = this.deps.lastLegacyPollAt
+    return this.polledWithin(legacy ? legacy() : this.deps.lastQuestionsPollAt(), now)
+  }
+
+  /** A poll stamp within the live window, and not more than the skew ahead of the clock. */
+  private polledWithin(polledAt: number | null | undefined, now: number): boolean {
+    if (polledAt === null || polledAt === undefined || !Number.isFinite(polledAt)) return false
     if (polledAt - now > POLL_FUTURE_SKEW_MS) return false
     return now - polledAt <= CLIENT_LIVE_WINDOW_MS
   }
@@ -951,26 +1043,29 @@ export class PermissionBroker {
     return Number.isFinite(ms) && ms > 0 ? ms : 0
   }
 
-  /** 6.60.0: the monotonic age of the newest counting poll, or null (never, absent, unreadable). */
-  private recentClientAgeMs(): number | null {
-    let value: number | null = null
-    try { value = this.deps.recentClientAgeMs?.() ?? null } catch { value = null }
-    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
-  }
-
-  /** 6.60.0: the recent-client window in ms; 0 when absent or unreadable (live right now). */
-  private awayRecentClientMs(): number {
+  /** 6.60.0: the recent-presence window in ms, never below the 30 s live window. */
+  private recentWindowMs(): number {
     let ms = 0
     try { ms = Number(this.deps.awayRecentClientMs?.() ?? 0) } catch { ms = 0 }
-    return Number.isFinite(ms) && ms > 0 ? ms : 0
+    return Math.max(CLIENT_LIVE_WINDOW_MS, Number.isFinite(ms) && ms > 0 ? ms : 0)
   }
 
   /**
-   * 6.60.0: a client that can answer is live now, or polled within the recent window. The
-   * away hold applies only then; without one a request is `{}` at once, as in 6.59.0.
+   * 6.60.0: the newest qualifying wearer presence and what it allows, read now:
+   *   - `recent`: within the window, so the away hold may apply;
+   *   - `holdLive`: a `hold=1` client polled within the live window AND its presence is
+   *     recent, so it counts as a live client the way an older client's poll does. A
+   *     connected lens nobody wears never counts (QA round 1, Skeptic W1).
    */
-  private recentClient(clientLive: boolean, ageMs: number | null): boolean {
-    return clientLive || (ageMs !== null && ageMs <= this.awayRecentClientMs())
+  private presence(now: number): { ageMs: number | null; recent: boolean; holdLive: boolean; windowMs: number } {
+    let ageMs: number | null = null
+    try { ageMs = this.deps.presenceAgeMs?.() ?? null } catch { ageMs = null }
+    if (typeof ageMs !== 'number' || !Number.isFinite(ageMs) || ageMs < 0) ageMs = null
+    const windowMs = this.recentWindowMs()
+    const recent = ageMs !== null && ageMs <= windowMs
+    let holdPollAt: number | null = null
+    try { holdPollAt = this.deps.lastHoldPollAt?.() ?? null } catch { holdPollAt = null }
+    return { ageMs, recent, holdLive: recent && this.polledWithin(holdPollAt, now), windowMs }
   }
 
   /** 6.60.0: the installed hook timeout, or null when absent or unreadable. */
@@ -982,32 +1077,34 @@ export class PermissionBroker {
 
   /**
    * 6.60.0: how long a request arriving now, from a hook that stamped `hookWaitS`, may be held:
-   * the away hold when on (never shorter than the base timeout), else the base timeout, and
-   * never past `holdCeilingS`.
+   * the away hold when it applies (never shorter than the base timeout), else the base
+   * timeout, and never past `holdCeilingS`. `ceilingAllowsAway` is the hook waiting longer
+   * than the 6.59.0 broker could hold.
    */
-  private holdMs(hookWaitS: number | null, away = true): { holdMs: number; awayHoldMs: number; installedHookTimeoutS: number | null; ceilingS: number } {
+  private holdMs(hookWaitS: number | null, away: boolean): { holdMs: number; awayHoldMs: number; installedHookTimeoutS: number | null; ceilingS: number; ceilingAllowsAway: boolean } {
     const awayHoldMs = away ? this.awayHoldMs() : 0
     const installedHookTimeoutS = this.installedHookTimeoutS()
     const ceilingS = holdCeilingS(installedHookTimeoutS, hookWaitS)
     const baseMs = this.deps.timeoutMs()
     const wanted = awayHoldMs > 0 ? Math.max(baseMs, awayHoldMs) : baseMs
-    return { holdMs: Math.min(wanted, ceilingS * 1000), awayHoldMs, installedHookTimeoutS, ceilingS }
+    return { holdMs: Math.min(wanted, ceilingS * 1000), awayHoldMs, installedHookTimeoutS, ceilingS, ceilingAllowsAway: ceilingS > AWAY_MIN_CEILING_S }
+  }
+
+  /** 6.60.0: the recent-presence window, for the questions route and `/api/models`. */
+  awayRecentClientWindowMs(): number {
+    return this.recentWindowMs()
   }
 
   /**
    * 6.60.0: the longest a question that starts now while Miles is away is held, for a hook
-   * as the settings file has it, when a client polled within the recent window
-   * (`awayHoldMs` on the questions route and `/api/models`). 0 when the away hold is off.
+   * as the settings file has it, when a `hold=1` client reported wearer presence within the
+   * window (`awayHoldMs` on the questions route and `/api/models`). 0 when the away hold is
+   * off, or when the installed hook waits no longer than the 6.59.0 broker could hold.
    */
-  /** 6.60.0: the recent-client window, for the questions route and `/api/models`. */
-  awayRecentClientWindowMs(): number {
-    return this.awayRecentClientMs()
-  }
-
   awayHoldNowMs(): number {
     if (this.awayHoldMs() === 0) return 0
-    const installed = this.installedHookTimeoutS()
-    return this.holdMs(installed).holdMs
+    const hold = this.holdMs(this.installedHookTimeoutS(), true)
+    return hold.ceilingAllowsAway ? hold.holdMs : 0
   }
 
   /** The desk-idle threshold, never below DESK_IDLE_MIN_S. */
@@ -1043,14 +1140,23 @@ export class PermissionBroker {
       if (UNBROKERED_TOOLS.has(facts.toolName)) return this.noteFastPath('unsupported_tool')
     }
     const now = this.deps.now()
-    const clientLive = this.clientLive(now)
-    const recentClientAgeMs = this.recentClientAgeMs()
-    // 6.60.0: the away hold applies only with a client that polled recently (Miles, 19:54).
-    const away = this.awayHoldMs() > 0 && this.recentClient(clientLive, recentClientAgeMs)
+    const presence = this.presence(now)
+    const clientLive = this.clientLive(now) || presence.holdLive
+    // 6.60.0: the away hold applies only when it is on, the installed hook waits longer than
+    // the 6.59.0 broker could hold, and a `hold=1` client reported wearer presence within the
+    // window (Miles, 19:54; QA round 1).
+    const switchOn = this.awayHoldMs() > 0
+    const ceilingAllowsAway = this.holdMs(facts.hookWaitS, false).ceilingAllowsAway
+    const away = switchOn && ceilingAllowsAway && presence.recent
+    const notAwayReason: NotAwayReason | null = away ? null
+      : !switchOn ? 'hold_off'
+      : !ceilingAllowsAway ? 'ceiling_at_base'
+      : presence.ageMs === null ? 'no_hold_client'
+      : 'stale_presence'
     const hold = this.holdMs(facts.hookWaitS, away)
     // With it, a request is held whether or not a client is polling right now, so a lens or
     // phone that comes back can still answer it. Without it, no client is `{}`, as in 6.59.0.
-    if (!clientLive && !away) return this.noteFastPath('no_client')
+    if (!clientLive && !away) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })
     // The deadline counts from when the HOOK started, when its stamp is sane: a request the
     // server read late must still be answered before the hook's curl gives up.
     const requestedAt = facts.hookStartedAtMs !== null && facts.hookStartedAtMs <= now ? facts.hookStartedAtMs : now
@@ -1060,7 +1166,7 @@ export class PermissionBroker {
     let idle: number | null = null
     try { idle = await this.deps.readDeskIdleSeconds() } catch { idle = null }
     if (idle === null) return this.noteFastPath('desk_unknown')
-    if (idle < this.deskIdleThreshold()) return this.noteFastPath('desk_active')
+    if (idle < this.deskIdleThreshold()) return this.noteFastPath('desk_active', { notAway: 'desk_active', presence, clientLive })
     const mode = this.deps.mode()
     if (mode === 'off') return this.noteFastPath('broker_off')
     if (!this.deps.admissionsOpen()) return this.noteFastPath('draining')
@@ -1088,7 +1194,9 @@ export class PermissionBroker {
       effectiveDeadlineS: Math.round(hold.holdMs / 1000),
       deskIdleMs: idle * 1000,
       clientLive,
-      recentClientAgeMs: recentClientAgeMs === null ? null : Math.round(recentClientAgeMs),
+      presenceAgeMs: presence.ageMs === null ? null : Math.round(presence.ageMs),
+      recentWindowS: Math.round(presence.windowMs / 1000),
+      notAwayReason,
     }
     return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, hold: holdFacts } }
   }
@@ -1201,7 +1309,12 @@ export class PermissionBroker {
     const settled: BrokerItem[] = []
     for (const item of this.items.values()) if (item.state !== 'pending' && item.settledAt !== null) settled.push(item)
     settled.sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0))
-    return settled.slice(0, SETTLED_LIST_MAX).map(item => ({
+    // Every item the Mac still waits on is listed whatever the cap, so a missing one is never
+    // read as "moved past" (Ghost Hunter W1); the newest others fill up to SETTLED_LIST_MAX.
+    const waiting = settled.filter(item => item.waitingAtMac)
+    const others = settled.filter(item => !item.waitingAtMac).slice(0, Math.max(0, SETTLED_LIST_MAX - waiting.length))
+    const listed = [...waiting, ...others].sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0))
+    return listed.map(item => ({
       id: item.id,
       sessionId: item.sessionId,
       provider: 'claude' as const,
@@ -1215,6 +1328,25 @@ export class PermissionBroker {
       awayHold: item.awayHold,
       waitingAtMac: item.waitingAtMac,
     }))
+  }
+
+  /**
+   * 6.60.0 (QA round 1, N2): the session's row now reads ended (its process is gone, or it
+   * ended), so no Mac dialog of it can still be waiting. Cleared at once, not after the hour.
+   * Takes a full session id or the registry's eight-character form. Returns how many cleared.
+   */
+  sessionRowEnded(sessionId: string): number {
+    const wanted = typeof sessionId === 'string' ? sessionId.toLowerCase() : ''
+    if (wanted.length < 8) return 0
+    let cleared = 0
+    for (const item of this.items.values()) {
+      if (!item.waitingAtMac) continue
+      if (item.sessionId !== wanted && !(wanted.length < 36 && item.sessionId.startsWith(wanted))) continue
+      item.waitingAtMac = false
+      cleared++
+    }
+    if (cleared > 0) this.log(`session row ended: ${cleared} no longer waiting at the Mac session=${wanted.slice(0, 8)}`)
+    return cleared
   }
 
   /** 6.60.0: how many settled items are still waiting at the Mac. */
@@ -1390,7 +1522,7 @@ export class PermissionBroker {
         continue
       }
       // 6.60.0: one handed to the Mac's dialog stops waiting there when the session moves past it.
-      if (item.waitingAtMac && env.ts >= item.requestedAt && sessionMovedPast(item, env, toolName, fingerprint)) {
+      if (item.waitingAtMac && env.ts >= item.requestedAt && sessionMovedPast(item, env, toolName, fingerprint, true)) {
         item.waitingAtMac = false
         continue
       }
@@ -1420,10 +1552,14 @@ export class PermissionBroker {
   async tick(): Promise<void> {
     if (this.pendingCount() === 0) { this.stopPolling(); return }
     if (!this.deps.admissionsOpen()) { this.settleAll('drained'); return }
-    if (!this.clientLive(this.deps.now())) {
-      // 6.60.0: an item held by the away hold outlives the client going quiet; the desk below
-      // still hands it back.
-      this.settleAll('no_client', item => !item.awayHold)
+    const now = this.deps.now()
+    const presence = this.presence(now)
+    if (!(this.clientLive(now) || presence.holdLive)) {
+      // 6.60.0: an item held by the away hold outlives the client going quiet, but only while
+      // the wearer's latest presence is still within the window (QA round 1, Skeptic W2: a
+      // single glance must not hold a question 10 more minutes). The desk below still hands
+      // it back.
+      this.settleAll('no_client', item => !item.awayHold || !presence.recent)
       if (this.pendingCount() === 0) return
     }
     if (this.pollInFlight) return
@@ -1455,13 +1591,33 @@ export class PermissionBroker {
     const settled: BrokerItem[] = []
     for (const item of this.items.values()) {
       if (item.state === 'pending') continue
-      const keep = item.waitingAtMac ? MAC_WAIT_RETENTION_MS : SETTLED_RETENTION_MS
-      if (item.settledAt !== null && now - item.settledAt > keep) this.items.delete(item.id)
+      if (item.settledAt !== null && now - item.settledAt > this.retentionMs(item)) this.forget(item)
       else settled.push(item)
     }
+    // Over the cap, the oldest that no longer wait go first.
     const excess = settled.length - MAX_SETTLED
-    for (let i = 0; i < excess; i++) this.items.delete(settled[i]!.id)
+    if (excess > 0) {
+      settled.sort((a, b) => Number(a.waitingAtMac) - Number(b.waitingAtMac) || (a.settledAt ?? 0) - (b.settledAt ?? 0))
+      for (let i = 0; i < excess; i++) this.forget(settled[i]!)
+    }
     if (this.pendingCount() === 0) this.stopPolling()
+  }
+
+  /**
+   * How long a settled item is kept: ten minutes; an hour while the Mac waits on it; a day
+   * while its session's row still waits on that very request (Ghost Hunter W1).
+   */
+  private retentionMs(item: BrokerItem): number {
+    if (!item.waitingAtMac) return SETTLED_RETENTION_MS
+    let still = false
+    try { still = this.deps.stillWaitingAtMac?.(item.sessionId, item.fingerprint) === true } catch { still = false }
+    return still ? MAC_WAIT_MAX_RETENTION_MS : MAC_WAIT_RETENTION_MS
+  }
+
+  /** Drop a settled item. One the Mac may still wait on moves the forgotten horizon. */
+  private forget(item: BrokerItem): void {
+    this.items.delete(item.id)
+    if (item.waitingAtMac && item.settledAt !== null && item.settledAt > this.waitingForgottenBefore) this.waitingForgottenBefore = item.settledAt
   }
 
   health(): PermissionBrokerHealth {

@@ -24,7 +24,7 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { cachedHookStatus, claudeDeskRunning, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { writeHaltMarker } from './lib/session-halt.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancel } from './lib/session-cancel.js'
 import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
@@ -40,7 +40,7 @@ import {
   wirePermissionBrokerToSignals,
 } from './lib/permission-broker.js'
 import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './routes/permission-broker.js'
-import { lastQuestionsPollAt, questionsPollAgeMs } from './lib/client-liveness.js'
+import { lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs } from './lib/client-liveness.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -243,12 +243,13 @@ app.use(cors({
 // (lib/permission-broker.ts). An app without the question UI never polls, so for it every
 // request is `{}`. `COS_PERMISSION_BROKER=0` is the switch, read per request, and every
 // request outside the gate is answered `{}` at once.
-// 6.60.0: the away hold. While the desk is idle, and only when glasses or a phone polled for
-// questions within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800, monotonic,
-// in memory), a request is held up to `COS_PERMISSION_BROKER_AWAY_HOLD_S` (default 600, `0`
-// is the 6.59.0 broker) whether or not a client is polling right now, never past the
-// PermissionRequest timeout the Claude settings file carries (read through the 5 s
-// hook-status cache; unreadable is the old 120 s clamp).
+// 6.60.0: the away hold. While the desk is idle, and only when glasses or a phone that send
+// `hold=1` reported wearer presence within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`
+// (default 1800; in memory, the larger of the monotonic and wall-clock age), a request is held
+// up to `COS_PERMISSION_BROKER_AWAY_HOLD_S` (default 600, `0` is the 6.59.0 broker) whether or
+// not a client is polling right now, never past the PermissionRequest timeout the Claude
+// settings file carries (read through the 5 s hook-status cache) and the hook's own stamp.
+// Older clients (no `hold=1`) keep the 6.59.0 liveness and never enable it.
 const permissionBroker = new PermissionBroker({
   now: () => Date.now(),
   mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
@@ -259,12 +260,20 @@ const permissionBroker = new PermissionBroker({
   timeoutMs: () => permissionBrokerTimeoutMs(process.env),
   awayHoldMs: () => permissionBrokerAwayHoldMs(process.env),
   installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,
-  recentClientAgeMs: () => questionsPollAgeMs(),
+  lastLegacyPollAt: lastLegacyQuestionsPollAt,
+  lastHoldPollAt: lastHoldQuestionsPollAt,
+  presenceAgeMs: () => presenceAgeMs(),
   awayRecentClientMs: () => permissionBrokerAwayRecentClientMs(process.env),
+  stillWaitingAtMac: (sessionId, fingerprint) => {
+    const signal = sessionSignalStore.get(sessionId)
+    return !!signal && !signal.ended && signal.waiting?.fingerprint === fingerprint
+  },
   signals: brokerSignalSink(sessionSignalStore),
 })
 registerPermissionBroker(permissionBroker)
 wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)
+// 6.60.0 (QA round 1, N2): a row that reads ended clears "waiting at the Mac" at once.
+onSessionRowEnded(sessionId => { permissionBroker.sessionRowEnded(sessionId) })
 
 // THE TWO HOOK-TOKEN DOORS, deliberately BEFORE the /api gate and the global body parser.
 // Each checks the per-install hook token (never the pairing token) in constant time before

@@ -25,6 +25,10 @@
 // so a surface that only shows a count can poll without making the Mac hold questions it
 // cannot answer. It checks X-Cos-Token itself as well, in constant time, and a request
 // without it is refused and never counted, whatever sits in front of this router.
+// 6.60.0: a poll with `&hold=1&presenceAgeMs=<int>` (COS Glasses 6.9.563 and later) records
+// wearer presence for the away hold instead of the 6.59.0 liveness; a `hold=1` poll without
+// a valid `presenceAgeMs` makes no client live and enables no hold. The response adds
+// `awayHoldMs`, `awayRecentClientMs`, `settled`, `waitingAtMac` and `serverStartedAt`.
 
 import express, { Router, type NextFunction, type Request, type Response } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
@@ -37,7 +41,7 @@ import {
   type HookReplyChannel,
   type PermissionBroker,
 } from '../lib/permission-broker.js'
-import { noteQuestionsPoll } from '../lib/client-liveness.js'
+import { noteQuestionsPoll, validPresenceAgeMs, type QuestionsPollFacts } from '../lib/client-liveness.js'
 
 export const PERMISSION_BROKER_HOOK_PATH = '/api/permission-requests/ask'
 /** The hook posts its spool envelope, capped at 1 MiB by the script itself. */
@@ -133,8 +137,26 @@ export interface SessionQuestionsRouterDeps {
   /** The pairing token (X-Cos-Token). A poll counts as a live client only with it. */
   apiToken: () => string
   /** Where a counted poll is recorded; `noteQuestionsPoll` in production. */
-  notePoll?: (at: number) => void
+  notePoll?: (at: number, poll: QuestionsPollFacts) => void
   now?: () => number
+  /** 6.60.0: when this server process started (ISO); defaults to the process's own start. */
+  serverStartedAt?: string
+}
+
+/** 6.60.0: this process's start, so a client can tell a restart from "nothing waiting". */
+export const SERVER_STARTED_AT = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString()
+
+/**
+ * 6.60.0, the contract shared with COS Glasses 6.9.563: `hold=1` (this client shows held
+ * questions) and `presenceAgeMs`, a whole number of ms within [0, 24 h] since the latest real
+ * wearer evidence. Anything else is no presence: the poll then counts only as a 6.59.0 poll
+ * (without `hold=1`) or as a `hold=1` poll with no presence.
+ */
+export function questionsPollFacts(query: Record<string, unknown>): QuestionsPollFacts {
+  const hold = query.hold === '1'
+  const raw = typeof query.presenceAgeMs === 'string' ? query.presenceAgeMs : ''
+  const parsed = /^\d{1,8}$/.test(raw) ? Number(raw) : Number.NaN
+  return { hold, presenceAgeMs: hold && validPresenceAgeMs(parsed) ? parsed : null }
 }
 
 export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): Router {
@@ -152,7 +174,7 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     }
     // Only a client that says it can answer (and shows the cards) counts as live.
     const client = typeof req.query.client === 'string' ? req.query.client : ''
-    if (ANSWERING_CLIENTS.has(client)) notePoll(now())
+    if (ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))
     const health = deps.broker.health()
     // Listed first: a deadline the timer has not caught yet is settled by the listing.
     const items = deps.broker.list()
@@ -172,6 +194,11 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       awayRecentClientMs: health.enabled && deps.broker.awayHoldNowMs() > 0 ? deps.broker.awayRecentClientWindowMs() : 0,
       settled: deps.broker.settledList(),
       waitingAtMac: deps.broker.waitingAtMacCount(),
+      serverStartedAt: deps.serverStartedAt ?? SERVER_STARTED_AT,
+      // 6.60.0 (Ghost Hunter W1): a waiting entry settled at or before this time may have been
+      // forgotten (the server started then, or dropped it while it still waited). Missing from
+      // `settled` and settled after it: the session moved past it.
+      waitingAtMacForgottenBefore: new Date(deps.broker.waitingAtMacForgottenBeforeMs()).toISOString(),
     })
   })
   router.post('/session-questions/:id/answer', (req: Request, res: Response) => {

@@ -163,8 +163,18 @@ DESK_S=$(cat "$GH/hook-desk-idle-s" 2>/dev/null || echo 90)
 { [ -n "$IDLE_NS" ] && [ "$(( ${IDLE_NS%.*} / 1000000000 ))" -ge "$DESK_S" ]; } || { cleanup; exit 0; }
 TOK=$(cat "$GH/hook-token" 2>/dev/null); [ -n "$TOK" ] || { cleanup; exit 0; }   # no token, no request
 PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
-OUT=$(curl -s --connect-timeout 2 --max-time $((WAIT - 5)) -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
-  --data-binary @"$T.req" "http://127.0.0.1:$PORT/api/permission-requests/ask") || { cleanup; exit 0; }
+# 6.60.0 (QA round 1, W7): curl runs as a tracked child, not only inside $(...), and this
+# script stops it when it is stopped itself (Claude Code's timeout, an interrupt). The
+# broker then sees the socket close at once (`hook_gone`) and never accepts an answer the
+# session can no longer receive.
+rm -f "$T.out"
+curl -s --connect-timeout 2 --max-time $((WAIT - 5)) -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
+  -o "$T.out" --data-binary @"$T.req" "http://127.0.0.1:$PORT/api/permission-requests/ask" &
+CURL=$!
+trap 'kill "$CURL" 2>/dev/null; rm -f "$T.req" "$T.out"; exit 0' TERM INT HUP
+wait "$CURL" || { trap - TERM INT HUP; cleanup; rm -f "$T.out"; exit 0; }
+trap - TERM INT HUP
+OUT=$(cat "$T.out" 2>/dev/null); rm -f "$T.out"
 cleanup
 case "$OUT" in '{"hookSpecificOutput"'*) printf '%s' "$OUT" ;; esac
 exit 0

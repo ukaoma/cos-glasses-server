@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, afterAll, vi } from 'vitest'
 import { spawn } from 'node:child_process'
 import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store.js'
-import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, deskTurnEndedAt, haltHandedOffTurn, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
+import { COS_PID_TOMBSTONE_MS, __resetSessionHooksForTests, claudeDeskRunning, deriveForRow, onSessionRowEnded, deskTurnEndedAt, haltHandedOffTurn, isCosSpawnedPid, registryEntrypointSync, registryIdleAfterStop, registryRecordSync, sessionHooksEnabled, sessionSignalStore, startSessionHooksRuntime } from './session-hooks-runtime.js'
 import { HALT_MARKER_TTL_MS, HALT_REARM_UNVERIFIED_MS, __resetHaltRearmsForTests, clearHaltMarker, hasHaltMarker, hasPendingHaltRearm, writeHaltMarker } from './session-halt.js'
 import { __resetThreadCancelsForTests, noteThreadCancelled } from './session-cancel.js'
 import { OPEN_TURN_CEILING_MS } from './session-state-derive.js'
@@ -73,6 +73,24 @@ describe('deriveForRow', () => {
     // The eight-character registry id and the full id share one memory once the store knows the session.
     const short = deriveForRow({ sessionId: id.slice(0, 8), registry: dead, transcript, now: t0 + DEAD_GRACE_MS + 1 })
     expect(short?.deadScans).toBe(1) // unknown to the store: its own key, its own memory
+  })
+
+  it('6.60.0: tells its listeners when a row derives ended, and only then (the broker stops saying the Mac waits)', () => {
+    const ended: string[] = []
+    const off = onSessionRowEnded(sessionId => { ended.push(sessionId) })
+    const t0 = 2_000_000
+    deriveForRow({ sessionId: id, registry: dead, transcript, now: t0 })
+    deriveForRow({ sessionId: id, registry: dead, transcript, now: t0 + 5 })
+    expect(ended).toEqual([])
+    expect(deriveForRow({ sessionId: id, registry: dead, transcript, now: t0 + DEAD_GRACE_MS })).toMatchObject({ agent_state: 'ended' })
+    expect(ended).toEqual([id])
+    // A throwing listener never breaks the row.
+    const bad = onSessionRowEnded(() => { throw new Error('x') })
+    expect(deriveForRow({ sessionId: id, registry: dead, transcript, now: t0 + DEAD_GRACE_MS + 1 })).toMatchObject({ agent_state: 'ended' })
+    expect(ended).toEqual([id, id])
+    off(); bad()
+    deriveForRow({ sessionId: id, registry: dead, transcript, now: t0 + DEAD_GRACE_MS + 2 })
+    expect(ended).toEqual([id, id])
   })
 
   it('returns nothing for a row it has no facts for, and nothing at all when the feature is off', () => {

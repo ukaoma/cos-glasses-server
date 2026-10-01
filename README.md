@@ -264,37 +264,63 @@ Touching the Mac hands a held request back to its dialog at once; the deadline i
 or the away hold's.
 
 **The away hold (6.60.0).** A request that starts while you are away (the desk idle 90 s,
-the same threshold as above) is held for up to 10 minutes, but only when glasses or a phone
-polled for questions in the last 30 minutes (`COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`,
-default 1800, clamped to 0 through 86400; `0` means a client must be polling right now). That
-client need not be polling when the request arrives, so glasses or a phone that come back
-can still answer it, and a client going quiet no longer hands it back. With no recent client
-(a Claude Remote Control session with no glasses, say) nothing changes from 6.59.0: `{}` at
-once and the Mac's dialog. The poll's age is kept in memory on a monotonic clock, so after a
-server restart no client is recent until one polls again. Touching the Mac still hands a held
-request to the Mac's dialog within 1.5 s, and a request that arrives while you are at the
-desk still goes straight to the dialog. It is never held past the hook's own wait: the PermissionRequest `timeout` in
-`~/.claude/settings.json` (630 s after Install hooks; 130 s on an install from before 6.60.0)
-and the wait the hook stamps on the request, the lesser, minus 10 s. An unreadable settings
-file, or a request from the earlier hook, is held at most 120 s, as before. After updating,
-`--hooks status` reads `drift` with `priorWaitOnly: true` until Install hooks (COS Control)
-or `npx --yes @gotcos/glasses-server@latest --hooks install` is run once; cancel from the
-lens keeps working meanwhile. `COS_PERMISSION_BROKER_AWAY_HOLD_S` sets it (default 600,
-clamped to 30 through 600; `0` is the 6.59.0 broker exactly). Additive fields, every earlier
-one unchanged:
+the same threshold as above) is held for up to 10 minutes, but only when the glasses or the
+phone that show held questions report that you wore or touched them in the last 30 minutes.
+The client contract (COS Glasses 6.9.563 and later):
 
-- each item: `answerable` (true while listed), `awayHold` (held by the away hold: it stays
-  answerable while no client polls, until `deadlineAt` or the desk) and `waitingAtMac`
-  (false while listed). `deadlineAt` is the held deadline, so "N s left" is true.
-- the response: `awayHoldMs` (how long a request that starts now is held at most when a
-  client polled recently; 0 when off), `awayRecentClientMs` (how recent that poll must be;
-  0 when the hold is off, or when it must be live), `settled` (up to 32 recently settled items, newest first: `id`, `sessionId`,
-  `provider`, `kind`, `tool`, `createdAt`, `deadlineAt`, `settledAt`, `resolution`,
-  `answerable: false`, `awayHold`, `waitingAtMac`; never the questions, the card or the
-  answer) and `waitingAtMac` (how many of them the Mac's own dialog still waits on).
-  `waitingAtMac` is true when the server handed the request to the Mac's dialog (back at the
-  desk, expired, no client, drained) and the session has not moved past it since: its tool
-  has not run or been denied, its turn has not ended. It is kept up to an hour, then dropped.
+- Poll `GET /api/session-questions?client=glasses|phone&hold=1&presenceAgeMs=<int>`.
+  `hold=1` says this client shows held questions. `presenceAgeMs` is the milliseconds since
+  the latest real wearer evidence (glasses: a ring or temple input, or a device status with
+  wearing true; phone: a foreground touch), a whole number from 0 to 86,400,000, and is left
+  out when there is none since the app started.
+- Only a poll with `hold=1` AND a valid `presenceAgeMs` counts toward the hold. The server
+  keeps the newest such presence in memory, on the monotonic clock and the wall clock, and
+  reads its age as the larger of the two (so a Mac that slept never makes it look newer).
+  Recent means within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800, clamped to 0
+  through 86400; under 30 it means the 30 s live window). After a server restart nothing is
+  recent until such a poll.
+- A `hold=1` poll without presence (a connected lens nobody wears) makes no client live and
+  holds nothing. A poll without `hold=1` (COS Glasses 6.9.562 and earlier, every older phone
+  build) keeps the 6.59.0 meaning exactly: live for 30 s, a 110 s hold, and never the away
+  hold.
+
+Held that way, a request stays answerable while no client is polling, so glasses or a phone
+that come back can still answer it. It is re-checked every 1.5 s: once no client is live and
+your latest presence is older than the window, it goes to the Mac's dialog. Touching the Mac
+still hands it back within 1.5 s, and a request that arrives while you are at the desk still
+goes straight to the dialog. With no recent presence (a Claude Remote Control session with
+no glasses, say) nothing changes from 6.59.0: `{}` at once and the Mac's dialog.
+
+It is never held past the hook's own wait: the PermissionRequest `timeout` in
+`~/.claude/settings.json` (630 s after Install hooks; 130 s on an install from before 6.60.0)
+and the wait the hook stamps on the request, the lesser, minus 10 s. Until Install hooks has
+run, the hook waits no longer than 6.59.0 could hold, so the away hold is off entirely and the
+broker is 6.59.0. After updating, `--hooks status` reads `drift` with `priorWaitOnly: true`
+until Install hooks (COS Control) or `npx --yes @gotcos/glasses-server@latest --hooks install`
+is run once; cancel from the lens keeps working meanwhile. `COS_PERMISSION_BROKER_AWAY_HOLD_S`
+sets the hold (default 600, clamped to 30 through 600; `0` is the 6.59.0 broker exactly).
+Additive fields, every earlier one unchanged:
+
+- each item: `answerable` (true while listed), `awayHold` (held by the away hold) and
+  `waitingAtMac` (false while listed). `deadlineAt` is the latest it stays answerable; it goes
+  sooner when your presence lapses with no client polling.
+- the response: `awayHoldMs` (how long a request that starts now is held at most with recent
+  presence; 0 when off or before Install hooks), `awayRecentClientMs` (the presence window,
+  0 when the hold is off), `settled` (recently settled items, newest first: every one the Mac
+  still waits on, and the newest others up to 32; `id`, `sessionId`, `provider`, `kind`,
+  `tool`, `createdAt`, `deadlineAt`, `settledAt`, `resolution`, `answerable: false`,
+  `awayHold`, `waitingAtMac`; never the questions, the card or the answer), `waitingAtMac`
+  (how many of them the Mac's own dialog still waits on), `serverStartedAt` (when this server
+  process started) and `waitingAtMacForgottenBefore`.
+- `waitingAtMac` is true when the server handed the request to the Mac's dialog (back at the
+  desk, expired, no client, drained) and that request has not been finished since: its own
+  tool has not finished or been denied, its turn has not ended, and its session row does not
+  read ended. No hook marks the moment a dialog is approved, so an approved tool that is
+  still running reads as waiting. It is kept an hour, or up to a day while the session's own
+  row still waits on that request.
+- Forgot vs moved past: an entry you saw waiting that is no longer in `settled` was moved past
+  if its `settledAt` is after `waitingAtMacForgottenBefore`; at or before it (or from a server
+  with another `serverStartedAt`), the server forgot it, and the Mac may still be waiting.
 - `/api/models` `capabilities.sessionQuestions.awayHoldMs` and `awayRecentClientMs`, the same numbers.
 
 Allow once or deny only: no permission rule is ever written. Rows carry
@@ -444,7 +470,8 @@ both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 `COS_PERMISSION_BROKER_AWAY_HOLD_S` (6.60.0: default 600, clamped to 30 through 600, never
 past the installed hook's wait; `0` turns the away hold off),
 `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (6.60.0: default 1800; the away hold applies
-only when glasses or a phone polled for questions within it; `0` means polling right now),
+only when a `hold=1` client reported its wearer present within it; under 30 means the 30 s
+live window),
 `COS_MEDIA_ROOT` (optional image/video store location; default
 `~/.cos-glasses/data/media`), and `COS_VIDEO_UPLOAD_V2=1` (private 6.27.3+
 resumable-video canary, managed by COS Control 0.5.20). The V2 canary retains
@@ -767,9 +794,12 @@ BIND_HOST=0.0.0.0 npm run start:server
   back, set `COS_DURABLE_QUERY_JOBS=0`; accepted jobs still drain while new prompts use legacy streaming.
 - *Session questions never reach the glasses?* The server holds one only when every
   gate passes. `/api/health` `permissionBroker.lastFastPath` names the last reason a
-  request went straight to the Mac's dialog: `no_client` (no poll with
-  `client=glasses|phone` in the last 30 s: the app build has no question cards, or its
-  timers are frozen), `desk_active` (the Mac saw input), `approvals_off`
+  request went straight to the Mac's dialog: `no_client` (no client could answer: no poll
+  with `client=glasses|phone` and without `hold=1` in the last 30 s, no `hold=1` poll in the
+  last 30 s whose wearer was present within the window, and (6.60.0) no away hold: the app
+  build has no question cards, its timers are frozen, nobody wore the glasses or touched the
+  phone recently, or Install hooks has not run; the server log line `fast path no_client
+  not_away=...` names which), `desk_active` (the Mac saw input), `approvals_off`
   (`COS_PERMISSION_BROKER=questions`), `broker_off`, `cursor`, `unsupported_tool`
   (ExitPlanMode is never held). `lastQuestionsPollAt` says when a client last counted.
   `--hooks status` must read `installed` (right after updating to 6.53.4 it reads
