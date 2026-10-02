@@ -15,8 +15,9 @@
 // Every word then takes its channel's name, or keeps its per-chunk name (the
 // live segment it sat in, else its existing label) where the channel is unmapped.
 //
-// SAFETY. Nothing is written unless the relabelled transcript holds exactly the
-// same words, in the same order, as the transcript it replaces. The original
+// SAFETY. Only labels change. The saved transcript's words are relabelled in
+// place (never regenerated and re-cleaned), and nothing is written unless the
+// result holds exactly the same words, in the same order. The original
 // labels stay recoverable: every changed batch word carries `originalSpeaker`,
 // every changed chunk carries `originalSpeaker`, and the sidecar keeps the whole
 // pre-relabel transcript under `diarization.originalTranscript`. Any failure
@@ -26,7 +27,7 @@
 // No LLM anywhere. Transcription must never call `claude -p`.
 
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
@@ -38,7 +39,6 @@ import {
   nemotronCliPath,
   prepareNemotronModelsDir,
 } from './diarizer-backend.js'
-import { cleanTranscriptLines } from './hallucination-filter.js'
 import { isUnattributed } from './meeting-speaker-review.js'
 import { NemotronRunError, runNemotronCli, type NemotronPreds, type RunNemotronOptions } from './nemotron-cli.js'
 import type { ChunkSpeakerSegment } from './nemotron-live.js'
@@ -48,12 +48,12 @@ import {
   frameRange,
   isActive,
   isWordToken,
-  pcm16ToWav,
   readPcm16Mono,
   splitTokens,
   tokenTimesFromWords,
   type Activity,
   type TokenTime,
+  wavHeader,
 } from './nemotron-segments.js'
 import { NEMOTRON_CHANNELS } from './nemotron-cli.js'
 import type { WhisperWord } from './whisper-local.js'
@@ -124,21 +124,38 @@ export interface MeetingTimeline {
 
 const chunkFile = (audioDir: string, index: number): string => join(audioDir, `chunk_${String(index).padStart(4, '0')}.wav`)
 
-/** The canary's timeline: each WAV at its real elapsed, only the overlapping tail trimmed. */
+/** Samples concatenateWavChunks reads from a chunk file: everything after a 44-byte header, if it is RIFF. */
+function concatSamples(path: string): number | null {
+  try {
+    const size = statSync(path).size
+    if (size <= WAV_HEADER) return null
+    const fd = openSync(path, 'r')
+    try {
+      const head = Buffer.alloc(4)
+      readSync(fd, head, 0, 4, 0)
+      return head.toString('ascii') === 'RIFF' ? Math.floor((size - WAV_HEADER) / 2) : null
+    } finally { closeSync(fd) }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The canary's timeline: each WAV at its real elapsed, only the overlapping tail
+ * trimmed. Two passes so that only the timeline itself is held in memory (a
+ * 90-minute meeting is about 170 MB of 16-bit audio): the first checks every
+ * chunk and keeps its place, the second copies its audio in.
+ */
 export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string): MeetingTimeline {
   const excluded = { missing: 0, hashMismatch: 0, unreadable: 0 }
-  const placed: Array<{ entry: SidecarEntry; pcm: Buffer; at: number }> = []
   const fileSamples = new Map<number, number>()
   const indices = entries.map(entry => entry.chunkIndex)
   const maxIndex = indices.length ? Math.max(...indices) : -1
   for (let index = 0; index <= maxIndex; index++) {
-    const path = chunkFile(audioDir, index)
-    if (!existsSync(path)) continue
-    try {
-      const wav = readFileSync(path)
-      if (wav.length > WAV_HEADER && wav.toString('ascii', 0, 4) === 'RIFF') fileSamples.set(index, Math.floor((wav.length - WAV_HEADER) / 2))
-    } catch { /* unreadable: absent from both */ }
+    const samples = concatSamples(chunkFile(audioDir, index))
+    if (samples !== null) fileSamples.set(index, samples)
   }
+  const placed: Array<{ entry: SidecarEntry; at: number; samples: number; dataOffset: number }> = []
   for (const entry of entries) {
     const path = chunkFile(audioDir, entry.chunkIndex)
     if (!existsSync(path)) { excluded.missing++; continue }
@@ -148,24 +165,29 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
     if (expected && createHash('sha256').update(wav).digest('hex') !== expected) { excluded.hashMismatch++; continue }
     const pcm = readPcm16Mono(wav)
     if (!pcm || pcm.sampleRate !== SR || !Number.isFinite(entry.chunk.elapsed)) { excluded.unreadable++; continue }
-    placed.push({ entry, pcm: pcm.pcm, at: Math.max(0, Math.round((entry.chunk.elapsed / 1000) * SR)) })
+    placed.push({ entry, at: Math.max(0, Math.round((entry.chunk.elapsed / 1000) * SR)), samples: pcm.pcm.length / 2, dataOffset: pcm.pcm.byteOffset - wav.byteOffset })
   }
   placed.sort((x, y) => x.at - y.at || x.entry.chunkIndex - y.entry.chunkIndex)
   let total = 0
-  for (const item of placed) total = Math.max(total, item.at + item.pcm.length / 2)
+  for (const item of placed) total = Math.max(total, item.at + item.samples)
   total += SR
-  const pcm = Buffer.alloc(total * 2)
+  const out = Buffer.alloc(WAV_HEADER + total * 2)
+  wavHeader(total * 2, SR).copy(out, 0)
   const windows: TimelineWindow[] = []
   for (let i = 0; i < placed.length; i++) {
     const item = placed[i]
-    const next = i + 1 < placed.length ? placed[i + 1].at : item.at + item.pcm.length / 2
+    const next = i + 1 < placed.length ? placed[i + 1].at : item.at + item.samples
     const room = Math.max(0, next - item.at)
-    const use = Math.min(item.pcm.length / 2, room)
-    item.pcm.copy(pcm, item.at * 2, 0, use * 2)
-    windows.push({ chunkIndex: item.entry.chunkIndex, start: item.at / SR, end: (item.at + use) / SR, chunk: item.entry.chunk })
+    const use = Math.min(item.samples, room)
+    let copied = 0
+    try {
+      const wav = readFileSync(chunkFile(audioDir, item.entry.chunkIndex))
+      copied = wav.copy(out, WAV_HEADER + item.at * 2, item.dataOffset, Math.min(wav.length, item.dataOffset + use * 2)) / 2
+    } catch { /* vanished between passes: its window stays silent */ }
+    windows.push({ chunkIndex: item.entry.chunkIndex, start: item.at / SR, end: (item.at + Math.floor(copied)) / SR, chunk: item.entry.chunk })
   }
   return {
-    wav: pcm16ToWav(pcm, SR),
+    wav: out,
     durationSec: total / SR,
     windows,
     byIndex: new Map(windows.map(window => [window.chunkIndex, window])),
@@ -433,6 +455,58 @@ export function relabelStreamingTranscript(
   return out.join('\n')
 }
 
+/**
+ * Relabel a transcript that is already on disk, word by word, without touching a
+ * word. The saved batch transcript is the speaker-words grouping AFTER cleaning
+ * (URL-only lines dropped, negative rules applied), so regenerating it from the
+ * relabelled words and cleaning again can change which words survive when the
+ * groups change. Instead each transcript word is matched, in order, to the next
+ * relabelled word with the same text (a small window, then a three-word anchor
+ * to resynchronise past anything cleaning removed). A word with no match keeps
+ * the turn it is in. Gap markers and other unlabelled lines are kept as they are.
+ */
+export function relabelTranscriptWords(transcript: string, sequence: Array<{ word: string; speaker: string }>): string {
+  const WINDOW = 12
+  const ANCHOR = 3
+  const RESYNC = 600
+  const lines = transcript.split('\n')
+  const parsed = lines.map(line => {
+    const match = /^\[([^\]\n]+)\]:\s*([\s\S]*)$/.exec(line)
+    return match ? { speaker: match[1], words: match[2].split(/\s+/).filter(Boolean) } : null
+  })
+  const flat: string[] = parsed.flatMap(line => line?.words ?? [])
+  const out: string[] = []
+  type Turn = { speaker: string; words: string[] }
+  let current = null as Turn | null
+  const flush = () => { if (current?.words.length) out.push(`[${current.speaker}]: ${current.words.join(' ')}`); current = null }
+  let pointer = 0
+  let flatIndex = 0
+  for (let li = 0; li < lines.length; li++) {
+    const line = parsed[li]
+    if (!line) { flush(); out.push(lines[li]); continue }
+    for (const word of line.words) {
+      let speaker: string | null = null
+      for (let k = pointer; k < Math.min(sequence.length, pointer + WINDOW); k++) {
+        if (sequence[k].word === word) { speaker = sequence[k].speaker; pointer = k + 1; break }
+      }
+      if (speaker === null) {
+        const anchor = flat.slice(flatIndex, flatIndex + ANCHOR)
+        if (anchor.length === ANCHOR) {
+          for (let k = pointer; k <= Math.min(sequence.length - ANCHOR, pointer + RESYNC); k++) {
+            if (anchor.every((w, a) => sequence[k + a].word === w)) { speaker = sequence[k].speaker; pointer = k + 1; break }
+          }
+        }
+      }
+      if (speaker === null) speaker = current?.speaker ?? line.speaker
+      if (!current || current.speaker !== speaker) { flush(); current = { speaker, words: [] } }
+      current.words.push(word)
+      flatIndex++
+    }
+  }
+  flush()
+  return out.join('\n')
+}
+
 const TRANSCRIPT_SECTION = /## Transcript\n\n([\s\S]*)$/
 
 export function readTranscriptSection(markdown: string): string | null {
@@ -447,14 +521,6 @@ export function replaceTranscriptSection(markdown: string, transcript: string): 
 }
 
 const sha = (text: string): string => createHash('sha256').update(text).digest('hex')
-
-function cleanFinal(transcript: string): string {
-  try {
-    return process.env.COS_WHISPER_STRIP_BRAND_URLS === '0' ? transcript : cleanTranscriptLines(transcript)
-  } catch {
-    return transcript
-  }
-}
 
 export type FinalPassStatus = 'applied' | 'skipped' | 'failed'
 
@@ -590,12 +656,16 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     if (!segments.length) return { status: 'skipped', reason: 'no_speaker_words' }
     const relabeled = relabelBatchSegments(segments, timeline, activity, mapping.map)
     stats = relabeled.stats
+    // finalizeBatch wrote labelled turns only when every segment had speaker words.
     const selected = selectBatchTranscriptForPersistence(
       String(sidecar.batchTranscript ?? ''),
-      relabeled.segments.map(segment => ({ text: segment.text, speakerWords: segment.speakerWords })),
+      segments.map(segment => ({ text: segment.text, speakerWords: segment.speakerWords })),
     )
     if (selected.source !== 'speaker-words') return { status: 'skipped', reason: 'no_speaker_words' }
-    next = cleanFinal(selected.text)
+    const sequence = relabeled.segments.flatMap(segment => segment.speakerWords
+      .map(word => ({ word: String(word.word ?? '').trim(), speaker: word.speaker || 'Ext' }))
+      .filter(word => word.word))
+    next = relabelTranscriptWords(transcript, sequence)
     nextSidecar.batchSegments = relabeled.segments
     // finalizeBatch records the exact canonical text here; keep that true.
     if (typeof sidecar.batchTranscript === 'string') nextSidecar.batchTranscript = next
@@ -623,6 +693,9 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     })
   }
 
+  // Both relabelers keep every word by construction (the batch one matches the
+  // saved words, the streaming one splits a line only into its own chunk text).
+  // This check is the last line of defence should either ever change.
   if (!sameWords(transcript, next)) return { status: 'skipped', reason: 'word_mismatch', mode }
   if (next === transcript) return { status: 'skipped', reason: 'no_change', mode, words: stats }
 

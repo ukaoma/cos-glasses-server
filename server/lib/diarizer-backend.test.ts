@@ -101,3 +101,11 @@ describe('the --models directory (offline by construction)', () => {
     expect(activeDiarizer({ ...env, COS_DIARIZER: 'nemotron' }, dir).fallback).toBe('models_missing')
   })
 })
+
+describe('the managed runtime contract', () => {
+  it('lists the diarizer settings so a managed install can carry them', async () => {
+    const { readFileSync } = await import('node:fs')
+    const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
+    for (const key of ['COS_DIARIZER', 'COS_NEMOTRON_CLI', 'COS_NEMOTRON_MODELS']) expect(contract.optionalEnvironment, key).toContain(key)
+  })
+})

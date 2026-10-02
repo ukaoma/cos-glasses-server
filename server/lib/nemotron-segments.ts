@@ -317,9 +317,14 @@ export function readPcm16Mono(wav: Buffer): Pcm16 | null {
 }
 
 export function pcm16ToWav(pcm: Buffer, sampleRate = 16_000): Buffer {
+  return Buffer.concat([wavHeader(pcm.length, sampleRate), pcm])
+}
+
+/** The 44-byte header of a 16-bit mono PCM WAV holding pcmBytes of audio. */
+export function wavHeader(pcmBytes: number, sampleRate = 16_000): Buffer {
   const header = Buffer.alloc(44)
   header.write('RIFF', 0)
-  header.writeUInt32LE(36 + pcm.length, 4)
+  header.writeUInt32LE(36 + pcmBytes, 4)
   header.write('WAVE', 8)
   header.write('fmt ', 12)
   header.writeUInt32LE(16, 16)
@@ -330,8 +335,8 @@ export function pcm16ToWav(pcm: Buffer, sampleRate = 16_000): Buffer {
   header.writeUInt16LE(2, 32)
   header.writeUInt16LE(16, 34)
   header.write('data', 36)
-  header.writeUInt32LE(pcm.length, 40)
-  return Buffer.concat([header, pcm])
+  header.writeUInt32LE(pcmBytes, 40)
+  return header
 }
 
 /** The audio where only this channel speaks, as a WAV, for the voiceprint. */

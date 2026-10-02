@@ -9,8 +9,10 @@ import { NemotronRunError, type RunNemotronOptions } from './nemotron-cli.js'
 import {
   buildMeetingTimeline,
   mapChannelsToNames,
+  readTranscriptSection,
   runNemotronFinalPass,
   sameWords,
+  transcriptWords,
   type SidecarBatchSegment,
   type SidecarEntry,
 } from './nemotron-final.js'
@@ -167,14 +169,30 @@ describe('the save-time final pass', () => {
     }
   })
 
-  it('never loses a word: a transcript that no longer matches its words is left alone', async () => {
+  it('never loses a word: words cleaning changed or removed stay exactly as saved, and labels stay in step', async () => {
+    // An inserted word (cleaning replaced one) keeps the turn it is in.
     const f = meeting({ batch: true })
-    const edited = f.markdownText.replace('alpha3', 'alpha3 inserted')
-    writeFileSync(f.meetingPath, edited)
-    const outcome = await runNemotronFinalPass(opts(f, fakeRun()))
-    expect(outcome).toMatchObject({ status: 'skipped', reason: 'word_mismatch' })
-    expect(readFileSync(f.meetingPath, 'utf8')).toBe(edited)
-    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(f.sidecarText)
+    writeFileSync(f.meetingPath, f.markdownText.replace('alpha3', 'alpha3 inserted'))
+    const edited = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
+    expect(await runNemotronFinalPass(opts(f, fakeRun()))).toMatchObject({ status: 'applied' })
+    const after = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
+    expect(transcriptWords(after)).toEqual(transcriptWords(edited))
+    expect(after).toContain('[Silas Larson]: alpha2 bravo2 charlie2 delta2 alpha3 inserted bravo3')
+
+    // Sixteen words cleaning removed (more than the match window): never resurrected,
+    // and the words after them still take their own channel's name.
+    const g = meeting({ batch: true })
+    const removed = [2, 3, 4, 5].flatMap(i => wordsOf(i))
+    const trimmed = g.transcript.split('\n').map(line => {
+      const [label, rest] = line.split(/(?<=\]):\s*/)
+      const kept = rest.split(' ').filter(word => !removed.includes(word))
+      return kept.length ? `${label}: ${kept.join(' ')}` : null
+    }).filter(Boolean).join('\n')
+    writeFileSync(g.meetingPath, g.markdownText.replace(g.transcript, trimmed))
+    expect(await runNemotronFinalPass(opts(g, fakeRun()))).toMatchObject({ status: 'applied' })
+    const relabelled = readTranscriptSection(readFileSync(g.meetingPath, 'utf8'))!
+    expect(transcriptWords(relabelled)).toEqual(transcriptWords(trimmed))
+    expect(relabelled).toBe('[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1\n[Silas Larson]: alpha6 bravo6 charlie6 delta6 alpha7 bravo7 charlie7 delta7')
   })
 
   it('a human correction always wins: a corrected meeting is never relabelled', async () => {

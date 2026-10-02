@@ -238,12 +238,15 @@ export async function resolveLiveLabels(input: LiveLabelInput): Promise<LiveLabe
   } catch (error) {
     return voiceprintOnly('error', null, error instanceof Error ? error.message : String(error))
   }
-  const ms = Math.round(clock() - input.startedAt)
+  // Nemotron's own run time, not how long the chunk waited: the run started
+  // before Whisper, so most of it is hidden behind Whisper.
+  const waited = Math.round(clock() - input.startedAt)
   if (!outcome.ok) {
     if (outcome.reason === 'embedding_requested') return { speaker: input.voiceprint.speaker, similarity: input.voiceprint.similarity }
     const ran = outcome.reason === 'timeout' || outcome.reason === 'cli_failed' || outcome.reason === 'bad_output' || outcome.reason === 'spawn_failed' || outcome.reason === 'error'
-    return voiceprintOnly(outcome.reason, ran ? ms : null, outcome.detail)
+    return voiceprintOnly(outcome.reason, ran ? (outcome.ms ?? waited) : null, outcome.detail)
   }
+  const ms = Math.round(outcome.run.wallMs ?? waited)
   try {
     const named = nameChunkSegments({
       activity: outcome.run,
@@ -291,7 +294,7 @@ export type LiveFallbackReason =
 
 export type LiveDiarizeOutcome =
   | { ok: true; run: NemotronRun }
-  | { ok: false; reason: LiveFallbackReason | 'embedding_requested'; detail?: string }
+  | { ok: false; reason: LiveFallbackReason | 'embedding_requested'; detail?: string; ms?: number }
 
 export type LiveState = 'off' | 'idle' | 'warming' | 'ready' | 'failed'
 
@@ -438,6 +441,7 @@ export class NemotronLiveRuntime {
     const blocked = this.gate()
     if (blocked) return { ok: false, reason: blocked }
     this.inFlight++
+    const started = this.now()
     try {
       const run = await (this.deps.run ?? runNemotronCli)({
         cli: this.cli!,
@@ -464,7 +468,7 @@ export class NemotronLiveRuntime {
           void this.startWarmup()
         }
       }
-      return { ok: false, reason, detail: error instanceof Error ? error.message : String(error) }
+      return { ok: false, reason, detail: error instanceof Error ? error.message : String(error), ms: this.now() - started }
     } finally {
       this.inFlight--
     }

@@ -39,7 +39,10 @@
     "COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S",
     "COS_LENS_GIST_ENGINE",
     "COS_LENS_GIST_MODEL",
-    "COS_LENS_GIST_DAILY_CAP"
+    "COS_LENS_GIST_DAILY_CAP",
+    "COS_DIARIZER",
+    "COS_NEMOTRON_CLI",
+    "COS_NEMOTRON_MODELS"
   ],
   "maintenance": {
     "scope": "cross_boot",

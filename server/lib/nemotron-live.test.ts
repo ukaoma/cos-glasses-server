@@ -147,7 +147,8 @@ describe('live labels never block or lose a chunk', () => {
     const labels = await resolveLiveLabels(input(Promise.resolve({ ok: true, run: runOf(6, [[0, 0, 2.6], [5, 3, 6]]) })))
     expect(labels.speaker).toBe('Silas Larson')
     expect(labels.segments?.map(s => s.speaker)).toEqual(['MU', 'Silas Larson'])
-    expect(labels.diarizer).toMatchObject({ engine: 'nemotron', tracks: 2, ms: 150 })
+    // Nemotron's own run time (140 ms), not the 150 ms the chunk waited.
+    expect(labels.diarizer).toMatchObject({ engine: 'nemotron', tracks: 2, ms: 140 })
     expect(labels.record).toMatchObject({ outcome: 'nemotron', segments: 2 })
   })
 
@@ -158,10 +159,10 @@ describe('live labels never block or lose a chunk', () => {
   })
 
   it('fallback on timeout: the voiceprint label, no segments, the reason recorded', async () => {
-    const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason: 'timeout', detail: 'no result within 1500 ms' })))
+    const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason: 'timeout', detail: 'no result within 1500 ms', ms: 1500 })))
     expect(labels).toMatchObject({ speaker: 'Silas Larson', similarity: 0.6, diarizer: { engine: 'voiceprint', fallback: 'timeout' } })
     expect(labels.segments).toBeUndefined()
-    expect(labels.record).toMatchObject({ outcome: 'voiceprint', reason: 'timeout', ms: 150 })
+    expect(labels.record).toMatchObject({ outcome: 'voiceprint', reason: 'timeout', ms: 1500 })
   })
 
   it('fallback on failure: a crashed CLI or a rejected promise keeps the voiceprint', async () => {
