@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import {
   NodeQueryJobJournalStorage,
+  QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS,
   QUERY_JOB_ORPHAN_FENCE_MS,
   QueryJobPersistenceError,
   QueryJobProviderOrphanFenceError,
@@ -188,24 +189,51 @@ describe('QueryJobStore durable journal', () => {
       new Date(clock.getTime() + QUERY_JOB_ORPHAN_FENCE_MS).toISOString(),
     )
 
-    await expect(restarted.admit(request(clientJobId, 2))).rejects.toMatchObject({
+    // 6.61.3: the fence holds the START, never the admission. Both the retry and a fresh
+    // client id in the same session are journaled now (the phone gets its 202) and
+    // neither may start a provider until the fence clears.
+    const retry = await restarted.admit(request(clientJobId, 2))
+    const freshId = await restarted.admit(request(randomUUID(), 1))
+    expect(retry).toMatchObject({ created: true, job: { status: 'accepted', generation: 2 } })
+    expect(freshId).toMatchObject({ created: true, job: { status: 'accepted' } })
+    expect(restarted.sessionFenceUntil('session-durable-1')).toBe(clock.getTime() + QUERY_JOB_ORPHAN_FENCE_MS)
+    await expect(restarted.markStarting(retry.job.jobId)).rejects.toMatchObject({
       code: 'provider_orphan_fence',
       retryAfterMs: QUERY_JOB_ORPHAN_FENCE_MS,
     } satisfies Partial<QueryJobProviderOrphanFenceError>)
-    await expect(restarted.admit(request(randomUUID(), 1))).rejects.toMatchObject({
+    await expect(restarted.markStarting(freshId.job.jobId)).rejects.toMatchObject({
       code: 'provider_orphan_fence',
       retryAfterMs: QUERY_JOB_ORPHAN_FENCE_MS,
     } satisfies Partial<QueryJobProviderOrphanFenceError>)
+    expect((await restarted.getSnapshot(retry.job.jobId)).status).toBe('accepted')
     const unrelatedSession = await restarted.admit({
       ...request(randomUUID(), 1),
       sessionId: 'session-durable-unrelated',
     })
     expect(unrelatedSession.created).toBe(true)
+    expect(restarted.sessionFenceUntil('session-durable-unrelated')).toBe(0)
+    expect((await restarted.markStarting(unrelatedSession.job.jobId)).applied).toBe(true)
 
     clock = new Date(clock.getTime() + QUERY_JOB_ORPHAN_FENCE_MS + 1)
-    const next = await restarted.admit(request(clientJobId, 2))
-    expect(next.created).toBe(true)
-    expect(next.job.generation).toBe(2)
+    const started = await restarted.markStarting(retry.job.jobId)
+    expect(started).toMatchObject({ applied: true, job: { status: 'starting', generation: 2 } })
+  })
+
+  it('reports a canceled held job as not applied, never as fenced (6.61.3)', async () => {
+    const root = await tempRoot()
+    const clock = new Date('2026-07-17T18:00:00.000Z')
+    const priorBoot = new QueryJobStore({ root, bootId: 'boot-cancel-held-a', now: () => new Date(clock) })
+    const owner = await priorBoot.admit(request())
+    await priorBoot.markStarting(owner.job.jobId)
+    await priorBoot.markRunning(owner.job.jobId, { provider: 'claude' })
+    await priorBoot.updateLinkage(owner.job.jobId, { provider: 'claude', claudeRunId: 'owned-child' })
+
+    const restarted = new QueryJobStore({ root, bootId: 'boot-cancel-held-b', now: () => new Date(clock) })
+    await restarted.init()
+    const held = await restarted.admit(request())
+    await restarted.cancel(held.job.jobId, 1)
+    const result = await restarted.markStarting(held.job.jobId)
+    expect(result).toMatchObject({ applied: false, job: { status: 'canceled' } })
   })
 
   it('does not orphan-fence work that never reached a provider process', async () => {
@@ -242,9 +270,53 @@ describe('QueryJobStore durable journal', () => {
 
     const restarted = new QueryJobStore({ root, bootId: 'boot-graceful-b', now: () => new Date(clock) })
     await restarted.init()
-    await expect(restarted.admit(request(randomUUID()))).rejects.toMatchObject({
+    const held = await restarted.admit(request(randomUUID()))
+    expect(held.created).toBe(true)
+    await expect(restarted.markStarting(held.job.jobId)).rejects.toMatchObject({
       code: 'provider_orphan_fence',
     })
+  })
+
+  it('keeps a recent never-started job accepted across a restart and hands it over once (6.61.3)', async () => {
+    const root = await tempRoot()
+    let clock = new Date('2026-07-17T19:00:00.000Z')
+    const priorBoot = new QueryJobStore({ root, bootId: 'boot-requeue-a', now: () => new Date(clock) })
+    const recent = await priorBoot.admit(request())
+    const started = await priorBoot.admit({ ...request(), sessionId: 'session-requeue-started' })
+    await priorBoot.markStarting(started.job.jobId)
+
+    clock = new Date(clock.getTime() + 60_000)
+    const restarted = new QueryJobStore({ root, bootId: 'boot-requeue-b', now: () => new Date(clock) })
+    const health = await restarted.init()
+    expect(health).toMatchObject({ requeuedOnBoot: 1, interruptedOnBoot: 1 })
+    expect((await restarted.getSnapshot(recent.job.jobId)).status).toBe('accepted')
+    // `starting` cannot go back to `accepted`, so it keeps the old classification.
+    expect((await restarted.getSnapshot(started.job.jobId)).status).toBe('interrupted')
+    expect(restarted.takeRequeuedOnBoot()).toEqual([recent.job.jobId])
+    expect(restarted.takeRequeuedOnBoot()).toEqual([])
+  })
+
+  it('interrupts a never-started job older than the requeue bound, as before (6.61.3)', async () => {
+    const root = await tempRoot()
+    let clock = new Date('2026-07-17T08:00:00.000Z')
+    const priorBoot = new QueryJobStore({ root, bootId: 'boot-requeue-old-a', now: () => new Date(clock) })
+    const stale = await priorBoot.admit(request())
+    const edge = await priorBoot.admit({ ...request(), sessionId: 'session-requeue-edge' })
+
+    clock = new Date(clock.getTime() + QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS)
+    const atBound = new QueryJobStore({ root, bootId: 'boot-requeue-old-b', now: () => new Date(clock) })
+    await atBound.init()
+    expect(atBound.takeRequeuedOnBoot().sort()).toEqual([stale.job.jobId, edge.job.jobId].sort())
+
+    clock = new Date(clock.getTime() + 1)
+    const pastBound = new QueryJobStore({ root, bootId: 'boot-requeue-old-c', now: () => new Date(clock) })
+    const health = await pastBound.init()
+    expect(health).toMatchObject({ requeuedOnBoot: 0, interruptedOnBoot: 2 })
+    expect((await pastBound.getSnapshot(stale.job.jobId))).toMatchObject({
+      status: 'interrupted',
+      error: { code: 'interrupted' },
+    })
+    expect(pastBound.takeRequeuedOnBoot()).toEqual([])
   })
 
   it('commits a prior-boot answer-ready reply with its era and provider identity intact', async () => {

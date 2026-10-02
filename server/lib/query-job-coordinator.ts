@@ -1,5 +1,6 @@
 import { getOrCreateSession } from './conversation.js'
 import {
+  QueryJobProviderOrphanFenceError,
   QueryJobStore,
   QueryJobStoreError,
   type QueryJobAdmissionResult,
@@ -81,6 +82,25 @@ export interface QueryJobCoordinatorOptions {
   /** Acquired synchronously before serialized admission and retained through
    * the provider terminal, so maintenance proof covers queued transitions. */
   acquireMaintenanceWork?: () => MaintenanceWorkLease
+  /** Longest single wait while a job is held (orphan fence, or a maintenance drain
+   * refusing its start lease) before the coordinator looks again. Bounded so a Mac
+   * that slept through the end of a fence does not wait out a stale timer. */
+  holdRecheckMs?: number
+}
+
+/** Margin past the fence before the start is retried, so the retry lands after it. */
+const FENCE_HOLD_SLACK_MS = 250
+
+/**
+ * The line a held job shows while it waits for an orphan fence (6.61.3). It travels as a
+ * tool-status activity, so a phone renders it in the header like any other step. Clock
+ * time rounded UP to the minute, never a countdown: the line is journaled once, and a
+ * countdown is wrong the moment it is read. Plain words: the lens font has no `·`.
+ */
+export function orphanFenceHoldStatus(startsAtMs: number): string {
+  const at = new Date(Math.ceil(startsAtMs / 60_000) * 60_000)
+    .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return `Waiting for the interrupted run to close. Starts about ${at}.`
 }
 
 interface ActiveRun {
@@ -107,6 +127,9 @@ interface ActiveRun {
 
 export interface QueryJobCoordinatorHealth {
   activeRuns: number
+  /** Admitted jobs waiting to start: an orphan fence on their session, or a drain
+   * refusing their start lease (6.61.3). Durable and `accepted`; not provider work. */
+  heldRuns: number
   shuttingDown: boolean
   callbackPersistenceFailures: number
   terminalProjectionFailures: number
@@ -129,6 +152,9 @@ export class QueryJobCoordinator {
   private readonly providerTimeoutMs: number
   private readonly active = new Map<string, ActiveRun>()
   private readonly admittedMaintenance = new Map<string, MaintenanceWorkLease>()
+  /** Held jobs, each with the function that ends its current wait early. */
+  private readonly holds = new Map<string, () => void>()
+  private readonly holdRecheckMs: number
   private admissionTail: Promise<void> = Promise.resolve()
   private shuttingDown = false
   private callbackPersistenceFailures = 0
@@ -143,6 +169,7 @@ export class QueryJobCoordinator {
     this.partialFlushMs = Math.max(0, options.partialFlushMs ?? 50)
     this.partialFlushChars = Math.max(1, options.partialFlushChars ?? 1_024)
     this.providerTimeoutMs = Math.max(1_000, options.providerTimeoutMs ?? 21 * 60_000)
+    this.holdRecheckMs = Math.max(10, options.holdRecheckMs ?? 30_000)
   }
 
   async init(): Promise<QueryJobCoordinatorHealth> {
@@ -155,6 +182,11 @@ export class QueryJobCoordinator {
           await this.projectTerminal(execution.job, execution.request)
         }
       }
+    }
+    // 6.61.3: work the last boot admitted but never started runs now, with no
+    // phone needed to send it again. Each takes its own start lease in execute.
+    for (const jobId of this.store.takeRequeuedOnBoot()) {
+      queueMicrotask(() => { void this.execute(jobId) })
     }
     return this.getHealth()
   }
@@ -207,14 +239,80 @@ export class QueryJobCoordinator {
     return { ...input, sessionId }
   }
 
-  private async execute(jobId: string): Promise<void> {
-    const maintenanceLease = this.admittedMaintenance.get(jobId)
-    this.admittedMaintenance.delete(jobId)
-    const starting = await this.store.markStarting(jobId).catch(() => null)
-    if (!starting?.applied) {
-      maintenanceLease?.release()
-      return
+  /**
+   * Start a job, holding it first while its session is orphan-fenced (6.61.3).
+   *
+   * THE CONTRACT: a prompt the Mac accepted runs to an answer whether or not the
+   * phone stays connected. The job is durable before this runs, so the hold needs
+   * no subscriber, and a phone that drops reads the answer when it reconnects.
+   *
+   * The admission lease is RELEASED for the hold, so a fence (itself left by a
+   * restart) cannot block the next Update Server for 21 minutes. Nothing is lost if
+   * that restart lands mid-hold: the job is still `accepted`, and the next boot
+   * re-queues it. The start takes a fresh lease, which a drain refuses; the job then
+   * stays held and retries, rather than starting a provider under a closing server.
+   *
+   * Returns null when this process will not run the job: it went terminal (a cancel
+   * during the hold), the coordinator is shutting down, or the store refused.
+   */
+  private async startWhenClear(
+    jobId: string,
+    admitted: MaintenanceWorkLease | undefined,
+  ): Promise<{ lease?: MaintenanceWorkLease } | null> {
+    let lease = admitted
+    let announced = false
+    for (;;) {
+      if (this.shuttingDown) {
+        lease?.release()
+        return null
+      }
+      if (!lease && this.options.acquireMaintenanceWork) {
+        try {
+          lease = this.options.acquireMaintenanceWork()
+        } catch {
+          await this.holdFor(jobId, this.holdRecheckMs)
+          continue
+        }
+      }
+      try {
+        const starting = await this.store.markStarting(jobId)
+        if (starting.applied) return { lease }
+        lease?.release()
+        return null
+      } catch (error) {
+        lease?.release()
+        lease = undefined
+        if (!(error instanceof QueryJobProviderOrphanFenceError)) return null
+        if (!announced) {
+          announced = true
+          await this.store.appendActivity(jobId, 'status', orphanFenceHoldStatus(Date.now() + error.retryAfterMs))
+            .catch(() => {})
+        }
+        await this.holdFor(jobId, Math.min(error.retryAfterMs + FENCE_HOLD_SLACK_MS, this.holdRecheckMs))
+      }
     }
+  }
+
+  /** One bounded wait for a held job, ended early by cancel or shutdown. */
+  private holdFor(jobId: string, ms: number): Promise<void> {
+    return new Promise(resolve => {
+      const end = () => {
+        clearTimeout(timer)
+        if (this.holds.get(jobId) === end) this.holds.delete(jobId)
+        resolve()
+      }
+      const timer = setTimeout(end, Math.max(0, ms))
+      timer.unref?.()
+      this.holds.set(jobId, end)
+    })
+  }
+
+  private async execute(jobId: string): Promise<void> {
+    const admitted = this.admittedMaintenance.get(jobId)
+    this.admittedMaintenance.delete(jobId)
+    const started = await this.startWhenClear(jobId, admitted)
+    if (!started) return
+    const maintenanceLease = started.lease
     maintenanceLease?.setPhase('active')
     let execution
     try {
@@ -526,6 +624,8 @@ export class QueryJobCoordinator {
   async cancel(jobId: string, generation: number): Promise<QueryJobMutationResult> {
     const result = await this.store.cancel(jobId, generation)
     if (result.applied) {
+      // A held job is not active: end its wait so it sees the cancel now.
+      this.holds.get(jobId)?.()
       const active = this.active.get(jobId)
       const request = active?.request ?? (await this.store.getExecution(jobId)).request
       await this.projectTerminal(result.job, request)
@@ -569,6 +669,8 @@ export class QueryJobCoordinator {
 
   async shutdown(reason = 'server_shutdown'): Promise<void> {
     this.shuttingDown = true
+    // Held jobs stay `accepted` in the journal; the next boot re-queues them.
+    for (const end of [...this.holds.values()]) end()
     await this.admissionTail.catch(() => {})
     for (const active of [...this.active.values()]) {
       try {
@@ -634,6 +736,7 @@ export class QueryJobCoordinator {
   getHealth(): QueryJobCoordinatorHealth {
     return {
       activeRuns: this.active.size,
+      heldRuns: this.holds.size,
       shuttingDown: this.shuttingDown,
       callbackPersistenceFailures: this.callbackPersistenceFailures,
       terminalProjectionFailures: this.terminalProjectionFailures,

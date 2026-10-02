@@ -63,6 +63,13 @@ const PARTITION_RE = /^\d{4}-\d{2}-\d{2}\.jsonl$/
 const MAX_JOURNAL_RECORD_BYTES = 512 * 1024
 const MAX_CHUNK_DELTA_CHARS = 16_000
 export const QUERY_JOB_ORPHAN_FENCE_MS = 21 * 60_000
+/**
+ * How old a never-started job may be and still run after a restart (6.61.3). Covers the
+ * 21-minute orphan fence plus an Update Server or a crash in the middle of it, with a wide
+ * margin. An older `accepted` job is interrupted on boot exactly as before, because a
+ * question asked that long ago may no longer be the question.
+ */
+export const QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS = 6 * 60 * 60_000
 
 interface QueryJobJournalRecord {
   schemaVersion: typeof QUERY_JOB_SCHEMA_VERSION
@@ -373,6 +380,8 @@ export class QueryJobStore {
   private readonly trailEmitter = new EventEmitter()
   private appendTail: Promise<void> = Promise.resolve()
   private initPromise: Promise<QueryJobStoreHealth> | null = null
+  /** Never-started jobs the last boot left `accepted`, for the coordinator to run. */
+  private requeuedJobIds: string[] = []
   private partitions: string[] = []
   private subscriberCount = 0
   private readonly health: QueryJobStoreHealth
@@ -398,6 +407,7 @@ export class QueryJobStore {
       malformedRows: 0,
       journalFailures: 0,
       interruptedOnBoot: 0,
+      requeuedOnBoot: 0,
       evictedHydratedJobs: 0,
       originDropped: 0,
       originStripped: 0,
@@ -418,6 +428,27 @@ export class QueryJobStore {
     return this.initPromise
   }
 
+  /** The never-started jobs init kept `accepted`, handed over exactly once. */
+  takeRequeuedOnBoot(): string[] {
+    return this.requeuedJobIds.splice(0)
+  }
+
+  /**
+   * Epoch ms until which a provider child of `sessionId` may still be running, or 0.
+   * Read from the in-memory identities, so it never hydrates a journal partition.
+   * Provider sessions, not phone queue ids, are the concurrency boundary: a fresh
+   * clientJobId in the same session is fenced exactly like a retry.
+   */
+  sessionFenceUntil(sessionId: string): number {
+    let latest = 0
+    for (const item of this.identitiesByJobId.values()) {
+      if (item.sessionId !== sessionId || item.status !== 'interrupted' || !item.orphanFenceUntil) continue
+      const value = new Date(item.orphanFenceUntil).getTime()
+      if (Number.isFinite(value)) latest = Math.max(latest, value)
+    }
+    return latest
+  }
+
   private async initialize(): Promise<QueryJobStoreHealth> {
     try {
       await this.storage.prepare(this.options.root)
@@ -436,11 +467,25 @@ export class QueryJobStore {
       // crossed the durable commit point, so finish it from the journaled
       // answer instead of throwing away a reply merely because bridge
       // post-processing was interrupted by the restart.
+      //
+      // 6.61.3: an `accepted` job never left admission, so no prompt byte reached
+      // any provider and running it now cannot repeat anything. It stays `accepted`
+      // and the coordinator starts it after init. This is what keeps a prompt held
+      // for an orphan fence alive across an Update Server in the middle of the wait,
+      // with no phone needed to send it again. `starting` and `running` keep the old
+      // path: their state machine has no way back to `accepted`.
       const priorBootJobs = [...this.jobs.values()].filter(job =>
         !isTerminalQueryJobStatus(job.snapshot.status) && job.lastBootId !== this.options.bootId)
+      const nowMs = this.now().getTime()
       for (const job of priorBootJobs) {
         const snapshot = job.snapshot
-        if (snapshot.status === 'answer_ready') {
+        const acceptedMs = Date.parse(snapshot.acceptedAt)
+        if (snapshot.status === 'accepted'
+          && Number.isFinite(acceptedMs)
+          && nowMs - acceptedMs <= QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS) {
+          this.requeuedJobIds.push(snapshot.jobId)
+          this.health.requeuedOnBoot = (this.health.requeuedOnBoot ?? 0) + 1
+        } else if (snapshot.status === 'answer_ready') {
           await this.complete(snapshot.jobId, {
             text: snapshot.partialText,
             attachments: snapshot.attachments,
@@ -801,17 +846,11 @@ export class QueryJobStore {
       if (lineage.some(item => !isTerminalQueryJobStatus(item.status))) {
         throw new QueryJobActiveGenerationError(request.clientJobId)
       }
-      const nowMs = this.now().getTime()
-      // Provider sessions, not phone queue ids, are the concurrency boundary.
-      // A restarted client can allocate a fresh clientJobId; it must not bypass
-      // an orphan fence and resume the same provider session too early.
-      const sessionLineage = identities.filter(item => item.sessionId === request.sessionId)
-      const fencedUntil = sessionLineage.reduce((latest, item) => {
-        if (item.status !== 'interrupted' || !item.orphanFenceUntil) return latest
-        const value = new Date(item.orphanFenceUntil).getTime()
-        return Number.isFinite(value) ? Math.max(latest, value) : latest
-      }, 0)
-      if (fencedUntil > nowMs) throw new QueryJobProviderOrphanFenceError(fencedUntil - nowMs)
+      // 6.61.3: an orphan fence no longer refuses admission. Refusing handed the
+      // prompt back to the phone as "Provider closing · retry in 1192s", where a
+      // phone that then lost signal never sent it again. The fence is enforced at
+      // markStarting instead, the one gate every path crosses before a provider,
+      // so the prompt is journaled now and starts on the Mac once the fence clears.
       const highestGeneration = lineage.reduce((max, item) => Math.max(max, item.generation), 0)
       if (request.generation <= highestGeneration) throw new QueryJobGenerationOrderError(request.clientJobId)
 
@@ -844,8 +883,29 @@ export class QueryJobStore {
     })
   }
 
+  /**
+   * The provider-start gate. A job whose session may still hold an orphaned provider
+   * child cannot start, whichever path admitted it: this throws `provider_orphan_fence`
+   * with the time left and the job stays `accepted`, for the coordinator to start once
+   * the fence clears (6.61.3; the check used to refuse admission instead). A job that
+   * is terminal, or already past `accepted`, is `applied: false` as before, checked
+   * first so a canceled job never reports a fence.
+   */
   async markStarting(jobId: string): Promise<QueryJobMutationResult> {
-    return this.transition(jobId, 'starting', 'starting', {}, {})
+    await this.ensureInitialized()
+    await this.ensureHydrated(jobId)
+    return this.enqueue(async () => {
+      this.assertWritable()
+      const hydrated = this.jobs.get(jobId)
+      if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      const status = hydrated.snapshot.status
+      if (isTerminalQueryJobStatus(status) || !ALLOWED_TRANSITIONS[status].has('starting')) {
+        return { applied: false, job: clone(hydrated.snapshot) }
+      }
+      const remainingMs = this.sessionFenceUntil(hydrated.request.sessionId) - this.now().getTime()
+      if (remainingMs > 0) throw new QueryJobProviderOrphanFenceError(remainingMs)
+      return this.persistMutation(hydrated, 'starting', 'starting', {}, {})
+    })
   }
 
   async markRunning(jobId: string, linkage: QueryJobProviderLinkage): Promise<QueryJobMutationResult> {

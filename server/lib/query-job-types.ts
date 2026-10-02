@@ -286,6 +286,10 @@ export interface QueryJobStoreHealth {
   malformedRows: number
   journalFailures: number
   interruptedOnBoot: number
+  /** Never-started jobs a prior boot left `accepted` that this boot runs (6.61.3).
+   * Optional only because the vendored 6.51.0 rollback fixture types its health
+   * against this interface and must stay byte-identical; this build always sets it. */
+  requeuedOnBoot?: number
   evictedHydratedJobs: number
   /** Requests whose `origin` was present but not one this build recognises
    * (a bare string, or an object of a later build's kind) and was dropped. */

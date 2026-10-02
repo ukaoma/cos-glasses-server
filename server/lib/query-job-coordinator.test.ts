@@ -16,6 +16,7 @@ import {
 } from './query-job-coordinator.js'
 import {
   NodeQueryJobJournalStorage,
+  QUERY_JOB_ORPHAN_FENCE_MS,
   QueryJobAnswerCommittingError,
   QueryJobGenerationMismatchError,
   QueryJobIdentityConflictError,
@@ -558,5 +559,205 @@ describe('QueryJobCoordinator provider ownership', () => {
     expect(completionOwned).toBe(false)
     expect(runnerReturned).toBe(true)
     expect(health.store.state).toBe('ready')
+  })
+})
+
+// 6.61.3, Miles 2026-10-02 17:38: every prompt from the glasses failed "Provider closing ·
+// retry in 1192s" for twenty minutes after a restart interrupted a running job, and a phone
+// that lost signal would never have sent them again. The contract under test: a prompt the
+// Mac accepted runs to an answer with NO phone attached. None of these tests subscribes.
+describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
+  const HELD_SESSION = 'session-held'
+
+  function heldRequest(clientJobId = randomUUID(), query = 'held prompt'): Record<string, unknown> {
+    return { clientJobId, generation: 1, query, sessionId: HELD_SESSION, activityToolMode: 'preview' }
+  }
+
+  /** A journal whose last boot shut down with a provider child running in HELD_SESSION,
+   *  so the next boot finds that session fenced until `fenceEndsAtMs`. */
+  async function fencedRoot(fenceEndsAtMs: number): Promise<string> {
+    const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-held-')))
+    roots.push(root)
+    const killedAt = new Date(fenceEndsAtMs - QUERY_JOB_ORPHAN_FENCE_MS)
+    const priorBoot = new QueryJobStore({ root, bootId: randomUUID(), now: () => new Date(killedAt) })
+    const owner = await priorBoot.admit(heldRequest(randomUUID(), 'the run the restart killed'))
+    await priorBoot.markStarting(owner.job.jobId)
+    await priorBoot.markRunning(owner.job.jobId, { provider: 'claude' })
+    await priorBoot.updateLinkage(owner.job.jobId, { provider: 'claude', claudeRunId: 'orphan-child' })
+    // The fence is stamped by whoever interrupts, at THEIR clock: interrupt here, as a
+    // graceful shutdown does, so it ends at `fenceEndsAtMs` and not 21 minutes from now.
+    await priorBoot.interrupt(owner.job.jobId, 'server_shutdown')
+    return root
+  }
+
+  function answeringRunner(calls: Array<{ query: string; atMs: number }>): QueryJobRunner {
+    return async ctx => {
+      calls.push({ query: ctx.request.query, atMs: Date.now() })
+      await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude' })
+      await ctx.callbacks.onDone({ text: `answer to ${ctx.request.query}` })
+    }
+  }
+
+  it('accepts a fenced prompt, says why it waits, and answers it once the fence clears', async () => {
+    const fenceEndsAtMs = Date.now() + 400
+    const root = await fencedRoot(fenceEndsAtMs)
+    const calls: Array<{ query: string; atMs: number }> = []
+    const value = new QueryJobCoordinator(
+      new QueryJobStore({ root, bootId: randomUUID() }),
+      answeringRunner(calls),
+      { partialFlushMs: 0 },
+    )
+    await value.init()
+
+    const admitted = await value.submit(heldRequest())
+    expect(admitted).toMatchObject({ created: true, job: { status: 'accepted', sessionId: HELD_SESSION } })
+    const held = await waitFor(
+      () => value.getSnapshot(admitted.job.jobId),
+      job => job.activity.length > 0,
+    )
+    expect(held.status).toBe('accepted')
+    expect(held.activity[0]).toMatchObject({ kind: 'status' })
+    expect(held.activity[0].text).toMatch(/^Waiting for the interrupted run to close\. Starts about \d{1,2}:\d{2} [AP]M\.$/)
+    expect(value.getHealth().heldRuns).toBe(1)
+    expect(calls).toEqual([])
+
+    const done = await waitFor(
+      () => value.getSnapshot(admitted.job.jobId),
+      job => job.status === 'completed',
+    )
+    expect(done.response).toBe('answer to held prompt')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].atMs).toBeGreaterThanOrEqual(fenceEndsAtMs)
+    expect(value.getHealth()).toMatchObject({ heldRuns: 0, activeRuns: 0 })
+  })
+
+  it('ends a hold on cancel, and the canceled prompt never reaches a provider', async () => {
+    const root = await fencedRoot(Date.now() + QUERY_JOB_ORPHAN_FENCE_MS)
+    const calls: Array<{ query: string; atMs: number }> = []
+    const value = new QueryJobCoordinator(
+      new QueryJobStore({ root, bootId: randomUUID() }),
+      answeringRunner(calls),
+      { partialFlushMs: 0 },
+    )
+    await value.init()
+
+    const admitted = await value.submit(heldRequest())
+    await waitFor(() => value.getHealth(), health => health.heldRuns === 1)
+    const canceled = await value.cancel(admitted.job.jobId, 1)
+    expect(canceled).toMatchObject({ applied: true, job: { status: 'canceled' } })
+    await waitFor(() => value.getHealth(), health => health.heldRuns === 0, 1_000)
+    expect(calls).toEqual([])
+  })
+
+  it('keeps a held prompt through a restart mid-hold and answers it on the next boot', async () => {
+    const fenceEndsAtMs = Date.now() + 600
+    const root = await fencedRoot(fenceEndsAtMs)
+    const firstCalls: Array<{ query: string; atMs: number }> = []
+    const first = new QueryJobCoordinator(
+      new QueryJobStore({ root, bootId: randomUUID() }),
+      answeringRunner(firstCalls),
+      { partialFlushMs: 0 },
+    )
+    await first.init()
+    const admitted = await first.submit(heldRequest(randomUUID(), 'asked before the update'))
+    await waitFor(() => first.getHealth(), health => health.heldRuns === 1)
+    await first.shutdown('server_shutdown')
+    expect(first.getHealth().heldRuns).toBe(0)
+    expect((await first.getSnapshot(admitted.job.jobId)).status).toBe('accepted')
+    expect(firstCalls).toEqual([])
+
+    const secondCalls: Array<{ query: string; atMs: number }> = []
+    const second = new QueryJobCoordinator(
+      new QueryJobStore({ root, bootId: randomUUID() }),
+      answeringRunner(secondCalls),
+      { partialFlushMs: 0 },
+    )
+    const health = await second.init()
+    expect(health.store.requeuedOnBoot).toBe(1)
+    const done = await waitFor(
+      () => second.getSnapshot(admitted.job.jobId),
+      job => job.status === 'completed',
+    )
+    expect(done.response).toBe('answer to asked before the update')
+    expect(secondCalls).toHaveLength(1)
+    expect(secondCalls[0].atMs).toBeGreaterThanOrEqual(fenceEndsAtMs)
+    // The process that shut down must not ALSO start it once the fence clears.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(firstCalls).toEqual([])
+  })
+
+  it('runs a never-started prompt from the last boot even with no fence at all', async () => {
+    const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-held-')))
+    roots.push(root)
+    const priorBoot = new QueryJobStore({ root, bootId: randomUUID() })
+    const orphaned = await priorBoot.admit({ ...heldRequest(randomUUID(), 'admitted then crashed'), sessionId: 'session-clean' })
+
+    const calls: Array<{ query: string; atMs: number }> = []
+    const value = new QueryJobCoordinator(
+      new QueryJobStore({ root, bootId: randomUUID() }),
+      answeringRunner(calls),
+      { partialFlushMs: 0 },
+    )
+    await value.init()
+    const done = await waitFor(
+      () => value.getSnapshot(orphaned.job.jobId),
+      job => job.status === 'completed',
+    )
+    expect(done.response).toBe('answer to admitted then crashed')
+    expect(calls).toHaveLength(1)
+  })
+
+  it('releases its lease for the hold and waits out a drain before taking a start lease', async () => {
+    const fenceEndsAtMs = Date.now() + 300
+    const root = await fencedRoot(fenceEndsAtMs)
+    const calls: Array<{ query: string; atMs: number }> = []
+    let draining = false
+    let live = 0
+    let refusals = 0
+    const value = new QueryJobCoordinator(
+      new QueryJobStore({ root, bootId: randomUUID() }),
+      answeringRunner(calls),
+      {
+        partialFlushMs: 0,
+        holdRecheckMs: 40,
+        acquireMaintenanceWork: () => {
+          if (draining) {
+            refusals++
+            throw Object.assign(new Error('Server is closed for a committed maintenance operation.'), {
+              code: 'maintenance_drain_active',
+            })
+          }
+          live++
+          let released = false
+          return {
+            id: randomUUID(),
+            setPhase: () => {},
+            release: () => { if (!released) { released = true; live-- } },
+          }
+        },
+      },
+    )
+    await value.init()
+
+    const admitted = await value.submit(heldRequest())
+    // Held for the fence with NO lease: a fence must not hold Update Server's drain open.
+    await waitFor(() => value.getHealth(), health => health.heldRuns === 1)
+    expect(live).toBe(0)
+    draining = true
+    // The drain must OUTLAST the fence, or the fence alone would keep the job from
+    // starting and a hold that ignored the drain would pass (the gate caught exactly that).
+    await waitFor(() => Date.now(), now => now > fenceEndsAtMs + 300)
+    expect(refusals).toBeGreaterThanOrEqual(2)
+    expect(calls).toEqual([])
+    expect((await value.getSnapshot(admitted.job.jobId)).status).toBe('accepted')
+
+    draining = false
+    const done = await waitFor(
+      () => value.getSnapshot(admitted.job.jobId),
+      job => job.status === 'completed',
+    )
+    expect(done.response).toBe('answer to held prompt')
+    expect(calls).toHaveLength(1)
+    await waitFor(() => live, count => count === 0)
   })
 })

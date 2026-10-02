@@ -162,7 +162,11 @@ describe('trail rows in the durable journal', () => {
     const { trail: _trail, ...withoutTrail } = current
     expect(rolledBack).toEqual(withoutTrail)
     expect(rolledBack.response).toBe('The answer')
-    expect((await old.getSnapshot(plainJob)).status).toBe('interrupted')
+    // Loaded whole and classified by THIS build's boot rule: since 6.61.3 a never-started
+    // job stays `accepted` for the coordinator to run. The real 6.51.0 store still
+    // interrupts it, which the rollback test below boots on a journal to prove.
+    expect((await old.getSnapshot(plainJob)).status).toBe('accepted')
+    expect(health.requeuedOnBoot).toBe(1)
   })
 
   it('rollback mid-run then roll forward: no eventSeq is ever reused, the job ends terminal once, and the trail survives', async () => {
