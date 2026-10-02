@@ -246,7 +246,11 @@ describe('adjacent month', () => {
 describe('the marker cache', () => {
   it('cache invalidates on a new scribe: a merged scribe written after a lookup is found by the next one', () => {
     capture('personal', '2026-09')
+    // The folder already exists and is cached by the first lookup, so only the
+    // folder's changed stamp can reveal the new file.
+    scribe('quilt', '2026-09', '2026-09-10_Unrelated.md', [])
     expect(findCosOperationsMeetingBySessionId(SESSION)?.domain).toBe('personal')
+    expect(mergedScribeCacheStats().months).toBe(2)
     const merged = scribe('quilt', '2026-09', '2026-09-10_Chris_Miles_Sync.md', [SESSION])
     expect(findCosOperationsMeetingBySessionId(SESSION)?.meetingPath).toBe(merged)
   })
