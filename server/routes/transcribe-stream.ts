@@ -40,7 +40,7 @@ import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whis
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
 import { identifySpeaker, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
-import { activeDiarizer } from '../lib/diarizer-backend.js'
+import { nemotronLive, resolveLiveLabels, type ChunkSpeakerSegment } from '../lib/nemotron-live.js'
 import {
   assertOpenAIWhisperBudget,
   recordOpenAIWhisperUsage,
@@ -267,6 +267,23 @@ export interface TranscriptChunk {
   audioSha256?: string
   canonical?: boolean
   evenHubSpeakerRole?: EvenSpeakerRoleHistogram
+  /** 6.61.0: who spoke when inside this chunk, in time order. Present when
+   *  Nemotron separated the chunk's voices; `speaker` is then the dominant name. */
+  segments?: ChunkSpeakerSegment[]
+  /** 6.61.0: which path labelled the chunk. Absent when COS_DIARIZER selects the voiceprint. */
+  diarizer?: ChunkDiarizerInfo
+}
+
+export interface ChunkDiarizerInfo {
+  engine: 'nemotron' | 'voiceprint'
+  /** Why Nemotron did not label this chunk although it was requested. */
+  fallback?: string
+  /** The whole-chunk voiceprint label, kept when the dominant track's name differs. */
+  voiceprintSpeaker?: string
+  voiceprintSimilarity?: number
+  tracks?: number
+  timing?: 'words' | 'estimated'
+  ms?: number
 }
 
 export interface ProviderCandidateRecord {
@@ -346,6 +363,9 @@ interface StreamChunkCompletionResponse {
   backend?: string
   asrProvider?: string
   fallbackReason?: string
+  /** 6.61.0, additive: the chunk's speaker turns in time order. Their texts
+   *  joined with one space equal `text`; `speaker` stays the dominant name. */
+  segments?: ChunkSpeakerSegment[]
 }
 
 const closedSessionRecords = new Map<string, ClosedTranscriptSession>()
@@ -1838,6 +1858,7 @@ function canonicalChunkResponse(
     backend: existing.backend,
     asrProvider: existing.asrProvider,
     fallbackReason: existing.fallbackReason,
+    ...(existing.segments?.length ? { segments: existing.segments } : {}),
   }
 }
 
@@ -1880,14 +1901,7 @@ async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Bu
   }
 }
 
-let diarizerChoiceLogged = false
-
 function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
-  if (!diarizerChoiceLogged) {
-    diarizerChoiceLogged = true
-    const choice = activeDiarizer()
-    console.log(`[diarizer] tracks=${choice.active} names=voiceprint${choice.fallback ? ` fallback=${choice.fallback}` : ''}`)
-  }
   const expectedSpeakers = undefined
   const audioDurationSec = Math.max(0, (audioBuffer.length - 44)) / 32000
   if (!isEmbeddingAvailable() || audioDurationSec < 2.0) return { speaker: clientSpeaker, similarity: 0 }
@@ -2041,6 +2055,15 @@ async function processStreamChunk(opts: {
   recordReceivedChunk(session, chunkIndex)
   persistSessionRequired(sessionId)
 
+  // 6.61.0: Nemotron reads the durable WAV just written, in parallel with
+  // Whisper, on the Neural Engine, inside its own budget. It is started before
+  // the synchronous voiceprint so the process is already running while that
+  // blocks. diarize() never throws; a fallback returns a reason.
+  const diarizeStartedAt = performance.now()
+  const diarizePromise = nemotronLive.diarize(
+    resolve(SESSION_AUDIO_DIR, sessionId, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`),
+  )
+
   const pcmData = audioBuffer.subarray(44)
   let sumSq = 0
   const nSamples = Math.floor(pcmData.length / 2)
@@ -2098,14 +2121,14 @@ async function processStreamChunk(opts: {
     sanitized = sanitizeStreamTranscript(sessionId, session, rawText, isQuiet)
   }
 
-  const { speaker, similarity } = await speakerPromise
+  const voiceprint = await speakerPromise
   if (evenHubSpeakerRole) {
     console.log(formatEvenRoleAgreement({
       chunkIndex,
       even: evenHubSpeakerRole,
       amp: clientSpeaker,
-      emb: speaker,
-      similarity,
+      emb: voiceprint.speaker,
+      similarity: voiceprint.similarity,
     }))
   }
   // Client time is authoritative for live network jitter and deferred replay.
@@ -2113,6 +2136,26 @@ async function processStreamChunk(opts: {
     ? Math.round(opts.clientElapsed as number)
     : Date.now() - session.startTime
   const trimmedText = sanitized.text
+
+  // Nemotron separates the voices; the voiceprint names each one. Any fallback
+  // keeps today's whole-chunk voiceprint label. Only chunks with text count.
+  const labels = trimmedText
+    ? await resolveLiveLabels({
+        diarize: diarizePromise,
+        startedAt: diarizeStartedAt,
+        text: trimmedText,
+        words,
+        audio: audioBuffer,
+        voiceprint,
+        clientSpeaker,
+        identify: wav => {
+          const named = identifySpeaker(wav)
+          return named ? { speaker: named.speaker, similarity: named.similarity } : null
+        },
+      })
+    : { speaker: voiceprint.speaker, similarity: voiceprint.similarity }
+  if (labels.record) nemotronLive.record({ sessionId, chunkIndex }, labels.record)
+  const { speaker, similarity } = labels
 
   if (!trimmedText) {
     console.log(`[hallucination] Filtered (${sanitized.fallbackReason || fallbackReason || 'empty'}): "${rawText.slice(0, 60)}"`)
@@ -2153,6 +2196,8 @@ async function processStreamChunk(opts: {
     audioSha256,
     canonical: true,
     evenHubSpeakerRole,
+    ...(labels.segments?.length ? { segments: labels.segments } : {}),
+    ...(labels.diarizer ? { diarizer: labels.diarizer } : {}),
   }
   const finalExisting = session.chunks[chunkIndex]
   if (finalExisting?.text) {
@@ -2182,7 +2227,10 @@ async function processStreamChunk(opts: {
 
   scheduleSessionProgressiveHq(sessionId)
 
-  emitDisplay({ type: 'transcript_chunk', data: { text: trimmedText, speaker, chunkIndex, elapsed, sessionId } })
+  emitDisplay({
+    type: 'transcript_chunk',
+    data: { text: trimmedText, speaker, chunkIndex, elapsed, sessionId, ...(chunk.segments ? { segments: chunk.segments } : {}) },
+  })
   // Live Cues feed — fire-and-forget, NEVER awaited: transcription must not
   // block on a cue, and no LLM runs on this path. .catch() is required — a
   // bare `void` on a rejecting promise is an unhandled rejection, which Node

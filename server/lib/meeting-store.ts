@@ -379,7 +379,9 @@ export class MeetingStore {
       canonicalProvider: canonicalProvider(input.chunks),
       providers,
       providerCandidates: input.providerCandidates ?? {},
-      speakers: [...new Set(input.chunks.map(chunk => chunk.speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+      // 6.61.0: a chunk can hold two named voices; its segments count too.
+      speakers: [...new Set(input.chunks.flatMap(chunk => [chunk.speaker, ...(chunk.segments ?? []).map(segment => segment.speaker)])
+        .filter(speaker => speaker && speaker !== 'Ext'))],
       chunks: input.chunks,
       chunkEntries: input.chunkEntries ?? input.chunks.map((chunk, chunkIndex) => ({ chunkIndex, chunk })),
       transferIntegrity: input.transferIntegrity ?? null,

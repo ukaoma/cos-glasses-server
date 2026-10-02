@@ -38,6 +38,7 @@ interface HarnessOptions {
   drainError?: Error
   moveFails?: boolean
   runBatch?: () => Promise<BatchTranscription>
+  finalDiarize?: import('./meeting.js').FinalDiarize
 }
 
 async function harness(options: HarnessOptions) {
@@ -98,6 +99,7 @@ async function harness(options: HarnessOptions) {
     scheduleBackground: task => { background.push(task) },
     emit: vi.fn(),
     finalizationJobs,
+    ...(options.finalDiarize ? { finalDiarize: options.finalDiarize } : {}),
   }))
   app.use('/api', createMeetingsRouter(store))
 
@@ -483,6 +485,59 @@ describe('meeting save/list/detail API', () => {
     expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
     expect(existsSync(h.pendingAudio)).toBe(false)
     expect(readdirSync(join(h.recordingsRoot, '2026-07')).filter(name => name.endsWith('.md'))).toHaveLength(1)
+  })
+
+  it('runs the Nemotron final pass on the saved files while the audio exists, before the job finishes', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    let h: Awaited<ReturnType<typeof harness>>
+    const finalDiarize = vi.fn(async (options: { meetingPath: string; sidecarPath: string; audioDir: string }) => {
+      seen.push({
+        ...options,
+        audioPresent: existsSync(options.audioDir),
+        batchPersisted: JSON.parse(readFileSync(options.sidecarPath, 'utf8')).batchApplied,
+        jobPhase: h.finalizationJobs.get('meeting_route_001')?.phase,
+      })
+      return { status: 'applied' as const }
+    })
+    h = await harness({ batch: acceptedBatch(), finalDiarize })
+    const response = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Final pass order' }),
+    })
+    const saved = await response.json() as any
+    await Promise.all(h.background)
+    expect(finalDiarize).toHaveBeenCalledTimes(1)
+    expect(seen[0]).toMatchObject({
+      meetingPath: join(h.recordingsRoot, '2026-07', saved.filename),
+      audioDir: h.pendingAudio,
+      audioPresent: true,
+      batchPersisted: true,
+      // Still inside batch_pending: the ops handoff (COS sync) has not run yet.
+      jobPhase: 'batch_pending',
+    })
+    expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+  })
+
+  it('a failed relabel saves as today: the meeting is byte-identical to a save without the pass', async () => {
+    const save = async (finalDiarize?: import('./meeting.js').FinalDiarize) => {
+      const h = await harness({ batch: rejectedBatch(), finalDiarize })
+      const response = await h.api('/api/meeting/save', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Relabel failure' }),
+      })
+      const saved = await response.json() as any
+      await Promise.all(h.background)
+      const meetingPath = join(h.recordingsRoot, '2026-07', saved.filename)
+      return { status: response.status, markdown: readFileSync(meetingPath, 'utf8'), job: h.finalizationJobs.get('meeting_route_001') }
+    }
+    const baseline = await save(async () => ({ status: 'skipped' as const, reason: 'embedding_requested' }))
+    const failed = await save(async () => ({ status: 'failed' as const, reason: 'nemotron_timeout' }))
+    const threw = await save(async () => { throw new Error('final pass exploded') })
+    for (const result of [failed, threw]) {
+      expect(result.status).toBe(200)
+      expect(result.markdown).toBe(baseline.markdown)
+      expect(result.job).toBeNull()
+    }
   })
 
   it('rejects mismatched status/save pins before any meeting mutation', async () => {

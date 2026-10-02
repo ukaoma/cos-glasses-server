@@ -160,6 +160,10 @@ import {
   type MeetingFinalizationJob,
 } from '../lib/meeting-finalization-jobs.js'
 import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
+import { runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
+
+/** 6.61.0: the save-time Nemotron pass. Injectable so tests never spawn the CLI. */
+export type FinalDiarize = (options: Pick<FinalPassOptions, 'meetingPath' | 'sidecarPath' | 'audioDir'>) => Promise<FinalPassOutcome>
 
 function cosOpsPipelineConfigured(): boolean {
   // Read env live (not the module-load COS_SCRIPTS_DIR const) so unit tests that
@@ -200,6 +204,7 @@ export interface MeetingRouteDependencies {
   scheduleBackground?: (task: Promise<void>) => void
   emit?: typeof emitDisplay
   finalizationJobs?: MeetingFinalizationJobStore
+  finalDiarize?: FinalDiarize
 }
 
 const activeFinalizationJobs = new Set<string>()
@@ -210,6 +215,7 @@ interface FinalizationRuntime {
   runBatch: NonNullable<MeetingRouteDependencies['runBatch']>
   scheduleBackground: (task: Promise<void>) => void
   sessions?: MeetingSessionSource
+  finalDiarize?: FinalDiarize
 }
 
 function validReplayEntries(raw: unknown[]): IndexedTranscriptChunk[] | null {
@@ -311,6 +317,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
           sidecarPath: current.sidecarPath,
           sessionId: current.sessionId,
           runBatch: runtime.runBatch,
+          finalDiarize: runtime.finalDiarize ?? runNemotronFinalPass,
         })
       } else {
         console.warn(`[meeting/save] Pending HQ audio missing for ${current.sessionId}; preserving streaming canonical`)
@@ -469,6 +476,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const scheduleBackground = deps.scheduleBackground ?? (task => { void task })
   const emit = deps.emit ?? emitDisplay
   const finalizationJobs = deps.finalizationJobs ?? new MeetingFinalizationJobStore()
+  const finalDiarize = deps.finalDiarize ?? runNemotronFinalPass
   const router = Router()
   const savingSessions = new Set<string>()
   setNamingSessionLiveness(id => sessions.getStartTime(id) !== null || savingSessions.has(id) || activeFinalizationJobs.has(id))
@@ -553,6 +561,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           runBatch,
           scheduleBackground,
           sessions,
+          finalDiarize,
         })
         res.set('Cache-Control', 'private, no-store')
         res.json(publicSaveResponse(alreadySaved, true))
@@ -717,6 +726,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           runBatch,
           scheduleBackground,
           sessions,
+          finalDiarize,
         })
       }
     } catch (error) {
@@ -2194,6 +2204,7 @@ async function finalizeBatch(options: {
   sidecarPath: string
   sessionId?: string
   runBatch: NonNullable<MeetingRouteDependencies['runBatch']>
+  finalDiarize?: FinalDiarize
 }): Promise<void> {
   const result = await options.runBatch(
     options.audioDir,
@@ -2234,6 +2245,26 @@ async function finalizeBatch(options: {
       '[meeting/save] Batch decision metadata was not durable:',
       error instanceof Error ? error.message : String(error),
     )
+  }
+
+  // 6.61.0: the Nemotron final pass relabels the transcript just persisted,
+  // while the raw chunk audio still exists and BEFORE this job reaches
+  // ops_pending, so COS sync (sync_meetings.py --g2-import-file, run by the
+  // handoff after this function returns) only ever imports the relabelled
+  // meeting. It never throws and writes nothing unless every word survives;
+  // on any failure the meeting stays exactly as saved above.
+  // Skipped when the batch text landed but its sidecar did not: the two would
+  // disagree about which transcript is canonical.
+  if (options.finalDiarize && !(transcriptApplied && !metadataPersisted)) {
+    try {
+      await options.finalDiarize({
+        meetingPath: options.meetingPath,
+        sidecarPath: options.sidecarPath,
+        audioDir: options.audioDir,
+      })
+    } catch (error) {
+      console.warn(`[diarizer] final pass threw; the saved transcript is unchanged: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   if (canDeletePendingBatchAudio(transcriptApplied, metadataPersisted)) {

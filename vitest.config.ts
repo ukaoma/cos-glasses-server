@@ -57,6 +57,9 @@ export default defineConfig({
     env: {
       COS_DATA_DIR: isolatedDataDir,
       COS_PROFILE_PATH: join(isolatedDataDir, '.cos-profile.json'),
+      // 6.61.0: no test may spawn the real Nemotron CLI from ~/.cos-glasses/bin.
+      // Tests that exercise Nemotron pass their own env and a fake runner.
+      COS_DIARIZER: 'embedding',
     },
   },
 })

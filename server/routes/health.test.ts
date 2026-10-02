@@ -52,6 +52,22 @@ describe('health capability contract', () => {
     expect(body.features?.g2LensVariant).toBe('png-288x144-v1')
   }, 20_000)
 
+  it('readiness.diarizer says what labels a chunk now, with the outcome counts', async () => {
+    const response = await fetch(`${base}/api/health`)
+    const body = await response.json() as any
+    // The suite runs with COS_DIARIZER=embedding (vitest.config.ts): the voiceprint by choice, not a fallback.
+    expect(body.readiness.diarizer).toMatchObject({
+      requested: 'embedding',
+      active: 'embedding',
+      fallback: null,
+      variant: 'fast32',
+      budgetMs: 1500,
+      chunks: { nemotron: 0, voiceprint: 0, reasons: {} },
+      final: { last: null, counts: {} },
+    })
+    expect(body.readiness.status).toBe(body.readiness.whisper === 'degraded' || body.readiness.speakerId === 'degraded' ? 'degraded' : 'ready')
+  }, 20_000)
+
   it('advertises CLI debug without exposing a raw provider session id', async () => {
     const response = await fetch(`${base}/api/health`)
     expect(response.status).toBe(200)

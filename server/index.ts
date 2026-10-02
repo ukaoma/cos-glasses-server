@@ -116,6 +116,7 @@ import { startLocalTtsServer, stopLocalTtsServer } from './lib/tts-local.js'
 import { initSileroVAD } from './lib/vad-silero.js'
 import { initSessionCache } from './lib/session-cache-writer.js'
 import { initSpeakerEmbeddings } from './lib/speaker-embeddings.js'
+import { startNemotronWarmup } from './lib/nemotron-live.js'
 import { logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
 import { getMediaStore } from './lib/media-store.js'
 import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
@@ -1162,6 +1163,9 @@ listenRequiredServers(listeners).then(() => {
     // Initialize Silero VAD (silence trimming before Whisper) — fails soft if model absent
     const vadOk = initSileroVAD()
     console.log(`[startup] Silero VAD: ${vadOk ? 'active' : 'disabled (model not found)'}`)
+    // 6.61.0: warm Nemotron in the background (the first Neural Engine compile
+    // takes 15-30 s). Chunks use the voiceprint until it is warm; never awaited.
+    startNemotronWarmup()
   }
 
   // Durable recovery starts with the admitted runtime by default. A literal
