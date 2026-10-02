@@ -44,7 +44,7 @@ const RECOVERY_T = ['server/routes/transcribe-stream-recovery-segments.test.ts']
 const ENROL = 'server/lib/meeting-relabel-enrolment.ts'
 const PRESSURE = 'QA 6.61.0: the final pass'
 
-const SHORT = 'naming a short track: dominant takes the chunk voiceprint, the other the client label, else Ext'
+const SHORT = 'naming a short track: the dominant takes the chunk voiceprint'
 const COLD = 'a cold model: chunks before the warm-up finishes are `warming`, then Nemotron runs'
 const CONTRACT = 'adds segments in time order and keeps the legacy fields intact'
 const CONSISTENT = 'final relabel with consistent tracks: one map for the whole meeting, original labels kept'
@@ -74,11 +74,10 @@ const mutations = [
   // Naming
   ['single-track-identified', LIVE, '  if (ordered.length === 1) {\n', '  if (false) {\n', 'a one-track chunk takes the whole-chunk voiceprint', LIVE_T],
   ['short-track-identified', LIVE, '      if (track.exclusiveSec >= NAME_TRACK_MIN_SEC && pcm) {\n', '      if (pcm) {\n', SHORT, LIVE_T],
-  ['short-track-never-client', LIVE, "      names.set(track.channel, { speaker: isRealLabel(client) && client !== dominantName ? client : 'Ext', similarity: 0 })\n", "      names.set(track.channel, { speaker: 'Ext', similarity: 0 })\n", SHORT, LIVE_T],
-  ['short-track-repeats-dominant', LIVE, "isRealLabel(client) && client !== dominantName ? client : 'Ext'", "isRealLabel(client) ? client : 'Ext'", SHORT, LIVE_T],
+  ['client-guard-counts-dominant', LIVE, '      if (isRealLabel(client) && client !== dominantName) ownerGuard.client_label++\n', '      if (isRealLabel(client)) ownerGuard.client_label++\n', SHORT, LIVE_T],
   ['unknown-is-a-name', LIVE, "  return value.length > 0 && value !== 'Unknown' && value !== 'Ext'\n", '  return value.length > 0\n', SHORT, LIVE_T],
   ['speaker-from-wordless-voice', LIVE, '    if (!names.has(track.channel) || !used.has(track.channel)) continue\n', '    if (!names.has(track.channel)) continue\n', 'the chunk speaker is the voice that carries the words', LIVE_T],
-  ['track-name-not-used', LIVE, '        if (named) { names.set(track.channel, named); identified++; continue }\n', '', 'two long tracks are each named by the voiceprint', LIVE_T],
+  ['track-name-not-used', LIVE, '        if (named) { names.set(track.channel, ownerSafe(named)); identified++; continue }\n', '', 'two long tracks are each named by the voiceprint', LIVE_T],
   // Fallbacks and the runtime
   ['fallback-reason-dropped', LIVE, "    diarizer: { engine: 'voiceprint', fallback: reason },\n", "    diarizer: { engine: 'voiceprint' },\n", 'fallback on timeout: the voiceprint label, no segments, the reason recorded', LIVE_T],
   ['config-counts-as-fallback', LIVE, "    if (outcome.reason === 'embedding_requested' || STATIC_REASONS.has(outcome.reason)) {\n", "    if (STATIC_REASONS.has(outcome.reason)) {\n", 'the voiceprint chosen by config is not a fallback and records nothing', LIVE_T],
@@ -106,7 +105,7 @@ const mutations = [
   ['crowded-ignored', FINAL, '  const crowded = isCrowded(identities, channelsUsed.size)\n', '  const crowded = false\n', 'gets no meeting-wide map; the live Nemotron turns still apply', FINAL_T],
   ['identities-not-crowded', FINAL, '  return identities > FINAL_MAX_IDENTITIES || channelsUsed >= FINAL_MAX_CHANNELS\n', '  return channelsUsed >= FINAL_MAX_CHANNELS\n', 'is more than four identities or all eight channels', FINAL_T],
   ['channels-not-crowded', FINAL, '  return identities > FINAL_MAX_IDENTITIES || channelsUsed >= FINAL_MAX_CHANNELS\n', '  return identities > FINAL_MAX_IDENTITIES\n', 'is more than four identities or all eight channels', FINAL_T],
-  ['live-turns-ignored-in-final', FINAL, '        name = (start && liveSpeakerAt(start.window.chunk, start.inChunk)) ?? original\n', '        name = original\n', 'gets no meeting-wide map; the live Nemotron turns still apply', FINAL_T],
+  ['live-turns-ignored-in-final', FINAL, '        name = (start && liveSpeakerAt(start.window.chunk, start.inChunk, owner))\n', '        name = null\n', 'gets no meeting-wide map; the live Nemotron turns still apply', FINAL_T],
   ['purity-ignored', FINAL, '    const accepted = top !== null && support >= minSupport && share >= purity\n', '    const accepted = top !== null && support >= minSupport\n', SHARED, FINAL_T],
   ['support-ignored', FINAL, '    const accepted = top !== null && support >= minSupport && share >= purity\n', '    const accepted = top !== null && share >= purity\n', SHARED, FINAL_T],
   ['similarity-floor-ignored', FINAL, '    if (!isName(chunk.speaker) || !(Number(chunk.similarity) >= minSimilarity)) continue\n', '    if (!isName(chunk.speaker)) continue\n', SHARED, FINAL_T],
