@@ -597,8 +597,9 @@ is split into turns instead of carrying one label.
   `segments: [{ speaker, text, startSec, endSec, similarity }]` in time order;
   their texts joined with one space equal `text`. A track with at least 2 s of
   its own audio is named by the voiceprint on that audio; a shorter one takes the
-  chunk's voiceprint when it is the dominant voice, otherwise the client's label
-  (when that is a real name different from the dominant one) or `Ext`. The
+  chunk's voiceprint when it is the dominant voice, otherwise it is `Ext`. The
+  glasses' default wearer label never names a track, and in a split chunk the
+  wearer is named only at owner-verify confidence (0.65; since 6.61.1). The
   segments are stored on the chunk, so the saved meeting keeps them.
 - **The final transcript.** When a meeting is saved, one Nemotron pass over the
   whole meeting maps each channel to a name from the chunks the voiceprint was

@@ -42,6 +42,7 @@ const require = createRequire(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 import { DATA_DIR } from './data-dir.js'
+import { OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
 
 export const SPEAKER_MODEL_FILENAME = '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx'
 
@@ -86,7 +87,7 @@ const PROFILES_PATH = resolve(DATA_DIR, 'voice-profiles.json')
 const CALIBRATION_LOG = resolve(DATA_DIR, 'speaker-calibration.jsonl')
 
 // Thresholds
-const VERIFY_THRESHOLD = 0.65
+const VERIFY_THRESHOLD = OWNER_VERIFY_SIMILARITY
 const SEARCH_THRESHOLD = 0.55
 /** The bar `autoEnroll` enrols at. From 6.45.4 also the bar at which a held
  *  group is offered as a person with one click ("high"): the identifier would

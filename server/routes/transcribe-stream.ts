@@ -9,7 +9,7 @@ import { chmodSync, readFileSync, writeFileSync, existsSync, lstatSync, mkdirSyn
 import { writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { getVocabulary, getOwnerName } from '../lib/profile.js'
+import { getVocabulary, getOwnerName, getOwnerSpeakerLabel } from '../lib/profile.js'
 import { getOpenAIKey } from '../lib/openai-key.js'
 import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from '../lib/transcription-policy.js'
 import { STRANDED_STALE_MS } from '../lib/stranded-sessions.js'
@@ -1908,6 +1908,11 @@ async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Bu
   }
 }
 
+/** The wearer's label for the 6.61.1 owner guard; null when the profile cannot say. */
+function ownerLabelOrNull(): string | null {
+  try { return getOwnerSpeakerLabel() } catch { return null }
+}
+
 function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
   const expectedSpeakers = undefined
   const audioDurationSec = Math.max(0, (audioBuffer.length - 44)) / 32000
@@ -2155,6 +2160,7 @@ async function processStreamChunk(opts: {
         audio: audioBuffer,
         voiceprint,
         clientSpeaker,
+        owner: ownerLabelOrNull(),
         identify: wav => {
           const named = identifySpeaker(wav, undefined, { event: 'nemotron-track' })
           return named ? { speaker: named.speaker, similarity: named.similarity } : null

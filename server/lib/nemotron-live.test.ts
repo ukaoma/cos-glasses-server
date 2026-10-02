@@ -73,29 +73,29 @@ describe('naming the tracks of one chunk', () => {
     expect(result.speaker).toBe('Silas Larson')
   })
 
-  it('naming a short track: dominant takes the chunk voiceprint, the other the client label, else Ext', () => {
+  it('naming a short track: the dominant takes the chunk voiceprint, any other short track is Ext, never the client label (6.61.1)', () => {
     const base = {
       // Dominant channel 2 speaks 0-4.5 s; channel 6 interjects 5-5.8 s (0.8 s: too short to name).
       activity: activityOf(6, [[2, 0, 4.5], [6, 5, 5.8]]),
       text: 'We should hold the budget until Monday. Right.',
       audio: wavOf(6, () => 300),
       identify: signVoiceprint({ positive: 'Silas Larson', negative: 'MU' }),
+      owner: 'MU',
     }
+    // The glasses send their default wearer label; it is not evidence of who spoke.
     const withClient = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 }, clientSpeaker: 'MU' })
     if (!withClient.ok) throw new Error(withClient.reason)
     expect(withClient.segments.map(s => [s.speaker, s.text])).toEqual([
       ['Silas Larson', 'We should hold the budget until Monday.'],
-      ['MU', 'Right.'],
+      ['Ext', 'Right.'],
     ])
-    expect(withClient.segments[1].similarity).toBe(0)
-    // The client label equals the dominant name: never repeat it onto another voice.
-    const sameClient = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 }, clientSpeaker: 'Silas Larson' })
-    if (!sameClient.ok) throw new Error(sameClient.reason)
-    expect(sameClient.segments.map(s => s.speaker)).toEqual(['Silas Larson', 'Ext'])
-    // Unknown is not a name.
-    const unknown = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 }, clientSpeaker: 'Unknown' })
-    if (!unknown.ok) throw new Error(unknown.reason)
-    expect(unknown.segments.map(s => s.speaker)).toEqual(['Silas Larson', 'Ext'])
+    expect(withClient.ownerGuard).toEqual({ client_label: 1, weak_owner: 0 })
+    for (const clientSpeaker of ['Silas Larson', 'Unknown', 'Ext']) {
+      const other = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 }, clientSpeaker })
+      if (!other.ok) throw new Error(other.reason)
+      expect(other.segments.map(s => s.speaker)).toEqual(['Silas Larson', 'Ext'])
+      expect(other.ownerGuard).toEqual({ client_label: 0, weak_owner: 0 })
+    }
   })
 
   it('a track the voiceprint cannot name (Ext) stays Ext; a name is never invented', () => {
@@ -142,8 +142,10 @@ describe('naming the tracks of one chunk', () => {
       identify: () => ({ speaker: 'Silas Larson', similarity: 0.7 }),
     })
     if (!result.ok) throw new Error(result.reason)
-    expect(result.segments.map(s => s.speaker)).toEqual(['MU'])
-    expect(result.speaker).toBe('MU')
+    // Channel 0 carries every word but has no audio of its own to name: Ext, not
+    // the client's MU (6.61.1) and not the louder wordless Silas.
+    expect(result.segments.map(s => s.speaker)).toEqual(['Ext'])
+    expect(result.speaker).toBe('Ext')
   })
 
   it('reports no_speech when Nemotron heard nothing', () => {
@@ -477,5 +479,113 @@ describe('turns always join to the text', () => {
       .toEqual([{ speaker: 'MU', text: 'alpha bravo noise delta', startSec: 0, endSec: 6, similarity: 0.9 }])
     // A word rewritten: the turns cannot be trusted.
     expect(resplitSegments(turns, 'alpha brave charlie')).toBeUndefined()
+  })
+})
+
+describe('6.61.1 owner guard: the field chunks of 2026-10-02 (meeting_1790953219564_yhwyxs)', () => {
+  // Rebuilt from the stored chunk records: text, turns, voiceprints and Even Hub
+  // shares as they were; positive samples on one channel, negative on the other,
+  // so the fake voiceprint answers per track exactly as the live one did.
+  const identifyAs = (positive: VoiceprintLike, negative: VoiceprintLike) => (wav: Buffer) => (wav.readInt16LE(44) >= 0 ? positive : negative)
+  type VoiceprintLike = { speaker: string; similarity: number }
+  const EXT = { speaker: 'Ext', similarity: 0 }
+
+  it('chunk 150 "Okay." (self 19/121): the short second voice is not the wearer', () => {
+    const result = nameChunkSegments({
+      activity: activityOf(6.06, [[0, 0, 5.3], [1, 5.3, 6.06]]),
+      text: 'to make sure it is getting billed because 29th is like when we will fire the billing. Okay.',
+      audio: wavOf(6.06, t => (t < 5.3 ? 400 : -400)),
+      chunkVoiceprint: EXT, clientSpeaker: 'MU', owner: 'MU',
+      identify: identifyAs(EXT, EXT),
+    })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.segments.some(s => s.speaker === 'MU')).toBe(false)
+    expect(result.ownerGuard.client_label).toBe(1)
+  })
+
+  it('chunk 157 "I can send a message. Yeah." (self 3/125): not the wearer; Kyle keeps his own track', () => {
+    const result = nameChunkSegments({
+      activity: activityOf(6.26, [[1, 0, 1.9], [0, 2.3, 6.26]]),
+      text: 'I can send a message. Yeah. There is still time on this. I pinged you and Silas earlier on at this meeting.',
+      audio: wavOf(6.26, t => (t < 2.1 ? -400 : 400)),
+      chunkVoiceprint: EXT, clientSpeaker: 'MU', owner: 'MU',
+      identify: identifyAs({ speaker: 'Kyle Johnson', similarity: 0.626 }, EXT),
+    })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.segments.map(s => s.speaker)).toEqual(['Ext', 'Kyle Johnson'])
+    expect(result.speaker).toBe('Kyle Johnson')
+  })
+
+  it('chunk 132 "Of course. All right." at 0.612 (self 42/124): a weak wearer match is Ext', () => {
+    const result = nameChunkSegments({
+      activity: activityOf(6.21, [[0, 0.6, 3.0], [1, 3.0, 6.21]]),
+      text: 'Of course. All right. Over to Nialla.',
+      audio: wavOf(6.21, t => (t < 3.0 ? 400 : -400)),
+      chunkVoiceprint: EXT, clientSpeaker: 'MU', owner: 'MU',
+      identify: identifyAs({ speaker: 'MU', similarity: 0.612 }, EXT),
+    })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.segments.some(s => s.speaker === 'MU')).toBe(false)
+    expect(result.ownerGuard).toEqual({ client_label: 0, weak_owner: 1 })
+  })
+
+  it('the wearer stays the wearer: chunk 103 (one track, 0.703) and a split chunk at 0.716 (chunk 129)', () => {
+    const single = nameChunkSegments({
+      activity: activityOf(5.8, [[0, 0, 5.8]]),
+      text: "Had mentioned in like the areas that we're really focusing, we're seeing good progress quarter over quarter and year over year.",
+      audio: wavOf(5.8, () => 400),
+      chunkVoiceprint: { speaker: 'MU', similarity: 0.703 }, clientSpeaker: 'MU', owner: 'MU',
+      identify: () => { throw new Error('a one-track chunk is never re-identified') },
+    })
+    if (!single.ok) throw new Error(single.reason)
+    expect(single.segments.map(s => s.speaker)).toEqual(['MU'])
+    const split = nameChunkSegments({
+      activity: activityOf(6.3, [[0, 0, 3.4], [1, 3.6, 6.3]]),
+      text: "That's it. We've, uh, we've done the full rollout. Over to you on the next one.",
+      audio: wavOf(6.3, t => (t < 3.5 ? 400 : -400)),
+      chunkVoiceprint: { speaker: 'MU', similarity: 0.716 }, clientSpeaker: 'MU', owner: 'MU',
+      identify: identifyAs({ speaker: 'MU', similarity: 0.716 }, { speaker: 'Jeremy Sokolic', similarity: 0.7 }),
+    })
+    if (!split.ok) throw new Error(split.reason)
+    expect(split.segments.map(s => s.speaker)).toEqual(['MU', 'Jeremy Sokolic'])
+    expect(split.ownerGuard).toEqual({ client_label: 0, weak_owner: 0 })
+  })
+
+  it('a weak wearer match is refused on either path: the whole-chunk voiceprint a short dominant turn takes, and the track check', () => {
+    // (a) The dominant turn is too short to check on its own, so it would take the whole chunk's weak MU.
+    const short = nameChunkSegments({
+      activity: activityOf(4, [[0, 0, 1.8], [1, 2.0, 3.2]]),
+      text: 'We moved the launch. Right.',
+      audio: wavOf(4, t => (t < 1.9 ? 400 : -400)),
+      chunkVoiceprint: { speaker: 'MU', similarity: 0.6 }, clientSpeaker: 'MU', owner: 'MU',
+      identify: () => { throw new Error('no track here has 2 s of its own audio') },
+    })
+    if (!short.ok) throw new Error(short.reason)
+    expect(short.segments.some(s => s.speaker === 'MU')).toBe(false)
+    expect(short.ownerGuard.weak_owner).toBe(1)
+    // (b) The dominant turn has 4 s of its own audio, and its own check is a weak wearer match.
+    const long = nameChunkSegments({
+      activity: activityOf(6, [[0, 0, 4], [1, 4.2, 5.4]]),
+      text: 'We moved the launch to next week. Right.',
+      audio: wavOf(6, t => (t < 4.1 ? 400 : -400)),
+      chunkVoiceprint: EXT, clientSpeaker: 'Ext', owner: 'MU',
+      identify: identifyAs({ speaker: 'MU', similarity: 0.58 }, EXT),
+    })
+    if (!long.ok) throw new Error(long.reason)
+    expect(long.segments.some(s => s.speaker === 'MU')).toBe(false)
+    expect(long.ownerGuard).toEqual({ client_label: 0, weak_owner: 1 })
+  })
+
+  it('logs one owner-guard line per chunk and counts it in health', () => {
+    const lines: string[] = []
+    const runtime = new NemotronLiveRuntime({ env: () => ({ COS_DIARIZER: 'nemotron' }), log: l => lines.push(l) })
+    runtime.record({ sessionId: 's', chunkIndex: 150 }, { outcome: 'nemotron', ms: 170, segments: 2, tracks: 2, timing: 'estimated', identified: 1, ownerGuard: { client_label: 1, weak_owner: 0 } })
+    runtime.record({ sessionId: 's', chunkIndex: 151 }, { outcome: 'nemotron', ms: 170, segments: 1, tracks: 1, timing: 'estimated', identified: 0 })
+    expect(lines).toEqual([
+      '[diarizer] chunk #150 nemotron 170 ms tracks=2 segments=2 timing=estimated named=1',
+      '[diarizer] owner-guard chunk #150 refused=1 client_label=1 weak_owner=0',
+      '[diarizer] chunk #151 nemotron 170 ms tracks=1 segments=1 timing=estimated named=0',
+    ])
+    expect(runtime.snapshot().ownerGuard).toEqual({ client_label: 1, weak_owner: 0 })
   })
 })

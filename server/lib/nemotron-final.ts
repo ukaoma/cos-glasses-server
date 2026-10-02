@@ -41,6 +41,8 @@ import {
   prepareNemotronModelsDir,
 } from './diarizer-backend.js'
 import { CONFIDENT_SIMILARITY, isUnattributed } from './meeting-speaker-review.js'
+import { getOwnerSpeakerLabel } from './profile.js'
+import { OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
 import {
   NEMOTRON_TMP_PREFIX,
   NemotronRunError,
@@ -265,6 +267,10 @@ export function crowdIdentities(windows: TimelineWindow[]): number {
   return [...counts.values()].filter(count => count >= FINAL_MIN_SUPPORT).length
 }
 
+function ownerLabelOrNull(): string | null {
+  try { return getOwnerSpeakerLabel() } catch { return null }
+}
+
 function isName(label: unknown): label is string {
   return typeof label === 'string' && !isUnattributed(label.trim())
 }
@@ -332,7 +338,21 @@ export function mapChannelsToNames(windows: TimelineWindow[], a: Activity, optio
 }
 
 /** The live segment that held chunk-relative time t, else null. */
-function liveSpeakerAt(chunk: SidecarChunk, t: number): string | null {
+/**
+ * 6.61.1 owner guard for per-chunk names. 6.61.0 named split tracks as the wearer
+ * from the glasses' default label (similarity 0) or a weak search match
+ * (0.55 to 0.65). In a chunk with more than one live turn, the wearer's name
+ * counts only at owner-verify confidence; otherwise it is Ext. A one-turn chunk
+ * keeps its label exactly as 6.60.0 gave it.
+ */
+export function guardOwnerName(name: string, similarity: unknown, chunk: SidecarChunk, owner: string | null | undefined): string {
+  if (!owner || name !== owner) return name
+  const split = Array.isArray(chunk.segments) && chunk.segments.length > 1
+  if (!split) return name
+  return Number(similarity) >= OWNER_VERIFY_SIMILARITY ? name : 'Ext'
+}
+
+function liveSpeakerAt(chunk: SidecarChunk, t: number, owner?: string | null): string | null {
   const segments = chunk.segments
   if (!Array.isArray(segments) || segments.length === 0) return null
   let best: ChunkSpeakerSegment | null = null
@@ -344,7 +364,7 @@ function liveSpeakerAt(chunk: SidecarChunk, t: number): string | null {
     const d = t < s ? s - t : t > e ? t - e : 0
     if (d < distance) { distance = d; best = segment }
   }
-  return best && typeof best.speaker === 'string' ? best.speaker : null
+  return best && typeof best.speaker === 'string' ? guardOwnerName(best.speaker, best.similarity, chunk, owner) : null
 }
 
 export interface RelabelStats {
@@ -383,6 +403,7 @@ export function relabelBatchSegments(
   timeline: MeetingTimeline,
   a: Activity,
   map: Map<number, string>,
+  owner?: string | null,
 ): { segments: SidecarBatchSegment[]; stats: RelabelStats } {
   const stats: RelabelStats = { total: 0, relabeled: 0, viaChannel: 0, kept: 0 }
   const out = segments.map(segment => ({
@@ -399,7 +420,8 @@ export function relabelBatchSegments(
       }
       if (name === null) {
         stats.kept++
-        name = (start && liveSpeakerAt(start.window.chunk, start.inChunk)) ?? original
+        name = (start && liveSpeakerAt(start.window.chunk, start.inChunk, owner))
+          ?? (start ? guardOwnerName(original, start.window.chunk.similarity, start.window.chunk, owner) : original)
       }
       if (name !== word.speaker) stats.relabeled++
       const next: SpeakerWord = { ...word, speaker: name }
@@ -441,6 +463,7 @@ export function relabelStreamingChunks(
   timeline: MeetingTimeline,
   a: Activity,
   map: Map<number, string>,
+  owner?: string | null,
 ): { finals: Map<number, { speaker: string; segments: ChunkSpeakerSegment[] }>; stats: RelabelStats } {
   const stats: RelabelStats = { total: 0, relabeled: 0, viaChannel: 0, kept: 0 }
   const finals = new Map<number, { speaker: string; segments: ChunkSpeakerSegment[] }>()
@@ -449,17 +472,17 @@ export function relabelStreamingChunks(
     if (typeof chunk.text !== 'string' || !chunk.text.trim()) continue
     const tokens = splitTokens(chunk.text)
     const times = streamingTokenTimes(chunk, tokens, window, a)
-    const base = typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker
+    const base = guardOwnerName(typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker, chunk.similarity, chunk, owner)
     const labels: string[] = []
     let carry: string | null = null
     for (let i = 0; i < tokens.length; i++) {
-      if (!isWordToken(tokens[i]) || !times) { labels.push(carry ?? liveSpeakerAt(chunk, 0) ?? base); continue }
+      if (!isWordToken(tokens[i]) || !times) { labels.push(carry ?? liveSpeakerAt(chunk, 0, owner) ?? base); continue }
       stats.total++
       const span = times[i]
       const channel = channelForSpan(a, window.start + span.start, window.start + Math.max(span.end, span.start + 0.01))
       let name: string
       if (channel !== null && map.has(channel)) { name = map.get(channel)!; stats.viaChannel++ }
-      else { name = liveSpeakerAt(chunk, span.start) ?? base; stats.kept++ }
+      else { name = liveSpeakerAt(chunk, span.start, owner) ?? base; stats.kept++ }
       labels.push(name)
       carry = name
     }
@@ -646,6 +669,8 @@ export interface FinalPassOptions {
   tmpRoot?: string
   log?: (line: string) => void
   now?: () => number
+  /** The wearer's label, for the 6.61.1 owner guard (default: the profile's). */
+  owner?: string | null
   /** Seam: how files are written (durable atomic by default). */
   write?: (path: string, data: string) => void
   /** Seam: the batch relabeller (word-aligned in place by default). */
@@ -758,6 +783,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
 
   const sidecarText = readFileSync(options.sidecarPath, 'utf8')
   const sidecar = JSON.parse(sidecarText) as Record<string, any>
+  const owner = options.owner !== undefined ? options.owner : ownerLabelOrNull()
   if (Number(sidecar.correctionRevision ?? 0) > 0) return { status: 'skipped', reason: 'human_corrected' }
   const markdown = readFileSync(options.meetingPath, 'utf8')
   const transcript = readTranscriptSection(markdown)
@@ -833,7 +859,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     mode = 'batch'
     const segments = (Array.isArray(sidecar.batchSegments) ? sidecar.batchSegments : []) as SidecarBatchSegment[]
     if (!segments.length) return { status: 'skipped', reason: 'no_speaker_words' }
-    const relabeled = relabelBatchSegments(segments, timeline, activity, mapping.map)
+    const relabeled = relabelBatchSegments(segments, timeline, activity, mapping.map, owner)
     stats = relabeled.stats
     // finalizeBatch wrote labelled turns only when every segment had speaker words.
     const selected = selectBatchTranscriptForPersistence(
@@ -850,7 +876,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     if (typeof sidecar.batchTranscript === 'string') nextSidecar.batchTranscript = next
   } else {
     mode = 'streaming'
-    const relabeled = relabelStreamingChunks(timeline, activity, mapping.map)
+    const relabeled = relabelStreamingChunks(timeline, activity, mapping.map, owner)
     stats = relabeled.stats
     const textEntries = entries.filter(entry => typeof entry.chunk?.text === 'string' && entry.chunk.text.trim())
     next = relabelStreamingTranscript(transcript, textEntries.map(entry => ({ chunkIndex: entry.chunkIndex, text: entry.chunk.text })), relabeled.finals)

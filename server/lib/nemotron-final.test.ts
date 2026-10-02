@@ -12,6 +12,7 @@ import {
   crowdIdentities,
   finalPassSnapshot,
   finalPassTimeoutMs,
+  guardOwnerName,
   recordFinalPassSkip,
   relabelTranscriptWords,
   isCrowded,
@@ -473,5 +474,37 @@ describe('QA 6.61.0: a pass the save path declines is still counted', () => {
     expect(finalPassSnapshot().counts['skipped:metadata_not_persisted']).toBe(before + 1)
     expect(finalPassSnapshot().last).toMatchObject({ status: 'skipped', reasonCode: 'metadata_not_persisted' })
     expect(lines).toEqual(['[diarizer] final pass skipped: metadata_not_persisted (the batch transcript was applied but its sidecar was not written); the saved transcript is unchanged'])
+  })
+})
+
+describe('6.61.1 owner guard in the final pass', () => {
+  it('a split chunk 6.61.0 named MU from the glasses label is not carried into the final transcript', async () => {
+    // Chunk 2's audio does not match its hash, so Silas's channel has too little evidence to map:
+    // chunk 7's words fall back to their per-chunk turns, where 6.61.0 put a similarity-0 MU.
+    const f = meeting({ batch: true, tamperWav: 2 })
+    const doc = JSON.parse(f.sidecarText)
+    const turns = [
+      { speaker: 'MU', text: 'alpha7 bravo7', startSec: 0, endSec: 2.5, similarity: 0 },
+      { speaker: 'Ext', text: 'charlie7 delta7', startSec: 2.5, endSec: 6, similarity: 0 },
+    ]
+    doc.chunkEntries[7].chunk.segments = turns
+    doc.chunks[7].segments = turns
+    writeFileSync(f.sidecarPath, JSON.stringify(doc, null, 2))
+    const outcome = await runNemotronFinalPass(opts(f, fakeRun(), { owner: 'MU' }))
+    // Without the guard chunk 7 would turn MU and the pass would apply that.
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'no_change' })
+    const words = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).batchSegments.flatMap((s: any) => s.speakerWords)
+    for (const w of ['alpha7', 'bravo7']) expect(words.find((x: any) => x.word === w).speaker).not.toBe('MU')
+    // A confident wearer turn in a split chunk stays the wearer.
+    expect(words.find((x: any) => x.word === 'alpha5').speaker).toBe('MU')
+  })
+
+  it('guardOwnerName: the wearer in a split chunk needs owner-verify confidence; a one-turn chunk keeps its label', () => {
+    const split = { text: 'a b', speaker: 'MU', elapsed: 0, similarity: 0.6, segments: [{ speaker: 'MU', text: 'a' }, { speaker: 'Ext', text: 'b' }] }
+    expect(guardOwnerName('MU', 0.612, split, 'MU')).toBe('Ext')
+    expect(guardOwnerName('MU', 0, split, 'MU')).toBe('Ext')
+    expect(guardOwnerName('MU', 0.65, split, 'MU')).toBe('MU')
+    expect(guardOwnerName('Jeremy Sokolic', 0.56, split, 'MU')).toBe('Jeremy Sokolic')
+    expect(guardOwnerName('MU', 0.6, { ...split, segments: [{ speaker: 'MU', text: 'a b' }] }, 'MU')).toBe('MU')
   })
 })

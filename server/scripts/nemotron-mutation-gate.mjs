@@ -29,6 +29,7 @@ const FINAL = 'server/lib/nemotron-final.ts'
 const STREAM = 'server/routes/transcribe-stream.ts'
 const MEETING = 'server/routes/meeting.ts'
 const HEALTH = 'server/routes/health.ts'
+const FLOOR = 'server/lib/voiceprint-floor.ts'
 const BACKEND_T = ['server/lib/diarizer-backend.test.ts']
 const CLI_T = ['server/lib/nemotron-cli.test.ts']
 const SEG_T = ['server/lib/nemotron-segments.test.ts']
@@ -155,6 +156,16 @@ const mutations = [
   ['excluded-not-logged', FINAL, "  if (!e || e.missing + e.hashMismatch + e.unreadable === 0) return ''\n", "  return ''\n", 'logs every outcome: a failed CLI, excluded chunks', FINAL_T],
   ['final-timeout-changed', FINAL, '  return 120_000 + Math.round((durationSec * 1000) / 20)\n', '  return 120_000 + Math.round((durationSec * 1000) / 10)\n', 'pins the timeout formula', FINAL_T],
   ['declined-pass-uncounted', FINAL, '  finalCounts[key] = (finalCounts[key] ?? 0) + 1\n  lastFinal = published\n', '', 'records metadata_not_persisted as a code', FINAL_T],
+  // 6.61.1 owner guard (field bug 2026-10-02: Jeremy and Kyle labelled MU)
+  ['client-label-names-track', LIVE, "      names.set(track.channel, { speaker: 'Ext', similarity: 0 })\n", "      names.set(track.channel, { speaker: isRealLabel(client) && client !== dominantName ? client : 'Ext', similarity: 0 })\n", 'chunk 150 "Okay."', LIVE_T],
+  ['weak-owner-accepted', LIVE, '      if (!owner || named.speaker !== owner || named.similarity >= OWNER_VERIFY_SIMILARITY) return named\n', '      return named\n', 'chunk 132 "Of course. All right." at 0.612', LIVE_T],
+  ['owner-threshold-is-search', FLOOR, 'export const OWNER_VERIFY_SIMILARITY = 0.65\n', 'export const OWNER_VERIFY_SIMILARITY = 0.55\n', 'chunk 132 "Of course. All right." at 0.612', LIVE_T],
+  ['track-identify-unguarded', LIVE, '        if (named) { names.set(track.channel, ownerSafe(named)); identified++; continue }\n', '        if (named) { names.set(track.channel, named); identified++; continue }\n', 'chunk 132 "Of course. All right." at 0.612', LIVE_T],
+  ['dominant-voiceprint-unguarded', LIVE, '      if (track.channel === dominant) { names.set(track.channel, ownerSafe(input.chunkVoiceprint)); continue }\n', '      if (track.channel === dominant) { names.set(track.channel, input.chunkVoiceprint); continue }\n', 'a weak wearer match is refused on either path', LIVE_T],
+  ['owner-guard-not-logged', LIVE, '        this.log(`[diarizer] owner-guard chunk', '        if (false) this.log(`[diarizer] owner-guard chunk', 'logs one owner-guard line per chunk', LIVE_T],
+  ['owner-not-passed', STREAM, '        owner: ownerLabelOrNull(),\n', '', 'own profile (owner_speaker_label) guards a split chunk', ROUTE_T],
+  ['final-owner-unguarded', FINAL, "  return Number(similarity) >= OWNER_VERIFY_SIMILARITY ? name : 'Ext'\n", '  return name\n', 'a split chunk 6.61.0 named MU from the glasses label', FINAL_T],
+  ['final-live-turn-unguarded', FINAL, "  return best && typeof best.speaker === 'string' ? guardOwnerName(best.speaker, best.similarity, chunk, owner) : null\n", "  return best && typeof best.speaker === 'string' ? best.speaker : null\n", 'a split chunk 6.61.0 named MU from the glasses label', FINAL_T],
   // Health
   ['health-not-honest', HEALTH, '    diarizer: { ...nemotronLive.snapshot(), final: finalPassSnapshot() },\n', "    diarizer: 'nemotron',\n", 'readiness.diarizer says what labels a chunk now', HEALTH_T],
 ]

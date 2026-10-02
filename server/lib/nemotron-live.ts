@@ -55,6 +55,7 @@ import {
   type TokenTime,
 } from './nemotron-segments.js'
 import type { WhisperWord } from './whisper-local.js'
+import { OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
 
 /** The chunk response contract shared with COS Glasses 6.9.567. Keep this shape. */
 export interface ChunkSpeakerSegment {
@@ -78,8 +79,10 @@ export interface LiveNamingInput {
   audio: Buffer
   /** Today's whole-chunk voiceprint result. */
   chunkVoiceprint: VoiceprintResult
-  /** The client's own label (amplitude / Even Hub), e.g. the owner or Ext. */
+  /** The client's own label (amplitude / Even Hub), e.g. the owner or Ext. Never names a split track. */
   clientSpeaker: string
+  /** The wearer's label (`owner_speaker_label`), for the owner guard. */
+  owner?: string | null
   identify: (wav: Buffer) => VoiceprintResult | null
 }
 
@@ -92,6 +95,8 @@ export type LiveNamingResult =
       tracks: number
       timing: 'words' | 'estimated'
       identified: number
+      /** Would-be wearer names refused in this chunk, by reason. */
+      ownerGuard: { client_label: number; weak_owner: number }
     }
   | { ok: false; reason: 'no_text' | 'no_speech' }
 
@@ -105,14 +110,19 @@ function isRealLabel(label: string): boolean {
 /**
  * Split one chunk's text into named segments. Pure apart from `identify`.
  *
- * Naming rules (2026-10-02 brief):
- *  - one track: it is the whole chunk, so it takes the chunk's voiceprint result;
+ * Naming rules (2026-10-02 brief, 6.61.1 owner guard):
+ *  - one track: it is the whole chunk, so it takes the chunk's voiceprint result,
+ *    exactly as 6.60.0 labelled the chunk (including the client's label when no
+ *    voiceprint could run);
  *  - two or more: each track with at least NAME_TRACK_MIN_SEC of its own audio is
- *    named by the voiceprint on that audio;
- *  - a shorter track takes the chunk's voiceprint when it is the dominant track,
- *    otherwise the client's label when that is a real name different from the
- *    dominant one, otherwise Ext. A name is never invented and the voiceprint's
- *    own thresholds decide every name it gives.
+ *    named by the voiceprint on that audio; a shorter dominant track takes the
+ *    chunk's voiceprint; any other short track is Ext;
+ *  - in a split chunk the WEARER is named only at owner-verify confidence
+ *    (OWNER_VERIFY_SIMILARITY). A full search can return the wearer from 0.55,
+ *    and the client's label is the glasses' default wearer label, not identity
+ *    evidence: on 2026-10-02 both named other people (Jeremy, Kyle) as the
+ *    wearer. Either becomes Ext and is counted (`ownerGuard`).
+ * A name is never invented.
  * The segments' texts joined with one space equal `text` exactly.
  */
 export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
@@ -139,6 +149,7 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
   const used = new Set(labels)
 
   const names = new Map<number, VoiceprintResult>()
+  const ownerGuard = { client_label: 0, weak_owner: 0 }
   let identified = 0
   const pcm = readPcm16Mono(input.audio)
   const ordered = tracks.filter(track => used.has(track.channel))
@@ -146,16 +157,25 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
   if (ordered.length === 1) {
     names.set(ordered[0].channel, input.chunkVoiceprint)
   } else {
+    const owner = input.owner?.trim() || null
+    const ownerSafe = (named: VoiceprintResult): VoiceprintResult => {
+      if (!owner || named.speaker !== owner || named.similarity >= OWNER_VERIFY_SIMILARITY) return named
+      ownerGuard[named.similarity > 0 ? 'weak_owner' : 'client_label']++
+      return { speaker: 'Ext', similarity: 0 }
+    }
     for (const track of ordered) {
       if (track.exclusiveSec >= NAME_TRACK_MIN_SEC && pcm) {
         const wav = exclusiveTrackWav(activity, track.channel, pcm)
         const named = wav ? input.identify(wav) : null
-        if (named) { names.set(track.channel, named); identified++; continue }
+        if (named) { names.set(track.channel, ownerSafe(named)); identified++; continue }
       }
-      if (track.channel === dominant) { names.set(track.channel, input.chunkVoiceprint); continue }
+      if (track.channel === dominant) { names.set(track.channel, ownerSafe(input.chunkVoiceprint)); continue }
+      // The client's label is the glasses' default wearer label, not evidence of
+      // who this voice is (6.61.0 named Jeremy Sokolic as MU through it).
       const dominantName = names.get(dominant)?.speaker ?? input.chunkVoiceprint.speaker
       const client = input.clientSpeaker.trim()
-      names.set(track.channel, { speaker: isRealLabel(client) && client !== dominantName ? client : 'Ext', similarity: 0 })
+      if (isRealLabel(client) && client !== dominantName) ownerGuard.client_label++
+      names.set(track.channel, { speaker: 'Ext', similarity: 0 })
     }
   }
 
@@ -196,7 +216,7 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
   let best = -1
   for (const [name, sec] of voiced) if (sec > best) { best = sec; speaker = name }
   const similarity = [...names.values()].find(named => named.speaker === speaker)?.similarity ?? 0
-  return { ok: true, speaker, similarity: round(similarity, 3), segments, tracks: tracks.length, timing, identified }
+  return { ok: true, speaker, similarity: round(similarity, 3), segments, tracks: tracks.length, timing, identified, ownerGuard }
 }
 
 /**
@@ -244,6 +264,8 @@ export interface LiveLabelInput {
   audio: Buffer
   voiceprint: VoiceprintResult
   clientSpeaker: string
+  /** The wearer's label, for the owner guard on split chunks. */
+  owner?: string | null
   identify: (wav: Buffer) => VoiceprintResult | null
   clock?: () => number
 }
@@ -260,10 +282,12 @@ export interface LiveLabels {
     tracks?: number
     timing?: 'words' | 'estimated'
     ms?: number
+    /** 6.61.1: would-be wearer names refused in this chunk (client_label, weak_owner). */
+    ownerGuard?: string[]
   }
   /** What NemotronLiveRuntime.record should log; absent when the voiceprint was chosen by config. */
   record?:
-    | { outcome: 'nemotron'; ms: number; segments: number; tracks: number; timing: string; identified: number }
+    | { outcome: 'nemotron'; ms: number; segments: number; tracks: number; timing: string; identified: number; ownerGuard?: { client_label: number; weak_owner: number } }
     | { outcome: 'voiceprint'; reason: string; ms: number | null; detail?: string }
 }
 
@@ -306,10 +330,15 @@ export async function resolveLiveLabels(input: LiveLabelInput): Promise<LiveLabe
       audio: input.audio,
       chunkVoiceprint: input.voiceprint,
       clientSpeaker: input.clientSpeaker,
+      owner: input.owner,
       identify: input.identify,
     })
     if (!named.ok) return voiceprintOnly(named.reason, ms)
     const changed = named.speaker !== input.voiceprint.speaker
+    const guarded = [
+      ...Array(named.ownerGuard.client_label).fill('client_label'),
+      ...Array(named.ownerGuard.weak_owner).fill('weak_owner'),
+    ] as string[]
     return {
       speaker: named.speaker,
       similarity: named.similarity,
@@ -320,8 +349,12 @@ export async function resolveLiveLabels(input: LiveLabelInput): Promise<LiveLabe
         timing: named.timing,
         ms,
         ...(changed ? { voiceprintSpeaker: input.voiceprint.speaker, voiceprintSimilarity: input.voiceprint.similarity } : {}),
+        ...(guarded.length ? { ownerGuard: guarded } : {}),
       },
-      record: { outcome: 'nemotron', ms, segments: named.segments.length, tracks: named.tracks, timing: named.timing, identified: named.identified },
+      record: {
+        outcome: 'nemotron', ms, segments: named.segments.length, tracks: named.tracks, timing: named.timing, identified: named.identified,
+        ...(guarded.length ? { ownerGuard: named.ownerGuard } : {}),
+      },
     }
   } catch (error) {
     return voiceprintOnly('error', ms, error instanceof Error ? error.message : String(error))
@@ -414,6 +447,8 @@ export interface LiveSnapshot {
   /** Whether the CLI binary is the v0.17.4 build the offline guarantee was verified on. */
   cliKnown: boolean | null
   chunks: { nemotron: number; voiceprint: number; reasons: Record<string, number> }
+  /** 6.61.1: would-be wearer names refused on split chunks since start. */
+  ownerGuard: { client_label: number; weak_owner: number }
   last: { at: string; outcome: 'nemotron' | 'voiceprint'; reason: string | null; ms: number | null } | null
 }
 
@@ -440,6 +475,7 @@ export class NemotronLiveRuntime {
   private modelsDir: string | null = null
   private identity: { path: string; sha256: string; known: boolean } | null = null
   private counts = { nemotron: 0, voiceprint: 0, reasons: {} as Record<string, number> }
+  private ownerGuard = { client_label: 0, weak_owner: 0 }
   private recent: Array<{ outcome: 'nemotron' | 'voiceprint'; reason: string | null }> = []
   private last: LiveSnapshot['last'] = null
   private lastStateLog: string | null = null
@@ -605,7 +641,7 @@ export class NemotronLiveRuntime {
 
   /** Record one chunk's outcome. Run failures are logged per chunk; state reasons once per change. */
   record(chunk: { sessionId: string; chunkIndex: number }, outcome:
-    | { outcome: 'nemotron'; ms: number; segments: number; tracks: number; timing: string; identified: number }
+    | { outcome: 'nemotron'; ms: number; segments: number; tracks: number; timing: string; identified: number; ownerGuard?: { client_label: number; weak_owner: number } }
     | { outcome: 'voiceprint'; reason: string; ms: number | null; detail?: string },
   ): void {
     const at = new Date(this.now()).toISOString()
@@ -615,6 +651,12 @@ export class NemotronLiveRuntime {
       this.pushRecent('nemotron', null)
       this.lastStateLog = null
       this.log(`[diarizer] chunk #${chunk.chunkIndex} nemotron ${outcome.ms} ms tracks=${outcome.tracks} segments=${outcome.segments} timing=${outcome.timing} named=${outcome.identified}`)
+      const guard = outcome.ownerGuard
+      if (guard && guard.client_label + guard.weak_owner > 0) {
+        this.ownerGuard.client_label += guard.client_label
+        this.ownerGuard.weak_owner += guard.weak_owner
+        this.log(`[diarizer] owner-guard chunk #${chunk.chunkIndex} refused=${guard.client_label + guard.weak_owner} client_label=${guard.client_label} weak_owner=${guard.weak_owner}`)
+      }
       return
     }
     this.counts.voiceprint++
@@ -676,6 +718,7 @@ export class NemotronLiveRuntime {
       warm: { state: this.state, ms: this.warmMs, loadSec: this.warmLoadSec, error: this.warmError },
       cliKnown: this.identity ? this.identity.known : null,
       chunks: { nemotron: this.counts.nemotron, voiceprint: this.counts.voiceprint, reasons: { ...this.counts.reasons } },
+      ownerGuard: { ...this.ownerGuard },
       last: this.last,
     }
   }

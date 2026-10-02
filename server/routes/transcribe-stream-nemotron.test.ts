@@ -27,7 +27,7 @@ const TEXT = 'Yeah I agree with that. So the bookings month came in light again.
 // MU speaks the first 2.6 s (positive samples), Silas the rest (negative samples).
 const AUDIO = wavOf(6, t => (t < 2.8 ? 400 : -400))
 
-async function mount(outcome: LiveDiarizeOutcome) {
+async function mount(outcome: LiveDiarizeOutcome, trackSimilarity = 0.83) {
   vi.resetModules()
   const root = mkdtempSync(join(tmpdir(), 'cos-nemotron-route-'))
   roots.push(root)
@@ -43,7 +43,7 @@ async function mount(outcome: LiveDiarizeOutcome) {
     // The whole (mixed) chunk sounds most like MU; each track's own audio is named by its sign.
     identifySpeaker: (wav: Buffer) => wav.length >= 44 + 5 * 32_000
       ? { speaker: 'MU', similarity: 0.61 }
-      : wav.readInt16LE(44) >= 0 ? { speaker: 'MU', similarity: 0.83 } : { speaker: 'Silas Larson', similarity: 0.77 },
+      : wav.readInt16LE(44) >= 0 ? { speaker: 'MU', similarity: trackSimilarity } : { speaker: 'Silas Larson', similarity: 0.77 },
     isEmbeddingAvailable: () => true,
     autoEnroll: vi.fn().mockReturnValue({ enrolled: false, reason: 'test' }),
     getEmbeddingCount: () => 3,
@@ -124,6 +124,14 @@ describe('the live chunk response with Nemotron', () => {
     // A replayed upload of the same canonical chunk returns the same segments.
     const replay = await post(base, 'nemotron_route_a', 0)
     expect(replay.segments).toEqual(body.segments)
+  })
+
+  it('6.61.1: the wearer\'s own profile (owner_speaker_label) guards a split chunk: a weak wearer match is Ext', async () => {
+    const { base, stream, record } = await mount({ ok: true, run: run() }, 0.6)
+    const body = await post(base, 'nemotron_route_guard', 0)
+    expect(body.segments.map((s: any) => s.speaker)).toEqual(['Ext', 'Silas Larson'])
+    expect(stream.getSessionChunks('nemotron_route_guard')![0].diarizer).toMatchObject({ ownerGuard: ['weak_owner'] })
+    expect(record).toHaveBeenCalledWith({ sessionId: 'nemotron_route_guard', chunkIndex: 0 }, expect.objectContaining({ ownerGuard: { client_label: 0, weak_owner: 1 } }))
   })
 
   it('a Nemotron fallback answers exactly like 6.60: the voiceprint label, no segments', async () => {
