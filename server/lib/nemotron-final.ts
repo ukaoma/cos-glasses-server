@@ -878,7 +878,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   if (!sameWords(transcript, next)) return { status: 'skipped', reason: 'word_mismatch', mode, excluded }
   // Both relabellers keep line breaks, so an unchanged transcript means no label
   // changed: nothing is written and no revision moves.
-  if (next === transcript) return { status: 'skipped', reason: 'no_change', mode, words: stats, excluded }
+  if (next === transcript) return { status: 'skipped', reason: 'no_change', mode, words: stats, excluded, crowded, identities, channels: channelsUsed.size }
 
   const speakers = new Set<string>(Array.isArray(sidecar.speakers) ? sidecar.speakers : [])
   for (const line of next.split('\n')) {

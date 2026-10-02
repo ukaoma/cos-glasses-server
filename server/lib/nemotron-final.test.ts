@@ -10,7 +10,9 @@ import { NemotronRunError, type RunNemotronOptions } from './nemotron-cli.js'
 import {
   buildMeetingTimeline,
   crowdIdentities,
+  finalPassSnapshot,
   finalPassTimeoutMs,
+  recordFinalPassSkip,
   relabelTranscriptWords,
   isCrowded,
   mapChannelsToNames,
@@ -183,14 +185,16 @@ describe('the save-time final pass', () => {
   })
 
   it('never loses a word: words cleaning changed or removed stay exactly as saved, and labels stay in step', async () => {
-    // An inserted word (cleaning replaced one) keeps the turn it is in.
+    // An inserted word (cleaning replaced one) keeps the turn it is in, both in a
+    // line the pass leaves whole and in one it splits.
     const f = meeting({ batch: true })
-    writeFileSync(f.meetingPath, f.markdownText.replace('alpha3', 'alpha3 inserted'))
+    writeFileSync(f.meetingPath, f.markdownText.replace('alpha3', 'alpha3 inserted').replace('alpha5', 'alpha5 added'))
     const edited = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
     expect(await runNemotronFinalPass(opts(f, fakeRun()))).toMatchObject({ status: 'applied' })
     const after = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
     expect(transcriptWords(after)).toEqual(transcriptWords(edited))
     expect(after).toContain('[Silas Larson]: alpha2 bravo2 charlie2 delta2 alpha3 inserted bravo3')
+    expect(after).toContain('[MU]: alpha4 bravo4 charlie4 delta4 alpha5 added bravo5\n[Silas Larson]: charlie5 delta5')
 
     // Sixteen words cleaning removed (more than the match window): never resurrected,
     // and the words after them still take their own channel's name.
@@ -459,4 +463,15 @@ describe('QA 6.61.0: nothing outlives the server', () => {
     expect(result.status).toBe(0)
     expect(readdirSync(tmpRoot).filter(name => name.startsWith('cos-nemotron-'))).toEqual([])
   }, 40_000)
+})
+
+describe('QA 6.61.0: a pass the save path declines is still counted', () => {
+  it('records metadata_not_persisted as a code with a log line', () => {
+    const lines: string[] = []
+    const before = finalPassSnapshot().counts['skipped:metadata_not_persisted'] ?? 0
+    recordFinalPassSkip('metadata_not_persisted', 'the batch transcript was applied but its sidecar was not written', { log: l => lines.push(l) })
+    expect(finalPassSnapshot().counts['skipped:metadata_not_persisted']).toBe(before + 1)
+    expect(finalPassSnapshot().last).toMatchObject({ status: 'skipped', reasonCode: 'metadata_not_persisted' })
+    expect(lines).toEqual(['[diarizer] final pass skipped: metadata_not_persisted (the batch transcript was applied but its sidecar was not written); the saved transcript is unchanged'])
+  })
 })

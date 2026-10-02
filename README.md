@@ -587,7 +587,9 @@ The voiceprint names a person but gives a chunk one label, and about 45% of
 meeting chunks hold two voices. Since 6.61.0 the server separates the voices
 with [Nemotron 3 Diarization](https://huggingface.co/FluidInference/nemotron-3-diarization-coreml)
 (FluidAudio's `fluidaudiocli`, preset `fast32`, Neural Engine) and lets the
-voiceprint name each one. Nemotron never names anyone itself.
+voiceprint name each one. Nemotron never names anyone itself, and the
+voiceprint's thresholds are unchanged: what changes is that a two-voice chunk
+is split into turns instead of carrying one label.
 
 - **Live, on the HUD.** Each chunk runs Nemotron in parallel with Whisper, inside
   a 1.5 s budget, at most two at once. The chunk response keeps `speaker` (now
@@ -602,15 +604,22 @@ voiceprint name each one. Nemotron never names anyone itself.
   whole meeting maps each channel to a name from the chunks the voiceprint was
   sure of (similarity 0.65 or more, one-sided), and relabels the transcript word
   by word before the meeting reaches COS sync. A channel two people share stays
-  unmapped and keeps the per-chunk names. Nothing is written unless every word
-  survives in order; changed words keep `originalSpeaker` and the sidecar keeps
-  the pre-relabel transcript under `diarization.originalTranscript`. A meeting
-  with a human speaker correction is never relabelled.
+  unmapped and keeps the per-chunk names. Only labels change: lines split where
+  the speaker changes and are never merged, nothing is written unless every
+  word survives in order, changed words keep `originalSpeaker`, and the sidecar
+  keeps the pre-relabel transcript under `diarization.originalTranscript`. A
+  meeting with a human speaker correction is never relabelled; an edit made
+  while the pass runs makes it stand down, and relabel or deattribute answer
+  409 `meeting_finalizing` until the meeting has finished finalizing.
 - **Never in the way.** Until the model is warm (the first Neural Engine compile
   takes 15 to 35 s, started in the background at server start), and on any
   timeout, crash, busy lane, missing CLI or missing model, a chunk keeps the
-  voiceprint label exactly as before, and the server logs the reason. A failed
-  final pass leaves the meeting exactly as saved. No model call is ever made.
+  voiceprint label exactly as before, and the server logs the reason. Three
+  failed runs in a row open a breaker: no CLI is spawned and every chunk takes
+  the voiceprint at once, for 2 minutes, doubling per trip up to an hour, then
+  one fresh warm-up decides. A failed final pass leaves the meeting exactly as
+  saved. The CLI runs with a minimal environment (no tokens or keys), and no run
+  or temp file outlives the server. No model call is ever made.
 
 **Offline.** The server always passes `--models <dir>` to the CLI, a directory
 holding `Nemotron3Diarizer_fast32.mlmodelc` and `learnable_sil_emb.bin`, and that
@@ -625,9 +634,12 @@ voiceprint and says so.
 
 `COS_DIARIZER=embedding` (or `voiceprint`, `eres2net`) turns Nemotron off: no
 warm-up, no run, the 6.60 labels. `/api/health` `readiness.diarizer` reports
-`active` (`nemotron`, `warming` or `embedding`), the `fallback` reason, the
-per-chunk outcome counts, the last chunk, the warm-up and the final passes. A
-Nemotron fallback never degrades `readiness.status`.
+`active` (`nemotron` only while warm, the breaker is closed and most recent
+chunks really were labelled by Nemotron; otherwise `warming` or `embedding`),
+the `fallback` reason, the recent outcomes, the breaker, the per-chunk counts,
+the warm-up and the final passes. `/api/health` is public, so this carries codes
+and counts only, never a speaker name, path or error text; those stay in
+`server.log`. A Nemotron fallback never degrades `readiness.status`.
 
 ## HQ dictation
 

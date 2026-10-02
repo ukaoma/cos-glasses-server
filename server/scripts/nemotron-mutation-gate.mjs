@@ -37,6 +37,11 @@ const FINAL_T = ['server/lib/nemotron-final.test.ts']
 const ROUTE_T = ['server/routes/transcribe-stream-nemotron.test.ts']
 const MEETING_T = ['server/routes/meeting.test.ts']
 const HEALTH_T = ['server/routes/health.test.ts']
+const PRIVACY_T = ['server/routes/health-diarizer-privacy.test.ts']
+const RELABEL_T = ['server/routes/meeting-relabel-route.test.ts']
+const RECOVERY_T = ['server/routes/transcribe-stream-recovery-segments.test.ts']
+const ENROL = 'server/lib/meeting-relabel-enrolment.ts'
+const PRESSURE = 'QA 6.61.0: the final pass'
 
 const SHORT = 'naming a short track: dominant takes the chunk voiceprint, the other the client label, else Ext'
 const COLD = 'a cold model: chunks before the warm-up finishes are `warming`, then Nemotron runs'
@@ -75,15 +80,15 @@ const mutations = [
   ['track-name-not-used', LIVE, '        if (named) { names.set(track.channel, named); identified++; continue }\n', '', 'two long tracks are each named by the voiceprint', LIVE_T],
   // Fallbacks and the runtime
   ['fallback-reason-dropped', LIVE, "    diarizer: { engine: 'voiceprint', fallback: reason },\n", "    diarizer: { engine: 'voiceprint' },\n", 'fallback on timeout: the voiceprint label, no segments, the reason recorded', LIVE_T],
-  ['config-counts-as-fallback', LIVE, "    if (outcome.reason === 'embedding_requested') return { speaker: input.voiceprint.speaker, similarity: input.voiceprint.similarity }\n", '', 'the voiceprint chosen by config is not a fallback and records nothing', LIVE_T],
+  ['config-counts-as-fallback', LIVE, "    if (outcome.reason === 'embedding_requested' || STATIC_REASONS.has(outcome.reason)) {\n", "    if (STATIC_REASONS.has(outcome.reason)) {\n", 'the voiceprint chosen by config is not a fallback and records nothing', LIVE_T],
+  ['static-reason-stamped', LIVE, "    if (outcome.reason === 'embedding_requested' || STATIC_REASONS.has(outcome.reason)) {\n", "    if (outcome.reason === 'embedding_requested') {\n", 'fallback on a missing CLI or models', LIVE_T],
   ['busy-not-refused', LIVE, "    if (this.inFlight >= this.maxConcurrent()) return 'busy'\n", '', 'caps concurrency', LIVE_T],
   ['warming-not-gated', LIVE, "    if (this.state === 'warming') return 'warming'\n", '', COLD, LIVE_T],
   ['live-not-on-ane', LIVE, "        timeoutMs: this.budget(),\n        computeUnits: 'ane',\n", "        timeoutMs: this.budget(),\n        computeUnits: 'all',\n", COLD, LIVE_T],
   ['snapshot-hides-warming', LIVE, "    else if (this.state === 'warming' || this.state === 'idle') { active = 'warming'; fallback = 'warming' }\n", '', COLD, LIVE_T],
-  ['no-rewarm', LIVE, "          this.state = 'warming'\n          void this.startWarmup()\n", '', 'three in a row re-warm in the background', LIVE_T],
   ['warm-retry-unbounded-or-none', LIVE, '    const attempts = delays.length + 1\n', '    const attempts = 1\n', 'a failing warm-up retries a bounded number of times', LIVE_T],
   ['missing-cli-spawns', LIVE, "      if (!this.cli || !this.modelsDir) {\n", "      if (false) {\n", 'fallback on a missing CLI: warm-up reports cli_missing and never spawns', LIVE_T],
-  ['fallback-not-logged', LIVE, "    this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}", "    if (false) this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}", 'counts every outcome and logs every fallback with its reason', LIVE_T],
+  ['fallback-not-logged', LIVE, "    this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}${outcome.ms", "    if (false) this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}${outcome.ms", 'counts every outcome and logs every fallback with its reason', LIVE_T],
   ['reasons-not-counted', LIVE, '    this.counts.reasons[outcome.reason] = (this.counts.reasons[outcome.reason] ?? 0) + 1\n', '', 'counts every outcome and logs every fallback with its reason', LIVE_T],
   ['embedding-still-warms', LIVE, "    if (requestedDiarizer(this.env()) === 'embedding') return 'embedding_requested'\n", '', 'the voiceprint selected by COS_DIARIZER never warms or runs Nemotron', LIVE_T],
   // The chunk route
@@ -107,15 +112,49 @@ const mutations = [
   ['one-sided-ignored', FINAL, '    if (!sided) continue\n', '', CONSISTENT, FINAL_T],
   ['original-not-kept', FINAL, '      if (name !== original) next.originalSpeaker = original\n', '      if (false) next.originalSpeaker = original\n', CONSISTENT, FINAL_T],
   ['resync-off', FINAL, '        if (anchor.length === ANCHOR) {\n', '        if (false) {\n', 'never loses a word', FINAL_T],
-  ['unmatched-word-dropped', FINAL, '      if (speaker === null) speaker = current?.speaker ?? line.speaker\n', '      if (speaker === null) continue\n', 'never loses a word', FINAL_T],
+  ['unmatched-word-dropped', FINAL, '      if (speaker === null) speaker = turns.at(-1)?.speaker ?? line.speaker\n', '      if (speaker === null) continue\n', 'never loses a word', FINAL_T],
   ['human-correction-ignored', FINAL, "  if (Number(sidecar.correctionRevision ?? 0) > 0) return { status: 'skipped', reason: 'human_corrected' }\n", '', 'a human correction always wins', FINAL_T],
   ['reruns-when-applied', FINAL, "  if (sidecar.diarization?.status === 'applied' && sidecar.diarization?.outputSha256 === sha(transcript)) {\n", '  if (false) {\n', CONSISTENT, FINAL_T],
   ['final-ignores-config', FINAL, "  if (choice.requested === 'embedding') return { status: 'skipped', reason: 'embedding_requested' }\n", '', 'the voiceprint selected by COS_DIARIZER skips the pass', FINAL_T],
   ['streaming-original-dropped', FINAL, '        if (final.speaker !== original) chunk.originalSpeaker = original\n', '        if (false) chunk.originalSpeaker = original\n', 'a streaming meeting is relabelled per chunk line', FINAL_T],
-  ['final-not-on-ane', FINAL, "        timeoutMs: 120_000 + Math.round((timeline.durationSec * 1000) / 20),\n        computeUnits: 'ane',\n", "        timeoutMs: 120_000 + Math.round((timeline.durationSec * 1000) / 20),\n        computeUnits: 'all',\n", CONSISTENT, FINAL_T],
+  ['final-not-on-ane', FINAL, "        timeoutMs: finalPassTimeoutMs(timeline.durationSec),\n        computeUnits: 'ane',\n", "        timeoutMs: finalPassTimeoutMs(timeline.durationSec),\n        computeUnits: 'all',\n", CONSISTENT, FINAL_T],
   // The save path: before the audio goes and before sync; a failure saves as today
-  ['final-pass-not-run', MEETING, '  if (options.finalDiarize && !(transcriptApplied && !metadataPersisted)) {\n', '  if (false) {\n', 'runs the Nemotron final pass on the saved files', MEETING_T],
+  ['final-pass-not-run', MEETING, '  } else if (options.finalDiarize) {\n', '  } else if (false) {\n', 'runs the Nemotron final pass on the saved files', MEETING_T],
   ['final-pass-throw-escapes', MEETING, "    } catch (error) {\n      console.warn(`[diarizer] final pass threw; the saved transcript is unchanged: ${error instanceof Error ? error.message : String(error)}`)\n    }\n", '    } finally { /* mutated */ }\n', 'a failed relabel saves as today', MEETING_T],
+  // QA 6.61.0, round 1 (Skeptic and Ghost Hunter)
+  ['health-publishes-raw-outcome', FINAL, '    finalCounts[key] = (finalCounts[key] ?? 0) + 1\n    lastFinal = published\n', '    finalCounts[key] = (finalCounts[key] ?? 0) + 1\n    lastFinal = { ...outcome, at: published.at } as never\n', 'unauthenticated /api/health after a final pass', PRIVACY_T],
+  ['health-publishes-channel-map', FINAL, '    mappedChannels: outcome.mapped ? Object.keys(outcome.mapped).length : null,\n', '    mappedChannels: (outcome.mapped ?? null) as never,\n', 'unauthenticated /api/health after a final pass', PRIVACY_T],
+  ['no-reread-before-write', FINAL, '  if (sidecarNow !== sidecarText || markdownNow !== markdown) {\n', '  if (false) {\n', 'a human relabel written while the CLI runs survives', FINAL_T],
+  ['reread-ignores-markdown', FINAL, '  if (sidecarNow !== sidecarText || markdownNow !== markdown) {\n', '  if (sidecarNow !== sidecarText) {\n', 'a summary written into the markdown while the CLI runs survives', FINAL_T],
+  ['relabel-not-guarded', MEETING, '    if (!running && !finalizationJobs.get(sessionId)) return null\n', '    return null\n', 'refuses a relabel or deattribution while the meeting is finalizing', MEETING_T],
+  ['other-voice-enrolled', ENROL, '  const candidates = found.filter(r => !isAnotherVoice(r.speaker, input.from, to) && !isMultiVoiceChunk(chunksByIndex.get(r.i)))\n', '  const candidates = found.filter(r => !isMultiVoiceChunk(chunksByIndex.get(r.i)))\n', 'cannot enrol the wrong person', RELABEL_T],
+  ['two-voice-chunk-enrolled', ENROL, '  const candidates = found.filter(r => !isAnotherVoice(r.speaker, input.from, to) && !isMultiVoiceChunk(chunksByIndex.get(r.i)))\n', '  const candidates = found.filter(r => !isAnotherVoice(r.speaker, input.from, to))\n', 'cannot enrol the wrong person', RELABEL_T],
+  ['from-label-refused', ENROL, '  return rowSpeaker !== from && rowSpeaker !== to\n', '  return rowSpeaker !== to\n', 'enrols a NEW name from a wrong existing label', RELABEL_T],
+  ['child-gets-full-env', CLI, '        env: nemotronChildEnv(),\n', '        env: process.env,\n', 'no COS token, provider key or API key reaches the child', CLI_T],
+  ['kill-skips-children', CLI, "child.kill('SIGKILL'); killed++", 'killed++', 'kills the children in flight and deletes their temp dirs', CLI_T],
+  ['exit-hook-missing', CLI, "  process.once('exit', () => { killNemotronChildren() })\n", '', 'an exit in the middle of a pass removes the temp dir', FINAL_T],
+  ['final-dir-untracked', FINAL, '  trackNemotronDir(work)\n  let run: NemotronPreds\n', '  let run: NemotronPreds\n', 'an exit in the middle of a pass removes the temp dir', FINAL_T],
+  ['sweep-ignores-age', CLI, '        if (!stat.isDirectory() || now - stat.mtimeMs < minAge) continue\n', '        if (!stat.isDirectory()) continue\n', 'the startup sweep removes stale cos-nemotron temp dirs', CLI_T],
+  ['sweep-any-prefix', CLI, '      if (!name.startsWith(NEMOTRON_TMP_PREFIX)) continue\n', '', 'the startup sweep removes stale cos-nemotron temp dirs', CLI_T],
+  ['breaker-never-opens', LIVE, "        if (this.consecutiveFailures >= BREAKER_FAILURES && this.state === 'ready') {\n", '        if (false) {\n', 'the breaker: three failed runs stop spawning', LIVE_T],
+  ['cooling-spawns', LIVE, '      if (this.now() < this.retryAt) return reason\n', '', 'the breaker: three failed runs stop spawning', LIVE_T],
+  ['backoff-not-growing', LIVE, '  private backoff(): number { return BREAKER_BACKOFF_MS[Math.min(this.trips, BREAKER_BACKOFF_MS.length - 1)] }\n', '  private backoff(): number { return BREAKER_BACKOFF_MS[0] }\n', 'the breaker: three failed runs stop spawning', LIVE_T],
+  ['live-budget-changed', LIVE, 'export const LIVE_BUDGET_MS = 1500\n', 'export const LIVE_BUDGET_MS = 1000\n', 'pins the real defaults', LIVE_T],
+  ['warm-temp-reason-lost', LIVE, "        this.warmError = error instanceof NemotronRunError ? error.reason : 'temp_dir'\n", "        this.warmError = error instanceof NemotronRunError ? error.reason : 'error'\n", 'a warm-up whose temp dir cannot be made', LIVE_T],
+  ['active-ignores-recent', LIVE, '    } else if (this.recent.length > 0 && recentVoiceprint * 2 > this.recent.length) {\n', '    } else if (false) {\n', 'warm but most recent chunks fell back', LIVE_T],
+  ['no-speech-counts-as-failure', LIVE, "    if (outcome.reason !== 'no_speech') this.pushRecent('voiceprint', outcome.reason)\n", "    this.pushRecent('voiceprint', outcome.reason)\n", 'warm but most recent chunks fell back', LIVE_T],
+  ['state-reasons-logged-each', LIVE, '      if (this.lastStateLog === outcome.reason) return\n', '', 'counts every outcome and logs every fallback with its reason', LIVE_T],
+  ['resplit-trusts-rewrites', LIVE, '    if (found < 0) return undefined\n', '    if (found < 0) { owner.push(owner.at(-1) ?? 0); continue }\n', 'refits turns to a text recovery stripped', LIVE_T],
+  ['recovery-keeps-stale-turns', STREAM, '                    const refit = resplitSegments(chunk.segments, stripped)\n', '                    const refit = chunk.segments\n', 'a recovered chunk whose text loses words', RECOVERY_T],
+  ['too-long-unchecked', FINAL, '  if (total / SR > (audio / SR) * FINAL_MAX_SPAN_RATIO + FINAL_SPAN_SLACK_SEC) {\n', '  if (false) {\n', 'a timeline far longer than its audio', FINAL_T],
+  ['no-change-ignored', FINAL, "  if (next === transcript) return { status: 'skipped', reason: 'no_change', mode, words: stats, excluded, crowded, identities, channels: channelsUsed.size }\n", '', 'no label changes: no_change', FINAL_T],
+  ['restore-skipped', FINAL, '      write(options.sidecarPath, sidecarText)\n', '', 'a markdown write that fails puts the sidecar back', FINAL_T],
+  ['restore-failure-hidden', FINAL, "        reason: 'sidecar_restore_failed',\n", "        reason: 'markdown_write',\n", 'a markdown write that fails puts the sidecar back', FINAL_T],
+  ['word-check-skipped', FINAL, "  if (!sameWords(transcript, next)) return { status: 'skipped', reason: 'word_mismatch', mode, excluded }\n", '', 'the word check is reachable', FINAL_T],
+  ['crowd-counts-blips', FINAL, '  const channelsUsed = new Set(tracksIn(activity, 0, activity.frames).map(track => track.channel))\n', '  const channelsUsed = new Set(tracksIn(activity, 0, activity.frames, 0.001).map(track => track.channel))\n', 'a channel counts toward a crowded room only with half a second', FINAL_T],
+  ['excluded-not-logged', FINAL, "  if (!e || e.missing + e.hashMismatch + e.unreadable === 0) return ''\n", "  return ''\n", 'logs every outcome: a failed CLI, excluded chunks', FINAL_T],
+  ['final-timeout-changed', FINAL, '  return 120_000 + Math.round((durationSec * 1000) / 20)\n', '  return 120_000 + Math.round((durationSec * 1000) / 10)\n', 'pins the timeout formula', FINAL_T],
+  ['declined-pass-uncounted', FINAL, '  finalCounts[key] = (finalCounts[key] ?? 0) + 1\n  lastFinal = published\n', '', 'records metadata_not_persisted as a code', FINAL_T],
   // Health
   ['health-not-honest', HEALTH, '    diarizer: { ...nemotronLive.snapshot(), final: finalPassSnapshot() },\n', "    diarizer: 'nemotron',\n", 'readiness.diarizer says what labels a chunk now', HEALTH_T],
 ]
