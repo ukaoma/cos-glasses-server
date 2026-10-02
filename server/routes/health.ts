@@ -10,6 +10,7 @@ import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contract.js'
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { profileProvenanceSummary, speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
+import { activeDiarizer } from '../lib/diarizer-backend.js'
 import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
 import { mintDisplayTicket, DISPLAY_TICKET_TTL_SECONDS } from '../lib/display-ticket.js'
 import { correctionStoreStats } from '../lib/meeting-corrections.js'
@@ -336,6 +337,7 @@ healthRouter.get('/health', async (_req, res) => {
     // Asserted, not merely reported: `speaker_id` above says what the state IS,
     // this says whether that state is acceptable.
     speakerId: speakerReadinessState,
+    diarizer: activeDiarizer().active,
   }
   const openai_whisper_budget = getOpenAIWhisperBudgetState()
   const meeting_summary = {

@@ -40,6 +40,7 @@ import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whis
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
 import { identifySpeaker, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
+import { activeDiarizer } from '../lib/diarizer-backend.js'
 import {
   assertOpenAIWhisperBudget,
   recordOpenAIWhisperUsage,
@@ -1879,7 +1880,14 @@ async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Bu
   }
 }
 
+let diarizerChoiceLogged = false
+
 function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
+  if (!diarizerChoiceLogged) {
+    diarizerChoiceLogged = true
+    const choice = activeDiarizer()
+    console.log(`[diarizer] tracks=${choice.active} names=voiceprint${choice.fallback ? ` fallback=${choice.fallback}` : ''}`)
+  }
   const expectedSpeakers = undefined
   const audioDurationSec = Math.max(0, (audioBuffer.length - 44)) / 32000
   if (!isEmbeddingAvailable() || audioDurationSec < 2.0) return { speaker: clientSpeaker, similarity: 0 }

@@ -1,3 +1,11 @@
+## 6.60.1
+
+### Speaker tracks can come from Nemotron. Names still come from the voiceprint.
+
+- `COS_DIARIZER` defaults to `nemotron`. `embedding`, `eres2net`, or `voiceprint` keeps the current per-chunk voiceprint path.
+- The Nemotron CLI is `COS_NEMOTRON_CLI`, or `~/.cos-glasses/bin/fluidaudiocli` when that variable is unset. If Nemotron is requested and that file is missing, the server stays on the voiceprint and health says why via `readiness.diarizer` (`nemotron` or `embedding`).
+- A live chunk is still named by the voiceprint. Nemotron separates who spoke when. It does not know which person a voice is. This release does not rewrite a meeting as it is recorded.
+
 ## 6.60.0
 
 ### A question that starts while you are away waits up to 10 minutes for the glasses you are wearing
