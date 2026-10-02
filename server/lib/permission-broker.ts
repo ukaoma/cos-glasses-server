@@ -16,7 +16,7 @@
 // exactly as if no hook existed. Every path here that is not an answer ends in `{}`.
 //
 // ---------------------------------------------------------------------------
-// WHAT GETS PARKED (Miles's Q3 and Q4, 2026-09-19): away AND wearing
+// WHAT GETS PARKED (Miles's Q3 and Q4, 2026-09-19): away AND recently present
 // ---------------------------------------------------------------------------
 // The hook has no matcher, so every permission request at an idle desk reaches the route.
 // Everything outside the gate answers `{}` at once (target: under 100 ms). A request is
@@ -67,10 +67,12 @@
 //     2026-09-30 19:54: "Hold only if the glasses or phone were connected in the last 30
 //     min. A Claude Remote Control session with no glasses gets its question right away,
 //     as before."). The contract shared with COS Glasses 6.9.563 (lib/client-liveness): a
-//     poll `?client=glasses|phone&hold=1&presenceAgeMs=<int>`, the ms since a ring or temple
-//     input, a device status with wearing true, or a phone foreground touch. Recent means
-//     within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800; below 30 s, the 30 s
-//     live window). A connected lens nobody wears sends no presence; an older client sends
+//     poll `?client=glasses|phone&hold=1&presenceAgeMs=<int>`, the ms since a ring, temple or
+//     lens gesture, or a phone touch while COS is in front. The worn status is never presence
+//     (Glasses 6.9.570, Miles 2026-10-02: wear detection can be turned off, and then it always
+//     reads not worn). Recent means within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`
+//     (default 1800; below 30 s, the 30 s live window). A connected lens nobody touches sends
+//     no presence; an older client sends
 //     no `hold=1` and keeps the 6.59.0 liveness, never the away hold. In memory: after a
 //     restart nothing is recent until such a poll.
 // Held that way, a request stays answerable while no client is polling, so a lens or phone
@@ -1057,7 +1059,7 @@ export class PermissionBroker {
    *   - `recent`: within the window, so the away hold may apply;
    *   - `holdLive`: a `hold=1` client polled within the live window AND its presence is
    *     recent, so it counts as a live client the way an older client's poll does. A
-   *     connected lens nobody wears never counts (QA round 1, Skeptic W1).
+   *     connected lens nobody touches never counts (QA round 1, Skeptic W1).
    */
   private presence(now: number): { ageMs: number | null; recent: boolean; holdLive: boolean; windowMs: number } {
     let ageMs: number | null = null

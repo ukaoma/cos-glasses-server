@@ -27,10 +27,11 @@
 // 6.60.0 (QA round 1, the contract shared with COS Glasses 6.9.563): the away hold needs
 // more than a poll. A poll QUALIFIES only with `hold=1` (this client shows held questions;
 // 6.9.563 and later send it) AND a finite `presenceAgeMs` within [0, 24 h]: the ms since
-// the latest real wearer evidence (glasses: a ring or temple input, or a device status with
-// wearing true; phone: a foreground touch). A connected lens nobody wears sends no
-// `presenceAgeMs`, and an older client sends no `hold=1`, so neither can make the Mac hold a
-// question for 10 minutes.
+// the latest real wearer evidence (glasses: a ring, temple or lens gesture; phone: a touch
+// while COS is in front). The worn status never counts: Glasses 6.9.570 dropped it because
+// wear detection can be turned off, and then it always reads not worn. A connected lens
+// nobody touches sends no `presenceAgeMs`, and an older client sends no `hold=1`, so neither
+// can make the Mac hold a question for 10 minutes.
 //
 // Kept apart, all in memory (a restart forgets them, which fails toward 6.59.0):
 //   - the newest counting poll of any kind (`lastQuestionsPollAt`, for /api/health);

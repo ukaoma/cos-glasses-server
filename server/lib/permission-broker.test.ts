@@ -176,7 +176,7 @@ describe('the liveness signal (lib/client-liveness)', () => {
     expect(lastLegacyQuestionsPollAt()).toBe(1_000_000)
     expect(lastHoldQuestionsPollAt()).toBeNull()
     expect(presenceAgeMs(10_000, 1_000_000)).toBeNull()
-    // A 6.9.563 lens nobody wears: hold=1, no presenceAgeMs. A hold poll, no presence.
+    // A 6.9.563 lens nobody touches: hold=1, no presenceAgeMs. A hold poll, no presence.
     noteQuestionsPoll(1_000_500, { hold: true, presenceAgeMs: null }, 10_500)
     expect(lastHoldQuestionsPollAt()).toBe(1_000_500)
     expect(lastLegacyQuestionsPollAt()).toBe(1_000_000)

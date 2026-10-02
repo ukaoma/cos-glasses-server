@@ -265,21 +265,22 @@ or the away hold's.
 
 **The away hold (6.60.0).** A request that starts while you are away (the desk idle 90 s,
 the same threshold as above) is held for up to 10 minutes, but only when the glasses or the
-phone that show held questions report that you wore or touched them in the last 30 minutes.
+phone that show held questions report that you touched them in the last 30 minutes.
 The client contract (COS Glasses 6.9.563 and later):
 
 - Poll `GET /api/session-questions?client=glasses|phone&hold=1&presenceAgeMs=<int>`.
   `hold=1` says this client shows held questions. `presenceAgeMs` is the milliseconds since
-  the latest real wearer evidence (glasses: a ring or temple input, or a device status with
-  wearing true; phone: a foreground touch), a whole number from 0 to 86,400,000, and is left
-  out when there is none since the app started.
+  the latest real wearer evidence (glasses: a ring, temple or lens gesture; phone: a touch
+  while COS is in front), a whole number from 0 to 86,400,000, and is left out when there is
+  none since the app started. The worn status never counts (COS Glasses 6.9.570 and later):
+  wear detection can be turned off, and then it always reads not worn.
 - Only a poll with `hold=1` AND a valid `presenceAgeMs` counts toward the hold. The server
   keeps the newest such presence in memory, on the monotonic clock and the wall clock, and
   reads its age as the larger of the two (so a Mac that slept never makes it look newer).
   Recent means within `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (default 1800, clamped to 0
   through 86400; under 30 it means the 30 s live window). After a server restart nothing is
   recent until such a poll.
-- A `hold=1` poll without presence (a connected lens nobody wears) makes no client live and
+- A `hold=1` poll without presence (a connected lens nobody touches) makes no client live and
   holds nothing. A poll without `hold=1` (COS Glasses 6.9.562 and earlier, every older phone
   build) keeps the 6.59.0 meaning exactly: live for 30 s, a 110 s hold, and never the away
   hold.
