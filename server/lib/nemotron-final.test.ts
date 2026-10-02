@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -9,6 +10,8 @@ import { NemotronRunError, type RunNemotronOptions } from './nemotron-cli.js'
 import {
   buildMeetingTimeline,
   crowdIdentities,
+  finalPassTimeoutMs,
+  relabelTranscriptWords,
   isCrowded,
   mapChannelsToNames,
   readTranscriptSection,
@@ -147,7 +150,15 @@ describe('the save-time final pass', () => {
     expect(outcome.words).toMatchObject({ total: 32, relabeled: 6 })
 
     const markdown = readFileSync(f.meetingPath, 'utf8')
-    expect(markdown).toContain('[MU]: alpha4 bravo4 charlie4 delta4 alpha5 bravo5\n[Silas Larson]: charlie5 delta5 alpha6 bravo6 charlie6 delta6 alpha7 bravo7 charlie7 delta7\n')
+    // Line breaks are kept: a line splits where its speaker changes and is never merged into its neighbour.
+    expect(readTranscriptSection(markdown)).toBe([
+      '[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1',
+      '[Silas Larson]: alpha2 bravo2 charlie2 delta2 alpha3 bravo3 charlie3 delta3',
+      '[MU]: alpha4 bravo4 charlie4 delta4 alpha5 bravo5',
+      '[Silas Larson]: charlie5 delta5',
+      '[Silas Larson]: alpha6 bravo6 charlie6 delta6',
+      '[Silas Larson]: alpha7 bravo7 charlie7 delta7',
+    ].join('\n'))
     expect(markdown).toContain('| **Transcription quality** | batch |')
     expect(sameWords(f.transcript, markdown.split('## Transcript\n\n')[1])).toBe(true)
     expect(sidecar.diarization).toMatchObject({
@@ -194,7 +205,7 @@ describe('the save-time final pass', () => {
     expect(await runNemotronFinalPass(opts(g, fakeRun()))).toMatchObject({ status: 'applied' })
     const relabelled = readTranscriptSection(readFileSync(g.meetingPath, 'utf8'))!
     expect(transcriptWords(relabelled)).toEqual(transcriptWords(trimmed))
-    expect(relabelled).toBe('[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1\n[Silas Larson]: alpha6 bravo6 charlie6 delta6 alpha7 bravo7 charlie7 delta7')
+    expect(relabelled).toBe('[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1\n[Silas Larson]: alpha6 bravo6 charlie6 delta6\n[Silas Larson]: alpha7 bravo7 charlie7 delta7')
   })
 
   it('a human correction always wins: a corrected meeting is never relabelled', async () => {
@@ -254,10 +265,10 @@ describe('a crowded room', () => {
 })
 
 describe('the meeting timeline and the channel map', () => {
-  it('places each WAV at its real elapsed and drops a chunk whose audio hash disagrees', () => {
+  it('places each WAV at its real elapsed and drops a chunk whose audio hash disagrees', async () => {
     const f = meeting({ batch: true, tamperWav: 3 })
     const entries = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).chunkEntries as SidecarEntry[]
-    const timeline = buildMeetingTimeline(entries, f.audioDir)
+    const timeline = await buildMeetingTimeline(entries, f.audioDir)
     expect(timeline.excluded).toEqual({ missing: 0, hashMismatch: 1, unreadable: 0 })
     expect(timeline.windows.map(w => w.chunkIndex)).toEqual([0, 1, 2, 4, 5, 6, 7])
     expect(timeline.byIndex.get(4)!.start).toBe(24)
@@ -265,23 +276,23 @@ describe('the meeting timeline and the channel map', () => {
     expect(timeline.byIndex.get(2)!.end).toBe(18)
   })
 
-  it('never reads a chunk file that is not a regular file (a symlink, or a FIFO that would hang the server)', () => {
+  it('never reads a chunk file that is not a regular file (a symlink, or a FIFO that would hang the server)', async () => {
     const f = meeting({ batch: true })
     const target = join(f.dir, 'elsewhere.wav')
     writeFileSync(target, readFileSync(join(f.audioDir, 'chunk_0003.wav')))
     rmSync(join(f.audioDir, 'chunk_0003.wav'))
     symlinkSync(target, join(f.audioDir, 'chunk_0003.wav'))
     const entries = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).chunkEntries as SidecarEntry[]
-    const timeline = buildMeetingTimeline(entries, f.audioDir)
+    const timeline = await buildMeetingTimeline(entries, f.audioDir)
     expect(timeline.excluded).toEqual({ missing: 0, hashMismatch: 0, unreadable: 1 })
     expect(timeline.byIndex.has(3)).toBe(false)
   })
 
-  it('trims only the tail that would run into the next chunk', () => {
+  it('trims only the tail that would run into the next chunk', async () => {
     const f = meeting({ batch: true })
     const entries = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).chunkEntries as SidecarEntry[]
     entries[1].chunk.elapsed = 4000 // chunk 0 is 6 s long; chunk 1 now starts at 4 s
-    const timeline = buildMeetingTimeline(entries, f.audioDir)
+    const timeline = await buildMeetingTimeline(entries, f.audioDir)
     expect(timeline.byIndex.get(0)!.end).toBe(4)
     expect(timeline.byIndex.get(1)!.start).toBe(4)
   })
@@ -300,4 +311,152 @@ describe('the meeting timeline and the channel map', () => {
     const unsure = mapChannelsToNames([0, 1, 2].map(i => ({ ...window(i, 'MU'), chunk: { text: 'x', speaker: 'MU', similarity: 0.6, elapsed: 0 } as never })), a)
     expect(unsure.eligible).toBe(0)
   })
+})
+
+describe('QA 6.61.0: the final pass under real-world pressure', () => {
+  it('a human relabel written while the CLI runs survives: the pass stands down (changed_during_pass)', async () => {
+    const f = meeting({ batch: false, liveSegments: true })
+    let relabelled = ''
+    const run = vi.fn(async () => {
+      // What POST /meeting/:id/relabel does to these files.
+      const doc = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
+      doc.correctionRevision = 1
+      doc.chunks[7].speaker = 'Kirstyn Blum'
+      doc.chunkEntries[7].chunk.speaker = 'Kirstyn Blum'
+      relabelled = JSON.stringify(doc, null, 2)
+      writeFileSync(f.sidecarPath, relabelled)
+      writeFileSync(f.meetingPath, readFileSync(f.meetingPath, 'utf8').replace('[Ext]: alpha7', '[Kirstyn Blum]: alpha7'))
+      return activityOf(49, SPANS)
+    })
+    const lines: string[] = []
+    const outcome = await runNemotronFinalPass(opts(f, run as never, { log: (l: string) => lines.push(l) }))
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'changed_during_pass' })
+    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(relabelled)
+    expect(readFileSync(f.meetingPath, 'utf8')).toContain('[Kirstyn Blum]: alpha7')
+    expect(lines).toEqual(['[diarizer] final pass skipped: changed_during_pass (sidecar changed); the saved transcript is unchanged'])
+  })
+
+  it('a summary written into the markdown while the CLI runs survives', async () => {
+    const f = meeting({ batch: true })
+    const run = vi.fn(async () => {
+      writeFileSync(f.meetingPath, readFileSync(f.meetingPath, 'utf8').replace('## Transcript', '## Summary\n\nWritten during the pass.\n\n## Transcript'))
+      return activityOf(49, SPANS)
+    })
+    const outcome = await runNemotronFinalPass(opts(f, run as never))
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'changed_during_pass' })
+    expect(readFileSync(f.meetingPath, 'utf8')).toContain('Written during the pass.')
+    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(f.sidecarText)
+  })
+
+  it('no label changes: no_change, both files byte-identical, no revision moves', async () => {
+    const f = meeting({ batch: true })
+    // Every channel already agrees with every word's label: MU throughout, one channel.
+    const doc = JSON.parse(f.sidecarText)
+    for (const segment of doc.batchSegments) for (const word of segment.speakerWords) word.speaker = 'MU'
+    for (const entry of doc.chunkEntries) { entry.chunk.speaker = 'MU'; entry.chunk.similarity = 0.9; entry.chunk.evenHubSpeakerRole = { schema: 1, frames: 120, self: 115, other: 5 } }
+    doc.chunks = doc.chunkEntries.map((e: { chunk: unknown }) => e.chunk)
+    const transcript = cleanTranscriptLines(selectBatchTranscriptForPersistence('', doc.batchSegments).text)
+    doc.batchTranscript = transcript
+    const sidecarText = JSON.stringify(doc, null, 2)
+    const markdownText = f.markdownText.replace(f.transcript, transcript)
+    writeFileSync(f.sidecarPath, sidecarText)
+    writeFileSync(f.meetingPath, markdownText)
+    const outcome = await runNemotronFinalPass(opts(f, vi.fn(async () => activityOf(49, [[0, 0, 48]])) as never))
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'no_change' })
+    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(sidecarText)
+    expect(readFileSync(f.meetingPath, 'utf8')).toBe(markdownText)
+  })
+
+  it('a timeline far longer than its audio (a bad elapsed) is refused before anything is allocated or run', async () => {
+    const f = meeting({ batch: true })
+    const doc = JSON.parse(f.sidecarText)
+    doc.chunkEntries[7].chunk.elapsed = 3 * 3_600_000 // one chunk stamped three hours late
+    writeFileSync(f.sidecarPath, JSON.stringify(doc, null, 2))
+    const run = fakeRun()
+    const outcome = await runNemotronFinalPass(opts(f, run))
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'too_long' })
+    expect(outcome.detail).toMatch(/^timeline 10807 s for 48 s of audio$/)
+    expect(run).not.toHaveBeenCalled()
+    const timeline = await buildMeetingTimeline(doc.chunkEntries, f.audioDir)
+    expect(timeline).toMatchObject({ tooLong: true, windows: [] })
+    expect(timeline.wav.length).toBe(0)
+  })
+
+  it('a markdown write that fails puts the sidecar back byte for byte; a failed restore is reported, not hidden', async () => {
+    const f = meeting({ batch: true })
+    const writes: string[] = []
+    const failMarkdown = (path: string, data: string) => {
+      writes.push(path)
+      if (path === f.meetingPath) throw new Error('EROFS: read-only file system')
+      writeFileSync(path, data)
+    }
+    expect(await runNemotronFinalPass(opts(f, fakeRun(), { write: failMarkdown }))).toMatchObject({ status: 'failed', reason: 'markdown_write' })
+    expect(writes).toEqual([f.sidecarPath, f.meetingPath, f.sidecarPath])
+    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(f.sidecarText)
+    expect(readFileSync(f.meetingPath, 'utf8')).toBe(f.markdownText)
+
+    const g = meeting({ batch: true })
+    let sidecarWrites = 0
+    const failRestore = (path: string, data: string) => {
+      if (path === g.meetingPath) throw new Error('EROFS: read-only file system')
+      if (++sidecarWrites === 2) throw new Error('EIO: restore failed')
+      writeFileSync(path, data)
+    }
+    const lines: string[] = []
+    const outcome = await runNemotronFinalPass(opts(g, fakeRun(), { write: failRestore, log: (l: string) => lines.push(l) }))
+    expect(outcome).toMatchObject({ status: 'failed', reason: 'sidecar_restore_failed' })
+    expect(lines[0]).toMatch(/^\[diarizer\] final pass FAILED and could not restore the sidecar: markdown write: EROFS/)
+  })
+
+  it('the word check is reachable: a relabeller that drops a word writes nothing', async () => {
+    const f = meeting({ batch: true })
+    const dropsAWord = (transcript: string, sequence: Array<{ word: string; speaker: string }>) =>
+      relabelTranscriptWords(transcript, sequence).replace(' bravo3', '')
+    const outcome = await runNemotronFinalPass(opts(f, fakeRun(), { relabelWords: dropsAWord }))
+    expect(outcome).toMatchObject({ status: 'skipped', reason: 'word_mismatch' })
+    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(f.sidecarText)
+    expect(readFileSync(f.meetingPath, 'utf8')).toBe(f.markdownText)
+  })
+
+  it('logs every outcome: a failed CLI, excluded chunks, and an applied pass', async () => {
+    const f = meeting({ batch: true, tamperWav: 0 })
+    const lines: string[] = []
+    await runNemotronFinalPass(opts(f, vi.fn(async () => { throw new NemotronRunError('timeout', 'no result within 1 ms') }) as never, { log: (l: string) => lines.push(l) }))
+    expect(lines.at(-1)).toBe('[diarizer] final pass failed: nemotron_timeout (no result within 1 ms); chunks left off the timeline: 0 missing, 1 hash mismatch, 0 unreadable; the saved transcript is unchanged')
+    await runNemotronFinalPass(opts(f, fakeRun(), { log: (l: string) => lines.push(l) }))
+    expect(lines.at(-1)).toMatch(/^\[diarizer\] final pass applied \(batch\) in \d+ ms: 2 channels, mapped \{"1":"Silas Larson"\}, \d+\/32 words relabelled, speakers 3 -> 2; chunks left off the timeline: 0 missing, 1 hash mismatch, 0 unreadable$/)
+  })
+
+  it('pins the timeout formula: 20x realtime plus two minutes for a cold compile', () => {
+    expect(finalPassTimeoutMs(0)).toBe(120_000)
+    expect(finalPassTimeoutMs(3600)).toBe(300_000)
+    expect(finalPassTimeoutMs(5400)).toBe(390_000)
+  })
+
+  it('a channel counts toward a crowded room only with half a second of speech, not a blip', async () => {
+    const f = meeting({ batch: true })
+    // Two people, plus six 10 ms blips on the other channels.
+    const blips = [2, 3, 4, 5, 6, 7].map(c => [c, 48 + c * 0.05, 48 + c * 0.05 + 0.01] as [number, number, number])
+    const outcome = await runNemotronFinalPass(opts(f, vi.fn(async () => activityOf(49, [...SPANS, ...blips])) as never))
+    expect(outcome).toMatchObject({ status: 'applied', crowded: false, channels: 2, mapped: { 0: 'MU', 1: 'Silas Larson' } })
+  })
+})
+
+describe('QA 6.61.0: nothing outlives the server', () => {
+  it('an exit in the middle of a pass removes the temp dir holding the meeting audio', async () => {
+    const f = meeting({ batch: true })
+    const tmpRoot = temp('nemotron-exit-')
+    const script = join(tmpRoot, 'exit-mid-pass.mts')
+    const lib = join(process.cwd(), 'server', 'lib', 'nemotron-final.ts')
+    writeFileSync(script, [
+      `const { runNemotronFinalPass } = await import(${JSON.stringify(lib)})`,
+      `void runNemotronFinalPass({ meetingPath: ${JSON.stringify(f.meetingPath)}, sidecarPath: ${JSON.stringify(f.sidecarPath)}, audioDir: ${JSON.stringify(f.audioDir)}, env: { COS_DIARIZER: 'nemotron' }, home: ${JSON.stringify(f.home)}, tmpRoot: ${JSON.stringify(tmpRoot)}, log: () => {}, run: () => new Promise(() => {}) })`,
+      `const wait = setInterval(() => { if (require_fs().readdirSync(${JSON.stringify(tmpRoot)}).some(n => n.startsWith('cos-nemotron-final-'))) { clearInterval(wait); process.exit(0) } }, 10)`,
+      `function require_fs() { return globalThis.__fs }`,
+      `globalThis.__fs = await import('node:fs')`,
+    ].join('\n'))
+    const result = spawnSync(process.execPath, ['--import', 'tsx/esm', script], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000, env: { ...process.env, COS_DATA_DIR: tmpRoot } })
+    expect(result.status).toBe(0)
+    expect(readdirSync(tmpRoot).filter(name => name.startsWith('cos-nemotron-'))).toEqual([])
+  }, 40_000)
 })

@@ -4,9 +4,14 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { NemotronRunError, type NemotronRun, type RunNemotronOptions } from './nemotron-cli.js'
 import {
+  BREAKER_BACKOFF_MS,
+  BREAKER_FAILURES,
+  LIVE_BUDGET_MS,
+  LIVE_MAX_CONCURRENT,
   NemotronLiveRuntime,
   nameChunkSegments,
   resolveLiveLabels,
+  resplitSegments,
   type LiveDiarizeOutcome,
 } from './nemotron-live.js'
 import { activityOf, signVoiceprint, wavOf } from './__fixtures__/nemotron-helpers.js'
@@ -189,9 +194,12 @@ describe('live labels never block or lose a chunk', () => {
     expect(rejected).toMatchObject({ speaker: 'Silas Larson', diarizer: { fallback: 'error' } })
   })
 
-  it('fallback on a missing CLI: no run time is claimed', async () => {
-    const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason: 'cli_missing' })))
-    expect(labels).toMatchObject({ speaker: 'Silas Larson', diarizer: { fallback: 'cli_missing' }, record: { reason: 'cli_missing', ms: null } })
+  it('fallback on a missing CLI or models: the voiceprint label, no per-chunk stamp and no per-chunk log', async () => {
+    // An install without the CLI is the public default: the warm-up says so once (QA N5).
+    for (const reason of ['cli_missing', 'models_missing'] as const) {
+      const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason })))
+      expect(labels).toEqual({ speaker: 'Silas Larson', similarity: 0.6 })
+    }
   })
 
   it('the voiceprint chosen by config is not a fallback and records nothing', async () => {
@@ -253,22 +261,147 @@ describe('the live runtime', () => {
     expect(runtime.snapshot().inFlight).toBe(0)
   })
 
-  it('fallback on timeout: the reason comes back, and three in a row re-warm in the background', async () => {
+  it('the breaker: three failed runs stop spawning, every chunk takes the voiceprint at once, then one warm-up after a bounded rest', async () => {
     const { home, env } = fakeHome()
+    let now = 1_000_000
+    let cliCalls = 0
     let warmRuns = 0
     const run = vi.fn((options: RunNemotronOptions) => {
+      cliCalls++
       if (options.timeoutMs > 10_000) { warmRuns++; return Promise.resolve(runOf(1, [])) }
       return Promise.reject(new NemotronRunError('timeout', 'no result within 1500 ms'))
     })
-    let now = 1_000_000
     const lines: string[] = []
+    // Real defaults: no budget, lane or backoff override.
     const runtime = new NemotronLiveRuntime({ env: () => env, home: () => home, run, log: l => lines.push(l), now: () => now })
     await runtime.startWarmup()
-    now += 11 * 60_000
-    for (let i = 0; i < 3; i++) expect(await runtime.diarize('/a.wav')).toMatchObject({ ok: false, reason: 'timeout' })
-    await Promise.resolve()
-    expect(lines.join('\n')).toContain('repeated Nemotron timeouts; re-warming')
+    const reasons: string[] = []
+    // Twenty chunks, one every 6 s (two minutes), all inside the first rest.
+    for (let i = 0; i < 20; i++) {
+      now += 6_000
+      const outcome = await runtime.diarize('/a.wav')
+      reasons.push(outcome.ok ? 'ok' : outcome.reason)
+    }
+    expect(reasons.slice(0, 3)).toEqual(['timeout', 'timeout', 'timeout'])
+    expect(reasons.slice(3).every(reason => reason === 'cooling')).toBe(true)
+    expect(cliCalls).toBe(1 + 3) // the warm-up and three budget kills; nothing while cooling
+    expect(lines.join('\n')).toContain('[diarizer] breaker open: 3 Nemotron runs failed in a row (last: timeout); voiceprint labels for 2 min, then a fresh warm-up')
+    expect(runtime.snapshot()).toMatchObject({ active: 'embedding', fallback: 'cooling', breaker: { open: true, trips: 1 } })
+    // The rest is over: one warm-up, then Nemotron is tried again.
+    now = 1_000_000 + 18_000 + BREAKER_BACKOFF_MS[0] + 1
+    expect(await runtime.diarize('/a.wav')).toMatchObject({ ok: false, reason: 'warming' })
+    await Promise.resolve(); await Promise.resolve()
     expect(warmRuns).toBe(2)
+    // Still failing: the second rest is twice as long.
+    for (let i = 0; i < 3; i++) await runtime.diarize('/a.wav')
+    expect(runtime.snapshot().breaker).toMatchObject({ open: true, trips: 2 })
+    expect(new Date(runtime.snapshot().breaker.retryAt!).getTime() - now).toBe(BREAKER_BACKOFF_MS[1])
+  })
+
+  it('pins the real defaults: 1.5 s budget, a lane of two, the backoff schedule', () => {
+    expect(LIVE_BUDGET_MS).toBe(1500)
+    expect(LIVE_MAX_CONCURRENT).toBe(2)
+    expect(BREAKER_FAILURES).toBe(3)
+    expect(BREAKER_BACKOFF_MS).toEqual([120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000])
+    const snapshot = new NemotronLiveRuntime({ env: () => ({ COS_DIARIZER: 'nemotron' }), log: () => {} }).snapshot()
+    expect(snapshot).toMatchObject({ budgetMs: 1500, maxConcurrent: 2, recent: { window: 5 } })
+  })
+
+  it('health never says nemotron while the chunks fall back: warm, then five failures', async () => {
+    const { home, env } = fakeHome()
+    let fail = false
+    const run = vi.fn((options: RunNemotronOptions) => options.timeoutMs > 10_000 || !fail
+      ? Promise.resolve(runOf(6, [[0, 0, 6]]))
+      : Promise.reject(new NemotronRunError('cli_failed', 'exit 1')))
+    const runtime = new NemotronLiveRuntime({ env: () => env, home: () => home, run, log: () => {} })
+    await runtime.startWarmup()
+    expect(runtime.snapshot().active).toBe('nemotron')
+    fail = true
+    for (let i = 0; i < 5; i++) {
+      const outcome = await runtime.diarize('/a.wav')
+      runtime.record({ sessionId: 's', chunkIndex: i }, outcome.ok
+        ? { outcome: 'nemotron', ms: 140, segments: 1, tracks: 1, timing: 'estimated', identified: 0 }
+        : { outcome: 'voiceprint', reason: outcome.reason, ms: 10 })
+    }
+    const snapshot = runtime.snapshot()
+    expect(snapshot.active).not.toBe('nemotron')
+    expect(snapshot.recent).toEqual({ window: 5, nemotron: 0, voiceprint: 5 })
+  })
+
+  it('warm but most recent chunks fell back: active says embedding and why, before any breaker', async () => {
+    const { home, env } = fakeHome()
+    const runtime = new NemotronLiveRuntime({ env: () => env, home: () => home, run: async () => runOf(6, [[0, 0, 6]]), log: () => {} })
+    await runtime.startWarmup()
+    runtime.record({ sessionId: 's', chunkIndex: 1 }, { outcome: 'nemotron', ms: 140, segments: 1, tracks: 1, timing: 'estimated', identified: 0 })
+    runtime.record({ sessionId: 's', chunkIndex: 2 }, { outcome: 'voiceprint', reason: 'busy', ms: null })
+    runtime.record({ sessionId: 's', chunkIndex: 3 }, { outcome: 'voiceprint', reason: 'busy', ms: null })
+    expect(runtime.snapshot()).toMatchObject({ active: 'embedding', fallback: 'busy', recent: { nemotron: 1, voiceprint: 2 } })
+    // A chunk Nemotron ran on and found silent is not a failure.
+    runtime.record({ sessionId: 's', chunkIndex: 4 }, { outcome: 'voiceprint', reason: 'no_speech', ms: 120 })
+    runtime.record({ sessionId: 's', chunkIndex: 5 }, { outcome: 'nemotron', ms: 140, segments: 1, tracks: 1, timing: 'estimated', identified: 0 })
+    runtime.record({ sessionId: 's', chunkIndex: 6 }, { outcome: 'nemotron', ms: 140, segments: 1, tracks: 1, timing: 'estimated', identified: 0 })
+    expect(runtime.snapshot()).toMatchObject({ active: 'nemotron', fallback: null, recent: { nemotron: 3, voiceprint: 2 } })
+  })
+
+  it('a warm-up whose temp dir cannot be made fails with a reason, never sticks on warming, never rejects', async () => {
+    const { home, env } = fakeHome()
+    let now = 0
+    const rejections: unknown[] = []
+    const onRejection = (reason: unknown) => rejections.push(reason)
+    process.on('unhandledRejection', onRejection)
+    const lines: string[] = []
+    const runtime = new NemotronLiveRuntime({
+      env: () => env, home: () => home, log: l => lines.push(l), now: () => now, sleep: async () => {},
+      tmpRoot: () => '/nonexistent-qa-root', run: async () => { throw new Error('never reached') },
+    })
+    await runtime.startWarmup()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    process.off('unhandledRejection', onRejection)
+    expect(rejections).toEqual([])
+    expect(runtime.snapshot()).toMatchObject({ active: 'embedding', fallback: 'warmup_failed', warm: { state: 'failed', error: 'temp_dir' } })
+    expect(lines.at(-1)).toBe('[diarizer] tracks=voiceprint names=voiceprint fallback=warmup_failed (temp_dir); next warm-up in 2 min')
+    expect(await runtime.diarize('/x.wav')).toMatchObject({ ok: false, reason: 'warmup_failed' })
+  })
+
+  it('a lane of two under a backlog of three hundred chunks: never more than two runs', async () => {
+    const { home, env } = fakeHome()
+    let inFlight = 0
+    let peak = 0
+    const runtime = new NemotronLiveRuntime({
+      env: () => env, home: () => home, log: () => {},
+      run: async options => {
+        if (options.timeoutMs > 10_000) return runOf(1, [])
+        inFlight++; peak = Math.max(peak, inFlight)
+        await new Promise(resolve => setTimeout(resolve, 20))
+        inFlight--
+        return runOf(6, [[0, 0, 5]])
+      },
+    })
+    await runtime.startWarmup()
+    const outcomes = await Promise.all(Array.from({ length: 300 }, () => runtime.diarize('/x.wav')))
+    expect(peak).toBe(2)
+    expect(outcomes.filter(o => o.ok)).toHaveLength(2)
+    expect(outcomes.filter(o => !o.ok && o.reason === 'busy')).toHaveLength(298)
+    expect(runtime.snapshot().inFlight).toBe(0)
+  })
+
+  it('logs the warm-up failure line and the CLI identity once', async () => {
+    const { home, env } = fakeHome()
+    const lines: string[] = []
+    const runtime = new NemotronLiveRuntime({
+      env: () => env, home: () => home, log: l => lines.push(l), sleep: async () => {},
+      cliIdentity: () => ({ sha256: 'abc123', known: false }),
+      run: () => Promise.reject(new NemotronRunError('cli_failed', 'exit 1: Error')),
+    })
+    await runtime.startWarmup()
+    expect(lines).toEqual([
+      '[diarizer] fluidaudiocli sha256 abc123 (an unverified build: offline use rests on --models; check its download behaviour)',
+      '[diarizer] Nemotron warm-up attempt 1/3 failed (cli_failed): exit 1: Error',
+      '[diarizer] Nemotron warm-up attempt 2/3 failed (cli_failed): exit 1: Error',
+      '[diarizer] Nemotron warm-up attempt 3/3 failed (cli_failed): exit 1: Error',
+      '[diarizer] tracks=voiceprint names=voiceprint fallback=warmup_failed (cli_failed); next warm-up in 2 min',
+    ])
+    expect(runtime.snapshot().cliKnown).toBe(false)
   })
 
   it('a failing warm-up retries a bounded number of times, then reports warmup_failed', async () => {
@@ -289,12 +422,16 @@ describe('the live runtime', () => {
     runtime.record({ sessionId: 's', chunkIndex: 4 }, { outcome: 'nemotron', ms: 140, segments: 2, tracks: 2, timing: 'estimated', identified: 2 })
     runtime.record({ sessionId: 's', chunkIndex: 5 }, { outcome: 'voiceprint', reason: 'timeout', ms: 1500 })
     runtime.record({ sessionId: 's', chunkIndex: 6 }, { outcome: 'voiceprint', reason: 'busy', ms: null })
-    expect(runtime.snapshot().chunks).toEqual({ nemotron: 1, voiceprint: 2, reasons: { timeout: 1, busy: 1 } })
-    expect(runtime.snapshot().last).toMatchObject({ outcome: 'voiceprint', reason: 'busy' })
+    // State reasons are counted per chunk and logged once per change of state.
+    runtime.record({ sessionId: 's', chunkIndex: 7 }, { outcome: 'voiceprint', reason: 'warming', ms: null })
+    runtime.record({ sessionId: 's', chunkIndex: 8 }, { outcome: 'voiceprint', reason: 'warming', ms: null })
+    expect(runtime.snapshot().chunks).toEqual({ nemotron: 1, voiceprint: 4, reasons: { timeout: 1, busy: 1, warming: 2 } })
+    expect(runtime.snapshot().last).toMatchObject({ outcome: 'voiceprint', reason: 'warming' })
     expect(lines).toEqual([
       '[diarizer] chunk #4 nemotron 140 ms tracks=2 segments=2 timing=estimated named=2',
       '[diarizer] chunk #5 fallback=timeout after 1500 ms -> voiceprint',
       '[diarizer] chunk #6 fallback=busy -> voiceprint',
+      '[diarizer] chunk #7 fallback=warming -> voiceprint (and every chunk after it until the state changes; counted in health)',
     ])
   })
 
@@ -305,5 +442,40 @@ describe('the live runtime', () => {
     expect(await runtime.diarize('/a.wav')).toEqual({ ok: false, reason: 'embedding_requested' })
     expect(run).not.toHaveBeenCalled()
     expect(runtime.snapshot()).toMatchObject({ requested: 'embedding', active: 'embedding', fallback: null })
+  })
+})
+
+describe('turns always join to the text', () => {
+  it('punctuation-only tokens, a double space and two tracks with one name merge into one exact turn', () => {
+    const text = 'Yeah , so - we ...  agree. Right'
+    for (const names of [{ positive: 'MU', negative: 'MU' }, { positive: 'MU', negative: 'Silas Larson' }]) {
+      const result = nameChunkSegments({
+        activity: activityOf(6, [[0, 0, 2.6], [5, 3, 6]]),
+        text,
+        audio: wavOf(6, t => (t < 2.8 ? 400 : -400)),
+        chunkVoiceprint: MU,
+        clientSpeaker: 'MU',
+        identify: signVoiceprint(names),
+      })
+      if (!result.ok) throw new Error(result.reason)
+      expect(result.segments.map(segment => segment.text).join(' ')).toBe(text)
+      if (names.negative === 'MU') expect(result.segments).toHaveLength(1)
+    }
+  })
+
+  it('refits turns to a text recovery stripped, or drops them when the words no longer line up', () => {
+    const turns = [
+      { speaker: 'MU', text: 'alpha bravo noise', startSec: 0, endSec: 2, similarity: 0.8 },
+      { speaker: 'Silas Larson', text: 'phrase charlie', startSec: 2, endSec: 5, similarity: 0.7 },
+    ]
+    expect(resplitSegments(turns, 'alpha bravo charlie')).toEqual([
+      { speaker: 'MU', text: 'alpha bravo', startSec: 0, endSec: 2, similarity: 0.8 },
+      { speaker: 'Silas Larson', text: 'charlie', startSec: 2, endSec: 5, similarity: 0.7 },
+    ])
+    // A whole turn stripped away: its neighbours of one name merge.
+    expect(resplitSegments([turns[0], turns[1], { speaker: 'MU', text: 'delta', startSec: 5, endSec: 6, similarity: 0.9 }], 'alpha bravo noise delta'))
+      .toEqual([{ speaker: 'MU', text: 'alpha bravo noise delta', startSec: 0, endSec: 6, similarity: 0.9 }])
+    // A word rewritten: the turns cannot be trusted.
+    expect(resplitSegments(turns, 'alpha brave charlie')).toBeUndefined()
   })
 })

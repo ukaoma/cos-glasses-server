@@ -372,6 +372,9 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
 export function identifySpeaker(
   wavBuffer: Buffer,
   expectedSpeakers?: string[],
+  /** 6.61.0: `event` tags the calibration rows, e.g. 'nemotron-track' for one
+   *  Nemotron track's audio, so they are never read as whole-chunk checks. */
+  options: { event?: string } = {},
 ): { speaker: string; similarity: number; embedding?: Float32Array } | null {
   if (!extractor || !manager) return null
 
@@ -385,7 +388,7 @@ export function identifySpeaker(
       const isOwner = manager.verify({ name: owner, v: embedding, threshold: VERIFY_THRESHOLD })
       if (isOwner) {
         const similarity = computeCosineSimilarity(embedding, owner)
-        logCalibration(owner, similarity, true)
+        logCalibration(owner, similarity, true, options.event)
         return { speaker: owner, similarity, embedding }
       }
     }
@@ -398,7 +401,7 @@ export function identifySpeaker(
         const matches = manager.verify({ name, v: embedding, threshold: SEARCH_THRESHOLD })
         if (matches) {
           const similarity = computeCosineSimilarity(embedding, name)
-          logCalibration(name, similarity, true)
+          logCalibration(name, similarity, true, options.event)
           return { speaker: name, similarity, embedding }
         }
       }
@@ -408,14 +411,14 @@ export function identifySpeaker(
     const found = manager.search({ v: embedding, threshold: SEARCH_THRESHOLD })
     if (found && found.length > 0) {
       const similarity = computeCosineSimilarity(embedding, found)
-      logCalibration(found, similarity, true)
+      logCalibration(found, similarity, true, options.event)
       return { speaker: found, similarity, embedding }
     }
 
     // No match — external speaker. The embedding still goes back: an
     // unidentified voice's vector is the most valuable thing to retain, because
     // naming it later is exactly the correction that has no other evidence.
-    logCalibration('Ext', 0, false)
+    logCalibration('Ext', 0, false, options.event)
     return { speaker: 'Ext', similarity: 0, embedding }
   } catch (err: unknown) {
     console.error('[speaker] Identification error:', errMsg(err))

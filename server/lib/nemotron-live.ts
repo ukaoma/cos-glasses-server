@@ -15,7 +15,8 @@
 //
 // No LLM anywhere. Transcription must never call `claude -p`.
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -25,7 +26,16 @@ import {
   prepareNemotronModelsDir,
   requestedDiarizer,
 } from './diarizer-backend.js'
-import { NemotronRunError, runNemotronCli, type NemotronRun, type RunNemotronOptions } from './nemotron-cli.js'
+import {
+  NEMOTRON_TMP_PREFIX,
+  NemotronRunError,
+  runNemotronCli,
+  sweepStaleNemotron,
+  trackNemotronDir,
+  untrackNemotronDir,
+  type NemotronRun,
+  type RunNemotronOptions,
+} from './nemotron-cli.js'
 import {
   NAME_TRACK_MIN_SEC,
   absorbFlickers,
@@ -189,6 +199,41 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
   return { ok: true, speaker, similarity: round(similarity, 3), segments, tracks: tracks.length, timing, identified }
 }
 
+/**
+ * Fit stored turns to a text that lost some words (session recovery strips inline
+ * hallucinations from `text` after the fact). Each surviving word keeps the turn
+ * it was in; a turn left empty goes; neighbours with one name merge. Returns
+ * undefined when the words cannot be matched in order, and the caller then drops
+ * the turns: joined turns must always equal the text.
+ */
+export function resplitSegments(segments: ChunkSpeakerSegment[], text: string): ChunkSpeakerSegment[] | undefined {
+  const old: Array<{ token: string; seg: number }> = []
+  segments.forEach((segment, seg) => { for (const token of splitTokens(String(segment.text ?? ''))) old.push({ token, seg }) })
+  const fresh = splitTokens(text)
+  const owner: number[] = []
+  let pointer = 0
+  for (const token of fresh) {
+    let found = -1
+    for (let k = pointer; k < Math.min(old.length, pointer + 40); k++) if (old[k].token === token) { found = k; break }
+    if (found < 0) return undefined
+    owner.push(old[found].seg)
+    pointer = found + 1
+  }
+  const out: ChunkSpeakerSegment[] = []
+  fresh.forEach((token, i) => {
+    const from = segments[owner[i]]
+    const last = out.at(-1)
+    if (last && last.speaker === from.speaker) {
+      last.text = `${last.text} ${token}`
+      if (typeof from.endSec === 'number') last.endSec = Math.max(last.endSec ?? 0, from.endSec)
+      if (typeof from.similarity === 'number') last.similarity = Math.max(last.similarity ?? 0, from.similarity)
+    } else {
+      out.push({ ...from, text: token })
+    }
+  })
+  return out.map(segment => segment.text).join(' ') === text ? out : undefined
+}
+
 export interface LiveLabelInput {
   /** The run started before Whisper; awaited here, bounded by its own budget. */
   diarize: Promise<LiveDiarizeOutcome>
@@ -244,7 +289,11 @@ export async function resolveLiveLabels(input: LiveLabelInput): Promise<LiveLabe
   // before Whisper, so most of it is hidden behind Whisper.
   const waited = Math.round(clock() - input.startedAt)
   if (!outcome.ok) {
-    if (outcome.reason === 'embedding_requested') return { speaker: input.voiceprint.speaker, similarity: input.voiceprint.similarity }
+    // The voiceprint by choice, or an install with no CLI or models: today's label,
+    // no per-chunk stamp and no per-chunk log (the warm-up logged it once).
+    if (outcome.reason === 'embedding_requested' || STATIC_REASONS.has(outcome.reason)) {
+      return { speaker: input.voiceprint.speaker, similarity: input.voiceprint.similarity }
+    }
     const ran = outcome.reason === 'timeout' || outcome.reason === 'cli_failed' || outcome.reason === 'bad_output' || outcome.reason === 'spawn_failed' || outcome.reason === 'error'
     return voiceprintOnly(outcome.reason, ran ? (outcome.ms ?? waited) : null, outcome.detail)
   }
@@ -286,6 +335,7 @@ export type LiveFallbackReason =
   | 'models_missing'
   | 'warming'
   | 'warmup_failed'
+  | 'cooling'
   | 'busy'
   | 'timeout'
   | 'cli_failed'
@@ -298,7 +348,14 @@ export type LiveDiarizeOutcome =
   | { ok: true; run: NemotronRun }
   | { ok: false; reason: LiveFallbackReason | 'embedding_requested'; detail?: string; ms?: number }
 
-export type LiveState = 'off' | 'idle' | 'warming' | 'ready' | 'failed'
+/** A run was attempted and failed. Consecutive ones open the breaker. */
+const RUN_FAILURES: ReadonlySet<string> = new Set(['timeout', 'cli_failed', 'bad_output', 'spawn_failed', 'error'])
+/** Install-level reasons: logged once by the warm-up, never stamped on a chunk. */
+export const STATIC_REASONS: ReadonlySet<string> = new Set(['cli_missing', 'models_missing'])
+/** State-level reasons: counted per chunk, logged once per change of state. */
+const STATE_REASONS: ReadonlySet<string> = new Set(['warming', 'warmup_failed', 'cooling', 'cli_missing', 'models_missing'])
+
+export type LiveState = 'off' | 'idle' | 'warming' | 'ready' | 'cooling' | 'failed'
 
 export interface NemotronLiveDeps {
   env?: () => NodeJS.ProcessEnv
@@ -312,44 +369,80 @@ export interface NemotronLiveDeps {
   budgetMs?: number
   warmTimeoutMs?: number
   warmRetryDelaysMs?: number[]
+  /** Hash of the CLI binary, for the startup identity line. */
+  cliIdentity?: (path: string) => { sha256: string; known: boolean } | null
 }
 
 export const LIVE_BUDGET_MS = 1500
 export const LIVE_MAX_CONCURRENT = 2
-const WARM_TIMEOUT_MS = 180_000
-const WARM_RETRY_DELAYS_MS = [5_000, 30_000]
-/** After this many consecutive timeouts the compiled model is presumed evicted. */
-const REWARM_AFTER_TIMEOUTS = 3
-const REWARM_MIN_INTERVAL_MS = 10 * 60_000
+export const WARM_TIMEOUT_MS = 180_000
+export const WARM_RETRY_DELAYS_MS = [5_000, 30_000]
+/** Consecutive failed runs (a budget kill, a crash) that open the breaker. */
+export const BREAKER_FAILURES = 3
+/**
+ * How long Nemotron rests after the breaker opens or a warm-up gives up, by
+ * consecutive trip: 2, 4, 8, 16, 32 minutes, then 60 at most. While it rests no
+ * CLI is spawned and every chunk takes the voiceprint at once (no 1.5 s wait);
+ * then one fresh warm-up decides. A clean chunk resets the trips.
+ */
+export const BREAKER_BACKOFF_MS = [120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000]
+/** Install-level checks (a CLI or models that appear later) are retried on this interval, without spawning. */
+export const STATIC_RECHECK_MS = 120_000
+/** The recent chunk outcomes `active` is read from. */
+export const RECENT_WINDOW = 5
+/** fluidaudiocli built from FluidAudio v0.17.4 (the 2026-10-01 canary's build). */
+export const KNOWN_CLI_SHA256 = '4714154623b59c40404563828cb0fbeb4da6878e90f582ad776c1c2cd061d35a'
 
 export interface LiveSnapshot {
   requested: 'nemotron' | 'embedding'
-  /** What labels a chunk right now. */
+  /**
+   * What is labelling chunks right now. `nemotron` only while the model is warm,
+   * the breaker is closed and at least half the recent chunks really were
+   * labelled by Nemotron; otherwise `warming` or `embedding` with the reason.
+   */
   active: 'nemotron' | 'warming' | 'embedding'
   fallback: string | null
+  /** The last RECENT_WINDOW chunk outcomes: who actually labelled them. */
+  recent: { window: number; nemotron: number; voiceprint: number }
+  breaker: { open: boolean; trips: number; consecutiveFailures: number; retryAt: string | null }
   variant: string
   computeUnits: 'ane'
   budgetMs: number
   maxConcurrent: number
   inFlight: number
   warm: { state: LiveState; ms: number | null; loadSec: number | null; error: string | null }
+  /** Whether the CLI binary is the v0.17.4 build the offline guarantee was verified on. */
+  cliKnown: boolean | null
   chunks: { nemotron: number; voiceprint: number; reasons: Record<string, number> }
   last: { at: string; outcome: 'nemotron' | 'voiceprint'; reason: string | null; ms: number | null } | null
+}
+
+export function cliIdentity(path: string): { sha256: string; known: boolean } | null {
+  try {
+    const sha256 = createHash('sha256').update(readFileSync(path)).digest('hex')
+    return { sha256, known: sha256 === KNOWN_CLI_SHA256 }
+  } catch {
+    return null
+  }
 }
 
 export class NemotronLiveRuntime {
   private state: LiveState = 'idle'
   private inFlight = 0
-  private consecutiveTimeouts = 0
+  private consecutiveFailures = 0
+  private trips = 0
+  private retryAt = 0
   private warming: Promise<void> | null = null
-  private lastWarmEndedAt = 0
   private warmMs: number | null = null
   private warmLoadSec: number | null = null
   private warmError: string | null = null
   private cli: string | null = null
   private modelsDir: string | null = null
+  private identity: { path: string; sha256: string; known: boolean } | null = null
   private counts = { nemotron: 0, voiceprint: 0, reasons: {} as Record<string, number> }
+  private recent: Array<{ outcome: 'nemotron' | 'voiceprint'; reason: string | null }> = []
   private last: LiveSnapshot['last'] = null
+  private lastStateLog: string | null = null
 
   constructor(private readonly deps: NemotronLiveDeps = {}) {}
 
@@ -359,20 +452,26 @@ export class NemotronLiveRuntime {
   private log(line: string): void { (this.deps.log ?? console.log)(line) }
   private budget(): number { return this.deps.budgetMs ?? LIVE_BUDGET_MS }
   private maxConcurrent(): number { return this.deps.maxConcurrent ?? LIVE_MAX_CONCURRENT }
+  private backoff(): number { return BREAKER_BACKOFF_MS[Math.min(this.trips, BREAKER_BACKOFF_MS.length - 1)] }
 
-  /** Start (or restart) the background warm-up. Never throws, never blocks a chunk. */
+  /** Start (or restart) the background warm-up. Never throws, never rejects, never blocks a chunk. */
   startWarmup(): Promise<void> {
     if (requestedDiarizer(this.env()) === 'embedding') {
+      if (this.state !== 'off') this.log('[diarizer] tracks=voiceprint names=voiceprint (COS_DIARIZER selects the voiceprint)')
       this.state = 'off'
-      this.log('[diarizer] tracks=voiceprint names=voiceprint (COS_DIARIZER selects the voiceprint)')
       return Promise.resolve()
     }
     if (this.warming) return this.warming
     this.state = 'warming'
-    this.warming = this.warm().finally(() => {
-      this.warming = null
-      this.lastWarmEndedAt = this.now()
-    })
+    this.warming = this.warm()
+      .catch(error => {
+        // Unreachable by design (warm catches per attempt); a warm-up must still never be left `warming`.
+        this.state = 'failed'
+        this.warmError = 'error'
+        this.retryAt = this.now() + this.backoff()
+        this.log(`[diarizer] Nemotron warm-up error: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      .finally(() => { this.warming = null })
     return this.warming
   }
 
@@ -384,16 +483,30 @@ export class NemotronLiveRuntime {
       this.cli = nemotronCliPath(this.env(), this.home())
       this.modelsDir = choice.fallback ? null : prepareNemotronModelsDir(this.env(), this.home())
       if (!this.cli || !this.modelsDir) {
-        // Static: retrying cannot install a binary or download a model.
+        // Static: retrying cannot install a binary or download a model. Checked
+        // again every STATIC_RECHECK_MS without spawning; logged once.
+        const reason = choice.fallback ?? 'models_missing'
         this.state = 'failed'
-        this.warmError = choice.fallback ?? 'models_missing'
-        this.log(`[diarizer] tracks=voiceprint names=voiceprint fallback=${this.warmError} (Nemotron requested)`)
+        if (this.warmError !== reason) this.log(`[diarizer] tracks=voiceprint names=voiceprint fallback=${reason} (Nemotron requested)`)
+        this.warmError = reason
+        this.retryAt = this.now() + STATIC_RECHECK_MS
         return
       }
-      const work = mkdtempSync(join(this.deps.tmpRoot?.() ?? tmpdir(), 'cos-nemotron-warm-'))
-      const wav = join(work, 'warm.wav')
+      if (!this.identity || this.identity.path !== this.cli) {
+        const id = (this.deps.cliIdentity ?? cliIdentity)(this.cli)
+        if (id) {
+          this.identity = { path: this.cli, ...id }
+          this.log(`[diarizer] fluidaudiocli sha256 ${id.sha256} ${id.known ? '(FluidAudio v0.17.4, the verified build)' : '(an unverified build: offline use rests on --models; check its download behaviour)'}`)
+        }
+      }
       const started = this.now()
+      let work: string | null = null
       try {
+        // Inside the try (QA 6.61.0): a temp dir that cannot be made is a failed
+        // attempt with a reason, never a warm-up stuck on `warming`.
+        work = mkdtempSync(join(this.deps.tmpRoot?.() ?? tmpdir(), `${NEMOTRON_TMP_PREFIX}warm-`))
+        trackNemotronDir(work)
+        const wav = join(work, 'warm.wav')
         // One second of silence: enough to load and compile, nothing to diarize.
         writeFileSync(wav, pcm16ToWav(Buffer.alloc(32_000)), { mode: 0o600 })
         const run = await (this.deps.run ?? runNemotronCli)({
@@ -409,19 +522,26 @@ export class NemotronLiveRuntime {
         this.warmMs = this.now() - started
         this.warmLoadSec = run.loadSec
         this.warmError = null
-        this.consecutiveTimeouts = 0
+        this.consecutiveFailures = 0
+        this.lastStateLog = null
         this.log(`[diarizer] tracks=nemotron names=voiceprint warm in ${this.warmMs} ms (model load ${run.loadSec ?? '?'} s, ${NEMOTRON_VARIANT}, ane)`)
         return
       } catch (error) {
-        this.warmError = error instanceof NemotronRunError ? error.reason : 'error'
+        this.warmError = error instanceof NemotronRunError ? error.reason : 'temp_dir'
         this.log(`[diarizer] Nemotron warm-up attempt ${attempt}/${attempts} failed (${this.warmError}): ${error instanceof Error ? error.message : String(error)}`)
       } finally {
-        try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort */ }
+        if (work) {
+          untrackNemotronDir(work)
+          try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort */ }
+        }
       }
       if (attempt < attempts) await (this.deps.sleep ?? (ms => new Promise(r => setTimeout(r, ms).unref?.())))(delays[attempt - 1])
     }
+    const wait = this.backoff()
+    this.trips++
     this.state = 'failed'
-    this.log(`[diarizer] tracks=voiceprint names=voiceprint fallback=warmup_failed (${this.warmError})`)
+    this.retryAt = this.now() + wait
+    this.log(`[diarizer] tracks=voiceprint names=voiceprint fallback=warmup_failed (${this.warmError}); next warm-up in ${Math.round(wait / 60_000)} min`)
   }
 
   /** Why Nemotron cannot take this chunk, or null when it can. */
@@ -429,10 +549,14 @@ export class NemotronLiveRuntime {
     if (requestedDiarizer(this.env()) === 'embedding') return 'embedding_requested'
     if (this.state === 'idle' || this.state === 'off') { void this.startWarmup(); return 'warming' }
     if (this.state === 'warming') return 'warming'
-    if (this.state === 'failed') {
-      // Bounded self-healing: one more warm-up at most every ten minutes.
-      if (this.now() - this.lastWarmEndedAt > REWARM_MIN_INTERVAL_MS) void this.startWarmup()
-      return this.warmError === 'cli_missing' || this.warmError === 'models_missing' ? this.warmError : 'warmup_failed'
+    if (this.state === 'cooling' || this.state === 'failed') {
+      const reason: LiveFallbackReason = this.state === 'cooling'
+        ? 'cooling'
+        : this.warmError === 'cli_missing' || this.warmError === 'models_missing' ? this.warmError : 'warmup_failed'
+      if (this.now() < this.retryAt) return reason
+      // The rest is over: one fresh warm-up decides.
+      void this.startWarmup()
+      return STATIC_REASONS.has(reason) ? reason : 'warming'
     }
     if (this.inFlight >= this.maxConcurrent()) return 'busy'
     return null
@@ -454,20 +578,23 @@ export class NemotronLiveRuntime {
         niceness: 10,
         tmpRoot: this.deps.tmpRoot?.(),
       })
-      this.consecutiveTimeouts = 0
+      this.consecutiveFailures = 0
+      this.trips = 0
       return { ok: true, run }
     } catch (error) {
       const reason: LiveFallbackReason = error instanceof NemotronRunError ? error.reason : 'error'
-      if (reason === 'timeout') {
-        this.consecutiveTimeouts++
-        if (this.consecutiveTimeouts >= REWARM_AFTER_TIMEOUTS && this.now() - this.lastWarmEndedAt > REWARM_MIN_INTERVAL_MS) {
-          // A warm run takes about 0.15 s, so repeated budget kills mean the
-          // compiled model is gone. Each kill aborts the compile it would need,
-          // so re-warm without a budget while chunks keep the voiceprint.
-          this.consecutiveTimeouts = 0
-          this.log('[diarizer] repeated Nemotron timeouts; re-warming in the background')
-          this.state = 'warming'
-          void this.startWarmup()
+      if (RUN_FAILURES.has(reason)) {
+        this.consecutiveFailures++
+        if (this.consecutiveFailures >= BREAKER_FAILURES && this.state === 'ready') {
+          // The breaker (QA 6.61.0): stop spawning. Every chunk takes the voiceprint
+          // at once instead of waiting out a budget it will not meet.
+          const wait = this.backoff()
+          this.trips++
+          this.state = 'cooling'
+          this.retryAt = this.now() + wait
+          this.warmError = reason
+          this.log(`[diarizer] breaker open: ${this.consecutiveFailures} Nemotron runs failed in a row (last: ${reason}); voiceprint labels for ${Math.round(wait / 60_000)} min, then a fresh warm-up`)
+          this.consecutiveFailures = 0
         }
       }
       return { ok: false, reason, detail: error instanceof Error ? error.message : String(error), ms: this.now() - started }
@@ -476,7 +603,7 @@ export class NemotronLiveRuntime {
     }
   }
 
-  /** Record one chunk's outcome and log it. Every fallback is logged with its reason. */
+  /** Record one chunk's outcome. Run failures are logged per chunk; state reasons once per change. */
   record(chunk: { sessionId: string; chunkIndex: number }, outcome:
     | { outcome: 'nemotron'; ms: number; segments: number; tracks: number; timing: string; identified: number }
     | { outcome: 'voiceprint'; reason: string; ms: number | null; detail?: string },
@@ -485,35 +612,69 @@ export class NemotronLiveRuntime {
     if (outcome.outcome === 'nemotron') {
       this.counts.nemotron++
       this.last = { at, outcome: 'nemotron', reason: null, ms: outcome.ms }
+      this.pushRecent('nemotron', null)
+      this.lastStateLog = null
       this.log(`[diarizer] chunk #${chunk.chunkIndex} nemotron ${outcome.ms} ms tracks=${outcome.tracks} segments=${outcome.segments} timing=${outcome.timing} named=${outcome.identified}`)
       return
     }
     this.counts.voiceprint++
     this.counts.reasons[outcome.reason] = (this.counts.reasons[outcome.reason] ?? 0) + 1
     this.last = { at, outcome: 'voiceprint', reason: outcome.reason, ms: outcome.ms }
+    // Nemotron ran and heard nobody: not a failure of Nemotron.
+    if (outcome.reason !== 'no_speech') this.pushRecent('voiceprint', outcome.reason)
+    if (STATE_REASONS.has(outcome.reason)) {
+      if (this.lastStateLog === outcome.reason) return
+      this.lastStateLog = outcome.reason
+      this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason} -> voiceprint (and every chunk after it until the state changes; counted in health)`)
+      return
+    }
     this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}${outcome.ms !== null ? ` after ${outcome.ms} ms` : ''} -> voiceprint${outcome.detail ? ` (${outcome.detail.slice(0, 160)})` : ''}`)
+  }
+
+  private pushRecent(outcome: 'nemotron' | 'voiceprint', reason: string | null): void {
+    this.recent.push({ outcome, reason })
+    if (this.recent.length > RECENT_WINDOW) this.recent.shift()
   }
 
   snapshot(): LiveSnapshot {
     const choice = activeDiarizer(this.env(), this.home())
     const requested = choice.requested
+    const recentNemotron = this.recent.filter(r => r.outcome === 'nemotron').length
+    const recentVoiceprint = this.recent.length - recentNemotron
     let active: LiveSnapshot['active']
     let fallback: string | null = null
     if (requested === 'embedding') active = 'embedding'
     else if (choice.fallback) { active = 'embedding'; fallback = choice.fallback }
-    else if (this.state === 'ready') active = 'nemotron'
     else if (this.state === 'warming' || this.state === 'idle') { active = 'warming'; fallback = 'warming' }
-    else { active = 'embedding'; fallback = this.warmError === 'cli_missing' || this.warmError === 'models_missing' ? this.warmError : 'warmup_failed' }
+    else if (this.state === 'cooling') { active = 'embedding'; fallback = 'cooling' }
+    else if (this.state === 'failed' || this.state === 'off') {
+      active = 'embedding'
+      fallback = this.warmError === 'cli_missing' || this.warmError === 'models_missing' ? this.warmError : 'warmup_failed'
+    } else if (this.recent.length > 0 && recentVoiceprint * 2 > this.recent.length) {
+      // Warm, but most recent chunks fell back: say so, and why.
+      active = 'embedding'
+      const tally = new Map<string, number>()
+      for (const r of this.recent) if (r.reason) tally.set(r.reason, (tally.get(r.reason) ?? 0) + 1)
+      fallback = [...tally.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? 'error'
+    } else active = 'nemotron'
     return {
       requested,
       active,
       fallback,
+      recent: { window: RECENT_WINDOW, nemotron: recentNemotron, voiceprint: recentVoiceprint },
+      breaker: {
+        open: this.state === 'cooling',
+        trips: this.trips,
+        consecutiveFailures: this.consecutiveFailures,
+        retryAt: (this.state === 'cooling' || this.state === 'failed') && this.retryAt ? new Date(this.retryAt).toISOString() : null,
+      },
       variant: NEMOTRON_VARIANT,
       computeUnits: 'ane',
       budgetMs: this.budget(),
       maxConcurrent: this.maxConcurrent(),
       inFlight: this.inFlight,
       warm: { state: this.state, ms: this.warmMs, loadSec: this.warmLoadSec, error: this.warmError },
+      cliKnown: this.identity ? this.identity.known : null,
       chunks: { nemotron: this.counts.nemotron, voiceprint: this.counts.voiceprint, reasons: { ...this.counts.reasons } },
       last: this.last,
     }
@@ -522,7 +683,11 @@ export class NemotronLiveRuntime {
 
 export const nemotronLive = new NemotronLiveRuntime()
 
-/** Server start: warm the model in the background. */
+/** Server start: sweep what a previous process left, then warm the model in the background. */
 export function startNemotronWarmup(): void {
-  void nemotronLive.startWarmup().catch(error => console.warn(`[diarizer] warm-up error: ${error instanceof Error ? error.message : String(error)}`))
+  try {
+    const swept = sweepStaleNemotron()
+    if (swept.dirs || swept.processes) console.log(`[diarizer] startup sweep: removed ${swept.dirs} stale temp dir(s), killed ${swept.processes} orphaned CLI run(s)`)
+  } catch { /* the sweep is housekeeping, never a reason not to start */ }
+  void nemotronLive.startWarmup()
 }

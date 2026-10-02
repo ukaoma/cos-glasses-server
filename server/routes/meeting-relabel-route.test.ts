@@ -624,6 +624,36 @@ describe('enrolling a named voice', () => {
     expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
   })
 
+  it('cannot enrol the wrong person: a chunk its own voiceprint gave to someone else, or a two-voice chunk (6.61.0)', async () => {
+    // Since Nemotron a chunk's label is its dominant TURN's name. Raw 8 reads Ext
+    // (its dominant turn was unnamed) but its whole-chunk embedding matched MU at
+    // capture; raw 21 is two turns. Neither may teach Kirstyn's profile.
+    seed('meeting_nemo', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
+    const path = join(root, MONTH, `${STEM}.g2-chunks.json`)
+    const doc = JSON.parse(readFileSync(path, 'utf-8'))
+    const turns = [
+      { speaker: 'Ext', text: 'segment 4 about the Jewel360', startSec: 0, endSec: 2.5, similarity: 0 },
+      { speaker: 'MU', text: 'pipeline at thirty six percent', startSec: 2.6, endSec: 5, similarity: 0.8 },
+    ]
+    doc.chunks[4].segments = turns
+    doc.chunkEntries.find((e: { chunkIndex: number }) => e.chunkIndex === 21).chunk.segments = turns
+    writeFileSync(path, JSON.stringify(doc, null, 2))
+    writeChunkEmbeddings('meeting_nemo', [
+      { i: 2, speaker: 'MU' }, { i: 3, speaker: 'Ext' }, { i: 5, speaker: 'MU' },
+      { i: 8, speaker: 'MU' }, { i: 13, speaker: 'MU' }, { i: 21, speaker: 'Ext' },
+    ])
+    await startServer()
+
+    const res = await post('/api/meeting/meeting_nemo/relabel', { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls.map(c => c.marker)).toEqual([3])
+    expect(res.json.enrolment).toEqual({
+      enrolled: 1, attempted: 3, created: true, clusterSkipped: 0, otherVoiceSkipped: 2, skipped: null,
+    })
+    // The rename itself is unaffected: every Ext chunk is Kirstyn now.
+    expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
+  })
+
   it('stamps correction:<sessionId>, which is what makes the samples retractable', async () => {
     // A bare tag breaks four things at once: isSampleFromSession accepts only
     // auto:/correction:/g2-training:, so "Not in this meeting" retracts NOTHING;

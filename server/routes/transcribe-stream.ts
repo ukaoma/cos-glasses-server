@@ -40,7 +40,8 @@ import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whis
 import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
 import { identifySpeaker, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
-import { nemotronLive, resolveLiveLabels, type ChunkSpeakerSegment } from '../lib/nemotron-live.js'
+import { nemotronLive, resolveLiveLabels, resplitSegments, type ChunkSpeakerSegment } from '../lib/nemotron-live.js'
+import { VOICEPRINT_MIN_AUDIO_SEC } from '../lib/voiceprint-floor.js'
 import {
   assertOpenAIWhisperBudget,
   recordOpenAIWhisperUsage,
@@ -793,6 +794,12 @@ function recoverSessions(): void {
                 const stripped = stripInlineHallucinations(chunk.text, data.sessionId)
                 if (stripped !== chunk.text) {
                   chunk.text = stripped
+                  // 6.61.0: the stored turns must still join to the text.
+                  if (chunk.segments) {
+                    const refit = resplitSegments(chunk.segments, stripped)
+                    if (refit?.length) chunk.segments = refit
+                    else delete chunk.segments
+                  }
                   cleaned++
                 }
               }
@@ -1904,7 +1911,7 @@ async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Bu
 function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
   const expectedSpeakers = undefined
   const audioDurationSec = Math.max(0, (audioBuffer.length - 44)) / 32000
-  if (!isEmbeddingAvailable() || audioDurationSec < 2.0) return { speaker: clientSpeaker, similarity: 0 }
+  if (!isEmbeddingAvailable() || audioDurationSec < VOICEPRINT_MIN_AUDIO_SEC) return { speaker: clientSpeaker, similarity: 0 }
 
   const tEmb = performance.now()
   const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers)
@@ -2149,7 +2156,7 @@ async function processStreamChunk(opts: {
         voiceprint,
         clientSpeaker,
         identify: wav => {
-          const named = identifySpeaker(wav)
+          const named = identifySpeaker(wav, undefined, { event: 'nemotron-track' })
           return named ? { speaker: named.speaker, similarity: named.similarity } : null
         },
       })

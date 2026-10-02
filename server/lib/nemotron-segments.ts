@@ -7,15 +7,16 @@
 // for the final pass). Times are seconds in that same coordinate system.
 
 import type { WhisperWord } from './whisper-local.js'
-import { NEMOTRON_CHANNELS } from './nemotron-cli.js'
+import { NEMOTRON_CHANNELS, NEMOTRON_FRAME_SEC } from './nemotron-cli.js'
+import { VOICEPRINT_MIN_AUDIO_SEC } from './voiceprint-floor.js'
 
 export const ACTIVE_THRESHOLD = 0.5
-const FPS = 100
-const SAMPLES_PER_FRAME = 160
+const FPS = Math.round(1 / NEMOTRON_FRAME_SEC)
+const SAMPLES_PER_FRAME = Math.round(16_000 * NEMOTRON_FRAME_SEC)
 /** A channel shorter than this inside the span is noise, not a speaker. */
 export const MIN_TRACK_SEC = 0.5
-/** The voiceprint needs about this much of one voice to name it. */
-export const NAME_TRACK_MIN_SEC = 2.0
+/** The voiceprint needs about this much of one voice to name it (the same floor as a whole chunk). */
+export const NAME_TRACK_MIN_SEC = VOICEPRINT_MIN_AUDIO_SEC
 
 export interface Activity {
   frames: number

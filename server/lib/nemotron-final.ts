@@ -29,6 +29,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { selectBatchTranscriptForPersistence } from './batch-transcript-quality.js'
@@ -39,8 +40,16 @@ import {
   nemotronCliPath,
   prepareNemotronModelsDir,
 } from './diarizer-backend.js'
-import { isUnattributed } from './meeting-speaker-review.js'
-import { NemotronRunError, runNemotronCli, type NemotronPreds, type RunNemotronOptions } from './nemotron-cli.js'
+import { CONFIDENT_SIMILARITY, isUnattributed } from './meeting-speaker-review.js'
+import {
+  NEMOTRON_TMP_PREFIX,
+  NemotronRunError,
+  runNemotronCli,
+  trackNemotronDir,
+  untrackNemotronDir,
+  type NemotronPreds,
+  type RunNemotronOptions,
+} from './nemotron-cli.js'
 import type { ChunkSpeakerSegment } from './nemotron-live.js'
 import {
   channelForSpan,
@@ -51,6 +60,7 @@ import {
   readPcm16Mono,
   splitTokens,
   tokenTimesFromWords,
+  tracksIn,
   type Activity,
   type TokenTime,
   wavHeader,
@@ -58,14 +68,18 @@ import {
 import { NEMOTRON_CHANNELS } from './nemotron-cli.js'
 import type { WhisperWord } from './whisper-local.js'
 
-export const FINAL_MIN_SIMILARITY = 0.65
+/** A name is evidence only from a chunk the voiceprint was sure of: the review panel's own floor. */
+export const FINAL_MIN_SIMILARITY = CONFIDENT_SIMILARITY
 export const FINAL_ONE_SIDED = 0.8
 export const FINAL_MIN_SUPPORT = 3
 export const FINAL_PURITY = 0.8
 /** The canary's eligibility for a meeting-wide map: at most this many identities... */
 export const FINAL_MAX_IDENTITIES = 4
-/** ...and fewer channels than Nemotron has, or two people already share one. */
-export const FINAL_MAX_CHANNELS = 8
+/** ...and fewer channels in use than Nemotron has, or two people already share one. */
+export const FINAL_MAX_CHANNELS = NEMOTRON_CHANNELS
+/** A timeline longer than this many times the audio it holds (plus slack) is a bad clock, not a meeting. */
+export const FINAL_MAX_SPAN_RATIO = 1.5
+export const FINAL_SPAN_SLACK_SEC = 600
 const SR = 16_000
 const WAV_HEADER = 44
 
@@ -124,6 +138,10 @@ export interface MeetingTimeline {
   /** PCM samples each chunk file holds as concatenateWavChunks reads it (bytes after a 44-byte header). */
   fileSamples: Map<number, number>
   excluded: { missing: number; hashMismatch: number; unreadable: number }
+  /** Seconds of chunk audio placed on the timeline. */
+  audioSec: number
+  /** True when the span is far beyond the audio: no WAV was built. */
+  tooLong: boolean
 }
 
 const chunkFile = (audioDir: string, index: number): string => join(audioDir, `chunk_${String(index).padStart(4, '0')}.wav`)
@@ -157,7 +175,20 @@ function concatSamples(path: string): number | null {
  * 90-minute meeting is about 170 MB of 16-bit audio): the first checks every
  * chunk and keeps its place, the second copies its audio in.
  */
-export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string): MeetingTimeline {
+/** Give the event loop back every this many chunks while the timeline is built. */
+const TIMELINE_YIELD_EVERY = 25
+const yieldToLoop = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+
+/**
+ * Async and chunked (QA 6.61.0, N7): reads are non-blocking and the loop is given
+ * back every TIMELINE_YIELD_EVERY chunks, so a long meeting's timeline does not
+ * freeze live chunk uploads while it is built.
+ *
+ * Returns `tooLong` instead of a timeline when the span the clocks claim is far
+ * beyond the audio the chunks hold (QA W5: one chunk stamped three hours late
+ * made a 346 MB timeline out of 12 s of audio). Nothing is allocated then.
+ */
+export async function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string): Promise<MeetingTimeline> {
   const excluded = { missing: 0, hashMismatch: 0, unreadable: 0 }
   const fileSamples = new Map<number, number>()
   const indices = entries.map(entry => entry.chunkIndex)
@@ -167,12 +198,14 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
     if (samples !== null) fileSamples.set(index, samples)
   }
   const placed: Array<{ entry: SidecarEntry; at: number; samples: number; dataOffset: number }> = []
+  let seen = 0
   for (const entry of entries) {
+    if (++seen % TIMELINE_YIELD_EVERY === 0) await yieldToLoop()
     const path = chunkFile(audioDir, entry.chunkIndex)
     if (!existsSync(path)) { excluded.missing++; continue }
     if (!isRegularFile(path)) { excluded.unreadable++; continue }
     let wav: Buffer
-    try { wav = readFileSync(path) } catch { excluded.unreadable++; continue }
+    try { wav = await readFile(path) } catch { excluded.unreadable++; continue }
     const expected = entry.chunk.audioSha256
     if (expected && createHash('sha256').update(wav).digest('hex') !== expected) { excluded.hashMismatch++; continue }
     const pcm = readPcm16Mono(wav)
@@ -181,12 +214,18 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
   }
   placed.sort((x, y) => x.at - y.at || x.entry.chunkIndex - y.entry.chunkIndex)
   let total = 0
-  for (const item of placed) total = Math.max(total, item.at + item.samples)
+  let audio = 0
+  for (const item of placed) { total = Math.max(total, item.at + item.samples); audio += item.samples }
   total += SR
+  const empty = { wav: Buffer.alloc(0), windows: [], byIndex: new Map<number, TimelineWindow>(), fileSamples, excluded }
+  if (total / SR > (audio / SR) * FINAL_MAX_SPAN_RATIO + FINAL_SPAN_SLACK_SEC) {
+    return { ...empty, durationSec: total / SR, audioSec: audio / SR, tooLong: true }
+  }
   const out = Buffer.alloc(WAV_HEADER + total * 2)
   wavHeader(total * 2, SR).copy(out, 0)
   const windows: TimelineWindow[] = []
   for (let i = 0; i < placed.length; i++) {
+    if ((i + 1) % TIMELINE_YIELD_EVERY === 0) await yieldToLoop()
     const item = placed[i]
     const next = i + 1 < placed.length ? placed[i + 1].at : item.at + item.samples
     const room = Math.max(0, next - item.at)
@@ -194,7 +233,7 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
     let copied = 0
     try {
       if (!isRegularFile(chunkFile(audioDir, item.entry.chunkIndex))) throw new Error('not a regular file')
-      const wav = readFileSync(chunkFile(audioDir, item.entry.chunkIndex))
+      const wav = await readFile(chunkFile(audioDir, item.entry.chunkIndex))
       copied = wav.copy(out, WAV_HEADER + item.at * 2, item.dataOffset, Math.min(wav.length, item.dataOffset + use * 2)) / 2
     } catch { /* vanished between passes: its window stays silent */ }
     windows.push({ chunkIndex: item.entry.chunkIndex, start: item.at / SR, end: (item.at + Math.floor(copied)) / SR, chunk: item.entry.chunk })
@@ -202,6 +241,8 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
   return {
     wav: out,
     durationSec: total / SR,
+    audioSec: audio / SR,
+    tooLong: false,
     windows,
     byIndex: new Map(windows.map(window => [window.chunkIndex, window])),
     fileSamples,
@@ -221,7 +262,7 @@ export function crowdIdentities(windows: TimelineWindow[]): number {
     const chunk = window.chunk
     if (isName(chunk.speaker) && Number(chunk.similarity) >= FINAL_MIN_SIMILARITY) counts.set(chunk.speaker, (counts.get(chunk.speaker) ?? 0) + 1)
   }
-  return [...counts.values()].filter(count => count >= 3).length
+  return [...counts.values()].filter(count => count >= FINAL_MIN_SUPPORT).length
 }
 
 function isName(label: unknown): label is string {
@@ -504,14 +545,15 @@ export function relabelTranscriptWords(transcript: string, sequence: Array<{ wor
   })
   const flat: string[] = parsed.flatMap(line => line?.words ?? [])
   const out: string[] = []
-  type Turn = { speaker: string; words: string[] }
-  let current = null as Turn | null
-  const flush = () => { if (current?.words.length) out.push(`[${current.speaker}]: ${current.words.join(' ')}`); current = null }
   let pointer = 0
   let flatIndex = 0
   for (let li = 0; li < lines.length; li++) {
     const line = parsed[li]
-    if (!line) { flush(); out.push(lines[li]); continue }
+    if (!line) { out.push(lines[li]); continue }
+    // Line breaks are kept (QA 6.61.0 W4): a line splits where its words change
+    // speaker and is never merged with its neighbour, so a pass that changes no
+    // label reproduces the transcript byte for byte.
+    const turns: Array<{ speaker: string; words: string[] }> = []
     for (const word of line.words) {
       let speaker: string | null = null
       for (let k = pointer; k < Math.min(sequence.length, pointer + WINDOW); k++) {
@@ -525,13 +567,15 @@ export function relabelTranscriptWords(transcript: string, sequence: Array<{ wor
           }
         }
       }
-      if (speaker === null) speaker = current?.speaker ?? line.speaker
-      if (!current || current.speaker !== speaker) { flush(); current = { speaker, words: [] } }
-      current.words.push(word)
+      if (speaker === null) speaker = turns.at(-1)?.speaker ?? line.speaker
+      const turn = turns.at(-1)
+      if (turn && turn.speaker === speaker) turn.words.push(word)
+      else turns.push({ speaker, words: [word] })
       flatIndex++
     }
+    if (turns.length === 1 && turns[0].speaker === line.speaker) { out.push(lines[li]); continue }
+    for (const turn of turns) out.push(`[${turn.speaker}]: ${turn.words.join(' ')}`)
   }
-  flush()
   return out.join('\n')
 }
 
@@ -552,9 +596,30 @@ const sha = (text: string): string => createHash('sha256').update(text).digest('
 
 export type FinalPassStatus = 'applied' | 'skipped' | 'failed'
 
+/**
+ * Every reason a final pass can give, a fixed set. `/api/health` is public (no
+ * token) and the server listens on the LAN, so health may carry only these codes
+ * and counts: never a speaker name, a path, a meeting title or a raw error
+ * message (QA 6.61.0 blocker). Anything else is reported as `error`, and the raw
+ * text goes to server.log only.
+ */
+export const FINAL_REASON_CODES = [
+  'embedding_requested', 'cli_missing', 'models_missing', 'meeting_missing', 'no_audio', 'human_corrected',
+  'no_transcript', 'already_applied', 'no_chunks', 'nemotron_timeout', 'nemotron_cli_failed',
+  'nemotron_bad_output', 'nemotron_spawn_failed', 'nemotron_error', 'no_speaker_words', 'chunk_map_ambiguous',
+  'word_mismatch', 'no_change', 'changed_during_pass', 'markdown_write', 'sidecar_restore_failed', 'too_long',
+  'metadata_not_persisted', 'error',
+] as const
+export type FinalReasonCode = typeof FINAL_REASON_CODES[number]
+const REASON_SET: ReadonlySet<string> = new Set(FINAL_REASON_CODES)
+export const finalReasonCode = (reason: string | undefined): FinalReasonCode | null =>
+  reason === undefined ? null : REASON_SET.has(reason) ? reason as FinalReasonCode : 'error'
+
 export interface FinalPassOutcome {
   status: FinalPassStatus
   reason?: string
+  /** Raw failure text for server.log. Never published. */
+  detail?: string
   mode?: 'batch' | 'streaming'
   /** True when the room was too full for a meeting-wide map (only per-chunk turns applied). */
   crowded?: boolean
@@ -564,6 +629,8 @@ export interface FinalPassOutcome {
   channels?: number
   mapped?: Record<string, string>
   words?: RelabelStats
+  /** Chunks left off the timeline: no file, a hash that disagrees, unreadable. */
+  excluded?: { missing: number; hashMismatch: number; unreadable: number }
   /** Distinct speakers in the transcript before and after. */
   speakersBefore?: number
   speakersAfter?: number
@@ -579,35 +646,95 @@ export interface FinalPassOptions {
   tmpRoot?: string
   log?: (line: string) => void
   now?: () => number
+  /** Seam: how files are written (durable atomic by default). */
+  write?: (path: string, data: string) => void
+  /** Seam: the batch relabeller (word-aligned in place by default). */
+  relabelWords?: (transcript: string, sequence: Array<{ word: string; speaker: string }>) => string
+}
+
+/** 20x realtime is the floor (the canary ran 155x), plus two minutes for a cold Neural Engine compile. */
+export function finalPassTimeoutMs(durationSec: number): number {
+  return 120_000 + Math.round((durationSec * 1000) / 20)
+}
+
+/** What `/api/health` may say about the last final pass: codes and counts only. */
+export interface PublicFinalOutcome {
+  status: FinalPassStatus
+  reasonCode: FinalReasonCode | null
+  mode: 'batch' | 'streaming' | null
+  crowded: boolean | null
+  channels: number | null
+  mappedChannels: number | null
+  wordsRelabeled: number | null
+  wordsTotal: number | null
+  excludedChunks: number | null
+  ms: number | null
+  at: string
 }
 
 let finalLane: Promise<unknown> = Promise.resolve()
-let lastFinal: (FinalPassOutcome & { at: string }) | null = null
+let lastFinal: PublicFinalOutcome | null = null
 const finalCounts: Record<string, number> = {}
 
-export function finalPassSnapshot(): { last: (FinalPassOutcome & { at: string }) | null; counts: Record<string, number> } {
-  return { last: lastFinal, counts: { ...finalCounts } }
+export function publicFinalOutcome(outcome: FinalPassOutcome, at: string): PublicFinalOutcome {
+  return {
+    status: outcome.status,
+    reasonCode: finalReasonCode(outcome.reason),
+    mode: outcome.mode ?? null,
+    crowded: typeof outcome.crowded === 'boolean' ? outcome.crowded : null,
+    channels: typeof outcome.channels === 'number' ? outcome.channels : null,
+    mappedChannels: outcome.mapped ? Object.keys(outcome.mapped).length : null,
+    wordsRelabeled: outcome.words?.relabeled ?? null,
+    wordsTotal: outcome.words?.total ?? null,
+    excludedChunks: outcome.excluded ? outcome.excluded.missing + outcome.excluded.hashMismatch + outcome.excluded.unreadable : null,
+    ms: typeof outcome.ms === 'number' ? outcome.ms : null,
+    at,
+  }
+}
+
+export function finalPassSnapshot(): { last: PublicFinalOutcome | null; counts: Record<string, number> } {
+  return { last: lastFinal ? { ...lastFinal } : null, counts: { ...finalCounts } }
 }
 
 /** One meeting's final pass, serialised with every other final pass. Never throws. */
 export function runNemotronFinalPass(options: FinalPassOptions): Promise<FinalPassOutcome> {
-  const job = finalLane.then(() => finalPassNow(options)).catch(error => ({
-    status: 'failed' as const,
-    reason: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+  const job = finalLane.then(() => finalPassNow(options)).catch((error): FinalPassOutcome => ({
+    status: 'failed',
+    reason: 'error',
+    detail: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
   }))
   finalLane = job.then(() => undefined, () => undefined)
   return job.then(outcome => {
-    const key = outcome.status === 'applied' ? 'applied' : `${outcome.status}:${outcome.reason ?? 'unknown'}`
+    const published = publicFinalOutcome(outcome, new Date((options.now ?? Date.now)()).toISOString())
+    const key = outcome.status === 'applied' ? 'applied' : `${outcome.status}:${published.reasonCode ?? 'error'}`
     finalCounts[key] = (finalCounts[key] ?? 0) + 1
-    lastFinal = { ...outcome, at: new Date((options.now ?? Date.now)()).toISOString() }
+    lastFinal = published
     const log = options.log ?? console.log
     if (outcome.status === 'applied') {
-      log(`[diarizer] final pass applied (${outcome.mode}${outcome.crowded ? `, crowded: ${outcome.identities} identities, per-chunk turns only` : ''}) in ${outcome.ms} ms: ${outcome.channels} channels, mapped ${JSON.stringify(outcome.mapped)}, ${outcome.words?.relabeled}/${outcome.words?.total} words relabelled, speakers ${outcome.speakersBefore} -> ${outcome.speakersAfter}`)
+      log(`[diarizer] final pass applied (${outcome.mode}${outcome.crowded ? `, crowded: ${outcome.identities} identities, per-chunk turns only` : ''}) in ${outcome.ms} ms: ${outcome.channels} channels, mapped ${JSON.stringify(outcome.mapped)}, ${outcome.words?.relabeled}/${outcome.words?.total} words relabelled, speakers ${outcome.speakersBefore} -> ${outcome.speakersAfter}${excludedNote(outcome)}`)
+    } else if (outcome.reason === 'sidecar_restore_failed') {
+      log(`[diarizer] final pass FAILED and could not restore the sidecar: ${outcome.detail}`)
     } else {
-      log(`[diarizer] final pass ${outcome.status}: ${outcome.reason}; the saved transcript is unchanged`)
+      log(`[diarizer] final pass ${outcome.status}: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ''}${excludedNote(outcome)}; the saved transcript is unchanged`)
     }
     return outcome
   })
+}
+
+function excludedNote(outcome: FinalPassOutcome): string {
+  const e = outcome.excluded
+  if (!e || e.missing + e.hashMismatch + e.unreadable === 0) return ''
+  return `; chunks left off the timeline: ${e.missing} missing, ${e.hashMismatch} hash mismatch, ${e.unreadable} unreadable`
+}
+
+/** A pass the caller decided not to run (the save path's metadata guard): counted and logged like any other. */
+export function recordFinalPassSkip(reason: FinalReasonCode, detail: string, options: { log?: (line: string) => void; now?: () => number } = {}): void {
+  const outcome: FinalPassOutcome = { status: 'skipped', reason, detail }
+  const published = publicFinalOutcome(outcome, new Date((options.now ?? Date.now)()).toISOString())
+  const key = `skipped:${published.reasonCode ?? 'error'}`
+  finalCounts[key] = (finalCounts[key] ?? 0) + 1
+  lastFinal = published
+  ;(options.log ?? console.log)(`[diarizer] final pass skipped: ${reason} (${detail}); the saved transcript is unchanged`)
 }
 
 function distinctSpeakers(transcript: string): number {
@@ -641,40 +768,53 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   const entries = (Array.isArray(sidecar.chunkEntries) ? sidecar.chunkEntries : []) as SidecarEntry[]
   if (!entries.length) return { status: 'skipped', reason: 'no_chunks' }
 
-  const timeline = buildMeetingTimeline(entries, options.audioDir)
-  if (!timeline.windows.length) return { status: 'skipped', reason: 'no_audio' }
+  const timeline = await buildMeetingTimeline(entries, options.audioDir)
+  const excluded = timeline.excluded
+  if (timeline.tooLong) {
+    return { status: 'skipped', reason: 'too_long', excluded, detail: `timeline ${Math.round(timeline.durationSec)} s for ${Math.round(timeline.audioSec)} s of audio` }
+  }
+  if (!timeline.windows.length) return { status: 'skipped', reason: 'no_audio', excluded }
 
   const cli = nemotronCliPath(env, home)
   const modelsDir = prepareNemotronModelsDir(env, home)
   if (!cli || !modelsDir) return { status: 'skipped', reason: !cli ? 'cli_missing' : 'models_missing' }
 
-  const work = mkdtempSync(join(options.tmpRoot ?? tmpdir(), 'cos-nemotron-final-'))
+  // Tracked, so a server exit mid-run kills the CLI and deletes this directory
+  // (it holds the whole meeting's audio); a sweep at the next start catches a crash.
+  const work = mkdtempSync(join(options.tmpRoot ?? tmpdir(), `${NEMOTRON_TMP_PREFIX}final-`))
+  trackNemotronDir(work)
   let run: NemotronPreds
   try {
     try { chmodSync(work, 0o700) } catch { /* mkdtemp is already 0700 */ }
     const wavPath = join(work, 'meeting.wav')
-    writeFileSync(wavPath, timeline.wav, { mode: 0o600 })
+    await writeFile(wavPath, timeline.wav, { mode: 0o600 })
     try {
-      // 20x realtime is the floor (the canary ran 155x), plus room for a cold compile.
       run = await (options.run ?? runNemotronCli)({
         cli,
         modelsDir,
         wavPath,
-        timeoutMs: 120_000 + Math.round((timeline.durationSec * 1000) / 20),
+        timeoutMs: finalPassTimeoutMs(timeline.durationSec),
         computeUnits: 'ane',
         niceness: 10,
         tmpRoot: options.tmpRoot,
       })
     } catch (error) {
-      return { status: 'failed', reason: error instanceof NemotronRunError ? `nemotron_${error.reason}` : 'nemotron_error' }
+      return {
+        status: 'failed',
+        reason: error instanceof NemotronRunError ? `nemotron_${error.reason}` : 'nemotron_error',
+        detail: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        excluded,
+      }
     }
   } finally {
+    untrackNemotronDir(work)
     try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort */ }
   }
 
   const activity: Activity = run
-  const channelsUsed = new Set<number>()
-  for (let f = 0; f < activity.frames; f++) for (let c = 0; c < NEMOTRON_CHANNELS; c++) if (isActive(activity, f, c)) channelsUsed.add(c)
+  // A channel is in use once it holds a track's worth of speech (QA 6.61.0 N2:
+  // one 10 ms blip on a third channel made a two-person call "crowded").
+  const channelsUsed = new Set(tracksIn(activity, 0, activity.frames).map(track => track.channel))
   // The canary's rule for a meeting-wide map (OUTCOME_2026-10-01, retro plan 4):
   // four or fewer identities and fewer than eight channels. A crowded room
   // (Wed 07:31 filled all eight with five names) gets no channel map; its words
@@ -704,7 +844,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     const sequence = relabeled.segments.flatMap(segment => segment.speakerWords
       .map(word => ({ word: String(word.word ?? '').trim(), speaker: word.speaker || 'Ext' }))
       .filter(word => word.word))
-    next = relabelTranscriptWords(transcript, sequence)
+    next = (options.relabelWords ?? relabelTranscriptWords)(transcript, sequence)
     nextSidecar.batchSegments = relabeled.segments
     // finalizeBatch records the exact canonical text here; keep that true.
     if (typeof sidecar.batchTranscript === 'string') nextSidecar.batchTranscript = next
@@ -735,8 +875,10 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   // Both relabelers keep every word by construction (the batch one matches the
   // saved words, the streaming one splits a line only into its own chunk text).
   // This check is the last line of defence should either ever change.
-  if (!sameWords(transcript, next)) return { status: 'skipped', reason: 'word_mismatch', mode }
-  if (next === transcript) return { status: 'skipped', reason: 'no_change', mode, words: stats }
+  if (!sameWords(transcript, next)) return { status: 'skipped', reason: 'word_mismatch', mode, excluded }
+  // Both relabellers keep line breaks, so an unchanged transcript means no label
+  // changed: nothing is written and no revision moves.
+  if (next === transcript) return { status: 'skipped', reason: 'no_change', mode, words: stats, excluded }
 
   const speakers = new Set<string>(Array.isArray(sidecar.speakers) ? sidecar.speakers : [])
   for (const line of next.split('\n')) {
@@ -778,14 +920,47 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   const nextMarkdown = replaceTranscriptSection(markdown, next)
   if (nextMarkdown === null) return { status: 'skipped', reason: 'no_transcript' }
 
-  // Sidecar first, markdown second, as the store does: the markdown is the
-  // visible commit. If the markdown write fails, put the sidecar back.
-  durableAtomicWriteFileSync(options.sidecarPath, JSON.stringify(nextSidecar, null, 2), { mode: 0o600 })
+  // The CLI ran for tens of seconds. A human relabel or deattribution, or a
+  // summary, may have landed meanwhile; writing from the copy read before the
+  // run would erase it. Re-read both files: any change and this pass is stale.
+  // Everything from here to the writes is synchronous, so no request handled by
+  // this process can land in between.
+  let sidecarNow: string
+  let markdownNow: string
   try {
-    durableAtomicWriteFileSync(options.meetingPath, nextMarkdown, { mode: 0o600 })
+    sidecarNow = readFileSync(options.sidecarPath, 'utf8')
+    markdownNow = readFileSync(options.meetingPath, 'utf8')
   } catch (error) {
-    try { durableAtomicWriteFileSync(options.sidecarPath, sidecarText, { mode: 0o600 }) } catch { /* reported below */ }
-    return { status: 'failed', reason: `markdown_write: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200) }
+    return { status: 'skipped', reason: 'changed_during_pass', detail: (error instanceof Error ? error.message : String(error)).slice(0, 300) }
+  }
+  if (sidecarNow !== sidecarText || markdownNow !== markdown) {
+    return { status: 'skipped', reason: 'changed_during_pass', detail: sidecarNow !== sidecarText ? 'sidecar changed' : 'markdown changed' }
+  }
+
+  // Sidecar first, markdown second, as the store does: the markdown is the
+  // visible commit. If the markdown write fails, put the sidecar back, and say
+  // so loudly if even that fails (the two files then disagree).
+  const write = options.write ?? ((path: string, data: string) => durableAtomicWriteFileSync(path, data, { mode: 0o600 }))
+  try {
+    write(options.sidecarPath, JSON.stringify(nextSidecar, null, 2))
+  } catch (error) {
+    return { status: 'failed', reason: 'markdown_write', detail: `sidecar write: ${(error instanceof Error ? error.message : String(error)).slice(0, 280)}`, excluded }
+  }
+  try {
+    write(options.meetingPath, nextMarkdown)
+  } catch (error) {
+    const why = (error instanceof Error ? error.message : String(error)).slice(0, 200)
+    try {
+      write(options.sidecarPath, sidecarText)
+    } catch (restoreError) {
+      return {
+        status: 'failed',
+        reason: 'sidecar_restore_failed',
+        detail: `markdown write: ${why}; sidecar restore: ${(restoreError instanceof Error ? restoreError.message : String(restoreError)).slice(0, 200)}; the sidecar holds the relabel and the markdown does not`,
+        excluded,
+      }
+    }
+    return { status: 'failed', reason: 'markdown_write', detail: `${why}; sidecar restored`, excluded }
   }
   return {
     status: 'applied',
@@ -797,6 +972,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     channels: channelsUsed.size,
     mapped,
     words: stats,
+    excluded,
     speakersBefore: distinctSpeakers(transcript),
     speakersAfter: distinctSpeakers(next),
   }

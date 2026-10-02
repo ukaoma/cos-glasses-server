@@ -540,6 +540,28 @@ describe('meeting save/list/detail API', () => {
     }
   })
 
+  it('refuses a relabel or deattribution while the meeting is finalizing, and takes it after (6.61.0)', async () => {
+    let release: () => void = () => {}
+    const h = await harness({
+      batch: acceptedBatch(),
+      runBatch: () => new Promise<BatchTranscription>(resolve => { release = () => resolve(acceptedBatch()) }),
+    })
+    const saved = await h.api('/api/meeting/save', { method: 'POST', body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Guarded' }) })
+    expect(saved.status).toBe(200)
+    expect(h.finalizationJobs.get('meeting_route_001')).not.toBeNull()
+    const relabel = await h.api('/api/meeting/meeting_route_001/relabel', { method: 'POST', body: JSON.stringify({ from: 'Speaker A', to: 'Kirstyn Blum', confirm: true }) })
+    expect(relabel.status).toBe(409)
+    expect(await relabel.json()).toMatchObject({ reason: 'meeting_finalizing', retryable: true })
+    const deattribute = await h.api('/api/meeting/meeting_route_001/deattribute', { method: 'POST', body: JSON.stringify({ from: 'Speaker A', confirm: true }) })
+    expect(deattribute.status).toBe(409)
+    expect(await deattribute.json()).toMatchObject({ reason: 'meeting_finalizing' })
+    release()
+    await Promise.all(h.background)
+    expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+    const after = await h.api('/api/meeting/meeting_route_001/relabel', { method: 'POST', body: JSON.stringify({ from: 'Speaker A', to: 'Kirstyn Blum' }) })
+    expect(after.status).not.toBe(409)
+  })
+
   it('rejects mismatched status/save pins before any meeting mutation', async () => {
     const h = await harness({ batch: acceptedBatch() })
     const wrongStatus = await h.api('/api/meeting/sessions/meeting_route_001/status?serverInstanceId=wrong-server', {

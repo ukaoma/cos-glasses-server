@@ -175,7 +175,7 @@ for (const sessionId of sessionIds) {
   const finalWallMs = Math.round(performance.now() - finalStarted)
   const after = JSON.parse(readFileSync(sidecarPath, 'utf8'))
   // Score on the real timeline (the same concat-offset mapping the pass uses), never nearest-elapsed.
-  const timeline = buildMeetingTimeline(after.chunkEntries, audioDir)
+  const timeline = await buildMeetingTimeline(after.chunkEntries, audioDir)
   const perChunk = new Map<number, Map<string, number>>()
   const transitions = new Map<string, number>()
   let liveTrackWords = 0, liveTrackSame = 0, finalWords = 0, finalSame = 0

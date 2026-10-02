@@ -160,7 +160,7 @@ import {
   type MeetingFinalizationJob,
 } from '../lib/meeting-finalization-jobs.js'
 import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
-import { runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
+import { recordFinalPassSkip, runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
 
 /** 6.61.0: the save-time Nemotron pass. Injectable so tests never spawn the CLI. */
 export type FinalDiarize = (options: Pick<FinalPassOptions, 'meetingPath' | 'sidecarPath' | 'audioDir'>) => Promise<FinalPassOutcome>
@@ -807,6 +807,25 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
   }
 
+  /**
+   * 6.61.0 (QA W2): refuse a correction while the meeting is finalizing.
+   *
+   * The Nemotron final pass rewrites the sidecar and the transcript inside the
+   * finalization job, after a CLI run of tens of seconds. A relabel or a
+   * deattribution landing in that window would race it (the pass also re-reads
+   * both files and stands down, but the edit and the pass should not interleave
+   * at all). Same rule held naming uses: while a finalization job exists for the
+   * session the answer is 409, and a retry after it finishes works.
+   */
+  function finalizingRefusal(sessionId: string): { status: number; body: Record<string, unknown> } | null {
+    const running = [...activeFinalizationJobs].some(key => key.endsWith(`:${sessionId}`))
+    if (!running && !finalizationJobs.get(sessionId)) return null
+    return {
+      status: 409,
+      body: { error: 'Meeting is finalizing; retry after it finishes', reason: 'meeting_finalizing', retryable: true },
+    }
+  }
+
   // ── Speaker review (6.21.12) ──────────────────────────────────────────
   // Backs COS Control's naming panel. Read-only: it reports what a saved
   // meeting's sidecar already contains and never writes. Naming, merging, and
@@ -1201,7 +1220,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // A merged G2 session is NOT refused here: it is a real capture with real
     // audio, and relabelling it is how its profile gets better. Only an imported
     // or derived IDENTITY is refused.
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? finalizingRefusal(sessionId)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -1535,7 +1554,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? finalizingRefusal(sessionId)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -2254,8 +2273,11 @@ async function finalizeBatch(options: {
   // meeting. It never throws and writes nothing unless every word survives;
   // on any failure the meeting stays exactly as saved above.
   // Skipped when the batch text landed but its sidecar did not: the two would
-  // disagree about which transcript is canonical.
-  if (options.finalDiarize && !(transcriptApplied && !metadataPersisted)) {
+  // disagree about which transcript is canonical. Counted and logged like any
+  // other skip, so health shows it.
+  if (options.finalDiarize && transcriptApplied && !metadataPersisted) {
+    recordFinalPassSkip('metadata_not_persisted', 'the batch transcript was applied but its sidecar was not written')
+  } else if (options.finalDiarize) {
     try {
       await options.finalDiarize({
         meetingPath: options.meetingPath,

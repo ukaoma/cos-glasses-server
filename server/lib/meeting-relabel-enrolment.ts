@@ -96,6 +96,10 @@ export interface EnrolmentReport {
   /** Candidates rejected as a different voice. `clusterSkipped === attempted`
    *  means the bucket had no dominant voice at all and nothing was written. */
   clusterSkipped: number
+  /** 6.61.0: candidates refused before clustering because the chunk is not one
+   *  voice: its own capture-time voiceprint named a third person, or Nemotron
+   *  split it into more than one turn. */
+  otherVoiceSkipped?: number
   skipped: EnrolmentSkipReason
 }
 
@@ -230,16 +234,35 @@ export function enrolNamedVoice(input: EnrolNamedVoiceInput): EnrolmentReport {
   if (read.missing) return { ...IDLE, skipped: missingReason(sidecar) }
 
   const wanted = new Set(rawIndices)
-  const candidates = read.rows.filter(r => wanted.has(r.i) && r.embedding && r.embedding.length > 0)
-  if (candidates.length === 0) return { ...IDLE, skipped: 'no_embeddings' }
+  const found = read.rows.filter(r => wanted.has(r.i) && r.embedding && r.embedding.length > 0)
+  if (found.length === 0) return { ...IDLE, skipped: 'no_embeddings' }
 
-  const attempted = candidates.length
+  // 6.61.0 (QA W3). Since Nemotron, a chunk's sidecar `speaker` is the dominant
+  // TURN's name, while the embedding row holds the WHOLE chunk's voice and the
+  // label the voiceprint gave that whole chunk. A rename of the turn's label must
+  // not teach the profile a chunk whose own voiceprint named someone else, or a
+  // chunk Nemotron heard as more than one voice: either would enrol the wrong
+  // person. `from` stays allowed (a wrong label is how a new person first shows up).
+  const chunksByIndex = new Map<number, Record<string, unknown>>()
+  for (const entry of Array.isArray(sidecar.chunkEntries) ? sidecar.chunkEntries as Array<Record<string, unknown>> : []) {
+    if (typeof entry?.chunkIndex === 'number' && entry.chunk && typeof entry.chunk === 'object') {
+      chunksByIndex.set(entry.chunkIndex, entry.chunk as Record<string, unknown>)
+    }
+  }
+  const candidates = found.filter(r => !isAnotherVoice(r.speaker, input.from, to) && !isMultiVoiceChunk(chunksByIndex.get(r.i)))
+  // Reported only when it happened, so the response is the 6.60 shape otherwise.
+  const otherVoice = found.length - candidates.length > 0 ? { otherVoiceSkipped: found.length - candidates.length } : {}
+  if (candidates.length === 0) {
+    return { enrolled: 0, attempted: found.length, created: false, clusterSkipped: 0, ...otherVoice, skipped: null }
+  }
+
+  const attempted = found.length
   const cluster = dominantCoherentCluster(candidates.map(r => r.embedding))
-  const clusterSkipped = attempted - cluster.members.length
+  const clusterSkipped = candidates.length - cluster.members.length
   // Every candidate disagreed with every other one. There is no voice here to
   // learn, only a bucket of strangers sharing one placeholder label.
   if (cluster.members.length === 0) {
-    return { enrolled: 0, attempted, created: false, clusterSkipped, skipped: null }
+    return { enrolled: 0, attempted, created: false, clusterSkipped, ...otherVoice, skipped: null }
   }
 
   // Diversity trims the coherent group to a bounded, spread-out sample. Those
@@ -261,12 +284,26 @@ export function enrolNamedVoice(input: EnrolNamedVoiceInput): EnrolmentReport {
     }
   } catch {
     return {
-      enrolled, attempted, created: !existedBefore && enrolled > 0, clusterSkipped,
+      enrolled, attempted, created: !existedBefore && enrolled > 0, clusterSkipped, ...otherVoice,
       skipped: 'store_unavailable',
     }
   }
 
   return {
-    enrolled, attempted, created: !existedBefore && enrolled > 0, clusterSkipped, skipped: null,
+    enrolled, attempted, created: !existedBefore && enrolled > 0, clusterSkipped, ...otherVoice, skipped: null,
   }
+}
+
+/** The row's own capture-time voiceprint named a real person other than the two in this rename. */
+export function isAnotherVoice(rowSpeaker: unknown, from: string, to: string): boolean {
+  if (typeof rowSpeaker !== 'string' || !rowSpeaker.trim()) return false
+  if (isPlaceholderLabel(rowSpeaker)) return false
+  return rowSpeaker !== from && rowSpeaker !== to
+}
+
+/** Nemotron heard more than one turn in this chunk, live or in the final pass. */
+export function isMultiVoiceChunk(chunk: Record<string, unknown> | undefined): boolean {
+  if (!chunk) return false
+  const turns = (value: unknown): number => Array.isArray(value) ? value.length : 0
+  return turns(chunk.segments) > 1 || turns(chunk.finalSegments) > 1
 }

@@ -1,18 +1,20 @@
 import { EventEmitter } from 'node:events'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import type { ChildProcess } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { NemotronRunError, nemotronArgs, parseNemotronOutput, runNemotronCli } from './nemotron-cli.js'
+import { NemotronRunError, killNemotronChildren, nemotronArgs, nemotronChildEnv, parseNemotronOutput, runNemotronCli, sweepStaleNemotron, trackNemotronDir } from './nemotron-cli.js'
 import { activityOf, predsBytes } from './__fixtures__/nemotron-helpers.js'
 
 type Behaviour = 'ok' | 'exit1' | 'hang' | 'error' | 'short' | 'long'
 
 function fakeSpawn(behaviour: Behaviour, frames = 601) {
-  const calls: Array<{ command: string; args: string[] }> = []
+  const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = []
   const killed: string[] = []
-  const spawnImpl = (command: string, args: string[]) => {
-    calls.push({ command, args })
+  const spawnImpl = (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+    calls.push({ command, args, env: options?.env })
     const child = new EventEmitter() as ChildProcess & EventEmitter
     const stdout = new PassThrough()
     const stderr = new PassThrough()
@@ -84,4 +86,55 @@ describe('one Nemotron CLI run', () => {
 
 it('the real spawn path is used when no spawnImpl is given (a missing binary fails cleanly)', async () => {
   await expect(runNemotronCli({ ...base, cli: '/no/such/fluidaudiocli-binary' })).rejects.toMatchObject({ reason: 'spawn_failed' })
+})
+
+describe('QA 6.61.0: the CLI child gets nothing it does not need', () => {
+  it('no COS token, provider key or API key reaches the child; PATH, HOME and TMPDIR do', async () => {
+    const secrets = { COS_API_TOKEN: 'cos-secret', OPENAI_API_KEY: 'sk-secret', ANTHROPIC_API_KEY: 'ant-secret', COS_TELEGRAM_BOT_TOKEN: 'tg', GITHUB_TOKEN: 'gh' }
+    const saved = Object.fromEntries(Object.keys(secrets).map(k => [k, process.env[k]]))
+    Object.assign(process.env, secrets)
+    try {
+      const fake = fakeSpawn('ok')
+      await runNemotronCli({ ...base, spawnImpl: fake.spawnImpl as never })
+      const env = fake.calls[0].env!
+      expect(Object.keys(env).sort()).toEqual(Object.keys(nemotronChildEnv()).sort())
+      for (const key of Object.keys(env)) expect(key).not.toMatch(/^COS_|TOKEN|KEY|SECRET/)
+      expect(JSON.stringify(env)).not.toMatch(/secret|sk-|ant-/)
+      expect(env.PATH).toBe(process.env.PATH)
+      expect(env.HOME).toBe(process.env.HOME)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
+  })
+})
+
+describe('QA 6.61.0: nothing in flight outlives the server', () => {
+  it('kills the children in flight and deletes their temp dirs, synchronously', async () => {
+    const fake = fakeSpawn('hang')
+    const pending = runNemotronCli({ ...base, timeoutMs: 60_000, spawnImpl: fake.spawnImpl as never }).catch(error => error)
+    await new Promise(resolve => setImmediate(resolve))
+    const dir = mkdtempSync(join(tmpdir(), 'cos-nemotron-final-test-'))
+    trackNemotronDir(dir)
+    const preds = fake.calls[0].args[fake.calls[0].args.indexOf('--dump-preds') + 1]
+    const result = killNemotronChildren()
+    expect(result).toEqual({ killed: 1, removed: 2 })
+    expect(fake.killed).toEqual(['SIGKILL'])
+    expect(existsSync(dir)).toBe(false)
+    expect(existsSync(preds.replace(/\/preds\.f32$/, ''))).toBe(false)
+    await pending
+  })
+
+  it('the startup sweep removes stale cos-nemotron temp dirs and nothing else', () => {
+    const root = mkdtempSync(join(tmpdir(), 'nemotron-sweep-'))
+    try {
+      for (const name of ['cos-nemotron-old', 'cos-nemotron-final-old', 'cos-nemotron-young', 'someone-elses']) mkdirSync(join(root, name))
+      writeFileSync(join(root, 'cos-nemotron-final-old', 'meeting.wav'), 'audio')
+      const old = new Date(Date.now() - 10 * 60_000)
+      for (const name of ['cos-nemotron-old', 'cos-nemotron-final-old', 'someone-elses']) utimesSync(join(root, name), old, old)
+      expect(sweepStaleNemotron({ tmpRoot: root, killOrphans: false })).toEqual({ dirs: 2, processes: 0 })
+      expect(readdirSync(root).sort()).toEqual(['cos-nemotron-young', 'someone-elses'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

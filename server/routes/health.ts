@@ -338,10 +338,13 @@ healthRouter.get('/health', async (_req, res) => {
     // Asserted, not merely reported: `speaker_id` above says what the state IS,
     // this says whether that state is acceptable.
     speakerId: speakerReadinessState,
-    // 6.61.0: what labels a chunk RIGHT NOW (`nemotron`, `warming`, or
-    // `embedding` with the reason), the per-chunk outcome counts since start,
-    // and the last save-time final pass. A Nemotron fallback is the designed
-    // voiceprint path, so it never degrades `status`.
+    // 6.61.0: what is labelling chunks RIGHT NOW. `active` reads `nemotron` only
+    // while the model is warm, the breaker is closed and most of the last five
+    // chunks really were labelled by Nemotron; otherwise `warming` or `embedding`
+    // with the reason. Plus the per-chunk outcome counts since start and the last
+    // save-time final pass, as codes and counts only: this route is public and
+    // must never carry a speaker name, a path or raw error text. A Nemotron
+    // fallback is the designed voiceprint path, so it never degrades `status`.
     diarizer: { ...nemotronLive.snapshot(), final: finalPassSnapshot() },
   }
   const openai_whisper_budget = getOpenAIWhisperBudgetState()

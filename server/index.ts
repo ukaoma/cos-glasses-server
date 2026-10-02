@@ -117,6 +117,7 @@ import { initSileroVAD } from './lib/vad-silero.js'
 import { initSessionCache } from './lib/session-cache-writer.js'
 import { initSpeakerEmbeddings } from './lib/speaker-embeddings.js'
 import { startNemotronWarmup } from './lib/nemotron-live.js'
+import { killNemotronChildren } from './lib/nemotron-cli.js'
 import { logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
 import { getMediaStore } from './lib/media-store.js'
 import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
@@ -1001,6 +1002,12 @@ async function gracefulShutdown(): Promise<void> {
     console.error('[live-cues] shutdown termination failed:', error)
   }
   try { logActiveSessionsOnShutdown() } catch { /* best-effort flush */ }
+  // 6.61.0: no Nemotron run may outlive the server, and no temp directory may
+  // keep a meeting's audio (the module's exit hook repeats this for any exit).
+  try {
+    const nemotron = killNemotronChildren()
+    if (nemotron.killed || nemotron.removed) console.log(`[diarizer] shutdown: killed ${nemotron.killed} Nemotron run(s), removed ${nemotron.removed} temp dir(s)`)
+  } catch { /* best effort */ }
   stopCodexModelCatalogRefresh()
   stopWhisperServer()
   await stopWhisperPreviewServer({ final: true })

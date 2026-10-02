@@ -52,13 +52,26 @@ export function nemotronCliPath(env: NodeJS.ProcessEnv = process.env, home: stri
   }
   const installed = join(home, '.cos-glasses', 'bin', 'fluidaudiocli')
   if (existsSync(installed)) return installed
-  try {
-    const found = execFileSync('which', ['fluidaudiocli'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    return found && existsSync(found) ? found : null
-  } catch {
-    return null
+  // Health reads this on every request; on an install with no CLI that was a
+  // synchronous `which` per request (QA 6.61.0 N5). Cached for a minute per PATH.
+  const key = env.PATH ?? ''
+  const now = Date.now()
+  if (whichCache && whichCache.key === key && now - whichCache.at < WHICH_CACHE_MS) {
+    return whichCache.value && existsSync(whichCache.value) ? whichCache.value : null
   }
+  let value: string | null = null
+  try {
+    const found = execFileSync('which', ['fluidaudiocli'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 }).trim()
+    value = found && existsSync(found) ? found : null
+  } catch {
+    value = null
+  }
+  whichCache = { key, at: now, value }
+  return value
 }
+
+const WHICH_CACHE_MS = 60_000
+let whichCache: { key: string; at: number; value: string | null } | null = null
 
 /** The directory passed to `--models`. COS_NEMOTRON_MODELS overrides it. */
 export function nemotronModelsDir(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
