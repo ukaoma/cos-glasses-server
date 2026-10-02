@@ -173,10 +173,12 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
     }
   }
 
-  // Dominant NAME by voiced time: two channels can carry one person.
+  // Dominant NAME by voiced time among the tracks that carry the text: two
+  // channels can carry one person, and a voice with no words here is not who
+  // said this chunk.
   const voiced = new Map<string, number>()
   for (const track of tracks) {
-    if (!names.has(track.channel)) continue
+    if (!names.has(track.channel) || !used.has(track.channel)) continue
     const name = names.get(track.channel)!.speaker
     voiced.set(name, (voiced.get(name) ?? 0) + track.activeSec)
   }

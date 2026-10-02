@@ -472,6 +472,9 @@ past the installed hook's wait; `0` turns the away hold off),
 `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (6.60.0: default 1800; the away hold applies
 only when a `hold=1` client reported its wearer present within it; under 30 means the 30 s
 live window),
+`COS_DIARIZER` (6.61.0: default `nemotron`; `embedding` keeps the voiceprint only),
+`COS_NEMOTRON_CLI` and `COS_NEMOTRON_MODELS` (6.61.0: the FluidAudio CLI and its
+local model directory; see Speaker diarization),
 `COS_MEDIA_ROOT` (optional image/video store location; default
 `~/.cos-glasses/data/media`), and `COS_VIDEO_UPLOAD_V2=1` (private 6.27.3+
 resumable-video canary, managed by COS Control 0.5.20). The V2 canary retains
@@ -577,6 +580,54 @@ while `owner_speaker_label` resolves to `Me`. `/api/voice/status` will then
 report `enrolled: false`. Set `owner_speaker_label` to `MU` to keep the existing
 voiceprints rather than re-enrolling, which would split the same voice across two
 profiles.
+
+### Who spoke when: Nemotron (6.61.0, the default)
+
+The voiceprint names a person but gives a chunk one label, and about 45% of
+meeting chunks hold two voices. Since 6.61.0 the server separates the voices
+with [Nemotron 3 Diarization](https://huggingface.co/FluidInference/nemotron-3-diarization-coreml)
+(FluidAudio's `fluidaudiocli`, preset `fast32`, Neural Engine) and lets the
+voiceprint name each one. Nemotron never names anyone itself.
+
+- **Live, on the HUD.** Each chunk runs Nemotron in parallel with Whisper, inside
+  a 1.5 s budget, at most two at once. The chunk response keeps `speaker` (now
+  the dominant voice's name) and `text`, and adds
+  `segments: [{ speaker, text, startSec, endSec, similarity }]` in time order;
+  their texts joined with one space equal `text`. A track with at least 2 s of
+  its own audio is named by the voiceprint on that audio; a shorter one takes the
+  chunk's voiceprint when it is the dominant voice, otherwise the client's label
+  (when that is a real name different from the dominant one) or `Ext`. The
+  segments are stored on the chunk, so the saved meeting keeps them.
+- **The final transcript.** When a meeting is saved, one Nemotron pass over the
+  whole meeting maps each channel to a name from the chunks the voiceprint was
+  sure of (similarity 0.65 or more, one-sided), and relabels the transcript word
+  by word before the meeting reaches COS sync. A channel two people share stays
+  unmapped and keeps the per-chunk names. Nothing is written unless every word
+  survives in order; changed words keep `originalSpeaker` and the sidecar keeps
+  the pre-relabel transcript under `diarization.originalTranscript`. A meeting
+  with a human speaker correction is never relabelled.
+- **Never in the way.** Until the model is warm (the first Neural Engine compile
+  takes 15 to 35 s, started in the background at server start), and on any
+  timeout, crash, busy lane, missing CLI or missing model, a chunk keeps the
+  voiceprint label exactly as before, and the server logs the reason. A failed
+  final pass leaves the meeting exactly as saved. No model call is ever made.
+
+**Offline.** The server always passes `--models <dir>` to the CLI, a directory
+holding `Nemotron3Diarizer_fast32.mlmodelc` and `learnable_sil_emb.bin`, and that
+path in FluidAudio never downloads. Without `--models` the CLI fetches from
+Hugging Face, so the server never runs it that way. The directory is
+`COS_NEMOTRON_MODELS`, else `~/.cos-glasses/models/nemotron-3-diarization`, which
+the server links to FluidAudio's own cache
+(`~/Library/Application Support/FluidAudio/Models/nemotron-3-diarization`, left
+there by running the CLI once by hand). The CLI is `COS_NEMOTRON_CLI`, else
+`~/.cos-glasses/bin/fluidaudiocli`. Missing either, the server stays on the
+voiceprint and says so.
+
+`COS_DIARIZER=embedding` (or `voiceprint`, `eres2net`) turns Nemotron off: no
+warm-up, no run, the 6.60 labels. `/api/health` `readiness.diarizer` reports
+`active` (`nemotron`, `warming` or `embedding`), the `fallback` reason, the
+per-chunk outcome counts, the last chunk, the warm-up and the final passes. A
+Nemotron fallback never degrades `readiness.status`.
 
 ## HQ dictation
 

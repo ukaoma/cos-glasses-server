@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -8,6 +8,8 @@ import { cleanTranscriptLines } from './hallucination-filter.js'
 import { NemotronRunError, type RunNemotronOptions } from './nemotron-cli.js'
 import {
   buildMeetingTimeline,
+  crowdIdentities,
+  isCrowded,
   mapChannelsToNames,
   readTranscriptSection,
   runNemotronFinalPass,
@@ -227,6 +229,30 @@ describe('the save-time final pass', () => {
   })
 })
 
+describe('a crowded room', () => {
+  it('gets no meeting-wide map; the live Nemotron turns still apply', async () => {
+    const f = meeting({ batch: true, liveSegments: true })
+    // Every one of the eight channels in use: two people already share one.
+    const crowdedRun = vi.fn(async () => activityOf(49, [...SPANS, ...[2, 3, 4, 5, 6, 7].map(c => [c, 48, 48.8] as [number, number, number])]))
+    const outcome = await runNemotronFinalPass(opts(f, crowdedRun as never))
+    expect(outcome).toMatchObject({ status: 'applied', crowded: true, mapped: {} })
+    const words = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).batchSegments.flatMap((s: any) => s.speakerWords)
+    const label = (w: string) => words.find((x: any) => x.word === w)
+    // The live turns of chunk 5 apply; chunk 7's unsure Ext has no map to become Silas.
+    expect(label('charlie5')).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'MU' })
+    expect(label('alpha7')).toMatchObject({ speaker: 'Ext' })
+    expect(label('alpha7').originalSpeaker).toBeUndefined()
+  })
+
+  it('is more than four identities or all eight channels', () => {
+    expect(isCrowded(5, 2)).toBe(true)
+    expect(isCrowded(4, 7)).toBe(false)
+    expect(isCrowded(2, 8)).toBe(true)
+    const windows = ['A', 'A', 'A', 'B', 'B', 'B', 'C', 'C'].map((speaker, i) => ({ chunkIndex: i, start: i, end: i + 1, chunk: { text: 'x', speaker, similarity: 0.7, elapsed: 0 } as never }))
+    expect(crowdIdentities(windows)).toBe(2)
+  })
+})
+
 describe('the meeting timeline and the channel map', () => {
   it('places each WAV at its real elapsed and drops a chunk whose audio hash disagrees', () => {
     const f = meeting({ batch: true, tamperWav: 3 })
@@ -237,6 +263,18 @@ describe('the meeting timeline and the channel map', () => {
     expect(timeline.byIndex.get(4)!.start).toBe(24)
     // Chunk 2 has no successor on the timeline until chunk 4, so it is not trimmed.
     expect(timeline.byIndex.get(2)!.end).toBe(18)
+  })
+
+  it('never reads a chunk file that is not a regular file (a symlink, or a FIFO that would hang the server)', () => {
+    const f = meeting({ batch: true })
+    const target = join(f.dir, 'elsewhere.wav')
+    writeFileSync(target, readFileSync(join(f.audioDir, 'chunk_0003.wav')))
+    rmSync(join(f.audioDir, 'chunk_0003.wav'))
+    symlinkSync(target, join(f.audioDir, 'chunk_0003.wav'))
+    const entries = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).chunkEntries as SidecarEntry[]
+    const timeline = buildMeetingTimeline(entries, f.audioDir)
+    expect(timeline.excluded).toEqual({ missing: 0, hashMismatch: 0, unreadable: 1 })
+    expect(timeline.byIndex.has(3)).toBe(false)
   })
 
   it('trims only the tail that would run into the next chunk', () => {

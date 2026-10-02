@@ -27,7 +27,7 @@
 // No LLM anywhere. Transcription must never call `claude -p`.
 
 import { createHash } from 'node:crypto'
-import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
@@ -62,6 +62,10 @@ export const FINAL_MIN_SIMILARITY = 0.65
 export const FINAL_ONE_SIDED = 0.8
 export const FINAL_MIN_SUPPORT = 3
 export const FINAL_PURITY = 0.8
+/** The canary's eligibility for a meeting-wide map: at most this many identities... */
+export const FINAL_MAX_IDENTITIES = 4
+/** ...and fewer channels than Nemotron has, or two people already share one. */
+export const FINAL_MAX_CHANNELS = 8
 const SR = 16_000
 const WAV_HEADER = 44
 
@@ -124,12 +128,19 @@ export interface MeetingTimeline {
 
 const chunkFile = (audioDir: string, index: number): string => join(audioDir, `chunk_${String(index).padStart(4, '0')}.wav`)
 
+/** lstat, so a symlink or a FIFO in the audio directory is never read. */
+function isRegularFile(path: string): boolean {
+  try { return lstatSync(path).isFile() } catch { return false }
+}
+
 /** Samples concatenateWavChunks reads from a chunk file: everything after a 44-byte header, if it is RIFF. */
 function concatSamples(path: string): number | null {
   try {
-    const size = statSync(path).size
-    if (size <= WAV_HEADER) return null
-    const fd = openSync(path, 'r')
+    const stat = statSync(path)
+    if (!stat.isFile() || stat.size <= WAV_HEADER) return null
+    const size = stat.size
+    // Non-blocking and no symlinks: a FIFO planted in its place must never hang the server.
+    const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW)
     try {
       const head = Buffer.alloc(4)
       readSync(fd, head, 0, 4, 0)
@@ -159,6 +170,7 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
   for (const entry of entries) {
     const path = chunkFile(audioDir, entry.chunkIndex)
     if (!existsSync(path)) { excluded.missing++; continue }
+    if (!isRegularFile(path)) { excluded.unreadable++; continue }
     let wav: Buffer
     try { wav = readFileSync(path) } catch { excluded.unreadable++; continue }
     const expected = entry.chunk.audioSha256
@@ -181,6 +193,7 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
     const use = Math.min(item.samples, room)
     let copied = 0
     try {
+      if (!isRegularFile(chunkFile(audioDir, item.entry.chunkIndex))) throw new Error('not a regular file')
       const wav = readFileSync(chunkFile(audioDir, item.entry.chunkIndex))
       copied = wav.copy(out, WAV_HEADER + item.at * 2, item.dataOffset, Math.min(wav.length, item.dataOffset + use * 2)) / 2
     } catch { /* vanished between passes: its window stays silent */ }
@@ -194,6 +207,21 @@ export function buildMeetingTimeline(entries: SidecarEntry[], audioDir: string):
     fileSamples,
     excluded,
   }
+}
+
+/** Too full for one meeting-wide map: more than four identities, or every channel in use. */
+export function isCrowded(identities: number, channelsUsed: number): boolean {
+  return identities > FINAL_MAX_IDENTITIES || channelsUsed >= FINAL_MAX_CHANNELS
+}
+
+/** Names with at least three chunks the voiceprint is sure of: the canary's identity count. */
+export function crowdIdentities(windows: TimelineWindow[]): number {
+  const counts = new Map<string, number>()
+  for (const window of windows) {
+    const chunk = window.chunk
+    if (isName(chunk.speaker) && Number(chunk.similarity) >= FINAL_MIN_SIMILARITY) counts.set(chunk.speaker, (counts.get(chunk.speaker) ?? 0) + 1)
+  }
+  return [...counts.values()].filter(count => count >= 3).length
 }
 
 function isName(label: unknown): label is string {
@@ -289,7 +317,7 @@ export interface RelabelStats {
 }
 
 /** Word times in a batch segment are relative to its concatenated chunk files. Put them on the timeline. */
-function batchWordToTimeline(segment: SidecarBatchSegment, t: number, timeline: MeetingTimeline): { window: TimelineWindow; inChunk: number; at: number } | null {
+export function batchWordToTimeline(segment: SidecarBatchSegment, t: number, timeline: MeetingTimeline): { window: TimelineWindow; inChunk: number; at: number } | null {
   let offset = 0
   let lastWindow: { window: TimelineWindow; inChunk: number; at: number } | null = null
   for (let index = segment.startChunkIdx; index <= segment.endChunkIdx; index++) {
@@ -528,6 +556,9 @@ export interface FinalPassOutcome {
   status: FinalPassStatus
   reason?: string
   mode?: 'batch' | 'streaming'
+  /** True when the room was too full for a meeting-wide map (only per-chunk turns applied). */
+  crowded?: boolean
+  identities?: number
   ms?: number
   audioSec?: number
   channels?: number
@@ -571,7 +602,7 @@ export function runNemotronFinalPass(options: FinalPassOptions): Promise<FinalPa
     lastFinal = { ...outcome, at: new Date((options.now ?? Date.now)()).toISOString() }
     const log = options.log ?? console.log
     if (outcome.status === 'applied') {
-      log(`[diarizer] final pass applied (${outcome.mode}) in ${outcome.ms} ms: ${outcome.channels} channels, mapped ${JSON.stringify(outcome.mapped)}, ${outcome.words?.relabeled}/${outcome.words?.total} words relabelled, speakers ${outcome.speakersBefore} -> ${outcome.speakersAfter}`)
+      log(`[diarizer] final pass applied (${outcome.mode}${outcome.crowded ? `, crowded: ${outcome.identities} identities, per-chunk turns only` : ''}) in ${outcome.ms} ms: ${outcome.channels} channels, mapped ${JSON.stringify(outcome.mapped)}, ${outcome.words?.relabeled}/${outcome.words?.total} words relabelled, speakers ${outcome.speakersBefore} -> ${outcome.speakersAfter}`)
     } else {
       log(`[diarizer] final pass ${outcome.status}: ${outcome.reason}; the saved transcript is unchanged`)
     }
@@ -642,9 +673,17 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   }
 
   const activity: Activity = run
-  const mapping = mapChannelsToNames(timeline.windows, activity)
   const channelsUsed = new Set<number>()
   for (let f = 0; f < activity.frames; f++) for (let c = 0; c < NEMOTRON_CHANNELS; c++) if (isActive(activity, f, c)) channelsUsed.add(c)
+  // The canary's rule for a meeting-wide map (OUTCOME_2026-10-01, retro plan 4):
+  // four or fewer identities and fewer than eight channels. A crowded room
+  // (Wed 07:31 filled all eight with five names) gets no channel map; its words
+  // keep their per-chunk names, which are the live Nemotron turns where those exist.
+  const identities = crowdIdentities(timeline.windows)
+  const crowded = isCrowded(identities, channelsUsed.size)
+  const mapping = crowded
+    ? { ...mapChannelsToNames(timeline.windows, activity), map: new Map<number, string>() }
+    : mapChannelsToNames(timeline.windows, activity)
 
   let mode: 'batch' | 'streaming'
   let next: string
@@ -722,6 +761,8 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     channelsUsed: channelsUsed.size,
     channelMap: mapped,
     mapping: {
+      crowded,
+      identities,
       eligibleChunks: mapping.eligible,
       minSimilarity: FINAL_MIN_SIMILARITY,
       oneSided: FINAL_ONE_SIDED,
@@ -749,6 +790,8 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   return {
     status: 'applied',
     mode,
+    crowded,
+    identities,
     ms,
     audioSec: Math.round(timeline.durationSec),
     channels: channelsUsed.size,

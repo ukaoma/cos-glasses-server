@@ -1,0 +1,172 @@
+#!/usr/bin/env node
+// 6.61.0 Nemotron mutation gate. Mutations run only in a disposable copy of server/, shared/
+// and bin/; the live checkout is never rewritten. The unmutated suites must pass first (a gate
+// over a red suite proves nothing), each target must match exactly once, and each mutant must
+// fail the NAMED test written for it (a transform or compile error fails the file, not a named
+// test, so it never counts as a kill).
+//
+// Covers the 2026-10-02 brief: the backend choice and offline models, the CLI run (models flag,
+// budget kill, exit codes, frame check), word-to-track mapping and the estimated timing, the
+// naming rules (one track, long tracks, short dominant, short other: client or Ext), the
+// fallbacks (timeout, failure, missing CLI, warming, busy, bounded warm-up, re-warm), honest
+// counts and logs, the chunk response contract and storage, and the final pass (timeline,
+// hash check, trim, map floors, one-sided evidence, word preservation, human corrections,
+// original labels, idempotency, a failed pass saving as today, and its place before sync).
+//
+// Usage: node server/scripts/nemotron-mutation-gate.mjs [--list] [name...]
+import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve, join, dirname, basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+const BACKEND = 'server/lib/diarizer-backend.ts'
+const CLI = 'server/lib/nemotron-cli.ts'
+const SEG = 'server/lib/nemotron-segments.ts'
+const LIVE = 'server/lib/nemotron-live.ts'
+const FINAL = 'server/lib/nemotron-final.ts'
+const STREAM = 'server/routes/transcribe-stream.ts'
+const MEETING = 'server/routes/meeting.ts'
+const HEALTH = 'server/routes/health.ts'
+const BACKEND_T = ['server/lib/diarizer-backend.test.ts']
+const CLI_T = ['server/lib/nemotron-cli.test.ts']
+const SEG_T = ['server/lib/nemotron-segments.test.ts']
+const LIVE_T = ['server/lib/nemotron-live.test.ts']
+const FINAL_T = ['server/lib/nemotron-final.test.ts']
+const ROUTE_T = ['server/routes/transcribe-stream-nemotron.test.ts']
+const MEETING_T = ['server/routes/meeting.test.ts']
+const HEALTH_T = ['server/routes/health.test.ts']
+
+const SHORT = 'naming a short track: dominant takes the chunk voiceprint, the other the client label, else Ext'
+const COLD = 'a cold model: chunks before the warm-up finishes are `warming`, then Nemotron runs'
+const CONTRACT = 'adds segments in time order and keeps the legacy fields intact'
+const CONSISTENT = 'final relabel with consistent tracks: one map for the whole meeting, original labels kept'
+const SHARED = 'a channel two people share stays unmapped, and too little evidence maps nothing'
+
+// [name, file, exact target, replacement, a substring of the test that must fail, tests]
+const mutations = [
+  // Backend: default, offline models, honest static fallbacks
+  ['default-not-nemotron', BACKEND, "(env.COS_DIARIZER ?? 'nemotron')", "(env.COS_DIARIZER ?? 'embedding')", 'defaults to nemotron', BACKEND_T],
+  ['cli-check-skipped', BACKEND, "  if (!nemotronCliPath(env, home)) return { requested, active: 'embedding', fallback: 'cli_missing' }\n", '', 'falls back when Nemotron is requested and the CLI is missing', BACKEND_T],
+  ['models-check-skipped', BACKEND, "  if (!nemotronModelSource(env, home)) return { requested, active: 'embedding', fallback: 'models_missing' }\n", '', 'falls back when the CLI exists but no local models do', BACKEND_T],
+  ['override-falls-through', BACKEND, "    return modelsDirComplete(dir) ? { dir, source: 'env' } : null\n", "    if (modelsDirComplete(dir)) return { dir, source: 'env' }\n", 'an explicit COS_NEMOTRON_MODELS that is incomplete', BACKEND_T],
+  ['cache-not-linked', BACKEND, '      symlinkSync(target, link)\n', '', 'links the FluidAudio cache into one directory', BACKEND_T],
+  // The CLI run
+  ['no-models-flag', CLI, "    '--models', modelsDir,\n", '', 'always passes the local models', CLI_T],
+  ['timeout-not-killed', CLI, "      try { child.kill('SIGKILL') } catch { /* already gone */ }\n", '', 'SIGKILL at the budget', CLI_T],
+  ['exit-code-ignored', CLI, '      if (code !== 0) {\n', '      if (false) {\n', 'a non-zero exit is cli_failed', CLI_T],
+  ['frames-unchecked', CLI, '  if (preds.length !== expected) {\n', '  if (false) {\n', 'preds that do not match the frame count are bad_output', CLI_T],
+  // Geometry
+  ['threshold-off', SEG, 'export const ACTIVE_THRESHOLD = 0.5\n', 'export const ACTIVE_THRESHOLD = 0.01\n', 'a silent span takes the nearest active channel', SEG_T],
+  ['pad-not-applied', SEG, '  return pick(f0 - pad, f1 + pad)\n', '  return null\n', 'a silent span takes the nearest active channel', SEG_T],
+  ['min-track-ignored', SEG, '    if (active[c] / FPS >= minTrackSec) tracks.push(', '    if (active[c] > 0) tracks.push(', 'ignores a channel shorter than half a second', SEG_T],
+  ['snap-never-moves', SEG, "        if (PUNCT_END.test(tokens[cand - 1] ?? '')) { target = cand; break }\n", '', 'moves a mid-phrase boundary to the phrase end', SEG_T],
+  ['flicker-kept', SEG, '    if (i > 0 && j + 1 < out.length && out[i - 1] === out[j + 1] && words <= 1 && span < minSec) {\n', '    if (false) {\n', 'absorbs a one-word flicker', SEG_T],
+  ['exclusive-includes-overlap', SEG, '    if (others) continue\n', '', 'cuts only the frames where the track speaks alone', SEG_T],
+  ['word-clocks-ignored', LIVE, '  let times: TokenTime[] | null = input.words?.length ? tokenTimesFromWords(tokens, input.words) : null\n', '  let times: TokenTime[] | null = null\n', 'uses whisper word clocks when the ASR gives them', LIVE_T],
+  // Naming
+  ['single-track-identified', LIVE, '  if (ordered.length === 1) {\n', '  if (false) {\n', 'a one-track chunk takes the whole-chunk voiceprint', LIVE_T],
+  ['short-track-identified', LIVE, '      if (track.exclusiveSec >= NAME_TRACK_MIN_SEC && pcm) {\n', '      if (pcm) {\n', SHORT, LIVE_T],
+  ['short-track-never-client', LIVE, "      names.set(track.channel, { speaker: isRealLabel(client) && client !== dominantName ? client : 'Ext', similarity: 0 })\n", "      names.set(track.channel, { speaker: 'Ext', similarity: 0 })\n", SHORT, LIVE_T],
+  ['short-track-repeats-dominant', LIVE, "isRealLabel(client) && client !== dominantName ? client : 'Ext'", "isRealLabel(client) ? client : 'Ext'", SHORT, LIVE_T],
+  ['unknown-is-a-name', LIVE, "  return value.length > 0 && value !== 'Unknown' && value !== 'Ext'\n", '  return value.length > 0\n', SHORT, LIVE_T],
+  ['speaker-from-wordless-voice', LIVE, '    if (!names.has(track.channel) || !used.has(track.channel)) continue\n', '    if (!names.has(track.channel)) continue\n', 'the chunk speaker is the voice that carries the words', LIVE_T],
+  ['track-name-not-used', LIVE, '        if (named) { names.set(track.channel, named); identified++; continue }\n', '', 'two long tracks are each named by the voiceprint', LIVE_T],
+  // Fallbacks and the runtime
+  ['fallback-reason-dropped', LIVE, "    diarizer: { engine: 'voiceprint', fallback: reason },\n", "    diarizer: { engine: 'voiceprint' },\n", 'fallback on timeout: the voiceprint label, no segments, the reason recorded', LIVE_T],
+  ['config-counts-as-fallback', LIVE, "    if (outcome.reason === 'embedding_requested') return { speaker: input.voiceprint.speaker, similarity: input.voiceprint.similarity }\n", '', 'the voiceprint chosen by config is not a fallback and records nothing', LIVE_T],
+  ['busy-not-refused', LIVE, "    if (this.inFlight >= this.maxConcurrent()) return 'busy'\n", '', 'caps concurrency', LIVE_T],
+  ['warming-not-gated', LIVE, "    if (this.state === 'warming') return 'warming'\n", '', COLD, LIVE_T],
+  ['live-not-on-ane', LIVE, "        timeoutMs: this.budget(),\n        computeUnits: 'ane',\n", "        timeoutMs: this.budget(),\n        computeUnits: 'all',\n", COLD, LIVE_T],
+  ['snapshot-hides-warming', LIVE, "    else if (this.state === 'warming' || this.state === 'idle') { active = 'warming'; fallback = 'warming' }\n", '', COLD, LIVE_T],
+  ['no-rewarm', LIVE, "          this.state = 'warming'\n          void this.startWarmup()\n", '', 'three in a row re-warm in the background', LIVE_T],
+  ['warm-retry-unbounded-or-none', LIVE, '    const attempts = delays.length + 1\n', '    const attempts = 1\n', 'a failing warm-up retries a bounded number of times', LIVE_T],
+  ['missing-cli-spawns', LIVE, "      if (!this.cli || !this.modelsDir) {\n", "      if (false) {\n", 'fallback on a missing CLI: warm-up reports cli_missing and never spawns', LIVE_T],
+  ['fallback-not-logged', LIVE, "    this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}", "    if (false) this.log(`[diarizer] chunk #${chunk.chunkIndex} fallback=${outcome.reason}", 'counts every outcome and logs every fallback with its reason', LIVE_T],
+  ['reasons-not-counted', LIVE, '    this.counts.reasons[outcome.reason] = (this.counts.reasons[outcome.reason] ?? 0) + 1\n', '', 'counts every outcome and logs every fallback with its reason', LIVE_T],
+  ['embedding-still-warms', LIVE, "    if (requestedDiarizer(this.env()) === 'embedding') return 'embedding_requested'\n", '', 'the voiceprint selected by COS_DIARIZER never warms or runs Nemotron', LIVE_T],
+  // The chunk route
+  ['response-drops-segments', STREAM, '    ...(existing.segments?.length ? { segments: existing.segments } : {}),\n', '', CONTRACT, ROUTE_T],
+  ['chunk-drops-segments', STREAM, '    ...(labels.segments?.length ? { segments: labels.segments } : {}),\n', '', CONTRACT, ROUTE_T],
+  ['speaker-stays-voiceprint', STREAM, '  const { speaker, similarity } = labels\n', '  const { speaker, similarity } = voiceprint\n', CONTRACT, ROUTE_T],
+  ['outcome-not-recorded', STREAM, '  if (labels.record) nemotronLive.record({ sessionId, chunkIndex }, labels.record)\n', '', CONTRACT, ROUTE_T],
+  ['hud-drops-segments', STREAM, '...(chunk.segments ? { segments: chunk.segments } : {})', '', CONTRACT, ROUTE_T],
+  ['wrong-wav-path', STREAM, "    resolve(SESSION_AUDIO_DIR, sessionId, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`),\n", "    resolve(SESSION_AUDIO_DIR, sessionId),\n", CONTRACT, ROUTE_T],
+  // The final pass
+  ['hash-unchecked', FINAL, "    if (expected && createHash('sha256').update(wav).digest('hex') !== expected) { excluded.hashMismatch++; continue }\n", '', 'drops a chunk whose audio hash disagrees', FINAL_T],
+  ['follows-symlinked-chunk', FINAL, '    if (!isRegularFile(path)) { excluded.unreadable++; continue }\n', '', 'never reads a chunk file that is not a regular file', FINAL_T],
+  ['tail-not-trimmed', FINAL, '    const use = Math.min(item.samples, room)\n', '    const use = item.samples\n', 'trims only the tail that would run into the next chunk', FINAL_T],
+  ['crowded-ignored', FINAL, '  const crowded = isCrowded(identities, channelsUsed.size)\n', '  const crowded = false\n', 'gets no meeting-wide map; the live Nemotron turns still apply', FINAL_T],
+  ['identities-not-crowded', FINAL, '  return identities > FINAL_MAX_IDENTITIES || channelsUsed >= FINAL_MAX_CHANNELS\n', '  return channelsUsed >= FINAL_MAX_CHANNELS\n', 'is more than four identities or all eight channels', FINAL_T],
+  ['channels-not-crowded', FINAL, '  return identities > FINAL_MAX_IDENTITIES || channelsUsed >= FINAL_MAX_CHANNELS\n', '  return identities > FINAL_MAX_IDENTITIES\n', 'is more than four identities or all eight channels', FINAL_T],
+  ['live-turns-ignored-in-final', FINAL, '        name = (start && liveSpeakerAt(start.window.chunk, start.inChunk)) ?? original\n', '        name = original\n', 'gets no meeting-wide map; the live Nemotron turns still apply', FINAL_T],
+  ['purity-ignored', FINAL, '    const accepted = top !== null && support >= minSupport && share >= purity\n', '    const accepted = top !== null && support >= minSupport\n', SHARED, FINAL_T],
+  ['support-ignored', FINAL, '    const accepted = top !== null && support >= minSupport && share >= purity\n', '    const accepted = top !== null && share >= purity\n', SHARED, FINAL_T],
+  ['similarity-floor-ignored', FINAL, '    if (!isName(chunk.speaker) || !(Number(chunk.similarity) >= minSimilarity)) continue\n', '    if (!isName(chunk.speaker)) continue\n', SHARED, FINAL_T],
+  ['one-sided-ignored', FINAL, '    if (!sided) continue\n', '', CONSISTENT, FINAL_T],
+  ['original-not-kept', FINAL, '      if (name !== original) next.originalSpeaker = original\n', '      if (false) next.originalSpeaker = original\n', CONSISTENT, FINAL_T],
+  ['resync-off', FINAL, '        if (anchor.length === ANCHOR) {\n', '        if (false) {\n', 'never loses a word', FINAL_T],
+  ['unmatched-word-dropped', FINAL, '      if (speaker === null) speaker = current?.speaker ?? line.speaker\n', '      if (speaker === null) continue\n', 'never loses a word', FINAL_T],
+  ['human-correction-ignored', FINAL, "  if (Number(sidecar.correctionRevision ?? 0) > 0) return { status: 'skipped', reason: 'human_corrected' }\n", '', 'a human correction always wins', FINAL_T],
+  ['reruns-when-applied', FINAL, "  if (sidecar.diarization?.status === 'applied' && sidecar.diarization?.outputSha256 === sha(transcript)) {\n", '  if (false) {\n', CONSISTENT, FINAL_T],
+  ['final-ignores-config', FINAL, "  if (choice.requested === 'embedding') return { status: 'skipped', reason: 'embedding_requested' }\n", '', 'the voiceprint selected by COS_DIARIZER skips the pass', FINAL_T],
+  ['streaming-original-dropped', FINAL, '        if (final.speaker !== original) chunk.originalSpeaker = original\n', '        if (false) chunk.originalSpeaker = original\n', 'a streaming meeting is relabelled per chunk line', FINAL_T],
+  ['final-not-on-ane', FINAL, "        timeoutMs: 120_000 + Math.round((timeline.durationSec * 1000) / 20),\n        computeUnits: 'ane',\n", "        timeoutMs: 120_000 + Math.round((timeline.durationSec * 1000) / 20),\n        computeUnits: 'all',\n", CONSISTENT, FINAL_T],
+  // The save path: before the audio goes and before sync; a failure saves as today
+  ['final-pass-not-run', MEETING, '  if (options.finalDiarize && !(transcriptApplied && !metadataPersisted)) {\n', '  if (false) {\n', 'runs the Nemotron final pass on the saved files', MEETING_T],
+  ['final-pass-throw-escapes', MEETING, "    } catch (error) {\n      console.warn(`[diarizer] final pass threw; the saved transcript is unchanged: ${error instanceof Error ? error.message : String(error)}`)\n    }\n", '    } finally { /* mutated */ }\n', 'a failed relabel saves as today', MEETING_T],
+  // Health
+  ['health-not-honest', HEALTH, '    diarizer: { ...nemotronLive.snapshot(), final: finalPassSnapshot() },\n', "    diarizer: 'nemotron',\n", 'readiness.diarizer says what labels a chunk now', HEALTH_T],
+]
+
+const args = process.argv.slice(2)
+if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }
+const chosen = args.length ? mutations.filter(([name]) => args.includes(name)) : mutations
+if (args.length && chosen.length !== args.length) throw new Error(`Unknown mutation name in: ${args.join(' ')}`)
+
+const scratch = mkdtempSync(join(tmpdir(), 'nemotron-mutations-'))
+try {
+  const skip = new Set(['data', 'models', 'certs', 'node_modules'])
+  cpSync(join(root, 'server'), join(scratch, 'server'), { recursive: true, filter: src => !(skip.has(basename(src)) && dirname(src) === join(root, 'server')) })
+  cpSync(join(root, 'shared'), join(scratch, 'shared'), { recursive: true })
+  cpSync(join(root, 'bin'), join(scratch, 'bin'), { recursive: true })
+  cpSync(join(root, 'vitest.config.ts'), join(scratch, 'vitest.config.ts'))
+  cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
+  cpSync(join(root, 'managed-runtime-contract.json'), join(scratch, 'managed-runtime-contract.json'))
+  symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'), 'dir')
+  const run = tests => spawnSync(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), 'run', '--maxWorkers=1', ...tests], {
+    cwd: scratch, env: { PATH: process.env.PATH, HOME: scratch, COS_DATA_DIR: join(scratch, 'data') }, encoding: 'utf8', timeout: 300_000,
+  })
+  // Green baseline first, over every suite any mutant names.
+  const all = [...new Set(chosen.flatMap(m => m[5]))]
+  const baseline = run(all)
+  if (baseline.status !== 0) throw new Error('Baseline failed; a gate over a red suite proves nothing:\n' + baseline.stdout + '\n' + baseline.stderr)
+  const summary = /Tests\s+(\d+) passed \((\d+)\)/.exec(baseline.stdout)
+  if (!summary || summary[1] !== summary[2]) throw new Error('Baseline did not report every test passing:\n' + baseline.stdout)
+  console.log(`baseline PASS (${summary[1]} tests in ${all.length} files)`)
+  // Every target exactly once, before any mutant runs.
+  for (const [name, file, find] of chosen) {
+    const n = readFileSync(join(scratch, file), 'utf8').split(find).length - 1
+    if (n !== 1) throw new Error(`Mutation ${name} matches ${n} times in ${file}; it must match exactly once`)
+  }
+  let killed = 0
+  for (const [name, file, find, replacement, killerName, tests] of chosen) {
+    const target = join(scratch, file), original = readFileSync(target, 'utf8')
+    const mutated = original.replace(find, () => replacement)
+    if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+    writeFileSync(target, mutated)
+    let result
+    try { result = run(tests) } finally { writeFileSync(target, original) }
+    if (readFileSync(target, 'utf8') !== original) throw new Error(`${file} was not restored after ${name}`)
+    const output = result.stdout + '\n' + result.stderr
+    // The intended test must be among the named failures: a kill by some unrelated test proves nothing about the rule.
+    const killers = [...output.matchAll(/FAIL\s+(server\/\S+\.test\.ts > [^\n]+)/g)].map(match => match[1].trim())
+    if (result.status === 0 || result.error || !killers.length) throw new Error(`Mutation survived or harness failed: ${name}\n${output.slice(-4000)}`)
+    const killer = killers.find(line => line.includes(killerName))
+    if (!killer) throw new Error(`Mutation ${name} was killed, but not by the test named for it ("${killerName}"): ${killers.join(' | ')}`)
+    killed++
+    console.log(`${name} KILLED by ${killer}`)
+  }
+  console.log(`${killed} of ${chosen.length} nemotron mutations killed`)
+} finally { rmSync(scratch, { recursive: true, force: true }) }

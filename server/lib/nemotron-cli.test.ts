@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { NemotronRunError, nemotronArgs, parseNemotronOutput, runNemotronCli } from './nemotron-cli.js'
 import { activityOf, predsBytes } from './__fixtures__/nemotron-helpers.js'
 
-type Behaviour = 'ok' | 'exit1' | 'hang' | 'error' | 'short'
+type Behaviour = 'ok' | 'exit1' | 'hang' | 'error' | 'short' | 'long'
 
 function fakeSpawn(behaviour: Behaviour, frames = 601) {
   const calls: Array<{ command: string; args: string[] }> = []
@@ -24,7 +24,7 @@ function fakeSpawn(behaviour: Behaviour, frames = 601) {
       if (behaviour === 'exit1') { stdout.write('Error: modelLoadFailed("Missing learnable_sil_emb.bin")\n'); child.emit('close', 1, null); return }
       const a = activityOf(frames / 100, [[0, 0, frames / 100]])
       const bytes = predsBytes({ frames, probs: a.probs.subarray(0, frames * 8) })
-      writeFileSync(preds, behaviour === 'short' ? bytes.subarray(0, 64) : bytes)
+      writeFileSync(preds, behaviour === 'short' ? bytes.subarray(0, 64) : behaviour === 'long' ? Buffer.concat([bytes, Buffer.alloc(8 * 4 * 99)]) : bytes)
       stdout.write(`Model loaded in 0.11s (variant: fast32)\nProcessed 6.0s in 0.06s (RTFx 102.9x), ${frames} x 10ms frames\nDetected 1 speakers, 1 segments\n`)
       child.emit('close', 0, null)
     })
@@ -75,6 +75,9 @@ describe('one Nemotron CLI run', () => {
   it('preds that do not match the frame count are bad_output, never a partial matrix', async () => {
     const fake = fakeSpawn('short')
     await expect(runNemotronCli({ ...base, spawnImpl: fake.spawnImpl as never })).rejects.toMatchObject({ reason: 'bad_output' })
+    // A longer file reads without error but is not this run's matrix.
+    const long = fakeSpawn('long')
+    await expect(runNemotronCli({ ...base, spawnImpl: long.spawnImpl as never })).rejects.toMatchObject({ reason: 'bad_output' })
     expect(() => parseNemotronOutput('nothing useful', Buffer.alloc(0))).toThrow(NemotronRunError)
   })
 })

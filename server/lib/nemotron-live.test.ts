@@ -124,6 +124,23 @@ describe('naming the tracks of one chunk', () => {
     expect(result.segments.map(s => [s.speaker, s.text])).toEqual([['MU', 'one two three four five'], ['Silas Larson', 'six']])
   })
 
+  it('the chunk speaker is the voice that carries the words, not a louder voice with none', () => {
+    // Channel 3 talks over the whole chunk in the background; every word sits on channel 0.
+    const words = ['one', 'two', 'three'].map((word, i) => ({ word, start: 0.3 + i * 0.4, end: 0.6 + i * 0.4, probability: 0.9 }))
+    const result = nameChunkSegments({
+      activity: activityOf(6, [[0, 0, 1.6], [3, 0, 6]], 0.9),
+      text: 'one two three',
+      words,
+      audio: wavOf(6, () => 300),
+      chunkVoiceprint: MU,
+      clientSpeaker: 'MU',
+      identify: () => ({ speaker: 'Silas Larson', similarity: 0.7 }),
+    })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.segments.map(s => s.speaker)).toEqual(['MU'])
+    expect(result.speaker).toBe('MU')
+  })
+
   it('reports no_speech when Nemotron heard nothing', () => {
     expect(nameChunkSegments({
       activity: activityOf(6, []), text: 'hello', audio: wavOf(6, () => 1), chunkVoiceprint: MU, clientSpeaker: 'MU', identify: () => null,
