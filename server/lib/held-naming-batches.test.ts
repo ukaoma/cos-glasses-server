@@ -1,5 +1,5 @@
 import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest'
-import {chmodSync,cpSync,existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs'
+import {chmodSync,cpSync,existsSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,rmSync,writeFileSync} from 'node:fs'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 let root='',data='',ops=''
@@ -308,4 +308,30 @@ describe('held naming execution',()=>{
     await expect(api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true,...({force:true}as any)})).rejects.toMatchObject({reason:'meetings_changed'})
   })
 
+  // 6.61.2: the operations copy of a merged meeting whose scribe sits in another domain folder.
+  function crossFolderCopy(scribes:string[],pointer?:string){
+    const sideDir=join(ops,'personal','meetings','2026-09');mkdirSync(sideDir,{recursive:true})
+    opSide=join(sideDir,'2026-09-13_G2_Recording_2026-09-13_0700_abcd1234.g2-chunks.json')
+    const doc=JSON.parse(readFileSync(saved.sidecarPath,'utf8'));if(pointer)doc.blended_into=[pointer];writeFileSync(opSide,JSON.stringify(doc))
+    const md=readFileSync(saved.filepath,'utf8')+'\n## G2 Speaker-Separated Transcript\n\n<!-- g2-transcript-blended -->\n<!-- g2-session: meeting_sample -->\n'
+    const paths=scribes.map(rel=>{const path=join(ops,rel);mkdirSync(join(path,'..'),{recursive:true});writeFileSync(path,md);return path})
+    process.env.COS_OPERATIONS_DIR=ops
+    return paths
+  }
+  it('cross-folder: held naming resolves the operations copy to the merged scribe in another domain, not the sidecar pointer',async()=>{
+    const [merged]=crossFolderCopy(['quilt/meetings/2026-09/2026-09-13_Weekly_Sync.md'],'personal/meetings/2026-09/2026-09-13_Weekly_Sync.md')
+    const out=await api.renameMeetingSpeaker('meeting_sample','Other','Separate Name')
+    expect(out.error).toBeUndefined()
+    expect(out.copies).toHaveLength(2)
+    const operations=out.copies.find(c=>realpathSync(c.sidecarPath)===realpathSync(opSide))!
+    expect(realpathSync(operations.meetingPath)).toBe(realpathSync(merged))
+    // The merged scribe is edited like a same-folder one, not left behind a staleness marker.
+    expect(operations.transcript).toBe(1)
+  })
+  it('two meetings declare the session: held naming refuses rather than follow the sidecar pointer',async()=>{
+    const [first]=crossFolderCopy(['quilt/meetings/2026-09/2026-09-13_Weekly_Sync.md','hermit_crabs/meetings/2026-09/2026-09-13_Standup.md'],'quilt/meetings/2026-09/2026-09-13_Weekly_Sync.md')
+    const before=readFileSync(first,'utf8')
+    await expect(api.renameMeetingSpeaker('meeting_sample','Other','Separate Name')).rejects.toThrow(/2 meetings declare this session/)
+    expect(readFileSync(first,'utf8')).toBe(before)
+  })
 })

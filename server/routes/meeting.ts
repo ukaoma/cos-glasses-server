@@ -171,6 +171,21 @@ function cosOpsPipelineConfigured(): boolean {
   return Boolean(process.env.COS_SCRIPTS_DIR?.trim())
 }
 
+/**
+ * Why a correction left the meeting's markdown alone when it could not read it.
+ *
+ * 6.61.2: when two meetings declare the same session the lookup chooses neither
+ * and the record falls back to the capture, whose own scribe the merge retired.
+ * "Unreadable" would send the reader looking for a missing file; the real
+ * answer is the duplicate claim, so the response names it.
+ */
+function markdownUnreadableReason(operations: { mergedScribeConflict?: string[] } | null): string {
+  const conflict = operations?.mergedScribeConflict
+  return conflict && conflict.length > 1
+    ? `no merged meeting chosen: ${conflict.length} meetings declare this session (${conflict.join(', ')})`
+    : 'meeting markdown unreadable'
+}
+
 function requestedRecordMatches(requested: unknown, expected: string): boolean {
   return requested == null || requested === '' || requested === expected
 }
@@ -1331,7 +1346,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       proseHits: md?.proseHits ?? [],
       markdownSkipped: !plan.value.coveredAllWithLabel
         ? 'partial relabel: transcript turns cannot be mapped to chunk indices'
-        : markdownRaw === null ? 'meeting markdown unreadable' : null,
+        : markdownRaw === null ? markdownUnreadableReason(operations) : null,
     }
 
     if (req.body?.dryRun === true || req.body?.confirm !== true) {
@@ -1684,7 +1699,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // markdown changes with no hint the document was never touched.
       markdownSkipped: !plan.value.coveredAllWithLabel
         ? 'partial de-attribution: transcript turns cannot be mapped to chunk indices'
-        : markdownUnreadable ? 'meeting markdown unreadable' : null,
+        : markdownUnreadable ? markdownUnreadableReason(operations) : null,
       scope: 'meeting' as const,
       chunks: plan.value.changed,
       surfaces,

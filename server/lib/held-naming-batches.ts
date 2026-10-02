@@ -188,6 +188,9 @@ function resolveCopies(sessionId:string):ResolvedCopy[] {
   if (operations) {
     const found = findCosOperationsMeetingBySessionId(sessionId)
     if (!found) throw new Error('Operations meeting copy is missing; retry after sync')
+    // 6.61.2: two meetings declare this session. Fail closed rather than let the
+    // sidecar's own blended_into pointer below pick one of them.
+    if (found.mergedScribeConflict) throw new Error(`${found.mergedScribeConflict.length} meetings declare this session; fix the duplicate before naming`)
     paths.push({copy:'operations',sidecarPath:found.sidecarPath,meetingPath:found.meetingPath})
   } else if (process.env.COS_OPERATIONS_DIR?.trim() || process.env.COS_SCRIPTS_DIR?.trim()) {
     // An explicitly configured but unavailable iCloud root is not standalone.

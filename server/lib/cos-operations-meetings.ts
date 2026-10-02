@@ -478,6 +478,12 @@ function withMeetingListInsights(meta: CosOperationsMeetingMeta, content: string
  * but the readable meeting is now the merged scribe, so this returns the orphan's
  * sidecar path with the merged scribe's path, filename and title. Without that,
  * naming a voice on a merged meeting opened a file that no longer existed.
+ *
+ * ...AND ITS DOMAIN AND MONTH (6.61.2). The merged scribe may sit in another
+ * domain folder than the sidecar, and `domain`, `month` and `filename` are what
+ * every caller builds the `ops:` recordId from, so all three describe the merged
+ * scribe: the same recordId the meetings list shows for that row. `sidecarPath`
+ * stays the capture's, wherever it is.
  */
 export function findCosOperationsMeetingBySessionId(sessionId: string): {
   sidecarPath: string
@@ -486,22 +492,31 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
   domain: string
   month: string
   title: string
+  /**
+   * 6.61.2. Set only when MORE THAN ONE meeting declares this session through
+   * `<!-- g2-session -->`: their operations-relative paths. The record then
+   * describes the capture alone, exactly as an unresolved merge does, because
+   * picking one of them would write a correction into a meeting chosen by
+   * directory order.
+   */
+  mergedScribeConflict?: string[]
 } | null {
   const operationsDir = resolveCosOperationsDir()
   if (!operationsDir) return null
 
-  for (const domain of discoverMeetingDomains(operationsDir)) {
+  const domains = discoverMeetingDomains(operationsDir)
+  for (const domain of domains) {
     const meetingsBase = join(operationsDir, domain, 'meetings')
     let months: string[]
     try {
-      months = readdirSync(meetingsBase).filter(d => /^\d{4}-\d{2}$/.test(d)).sort().reverse()
+      months = readdirSync(meetingsBase).filter(d => MONTH_PATTERN.test(d)).sort().reverse()
     } catch { continue }
 
     for (const month of months) {
       const monthDir = join(meetingsBase, month)
       let sidecars: string[]
       try {
-        sidecars = readdirSync(monthDir).filter(f => f.endsWith('.g2-chunks.json') && !/ \d+(\.[A-Za-z0-9-]+)*\.json$/.test(f)).sort().reverse()
+        sidecars = readdirSync(monthDir).filter(f => f.endsWith('.g2-chunks.json') && !ICLOUD_CONFLICT_COPY.test(f)).sort().reverse()
       } catch { continue }
 
       for (const sidecarName of sidecars) {
@@ -510,17 +525,26 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
         const sidecarPath = join(monthDir, sidecarName)
         let meetingPath = join(monthDir, meetingFilename)
         let resolvedFilename = meetingFilename
+        let resolvedDomain = domain
+        let resolvedMonth = month
+        let mergedScribeConflict: string[] | undefined
         let content: string | null = null
         try {
           content = readFileSync(meetingPath, 'utf-8')
         } catch {
-          // The capture's own scribe is gone. Only now is it worth reading the
-          // month's other scribes to find the one that declares this session.
-          const merged = findMergedScribeForSession(monthDir, sessionId)
-          if (merged) {
+          // The capture's own scribe is gone. Only now is it worth looking for
+          // the merged scribe that declares this session, in EVERY domain: the
+          // pipeline re-files a merge by its Fireflies call, so a capture filed
+          // under personal is routinely merged into a scribe under quilt.
+          const merged = resolveMergedScribe(operationsDir, domains, month, sidecarName, sessionId)
+          if (merged.status === 'resolved') {
+            resolvedDomain = merged.domain
+            resolvedMonth = merged.month
             resolvedFilename = merged.filename
-            meetingPath = join(monthDir, merged.filename)
+            meetingPath = merged.path
             content = merged.content
+          } else if (merged.status === 'ambiguous') {
+            mergedScribeConflict = merged.claimants
           }
         }
         let title = resolvedFilename.replace(/\.md$/, '')
@@ -530,9 +554,10 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
           sidecarPath,
           meetingPath,
           filename: resolvedFilename,
-          domain,
-          month,
+          domain: resolvedDomain,
+          month: resolvedMonth,
           title,
+          ...(mergedScribeConflict ? { mergedScribeConflict } : {}),
         }
       }
     }
@@ -540,30 +565,195 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
   return null
 }
 
+// ── Merged-scribe resolution across domains (6.61.2) ────────────────────────
+//
+// 6.47.0 looked for the merged scribe only in the sidecar's own folder. On
+// 2026-10-02, 65 of the 199 merged scribes on the author's Mac sat in a
+// different DOMAIN folder from their capture (38 personal -> quilt, 11 personal
+// -> hermit_crabs, 9 personal -> sprocket_rocket, 7 between hermit_crabs,
+// sprocket_rocket and quilt), so those sessions resolved to the retired
+// standalone filename: the speaker review named a record the meetings list does
+// not show, and every correction either 409'd on `record_source_mismatch` or
+// renamed the voice in the sidecar alone.
+//
+// IDENTITY IS THE MARKER. A scribe holds a session only if it carries
+// `<!-- g2-session: <exact id> -->`. No filename, title or date is ever a match,
+// and two scribes declaring one session resolve to neither.
+
 /**
- * The scribe in this month that declares `sessionId` through `<!-- g2-session -->`.
- *
- * Only ever called when a capture's own scribe is missing, so the full-content
- * read it costs lands on a path that was about to answer with a dead file.
+ * iCloud conflict copies ("Chris_Miles_Sync 2.md", "x 2.g2-chunks.json").
+ * Never canonical, and a copy of a merged scribe carries the same markers as the
+ * original, so counting it would turn every conflict copy into a duplicate claim.
  */
-function findMergedScribeForSession(
-  monthDir: string,
-  sessionId: string,
-): { filename: string; content: string } | null {
-  let names: string[]
+const ICLOUD_CONFLICT_COPY = / \d+(\.[A-Za-z0-9-]+)*\.(md|json)$/
+
+function shiftMonth(month: string, by: number): string {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const index = year * 12 + (monthNumber - 1) + by
+  return `${String(Math.floor(index / 12)).padStart(4, '0')}-${String((index % 12) + 1).padStart(2, '0')}`
+}
+
+/**
+ * The month folders a merged scribe for this capture can sit in.
+ *
+ * The capture's own month, always. Measured on 2026-10-02: all 199 merged
+ * scribes carry the capture's own date (0 of 199 a day off) and the nearest any
+ * capture came to a month edge was 7.5 hours. So a merge can land in another
+ * month only when the capture sits on a month's first or last day (a call that
+ * began before midnight and a capture that began after it, or the reverse), and
+ * those two days also search the neighbouring month. A sidecar whose name does
+ * not carry a date inside its own month searches both neighbours, because
+ * nothing says which way it leans. Never a `2026-09 2` folder: every name here
+ * is built, not listed.
+ */
+export function mergedScribeMonthsFor(sidecarMonth: string, sidecarFilename: string): string[] {
+  if (!MONTH_PATTERN.test(sidecarMonth)) return []
+  const date = /^(\d{4}-\d{2})-(\d{2})/.exec(sidecarFilename)
+  if (!date || date[1] !== sidecarMonth) {
+    return [sidecarMonth, shiftMonth(sidecarMonth, -1), shiftMonth(sidecarMonth, 1)]
+  }
+  const day = Number(date[2])
+  const [year, monthNumber] = sidecarMonth.split('-').map(Number)
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate()
+  const months = [sidecarMonth]
+  if (day === 1) months.push(shiftMonth(sidecarMonth, -1))
+  if (day === lastDay) months.push(shiftMonth(sidecarMonth, 1))
+  return months
+}
+
+// The cost guard. A cold lookup reads every scribe in the months above across
+// every domain (about 300 files and 11 MB for a busy month on the author's Mac);
+// a warm one stats them and reads nothing. A month's listing is reused while the
+// folder's own stamp is unchanged, and a scribe's markers while ITS stamp is,
+// so an in-place edit that leaves the folder's mtime alone is still seen.
+interface ScribeClaimEntry { stamp: string; sessions: readonly string[] }
+interface MonthListingEntry { stamp: string; names: string[] }
+const scribeClaimCache = new Map<string, ScribeClaimEntry>()
+const monthListingCache = new Map<string, MonthListingEntry>()
+let scribeClaimReads = 0
+
+function statStamp(stat: { ino: number; size: number; mtimeMs: number; ctimeMs: number }): string {
+  return `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+}
+
+/** Every canonical scribe in one month folder that declares at least one session. */
+function scribeClaimsIn(monthDir: string): Array<{ filename: string; sessions: readonly string[] }> {
+  let dirStat: ReturnType<typeof statSync>
   try {
-    names = readdirSync(monthDir).filter(name => name.endsWith('.md')).sort().reverse()
+    dirStat = statSync(monthDir)
   } catch {
-    return null
+    monthListingCache.delete(monthDir)
+    return []
   }
-  for (const filename of names.slice(0, MAX_LIST_CANDIDATES)) {
-    let content: string
+  if (!dirStat.isDirectory()) return []
+  const dirStamp = statStamp(dirStat)
+  let listing = monthListingCache.get(monthDir)
+  if (!listing || listing.stamp !== dirStamp) {
+    let names: string[]
     try {
-      content = readFileSync(join(monthDir, filename), 'utf-8')
-    } catch { continue }
-    if (mergedScribeSessions(content).includes(sessionId)) return { filename, content }
+      names = readdirSync(monthDir)
+        .filter(name => name.endsWith('.md') && !ICLOUD_CONFLICT_COPY.test(name))
+        .sort()
+        .slice(0, MAX_LIST_CANDIDATES)
+    } catch {
+      return []
+    }
+    const kept = new Set(names)
+    for (const old of listing?.names ?? []) if (!kept.has(old)) scribeClaimCache.delete(join(monthDir, old))
+    listing = { stamp: dirStamp, names }
+    monthListingCache.set(monthDir, listing)
   }
-  return null
+  const claims: Array<{ filename: string; sessions: readonly string[] }> = []
+  for (const filename of listing.names) {
+    const path = join(monthDir, filename)
+    let stat: ReturnType<typeof statSync>
+    try {
+      stat = statSync(path)
+    } catch {
+      scribeClaimCache.delete(path)
+      continue
+    }
+    if (!stat.isFile()) continue
+    const stamp = statStamp(stat)
+    let entry = scribeClaimCache.get(path)
+    if (!entry || entry.stamp !== stamp) {
+      let content: string
+      try {
+        content = readFileSync(path, 'utf-8')
+      } catch {
+        scribeClaimCache.delete(path)
+        continue
+      }
+      scribeClaimReads++
+      entry = { stamp, sessions: mergedScribeSessions(content) }
+      scribeClaimCache.set(path, entry)
+    }
+    if (entry.sessions.length > 0) claims.push({ filename, sessions: entry.sessions })
+  }
+  return claims
+}
+
+/** How much work the marker cache has done. Diagnostics and the cost tests read it. */
+export function mergedScribeCacheStats(): { reads: number; scribes: number; months: number } {
+  return { reads: scribeClaimReads, scribes: scribeClaimCache.size, months: monthListingCache.size }
+}
+
+/** Drop the marker cache. Tests use it to measure a cold lookup. */
+export function resetMergedScribeCache(): void {
+  scribeClaimCache.clear()
+  monthListingCache.clear()
+  scribeClaimReads = 0
+}
+
+export type MergedScribeResolution =
+  | { status: 'resolved'; domain: string; month: string; filename: string; path: string; content: string }
+  | { status: 'none' }
+  | { status: 'ambiguous'; claimants: string[] }
+
+const loggedConflicts = new Set<string>()
+
+/**
+ * The ONE scribe, in any domain, that declares `sessionId` through
+ * `<!-- g2-session -->`. Two or more is `ambiguous` and resolves to none of them.
+ */
+export function resolveMergedScribe(
+  operationsDir: string,
+  domains: readonly string[],
+  sidecarMonth: string,
+  sidecarFilename: string,
+  sessionId: string,
+): MergedScribeResolution {
+  const months = mergedScribeMonthsFor(sidecarMonth, sidecarFilename)
+  const found: Array<{ domain: string; month: string; filename: string }> = []
+  for (const domain of domains) {
+    for (const month of months) {
+      for (const claim of scribeClaimsIn(join(operationsDir, domain, 'meetings', month))) {
+        if (claim.sessions.includes(sessionId)) found.push({ domain, month, filename: claim.filename })
+      }
+    }
+  }
+  if (found.length === 0) return { status: 'none' }
+  if (found.length > 1) {
+    const claimants = found.map(f => `${f.domain}/meetings/${f.month}/${f.filename}`)
+    const key = `${sessionId}|${claimants.join('|')}`
+    if (!loggedConflicts.has(key)) {
+      if (loggedConflicts.size >= 200) loggedConflicts.clear()
+      loggedConflicts.add(key)
+      console.warn(`[meetings] merged_scribe_ambiguous: ${claimants.length} meetings declare session ${sessionId} (${claimants.join(', ')}); using the capture alone until one is fixed`)
+    }
+    return { status: 'ambiguous', claimants }
+  }
+  const only = found[0]
+  const path = join(operationsDir, only.domain, 'meetings', only.month, only.filename)
+  let content: string
+  try {
+    content = readFileSync(path, 'utf-8')
+  } catch {
+    return { status: 'none' }
+  }
+  // The cache is a hint; the file just read is the identity.
+  if (!mergedScribeSessions(content).includes(sessionId)) return { status: 'none' }
+  return { status: 'resolved', ...only, path, content }
 }
 
 export type MeetingLibraryRecord = NonNullable<ReturnType<typeof findCosOperationsMeetingBySessionId>> & {
