@@ -5,7 +5,8 @@
 // session into a record: which folders it searches, what it refuses to count,
 // that two claims resolve to neither, and that a warm lookup reads nothing.
 // Executed against real files in a temp operations tree.
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,6 +15,7 @@ import {
   mergedScribeCacheStats,
   mergedScribeMonthsFor,
   resetMergedScribeCache,
+  resolveMergedScribe,
 } from './cos-operations-meetings.js'
 import { MeetingStore } from './meeting-store.js'
 import { ImportedMeetingLibrary } from './imported-meeting-library.js'
@@ -39,7 +41,9 @@ beforeEach(() => {
   resetMergedScribeCache()
 })
 
+const children: ChildProcess[] = []
 afterEach(() => {
+  for (const child of children.splice(0)) child.kill('SIGKILL')
   vi.restoreAllMocks()
   for (const key of ENV_KEYS) {
     if (savedEnv[key] === undefined) delete process.env[key]
@@ -159,10 +163,7 @@ describe('two claims fail closed', () => {
       'sprocket_rocket/meetings/2026-09/2026-09-10_Chris_Miles_Sync.md',
     ])
     const lines = warn.mock.calls.map(call => String(call[0]))
-    expect(lines.filter(line => line.includes('merged_scribe_ambiguous') && line.includes(SESSION))).toHaveLength(1)
-    // Logged once per claim set, not on every lookup.
-    findCosOperationsMeetingBySessionId(SESSION)
-    expect(warn.mock.calls.filter(call => String(call[0]).includes('merged_scribe_ambiguous'))).toHaveLength(1)
+    expect(lines.filter(line => line.includes('merged_scribe_ambiguous') && line.includes(SESSION) && line.includes('2 meetings'))).toHaveLength(1)
   })
 
   it('two claims in one folder are as ambiguous as two in different folders', () => {
@@ -192,6 +193,15 @@ describe('iCloud copies are never claims', () => {
     const found = findCosOperationsMeetingBySessionId(SESSION)
     expect(found?.meetingPath).toBe(real)
     expect(found?.mergedScribeConflict).toBeUndefined()
+  })
+
+  it('an iCloud copy of the capture\'s month folder is never the capture', () => {
+    capture('personal', '2026-09 2')
+    const real = capture('personal', '2026-09')
+    const merged = scribe('quilt', '2026-09', '2026-09-10_Chris_Miles_Sync.md', [SESSION])
+    const found = findCosOperationsMeetingBySessionId(SESSION)
+    expect(found?.sidecarPath).toBe(real)
+    expect(found?.meetingPath).toBe(merged)
   })
 
   it('an iCloud copy of the sidecar is never the capture', () => {
@@ -258,6 +268,23 @@ describe('the marker cache', () => {
     expect(findCosOperationsMeetingBySessionId(SESSION)?.domain).toBe('personal')
   })
 
+  it('a deleted scribe and a deleted month folder leave the cache', () => {
+    capture('personal', '2026-09')
+    scribe('quilt', '2026-09', '2026-09-10_Chris_Miles_Sync.md', [SESSION])
+    const gone = scribe('quilt', '2026-09', '2026-09-10_Old.md', [])
+    scribe('hermit_crabs', '2026-09', '2026-09-10_Standup.md', [])
+    findCosOperationsMeetingBySessionId(SESSION)
+    const before = mergedScribeCacheStats()
+    rmSync(gone)
+    rmSync(join(operations, 'hermit_crabs', 'meetings', '2026-09'), { recursive: true })
+    mkdirSync(join(operations, 'hermit_crabs', 'meetings', '2026-08'), { recursive: true })
+    findCosOperationsMeetingBySessionId(SESSION)
+    const after = mergedScribeCacheStats()
+    // The deleted scribe, and the scribe that went with its month folder.
+    expect(after.scribes).toBe(before.scribes - 2)
+    expect(after.months).toBe(before.months - 1)
+  })
+
   it('a warm lookup reads no scribe again; a cold one reads each scribe once', () => {
     capture('personal', '2026-09')
     for (let i = 0; i < 12; i++) scribe(['quilt', 'hermit_crabs', 'sprocket_rocket'][i % 3], '2026-09', `2026-09-1${i % 10}_Other_${i}.md`, [])
@@ -267,6 +294,46 @@ describe('the marker cache', () => {
     expect(cold).toBe(13)
     for (let i = 0; i < 5; i++) expect(findCosOperationsMeetingBySessionId(SESSION)?.domain).toBe('quilt')
     expect(mergedScribeCacheStats().reads).toBe(cold)
+  })
+})
+
+describe('what the lookup refuses to read', () => {
+  it('a scribe rewritten between the scan and the final read does not resolve', () => {
+    capture('personal', '2026-09')
+    scribe('quilt', '2026-09', '2026-09-10_Chris_Miles_Sync.md', [SESSION])
+    const domains = ['personal', 'quilt']
+    expect(resolveMergedScribe(operations, domains, '2026-09', `${CAPTURE}.g2-chunks.json`, SESSION).status).toBe('resolved')
+    expect(resolveMergedScribe(operations, domains, '2026-09', `${CAPTURE}.g2-chunks.json`, SESSION, () => '# Marker gone\n').status).toBe('none')
+    expect(resolveMergedScribe(operations, domains, '2026-09', `${CAPTURE}.g2-chunks.json`, SESSION, () => { throw new Error('ENOENT') }).status).toBe('none')
+  })
+
+  it('an unreadable month folder or scribe in one domain does not stop the lookup', () => {
+    capture('personal', '2026-09')
+    const locked = dir('hermit_crabs', '2026-09')
+    writeFileSync(join(locked, '2026-09-10_Locked.md'), `<!-- g2-session: ${SESSION} -->`)
+    const unreadable = scribe('quilt', '2026-09', '2026-09-10_Unreadable.md', [SESSION])
+    const merged = scribe('sprocket_rocket', '2026-09', '2026-09-10_Chris_Miles_Sync.md', [SESSION])
+    chmodSync(locked, 0o000)
+    chmodSync(unreadable, 0o000)
+    try {
+      expect(findCosOperationsMeetingBySessionId(SESSION)?.meetingPath).toBe(merged)
+    } finally {
+      chmodSync(locked, 0o700)
+      chmodSync(unreadable, 0o600)
+    }
+  })
+
+  it('a FIFO named like a scribe is never opened', () => {
+    capture('personal', '2026-09')
+    const merged = scribe('quilt', '2026-09', '2026-09-10_Chris_Miles_Sync.md', [SESSION])
+    const fifo = join(dir('hermit_crabs', '2026-09'), '2026-09-10_Pipe.md')
+    execFileSync('mkfifo', [fifo])
+    // A writer that would hand any reader a matching marker. If the lookup opened
+    // the FIFO it would count it as a second claim; it must not open it at all.
+    children.push(spawn('/bin/sh', ['-c', `printf '%s' '<!-- g2-session: ${SESSION} -->' > "$1"`, 'sh', fifo], { stdio: 'ignore' }))
+    const found = findCosOperationsMeetingBySessionId(SESSION)
+    expect(found?.meetingPath).toBe(merged)
+    expect(found?.mergedScribeConflict).toBeUndefined()
   })
 })
 

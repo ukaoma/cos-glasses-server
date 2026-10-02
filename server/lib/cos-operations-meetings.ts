@@ -638,15 +638,14 @@ function statStamp(stat: { ino: number; size: number; mtimeMs: number; ctimeMs: 
 
 /** Every canonical scribe in one month folder that declares at least one session. */
 function scribeClaimsIn(monthDir: string): Array<{ filename: string; sessions: readonly string[] }> {
-  let dirStat: ReturnType<typeof statSync>
+  let dirStamp: string
   try {
-    dirStat = statSync(monthDir)
+    dirStamp = statStamp(statSync(monthDir))
   } catch {
+    for (const name of monthListingCache.get(monthDir)?.names ?? []) scribeClaimCache.delete(join(monthDir, name))
     monthListingCache.delete(monthDir)
     return []
   }
-  if (!dirStat.isDirectory()) return []
-  const dirStamp = statStamp(dirStat)
   let listing = monthListingCache.get(monthDir)
   if (!listing || listing.stamp !== dirStamp) {
     let names: string[]
@@ -669,10 +668,8 @@ function scribeClaimsIn(monthDir: string): Array<{ filename: string; sessions: r
     let stat: ReturnType<typeof statSync>
     try {
       stat = statSync(path)
-    } catch {
-      scribeClaimCache.delete(path)
-      continue
-    }
+    } catch { continue }
+    // A FIFO or a folder named *.md is never read: a FIFO would block the server.
     if (!stat.isFile()) continue
     const stamp = statStamp(stat)
     let entry = scribeClaimCache.get(path)
@@ -680,10 +677,7 @@ function scribeClaimsIn(monthDir: string): Array<{ filename: string; sessions: r
       let content: string
       try {
         content = readFileSync(path, 'utf-8')
-      } catch {
-        scribeClaimCache.delete(path)
-        continue
-      }
+      } catch { continue }
       scribeClaimReads++
       entry = { stamp, sessions: mergedScribeSessions(content) }
       scribeClaimCache.set(path, entry)
@@ -710,11 +704,12 @@ export type MergedScribeResolution =
   | { status: 'none' }
   | { status: 'ambiguous'; claimants: string[] }
 
-const loggedConflicts = new Set<string>()
-
 /**
  * The ONE scribe, in any domain, that declares `sessionId` through
  * `<!-- g2-session -->`. Two or more is `ambiguous` and resolves to none of them.
+ *
+ * `read` is the final read of the chosen scribe. Injectable so a test can stand
+ * in for a scribe rewritten between the scan and this read.
  */
 export function resolveMergedScribe(
   operationsDir: string,
@@ -722,6 +717,7 @@ export function resolveMergedScribe(
   sidecarMonth: string,
   sidecarFilename: string,
   sessionId: string,
+  read: (path: string) => string = path => readFileSync(path, 'utf-8'),
 ): MergedScribeResolution {
   const months = mergedScribeMonthsFor(sidecarMonth, sidecarFilename)
   const found: Array<{ domain: string; month: string; filename: string }> = []
@@ -735,19 +731,16 @@ export function resolveMergedScribe(
   if (found.length === 0) return { status: 'none' }
   if (found.length > 1) {
     const claimants = found.map(f => `${f.domain}/meetings/${f.month}/${f.filename}`)
-    const key = `${sessionId}|${claimants.join('|')}`
-    if (!loggedConflicts.has(key)) {
-      if (loggedConflicts.size >= 200) loggedConflicts.clear()
-      loggedConflicts.add(key)
-      console.warn(`[meetings] merged_scribe_ambiguous: ${claimants.length} meetings declare session ${sessionId} (${claimants.join(', ')}); using the capture alone until one is fixed`)
-    }
+    // Once per lookup, and lookups happen on a person's action (opening the
+    // speaker panel, a correction), never in a loop.
+    console.warn(`[meetings] merged_scribe_ambiguous: ${claimants.length} meetings declare session ${sessionId} (${claimants.join(', ')}); using the capture alone until one is fixed`)
     return { status: 'ambiguous', claimants }
   }
   const only = found[0]
   const path = join(operationsDir, only.domain, 'meetings', only.month, only.filename)
   let content: string
   try {
-    content = readFileSync(path, 'utf-8')
+    content = read(path)
   } catch {
     return { status: 'none' }
   }
