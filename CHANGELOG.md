@@ -1,3 +1,13 @@
+## 6.61.4
+
+Local hardening candidate; stable promotion remains gated on native UI and G2 acceptance.
+
+- Resolve a marked merged G2 meeting before any surviving original scribe. Ambiguous merge claims remain readable but refuse corrections.
+- Bind speaker/content reads to the selected record and return a revision over the scribe and speaker sidecar. Corrections carrying a stale revision fail before writing.
+- Add capability-gated, revision-guarded Work task-name and finish-line editing in one locked replacement. Preserve Work identity and links, and invalidate the board after a write attempt.
+- Regenerate the portable task writer from canonical commit e0016764 and test the new command through the bundled bridge.
+- Add disposable Work QA service using the actual board routes and portable writer, with provider routes absent. Exclude that service from the public package.
+
 ## 6.61.3
 
 ### A prompt the Mac accepted runs to an answer, phone or no phone: an orphan fence holds the start, it no longer refuses the prompt
@@ -21,16 +31,6 @@
 - Mutation gate: 30 cases for this release, one per guard (the 15 from the first pass retargeted, 15 new from QA), on a green baseline of the 6 suites they name: 30 of 30 killed. The first pass's run caught a test gap (a drain that ended inside the fence), and QA caught three guards no test could reach (cancel and shutdown waking a long hold, `canStart` inside the write, the lock waiter's released lease); each now has a test and a case. Not gated: the U+202F replacement in `holdClock` (this Node's ICU prints a plain space, so no test can produce the input).
 - Full suite (Linux container, not the Mac): 5,670 passed, 76 skipped, 39 failed in 15 files. The failing set is identical, file by file, to the same run on unmodified 6.61.2 (`93cc478`): 38 container-bound failures (no `codex` binary, Linux `ps`, no ffmpeg, macOS paths) and 1 unreadable-folder case the container's root user can still read. The Mac run (`publish_server.py --verify`) is still owed before publish.
 - No Install hooks and no COS Control change; Control can read the two new maintenance-status fields when it wants them.
-
-## [6.61.4] - 2026-10-03
-
-Local hardening candidate; not published or installed by this build.
-
-- Resolve a marked merged G2 meeting before any surviving original scribe. Ambiguous merge claims remain readable but refuse corrections.
-- Bind speaker/content reads to the selected record and return a revision over the scribe and speaker sidecar. Corrections carrying a stale revision fail before writing.
-- Add capability-gated, revision-guarded Work task-name and finish-line editing in one locked replacement. Preserve Work identity and links, and invalidate the board after a write attempt.
-- Regenerate the portable task writer from canonical commit e0016764 and test the new command through the bundled bridge.
-- Add disposable Work QA service using the actual board routes and portable writer, with provider routes absent. Exclude that service from the public package.
 
 ## 6.61.2
 
