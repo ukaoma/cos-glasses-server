@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, afterAll } from 'vitest'
-import { TURN_END_TAIL_BYTES, transcriptTurnEnded, transcriptTurnVerdict } from './thread-turn-queue-store.js'
+import { queuedTurnsFields, TURN_END_TAIL_BYTES, transcriptTurnEnded, transcriptTurnVerdict } from './thread-turn-queue-store.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -60,4 +60,9 @@ describe('transcriptTurnEnded reads past an oversized bookkeeping row', () => {
     expect(transcriptTurnEnded('claude', null)).toBe(false)
     expect(transcriptTurnEnded('claude', '/nonexistent/x.jsonl')).toBe(false)
   })
+})
+
+
+it('marks an unreadable queue as unknown, not empty', () => {
+  expect(queuedTurnsFields(null)).toEqual({ queue_unknown: true })
 })

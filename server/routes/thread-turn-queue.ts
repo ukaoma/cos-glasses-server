@@ -16,7 +16,8 @@
 // EVERY DEPENDENCY IS INJECTED so the whole path is testable without a live server.
 
 import { Router, type Request, type Response } from 'express'
-import { COS_SESSION_ID_RE } from './agent-session-bindings.js'
+import { nativeQueueControl, plainQueueText, type NativeQueueControl } from '../lib/codex-queue-control.js'
+import { COS_SESSION_ID_RE, DEFAULT_MAX_PROMPT_CHARS } from './agent-session-bindings.js'
 import {
   admitToQueue, drainDecision, queueableRefusal, queuePosition,
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
@@ -47,6 +48,7 @@ export interface ThreadTurnQueueDeps {
     /** The turn route's OWN `retryable` judgement, when it sent one. Authoritative. */
     serverRetryable?: boolean
   }>
+  nativeQueue?: NativeQueueControl
   now: () => number
 }
 
@@ -58,6 +60,9 @@ function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unk
     queuedAt: turn.queuedAt,
     attempts: turn.attempts,
     position: turn.status === 'waiting' ? position : -1,
+    prompt: turn.prompt,
+    editable: turn.status === 'waiting',
+    owner: 'cos',
     preview: turn.prompt.length > 80 ? `${turn.prompt.slice(0, 79)}…` : turn.prompt,
     ...(turn.reason ? { reason: turn.reason } : {}),
     ...(turn.settledAt ? { settledAt: turn.settledAt } : {}),
@@ -116,10 +121,16 @@ export async function drainThread(
   if (queue.length === 0) return { delivered: 0, held: 0, retired: 0 }
 
   let delivered = 0, held = 0, retired = 0
-  let dirty = false
+  const persist = (turn: QueuedThreadTurn) => {
+    const latest = readQueue(provider, threadId, deps.now())
+    const index = latest.findIndex(t => t.clientTurnId === turn.clientTurnId)
+    if (index >= 0) { latest[index] = turn; writeQueue(provider, threadId, latest) }
+  }
   let refusedGate: ReturnType<ThreadTurnQueueDeps['occupancy']> | null = null
 
-  for (const turn of queue) {
+  for (const snapshot of queue) {
+    const turn = readQueue(provider, threadId, deps.now()).find(t => t.clientTurnId === snapshot.clientTurnId)
+    if (!turn) continue
     if (turn.status !== 'waiting') continue
 
     // Reuse only refusal within this synchronous pass. Rechecking a busy thread
@@ -150,7 +161,7 @@ export async function drainThread(
       turn.status = decision === 'expire' ? 'expired' : 'refused'
       turn.reason = decision === 'expire' ? 'queued_turn_expired' : 'delivery_attempts_exhausted'
       turn.settledAt = deps.now()
-      retired += 1; dirty = true
+      retired += 1; persist(turn)
       continue
     }
 
@@ -159,8 +170,7 @@ export async function drainThread(
     // forever; the ceiling only bounds anything if it survives the crash it is bounding.
     turn.attempts += 1
     turn.status = 'delivering'
-    writeQueue(provider, threadId, queue)
-    dirty = true
+    persist(turn)
 
     let outcome: { ok: boolean; reason?: string; serverRetryable?: boolean }
     refusedGate = null
@@ -209,9 +219,8 @@ export async function drainThread(
       turn.reason = outcome.reason
       held += 1
     }
+    persist(turn)
   }
-
-  if (dirty) writeQueue(provider, threadId, queue)
   return { delivered, held, retired }
 }
 
@@ -286,20 +295,59 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
   })
 
   // GET — what is waiting, for the pending row on the lens.
-  router.get('/agent-sessions/:provider/:threadId/queued-turns', (req: Request, res: Response) => {
+  router.get('/agent-sessions/:provider/:threadId/queued-turns', async (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
     const provider = String(req.params.provider ?? '')
     const threadId = String(req.params.threadId ?? '')
     const queue = readQueue(provider, threadId, deps.now())
-    return res.json({ turns: queue.map(t => publicRow(t, queuePosition(queue, t.clientTurnId))) })
+    let native: Record<string, unknown>[] = []
+    if (provider === 'codex') {
+      try {
+        native = (await (deps.nativeQueue ?? nativeQueueControl).list(threadId)).map((row, position) => {
+          const text = plainQueueText(row)
+          return { clientTurnId: `codex-native:${row.id}`, status: 'waiting', position, queuedAt: 0,
+            attempts: 0, preview: text?.slice(0, 80) ?? 'Message with attachments · manage in Codex',
+            ...(text !== null ? { prompt: text } : {}), editable: text !== null, owner: 'codex' }
+        })
+      } catch { return res.status(503).json({ error: 'native_queue_unavailable' }) }
+    }
+    // Re-read after the native await: delivery may have changed COS ownership.
+    const current = readQueue(provider, threadId, deps.now())
+    return res.json({ turns: [...native, ...current.map(t => publicRow(t, queuePosition(current, t.clientTurnId) + native.length))] })
+  })
+
+  // Atomic replacement: no cancel-and-requeue window, and the slot is retained.
+  router.patch('/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId', async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    const provider = String(req.params.provider), threadId = String(req.params.threadId), id = String(req.params.clientTurnId)
+    const prompt = req.body?.prompt
+    if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > DEFAULT_MAX_PROMPT_CHARS) return res.status(400).json({ error: 'invalid_prompt' })
+    if (provider === 'codex' && id.startsWith('codex-native:')) {
+      try {
+        await (deps.nativeQueue ?? nativeQueueControl).update(threadId, id.slice(13), prompt)
+        return res.json({ updated: true })
+      } catch { return res.status(409).json({ error: 'queue_edit_unconfirmed' }) }
+    }
+    const queue = readQueue(provider, threadId, deps.now())
+    const row = queue.find(t => t.clientTurnId === id)
+    if (!row || row.status !== 'waiting') return res.status(409).json({ error: 'already_delivering' })
+    row.prompt = prompt
+    writeQueue(provider, threadId, queue)
+    return res.json({ updated: true })
   })
 
   // DELETE — the cancel control, the same affordance the desktop queue offers.
-  router.delete('/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId', (req: Request, res: Response) => {
+  router.delete('/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId', async (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
     const provider = String(req.params.provider ?? '')
     const threadId = String(req.params.threadId ?? '')
     const clientTurnId = String(req.params.clientTurnId ?? '')
+    if (provider === 'codex' && clientTurnId.startsWith('codex-native:')) {
+      try {
+        const cancelled = await (deps.nativeQueue ?? nativeQueueControl).cancel(threadId, clientTurnId.slice(13))
+        return res.status(cancelled ? 200 : 409).json(cancelled ? { cancelled: true, clientTurnId, status: 'cancelled' } : { error: 'already_delivering' })
+      } catch { return res.status(503).json({ error: 'native_queue_unavailable' }) }
+    }
     const now = deps.now()
     const queue = readQueue(provider, threadId, now)
     const row = queue.find(t => t.clientTurnId === clientTurnId)

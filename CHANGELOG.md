@@ -1,3 +1,10 @@
+## 6.61.6 — 2026-10-03
+
+- Keep Codex-owned waiting messages visible in Sessions queue counts and queue reads after the COS handoff. Unavailable native reads report unknown, not empty.
+- Edit existing COS and Codex queue slots in place. Return full text for authenticated queue reads; never cancel and resend as an edit. Native messages with attachments or structured spans remain manageable in Codex.
+- Preserve concurrent enqueue, cancel and edit changes while the drainer awaits delivery. Native management uses local Codex queue protocol calls with automation and memory jobs disabled; no model turn is started.
+
+
 ## 6.61.5
 
 Local dictation-choice candidate, based on the 6.61.4 hardening candidate.
@@ -6,6 +13,7 @@ Local dictation-choice candidate, based on the 6.61.4 hardening candidate.
 - Advertise `capabilities.dictationCleanup.models` on health and bootstrap so app 6.10.573 can avoid silently selecting another model on an older server. Both phone-text and audio-draft finalize/retry paths honor the choice. Older clients may still explicitly request Haiku.
 - Run cleanup in a temporary workspace with no MCP. Claude tools/hooks are disabled; Cursor ask mode retains its read tools and uses an isolated subscription profile. Abort/timeout terminates the process tree; failures preserve the glossary-corrected transcript. Model circuit breakers are independent.
 - Local verification: model routing, legacy/default behavior, failure recovery, isolated configuration, cancellation, and real signed-in CLI smoke calls. Hardware acceptance and stable promotion remain outstanding.
+
 
 ## 6.61.4
 

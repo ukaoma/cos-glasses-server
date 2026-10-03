@@ -431,3 +431,66 @@ describe('a gate refusal does not spend the delivery ceiling', () => {
     expect(onDisk).toBe(1)
   })
 })
+
+describe('queue editing and Codex ownership', () => {
+  it('edits a COS slot in place with full text available after local data loss', async () => {
+    await start()
+    await http('POST', POST, { clientTurnId: 'edit-1', cosSessionId: 'cos-1', prompt: 'a'.repeat(3000) })
+    await http('POST', POST, { clientTurnId: 'edit-2', cosSessionId: 'cos-1', prompt: 'second' })
+    expect((await http('GET', POST)).json.turns[0]).toMatchObject({ prompt: 'a'.repeat(3000), editable: true })
+    expect((await http('PATCH', `${POST}/edit-1`, { prompt: 'changed' })).status).toBe(200)
+    expect(readQueue('claude', threadId, clock).map(r => [r.clientTurnId, r.prompt])).toEqual([['edit-1', 'changed'], ['edit-2', 'second']])
+    expect((await http('PATCH', `${POST}/missing`, { prompt: 'never send' })).status).toBe(409)
+  })
+
+  it('does not lose a new enqueue, cancellation or edit during an awaited delivery', async () => {
+    await start()
+    for (const id of ['first', 'second', 'third']) await http('POST', POST, { clientTurnId: id, cosSessionId: 'cos-1', prompt: id })
+    gate = { attachable: true, reason: null }; ended = true; activity = 'idle'
+    const seen: string[] = []
+    await drainThread('claude', threadId, { ...deps(), deliver: async turn => {
+      seen.push(turn.prompt)
+      if (turn.clientTurnId === 'first') {
+        expect((await http('PATCH', `${POST}/first`, { prompt: 'too late' })).status).toBe(409)
+        await http('DELETE', `${POST}/second`)
+        await http('PATCH', `${POST}/third`, { prompt: 'third edited' })
+        const fresh = readQueue('claude', threadId, clock)
+        writeQueue('claude', threadId, [...fresh, { ...fresh[0], clientTurnId: 'fourth', status: 'waiting', prompt: 'new' }])
+      }
+      return { ok: true }
+    } })
+    expect(seen).toEqual(['first', 'third edited'])
+    expect(readQueue('claude', threadId, clock).map(r => [r.clientTurnId, r.status])).toEqual([['first','delivered'],['second','cancelled'],['third','delivered'],['fourth','waiting']])
+  })
+
+  it('lists and edits native Codex rows, and refuses a vanished row without enqueueing', async () => {
+    let native = [{ id: 'native-one', input: [{ type: 'text', text: 'whole message' }], clientUserMessageId: 'client-one' }]
+    const app = express(); app.use(express.json())
+    app.use('/api', createThreadTurnQueueRouter({ ...deps(), nativeQueue: {
+      list: async () => native,
+      update: async (_t, id, prompt) => { const row = native.find(r => r.id === id); if (!row) throw Error('gone'); row.input[0].text = prompt },
+      cancel: async (_t, id) => { const found = native.some(r => r.id === id); native = native.filter(r => r.id !== id); return found },
+    } }))
+    await new Promise<void>(resolve => { server = app.listen(0, '127.0.0.1', () => resolve()) })
+    const addr = server!.address() as { port: number }; baseUrl = `http://127.0.0.1:${addr.port}`
+    const path = `/api/agent-sessions/codex/${threadId}/queued-turns`
+    expect((await http('GET', path)).json.turns[0]).toMatchObject({ clientTurnId: 'codex-native:native-one', prompt: 'whole message', owner: 'codex', editable: true })
+    expect((await http('PATCH', `${path}/codex-native:native-one`, { prompt: 'changed' })).json.updated).toBe(true)
+    expect(native[0].input[0].text).toBe('changed')
+    expect((await http('DELETE', `${path}/codex-native:native-one`)).json.status).toBe('cancelled')
+    expect((await http('PATCH', `${path}/codex-native:native-one`, { prompt: 'duplicate?' })).status).toBe(409)
+    expect(readQueue('codex', threadId, clock)).toEqual([])
+  })
+})
+
+it('does not report an empty queue when native Codex cannot be read', async () => {
+  const app = express(); app.use(express.json())
+  app.use('/api', createThreadTurnQueueRouter({ ...deps(), nativeQueue: {
+    list: async () => { throw Error('offline') }, update: async () => {}, cancel: async () => false,
+  } }))
+  await new Promise<void>(resolve => { server = app.listen(0, '127.0.0.1', () => resolve()) })
+  baseUrl = `http://127.0.0.1:${(server!.address() as { port: number }).port}`
+  const result = await http('GET', `/api/agent-sessions/codex/${threadId}/queued-turns`)
+  expect(result.status).toBe(503)
+  expect(result.json).not.toHaveProperty('turns')
+})

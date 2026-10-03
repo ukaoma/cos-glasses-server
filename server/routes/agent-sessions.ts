@@ -43,7 +43,7 @@ import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, re
 import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
 import { deriveForRow, signalFor } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
-import { queuedTurnsFields, queuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
+import { queuedTurnsFields, allQueuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
 import { isAttachedTurnActive, sessionStreamKey } from '../lib/session-stream-bus.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 import {
@@ -83,7 +83,7 @@ function asSort(value: unknown): AgentSessionSort {
   return String(value ?? '').toLowerCase() === 'opened' ? 'opened' : 'updated'
 }
 
-function toSearchHit(row: AgentSessionSearchHit, queuedTurns = 0, derived?: DerivedSessionState) {
+function toSearchHit(row: AgentSessionSearchHit, queuedTurns: number | null = 0, derived?: DerivedSessionState) {
   return {
     ...toEntry(row, undefined, derived, queuedTurns),
     snippet: row.snippet,
@@ -269,7 +269,7 @@ function runningForThread(provider: AgentProvider, threadId: string, mtimeMs: nu
   }
 }
 
-function toEntry(row: AgentSessionRow, activity?: SessionActivity | null, derived?: DerivedSessionState, queuedTurns = 0) {
+function toEntry(row: AgentSessionRow, activity?: SessionActivity | null, derived?: DerivedSessionState, queuedTurns: number | null = 0) {
   return {
     session_id: row.session_id,
     provider: row.provider,
@@ -397,7 +397,7 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       if (row.provider !== 'cursor' || !signalFor(row.session_id)) continue
       derivedById.set(row.session_id, deriveForRow({ sessionId: row.session_id, now, remember: false }))
     }
-    const queuedOf = queuedWaitingLookup(now)
+    const queuedOf = await allQueuedWaitingLookup(now)
     res.json({
       sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running)),
       total: sessions.length,
@@ -428,7 +428,7 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
   try {
     const limit = boundedInteger(req.query.limit, 20, 1, 50)
     const result = await searchAgentSessions({ query, limit })
-    const queuedOf = queuedWaitingLookup(Date.now())
+    const queuedOf = await allQueuedWaitingLookup(Date.now())
     // 6.48.1: search hits carry the same derived state as list rows (no list/search shape
     // drift), from the registry and the hook signal; a hit has no transcript walk.
     const peers = await liveClaudePeerRecords()
@@ -532,7 +532,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     res.json({
       ...withRunning({ session_id: parsed.session_id }, running),
       ...derivedRowFields(derived),
-      ...queuedTurnsFields(queuedWaitingLookup(Date.now())(provider, parsed.session_id)),
+      ...queuedTurnsFields((await allQueuedWaitingLookup(Date.now()))(provider, parsed.session_id)),
       // The client must be able to tell "this server stamped nothing" from "this
       // server stamped false", because the two demand opposite behaviour: an old
       // server's silence means keep using the hint borrowed from the list row, and

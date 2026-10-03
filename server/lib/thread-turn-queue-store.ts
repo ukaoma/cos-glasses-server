@@ -1,3 +1,4 @@
+import { nativeQueuedCounts } from './codex-queue-control.js'
 // Durable storage for queued thread turns, and the terminal-record probe.
 //
 // SEPARATE FROM THE DECISIONS. `thread-turn-queue.ts` is pure and holds every rule;
@@ -104,8 +105,8 @@ export function queuedWaitingLookup(now: number): (provider: string, sessionId: 
   return (provider, sessionId) => queuedWaitingForSession(queues, provider, sessionId)
 }
 
-export function queuedTurnsFields(count: number): { queued_turns?: number } {
-  return count > 0 ? { queued_turns: count } : {}
+export function queuedTurnsFields(count: number | null): { queued_turns?: number; queue_unknown?: boolean } {
+  return count === null ? { queue_unknown: true } : count > 0 ? { queued_turns: count } : {}
 }
 
 /** Every thread with a queue file, for the drain sweep. */
@@ -181,4 +182,12 @@ export function readTranscriptTailLines(path: string | null, maxBytes: number): 
   } catch {
     return null
   }
+}
+
+/** Native queued submissions remain waiting after COS has handed them over. */
+export async function allQueuedWaitingLookup(now: number): Promise<(provider: string, id: string) => number | null> {
+  const cos = queuedWaitingLookup(now)
+  const native = await nativeQueuedCounts()
+  return (provider, id) => provider !== 'codex' ? cos(provider, id)
+    : native === null ? null : cos(provider, id) + (native.get(id) ?? 0)
 }
