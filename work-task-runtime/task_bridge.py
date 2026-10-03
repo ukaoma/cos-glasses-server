@@ -31,7 +31,7 @@ def main():
     raw=sys.stdin.buffer.read(32769)
     if len(raw)>32768: raise ValueError('Task input exceeds supported limit')
     sys.stdin=io.StringIO(raw.decode('utf-8'))
-    commands={'task-rows':'cmd_task_rows','task-capture':'cmd_task_capture','task-set-text':'cmd_task_set_text','task-set-run-at':'cmd_task_set_run_at','task-set-marker':'cmd_task_set_marker','task-set-stage':'cmd_task_set_stage','task-set-done-when':'cmd_task_set_done_when','task-move':'cmd_task_move','task-check':'cmd_task_check','task-set-work-stage':'cmd_task_work_write','task-link-meeting':'cmd_task_work_write'}
+    commands={'task-rows':'cmd_task_rows','task-capture':'cmd_task_capture','task-set-text':'cmd_task_set_text','task-set-run-at':'cmd_task_set_run_at','task-set-marker':'cmd_task_set_marker','task-set-stage':'cmd_task_set_stage','task-set-done-when':'cmd_task_set_done_when','task-move':'cmd_task_move','task-check':'cmd_task_check','task-set-work-stage':'cmd_task_work_write','task-link-meeting':'cmd_task_work_write','task-edit-work':'cmd_task_work_write'}
     if opts.command not in commands and opts.command!='task-work-capabilities': raise ValueError('Unsupported task command')
     rootfd=directory(opts.root,create=True); domainfds={}; lockfd=None
     try:
@@ -68,13 +68,14 @@ def main():
             original_write(domain,identity,path,text)
         task_write._guarded_write=guarded
         import task_commands
-        if opts.command=='task-work-capabilities': print(json.dumps({'version':1,'protocol':'cos-control-task-write/1'}));return
+        if opts.command=='task-work-capabilities': print(json.dumps({'version':1,'protocol':'cos-control-task-write/1','editTasks':1}));return
         if not opts.args or opts.args[0] not in domains: raise ValueError('Unknown task domain')
         path=domain_path(opts.args[0])
         try: safe_read_text(path)
         except FileNotFoundError: pass
         fn=getattr(task_commands,commands[opts.command])
         if opts.command=='task-link-meeting':fn(opts.args,linking=True)
+        elif opts.command=='task-edit-work':fn(opts.args,editing=True)
         else:fn(opts.args)
     finally:
         for fd in domainfds.values():os.close(fd)

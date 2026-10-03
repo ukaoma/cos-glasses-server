@@ -543,11 +543,11 @@ export async function setTaskText(domain: string, id: string, text: string): Pro
 export function rejectReservedWorkText(text: string): void {
   if (/cos-work\s*:|\*\*Source:\*\*/i.test(text)) throw new TaskRunError(422, 'reserved_work_metadata', 'Use the explicit meeting link and stage controls; Source metadata is reserved.')
 }
-export async function workBoardCapabilities(): Promise<{ version: number; writable: boolean }> {
+export async function workBoardCapabilities(): Promise<{ version: number; writable: boolean; editTasks?: number }> {
   if (!taskBridgeAvailable()) return { version: 0, writable: false }
   try {
-    const value = await bridge(['task-work-capabilities']) as { version?: unknown }
-    return value?.version === 1 ? { version: 1, writable: true } : { version: 0, writable: false }
+    const value = await bridge(['task-work-capabilities']) as { version?: unknown; editTasks?: unknown }
+    return value?.version === 1 ? { version: 1, writable: true, ...(value.editTasks === 1 ? { editTasks: 1 } : {}) } : { version: 0, writable: false }
   } catch { return { version: 0, writable: false } }
 }
 function validateWorkTarget(domain: string, id: string, expectedText: string, expectedRevision: string): void {
@@ -559,6 +559,20 @@ export async function setTaskWorkStage(domain: string, id: string, workStage: Wo
   validateWorkTarget(domain, id, expectedText, expectedRevision)
   if (!WORK_STAGES.includes(workStage)) throw new TaskRunError(422, 'invalid_work_stage', 'Unknown Work stage')
   await withLockRetry(() => bridge(['task-set-work-stage', domain, id, workStage], JSON.stringify({ expectedText, expectedRevision })))
+}
+
+export interface WorkTaskEditResult { ok: true; id: string; workIdentity: string; workRevision: string; text: string; doneWhen: string }
+export async function editWorkTask(domain: string, id: string, text: string, doneWhen: string, expectedText: string, expectedRevision: string): Promise<WorkTaskEditResult> {
+  validateWorkTarget(domain, id, expectedText, expectedRevision)
+  rejectReservedWorkText(text); rejectReservedWorkText(doneWhen)
+  const clean = text.replace(/\s+/g, ' ').trim(), finish = doneWhen.replace(/\s+/g, ' ').trim()
+  if (!clean || clean.length > 2000) throw new TaskRunError(422, 'invalid_task_text', 'Task name must contain 1 to 2,000 characters')
+  if (finish.length > 500 || finish.includes('**')) throw new TaskRunError(422, 'invalid_done_when', 'Finish line must be at most 500 characters without ** markup')
+  const out = await withLockRetry(() => bridge(['task-edit-work', domain, id], JSON.stringify({ text: clean, doneWhen: finish, expectedText, expectedRevision }))) as WorkTaskEditResult
+  if (out?.ok !== true || !/^[a-f0-9]{12}$/.test(out.id) || !/^[a-f0-9]{12}$/.test(out.workIdentity) || !/^[a-f0-9]{64}$/.test(out.workRevision) || out.text !== clean || out.doneWhen !== finish) {
+    throw new TaskRunError(502, 'edit_unverified', 'The save response could not be verified. Refresh before trying again; do not repeat the save blindly.')
+  }
+  return out
 }
 /**
  * Work intake needs two bridge powers: exact meeting links (version 1) and one-write card capture. A bridge that

@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { readWorkJournal, projectWorkActivity, projectOpenWork, savedDestinationFor, controlSnapshotRevision,
   type WorkActivityCapabilities, type WorkActivityResult } from '../lib/work-activity.js'
-import { listBoard, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, TaskRunError, TaskBridgeError,
+import { listBoard, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, editWorkTask, TaskRunError, TaskBridgeError,
   WORK_STAGES, type WorkStage, type WorkMeetingRef, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader, WORK_BOARD_READ_LIMITS, WorkBoardTimeoutError, type WorkBoardReader } from '../lib/work-board-reader.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
@@ -16,6 +16,7 @@ export interface WorkBoardDependencies {
   capabilities: typeof workBoardCapabilities
   stage: typeof setTaskWorkStage
   link: typeof linkTaskMeeting
+  edit: typeof editWorkTask
   resolveMeeting: (descriptor: MeetingDescriptor) => MeetingDetail | Promise<MeetingDetail>
   /** 6.59.0: the handoff request inbox as the glasses should see it (lib/work-handoff-requests.ts handoffRequestCapabilities). */
   requests: () => Pick<WorkActivityCapabilities, 'requests' | 'requestsInbox' | 'requestsConsumerSeenAt'>
@@ -24,7 +25,7 @@ export interface WorkBoardDependencies {
   now: () => number
 }
 const defaults: WorkBoardDependencies = { journal: () => readWorkJournal(), list: listBoard, capabilities: workBoardCapabilities,
-  stage: setTaskWorkStage, link: linkTaskMeeting, resolveMeeting: resolveSavedMeetingDetail,
+  stage: setTaskWorkStage, link: linkTaskMeeting, edit: editWorkTask, resolveMeeting: resolveSavedMeetingDetail,
   requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), now: () => Date.now() }
 /** How old a board read the activity and open-work glances accept (the reader shares one read between them). */
 export const WORK_GLANCE_BOARD_AGE_MS = 10_000
@@ -87,10 +88,10 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
     }
     catch (e) { fail(res, e) }
   })
-  for (const action of ['stage', 'meeting'] as const) router.post('/work-board/' + action, async (req, res) => {
+  for (const action of ['stage', 'meeting', 'edit'] as const) router.post('/work-board/' + action, async (req, res) => {
     try {
       const body = req.body
-      const keys = ['domain', 'id', 'expectedText', 'expectedRevision', action === 'stage' ? 'workStage' : 'meeting']
+      const keys = ['domain', 'id', 'expectedText', 'expectedRevision', ...(action === 'edit' ? ['text', 'doneWhen'] : [action === 'stage' ? 'workStage' : 'meeting'])]
       if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !keys.includes(k))
         || Buffer.byteLength(JSON.stringify(body)) > 16_384 || !['domain','id','expectedText','expectedRevision'].every(k => typeof body[k] === 'string')
         || !isSafeDomainName(body.domain) || !/^[a-f0-9]{12}$/.test(body.id)
@@ -99,7 +100,14 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
       }
       const capability = await deps.capabilities()
       if (capability.version !== 1 || !capability.writable) throw new TaskRunError(409, 'work_board_read_only', 'The canonical task bridge needs a compatible update')
-      if (action === 'stage') {
+      if (action === 'edit') {
+        if (capability.editTasks !== 1) throw new TaskRunError(409, 'task_edit_unavailable', 'Update the canonical task bridge before editing task names')
+        if (typeof body.text !== 'string' || typeof body.doneWhen !== 'string') throw new TaskRunError(400, 'invalid_task_edit', 'Task name and finish line are required')
+        try {
+          const saved = await deps.edit(body.domain, body.id, body.text, body.doneWhen, body.expectedText, body.expectedRevision)
+          return res.json(saved)
+        } finally { board.invalidate() }
+      } else if (action === 'stage') {
         if (!WORK_STAGES.includes(body.workStage as WorkStage)) throw new TaskRunError(422, 'invalid_work_stage', 'Choose a valid Work stage')
         // The glasses' shared board read must not serve the board as it was before this write.
         try { await deps.stage(body.domain, body.id, body.workStage, body.expectedText, body.expectedRevision) } finally { board.invalidate() }

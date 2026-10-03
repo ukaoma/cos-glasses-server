@@ -325,7 +325,7 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     mkdirSync(monthDir('quilt'), { recursive: true })
     const rival = join(monthDir('quilt'), '2026-09-10_Rival_Claim.md')
     writeFileSync(rival, mergedScribe().replace('# Chris <> Miles Sync', '# Rival claim'))
-    const before = { scribe: scribeNow(), rival: readFileSync(rival, 'utf8') }
+    const before = { scribe: scribeNow(), rival: readFileSync(rival, 'utf8'), sidecar: sidecarNow() }
     await startServer()
     const review = await call('GET', `/api/meeting/${SESSION}/speakers`)
     expect(review.status).toBe(200)
@@ -334,8 +334,10 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     const res = await call('POST', `/api/meeting/${SESSION}/relabel`, {
       from: 'Speaker 2', to: 'Chris Dubois', recordId: review.json.recordId, confirm: true,
     })
-    expect(res.status).toBe(200)
-    expect(res.json.markdownSkipped).toMatch(/2 meetings declare this session/)
+    expect(review.json.mutable).toBe(false)
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('record_source_mismatch')
+    expect(sidecarNow()).toEqual(before.sidecar)
     expect(scribeNow()).toBe(before.scribe)
     expect(readFileSync(rival, 'utf8')).toBe(before.rival)
     // A client holding either list row's recordId is refused rather than pointed at one of them.
@@ -345,4 +347,51 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     expect(refused.status).toBe(409)
     expect(refused.json.reason).toBe('record_source_mismatch')
   }, HTTP_TEST_TIMEOUT)
+  it('surviving raw file cannot displace the marked merged scribe for list, review, content or correction', async () => {
+    seedCrossFolder()
+    const raw = join(monthDir(SIDECAR_DOMAIN), `${CAPTURE_STEM}.md`)
+    writeFileSync(raw, '# Original capture\n\n## Transcript\n[Speaker 2]: old text\n')
+    const before = readFileSync(raw, 'utf8')
+    await startServer()
+    const row = await listRow()
+    for (const route of ['speakers', 'content']) {
+      const res = await call('GET', `/api/meeting/${SESSION}/${route}?recordId=${encodeURIComponent(row.recordId)}`)
+      expect(res.status).toBe(200)
+      expect(res.json.recordId).toBe(row.recordId)
+      expect(res.json.sourceRevision).toMatch(/^[a-f0-9]{64}$/)
+      expect(res.json.reviewIdentityVersion).toBe(1)
+    }
+    const res = await call('POST', `/api/meeting/${SESSION}/relabel`, { from:'Speaker 2', to:'Chris Dubois', recordId:row.recordId, confirm:true })
+    expect(res.status).toBe(200)
+    expect(scribeNow()).toContain('[Chris Dubois]:')
+    expect(readFileSync(raw, 'utf8')).toBe(before)
+  }, HTTP_TEST_TIMEOUT)
+
+  it('explicit wrong selection is refused for both reads', async () => {
+    seedCrossFolder(); await startServer()
+    for (const route of ['speakers', 'content']) {
+      const res = await call('GET', `/api/meeting/${SESSION}/${route}?recordId=${encodeURIComponent('ops:personal:2026-09:wrong.md')}`)
+      expect(res.status).toBe(409)
+      expect(res.json.reason).toBe('record_source_mismatch')
+    }
+  }, HTTP_TEST_TIMEOUT)
+
+  it('changed scribe or sidecar refuses the viewed revision without writing any correction', async () => {
+    for (const changeSidecar of [false, true]) {
+      seedCrossFolder()
+      if (!server) await startServer()
+      const review = await call('GET', `/api/meeting/${SESSION}/speakers`)
+      const path = changeSidecar ? join(monthDir(SIDECAR_DOMAIN), `${CAPTURE_STEM}.g2-chunks.json`) : join(monthDir(SCRIBE_DOMAIN), SCRIBE)
+      writeFileSync(path, readFileSync(path, 'utf8') + '\n')
+      const before = { scribe:scribeNow(), sidecar:sidecarNow() }
+      for (const [route, body] of [['relabel',{from:'Speaker 2',to:'Chris Dubois',confirm:true}],['deattribute',{from:'Speaker 2',confirm:true}],['confirm',{label:'Speaker 2'}]] as const) {
+        const res = await call('POST', `/api/meeting/${SESSION}/${route}`, {...body,recordId:review.json.recordId,expectedRevision:review.json.sourceRevision})
+        expect(res.status).toBe(409)
+        expect(res.json.reason).toBe('record_source_mismatch')
+        expect(scribeNow()).toBe(before.scribe)
+        expect(sidecarNow()).toEqual(before.sidecar)
+      }
+    }
+  }, HTTP_TEST_TIMEOUT)
+
 })

@@ -576,7 +576,106 @@ def check(domain: str, task_id: Optional[str] = None, *, text: Optional[str] = N
 LockStoreCorrupt = LockStoreCorrupt
 
 
-def _work_mutation(domain: str, task_id: str, expected_text: str, expected_revision: str, change) -> bool:
+def _probe_rows(full: str, line: str) -> list:
+    """Parse one rebuilt line exactly as parse_path will, in a scratch file, before it touches tasks.md."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as scratch:
+        probe = Path(scratch) / "tasks.md"
+        probe.write_text("## INBOX\n" + line + "\n")
+        return parse_path(probe, full)
+
+
+def capture_work_item(domain: str, text: str, *, meeting, phase: str = "mentioned") -> dict:
+    """Create one Work card from a meeting action item, linked to that meeting, in ONE locked write.
+
+    The row lands at the top of INBOX as `<text> — **Source:** <meeting title> [<date>]` carrying
+    `workflowPhase` and the exact meeting reference, so no second write is needed to link it.
+
+    Never a second copy. Task ids are sha256(domain|normalized text|ordinal), so a copy inserted
+    above an existing row would silently shift that row's id; and a renamed card keeps its first id
+    as its Work identity, so recapturing the old wording would duplicate that identity and lock both
+    rows. Either kind of match returns the existing row instead: `created` False, `linked` says
+    whether it already carries this meeting, and checked/archived/delegated describe its state.
+    The rebuilt line is parsed in isolation first and refused unless it reads back as exactly this
+    text, meeting and phase (the parser drops leading owners, [REVIEW], a trailing dash, comments).
+    """
+    from task_dedup import TaskDeduplicator
+
+    text = " ".join(text.split()) if isinstance(text, str) else ""
+    if not text or len(text) > 2000:
+        raise WorkMetadataError("invalid_task_text", "Card text must be 1 to 2,000 characters.")
+    try:
+        reject_marker_text(text, "task text")
+    except WorkMetadataError:
+        raise
+    except ValueError as exc:
+        raise WorkMetadataError("invalid_task_text", str(exc)) from exc
+    meeting = validate_meeting(meeting)
+    if phase not in PHASES:
+        raise WorkMetadataError("invalid_work_stage", "Unknown Work phase.")
+    full = _full_domain(domain)
+    path = domain_path(full)
+    date = meeting["filename"][:10] if re.match(r"\d{4}-\d{2}-\d{2}_", meeting["filename"]) else datetime.now().strftime("%Y-%m-%d")
+    title = re.sub(r"[\[\]*]", "", meeting["title"]).strip() or "Meeting"
+    line = _rebuild_line(text, write_source(f"{title} [{date}]", {"workflowPhase": phase, "meetingRefs": [meeting]}),
+                         None, None, None, False, False)
+    probe = _probe_rows(full, line)
+    if (len(probe) != 1 or probe[0].description != text or probe[0].work_metadata_error
+            or probe[0].meeting_refs != [meeting] or probe[0].work_stage != phase):
+        raise WorkMetadataError("invalid_task_text", "This text would not read back as the same card.")
+    norm, candidate = TaskDeduplicator.normalize(text), probe[0].id
+    if not norm:
+        raise WorkMetadataError("invalid_task_text", "Card text has no words.")
+    with file_lock(full) as identity:
+        same = [r for r in parse_path(path, full)
+                if TaskDeduplicator.normalize(r.description) == norm or candidate in (r.id, r.work_identity)]
+        if same:
+            row = next((r for r in same if any(ref["recordId"] == meeting["recordId"] for ref in r.meeting_refs)), same[0])
+            return {"ok": True, "created": False, "id": row.id,
+                    "linked": any(ref["recordId"] == meeting["recordId"] for ref in row.meeting_refs),
+                    "checked": row.is_checked, "archived": row.archived, "delegated": row.delegated}
+        lines = safe_read_text(path).splitlines() if path.exists() else []
+        lines, heading_idx, _ = _locked_ensure_section(lines, "inbox")
+        _top_insert(lines, heading_idx, line)
+        _guarded_write(full, identity, path, "\n".join(lines) + "\n")
+        created = [r for r in parse_path(path, full) if r.id == candidate]
+    if len(created) != 1 or created[0].meeting_refs != [meeting]:
+        raise WorkMetadataError("capture_unverified", "The new card could not be read back exactly once.")
+    return {"ok": True, "created": True, "id": candidate, "linked": True,
+            "checked": False, "archived": False, "delegated": created[0].delegated}
+
+
+def archive_work_item(domain: str, task_id: str, *, record_id: str, expected_text: Optional[str] = None) -> str:
+    """Undo for capture_work_item: archive ([~]) the card only while it is still untouched.
+
+    Untouched means open and still Mentioned (so not completed or moved to another stage), no run or agent
+    marker, no finish line, linked to exactly the one meeting it was created from, and, when `expected_text`
+    is given, still worded as written. Anything else is left alone. A move between sections is not checked.
+    Returns archived | already_archived | changed | absent.
+    """
+    if not isinstance(task_id, str) or not re.fullmatch(r"[a-f0-9]{12}", task_id):
+        raise WorkMetadataError("invalid_task_id", "An exact canonical task ID is required.")
+    full = _full_domain(domain)
+    path = domain_path(full)
+    with file_lock(full) as identity:
+        matches = [r for r in parse_path(path, full) if r.id == task_id]
+        if len(matches) != 1:
+            return "absent"
+        row = matches[0]
+        if row.archived:
+            return "already_archived"
+        if (row.work_stage != "mentioned" or row.run_at or row.agent_state or row.done_when
+                or [ref["recordId"] for ref in row.meeting_refs] != [record_id]
+                or (expected_text is not None and row.description != expected_text)):
+            return "changed"
+        result = _rewrite_row(path, full, task_id, lambda state: state.update(archived=True))
+        if result is False:
+            return "absent"
+        _guarded_write(full, identity, path, result[1])
+        return "archived"
+
+
+def _work_mutation(domain: str, task_id: str, expected_text: str, expected_revision: str, change, *, return_row=False):
     if not isinstance(expected_text, str) or not expected_text or len(expected_text) > 20_000:
         raise WorkMetadataError("expected_text_required", "Full current task text is required.")
     if not isinstance(task_id, str) or not re.fullmatch(r"[a-f0-9]{12}", task_id):
@@ -612,7 +711,35 @@ def _work_mutation(domain: str, task_id: str, expected_text: str, expected_revis
             return False
         _, contents = result
         _guarded_write(full, identity, path, contents)
+        if return_row:
+            # Still under the file lock: the response describes this exact commit.
+            row = next(r for r in parse_path(path, full) if r.line_number == target.line_number)
+            return {"ok": True, "id": row.id, "workIdentity": row.work_identity,
+                    "workRevision": row.work_revision, "text": row.description,
+                    "doneWhen": row.done_when or ""}
         return True
+
+
+def edit_work_task(domain: str, task_id: str, text: str, done_when: str, *, expected_text: str, expected_revision: str):
+    """One guarded replacement for task name and finish line; preserve Work identity."""
+    if not isinstance(text, str) or not isinstance(done_when, str):
+        raise ValueError("Task name and finish line must be text")
+    clean = " ".join(text.split())
+    finish = " ".join(done_when.split())
+    if not clean or len(clean.encode("utf-16-le")) // 2 > 2000:
+        raise ValueError("Task name must contain 1 to 2,000 characters")
+    if len(finish.encode("utf-16-le")) // 2 > 500 or "**" in finish:
+        raise ValueError("Finish line must be at most 500 characters without ** markup")
+    reject_marker_text(clean, "task text")
+    reject_marker_text(finish, "done_when")
+
+    def change(state, metadata):
+        if state["agent_state"] == "running":
+            raise TaskRunning("This task is already running; its name cannot change during the run")
+        state["description"] = clean
+        state["done_when"] = finish or None
+
+    return _work_mutation(domain, task_id, expected_text, expected_revision, change, return_row=True)
 
 
 def set_work_stage(domain: str, task_id: str, phase: str, *, expected_text: str, expected_revision: str) -> bool:

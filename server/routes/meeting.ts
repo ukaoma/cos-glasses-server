@@ -5,6 +5,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
@@ -847,6 +848,31 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // rebuilding are the /api/voice/* routes, each with its own confirmation.
   //
   // Keyed on sessionId so it can reuse the store's traversal-hardened readers
+  function reviewRevision(meetingPath: string, sidecarPath: string): string {
+    const hash = createHash('sha256')
+    for (const path of [meetingPath, sidecarPath]) {
+      let text: string | null = null
+      try { text = readFileSync(path, 'utf-8') } catch { /* missing content is part of the revision */ }
+      hash.update(JSON.stringify(text))
+    }
+    return hash.digest('hex')
+  }
+
+  function selectedReadMatches(requested: unknown, sessionId: string, actual: string): boolean {
+    return requestedRecordMatches(requested, actual) || blendedRecordFor(requested, sessionId) !== undefined
+  }
+
+  function sourceRevisionRefusal(sessionId: string, body: any): { status: number; body: Record<string, unknown> } | null {
+    const ops = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
+    if (ops?.mergedScribeConflict?.length) return { status: 409, body: { reason: 'record_source_mismatch', error: markdownUnreadableReason(ops) } }
+    if (body?.expectedRevision == null) return null // older clients keep their existing record guard
+    const saved = ops ? null : store.findBySessionId(sessionId)
+    if (!ops && !saved) return { status: 409, body: { reason: 'record_source_mismatch', error: 'Meeting source changed; reopen the meeting' } }
+    const actual = reviewRevision(ops?.meetingPath ?? saved!.filepath, ops?.sidecarPath ?? saved!.sidecarPath)
+    if (typeof body.expectedRevision !== 'string' || body.expectedRevision !== actual) return { status: 409, body: { reason: 'record_source_mismatch', error: 'Meeting changed since review; reopen before correcting it' } }
+    return null
+  }
+
   // (safeDirectoryRealpath / safeReadFile) instead of reassembling a path from
   // client-supplied domain and filename components.
   router.get('/meeting/:sessionId/speakers', (req, res) => {
@@ -876,6 +902,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const saved = operations || direct ? null : store.findBySessionId(sessionId)
     if (!operations && !direct && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const identity = speakerRecordIdentity(sessionId, operations, direct, blendedRecordFor(req.query.recordId, sessionId))
+    if (!selectedReadMatches(req.query.recordId, sessionId, identity.recordId)) {
+      res.status(409).json({ error: 'Meeting source changed; reopen the selected meeting', reason: 'record_source_mismatch' })
       return
     }
     const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
@@ -932,7 +963,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       title,
       domain,
       filename,
-      ...speakerRecordIdentity(sessionId, operations, direct, blendedRecordFor(req.query.recordId, sessionId)),
+      ...identity,
+      reviewIdentityVersion: 1,
+      sourceRevision: reviewRevision(operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath, sidecarPath),
+      ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
     })
@@ -983,6 +1017,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const saved = operations || direct ? null : store.findBySessionId(sessionId)
     if (!operations && !direct && !saved) {
       res.status(404).json({ error: 'No saved meeting for this session', reason: 'meeting_not_found' })
+      return
+    }
+    const identity = speakerRecordIdentity(sessionId, operations, direct, blendedRecordFor(req.query.recordId, sessionId))
+    if (!selectedReadMatches(req.query.recordId, sessionId, identity.recordId)) {
+      res.status(409).json({ error: 'Meeting source changed; reopen the selected meeting', reason: 'record_source_mismatch' })
       return
     }
     const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
@@ -1112,7 +1151,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // no write-up yet.
       capturedChars: clip.capturedChars,
       domain: clip.domain,
-      ...speakerRecordIdentity(sessionId, operations, direct, blendedRecordFor(req.query.recordId, sessionId)),
+      ...identity,
+      reviewIdentityVersion: 1,
+      sourceRevision: reviewRevision(operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath, sidecarPath),
+      ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
       // So the panel can warn above the write-up, not just the clipboard.
       removedNames: clip.removed,
       coverage,
@@ -1169,7 +1211,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // Enrolment writes to the voice store, so the same two gates as the other
     // corrections: the session must be a capture, and the record aimed at must
     // not be a derived one.
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -1235,7 +1277,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // A merged G2 session is NOT refused here: it is a real capture with real
     // audio, and relabelling it is how its profile gets better. Only an imported
     // or derived IDENTITY is refused.
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? finalizingRefusal(sessionId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -1478,7 +1520,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -1569,7 +1611,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? finalizingRefusal(sessionId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return

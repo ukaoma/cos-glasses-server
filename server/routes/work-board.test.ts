@@ -279,3 +279,19 @@ it('the reader serves a slow read after it ends (a running clock), keeps the new
   reader.prime(['also before the write'], token)
   expect(await reader.read(1_000)).toEqual(['after the write'])
 })
+
+
+it('task edit requires advertised capability, accepts one exact guarded payload, and returns the saved identity',async()=>{
+  const saved={ok:true,id:target.id,workIdentity:target.id,workRevision:'c'.repeat(64),text:'Renamed task',doneWhen:'Reviewed'}
+  const edit=vi.fn(async()=>saved)
+  const legacy=await setup(true,{edit}); expect((await legacy.post('/edit',{...target,text:'Renamed task',doneWhen:'Reviewed'})).status).toBe(409)
+  expect(edit).not.toHaveBeenCalled()
+  const s=await setup(true,{edit,capabilities:async()=>({version:1,writable:true,editTasks:1})})
+  const response=await s.post('/edit',{...target,text:'Renamed task',doneWhen:'Reviewed'})
+  expect(response.status).toBe(200);expect(await response.json()).toEqual(saved)
+  expect(edit).toHaveBeenCalledExactlyOnceWith(target.domain,target.id,'Renamed task','Reviewed',target.expectedText,target.expectedRevision)
+  for(const extra of [{checked:true},{doneWhen:4},{text:4},{expectedRevision:''},{id:'ambiguous'}]) {
+    expect((await s.post('/edit',{...target,text:'Renamed task',doneWhen:'Reviewed',...extra})).status).toBe(400)
+  }
+  expect(edit).toHaveBeenCalledTimes(1)
+})

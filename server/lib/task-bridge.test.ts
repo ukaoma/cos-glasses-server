@@ -115,3 +115,16 @@ it('malformed canonical lock ownership never authorizes capture or changes sourc
   }
  }
 })
+
+it('bundled guarded edit saves both fields, preserves linked identity, and refuses stale repeat',async()=>{
+ expect(await callTaskBridge(['task-work-capabilities'])).toMatchObject({version:1,editTasks:1})
+ await callTaskBridge(['task-capture','business','--section','inbox'],12000,'Original task')
+ const row=(await rows())[0], original=row.id
+ const input={expectedText:row.description,expectedRevision:row.work_revision,text:'Changed name',doneWhen:'Reviewed result'}
+ const out=await callTaskBridge(['task-edit-work','business',row.id],12000,JSON.stringify(input))
+ expect(out).toMatchObject({ok:true,workIdentity:original,text:'Changed name',doneWhen:'Reviewed result'})
+ const fresh=(await rows())[0]
+ expect(fresh.work_identity).toBe(original);expect(fresh.done_when).toBe('Reviewed result');expect(fresh.description).toBe('Changed name')
+ expect(await callTaskBridge(['task-edit-work','business',row.id],12000,JSON.stringify(input))).toHaveProperty('error')
+ expect((await rows())[0]).toEqual(fresh)
+})

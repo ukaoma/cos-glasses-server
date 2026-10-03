@@ -356,18 +356,18 @@ describe('voice evidence guard', () => {
     expect(speakers.json.mutable).toBe(true)
 
     // A recordId that names a REAL merged record which does not hold this
-    // session is ignored rather than trusted. The record has to exist for this to
+    // session is refused rather than silently opening a different meeting. The record has to exist for this to
     // mean anything: an id that resolves to nothing is refused a step earlier, so
     // testing only that case would leave the membership check unexercised.
     const other = await seedOtherMergedRecord()
     const wrong = await call('GET', `/api/meeting/${SESSION}/speakers?recordId=${encodeURIComponent(other)}`)
-    expect(wrong.status).toBe(200)
-    expect(wrong.json.blendedRecordId).toBeUndefined()
+    expect(wrong.status).toBe(409)
+    expect(wrong.json.reason).toBe('record_source_mismatch')
 
     // And an id that resolves to no record at all.
     const missing = await call('GET', `/api/meeting/${SESSION}/speakers?recordId=blended:${'0'.repeat(16)}`)
-    expect(missing.status).toBe(200)
-    expect(missing.json.blendedRecordId).toBeUndefined()
+    expect(missing.status).toBe(409)
+    expect(missing.json.reason).toBe('record_source_mismatch')
 
     // A SPLIT PIECE is a `blended:` record too, and it does hold this session in
     // its sidecar, but it is a span of a longer recording rather than a merge of
@@ -375,8 +375,8 @@ describe('voice evidence guard', () => {
     // opened a merged meeting they never made.
     const piece = await seedSplitPiece()
     const asPiece = await call('GET', `/api/meeting/${SESSION}/speakers?recordId=${encodeURIComponent(piece)}`)
-    expect(asPiece.status).toBe(200)
-    expect(asPiece.json.blendedRecordId).toBeUndefined()
+    expect(asPiece.status).toBe(409)
+    expect(asPiece.json.reason).toBe('record_source_mismatch')
   }, HTTP_TEST_TIMEOUT)
 
   it('refuses an imported or derived id in the path before any lookup', async () => {

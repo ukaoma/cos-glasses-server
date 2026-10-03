@@ -110,14 +110,15 @@ describe('cross-folder resolution', () => {
     expect(found?.domain).toBe('quilt')
   })
 
-  it('a capture whose own scribe still exists keeps it, even when another meeting declares the session', () => {
+  it('a surviving capture scribe yields to the unique meeting declaring the merged session', () => {
     capture('personal', '2026-09')
     const own = join(dir('personal', '2026-09'), `${CAPTURE}.md`)
     writeFileSync(own, '# G2 Recording\n')
-    scribe('quilt', '2026-09', '2026-09-10_Weekly_Sync.md', [SESSION])
+    const merged = scribe('quilt', '2026-09', '2026-09-10_Weekly_Sync.md', [SESSION])
     const found = findCosOperationsMeetingBySessionId(SESSION)
-    expect(found?.meetingPath).toBe(own)
-    expect(found?.domain).toBe('personal')
+    expect(found?.meetingPath).toBe(merged)
+    expect(found?.domain).toBe('quilt')
+    expect(readFileSync(own,'utf8')).toBe('# G2 Recording\n')
   })
 
   it('no scribe declares the session: the record is the capture alone, as in 6.61.1', () => {

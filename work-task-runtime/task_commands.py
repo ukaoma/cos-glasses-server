@@ -132,12 +132,12 @@ def cmd_task_set_text(args):
         return
     print(json.dumps({"ok": True}))
 
-def cmd_task_work_write(args, *, linking=False):
-    from task_write import set_work_stage, link_meeting
+def cmd_task_work_write(args, *, linking=False, editing=False):
+    from task_write import set_work_stage, link_meeting, edit_work_task
     domain = _bridge_domain(args)
     if domain is None:
         return
-    if len(args) != (2 if linking else 3):
+    if len(args) != (2 if linking or editing else 3):
         _bridge_error("argv_required", "Expected domain, task ID, and phase for stage writes.")
         return
     try:
@@ -147,20 +147,24 @@ def cmd_task_work_write(args, *, linking=False):
         body = json.loads(raw)
         if not isinstance(body, dict) or not isinstance(body.get("expectedText"), str) or not isinstance(body.get("expectedRevision"), str):
             raise ValueError()
-        allowed = {"expectedText", "expectedRevision", "meeting", "removeRecordId"} if linking else {"expectedText", "expectedRevision"}
+        allowed = {"expectedText", "expectedRevision", "text", "doneWhen"} if editing else {"expectedText", "expectedRevision", "meeting", "removeRecordId"} if linking else {"expectedText", "expectedRevision"}
         if set(body) - allowed:
+            raise ValueError()
+        if editing and (not isinstance(body.get("text"), str) or not isinstance(body.get("doneWhen"), str)):
             raise ValueError()
     except (ValueError, TypeError):
         _bridge_error("invalid_work_request", "Bounded JSON with expectedText and expectedRevision is required.")
         return
-    if linking:
+    if editing:
+        ok = _bridge_write(lambda: edit_work_task(domain, args[1], body["text"], body["doneWhen"], expected_text=body["expectedText"], expected_revision=body["expectedRevision"]))
+    elif linking:
         ok = _bridge_write(lambda: link_meeting(domain, args[1], expected_text=body["expectedText"], expected_revision=body["expectedRevision"], meeting=body.get("meeting"), remove_record_id=body.get("removeRecordId")))
     else:
         ok = _bridge_write(lambda: set_work_stage(domain, args[1], args[2], expected_text=body["expectedText"], expected_revision=body["expectedRevision"]))
     if ok is False:
         _bridge_error("task_not_found", "Task not found in this domain.")
     elif ok is not None:
-        print(json.dumps({"ok": True}))
+        print(json.dumps(ok if editing else {"ok": True}))
 
 def cmd_task_set_stage(args):
     """Move a task between board stages. Clearing returns it to planning, which

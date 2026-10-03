@@ -529,23 +529,17 @@ export function findCosOperationsMeetingBySessionId(sessionId: string): {
         let resolvedMonth = month
         let mergedScribeConflict: string[] | undefined
         let content: string | null = null
-        try {
-          content = readFileSync(meetingPath, 'utf-8')
-        } catch {
-          // The capture's own scribe is gone. Only now is it worth looking for
-          // the merged scribe that declares this session, in EVERY domain: the
-          // pipeline re-files a merge by its Fireflies call, so a capture filed
-          // under personal is routinely merged into a scribe under quilt.
-          const merged = resolveMergedScribe(operationsDir, domains, month, sidecarName, sessionId)
-          if (merged.status === 'resolved') {
-            resolvedDomain = merged.domain
-            resolvedMonth = merged.month
-            resolvedFilename = merged.filename
-            meetingPath = merged.path
-            content = merged.content
-          } else if (merged.status === 'ambiguous') {
-            mergedScribeConflict = merged.claimants
-          }
+        // Capture identity belongs to the exact marker, independent of raw-file retirement.
+        const merged = resolveMergedScribe(operationsDir, domains, month, sidecarName, sessionId)
+        if (merged.status === 'resolved') {
+          resolvedDomain = merged.domain
+          resolvedMonth = merged.month
+          resolvedFilename = merged.filename
+          meetingPath = merged.path
+          content = merged.content
+        } else {
+          if (merged.status === 'ambiguous') mergedScribeConflict = merged.claimants
+          try { content = readFileSync(meetingPath, 'utf-8') } catch { /* capture remains readable through its sidecar */ }
         }
         let title = resolvedFilename.replace(/\.md$/, '')
         const heading = content?.slice(0, 4000).match(/^#\s+(.+)$/m)?.[1]?.trim()

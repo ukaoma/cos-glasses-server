@@ -10,7 +10,7 @@ import { dataPath } from './data-dir.js'
 import { taskDomainNames } from './domains.js'
 import { loadProfileObject } from './profile.js'
 const runtime = resolve(import.meta.dirname, '../../work-task-runtime')
-const commands = new Set(['task-rows','task-capture','task-set-text','task-set-run-at','task-set-marker','task-set-stage','task-set-done-when','task-move','task-check','task-work-capabilities','task-set-work-stage','task-link-meeting'])
+const commands = new Set(['task-rows','task-capture','task-set-text','task-set-run-at','task-set-marker','task-set-stage','task-set-done-when','task-move','task-check','task-work-capabilities','task-set-work-stage','task-link-meeting','task-edit-work'])
 export function taskBridgeUnavailableMessage(): string {
   if (process.env.COS_SCRIPTS_DIR && !pythonBridgeAvailable()) return 'The configured COS bridge is unavailable. Repair COS_SCRIPTS_DIR so it contains cos_api_bridge.py and an executable venv/bin/python3. Work will not switch task storage automatically.'
   if (process.env.COS_PORTABLE_TASKS === '0') return 'Portable Work tasks are disabled. Enable COS_PORTABLE_TASKS or configure a compatible COS bridge.'
