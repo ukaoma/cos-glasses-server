@@ -127,4 +127,8 @@ it('bundled guarded edit saves both fields, preserves linked identity, and refus
  expect(fresh.work_identity).toBe(original);expect(fresh.done_when).toBe('Reviewed result');expect(fresh.description).toBe('Changed name')
  expect(await callTaskBridge(['task-edit-work','business',row.id],12000,JSON.stringify(input))).toHaveProperty('error')
  expect((await rows())[0]).toEqual(fresh)
+ for(const text of ['**Another owner**: New name','[Another owner] New name','New [REVIEW] name']) {
+  expect(await callTaskBridge(['task-edit-work','business',fresh.id],12000,JSON.stringify({expectedText:fresh.description,expectedRevision:fresh.work_revision,text,doneWhen:'Reviewed result'}))).toMatchObject({error:{code:'reserved_task_name'}})
+  expect((await rows())[0]).toEqual(fresh)
+ }
 })

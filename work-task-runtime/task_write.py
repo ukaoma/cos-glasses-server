@@ -24,6 +24,7 @@ from task_rows import (
     classify_heading,
     domain_path,
     parse_path,
+    parse_owner,
     split_source,
     split_done_when,
     STAGES,
@@ -732,6 +733,8 @@ def edit_work_task(domain: str, task_id: str, text: str, done_when: str, *, expe
         raise ValueError("Finish line must be at most 500 characters without ** markup")
     reject_marker_text(clean, "task text")
     reject_marker_text(finish, "done_when")
+    if parse_owner(clean)[0] is not None or "[REVIEW]" in clean:
+        raise WorkMetadataError("reserved_task_name", "Task names cannot contain an owner prefix or the reserved [REVIEW] flag.")
 
     def change(state, metadata):
         if state["agent_state"] == "running":

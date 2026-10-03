@@ -5,7 +5,7 @@ Local hardening candidate; stable promotion remains gated on native UI and G2 ac
 - Resolve a marked merged G2 meeting before any surviving original scribe. Ambiguous merge claims remain readable but refuse corrections.
 - Bind speaker/content reads to the selected record and return a revision over the scribe and speaker sidecar. Corrections carrying a stale revision fail before writing.
 - Add capability-gated, revision-guarded Work task-name and finish-line editing in one locked replacement. Preserve Work identity and links, and invalidate the board after a write attempt.
-- Regenerate the portable task writer from canonical commit e0016764 and test the new command through the bundled bridge.
+- Regenerate the portable task writer from canonical commit 2fd2be86 and test the new command through the bundled bridge.
 - Add disposable Work QA service using the actual board routes and portable writer, with provider routes absent. Exclude that service from the public package.
 
 ## 6.61.3

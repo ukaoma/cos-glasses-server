@@ -2,10 +2,10 @@
   "version": 1,
   "protocol": "cos-control-task-write/1",
   "pythonMinimum": "3.10",
-  "sourceCommit": "e001676432cd6549970e6d0ff6319a3270e7a11b",
+  "sourceCommit": "2fd2be86f072781adc9ca856194325ea263858ae",
   "sourceHashes": {
     "task_rows.py": "58b568fd4081072eddc3110b4c3397f5e5048ede9e052391e1d09f919e8c2e7d",
-    "task_write.py": "42b811f905d7649d665c0aa44db0225bf618ca349b4fcb40820d3969e144b5e5",
+    "task_write.py": "fb618ba4a75cdd40859587cf0d74b5d5c8d005c0cc0eaab3573412ac028171a1",
     "task_work_metadata.py": "534c45910e2109ac1e18eeb236c6b286d8a899f96c7a153d0187aee5839854a5",
     "task_checkout.py": "56c94c5b28282398abc1f8daea9d910e64228afb8ac8cfae89b54117a7e30b86",
     "cos_atomic.py": "055f7d6bc3093aeec7b051f87cb68c543637603a538f383a614c1903bd1b503e",
@@ -28,6 +28,6 @@
     "task_dedup.py": "745971722898a3de520f8bb5246d714c70f3189dbe53bf8f42feafaaf241a51b",
     "task_rows.py": "9e48375d9d6ee5d29bf3cc1f92bdf1182a6eea40ee305ff1fe1632b9f3a9fcf7",
     "task_work_metadata.py": "534c45910e2109ac1e18eeb236c6b286d8a899f96c7a153d0187aee5839854a5",
-    "task_write.py": "c49719b6ff626689d4d2a15d202f1b0deb69f7d35ac80c936d3b51b7ed2d27ef"
+    "task_write.py": "6aea995bd213515eaae00e6e9dae16d77c7de579151fe6a717e6ad9e83b7db63"
   }
 }
