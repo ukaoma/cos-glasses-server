@@ -112,8 +112,8 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
 
 - Ask anything, get a streamed answer on the lens (`/api/query`, `/v1/chat/completions`)
 - With COS Glasses build 204+, server-owned durable queries are on by default:
-  accepted work survives phone backgrounding, a phone that goes offline, a server
-  restart before the prompt started (since 6.61.3),
+  accepted work survives phone backgrounding, the phone going offline after the Mac
+  accepted it, a server restart before it started (since 6.61.3),
   WebView reloads, and network handoffs, then reattaches without duplicate work
   or duplicate replies
 - Choose Opus, Fable, Sonnet, GPT Frontier, GPT Balanced, Composer 2.5 Fast, or
@@ -858,12 +858,13 @@ BIND_HOST=0.0.0.0 npm run start:server
   Restart once, then confirm `/api/health` reports
   `features.durableQueryJobs: true`, protocol `1`, and state `ready`. To roll
   back, set `COS_DURABLE_QUERY_JOBS=0`; accepted jobs still drain while new prompts use legacy streaming.
-- *"Waiting for the interrupted run to close. Starts about 5:53 PM."* — a restart stopped a
-  run in that session, and its provider may still be exiting, so the server holds new prompts
-  for that session for up to 21 minutes (since 6.61.3; before, they failed as `Provider
-  closing · retry in Ns`). Nothing to do: the prompt is saved on the Mac and runs at that time
-  whether or not the phone is connected. `/api/health` `durable_query_jobs.heldRuns` counts
-  held prompts. The interrupted run itself is not re-run automatically; retry it if you want it.
+- *"An earlier run may still be running", then "Starts 5:53 PM"?* — a restart stopped a run in
+  that conversation, and its provider may still be exiting, so the server holds new prompts
+  for that conversation for up to 21 minutes (since 6.61.3; before, they failed as `Provider
+  closing · retry in Ns`). The prompt is saved on the Mac and runs at that time even if the
+  phone disconnects; COS Control's maintenance status counts it (`heldJobs`). The phone sends
+  one prompt at a time, so anything you ask meanwhile waits on the phone behind it. The
+  interrupted run itself is not re-run automatically; retry it if you want it.
 - *Session questions never reach the glasses?* The server holds one only when every
   gate passes. `/api/health` `permissionBroker.lastFastPath` names the last reason a
   request went straight to the Mac's dialog: `no_client` (no client could answer: no poll

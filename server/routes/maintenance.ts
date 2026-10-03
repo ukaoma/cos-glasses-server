@@ -112,6 +112,11 @@ function statusSnapshot(credentials: MaintenanceOperationCredentials = {}) {
     serverInstanceId: getServerInstanceId(),
     bootId: serverMetrics.bootId,
     activeJobs: jobs.activeRuns,
+    // 6.61.3: admitted prompts not started yet (an orphan fence, an earlier run in their
+    // session, or this drain). They are journaled `accepted` and a restart re-queues
+    // them, so they never block safeToRestart; a rollback below 6.61.3 interrupts them.
+    heldJobs: jobs.heldRuns,
+    requeuedOnBoot: jobs.store.requeuedOnBoot ?? 0,
     activeTranscriptionSessions,
     // Split out so a blocked operator can SEE why, and so "0 orphans" can never
     // again coexist with a held lock: the orphans endpoint reads the quarantine

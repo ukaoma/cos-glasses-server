@@ -17,7 +17,6 @@ import {
   QueryJobIdentityConflictError,
   QueryJobNotFoundError,
   QueryJobPersistenceError,
-  QueryJobProviderOrphanFenceError,
   type QueryJobAdmissionResult,
   type QueryJobMutationResult,
 } from './query-job-store.js'
@@ -141,10 +140,11 @@ function buildTaskRequest(run: TaskRun, tz: string): RestrictedRequest {
   }
 }
 
-function classifySubmitError(error: unknown): 'identity_conflict' | 'adopt' | 'fence' | 'drain' | 'transient' {
+// No 'fence' kind since 6.61.3: an orphan fence holds a durable job at its start and never
+// refuses its admission, so submit cannot throw it.
+function classifySubmitError(error: unknown): 'identity_conflict' | 'adopt' | 'drain' | 'transient' {
   if (error instanceof QueryJobIdentityConflictError) return 'identity_conflict'
   if (error instanceof QueryJobActiveGenerationError || error instanceof QueryJobGenerationOrderError) return 'adopt'
-  if (error instanceof QueryJobProviderOrphanFenceError) return 'fence'
   if (error instanceof MaintenanceLifecycleError) return 'drain'
   if (error instanceof QueryJobCoordinatorError && error.code === 'query_job_coordinator_shutting_down') return 'transient'
   return 'transient'
@@ -273,11 +273,10 @@ async function adoptOrSubmit(deps: TaskDispatcherDeps, run: TaskRun): Promise<Ta
         return accepted ?? run
       }
     }
-    const fenceMs = error instanceof QueryJobProviderOrphanFenceError ? error.retryAfterMs : TASK_DISPATCH_LIMITS.submitSpacingMs
     const consume = kind !== 'drain'
     await persistRun(deps, run.id, {
       status: 'dispatching',
-      retryAfter: nowMs(deps) + fenceMs,
+      retryAfter: nowMs(deps) + TASK_DISPATCH_LIMITS.submitSpacingMs,
       ...(consume ? { submitAttempts: run.submitAttempts + 1 } : {}),
     })
     throw new TaskRunError(503, kind === 'drain' ? 'admissions_closed' : 'submit_failed', error instanceof Error ? error.message : 'submit failed')

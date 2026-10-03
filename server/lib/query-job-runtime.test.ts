@@ -517,3 +517,39 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 })
+
+// 6.61.3: the production store keeps prior-boot never-started work for its coordinator
+// only when durable jobs are on. With COS_DURABLE_QUERY_JOBS=0 no coordinator runs, so a
+// kept job would sit `accepted` for the life of the process; it must be interrupted.
+describe('public durable query runtime: boot requeue follows the kill switch (6.61.3)', () => {
+  async function priorBootAccepted(): Promise<string> {
+    const { QueryJobStore } = await import('./query-job-store.js')
+    const prior = new QueryJobStore({ root, bootId: randomUUID() })
+    const admitted = await prior.admit({
+      clientJobId: randomUUID(), generation: 1, query: 'asked before the restart',
+      sessionId: 'session-requeue-wiring', activityToolMode: 'status',
+    })
+    return admitted.job.jobId
+  }
+
+  it('re-queues it with durable jobs on', async () => {
+    const jobId = await priorBootAccepted()
+    const runtime = await import('./query-job-runtime.js')
+    const health = await runtime.queryJobStore.init()
+    expect(health).toMatchObject({ requeuedOnBoot: 1, interruptedOnBoot: 0 })
+    expect((await runtime.queryJobStore.getSnapshot(jobId)).status).toBe('accepted')
+  })
+
+  it('interrupts it with COS_DURABLE_QUERY_JOBS=0', async () => {
+    const jobId = await priorBootAccepted()
+    process.env.COS_DURABLE_QUERY_JOBS = '0'
+    try {
+      const runtime = await import('./query-job-runtime.js')
+      const health = await runtime.queryJobStore.init()
+      expect(health).toMatchObject({ requeuedOnBoot: 0, interruptedOnBoot: 1 })
+      expect((await runtime.queryJobStore.getSnapshot(jobId)).status).toBe('interrupted')
+    } finally {
+      process.env.COS_DURABLE_QUERY_JOBS = '1'
+    }
+  })
+})

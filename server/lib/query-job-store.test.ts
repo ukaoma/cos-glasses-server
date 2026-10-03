@@ -14,6 +14,7 @@ import {
   type QueryJobJournalStorage,
 } from './query-job-store.js'
 import { QUERY_JOB_LIMITS } from './query-job-types.js'
+import { STAGED_TTL_MS } from './media-store.js'
 
 const roots: string[] = []
 
@@ -277,22 +278,46 @@ describe('QueryJobStore durable journal', () => {
     })
   })
 
-  it('keeps a recent never-started job accepted across a restart and hands it over once (6.61.3)', async () => {
+  it('keeps a recent never-started job accepted across a restart and hands it over once, in admission order (6.61.3)', async () => {
     const root = await tempRoot()
     let clock = new Date('2026-07-17T19:00:00.000Z')
     const priorBoot = new QueryJobStore({ root, bootId: 'boot-requeue-a', now: () => new Date(clock) })
-    const recent = await priorBoot.admit(request())
+    const first = await priorBoot.admit(request())
     const started = await priorBoot.admit({ ...request(), sessionId: 'session-requeue-started' })
     await priorBoot.markStarting(started.job.jobId)
+    const second = await priorBoot.admit({ ...request(), sessionId: 'session-requeue-second' })
 
     clock = new Date(clock.getTime() + 60_000)
-    const restarted = new QueryJobStore({ root, bootId: 'boot-requeue-b', now: () => new Date(clock) })
+    const restarted = new QueryJobStore({
+      root, bootId: 'boot-requeue-b', now: () => new Date(clock), requeueNeverStartedOnBoot: true,
+    })
     const health = await restarted.init()
-    expect(health).toMatchObject({ requeuedOnBoot: 1, interruptedOnBoot: 1 })
-    expect((await restarted.getSnapshot(recent.job.jobId)).status).toBe('accepted')
+    expect(health).toMatchObject({ requeuedOnBoot: 2, interruptedOnBoot: 1 })
+    expect((await restarted.getSnapshot(first.job.jobId)).status).toBe('accepted')
     // `starting` cannot go back to `accepted`, so it keeps the old classification.
     expect((await restarted.getSnapshot(started.job.jobId)).status).toBe('interrupted')
-    expect(restarted.takeRequeuedOnBoot()).toEqual([recent.job.jobId])
+    expect(restarted.takeRequeuedOnBoot()).toEqual([
+      { jobId: first.job.jobId, sessionId: 'session-durable-1' },
+      { jobId: second.job.jobId, sessionId: 'session-requeue-second' },
+    ])
+    expect(restarted.takeRequeuedOnBoot()).toEqual([])
+  })
+
+  it('without requeueNeverStartedOnBoot interrupts a never-started job, as before: the kill-switch boot (6.61.3)', async () => {
+    // COS_DURABLE_QUERY_JOBS=0 starts no coordinator, so a kept job would sit `accepted`
+    // forever while the phone waits on it. The default store must interrupt it instead.
+    const root = await tempRoot()
+    const clock = new Date('2026-07-17T19:30:00.000Z')
+    const priorBoot = new QueryJobStore({ root, bootId: 'boot-killswitch-a', now: () => new Date(clock) })
+    const admitted = await priorBoot.admit(request())
+
+    const restarted = new QueryJobStore({ root, bootId: 'boot-killswitch-b', now: () => new Date(clock) })
+    const health = await restarted.init()
+    expect(health).toMatchObject({ requeuedOnBoot: 0, interruptedOnBoot: 1 })
+    expect(await restarted.getSnapshot(admitted.job.jobId)).toMatchObject({
+      status: 'interrupted',
+      error: { code: 'interrupted', retryable: true },
+    })
     expect(restarted.takeRequeuedOnBoot()).toEqual([])
   })
 
@@ -304,12 +329,16 @@ describe('QueryJobStore durable journal', () => {
     const edge = await priorBoot.admit({ ...request(), sessionId: 'session-requeue-edge' })
 
     clock = new Date(clock.getTime() + QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS)
-    const atBound = new QueryJobStore({ root, bootId: 'boot-requeue-old-b', now: () => new Date(clock) })
+    const atBound = new QueryJobStore({
+      root, bootId: 'boot-requeue-old-b', now: () => new Date(clock), requeueNeverStartedOnBoot: true,
+    })
     await atBound.init()
-    expect(atBound.takeRequeuedOnBoot().sort()).toEqual([stale.job.jobId, edge.job.jobId].sort())
+    expect(atBound.takeRequeuedOnBoot().map(item => item.jobId)).toEqual([stale.job.jobId, edge.job.jobId])
 
     clock = new Date(clock.getTime() + 1)
-    const pastBound = new QueryJobStore({ root, bootId: 'boot-requeue-old-c', now: () => new Date(clock) })
+    const pastBound = new QueryJobStore({
+      root, bootId: 'boot-requeue-old-c', now: () => new Date(clock), requeueNeverStartedOnBoot: true,
+    })
     const health = await pastBound.init()
     expect(health).toMatchObject({ requeuedOnBoot: 0, interruptedOnBoot: 2 })
     expect((await pastBound.getSnapshot(stale.job.jobId))).toMatchObject({
@@ -317,6 +346,21 @@ describe('QueryJobStore durable journal', () => {
       error: { code: 'interrupted' },
     })
     expect(pastBound.takeRequeuedOnBoot()).toEqual([])
+  })
+
+  it('keeps the requeue bound inside the staged-upload TTL, so a re-queued photo prompt finds its upload (6.61.3)', () => {
+    expect(QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS).toBeGreaterThanOrEqual(QUERY_JOB_ORPHAN_FENCE_MS)
+    expect(QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS).toBeLessThan(STAGED_TTL_MS)
+  })
+
+  it('refuses a start canStart vetoes inside the write, and leaves the job accepted (6.61.3)', async () => {
+    const root = await tempRoot()
+    const store = new QueryJobStore({ root, bootId: 'boot-canstart' })
+    const admitted = await store.admit(request())
+    const vetoed = await store.markStarting(admitted.job.jobId, () => false)
+    expect(vetoed).toMatchObject({ applied: false, job: { status: 'accepted' } })
+    const started = await store.markStarting(admitted.job.jobId, () => true)
+    expect(started).toMatchObject({ applied: true, job: { status: 'starting' } })
   })
 
   it('commits a prior-boot answer-ready reply with its era and provider identity intact', async () => {

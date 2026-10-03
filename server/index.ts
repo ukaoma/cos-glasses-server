@@ -1229,7 +1229,7 @@ listenRequiredServers(listeners).then(() => {
 
     void initQueryJobRuntime().then(health => {
       if (process.env.COS_DURABLE_QUERY_JOBS !== '0') {
-        console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained`)
+        console.log(`[COS API] Durable query jobs: ${health.store.state} · ${health.store.retainedIdentities} retained · ${health.store.requeuedOnBoot ?? 0} requeued from the last boot`)
       } else {
         console.log('[COS API] Durable query jobs: disabled by COS_DURABLE_QUERY_JOBS=0')
       }

@@ -65,11 +65,13 @@ const MAX_CHUNK_DELTA_CHARS = 16_000
 export const QUERY_JOB_ORPHAN_FENCE_MS = 21 * 60_000
 /**
  * How old a never-started job may be and still run after a restart (6.61.3). Covers the
- * 21-minute orphan fence plus an Update Server or a crash in the middle of it, with a wide
- * margin. An older `accepted` job is interrupted on boot exactly as before, because a
- * question asked that long ago may no longer be the question.
+ * 21-minute orphan fence plus an Update Server or a crash in the middle of it, with margin.
+ * Kept under media-store's STAGED_TTL_MS (4 h), so a re-queued photo prompt still finds its
+ * staged upload (a test pins that). An older `accepted` job is interrupted on boot exactly
+ * as before: a question asked that long ago may no longer be the question, and the phone may
+ * have recorded a cancel it could not send while the Mac was down.
  */
-export const QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS = 6 * 60 * 60_000
+export const QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS = 60 * 60_000
 
 interface QueryJobJournalRecord {
   schemaVersion: typeof QUERY_JOB_SCHEMA_VERSION
@@ -241,6 +243,14 @@ export interface QueryJobStoreOptions {
    * rollback contract on real bytes without shipping a second copy of this class.
    */
   journalEventTypes?: readonly QueryJobEventType[]
+  /**
+   * Keep a recent never-started (`accepted`) job from a prior boot `accepted` for the
+   * coordinator to run (6.61.3), instead of interrupting it. Off by default: only a store
+   * whose coordinator will actually take the list may turn it on. Production sets it from
+   * `durableQueryJobsEnabled()`, because with COS_DURABLE_QUERY_JOBS=0 no coordinator runs
+   * and a kept job would sit `accepted` for the life of the process.
+   */
+  requeueNeverStartedOnBoot?: boolean
 }
 
 export class QueryJobStoreError extends Error {
@@ -380,8 +390,8 @@ export class QueryJobStore {
   private readonly trailEmitter = new EventEmitter()
   private appendTail: Promise<void> = Promise.resolve()
   private initPromise: Promise<QueryJobStoreHealth> | null = null
-  /** Never-started jobs the last boot left `accepted`, for the coordinator to run. */
-  private requeuedJobIds: string[] = []
+  /** Never-started jobs the last boot left `accepted`, in journal (admission) order. */
+  private requeuedJobs: Array<{ jobId: string; sessionId: string }> = []
   private partitions: string[] = []
   private subscriberCount = 0
   private readonly health: QueryJobStoreHealth
@@ -428,9 +438,9 @@ export class QueryJobStore {
     return this.initPromise
   }
 
-  /** The never-started jobs init kept `accepted`, handed over exactly once. */
-  takeRequeuedOnBoot(): string[] {
-    return this.requeuedJobIds.splice(0)
+  /** The never-started jobs init kept `accepted`, handed over exactly once, in admission order. */
+  takeRequeuedOnBoot(): Array<{ jobId: string; sessionId: string }> {
+    return this.requeuedJobs.splice(0)
   }
 
   /**
@@ -461,29 +471,31 @@ export class QueryJobStore {
       for (const partition of this.partitions) await this.hydratePartition(partition)
       this.health.state = 'ready'
 
-      // A local child process cannot survive a server boot. Persist the
+      // No provider child can be reattached after a boot (a detached one may still be
+      // running, which is what the orphan fence is for). Persist the
       // classification once; never invoke a runner during hydration. An
       // answer_ready record is different: provider generation has already
       // crossed the durable commit point, so finish it from the journaled
       // answer instead of throwing away a reply merely because bridge
       // post-processing was interrupted by the restart.
       //
-      // 6.61.3: an `accepted` job never left admission, so no prompt byte reached
-      // any provider and running it now cannot repeat anything. It stays `accepted`
-      // and the coordinator starts it after init. This is what keeps a prompt held
-      // for an orphan fence alive across an Update Server in the middle of the wait,
-      // with no phone needed to send it again. `starting` and `running` keep the old
-      // path: their state machine has no way back to `accepted`.
+      // 6.61.3: an `accepted` job never passed markStarting, so no prompt byte reached
+      // any provider and running it now cannot repeat anything. With
+      // requeueNeverStartedOnBoot it stays `accepted` and the coordinator starts it
+      // after init. This is what keeps a held prompt alive across an Update Server in
+      // the middle of its wait, with no phone needed to send it again. `starting` and
+      // `running` keep the old path: their state machine has no way back to `accepted`.
       const priorBootJobs = [...this.jobs.values()].filter(job =>
         !isTerminalQueryJobStatus(job.snapshot.status) && job.lastBootId !== this.options.bootId)
       const nowMs = this.now().getTime()
       for (const job of priorBootJobs) {
         const snapshot = job.snapshot
         const acceptedMs = Date.parse(snapshot.acceptedAt)
-        if (snapshot.status === 'accepted'
+        if (this.options.requeueNeverStartedOnBoot === true
+          && snapshot.status === 'accepted'
           && Number.isFinite(acceptedMs)
           && nowMs - acceptedMs <= QUERY_JOB_BOOT_REQUEUE_MAX_AGE_MS) {
-          this.requeuedJobIds.push(snapshot.jobId)
+          this.requeuedJobs.push({ jobId: snapshot.jobId, sessionId: job.request.sessionId })
           this.health.requeuedOnBoot = (this.health.requeuedOnBoot ?? 0) + 1
         } else if (snapshot.status === 'answer_ready') {
           await this.complete(snapshot.jobId, {
@@ -502,6 +514,9 @@ export class QueryJobStore {
           const result = await this.interrupt(snapshot.jobId, 'server_restarted')
           if (result.applied) this.health.interruptedOnBoot++
         }
+      }
+      if (this.requeuedJobs.length > 0) {
+        console.warn(`[query-jobs] boot: ${this.requeuedJobs.length} never-started job(s) from the last boot kept for the coordinator to run`)
       }
       this.trimHydratedJobs()
       this.refreshHealth()
@@ -849,7 +864,7 @@ export class QueryJobStore {
       // 6.61.3: an orphan fence no longer refuses admission. Refusing handed the
       // prompt back to the phone as "Provider closing · retry in 1192s", where a
       // phone that then lost signal never sent it again. The fence is enforced at
-      // markStarting instead, the one gate every path crosses before a provider,
+      // markStarting instead, the gate every durable job crosses before a provider,
       // so the prompt is journaled now and starts on the Mac once the fence clears.
       const highestGeneration = lineage.reduce((max, item) => Math.max(max, item.generation), 0)
       if (request.generation <= highestGeneration) throw new QueryJobGenerationOrderError(request.clientJobId)
@@ -884,15 +899,20 @@ export class QueryJobStore {
   }
 
   /**
-   * The provider-start gate. A job whose session may still hold an orphaned provider
-   * child cannot start, whichever path admitted it: this throws `provider_orphan_fence`
-   * with the time left and the job stays `accepted`, for the coordinator to start once
-   * the fence clears (6.61.3; the check used to refuse admission instead). A job that
-   * is terminal, or already past `accepted`, is `applied: false` as before, checked
-   * first so a canceled job never reports a fence.
+   * The durable-job provider-start gate. Every durable job crosses it before a provider
+   * (the legacy /api/query and /v1 routes are not durable jobs and never did). A job whose
+   * session may still hold an orphaned provider child cannot start: this throws
+   * `provider_orphan_fence` with the time left and the job stays `accepted`, for the
+   * coordinator to start once the fence clears (6.61.3; the check used to refuse admission
+   * instead). A job that is terminal, or already past `accepted`, is `applied: false`,
+   * checked first so a canceled job never reports a fence. So is one `canStart` refuses,
+   * which is evaluated INSIDE the serialized write: a shutdown that begins while this call
+   * waits its turn leaves the job `accepted` for the next boot, never `starting`.
+   * Awaits the WHOLE boot classification, not just readiness: a start must never slip in
+   * before the boot has stamped the fence of a run it is about to interrupt.
    */
-  async markStarting(jobId: string): Promise<QueryJobMutationResult> {
-    await this.ensureInitialized()
+  async markStarting(jobId: string, canStart: () => boolean = () => true): Promise<QueryJobMutationResult> {
+    await this.init()
     await this.ensureHydrated(jobId)
     return this.enqueue(async () => {
       this.assertWritable()
@@ -904,6 +924,7 @@ export class QueryJobStore {
       }
       const remainingMs = this.sessionFenceUntil(hydrated.request.sessionId) - this.now().getTime()
       if (remainingMs > 0) throw new QueryJobProviderOrphanFenceError(remainingMs)
+      if (!canStart()) return { applied: false, job: clone(hydrated.snapshot) }
       return this.persistMutation(hydrated, 'starting', 'starting', {}, {})
     })
   }

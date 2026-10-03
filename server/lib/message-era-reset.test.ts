@@ -43,6 +43,18 @@ describe('resetLiveMessageEra', () => {
     expect(currentMessageEra()).toBe(before)
   })
 
+  it('refuses while a prompt is held waiting to start: it carries an old-era number (6.61.3)', async () => {
+    const { resetLiveMessageEra } = await import('./message-era-reset.js')
+    const { currentMessageEra } = await import('./message-era.js')
+    const before = currentMessageEra()
+    await expect(resetLiveMessageEra({ confirm: true, activeRuns: 0, heldRuns: 1 })).rejects.toMatchObject({
+      code: 'query_in_flight',
+      status: 409,
+      message: 'A query is waiting to start. Wait for it to finish, then reset.',
+    })
+    expect(currentMessageEra()).toBe(before)
+  })
+
   // 6.36.19 inverted this. It used to end every live session before rotating,
   // which is what made "reset the message count" also empty CHAT and kill the
   // conversation in progress. The thread must now survive the reset.

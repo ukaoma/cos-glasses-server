@@ -44,19 +44,26 @@ export interface MessageEraResetInput {
   confirm: boolean
   now?: number
   activeRuns?: number
+  /** Admitted jobs not started yet (6.61.3): each holds a live message number. */
+  heldRuns?: number
   shuttingDown?: boolean
 }
 
-async function resolveJobHealth(input: MessageEraResetInput): Promise<{ activeRuns: number; shuttingDown: boolean }> {
-  if (input.activeRuns != null || input.shuttingDown != null) {
+async function resolveJobHealth(input: MessageEraResetInput): Promise<{ activeRuns: number; heldRuns: number; shuttingDown: boolean }> {
+  if (input.activeRuns != null || input.heldRuns != null || input.shuttingDown != null) {
     return {
       activeRuns: input.activeRuns ?? 0,
+      heldRuns: input.heldRuns ?? 0,
       shuttingDown: input.shuttingDown ?? false,
     }
   }
   const { queryJobCoordinator } = await import('./query-job-runtime.js')
   const health = queryJobCoordinator.getHealth()
-  return { activeRuns: health.activeRuns, shuttingDown: health.shuttingDown }
+  // A held job can wait 21 minutes for an orphan fence and survives the restart that is
+  // part of the reset; it carries an old-era number (6.61.3). Not-yet-started jobs the
+  // store holds but no execute has picked up yet count too.
+  const notStarted = Math.max(health.heldRuns, health.store.counts.accepted + health.store.counts.starting)
+  return { activeRuns: health.activeRuns, heldRuns: notStarted, shuttingDown: health.shuttingDown }
 }
 
 export async function resetLiveMessageEra(input: MessageEraResetInput): Promise<MessageEraResetResult> {
@@ -69,10 +76,12 @@ export async function resetLiveMessageEra(input: MessageEraResetInput): Promise<
   }
 
   const jobs = await resolveJobHealth(input)
-  if (jobs.activeRuns > 0) {
+  if (jobs.activeRuns > 0 || jobs.heldRuns > 0) {
     throw new MessageEraResetError(
       'query_in_flight',
-      'A query is still running. Wait for it to finish, then reset.',
+      jobs.activeRuns > 0
+        ? 'A query is still running. Wait for it to finish, then reset.'
+        : 'A query is waiting to start. Wait for it to finish, then reset.',
       409,
     )
   }

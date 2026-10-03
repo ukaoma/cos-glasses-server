@@ -6,13 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const state = vi.hoisted(() => ({ activeJobs: 0, activeSessions: 0, staleSessions: 0 }))
+const state = vi.hoisted(() => ({ activeJobs: 0, heldJobs: 0, requeuedOnBoot: 0, activeSessions: 0, staleSessions: 0 }))
 
 vi.mock('../lib/query-job-runtime.js', () => ({
   getQueryJobRuntimeHealth: () => ({
     activeRuns: state.activeJobs,
+    heldRuns: state.heldJobs,
     shuttingDown: false,
-    store: { state: 'ready' },
+    store: { state: 'ready', requeuedOnBoot: state.requeuedOnBoot },
   }),
 }))
 vi.mock('../lib/server-instance-id.js', () => ({
@@ -195,6 +196,24 @@ describe('managed maintenance rev4 contract', () => {
     const body = await response.json() as any
     expect(body.safeToRestart).toBe(false)
     expect(body.lifecycle.activeByKind.recording_session).toBe(1)
+  })
+
+  it('reports held prompts and boot requeues, and held prompts never block a restart (6.61.3)', async () => {
+    // A held prompt is journaled `accepted` and re-queued by the next boot, so COS Control
+    // may restart over it; it shows here so Control can say so (and warn before a rollback
+    // below 6.61.3, which interrupts it). The public /api/health keeps counts internal.
+    state.heldJobs = 2
+    state.requeuedOnBoot = 1
+    try {
+      await beginDrain()
+      const response = await fetch(`${base}/api/maintenance/status`, { headers: proofHeaders() })
+      const body = await response.json() as any
+      expect(body).toMatchObject({ heldJobs: 2, requeuedOnBoot: 1, activeJobs: 0 })
+      expect(body.safeToRestart).toBe(true)
+    } finally {
+      state.heldJobs = 0
+      state.requeuedOnBoot = 0
+    }
   })
 
   it('a STALE recording session is surfaced but never blocks a restart', async () => {

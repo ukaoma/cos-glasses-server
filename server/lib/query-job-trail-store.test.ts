@@ -162,11 +162,27 @@ describe('trail rows in the durable journal', () => {
     const { trail: _trail, ...withoutTrail } = current
     expect(rolledBack).toEqual(withoutTrail)
     expect(rolledBack.response).toBe('The answer')
-    // Loaded whole and classified by THIS build's boot rule: since 6.61.3 a never-started
-    // job stays `accepted` for the coordinator to run. The real 6.51.0 store still
-    // interrupts it, which the rollback test below boots on a journal to prove.
-    expect((await old.getSnapshot(plainJob)).status).toBe('accepted')
-    expect(health.requeuedOnBoot).toBe(1)
+    expect((await old.getSnapshot(plainJob)).status).toBe('interrupted')
+  })
+
+  it('a rollback to the real 6.51.0 store interrupts a held (never-started) prompt this build journaled (6.61.3)', async () => {
+    // The CHANGELOG's rollback claim: a held prompt is `accepted` with a hold status line,
+    // and an older server classifies it at its boot exactly as it always did.
+    const root = await tempRoot()
+    const writer = new QueryJobStore({ root, bootId: 'boot-a', requeueNeverStartedOnBoot: true })
+    await writer.init()
+    const held = (await writer.admit(request())).job.jobId
+    await writer.appendActivity(held, 'status', 'An earlier run may still be running')
+    await writer.appendActivity(held, 'status', 'Starts 5:53 PM')
+
+    const rolledBack = new QueryJobStore6510({ root, bootId: 'boot-b' })
+    const health = await rolledBack.init()
+    expect(health.malformedRows).toBe(0)
+    expect(health.interruptedOnBoot).toBe(1)
+    expect(await rolledBack.getSnapshot(held)).toMatchObject({
+      status: 'interrupted',
+      error: { code: 'interrupted', retryable: true },
+    })
   })
 
   it('rollback mid-run then roll forward: no eventSeq is ever reused, the job ends terminal once, and the trail survives', async () => {

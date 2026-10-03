@@ -10,10 +10,14 @@ vi.mock('./conversation.js', () => ({
 }))
 
 import {
+  DRAIN_HOLD_STATUS,
   QueryJobCoordinator,
+  holdClock,
+  orphanFenceHoldStatus,
   type QueryJobRunner,
   type QueryJobRunnerContext,
 } from './query-job-coordinator.js'
+import { acquireModelSessionRunLock } from './model-router.js'
 import {
   NodeQueryJobJournalStorage,
   QUERY_JOB_ORPHAN_FENCE_MS,
@@ -590,6 +594,11 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     return root
   }
 
+  /** The store production builds: it re-queues never-started work for its coordinator. */
+  function liveStore(root: string, storage?: QueryJobJournalStorage): QueryJobStore {
+    return new QueryJobStore({ root, bootId: randomUUID(), requeueNeverStartedOnBoot: true, ...(storage ? { storage } : {}) })
+  }
+
   function answeringRunner(calls: Array<{ query: string; atMs: number }>): QueryJobRunner {
     return async ctx => {
       calls.push({ query: ctx.request.query, atMs: Date.now() })
@@ -598,26 +607,39 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     }
   }
 
+  const statuses = (job: { activity: Array<{ kind: string; text: string }> }) =>
+    job.activity.filter(entry => entry.kind === 'status').map(entry => entry.text)
+
+  it('words the hold for an 18-character lens header: the reason, then a clock time rounded UP', () => {
+    const at = (h: number, m: number, sec: number, ms = 0) => new Date(2026, 9, 2, h, m, sec, ms).getTime()
+    expect(orphanFenceHoldStatus(at(17, 52, 1))).toEqual(['An earlier run may still be running', 'Starts 5:53 PM'])
+    expect(holdClock(at(17, 53, 0))).toBe('5:53 PM')
+    expect(holdClock(at(17, 52, 59, 999))).toBe('5:53 PM')
+    expect(holdClock(at(23, 59, 30))).toBe('12:00 AM')
+    for (let hour = 0; hour < 24; hour++) {
+      const [, line] = orphanFenceHoldStatus(at(hour, 58, 30))
+      expect(line.length, line).toBeLessThanOrEqual(18)
+      expect(line).toMatch(/^Starts \d{1,2}:\d{2} [AP]M$/)
+    }
+    expect(DRAIN_HOLD_STATUS.length).toBeLessThanOrEqual(18)
+  })
+
   it('accepts a fenced prompt, says why it waits, and answers it once the fence clears', async () => {
     const fenceEndsAtMs = Date.now() + 400
     const root = await fencedRoot(fenceEndsAtMs)
     const calls: Array<{ query: string; atMs: number }> = []
-    const value = new QueryJobCoordinator(
-      new QueryJobStore({ root, bootId: randomUUID() }),
-      answeringRunner(calls),
-      { partialFlushMs: 0 },
-    )
+    const value = new QueryJobCoordinator(liveStore(root), answeringRunner(calls), { partialFlushMs: 0 })
     await value.init()
 
     const admitted = await value.submit(heldRequest())
     expect(admitted).toMatchObject({ created: true, job: { status: 'accepted', sessionId: HELD_SESSION } })
     const held = await waitFor(
       () => value.getSnapshot(admitted.job.jobId),
-      job => job.activity.length > 0,
+      job => statuses(job).length >= 2,
     )
     expect(held.status).toBe('accepted')
-    expect(held.activity[0]).toMatchObject({ kind: 'status' })
-    expect(held.activity[0].text).toMatch(/^Waiting for the interrupted run to close\. Starts about \d{1,2}:\d{2} [AP]M\.$/)
+    expect(statuses(held)[0]).toBe('An earlier run may still be running')
+    expect(statuses(held)[1]).toMatch(/^Starts \d{1,2}:\d{2} [AP]M$/)
     expect(value.getHealth().heldRuns).toBe(1)
     expect(calls).toEqual([])
 
@@ -626,52 +648,136 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
       job => job.status === 'completed',
     )
     expect(done.response).toBe('answer to held prompt')
+    expect(statuses(done)).toHaveLength(2)
     expect(calls).toHaveLength(1)
     expect(calls[0].atMs).toBeGreaterThanOrEqual(fenceEndsAtMs)
     expect(value.getHealth()).toMatchObject({ heldRuns: 0, activeRuns: 0 })
   })
 
-  it('ends a hold on cancel, and the canceled prompt never reaches a provider', async () => {
-    const root = await fencedRoot(Date.now() + QUERY_JOB_ORPHAN_FENCE_MS)
+  it('ends a hold on cancel, and the canceled prompt never reaches a provider after the fence clears', async () => {
+    const fenceEndsAtMs = Date.now() + 400
+    const root = await fencedRoot(fenceEndsAtMs)
     const calls: Array<{ query: string; atMs: number }> = []
-    const value = new QueryJobCoordinator(
-      new QueryJobStore({ root, bootId: randomUUID() }),
-      answeringRunner(calls),
-      { partialFlushMs: 0 },
-    )
+    const value = new QueryJobCoordinator(liveStore(root), answeringRunner(calls), { partialFlushMs: 0 })
     await value.init()
 
     const admitted = await value.submit(heldRequest())
-    await waitFor(() => value.getHealth(), health => health.heldRuns === 1)
+    await waitFor(() => value.getSnapshot(admitted.job.jobId), job => statuses(job).length >= 2)
     const canceled = await value.cancel(admitted.job.jobId, 1)
     expect(canceled).toMatchObject({ applied: true, job: { status: 'canceled' } })
     await waitFor(() => value.getHealth(), health => health.heldRuns === 0, 1_000)
+    // Past the fence: a hold that ignored the cancel would have started by now.
+    await waitFor(() => Date.now(), now => now > fenceEndsAtMs + 500)
     expect(calls).toEqual([])
+    expect((await value.getSnapshot(admitted.job.jobId)).status).toBe('canceled')
+  })
+
+  it('starts the held prompts of one session in admission order, through the real session lock', async () => {
+    const fenceEndsAtMs = Date.now() + 400
+    const root = await fencedRoot(fenceEndsAtMs)
+    const calls: Array<{ query: string; atMs: number }> = []
+    const value = new QueryJobCoordinator(liveStore(root), answeringRunner(calls), {
+      partialFlushMs: 0,
+      acquireSessionLock: acquireModelSessionRunLock,
+    })
+    await value.init()
+    const ids: string[] = []
+    for (const query of ['P1', 'P2', 'P3', 'P4']) {
+      ids.push((await value.submit(heldRequest(randomUUID(), query))).job.jobId)
+    }
+    await waitFor(() => value.getHealth(), health => health.heldRuns === 4)
+    for (const jobId of ids) {
+      await waitFor(() => value.getSnapshot(jobId), job => job.status === 'completed', 4_000)
+    }
+    expect(calls.map(call => call.query)).toEqual(['P1', 'P2', 'P3', 'P4'])
+    expect(calls[0].atMs).toBeGreaterThanOrEqual(fenceEndsAtMs)
+  }, 8_000)
+
+  it('keeps a prompt waiting on its session lock `accepted`, so a restart re-queues it', async () => {
+    const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-held-')))
+    roots.push(root)
+    let releaseFirst!: () => void
+    const firstBlocked = new Promise<void>(resolve => { releaseFirst = resolve })
+    const firstCalls: string[] = []
+    let leases = 0
+    const first = new QueryJobCoordinator(liveStore(root), async ctx => {
+      firstCalls.push(ctx.request.query)
+      await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude' })
+      await firstBlocked
+    }, {
+      partialFlushMs: 0,
+      acquireSessionLock: acquireModelSessionRunLock,
+      acquireMaintenanceWork: () => {
+        leases++
+        let released = false
+        return { id: randomUUID(), setPhase: () => {}, release: () => { if (!released) { released = true; leases-- } } }
+      },
+    })
+    await first.init()
+    const running = await first.submit({ ...heldRequest(randomUUID(), 'long run'), sessionId: 'session-lock-wait' })
+    await waitFor(() => first.getSnapshot(running.job.jobId), job => job.status === 'running')
+    const queued = await first.submit({ ...heldRequest(randomUUID(), 'queued behind it'), sessionId: 'session-lock-wait' })
+    await waitFor(() => first.getHealth(), health => health.heldRuns === 1)
+    expect((await first.getSnapshot(queued.job.jobId)).status).toBe('accepted')
+    // Only the running job holds a lease: one queued behind it must not hold a drain open.
+    expect(leases).toBe(1)
+
+    await first.shutdown('server_shutdown')
+    releaseFirst()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(firstCalls).toEqual(['long run'])
+    expect((await first.getSnapshot(queued.job.jobId)).status).toBe('accepted')
+
+    const secondCalls: Array<{ query: string; atMs: number }> = []
+    const second = new QueryJobCoordinator(liveStore(root), answeringRunner(secondCalls), {
+      partialFlushMs: 0,
+      acquireSessionLock: acquireModelSessionRunLock,
+    })
+    expect((await second.init()).store.requeuedOnBoot).toBe(1)
+    const done = await waitFor(() => second.getSnapshot(queued.job.jobId), job => job.status === 'completed')
+    expect(done.response).toBe('answer to queued behind it')
+  })
+
+  it('never spawns a provider for a start that lands after shutdown began', async () => {
+    // The start write is slowed so shutdown begins inside it: markStarting applies, and
+    // the coordinator must still not reach the runner (QA 2026-10-03, the Skeptic's probe).
+    class SlowStartStorage extends NodeQueryJobJournalStorage {
+      async append(root: string, partitionDay: string, line: string): Promise<void> {
+        if ((JSON.parse(line) as { type?: string }).type === 'starting') {
+          await new Promise(resolve => setTimeout(resolve, 300))
+        }
+        return super.append(root, partitionDay, line)
+      }
+    }
+    const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-held-')))
+    roots.push(root)
+    const calls: Array<{ query: string; atMs: number }> = []
+    const value = new QueryJobCoordinator(liveStore(root, new SlowStartStorage()), answeringRunner(calls), { partialFlushMs: 0 })
+    await value.init()
+    const admitted = await value.submit(heldRequest(randomUUID(), 'mid-shutdown'))
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await value.shutdown('server_shutdown')
+    await new Promise(resolve => setTimeout(resolve, 500))
+    expect(calls).toEqual([])
+    // Applied just before shutdown: `starting`, which the next boot interrupts (no fence).
+    expect((await value.getSnapshot(admitted.job.jobId)).status).toBe('starting')
   })
 
   it('keeps a held prompt through a restart mid-hold and answers it on the next boot', async () => {
     const fenceEndsAtMs = Date.now() + 600
     const root = await fencedRoot(fenceEndsAtMs)
     const firstCalls: Array<{ query: string; atMs: number }> = []
-    const first = new QueryJobCoordinator(
-      new QueryJobStore({ root, bootId: randomUUID() }),
-      answeringRunner(firstCalls),
-      { partialFlushMs: 0 },
-    )
+    const first = new QueryJobCoordinator(liveStore(root), answeringRunner(firstCalls), { partialFlushMs: 0 })
     await first.init()
     const admitted = await first.submit(heldRequest(randomUUID(), 'asked before the update'))
-    await waitFor(() => first.getHealth(), health => health.heldRuns === 1)
+    await waitFor(() => first.getSnapshot(admitted.job.jobId), job => statuses(job).length >= 2)
     await first.shutdown('server_shutdown')
-    expect(first.getHealth().heldRuns).toBe(0)
+    await waitFor(() => first.getHealth(), health => health.heldRuns === 0, 1_000)
     expect((await first.getSnapshot(admitted.job.jobId)).status).toBe('accepted')
     expect(firstCalls).toEqual([])
 
     const secondCalls: Array<{ query: string; atMs: number }> = []
-    const second = new QueryJobCoordinator(
-      new QueryJobStore({ root, bootId: randomUUID() }),
-      answeringRunner(secondCalls),
-      { partialFlushMs: 0 },
-    )
+    const second = new QueryJobCoordinator(liveStore(root), answeringRunner(secondCalls), { partialFlushMs: 0 })
     const health = await second.init()
     expect(health.store.requeuedOnBoot).toBe(1)
     const done = await waitFor(
@@ -679,11 +785,84 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
       job => job.status === 'completed',
     )
     expect(done.response).toBe('answer to asked before the update')
+    // The restart re-announced nothing: the two hold lines are still the job's only ones.
+    expect(statuses(done)).toHaveLength(2)
     expect(secondCalls).toHaveLength(1)
     expect(secondCalls[0].atMs).toBeGreaterThanOrEqual(fenceEndsAtMs)
     // The process that shut down must not ALSO start it once the fence clears.
     await new Promise(resolve => setTimeout(resolve, 100))
     expect(firstCalls).toEqual([])
+  })
+
+  it('ends a long hold at once on cancel, and on shutdown during a drain hold', async () => {
+    // A 21-minute fence: nothing but the wake can end these holds inside the test.
+    const root = await fencedRoot(Date.now() + QUERY_JOB_ORPHAN_FENCE_MS)
+    const calls: Array<{ query: string; atMs: number }> = []
+    let draining = false
+    const value = new QueryJobCoordinator(liveStore(root), answeringRunner(calls), {
+      partialFlushMs: 0,
+      acquireMaintenanceWork: () => {
+        if (draining) throw Object.assign(new Error('drain'), { code: 'maintenance_drain_active' })
+        return { id: randomUUID(), setPhase: () => {}, release: () => {} }
+      },
+    })
+    await value.init()
+    const fenced = await value.submit(heldRequest())
+    await waitFor(() => value.getSnapshot(fenced.job.jobId), job => statuses(job).length >= 2)
+    await value.cancel(fenced.job.jobId, 1)
+    await waitFor(() => value.getHealth(), health => health.heldRuns === 0, 300)
+
+    expect(calls).toEqual([])
+
+    // A drain refuses admission itself, so it must begin while a job is already held: a
+    // short fence, then Update Server's drain outlasting it, then shutdown.
+    const shortRoot = await fencedRoot(Date.now() + 200)
+    const drainCalls: Array<{ query: string; atMs: number }> = []
+    const drainingCoordinator = new QueryJobCoordinator(liveStore(shortRoot), answeringRunner(drainCalls), {
+      partialFlushMs: 0,
+      acquireMaintenanceWork: () => {
+        if (draining) throw Object.assign(new Error('drain'), { code: 'maintenance_drain_active' })
+        return { id: randomUUID(), setPhase: () => {}, release: () => {} }
+      },
+    })
+    await drainingCoordinator.init()
+    const drained = await drainingCoordinator.submit(heldRequest(randomUUID(), 'during update'))
+    await waitFor(() => drainingCoordinator.getSnapshot(drained.job.jobId), job => statuses(job).length >= 2)
+    draining = true
+    await waitFor(() => drainingCoordinator.getSnapshot(drained.job.jobId), job => statuses(job).includes(DRAIN_HOLD_STATUS))
+    await drainingCoordinator.shutdown('server_shutdown')
+    await waitFor(() => drainingCoordinator.getHealth(), health => health.heldRuns === 0, 300)
+    expect((await drainingCoordinator.getSnapshot(drained.job.jobId)).status).toBe('accepted')
+    expect(drainCalls).toEqual([])
+  })
+
+  it('leaves a start that was still waiting its turn when shutdown began `accepted`, for the next boot', async () => {
+    // Job A's start write is slowed, so job B's markStarting waits behind it in the store's
+    // write queue while shutdown begins. B must be refused inside its own write (accepted,
+    // re-queued at boot), not merely kept from spawning after it is `starting`.
+    class SlowFirstStartStorage extends NodeQueryJobJournalStorage {
+      private slowed = false
+      async append(root: string, partitionDay: string, line: string): Promise<void> {
+        if (!this.slowed && (JSON.parse(line) as { type?: string }).type === 'starting') {
+          this.slowed = true
+          await new Promise(resolve => setTimeout(resolve, 300))
+        }
+        return super.append(root, partitionDay, line)
+      }
+    }
+    const root = trackedTemp(await mkdtemp(join(tmpdir(), 'cos-query-held-')))
+    roots.push(root)
+    const calls: Array<{ query: string; atMs: number }> = []
+    const value = new QueryJobCoordinator(liveStore(root, new SlowFirstStartStorage()), answeringRunner(calls), { partialFlushMs: 0 })
+    await value.init()
+    const a = await value.submit({ ...heldRequest(randomUUID(), 'A'), sessionId: 'session-a' })
+    const b = await value.submit({ ...heldRequest(randomUUID(), 'B'), sessionId: 'session-b' })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await value.shutdown('server_shutdown')
+    await new Promise(resolve => setTimeout(resolve, 500))
+    expect(calls).toEqual([])
+    expect((await value.getSnapshot(a.job.jobId)).status).toBe('starting')
+    expect((await value.getSnapshot(b.job.jobId)).status).toBe('accepted')
   })
 
   it('runs a never-started prompt from the last boot even with no fence at all', async () => {
@@ -693,11 +872,7 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     const orphaned = await priorBoot.admit({ ...heldRequest(randomUUID(), 'admitted then crashed'), sessionId: 'session-clean' })
 
     const calls: Array<{ query: string; atMs: number }> = []
-    const value = new QueryJobCoordinator(
-      new QueryJobStore({ root, bootId: randomUUID() }),
-      answeringRunner(calls),
-      { partialFlushMs: 0 },
-    )
+    const value = new QueryJobCoordinator(liveStore(root), answeringRunner(calls), { partialFlushMs: 0 })
     await value.init()
     const done = await waitFor(
       () => value.getSnapshot(orphaned.job.jobId),
@@ -715,7 +890,7 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     let live = 0
     let refusals = 0
     const value = new QueryJobCoordinator(
-      new QueryJobStore({ root, bootId: randomUUID() }),
+      liveStore(root),
       answeringRunner(calls),
       {
         partialFlushMs: 0,
@@ -741,15 +916,17 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
 
     const admitted = await value.submit(heldRequest())
     // Held for the fence with NO lease: a fence must not hold Update Server's drain open.
-    await waitFor(() => value.getHealth(), health => health.heldRuns === 1)
-    expect(live).toBe(0)
+    await waitFor(() => value.getSnapshot(admitted.job.jobId), job => statuses(job).length >= 2)
+    await waitFor(() => live, count => count === 0)
     draining = true
     // The drain must OUTLAST the fence, or the fence alone would keep the job from
     // starting and a hold that ignored the drain would pass (the gate caught exactly that).
     await waitFor(() => Date.now(), now => now > fenceEndsAtMs + 300)
     expect(refusals).toBeGreaterThanOrEqual(2)
     expect(calls).toEqual([])
-    expect((await value.getSnapshot(admitted.job.jobId)).status).toBe('accepted')
+    const drained = await value.getSnapshot(admitted.job.jobId)
+    expect(drained.status).toBe('accepted')
+    expect(statuses(drained).at(-1)).toBe(DRAIN_HOLD_STATUS)
 
     draining = false
     const done = await waitFor(

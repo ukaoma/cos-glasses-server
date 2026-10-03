@@ -362,6 +362,9 @@ const queryJobRoot = configuredRoot ? resolve(configuredRoot) : dataPath('query-
 export const queryJobStore = new QueryJobStore({
   root: queryJobRoot,
   bootId: randomUUID(),
+  // 6.61.3: only when the coordinator will run them. With COS_DURABLE_QUERY_JOBS=0 no
+  // coordinator starts, so prior-boot never-started jobs are interrupted as before.
+  requeueNeverStartedOnBoot: durableQueryJobsEnabled(),
 })
 
 export const queryJobCoordinator = new QueryJobCoordinator(queryJobStore, runner, {

@@ -49,6 +49,8 @@ function wireError(error: unknown): { status: number; body: WireError } {
     || error instanceof QueryJobIdentityConflictError
     || error instanceof QueryJobActiveGenerationError
     || error instanceof QueryJobGenerationOrderError
+    // Since 6.61.3 admission never throws this (the fence holds a job at its start);
+    // kept so the store error map stays complete for any caller of markStarting.
     || error instanceof QueryJobProviderOrphanFenceError
     || error instanceof QueryJobAnswerCommittingError
     || error instanceof QueryJobNotTerminalError) status = 409
