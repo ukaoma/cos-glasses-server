@@ -644,6 +644,21 @@ the warm-up and the final passes. `/api/health` is public, so this carries codes
 and counts only, never a speaker name, path or error text; those stay in
 `server.log`. A Nemotron fallback never degrades `readiness.status`.
 
+## Final dictation polish (6.61.5)
+
+With glasses app 6.10.573, **Settings → Voice → Polish model** offers **Sonnet**
+(the default, using your Claude CLI sign-in) and **GPT-5.6 Luna Fast** (using your
+Cursor CLI sign-in). Luna uses `gpt-5.6-luna-none-fast`; it needs server 6.61.5.
+Both phone text and recovered audio drafts honor the choice. The server advertises
+these options in `capabilities.dictationCleanup.models` on health and models.
+
+Cleanup uses subscription CLIs only, with no API-key fallback or automatic model
+substitution. A failed or unavailable cleanup keeps the glossary-corrected
+transcript. Turn **Final polish (AI)** off to skip the model call. Claude tools
+and hooks are disabled; Cursor runs in read-only ask mode with a temporary profile
+and empty workspace. Live preview and canonical meeting transcription are unchanged.
+Older clients may still explicitly request Haiku.
+
 ## HQ dictation
 
 Prompt dictation defaults to HQ. The phone owns the preference: **Fast mode

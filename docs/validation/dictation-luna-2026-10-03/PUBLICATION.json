@@ -1,0 +1,15 @@
+{
+  "version": "6.61.5",
+  "tag": "latest",
+  "verifiedAt": "2026-10-03T14:33:15.421107+00:00",
+  "integrity": "sha512-uuhSEO8t3t/nuPh8GZCBCAKvWRZEQ9AdOr7SruL96dF+qEVm7SIPqYqopuPiVZriXL2944Kxnq0AvvK/adwwpA==",
+  "tarballSha256": "44da78a6693e1e2abec71671fef5c489b002ad82bde6e6ef9b3ca655e4fe82f7",
+  "bytes": 3769878,
+  "files": 368,
+  "testsPassed": 5801,
+  "testsSkipped": 2,
+  "auditVulnerabilities": 0,
+  "cleanCacheNpxHelp": "passed",
+  "pairedApp": "6.10.573",
+  "notes": "Browser/passkey approved. The piped publisher first returned EOTP; the direct interactive retry published an identical verified tarball. Registry integrity and clean-cache install were verified with the release runner verification function. No managed-server restart was performed."
+}
