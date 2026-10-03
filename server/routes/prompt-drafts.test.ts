@@ -188,6 +188,48 @@ describe('public prompt draft recovery contract', () => {
     expect(autoCleanDictation).toHaveBeenCalledTimes(2)
   })
 
+  it('routes Luna explicitly, defaults to Sonnet, and rejects unknown text models', async () => {
+    for (const model of ['luna-5.6-fast', undefined]) {
+      const result = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+        text: 'Keep this draft.', surface: 'message', autocleanModel: model,
+      }))
+      expect(result.status).toBe(200)
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('Keep this draft.', expect.any(Array), expect.objectContaining({ model: model ?? 'sonnet' }))
+    }
+    const invalid = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+      text: 'Keep this draft.', surface: 'meeting', autocleanModel: 'unknown',
+    }))
+    expect(invalid.status).toBe(400)
+    expect(autoCleanDictation).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves text after Luna failures and keeps Sonnet available independently', async () => {
+    autoCleanDictation.mockImplementation(async (text: string, _terms: unknown, opts: { model: string }) => {
+      if (opts.model === 'luna-5.6-fast') throw new Error('Cursor unavailable')
+      return text + ' Polished.'
+    })
+    for (let i = 0; i < 10; i++) {
+      const result = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+        text: 'Keep this draft.', surface: 'message', autocleanModel: 'luna-5.6-fast',
+      }))
+      expect(result.json.text).toBe('Keep this draft.')
+    }
+    const result = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
+      text: 'Keep this draft.', surface: 'meeting', autocleanModel: 'sonnet',
+    }))
+    expect(result.json.text).toBe('Keep this draft. Polished.')
+  })
+
+  it.each(['finalize', 'retry'])('passes Luna to audio-draft %s without changing transcription', async (action) => {
+    transcribeAudioBuffer.mockResolvedValue({ text: 'Keep this draft.', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+    const result = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/${action}?mode=fast&autoclean=1&autocleanModel=luna-5.6-fast`)
+    expect(result.status).toBe(200)
+    expect(autoCleanDictation).toHaveBeenCalledWith('Keep this draft.', expect.any(Array), expect.objectContaining({ model: 'luna-5.6-fast' }))
+  })
+
   it('rejects invalid or oversized phone-local finalizer payloads', async () => {
     const invalidSurface = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
       text: 'hello',

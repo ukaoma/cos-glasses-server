@@ -1,0 +1,19 @@
+{
+  "at": "2026-10-03T13:58:20.950Z",
+  "results": [
+    {
+      "model": "sonnet",
+      "input": "um keep the the budget at 1250 dollars not 12500 dollars I think we should wait do not send anything yet",
+      "output": "Keep the budget at $1,250, not $12,500. I think we should wait. Do not send anything yet.",
+      "durationMs": 2137,
+      "ok": true
+    },
+    {
+      "model": "luna-5.6-fast",
+      "input": "um keep the the budget at 1250 dollars not 12500 dollars I think we should wait do not send anything yet",
+      "output": "Keep the budget at 1,250 dollars, not 12,500 dollars. I think we should wait. Do not send anything yet.",
+      "durationMs": 5588,
+      "ok": true
+    }
+  ]
+}

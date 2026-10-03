@@ -1,3 +1,12 @@
+## 6.61.5
+
+Local dictation-choice candidate, based on the 6.61.4 hardening candidate.
+
+- Offer Sonnet (default) and GPT-5.6 Luna Fast for final dictation cleanup. Luna calls the signed-in Cursor CLI with `gpt-5.6-luna-none-fast`; Sonnet calls the signed-in Claude CLI. No provider API-key fallback or automatic model substitution.
+- Advertise `capabilities.dictationCleanup.models` on health and bootstrap so app 6.10.573 can avoid silently selecting another model on an older server. Both phone-text and audio-draft finalize/retry paths honor the choice. Older clients may still explicitly request Haiku.
+- Run cleanup in a temporary workspace with no MCP. Claude tools/hooks are disabled; Cursor ask mode retains its read tools and uses an isolated subscription profile. Abort/timeout terminates the process tree; failures preserve the glossary-corrected transcript. Model circuit breakers are independent.
+- Local verification: model routing, legacy/default behavior, failure recovery, isolated configuration, cancellation, and real signed-in CLI smoke calls. Hardware acceptance and stable promotion remain outstanding.
+
 ## 6.61.4
 
 Local hardening candidate; stable promotion remains gated on native UI and G2 acceptance.

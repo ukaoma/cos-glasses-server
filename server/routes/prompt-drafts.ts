@@ -1,3 +1,4 @@
+import { isDictationCleanModel, type DictationCleanModel } from '../lib/dictation-clean-models.js'
 import { Router } from 'express'
 import { createHash } from 'node:crypto'
 import type { Response } from 'express'
@@ -75,7 +76,11 @@ function speculativeHqWarmEnabled(): boolean {
   return !['0', 'false', 'off'].includes((process.env.COS_HQ_SPECULATIVE_WARM ?? '1').toLowerCase())
 }
 
-const autoCleanBreaker = createBreaker({ label: 'dictation-autoclean' })
+const autoCleanBreakers = {
+  sonnet: createBreaker({ label: 'dictation-autoclean-sonnet' }),
+  'luna-5.6-fast': createBreaker({ label: 'dictation-autoclean-luna' }),
+  haiku: createBreaker({ label: 'dictation-autoclean-haiku' }),
+}
 const autoCleanCountFile = () => process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE || dataPath('.dictation_autoclean_count.json')
 const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
 const autoCleanDailyCap = () => {
@@ -97,12 +102,14 @@ function recordAutoCleanCall(): void {
   } catch {}
 }
 
-interface AutoCleanRequest { enabled?: boolean; model?: 'haiku' | 'sonnet' }
+interface AutoCleanRequest { enabled?: boolean; model?: DictationCleanModel }
 function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
   const rawEnabled = req.body?.autoclean ?? req.query?.autoclean
   const enabled = rawEnabled === undefined ? undefined : ['1', 'true', 'on'].includes(String(rawEnabled).toLowerCase())
   const rawModel = String(req.body?.autocleanModel ?? req.query?.autocleanModel ?? '').toLowerCase()
-  return { enabled, model: rawModel === 'sonnet' ? 'sonnet' : rawModel === 'haiku' ? 'haiku' : undefined }
+  // An unknown model must never silently select another provider.
+  if (rawModel && !isDictationCleanModel(rawModel)) return { enabled: false }
+  return { enabled, model: isDictationCleanModel(rawModel) ? rawModel : undefined }
 }
 
 async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { signal?: AbortSignal }): Promise<string> {
@@ -129,9 +136,10 @@ async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { s
     console.warn(`[prompt-draft] Fuzzy correction failed (non-fatal): ${fuzzyErr?.message ?? fuzzyErr}`)
   }
   if (!(opts.enabled ?? autoCleanDefaultEnabled())) return cleaned
+  const model = opts.model ?? 'sonnet'
+  const autoCleanBreaker = autoCleanBreakers[model]
   if (cleaned.length > AUTOCLEAN_MAX_CHARS || autoCleanBreaker.isOpen() || autoCleanCountToday() >= autoCleanDailyCap()) return cleaned
   const startedAt = Date.now()
-  const model = opts.model === 'sonnet' ? 'sonnet' : 'haiku'
   recordAutoCleanCall()
   try {
     const polished = (await autoCleanDictation(cleaned, getVocabulary(), { model, signal: opts.signal })).trim()
@@ -162,7 +170,7 @@ promptDraftsRouter.post('/dictation/finalize', async (req, res) => {
   if (surface !== 'message' && surface !== 'meeting') {
     return res.status(400).json({ error: 'invalid_surface' })
   }
-  if (model !== undefined && model !== 'haiku' && model !== 'sonnet') {
+  if (model !== undefined && !isDictationCleanModel(model)) {
     return res.status(400).json({ error: 'invalid_autoclean_model' })
   }
 

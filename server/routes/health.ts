@@ -1,3 +1,4 @@
+import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
 import { taskBridgeAvailable } from '../lib/task-bridge.js'
 import { Router } from 'express'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
@@ -446,6 +447,7 @@ healthRouter.get('/health', async (_req, res) => {
     review_audio: reviewAudio,
     ...(voiceProvenance ? { voice_provenance: voiceProvenance } : {}),
     capabilities: {
+      dictationCleanup: { models: DICTATION_CLEAN_MODELS },
       // Advertised on the PUBLIC health route on purpose: a client deciding whether
       // to request a display ticket may not hold a usable token yet, and an old
       // server simply omits this key, which is how a new client detects it.
@@ -598,6 +600,7 @@ healthRouter.get('/models', async (req, res) => {
     // Changing that is a breaking change that needs a client version gate first.
     ...(apiToken ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
     capabilities: {
+      dictationCleanup: { models: DICTATION_CLEAN_MODELS },
       durableQueryJobs: {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,

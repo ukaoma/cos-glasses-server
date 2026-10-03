@@ -218,6 +218,7 @@ describe('display-stream capability advertisement', () => {
     // yet, and an old server simply omits the key — which is how a new client
     // detects support at all.
     const body = await (await fetch(`${base}/api/health`)).json() as any
+    expect(body.capabilities?.dictationCleanup).toEqual({ models: ['sonnet', 'luna-5.6-fast'] })
     expect(body.capabilities?.displayStream).toEqual({
       ticketSupported: true,
       ticketTtlSeconds: DISPLAY_TICKET_TTL_SECONDS,

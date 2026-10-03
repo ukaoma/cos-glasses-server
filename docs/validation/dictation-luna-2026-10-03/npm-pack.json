@@ -1,0 +1,1856 @@
+[
+  {
+    "id": "@gotcos/glasses-server@6.61.5",
+    "name": "@gotcos/glasses-server",
+    "version": "6.61.5",
+    "size": 3769432,
+    "unpackedSize": 8176936,
+    "shasum": "e12be6316ffc699df52b7afd52b33592cca9c9a3",
+    "integrity": "sha512-L7rPuOHQ+qvkQckdWFieQtJIN2Oeue4TAVkzI+5xow0JCGMBlZ9rHq93tK9hjS659eBYpBmpW/Slr/BpjEGcGQ==",
+    "filename": "gotcos-glasses-server-6.61.5.tgz",
+    "files": [
+      {
+        "path": ".cos-profile.example.json",
+        "size": 133,
+        "mode": 420
+      },
+      {
+        "path": ".env.example",
+        "size": 20668,
+        "mode": 420
+      },
+      {
+        "path": "CHANGELOG.md",
+        "size": 523495,
+        "mode": 420
+      },
+      {
+        "path": "LICENSE",
+        "size": 1073,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 57686,
+        "mode": 420
+      },
+      {
+        "path": "SECURITY.md",
+        "size": 1344,
+        "mode": 420
+      },
+      {
+        "path": "bin/cli.cjs",
+        "size": 37613,
+        "mode": 493
+      },
+      {
+        "path": "bin/control2-foundation.cjs",
+        "size": 693,
+        "mode": 420
+      },
+      {
+        "path": "bin/hooks/cos-session-hook",
+        "size": 11340,
+        "mode": 493
+      },
+      {
+        "path": "bin/managed-server.cjs",
+        "size": 1002,
+        "mode": 493
+      },
+      {
+        "path": "bin/memory-setup.cjs",
+        "size": 3497,
+        "mode": 420
+      },
+      {
+        "path": "bin/task-runtime-check.cjs",
+        "size": 3993,
+        "mode": 420
+      },
+      {
+        "path": "docs/control2-foundation.md",
+        "size": 4252,
+        "mode": 420
+      },
+      {
+        "path": "docs/control2-sandbox.md",
+        "size": 8155,
+        "mode": 420
+      },
+      {
+        "path": "docs/control2-task-runtime.md",
+        "size": 9811,
+        "mode": 420
+      },
+      {
+        "path": "docs/work-handoff-requests.md",
+        "size": 19229,
+        "mode": 420
+      },
+      {
+        "path": "docs/work-intake.md",
+        "size": 6584,
+        "mode": 420
+      },
+      {
+        "path": "docs/work-reviews.md",
+        "size": 3614,
+        "mode": 420
+      },
+      {
+        "path": "docs/work-task-runtime.md",
+        "size": 6348,
+        "mode": 420
+      },
+      {
+        "path": "managed-runtime-contract.json",
+        "size": 1373,
+        "mode": 420
+      },
+      {
+        "path": "memory-runtime/cos-memory-runtime-0.1.0.tar.gz",
+        "size": 53375,
+        "mode": 420
+      },
+      {
+        "path": "memory-runtime/runtime.json",
+        "size": 182,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 3160,
+        "mode": 420
+      },
+      {
+        "path": "server/bin/cos-output-image-publisher.mjs",
+        "size": 11591,
+        "mode": 493
+      },
+      {
+        "path": "server/bootstrap.ts",
+        "size": 645,
+        "mode": 420
+      },
+      {
+        "path": "server/env.ts",
+        "size": 1058,
+        "mode": 420
+      },
+      {
+        "path": "server/index.ts",
+        "size": 70517,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/activity-preview.ts",
+        "size": 11058,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/adaptive-playback-audio.ts",
+        "size": 14218,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-activity.ts",
+        "size": 8788,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-binding-registry.ts",
+        "size": 56371,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-binding-store.ts",
+        "size": 13956,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-ownership-store.ts",
+        "size": 16971,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-search.ts",
+        "size": 21600,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-store.ts",
+        "size": 81926,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/agent-session-turns.ts",
+        "size": 9684,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/api-auth.ts",
+        "size": 2972,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/archive-budget.ts",
+        "size": 2337,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/archive-index.ts",
+        "size": 6455,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/archive-search.ts",
+        "size": 7113,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/archive.ts",
+        "size": 22350,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/atomic-fs.ts",
+        "size": 4285,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/attached-provider-adapter.ts",
+        "size": 77726,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/attached-workspace.ts",
+        "size": 11673,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/audio-enhance.ts",
+        "size": 3249,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/audio-retention.ts",
+        "size": 1810,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/banned-permission-args.ts",
+        "size": 1541,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/batch-transcript-quality.ts",
+        "size": 8808,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/bookmarks.ts",
+        "size": 3387,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/chunk-embedding-diagnostics.ts",
+        "size": 5414,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/chunk-embedding-store.ts",
+        "size": 10571,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-bridge.ts",
+        "size": 43173,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-circuit.ts",
+        "size": 1894,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-cli-support.ts",
+        "size": 1405,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-hooks-installer.ts",
+        "size": 30453,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-permissions.ts",
+        "size": 2366,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-run-ledger.ts",
+        "size": 9424,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-session-registry.ts",
+        "size": 8748,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/claude-tool-access.ts",
+        "size": 12380,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cli-debug-view.ts",
+        "size": 8793,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/client-instance-claim.ts",
+        "size": 16721,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/client-liveness.ts",
+        "size": 7248,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-bridge.ts",
+        "size": 33159,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-engine-sessions.ts",
+        "size": 5795,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-extra-args.ts",
+        "size": 7350,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-live-queue-deps.ts",
+        "size": 5267,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-live-queue.ts",
+        "size": 11293,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-model-catalog.ts",
+        "size": 16985,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-run-ledger.ts",
+        "size": 10660,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/codex-turn-clock.ts",
+        "size": 1542,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/context-builder.ts",
+        "size": 10149,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/context-files.ts",
+        "size": 18299,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/context-library-search.ts",
+        "size": 12365,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/control2-draft.ts",
+        "size": 8833,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/control2-foundation.ts",
+        "size": 10963,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/control2-sandbox.ts",
+        "size": 14190,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/conversation.ts",
+        "size": 34998,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cos-context-browser.ts",
+        "size": 63814,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cos-operations-meetings.ts",
+        "size": 45852,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cursor-agent-store.ts",
+        "size": 6123,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cursor-bridge.ts",
+        "size": 26211,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cursor-engine-sessions.ts",
+        "size": 5755,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cursor-model-catalog.ts",
+        "size": 13045,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cursor-run-ledger.ts",
+        "size": 9895,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/cursor-stop-followup.ts",
+        "size": 7208,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/data-dir.ts",
+        "size": 887,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/diarizer-backend.ts",
+        "size": 7748,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/dictation-clean-models.ts",
+        "size": 458,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/dictation-clean.ts",
+        "size": 7323,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/display-bus.ts",
+        "size": 2712,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/display-format.ts",
+        "size": 759,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/display-ticket.ts",
+        "size": 5527,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/domain-label.ts",
+        "size": 736,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/domains.ts",
+        "size": 13172,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/embedding-eviction.ts",
+        "size": 6624,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/even-hub-speaker-role.ts",
+        "size": 4303,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/fence-liveness.ts",
+        "size": 8593,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/fireflies-client.ts",
+        "size": 33618,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/fireflies-key.ts",
+        "size": 6504,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/fork-thread.ts",
+        "size": 39516,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/fuzzy-correct.ts",
+        "size": 13853,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/g2-enrichment-runner.ts",
+        "size": 6578,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/g2-ops-handoff.ts",
+        "size": 13838,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/hallucination-filter.ts",
+        "size": 26305,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/handoff-store.ts",
+        "size": 14277,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/health-static-probes.ts",
+        "size": 6556,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/held-naming-batches.ts",
+        "size": 42914,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/held-voice-groups.ts",
+        "size": 41553,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/image-safety.ts",
+        "size": 20213,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/imported-library-rows.ts",
+        "size": 25067,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/imported-meeting-library.ts",
+        "size": 25262,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/jev.ts",
+        "size": 9217,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/job-trail.ts",
+        "size": 33449,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/launch-dir.ts",
+        "size": 2520,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/lens-gist-engines.ts",
+        "size": 18114,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/lens-gist.ts",
+        "size": 45970,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/listener-startup.ts",
+        "size": 1180,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/live-cues-capability.ts",
+        "size": 3794,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/live-cues-cursor.ts",
+        "size": 5740,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/live-cues-engine.ts",
+        "size": 18273,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/live-cues-memory.ts",
+        "size": 7347,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/live-cues-prompt.ts",
+        "size": 4401,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/local-day.ts",
+        "size": 591,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/local-first-meetings-contract.ts",
+        "size": 2051,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/maintenance-lifecycle.ts",
+        "size": 31195,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/managed-restart.ts",
+        "size": 1899,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/managed-runtime.ts",
+        "size": 1445,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/media-store.ts",
+        "size": 59349,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-actions-store.ts",
+        "size": 19186,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-actions.ts",
+        "size": 114634,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-audio-archive.ts",
+        "size": 15435,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-batch-persistence.ts",
+        "size": 2419,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-batch-progress.ts",
+        "size": 14707,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-batch-transcribe.ts",
+        "size": 32843,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-corrections.ts",
+        "size": 14180,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-decisions.ts",
+        "size": 8790,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine-mode.ts",
+        "size": 8718,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/align.ts",
+        "size": 6059,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/attribute.ts",
+        "size": 8990,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/evidence.ts",
+        "size": 16064,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/pairing.ts",
+        "size": 12886,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/render.ts",
+        "size": 28061,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/split.ts",
+        "size": 9041,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-engine/worker.ts",
+        "size": 8484,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-file-guards.ts",
+        "size": 4897,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-finalization-jobs.ts",
+        "size": 9215,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-import.ts",
+        "size": 30153,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-library-search.ts",
+        "size": 21489,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-parse.ts",
+        "size": 7939,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-relabel-enrolment.ts",
+        "size": 15051,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-relabel.ts",
+        "size": 11625,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-scribe-content.ts",
+        "size": 24836,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-speaker-labels.ts",
+        "size": 11107,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-speaker-review.ts",
+        "size": 33064,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-store.ts",
+        "size": 24014,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-suggestion-sides.ts",
+        "size": 10024,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-summary-budget.ts",
+        "size": 3446,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-summary-persistence.ts",
+        "size": 6670,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-summary.ts",
+        "size": 17044,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-sync-lock.ts",
+        "size": 1784,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/meeting-voice-review.ts",
+        "size": 1705,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/message-era-reset.ts",
+        "size": 4866,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/message-era.ts",
+        "size": 4435,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/message-reservations.ts",
+        "size": 2572,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/model-image-input.ts",
+        "size": 1245,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/model-router.ts",
+        "size": 5300,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/morning-brief-config.ts",
+        "size": 22587,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/morning-brief-coverage.ts",
+        "size": 17502,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/morning-brief-prompt.ts",
+        "size": 13792,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/morning-brief-runtime.ts",
+        "size": 11575,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/morning-brief-schedule.ts",
+        "size": 7782,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/morning-brief-scheduler.ts",
+        "size": 22232,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/native-head.ts",
+        "size": 29316,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/native-thread-id.ts",
+        "size": 1207,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/nemotron-cli.ts",
+        "size": 11016,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/nemotron-final.ts",
+        "size": 46833,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/nemotron-live.ts",
+        "size": 33313,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/nemotron-segments.ts",
+        "size": 13370,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/network-policy.ts",
+        "size": 1388,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/occupancy-probes.ts",
+        "size": 40711,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/occupied-threads.ts",
+        "size": 10973,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/ollama-bridge.ts",
+        "size": 21259,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/ollama-catalog.ts",
+        "size": 7520,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/ollama-run-ledger.ts",
+        "size": 6397,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/ollama-tools.ts",
+        "size": 14778,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/openai-key.ts",
+        "size": 5575,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/openai-tts-budget.ts",
+        "size": 5257,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/openai-whisper-budget.ts",
+        "size": 6934,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/permission-broker.ts",
+        "size": 87706,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/pipeline-runner.ts",
+        "size": 8391,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/profile.ts",
+        "size": 10093,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/prompt-draft-store.ts",
+        "size": 10872,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/prompt-edit.ts",
+        "size": 9166,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/prompt-reference-boundary.ts",
+        "size": 1341,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/prompt-tail-guard.ts",
+        "size": 12472,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/provider-binary.ts",
+        "size": 8797,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/provider-process-lifecycle.ts",
+        "size": 4463,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/provider-proof.ts",
+        "size": 13395,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/provider-terminal-error.ts",
+        "size": 2945,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/python-bridge.ts",
+        "size": 11837,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/quarantine-auto-recover.ts",
+        "size": 7717,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/query-attachments.ts",
+        "size": 8911,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/query-job-coordinator.ts",
+        "size": 35652,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/query-job-feature.ts",
+        "size": 1120,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/query-job-runtime.ts",
+        "size": 16504,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/query-job-store.ts",
+        "size": 63352,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/query-job-types.ts",
+        "size": 25780,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/queue-turn-evidence.ts",
+        "size": 6984,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/recent-messages.ts",
+        "size": 2250,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/recovery-activity.ts",
+        "size": 7525,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/response-cache.ts",
+        "size": 4484,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/rich-media-safety.ts",
+        "size": 25738,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/run-output-images.ts",
+        "size": 19733,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/secure-user-config.ts",
+        "size": 1904,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/send-audio.ts",
+        "size": 2058,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/server-instance-id.ts",
+        "size": 1552,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/server-instance-lock.ts",
+        "size": 4581,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/server-metrics.ts",
+        "size": 143,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-cache-writer.ts",
+        "size": 8612,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-cancel.ts",
+        "size": 12182,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-halt.ts",
+        "size": 13536,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-heartbeats.ts",
+        "size": 2465,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-hook-events.ts",
+        "size": 9245,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-hook-ledger.ts",
+        "size": 5192,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-hook-spool.ts",
+        "size": 11516,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-hooks-runtime.ts",
+        "size": 22075,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-log.ts",
+        "size": 5372,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-peer-inbox-deps.ts",
+        "size": 8594,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-peer-inbox.ts",
+        "size": 23367,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-recommendation.ts",
+        "size": 7956,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-signal-store.ts",
+        "size": 18304,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-state-derive.ts",
+        "size": 13526,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-stream-bus.ts",
+        "size": 9676,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-stream-events.ts",
+        "size": 66690,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-stream-producer.ts",
+        "size": 6255,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/session-transcript-watcher.ts",
+        "size": 22986,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/speaker-calibration-log.ts",
+        "size": 5272,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/speaker-embeddings.ts",
+        "size": 42383,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/speaker-name.ts",
+        "size": 3956,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/speaker-rename-fanout.ts",
+        "size": 9218,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/speaker-trainer.ts",
+        "size": 16852,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/stranded-session-actions.ts",
+        "size": 12240,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/stranded-sessions.ts",
+        "size": 6135,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/task-bridge.ts",
+        "size": 6642,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/task-dispatcher.ts",
+        "size": 26865,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/task-store.ts",
+        "size": 36376,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/telegram-notify.ts",
+        "size": 3110,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-attach-capability.ts",
+        "size": 9124,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-drain-kick.ts",
+        "size": 6828,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-fence-store.ts",
+        "size": 8158,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-occupancy.ts",
+        "size": 31827,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-turn-queue-deliver.ts",
+        "size": 6765,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-turn-queue-store.ts",
+        "size": 8131,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/thread-turn-queue.ts",
+        "size": 14877,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/token-audit.ts",
+        "size": 2241,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/token-auth.ts",
+        "size": 1130,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/training-audio-provenance.ts",
+        "size": 3231,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/training-audio-save.ts",
+        "size": 1086,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/transcribe-audio.ts",
+        "size": 11371,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/transcription-policy.ts",
+        "size": 985,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/tts-cache.ts",
+        "size": 32557,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/tts-engine.ts",
+        "size": 10073,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/tts-local.ts",
+        "size": 21670,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/tts-pronounce.ts",
+        "size": 2016,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/unsaved-audio-quarantine.ts",
+        "size": 12815,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/upload-session.ts",
+        "size": 17362,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/utils.ts",
+        "size": 178,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/vad-silero.ts",
+        "size": 7138,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/video-compression.ts",
+        "size": 16000,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/video-upload-v2.ts",
+        "size": 35153,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/voice-directory.ts",
+        "size": 14757,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/voice-enrolment-selection.ts",
+        "size": 11697,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/voice-evidence-guard.ts",
+        "size": 3652,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/voice-profile-store.ts",
+        "size": 24842,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/voiceprint-floor.ts",
+        "size": 667,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/whisper-local.ts",
+        "size": 62437,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/whisper-metal-gate.ts",
+        "size": 10504,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/whisper-preview.ts",
+        "size": 22914,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-activity.ts",
+        "size": 31358,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-board-reader.ts",
+        "size": 3746,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-completion.ts",
+        "size": 6795,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-handoff-requests.ts",
+        "size": 28619,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-intake-store.ts",
+        "size": 13612,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-review-backend.ts",
+        "size": 2235,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-review-runtime.ts",
+        "size": 15190,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/work-review-store.ts",
+        "size": 7126,
+        "mode": 420
+      },
+      {
+        "path": "server/lib/workspace-skills.ts",
+        "size": 7166,
+        "mode": 420
+      },
+      {
+        "path": "server/models/silero_vad.onnx",
+        "size": 2327524,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/agent-session-bindings.ts",
+        "size": 160416,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/agent-session-stream.ts",
+        "size": 23351,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/agent-sessions.ts",
+        "size": 29527,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/archive.ts",
+        "size": 5492,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/bookmarks.ts",
+        "size": 1728,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/claude-sessions.ts",
+        "size": 7550,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/cli-debug.ts",
+        "size": 2604,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/client-instance.ts",
+        "size": 5354,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/control2-foundation.ts",
+        "size": 3682,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/cursor-stop-followup.ts",
+        "size": 4413,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/diag.ts",
+        "size": 5118,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/display.ts",
+        "size": 16302,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/fireflies-key.ts",
+        "size": 4261,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/glossary.ts",
+        "size": 5996,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/handoffs.ts",
+        "size": 3830,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/health.ts",
+        "size": 31432,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/jev.ts",
+        "size": 10053,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/lens-gist.ts",
+        "size": 2117,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/live-cues.ts",
+        "size": 2311,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/maintenance.ts",
+        "size": 8021,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/media.ts",
+        "size": 41366,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/meeting-actions.ts",
+        "size": 3786,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/meeting-engine.ts",
+        "size": 2413,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/meeting-import.ts",
+        "size": 2618,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/meeting-suggestions.ts",
+        "size": 3067,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/meeting.ts",
+        "size": 106789,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/meetings.ts",
+        "size": 18329,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/memory.ts",
+        "size": 48932,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/message-ref.ts",
+        "size": 10206,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/morning-brief.ts",
+        "size": 4062,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/openai-compat.ts",
+        "size": 21054,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/openai-key.ts",
+        "size": 4886,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/permission-broker.ts",
+        "size": 10237,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/prompt-drafts.ts",
+        "size": 30540,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/prompt-edit.ts",
+        "size": 1208,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/provider-proof.ts",
+        "size": 2577,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/query-jobs.ts",
+        "size": 13785,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/query.ts",
+        "size": 10240,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/recovery.ts",
+        "size": 3499,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/session-hooks.ts",
+        "size": 4159,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/session-index.ts",
+        "size": 12661,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/sessions.ts",
+        "size": 15532,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/skills.ts",
+        "size": 510,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/tasks.ts",
+        "size": 7747,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/thread-turn-queue.ts",
+        "size": 15439,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/threads.ts",
+        "size": 2467,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/transcribe-stream.ts",
+        "size": 115572,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/transcribe.ts",
+        "size": 3222,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/tts.ts",
+        "size": 43484,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/voice.ts",
+        "size": 42935,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/welcome-context.ts",
+        "size": 9520,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/work-board.ts",
+        "size": 10677,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/work-handoff-requests.ts",
+        "size": 10489,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/work-intake.ts",
+        "size": 7782,
+        "mode": 420
+      },
+      {
+        "path": "server/routes/work-reviews.ts",
+        "size": 1413,
+        "mode": 420
+      },
+      {
+        "path": "server/scripts/control2-draft-canary.ts",
+        "size": 1981,
+        "mode": 420
+      },
+      {
+        "path": "server/scripts/control2-foundation-lab.ts",
+        "size": 3662,
+        "mode": 420
+      },
+      {
+        "path": "server/scripts/control2-sandbox-canary.ts",
+        "size": 196,
+        "mode": 420
+      },
+      {
+        "path": "server/scripts/hooks-cli.ts",
+        "size": 2696,
+        "mode": 420
+      },
+      {
+        "path": "server/scripts/repair-archive-duplicates.ts",
+        "size": 7376,
+        "mode": 420
+      },
+      {
+        "path": "server/scripts/reset-message-era.ts",
+        "size": 1035,
+        "mode": 420
+      },
+      {
+        "path": "server/tts-sidecar/bootstrap.sh",
+        "size": 2153,
+        "mode": 420
+      },
+      {
+        "path": "server/tts-sidecar/requirements.txt",
+        "size": 259,
+        "mode": 420
+      },
+      {
+        "path": "server/tts-sidecar/server.py",
+        "size": 8093,
+        "mode": 420
+      },
+      {
+        "path": "shared/handoff-intent.ts",
+        "size": 2906,
+        "mode": 420
+      },
+      {
+        "path": "shared/media-attachment.ts",
+        "size": 10043,
+        "mode": 420
+      },
+      {
+        "path": "shared/model-preference.ts",
+        "size": 10305,
+        "mode": 420
+      },
+      {
+        "path": "task-runtime/LICENSE",
+        "size": 1073,
+        "mode": 420
+      },
+      {
+        "path": "task-runtime/manifest.json",
+        "size": 1148,
+        "mode": 420
+      },
+      {
+        "path": "task-runtime/task_runtime.py",
+        "size": 14110,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/cos_atomic.py",
+        "size": 2924,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/manifest.json",
+        "size": 2036,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/runtime_io.py",
+        "size": 1218,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_bridge.py",
+        "size": 5440,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_checkout.py",
+        "size": 13395,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_commands.py",
+        "size": 10185,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_dedup.py",
+        "size": 407,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_rows.py",
+        "size": 15044,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_work_metadata.py",
+        "size": 5344,
+        "mode": 420
+      },
+      {
+        "path": "work-task-runtime/task_write.py",
+        "size": 32749,
+        "mode": 420
+      }
+    ],
+    "entryCount": 368,
+    "bundled": []
+  }
+]
