@@ -636,3 +636,17 @@ describe('6.60.0: the PermissionRequest wait (the away hold)', () => {
     expect(HOOK_SUBSCRIPTIONS.filter(sub => sub.passTimeout).map(sub => sub.event)).toEqual(['PermissionRequest'])
   })
 })
+
+it('adding only the compaction observer never disables existing desk Cancel',()=>{
+ const root=dir(),settingsPath=join(root,'claude','settings.json'),scriptPath=join(root,'stable','bin','cos-session-hook')
+ const previous=process.env.COS_GLASSES_HOME;process.env.COS_GLASSES_HOME=join(root,'home')
+ try {
+  mkdirSync(dirname(settingsPath),{recursive:true});writeFileSync(settingsPath,'{}')
+  installClaudeHooks({settingsPath,scriptPath,packageScriptPath:packagedHookScriptPath(),port:3141})
+  const config=JSON.parse(readFileSync(settingsPath,'utf8'));delete config.hooks.PreCompact
+  writeFileSync(settingsPath,JSON.stringify(config))
+  const status=hookStatus({settingsPath,scriptPath,packageScriptPath:packagedHookScriptPath()})
+  expect(status).toMatchObject({state:'drift',missing:['PreCompact'],observerOnlyDrift:true})
+  expect(hookHaltReady(status)).toBe(true)
+ } finally {if(previous===undefined)delete process.env.COS_GLASSES_HOME;else process.env.COS_GLASSES_HOME=previous}
+})

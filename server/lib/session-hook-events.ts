@@ -30,6 +30,7 @@ export const HOOK_EVENT_NAMES = [
   'Notification',
   'SubagentStart',
   'SubagentStop',
+  'PreCompact',
   'PostCompact',
   'PostModelSwitch',
 ] as const
@@ -154,6 +155,7 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
   const str = (k: string) => (typeof payload[k] === 'string' ? payload[k] as string : undefined)
   const base: Record<string, unknown> = {
     session_id: str('session_id'),
+    ...(payload.display_only === true ? { display_only: true } : {}),
     ...(str('transcript_path') ? { transcript_path: str('transcript_path') } : {}),
     ...(str('cwd') ? { cwd: str('cwd') } : {}),
     ...(str('permission_mode') ? { permission_mode: str('permission_mode') } : {}),
@@ -199,6 +201,7 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
       return { ...base, agent_id: str('agent_id'), agent_type: str('agent_type') }
     case 'PostModelSwitch':
       return { ...base, from_model: str('from_model'), to_model: str('to_model') }
+    case 'PreCompact':
     case 'PostCompact':
       return base
   }

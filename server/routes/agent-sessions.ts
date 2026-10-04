@@ -1,3 +1,5 @@
+import { workObservationFields } from '../lib/session-work-observation.js'
+import { readCodexSubagents } from '../lib/codex-subagent-activity.js'
 // GET /api/agent-sessions
 // GET /api/agent-sessions/search?q=
 // GET /api/agent-sessions/:provider/:sessionId
@@ -41,7 +43,7 @@ import {
 import { searchAgentSessions, type AgentSessionSearchHit } from '../lib/agent-session-search.js'
 import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
 import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
-import { deriveForRow, signalFor } from '../lib/session-hooks-runtime.js'
+import { deriveForRow, signalFor, workObservationFor } from '../lib/session-hooks-runtime.js'
 import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
 import { queuedTurnsFields, allQueuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
 import { isAttachedTurnActive, sessionStreamKey } from '../lib/session-stream-bus.js'
@@ -398,8 +400,10 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       derivedById.set(row.session_id, deriveForRow({ sessionId: row.session_id, now, remember: false }))
     }
     const queuedOf = await allQueuedWaitingLookup(now)
+    const subagents = await readCodexSubagents(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), roots.codexSessions, now)
     res.json({
-      sessions: sessions.map((row, index) => withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running)),
+      sessions: sessions.map((row, index) => ({ ...withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running),
+        ...(row.provider === 'codex' ? (subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}) : workObservationFields(workObservationFor(row.session_id), now)) })),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
@@ -511,6 +515,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       const named = names.get(parsed.session_id) || names.get(sessionId)
       if (named) parsed.display_label = named
     }
+    const observed = provider === 'codex' ? {} : workObservationFields(workObservationFor(parsed.session_id))
+    const subagents = provider === 'codex' ? (await readCodexSubagents([sessionId], agentSessionRoots().codexSessions)).get(sessionId.toLowerCase()) : observed.subagent_activity
     const modified = st.mtime.toISOString()
     const activity = await readSessionActivity(provider, found)
     const running = runningForThread(provider, parsed.session_id, activityClockMs(st.mtimeMs, activity))
@@ -573,7 +579,9 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       tools_used: {},
       files_touched: [],
       git_branch: parsed.git_branch || 'unknown',
-      has_subagents: false,
+      has_subagents: (subagents?.total ?? 0) > 0,
+      ...observed,
+      ...(subagents ? { subagent_activity: subagents } : {}),
       total_input_tokens: 0,
       total_output_tokens: 0,
       file_size_bytes: parsed.file_size_bytes,

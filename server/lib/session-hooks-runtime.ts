@@ -404,7 +404,14 @@ export function sessionHooksHealthFields(): { sessionHooks: SessionHooksHealth }
 /** Signal for a row id that may be the registry's eight-character form. */
 export function signalFor(sessionId: string): SessionSignal | undefined {
   if (!sessionHooksEnabled()) return undefined
-  return sessionId.length >= 36 ? sessionSignalStore.get(sessionId) : sessionSignalStore.getByPrefix(sessionId)
+  const signal = sessionId.length >= 36 ? sessionSignalStore.get(sessionId) : sessionSignalStore.getByPrefix(sessionId)
+  return signal?.observationOnly ? undefined : signal
+}
+
+/** Display observers do not create hook occupancy or permission evidence. */
+export function workObservationFor(sessionId: string) {
+  if (!sessionHooksEnabled()) return undefined
+  return (sessionId.length >= 36 ? sessionSignalStore.get(sessionId) : sessionSignalStore.getByPrefix(sessionId))?.workObservation
 }
 
 /** 6.60.0: told when a row derives `ended`, so the broker stops saying the Mac is waiting on it. */

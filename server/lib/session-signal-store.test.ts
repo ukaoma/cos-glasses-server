@@ -93,7 +93,7 @@ describe('recorded 2.1.272 sequences replay into the expected phases', () => {
     for (const file of readdirSync(FIXTURES).filter(f => f.endsWith('.jsonl'))) {
       for (const env of recording(file)) recorded.add(env.event)
     }
-    const interactiveOnly = new Set(['StopFailure', 'PermissionDenied', 'PreToolUse', 'Notification', 'SubagentStart', 'SubagentStop', 'PostCompact', 'PostModelSwitch'])
+    const interactiveOnly = new Set(['StopFailure', 'PermissionDenied', 'PreToolUse', 'Notification', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'PostModelSwitch'])
     for (const name of HOOK_EVENT_NAMES) {
       expect(recorded.has(name) || interactiveOnly.has(name), name).toBe(true)
     }

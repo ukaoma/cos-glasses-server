@@ -445,3 +445,20 @@ describe('the route-facing degrade flag', () => {
     }
   })
 })
+
+it('keeps the stream alive through an oversized Codex compaction and resumes the following reply', async () => {
+ const path=join(tmpRoot(),'compacted.jsonl')
+ const compact=JSON.stringify({timestamp:new Date().toISOString(),type:'compacted',payload:{replacement_history:'x'.repeat(1200)}})+'\n'
+ writeFileSync(path,compact)
+ const {drafts,publish}=collector()
+ const tailer=createTranscriptTailer({key:KEY,path,provider:'codex',publish,offset:0,maxReadBytes:256,suppressed:()=>false})
+ await tailer.tick()
+ expect(tailer.degraded()).toBe(false)
+ expect(drafts).toContainEqual({kind:'status',state:'working',reasoning:'Updating context'})
+ for(let i=0;i<8;i++)await tailer.tick()
+ appendFileSync(path,JSON.stringify({type:'event_msg',payload:{type:'agent_message',message:'Reply after compaction'}})+'\n')
+ await tailer.tick()
+ expect(tailer.degraded()).toBe(false)
+ expect(drafts.some(d=>d.kind==='prose'&&d.text==='Reply after compaction')).toBe(true)
+ expect(drafts.some(d=>d.kind==='status'&&d.state==='done')).toBe(false)
+})

@@ -1,3 +1,4 @@
+import { observeWork, type WorkObservation } from './session-work-observation.js'
 // The signal store: what the hooks have said about each Claude session, reduced to
 // one record per full session id.
 //
@@ -48,6 +49,8 @@ export interface FailureSignal {
 }
 
 export interface SessionSignal {
+  workObservation?: WorkObservation
+  observationOnly?: boolean
   sessionId: string
   firstSeenAt: number
   lastEventAt: number
@@ -179,7 +182,10 @@ function resolvesWaiting(waiting: WaitingSignal, event: HookEventName, toolName:
 export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelope, ctx: ReducerContext, child?: boolean): SessionSignal {
   const base = prev ? { ...prev } : fresh(env)
   const p = env.payload
+  if (p.display_only === true) return { ...base, ...(prev?.observationOnly !== false ? { lastEventAt: Math.max(base.lastEventAt, env.ts) } : {}), observationOnly: prev?.observationOnly ?? !prev, workObservation: observeWork(base.workObservation, env) }
   const common = {
+    observationOnly: false,
+    workObservation: observeWork(base.workObservation, env),
     cwd: str(p.cwd) ?? base.cwd,
     transcriptPath: str(p.transcript_path) ?? base.transcriptPath,
     permissionMode: str(p.permission_mode) ?? base.permissionMode,
@@ -285,6 +291,8 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
       return { ...next, subagentsOpen: next.subagentsOpen + 1 }
     case 'SubagentStop':
       return { ...next, subagentsOpen: Math.max(0, next.subagentsOpen - 1) }
+    case 'PreCompact':
+      return next
     case 'PostCompact':
       return { ...next, compactions: next.compactions + 1 }
     case 'PostModelSwitch':
@@ -313,6 +321,7 @@ export class SessionSignalStore {
   apply(env: HookEnvelope, child?: boolean): SessionSignal {
     const next = applyHookEvent(this.signals.get(env.sessionId), env, this.ctx, child)
     this.signals.set(env.sessionId, next)
+    if (env.payload.display_only === true) return next // no drain, permission or halt listeners
     const isChild = child ?? this.ctx.isCosSpawnedPid(env.ppid)
     for (const listener of this.listeners) {
       try { listener(next, env, isChild) } catch (error) {

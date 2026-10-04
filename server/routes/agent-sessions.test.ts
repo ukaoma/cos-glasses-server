@@ -729,3 +729,58 @@ describe('6.50.0: ?turns=N on the detail route, the recent conversation for the 
     }
   })
 })
+
+it('projects child work in list and detail without changing parent write occupancy, then clears it', async () => {
+  const {home,roots}=fixtureHome()
+  const child='00000000-0000-0000-0000-000000000002'
+  const parentFile=join(roots.codexSessions,'2026/10/04',`rollout-2026-10-04T16-00-00-${marktId}.jsonl`)
+  const childFile=join(roots.codexSessions,'2026/10/04',`rollout-2026-10-04T16-00-01-${child}.jsonl`)
+  const event=(type:string)=>JSON.stringify({timestamp:new Date().toISOString(),type:'event_msg',payload:{type}})
+  writeJsonl(parentFile,[JSON.stringify({type:'session_meta',payload:{id:marktId,cwd:'/fixture'}}),event('task_complete')])
+  writeJsonl(childFile,[JSON.stringify({type:'session_meta',payload:{id:child,thread_source:'subagent'}}),event('task_started')])
+  execFileSync('/usr/bin/sqlite3',[join(home,'.codex','state_5.sqlite'),`CREATE TABLE threads(id TEXT,rollout_path TEXT,archived INT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT); INSERT INTO threads VALUES('${child}','${childFile}',0); INSERT INTO thread_spawn_edges VALUES('${marktId}','${child}','open');`])
+  const previousHome=process.env.COS_AGENT_SESSIONS_HOME,previousCodex=process.env.CODEX_HOME
+  process.env.COS_AGENT_SESSIONS_HOME=home;process.env.CODEX_HOME=join(home,'.codex')
+  try {
+    const base=await startSearchServer()
+    const detail=await (await fetch(`${base}/api/agent-sessions/codex/${marktId}`)).json() as any
+    expect(detail.subagent_activity).toMatchObject({active:1,completed:0,total:1,partial:false})
+    expect(detail.has_subagents).toBe(true)
+    const list=await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as any
+    expect(list.sessions.find((s:any)=>s.session_id===marktId)?.subagent_activity).toMatchObject({active:1,total:1})
+    writeJsonl(childFile,[event('task_started'),event('task_complete')])
+    const ended=await (await fetch(`${base}/api/agent-sessions/codex/${marktId}`)).json() as any
+    expect(ended.subagent_activity).toMatchObject({active:0,completed:1,total:1})
+    expect(ended.running).toBe(detail.running)
+    expect(ended.running_foreign).toBe(detail.running_foreign)
+  } finally {
+    if(previousHome===undefined)delete process.env.COS_AGENT_SESSIONS_HOME;else process.env.COS_AGENT_SESSIONS_HOME=previousHome
+    if(previousCodex===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=previousCodex
+  }
+})
+
+it('exposes Claude and native Cursor agent/compaction observations through HTTP without making them write authority',async()=>{
+ const {home,roots}=fixtureHome(),id='bbbbbbbb-1111-2222-3333-eeeeeeeeeeee'
+ writeJsonl(join(roots.claudeProjects,'-fixture',`${id}.jsonl`),[JSON.stringify({type:'user',timestamp:new Date().toISOString(),message:{role:'user',content:'Fixture'}})])
+ writeJsonl(join(roots.cursorProjects,'fixture','agent-transcripts',id,`${id}.jsonl`),[JSON.stringify({role:'user',message:{content:[{type:'text',text:'Fixture'}]}})])
+ const previous=process.env.COS_AGENT_SESSIONS_HOME,previousHooks=process.env.COS_SESSION_HOOKS;process.env.COS_AGENT_SESSIONS_HOME=home;process.env.COS_SESSION_HOOKS='1'
+ try {
+  __resetSessionHooksForTests()
+  const now=Date.now()
+  sessionSignalStore.apply({event:'SubagentStart',ts:now,ppid:null,sessionId:id,payload:{display_only:true,agent_id:'a'}})
+  sessionSignalStore.apply({event:'PreCompact',ts:now+1,ppid:null,sessionId:id,payload:{display_only:true}})
+  const base=await startSearchServer()
+  for(const provider of ['claude','cursor']) {
+   const response=await fetch(`${base}/api/agent-sessions/${provider}/${id}`)
+   expect(response.status,provider).toBe(200)
+   const detail=await response.json() as any
+   expect(detail.subagent_activity,provider).toMatchObject({active:1,total:1})
+   expect(detail.compaction,provider).toMatchObject({state:'compacting'})
+  }
+  expect(sessionSignalStore.get(id)?.turnOpen).toBe(false)
+ } finally {
+  __resetSessionHooksForTests()
+  if(previousHooks===undefined)delete process.env.COS_SESSION_HOOKS;else process.env.COS_SESSION_HOOKS=previousHooks
+  if(previous===undefined)delete process.env.COS_AGENT_SESSIONS_HOME;else process.env.COS_AGENT_SESSIONS_HOME=previous
+ }
+})

@@ -243,6 +243,7 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
   let state: 'working' | 'idle' | 'done' | null = null
   let lastActivity = now()
   let degraded = false
+  let skippingCompaction = false
 
   const emit = (draft: SessionStreamDraft) => {
     try {
@@ -275,17 +276,40 @@ export function createTranscriptTailer(options: TranscriptTailerOptions): Transc
           // this design exists to avoid, so we rejoin at the new end and let the poll
           // fallback carry whatever the rotation took with it.
           cursor = { offset: size }
+          skippingCompaction = false
           return
         }
 
         if (size > cursor.offset) {
           const pending = size - cursor.offset
           const length = Math.min(pending, maxRead)
-          const chunk = await readRangeAt(options.path, cursor.offset, length)
+          let chunk = await readRangeAt(options.path, cursor.offset, length)
           if (chunk !== null && chunk.length > 0) {
+            if (skippingCompaction) {
+              const end = chunk.indexOf(10)
+              if (end < 0) { cursor.offset += chunk.length; lastActivity = now(); return }
+              cursor.offset += end + 1
+              chunk = chunk.subarray(end + 1)
+              skippingCompaction = false
+              lastActivity = now()
+              if (!suppressed(options.key)) emit({ kind: 'status', state: 'working' })
+              if (!chunk.length) return
+            }
             const result = consumeTranscriptChunk(cursor, chunk, chunk.length >= maxRead)
             cursor = result.cursor
             if (result.tooLarge) {
+              // A Codex context replacement is internal bookkeeping, not a reply. Its
+              // replacement_history can exceed 4 MiB. Discard just this recognized
+              // top-level record incrementally, retaining heartbeats and later output.
+              const head = chunk.subarray(0, 512).toString('utf8')
+              if (options.provider === 'codex' && /^\s*\{\s*(?:"timestamp"\s*:\s*"[^"\r\n]*"\s*,\s*)?"type"\s*:\s*"compacted"\s*[,}]/.test(head)) {
+                skippingCompaction = true
+                cursor.offset += chunk.length
+                lastActivity = now()
+                state = 'working'
+                if (!suppressed(options.key)) emit({ kind: 'status', state: 'working', reasoning: 'Updating context' } as SessionStreamDraft)
+                return
+              }
               // HAND OFF, do not skip. `done` is the same terminal status a finished turn
               // sends, so the client already knows to close the stream and resume its
               // 5s/15s/60s poll -- no new client vocabulary, no frozen screen.

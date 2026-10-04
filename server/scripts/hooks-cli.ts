@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { installCursorObserver } from '../lib/cursor-observer-installer.js'
 // Install, inspect or remove the COS session hook in ~/.claude/settings.json.
 //
 //   npx --yes @gotcos/glasses-server@latest --hooks install [--dry-run] [--port 3141]
@@ -40,13 +41,15 @@ if (action === 'status') {
 if (action === 'install') {
   if (!Number.isFinite(port) || port <= 0) { console.error('Bad --port'); process.exit(64) }
   const result = installClaudeHooks({ port, deskIdleSeconds: Number.isFinite(deskIdleSeconds) ? deskIdleSeconds : 90, dryRun })
-  print({ action, dryRun, serverApplies, ...(flagsNote ? { note: flagsNote } : {}), ...result })
-  process.exit(result.ok ? 0 : 2)
+  const cursorObserver = result.ok ? installCursorObserver({ dryRun }) : undefined
+  print({ action, dryRun, serverApplies, ...(flagsNote ? { note: flagsNote } : {}), ...result, cursorObserver })
+  process.exit(result.ok && cursorObserver?.ok ? 0 : 2)
 }
 if (action === 'uninstall') {
   const result = uninstallClaudeHooks({ dryRun })
-  print({ action, dryRun, ...result })
-  process.exit(result.ok ? 0 : 2)
+  const cursorObserver = result.ok ? installCursorObserver({ dryRun, uninstall: true }) : undefined
+  print({ action, dryRun, ...result, cursorObserver })
+  process.exit(result.ok && cursorObserver?.ok ? 0 : 2)
 }
 console.error('Usage: --hooks install|status|uninstall [--dry-run] [--port N] [--desk-idle-s N]')
 process.exit(64)

@@ -90,6 +90,7 @@ export const HOOK_SUBSCRIPTIONS: readonly HookSubscription[] = [
   { event: 'Notification', matcher: 'permission_prompt|idle_prompt|elicitation_dialog|agent_needs_input', async: true, timeout: 10 },
   { event: 'SubagentStart', async: true, timeout: 10 },
   { event: 'SubagentStop', async: true, timeout: 10 },
+  { event: 'PreCompact', async: true, timeout: 10 },
   { event: 'PostCompact', async: true, timeout: 10 },
   { event: 'PostModelSwitch', async: true, timeout: 10 },
 ]
@@ -307,6 +308,7 @@ export interface HookStatus {
    * has not run Install hooks since. Questions are then held at most 120 s, as before.
    */
   priorWaitOnly: boolean
+  observerOnlyDrift?: boolean
   /** 6.60.0: our PermissionRequest hook's `timeout` in the settings file, or null (`permissionHookTimeoutS`). */
   permissionHookTimeoutS: number | null
   tokenPresent: boolean
@@ -362,7 +364,8 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   else state = 'installed'
   const priorWaitOnly = state === 'drift' && events.missing.length === 0 && events.drifted.length > 0
     && events.drifted.every(event => events.priorWait.includes(event))
-  return { state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, tokenPresent }
+  const observerOnlyDrift = state === 'drift' && events.missing.length > 0 && events.missing.every(event => event === 'PreCompact') && events.drifted.every(event => events.priorWait.includes(event))
+  return { observerOnlyDrift, state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, tokenPresent }
 }
 
 /**
@@ -397,11 +400,11 @@ export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
  * check, so updating the server never turns cancel from the lens off. Any other drift
  * still is not halt-ready.
  */
-export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha'> & Partial<Pick<HookStatus, 'priorWaitOnly' | 'packageScriptSha'>>): boolean {
+export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | 'scriptSha'> & Partial<Pick<HookStatus, 'priorWaitOnly' | 'observerOnlyDrift' | 'packageScriptSha'>>): boolean {
   if (status.installed === true) return true
   const priorScript = typeof status.scriptSha === 'string' && HALT_CAPABLE_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)
   if (status.state === 'script_outdated') return priorScript
-  if (status.state === 'drift' && status.priorWaitOnly === true) {
+  if (status.state === 'drift' && (status.priorWaitOnly === true || status.observerOnlyDrift === true)) {
     return priorScript || (typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha)
   }
   return false

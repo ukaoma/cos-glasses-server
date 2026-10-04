@@ -1,3 +1,4 @@
+import { installCursorObserver } from '../lib/cursor-observer-installer.js'
 // Session hooks: status, install, uninstall, and today's runs.
 //
 // `GET /api/session-hooks/status` is what Control's banner keys off. Five outcomes on
@@ -32,7 +33,9 @@ export function createSessionHooksRouter(options: { port: number }): Router {
       res.status(409).json({ ok: false, reason: result.reason ?? 'install_failed', status: result.status })
       return
     }
-    res.json({ ok: true, changed: result.changed, scriptCopied: result.scriptCopied, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
+    const cursorObserver = installCursorObserver({ dryRun })
+    if (!cursorObserver.ok) { res.status(409).json({ ok: false, reason: 'cursor_observer_install_failed', cursorObserver, status: result.status }); return }
+    res.json({ ok: true, cursorObserver, changed: result.changed || cursorObserver.changed, scriptCopied: result.scriptCopied, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
   })
 
   router.post('/session-hooks/uninstall', (req, res) => {
@@ -43,7 +46,9 @@ export function createSessionHooksRouter(options: { port: number }): Router {
       res.status(409).json({ ok: false, reason: result.reason ?? 'uninstall_failed', status: result.status })
       return
     }
-    res.json({ ok: true, changed: result.changed, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
+    const cursorObserver = installCursorObserver({ dryRun, uninstall: true })
+    if (!cursorObserver.ok) { res.status(409).json({ ok: false, reason: 'cursor_observer_uninstall_failed', cursorObserver, status: result.status }); return }
+    res.json({ ok: true, cursorObserver, changed: result.changed || cursorObserver.changed, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
   })
 
   // Sessions the hooks saw start and end, for Control's scheduled-job ledger. A run
@@ -57,6 +62,7 @@ export function createSessionHooksRouter(options: { port: number }): Router {
     const all = req.query.all === '1'
     const runs: Array<Record<string, unknown>> = []
     for (const signal of sessionSignalStore.snapshot()) {
+      if (signal.observationOnly) continue
       if (signal.firstSeenAt < sinceMs && !(signal.ended && signal.ended.at >= sinceMs)) continue
       if (!all && isInteractiveEntrypoint(signal.entrypoint)) continue
       runs.push({
