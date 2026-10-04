@@ -1,9 +1,9 @@
-## 6.61.7 — Agent activity and compaction visibility (candidate)
+## 6.61.7 — 2026-10-04 — Agent activity and compaction visibility
 
 - Add display-only child activity to native Sessions list/detail. Codex uses read-only spawn relationships plus each child's lifecycle, with bounded reads, freshness, deduplication and explicit incomplete/unknown counts.
 - Observe Claude subagent identities and compaction hooks. Refresh hooks after upgrading. Native Cursor observers cover subagent start/stop, context compaction and resumed output; installation preserves other hooks. Observers retain no prompts and never trigger queue drains or permission decisions.
 - Stream past oversized top-level Codex context replacement records in bounded chunks instead of declaring completion and disconnecting. Other oversized records keep their existing fallback.
-- Paired with glasses 6.10.590. No model routing or Cursor model-catalog changes. Local fixture canaries and device/live-provider acceptance are recorded separately; publication is not implied by this candidate entry.
+- Paired with glasses 6.10.590. No model routing or Cursor model-catalog changes. Automated fixture canaries pass; physical device and live-provider acceptance are recorded separately.
 
 ## 6.61.6 — 2026-10-03
 

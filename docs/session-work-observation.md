@@ -1,4 +1,4 @@
-# Session child work and context phases — 6.61.7 candidate
+# Session child work and context phases — 6.61.7
 
 This additive, display-only API metadata requires app 6.10.590 to render the new status row. Existing clients ignore it. No model, queue, permission, storage or continuation policy changes.
 
@@ -10,4 +10,4 @@ After publication and server update, use the normal `--hooks install` or Control
 
 An active child without fresh evidence becomes unknown after five minutes; compaction without a resume event becomes unknown after ten. Native Cursor modes that do not emit these events remain unverified. Codex on this installation exposes the context replacement record, not reliable live compaction-start telemetry. Oversized recognized context records are skipped incrementally while the stream stays open; ordinary oversized records keep the existing safe polling fallback.
 
-Validation: full suite 5,829 passed / 2 optional skipped; supplementary three-suite run 63 passed (HTTP provider projection, hook backward compatibility, observer lifecycle). Types passed, production dependency audit zero vulnerabilities, tarball inventory includes the native observer. No live positive Claude/Cursor swarm or physical G2 acceptance is claimed. npm publication, clean-cache registry installation, hook refresh, and device acceptance remain pending.
+Validation: full suite 5,830 passed / 2 optional skipped; supplementary three-suite run 63 passed (HTTP provider projection, hook backward compatibility, observer lifecycle). Types passed, production dependency audit zero vulnerabilities, tarball inventory includes the native observer. No live positive Claude/Cursor swarm or physical G2 acceptance is claimed. npm publication and clean-cache registry installation verified October 4, 2026. dist.integrity: sha512-Tu5HZVGMq6Nr2vq3EYKmYH5RHTl04PX+JitfnzUfvMWNDTNVQwPFqMqqL+Wt1mCKXVGTipNf4EO7Ft+Esi1pCg==. Hook refresh and physical device/native-provider acceptance are deployment-specific gates. App 591 additionally summarizes observed parent sessions on Home without changing tap or swipe behavior.

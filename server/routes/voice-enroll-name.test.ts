@@ -10,8 +10,8 @@ import { voiceRouter } from './voice.js'
 
 const servers: Server[] = []
 
-afterEach(() => {
-  for (const server of servers.splice(0)) server.close()
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
 })
 
 async function harness(): Promise<string> {
@@ -32,7 +32,8 @@ const ENOUGH_AUDIO = Buffer.alloc(2000)
 async function enroll(base: string, name: string, body: Buffer) {
   const res = await fetch(`${base}/api/voice/enroll?name=${encodeURIComponent(name)}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
+    // Each case owns a short-lived server; do not pool sockets across reused ports.
+    headers: { 'Content-Type': 'application/octet-stream', Connection: 'close' },
     body: new Uint8Array(body),
   })
   return { status: res.status, json: await res.json() as Record<string, unknown> }
