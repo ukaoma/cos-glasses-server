@@ -56,6 +56,14 @@ const SCRIPT_6_53_3_SHA256 = 'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16
  * the 6.53.3 script, which is halt-capable and holds a question at most 120 s as before.
  */
 const SCRIPT_6_60_0_SHA256 = '0e1bbb9816c9475436f89f6326d5504eccc9aa6519ff5e466b949d53a73d8439'
+/**
+ * sha256 of the script 6.62.0 ships: Codex and Cursor parity (a provider stamp from the Codex
+ * command, the Codex deny-only halt reply, Cursor's `conversation_id`). Changed on purpose,
+ * with its reinstall plan (Install hooks in COS Control); until then an install keeps the
+ * 6.60.0 script, which stops desk Claude runs exactly as before (B1,
+ * `HALT_CAPABLE_PRIOR_SCRIPT_SHAS`) and cannot stop a Codex run (the Codex hooks need this one).
+ */
+const SCRIPT_6_62_0_SHA256 = '1877c90c5359571dfc74c6d03395104a73925868147e8a50cd9d7b4226b1b5ca'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -600,22 +608,28 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       }
     })
 
-    it('the shipped script is the 6.60.0 script, byte for byte (a change is a reinstall on every Mac)', () => {
+    it('the shipped script is the 6.62.0 script, byte for byte (a change is a reinstall on every Mac)', () => {
       const bytes = readFileSync(SCRIPT)
       // 6.53.0 changed the script DELIBERATELY (the halt check), and with it the PreToolUse
       // subscription; 6.53.3 changed it again (the single-entry rewrite), subscription as it
       // was; 6.60.0 again (the PermissionRequest wait, $2), with the PermissionRequest
       // subscription (630 s and the argument). The rollout is the plan's: Update Server, then
       // Install hooks in COS Control. Until that reinstall `hookStatus()` reads `drift` with
-      // `priorWaitOnly`; the 6.53.3 script stays halt-capable meanwhile.
-      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_60_0_SHA256)
+      // `priorWaitOnly`; the 6.53.3 script stays halt-capable meanwhile. 6.62.0 changed it
+      // again (Codex and Cursor), with no Claude subscription change: `script_outdated` until
+      // Install hooks, and the 6.60.0 script stays halt-capable for Claude meanwhile (B1).
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_62_0_SHA256)
+      expect(SCRIPT_6_62_0_SHA256).not.toBe(SCRIPT_6_60_0_SHA256)
       expect(SCRIPT_6_60_0_SHA256).not.toBe(SCRIPT_6_53_3_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_0_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_3_PREQA_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
       // The current script is never its own "prior"; every earlier halt-capable one is.
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256])
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_60_0_SHA256)
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256])
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_62_0_SHA256)
+      // And the 6.61.7 fixture IS that 6.60.0 script, byte for byte.
+      const fixture = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7'))
+      expect(createHash('sha256').update(fixture).digest('hex')).toBe(SCRIPT_6_60_0_SHA256)
       // And it still posts to exactly the route this server serves.
       expect(bytes.toString('utf8')).toContain(`"http://127.0.0.1:$PORT${PERMISSION_BROKER_HOOK_PATH}"`)
     })

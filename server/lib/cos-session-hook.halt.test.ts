@@ -8,6 +8,8 @@
 // macOS-only (BSD head); skipped elsewhere, like the script suite.
 
 import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -389,5 +391,149 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: one read, and a drained std
     const blocked = { home: q.home, spool: join(q.home, 'not-a-dir', 'hook-spool') }
     writeFileSync(join(q.home, 'not-a-dir'), 'x')
     expect(await stream('UserPromptSubmit', [big({ hook_event_name: 'UserPromptSubmit', prompt: 'p' })], blocked)).toEqual({ status: 0, stdout: '', writerError: null })
+  })
+})
+
+// 6.62.0 provider parity (plan 2.2). Codex runs this same script from ~/.codex/hooks.json with
+// COS_HOOK_PROVIDER=codex baked into its command; Cursor runs it from ~/.claude/settings.json.
+describe.skipIf(!onMac)('bin/hooks/cos-session-hook: Codex and Cursor (6.62.0)', () => {
+  /** The three halt replies, byte for byte. Claude and Cursor keep the 6.53 bytes (C10). */
+  const CLAUDE_DENY = '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
+  const CURSOR_DENY = CLAUDE_DENY
+  /** Codex rejects `continue:false` here and then RUNS the tool (C10); deny alone blocks it (C12). */
+  const CODEX_DENY = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS. Stop and do not work around this."}}'
+  const CODEX = '01a10c4b-0000-7000-8000-00000000c0de'
+  const CURSOR = '8c149bba-82b6-4b73-9f2f-eb26e72a72a9'
+  const OTHER = 'b2c3d4e5-0000-4000-8000-00000000beef'
+
+  function halted(sessionIds: string[] = []) {
+    const paths = home()
+    const halt = join(dirname(paths.spool), 'session-halt')
+    mkdirSync(halt, { recursive: true })
+    for (const id of sessionIds) writeFileSync(join(halt, id), JSON.stringify({ at: Date.now(), clientCancelId: 'cc-test-1' }))
+    return { ...paths, halt, tmp: tmpRoot('cos-hook-tmp-') }
+  }
+  function runAs(event: string, stdin: string, p: ReturnType<typeof halted>, extra: Record<string, string> = {}) {
+    return spawnSync('/bin/sh', [SCRIPT, event], {
+      input: stdin,
+      env: { HOME: dirname(p.home), COS_GLASSES_HOME: p.home, COS_HOOK_SPOOL: p.spool, PATH: '/usr/bin:/bin', TMPDIR: p.tmp, ...extra },
+      timeout: 10_000,
+    })
+  }
+  /** A Codex PreToolUse as codex-cli 0.160.0 writes it (C1): session_id first, the rollout second. */
+  const codexTool = (id = CODEX) => JSON.stringify({
+    session_id: id, transcript_path: `/Users/example/.codex/sessions/2026/10/05/rollout-x-${id}.jsonl`, cwd: '/Users/example/Ukaoma Chief Of Staff',
+    hook_event_name: 'PreToolUse', model: 'gpt-6.1-sol', permission_mode: 'bypassPermissions', turn_id: 't1', tool_name: 'Bash', tool_input: { command: 'touch x' }, tool_use_id: 'call_1',
+  })
+  /** A Cursor Claude-compatible PreToolUse in the recorded key order (W7): conversation_id at byte 1, session_id behind tool_input. */
+  const cursorTool = (input: Record<string, unknown>) => JSON.stringify({
+    conversation_id: CURSOR, generation_id: CURSOR, model: 'composer-2.5', tool_name: 'Shell', tool_input: input, tool_use_id: 'u1',
+    cwd: '/Users/example/Ukaoma Chief Of Staff', session_id: CURSOR, hook_event_name: 'preToolUse', cursor_version: '2026.10.01-e373342',
+    workspace_roots: ['/Users/example/Ukaoma Chief Of Staff'], user_email: 'x@example.com', transcript_path: null,
+  })
+
+  it('the three halt replies, byte for byte: Claude and Cursor unchanged, Codex deny-only', () => {
+    expect(JSON.parse(CODEX_DENY)).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Cancelled from COS. Stop and do not work around this.' } })
+    expect(CODEX_DENY).not.toContain('continue')
+    const claude = halted(['a1b2c3d4-0000-4000-8000-00000000abcd'])
+    expect(runAs('PreToolUse', JSON.stringify({ session_id: 'a1b2c3d4-0000-4000-8000-00000000abcd', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }), claude).stdout.toString()).toBe(CLAUDE_DENY)
+    const cursor = halted([CURSOR])
+    expect(runAs('PreToolUse', cursorTool({ command: 'touch x' }), cursor, { CURSOR_VERSION: '2026.10.01' }).stdout.toString()).toBe(CURSOR_DENY)
+    const codex = halted([CODEX])
+    const r = runAs('PreToolUse', codexTool(), codex, { COS_HOOK_PROVIDER: 'codex' })
+    expect(r.status).toBe(0)
+    expect(r.stdout.toString()).toBe(CODEX_DENY)
+    expect(r.stderr.toString()).toBe('')
+    // Nothing spooled for a plain tool call, marker kept for the next one.
+    expect(spooled(codex.spool)).toEqual([])
+    expect(existsSync(join(codex.halt, CODEX))).toBe(true)
+    // An unknown COS_HOOK_PROVIDER is no provider: the Claude bytes.
+    expect(runAs('PreToolUse', codexTool(), codex, { COS_HOOK_PROVIDER: 'gemini' }).stdout.toString()).toBe(CLAUDE_DENY)
+    // No marker for this Codex thread: nothing at all.
+    const quiet = halted([OTHER])
+    expect(runAs('PreToolUse', codexTool(), quiet, { COS_HOOK_PROVIDER: 'codex' }).stdout.toString()).toBe('')
+  })
+
+  it('Cursor: conversation_id decides, even behind a 10 KiB tool input that names another session (W7)', () => {
+    // The input names another session EARLY (inside the first read) and is 10 KiB long.
+    const big = { session_id: OTHER, command: 'apply', content: 'q'.repeat(10 * 1024) }
+    const payload = cursorTool(big)
+    expect(payload.indexOf('"conversation_id"')).toBe(1)
+    // The payload's own session_id sits past the 8 KiB the halt check reads at most.
+    expect(payload.indexOf(`"session_id":"${CURSOR}"`)).toBeGreaterThan(10 * 1024)
+    expect(payload.indexOf(`"session_id":"${OTHER}"`)).toBeLessThan(payload.indexOf(`"session_id":"${CURSOR}"`))
+    // This composer is halted: it stops.
+    const p = halted([CURSOR])
+    expect(runAs('PreToolUse', payload, p, { CURSOR_VERSION: '2026.10.01' }).stdout.toString()).toBe(CURSOR_DENY)
+    // Only the session named inside tool_input is halted: nothing stops (6.61.7 stopped the wrong run here).
+    const q = halted([OTHER])
+    expect(runAs('PreToolUse', payload, q, { CURSOR_VERSION: '2026.10.01' }).stdout.toString()).toBe('')
+    // A new Cursor prompt clears its OWN marker by conversation_id.
+    const s = halted([CURSOR, OTHER])
+    const prompt = JSON.stringify({ conversation_id: CURSOR, generation_id: CURSOR, prompt: `about ${OTHER}`, session_id: CURSOR, hook_event_name: 'beforeSubmitPrompt', cursor_version: '2026.10.01' })
+    expect(runAs('UserPromptSubmit', prompt, s).status).toBe(0)
+    expect(existsSync(join(s.halt, CURSOR))).toBe(false)
+    expect(existsSync(join(s.halt, OTHER))).toBe(true)
+  })
+
+  it('Claude: a conversation_id inside tool_input never wins over the payload\'s own first session_id', () => {
+    const own = 'a1b2c3d4-0000-4000-8000-00000000abcd'
+    const p = halted([OTHER])
+    const claude = JSON.stringify({ session_id: own, hook_event_name: 'PreToolUse', tool_name: 'mcp__x__y', tool_input: { conversation_id: OTHER } })
+    expect(runAs('PreToolUse', claude, p).stdout.toString()).toBe('')
+    const q = halted([own])
+    expect(runAs('PreToolUse', claude, q).stdout.toString()).toBe(CLAUDE_DENY)
+  })
+
+  it('Codex events are spooled with "provider":"codex", Interrupt included, and parse as Codex', () => {
+    const p = halted()
+    const env = { COS_HOOK_PROVIDER: 'codex' }
+    const base = { session_id: CODEX, transcript_path: null, cwd: '/x', model: 'gpt-6.1-sol', permission_mode: 'bypassPermissions' }
+    expect(runAs('SessionStart', JSON.stringify({ ...base, hook_event_name: 'SessionStart', source: 'startup' }), p, env).status).toBe(0)
+    expect(runAs('UserPromptSubmit', JSON.stringify({ ...base, hook_event_name: 'UserPromptSubmit', prompt: 'go', turn_id: 't1' }), p, env).status).toBe(0)
+    expect(runAs('Interrupt', JSON.stringify({ ...base, hook_event_name: 'Interrupt', turn_id: 't1' }), p, env).status).toBe(0)
+    const parsed = spooled(p.spool).sort().map(n => {
+      const text = readFileSync(join(p.spool, n), 'utf-8')
+      expect(text).toContain('"provider":"codex"')
+      const e = parseHookEnvelope(text)
+      if (!e.ok) throw new Error(e.reason)
+      return e.envelope
+    })
+    expect(parsed.map(e => e.event).sort()).toEqual(['Interrupt', 'SessionStart', 'UserPromptSubmit'])
+    expect(parsed.every(e => e.provider === 'codex' && e.sessionId === CODEX)).toBe(true)
+    expect(parsed.find(e => e.event === 'SessionStart')?.payload.model).toBe('gpt-6.1-sol')
+    // The Claude command stamps nothing: the server infers from the payload.
+    const q = halted()
+    expect(runAs('Stop', JSON.stringify({ session_id: 'a1b2c3d4-0000-4000-8000-00000000abcd', hook_event_name: 'Stop' }), q).status).toBe(0)
+    expect(readFileSync(join(q.spool, spooled(q.spool)[0]!), 'utf-8')).not.toContain('"provider"')
+  })
+
+  it('a Codex Stop never asks for a Cursor follow-up, whatever its environment says', async () => {
+    // A listener in THIS process stands in for the server's stop-followup route.
+    const hits: string[] = []
+    const listener = createServer((req, res) => { hits.push(String(req.url)); res.end('{}') })
+    await new Promise<void>(r => listener.listen(0, '127.0.0.1', () => r()))
+    try {
+      const p = halted()
+      writeFileSync(join(p.home, 'hook-token'), 'tok')
+      writeFileSync(join(p.home, 'hook-port'), String((listener.address() as AddressInfo).port))
+      const stop = JSON.stringify({ session_id: CODEX, transcript_path: null, cwd: '/x', hook_event_name: 'Stop', turn_id: 't1', cursor_version: 'forged', last_assistant_message: 'done' })
+      const run = (extra: Record<string, string>) => new Promise<{ status: number | null; stdout: string }>(resolveRun => {
+        const child = spawn('/bin/sh', [SCRIPT, 'Stop'], { env: { HOME: dirname(p.home), COS_GLASSES_HOME: p.home, COS_HOOK_SPOOL: p.spool, PATH: '/usr/bin:/bin', TMPDIR: p.tmp, CURSOR_VERSION: 'forged', ...extra } })
+        let stdout = ''
+        child.stdout.on('data', c => { stdout += c })
+        child.on('close', status => resolveRun({ status, stdout }))
+        child.stdin.end(stop)
+      })
+      expect(await run({ COS_HOOK_PROVIDER: 'codex' })).toEqual({ status: 0, stdout: '' })
+      expect(hits).toEqual([])
+      expect(spooled(p.spool)).toHaveLength(1)
+      // The control: the same payload through the Claude command does ask, so the listener
+      // above would have seen a Codex request had one been made.
+      expect((await run({})).status).toBe(0)
+      expect(hits).toEqual(['/hooks/cursor/stop-followup'])
+    } finally {
+      await new Promise<void>(r => listener.close(() => r()))
+    }
   })
 })
