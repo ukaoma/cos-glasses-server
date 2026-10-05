@@ -29,7 +29,7 @@ export const LAST_DRAIN_STAMP = '.last-drain'
 
 /**
  * `<ms>-<pid>-<Event>.json` from the hook script; 6.62.0: also `<ms>-<pid>-<12 hex>-<Event>.json`,
- * the Cursor observer's name since it shipped (6.61.5). The nonce keeps two observer runs in one
+ * the Cursor observer's name since it shipped (6.61.7). The nonce keeps two observer runs in one
  * millisecond apart; until 6.62.0 every one of its files was moved aside as unrecognized.
  * Ordering reads groups 1 and 2 only.
  */

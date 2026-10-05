@@ -129,7 +129,7 @@ describe('AgentThought: memory and live feed only (plan 1.7, W18)', () => {
   const thought = (ts: number, text: unknown, extra: Record<string, unknown> = {}): HookEnvelope =>
     ({ ts, ppid: null, event: 'AgentThought', sessionId: CURSOR, provider: 'cursor', payload: { session_id: CURSOR, display_only: true, text, ...extra } })
 
-  it('keeps the newest thought capped at 280, tells only the thought listeners, and never opens a turn', () => {
+  it('keeps the newest thought capped at AGENT_THOUGHT_MAX, tells only the thought listeners, and never opens a turn', () => {
     const store = new SessionSignalStore(noSpawn)
     const signals: string[] = []
     const thoughts: string[] = []
