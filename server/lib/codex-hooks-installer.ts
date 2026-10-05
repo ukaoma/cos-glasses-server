@@ -390,7 +390,16 @@ export function readCodexHookTrust(options: { binary: string; cwd?: string; env?
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { child?.kill('SIGTERM') } catch { /* gone */ }
+      const proc = child
+      try { proc?.kill('SIGTERM') } catch { /* gone */ }
+      // QA W4: an app-server that ignores SIGTERM is killed, never left behind once a minute.
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        const kill = setTimeout(() => {
+          if (proc.exitCode === null && proc.signalCode === null) { try { proc.kill('SIGKILL') } catch { /* gone */ } }
+        }, CODEX_TRUST_KILL_GRACE_MS)
+        kill.unref?.()
+        proc.once('exit', () => clearTimeout(kill))
+      }
       resolvePromise(value)
     }
     const timer = setTimeout(() => finish({ trust: 'unknown', listed: 0, reason: 'timeout' }), options.timeoutMs ?? CODEX_TRUST_TIMEOUT_MS)
@@ -436,23 +445,51 @@ export function readCodexHookTrust(options: { binary: string; cwd?: string; env?
   })
 }
 
-/** Codex's trust, cached five minutes (a spawn of the app-server is not a health-poll cost). */
-export const CODEX_TRUST_CACHE_MS = 5 * 60_000
+/**
+ * QA W4: how often the background tick reads Codex's trust, and how long a read stays the
+ * answer. The TTL is three refreshes, so a read that lands late (a 15 s timeout, a slow tick)
+ * never leaves a gap where trust reads `unknown` and a desk cancel turns off for a cycle.
+ */
+export const CODEX_TRUST_REFRESH_MS = 5 * 60_000
+export const CODEX_TRUST_CACHE_MS = 3 * CODEX_TRUST_REFRESH_MS
+/** After SIGTERM, an app-server still running this long later is SIGKILLed. */
+export const CODEX_TRUST_KILL_GRACE_MS = 2_000
+
+/** A read that did not get Codex's answer at all. It never replaces the last answer it got. */
+const TRUST_READ_FAILURES: ReadonlySet<string> = new Set(['spawn_failed', 'timeout', 'rpc_error', 'no_binary'])
 
 let trustCache: { at: number; value: CodexTrustRead } | null = null
+let lastFailure: { at: number; reason: string } | null = null
 let trustInFlight: Promise<CodexTrustRead> | null = null
+let trustGeneration = 0
 
-export function cachedCodexHookTrust(nowMs = Date.now()): (CodexTrustRead & { checkedAt: number | null }) {
-  if (trustCache && nowMs - trustCache.at < CODEX_TRUST_CACHE_MS) return { ...trustCache.value, checkedAt: trustCache.at }
-  return { trust: 'unknown', listed: 0, reason: trustCache ? 'stale' : 'unchecked', checkedAt: trustCache?.at ?? null }
+/**
+ * Codex's trust as health and the desk cancel read it: the newest ANSWER (trusted, untrusted,
+ * modified, managed, or `unknown` with `not_listed`) for CODEX_TRUST_CACHE_MS. A read that
+ * failed (timeout, a dead app-server) keeps the last answer and is named in `trustReason`.
+ *   trustReason  null: a fresh answer and the newest read got it
+ *                `<code>`: the newest read failed with that code (the answer shown is older)
+ *                `not_listed`: Codex answered and lists none of our hooks
+ *                `stale`: the newest answer is past the TTL; `unchecked`: never read
+ */
+export function cachedCodexHookTrust(nowMs = Date.now()): (CodexTrustRead & { checkedAt: number | null; trustReason: string | null }) {
+  const failedSince = lastFailure && (!trustCache || lastFailure.at >= trustCache.at) ? lastFailure.reason : null
+  if (trustCache && nowMs - trustCache.at < CODEX_TRUST_CACHE_MS) {
+    return { ...trustCache.value, checkedAt: trustCache.at, trustReason: failedSince ?? trustCache.value.reason }
+  }
+  const reason = trustCache ? 'stale' : (failedSince ?? 'unchecked')
+  return { trust: 'unknown', listed: 0, reason, checkedAt: trustCache?.at ?? null, trustReason: reason }
 }
 
 /**
- * Refresh the trust cache now (after an install, or on the background tick). One read at a
- * time; a caller during a read gets that read. With no Codex binary the answer is `unknown`.
+ * Read Codex's trust now: on the background tick, or after an install. One read at a time;
+ * a tick during a read gets that read. `fresh` (after an install) starts a NEW read whatever
+ * is in flight, and only the newest read started may write the answer, so a read begun
+ * before the install can never stand in for one after it (QA W4).
  */
-export function refreshCodexHookTrust(options: { binary?: string; cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; now?: () => number } = {}): Promise<CodexTrustRead> {
-  if (trustInFlight) return trustInFlight
+export function refreshCodexHookTrust(options: { binary?: string; cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; now?: () => number; fresh?: boolean } = {}): Promise<CodexTrustRead> {
+  if (trustInFlight && options.fresh !== true) return trustInFlight
+  const generation = ++trustGeneration
   const binary = options.binary ?? (() => {
     const resolved = resolveProviderBinary('codex', options.env ?? process.env)
     return resolved.ok ? resolved.path : null
@@ -460,16 +497,26 @@ export function refreshCodexHookTrust(options: { binary?: string; cwd?: string; 
   const read = binary
     ? readCodexHookTrust({ binary, cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs })
     : Promise.resolve<CodexTrustRead>({ trust: 'unknown', listed: 0, reason: 'no_binary' })
-  trustInFlight = read.then(value => {
-    trustCache = { at: (options.now ?? Date.now)(), value }
+  const pending: Promise<CodexTrustRead> = read.then(value => {
+    if (generation !== trustGeneration) return value
+    const at = (options.now ?? Date.now)()
+    if (value.trust === 'unknown' && value.reason && TRUST_READ_FAILURES.has(value.reason)) {
+      lastFailure = { at, reason: value.reason }
+      console.warn(`[codex-hooks] trust read failed (${value.reason}); keeping the last answer`)
+    } else {
+      trustCache = { at, value }
+    }
     return value
-  }).finally(() => { trustInFlight = null })
-  return trustInFlight
+  }).finally(() => { if (trustInFlight === pending) trustInFlight = null })
+  trustInFlight = pending
+  return pending
 }
 
 export function __resetCodexHookTrustForTests(): void {
   trustCache = null
+  lastFailure = null
   trustInFlight = null
+  trustGeneration = 0
 }
 
 /** For `--hooks status`: say in words what a Codex state means. Null when ready. */

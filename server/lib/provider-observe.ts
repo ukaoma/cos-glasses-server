@@ -14,7 +14,8 @@
 // refresh (`startProviderObserveRefresh`); the install routes refresh after they write. A
 // process that never started it (every test) reports `checkedAt: null` and reads no home file.
 
-import { cachedCodexHookTrust, codexHookStatus, codexPresent, refreshCodexHookTrust, type CodexHookStatus, type CodexHookTrust } from './codex-hooks-installer.js'
+import { CODEX_TRUST_REFRESH_MS, cachedCodexHookTrust, codexHookStatus, codexPresent, refreshCodexHookTrust, type CodexHookStatus, type CodexHookTrust } from './codex-hooks-installer.js'
+import { sweepStaleCursorSpawnDirs } from './cursor-spawn-env.js'
 import { cursorObserverStatus } from './cursor-observer-installer.js'
 import { setCodexDeskCancelReady } from './session-cancel.js'
 
@@ -24,8 +25,17 @@ export interface CodexHooksHealth {
   installed: boolean
   /** The install state word (`CodexHookStatus.state`), or null when Codex is not present. */
   state: CodexHookStatus['state'] | null
-  /** Codex's own word through `hooks/list` (K3); `unknown` until read, or when the read failed. */
+  /**
+   * Codex's own word through `hooks/list` (K3): the newest answer for CODEX_TRUST_CACHE_MS, kept
+   * through a failed read (QA W4); `unknown` until read, past the TTL, or when not installed.
+   */
   trust: CodexHookTrust
+  /**
+   * QA W4: why `trust` says what it says when it is not a fresh answer: the newest read's failure
+   * code (`timeout`, `rpc_error`, `spawn_failed`, `no_binary`), `not_listed`, `stale`,
+   * `unchecked`, or `not_installed`. Null for a fresh answer.
+   */
+  trustReason: string | null
   /** The stable script is this package's: the only script whose Codex halt reply Codex honours. */
   scriptOk: boolean
   /** When the file status was last read; null when this process never read it. */
@@ -69,6 +79,7 @@ export function codexHooksHealthField(nowMs = Date.now()): CodexHooksHealth {
     installed: codex?.status?.installed === true,
     state: codex?.status?.state ?? null,
     trust: codex?.status?.installed === true ? trust.trust : 'unknown',
+    trustReason: codex?.status?.installed === true ? trust.trustReason : 'not_installed',
     scriptOk: codex?.status?.scriptOk === true,
     checkedAt: iso(codex?.at),
     trustCheckedAt: iso(trust.checkedAt),
@@ -145,19 +156,7 @@ export function providerObserveFields(claudeHooks: { state: string; ready: boole
   }
 }
 
-/**
- * Deep-merge per-provider blocks, so the observe block here and an `act` block built elsewhere
- * (plan 3.11) can share one `providers` key on the wire.
- */
-export function mergeProviderBlocks(...blocks: Array<Record<string, Record<string, unknown>>>): Record<string, Record<string, unknown>> {
-  const out: Record<string, Record<string, unknown>> = {}
-  for (const block of blocks) {
-    for (const [provider, fields] of Object.entries(block)) out[provider] = { ...(out[provider] ?? {}), ...fields }
-  }
-  return out
-}
-
-/** File status every half minute; Codex trust every five (its cache window). */
+/** File status every half minute; Codex trust every CODEX_TRUST_REFRESH_MS (a third of its cache window). */
 export const PROVIDER_FILES_REFRESH_MS = 30_000
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -170,12 +169,20 @@ let lastTrustAt = 0
 export function startProviderObserveRefresh(): () => void {
   // The desk cancel reads Codex readiness from the same snapshot health shows (plan 3.8).
   setCodexDeskCancelReady(() => codexDeskHaltReady())
+  // QA W20: per-spawn Cursor config folders a crash or a restart left behind are reaped at
+  // boot, not only when the next Cursor spawn happens to run.
+  try {
+    const swept = sweepStaleCursorSpawnDirs()
+    if (swept > 0) console.log(`[provider-observe] removed ${swept} stale Cursor spawn folder(s)`)
+  } catch (error) {
+    console.warn(`[provider-observe] Cursor spawn sweep skipped: ${error instanceof Error ? error.name : 'error'}`)
+  }
   const tick = () => {
     refreshProviderHookFiles()
     const now = Date.now()
-    if (snapshot.codex?.status?.installed === true && now - lastTrustAt >= 5 * 60_000) {
+    if (snapshot.codex?.status?.installed === true && now - lastTrustAt >= CODEX_TRUST_REFRESH_MS) {
       lastTrustAt = now
-      void refreshCodexHookTrust().catch(() => { /* `unknown` stands */ })
+      void refreshCodexHookTrust().catch(() => { /* the last answer stands */ })
     }
   }
   tick()
@@ -184,12 +191,15 @@ export function startProviderObserveRefresh(): () => void {
   return () => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null }
 }
 
-/** After an install or uninstall: the files now, and Codex's trust in the background. */
+/**
+ * After an install or uninstall: the files now, and a FRESH trust read in the background. A read
+ * already in flight began before the write and is superseded, never reused (QA W4).
+ */
 export function refreshAfterInstall(): void {
   refreshProviderHookFiles()
   if (snapshot.codex?.status?.installed === true) {
     lastTrustAt = Date.now()
-    void refreshCodexHookTrust().catch(() => { /* `unknown` stands */ })
+    void refreshCodexHookTrust({ fresh: true }).catch(() => { /* the last answer stands */ })
   }
 }
 

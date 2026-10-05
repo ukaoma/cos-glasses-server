@@ -163,7 +163,7 @@ describe('provider observation on health (6.62.0)', () => {
   it('sessionHooks.codex and cursorObserver sit beside the Claude fields; providers.*.observe has the five sources', async () => {
     __resetProviderObserveForTests()
     const body = await (await fetch(`${base}/api/health`)).json() as any
-    expect(body.sessionHooks.codex).toEqual({ present: false, installed: false, state: null, trust: 'unknown', scriptOk: false, checkedAt: null, trustCheckedAt: null })
+    expect(body.sessionHooks.codex).toEqual({ present: false, installed: false, state: null, trust: 'unknown', trustReason: 'not_installed', scriptOk: false, checkedAt: null, trustCheckedAt: null })
     expect(body.sessionHooks.cursorObserver).toEqual({ installed: false, nodeOk: false, checkedAt: null })
     // Claude's own words are exactly where and what they were.
     expect(['installed', 'drift', 'missing', 'script_outdated', 'disabled_by_settings', 'settings_unparseable', 'settings_symlink', 'settings_unreadable']).toContain(body.sessionHooks.state)
@@ -202,7 +202,7 @@ describe('provider observation on health (6.62.0)', () => {
       refreshProviderHookFiles()
       // Codex installed, Claude not yet: Claude's words stay Claude's (B2), nothing leaks across.
       const codexOnly = await (await fetch(`${base}/api/health`)).json() as any
-      expect(codexOnly.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown' })
+      expect(codexOnly.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown', trustReason: 'unchecked' })
       expect(codexOnly.sessionHooks.state).toBe('missing')
       expect(codexOnly.sessionHooks.installed).toBe(false)
       expect(codexOnly.features.sessionCancel).toMatchObject({ deskClaude: false, deskCodex: false, deskCursor: false })

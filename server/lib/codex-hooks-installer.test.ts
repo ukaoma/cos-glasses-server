@@ -13,6 +13,9 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { hookStatus, installClaudeHooks, packagedHookScriptPath, type HookPaths } from './claude-hooks-installer.js'
 import {
   CODEX_HOOK_SUBSCRIPTIONS,
+  CODEX_TRUST_CACHE_MS,
+  CODEX_TRUST_KILL_GRACE_MS,
+  CODEX_TRUST_REFRESH_MS,
   __resetCodexHookTrustForTests,
   cachedCodexHookTrust,
   codexHookAdvice,
@@ -246,15 +249,19 @@ describe('trust from Codex\'s own app-server (K3)', () => {
   afterEach(() => __resetCodexHookTrustForTests())
 
   /** A stand-in `codex` that answers initialize and hooks/list exactly as the v2 schema says. */
-  function fakeCodex(f: ReturnType<typeof fixture>, mode: 'answer' | 'exit' | 'silent', hooks: unknown[] = []): string {
-    const bin = join(f.home, 'Fake Codex.app', 'codex')
-    mkdirSync(join(f.home, 'Fake Codex.app'), { recursive: true })
+  let fakes = 0
+  function fakeCodex(f: ReturnType<typeof fixture>, mode: 'answer' | 'exit' | 'silent' | 'stubborn', hooks: unknown[] = [], delayMs = 0): string {
+    const dir = join(f.home, `Fake Codex ${++fakes}.app`)
+    const bin = join(dir, 'codex')
+    mkdirSync(dir, { recursive: true })
     const log = join(f.home, 'calls.log')
     writeFileSync(bin, `#!${process.execPath}
 const fs = require('node:fs')
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+fs.writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid))
 const mode = ${JSON.stringify(mode)}
 if (mode === 'exit') process.exit(3)
+if (mode === 'stubborn') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000) }
 let buf = ''
 process.stdin.on('data', c => {
   buf += c
@@ -262,9 +269,9 @@ process.stdin.on('data', c => {
   while ((i = buf.indexOf('\\n')) >= 0) {
     const msg = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1)
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(msg) + '\\n')
-    if (mode === 'silent') continue
+    if (mode === 'silent' || mode === 'stubborn') continue
     if (msg.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: 'fake' } }) + '\\n')
-    if (msg.id === 2) process.stdout.write(JSON.stringify({ id: 2, result: { data: [{ cwd: msg.params.cwds[0], errors: [], warnings: [], hooks: ${JSON.stringify(hooks)} }] } }) + '\\n')
+    if (msg.id === 2) setTimeout(() => process.stdout.write(JSON.stringify({ id: 2, result: { data: [{ cwd: msg.params.cwds[0], errors: [], warnings: [], hooks: ${JSON.stringify(hooks)} }] } }) + '\\n'), ${delayMs})
   }
 })
 `)
@@ -309,14 +316,56 @@ process.stdin.on('data', c => {
     expect(foldCodexTrust(all.map(h => ({ ...h, trustStatus: 'managed' }))).trust).toBe('managed')
   })
 
-  it('the cache: unknown until read, the read for five minutes, then stale', async () => {
+  it('the cache: unknown until read, then the answer for longer than a refresh period (QA W4), then stale', async () => {
     const f = fixture()
-    expect(cachedCodexHookTrust(1_000)).toMatchObject({ trust: 'unknown', reason: 'unchecked', checkedAt: null })
+    expect(CODEX_TRUST_CACHE_MS).toBeGreaterThan(CODEX_TRUST_REFRESH_MS)
+    expect(cachedCodexHookTrust(1_000)).toMatchObject({ trust: 'unknown', reason: 'unchecked', trustReason: 'unchecked', checkedAt: null })
+    const t = 10_000
+    await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'trusted')), cwd: f.home, now: () => t })
+    expect(cachedCodexHookTrust(t + 1_000)).toMatchObject({ trust: 'trusted', trustReason: null, checkedAt: t })
+    // A refresh that lands late (a timeout, a slow tick) leaves no `unknown` gap.
+    expect(cachedCodexHookTrust(t + CODEX_TRUST_REFRESH_MS + 60_000)).toMatchObject({ trust: 'trusted', checkedAt: t })
+    expect(cachedCodexHookTrust(t + CODEX_TRUST_CACHE_MS)).toMatchObject({ trust: 'unknown', reason: 'stale', trustReason: 'stale', checkedAt: t })
+  })
+
+  it('QA W4: a failed read keeps the last answer and names why; a new answer replaces it', async () => {
+    const f = fixture()
     let t = 10_000
     await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'trusted')), cwd: f.home, now: () => t })
-    expect(cachedCodexHookTrust(t + 1_000)).toMatchObject({ trust: 'trusted', checkedAt: 10_000 })
-    expect(cachedCodexHookTrust(t + 5 * 60_000 + 1)).toMatchObject({ trust: 'unknown', reason: 'stale', checkedAt: 10_000 })
-    t = 0
+    t = 20_000
+    expect(await refreshCodexHookTrust({ binary: fakeCodex(f, 'silent'), cwd: f.home, timeoutMs: 300, now: () => t })).toMatchObject({ trust: 'unknown', reason: 'timeout' })
+    expect(cachedCodexHookTrust(t + 1)).toMatchObject({ trust: 'trusted', checkedAt: 10_000, trustReason: 'timeout' })
+    t = 30_000
+    await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'untrusted')), cwd: f.home, now: () => t })
+    expect(cachedCodexHookTrust(t + 1)).toMatchObject({ trust: 'untrusted', checkedAt: 30_000, trustReason: null })
+    // Codex answering that it lists none of ours IS an answer, and replaces the last one.
+    t = 40_000
+    await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', []), cwd: f.home, now: () => t })
+    expect(cachedCodexHookTrust(t + 1)).toMatchObject({ trust: 'unknown', checkedAt: 40_000, trustReason: 'not_listed' })
+  })
+
+  it('QA W4: a fresh read after an install supersedes one already in flight; the older one never writes', async () => {
+    const f = fixture()
+    const before = refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'untrusted'), 600), cwd: f.home })
+    // A tick during the read joins it; the install starts a NEW one.
+    expect(refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'modified')), cwd: f.home })).toBe(before)
+    const after = refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'trusted')), cwd: f.home, fresh: true })
+    expect(after).not.toBe(before)
+    expect((await after).trust).toBe('trusted')
+    expect((await before).trust).toBe('untrusted')
+    expect(cachedCodexHookTrust().trust).toBe('trusted')
+  })
+
+  it('QA W4: an app-server that ignores SIGTERM is SIGKILLed after the grace', { timeout: 15_000 }, async () => {
+    const f = fixture()
+    const bin = fakeCodex(f, 'stubborn')
+    expect(await readCodexHookTrust({ binary: bin, cwd: f.home, timeoutMs: 400 })).toMatchObject({ trust: 'unknown', reason: 'timeout' })
+    const pid = Number(readFileSync(join(dirname(bin), 'pid'), 'utf8'))
+    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    expect(alive()).toBe(true)
+    const deadline = Date.now() + CODEX_TRUST_KILL_GRACE_MS + 3_000
+    while (alive() && Date.now() < deadline) await new Promise(r => setTimeout(r, 100))
+    expect(alive()).toBe(false)
   })
 })
 
