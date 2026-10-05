@@ -27,6 +27,7 @@ import {
   readCodexHookTrust,
   refreshCodexHookTrust,
   stableCodexHookScriptPath,
+  stripCodexHooks,
   uninstallCodexHooks,
 } from './codex-hooks-installer.js'
 import { createSessionHooksRouter, type SessionHooksCodexDeps } from '../routes/session-hooks.js'
@@ -58,6 +59,23 @@ function fixture() {
 const user = (name: string, matcher?: string) => ({ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command: `'/Users/me/bin/${name}'` }] })
 
 describe('the generated hooks.json (K2 fields, Claude-shaped, the provider in the command)', () => {
+  it('preserves a mixed user/COS block when it is the first matching block, on install and uninstall', () => {
+    const f = fixture()
+    const mixed = { hooks: [
+      { type: 'command', command: `'${f.scriptPath}' Stop` },
+      { type: 'command', command: "'/Users/me/bin/mine'" },
+    ] }
+    const original = { hooks: { Stop: [mixed, user('after')] } }
+    const merged = mergeCodexHooks(original, f.scriptPath, f.hookPaths)
+    if (!merged.ok) throw new Error(merged.reason)
+    const blocks = (merged.settings.hooks as Record<string, unknown[]>).Stop
+    expect(blocks.slice(0, 2)).toEqual(original.hooks.Stop)
+    expect(blocks).toHaveLength(3)
+    const stripped = stripCodexHooks(merged.settings)
+    if (!stripped.ok) throw new Error(stripped.reason)
+    expect((stripped.settings.hooks as Record<string, unknown[]>).Stop).toEqual(original.hooks.Stop)
+  })
+
   it('one block per subscribed event: timeoutSec and an explicit async, COS_HOOK_PROVIDER=codex, never trusted_hash', () => {
     const f = fixture()
     const result = installCodexHooks(f)

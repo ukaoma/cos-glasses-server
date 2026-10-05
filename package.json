@@ -74,7 +74,8 @@
     "work-task-runtime",
     "docs/work-task-runtime.md",
     "!server/scripts/build-work-task-runtime.py",
-    "bin/hooks/cos-cursor-observer.cjs"
+    "bin/hooks/cos-cursor-observer.cjs",
+    "docs/provider-parity.md"
   ],
   "author": "COS Contributors",
   "license": "MIT",

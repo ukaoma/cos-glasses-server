@@ -5176,7 +5176,7 @@ const CASES = [
     file: "server/lib/cursor-bridge.ts",
     find: "import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'\n",
     replace: "",
-    tests: ["server/lib/cursor-spawn-env.test.ts"],
+    tests: ["server/lib/cursor-spawn-env.test.ts", "server/lib/job-trail-codex-cursor-bridges.test.ts"],
   },
   {
     name: "6620-cli-chat-busy-window-ignored",

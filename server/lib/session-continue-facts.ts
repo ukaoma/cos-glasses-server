@@ -1,9 +1,9 @@
 // One resolver for "what model is this session on, and what would a Continue run with"
 // (6.62.0, plans 1.8, 3.2, 3.3, 3.12).
 //
-// Four readers share it, so they cannot disagree:
+// These readers share the resolver; observations may change between reads:
 //   - the attached shim in index.ts (the plan that becomes argv),
-//   - list rows and the detail route (`reported_model`, `continue_note`),
+//   - the detail route (`reported_model`, `continue_note`); list rows skip these reads,
 //   - the attachability verdict (`continue_note`).
 //
 // Every read is bounded and fails to "unknown": `reported_model` is OMITTED on any failure
@@ -33,7 +33,7 @@ import {
   readComposerFacts,
 } from './cursor-session-model.js'
 
-/** The lens's own filter for this field (session-model-identity.ts:14), applied here first. */
+/** The lens's own filter for this field (session-model-identity.ts), applied here first. */
 export const REPORTED_MODEL_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:/ -]*$/
 export const REPORTED_MODEL_MAX = 100
 

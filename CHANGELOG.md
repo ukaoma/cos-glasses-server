@@ -1,27 +1,29 @@
-## 6.62.0 — 2026-10-05 — Provider parity: Claude, Codex and Cursor sessions read and act the same
+## 6.62.0 — 2026-10-05 — Provider parity: Claude, Codex and Cursor session visibility and continuation
 
 Candidate first: published under the `next` dist-tag, promoted to `latest` only after the regression matrix in the plan passes. Pairs with glasses 6.10.600 (copy only); older glasses keep working.
 
 **Permission change on Continue (read this).** A Continue now carries the session's OWN permissions:
 - Codex: the session's model, effort and sandbox from its latest `turn_context`. A Desktop thread recorded as `danger-full-access` resumes with it, but only when its folder is already trusted in `~/.codex/config.toml`; otherwise `workspace-write` (network as the session had it). Unreadable settings fall back to the 6.61 posture with a note. 6.61 resumed every Codex Continue read-only.
-- Cursor: Run Everything (`--force`) on the session's own model (6.61: Ask mode on Composer 2.5 Fast). Forks stay read-only for every provider; Cursor's Fork is a new read-only chat seeded with the session's context.
+- Cursor: Run Everything (`--force`) on the session's own model only for clients sending `X-COS-Continue-Note: 1`; older clients retain Ask mode (6.61: Ask mode on Composer 2.5 Fast). Forks stay read-only for every provider; Cursor's Fork is a new read-only chat seeded with the session's context.
 - Claude: unchanged.
-- Kill switch: `COS_CONTINUE_FULL_PERMISSIONS=0` in `~/.cos-glasses/.env` restores the 6.61 argv byte for byte. Rows, detail and the attach verdict carry a `continue_note` (≤60 chars) saying what will run.
+- Kill switch: `COS_CONTINUE_FULL_PERMISSIONS=0` in `~/.cos-glasses/.env` restores the 6.61 argv byte for byte. Detail and the attach verdict carry a `continue_note` (≤60 chars) saying what will run.
 
 **Seeing the work.**
 - One working hint for every provider: an open hook turn reads active for up to 5 minutes after its last event (Esc without Stop decays), on top of the 6.61 reading; Cursor rows are decided by their hooks (they were always quiet before). Codex reads its rollout turn markers until its hooks are trusted.
-- Codex hooks: `--hooks install` (and Control's Install hooks) also writes the COS hook into `~/.codex/hooks.json`. Codex runs untrusted hooks silently never, so trust them once in the `codex` app ("Trust all and continue"). Trust is read through Codex's own `hooks/list`; COS never writes trust. Claude's hooks state, banner and desk cancel stay Claude-only.
-- Cursor observer: its spool files were rejected since 6.61.7 (filename nonce); now accepted, recent rejects re-ingested once, `afterAgentThought` gives Cursor a reasoning line (memory and stream only, never the ledger).
-- `reported_model` on rows and detail for all three; Cursor titles use the composer name or the first query; Codex compaction from the rollout.
+- Codex hooks: `--hooks install` (and Control's Install hooks) also writes the COS hook into `~/.codex/hooks.json`. Codex runs untrusted hooks silently never, so run `codex` in Terminal and trust them once ("Trust all and continue"). Trust is read through Codex's own `hooks/list`; COS never writes hook trust. Continue never adds project trust; Codex itself may write project trust when starting a new session. Claude's hooks state, banner and desk cancel stay Claude-only.
+- Cursor observer: its spool files were rejected since 6.61.7 (filename nonce); now accepted, recent rejects re-ingested once, `afterAgentThought` gives Cursor a reasoning line (spooled on disk until drained, then memory and stream only; never the ledger). The observer stops adding thoughts when the drain is stale.
+- `reported_model` on detail for all three; list polling avoids model lookups. Cursor titles use the composer name or the first query. Codex rollout completion can close an observed compaction phase; compaction start still needs hook evidence.
 - `/api/health` and `/api/models`: `providers.{claude,codex,cursor}.{observe,act}` with a reason for every "no"; `threadForkProviders`; `features.sessionCancel.deskCodex` / `deskCursor`.
 
 **Acting the same.**
-- Cancel run stops desk Codex (trusted hooks) and desk Cursor runs at their next command, like Claude. Codex gets a deny-only halt reply (it fails open on Claude's); Claude's reply bytes are unchanged and the 6.61.7 script stays halt-ready.
-- Live Continue into an open Claude session is on by default (`COS_CONTINUE_LIVE=0` turns it off). A busy Codex Desktop thread takes a Continue straight into its own queue when COS has nothing queued for it. An Interrupt kicks the queue like a Stop.
-- Every Cursor CLI spawn runs on its own config dir (copy of the user's config, chats/hooks/MCP linked), so COS no longer overwrites the user's Cursor default model.
+- Cancel run stops desk Codex (trusted hooks) and desk Cursor runs at their next command, like Claude, after provider-stamped hooks have been observed for that thread and the current hook is ready. Codex gets a deny-only halt reply (it fails open on Claude's); Claude's reply bytes are unchanged and the 6.61.7 script stays halt-ready.
+- Live Continue into an open Claude session is on by default (`COS_CONTINUE_LIVE=0` turns it off). A busy Codex Desktop thread takes a Continue straight into its own queue when COS has nothing queued for it. That hop accepts the moving native head and enters the app queue, which is not shown in the COS Queue. An Interrupt kicks the queue like a Stop. Cursor CLI queued turns auto-run after the chat is free; the stored client acknowledgement determines Ask versus Run Everything.
+- Every Cursor CLI spawn runs on its own config dir (copy of the user's config, chats/hooks/MCP/agents/plans linked), and Continue/Fork refuse if isolation fails, so COS no longer overwrites the user's Cursor default model.
 - Codex and Cursor Messages jobs link to their native session at the first event.
 
 Engine limits kept, with honest copy: an idle Cursor IDE composer cannot take an outside message; Cursor approvals cannot be answered remotely in `-p`; a ChatGPT.app thread cannot be steered mid-turn; pure `js` Codex steps are not caught by a cancel.
+
+Codex hook trust is refreshed through a bounded `codex app-server` call every five minutes. Cursor hook-open turns quiet beyond five minutes stay OPEN (not actively writing) up to the 30-minute ceiling. Claude/Codex end-state visibility may lag by 30 seconds. Control does not yet persist the full-permissions kill switch through updates; set it in `.env`.
 
 ## 6.61.7 — 2026-10-04 — Agent activity and compaction visibility
 

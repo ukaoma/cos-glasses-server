@@ -206,7 +206,7 @@ state drafts; the `cursor`, `epoch` and `id:` line stay.
 Since 6.49.0 a Continue can land in the running session itself, so the Desktop tab or
 the `claude` in a terminal that you left open shows the turn and answers it with its own
 context, instead of a resume child writing to the transcript behind that window. It is
-off until `COS_CONTINUE_LIVE=1`. The server writes the turn to the session's own inbox
+on by default since 6.62.0; set `COS_CONTINUE_LIVE=0` to disable it. The server writes the turn to the session's own inbox
 (the socket Claude Code publishes in `~/.claude/sessions/<pid>.json`, in the line format
 its help text documents), pinned to the full session id, and calls it delivered only
 when the session's transcript shows the message accepted; every other outcome takes the
@@ -913,3 +913,7 @@ The package includes a checksummed public Python runtime. It uses a unique owner
 Run `glasses-memory-setup --runtime-dir /absolute/path/to/cos-memory-runtime --data-root /absolute/path/to/private-memory` with Python 3.11+ installed. Set `COS_SCRIPTS_DIR` to the runtime directory in your server configuration, then restart the server. Add an explicitly granted Markdown/text source using `venv/bin/python3 manage.py grant /path/to/notes.md --title "Project"` from that runtime directory. The bundled README documents captures, reviews, document links, source refresh, upgrade and staged restore. Keep the latest independent deletion checkpoint separately from restorable snapshots.
 
 This is a local owner instance, separate from app.gotcos.com tenants and hosted Sessions. Installing the package does not upload your corpus or enable household sharing. A source build or local setup test is not proof of a published registry version; use the release ledger for actual availability.
+
+## Provider parity in 6.62.0
+
+See [provider capabilities and limits](docs/provider-parity.md) for Continue permissions, client compatibility, hook trust, observation limits and rollback. Glasses 6.10.600 shows the server's Continue note. Older clients retain Cursor Ask behavior; forks remain read-only.

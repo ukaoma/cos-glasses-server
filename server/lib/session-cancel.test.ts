@@ -90,6 +90,9 @@ describe('cancelTargetFor', () => {
       // Another thread, or none named: the hooks were not seen for it.
       expect(cancelTargetFor({ ...base, provider: 'codex', threadId: 'b2c3d4e5-0000-4000-8000-00000000beef' })).toBe('unsupported')
       expect(cancelTargetFor({ ...base, provider: 'cursor' })).toBe('unsupported')
+      expect(cancelTargetFor({ ...base, provider: 'codex', threadId: '' })).toBe('unsupported')
+      // No identity means no hook lookup: never ask a shared reader about an unnamed run.
+      expect(seen).toEqual([['codex', SID], ['cursor', SID], ['codex', 'b2c3d4e5-0000-4000-8000-00000000beef']])
       // A fact given wins over the reader.
       expect(cancelTargetFor({ ...base, provider: 'codex', threadId: SID, codexHooksReady: false })).toBe('unsupported')
       expect(cancelTargetFor({ ...base, provider: 'cursor', threadId: SID, threadHookSeen: false })).toBe('unsupported')
