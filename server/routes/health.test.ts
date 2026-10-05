@@ -158,6 +158,26 @@ describe('features.sessionCancel (6.53.0)', () => {
 // fields, and `providers.<engine>.observe` names where each observation comes from. With no
 // background refresh started (no test starts one) nothing is read from a home directory.
 describe('provider observation on health (6.62.0)', () => {
+  it('health and models preserve actions alongside observation, including provider limits', async () => {
+    const health = await (await fetch(`${base}/api/health`)).json() as any
+    const models = await (await fetch(`${base}/api/models`)).json() as any
+    const capabilities = ['approvals', 'cancelDesk', 'continueBusy', 'continueIdle', 'fork', 'keepModel', 'nativeQueue', 'permissions']
+    for (const body of [health, models]) {
+      for (const provider of ['claude', 'codex', 'cursor']) {
+        expect(Object.keys(body.providers[provider].act).sort()).toEqual(capabilities)
+        expect(body.providers[provider].observe.liveState).toEqual(expect.any(String))
+        for (const capability of Object.values(body.providers[provider].act) as any[]) {
+          expect(typeof capability.supported).toBe('boolean')
+          if (!capability.supported) expect(capability.reason).toEqual(expect.any(String))
+        }
+      }
+      expect(body.providers.cursor.act.approvals).toEqual({ supported: false, reason: 'engine_limit' })
+      expect(body.providers.cursor.act.nativeQueue).toEqual({ supported: false, reason: 'engine_limit' })
+      expect(body.providers.codex.act.nativeQueue).toEqual({ supported: true })
+    }
+    expect(models.providers).toEqual(health.providers)
+  }, 20_000)
+
   it('sessionHooks.codex and cursorObserver sit beside the Claude fields; providers.*.observe has the five sources', async () => {
     __resetProviderObserveForTests()
     const body = await (await fetch(`${base}/api/health`)).json() as any

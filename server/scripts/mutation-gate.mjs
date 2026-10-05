@@ -43,6 +43,34 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
  * `find` must be unique in the file. `replace` is the mutation. `tests` is what runs.
  */
 const CASES = [
+  {
+    name: '6620-provider-merge-loses-actions',
+    file: 'server/lib/provider-actions.ts',
+    find: '      out[provider] = { ...(out[provider] ?? {}), ...fields }',
+    replace: '      out[provider] = { ...fields }',
+    tests: ['server/routes/health.test.ts'],
+  },
+  {
+    name: '6620-provider-merge-loses-observation',
+    file: 'server/lib/provider-actions.ts',
+    find: '      out[provider] = { ...(out[provider] ?? {}), ...fields }',
+    replace: '      out[provider] ??= { ...fields }',
+    tests: ['server/routes/health.test.ts'],
+  },
+  {
+    name: '6620-interrupt-does-not-drain',
+    file: 'server/lib/thread-drain-kick.ts',
+    find: "  if (event !== 'Stop' && event !== 'Interrupt') return null",
+    replace: "  if (event !== 'Stop') return null",
+    tests: ['server/lib/thread-drain-kick.test.ts'],
+  },
+  {
+    name: '6620-desk-cancel-effect-copy-missing',
+    file: 'server/routes/agent-session-bindings.ts',
+    find: "        effectCopy: DESK_RUN_EFFECT_COPY,\n        queuedHeld: queuedHeld(),",
+    replace: "        queuedHeld: queuedHeld(),",
+    tests: ['server/routes/agent-session-bindings.test.ts'],
+  },
   // ── 6.54.0: the lens gist (lib/lens-gist.ts, lib/lens-gist-engines.ts, routes/lens-gist.ts) ──
   {
     name: "654-json-error-limit-lost",
@@ -1132,8 +1160,8 @@ const CASES = [
   {
     name: 'turns-kick-plan-no-subagent-stop',
     file: 'server/lib/thread-drain-kick.ts',
-    find: "  if (event !== 'Stop') return null",
-    replace: "  if (event !== 'Stop' && event !== 'SubagentStop') return null",
+    find: "  if (event !== 'Stop' && event !== 'Interrupt') return null",
+    replace: "  if (event !== 'Stop' && event !== 'Interrupt' && event !== 'SubagentStop') return null",
     tests: ['server/lib/thread-drain-kick.test.ts'],
   },
   {
@@ -3695,8 +3723,8 @@ const CASES = [
   {
     name: "cancel-202-carries-hold-ms",
     file: "server/routes/agent-session-bindings.ts",
-    find: "        effective: 'next_tool_call',\n        queuedHeld: queuedHeld(),\n        queuedHoldMs: CANCEL_QUEUE_HOLD_MS,\n",
-    replace: "        effective: 'next_tool_call',\n        queuedHeld: queuedHeld(),\n",
+    find: "        queuedHeld: queuedHeld(),\n        queuedHoldMs: CANCEL_QUEUE_HOLD_MS,\n        settledPermissions:",
+    replace: "        queuedHeld: queuedHeld(),\n        settledPermissions:",
     tests: ["server/routes/agent-session-bindings.test.ts"],
   },
   {
@@ -4118,7 +4146,7 @@ const CASES = [
   {
     name: "cx-6533-handoff-latch-noted-as-desk",
     file: "server/routes/agent-session-bindings.ts",
-    find: "cancelDeps.noteCancelled?.(provider, threadId, now, provider === 'claude' ? 'desk_run' : 'unsupported')",
+    find: "cancelDeps.noteCancelled?.(provider, threadId, now, landedAs)",
     replace: "cancelDeps.noteCancelled?.(provider, threadId, now, 'cos_turn')",
     tests: ["server/routes/agent-session-bindings.test.ts"],
   },
