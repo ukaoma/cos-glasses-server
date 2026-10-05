@@ -126,6 +126,7 @@ import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/ag
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-thread.js'
+import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -447,6 +448,13 @@ export interface AgentSessionBindingsDeps {
    * one store between the two routes rather than inventing a second.
    */
   forkRefs?: ForkRefStore
+
+  /**
+   * 6.63.0: where a background fork (`clientForkId` in the body) records its outcome for
+   * `GET /agent-session-forks/:clientForkId`. Defaults to an in-memory ledger per router;
+   * the server wires the durable one (`<data>/fork-jobs.json`).
+   */
+  forkJobs?: ForkJobLedger
 
   /** Lease TTL for a new binding. */
   attachTtlMs?: number
@@ -1522,6 +1530,22 @@ export function classifyFork(result: unknown, sourceNativeThreadId: string): For
 }
 
 export const FORKED_COPY = 'Copied into a new thread. Your original is untouched.'
+/** 6.63.0: the 202 for a background fork. The outcome is read from the status route. */
+export const FORK_RUNNING_COPY = 'COS is making the copy and sending your instruction. This can take several minutes.'
+export const FORK_JOB_UNKNOWN_COPY = 'This server has no record of that fork. Look for the copy in Sessions before forking again.'
+
+/** What a background fork's id answers right now: running, or the recorded outcome. */
+export function projectForkJob(row: ForkJobRow): { status: number; body: Record<string, unknown> } {
+  if (row.state === 'running') {
+    return { status: 200, body: { state: 'running', clientForkId: row.clientForkId, acceptedAt: row.acceptedAt, reasonCopy: FORK_RUNNING_COPY } }
+  }
+  // `status` is the ORIGINAL answer's code, surfaced under its own name: a refused fork
+  // read back correctly is a successful read.
+  return {
+    status: 200,
+    body: { ...(row.result ?? {}), state: 'done', clientForkId: row.clientForkId, recordedStatus: row.status ?? null, polled: true },
+  }
+}
 /** 6.62.1: `unverified` must never be rendered as confirmed untouched (see the success body). */
 export const FORKED_COPY_UNVERIFIED = 'Copied into a new thread. COS could not re-read your original afterwards to confirm it is unchanged.'
 
@@ -1648,6 +1672,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   // One per router. Injectable so the follow-on (attach accepting a `forkRef`)
   // shares this instance rather than standing up a second, disconnected one.
   const forkRefs = deps?.forkRefs instanceof ForkRefStore ? deps.forkRefs : new ForkRefStore()
+  const forkJobs = deps?.forkJobs instanceof ForkJobLedger ? deps.forkJobs : new ForkJobLedger(randomUUID())
   const attachTtlMs =
     Number.isFinite(deps?.attachTtlMs) && (deps.attachTtlMs as number) > 0
       ? (deps.attachTtlMs as number)
@@ -2443,10 +2468,23 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
 
     /** The per-source serialisation claim, released in the finally. */
     let claimedForkKey: string | null = null
+    /**
+     * 6.63.0: set once a background fork has answered 202. From then on the ledger is the
+     * ONLY channel for the outcome, exactly like a queued turn: `answer` settles it there.
+     */
+    let backgroundForkId: string | null = null
+
+    const answer = (status: number, payload: Record<string, unknown>): void => {
+      if (backgroundForkId !== null) {
+        forkJobs.settle(backgroundForkId, status, payload, readNow() ?? Date.now())
+        return
+      }
+      if (res.headersSent) return
+      res.status(status).json(payload)
+    }
 
     const refuseFork = (reason: WriteRefusal, extra: Record<string, unknown> = {}): void => {
-      if (res.headersSent) return
-      res.status(refusalStatus(reason)).json({
+      answer(refusalStatus(reason), {
         forked: false,
         forkRef: null,
         sourceIntegrity: null,
@@ -2457,6 +2495,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         reason,
         reasonCopy: writeReasonCopy(reason),
         ...extra,
+      })
+    }
+
+    /** Answers a known background fork id with its job, never a second spawn. */
+    const replayForkJob = (row: ForkJobRow): void => {
+      const projected = projectForkJob(row)
+      res.status(row.state === 'running' ? 202 : projected.status).json({
+        ...projected.body,
+        accepted: row.state === 'running' ? true : undefined,
+        replayed: true,
       })
     }
 
@@ -2477,6 +2525,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (typeof prompt !== 'string' || prompt.trim().length === 0 || prompt.length > maxPromptChars) {
         return refuseFork('invalid_request')
       }
+      // 6.63.0: optional. With it, the fork answers 202 once every gate has passed and runs
+      // in the background; without it, the route behaves exactly as before.
+      const clientForkId = body.clientForkId
+      if (clientForkId !== undefined && (typeof clientForkId !== 'string' || !CLIENT_FORK_ID_RE.test(clientForkId))) {
+        return refuseFork('invalid_request')
+      }
 
       const providerParam = String(req.params.provider ?? '')
       const threadIdParam = String(req.params.threadId ?? '')
@@ -2485,6 +2539,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // argument and a lock key, so `isValidNativeThreadId` is the whole guard.
       if (!isForkableProvider(providerParam)) return refuseFork('fork_unsupported_provider')
       if (!isValidNativeThreadId(threadIdParam)) return refuseFork('fork_invalid_thread_id')
+
+      // A repeat of a known id replays its job and never spawns: a client that lost the
+      // 202 (or restarted) must be able to resend without making a second copy.
+      const forkSource = opaqueRevision(targetKey(providerParam, threadIdParam))
+      if (typeof clientForkId === 'string') {
+        const known = forkJobs.get(clientForkId)
+        if (known) return known.source === forkSource ? replayForkJob(known) : refuseFork('invalid_request')
+      }
 
       const now = readNow()
       if (now === null) return refuseFork('fork_failed')
@@ -2514,8 +2576,35 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // continuation or be blocked by one — `targetKey` is length-prefixed and
       // therefore unambiguous, and this prefix cannot collide with one.
       const forkKey = `fork:${targetKey(providerParam, threadIdParam)}`
-      if (!guard.tryClaim(forkKey, forkKey)) return refuseFork('fork_in_progress')
+      if (!guard.tryClaim(forkKey, forkKey)) {
+        // The same id arriving twice while the first is still resolving its workspace: the
+        // first holds the claim and has begun the job by now, so replay it.
+        const raced = typeof clientForkId === 'string' ? forkJobs.get(clientForkId) : null
+        if (raced && raced.source === forkSource) return replayForkJob(raced)
+        return refuseFork('fork_in_progress')
+      }
       claimedForkKey = forkKey
+
+      if (typeof clientForkId === 'string') {
+        // Recorded BEFORE the spawn and before the 202: a job the ledger cannot hold would
+        // have an outcome nobody can read, so it does not start.
+        const begun = forkJobs.begin({ clientForkId, source: forkSource, provider: providerParam }, now)
+        if (begun.kind === 'existing') return replayForkJob(begun.row)
+        if (begun.kind !== 'started') return refuseFork(begun.kind === 'conflict' ? 'invalid_request' : 'fork_failed')
+        res.status(202).json({
+          accepted: true,
+          state: 'running',
+          clientForkId,
+          forked: null,
+          forkRef: null,
+          orphanPossible: false,
+          retryable: false,
+          reason: null,
+          reasonCopy: FORK_RUNNING_COPY,
+        })
+        backgroundForkId = clientForkId
+        console.log(`[agent-session-bindings] fork accepted provider=${providerParam} background=true`)
+      }
 
       let raw: unknown
       try {
@@ -2568,7 +2657,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // a fresh fork exactly as for an existing thread.
       const forkRef = forkRefs.remember(providerParam, outcome.newNativeThreadId, now)
 
-      res.status(201).json({
+      answer(201, {
         forked: true,
         reason: null,
         reasonCopy: outcome.integrity === 'verified_unchanged' ? FORKED_COPY : FORKED_COPY_UNVERIFIED,
@@ -2586,7 +2675,39 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       refuseFork('fork_orphan_possible', { orphanPossible: true })
     } finally {
       if (claimedForkKey !== null) guard.release(claimedForkKey, claimedForkKey)
+      // A background job must never be left `running` by a path that forgot to answer:
+      // its caller would poll a fork that can no longer finish. Cautious outcome only.
+      if (backgroundForkId !== null && forkJobs.get(backgroundForkId)?.state === 'running') {
+        console.error('[agent-session-bindings] background fork ended without an outcome; recorded as orphan-possible')
+        forkJobs.settle(backgroundForkId, refusalStatus('fork_orphan_possible'), {
+          forked: false, forkRef: null, sourceIntegrity: null, orphanPossible: true, retryable: false,
+          reason: 'fork_orphan_possible', reasonCopy: writeReasonCopy('fork_orphan_possible'),
+        }, readNow() ?? Date.now())
+      }
     }
+  })
+
+  // ----------------------------------------------------- background fork status
+  //
+  // 6.63.0: the outcome of a fork started with a `clientForkId`. Its own path segment
+  // (`/agent-session-forks`), so it can never be read as `/agent-sessions/:provider/:threadId`.
+  // UNGATED, like the fork route it reports on.
+  router.get('/agent-session-forks/:clientForkId', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const clientForkId = String(req.params.clientForkId ?? '')
+    if (!CLIENT_FORK_ID_RE.test(clientForkId)) {
+      res.status(400).json({ state: 'invalid_request', reasonCopy: FORK_JOB_UNKNOWN_COPY })
+      return
+    }
+    const row = forkJobs.get(clientForkId)
+    if (row === null) {
+      // Not "failed": an older server, a dropped row or an id never admitted all read this way,
+      // and any of them may have a copy.
+      res.status(404).json({ state: 'unknown', clientForkId, reasonCopy: FORK_JOB_UNKNOWN_COPY })
+      return
+    }
+    const projected = projectForkJob(row)
+    res.status(projected.status).json(projected.body)
   })
 
   // ----------------------------------------------------------------- turns

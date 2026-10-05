@@ -34,6 +34,8 @@ import {
   REASON_COPY,
   FORKED_COPY,
   FORKED_COPY_UNVERIFIED,
+  FORK_RUNNING_COPY,
+  refusalStatus,
   writeReasonCopy,
   TURN_SENT_CODEX_QUEUE_COPY,
   UNKNOWN_REASON_COPY,
@@ -58,6 +60,7 @@ import { boundToMarker, targetKey, type NativeBinding } from '../lib/agent-sessi
 import { deliverAttachedTurn, CANCEL_KILL_GRACE_MS, type AttachedChildProcess } from '../lib/attached-provider-adapter.js'
 import { hasHaltMarker, writeHaltMarker } from '../lib/session-halt.js'
 import type { CancelDeps } from './agent-session-bindings.js'
+import { ForkJobLedger, INTERRUPTED_FORK_RESULT, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { DESK_RUN_EFFECT_COPY, __resetDeskCancelReadersForTests, setDeskCancelReaders, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
 import { fallbackContinueNote } from '../lib/continue-plan.js'
 import { EventEmitter } from 'node:events'
@@ -4754,5 +4757,171 @@ describe('6.62.1: a fork whose copy exists but whose first turn failed', () => {
     const unverified = await fork({ ...FORK_SUCCESS, sourceIntegrity: 'unverified' })
     expect(unverified.body.reasonCopy).toBe(FORKED_COPY_UNVERIFIED)
     expect(unverified.body.reasonCopy).not.toMatch(/untouched/)
+  })
+})
+
+// ----------------------------------------------------------- background forks (6.63.0)
+//
+// 2026-10-05: COS Control waited 5 minutes for a fork the server allows 21 for. A 6.5-minute
+// fork that SUCCEEDED was shown as "Server stopped" and the card kept pointing at the
+// original. With a `clientForkId` the route answers 202 once its gates pass, and the outcome
+// is read from GET /api/agent-session-forks/:id.
+describe('background fork jobs', () => {
+  const FORK_ID = 'cf-0e145ea2-c421-4882'
+  const forkStatusPath = (id: string) => `/api/agent-session-forks/${id}`
+
+  async function getJson(base: string, path: string): Promise<{ status: number; body: any }> {
+    const res = await fetch(`${base}${path}`)
+    return { status: res.status, body: await res.json() }
+  }
+  async function settledFork(base: string, id: string): Promise<any> {
+    for (let i = 0; i < 500; i++) {
+      const r = await getJson(base, forkStatusPath(id))
+      if (r.body?.state === 'done') return r.body
+      await new Promise(resolve => setTimeout(resolve, 2))
+    }
+    throw new Error('fork job never settled')
+  }
+  /** A fork that waits for `open()` and counts every spawn. */
+  function countedHeldFork(result: unknown = FORK_SUCCESS) {
+    let open!: () => void
+    const gate = new Promise<void>(resolve => { open = resolve })
+    const seen = { n: 0 }
+    return { get calls() { return seen.n }, open, fork: async () => { seen.n += 1; await gate; return result } }
+  }
+
+  it('answers 202 at once, reports running, then records the outcome the sync route would have sent', async () => {
+    const held = countedHeldFork()
+    const base = await start(forkDeps({ forkThread: held.fork }))
+    const accepted = await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    expect(accepted.status).toBe(202)
+    expect(accepted.body).toMatchObject({ accepted: true, state: 'running', clientForkId: FORK_ID, reasonCopy: FORK_RUNNING_COPY })
+    while (held.calls === 0) await new Promise(r => setTimeout(r, 2))
+
+    const running = await getJson(base, forkStatusPath(FORK_ID))
+    expect(running.status).toBe(200)
+    expect(running.body).toMatchObject({ state: 'running', clientForkId: FORK_ID })
+
+    held.open()
+    const done = await settledFork(base, FORK_ID)
+    expect(done).toMatchObject({ state: 'done', forked: true, recordedStatus: 201, reasonCopy: FORKED_COPY, orphanPossible: false })
+    expect(done.forkRef).toBe(opaqueRevision(targetKey('claude', FORKED_SID)))
+    // The id never crosses the wire, in the ledger answer exactly as in the sync one.
+    expect(JSON.stringify(done)).not.toContain(FORKED_SID)
+  })
+
+  it('a repeated id replays its job and never spawns a second copy, while running and after', async () => {
+    const held = countedHeldFork()
+    const base = await start(forkDeps({ forkThread: held.fork }))
+    await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    while (held.calls === 0) await new Promise(r => setTimeout(r, 2))
+
+    const whileRunning = await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    expect(whileRunning.status).toBe(202)
+    expect(whileRunning.body).toMatchObject({ state: 'running', replayed: true })
+
+    held.open()
+    await settledFork(base, FORK_ID)
+    const afterDone = await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    expect(afterDone.status).toBe(200)
+    expect(afterDone.body).toMatchObject({ state: 'done', forked: true, recordedStatus: 201, replayed: true })
+    expect(held.calls).toBe(1)
+  })
+
+  it('records a failed first turn with its copy, so the client can open the copy later', async () => {
+    const base = await start(forkDeps({ forkThread: async () => forkTurnFailed('context_too_long') }))
+    expect((await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })).status).toBe(202)
+    const done = await settledFork(base, FORK_ID)
+    expect(done).toMatchObject({ state: 'done', forked: false, turnFailed: true, failureClass: 'context_too_long', reason: 'fork_context_too_long', retryable: false })
+    expect(done.recordedStatus).toBeGreaterThanOrEqual(400)
+    expect(done.forkRef).toBe(opaqueRevision(targetKey('claude', FORKED_SID)))
+  })
+
+  it('a fork that throws after the 202 is recorded as orphan-possible, never left running', async () => {
+    const base = await start(forkDeps({ forkThread: async () => { throw new Error('spawn exploded') } }))
+    expect((await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })).status).toBe(202)
+    const done = await settledFork(base, FORK_ID)
+    expect(done).toMatchObject({ state: 'done', reason: 'fork_orphan_possible', orphanPossible: true })
+  })
+
+  it('a refusal before the claim answers synchronously and records nothing', async () => {
+    const calls = { n: 0 }
+    const base = await start(forkDeps({ resolveForkWorkspace: () => null, forkThread: () => { calls.n += 1; return FORK_SUCCESS } }))
+    const refused = await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    expect(refused.status).toBe(refusalStatus('fork_workspace_unresolvable'))
+    expect(refused.body).toMatchObject({ forked: false, reason: 'fork_workspace_unresolvable' })
+    expect((await getJson(base, forkStatusPath(FORK_ID))).status).toBe(404)
+    expect(calls.n).toBe(0)
+  })
+
+  it('refuses a malformed id, and an id reused for a different source thread', async () => {
+    const base = await start(forkDeps())
+    expect((await post(base, forkPath(), { ...FORK_BODY, clientForkId: 'x' })).body.reason).toBe('invalid_request')
+    expect((await post(base, forkPath(), { ...FORK_BODY, clientForkId: 42 })).body.reason).toBe('invalid_request')
+    await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    await settledFork(base, FORK_ID)
+    const reused = await post(base, forkPath('codex', CODEX_THREAD), { ...FORK_BODY, clientForkId: FORK_ID })
+    expect(reused.body.reason).toBe('invalid_request')
+  })
+
+  it('does not start a fork whose job the ledger cannot write', async () => {
+    const calls = { n: 0 }
+    const ledger = new ForkJobLedger('instance-a', { load: () => [], save: () => { throw new Error('ENOSPC') } })
+    const base = await start(forkDeps({ forkJobs: ledger, forkThread: () => { calls.n += 1; return FORK_SUCCESS } }))
+    const refused = await post(base, forkPath(), { ...FORK_BODY, clientForkId: FORK_ID })
+    expect(refused.body).toMatchObject({ forked: false, reason: 'fork_failed' })
+    expect(calls.n).toBe(0)
+  })
+
+  it('status route: 400 for a malformed id, 404 for an unknown one', async () => {
+    const base = await start(forkDeps())
+    expect((await getJson(base, forkStatusPath('x'))).status).toBe(400)
+    const unknown = await getJson(base, forkStatusPath('cf-never-admitted-01'))
+    expect(unknown.status).toBe(404)
+    expect(unknown.body.state).toBe('unknown')
+  })
+
+  it('without a clientForkId the route still answers synchronously, as before', async () => {
+    const base = await start(forkDeps())
+    const res = await post(base, forkPath(), FORK_BODY)
+    expect(res.status).toBe(201)
+    expect(res.body).toMatchObject({ forked: true })
+    expect(res.body.state).toBeUndefined()
+  })
+})
+
+describe('fork job ledger', () => {
+  const row = (over: Partial<ForkJobRow> = {}): ForkJobRow => ({
+    clientForkId: 'cf-ledger-0001', source: 'src', provider: 'claude', state: 'running', acceptedAt: 1_000, instance: 'old', ...over,
+  })
+
+  it('a running row from an earlier process loads as interrupted (orphan-possible), and is saved that way', () => {
+    const saved: ForkJobRow[][] = []
+    const ledger = new ForkJobLedger('new', { load: () => [row()], save: rows => { saved.push(rows) } }, 5_000)
+    const loaded = ledger.get('cf-ledger-0001')!
+    expect(loaded.state).toBe('done')
+    expect(loaded.result).toMatchObject({ ...INTERRUPTED_FORK_RESULT })
+    expect(loaded.result?.retryable).toBe(false)
+    expect(saved.at(-1)?.[0]?.state).toBe('done')
+  })
+
+  it('a running row from THIS process stays running', () => {
+    const ledger = new ForkJobLedger('same', { load: () => [row({ instance: 'same' })], save: () => {} })
+    expect(ledger.get('cf-ledger-0001')?.state).toBe('running')
+  })
+
+  it('the first settle wins', () => {
+    const ledger = new ForkJobLedger('a')
+    expect(ledger.begin({ clientForkId: 'cf-ledger-0002', source: 's', provider: 'claude' }, 1).kind).toBe('started')
+    expect(ledger.settle('cf-ledger-0002', 201, { forked: true }, 2)).toBe(true)
+    expect(ledger.settle('cf-ledger-0002', 503, { forked: false }, 3)).toBe(false)
+    expect(ledger.get('cf-ledger-0002')?.status).toBe(201)
+  })
+
+  it('drops unreadable rows and keeps running rows past the cap', () => {
+    const rows: unknown[] = [{ junk: true }, row({ clientForkId: 'cf-ledger-0003', instance: 'a' })]
+    const ledger = new ForkJobLedger('a', { load: () => rows, save: () => {} })
+    expect(ledger.get('cf-ledger-0003')?.state).toBe('running')
+    expect(ledger.runningCount()).toBe(1)
   })
 })

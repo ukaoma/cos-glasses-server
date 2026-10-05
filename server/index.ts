@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { networkInterfaces, homedir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { diagRouter } from './routes/diag.js'
 import { createClientInstanceRouter } from './routes/client-instance.js'
@@ -67,6 +67,7 @@ import { parseAgentSession } from './lib/agent-session-store.js'
 import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
 import { makeCodexLiveDeliverer } from './lib/codex-live-queue-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
+import { ForkJobLedger, fileForkJobPersistence } from './lib/fork-job-ledger.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
@@ -989,6 +990,10 @@ app.use('/api', createAgentSessionBindingsRouter({
   // 6.62.0 /qa (W9): the fixed note when the read misses its budget.
   continueNoteFallback: (provider, options) => fallbackContinueNote(provider, { noteAck: options.noteAck, codexFallbackSandbox: continueFactsDeps.codexFallbackSandbox() }),
   forkThread: forkThreadForRoute,
+  // 6.63.0: background forks record their outcome here, so a client that cannot hold a
+  // 21-minute request (COS Control, the phone) reads it from GET /api/agent-session-forks/:id.
+  // Durable: a restart turns a still-running row into the cautious orphan-possible answer.
+  forkJobs: new ForkJobLedger(randomUUID(), fileForkJobPersistence(dataPath('fork-jobs.json'))),
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path
   // off anything client-visible. Null refuses: never fall back to the server's own
