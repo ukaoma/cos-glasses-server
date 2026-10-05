@@ -15,7 +15,7 @@ import { agentSessionsRouter, runningHintFor } from './agent-sessions.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import { HOOK_ACTIVE_CAP_MS, __resetCodexRolloutStateForTests, codexRolloutReads } from '../lib/codex-rollout-state.js'
 import { resetLockSnapshot } from '../lib/occupancy-probes.js'
-import type { DerivedSessionState } from '../lib/session-state-derive.js'
+import { OPEN_TURN_CEILING_MS, type DerivedSessionState } from '../lib/session-state-derive.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
 
 const roots: string[] = []
@@ -87,11 +87,11 @@ describe('runningHintFor (pure)', () => {
     expect(runningHintFor('claude', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS, now)?.active).toBe(true)
   })
 
-  it('past the cap: no hint for Claude and Codex (occupancy answers), not running for Cursor', () => {
+  it('past the cap: no hint for Claude and Codex (occupancy answers); Cursor reads OPEN and quiet (QA W8)', () => {
     expect(runningHintFor('claude', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS - 1, now)).toBeNull()
-    expect(runningHintFor('codex', derived('running', 'hook'), now - 6 * 60_000, now)).toBeNull()
-    expect(runningHintFor('cursor', derived('running', 'hook'), now - 6 * 60_000, now)).toEqual({ running: false, active: false, foreign: false, decides: true })
-    expect(runningHintFor('cursor', derived('running', 'hook'), null, now)).toEqual({ running: false, active: false, foreign: false, decides: true })
+    expect(runningHintFor('codex', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS - 60_000, now)).toBeNull()
+    expect(runningHintFor('cursor', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS - 60_000, now)).toEqual({ running: true, active: false, foreign: true, decides: true })
+    expect(runningHintFor('cursor', derived('running', 'hook'), null, now)).toEqual({ running: true, active: false, foreign: true, decides: true })
   })
 
   it('waiting: running, never active; idle and ended: nothing for Claude/Codex, quiet for Cursor', () => {
@@ -137,12 +137,19 @@ describe('Cursor rows follow the hooks (plan 1.1)', () => {
     }
   })
 
-  it('6 minutes after the last event (Esc with no Stop): not running, not active', async () => {
+  it('quiet past the cap (a long tool, or Esc with no Stop): OPEN and quiet, not active (QA W8)', async () => {
     cursorHome()
-    turnOpen(6 * 60_000)
+    turnOpen(HOOK_ACTIVE_CAP_MS + 60_000)
     const { row, detail } = await rowAndDetail(await server(), 'cursor', ID)
-    // The deriver still says running (inside the 30-minute ceiling); the HINT decays.
-    for (const r of [row, detail]) expect(r).toMatchObject({ agent_state: 'running', running: false, running_active: false, running_foreign: false })
+    // The deriver still says running (inside the 30-minute ceiling); the hint says open, not working.
+    for (const r of [row, detail]) expect(r).toMatchObject({ agent_state: 'running', running: true, running_active: false, running_foreign: true })
+  })
+
+  it('past the 30-minute open-turn ceiling with no Stop: not running at all', async () => {
+    cursorHome()
+    turnOpen(OPEN_TURN_CEILING_MS + 60_000)
+    const { row, detail } = await rowAndDetail(await server(), 'cursor', ID)
+    for (const r of [row, detail]) expect(r).toMatchObject({ running: false, running_active: false, running_foreign: false })
   })
 
   it('a Stop reads not active at once, even with the transcript written seconds ago (the hooks decide, not the file time)', async () => {

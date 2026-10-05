@@ -238,9 +238,16 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
  * otherwise show a ghost "working" row for thirty minutes (W5).
  *
  *   hook running, last event inside the cap   running, active (every provider)
+ *   hook running, quiet past the cap          Cursor: running, NOT active (OPEN, quiet: a
+ *                                             tool can run longer than the cap with no event,
+ *                                             and an Esc with no Stop looks the same, QA W8);
+ *                                             Claude and Codex: no hint (occupancy answers)
  *   hook waiting                               running, not active
  *   Codex rollout turn open inside the cap     running, active (no Codex hooks yet)
  *   Cursor, any other hook state               not running, not active (`decides`)
+ *
+ * A hook-derived `running` only exists inside the deriver's 30-minute open-turn ceiling, so an
+ * open-quiet Cursor row ends there, or at its Stop or SessionEnd.
  *
  * For Claude and Codex the hint only ADDS to occupancy (a held, freshly written thread still
  * reads as it did). For Cursor, whose list has no occupancy at all, a hook signal decides, and
@@ -263,6 +270,7 @@ export function runningHintFor(provider: AgentProvider, derived: DerivedSessionS
   if (derived.state_source === 'hook') {
     if (derived.agent_state === 'waiting') return { running: true, active: false, foreign: cursor, decides: cursor }
     if (derived.agent_state === 'running' && inCap) return { running: true, active: true, foreign: cursor, decides: cursor }
+    if (derived.agent_state === 'running' && cursor) return { running: true, active: false, foreign: true, decides: true }
     return quiet
   }
   if (provider === 'codex' && derived.state_source === 'transcript' && derived.agent_state === 'running' && inCap) {
