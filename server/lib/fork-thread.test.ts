@@ -1098,3 +1098,28 @@ describe('6.62.1: classifyProviderOutputLine reads only error carriers', () => {
     expect(classifyProviderOutputLine('not json')).toBeNull()
   })
 })
+
+describe('6.62.2: retry notices are not verdicts; the final error event wins', () => {
+  const retry = (error: string) => `${JSON.stringify({ type: 'system', subtype: 'api_retry', attempt: 1, error })}\n`
+  it('a recovered 529 retry followed by "Prompt is too long" reports context_too_long', async () => {
+    const [init, assistant, result] = claudeRefused(CLAUDE_FORK, 'Prompt is too long')
+    const h = harness({}, { stdout: [init!, retry('overloaded'), retry('rate_limit'), assistant!, result!], exitCode: 1 })
+    const out = await run(h)
+    if (out.ok) throw new Error('expected failure')
+    expect(out.detail).toBe('context_too_long')
+  })
+  it('a retry notice alone is never a cause', () => {
+    expect(classifyProviderOutputLine(retry('overloaded').trim())).toBeNull()
+    expect(classifyProviderOutputLine(JSON.stringify({ type: 'error', message: 'Reconnecting... 1/5 (unexpected status 429 Too Many Requests)' }))).toBeNull()
+  })
+  it('an earlier non-terminal carrier never overrides the terminal verdict', async () => {
+    const lines = [
+      `${JSON.stringify({ type: 'system', subtype: 'init', session_id: CLAUDE_FORK, cwd: CWD })}\n`,
+      `${JSON.stringify({ type: 'assistant', session_id: CLAUDE_FORK, error: 'rate_limit', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'slow down' }] } })}\n`,
+      `${JSON.stringify({ type: 'result', session_id: CLAUDE_FORK, is_error: true, result: 'Prompt is too long' })}\n`,
+    ]
+    const out = await run(harness({}, { stdout: lines, exitCode: 1 }))
+    if (out.ok) throw new Error('expected failure')
+    expect(out.detail).toBe('context_too_long')
+  })
+})

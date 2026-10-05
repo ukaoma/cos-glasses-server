@@ -232,13 +232,32 @@ export function classifyProviderErrorText(text: string): ForkProviderFailure | n
  * merely mentions a limit is never read.
  */
 export function classifyProviderOutputLine(line: string): ForkProviderFailure | null {
+  return readProviderOutputLine(line)?.cause ?? null
+}
+
+/**
+ * The cause on one stdout line, and whether the line is the provider's FINAL verdict
+ * (Claude's `result` with `is_error`, Codex's `turn.failed`). A terminal verdict beats
+ * anything earlier. A retry notice is not a verdict at all: the Claude CLI writes
+ * `{type:"system",subtype:"api_retry",error:"overloaded"|"rate_limit"}` and Codex
+ * writes `{type:"error",message:"Reconnecting... 1/5 (… 429 …)"}` for retries that
+ * may recover, and the first-carrier rule turned a recovered 529 followed by
+ * "Prompt is too long" into "usage limit" (6.62.1 QA).
+ */
+export function readProviderOutputLine(line: string): { cause: ForkProviderFailure | null; terminal: boolean } | null {
   if (!line || line.length > 2_000_000 || line[0] !== '{') return null
   let j: any
   try { j = JSON.parse(line) } catch { return null }
   if (!j || typeof j !== 'object') return null
-  const carrier = (j.type === 'result' && j.is_error === true) || j.isApiErrorMessage === true
-    || typeof j.error === 'string' || j.type === 'error' || j.type === 'turn.failed'
+  if (j.type === 'system' && j.subtype === 'api_retry') return null
+  if (j.type === 'error' && typeof j.message === 'string' && /\b(?:reconnecting|retrying)\b/i.test(j.message)) return null
+  const terminal = (j.type === 'result' && j.is_error === true) || j.type === 'turn.failed'
+  const carrier = terminal || j.isApiErrorMessage === true || typeof j.error === 'string' || j.type === 'error'
   if (!carrier) return null
+  return { cause: providerCauseOf(j), terminal }
+}
+
+function providerCauseOf(j: any): ForkProviderFailure | null {
   if (j.error === 'rate_limit' || j.apiErrorStatus === 429) return 'provider_limit'
   if (j.error === 'authentication_failed') return 'provider_auth'
   const parts: string[] = []
@@ -824,6 +843,13 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
     let forkState: ForkState = 'none'
     let exitCode: number | null = null
     let providerFailure: ForkProviderFailure | null = null
+    let terminalFailure: ForkProviderFailure | null = null
+    const noteProviderLine = (line: string) => {
+      const read = readProviderOutputLine(line)
+      if (!read?.cause) return
+      if (read.terminal) terminalFailure = read.cause   // the last verdict wins
+      else providerFailure ??= read.cause
+    }
     let settled = false
     let timedOut = false
     let spawnErrored = false
@@ -873,7 +899,7 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
           for (const id of extractNativeIdsFromLine(line)) {
             if (!observedIds.includes(id)) observedIds.push(id)
           }
-          providerFailure ??= classifyProviderOutputLine(line)
+          noteProviderLine(line)
         }
         // Deliberately nothing else: no text, no tool calls, no transcript. This
         // module cannot leak what it never held.
@@ -900,7 +926,7 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
         for (const id of extractNativeIdsFromLine(stdoutTail)) {
           if (!observedIds.includes(id)) observedIds.push(id)
         }
-        providerFailure ??= classifyProviderOutputLine(stdoutTail)
+        noteProviderLine(stdoutTail)
         stdoutTail = ''
       }
 
@@ -912,7 +938,7 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
         const verdict = selectForkedId(observedIds, sourceNativeThreadId)
         return verdict.ok ? verdict.newNativeThreadId : null
       }
-      const cause = (): string | null => providerFailure ?? classifyProviderErrorText(stderrSample)
+      const cause = (): string | null => terminalFailure ?? providerFailure ?? classifyProviderErrorText(stderrSample)
       if (timedOut) return settleFailure('timeout', { newNativeThreadId: copyId() })
       if (spawnErrored) return settleFailure('spawn_failed', { detail: 'child_error' })
       if (exitCode !== 0) return settleFailure('provider_exit_nonzero', { newNativeThreadId: copyId(), detail: cause() })
