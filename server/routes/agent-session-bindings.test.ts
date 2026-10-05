@@ -54,7 +54,7 @@ import { boundToMarker, targetKey, type NativeBinding } from '../lib/agent-sessi
 import { deliverAttachedTurn, CANCEL_KILL_GRACE_MS, type AttachedChildProcess } from '../lib/attached-provider-adapter.js'
 import { hasHaltMarker, writeHaltMarker } from '../lib/session-halt.js'
 import type { CancelDeps } from './agent-session-bindings.js'
-import type { SessionCancelLedgerRow } from '../lib/session-cancel.js'
+import { setCodexDeskCancelReady, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
@@ -4319,11 +4319,13 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     expect(calls.noted).toEqual([])
   })
 
+  // 6.62.0 (plan 3.8): Codex stops only through its own TRUSTED hooks (none registered here, so
+  // no); Cursor through the Claude hooks it runs, so only when those cannot halt.
   it.each([
-    ['codex', 'Runs in Codex on your Mac. Stop it there.'],
-    ['cursor', 'Runs in Cursor on your Mac. Stop it there.'],
-  ])('a %s run outside COS: 409 cancel_unsupported, naming the app', async (provider, copy) => {
-    const { cancel, calls } = recordingCancel()
+    ['codex', 'Runs in Codex on your Mac. Stop it there.', {}],
+    ['cursor', 'Runs in Cursor on your Mac. Stop it there.', { hooksReady: () => false }],
+  ] as const)('a %s run outside COS with no hooks that can stop it: 409 cancel_unsupported, naming the app', async (provider, copy, over) => {
+    const { cancel, calls } = recordingCancel(over)
     const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
     const base = await start(deps({ cancel, occupancy: working }))
     const res = await postCancel(base, 'cc-unsup-0001', provider, CODEX_THREAD)
@@ -4332,6 +4334,25 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     expect(calls.halt).toEqual([])
     const body = await (await fetch(`${base}/api/agent-sessions/${provider}/${CODEX_THREAD}/attachability`)).json()
     expect(body.cancel).toBe('unsupported')
+  })
+
+  it('6.62.0: a Cursor or (trusted-hooks) Codex run at the desk: the marker is written under its id, 202 next_tool_call', async () => {
+    for (const provider of ['cursor', 'codex'] as const) {
+      if (provider === 'codex') setCodexDeskCancelReady(() => true)
+      try {
+        const { cancel, calls } = recordingCancel()
+        const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
+        const base = await start(deps({ cancel, occupancy: working }))
+        const res = await postCancel(base, `cc-desk-${provider}`, provider, CODEX_THREAD)
+        expect(res.status).toBe(202)
+        expect(res.body).toMatchObject({ cancelled: true, target: 'desk_run', effective: 'next_tool_call' })
+        expect(calls.halt).toEqual([{ sessionId: CODEX_THREAD, at: NOW, clientCancelId: `cc-desk-${provider}` }])
+        const body = await (await fetch(`${base}/api/agent-sessions/${provider}/${CODEX_THREAD}/attachability`)).json()
+        expect(body.cancel).toBe('desk_run')
+      } finally {
+        setCodexDeskCancelReady(() => false)
+      }
+    }
   })
 
   it('nothing running: 409 not_running, for Claude and for Codex', async () => {

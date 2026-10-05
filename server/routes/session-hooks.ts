@@ -1,4 +1,6 @@
 import { installCursorObserver } from '../lib/cursor-observer-installer.js'
+import { codexPresent, installCodexHooks, uninstallCodexHooks, type CodexInstallResult } from '../lib/codex-hooks-installer.js'
+import { refreshAfterInstall } from '../lib/provider-observe.js'
 // Session hooks: status, install, uninstall, and today's runs.
 //
 // `GET /api/session-hooks/status` is what Control's banner keys off. Five outcomes on
@@ -17,8 +19,50 @@ export function isInteractiveEntrypoint(entrypoint: string | null): boolean {
   return entrypoint === 'claude-desktop' || entrypoint === 'cli'
 }
 
-export function createSessionHooksRouter(options: { port: number }): Router {
+/**
+ * 6.62.0: the Codex half of install and uninstall, injectable so a test never touches the
+ * real `~/.codex`. Defaults are the real installer, gated on Codex being present at all.
+ */
+export interface SessionHooksCodexDeps {
+  present: () => boolean
+  install: (options: { dryRun: boolean }) => CodexInstallResult
+  uninstall: (options: { dryRun: boolean }) => CodexInstallResult
+  /** Re-read the provider hook files (and Codex trust, in the background) after a write. */
+  refresh: () => void
+}
+
+const realCodexDeps: SessionHooksCodexDeps = {
+  present: () => codexPresent(),
+  install: options => installCodexHooks(options),
+  uninstall: options => uninstallCodexHooks(options),
+  refresh: () => refreshAfterInstall(),
+}
+
+/**
+ * The Codex half, run AFTER Claude's and the observer's and never able to change their answer
+ * (B2): a missing Codex is `skipped`, a refusal or a throw is reported in `codex` and the route
+ * still answers as Claude's result says.
+ */
+export function codexHookStep(deps: SessionHooksCodexDeps, action: 'install' | 'uninstall', dryRun: boolean): Record<string, unknown> {
+  try {
+    if (!deps.present()) return { ok: true, skipped: 'codex_not_present' }
+    const result = action === 'install' ? deps.install({ dryRun }) : deps.uninstall({ dryRun })
+    return {
+      ok: result.ok,
+      ...(result.reason ? { reason: result.reason } : {}),
+      changed: result.changed,
+      backupPath: result.backupPath,
+      status: { state: result.status.state, installed: result.status.installed, scriptOk: result.status.scriptOk },
+      ...(dryRun && result.merged ? { merged: result.merged } : {}),
+    }
+  } catch (error) {
+    return { ok: false, reason: 'codex_step_threw', detail: error instanceof Error ? error.name : 'error' }
+  }
+}
+
+export function createSessionHooksRouter(options: { port: number; codex?: SessionHooksCodexDeps }): Router {
   const router = Router()
+  const codex = options.codex ?? realCodexDeps
 
   router.get('/session-hooks/status', (_req, res) => {
     res.set('Cache-Control', 'private, no-store')
@@ -34,8 +78,10 @@ export function createSessionHooksRouter(options: { port: number }): Router {
       return
     }
     const cursorObserver = installCursorObserver({ dryRun })
-    if (!cursorObserver.ok) { res.status(409).json({ ok: false, reason: 'cursor_observer_install_failed', cursorObserver, status: result.status }); return }
-    res.json({ ok: true, cursorObserver, changed: result.changed || cursorObserver.changed, scriptCopied: result.scriptCopied, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
+    const codexStep = codexHookStep(codex, 'install', dryRun)
+    if (!dryRun) { try { codex.refresh() } catch { /* health catches up on its own tick */ } }
+    if (!cursorObserver.ok) { res.status(409).json({ ok: false, reason: 'cursor_observer_install_failed', cursorObserver, codex: codexStep, status: result.status }); return }
+    res.json({ ok: true, cursorObserver, codex: codexStep, changed: result.changed || cursorObserver.changed, scriptCopied: result.scriptCopied, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
   })
 
   router.post('/session-hooks/uninstall', (req, res) => {
@@ -47,8 +93,10 @@ export function createSessionHooksRouter(options: { port: number }): Router {
       return
     }
     const cursorObserver = installCursorObserver({ dryRun, uninstall: true })
-    if (!cursorObserver.ok) { res.status(409).json({ ok: false, reason: 'cursor_observer_uninstall_failed', cursorObserver, status: result.status }); return }
-    res.json({ ok: true, cursorObserver, changed: result.changed || cursorObserver.changed, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
+    const codexStep = codexHookStep(codex, 'uninstall', dryRun)
+    if (!dryRun) { try { codex.refresh() } catch { /* health catches up on its own tick */ } }
+    if (!cursorObserver.ok) { res.status(409).json({ ok: false, reason: 'cursor_observer_uninstall_failed', cursorObserver, codex: codexStep, status: result.status }); return }
+    res.json({ ok: true, cursorObserver, codex: codexStep, changed: result.changed || cursorObserver.changed, backupPath: result.backupPath, status: result.status, ...(dryRun ? { merged: result.merged } : {}) })
   })
 
   // Sessions the hooks saw start and end, for Control's scheduled-job ledger. A run

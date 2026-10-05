@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -87,7 +88,8 @@ describe('the spool ingester', () => {
     expect(stats.duplicates).toBe(1)
     expect(stats.salvaged).toBe(1)
     expect(stats.rejected).toBe(2)
-    expect(readdirSync(join(dir, 'rejected')).length).toBe(2)
+    // 6.62.0: `rejected/` also holds the re-ingest marker (`.reingested-6.62.0`), a dot file.
+    expect(readdirSync(join(dir, 'rejected')).filter(n => !n.startsWith('.')).length).toBe(2)
     // The salvaged envelope carries the ts the head of the file named, not the filename's.
     const stops = applied.filter(e => e.event === 'Stop')
     expect(stops).toHaveLength(2) // the seeded Stop and the salvaged one
@@ -279,5 +281,104 @@ describe('the ledger', () => {
     // A window that the current file already covers never opens the rotated file.
     const narrow = current.replay(envs[2].ts, () => {})
     expect([...narrow.keys]).toEqual(['k2', 'k3'])
+  })
+})
+
+// 6.62.0 (plan 2.4): the Cursor observer's files are spool files. Every path here has a space
+// and a dot directory in it, as the real `~/.cos-glasses/data/hook-spool` and repo path do.
+describe('the Cursor observer and the spool (6.62.0)', () => {
+  const OBSERVER = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hooks', 'cos-cursor-observer.cjs')
+  const CURSOR = '8c149bba-82b6-4b73-9f2f-eb26e72a72a9'
+  function realSpool(): string {
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-spool-observer-')))
+    const dir = join(root, 'Ukaoma Chief Of Staff', '.cos-glasses', 'data', 'hook-spool')
+    mkdirSync(dir, { recursive: true })
+    return dir
+  }
+  const observe = (event: string, spool: string, payload: Record<string, unknown>) =>
+    execFileSync(process.execPath, [OBSERVER, event, spool], { input: JSON.stringify(payload) }).toString()
+
+  it('parity: the REAL observer writes into a spool the REAL drain ingests, thought included', () => {
+    const dir = realSpool()
+    expect(observe('subagentStart', dir, { conversation_id: CURSOR, subagent_id: 'worker-a', task: 'Private task' }).trim()).toBe('{"permission":"allow"}')
+    expect(observe('preCompact', dir, { conversation_id: CURSOR }).trim()).toBe('{}')
+    expect(observe('afterAgentThought', dir, { conversation_id: CURSOR, session_id: CURSOR, text: `Reading the queue. ${'t'.repeat(400)}`, cursor_version: '2026.10.01' }).trim()).toBe('{}')
+    const names = readdirSync(dir).filter(n => n.endsWith('.json'))
+    expect(names).toHaveLength(3)
+    // The observer's own name: a 12-hex nonce between the pid and the event.
+    for (const name of names) expect(name).toMatch(/^\d+-\d+-[0-9a-f]{12}-[A-Za-z]+\.json$/)
+    const applied: HookEnvelope[] = []
+    running = startSpoolIngester({ dir, ledger: new SessionHookLedger(ledgerPath(dir)), apply: env => applied.push(env), sweepMs: 60_000 })
+    expect(running.stats()).toMatchObject({ ingested: 3, rejected: 0, rejected24h: 0 })
+    expect(readdirSync(dir).filter(n => n.endsWith('.json'))).toEqual([])
+    expect(readdirSync(join(dir, 'rejected')).filter(n => n.endsWith('.unrecognized'))).toEqual([])
+    expect(applied.map(e => e.event).sort()).toEqual(['AgentThought', 'PreCompact', 'SubagentStart'])
+    expect(applied.every(e => e.provider === 'cursor' && e.sessionId === CURSOR && e.payload.display_only === true)).toBe(true)
+    const thought = applied.find(e => e.event === 'AgentThought')!
+    expect(String(thought.payload.text)).toMatch(/^Reading the queue\. t+$/)
+    expect(String(thought.payload.text).length).toBe(280)
+    // The thought's text never reaches the ledger.
+    expect(readFileSync(ledgerPath(dir), 'utf8')).not.toContain('Reading the queue')
+    expect(readFileSync(ledgerPath(dir), 'utf8')).not.toContain('Private task')
+  })
+
+  it('a thought with no text writes nothing', () => {
+    const dir = realSpool()
+    observe('afterAgentThought', dir, { conversation_id: CURSOR })
+    observe('afterAgentThought', dir, { conversation_id: CURSOR, text: '   ' })
+    expect(readdirSync(dir).filter(n => n.endsWith('.json'))).toEqual([])
+  })
+
+  it('re-ingest: rejected observer files from the last hour go back once, across two boots; older ones stay', () => {
+    const dir = realSpool()
+    const rejected = join(dir, 'rejected')
+    mkdirSync(rejected, { recursive: true })
+    const now = Date.now()
+    const fresh = `${now - 60_000}-4242-0123456789ab-SubagentStop.json`
+    const old = `${now - 3 * 60 * 60_000}-4242-abcdefabcdef-SubagentStop.json`
+    const notOurs = 'garbage.json'
+    const body = (ts: number) => JSON.stringify({ ts, ppid: null, event: 'SubagentStop', provider: 'cursor', payload: { session_id: CURSOR, display_only: true, agent_id: 'w1' } })
+    writeFileSync(join(rejected, `${fresh}.unrecognized`), body(now - 60_000))
+    writeFileSync(join(rejected, `${old}.unrecognized`), body(now - 3 * 60 * 60_000))
+    writeFileSync(join(rejected, `${notOurs}.unrecognized`), '{}')
+    const oldTime = new Date(now - 3 * 60 * 60_000)
+    utimesSync(join(rejected, `${old}.unrecognized`), oldTime, oldTime)
+    const ledger = new SessionHookLedger(ledgerPath(dir))
+    const applied: HookEnvelope[] = []
+    running = startSpoolIngester({ dir, ledger, apply: env => applied.push(env), sweepMs: 60_000 })
+    expect(running.stats()).toMatchObject({ reingested: 1, ingested: 1 })
+    expect(applied.map(e => e.event)).toEqual(['SubagentStop'])
+    expect(existsSync(join(rejected, `${fresh}.unrecognized`))).toBe(false)
+    expect(existsSync(join(rejected, `${old}.unrecognized`))).toBe(true)
+    expect(existsSync(join(rejected, `${notOurs}.unrecognized`))).toBe(true)
+    expect(existsSync(join(rejected, '.reingested-6.62.0'))).toBe(true)
+    running.stop()
+    // Second boot: the marker holds. A fresh rejected file is NOT put back (and nothing is applied twice).
+    writeFileSync(join(rejected, `${now - 30_000}-4243-0123456789ac-PreCompact.json.unrecognized`), body(now - 30_000))
+    const second: HookEnvelope[] = []
+    running = startSpoolIngester({ dir, ledger, apply: env => second.push(env), sweepMs: 60_000 })
+    expect(running.stats()).toMatchObject({ reingested: 0, ingested: 0 })
+    expect(second).toEqual([])
+  })
+
+  it('rejected24h counts the last day, apart from the cumulative count; dot temp files over an hour are reaped', () => {
+    const dir = realSpool()
+    let clock = Date.now()
+    writeFileSync(join(dir, 'stray.json'), '{}')
+    writeFileSync(join(dir, `${clock}-1-Stop.json`), 'not json at all')
+    // An observer killed between its write and its rename: `.<spool name>`, an hour old.
+    const dotTemp = `.${clock - 2 * 60 * 60_000}-77-0123456789ab-PostToolUse.json`
+    writeFileSync(join(dir, dotTemp), '{}')
+    const twoHours = new Date(clock - 2 * 60 * 60_000)
+    utimesSync(join(dir, dotTemp), twoHours, twoHours)
+    const youngTemp = `.${clock}-78-0123456789ab-PostToolUse.json`
+    writeFileSync(join(dir, youngTemp), '{}')
+    running = startSpoolIngester({ dir, ledger: new SessionHookLedger(ledgerPath(dir)), sweepMs: 60_000, now: () => clock })
+    expect(running.stats()).toMatchObject({ rejected: 2, rejected24h: 2 })
+    expect(existsSync(join(dir, dotTemp))).toBe(false)
+    expect(existsSync(join(dir, youngTemp))).toBe(true)
+    expect(existsSync(join(dir, LAST_DRAIN_STAMP))).toBe(true)
+    clock += 25 * 60 * 60_000
+    expect(running.stats()).toMatchObject({ rejected: 2, rejected24h: 0 })
   })
 })

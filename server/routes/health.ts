@@ -87,6 +87,7 @@ import {
 } from '../lib/thread-attach-capability.js'
 import { cachedHookStatus, sessionHooksEnabled, sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
 import { sessionCancelFeature } from '../lib/session-cancel.js'
+import { codexDeskHaltReady, mergeProviderBlocks, providerObserveFields } from '../lib/provider-observe.js'
 import { hookHaltReady } from '../lib/claude-hooks-installer.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
@@ -305,7 +306,9 @@ healthRouter.get('/health', async (_req, res) => {
     // 6.53.0: cancel a session run. `cosTurn` always; `deskClaude` only once the hooks are
     // applied and the 6.53 hook is installed (Install hooks in COS Control after updating).
     // The status read is the same cached one `sessionHooks` below reports.
-    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus())),
+    // 6.62.0: `deskCodex` (the Codex hooks installed AND trusted by Codex) and `deskCursor` (it
+    // runs the Claude hooks). `deskClaude` reads exactly as before.
+    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady()),
   }
   const voice = {
     available: keyStatus.hasKey || tts_local.ready,
@@ -411,6 +414,8 @@ healthRouter.get('/health', async (_req, res) => {
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
     ...sessionHooksHealthFields(),
+    // 6.62.0 (plan 1.10): what COS can see of each engine's sessions, by source.
+    providers: mergeProviderBlocks(providerObserveFields({ state: cachedHookStatus().state, ready: hookHaltReady(cachedHookStatus()) })),
     // 6.52.0: counts, the mode and two timestamps; never an id, a question, a command, or
     // how many are held (that is on the authenticated questions route).
     ...permissionBrokerHealthFields(),

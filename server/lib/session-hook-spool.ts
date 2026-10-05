@@ -27,7 +27,13 @@ export const REJECTED_KEEP = 1_000
 export const REJECTED_MAX_AGE_MS = 7 * 24 * 60 * 60_000
 export const LAST_DRAIN_STAMP = '.last-drain'
 
-const SPOOL_FILE_RE = /^(\d{10,16})-(\d+)-([A-Za-z]+)\.json$/
+/**
+ * `<ms>-<pid>-<Event>.json` from the hook script; 6.62.0: also `<ms>-<pid>-<12 hex>-<Event>.json`,
+ * the Cursor observer's name since it shipped (6.61.5). The nonce keeps two observer runs in one
+ * millisecond apart; until 6.62.0 every one of its files was moved aside as unrecognized.
+ * Ordering reads groups 1 and 2 only.
+ */
+export const SPOOL_FILE_RE = /^(\d{10,16})-(\d+)(?:-[0-9a-f]{12})?-([A-Za-z]+)\.json$/
 
 /** A code, never a message: raw fs messages carry the home path and health is public. */
 export function errorCode(error: unknown): string {
@@ -38,6 +44,17 @@ export function errorCode(error: unknown): string {
 
 /** A hook killed mid-write leaves `.tmp.*`; reap those older than this. */
 export const TMP_MAX_AGE_MS = 10 * 60_000
+/** 6.62.0: the observer's `.<name>` temp file, left by a run killed between write and rename. */
+export const DOT_TEMP_MAX_AGE_MS = 60 * 60_000
+/**
+ * 6.62.0: observer files 6.61.x moved aside as `.unrecognized` are put back ONCE, and only those
+ * from the last hour: older ones describe sub-agents and compactions long over (and canary
+ * throwaways), and age out with the rest of `rejected/` as before.
+ */
+export const REINGEST_MAX_AGE_MS = 60 * 60_000
+export const REINGEST_MARKER = '.reingested-6.62.0'
+/** The window `rejected24h` counts over. */
+export const REJECTED_WINDOW_MS = 24 * 60 * 60_000
 /** The startup drain never loops more times than a full spool needs. */
 export const STARTUP_MAX_PASSES = Math.ceil(2_000 / SPOOL_BATCH) + 1
 
@@ -63,7 +80,12 @@ export interface SpoolIngesterOptions {
 
 export interface SpoolStats {
   ingested: number
+  /** Since the process started (cumulative). */
   rejected: number
+  /** 6.62.0: in the last 24 hours, so a fixed cause reads as fixed without a restart. */
+  rejected24h: number
+  /** 6.62.0: rejected observer files put back into the spool at boot (once per Mac). */
+  reingested: number
   salvaged: number
   duplicates: number
   /** Files a sweep visited and could not remove (ledger refused, unreadable). */
@@ -90,7 +112,13 @@ export function startSpoolIngester(options: SpoolIngesterOptions): SpoolIngester
   const batch = options.batch ?? SPOOL_BATCH
   const seen = options.seenKeys ?? new Set<string>()
   const rejectedDir = join(dir, 'rejected')
-  const stats: SpoolStats = { ingested: 0, rejected: 0, salvaged: 0, duplicates: 0, stuck: 0, foreign: 0, applyErrors: 0, backlog: 0, lastSweepAt: null, lastEventAt: null, lastError: null }
+  const stats: SpoolStats = { ingested: 0, rejected: 0, rejected24h: 0, reingested: 0, salvaged: 0, duplicates: 0, stuck: 0, foreign: 0, applyErrors: 0, backlog: 0, lastSweepAt: null, lastEventAt: null, lastError: null }
+  const rejectedAt: number[] = []
+  const countRejected = () => {
+    stats.rejected++
+    rejectedAt.push(now())
+    if (rejectedAt.length > 10_000) rejectedAt.splice(0, rejectedAt.length - 10_000)
+  }
   let ticking = false
   let stopped = false
   let watcher: FSWatcher | null = null
@@ -134,16 +162,22 @@ export function startSpoolIngester(options: SpoolIngesterOptions): SpoolIngester
         try { if (now() - statSync(join(dir, n)).mtimeMs > TMP_MAX_AGE_MS) unlinkSync(join(dir, n)) } catch { /* fine */ }
         continue
       }
+      // 6.62.0: the observer writes `.<spool name>` and renames it; one killed in between left
+      // it here for good. Only that exact shape, and only once it is an hour old.
+      if (n.startsWith('.') && SPOOL_FILE_RE.test(n.slice(1))) {
+        try { if (now() - statSync(join(dir, n)).mtimeMs > DOT_TEMP_MAX_AGE_MS) unlinkSync(join(dir, n)) } catch { /* fine */ }
+        continue
+      }
       if (n.startsWith('.')) continue
       if (!n.endsWith('.json')) { foreign++; continue }
-      try { renameSync(join(dir, n), join(rejectedDir, `${n}.unrecognized`)) ; stats.rejected++ } catch { /* fine */ }
+      try { renameSync(join(dir, n), join(rejectedDir, `${n}.unrecognized`)) ; countRejected() } catch { /* fine */ }
     }
     stats.foreign = foreign
     return names.filter(n => SPOOL_FILE_RE.test(n)).sort(spoolOrder)
   }
 
   const reject = (name: string, reason: string) => {
-    stats.rejected++
+    countRejected()
     try { renameSync(join(dir, name), join(rejectedDir, `${name}.${reason}`)) } catch {
       try { unlinkSync(join(dir, name)) } catch { /* gone already */ }
     }
@@ -203,7 +237,8 @@ export function startSpoolIngester(options: SpoolIngesterOptions): SpoolIngester
 
   const pruneRejected = () => {
     let names: string[]
-    try { names = readdirSync(rejectedDir).sort() } catch { return }
+    // The re-ingest marker is not a rejected file: it is never pruned, so the re-ingest stays once.
+    try { names = readdirSync(rejectedDir).filter(n => n !== REINGEST_MARKER).sort() } catch { return }
     const cutoff = now() - REJECTED_MAX_AGE_MS
     const excess = Math.max(0, names.length - REJECTED_KEEP)
     names.forEach((n, index) => {
@@ -242,6 +277,29 @@ export function startSpoolIngester(options: SpoolIngesterOptions): SpoolIngester
     return removed
   }
 
+  // 6.62.0: put back the observer files 6.61.x could not read (see REINGEST_MAX_AGE_MS), once.
+  // Moved, never copied: the normal drain below ingests and deletes them like any other file.
+  const reingest = () => {
+    const marker = join(rejectedDir, REINGEST_MARKER)
+    if (existsSync(marker)) return
+    let names: string[] = []
+    try { names = readdirSync(rejectedDir) } catch { return }
+    const suffix = '.unrecognized'
+    for (const n of names) {
+      if (!n.endsWith(suffix)) continue
+      const original = n.slice(0, -suffix.length)
+      if (!SPOOL_FILE_RE.test(original)) continue
+      try {
+        if (now() - statSync(join(rejectedDir, n)).mtimeMs > REINGEST_MAX_AGE_MS) continue
+        if (existsSync(join(dir, original))) continue
+        renameSync(join(rejectedDir, n), join(dir, original))
+        stats.reingested++
+      } catch { /* left where it is; it ages out */ }
+    }
+    try { writeFileSync(marker, `${new Date(now()).toISOString()} ${stats.reingested}\n`, { mode: 0o600 }) } catch { /* the next boot tries once more */ }
+  }
+  reingest()
+
   // Startup drain: the backlog, in bounded passes, before anyone asks. Bounded twice: a pass
   // that removed nothing ends it (a refusing ledger must never spin the boot), and no
   // backlog needs more passes than a full spool.
@@ -267,6 +325,10 @@ export function startSpoolIngester(options: SpoolIngesterOptions): SpoolIngester
       clearInterval(timer)
       try { watcher?.close() } catch { /* fine */ }
     },
-    stats: () => ({ ...stats }),
+    stats: () => {
+      const since = now() - REJECTED_WINDOW_MS
+      while (rejectedAt.length > 0 && rejectedAt[0]! < since) rejectedAt.shift()
+      return { ...stats, rejected24h: rejectedAt.length }
+    },
   }
 }

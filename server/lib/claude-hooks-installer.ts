@@ -158,7 +158,8 @@ export function currentHookPaths(): HookPaths {
 
 type HookBlock = { matcher?: unknown; hooks?: unknown }
 
-function hookIsOurs(h: unknown): boolean {
+/** Exported (6.62.0) so the Codex installer names our hooks by the same script path. */
+export function hookIsOurs(h: unknown): boolean {
   return !!h && typeof h === 'object' && typeof (h as { command?: unknown }).command === 'string'
     && ((h as { command: string }).command.includes(HOOK_SCRIPT_MARKER) || (h as { command: string }).command.includes(HOOK_SCRIPT_NAME + ' '))
 }
@@ -475,7 +476,8 @@ export interface InstallResult {
 
 const BACKUPS_KEPT = 3
 
-function backupSettings(settingsPath: string): string | null {
+/** Exported (6.62.0) for the Codex installer: the same backup, the same three kept. */
+export function backupSettings(settingsPath: string): string | null {
   if (!existsSync(settingsPath)) return null
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const backup = `${settingsPath}.cos-backup-${stamp}`

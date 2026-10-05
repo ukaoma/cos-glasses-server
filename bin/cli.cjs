@@ -146,12 +146,13 @@ function setupSpeakerModel() {
   return 0
 }
 
-// --hooks install|status|uninstall: the Claude Code session hook (6.48.0). Runs before the
+// --hooks install|status|uninstall: the Claude Code session hook (6.48.0), and the same hook in
+// Codex when Codex is on the Mac (6.62.0; `--codex` for Codex only). Runs before the
 // banner and the runtime checks, resolving tsx itself; the managed runtime never comes
 // through here (Control uses POST /api/session-hooks/install on the running server).
 if (process.argv.includes('--hooks')) {
   if (!['install', 'status', 'uninstall'].includes(HOOKS_ACTION)) {
-    console.error('Usage: --hooks install|status|uninstall [--dry-run] [--port N]')
+    console.error('Usage: --hooks install|status|uninstall [--dry-run] [--port N] [--codex]')
     process.exit(64)
   }
   let hooksTsx
@@ -183,7 +184,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-transcription --transcription-tier balanced|max')
   console.log('    npx --yes @gotcos/glasses-server@latest --setup-speaker-model')
   console.log('    npx --yes @gotcos/glasses-server@latest --prepare-only')
-  console.log('    npx --yes @gotcos/glasses-server@latest --hooks install|status|uninstall [--dry-run] [--port N]')
+  console.log('    npx --yes @gotcos/glasses-server@latest --hooks install|status|uninstall [--dry-run] [--port N] [--codex]')
   console.log('')
   console.log('  Requirements:')
   console.log('    - Node.js 20.11+')

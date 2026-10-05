@@ -248,7 +248,17 @@ describe('reading the envelope', () => {
     const verdict = parsePermissionRequestEnvelope(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, 5_000))
     expect(verdict.ok).toBe(true)
     if (!verdict.ok) return
-    expect(verdict.facts).toEqual({ sessionId: SESSION, toolName: 'AskUserQuestion', toolInput: ASK_INPUT, fingerprint: toolFingerprint('AskUserQuestion', ASK_INPUT), hookStartedAtMs: 5_000, hookWaitS: null })
+    expect(verdict.facts).toEqual({ sessionId: SESSION, toolName: 'AskUserQuestion', toolInput: ASK_INPUT, fingerprint: toolFingerprint('AskUserQuestion', ASK_INPUT), hookStartedAtMs: 5_000, hookWaitS: null, provider: 'claude' })
+  })
+
+  it('6.62.0 (plan 3.10): a Codex request is Codex, from the envelope stamp or its rollout path', () => {
+    const stamped = parsePermissionRequestEnvelope({ ...permissionEnvelope('Bash', { command: 'ls' }, {}, 5_000), provider: 'codex' })
+    expect(stamped.ok && stamped.facts.provider).toBe('codex')
+    const byPath = parsePermissionRequestEnvelope(permissionEnvelope('Bash', { command: 'ls' }, { transcript_path: '/Users/x/.codex/sessions/2026/10/05/rollout-y.jsonl' }, 5_000))
+    expect(byPath.ok && byPath.facts.provider).toBe('codex')
+    // A stamp that is not a provider is no stamp.
+    const junk = parsePermissionRequestEnvelope({ ...permissionEnvelope('Bash', { command: 'ls' }, {}, 5_000), provider: 'gemini' })
+    expect(junk.ok && junk.facts.provider).toBe('claude')
   })
 
   it('6.60.0: reads the hook\'s wait stamp only as a whole number of seconds the installer could write', () => {
@@ -495,6 +505,21 @@ describe('the broker, driven directly', () => {
       // Nothing left to cancel for the session: zero, and nothing sent twice.
       expect(broker.cancelSession(SESSION)).toBe(0)
       expect(approval.sent).toHaveLength(1)
+    })
+
+    it('6.62.0 (W20, plan 3.10): a held Codex prompt is denied WITHOUT interrupt, and every view says codex', async () => {
+      const { broker, clock } = brokerWith()
+      brokers.push(broker)
+      const a = await broker.admit({ ...permissionEnvelope('Bash', { command: 'rm -rf build' }, {}, clock.now), provider: 'codex' })
+      if (!a.ok) throw new Error(a.reason)
+      const c = fakeChannel(true)
+      const id = broker.park(a.request, c.channel)
+      expect(broker.list()).toEqual([expect.objectContaining({ id, provider: 'codex' })])
+      expect(broker.cancelSession(SESSION)).toBe(1)
+      expect(c.sent).toEqual([cancelHookOutput('codex')])
+      expect(cancelHookOutput('codex')).toEqual({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Cancelled from COS' } } })
+      expect(JSON.stringify(c.sent)).not.toContain('interrupt')
+      expect(broker.settledList()).toEqual([expect.objectContaining({ id, provider: 'codex', resolution: 'answered' })])
     })
 
     it('a hook that already left is hook_gone, not counted as denied', async () => {
