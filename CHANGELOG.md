@@ -1,7 +1,6 @@
-## Unreleased (next: 6.63.0)
+## 6.63.0 — 2026-10-05 — Background forks
 
 - Background forks. `POST /api/agent-sessions/:provider/:threadId/fork` accepts an optional `clientForkId`: once every gate passes it answers 202 and runs the fork in the background, and `GET /api/agent-session-forks/:clientForkId` returns `running` or the exact answer the synchronous route would have sent. A repeated id replays its job and never makes a second copy. Outcomes are kept in `<data>/fork-jobs.json` (7 days, 200 rows); a fork still running when the server stops reads back as orphan-possible ("look in Sessions before forking again"), never as failed. Without the id the route is unchanged. Why: on 2026-10-05 COS Control waited 5 minutes for a 6.5-minute fork that succeeded and told Miles the server had stopped. Pairs with COS Control 0.5.257; older clients keep the synchronous route.
-
 - A fork that recovered from a transient retry (Claude `api_retry` "overloaded"/"rate_limit", Codex "Reconnecting… 429") and then failed is reported by the provider's final error, not the retry: "too long" no longer reads as "usage limit". (6.62.1 QA)
 
 ## 6.62.1 — 2026-10-05 — Combined provider parity and handoff hardening
