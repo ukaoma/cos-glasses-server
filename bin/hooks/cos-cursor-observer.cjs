@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Read-only native Cursor lifecycle observer. No network, credentials, commands or prompts; agent thoughts are capped, display-only and never persisted.
+// Read-only native Cursor lifecycle observer. No network, credentials, commands or prompts. An agent
+// thought (6.62.0) is capped at 280 characters and display only: it sits in a 0600 spool file until
+// the server drains it, then lives in memory and on the live feed, and is never written to the ledger.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const event=process.argv[2],spool=process.argv[3];
 const names={subagentStart:'SubagentStart',subagentStop:'SubagentStop',preCompact:'PreCompact',postToolUse:'PostToolUse',afterAgentResponse:'PostCompact',stop:'PostCompact',sessionEnd:'PostCompact',afterAgentThought:'AgentThought'};
@@ -13,7 +15,10 @@ process.stdin.on('end',()=>{
    const p=JSON.parse(input),id=p.parent_conversation_id||p.conversation_id||p.session_id;
    if(typeof id==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)){
     fs.mkdirSync(spool,{recursive:true,mode:0o700});
-    if(fs.readdirSync(spool).length<2000){
+    // 6.62.0 (QA W16): the hook script's guard. A drain stamp older than a day means nobody is
+    // reading the spool, so nothing more is written into it (thoughts least of all).
+    let stale=false;try{stale=Date.now()-fs.statSync(path.join(spool,'.last-drain')).mtimeMs>86400000}catch{}
+    if(!stale&&fs.readdirSync(spool).length<2000){
      const ts=Date.now(),payload={session_id:id.toLowerCase(),display_only:true};
      const agent=p.subagent_id||p.agent_id;
      if(typeof agent==='string'&&/^[a-zA-Z0-9_-]{1,160}$/.test(agent))payload.agent_id=agent;

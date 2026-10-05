@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   HALT_CAPABLE_PRIOR_SCRIPT_SHAS,
+  cursorDeskHaltReady,
   HOOK_SUBSCRIPTIONS,
   LEGACY_PERMISSION_HOOK_TIMEOUT_S,
   PERMISSION_HOOK_TIMEOUT_S,
@@ -460,6 +461,27 @@ describe('after the 6.53.3 script change', () => {
       expect(status.installed).toBe(false)
       expect(hookHaltReady(status)).toBe(true)
       expect(hookStatusAdvice(status)).toContain('still stops desk runs')
+      // QA W1: halt-ready for CLAUDE only. Cursor needs the current script (conversation_id).
+      expect(cursorDeskHaltReady(status)).toBe(false)
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('6.62.0 (QA W1): Cursor desk cancel needs this package\'s script: installed yes, any earlier script no', () => {
+    try {
+      const current = onScript(readFileSync(packagedHookScriptPath()))
+      expect(current.state).toBe('installed')
+      expect(cursorDeskHaltReady(current)).toBe(true)
+      for (const fixture of [SCRIPT_6_53_0, SCRIPT_6_53_3, SCRIPT_6_61_7]) {
+        const prior = onScript(readFileSync(fixture))
+        expect(hookHaltReady(prior)).toBe(true)
+        expect(cursorDeskHaltReady(prior)).toBe(false)
+      }
+      // The current script but a drifted subscription that cannot halt: no either.
+      expect(cursorDeskHaltReady({ installed: false, state: 'drift', scriptSha: 'x', packageScriptSha: 'x', priorWaitOnly: false })).toBe(false)
+      expect(cursorDeskHaltReady({ installed: false, state: 'drift', scriptSha: 'x', packageScriptSha: 'x', priorWaitOnly: true })).toBe(true)
+      expect(cursorDeskHaltReady({ installed: true, state: 'installed', scriptSha: null, packageScriptSha: null })).toBe(false)
     } finally {
       delete process.env.COS_GLASSES_HOME
     }

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { LAST_DRAIN_STAMP, SPOOL_BATCH, STARTUP_MAX_PASSES, startSpoolIngester, type SpoolIngester } from './session-hook-spool.js'
-import { parseHookEnvelope, type HookEnvelope } from './session-hook-events.js'
+import { AGENT_THOUGHT_MAX, parseHookEnvelope, type HookEnvelope } from './session-hook-events.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -316,10 +316,26 @@ describe('the Cursor observer and the spool (6.62.0)', () => {
     expect(applied.every(e => e.provider === 'cursor' && e.sessionId === CURSOR && e.payload.display_only === true)).toBe(true)
     const thought = applied.find(e => e.event === 'AgentThought')!
     expect(String(thought.payload.text)).toMatch(/^Reading the queue\. t+$/)
-    expect(String(thought.payload.text).length).toBe(280)
+    // Parity pin (QA W19): the observer's cap IS the server's AGENT_THOUGHT_MAX.
+    expect(String(thought.payload.text).length).toBe(AGENT_THOUGHT_MAX)
     // The thought's text never reaches the ledger.
     expect(readFileSync(ledgerPath(dir), 'utf8')).not.toContain('Reading the queue')
     expect(readFileSync(ledgerPath(dir), 'utf8')).not.toContain('Private task')
+  })
+
+  it('QA W16: with a drain stamp older than a day (nobody reading), the observer writes nothing', () => {
+    const dir = realSpool()
+    const stamp = join(dir, LAST_DRAIN_STAMP)
+    writeFileSync(stamp, '')
+    const old = new Date(Date.now() - 25 * 60 * 60_000)
+    utimesSync(stamp, old, old)
+    observe('afterAgentThought', dir, { conversation_id: CURSOR, text: 'thinking' })
+    observe('preCompact', dir, { conversation_id: CURSOR })
+    expect(readdirSync(dir).filter(n => n.endsWith('.json'))).toEqual([])
+    // A fresh stamp (a server draining): written as before.
+    utimesSync(stamp, new Date(), new Date())
+    observe('afterAgentThought', dir, { conversation_id: CURSOR, text: 'thinking' })
+    expect(readdirSync(dir).filter(n => n.endsWith('.json'))).toHaveLength(1)
   })
 
   it('a thought with no text writes nothing', () => {

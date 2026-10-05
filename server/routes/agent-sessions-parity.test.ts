@@ -15,7 +15,7 @@ import { agentSessionsRouter, runningHintFor } from './agent-sessions.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import { HOOK_ACTIVE_CAP_MS, __resetCodexRolloutStateForTests, codexRolloutReads } from '../lib/codex-rollout-state.js'
 import { resetLockSnapshot } from '../lib/occupancy-probes.js'
-import type { DerivedSessionState } from '../lib/session-state-derive.js'
+import { OPEN_TURN_CEILING_MS, type DerivedSessionState } from '../lib/session-state-derive.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
 
 const roots: string[] = []
@@ -87,11 +87,11 @@ describe('runningHintFor (pure)', () => {
     expect(runningHintFor('claude', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS, now)?.active).toBe(true)
   })
 
-  it('past the cap: no hint for Claude and Codex (occupancy answers), not running for Cursor', () => {
+  it('past the cap: no hint for Claude and Codex (occupancy answers); Cursor reads OPEN and quiet (QA W8)', () => {
     expect(runningHintFor('claude', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS - 1, now)).toBeNull()
-    expect(runningHintFor('codex', derived('running', 'hook'), now - 6 * 60_000, now)).toBeNull()
-    expect(runningHintFor('cursor', derived('running', 'hook'), now - 6 * 60_000, now)).toEqual({ running: false, active: false, foreign: false, decides: true })
-    expect(runningHintFor('cursor', derived('running', 'hook'), null, now)).toEqual({ running: false, active: false, foreign: false, decides: true })
+    expect(runningHintFor('codex', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS - 60_000, now)).toBeNull()
+    expect(runningHintFor('cursor', derived('running', 'hook'), now - HOOK_ACTIVE_CAP_MS - 60_000, now)).toEqual({ running: true, active: false, foreign: true, decides: true })
+    expect(runningHintFor('cursor', derived('running', 'hook'), null, now)).toEqual({ running: true, active: false, foreign: true, decides: true })
   })
 
   it('waiting: running, never active; idle and ended: nothing for Claude/Codex, quiet for Cursor', () => {
@@ -105,7 +105,7 @@ describe('runningHintFor (pure)', () => {
 
   it('only Codex reads a transcript-derived run, inside the cap; registry and other providers never', () => {
     expect(runningHintFor('codex', derived('running', 'transcript'), now - 60_000, now)).toEqual({ running: true, active: true, foreign: false, decides: false })
-    expect(runningHintFor('codex', derived('running', 'transcript'), now - 6 * 60_000, now)).toBeNull()
+    expect(runningHintFor('codex', derived('running', 'transcript'), now - HOOK_ACTIVE_CAP_MS - 60_000, now)).toBeNull()
     expect(runningHintFor('claude', derived('running', 'transcript'), now, now)).toBeNull()
     expect(runningHintFor('claude', derived('running', 'registry'), now, now)).toBeNull()
     expect(runningHintFor('cursor', undefined, now, now)).toBeNull()
@@ -137,12 +137,19 @@ describe('Cursor rows follow the hooks (plan 1.1)', () => {
     }
   })
 
-  it('6 minutes after the last event (Esc with no Stop): not running, not active', async () => {
+  it('quiet past the cap (a long tool, or Esc with no Stop): OPEN and quiet, not active (QA W8)', async () => {
     cursorHome()
-    turnOpen(6 * 60_000)
+    turnOpen(HOOK_ACTIVE_CAP_MS + 60_000)
     const { row, detail } = await rowAndDetail(await server(), 'cursor', ID)
-    // The deriver still says running (inside the 30-minute ceiling); the HINT decays.
-    for (const r of [row, detail]) expect(r).toMatchObject({ agent_state: 'running', running: false, running_active: false, running_foreign: false })
+    // The deriver still says running (inside the 30-minute ceiling); the hint says open, not working.
+    for (const r of [row, detail]) expect(r).toMatchObject({ agent_state: 'running', running: true, running_active: false, running_foreign: true })
+  })
+
+  it('past the 30-minute open-turn ceiling with no Stop: not running at all', async () => {
+    cursorHome()
+    turnOpen(OPEN_TURN_CEILING_MS + 60_000)
+    const { row, detail } = await rowAndDetail(await server(), 'cursor', ID)
+    for (const r of [row, detail]) expect(r).toMatchObject({ running: false, running_active: false, running_foreign: false })
   })
 
   it('a Stop reads not active at once, even with the transcript written seconds ago (the hooks decide, not the file time)', async () => {
@@ -193,10 +200,10 @@ describe('Claude: hook evidence counts as active for five minutes (plan 1.2)', (
   })
 
   it('Esc with no Stop decays: 6 minutes after the last event it is not active', async () => {
-    claudeHome(6 * 60_000)
+    claudeHome(HOOK_ACTIVE_CAP_MS + 60_000)
     const now = Date.now()
-    sessionSignalStore.apply(env(ID, 'claude', now - 6 * 60_000 - 1_000, 'UserPromptSubmit', { prompt: 'Long think' }))
-    sessionSignalStore.apply(env(ID, 'claude', now - 6 * 60_000, 'PreToolUse', { tool_name: 'Bash', tool_input: { command: 'x' } }))
+    sessionSignalStore.apply(env(ID, 'claude', now - HOOK_ACTIVE_CAP_MS - 61_000, 'UserPromptSubmit', { prompt: 'Long think' }))
+    sessionSignalStore.apply(env(ID, 'claude', now - HOOK_ACTIVE_CAP_MS - 60_000, 'PreToolUse', { tool_name: 'Bash', tool_input: { command: 'x' } }))
     const { row, detail } = await rowAndDetail(await server(), 'claude', ID)
     for (const r of [row, detail]) expect(r).toMatchObject({ running: false, running_active: false })
   })
@@ -237,7 +244,7 @@ describe('Codex rows: the hooks, else the rollout (plan 1.3, 1.9)', () => {
     const done = await rowAndDetail(await server(), 'codex', ID)
     for (const r of [done.row, done.detail]) expect(r).toMatchObject({ agent_state: 'idle', running: false, running_active: false })
     __resetCodexRolloutStateForTests()
-    rollout(home(), [started], 6 * 60_000)
+    rollout(home(), [started], HOOK_ACTIVE_CAP_MS + 60_000)
     const cold = await rowAndDetail(await server(), 'codex', ID)
     for (const r of [cold.row, cold.detail]) expect(r).toMatchObject({ agent_state: 'idle', running: false, running_active: false })
     expect(codexRolloutReads()).toBe(0)

@@ -130,7 +130,9 @@ describe('features.sessionCancel (6.53.0)', () => {
       invalidateHookStatus()
       const prior = await (await fetch(`${base}/api/health`)).json()
       expect(prior.sessionHooks.state).toBe('script_outdated')
-      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+      // QA W1: a halt-capable EARLIER script stops desk Claude runs, never Cursor ones: it reads
+      // the first session_id, which Cursor writes behind tool_input.
+      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: false })
       // 6.62.0 (B1): the 6.61.7 script next to this package is the Mac right after Update
       // Server and before Install hooks. Desk cancel must not turn off in that window.
       copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', '__fixtures__', 'cos-session-hook-6.61.7'), stable)
@@ -138,7 +140,7 @@ describe('features.sessionCancel (6.53.0)', () => {
       const upgraded = await (await fetch(`${base}/api/health`)).json()
       expect(upgraded.sessionHooks.state).toBe('script_outdated')
       expect(upgraded.sessionHooks.installed).toBe(false)
-      expect(upgraded.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+      expect(upgraded.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: false })
       writeFileSync(stable, '#!/bin/sh\n# a 6.51 script, no halt check\nexit 0\n')
       invalidateHookStatus()
       const older = await (await fetch(`${base}/api/health`)).json()
@@ -181,7 +183,7 @@ describe('provider observation on health (6.62.0)', () => {
   it('sessionHooks.codex and cursorObserver sit beside the Claude fields; providers.*.observe has the five sources', async () => {
     __resetProviderObserveForTests()
     const body = await (await fetch(`${base}/api/health`)).json() as any
-    expect(body.sessionHooks.codex).toEqual({ present: false, installed: false, state: null, trust: 'unknown', scriptOk: false, checkedAt: null, trustCheckedAt: null })
+    expect(body.sessionHooks.codex).toEqual({ present: false, installed: false, state: null, trust: 'unknown', trustReason: 'not_installed', scriptOk: false, checkedAt: null, trustCheckedAt: null })
     expect(body.sessionHooks.cursorObserver).toEqual({ installed: false, nodeOk: false, checkedAt: null })
     // Claude's own words are exactly where and what they were.
     expect(['installed', 'drift', 'missing', 'script_outdated', 'disabled_by_settings', 'settings_unparseable', 'settings_symlink', 'settings_unreadable']).toContain(body.sessionHooks.state)
@@ -220,7 +222,7 @@ describe('provider observation on health (6.62.0)', () => {
       refreshProviderHookFiles()
       // Codex installed, Claude not yet: Claude's words stay Claude's (B2), nothing leaks across.
       const codexOnly = await (await fetch(`${base}/api/health`)).json() as any
-      expect(codexOnly.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown' })
+      expect(codexOnly.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown', trustReason: 'unchecked' })
       expect(codexOnly.sessionHooks.state).toBe('missing')
       expect(codexOnly.sessionHooks.installed).toBe(false)
       expect(codexOnly.features.sessionCancel).toMatchObject({ deskClaude: false, deskCodex: false, deskCursor: false })

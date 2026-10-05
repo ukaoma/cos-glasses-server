@@ -4403,8 +4403,8 @@ const CASES = [
     file: "server/routes/health.ts",
     // 6.62.0: anchored on the 4-space /api/health features line; /api/models calls the same
     // feature (6-space indent) for its provider contract, so the bare call appears twice.
-    find: "\n    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady()),\n",
-    replace: "\n    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), cachedHookStatus().installed, codexDeskHaltReady()),\n",
+    find: "    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady(), cursorDeskHaltReady(cachedHookStatus())),\n  }",
+    replace: "    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), cachedHookStatus().installed, codexDeskHaltReady(), cursorDeskHaltReady(cachedHookStatus())),\n  }",
     tests: ["server/routes/health.test.ts"],
   },
   {
@@ -4910,15 +4910,15 @@ const CASES = [
   {
     name: "6620-codex-merge-drop-then-append",
     file: "server/lib/codex-hooks-installer.ts",
-    find: "      blocks[ours[0]!] = canonical\n",
-    replace: "      blocks.splice(ours[0]!, 1)\n      blocks.push(canonical)\n",
+    find: "    else blocks[ours[0]!] = canonical\n",
+    replace: "    else { blocks.splice(ours[0]!, 1); blocks.push(canonical) }\n",
     tests: ["server/lib/codex-hooks-installer.test.ts"],
   },
   {
     name: "6620-codex-mixed-block-is-ours",
     file: "server/lib/codex-hooks-installer.ts",
-    find: "  return Array.isArray(hooks) && hooks.length > 0 && hooks.every(hookIsOurs)\n",
-    replace: "  return Array.isArray(hooks) && hooks.some(hookIsOurs)\n",
+    find: "  return Array.isArray(hooks) && hooks.length > 0 && hooks.every(codexHookIsOurs)\n",
+    replace: "  return Array.isArray(hooks) && hooks.some(codexHookIsOurs)\n",
     tests: ["server/lib/codex-hooks-installer.test.ts"],
   },
   {
@@ -5015,14 +5015,14 @@ const CASES = [
   {
     name: "6620-codex-cancel-reads-claude-hooks",
     file: "server/lib/session-cancel.ts",
-    find: "  if (facts.provider === 'codex') return facts.hooksEnabled === true && codexReady(facts) ? 'desk_run' : 'unsupported'\n",
-    replace: "  if (facts.provider === 'codex') return facts.hooksEnabled === true && facts.hooksReady === true ? 'desk_run' : 'unsupported'\n",
+    find: "  if (facts.provider === 'codex') return facts.hooksEnabled === true && codexReady(facts) && hookSeen(facts, 'codex') ? 'desk_run' : 'unsupported'\n",
+    replace: "  if (facts.provider === 'codex') return facts.hooksEnabled === true && facts.hooksReady === true && hookSeen(facts, 'codex') ? 'desk_run' : 'unsupported'\n",
     tests: ["server/lib/session-cancel.test.ts"],
   },
   {
     name: "6620-cursor-cancel-unsupported",
     file: "server/lib/session-cancel.ts",
-    find: "  if (facts.provider === 'cursor') return facts.hooksEnabled === true && facts.hooksReady === true ? 'desk_run' : 'unsupported'\n",
+    find: "  if (facts.provider === 'cursor') return facts.hooksEnabled === true && cursorReady(facts) && hookSeen(facts, 'cursor') ? 'desk_run' : 'unsupported'\n",
     replace: "",
     tests: ["server/lib/session-cancel.test.ts", "server/routes/agent-session-bindings.test.ts"],
   },
@@ -5251,6 +5251,168 @@ const CASES = [
     replace: "export const FORKABLE = new Set<string>(FORKABLE_PROVIDERS)\n",
     tests: ["server/lib/session-recommendation.test.ts"],
   },
+  // ── 6.62.0 /qa fix list A (S1): desk cancel readiness, Codex trust, Codex script copy, Cursor open-quiet ──
+  {
+    name: "6620fa-cursor-cancel-reads-claude-ready",
+    file: "server/lib/session-cancel.ts",
+    find: "facts.hooksEnabled === true && cursorReady(facts) && hookSeen(facts, 'cursor')",
+    replace: "facts.hooksEnabled === true && facts.hooksReady === true && hookSeen(facts, 'cursor')",
+    tests: ["server/lib/session-cancel.test.ts", "server/routes/provider-parity.test.ts"],
+  },
+  {
+    name: "6620fa-cursor-cancel-no-thread-evidence",
+    file: "server/lib/session-cancel.ts",
+    find: "cursorReady(facts) && hookSeen(facts, 'cursor') ? 'desk_run'",
+    replace: "cursorReady(facts) ? 'desk_run'",
+    tests: ["server/lib/session-cancel.test.ts", "server/routes/agent-session-bindings.test.ts"],
+  },
+  {
+    name: "6620fa-codex-cancel-no-thread-evidence",
+    file: "server/lib/session-cancel.ts",
+    find: "codexReady(facts) && hookSeen(facts, 'codex') ? 'desk_run'",
+    replace: "codexReady(facts) ? 'desk_run'",
+    tests: ["server/lib/session-cancel.test.ts", "server/routes/agent-session-bindings.test.ts"],
+  },
+  {
+    name: "6620fa-cancel-thread-unchecked",
+    file: "server/lib/session-cancel.ts",
+    find: "  return typeof threadId === 'string' && threadId.length > 0 && readerSays(() => readers.threadHookSeen(provider, threadId))\n",
+    replace: "  return readerSays(() => readers.threadHookSeen(provider, threadId ?? ''))\n",
+    tests: ["server/lib/session-cancel.test.ts"],
+  },
+  {
+    name: "6620fa-cursor-current-script-only",
+    file: "server/lib/claude-hooks-installer.ts",
+    find: "  return hookHaltReady(status) && typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha\n",
+    replace: "  return hookHaltReady(status)\n",
+    tests: ["server/lib/claude-hooks-installer.test.ts", "server/routes/health.test.ts"],
+  },
+  {
+    name: "6620fa-health-cursor-from-claude-ready",
+    file: "server/routes/health.ts",
+    find: "codexDeskHaltReady(), cursorDeskHaltReady(cachedHookStatus())),\n  }",
+    replace: "codexDeskHaltReady(), hookHaltReady(cachedHookStatus())),\n  }",
+    tests: ["server/routes/health.test.ts"],
+  },
+  {
+    name: "6620fa-codex-evidence-unstamped",
+    file: "server/lib/session-hooks-runtime.ts",
+    find: "  return provider === 'codex' ? typeof signal.stampedAt === 'number' : true\n",
+    replace: "  return true\n",
+    tests: ["server/lib/session-hook-provider.test.ts"],
+  },
+  {
+    name: "6620fa-observer-is-evidence",
+    file: "server/lib/session-hooks-runtime.ts",
+    find: "  const signal = signalFor(threadId)\n  if (!signal || signal.provider !== provider) return false\n",
+    replace: "  const signal = sessionSignalStore.get(threadId)\n  if (!signal || signal.provider !== provider) return false\n",
+    tests: ["server/lib/session-hook-provider.test.ts"],
+  },
+  {
+    name: "6620fa-inferred-is-stamped",
+    file: "server/lib/session-hook-events.ts",
+    find: "      ...(isHookProvider(r.provider) ? { stamped: true as const } : {}),\n",
+    replace: "      stamped: true as const,\n",
+    tests: ["server/lib/session-hook-provider.test.ts"],
+  },
+  {
+    name: "6620fa-ledger-drops-stamp",
+    file: "server/lib/session-hook-ledger.ts",
+    find: "        ...(env.stamped ? { stamped: true as const } : {}),\n",
+    replace: "",
+    tests: ["server/lib/session-hook-provider.test.ts"],
+  },
+  {
+    name: "6620fa-trust-failure-overwrites",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "    if (value.trust === 'unknown' && value.reason && TRUST_READ_FAILURES.has(value.reason)) {\n",
+    replace: "    if (false) {\n",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-trust-ttl-equals-refresh",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "export const CODEX_TRUST_CACHE_MS = 3 * CODEX_TRUST_REFRESH_MS\n",
+    replace: "export const CODEX_TRUST_CACHE_MS = CODEX_TRUST_REFRESH_MS\n",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-trust-stale-read-writes",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "    if (generation !== trustGeneration) return value\n",
+    replace: "",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-trust-fresh-ignored",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "  if (trustInFlight && options.fresh !== true) return trustInFlight\n",
+    replace: "  if (trustInFlight) return trustInFlight\n",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-trust-no-sigkill",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "          if (proc.exitCode === null && proc.signalCode === null) { try { proc.kill('SIGKILL') } catch { /* gone */ } }\n",
+    replace: "",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-after-install-not-fresh",
+    file: "server/lib/provider-observe.ts",
+    find: "    void refreshCodexHookTrust({ fresh: true }).catch(() => { /* the last answer stands */ })\n",
+    replace: "    void refreshCodexHookTrust().catch(() => { /* the last answer stands */ })\n",
+    tests: ["server/lib/provider-observe.test.ts"],
+  },
+  {
+    name: "6620fa-boot-sweep-dropped",
+    file: "server/lib/provider-observe.ts",
+    find: "    const swept = sweepStaleCursorSpawnDirs()\n",
+    replace: "    const swept = 0\n",
+    tests: ["server/lib/provider-observe.test.ts"],
+  },
+  {
+    name: "6620fa-cursor-open-quiet-stops",
+    file: "server/routes/agent-sessions.ts",
+    find: "    if (derived.agent_state === 'running' && cursor) return { running: true, active: false, foreign: true, decides: true }\n",
+    replace: "",
+    tests: ["server/routes/agent-sessions-parity.test.ts", "server/routes/provider-parity.test.ts"],
+  },
+  {
+    name: "6620fa-codex-shares-claude-script",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "  return join(cosGlassesHome(), 'bin', CODEX_HOOK_SCRIPT_NAME)\n",
+    replace: "  return join(cosGlassesHome(), 'bin', 'cos-session-hook')\n",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-codex-duplicate-unreported",
+    file: "server/lib/codex-hooks-installer.ts",
+    find: "    if (mentions.length > 1) duplicated.push(sub.event)\n",
+    replace: "",
+    tests: ["server/lib/codex-hooks-installer.test.ts"],
+  },
+  {
+    name: "6620fa-script-codex-payload-ignored",
+    file: "bin/hooks/cos-session-hook",
+    find: "  [ -n \"$PROV\" ] || { [ -z \"$ANY\" ] && [ -z \"$NEED\" ]; } || codex_of\n",
+    replace: "",
+    tests: ["server/lib/cos-session-hook.halt.test.ts"],
+  },
+  {
+    name: "6620fa-script-codex-any-rollout-path",
+    file: "bin/hooks/cos-session-hook",
+    find: "    [ ${#B} -le 64 ] || return\n",
+    replace: "",
+    tests: ["server/lib/cos-session-hook.halt.test.ts"],
+  },
+  {
+    name: "6620fa-observer-ignores-stale-drain",
+    file: "bin/hooks/cos-cursor-observer.cjs",
+    find: "    if(!stale&&fs.readdirSync(spool).length<2000){",
+    replace: "    if(fs.readdirSync(spool).length<2000){",
+    tests: ["server/lib/session-hook-spool.test.ts"],
+  },
 ]
 
 function sha256(text) {
@@ -5294,12 +5456,48 @@ function runTests(files) {
   }
 }
 
+/**
+ * 6.62.0 /qa (Q1): cases whose anchor was ALREADY gone at c858ec0, the base of 6.62.0, in code
+ * this release does not touch. The twelve referee cases predate a rewrite of
+ * client-instance-claim.ts; the lock-file case pins the 6.51.0 version string. Each one would be
+ * refused on every run, so no full run could exit 0, and a "green baseline" claim over a full run
+ * would quietly hide them. They are EXCLUDED BY NAME and printed on every run as excluded
+ * (pre-existing), never dropped silently; a run also says when one of them has become runnable
+ * again (its anchor is back), so the list can only shrink. Retargeting them belongs to the next
+ * change to those files.
+ */
+const EXCLUDED_PRE_EXISTING = new Set([
+  'referee-zombie-reclaims-after-45s',
+  'referee-hands-over-mid-meeting',
+  'referee-claimed-recording-ignored',
+  'referee-recording-flag-never-refreshed',
+  'referee-recording-parsed-loosely',
+  'referee-stops-the-only-recorder',
+  'referee-duplicate-claimant-wins',
+  'referee-dead-owner-pinned-by-untagged',
+  'referee-untagged-ignored',
+  'referee-owner-recording-flag-ignored',
+  'referee-any-copy-chunk-is-the-owners',
+  'referee-dead-owner-never-released',
+  'manifest-lock-version-drift',
+])
+
 const args = process.argv.slice(2)
 if (args.includes('--list')) {
-  for (const testCase of CASES) console.log(`${testCase.name}\t${testCase.file}`)
+  for (const testCase of CASES) console.log(`${testCase.name}\t${testCase.file}${EXCLUDED_PRE_EXISTING.has(testCase.name) ? '\texcluded (pre-existing)' : ''}`)
   process.exit(0)
 }
-const selected = args.length > 0 ? CASES.filter(c => args.includes(c.name)) : CASES
+const requested = args.length > 0 ? CASES.filter(c => args.includes(c.name)) : CASES
+const excluded = requested.filter(c => EXCLUDED_PRE_EXISTING.has(c.name))
+const selected = requested.filter(c => !EXCLUDED_PRE_EXISTING.has(c.name))
+if (excluded.length > 0) {
+  console.log(`excluded (pre-existing, anchor gone at c858ec0): ${excluded.length}`)
+  for (const testCase of excluded) {
+    let back = false
+    try { back = readFileSync(join(ROOT, testCase.file), 'utf8').split(testCase.find).length - 1 === 1 } catch { back = false }
+    console.log(`  ${testCase.name}  (${testCase.file})${back ? '  ANCHOR IS BACK: remove it from EXCLUDED_PRE_EXISTING' : ''}`)
+  }
+}
 if (selected.length === 0) {
   console.error(`No matching cases. Known: ${CASES.map(c => c.name).join(', ')}`)
   process.exit(2)
@@ -5397,7 +5595,7 @@ for (const testCase of selected) {
 }
 
 console.log('')
-console.log(`killed ${killed.length}/${selected.length}`)
+console.log(`killed ${killed.length}/${selected.length}${excluded.length > 0 ? ` (excluded, pre-existing: ${excluded.length})` : ''}`)
 if (refused.length > 0) {
   console.log('refused:')
   for (const line of refused) console.log(`  ${line}`)

@@ -63,7 +63,13 @@ const SCRIPT_6_60_0_SHA256 = '0e1bbb9816c9475436f89f6326d5504eccc9aa6519ff5e466b
  * 6.60.0 script, which stops desk Claude runs exactly as before (B1,
  * `HALT_CAPABLE_PRIOR_SCRIPT_SHAS`) and cannot stop a Codex run (the Codex hooks need this one).
  */
-const SCRIPT_6_62_0_SHA256 = '1877c90c5359571dfc74c6d03395104a73925868147e8a50cd9d7b4226b1b5ca'
+const SCRIPT_6_62_0_PREQA_SHA256 = '1877c90c5359571dfc74c6d03395104a73925868147e8a50cd9d7b4226b1b5ca'
+/**
+ * sha256 of the script 6.62.0 ships after its /qa round: it also recognises a Codex payload that
+ * reaches the Claude command (QA W13), so an imported block still gets the deny-only reply.
+ * The pre-QA build is halt-capable for Claude (a local build could have installed it).
+ */
+const SCRIPT_6_62_0_SHA256 = '0fd4f98801333399625701bdc83ed1a5906bbf18c449d0586daa6b8e58ada7f3'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -625,8 +631,10 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_3_PREQA_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
       // The current script is never its own "prior"; every earlier halt-capable one is.
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256])
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256, SCRIPT_6_62_0_PREQA_SHA256])
       expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_62_0_SHA256)
+      const preqa = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.62.0-preqa'))
+      expect(createHash('sha256').update(preqa).digest('hex')).toBe(SCRIPT_6_62_0_PREQA_SHA256)
       // And the 6.61.7 fixture IS that 6.60.0 script, byte for byte.
       const fixture = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7'))
       expect(createHash('sha256').update(fixture).digest('hex')).toBe(SCRIPT_6_60_0_SHA256)

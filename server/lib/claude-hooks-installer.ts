@@ -385,6 +385,9 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
  *   - 0e1bbb98...: the script 6.60.0 through 6.61.7 shipped (B1). 6.62.0 changed it for Codex
  *     and Cursor (provider stamp, Codex deny-only reply, Cursor `conversation_id`); its Claude
  *     halt reply is byte for byte the same, so a Mac still on it stops desk Claude runs.
+ *   - 1877c90c...: the 6.62.0 script as first built, before its /qa round taught it to recognise
+ *     a Codex payload (QA W13). Never published, but installable from a local build of that
+ *     branch, and its Claude halt check is the same.
  * Each is pinned against its bytes in `server/lib/__fixtures__/`.
  */
 export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
@@ -392,6 +395,7 @@ export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
   'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51',
   'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547',
   '0e1bbb9816c9475436f89f6326d5504eccc9aa6519ff5e466b949d53a73d8439',
+  '1877c90c5359571dfc74c6d03395104a73925868147e8a50cd9d7b4226b1b5ca',
 ]
 
 /**
@@ -413,6 +417,16 @@ export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | '
     return priorScript || (typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha)
   }
   return false
+}
+
+/**
+ * 6.62.0 (QA W1): can these hooks stop a desk CURSOR run? Halt-ready, AND the installed script is
+ * this package's, byte for byte. Every earlier script reads the first `session_id`, which Cursor
+ * writes behind `tool_input`: a large tool call is missed, and one naming another session stops
+ * the wrong run. Claude's own readiness (`hookHaltReady`) is unchanged.
+ */
+export function cursorDeskHaltReady(status: Parameters<typeof hookHaltReady>[0]): boolean {
+  return hookHaltReady(status) && typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha
 }
 
 const INSTALL_COMMAND = 'npx --yes @gotcos/glasses-server@latest --hooks install'

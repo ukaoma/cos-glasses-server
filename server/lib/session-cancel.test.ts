@@ -20,6 +20,8 @@ import {
   noteThreadCancelled,
   sessionCancelFeature,
   setCodexDeskCancelReady,
+  setDeskCancelReaders,
+  __resetDeskCancelReadersForTests,
   threadCancel,
   threadCancelledAt,
   type CancelFacts,
@@ -55,31 +57,50 @@ describe('cancelTargetFor', () => {
     expect(cancelTargetFor({ ...base, provider: 'codex', runningOutsideCos: false })).toBeNull()
   })
 
-  // 6.62.0 (plan 3.8): Cursor runs the Claude hooks, so the Claude halt readiness decides; Codex
-  // needs its OWN hooks installed and trusted (`codexHooksReady`). Otherwise only their app can.
-  it('Codex and Cursor outside COS: desk_run with hooks that can stop them, else unsupported', () => {
-    expect(cancelTargetFor({ ...base, provider: 'cursor' })).toBe('desk_run')
-    expect(cancelTargetFor({ ...base, provider: 'cursor', hooksReady: false })).toBe('unsupported')
-    expect(cancelTargetFor({ ...base, provider: 'cursor', hooksEnabled: false })).toBe('unsupported')
+  // 6.62.0 (plan 3.8, QA W1/W2): Cursor stops through the Claude hooks with THIS package's script
+  // (`cursorHooksReady`), Codex through its own installed, trusted, current hooks
+  // (`codexHooksReady`), and either only once that engine's hooks were seen for the thread.
+  it('Codex and Cursor outside COS: desk_run only with current hooks AND hook evidence for the thread, else unsupported', () => {
+    const cursor = { ...base, provider: 'cursor', cursorHooksReady: true, threadHookSeen: true }
+    expect(cancelTargetFor(cursor)).toBe('desk_run')
+    expect(cancelTargetFor({ ...cursor, cursorHooksReady: false })).toBe('unsupported')
+    expect(cancelTargetFor({ ...cursor, threadHookSeen: false })).toBe('unsupported')
+    expect(cancelTargetFor({ ...cursor, hooksEnabled: false })).toBe('unsupported')
+    // Claude's halt readiness (any halt-capable script, the 6.61.7 one included) is not Cursor's.
+    expect(cancelTargetFor({ ...base, provider: 'cursor', threadHookSeen: true })).toBe('unsupported')
+    const codex = { ...base, provider: 'codex', codexHooksReady: true, threadHookSeen: true }
+    expect(cancelTargetFor(codex)).toBe('desk_run')
     // Claude's hooks being ready says nothing about Codex's.
-    expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('unsupported')
-    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: true })).toBe('desk_run')
-    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: true, hooksEnabled: false })).toBe('unsupported')
-    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: true, hooksReady: false })).toBe('desk_run')
-    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: 'yes' as unknown as boolean })).toBe('unsupported')
+    expect(cancelTargetFor({ ...base, provider: 'codex', threadHookSeen: true })).toBe('unsupported')
+    expect(cancelTargetFor({ ...codex, threadHookSeen: false })).toBe('unsupported')
+    expect(cancelTargetFor({ ...codex, hooksEnabled: false })).toBe('unsupported')
+    expect(cancelTargetFor({ ...codex, hooksReady: false })).toBe('desk_run')
+    expect(cancelTargetFor({ ...codex, codexHooksReady: 'yes' as unknown as boolean })).toBe('unsupported')
     expect(cancelTargetFor({ ...base, provider: 'ollama' })).toBe('unsupported')
   })
 
-  it('6.62.0: with no fact given, Codex readiness comes from the registered reader, and a throwing one is no', () => {
+  it('6.62.0: with no fact given, readiness and per-thread evidence come from the registered readers; a throwing one is no', () => {
+    const seen: Array<[string, string]> = []
     try {
-      expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('unsupported')
-      setCodexDeskCancelReady(() => true)
-      expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('desk_run')
-      expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: false })).toBe('unsupported')
+      expect(cancelTargetFor({ ...base, provider: 'codex', threadId: SID })).toBe('unsupported')
+      setDeskCancelReaders({ codexReady: () => true, cursorReady: () => true, threadHookSeen: (provider, threadId) => { seen.push([provider, threadId]); return threadId === SID } })
+      expect(cancelTargetFor({ ...base, provider: 'codex', threadId: SID })).toBe('desk_run')
+      expect(cancelTargetFor({ ...base, provider: 'cursor', threadId: SID })).toBe('desk_run')
+      expect(seen).toEqual([['codex', SID], ['cursor', SID]])
+      // Another thread, or none named: the hooks were not seen for it.
+      expect(cancelTargetFor({ ...base, provider: 'codex', threadId: 'b2c3d4e5-0000-4000-8000-00000000beef' })).toBe('unsupported')
+      expect(cancelTargetFor({ ...base, provider: 'cursor' })).toBe('unsupported')
+      // A fact given wins over the reader.
+      expect(cancelTargetFor({ ...base, provider: 'codex', threadId: SID, codexHooksReady: false })).toBe('unsupported')
+      expect(cancelTargetFor({ ...base, provider: 'cursor', threadId: SID, threadHookSeen: false })).toBe('unsupported')
       setCodexDeskCancelReady(() => { throw new Error('read failed') })
-      expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('unsupported')
+      expect(cancelTargetFor({ ...base, provider: 'codex', threadId: SID })).toBe('unsupported')
+      setDeskCancelReaders({ threadHookSeen: () => { throw new Error('read failed') } })
+      expect(cancelTargetFor({ ...base, provider: 'cursor', threadId: SID })).toBe('unsupported')
+      // Claude never consults the Codex or Cursor readers.
+      expect(cancelTargetFor({ ...base, threadId: SID })).toBe('desk_run')
     } finally {
-      setCodexDeskCancelReady(() => false)
+      __resetDeskCancelReadersForTests()
     }
   })
 
@@ -168,7 +189,10 @@ describe('the ledger', () => {
 describe('features.sessionCancel', () => {
   it('a COS turn is always cancellable; a desk run only with the hooks applied AND installed', () => {
     // 6.62.0: deskCursor follows the Claude hooks Cursor runs; deskCodex its own trusted hooks.
-    expect(sessionCancelFeature(true, true)).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+    // QA W1: deskCursor needs the CURRENT script (`cursorDeskHaltReady`), not Claude's readiness.
+    expect(sessionCancelFeature(true, true)).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: false })
+    expect(sessionCancelFeature(true, true, false, true)).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+    expect(sessionCancelFeature(false, true, true, true)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
     expect(sessionCancelFeature(true, false)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
     expect(sessionCancelFeature(false, true)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
     expect(sessionCancelFeature(false, false)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })

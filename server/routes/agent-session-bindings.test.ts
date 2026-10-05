@@ -55,7 +55,7 @@ import { boundToMarker, targetKey, type NativeBinding } from '../lib/agent-sessi
 import { deliverAttachedTurn, CANCEL_KILL_GRACE_MS, type AttachedChildProcess } from '../lib/attached-provider-adapter.js'
 import { hasHaltMarker, writeHaltMarker } from '../lib/session-halt.js'
 import type { CancelDeps } from './agent-session-bindings.js'
-import { setCodexDeskCancelReady, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
+import { __resetDeskCancelReadersForTests, setDeskCancelReaders, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
@@ -4440,9 +4440,12 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
   })
 
   it('6.62.0: a Cursor or (trusted-hooks) Codex run at the desk: the marker is written under its id, 202 next_tool_call', async () => {
-    for (const provider of ['cursor', 'codex'] as const) {
-      if (provider === 'codex') setCodexDeskCancelReady(() => true)
-      try {
+    // QA W1/W2: the current script for Cursor, installed+trusted hooks for Codex, and the
+    // engine's hooks already seen for THIS thread (the route passes the thread id through).
+    const asked: Array<[string, string]> = []
+    setDeskCancelReaders({ codexReady: () => true, cursorReady: () => true, threadHookSeen: (p, id) => { asked.push([p, id]); return true } })
+    try {
+      for (const provider of ['cursor', 'codex'] as const) {
         const { cancel, calls } = recordingCancel()
         const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
         const base = await start(deps({ cancel, occupancy: working }))
@@ -4452,9 +4455,28 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
         expect(calls.halt).toEqual([{ sessionId: CODEX_THREAD, at: NOW, clientCancelId: `cc-desk-${provider}` }])
         const body = await (await fetch(`${base}/api/agent-sessions/${provider}/${CODEX_THREAD}/attachability`)).json()
         expect(body.cancel).toBe('desk_run')
-      } finally {
-        setCodexDeskCancelReady(() => false)
       }
+      expect(asked.some(([p, id]) => p === 'cursor' && id === CODEX_THREAD)).toBe(true)
+      expect(asked.some(([p, id]) => p === 'codex' && id === CODEX_THREAD)).toBe(true)
+    } finally {
+      __resetDeskCancelReadersForTests()
+    }
+  })
+
+  it('6.62.0 (QA W2): ready hooks but none seen for THIS thread: 409 cancel_unsupported, no marker', async () => {
+    setDeskCancelReaders({ codexReady: () => true, cursorReady: () => true, threadHookSeen: () => false })
+    try {
+      for (const provider of ['cursor', 'codex'] as const) {
+        const { cancel, calls } = recordingCancel()
+        const working = (): Occupancy => ({ attachable: false, owners: [], reason: 'native_thread_working' })
+        const base = await start(deps({ cancel, occupancy: working }))
+        const res = await postCancel(base, `cc-unseen-${provider}`, provider, CODEX_THREAD)
+        expect(res.status).toBe(409)
+        expect(res.body).toMatchObject({ cancelled: false, reason: 'cancel_unsupported', provider })
+        expect(calls.halt).toEqual([])
+      }
+    } finally {
+      __resetDeskCancelReadersForTests()
     }
   })
 

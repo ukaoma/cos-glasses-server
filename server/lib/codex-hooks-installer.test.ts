@@ -13,8 +13,12 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { hookStatus, installClaudeHooks, packagedHookScriptPath, type HookPaths } from './claude-hooks-installer.js'
 import {
   CODEX_HOOK_SUBSCRIPTIONS,
+  CODEX_TRUST_CACHE_MS,
+  CODEX_TRUST_KILL_GRACE_MS,
+  CODEX_TRUST_REFRESH_MS,
   __resetCodexHookTrustForTests,
   cachedCodexHookTrust,
+  codexHookAdvice,
   codexHookCommand,
   codexHookStatus,
   foldCodexTrust,
@@ -22,6 +26,7 @@ import {
   mergeCodexHooks,
   readCodexHookTrust,
   refreshCodexHookTrust,
+  stableCodexHookScriptPath,
   uninstallCodexHooks,
 } from './codex-hooks-installer.js'
 import { createSessionHooksRouter, type SessionHooksCodexDeps } from '../routes/session-hooks.js'
@@ -122,19 +127,55 @@ describe('the merge replaces our blocks IN PLACE and keeps every user block inde
     expect(written.PreToolUse[0]).toEqual(user('a', 'Bash'))
     expect(written.PreToolUse[2]).toEqual(user('b', 'Edit'))
 
-    // A second block of ours (a hand edit) is removed; a user block that ALSO calls our script
-    // is not ours to rewrite: left alone, and the event reads drift.
+    // QA W13: a SECOND block of ours (a hand edit, or a COS block Codex imported from the
+    // Claude settings) is left where it stands: removing it would move the user block after it.
+    // A user block that ALSO calls our script is not ours to rewrite either. Both read drift.
+    const imported = { hooks: [{ type: 'command', command: `COS_GLASSES_HOME=x '${f.scriptPath}' PreToolUse`, timeout: 5 }] }
     const mixed = { hooks: [{ type: 'command', command: `'${f.scriptPath}' Stop` }, { type: 'command', command: `'/Users/me/bin/mine'` }] }
-    const twice = { hooks: { ...written, PreToolUse: [...written.PreToolUse, written.PreToolUse[1]], Stop: [...written.Stop, mixed] } }
+    const twice = { hooks: { ...written, PreToolUse: [...written.PreToolUse, imported, user('after', 'Read')], Stop: [...written.Stop, mixed] } }
     const again = mergeCodexHooks(twice, f.scriptPath, f.hookPaths)
     if (!again.ok) throw new Error(again.reason)
     const againHooks = again.settings.hooks as Record<string, unknown[]>
-    expect(againHooks.PreToolUse).toHaveLength(3)
+    expect(againHooks.PreToolUse).toEqual([user('a', 'Bash'), written.PreToolUse[1], user('b', 'Edit'), imported, user('after', 'Read')])
     expect(againHooks.Stop).toEqual([user('c'), written.Stop[1], mixed])
     writeFileSync(f.hooksPath, JSON.stringify(again.settings))
     const status = codexHookStatus(f)
     expect(status.state).toBe('drift')
-    expect(status.drifted).toEqual(['Stop'])
+    // In subscription order (CODEX_HOOK_SUBSCRIPTIONS): Stop is listed before PreToolUse.
+    expect(status.drifted).toEqual(['Stop', 'PreToolUse'])
+    expect(status.duplicated).toEqual(['Stop', 'PreToolUse'])
+    expect(codexHookAdvice(status, 'unknown')).toContain('more than once for Stop, PreToolUse')
+  })
+
+  it('6.62.0 (QA W12): Codex runs its OWN copy of the script, so rolling the Claude script back changes nothing for Codex', () => {
+    const f = fixture()
+    const prev = process.env.COS_GLASSES_HOME
+    process.env.COS_GLASSES_HOME = f.hookPaths.home
+    try {
+      expect(stableCodexHookScriptPath()).toBe(join(f.hookPaths.home, 'bin', 'cos-session-hook-codex'))
+      const result = installCodexHooks({ hooksPath: f.hooksPath, hookPaths: f.hookPaths })
+      expect(result.ok).toBe(true)
+      expect(result.status).toMatchObject({ state: 'installed', scriptOk: true, scriptPath: stableCodexHookScriptPath() })
+      const command = JSON.parse(readFileSync(f.hooksPath, 'utf8')).hooks.Stop[0].hooks[0].command as string
+      expect(command).toContain(`'${stableCodexHookScriptPath()}' Stop`)
+      expect(readFileSync(stableCodexHookScriptPath()).equals(readFileSync(f.packageScriptPath))).toBe(true)
+      // A rollback reinstalls the 6.61.7 script at the CLAUDE stable path: Codex is unaffected.
+      mkdirSync(join(f.hookPaths.home, 'bin'), { recursive: true })
+      copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7'), join(f.hookPaths.home, 'bin', 'cos-session-hook'))
+      expect(codexHookStatus({ hooksPath: f.hooksPath, hookPaths: f.hookPaths })).toMatchObject({ state: 'installed', scriptOk: true })
+      // An older copy at the CODEX path is not ok: its halt reply makes Codex fail open.
+      copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7'), stableCodexHookScriptPath())
+      expect(codexHookStatus({ hooksPath: f.hooksPath, hookPaths: f.hookPaths })).toMatchObject({ state: 'script_outdated', scriptOk: false })
+      // Hooks pointing at the shared script (a pre-W12 install) are ours, rewritten in place.
+      const legacy = { hooks: { Stop: [user('c'), { hooks: [{ type: 'command', command: `COS_HOOK_PROVIDER=codex '${join(f.hookPaths.home, 'bin', 'cos-session-hook')}' Stop`, timeoutSec: 5, async: false }] }] } }
+      const merged = mergeCodexHooks(legacy, stableCodexHookScriptPath(), f.hookPaths)
+      if (!merged.ok) throw new Error(merged.reason)
+      expect((merged.settings.hooks as Record<string, unknown[]>).Stop).toHaveLength(2)
+      expect(JSON.stringify((merged.settings.hooks as Record<string, unknown[]>).Stop[1])).toContain('cos-session-hook-codex')
+    } finally {
+      if (prev === undefined) delete process.env.COS_GLASSES_HOME
+      else process.env.COS_GLASSES_HOME = prev
+    }
   })
 
   it('refuses a hooks shape it would have to destroy, and writes nothing', () => {
@@ -208,15 +249,19 @@ describe('trust from Codex\'s own app-server (K3)', () => {
   afterEach(() => __resetCodexHookTrustForTests())
 
   /** A stand-in `codex` that answers initialize and hooks/list exactly as the v2 schema says. */
-  function fakeCodex(f: ReturnType<typeof fixture>, mode: 'answer' | 'exit' | 'silent', hooks: unknown[] = []): string {
-    const bin = join(f.home, 'Fake Codex.app', 'codex')
-    mkdirSync(join(f.home, 'Fake Codex.app'), { recursive: true })
+  let fakes = 0
+  function fakeCodex(f: ReturnType<typeof fixture>, mode: 'answer' | 'exit' | 'silent' | 'stubborn', hooks: unknown[] = [], delayMs = 0): string {
+    const dir = join(f.home, `Fake Codex ${++fakes}.app`)
+    const bin = join(dir, 'codex')
+    mkdirSync(dir, { recursive: true })
     const log = join(f.home, 'calls.log')
     writeFileSync(bin, `#!${process.execPath}
 const fs = require('node:fs')
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+fs.writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid))
 const mode = ${JSON.stringify(mode)}
 if (mode === 'exit') process.exit(3)
+if (mode === 'stubborn') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000) }
 let buf = ''
 process.stdin.on('data', c => {
   buf += c
@@ -224,9 +269,9 @@ process.stdin.on('data', c => {
   while ((i = buf.indexOf('\\n')) >= 0) {
     const msg = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1)
     fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(msg) + '\\n')
-    if (mode === 'silent') continue
+    if (mode === 'silent' || mode === 'stubborn') continue
     if (msg.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: 'fake' } }) + '\\n')
-    if (msg.id === 2) process.stdout.write(JSON.stringify({ id: 2, result: { data: [{ cwd: msg.params.cwds[0], errors: [], warnings: [], hooks: ${JSON.stringify(hooks)} }] } }) + '\\n')
+    if (msg.id === 2) setTimeout(() => process.stdout.write(JSON.stringify({ id: 2, result: { data: [{ cwd: msg.params.cwds[0], errors: [], warnings: [], hooks: ${JSON.stringify(hooks)} }] } }) + '\\n'), ${delayMs})
   }
 })
 `)
@@ -271,14 +316,56 @@ process.stdin.on('data', c => {
     expect(foldCodexTrust(all.map(h => ({ ...h, trustStatus: 'managed' }))).trust).toBe('managed')
   })
 
-  it('the cache: unknown until read, the read for five minutes, then stale', async () => {
+  it('the cache: unknown until read, then the answer for longer than a refresh period (QA W4), then stale', async () => {
     const f = fixture()
-    expect(cachedCodexHookTrust(1_000)).toMatchObject({ trust: 'unknown', reason: 'unchecked', checkedAt: null })
+    expect(CODEX_TRUST_CACHE_MS).toBeGreaterThan(CODEX_TRUST_REFRESH_MS)
+    expect(cachedCodexHookTrust(1_000)).toMatchObject({ trust: 'unknown', reason: 'unchecked', trustReason: 'unchecked', checkedAt: null })
+    const t = 10_000
+    await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'trusted')), cwd: f.home, now: () => t })
+    expect(cachedCodexHookTrust(t + 1_000)).toMatchObject({ trust: 'trusted', trustReason: null, checkedAt: t })
+    // A refresh that lands late (a timeout, a slow tick) leaves no `unknown` gap.
+    expect(cachedCodexHookTrust(t + CODEX_TRUST_REFRESH_MS + 60_000)).toMatchObject({ trust: 'trusted', checkedAt: t })
+    expect(cachedCodexHookTrust(t + CODEX_TRUST_CACHE_MS)).toMatchObject({ trust: 'unknown', reason: 'stale', trustReason: 'stale', checkedAt: t })
+  })
+
+  it('QA W4: a failed read keeps the last answer and names why; a new answer replaces it', async () => {
+    const f = fixture()
     let t = 10_000
     await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'trusted')), cwd: f.home, now: () => t })
-    expect(cachedCodexHookTrust(t + 1_000)).toMatchObject({ trust: 'trusted', checkedAt: 10_000 })
-    expect(cachedCodexHookTrust(t + 5 * 60_000 + 1)).toMatchObject({ trust: 'unknown', reason: 'stale', checkedAt: 10_000 })
-    t = 0
+    t = 20_000
+    expect(await refreshCodexHookTrust({ binary: fakeCodex(f, 'silent'), cwd: f.home, timeoutMs: 300, now: () => t })).toMatchObject({ trust: 'unknown', reason: 'timeout' })
+    expect(cachedCodexHookTrust(t + 1)).toMatchObject({ trust: 'trusted', checkedAt: 10_000, trustReason: 'timeout' })
+    t = 30_000
+    await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'untrusted')), cwd: f.home, now: () => t })
+    expect(cachedCodexHookTrust(t + 1)).toMatchObject({ trust: 'untrusted', checkedAt: 30_000, trustReason: null })
+    // Codex answering that it lists none of ours IS an answer, and replaces the last one.
+    t = 40_000
+    await refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', []), cwd: f.home, now: () => t })
+    expect(cachedCodexHookTrust(t + 1)).toMatchObject({ trust: 'unknown', checkedAt: 40_000, trustReason: 'not_listed' })
+  })
+
+  it('QA W4: a fresh read after an install supersedes one already in flight; the older one never writes', async () => {
+    const f = fixture()
+    const before = refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'untrusted'), 600), cwd: f.home })
+    // A tick during the read joins it; the install starts a NEW one.
+    expect(refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'modified')), cwd: f.home })).toBe(before)
+    const after = refreshCodexHookTrust({ binary: fakeCodex(f, 'answer', listed(f, 'trusted')), cwd: f.home, fresh: true })
+    expect(after).not.toBe(before)
+    expect((await after).trust).toBe('trusted')
+    expect((await before).trust).toBe('untrusted')
+    expect(cachedCodexHookTrust().trust).toBe('trusted')
+  })
+
+  it('QA W4: an app-server that ignores SIGTERM is SIGKILLed after the grace', { timeout: 15_000 }, async () => {
+    const f = fixture()
+    const bin = fakeCodex(f, 'stubborn')
+    expect(await readCodexHookTrust({ binary: bin, cwd: f.home, timeoutMs: 400 })).toMatchObject({ trust: 'unknown', reason: 'timeout' })
+    const pid = Number(readFileSync(join(dirname(bin), 'pid'), 'utf8'))
+    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    expect(alive()).toBe(true)
+    const deadline = Date.now() + CODEX_TRUST_KILL_GRACE_MS + 3_000
+    while (alive() && Date.now() < deadline) await new Promise(r => setTimeout(r, 100))
+    expect(alive()).toBe(false)
   })
 })
 

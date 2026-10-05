@@ -37,9 +37,10 @@ async function codexPart(action: 'status' | 'install' | 'uninstall'): Promise<Re
   if (!codexPresent()) return { ok: true, skipped: 'codex_not_present' }
   const result = action === 'status' ? { ok: true, status: codexHookStatus() }
     : action === 'install' ? installCodexHooks({ dryRun }) : uninstallCodexHooks({ dryRun })
-  const trust = result.status.installed && !dryRun ? await refreshCodexHookTrust() : null
+  const trust = result.status.installed && !dryRun ? await refreshCodexHookTrust({ fresh: true }) : null
   const advice = action === 'uninstall' ? null : codexHookAdvice(result.status, trust?.trust ?? 'unknown')
-  return { ...result, ...(trust ? { trust: trust.trust } : {}), ...(advice ? { advice } : {}) }
+  // QA W4: why the trust word is what it is (a failed read's code, `not_listed`), or null.
+  return { ...result, ...(trust ? { trust: trust.trust, trustReason: trust.reason } : {}), ...(advice ? { advice } : {}) }
 }
 
 // `serverApplies` says whether the running server would READ the spool into rows: the

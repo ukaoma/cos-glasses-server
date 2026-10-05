@@ -1647,6 +1647,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     }
     return {
       provider,
+      threadId,
       cosTurnInFlight,
       runningOutsideCos,
       hooksEnabled: cancelProbe(() => cancelDeps.hooksEnabled?.() === true, false),
@@ -1697,6 +1698,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     if (reached !== 'none') {
       target = cancelTargetFor({
         provider,
+        threadId,
         cosTurnInFlight: false,
         runningOutsideCos: true,
         hooksEnabled: cancelProbe(() => cancelDeps.hooksEnabled?.() === true, false),

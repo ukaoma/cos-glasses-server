@@ -422,6 +422,20 @@ export function signalFor(sessionId: string): SessionSignal | undefined {
   return signal?.observationOnly ? undefined : signal
 }
 
+/**
+ * 6.62.0 (QA W2): has a hook event of this engine reached COS for this thread? The positive
+ * evidence a desk cancel needs before it may be offered for Codex or Cursor. Never an observer
+ * event (those prove the observer runs, not the halt check):
+ *   codex   an event the Codex command's script STAMPED (a 6.62 script, whose halt reply Codex
+ *           honours; an inferred-only Codex event came from an older script that fails open)
+ *   cursor  an event from the Claude-compatible hook Cursor runs (its own `cursor_version`)
+ */
+export function providerHookSeen(provider: 'codex' | 'cursor', threadId: string): boolean {
+  const signal = signalFor(threadId)
+  if (!signal || signal.provider !== provider) return false
+  return provider === 'codex' ? typeof signal.stampedAt === 'number' : true
+}
+
 /** Display observers do not create hook occupancy or permission evidence. */
 export function workObservationFor(sessionId: string) {
   if (!sessionHooksEnabled()) return undefined

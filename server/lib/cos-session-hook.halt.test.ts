@@ -16,6 +16,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import { parseHookEnvelope } from './session-hook-events.js'
+import { CODEX_HOOK_SUBSCRIPTIONS, codexHookCommand } from './codex-hooks-installer.js'
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'hooks', 'cos-session-hook')
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
@@ -447,8 +448,12 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: Codex and Cursor (6.62.0)',
     // Nothing spooled for a plain tool call, marker kept for the next one.
     expect(spooled(codex.spool)).toEqual([])
     expect(existsSync(join(codex.halt, CODEX))).toBe(true)
-    // An unknown COS_HOOK_PROVIDER is no provider: the Claude bytes.
-    expect(runAs('PreToolUse', codexTool(), codex, { COS_HOOK_PROVIDER: 'gemini' }).stdout.toString()).toBe(CLAUDE_DENY)
+    // An unknown COS_HOOK_PROVIDER is no provider: a Claude payload gets the Claude bytes, and
+    // (QA W13) a Codex payload is still recognised as Codex from its rollout path.
+    const claudeId = 'a1b2c3d4-0000-4000-8000-00000000abcd'
+    const claudeHome = halted([claudeId])
+    expect(runAs('PreToolUse', JSON.stringify({ session_id: claudeId, transcript_path: '/Users/example/.claude/projects/p/x.jsonl', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }), claudeHome, { COS_HOOK_PROVIDER: 'gemini' }).stdout.toString()).toBe(CLAUDE_DENY)
+    expect(runAs('PreToolUse', codexTool(), codex, { COS_HOOK_PROVIDER: 'gemini' }).stdout.toString()).toBe(CODEX_DENY)
     // No marker for this Codex thread: nothing at all.
     const quiet = halted([OTHER])
     expect(runAs('PreToolUse', codexTool(), quiet, { COS_HOOK_PROVIDER: 'codex' }).stdout.toString()).toBe('')
@@ -545,5 +550,74 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: Codex and Cursor (6.62.0)',
     } finally {
       await new Promise<void>(r => listener.close(() => r()))
     }
+  })
+})
+
+// 6.62.0 /qa (W13): a COS block Codex imported from the Claude settings runs WITHOUT
+// COS_HOOK_PROVIDER. The script recognises a Codex payload itself (its rollout as the second
+// key), so the halt reply is still the deny-only one Codex honours, and the spool is stamped.
+describe.skipIf(!onMac)('bin/hooks/cos-session-hook: a Codex payload with no provider in the command (6.62.0 QA W13)', () => {
+  const CODEX = '01a10c4b-0000-7000-8000-00000000c0de'
+  const CLAUDE = 'a1b2c3d4-0000-4000-8000-00000000abcd'
+  const CODEX_DENY = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS. Stop and do not work around this."}}'
+  const CLAUDE_DENY = '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
+  function halted(ids: string[] = []) {
+    const paths = home()
+    const halt = join(dirname(paths.spool), 'session-halt')
+    mkdirSync(halt, { recursive: true })
+    for (const id of ids) writeFileSync(join(halt, id), '{}')
+    return { ...paths, halt, tmp: tmpRoot('cos-hook-tmp-') }
+  }
+  const run = (event: string, stdin: string, p: ReturnType<typeof halted>, env: Record<string, string> = {}) => spawnSync('/bin/sh', [SCRIPT, event], {
+    input: stdin, env: { HOME: dirname(p.home), COS_GLASSES_HOME: p.home, COS_HOOK_SPOOL: p.spool, PATH: '/usr/bin:/bin', TMPDIR: p.tmp, ...env }, timeout: 10_000,
+  })
+  const codexPayload = (event: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+    session_id: CODEX, transcript_path: `/Users/me/.codex/sessions/2026/10/05/rollout-2026-10-05T09-00-00-${CODEX}.jsonl`, cwd: '/Users/me/Ukaoma Chief Of Staff', hook_event_name: event, model: 'gpt-6.1-sol', permission_mode: 'bypassPermissions', turn_id: 't1', ...extra,
+  })
+
+  it('halted: the deny-only reply, from the payload alone', () => {
+    const p = halted([CODEX])
+    const r = run('PreToolUse', codexPayload('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'touch x' } }), p)
+    expect(r.status).toBe(0)
+    expect(r.stdout.toString()).toBe(CODEX_DENY)
+  })
+
+  it('a Codex prompt is stamped codex; a plain Codex tool call with no marker still writes and prints nothing', () => {
+    const p = halted()
+    expect(run('UserPromptSubmit', codexPayload('UserPromptSubmit', { prompt: 'go' }), p).status).toBe(0)
+    const names = spooled(p.spool)
+    expect(names).toHaveLength(1)
+    const parsed = parseHookEnvelope(readFileSync(join(p.spool, names[0]!), 'utf-8'))
+    expect(parsed.ok && parsed.envelope).toMatchObject({ provider: 'codex', stamped: true, sessionId: CODEX })
+    const r = run('PreToolUse', codexPayload('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } }), p)
+    expect(r.stdout.toString()).toBe('')
+    expect(spooled(p.spool)).toHaveLength(1)
+  })
+
+  it('never from a rollout path that is not the payload\'s own: Claude reading a rollout, or Cursor', () => {
+    const p = halted([CLAUDE])
+    // Claude's own transcript is its second key; a rollout path further in is a tool's input.
+    const claude = JSON.stringify({ session_id: CLAUDE, transcript_path: '/Users/me/.claude/projects/p/x.jsonl', cwd: '/x', hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '/Users/me/.codex/sessions/2026/10/05/rollout-y.jsonl', transcript_path: '/Users/me/.codex/sessions/z.jsonl' } })
+    expect(run('PreToolUse', claude, p).stdout.toString()).toBe(CLAUDE_DENY)
+    const q = halted()
+    expect(run('UserPromptSubmit', JSON.stringify({ session_id: CLAUDE, transcript_path: '/Users/me/.claude/projects/p/x.jsonl', prompt: 'read /Users/me/.codex/sessions/r.jsonl', hook_event_name: 'UserPromptSubmit' }), q).status).toBe(0)
+    expect(readFileSync(join(q.spool, spooled(q.spool)[0]!), 'utf-8')).not.toContain('"provider"')
+    // Cursor writes transcript_path last, far behind its session_id: never read as Codex.
+    const cursor = '8c149bba-82b6-4b73-9f2f-eb26e72a72a9'
+    const c = halted([cursor])
+    const cursorTool = JSON.stringify({ conversation_id: cursor, model: 'composer-2.5', tool_name: 'Shell', tool_input: { command: 'ls' }, session_id: cursor, hook_event_name: 'preToolUse', cursor_version: '2026.10.01', workspace_roots: ['/x'], transcript_path: '/Users/me/.codex/sessions/odd.jsonl' })
+    expect(run('PreToolUse', cursorTool, c).stdout.toString()).toBe(CLAUDE_DENY)
+  })
+
+  it('the GENERATED Codex command, run through sh as Codex runs it, prints the deny-only reply (QA N5)', () => {
+    const p = halted([CODEX])
+    const sub = CODEX_HOOK_SUBSCRIPTIONS.find(s => s.event === 'PreToolUse')!
+    const command = codexHookCommand(SCRIPT, sub, { home: p.home, spoolDir: p.spool })
+    const r = spawnSync('/bin/sh', ['-c', command], {
+      input: JSON.stringify({ session_id: CODEX, transcript_path: null, cwd: '/x', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'touch x' } }),
+      env: { HOME: dirname(p.home), PATH: '/usr/bin:/bin', TMPDIR: p.tmp }, timeout: 10_000,
+    })
+    expect(r.status).toBe(0)
+    expect(r.stdout.toString()).toBe(CODEX_DENY)
   })
 })

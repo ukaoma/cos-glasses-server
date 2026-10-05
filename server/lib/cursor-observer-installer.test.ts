@@ -4,6 +4,7 @@ import {join,resolve} from 'node:path'
 import {tmpdir} from 'node:os'
 import {execFileSync} from 'node:child_process'
 import {installCursorObserver,CURSOR_OBSERVER_EVENTS,cursorObserverStatus,observerNodeOf} from './cursor-observer-installer.js'
+import {AGENT_THOUGHT_MAX} from './session-hook-events.js'
 const dirs:string[]=[]
 afterEach(()=>dirs.splice(0).forEach(p=>rmSync(p,{recursive:true,force:true})))
 // 6.62.0: a space and a dot directory in every path, as the real ones have.
@@ -32,10 +33,10 @@ it('executes the actual observer with native payloads, strips prompts and never 
  expect(rows.every(r=>r.payload.session_id===sid&&r.payload.display_only===true&&r.provider==='cursor')).toBe(true)
  expect(JSON.stringify(rows)).not.toContain('Private task')
  expect(execFileSync(process.execPath,[script,'subagentStart',f.spool],{input:'bad'}).toString().trim()).toBe('{"permission":"allow"}')
- // A thought is spooled capped at 280, display only, and nothing else of the payload rides along.
+ // A thought is spooled capped at AGENT_THOUGHT_MAX (the server's cap, QA W19), display only, and nothing else rides along.
  execFileSync(process.execPath,[script,'afterAgentThought',f.spool],{input:JSON.stringify({conversation_id:sid,text:'x'.repeat(600),user_email:'me@example.com',workspace_roots:['/secret']})})
  const thought=readdirSync(f.spool).map(n=>JSON.parse(readFileSync(join(f.spool,n),'utf8'))).find(r=>r.event==='AgentThought')
- expect(thought.payload).toEqual({session_id:sid,display_only:true,text:'x'.repeat(280)})
+ expect(thought.payload).toEqual({session_id:sid,display_only:true,text:'x'.repeat(AGENT_THOUGHT_MAX)})
 })
 it('6.62.0 (W18): ours by the script path, so a node upgrade replaces the hook instead of adding a second',()=>{
  const f=fixture()

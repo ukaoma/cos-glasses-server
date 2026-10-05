@@ -61,6 +61,11 @@ export interface SessionSignal {
    * AGENT_THOUGHT_MAX. MEMORY ONLY: the ledger keeps no thought text, so a restart forgets it.
    */
   lastThought?: { text: string; at: number }
+  /**
+   * 6.62.0 (QA W2): the newest phase event (never an observer one) whose envelope the hook
+   * script stamped with its provider: proof a 6.62 script is running this session's hooks.
+   */
+  stampedAt?: number
   sessionId: string
   firstSeenAt: number
   lastEventAt: number
@@ -216,6 +221,7 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
   if (isDisplayOnly(env)) return { ...base, ...(prev?.observationOnly !== false ? { lastEventAt: Math.max(base.lastEventAt, env.ts) } : {}), observationOnly: prev?.observationOnly ?? !prev, workObservation: observeWork(base.workObservation, env), ...thoughtOf(base, env) }
   const common = {
     observationOnly: false,
+    ...(env.stamped ? { stampedAt: Math.max(base.stampedAt ?? 0, env.ts) } : {}),
     workObservation: observeWork(base.workObservation, env),
     cwd: str(p.cwd) ?? base.cwd,
     transcriptPath: str(p.transcript_path) ?? base.transcriptPath,

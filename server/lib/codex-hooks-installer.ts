@@ -6,18 +6,26 @@
 // banner and its Install check off `sessionHooks.state` / `installed`, and `hookHaltReady`
 // feeds `deskClaude`. Codex is reported apart, as `sessionHooks.codex`.
 //
-// THE SAME SCRIPT, ITS OWN COMMAND. The command carries `COS_HOOK_PROVIDER=codex`, which makes
-// the script print the deny-only halt reply Codex honours (canaries C10, C12) and stamp
-// `"provider":"codex"` on what it spools. The bytes of the command never change between
-// releases (no version in it), so a reinstall does not ask Miles to review the hooks again.
+// THE SAME BYTES, ITS OWN COPY AND COMMAND (QA W12). Codex runs `cos-session-hook-codex`, a
+// copy of the packaged script this installer keeps current, never the stable Claude script: a
+// rollback that reinstalls an older Claude script must not change what Codex runs (an older
+// script has no provider stamp and a halt reply Codex fails open on). The command carries
+// `COS_HOOK_PROVIDER=codex`, which makes the script print the deny-only halt reply Codex
+// honours (canaries C10, C12) and stamp `"provider":"codex"` on what it spools. The bytes of
+// the command never change between releases (no version in it), so a reinstall does not ask
+// Miles to review the hooks again.
 //
-// THE MERGE REPLACES OUR BLOCKS IN PLACE (W2). Codex trusts each hook by a POSITIONAL key,
+// THE MERGE NEVER MOVES A USER BLOCK (W2, QA W13). Codex trusts each hook by a POSITIONAL key,
 // `<file>:<snake_event>:<block index>:<hook index>`, recorded as `trusted_hash` in
 // `~/.codex/config.toml`. Claude's merge drops our block and appends a fresh one, which would
-// move every user block after it to a new index and silently untrust it. Here our block keeps
-// its index, a missing one is appended at the end, and no user block moves. Only a block whose
-// every hook is ours is ours: a user block that also calls our script is left alone (and reads
-// as drift), because rewriting it would drop the user's own hooks.
+// move every user block after it to a new index and silently untrust it. Here our FIRST block
+// is rewritten where it stands and a missing one is appended at the end. A second block of
+// ours (a hand edit, or a COS block Codex imported from the Claude settings) is LEFT where it
+// is and reported as drift: removing it would shift every user block after it, and whether
+// Codex accepts an emptied group is unproven. Only a block whose every hook is ours is ours:
+// a user block that also calls our script is left alone too, because rewriting it would drop
+// the user's own hooks. Uninstall is the one write that removes our blocks, and a user block
+// after one of them then moves (and Codex asks to review it again).
 //
 // TRUST IS READ, NEVER WRITTEN (K3). An untrusted user hook silently does not run (C1). Trust is
 // recorded by Codex itself when Miles trusts the hooks once in the `codex` TUI; COS never writes
@@ -38,7 +46,7 @@ import {
   hookIsOurs,
   packagedHookScriptPath,
   shellQuote,
-  stableHookScriptPath,
+  cosGlassesHome,
   type HookPaths,
 } from './claude-hooks-installer.js'
 import { resolveProviderBinary } from './provider-binary.js'
@@ -76,6 +84,19 @@ export const CODEX_HOOK_SUBSCRIPTIONS: readonly CodexHookSubscription[] = [
   { event: 'PostCompact', async: true, timeoutSec: 10 },
 ]
 
+/** QA W12: the script Codex runs, a copy of the packaged one beside the stable Claude script. */
+export const CODEX_HOOK_SCRIPT_NAME = 'cos-session-hook-codex'
+
+export function stableCodexHookScriptPath(): string {
+  return join(cosGlassesHome(), 'bin', CODEX_HOOK_SCRIPT_NAME)
+}
+
+/** Ours in the Codex file: the Claude predicate (an imported block) or the Codex copy's name. */
+function codexHookIsOurs(h: unknown): boolean {
+  return hookIsOurs(h) || (!!h && typeof h === 'object' && typeof (h as { command?: unknown }).command === 'string'
+    && (h as { command: string }).command.includes(`/${CODEX_HOOK_SCRIPT_NAME}`))
+}
+
 /** Codex's own home variable, as `occupancy-probes.ts` reads it. */
 export function codexHome(env: NodeJS.ProcessEnv = process.env): string {
   const raw = env.CODEX_HOME?.trim()
@@ -109,14 +130,14 @@ function canonicalBlock(scriptPath: string, sub: CodexHookSubscription, paths: H
 function blockIsOurs(block: unknown): boolean {
   if (!block || typeof block !== 'object') return false
   const hooks = (block as { hooks?: unknown }).hooks
-  return Array.isArray(hooks) && hooks.length > 0 && hooks.every(hookIsOurs)
+  return Array.isArray(hooks) && hooks.length > 0 && hooks.every(codexHookIsOurs)
 }
 
 /** Any hook of ours inside this block, pure or mixed. */
 function blockMentionsUs(block: unknown): boolean {
   if (!block || typeof block !== 'object') return false
   const hooks = (block as { hooks?: unknown }).hooks
-  return Array.isArray(hooks) && hooks.some(hookIsOurs)
+  return Array.isArray(hooks) && hooks.some(codexHookIsOurs)
 }
 
 export type CodexMergeResult =
@@ -124,9 +145,10 @@ export type CodexMergeResult =
   | { ok: false; reason: 'codex_hooks_invalid' }
 
 /**
- * Pure. Our block for each subscribed event is REPLACED WHERE IT STANDS, or appended when there
- * is none; a second block of ours (a hand edit) is removed. Every user block keeps its index,
- * so every trust key Codex holds for it still names it. Other events and keys pass through.
+ * Pure. Our first block for each subscribed event is REPLACED WHERE IT STANDS, or appended when
+ * there is none; a second block of ours is left in place (and reads as drift, `duplicated`).
+ * Every user block keeps its index, so every trust key Codex holds for it still names it. Other
+ * events and keys pass through.
  */
 export function mergeCodexHooks(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): CodexMergeResult {
   const settings: Record<string, unknown> = current && typeof current === 'object' && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {}
@@ -139,13 +161,8 @@ export function mergeCodexHooks(current: unknown, scriptPath: string, paths: Hoo
     const blocks = Array.isArray(value) ? [...value] : []
     const ours = blocks.map((block, index) => (blockIsOurs(block) ? index : -1)).filter(index => index >= 0)
     const canonical = canonicalBlock(scriptPath, sub, paths)
-    if (ours.length === 0) {
-      blocks.push(canonical)
-    } else {
-      blocks[ours[0]!] = canonical
-      // Removed from the end, so the indices still to remove stay valid.
-      for (const index of ours.slice(1).reverse()) blocks.splice(index, 1)
-    }
+    if (ours.length === 0) blocks.push(canonical)
+    else blocks[ours[0]!] = canonical
     hooks[sub.event] = blocks
   }
   settings.hooks = hooks
@@ -168,20 +185,22 @@ export function stripCodexHooks(current: unknown): CodexMergeResult {
   return { ok: true, settings, changed: JSON.stringify(settings) !== before }
 }
 
-export function codexSubscribedEvents(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): { subscribed: string[]; missing: string[]; drifted: string[] } {
+export function codexSubscribedEvents(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): { subscribed: string[]; missing: string[]; drifted: string[]; duplicated: string[] } {
   const hooks = current && typeof current === 'object' ? (current as Record<string, unknown>).hooks : null
   const table = hooks && typeof hooks === 'object' ? hooks as Record<string, unknown> : {}
   const subscribed: string[] = []
   const missing: string[] = []
   const drifted: string[] = []
+  const duplicated: string[] = []
   for (const sub of CODEX_HOOK_SUBSCRIPTIONS) {
     const blocks = Array.isArray(table[sub.event]) ? table[sub.event] as unknown[] : []
     const mentions = blocks.filter(blockMentionsUs)
     if (mentions.length === 0) { missing.push(sub.event); continue }
     if (mentions.length === 1 && JSON.stringify(mentions[0]) === JSON.stringify(canonicalBlock(scriptPath, sub, paths))) subscribed.push(sub.event)
     else drifted.push(sub.event)
+    if (mentions.length > 1) duplicated.push(sub.event)
   }
-  return { subscribed, missing, drifted }
+  return { subscribed, missing, drifted, duplicated }
 }
 
 export type CodexHookInstallState =
@@ -209,6 +228,8 @@ export interface CodexHookStatus {
   subscribed: string[]
   missing: string[]
   drifted: string[]
+  /** QA W13: events carrying more than one block of ours. Install leaves the extra (removing it would move user blocks). */
+  duplicated: string[]
 }
 
 function sha256File(path: string): string | null {
@@ -238,7 +259,7 @@ export interface CodexHookPaths {
 
 export function codexHookStatus(paths: CodexHookPaths = {}): CodexHookStatus {
   const hooksPath = paths.hooksPath ?? codexHooksPath()
-  const scriptPath = paths.scriptPath ?? stableHookScriptPath()
+  const scriptPath = paths.scriptPath ?? stableCodexHookScriptPath()
   const packageScriptPath = paths.packageScriptPath ?? packagedHookScriptPath()
   const hookPaths = paths.hookPaths ?? currentHookPaths()
   const scriptSha = sha256File(scriptPath)
@@ -246,7 +267,7 @@ export function codexHookStatus(paths: CodexHookPaths = {}): CodexHookStatus {
   const scriptOk = scriptSha !== null && scriptSha === packageScriptSha
   const read = readHooksFile(hooksPath)
   if (!read.ok) {
-    return { state: read.reason, installed: false, hooksPath, scriptPath, scriptSha, packageScriptSha, scriptOk, subscribed: [], missing: CODEX_HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [] }
+    return { state: read.reason, installed: false, hooksPath, scriptPath, scriptSha, packageScriptSha, scriptOk, subscribed: [], missing: CODEX_HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [], duplicated: [] }
   }
   const events = codexSubscribedEvents(read.settings, scriptPath, hookPaths)
   let state: CodexHookInstallState
@@ -269,7 +290,7 @@ export interface CodexInstallResult {
 
 export function installCodexHooks(options: CodexHookPaths & { dryRun?: boolean } = {}): CodexInstallResult {
   const hooksPath = options.hooksPath ?? codexHooksPath()
-  const scriptPath = options.scriptPath ?? stableHookScriptPath()
+  const scriptPath = options.scriptPath ?? stableCodexHookScriptPath()
   const packageScriptPath = options.packageScriptPath ?? packagedHookScriptPath()
   const hookPaths = options.hookPaths ?? currentHookPaths()
   const statusNow = () => codexHookStatus({ hooksPath, scriptPath, packageScriptPath, hookPaths })
@@ -303,7 +324,7 @@ export function installCodexHooks(options: CodexHookPaths & { dryRun?: boolean }
 
 export function uninstallCodexHooks(options: CodexHookPaths & { dryRun?: boolean } = {}): CodexInstallResult {
   const hooksPath = options.hooksPath ?? codexHooksPath()
-  const scriptPath = options.scriptPath ?? stableHookScriptPath()
+  const scriptPath = options.scriptPath ?? stableCodexHookScriptPath()
   const packageScriptPath = options.packageScriptPath ?? packagedHookScriptPath()
   const hookPaths = options.hookPaths ?? currentHookPaths()
   const statusNow = () => codexHookStatus({ hooksPath, scriptPath, packageScriptPath, hookPaths })
@@ -346,7 +367,7 @@ export const CODEX_TRUST_TIMEOUT_MS = 15_000
  */
 export function foldCodexTrust(hooks: readonly unknown[]): CodexTrustRead {
   const ours = hooks.filter((h): h is Record<string, unknown> => !!h && typeof h === 'object'
-    && (h as Record<string, unknown>).source === 'user' && hookIsOurs(h))
+    && (h as Record<string, unknown>).source === 'user' && codexHookIsOurs(h))
   if (ours.length === 0) return { trust: 'unknown', listed: 0, reason: 'not_listed' }
   const statuses = ours.map(h => (h.enabled === false ? 'untrusted' : String(h.trustStatus)))
   if (statuses.includes('modified')) return { trust: 'modified', listed: ours.length, reason: null }
@@ -369,7 +390,16 @@ export function readCodexHookTrust(options: { binary: string; cwd?: string; env?
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { child?.kill('SIGTERM') } catch { /* gone */ }
+      const proc = child
+      try { proc?.kill('SIGTERM') } catch { /* gone */ }
+      // QA W4: an app-server that ignores SIGTERM is killed, never left behind once a minute.
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        const kill = setTimeout(() => {
+          if (proc.exitCode === null && proc.signalCode === null) { try { proc.kill('SIGKILL') } catch { /* gone */ } }
+        }, CODEX_TRUST_KILL_GRACE_MS)
+        kill.unref?.()
+        proc.once('exit', () => clearTimeout(kill))
+      }
       resolvePromise(value)
     }
     const timer = setTimeout(() => finish({ trust: 'unknown', listed: 0, reason: 'timeout' }), options.timeoutMs ?? CODEX_TRUST_TIMEOUT_MS)
@@ -415,23 +445,51 @@ export function readCodexHookTrust(options: { binary: string; cwd?: string; env?
   })
 }
 
-/** Codex's trust, cached five minutes (a spawn of the app-server is not a health-poll cost). */
-export const CODEX_TRUST_CACHE_MS = 5 * 60_000
+/**
+ * QA W4: how often the background tick reads Codex's trust, and how long a read stays the
+ * answer. The TTL is three refreshes, so a read that lands late (a 15 s timeout, a slow tick)
+ * never leaves a gap where trust reads `unknown` and a desk cancel turns off for a cycle.
+ */
+export const CODEX_TRUST_REFRESH_MS = 5 * 60_000
+export const CODEX_TRUST_CACHE_MS = 3 * CODEX_TRUST_REFRESH_MS
+/** After SIGTERM, an app-server still running this long later is SIGKILLed. */
+export const CODEX_TRUST_KILL_GRACE_MS = 2_000
+
+/** A read that did not get Codex's answer at all. It never replaces the last answer it got. */
+const TRUST_READ_FAILURES: ReadonlySet<string> = new Set(['spawn_failed', 'timeout', 'rpc_error', 'no_binary'])
 
 let trustCache: { at: number; value: CodexTrustRead } | null = null
+let lastFailure: { at: number; reason: string } | null = null
 let trustInFlight: Promise<CodexTrustRead> | null = null
+let trustGeneration = 0
 
-export function cachedCodexHookTrust(nowMs = Date.now()): (CodexTrustRead & { checkedAt: number | null }) {
-  if (trustCache && nowMs - trustCache.at < CODEX_TRUST_CACHE_MS) return { ...trustCache.value, checkedAt: trustCache.at }
-  return { trust: 'unknown', listed: 0, reason: trustCache ? 'stale' : 'unchecked', checkedAt: trustCache?.at ?? null }
+/**
+ * Codex's trust as health and the desk cancel read it: the newest ANSWER (trusted, untrusted,
+ * modified, managed, or `unknown` with `not_listed`) for CODEX_TRUST_CACHE_MS. A read that
+ * failed (timeout, a dead app-server) keeps the last answer and is named in `trustReason`.
+ *   trustReason  null: a fresh answer and the newest read got it
+ *                `<code>`: the newest read failed with that code (the answer shown is older)
+ *                `not_listed`: Codex answered and lists none of our hooks
+ *                `stale`: the newest answer is past the TTL; `unchecked`: never read
+ */
+export function cachedCodexHookTrust(nowMs = Date.now()): (CodexTrustRead & { checkedAt: number | null; trustReason: string | null }) {
+  const failedSince = lastFailure && (!trustCache || lastFailure.at >= trustCache.at) ? lastFailure.reason : null
+  if (trustCache && nowMs - trustCache.at < CODEX_TRUST_CACHE_MS) {
+    return { ...trustCache.value, checkedAt: trustCache.at, trustReason: failedSince ?? trustCache.value.reason }
+  }
+  const reason = trustCache ? 'stale' : (failedSince ?? 'unchecked')
+  return { trust: 'unknown', listed: 0, reason, checkedAt: trustCache?.at ?? null, trustReason: reason }
 }
 
 /**
- * Refresh the trust cache now (after an install, or on the background tick). One read at a
- * time; a caller during a read gets that read. With no Codex binary the answer is `unknown`.
+ * Read Codex's trust now: on the background tick, or after an install. One read at a time;
+ * a tick during a read gets that read. `fresh` (after an install) starts a NEW read whatever
+ * is in flight, and only the newest read started may write the answer, so a read begun
+ * before the install can never stand in for one after it (QA W4).
  */
-export function refreshCodexHookTrust(options: { binary?: string; cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; now?: () => number } = {}): Promise<CodexTrustRead> {
-  if (trustInFlight) return trustInFlight
+export function refreshCodexHookTrust(options: { binary?: string; cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; now?: () => number; fresh?: boolean } = {}): Promise<CodexTrustRead> {
+  if (trustInFlight && options.fresh !== true) return trustInFlight
+  const generation = ++trustGeneration
   const binary = options.binary ?? (() => {
     const resolved = resolveProviderBinary('codex', options.env ?? process.env)
     return resolved.ok ? resolved.path : null
@@ -439,27 +497,42 @@ export function refreshCodexHookTrust(options: { binary?: string; cwd?: string; 
   const read = binary
     ? readCodexHookTrust({ binary, cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs })
     : Promise.resolve<CodexTrustRead>({ trust: 'unknown', listed: 0, reason: 'no_binary' })
-  trustInFlight = read.then(value => {
-    trustCache = { at: (options.now ?? Date.now)(), value }
+  const pending: Promise<CodexTrustRead> = read.then(value => {
+    if (generation !== trustGeneration) return value
+    const at = (options.now ?? Date.now)()
+    if (value.trust === 'unknown' && value.reason && TRUST_READ_FAILURES.has(value.reason)) {
+      lastFailure = { at, reason: value.reason }
+      console.warn(`[codex-hooks] trust read failed (${value.reason}); keeping the last answer`)
+    } else {
+      trustCache = { at, value }
+    }
     return value
-  }).finally(() => { trustInFlight = null })
-  return trustInFlight
+  }).finally(() => { if (trustInFlight === pending) trustInFlight = null })
+  trustInFlight = pending
+  return pending
 }
 
 export function __resetCodexHookTrustForTests(): void {
   trustCache = null
+  lastFailure = null
   trustInFlight = null
+  trustGeneration = 0
 }
 
 /** For `--hooks status`: say in words what a Codex state means. Null when ready. */
-export function codexHookAdvice(status: Pick<CodexHookStatus, 'installed' | 'state'>, trust: CodexHookTrust): string | null {
+export function codexHookAdvice(status: Pick<CodexHookStatus, 'installed' | 'state'> & Partial<Pick<CodexHookStatus, 'duplicated'>>, trust: CodexHookTrust): string | null {
+  if (status.duplicated && status.duplicated.length > 0) {
+    // QA W13: Install leaves these alone (removing one would move the user's blocks).
+    return `~/.codex/hooks.json carries the COS hook more than once for ${status.duplicated.join(', ')}, so it runs twice there. `
+      + 'Remove the extra COS block by hand; Install never moves or removes your blocks.'
+  }
   if (!status.installed) {
     return status.state === 'missing' || status.state === 'drift' || status.state === 'script_outdated'
       ? 'The COS hooks in ~/.codex/hooks.json are not current. Run `npx --yes @gotcos/glasses-server@latest --hooks install`, or press Install hooks in COS Control.'
       : 'The Codex hooks file could not be read as it is; nothing was changed. Fix or restore it, then install again.'
   }
   if (trust === 'trusted' || trust === 'managed') return null
-  if (trust === 'unknown') return 'Codex did not say whether it trusts the COS hooks. If they never ran, open `codex` once and trust them there.'
-  return 'Codex has not trusted the COS hooks yet, so they do not run. Open `codex` once in a terminal and choose to trust them.'
+  if (trust === 'unknown') return 'Codex did not say whether it trusts the COS hooks (see trustReason). If they never ran, run `codex` in Terminal and choose Trust all and continue.'
+  return 'Codex has not trusted the COS hooks yet, so they do not run. Run `codex` in Terminal and choose Trust all and continue.'
 }
 
