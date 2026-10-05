@@ -134,6 +134,26 @@ describe('derived state on the claude-sessions wire', () => {
     expect(jobs.runs.map(r => r.entrypoint)).toEqual(['sdk-cli'])
   })
 
+  it('6.62.0: Codex threads and Cursor composers are never runs, even with ?all=1 (W12)', async () => {
+    const base = await start()
+    for (const env of recorded) sessionSignalStore.apply(env)
+    sessionSignalStore.setEntrypoint(sessionId, 'sdk-cli')
+    const codex = '01a10c4b-0000-7000-8000-00000000c0de'
+    const cursor = '8c149bba-82b6-4b73-9f2f-eb26e72a72a9'
+    const t = recorded[0].ts
+    // A Codex thread has no registry entrypoint (null), which is exactly what `/runs` used to list.
+    sessionSignalStore.apply({ ts: t, ppid: 1, event: 'SessionStart', sessionId: codex, provider: 'codex', payload: { session_id: codex, source: 'startup', model: 'gpt-6.1-sol' } })
+    sessionSignalStore.apply({ ts: t + 1, ppid: 1, event: 'SessionEnd', sessionId: codex, provider: 'codex', payload: { session_id: codex, reason: 'other' } })
+    // A Cursor composer through the Claude hook, as parsed from a real payload (cursor_version).
+    const parsed = parseHookEnvelope(JSON.stringify({ ts: t, ppid: 1, event: 'UserPromptSubmit', payload: { conversation_id: cursor, session_id: cursor, cursor_version: '2026.10.01', prompt: 'x' } }))
+    if (!parsed.ok) throw new Error(parsed.reason)
+    sessionSignalStore.apply(parsed.envelope)
+    for (const query of ['', '&all=1']) {
+      const runs = (await (await fetch(`${base}/api/session-hooks/runs?since=${t - 1}${query}`)).json()) as { runs: Array<Record<string, unknown>> }
+      expect(runs.runs.map(r => r.session_id)).toEqual([sessionId])
+    }
+  })
+
   it('off means off: with COS_SESSION_HOOKS=0 the peer carries none of the hook-derived fields, the broker ids included', async () => {
     process.env.COS_SESSION_HOOKS = '0'
     const base = await start()

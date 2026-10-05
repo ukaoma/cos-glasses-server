@@ -277,7 +277,8 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
     ledger,
     seenKeys: replay.keys,
     isChild: env => isCosSpawnedPid(env.ppid),
-    entrypointOf: enabled ? (env, child) => entrypointFor(env.sessionId, child) : undefined,
+    // 6.62.0: only a Claude session has a `~/.claude/sessions` record to read.
+    entrypointOf: enabled ? (env, child) => (env.provider === undefined || env.provider === 'claude' ? entrypointFor(env.sessionId, child) : null) : undefined,
     apply: enabled ? (env, child, entrypoint) => {
       sessionSignalStore.apply(env, child)
       if (entrypoint) sessionSignalStore.setEntrypoint(env.sessionId, entrypoint)

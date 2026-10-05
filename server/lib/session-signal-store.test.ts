@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { HOOK_EVENT_NAMES, parseHookEnvelope, toolFingerprint, type HookEnvelope } from './session-hook-events.js'
+import { HOOK_EVENT_NAMES, NON_CLAUDE_HOOK_EVENTS, parseHookEnvelope, toolFingerprint, type HookEnvelope } from './session-hook-events.js'
 import { applyHookEvent, SessionSignalStore, SIGNAL_PRUNE_AFTER_END_MS, type SessionSignal } from './session-signal-store.js'
 import { DEAD_GRACE_MS, HOOK_SILENCE_MS, OPEN_TURN_CEILING_MS, deriveSessionState } from './session-state-derive.js'
 import { HOOK_SUBSCRIPTIONS } from './claude-hooks-installer.js'
@@ -93,7 +93,8 @@ describe('recorded 2.1.272 sequences replay into the expected phases', () => {
     for (const file of readdirSync(FIXTURES).filter(f => f.endsWith('.jsonl'))) {
       for (const env of recording(file)) recorded.add(env.event)
     }
-    const interactiveOnly = new Set(['StopFailure', 'PermissionDenied', 'PreToolUse', 'Notification', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'PostModelSwitch'])
+    // 6.62.0: Interrupt (Codex) and AgentThought (the Cursor observer) are never in a Claude recording.
+    const interactiveOnly = new Set(['StopFailure', 'PermissionDenied', 'PreToolUse', 'Notification', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'PostModelSwitch', 'Interrupt', 'AgentThought'])
     for (const name of HOOK_EVENT_NAMES) {
       expect(recorded.has(name) || interactiveOnly.has(name), name).toBe(true)
     }
@@ -102,7 +103,10 @@ describe('recorded 2.1.272 sequences replay into the expected phases', () => {
   })
 
   it('the installer subscribes exactly the events the reducer understands (one list, two homes, pinned)', () => {
-    expect([...HOOK_SUBSCRIPTIONS.map(s => s.event)].sort()).toEqual([...HOOK_EVENT_NAMES].sort())
+    // 6.62.0: every event the reducer reads EXCEPT the two no Claude Code hook fires. Adding
+    // either to Claude's list would turn every install into drift and desk cancel off (B1, W2).
+    expect(NON_CLAUDE_HOOK_EVENTS).toEqual(['Interrupt', 'AgentThought'])
+    expect([...HOOK_SUBSCRIPTIONS.map(s => s.event)].sort()).toEqual(HOOK_EVENT_NAMES.filter(name => !NON_CLAUDE_HOOK_EVENTS.includes(name)).sort())
     expect(new Set(HOOK_SUBSCRIPTIONS.map(s => s.event)).size).toBe(HOOK_SUBSCRIPTIONS.length)
   })
 })

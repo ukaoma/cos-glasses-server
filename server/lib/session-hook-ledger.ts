@@ -7,8 +7,8 @@
 // applying the same event twice.
 
 import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs'
-import type { HookEnvelope, HookEventName } from './session-hook-events.js'
-import { projectHookPayload, isHookEventName, SESSION_ID_RE } from './session-hook-events.js'
+import type { HookEnvelope, HookEventName, HookProvider } from './session-hook-events.js'
+import { projectHookPayload, isHookEventName, isHookProvider, SESSION_ID_RE } from './session-hook-events.js'
 
 export const LEDGER_ROTATE_BYTES = 10 * 1024 * 1024
 
@@ -22,6 +22,12 @@ export interface LedgerRow {
   child?: boolean
   /** The registry's `entrypoint` for the session, once read (6.48.1); a replay restores it. */
   entrypoint?: string
+  /**
+   * 6.62.0: the engine, decided at ingest from the full payload (`inferHookProvider`). The
+   * projection drops `cursor_version`, so a replay could not tell a Cursor row again without
+   * it. A row from an older server has none and replays exactly as it did.
+   */
+  provider?: HookProvider
   payload: Record<string, unknown>
 }
 
@@ -67,6 +73,7 @@ export class SessionHookLedger {
         session_id: env.sessionId,
         ...(child ? { child: true } : {}),
         ...(entrypoint ? { entrypoint } : {}),
+        ...(env.provider ? { provider: env.provider } : {}),
         payload: projectHookPayload(env.event, env.payload),
       }
     } catch (error) {
@@ -119,7 +126,14 @@ export class SessionHookLedger {
       if (r.ts < sinceMs) continue
       const payload = r.payload && typeof r.payload === 'object' ? r.payload as Record<string, unknown> : {}
       const entrypoint = typeof r.entrypoint === 'string' && r.entrypoint ? r.entrypoint : null
-      apply({ ts: r.ts, ppid: typeof r.ppid === 'number' ? r.ppid : null, event: r.event, sessionId: r.session_id.toLowerCase(), payload: { session_id: r.session_id, ...payload } }, r.key, r.child === true, entrypoint)
+      apply({
+        ts: r.ts,
+        ppid: typeof r.ppid === 'number' ? r.ppid : null,
+        event: r.event,
+        sessionId: r.session_id.toLowerCase(),
+        payload: { session_id: r.session_id, ...payload },
+        ...(isHookProvider(r.provider) ? { provider: r.provider } : {}),
+      }, r.key, r.child === true, entrypoint)
       applied++
     }
     return { rows, applied, keys }

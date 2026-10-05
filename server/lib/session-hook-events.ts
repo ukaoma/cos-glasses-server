@@ -33,9 +33,49 @@ export const HOOK_EVENT_NAMES = [
   'PreCompact',
   'PostCompact',
   'PostModelSwitch',
+  // 6.62.0: Codex fires this when a turn is interrupted (Esc). It closes the turn, as a Stop
+  // does. Never in Claude's subscription list: Claude Code has no such hook.
+  'Interrupt',
+  // 6.62.0: the Cursor observer's `afterAgentThought`. Display only, like every observer
+  // event: its text lives in memory and on the live feed, never in the ledger.
+  'AgentThought',
 ] as const
 
 export type HookEventName = typeof HOOK_EVENT_NAMES[number]
+
+/**
+ * 6.62.0: events the reducer understands that no Claude Code hook fires. They stay OUT of
+ * Claude's `HOOK_SUBSCRIPTIONS` (a new Claude block would turn every install into `drift`):
+ * `Interrupt` is Codex's, and `AgentThought` is the Cursor observer's.
+ */
+export const NON_CLAUDE_HOOK_EVENTS: readonly HookEventName[] = ['Interrupt', 'AgentThought']
+
+/**
+ * 6.62.0: which engine ran the hook. The Codex command carries `COS_HOOK_PROVIDER=codex`,
+ * which the script writes into the envelope; Claude Code and Cursor share the
+ * `~/.claude/settings.json` command and are told apart by the payload (`inferHookProvider`).
+ */
+export type HookProvider = 'claude' | 'codex' | 'cursor'
+
+export function isHookProvider(value: unknown): value is HookProvider {
+  return value === 'claude' || value === 'codex' || value === 'cursor'
+}
+
+/**
+ * The provider of one envelope, in this order (plan 2.1): the envelope's own stamp (the Codex
+ * command and the Cursor observer write one); else Cursor's `cursor_version`, which every
+ * Cursor payload carries and no other engine's does; else a transcript under
+ * `/.codex/sessions/` (a COS Claude block Codex imported runs without the stamp); else Claude.
+ */
+export function inferHookProvider(stamped: unknown, payload: Record<string, unknown>): HookProvider {
+  if (isHookProvider(stamped)) return stamped
+  if ('cursor_version' in payload) return 'cursor'
+  if (typeof payload.transcript_path === 'string' && payload.transcript_path.includes('/.codex/sessions/')) return 'codex'
+  return 'claude'
+}
+
+/** 6.62.0: the cap on an agent thought kept in memory and sent on the live feed. */
+export const AGENT_THOUGHT_MAX = 280
 
 const EVENT_SET: ReadonlySet<string> = new Set(HOOK_EVENT_NAMES)
 
@@ -57,6 +97,8 @@ export interface HookEnvelope {
   event: HookEventName
   sessionId: string
   payload: Record<string, unknown>
+  /** 6.62.0: set by `parseHookEnvelope` and a 6.62 ledger row; absent on older rows and hand-built envelopes. */
+  provider?: HookProvider
 }
 
 /**
@@ -111,6 +153,7 @@ export function parseHookEnvelope(text: string): ParsedHookEnvelope {
       event: r.event,
       sessionId,
       payload: p,
+      provider: inferHookProvider(r.provider, p),
     },
   }
 }
@@ -160,6 +203,9 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
     ...(str('cwd') ? { cwd: str('cwd') } : {}),
     ...(str('permission_mode') ? { permission_mode: str('permission_mode') } : {}),
     ...(str('prompt_id') ? { prompt_id: str('prompt_id') } : {}),
+    // 6.62.0: Codex stamps every turn-scoped event with its turn id and model.
+    ...(str('turn_id') ? { turn_id: str('turn_id') } : {}),
+    ...(event !== 'SessionStart' && str('model') ? { model: clipText(payload.model, 100) } : {}),
   }
   switch (event) {
     case 'SessionStart':
@@ -203,6 +249,11 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
       return { ...base, from_model: str('from_model'), to_model: str('to_model') }
     case 'PreCompact':
     case 'PostCompact':
+    case 'Interrupt':
+      return base
+    // The thought's TEXT is never kept: the ledger is a 10 MB ring replayed at boot, and a
+    // thought can quote anything the agent read. A replayed AgentThought carries nothing.
+    case 'AgentThought':
       return base
   }
 }

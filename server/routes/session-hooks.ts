@@ -63,6 +63,9 @@ export function createSessionHooksRouter(options: { port: number }): Router {
     const runs: Array<Record<string, unknown>> = []
     for (const signal of sessionSignalStore.snapshot()) {
       if (signal.observationOnly) continue
+      // 6.62.0: Control's scheduled-job ledger lists `claude -p` jobs. A Codex thread (no
+      // registry entrypoint at all) or a Cursor composer is never one.
+      if (signal.provider !== undefined && signal.provider !== 'claude') continue
       if (signal.firstSeenAt < sinceMs && !(signal.ended && signal.ended.at >= sinceMs)) continue
       if (!all && isInteractiveEntrypoint(signal.entrypoint)) continue
       runs.push({
