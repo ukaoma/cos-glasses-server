@@ -85,6 +85,7 @@ import {
   type BinaryResolution,
 } from './attached-provider-adapter.js'
 import { findBannedPermissionArg } from './banned-permission-args.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 
 /**
  * Providers that can be forked. A strict subset of the attached set.
@@ -937,13 +938,24 @@ export function realForkDeps(
   return {
     now: () => Date.now(),
     resolveBinary: provider => resolveProviderBinary(provider),
-    spawn: request => nodeSpawn(request.binaryPath, [...request.args], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: request.cwd,
-      env: request.env,
-      // Group leader, so the whole provider tree can be signalled on timeout.
-      detached: true,
-    }) as unknown as AttachedChildProcess,
+    spawn: request => {
+      // 6.62.0 (plan 3.4): the Cursor fork's `--model` must not rewrite the CLI default.
+      const isolation = request.provider === 'cursor' ? cursorSpawnEnv({ baseEnv: request.env }) : null
+      try {
+        const child = nodeSpawn(request.binaryPath, [...request.args], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: request.cwd,
+          env: isolation ? isolation.env : request.env,
+          // Group leader, so the whole provider tree can be signalled on timeout.
+          detached: true,
+        })
+        if (isolation) releaseCursorSpawnOnExit(child, isolation)
+        return child as unknown as AttachedChildProcess
+      } catch (error) {
+        isolation?.release()
+        throw error
+      }
+    },
     processStartMs: pid => realProcessStartMs(pid),
     recordSpawn: (pid, startMs) => recordCosSpawn(pid, startMs),
     releaseSpawn: pid => releaseCosSpawn(pid),

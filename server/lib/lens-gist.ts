@@ -937,7 +937,7 @@ async function cursorGistModels(): Promise<string[]> {
   const binary = resolveProviderBinary('cursor')
   if (!binary.ok) return []
   try {
-    const result = await runProcess(binary.path, ['models'], { stdin: '', cwd: homedir(), timeoutMs: 15_000, label: 'cursor models' })
+    const result = await runProcess(binary.path, ['models'], { stdin: '', cwd: homedir(), timeoutMs: 15_000, label: 'cursor models', cursorIsolation: true })
     const ids = result.code === 0 ? parseAgentModelsText(result.stdout).map(m => m.id).filter(isLensGistModelName) : []
     if (ids.length) cursorModels = { at: Date.now(), ids }
     return ids

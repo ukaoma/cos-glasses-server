@@ -101,6 +101,7 @@ import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store
 import { interpretPsLstart, processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import { getCodexTrustMode } from './codex-run-ledger.js'
 import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import type { PermissionAllowance } from './banned-permission-args.js'
 import {
   continueAllowanceFor,
@@ -1839,14 +1840,24 @@ export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict):
       // after it. This is the floor that keeps group ownership (rule 4 above) from ever
       // claiming a process that predates the turn.
       const floor = Date.now() - OWNED_START_SLACK_MS
-      const child = nodeSpawn(request.binaryPath, [...request.args], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: request.cwd,
-        env: request.env,
-        // Group leader, so the whole provider tree can be signalled on timeout —
-        // matching what both ordinary bridges do.
-        detached: true,
-      })
+      // 6.62.0 (plan 3.4): a Cursor child gets a config dir of its own, so `--model` cannot
+      // rewrite the person's CLI default (C9). Child env only; removed when it exits.
+      const isolation = request.provider === 'cursor' ? cursorSpawnEnv({ baseEnv: request.env }) : null
+      let child: ReturnType<typeof nodeSpawn>
+      try {
+        child = nodeSpawn(request.binaryPath, [...request.args], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: request.cwd,
+          env: isolation ? isolation.env : request.env,
+          // Group leader, so the whole provider tree can be signalled on timeout —
+          // matching what both ordinary bridges do.
+          detached: true,
+        })
+      } catch (error) {
+        isolation?.release()
+        throw error
+      }
+      if (isolation) releaseCursorSpawnOnExit(child, isolation)
       const pid = child.pid
       if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) treeMemory.floorByRoot.set(pid, floor)
       return child as unknown as AttachedChildProcess

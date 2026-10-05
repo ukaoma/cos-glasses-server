@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { cosBrainDir } from './launch-dir.js'
 import { resolveAgentBinary } from './cursor-model-catalog.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 
 export type ProofProvider = 'claude' | 'codex' | 'cursor'
@@ -54,12 +55,17 @@ export const CLAUDE_SAFE_MODE_ENV = 'CLAUDE_CODE_SAFE_MODE'
 
 type TerminationReason = 'timeout' | 'abort' | null
 
+function spawnPiped(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) {
+  return spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+}
+
 export function runBounded(
   command: string,
   args: string[],
   input: string,
   timeoutMs = 120_000,
   signal?: AbortSignal,
+  options: { cursorIsolation?: boolean } = {},
 ): Promise<ProcessResult> {
   return new Promise((resolvePromise) => {
     if (signal?.aborted) {
@@ -69,12 +75,17 @@ export function runBounded(
     const env = { ...process.env }
     delete env.CLAUDECODE
     env[CLAUDE_SAFE_MODE_ENV] = '1'
-    const child = spawn(command, args, {
-      cwd: cosBrainDir() ?? process.cwd(),
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
-    })
+    // 6.62.0 (plan 3.4): the Cursor proof runs on a config dir of its own, like every
+    // other `agent` spawn, so Update Server's proof cannot touch the person's CLI default.
+    const isolation = options.cursorIsolation === true ? cursorSpawnEnv({ baseEnv: env }) : null
+    let child: ReturnType<typeof spawnPiped>
+    try {
+      child = spawnPiped(command, args, cosBrainDir() ?? process.cwd(), isolation ? isolation.env : env)
+    } catch (error) {
+      isolation?.release()
+      throw error
+    }
+    if (isolation) releaseCursorSpawnOnExit(child, isolation)
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -286,7 +297,7 @@ async function executeProof(provider: ProofProvider, signal?: AbortSignal): Prom
   } else {
     const binary = resolveAgentBinary()
     result = binary
-      ? await runBounded(binary, cursorProofArgs(), PROOF_PROMPT, CURSOR_PROOF_TIMEOUT_MS, signal)
+      ? await runBounded(binary, cursorProofArgs(), PROOF_PROMPT, CURSOR_PROOF_TIMEOUT_MS, signal, { cursorIsolation: true })
       : { code: null, stdout: '', stderr: 'ENOENT: cursor agent binary not found', timedOut: false, aborted: false }
   }
   const text = provider === 'claude'

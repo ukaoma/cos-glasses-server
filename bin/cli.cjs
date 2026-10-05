@@ -280,9 +280,51 @@ function resolveCursorAgentBinary() {
   const homeLocal = resolve(homedir(), '.local', 'bin', 'agent')
   return existsSync(homeLocal) ? homeLocal : null
 }
+// 6.62.0 (plan 3.4): the launcher's two `agent` probes run on a config dir of their own,
+// like every server spawn (server/lib/cursor-spawn-env.ts, which this mirrors: CommonJS
+// cannot import it). Same link list; the census test pins that the two lists agree.
+const CURSOR_SPAWN_LINKS = ['chats', 'hooks.json', 'mcp.json', 'plugins', 'skills-cursor']
+function cursorSpawnEnvSync() {
+  const { mkdtempSync, symlinkSync, rmSync } = require('fs')
+  const sourceDir = process.env.CURSOR_CONFIG_DIR?.trim() || join(homedir(), '.cursor')
+  const root = join(CONFIG_DIR, 'cursor-cli')
+  let dir = null
+  const release = () => {
+    if (!dir) return
+    for (const name of CURSOR_SPAWN_LINKS) {
+      try { if (lstatSync(join(dir, name)).isSymbolicLink()) unlinkSync(join(dir, name)) } catch { /* absent */ }
+    }
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+    dir = null
+  }
+  try {
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    dir = mkdtempSync(join(root, 'spawn-'))
+    chmodSync(dir, 0o700)
+    if (existsSync(join(sourceDir, 'cli-config.json'))) {
+      copyFileSync(join(sourceDir, 'cli-config.json'), join(dir, 'cli-config.json'))
+      chmodSync(join(dir, 'cli-config.json'), 0o600)
+    }
+    for (const name of CURSOR_SPAWN_LINKS) {
+      if (existsSync(join(sourceDir, name))) symlinkSync(join(sourceDir, name), join(dir, name))
+    }
+    return { env: { ...process.env, CURSOR_CONFIG_DIR: dir }, release }
+  } catch {
+    release()
+    return { env: { ...process.env }, release: () => {} }
+  }
+}
 function cursorCliState() {
   const binary = resolveCursorAgentBinary()
   if (!binary) return { binary: null, version: null, auth: null }
+  const isolation = cursorSpawnEnvSync()
+  try {
+    return cursorCliStateWith(binary, isolation.env)
+  } finally {
+    isolation.release()
+  }
+}
+function cursorCliStateWith(binary, env) {
 
   let version = 'available'
   try {
@@ -290,6 +332,7 @@ function cursorCliState() {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 5000,
+      env,
     }).trim()
     const versionLine = about.split('\n').map((line) => line.trim()).find((line) => /CLI Version|cursor|agent/i.test(line))
     if (versionLine) version = versionLine
@@ -300,6 +343,7 @@ function cursorCliState() {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 7000,
+      env,
     })
     // Cursor 2026.09 introduced `grok-4.7-high-fast` without the old
     // `cursor-` prefix. Accept both exact high-fast families, like runtime does.

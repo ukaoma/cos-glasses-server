@@ -3,10 +3,12 @@
 // Stable app slots (cursor-grok / cursor-composer) map to concrete CLI model
 // ids proven in Phase 0. `agent models` is text-only — parse + cache it.
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import {
   CURSOR_COMPOSER_MODEL,
   CURSOR_GROK_MODEL,
@@ -259,10 +261,19 @@ async function fetchCliModels(agentBinary: string): Promise<CursorCatalogModel[]
   return new Promise((resolveModels, reject) => {
     const env = { ...process.env }
     delete env.CLAUDECODE
-    const child = spawn(agentBinary, ['models'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-    })
+    // 6.62.0 (plan 3.4): every `agent` spawn runs on a config dir of its own.
+    const isolation = cursorSpawnEnv({ baseEnv: env })
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawn(agentBinary, ['models'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: isolation.env,
+      })
+    } catch (error) {
+      isolation.release()
+      throw error
+    }
+    releaseCursorSpawnOnExit(child, isolation)
     let settled = false
     let stdout = ''
     let stderr = ''

@@ -13,6 +13,7 @@ import {
   extractCursorResponseText,
 } from './cursor-bridge.js'
 import { resolveAgentBinary } from './cursor-model-catalog.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import { classifyCursorError, getCursorExecutionCwd } from './cursor-run-ledger.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
@@ -70,12 +71,21 @@ export async function composerAsk(input: {
     // detached: the CLI gets its own process group so a timeout kill reaches
     // tool grandchildren. This is NEW relative to cursor-bridge (which spawns
     // attached) — the shutdown path in the engine must also kill this tree.
-    const proc = spawn(agentBinary, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env,
-      cwd: workspace,
-      detached: true,
-    })
+    // 6.62.0 (plan 3.4): `--model` here must not rewrite the person's CLI default (C9).
+    const isolation = cursorSpawnEnv({ baseEnv: env })
+    let proc: ReturnType<typeof spawn>
+    try {
+      proc = spawn(agentBinary, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: isolation.env,
+        cwd: workspace,
+        detached: true,
+      })
+    } catch (error) {
+      isolation.release()
+      throw error
+    }
+    releaseCursorSpawnOnExit(proc, isolation)
     input.onProcess?.(proc)
 
     const finish = (result: ComposerAskResult) => {

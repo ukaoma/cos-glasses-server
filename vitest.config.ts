@@ -60,6 +60,11 @@ export default defineConfig({
       // 6.61.0: no test may spawn the real Nemotron CLI from ~/.cos-glasses/bin.
       // Tests that exercise Nemotron pass their own env and a fake runner.
       COS_DIARIZER: 'embedding',
+      // 6.62.0: every Cursor spawn path copies the CLI config into a per-spawn dir
+      // (cursor-spawn-env.ts). Under test, the copy comes from and lands in the
+      // isolated home, never the live ~/.cursor or ~/.cos-glasses.
+      COS_CURSOR_SPAWN_ROOT: join(isolatedDataDir, 'cursor-cli'),
+      COS_CURSOR_SPAWN_SOURCE: join(isolatedDataDir, 'cursor-home'),
     },
   },
 })

@@ -1,7 +1,7 @@
 // Cursor Agent CLI bridge — ask or full agent (`--force` + `--sandbox disabled`).
 // Fail-closed: never fall through to Claude.
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { logTokenAudit } from './token-audit.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-builder.js'
@@ -64,6 +64,7 @@ import {
 } from '../../shared/media-attachment.js'
 import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { teeJobTrail } from './job-trail.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -355,12 +356,22 @@ export async function callCursorStreaming(
   const env = { ...process.env }
   delete env.CLAUDECODE
   if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)
+  // 6.62.0 (plan 3.4): Messages and reviews pass `--model`; the child's own config dir keeps
+  // that from rewriting the person's CLI default (C9). Removed when the child exits.
+  const isolation = cursorSpawnEnv({ baseEnv: env })
 
-  const proc = spawn(agentBinary, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env,
-    cwd: cursorCwd,
-  })
+  let proc: ChildProcessWithoutNullStreams
+  try {
+    proc = spawn(agentBinary, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: isolation.env,
+      cwd: cursorCwd,
+    })
+  } catch (error) {
+    isolation.release()
+    throw error
+  }
+  releaseCursorSpawnOnExit(proc, isolation)
 
   let fullText = ''
   let stderr = ''
