@@ -55,6 +55,8 @@ import { readCodexTurnEndedAtMs } from './lib/codex-turn-clock.js'
 import { codexLiveQueueEnabled } from './lib/codex-live-queue.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
+import { resolveSessionContinueFacts } from './lib/session-continue-facts.js'
+import { realContinueFactsDeps } from './lib/session-continue-facts-real.js'
 import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
 import { makeCodexLiveDeliverer } from './lib/codex-live-queue-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
@@ -461,6 +463,8 @@ bindingReapTimer.unref()
 const occupancyDirs = realOccupancyDirs()
 const nativeHeadDeps = realNativeHeadDeps()
 const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
+// 6.62.0: one set of readers for the Continue plan, rows, detail and the attach verdict.
+const continueFactsDeps = realContinueFactsDeps()
 /**
  * THE ONE PLACE the idle-holder relaxation is switched on, on the ONE flag
  * that also registers the write routes (6.33.0).
@@ -568,6 +572,26 @@ const deliverAttachedTurnForRoute = async (request: {
   // turn sees `working` rather than silence, and closed in a `finally` because the
   // duplicate-suppression gate it holds must be released on EVERY exit path -- a stuck
   // gate would silence Phase 2 for that session permanently.
+  // 6.62.0 (D1): what this Continue runs with. Claude: no plan, unchanged. Codex: the
+  // session's own sandbox, model and effort. Cursor: Run Everything on its own model. A
+  // read that fails plans the 6.61 posture with a note; never anything broader. With
+  // COS_CONTINUE_FULL_PERMISSIONS=0 no plan is resolved and the adapter builds the 6.61 argv.
+  let plan: unknown
+  if (request.provider !== 'claude') {
+    try {
+      const facts = await resolveSessionContinueFacts({
+        provider: request.provider,
+        threadId: request.nativeThreadId,
+        transcriptPath: attachedWorkspaceDeps.transcriptPath(request.provider, request.nativeThreadId),
+        cwd: workspace.path,
+      }, continueFactsDeps)
+      plan = facts.plan
+    } catch (error) {
+      console.error(`[attached] continue plan failed provider=${request.provider}: ${error instanceof Error ? error.message : error}`)
+      plan = undefined
+    }
+  }
+
   const live = createAttachedTurnStream({
     provider: request.provider,
     sessionId: request.nativeThreadId,
@@ -579,9 +603,11 @@ const deliverAttachedTurnForRoute = async (request: {
       nativeThreadId: request.nativeThreadId,
       prompt: request.prompt,
       cwd: workspace.path,
-      // The only policy this build accepts. The adapter refuses anything else and
-      // asserts no bypass/always-approve flag reaches the argv (plan 4.7).
-      policy: 'read_only',
+      // 6.62.0: the session's own posture, carried by `plan`. The adapter refuses any other
+      // policy word, validates the plan, and still bans every bypass flag but the one the
+      // plan's allowance names, at both of its checks (plan 3.1).
+      policy: 'session_posture',
+      plan,
       abortSignal: request.abortSignal,
       deps: {
         ...base,
@@ -802,6 +828,8 @@ if (threadAttachEnabled()) {
     deliver: (turn: QueuedThreadTurn) => deliverQueuedTurnOverLoopback(turn, PORT, API_TOKEN),
     // 6.53.0: parked turns hold for two minutes after a cancel on their thread.
     cancelHoldUntil: (provider: string, threadId: string) => cancelHoldUntilFor(provider, threadId),
+    // 6.62.0 (W14): a busy Agent CLI chat's parked turn drains here (no Stop hook fires for `-p`).
+    cursorCliChat: (threadId: string) => continueFactsDeps.cursorChatDir(threadId) !== null,
     now: () => Date.now(),
   }
   app.use('/api', createThreadTurnQueueRouter(queueDeps))

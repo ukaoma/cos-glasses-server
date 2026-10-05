@@ -4223,7 +4223,7 @@ describe('cancel a COS turn (6.53.0)', () => {
     const signals: string[] = []
     const ledger = new CosSpawnLedger({ now: () => Date.now() })
     const real = (req: AttachedTurnRequest) => deliverAttachedTurn({
-      provider: req.provider, nativeThreadId: req.nativeThreadId, prompt: req.prompt, cwd: CWD, policy: 'read_only',
+      provider: req.provider, nativeThreadId: req.nativeThreadId, prompt: req.prompt, cwd: CWD, policy: 'session_posture',
       abortSignal: req.abortSignal,
       deps: {
         now: () => Date.now(),

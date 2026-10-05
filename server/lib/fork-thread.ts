@@ -78,7 +78,6 @@ import {
   buildAttachedEnv,
   classifyStderr,
   extractNativeIdsFromLine,
-  isAttachedPermissionPolicy,
   resolveProviderBinary,
   type AttachedChildProcess,
   type AttachedSpawnRequest,
@@ -96,8 +95,16 @@ import { findBannedPermissionArg } from './banned-permission-args.js'
  */
 export type ForkProvider = ForkableProvider
 
-/** Same one-member policy as the attached path. An omitted policy is refused. */
+/**
+ * One member, and it stays `read_only` (plan v3, B3): D1 widened CONTINUE to the session's
+ * own posture, never Fork. Every fork, Cursor's included, is read-only. Its own predicate
+ * since 6.62.0, when the attached path's policy word became `session_posture`.
+ */
 export type ForkPermissionPolicy = 'read_only'
+
+export function isForkPermissionPolicy(value: unknown): value is ForkPermissionPolicy {
+  return value === 'read_only'
+}
 
 /** Terminal reason on failure. Never carries prompt, transcript or provider text. */
 export type ForkFailure =
@@ -541,7 +548,7 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
 
   const base = { provider, sourceNativeThreadId }
 
-  if (!isAttachedPermissionPolicy(request.policy)) {
+  if (!isForkPermissionPolicy(request.policy)) {
     // Includes `undefined`. An omitted policy is not a request for the safest one;
     // it is a caller that has not decided.
     return fail('unsupported_policy', 'none', { ...base, durationMs: duration() })

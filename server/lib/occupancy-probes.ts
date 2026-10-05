@@ -53,7 +53,8 @@ import { basename, join, resolve } from 'node:path'
 import { NATIVE_THREAD_ID_RE } from './native-thread-id.js'
 import { transcriptPathFor, type NativeHeadDeps } from './native-head.js'
 import { parseProcStartUtcMs, type OccupancyDirs, type OccupancyProbes } from './thread-occupancy.js'
-import { resolveCursorAgentSession } from './cursor-agent-store.js'
+import { cursorTranscriptPath, resolveCursorAgentSession } from './cursor-agent-store.js'
+import { cliChatLastWriteMs } from './cursor-session-model.js'
 
 // Re-exported rather than reimplemented. `claudeSessionsDir` already encodes the
 // COS_CLAUDE_SESSIONS_DIR -> CLAUDE_CONFIG_DIR -> ~/.claude precedence AND is the
@@ -728,6 +729,11 @@ export function realOccupancyProbes(ledger: SpawnLedgerAccessor): OccupancyProbe
     lockHolders,
     cosSpawnedPids: () => sanitizeLedger(ledger()),
     cursorAgentSession: (threadId, chatsDir) => resolveCursorAgentSession(threadId, chatsDir),
+    // 6.62.0 (W14): the CLI chat busy window reads the chat's own files.
+    cursorChatLastWriteMs: (chatDir, threadId) => cliChatLastWriteMs(
+      chatDir,
+      cursorTranscriptPath(threadId, join(process.env.COS_AGENT_SESSIONS_HOME?.trim() || homedir(), '.cursor', 'projects')),
+    ),
     // transcriptMtimeMs is DELIBERATELY absent here. See `withTranscriptClock`.
   }
 }
