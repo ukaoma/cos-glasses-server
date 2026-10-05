@@ -29,8 +29,29 @@ import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, s
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-/** What K1 linked. The census test and `bin/cli.cjs` read this exact list. */
-export const CURSOR_SPAWN_LINKS = ['chats', 'hooks.json', 'mcp.json', 'plugins', 'skills-cursor'] as const
+/**
+ * What K1 linked, plus `agents` and `plans` (6.62.0 /qa W6), each only when it exists. The
+ * census test and `bin/cli.cjs` read this exact list.
+ */
+export const CURSOR_SPAWN_LINKS = ['chats', 'hooks.json', 'mcp.json', 'plugins', 'skills-cursor', 'agents', 'plans'] as const
+
+/**
+ * 6.62.0 /qa (W6): the code a spawn that MUST be isolated (a Continue, a fork) throws when it
+ * cannot be: those paths refuse with an honest reason instead of falling back to the shared
+ * config, where `--model` (and Run Everything's own config writes) would land in the
+ * person's real CLI default. Every other spawn may still fail open, and logs it.
+ */
+export const CURSOR_ISOLATION_UNAVAILABLE = 'COS_CURSOR_ISOLATION_UNAVAILABLE'
+
+export function cursorIsolationUnavailableError(): Error & { code: string } {
+  const error = new Error('Cursor spawn isolation unavailable') as Error & { code: string }
+  error.code = CURSOR_ISOLATION_UNAVAILABLE
+  return error
+}
+
+export function isCursorIsolationUnavailable(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === CURSOR_ISOLATION_UNAVAILABLE
+}
 
 /** A spawn dir older than this belongs to a server that died mid-run; a Continue lasts 30 min at most. */
 export const CURSOR_SPAWN_STALE_MS = 6 * 60 * 60_000

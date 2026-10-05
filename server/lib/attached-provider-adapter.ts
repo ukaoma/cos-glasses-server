@@ -101,7 +101,7 @@ import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store
 import { interpretPsLstart, processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import { getCodexTrustMode } from './codex-run-ledger.js'
 import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
-import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
+import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import type { PermissionAllowance } from './banned-permission-args.js'
 import {
   continueAllowanceFor,
@@ -377,6 +377,13 @@ export interface AttachedTurnDeps {
    * future edit can let it modify what the scan sees.
    */
   observeStdout?: (chunk: string) => void
+  /**
+   * 6.62.0 /qa (W5, N1): does Codex itself trust this cwd RIGHT NOW (the cwd or its git
+   * root is a trusted `[projects]` entry)? Asked at the spawn for a full-access plan only;
+   * absent, false, or a throw refuses that plan. The plan was built from the same rule
+   * seconds earlier; this is the second check, so the allowance never outlives the trust.
+   */
+  codexFolderTrusted?: (cwd: string) => boolean
 }
 
 export interface AttachedTurnRequest {
@@ -898,6 +905,21 @@ async function run(
     return fail('native_owner_appeared', 'not_attempted', { ...base, detail: reasonText, durationMs: duration() })
   }
 
+  // 6.62.0 /qa (W5, N1): a full-access Codex plan is re-checked against Codex's own trust at
+  // the spawn. A folder that stopped being trusted (or never was) refuses, never downgrades:
+  // the note promised full access, and a quieter posture would make the note a lie.
+  if (plan?.provider === 'codex' && plan.sandbox === 'danger-full-access') {
+    let trusted = false
+    try {
+      trusted = typeof deps.codexFolderTrusted === 'function' && deps.codexFolderTrusted(cwd) === true
+    } catch {
+      trusted = false
+    }
+    if (!trusted) {
+      return fail('unsupported_policy', 'not_attempted', { ...base, detail: 'codex_folder_untrusted', durationMs: duration() })
+    }
+  }
+
   // --- 4. Spawn ---------------------------------------------------------------
   // Built through an injectable seam so the banned-flag check below is reachable
   // by a test. Without the seam no test could make the builders emit a banned
@@ -929,9 +951,10 @@ async function run(
   let child: AttachedChildProcess
   try {
     child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv(), provider })
-  } catch {
+  } catch (error) {
     // Includes ENOENT. No process exists, so no turn can have landed.
-    return fail('spawn_failed', 'not_attempted', { ...base, detail: 'threw', durationMs: duration() })
+    const detail = isCursorIsolationUnavailable(error) ? 'cursor_isolation_unavailable' : 'threw'
+    return fail('spawn_failed', 'not_attempted', { ...base, detail, durationMs: duration() })
   }
   if (!child || typeof child !== 'object' || typeof child.on !== 'function') {
     return fail('spawn_failed', 'not_attempted', { ...base, detail: 'no_child', durationMs: duration() })
@@ -1843,6 +1866,8 @@ export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict):
       // 6.62.0 (plan 3.4): a Cursor child gets a config dir of its own, so `--model` cannot
       // rewrite the person's CLI default (C9). Child env only; removed when it exits.
       const isolation = request.provider === 'cursor' ? cursorSpawnEnv({ baseEnv: request.env }) : null
+      // 6.62.0 /qa (W6): a Continue never falls back to the shared Cursor config.
+      if (isolation && !isolation.isolated) throw cursorIsolationUnavailableError()
       let child: ReturnType<typeof nodeSpawn>
       try {
         child = nodeSpawn(request.binaryPath, [...request.args], {

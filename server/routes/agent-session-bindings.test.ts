@@ -55,7 +55,8 @@ import { boundToMarker, targetKey, type NativeBinding } from '../lib/agent-sessi
 import { deliverAttachedTurn, CANCEL_KILL_GRACE_MS, type AttachedChildProcess } from '../lib/attached-provider-adapter.js'
 import { hasHaltMarker, writeHaltMarker } from '../lib/session-halt.js'
 import type { CancelDeps } from './agent-session-bindings.js'
-import { __resetDeskCancelReadersForTests, setDeskCancelReaders, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
+import { DESK_RUN_EFFECT_COPY, __resetDeskCancelReadersForTests, setDeskCancelReaders, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
+import { fallbackContinueNote } from '../lib/continue-plan.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
@@ -4569,4 +4570,124 @@ describe('6.62.0 (plan 3.12): the attachability verdict carries continue_note', 
       expect(typeof body.attachable).toBe('boolean')
     }
   })
+})
+
+describe('6.62.0 /qa: Cancel run on a busy Codex hop (Q2) and a latched hop cancel (W3, Q1)', () => {
+  const heldBusy = () => probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() })
+  const heldIdle = () => probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() - 10 * 60_000 })
+  const turnBody = (a: { epoch: number; targetKey: string; boundTo: string }, clientTurnId: string) =>
+    ({ prompt: PROMPT, clientTurnId, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo })
+  async function codexAttached(base: string) {
+    const res = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    return { bindingId: res.body.bindingId, epoch: res.body.epoch, boundTo: res.body.boundTo, targetKey: targetKey('codex', CODEX_THREAD) }
+  }
+
+  it('Q2: a busy app-held Codex thread is attachable through the hop AND keeps the desk cancel row', async () => {
+    for (const ready of [true, false]) {
+      setDeskCancelReaders({ codexReady: () => ready, threadHookSeen: (provider, id) => provider === 'codex' && id === CODEX_THREAD })
+      try {
+        const { cancel } = recordingCancel()
+        const base = await start(writeDeps({
+          probes: heldBusy(),
+          cancel,
+          deliverCodexLiveTurn: async () => ({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue' }),
+          busyCodexHop: () => true,
+        }))
+        const body = await (await fetch(`${base}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
+        expect(body.attachable).toBe(true)
+        // What cancelTargetFor answers for a Codex desk run: desk_run with trusted hooks, else unsupported.
+        expect(body.cancel, String(ready)).toBe(ready ? 'desk_run' : 'unsupported')
+      } finally {
+        __resetDeskCancelReadersForTests()
+      }
+    }
+  })
+
+  for (const [label, busy] of [['busy', true], ['idle', false]] as const) {
+    it(`a cancel latched on a ${label} Codex hop notes a desk run (trusted hooks) and ${busy ? 'DEFERS' : 'writes'} the marker`, async () => {
+      setDeskCancelReaders({ codexReady: () => true, threadHookSeen: (provider, id) => provider === 'codex' && id === CODEX_THREAD })
+      try {
+        let entered!: () => void
+        let release!: (value: { ok: boolean; reason: string; verifiedBy: string; queuedId: string }) => void
+        const liveEntered = new Promise<void>(resolve => { entered = resolve })
+        const heldLive = new Promise<{ ok: boolean; reason: string; verifiedBy: string; queuedId: string }>(resolve => { release = resolve })
+        const { cancel, calls } = recordingCancel({ deskRunning: () => false })
+        const base = await start(writeDeps({
+          probes: busy ? heldBusy() : heldIdle(),
+          cancel,
+          deliverCodexLiveTurn: async () => { entered(); return heldLive },
+          ...(busy ? { busyCodexHop: () => true } : {}),
+        }))
+        const a = await codexAttached(base)
+        const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(turnBody(a, `ct-latched-${label}`)),
+        })
+        await liveEntered
+        const stopped = await postCancel(base, `cc-latched-${label}`, 'codex', CODEX_THREAD)
+        expect(stopped.body).toMatchObject({ cancelled: true, target: 'cos_turn', state: 'stopping' })
+        expect(calls.noted).toEqual([['codex', CODEX_THREAD, NOW, 'desk_run']])
+        release({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-1' })
+        expect((await sent).status).toBe(200)
+        expect(calls.handed).toHaveLength(1)
+        expect(calls.handed[0]).toMatchObject({ sessionId: CODEX_THREAD, prompt: PROMPT, verbatim: true })
+        if (busy) expect(calls.handed[0]).toMatchObject({ deferMarker: true })
+        else expect('deferMarker' in calls.handed[0]!).toBe(false)
+        const replay = await postCancel(base, `cc-latched-${label}`, 'codex', CODEX_THREAD)
+        expect(replay.body).toMatchObject({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', effectCopy: DESK_RUN_EFFECT_COPY, replayed: true })
+      } finally {
+        __resetDeskCancelReadersForTests()
+      }
+    })
+  }
+})
+
+describe('6.62.0 /qa: the Continue-note header (Q3) and the fixed verdict note (W9)', () => {
+  it('Q3: the turn route hands the client acknowledgement to the adapter shim, both ways', async () => {
+    const seen: Array<boolean | undefined> = []
+    const base = await start(writeDeps({ deliverAttachedTurn: async req => { seen.push(req.continueNoteAck); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } } }))
+    const a = await attached(base)
+    for (const [clientTurnId, headers] of [
+      ['ct-note-ack-1', { 'X-COS-Continue-Note': '1' }],
+      ['ct-note-ack-0', {}],
+      ['ct-note-ack-x', { 'X-COS-Continue-Note': 'yes' }],
+    ] as const) {
+      const res = await fetch(`${base}${turnsPath(a.bindingId)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId }),
+      })
+      expect(res.status, clientTurnId).toBe(202)
+      expect(await settled(base, a.bindingId, clientTurnId)).toMatchObject({ outcome: 'completed' })
+    }
+    expect(seen).toEqual([true, false, false])
+  })
+
+  it('Q3: the verdict note is asked for with the acknowledgement the client sent', async () => {
+    const asked: Array<boolean | undefined> = []
+    const base = await start(writeDeps({ continueNote: (_p, _t, options) => { asked.push(options?.noteAck); return 'n' } }))
+    await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`, { headers: { 'X-COS-Continue-Note': '1' } })
+    await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)
+    expect(asked).toEqual([true, false])
+  })
+
+  it('W9: a slow, thrown or empty note read gives Codex and Cursor the fixed note, never none; Claude none', async () => {
+    const reads = [
+      () => new Promise<string>(resolve => setTimeout(() => resolve('late'), CONTINUE_NOTE_BUDGET_MS + 300)),
+      () => { throw new Error('EIO') },
+      () => null,
+    ]
+    for (const continueNote of reads) {
+      const base = await start(writeDeps({ continueNote, probes: freeProbes({ cursorAgentSession: () => ({ dir: '/c/h/x', cwd: '/w', hasConversation: true }) }) }))
+      const cursorAck = await (await fetch(`${base}/api/agent-sessions/cursor/${CODEX_THREAD}/attachability`, { headers: { 'X-COS-Continue-Note': '1' } })).json()
+      expect(cursorAck.continue_note).toBe(fallbackContinueNote('cursor', { noteAck: true }))
+      const cursorOld = await (await fetch(`${base}/api/agent-sessions/cursor/${CODEX_THREAD}/attachability`)).json()
+      expect(cursorOld.continue_note).toBe(fallbackContinueNote('cursor', { noteAck: false }))
+      const codex = await (await fetch(`${base}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
+      expect(codex.continue_note).toBe(fallbackContinueNote('codex', { noteAck: false }))
+      const claude = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+      expect('continue_note' in claude).toBe(false)
+    }
+  }, 15_000)
 })

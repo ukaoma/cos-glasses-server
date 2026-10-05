@@ -523,3 +523,22 @@ describe('6.62.0 (W14): a parked Agent CLI chat turn drains once the chat is qui
     expect(delivered).toEqual([])
   })
 })
+
+describe('6.62.0 /qa (Q3): a parked turn carries the client\'s Continue-note acknowledgement', () => {
+  beforeEach(() => { threadId = `0000000${seq++}-0000-4000-8000-0000000000aa`.slice(0, 36); clock = 10_000 })
+  it('stores it only when the header says 1', async () => {
+    gate = { attachable: false, reason: 'native_thread_working' }
+    await start()
+    for (const [id, value] of [['ct-ack-1', '1'], ['ct-ack-0', undefined]] as const) {
+      const res = await fetch(`${baseUrl}/api/agent-sessions/codex/${threadId}/queued-turns`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(value ? { 'X-COS-Continue-Note': value } : {}) },
+        body: JSON.stringify({ clientTurnId: id, cosSessionId: 'cos-1', prompt: `p ${id}` }),
+      })
+      expect(res.status).toBe(202)
+    }
+    const rows = readQueue('codex', threadId, clock)
+    expect(rows.find(r => r.clientTurnId === 'ct-ack-1')?.continueNoteAck).toBe(true)
+    expect(rows.find(r => r.clientTurnId === 'ct-ack-0')).not.toHaveProperty('continueNoteAck')
+  })
+})

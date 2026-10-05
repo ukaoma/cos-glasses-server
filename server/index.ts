@@ -25,7 +25,7 @@ import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
 import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
-import { writeHaltMarker } from './lib/session-halt.js'
+import { clearingHaltOnSpawn, writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, setDeskCancelReaders, threadCancel } from './lib/session-cancel.js'
 import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
@@ -57,7 +57,8 @@ import { codexLiveQueueEnabled } from './lib/codex-live-queue.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { resolveSessionContinueFacts } from './lib/session-continue-facts.js'
-import { realContinueFactsDeps } from './lib/session-continue-facts-real.js'
+import { fallbackContinueNote } from './lib/continue-plan.js'
+import { codexFolderTrustedNow, realContinueFactsDeps } from './lib/session-continue-facts-real.js'
 import { prepareCursorFork, resolveCursorForkWorkspace } from './lib/cursor-fork-context.js'
 import { readComposerFacts } from './lib/cursor-session-model.js'
 import { MAX_PROMPT_CHARS } from './lib/attached-provider-adapter.js'
@@ -559,6 +560,8 @@ const deliverAttachedTurnForRoute = async (request: {
   onSpawn: (pid: number) => boolean
   /** 6.53.0: the cancel from the lens, passed straight through to the adapter. */
   abortSignal?: AbortSignal
+  /** 6.62.0 /qa (Q3): the client shows `continue_note`; only then Cursor Run Everything. */
+  continueNoteAck?: boolean
 }): Promise<unknown> => {
   // Resolved here, not stored on the binding: the cwd is read from the transcript,
   // which records it verbatim. Decoding the project slug is lossy — this Mac's own
@@ -599,6 +602,7 @@ const deliverAttachedTurnForRoute = async (request: {
         threadId: request.nativeThreadId,
         transcriptPath: attachedWorkspaceDeps.transcriptPath(request.provider, request.nativeThreadId),
         cwd: workspace.path,
+        noteAck: request.continueNoteAck === true,
       }, continueFactsDeps)
       plan = facts.plan
     } catch (error) {
@@ -625,7 +629,11 @@ const deliverAttachedTurnForRoute = async (request: {
       plan,
       abortSignal: request.abortSignal,
       deps: {
-        ...base,
+        // 6.62.0 /qa (Q4): the child is about to start, every gate passed (a Continue or a
+        // queue drain): no earlier desk-cancel marker may deny COS's own turn.
+        ...clearingHaltOnSpawn(base, request.nativeThreadId, 'continue'),
+        // 6.62.0 /qa (W5): full access is re-checked against Codex's own trust at the spawn.
+        codexFolderTrusted: cwd => codexFolderTrustedNow(cwd),
         // `startMs` is deliberately unused: the adapter already probed it as a GATE
         // (a null there aborts before this is reached), and the route probes again
         // as the recorder. One record, one authority.
@@ -705,7 +713,19 @@ const forkThreadForRoute = async (request: {
     ...request,
     prompt,
     ...(cursorModel ? { cursorModel } : {}),
-    deps: realForkDeps((provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps)),
+    deps: forkDepsClearingIdleHalt(request.provider, request.nativeThreadId),
+  })
+}
+
+/**
+ * 6.62.0 /qa (Q4): the fork deps, with the source thread's halt marker cleared at the spawn,
+ * but ONLY when no desk run is working there. A fork has no occupancy gate (it may run while
+ * the desk works), and clearing then would undo the person's own cancel.
+ */
+function forkDepsClearingIdleHalt(provider: 'claude' | 'codex' | 'cursor', threadId: string) {
+  return clearingHaltOnSpawn(realForkDeps((p, id) => nativeHead(p, id, nativeHeadDeps)), threadId, 'fork', () => {
+    const reason = threadOccupancy(provider, threadId, occupancyProbes, occupancyDirs).reason
+    return reason !== 'native_thread_working' && reason !== 'live_desktop_process'
   })
 }
 
@@ -958,12 +978,15 @@ app.use('/api', createAgentSessionBindingsRouter({
   busyCodexHop: (threadId: string) => codexLiveQueueEnabled()
     && readQueue('codex', threadId, Date.now()).every(turn => turn.status !== 'waiting' && turn.status !== 'delivering'),
   // 6.62.0 (plan 3.12): the attach verdict says what a Continue would run with.
-  continueNote: async (provider, threadId) => (await resolveSessionContinueFacts({
+  continueNote: async (provider, threadId, options) => (await resolveSessionContinueFacts({
     provider,
     threadId,
     transcriptPath: attachedWorkspaceDeps.transcriptPath(provider, threadId),
     cwd: resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)?.path ?? null,
+    noteAck: options?.noteAck === true,
   }, continueFactsDeps)).note,
+  // 6.62.0 /qa (W9): the fixed note when the read misses its budget.
+  continueNoteFallback: (provider, options) => fallbackContinueNote(provider, { noteAck: options.noteAck, codexFallbackSandbox: continueFactsDeps.codexFallbackSandbox() }),
   forkThread: forkThreadForRoute,
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path

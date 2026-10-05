@@ -284,7 +284,7 @@ function resolveCursorAgentBinary() {
 // 6.62.0 (plan 3.4): the launcher's two `agent` probes run on a config dir of their own,
 // like every server spawn (server/lib/cursor-spawn-env.ts, which this mirrors: CommonJS
 // cannot import it). Same link list; the census test pins that the two lists agree.
-const CURSOR_SPAWN_LINKS = ['chats', 'hooks.json', 'mcp.json', 'plugins', 'skills-cursor']
+const CURSOR_SPAWN_LINKS = ['chats', 'hooks.json', 'mcp.json', 'plugins', 'skills-cursor', 'agents', 'plans']
 function cursorSpawnEnvSync() {
   const { mkdtempSync, symlinkSync, rmSync } = require('fs')
   const sourceDir = process.env.CURSOR_CONFIG_DIR?.trim() || join(homedir(), '.cursor')
@@ -310,8 +310,10 @@ function cursorSpawnEnvSync() {
       if (existsSync(join(sourceDir, name))) symlinkSync(join(sourceDir, name), join(dir, name))
     }
     return { env: { ...process.env, CURSOR_CONFIG_DIR: dir }, release }
-  } catch {
+  } catch (error) {
     release()
+    // 6.62.0 /qa (W6): fail open for these two read-only probes, but never silently.
+    console.warn(`[cursor-spawn-env] isolation unavailable for the launcher's agent probe, using the shared config: ${error && error.code ? error.code : error}`)
     return { env: { ...process.env }, release: () => {} }
   }
 }

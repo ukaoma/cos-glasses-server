@@ -137,6 +137,37 @@ export function killSwitchNote(provider: string, codexFallbackSandbox: 'read-onl
   return null
 }
 
+/**
+ * 6.62.0 /qa (Q3): the request header by which a client says it SHOWS `continue_note`. Only
+ * then does a Cursor Continue run Run Everything: glasses 599 and older label Cursor Continue
+ * "Ask", and the server must not do more than the button said. Codex needs no gate (the old
+ * copy, "uses this session's settings", stays true). The kill switch still wins.
+ */
+export const CONTINUE_NOTE_HEADER = 'x-cos-continue-note'
+
+/** The header's value read strictly: exactly '1' (an array takes its first value). */
+export function continueNoteAcknowledged(value: unknown): boolean {
+  const first = Array.isArray(value) ? value[0] : value
+  return typeof first === 'string' && first.trim() === '1'
+}
+
+/** A Cursor Continue for a client that does not show the note: the 6.61 Ask posture, said so. */
+export const CURSOR_ASK_UNACKED_NOTE = 'Ask mode (read-only) for this app version.'
+
+/**
+ * 6.62.0 /qa (W9): the note a verdict carries when the read missed its budget, so a Cursor
+ * Continue never runs Run Everything without saying so. Claude has none (unchanged).
+ */
+export function fallbackContinueNote(
+  provider: string,
+  options: { noteAck: boolean; env?: NodeJS.ProcessEnv; codexFallbackSandbox?: 'read-only' | 'workspace-write' },
+): string | null {
+  if (provider !== 'codex' && provider !== 'cursor') return null
+  if (!continueFullPermissionsEnabled(options.env)) return killSwitchNote(provider, options.codexFallbackSandbox ?? 'read-only')
+  if (provider === 'codex') return 'This Codex session\'s own access.'
+  return options.noteAck ? 'Run Everything on this chat\'s model.' : CURSOR_ASK_UNACKED_NOTE
+}
+
 /** An IDE composer is not resumed from outside; a turn queued for it runs in Cursor. */
 export const CURSOR_COMPOSER_NOTE = 'Runs in Cursor\'s own chat with its settings.'
 

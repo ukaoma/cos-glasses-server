@@ -121,7 +121,7 @@ import {
   type BindingState,
   type NativeBinding,
 } from '../lib/agent-session-binding-store.js'
-import { boundedContinueNote } from '../lib/continue-plan.js'
+import { boundedContinueNote, CONTINUE_NOTE_HEADER, continueNoteAcknowledged, fallbackContinueNote } from '../lib/continue-plan.js'
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
@@ -260,6 +260,11 @@ export interface AttachedTurnRequest {
    */
   onSpawn: (pid: number) => boolean
   /**
+   * 6.62.0 /qa (Q3): the client sent `X-COS-Continue-Note: 1`, i.e. it shows `continue_note`.
+   * Only then may a Cursor Continue run Run Everything; otherwise it keeps the 6.61 Ask posture.
+   */
+  continueNoteAck?: boolean
+  /**
    * 6.53.0: aborted by POST .../cancel. The adapter checks it before the spawn and
    * before the prompt write, and stops the child's process group after. Optional so an
    * adapter that ignores it is byte-for-byte the 6.52 route.
@@ -386,7 +391,14 @@ export interface AgentSessionBindingsDeps {
    * `continue_note`. Optional; absent, null, slow (past `CONTINUE_NOTE_BUDGET_MS`) or a
    * throw omits the field, and the verdict is unchanged.
    */
-  continueNote?: (provider: BindableProvider, threadId: string) => Promise<string | null> | string | null
+  continueNote?: (provider: BindableProvider, threadId: string, options?: { noteAck: boolean }) => Promise<string | null> | string | null
+
+  /**
+   * 6.62.0 /qa (W9): the note when `continueNote` misses its budget, throws, or answers
+   * nothing usable, so a Cursor Continue never runs Run Everything unannounced. Defaults to
+   * `fallbackContinueNote` with this process's environment.
+   */
+  continueNoteFallback?: (provider: BindableProvider, options: { noteAck: boolean }) => string | null
 
   /**
    * The self-recursion ledger. Defaults to the real process-wide one.
@@ -477,7 +489,7 @@ export interface CancelDeps {
    * have reached) the open session. Writes the halt marker, and re-arms it once when that
    * turn's own UserPromptSubmit deletes it (`haltHandedOffTurn`). False: not armed.
    */
-  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean; verbatim?: boolean }) => boolean
+  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean; verbatim?: boolean; deferMarker?: boolean }) => boolean
   /** Append to `data/session-cancel.jsonl`. */
   ledger?: (row: SessionCancelLedgerRow) => void
 }
@@ -1685,7 +1697,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     provider: string,
     threadId: string,
     reached: 'none' | 'reached' | 'maybe',
-    turn: { prompt: string; sentAt: number },
+    turn: { prompt: string; sentAt: number; busy?: boolean },
   ): void => {
     const latch = entry.latched
     if (latch === null) return
@@ -1714,6 +1726,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // 6.62.0 (plan 3.6): a Codex turn went into the app's own queue, which hands its
           // text to the session's UserPromptSubmit as is: matched verbatim, no peer unwrap.
           ...(provider === 'codex' ? { verbatim: true } : {}),
+          // 6.62.0 /qa (W3): on a BUSY hop the session is still running Miles's OWN desk turn.
+          // A marker written now would stop that turn at its next tool, so only the re-arm is
+          // registered: the marker lands on the delivered turn's own UserPromptSubmit.
+          ...(turn.busy === true ? { deferMarker: true } : {}),
         }) === true, false)
         if (armed) {
           const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)
@@ -1904,21 +1920,40 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     res.json({ released: true, target, provider: outcome.row.provider })
   })
 
-  /** 6.62.0 (plan 3.12): `continue_note` for the verdict, bounded in time and length. */
-  const continueNoteFor = async (provider: string, threadId: string): Promise<{ continue_note?: string }> => {
+  /**
+   * 6.62.0 (plan 3.12): `continue_note` for the verdict, bounded in time and length. 6.62.0
+   * /qa (W9): a read that misses the budget, throws, or answers nothing usable gets the
+   * provider's fixed note instead, never no note (Claude has none either way).
+   */
+  const continueNoteFor = async (provider: string, threadId: string, noteAck: boolean): Promise<{ continue_note?: string }> => {
     const read = deps.continueNote
     if (typeof read !== 'function' || !isBindableProvider(provider) || !isValidNativeThreadId(threadId)) return {}
-    let timer: ReturnType<typeof setTimeout> | null = null
-    try {
-      const note = await Promise.race([
-        Promise.resolve(read(provider, threadId)),
-        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTINUE_NOTE_BUDGET_MS) }),
-      ])
+    const fallback = (): { continue_note?: string } => {
+      let note: string | null = null
+      try {
+        note = deps.continueNoteFallback
+          ? deps.continueNoteFallback(provider, { noteAck })
+          : fallbackContinueNote(provider, { noteAck })
+      } catch {
+        note = null
+      }
       const bounded = boundedContinueNote(note)
       return bounded ? { continue_note: bounded } : {}
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let missed = false
+    try {
+      const note = await Promise.race([
+        Promise.resolve(read(provider, threadId, { noteAck })),
+        new Promise<null>(resolve => { timer = setTimeout(() => { missed = true; resolve(null) }, CONTINUE_NOTE_BUDGET_MS) }),
+      ])
+      const bounded = boundedContinueNote(note)
+      if (bounded) return { continue_note: bounded }
+      if (missed) console.warn(`[agent-session-bindings] continue note missed its ${CONTINUE_NOTE_BUDGET_MS} ms budget provider=${provider}: fixed note sent`)
+      return fallback()
     } catch (error) {
       console.error(`[agent-session-bindings] continue note failed: ${error instanceof Error ? error.message : error}`)
-      return {}
+      return fallback()
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -1970,8 +2005,17 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // truncated-id hole opened. The tests pin the ordering behaviorally instead:
     // probes that throw on every call still return `unsupported_provider` /
     // `invalid_thread_id`, which is only possible if nothing was probed.
-    const verdictBody = withCancel(runOccupancy(provider, threadId))
-    res.json({ ...verdictBody, ...(await continueNoteFor(provider, threadId)) })
+    // 6.62.0 /qa (Q2): the busy Codex hop makes the verdict attachable, but a desk run IS
+    // working on that thread, so the cancel row reads the RAW reason. Built from the verdict's
+    // reason, the lens hid Cancel run on every busy Codex Desktop thread.
+    const detected = routeOccupancy(provider, threadId)
+    const verdictBody = projectAttachability(detected)
+    const cancelReason = detected.busyHolder === true ? 'native_thread_working' : verdictBody.reason
+    res.json({
+      ...verdictBody,
+      cancel: cancelFieldFor(provider, threadId, cancelReason),
+      ...(await continueNoteFor(provider, threadId, continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]))),
+    })
   })
 
   // ------------------------------------------------------------------ cancel
@@ -2903,7 +2947,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         if (live?.ok) {
           // 6.53.3: queued in the Codex app, which only the app can stop ("Stop it there").
           const latched = latchedHere()
-          if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt })
+          if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt, busy: busyCodexHop })
           console.log(`[agent-session-bindings] turn delivered live provider=codex turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} queuedId=${live.queuedId ?? 'null'}`)
           respond(200, {
             turnId,
@@ -2922,7 +2966,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // latched on the way that is the whole turn: cancelled, and no child.
         const codexLatched = latchedHere()
         if (codexLatched && live !== null && live.reason !== 'unverified') {
-          settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt })
+          settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt, busy: busyCodexHop })
           console.log(`[agent-session-bindings] turn cancelled during live hand-off provider=codex turnId=${turnId} bindingId=${bindingId} hop=${live.reason}`)
           return refuseTurn('turn_cancelled', { retryable: false })
         }
@@ -2958,7 +3002,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             })
             console.warn(`[agent-session-bindings] fence set site=codex_live provider=codex target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest} adapterReason=codex_queue_unverified`)
             // 6.53.3: a row MAY be in the Codex app's queue; a latched cancel says where to stop it.
-            if (codexLatched) settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt })
+            if (codexLatched) settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt, busy: busyCodexHop })
             return reportAmbiguous()
           }
           // Nothing was queued, and the child cannot run against a held thread. Not
@@ -3010,6 +3054,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           expectedNativeHead: head.raw,
           prompt,
           abortSignal: cancelController.signal,
+          // 6.62.0 /qa (Q3): only a client that shows `continue_note` gets Cursor Run Everything.
+          continueNoteAck: continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]),
           onSpawn: (pid: number): boolean => {
             // THE SELF-RECURSION ORDER. The child registers itself against the id
             // we are targeting, so unless it is in the ledger the next occupancy

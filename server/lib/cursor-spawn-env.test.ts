@@ -33,6 +33,8 @@ beforeEach(() => {
   writeFileSync(join(source, 'chats', 'hash', 'chat.txt'), 'the person’s chat')
   mkdirSync(join(source, 'plugins'), { recursive: true })
   mkdirSync(join(source, 'skills-cursor'), { recursive: true })
+  mkdirSync(join(source, 'agents'), { recursive: true })
+  mkdirSync(join(source, 'plans'), { recursive: true })
   writeFileSync(join(source, 'hooks.json'), '{"hooks":{}}')
   writeFileSync(join(source, 'mcp.json'), '{"mcpServers":{"x":{}}}')
   writeFileSync(join(source, 'cli-config.json'), CONFIG)
@@ -182,7 +184,39 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /** Resolves the Cursor binary (or any provider binary by variable) AND starts a process. */
-const RESOLVES_CURSOR = /resolveAgentBinary\(|resolveProviderBinary\([^)]*cursor|resolveProviderBinary\(provider\)|resolveCursorAgentBinary\(|resolveProviderBinary\(cursor/
+const RESOLVES_CURSOR = /resolveAgentBinary\(|resolveProviderBinary\([^)]*cursor|resolveProviderBinary\((?:request\.)?provider\)|resolveCursorAgentBinary\(|resolveProviderBinary\(cursor/
+
+/**
+ * Calls in the census files whose binary is NOT the Cursor CLI, or whose env is a parameter
+ * checked at the caller, by file and first argument, each with its reason.
+ */
+const NOT_THE_CURSOR_CLI: Array<[file: string, head: string, why: string]> = [
+  ['bin/cli.cjs', 'execFileSync(command', 'claude/codex --version probe (getCliVersion)'],
+  ['bin/cli.cjs', 'execFileSync(binary', 'env is the parameter cursorCliState hands over: isolation.env (asserted below)'],
+  ['bin/cli.cjs', 'spawn( process.execPath', 'the server itself under node'],
+  ['server/lib/health-static-probes.ts', 'execute(PYTHON_BIN', 'python --version'],
+  ['server/lib/health-static-probes.ts', 'execute(resolved.path', 'codex --version'],
+  ['server/lib/provider-proof.ts', 'spawn(command', 'spawnPiped body: env is its parameter, isolated at the cursor caller (asserted below)'],
+]
+
+/** Every call of a spawn-family function, with its balanced argument text. Definitions skipped. */
+function spawnCalls(text: string): string[] {
+  const out: string[] = []
+  const CALL = /(^|[^.\w])(spawn|nodeSpawn|execFile|execFileSync|spawnSync|runProcess|runBounded|execute|spawnPiped)\(/g
+  let match: RegExpExecArray | null
+  while ((match = CALL.exec(text)) !== null) {
+    const start = match.index + match[1]!.length
+    if (/function\s+$/.test(text.slice(Math.max(0, start - 20), start))) continue
+    let depth = 0
+    let i = start + match[2]!.length
+    for (; i < text.length; i++) {
+      if (text[i] === '(') depth++
+      else if (text[i] === ')' && --depth === 0) break
+    }
+    out.push(text.slice(start, i + 1))
+  }
+  return out
+}
 const SPAWNS = /\b(spawn|execFile|execFileSync|spawnSync|nodeSpawn)\(|runProcess\(|runBounded\(/
 
 describe('the Cursor spawn census', () => {
@@ -190,24 +224,37 @@ describe('the Cursor spawn census', () => {
     .map(path => relative(REPO, path))
     .filter(path => !path.startsWith('server/scripts/'))
 
-  it('finds every file that resolves the Cursor binary and spawns, and each uses the helper or is exempt', () => {
+  it('finds every file that resolves the Cursor binary and spawns; nothing new appears unreviewed', () => {
     const found = files.filter(path => {
       const text = readFileSync(join(REPO, path), 'utf8')
       return RESOLVES_CURSOR.test(text) && SPAWNS.test(text)
     }).sort()
-    for (const path of found) {
-      const text = readFileSync(join(REPO, path), 'utf8')
-      // Either the helper itself, or a spawn wrapper that takes `cursorIsolation: true` and
-      // imports the helper (runProcess in lens-gist-engines, runBounded, execute).
-      const uses = path.endsWith('.cjs')
-        ? /cursorSpawnEnvSync\(\)/.test(text)
-        : /from '\.\/cursor-spawn-env\.js'/.test(text) || /cursorIsolation: true/.test(text)
-      expect(uses || path in EXEMPT, `${path} spawns the Cursor CLI without cursor-spawn-env`).toBe(true)
-    }
     // Every named site is still found: a refactor that hides one from this grep fails here.
     for (const path of EXPECTED) expect(found, path).toContain(path)
-    // And nothing new appeared that nobody looked at.
     expect(found.filter(path => !EXPECTED.includes(path) && !(path in EXEMPT))).toEqual([])
+  })
+
+  // 6.62.0 /qa (W14): per spawn CALL, not per file. A file that imports the helper and also
+  // has a second, unwrapped spawn of the Cursor binary used to pass.
+  it('every spawn CALL in those files passes the isolation env, or is named here as not the Cursor CLI', () => {
+    const calls: string[] = []
+    for (const path of EXPECTED) {
+      for (const call of spawnCalls(readFileSync(join(REPO, path), 'utf8'))) {
+        if (/^\w+\(\s*['"`]/.test(call)) continue // a literal binary: '/bin/ps', 'claude', 'ffmpeg'
+        const head = call.slice(0, call.indexOf(',') > 0 ? call.indexOf(',') : call.length).replace(/\s+/g, ' ')
+        const reviewed = NOT_THE_CURSOR_CLI.find(([file, prefix]) => file === path && head === prefix)
+        if (reviewed) continue
+        calls.push(`${path}: ${call.replace(/\s+/g, ' ').slice(0, 100)}`)
+        expect(/\bisolation\.env\b|cursorIsolation:\s*(true|provider === 'cursor')/.test(call), `${path} spawns without isolation: ${head}`).toBe(true)
+      }
+    }
+    // The pass-through wrappers are checked at THEIR caller, which must hand over isolation.
+    expect(readFileSync(join(REPO, 'bin/cli.cjs'), 'utf8')).toContain('cursorCliStateWith(binary, isolation.env)')
+    const proof = spawnCalls(readFileSync(join(REPO, 'server/lib/provider-proof.ts'), 'utf8')).filter(call => call.startsWith('spawnPiped('))
+    expect(proof).toHaveLength(1)
+    expect(proof[0]).toContain('isolation ? isolation.env : env')
+    // Each of the ten sites contributed at least one checked call.
+    expect(new Set(calls.map(line => line.split(':')[0])).size).toBeGreaterThanOrEqual(8)
   })
 
   it('keeps the CommonJS launcher’s link list identical to the helper’s', () => {
@@ -215,5 +262,30 @@ describe('the Cursor spawn census', () => {
     const match = /const CURSOR_SPAWN_LINKS = (\[[^\]]*\])/.exec(cli)
     expect(match).not.toBeNull()
     expect(JSON.parse(match![1]!.replace(/'/g, '"'))).toEqual([...CURSOR_SPAWN_LINKS])
+  })
+})
+
+describe('6.62.0 /qa (W6): Continue and fork REFUSE when the Cursor isolation cannot be made', () => {
+  it('the real Continue and fork spawns throw the isolation code before any process starts', async () => {
+    const { realAttachedTurnDeps } = await import('./attached-provider-adapter')
+    const { realForkDeps } = await import('./fork-thread')
+    const { isCursorIsolationUnavailable, cursorSpawnStats } = await import('./cursor-spawn-env')
+    writeFileSync(join(root, 'a file'), 'x')
+    const previous = process.env.COS_CURSOR_SPAWN_ROOT
+    process.env.COS_CURSOR_SPAWN_ROOT = join(root, 'a file', 'cursor-cli')
+    const failedBefore = cursorSpawnStats.failed
+    try {
+      const request = { provider: 'cursor' as const, binaryPath: join(root, 'no such agent'), args: ['-p'], cwd: root, env: {} }
+      let thrown: unknown = null
+      try { realAttachedTurnDeps(() => ({ attachable: true, reason: null })).spawn(request) } catch (error) { thrown = error }
+      expect(isCursorIsolationUnavailable(thrown)).toBe(true)
+      thrown = null
+      try { realForkDeps().spawn(request) } catch (error) { thrown = error }
+      expect(isCursorIsolationUnavailable(thrown)).toBe(true)
+      expect(cursorSpawnStats.failed).toBe(failedBefore + 2)
+    } finally {
+      if (previous === undefined) delete process.env.COS_CURSOR_SPAWN_ROOT
+      else process.env.COS_CURSOR_SPAWN_ROOT = previous
+    }
   })
 })

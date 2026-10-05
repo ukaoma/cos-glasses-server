@@ -39,8 +39,13 @@ function clip(text: string, max: number): string {
 export function buildCursorForkPrompt(input: CursorForkPromptInput): string {
   const message = input.message
   const tail = `\n\nNew message:\n${message}`
-  const header = 'This is a new chat that carries on from an earlier Cursor chat. Its context, for reference only:'
-  const lines: string[] = [header, '']
+  // 6.62.0 /qa (W10): Cursor titles a chat by its first line, so the FIRST line is the source's
+  // title (else the person's message), never a fixed header every fork would share.
+  const titleLine = input.title && input.title.trim()
+    ? clip(input.title.split('\n')[0]!, MAX_TITLE_CHARS)
+    : clip(message.split('\n').find(line => line.trim()) ?? message, MAX_TITLE_CHARS)
+  const header = 'A new chat that carries on from an earlier Cursor chat. Its context, for reference only:'
+  const lines: string[] = [titleLine, '', header, '']
   if (input.title && input.title.trim()) lines.push(`Title: ${clip(input.title, MAX_TITLE_CHARS)}`)
   if (input.firstPrompt && input.firstPrompt.trim()) lines.push(`First request: ${clip(input.firstPrompt, MAX_FIRST_PROMPT_CHARS)}`)
   const head = lines.join('\n')
@@ -117,12 +122,17 @@ export async function prepareCursorFork(
   let turns: SessionTurn[] = []
   let title: string | null = null
   let firstPrompt: string | null = null
+  // 6.62.0 /qa (W17): a fork that loses its context says so in the server log.
+  const lost: string[] = []
   if (path) {
-    try { turns = await deps.readTurns(path, CURSOR_FORK_TURNS) } catch { turns = [] }
-    try { ({ title, firstPrompt } = await deps.readTitle(path, threadId)) } catch { title = null; firstPrompt = null }
+    try { turns = await deps.readTurns(path, CURSOR_FORK_TURNS) } catch { turns = []; lost.push('turns') }
+    try { ({ title, firstPrompt } = await deps.readTitle(path, threadId)) } catch { title = null; firstPrompt = null; lost.push('title') }
+  } else {
+    lost.push('transcript')
   }
   let cursorModel: string | null = null
-  try { cursorModel = await deps.sessionModel(threadId, path) } catch { cursorModel = null }
+  try { cursorModel = await deps.sessionModel(threadId, path) } catch { cursorModel = null; lost.push('model') }
+  if (lost.length > 0) console.warn(`[cursor-fork] context lost thread=${threadId.slice(0, 8)} missing=${lost.join(',')}`)
   return {
     prompt: buildCursorForkPrompt({ title, firstPrompt, turns, message, maxChars: deps.maxChars }),
     cursorModel,

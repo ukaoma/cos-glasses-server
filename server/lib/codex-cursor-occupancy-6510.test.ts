@@ -153,3 +153,34 @@ describe('6.62.0 (W14): an Agent CLI chat written in the last 30 s is working', 
     expect(threadOccupancy('cursor', CURSOR, throwing, dirs).attachable).toBe(true)
   })
 })
+
+describe('6.62.0 /qa (W7): positive evidence: a non-COS process holding the chat open', () => {
+  const chat = () => ({ dir: '/cur/chats/h/x', cwd: '/w', hasConversation: true })
+  it('a foreign holder reads working even after 30 quiet seconds; none, or cannot-tell, keeps the window rule', () => {
+    const quiet = () => Date.now() - 120_000
+    expect(threadOccupancy('cursor', CURSOR, base({ cursorAgentSession: chat, cursorChatLastWriteMs: quiet, cursorChatForeignHolder: () => true }), dirs))
+      .toEqual({ attachable: false, owners: [], reason: 'native_thread_working' })
+    for (const holder of [() => false, () => null, () => { throw new Error('lsof') }]) {
+      expect(threadOccupancy('cursor', CURSOR, base({ cursorAgentSession: chat, cursorChatLastWriteMs: quiet, cursorChatForeignHolder: holder }), dirs).attachable).toBe(true)
+    }
+    // The write window still answers first (no lsof needed for a chat written seconds ago).
+    let asked = 0
+    expect(threadOccupancy('cursor', CURSOR, base({ cursorAgentSession: chat, cursorChatLastWriteMs: () => Date.now(), cursorChatForeignHolder: () => { asked += 1; return false } }), dirs).reason).toBe('native_thread_working')
+    expect(asked).toBe(0)
+  })
+
+  it('cursorChatForeignHolder: excludes COS (server, children, own sqlite reads), and a failed lsof is null', async () => {
+    const { cursorChatForeignHolder, cursorChatHolderStats } = await import('./occupancy-probes.js')
+    const outcome = (stdout: string, extra: Record<string, unknown> = {}) => () => ({ ok: true, stdout, stderr: '', status: 0, killed: false, spawnError: null, ...extra })
+    expect(cursorChatForeignHolder('/c/h/x', () => [4242], outcome(`${process.pid}\n4242\n`))).toBe(false)
+    expect(cursorChatForeignHolder('/c/h/x', () => [4242], outcome('4242\n777\n'))).toBe(true)
+    const failedBefore = cursorChatHolderStats.failed
+    expect(cursorChatForeignHolder('/c/h/x', () => [], outcome('', { ok: false, killed: true, status: null }))).toBeNull()
+    expect(cursorChatHolderStats.failed).toBe(failedBefore + 1)
+    expect(cursorChatForeignHolder('relative', () => [], outcome('1\n'))).toBeNull()
+    // The probe asks lsof about exactly the chat's store.db, options terminated.
+    const seen: string[][] = []
+    cursorChatForeignHolder('/c/h dir/x', () => [], (_bin, args) => { seen.push(args); return outcome('')() })
+    expect(seen).toEqual([['-w', '-t', '--', '/c/h dir/x/store.db']])
+  })
+})

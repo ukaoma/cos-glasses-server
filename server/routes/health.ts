@@ -90,6 +90,7 @@ import { sessionCancelFeature } from '../lib/session-cancel.js'
 import { codexDeskHaltReady, providerObserveFields } from '../lib/provider-observe.js'
 import { liveProviderActInput, mergeProviderSections, providerActSections } from '../lib/provider-actions.js'
 import { cursorDeskHaltReady, hookHaltReady } from '../lib/claude-hooks-installer.js'
+import { continueReadHealthFields } from '../lib/continue-read-health.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
@@ -419,6 +420,8 @@ healthRouter.get('/health', async (_req, res) => {
     // how many are held (that is on the authenticated questions route).
     ...permissionBrokerHealthFields(),
     ...continueLiveHealthFields(),
+    // 6.62.0 /qa (W6): spawn isolation, posture and Cursor model read counters.
+    ...continueReadHealthFields(),
     // 6.62.0: ONE providers object per engine. `act` (plan 3.11): what each provider can do,
     // with a reason for every "no". `observe` (plan 1.10): what COS can see of its sessions.
     providers: mergeProviderSections(

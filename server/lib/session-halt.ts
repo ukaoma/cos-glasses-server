@@ -101,6 +101,44 @@ export function clearHaltMarker(sessionId: string, dir = haltDir()): boolean {
 }
 
 /**
+ * 6.62.0 /qa (Q4): COS is about to start its OWN child on this thread (a Continue, a queue
+ * drain, or a fork). A marker left by an earlier desk cancel must not deny it: Cursor `-p`
+ * fires neither UserPromptSubmit nor SessionEnd, so until this a cancelled Cursor CLI chat
+ * refused every Continue for the marker's hour. The callers only reach here once the
+ * occupancy gate (Continue, drain) or an explicit probe (fork) says no desk run is working,
+ * so no live desk cancel is undone. True when a marker was removed.
+ */
+export function clearHaltForCosChild(sessionId: string, why: 'continue' | 'fork', dir = haltDir()): boolean {
+  const cleared = clearHaltMarker(sessionId, dir)
+  if (cleared) console.log(`[session-halt] marker cleared: COS starts its own ${why} child session=${String(sessionId).slice(0, 8)}`)
+  return cleared
+}
+
+/**
+ * The same deps with `spawn` clearing the thread's marker first, at the moment the child is
+ * created (after every gate and ban check), and only when `mayClear` says no desk run is
+ * working. A throwing `mayClear` clears nothing.
+ */
+export function clearingHaltOnSpawn<T extends { spawn: (request: never) => unknown }>(
+  deps: T,
+  sessionId: string,
+  why: 'continue' | 'fork',
+  mayClear: () => boolean = () => true,
+  dir = haltDir(),
+): T {
+  const spawn = deps.spawn as (request: unknown) => unknown
+  return {
+    ...deps,
+    spawn: ((request: unknown) => {
+      let clear = false
+      try { clear = mayClear() === true } catch { clear = false }
+      if (clear) clearHaltForCosChild(sessionId, why, dir)
+      return spawn(request)
+    }) as T['spawn'],
+  }
+}
+
+/**
  * Clear the marker because the SESSION ended, but only a marker written at or before the
  * event. A SessionEnd drained late from the spool must not remove a cancel written after
  * it for the same session id (a resumed tab reuses its id).
@@ -180,12 +218,21 @@ const MAX_PENDING_REARMS = 64
 export function haltDeliveredTurn(
   sessionId: string,
   marker: HaltMarker,
-  turn: { prompt: string; after: number; rearm: boolean; now?: number; windowMs?: number; verbatim?: boolean },
+  turn: { prompt: string; after: number; rearm: boolean; now?: number; windowMs?: number; verbatim?: boolean; deferMarker?: boolean },
   dir = haltDir(),
 ): boolean {
-  if (!writeHaltMarker(sessionId, marker, dir)) return false
-  const id = sessionId.toLowerCase()
+  const id = typeof sessionId === 'string' ? sessionId.toLowerCase() : ''
   const words = normalizePromptWords(turn.prompt)
+  // 6.62.0 /qa (W3): `deferMarker` (a busy hop) writes NOTHING now: the session is still on
+  // the person's own turn, and a marker would stop it. Only the re-arm is registered, and it
+  // writes the marker when the delivered turn's own prompt arrives. A delivered turn that has
+  // already started (`rearm` false) is ours, so it is written at once as before.
+  const deferred = turn.deferMarker === true && turn.rearm && words.length > 0
+  if (deferred) {
+    if (haltMarkerPath(id, dir) === null) return false
+  } else if (!writeHaltMarker(sessionId, marker, dir)) {
+    return false
+  }
   if (!turn.rearm || words.length === 0) {
     pendingRearms.delete(id)
     return true

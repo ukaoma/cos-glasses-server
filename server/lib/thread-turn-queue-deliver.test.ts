@@ -21,12 +21,12 @@ describe('deliverQueuedTurnOverLoopback', () => {
   let server: Server | null = null
   afterEach(() => { server?.close(); server = null })
 
-  async function listen(handle: (path: string, body: Record<string, unknown>) => { status: number; body: unknown }): Promise<number> {
+  async function listen(handle: (path: string, body: Record<string, unknown>, headers: Record<string, unknown>) => { status: number; body: unknown }): Promise<number> {
     server = createServer((req, res) => {
       let raw = ''
       req.on('data', c => { raw += c })
       req.on('end', () => {
-        const out = handle(req.url ?? '', raw ? JSON.parse(raw) : {})
+        const out = handle(req.url ?? '', raw ? JSON.parse(raw) : {}, req.headers)
         res.statusCode = out.status
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify(out.body))
@@ -63,5 +63,20 @@ describe('deliverQueuedTurnOverLoopback', () => {
       ? { status: 201, body: { attached: true, bindingId: 'bnd-1', epoch: 1 } }
       : { status: 409, body: { reason: 'stale_epoch', retryable: false } })
     expect(await deliverQueuedTurnOverLoopback(turn, port, 'tok')).toEqual({ ok: false, reason: 'stale_epoch', serverRetryable: false })
+  })
+
+  it('6.62.0 /qa (Q3): repeats the parking client\'s Continue-note acknowledgement on attach and turn, and only that', async () => {
+    for (const ack of [true, false]) {
+      const headers: Array<unknown> = []
+      const port = await listen((path, _body, h) => {
+        headers.push(h['x-cos-continue-note'])
+        if (path.endsWith('/attach')) return { status: 201, body: { attached: true, bindingId: 'bnd-1', epoch: 1 } }
+        return { status: 202, body: { outcome: 'queued' } }
+      })
+      const parked = { ...turn, provider: 'cursor', ...(ack ? { continueNoteAck: true as const } : {}) } as QueuedThreadTurn
+      expect(await deliverQueuedTurnOverLoopback(parked, port, 'tok')).toEqual({ ok: true })
+      expect(headers).toEqual(ack ? ['1', '1'] : [undefined, undefined])
+      server?.close(); server = null
+    }
   })
 })

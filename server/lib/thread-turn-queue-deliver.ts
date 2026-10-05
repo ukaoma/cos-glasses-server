@@ -34,7 +34,7 @@ const DELIVER_TIMEOUT_MS = 15_000
 
 interface LoopbackReply { status: number; body: Record<string, unknown> }
 
-function post(port: number, token: string, path: string, payload: unknown): Promise<LoopbackReply> {
+function post(port: number, token: string, path: string, payload: unknown, extraHeaders: Record<string, string> = {}): Promise<LoopbackReply> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(payload)
     const req = request({
@@ -47,6 +47,7 @@ function post(port: number, token: string, path: string, payload: unknown): Prom
         'content-length': Buffer.byteLength(data),
         // The header the rest of COS authenticates with. NOT `Authorization: Bearer`.
         'X-Cos-Token': token,
+        ...extraHeaders,
       },
       timeout: DELIVER_TIMEOUT_MS,
     }, res => {
@@ -77,11 +78,14 @@ export async function deliverQueuedTurnOverLoopback(
   port: number,
   token: string,
 ): Promise<{ ok: boolean; reason?: string; serverRetryable?: boolean }> {
+  // 6.62.0 /qa (Q3): repeat the parking client's acknowledgement, and only that.
+  const noteHeaders: Record<string, string> = turn.continueNoteAck === true ? { 'X-COS-Continue-Note': '1' } : {}
   try {
     const attach = await post(
       port, token,
       `/api/agent-sessions/${encodeURIComponent(turn.provider)}/${encodeURIComponent(turn.threadId)}/attach`,
       { cosSessionId: turn.cosSessionId },
+      noteHeaders,
     )
     if (attach.status !== 200 && attach.status !== 201) {
       // THE KEY IS `reason`, NOT `error`. `refuseAttach` emits
@@ -117,6 +121,7 @@ export async function deliverQueuedTurnOverLoopback(
         targetKey: targetKey(turn.provider, turn.threadId),
         ...(boundTo ? { boundTo } : {}),
       },
+      noteHeaders,
     )
     if (sent.status === 202 || sent.status === 200) return { ok: true }
     // Same defect on the turn leg: `refuseTurn` emits `reason`/`reasonCopy`/`retryable`
