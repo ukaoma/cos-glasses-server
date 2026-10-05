@@ -1,3 +1,7 @@
+## Unreleased (next: 6.62.2)
+
+- A fork that recovered from a transient retry (Claude `api_retry` "overloaded"/"rate_limit", Codex "Reconnecting… 429") and then failed is reported by the provider's final error, not the retry: "too long" no longer reads as "usage limit". (6.62.1 QA)
+
 ## 6.62.1 — 2026-10-05 — Combined provider parity and handoff hardening
 
 - Includes the 6.62.0 provider parity, cancellation, hook readiness, and safe Cursor continuation updates.
