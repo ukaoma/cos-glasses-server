@@ -1270,10 +1270,12 @@ export async function listCursorSessions(
       const candidate = candidates[i]
       const peek = await peekCursorDiscussion(candidate.file)
       const firstPrompt = await firstCursorUserTitle(candidate.file) ?? peek.lastUser ?? ''
+      // 6.62.0 (plan 1.6): the composer's name, else the FIRST query, as the detail titles it.
+      // The newest query is what changes turn to turn; a title that moved with every prompt
+      // never named the session.
       const title = composerNames.get(candidate.sessionDir)
-        ?? peek.lastUser
-        ?? firstPrompt
-        ?? 'Cursor session'
+        || firstPrompt
+        || 'Cursor session'
       if (isKeepWarmSessionTitle(title)) continue
       const alive = now.getTime() - candidate.mtimeMs < 180_000
       rows.push(row({
@@ -1835,7 +1837,8 @@ export async function parseAgentSession(
         const query = cursorUserTitle(text, true) ?? cursorUserTitle(text, false)
         collectTurn(query ?? text, tail)
         if (query) {
-          title = query
+          // 6.62.0 (plan 1.6): the FIRST query titles the session, as on its list row.
+          if (!title) title = query
           if (!firstPrompt) firstPrompt = query
         }
       } else {

@@ -276,3 +276,93 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     for (const bad of ['', ' ', 'x', '-1', '1.5.2', `${RING_EPOCH}.`, `${RING_EPOCH}.-1`, undefined, 3]) expect(parseAfterCursor(bad)).toBeNull()
   })
 })
+
+// 6.62.0 provider parity on the live feed (plan 1.3, 1.5, 1.7): Codex and Cursor sessions get
+// the derived state once their hooks have spoken, a Cursor feed shows the user's query, and a
+// Cursor agent thought is the reasoning line (memory and SSE only).
+describe('GET /api/agent-sessions/{codex,cursor}/:id/stream (6.62.0)', () => {
+  const saved: Record<string, string | undefined> = {}
+  const KEYS = ['COS_AGENT_SESSIONS_HOME', 'COS_SESSION_HOOKS', 'COS_SESSION_HOOK_SSE', 'COS_SESSION_STREAM_ENABLED', 'CODEX_HOME'] as const
+  const closers: Array<() => Promise<void>> = []
+  const CURSOR = '8c149bba-82b6-4b73-9f2f-eb26e72a72a9'
+  const CODEX = '01a10c4b-0000-7000-8000-00000000c0de'
+  const cursorEnv = (ts: number, event: HookEnvelope['event'], payload: Record<string, unknown> = {}): HookEnvelope =>
+    ({ ts, ppid: 4242, event, sessionId: CURSOR, provider: 'cursor', payload: { session_id: CURSOR, ...payload } })
+
+  beforeEach(() => {
+    for (const k of KEYS) saved[k] = process.env[k]
+    const home = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-parity-'))), 'Ukaoma Chief Of Staff')
+    const cursorDir = join(home, '.cursor', 'projects', 'Users-me-Ukaoma-Chief-Of-Staff', 'agent-transcripts', CURSOR)
+    mkdirSync(cursorDir, { recursive: true })
+    writeFileSync(join(cursorDir, `${CURSOR}.jsonl`), [
+      j({ role: 'user', message: { content: [{ type: 'text', text: '<attached_files>a.ts</attached_files><user_query>Wire the queue</user_query>' }] } }),
+      j({ role: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/repo/queue.ts' } }] } }),
+    ].join('\n') + '\n')
+    const codexDir = join(home, '.codex', 'sessions', '2026', '10', '05')
+    mkdirSync(codexDir, { recursive: true })
+    writeFileSync(join(codexDir, `rollout-2026-10-05T09-00-00-${CODEX}.jsonl`), [
+      j({ timestamp: new Date().toISOString(), type: 'session_meta', payload: { id: CODEX, cwd: '/repo' } }),
+      j({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } }),
+    ].join('\n') + '\n')
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    process.env.CODEX_HOME = join(home, '.codex')
+    process.env.COS_SESSION_HOOKS = '1'
+    delete process.env.COS_SESSION_HOOK_SSE
+    delete process.env.COS_SESSION_STREAM_ENABLED
+    __resetSessionHooksForTests()
+    __resetSessionStreamBusForTests()
+  })
+
+  afterEach(async () => {
+    for (const close of closers.splice(0)) await close()
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    __resetSessionHooksForTests()
+    __resetSessionStreamBusForTests()
+  })
+
+  async function start(provider: string, id: string): Promise<string> {
+    const app = express()
+    app.use('/api', agentSessionStreamRouter)
+    const server = await new Promise<ReturnType<typeof app.listen>>(r => { const l = app.listen(0, '127.0.0.1', () => r(l)) })
+    closers.push(() => new Promise<void>((res, rej) => server.close(e => e ? rej(e) : res())))
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/agent-sessions/${provider}/${id}/stream`
+  }
+
+  it('Cursor: the seed carries the user query; the opening status the hook state; a thought is a reasoning line, a stop a state change', async () => {
+    sessionSignalStore.apply(cursorEnv(T0 + 1_000, 'UserPromptSubmit', { prompt: 'Wire the queue', cursor_version: '1' }))
+    const framesPromise = readFrames(await start('cursor', CURSOR), 5)
+    await new Promise(r => setTimeout(r, 150))
+    sessionSignalStore.apply(cursorEnv(Date.now(), 'AgentThought', { display_only: true, text: 'I will read the queue store first.' }))
+    sessionSignalStore.apply(cursorEnv(Date.now() + 1, 'Stop', { cursor_version: '1' }))
+    const frames = await framesPromise
+    expect(frames[0].data).toMatchObject({ kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook' })
+    expect(frames[1].data).toMatchObject({ kind: 'prompt', text: 'Wire the queue' })
+    expect(frames[2].data).toMatchObject({ kind: 'tool', verb: 'read', target: 'queue.ts' })
+    expect(frames[3].data).toMatchObject({ kind: 'status', state: 'working', reasoning: 'I will read the queue store first.' })
+    expect(frames[4].data).toMatchObject({ kind: 'status', agent_state: 'idle', state: 'idle' })
+    // The shipped parser reads the reasoning frame as a plain working status: no gap.
+    expect(frames.map(f => shippedParse(JSON.stringify(f.data))!.seq)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('Cursor with no hook evidence: no derived fields, and a thought for ANOTHER session is not written here', async () => {
+    const framesPromise = readFrames(await start('cursor', CURSOR), 4, 1_500)
+    await new Promise(r => setTimeout(r, 150))
+    const other = 'b2c3d4e5-0000-4000-8000-00000000beef'
+    sessionSignalStore.apply({ ts: Date.now(), ppid: null, event: 'AgentThought', sessionId: other, provider: 'cursor', payload: { session_id: other, display_only: true, text: 'not mine' } })
+    const frames = await framesPromise
+    expect(frames[0].data).not.toHaveProperty('agent_state')
+    expect(frames.some(f => f.data.reasoning === 'not mine')).toBe(false)
+  })
+
+  it('Codex: the hooks\' state rides the opening status and every change (Interrupt reads idle)', async () => {
+    const codexEnv = (ts: number, event: HookEnvelope['event'], payload: Record<string, unknown> = {}): HookEnvelope =>
+      ({ ts, ppid: 4242, event, sessionId: CODEX, provider: 'codex', payload: { session_id: CODEX, turn_id: 't1', ...payload } })
+    sessionSignalStore.apply(codexEnv(T0 + 1_000, 'UserPromptSubmit', { prompt: 'go' }))
+    const framesPromise = readFrames(await start('codex', CODEX), 2)
+    await new Promise(r => setTimeout(r, 150))
+    sessionSignalStore.apply(codexEnv(Date.now(), 'Interrupt'))
+    const frames = await framesPromise
+    expect(frames[0].data).toMatchObject({ kind: 'status', agent_state: 'running', state_source: 'hook' })
+    expect(frames[1].data).toMatchObject({ kind: 'status', agent_state: 'idle', state: 'idle' })
+  })
+})
