@@ -44,7 +44,8 @@
 // registered."
 //
 // `providers` is sourced from BINDABLE_PROVIDERS for the same reason. Cursor is
-// Continue-capable once bindable; Fork stays on FORKABLE_PROVIDERS (claude/codex).
+// Continue-capable once bindable; Fork reads FORKABLE_PROVIDERS (6.62.0: Cursor too, as a new
+// read-only session with context).
 // The way to guarantee the published list matches the attach route is to read
 // the list that `isBindableProvider` is built from, rather than restating names
 // here and hoping.
@@ -64,8 +65,10 @@
 
 import {
   BINDABLE_PROVIDERS,
+  FORKABLE_PROVIDERS,
   isBindableProvider,
   type BindableProvider,
+  type ForkableProvider,
 } from './agent-session-binding-store.js'
 import { threadAttachEnabled } from '../routes/agent-session-bindings.js'
 
@@ -98,6 +101,13 @@ export interface ThreadAttachCapability {
    * incoherent default: every refusal recommends Fork while the route 404s.
    */
   forkSupported: boolean
+  /**
+   * 6.62.0 (plan 3.7, W10): WHICH providers the fork route serves. `forkSupported` stays a
+   * boolean for every reader that already checks it with `=== true`; this list is new.
+   * Sourced from FORKABLE_PROVIDERS, the list `isForkableProvider` is built from. Cursor's
+   * entry is "New session with this context" (a new read-only chat), not a native fork.
+   */
+  forkProviders?: ForkableProvider[]
 }
 
 /**
@@ -129,6 +139,7 @@ export function threadAttachCapability(
     // byte-identical, so the flag protecting an existing conversation does not
     // apply. Gating it made every refusal recommend a route that 404s.
     forkSupported: THREAD_ATTACH_SUPPORTED,
+    forkProviders: THREAD_ATTACH_SUPPORTED ? [...FORKABLE_PROVIDERS] : [],
   }
 }
 
@@ -139,6 +150,8 @@ export interface ThreadAttachHealthFields {
   /** Fork is available whenever the build supports it, gate or no gate. */
   threadForkSupported: boolean
   threadAttachProviders: BindableProvider[]
+  /** 6.62.0: the providers the fork route serves (`threadForkSupported` stays the boolean). */
+  threadForkProviders: ForkableProvider[]
 }
 
 /** Flatten the capability onto the health payload's key names. */
@@ -150,6 +163,7 @@ export function threadAttachHealthFields(
     threadAttachEnabled: capability.enabled,
     threadAttachProviders: capability.providers,
     threadForkSupported: capability.forkSupported,
+    threadForkProviders: capability.forkSupported ? [...(capability.forkProviders ?? [])] : [],
   }
 }
 

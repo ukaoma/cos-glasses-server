@@ -27,8 +27,9 @@ const EXACT = "Which one of the user's agent sessions is already doing this exac
   + 'A session on the same project doing different work does not count. Choose none if no session is doing this task.'
 
 /** Providers a Work handoff can fork natively (Control 0.5.243 applies a Fork suggestion as a same-platform fork).
- *  One list with the fork route (agent-session-binding-store FORKABLE_PROVIDERS). */
-export const FORKABLE = new Set<string>(FORKABLE_PROVIDERS)
+ *  6.62.0 (W9): the fork route also serves Cursor ("New session with this context"), but Control 0.5.254 has no
+ *  Cursor fork plan, so the recommender keeps to Claude and Codex until the Control release. */
+export const FORKABLE = new Set<string>(FORKABLE_PROVIDERS.filter(provider => provider !== 'cursor'))
 const clip = (text: string | undefined, max: number) => (text ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 const round = (n: number) => Math.round(n * 100) / 100
 

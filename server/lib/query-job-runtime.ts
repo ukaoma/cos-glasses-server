@@ -29,6 +29,7 @@ import {
 } from './conversation.js'
 import {
   isTerminalQueryJobStatus,
+  type QueryJobProviderLinkage,
   type QueryJobRequest,
   type QueryJobSnapshot,
 } from './query-job-types.js'
@@ -179,6 +180,17 @@ export async function projectPublicConversationTerminal(
   flushConversationToDisk()
 }
 
+/**
+ * 6.62.0 (plan 3.9, W11): a provider's early "this is my session" into the job's linkage.
+ * A Claude announcement carries no provider (its bridge is unchanged) and reads as Claude.
+ */
+export function nativeSessionLinkage(linkage: { cliSessionId: string; provider?: 'claude' | 'codex' | 'cursor' }): QueryJobProviderLinkage {
+  const provider = linkage.provider ?? 'claude'
+  return provider === 'codex'
+    ? { provider, codexThreadId: linkage.cliSessionId }
+    : { provider, cliSessionId: linkage.cliSessionId }
+}
+
 const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callbacks }) => {
   // Resolve ids again at execution time. This closes the admission/execution
   // TOCTOU window without ever putting paths or bytes in the journal.
@@ -235,7 +247,10 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
               : { codexRunId: metadata.runId }),
       }),
       // 6.58.2: the provider's own session id, as soon as it names it (Claude: first stream event).
-      onNativeSession: linkage => { void callbacks.onLinkage?.({ provider: 'claude', cliSessionId: linkage.cliSessionId }) },
+      // 6.62.0 (plan 3.9, W11): provider-aware, so a Codex or Cursor job links to its native
+      // session as early as a Claude one. Codex names it as `codexThreadId`, the field its
+      // completion has always used. No naming for Codex or Cursor this release (uncanaried).
+      onNativeSession: linkage => { void callbacks.onLinkage?.(nativeSessionLinkage(linkage)) },
       onChunk: text => { callbacks.onChunk(text) },
       onToolStatus: toolName => {
         const message = request.activityToolMode === 'off'

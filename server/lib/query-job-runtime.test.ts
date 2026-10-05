@@ -553,3 +553,13 @@ describe('public durable query runtime: boot requeue follows the kill switch (6.
     }
   })
 })
+
+describe('6.62.0 (plan 3.9): native session linkage names its provider', () => {
+  const ID = '01a10c5f-6c47-7030-beaa-569c74d2f352'
+  it('Claude stays exactly as before; Codex links its thread; Cursor its chat', async () => {
+    const { nativeSessionLinkage } = await import('./query-job-runtime.js')
+    expect(nativeSessionLinkage({ cliSessionId: ID })).toEqual({ provider: 'claude', cliSessionId: ID })
+    expect(nativeSessionLinkage({ provider: 'codex', cliSessionId: ID })).toEqual({ provider: 'codex', codexThreadId: ID })
+    expect(nativeSessionLinkage({ provider: 'cursor', cliSessionId: ID })).toEqual({ provider: 'cursor', cliSessionId: ID })
+  })
+})

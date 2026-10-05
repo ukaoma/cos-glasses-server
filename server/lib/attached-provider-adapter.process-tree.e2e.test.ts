@@ -123,7 +123,7 @@ async function run(variant: string, mode: 'cancel' | 'timeout', context: TestCon
       nativeThreadId: SID,
       prompt: 'hi',
       cwd: tmpdir(),
-      policy: 'read_only',
+      policy: 'session_posture',
       deps,
       abortSignal: controller.signal,
       timeoutMs: mode === 'timeout' ? 2_000 : 60_000,

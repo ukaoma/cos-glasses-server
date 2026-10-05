@@ -112,9 +112,10 @@ describe('input validation', () => {
     })).toMatchObject({ binding: null, reason: 'invalid_provider' })
   })
 
-  it('accepts cursor as bindable, not forkable', () => {
-    expect(FORKABLE_PROVIDERS).not.toContain('cursor')
-    expect(isForkableProvider('cursor')).toBe(false)
+  it('accepts cursor as bindable, and (6.62.0) forkable as a new session with context', () => {
+    expect(FORKABLE_PROVIDERS).toContain('cursor')
+    expect(isForkableProvider('cursor')).toBe(true)
+    expect(isForkableProvider('gemini')).toBe(false)
     expect(createBinding({
       bindingId: 'b', cosSessionId: 'c', provider: 'cursor', nativeThreadId: THREAD,
       workspaceFingerprint: '', sourceFingerprint: '', ttlMs: TTL, now: NOW,

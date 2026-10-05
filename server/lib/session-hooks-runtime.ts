@@ -236,7 +236,7 @@ export function claudeDeskRunning(sessionId: string, now = Date.now(), dir = cla
  * hooks do not yet show the turn started (its UserPromptSubmit at or after `sentAt`), it is
  * re-armed once when that prompt's own UserPromptSubmit deletes it (`haltDeliveredTurn`).
  */
-export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: { prompt: string; sentAt: number; unverified?: boolean }, now = Date.now()): boolean {
+export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: { prompt: string; sentAt: number; unverified?: boolean; verbatim?: boolean }, now = Date.now()): boolean {
   const signal = signalFor(sessionId)
   const started = !!signal && typeof signal.turnStartedAt === 'number' && signal.turnStartedAt >= turn.sentAt
   return haltDeliveredTurn(sessionId, marker, {
@@ -246,6 +246,8 @@ export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: {
     now,
     // 6.53.3 /qa: an unverified hand-off (`maybe`) holds its re-arm two minutes, not an hour.
     windowMs: turn.unverified === true ? HALT_REARM_UNVERIFIED_MS : HALT_MARKER_TTL_MS,
+    // 6.62.0 (plan 3.6): a Codex turn queued into the app is matched verbatim.
+    verbatim: turn.verbatim === true,
   })
 }
 

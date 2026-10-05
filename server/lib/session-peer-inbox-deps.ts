@@ -19,12 +19,13 @@ import {
 } from './session-peer-inbox.js'
 
 /**
- * `COS_CONTINUE_LIVE`. OFF by default in 6.49.0.
+ * `COS_CONTINUE_LIVE`. ON unless exactly '0' (6.62.0, D3).
  *
- * The transport rides a protocol Claude Code documents in a help string, not a
- * contract, and the first days are for reading the health row on one Mac. A literal
- * '1' turns it on; anything else, including absence, keeps every Continue on the
- * 6.48.2 path.
+ * 6.49.0 shipped it off: the transport rides a protocol Claude Code documents in a help
+ * string, not a contract, and the first days were for reading the health row on one Mac.
+ * Those days are behind it (Miles's Mac has run it on since 6.49; measured on Claude Code
+ * 2.1.289), and a Continue that lands in the open session is the desk behaviour. '0' keeps
+ * every Continue on the 6.48.2 spawn path; every refusal still falls back there anyway.
  *
  * WHERE TO SET IT. `~/.cos-glasses/.env` (read at boot by `env.ts`, the plist wins
  * when both carry it). Control's `providerEnvironmentKeys` allowlist does NOT carry
@@ -32,7 +33,7 @@ import {
  * by the next Install/Repair/Update Server; Control 0.5.234 is to add it.
  */
 export function continueLiveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.COS_CONTINUE_LIVE === '1'
+  return env.COS_CONTINUE_LIVE !== '0'
 }
 
 /** Registry files are small; anything larger is not one. */

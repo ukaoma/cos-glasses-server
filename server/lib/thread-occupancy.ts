@@ -93,6 +93,14 @@ export interface Occupancy {
    * Absent (not false) on every other verdict, so `=== true` is the only test.
    */
   idleHolder?: true
+  /**
+   * 6.62.0 (plan 3.6, W8): attachable DESPITE a foreign owner that is WORKING, because the
+   * owner is the Codex app and the turn goes into that app's own queue (`codex queue`),
+   * which runs it at the end of the running turn. Never set by `threadOccupancy`: only the
+   * bindings route declares it, and only when the hop is wired, on, and COS holds no turn
+   * of its own for the thread. Same `=== true` contract as `idleHolder`.
+   */
+  busyHolder?: true
 }
 
 /**
@@ -191,7 +199,18 @@ export interface OccupancyProbes {
    * absent, null, or a throw keeps the 6.50 verdict (`unsupported_provider`).
    */
   cursorComposerTurnOpen?: (threadId: string) => boolean | null
+  /**
+   * 6.62.0 (W14): the newest write to a Cursor CLI chat (`store.db`, its WAL, or the agent
+   * transcript), epoch ms, or null. A `-p` run fires no turn hooks (canary C7), so file
+   * times are the only busy signal a CLI chat has, and a Run Everything Continue must not
+   * run at the same moment as the person's own terminal run. OPTIONAL; absent or null
+   * keeps the 6.61 verdict.
+   */
+  cursorChatLastWriteMs?: (chatDir: string, threadId: string) => number | null
 }
+
+/** 6.62.0 (W14): a CLI chat written this recently is working; a turn for it queues. */
+export const CURSOR_CHAT_BUSY_WINDOW_MS = 30_000
 
 /**
  * How recently the transcript must have been written for a held thread to read
@@ -636,6 +655,18 @@ export function threadOccupancy(
         open = null
       }
       return { attachable: false, owners: [], reason: open === true ? 'native_thread_working' : 'unsupported_provider' }
+    }
+    // 6.62.0 (W14): a CLI chat written in the last 30 s is mid-run, at the desk or by a
+    // COS child that just finished; a turn spoken at it waits rather than running
+    // alongside. A probe that throws or cannot tell keeps the 6.61 verdict.
+    let lastWrite: number | null = null
+    try {
+      lastWrite = typeof probes.cursorChatLastWriteMs === 'function' ? probes.cursorChatLastWriteMs(session.dir, threadId) : null
+    } catch {
+      lastWrite = null
+    }
+    if (typeof lastWrite === 'number' && Number.isFinite(lastWrite) && Date.now() - lastWrite < CURSOR_CHAT_BUSY_WINDOW_MS) {
+      return { attachable: false, owners: [], reason: 'native_thread_working' }
     }
     return { attachable: true, owners: [], reason: null }
   }

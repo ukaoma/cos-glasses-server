@@ -87,7 +87,8 @@ import {
 } from '../lib/thread-attach-capability.js'
 import { cachedHookStatus, sessionHooksEnabled, sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
 import { sessionCancelFeature } from '../lib/session-cancel.js'
-import { codexDeskHaltReady, mergeProviderBlocks, providerObserveFields } from '../lib/provider-observe.js'
+import { codexDeskHaltReady, providerObserveFields } from '../lib/provider-observe.js'
+import { liveProviderActInput, mergeProviderSections, providerActSections } from '../lib/provider-actions.js'
 import { hookHaltReady } from '../lib/claude-hooks-installer.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
@@ -414,12 +415,20 @@ healthRouter.get('/health', async (_req, res) => {
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
     ...sessionHooksHealthFields(),
-    // 6.62.0 (plan 1.10): what COS can see of each engine's sessions, by source.
-    providers: mergeProviderBlocks(providerObserveFields({ state: cachedHookStatus().state, ready: hookHaltReady(cachedHookStatus()) })),
     // 6.52.0: counts, the mode and two timestamps; never an id, a question, a command, or
     // how many are held (that is on the authenticated questions route).
     ...permissionBrokerHealthFields(),
     ...continueLiveHealthFields(),
+    // 6.62.0: ONE providers object per engine. `act` (plan 3.11): what each provider can do,
+    // with a reason for every "no". `observe` (plan 1.10): what COS can see of its sessions.
+    providers: mergeProviderSections(
+      providerActSections(liveProviderActInput({
+        attachEnabled: threadAttach.enabled,
+        forkProviders: threadAttach.forkProviders ?? [],
+        sessionCancel: features.sessionCancel,
+      })),
+      providerObserveFields({ state: cachedHookStatus().state, ready: hookHaltReady(cachedHookStatus()) }),
+    ),
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),
@@ -553,6 +562,14 @@ healthRouter.get('/models', async (req, res) => {
   res.json({
     ...catalog,
     ...threadAttachHealthFields(threadAttach),
+    // 6.62.0 (plans 3.5, 3.11): the phone reads THIS surface, so the live-Continue counters
+    // and the per-provider action contract are published here too, same helpers as health.
+    ...continueLiveHealthFields(),
+    providers: mergeProviderSections(providerActSections(liveProviderActInput({
+      attachEnabled: threadAttach.enabled,
+      forkProviders: threadAttach.forkProviders ?? [],
+      sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady()),
+    }))),
     options: [
       ...(catalog.options ?? []),
       ...cursorOptions,

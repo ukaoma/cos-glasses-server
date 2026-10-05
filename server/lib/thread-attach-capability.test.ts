@@ -285,6 +285,26 @@ describe('the live /api/health and /api/models surfaces', () => {
     expect(mayContinue(models, 'claude')).toBe(true)
   }, 30_000)
 
+  it('6.62.0: publishes providers.<p>.act and the live-Continue counters on BOTH surfaces', async () => {
+    setGateEnv('1')
+    const health = await (await fetch(`${base}/api/health`)).json() as any
+    const models = await (await fetch(`${base}/api/models`)).json() as any
+    for (const body of [health, models]) {
+      for (const provider of ['claude', 'codex', 'cursor']) {
+        const act = body.providers?.[provider]?.act
+        expect(act, provider).toBeTruthy()
+        for (const [name, entry] of Object.entries(act as Record<string, { supported: boolean; reason?: string }>)) {
+          expect(typeof entry.supported, `${provider}.${name}`).toBe('boolean')
+          if (!entry.supported) expect(entry.reason, `${provider}.${name}`).toMatch(/^[a-z_]+$/)
+        }
+      }
+      expect(body.providers.cursor.act.fork).toEqual({ supported: true, mode: 'new_session' })
+      expect(typeof body.continueLive?.enabled).toBe('boolean')
+      expect(typeof body.codexLiveQueue?.enabled).toBe('boolean')
+    }
+    expect(models.providers).toEqual(health.providers)
+  }, 30_000)
+
   it('leaves the existing health contract intact', async () => {
     // Other clients depend on these. Adding fields must not move them.
     const body = await (await fetch(`${base}/api/health`)).json() as any
@@ -352,5 +372,15 @@ describe('the detector reads the same gate the routes do', () => {
     expect(scanned.length).toBeGreaterThan(100)
     const offenders = scanned.filter(file => readFileSync(file, 'utf8').includes(RETIRED_KEY))
     expect(offenders).toEqual([])
+  })
+})
+
+describe('6.62.0: threadForkProviders beside the threadForkSupported boolean', () => {
+  it('publishes which providers the fork route serves, gate on or off, and keeps the boolean a boolean', () => {
+    for (const gate of [() => true, () => false]) {
+      const fields = threadAttachHealthFields(threadAttachCapability(gate))
+      expect(fields.threadForkSupported).toBe(true)
+      expect(fields.threadForkProviders).toEqual(['claude', 'codex', 'cursor'])
+    }
   })
 })

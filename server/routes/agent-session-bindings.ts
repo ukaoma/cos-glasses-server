@@ -121,6 +121,7 @@ import {
   type BindingState,
   type NativeBinding,
 } from '../lib/agent-session-binding-store.js'
+import { boundedContinueNote } from '../lib/continue-plan.js'
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
@@ -371,6 +372,22 @@ export interface AgentSessionBindingsDeps {
   deliverCodexLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; foreignHolder: boolean }) => Promise<{ ok: boolean; reason: string; verifiedBy?: string | null; queuedId?: string | null }>
 
   /**
+   * 6.62.0 (plan 3.6, W8): may a BUSY Codex thread the Codex app holds take a turn through
+   * that app's own queue right now? Production: `COS_CODEX_LIVE_QUEUE` is on AND the COS
+   * queue for the thread is empty (so a new turn never jumps one already waiting). Absent
+   * or anything but `true`: a busy holder refuses `native_thread_working`, as in 6.61.
+   */
+  busyCodexHop?: (threadId: string) => boolean
+
+  /**
+   * 6.62.0 (plan 3.12): what a Continue on this thread would run with, in 60 characters
+   * or less (`session-continue-facts.ts`). Added to the attachability verdict as
+   * `continue_note`. Optional; absent, null, slow (past `CONTINUE_NOTE_BUDGET_MS`) or a
+   * throw omits the field, and the verdict is unchanged.
+   */
+  continueNote?: (provider: BindableProvider, threadId: string) => Promise<string | null> | string | null
+
+  /**
    * The self-recursion ledger. Defaults to the real process-wide one.
    *
    * `record` takes a MEASURED process start, never a wall clock. See rule 2 in
@@ -406,7 +423,7 @@ export interface AgentSessionBindingsDeps {
    * write a NEW session rather than the one asked for, which for a fork means the
    * copy silently lands in the wrong project.
    */
-  resolveForkWorkspace?: (provider: BindableProvider, nativeThreadId: string) => string | null
+  resolveForkWorkspace?: (provider: BindableProvider, nativeThreadId: string) => string | null | Promise<string | null>
 
   /**
    * Where an opaque fork reference is exchanged for the thread it names.
@@ -459,7 +476,7 @@ export interface CancelDeps {
    * have reached) the open session. Writes the halt marker, and re-arms it once when that
    * turn's own UserPromptSubmit deletes it (`haltHandedOffTurn`). False: not armed.
    */
-  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean }) => boolean
+  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean; verbatim?: boolean }) => boolean
   /** Append to `data/session-cancel.jsonl`. */
   ledger?: (row: SessionCancelLedgerRow) => void
 }
@@ -814,7 +831,7 @@ export function projectAttachability(verdict: Occupancy): AttachabilityBody {
   const owners = Array.isArray(verdict?.owners) ? verdict.owners : null
   // Strictly `=== true`. An idleHolder of 1, 'yes', or {} is a malformed verdict,
   // and a malformed verdict must not buy an exemption.
-  const foreignOwnerDeclared = verdict?.idleHolder === true
+  const foreignOwnerDeclared = verdict?.idleHolder === true || verdict?.busyHolder === true
   const sound =
     verdict?.attachable === true &&
     verdict.reason === null &&
@@ -1501,6 +1518,12 @@ export const TURN_SENT_CODEX_QUEUE_COPY = 'Queued in the Codex app. It runs when
 export const LIVE_VERIFY_BUDGET_MS = PEER_VERIFY_TIMEOUT_MS
 
 /**
+ * 6.62.0: how long the attachability verdict waits for its `continue_note`. The verdict is
+ * a menu-open read; a cold Codex posture scan or a busy Cursor database must not hold it.
+ */
+export const CONTINUE_NOTE_BUDGET_MS = 1_500
+
+/**
  * The 202 copy. Says QUEUED and not sent, because at this instant the provider has
  * not been spawned — claiming otherwise would be the same silent-success lie the
  * ambiguous path exists to avoid.
@@ -1685,6 +1708,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           prompt: turn.prompt,
           sentAt: turn.sentAt,
           unverified: reached === 'maybe',
+          // 6.62.0 (plan 3.6): a Codex turn went into the app's own queue, which hands its
+          // text to the session's UserPromptSubmit as is: matched verbatim, no peer unwrap.
+          ...(provider === 'codex' ? { verbatim: true } : {}),
         }) === true, false)
         if (armed) {
           const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)
@@ -1743,8 +1769,29 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       return { attachable: false, owners: [], reason: 'probe_failed' }
     }
   }
+  /**
+   * 6.62.0 (plan 3.6, W8): a WORKING Codex holder that is not ours, on a thread the hop may
+   * take, reads attachable through a declared `busyHolder`. Shared by the probe, attach and
+   * turns, so all three agree. Anything less than every condition keeps the verdict as is.
+   */
+  const withBusyCodexHop = (provider: string, threadId: string, detected: Occupancy): Occupancy => {
+    if (provider !== 'codex' || detected.attachable || detected.reason !== 'native_thread_working') return detected
+    if (typeof deps.deliverCodexLiveTurn !== 'function' || typeof deps.busyCodexHop !== 'function') return detected
+    const owners = Array.isArray(detected.owners) ? detected.owners : []
+    if (!owners.some(owner => owner?.selfOwned !== true && owner?.source === 'codex-writer-lock')) return detected
+    let allowed = false
+    try {
+      allowed = deps.busyCodexHop(threadId) === true
+    } catch (error) {
+      console.error(`[agent-session-bindings] busy codex hop check threw: ${error instanceof Error ? error.message : error}`)
+      allowed = false
+    }
+    return allowed ? { attachable: true, owners, reason: null, busyHolder: true } : detected
+  }
+  const routeOccupancy = (provider: string, threadId: string): Occupancy =>
+    withBusyCodexHop(provider, threadId, detectOccupancy(provider, threadId))
   const runOccupancy = (provider: string, threadId: string): AttachabilityBody =>
-    projectAttachability(detectOccupancy(provider, threadId))
+    projectAttachability(routeOccupancy(provider, threadId))
 
   const refuseAttach = (res: Response, reason: WriteRefusal): void => {
     res.status(refusalStatus(reason)).json({
@@ -1853,7 +1900,27 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     res.json({ released: true, target, provider: outcome.row.provider })
   })
 
-  router.get('/agent-sessions/:provider/:threadId/attachability', (req, res) => {
+  /** 6.62.0 (plan 3.12): `continue_note` for the verdict, bounded in time and length. */
+  const continueNoteFor = async (provider: string, threadId: string): Promise<{ continue_note?: string }> => {
+    const read = deps.continueNote
+    if (typeof read !== 'function' || !isBindableProvider(provider) || !isValidNativeThreadId(threadId)) return {}
+    let timer: ReturnType<typeof setTimeout> | null = null
+    try {
+      const note = await Promise.race([
+        Promise.resolve(read(provider, threadId)),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTINUE_NOTE_BUDGET_MS) }),
+      ])
+      const bounded = boundedContinueNote(note)
+      return bounded ? { continue_note: bounded } : {}
+    } catch (error) {
+      console.error(`[agent-session-bindings] continue note failed: ${error instanceof Error ? error.message : error}`)
+      return {}
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  router.get('/agent-sessions/:provider/:threadId/attachability', async (req, res) => {
     // An occupancy verdict is a liveness answer with a lifetime of roughly now.
     // A cached `attachable: true` is indistinguishable from a stale one, which is
     // the whole failure this feature exists to prevent.
@@ -1899,7 +1966,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // truncated-id hole opened. The tests pin the ordering behaviorally instead:
     // probes that throw on every call still return `unsupported_provider` /
     // `invalid_thread_id`, which is only possible if nothing was probed.
-    res.json(withCancel(runOccupancy(provider, threadId)))
+    const verdictBody = withCancel(runOccupancy(provider, threadId))
+    res.json({ ...verdictBody, ...(await continueNoteFor(provider, threadId)) })
   })
 
   // ------------------------------------------------------------------ cancel
@@ -2331,7 +2399,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (typeof resolveWorkspace !== 'function') return refuseFork('fork_workspace_unresolvable')
       let cwd: string | null = null
       try {
-        cwd = resolveWorkspace(providerParam, threadIdParam)
+        // 6.62.0: may answer later (a Cursor IDE composer's folder is read from Cursor's own
+        // store). Still before the claim below, which stays the last synchronous step.
+        cwd = await resolveWorkspace(providerParam, threadIdParam)
       } catch (error) {
         console.error(`[agent-session-bindings] fork workspace resolve threw: ${error instanceof Error ? error.message : error}`)
         cwd = null
@@ -2656,14 +2726,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // session started in the gap is exactly the residual risk option B leaves
       // open, and it is terminal here rather than a warning because COS has no
       // cross-process lock that could fence a live desktop writer.
-      const detected = detectOccupancy(binding.provider, binding.nativeThreadId)
+      const detected = routeOccupancy(binding.provider, binding.nativeThreadId)
       const verdict = projectAttachability(detected)
       stage('gate')
       if (!verdict.attachable) return refuseTurn(verdict.reason ?? 'probe_failed')
       // 6.51.0: the SAME verdict says whether a live process that is not ours holds the
-      // thread. Only the declared idle-holder exemption can carry one on an attachable
-      // verdict (`projectAttachability` refuses anything else), so this is that fact.
-      const foreignHolder = detected.idleHolder === true
+      // thread. Only the declared idle-holder exemption (or, 6.62.0, the busy Codex hop)
+      // can carry one on an attachable verdict (`projectAttachability` refuses anything
+      // else), so this is that fact.
+      const busyCodexHop = detected.busyHolder === true
+      const foreignHolder = (detected.idleHolder === true || busyCodexHop)
         && Array.isArray(detected.owners)
         && detected.owners.some(owner => owner?.selfOwned !== true)
 
@@ -2677,7 +2749,15 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // reads as diverged, because the first turn is what moved the head.
       const baseline = guard.acknowledgedHead(bindingId) ?? binding.nativeHeadAtAttach
       if (typeof baseline !== 'string' || baseline.length === 0) return refuseTurn('native_head_unavailable')
-      if (head.digest !== baseline) {
+      if (head.digest !== baseline && busyCodexHop) {
+        // 6.62.0 (plan 3.6): a busy thread moves while it works; that is what busy means.
+        // The hop puts the turn into the app's own queue, which runs it after the current
+        // turn, the same "append to whatever the thread is when it frees" the COS queue's
+        // watermark exemption already grants a parked turn. Recorded, so the next
+        // interactive turn compares against this head.
+        console.log(`[agent-session-bindings] busy codex hop acknowledges a moving head turnId=${turnId} bindingId=${bindingId}`)
+        guard.acknowledgeHead(bindingId, head.digest)
+      } else if (head.digest !== baseline) {
         // Only a changed/not-changed signal and a new opaque revision. No diff, no
         // content, no path — the client is told THAT it moved, never to what.
         if (acknowledged !== head.digest) {
@@ -2835,6 +2915,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt })
           console.log(`[agent-session-bindings] turn cancelled during live hand-off provider=codex turnId=${turnId} bindingId=${bindingId} hop=${live.reason}`)
           return refuseTurn('turn_cancelled', { retryable: false })
+        }
+        // 6.62.0 (plan 3.6): a BUSY thread never falls through to a child (the writer lock
+        // is held, so the spawn would fail after the prompt and fence). Whatever reached no
+        // queue row is the 6.61 answer instead: working, and queueable, so the COS queue
+        // takes it. A row that MAY be queued is still the ambiguous fence below.
+        if (busyCodexHop && live !== null && live.reason !== 'unverified') {
+          console.log(`[agent-session-bindings] busy codex hop declined provider=codex turnId=${turnId} bindingId=${bindingId} hop=${live.reason}`)
+          return refuseTurn('native_thread_working')
         }
         // The operator switched this off: nothing was queued, so the abortable
         // 6.50 child path is cancellable again before it starts.

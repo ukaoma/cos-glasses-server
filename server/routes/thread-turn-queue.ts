@@ -49,6 +49,13 @@ export interface ThreadTurnQueueDeps {
     serverRetryable?: boolean
   }>
   nativeQueue?: NativeQueueControl
+  /**
+   * 6.62.0 (W14), optional: is this Cursor id an Agent CLI chat (a `~/.cursor/chats` dir)?
+   * Only those are drained from here, and only when the gate, which now includes the
+   * chat's 30 s busy window, says free. An IDE composer still leaves only through its own
+   * Stop hook. Absent: no Cursor turn is ever drained here, exactly as in 6.61.
+   */
+  cursorCliChat?: (threadId: string) => boolean
   now: () => number
 }
 
@@ -90,6 +97,11 @@ function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unk
 /** A throwing turnOpen probe is not evidence either way. */
 function safeTurnOpen(deps: ThreadTurnQueueDeps, provider: string, threadId: string): boolean | undefined {
   try { return deps.turnOpen!(provider, threadId) } catch { return undefined }
+}
+
+/** A throwing or absent CLI-chat probe means "not a CLI chat": the 6.61 Cursor hold. */
+function safeCursorCliChat(deps: ThreadTurnQueueDeps, threadId: string): boolean {
+  try { return deps.cursorCliChat ? deps.cursorCliChat(threadId) === true : false } catch { return false }
 }
 
 /** A throwing cancel read is no hold: the gate still decides every delivery. */
@@ -142,18 +154,31 @@ export async function drainThread(
     // composer's own Stop hook (`routes/cursor-stop-followup.ts`), which claims it the
     // moment the turn ends; a second deliverer could hand the same sentence over twice.
     // The pass still runs for it so the TTL retires an unclaimed turn honestly.
-    const gate: ReturnType<ThreadTurnQueueDeps['occupancy']> = provider === 'cursor'
+    //
+    // 6.62.0 (W14): an Agent CLI chat is the exception. A `-p` run fires no Stop hook, so
+    // nothing else would ever send its parked turn; it drains here once the gate (with the
+    // chat's 30 s busy window) reads free, and that quiet window is its turn-ended signal.
+    const cliChat = provider === 'cursor' && safeCursorCliChat(deps, threadId)
+    const gate: ReturnType<ThreadTurnQueueDeps['occupancy']> = provider === 'cursor' && !cliChat
       ? { attachable: false, reason: 'cursor_stop_hook_delivery' }
       : refusedGate ?? deps.occupancy(provider, threadId)
     if (!gate.attachable) refusedGate = gate
-    const seen: DrainObservation = {
-      attachable: gate.attachable,
-      turnEnded: deps.turnEnded(provider, threadId),
-      turnOpen: deps.turnOpen ? safeTurnOpen(deps, provider, threadId) : undefined,
-      activity: deps.activity(provider, threadId),
-      reason: gate.reason,
-      cancelHoldUntil: safeCancelHold(deps, provider, threadId),
-    }
+    const seen: DrainObservation = cliChat
+      ? {
+          attachable: gate.attachable,
+          turnEnded: gate.attachable,
+          activity: gate.attachable ? 'idle' : 'working',
+          reason: gate.reason,
+          cancelHoldUntil: safeCancelHold(deps, provider, threadId),
+        }
+      : {
+          attachable: gate.attachable,
+          turnEnded: deps.turnEnded(provider, threadId),
+          turnOpen: deps.turnOpen ? safeTurnOpen(deps, provider, threadId) : undefined,
+          activity: deps.activity(provider, threadId),
+          reason: gate.reason,
+          cancelHoldUntil: safeCancelHold(deps, provider, threadId),
+        }
     const decision = drainDecision(turn, seen, deps.now())
 
     if (decision === 'hold') { held += 1; continue }

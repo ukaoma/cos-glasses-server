@@ -101,19 +101,30 @@ import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store
 import { interpretPsLstart, processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import { getCodexTrustMode } from './codex-run-ledger.js'
 import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
+import type { PermissionAllowance } from './banned-permission-args.js'
+import {
+  continueAllowanceFor,
+  validateContinuePlan,
+  type AttachedContinuePlan,
+  type CodexContinuePlan,
+  type CursorContinuePlan,
+} from './continue-plan.js'
 
 /** Providers with a certified attached path. Cursor is bindable, not forkable. */
 export type AttachedProvider = BindableProvider
 
 /**
- * Protocol 1 ships text-only read-only continuation (plan 4.7). The type has
- * one member on purpose: `agent` is not "not implemented yet", it is a value
- * this module must refuse until Control gates it per binding.
+ * 6.62.0 (D1): a Continue runs with the SESSION'S OWN posture, described by the request's
+ * `plan` (`continue-plan.ts`). Until 6.61 this was `'read_only'`, a name that had stopped
+ * being true for Claude on 2026-08-16. The type still has one member on purpose: `agent`
+ * and anything else is a value this module refuses, and the plan, not the policy word,
+ * is what may ever widen the argv.
  */
-export type AttachedPermissionPolicy = 'read_only'
+export type AttachedPermissionPolicy = 'session_posture'
 
 export function isAttachedPermissionPolicy(value: unknown): value is AttachedPermissionPolicy {
-  return value === 'read_only'
+  return value === 'session_posture'
 }
 
 /** Terminal reason on failure. Never carries prompt or transcript text. */
@@ -284,6 +295,11 @@ export interface AttachedSpawnRequest {
   args: readonly string[]
   cwd: string
   env: NodeJS.ProcessEnv
+  /**
+   * 6.62.0: which CLI this is, so the real spawn can isolate a Cursor child's config dir
+   * (`cursor-spawn-env.ts`). Optional so every test double keeps its shape.
+   */
+  provider?: AttachedProvider
 }
 
 /** Result of the final occupancy re-check (plan 4.3 step 6). */
@@ -341,7 +357,7 @@ export interface AttachedTurnDeps {
    * Exists ONLY so a test can hand back an argv carrying a banned permission flag
    * and prove the turn is refused with zero spawns. Production never sets it.
    */
-  buildArgs?: (provider: AttachedProvider, nativeThreadId: string, cwd: string) => string[]
+  buildArgs?: (provider: AttachedProvider, nativeThreadId: string, cwd: string, plan?: AttachedContinuePlan) => string[]
   /**
    * A PASSIVE reader of the child's stdout. Optional; omitted changes nothing.
    *
@@ -369,6 +385,12 @@ export interface AttachedTurnRequest {
   prompt: unknown
   cwd: unknown
   policy: unknown
+  /**
+   * 6.62.0: what this Continue runs with (`continue-plan.ts`). Absent: the 6.61 argv for
+   * every provider. Validated here, structurally, before any argv is built; a plan for
+   * another provider or with an unusable value refuses the turn rather than being ignored.
+   */
+  plan?: unknown
   deps: AttachedTurnDeps
   /** Wall-clock budget for the provider run. Omitted uses the default. */
   timeoutMs?: number
@@ -506,7 +528,13 @@ export function buildClaudeAttachedArgs(nativeThreadId: string): string[] {
 }
 
 /**
- * Codex: `codex exec -s read-only -C <cwd> resume --json <id> -`.
+ * Codex: `codex exec [-m <model>] [-c model_reasoning_effort=…] --sandbox <s> [-c
+ * sandbox_workspace_write.network_access=…] --cd <cwd> resume --json <id> -`.
+ *
+ * 6.62.0 (D1, canary C11): with a plan, the session's OWN model, effort and sandbox are
+ * passed, because `exec resume` otherwise takes the config defaults for all three. Every
+ * one of them is an option of `exec` and precedes `resume`. With no plan (the kill switch,
+ * or an older caller) the argv is the 6.61 one, byte for byte.
  *
  * Verified against codex-cli 0.148.0-alpha.9 on 2026-08-15:
  * `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]`. `--sandbox` and `--cd`
@@ -518,33 +546,61 @@ export function buildClaudeAttachedArgs(nativeThreadId: string): string[] {
  * `--ephemeral` is deliberately absent: the whole point is that the turn
  * persists into the user's rollout.
  */
-export function buildCodexAttachedArgs(nativeThreadId: string, cwd: string): string[] {
-  return [
-    'exec',
-    // The posture ordinary Codex runs use on this host, not a stricter one
-    // invented here. `COS_CODEX_SANDBOX=workspace-write` opts in; absent stays
-    // read-only, so this is never MORE permissive than the rest of the server.
-    '--sandbox', getCodexTrustMode(),
-    '--cd', cwd,
-    'resume',
-    '--json',
-    '--skip-git-repo-check',
-    nativeThreadId,
-    '-',
-  ]
+export function buildCodexAttachedArgs(nativeThreadId: string, cwd: string, plan?: CodexContinuePlan): string[] {
+  if (!plan) {
+    return [
+      'exec',
+      // The posture ordinary Codex runs use on this host, not a stricter one
+      // invented here. `COS_CODEX_SANDBOX=workspace-write` opts in; absent stays
+      // read-only, so this is never MORE permissive than the rest of the server.
+      '--sandbox', getCodexTrustMode(),
+      '--cd', cwd,
+      'resume',
+      '--json',
+      '--skip-git-repo-check',
+      nativeThreadId,
+      '-',
+    ]
+  }
+  const args = ['exec']
+  if (plan.model) args.push('-m', plan.model)
+  if (plan.effort) args.push('-c', `model_reasoning_effort="${plan.effort}"`)
+  args.push('--sandbox', plan.sandbox)
+  if (plan.sandbox === 'workspace-write' && typeof plan.networkAccess === 'boolean') {
+    args.push('-c', `sandbox_workspace_write.network_access=${plan.networkAccess}`)
+  }
+  args.push('--cd', cwd, 'resume', '--json', '--skip-git-repo-check', nativeThreadId, '-')
+  return args
 }
 
 /**
- * Cursor Agent CLI: ask-mode resume into an existing thread.
+ * Cursor Agent CLI: resume into an existing thread.
  *
- * `--force` is the agent-mode bypass and is banned here. Workspace is the
- * spawn spelling from `spawnWorkspace`, never realpath of `meta.json.cwd`.
+ * 6.62.0 (D1, canaries C4/C5): with a plan, Run Everything (`--force`) on the session's
+ * own model. Agent mode alone is not full permissions (C4: the CLI's allowlist still
+ * blocked `touch`), and `--resume` without `--model` runs the GLOBAL default (C5). `--force`
+ * stays on the ban list: only the plan's allowance lets this one argv slot through, at
+ * both checks. With no plan (the kill switch) the argv is the 6.61 ask-mode one.
+ *
+ * Workspace is the spawn spelling from `spawnWorkspace`, never realpath of `meta.json.cwd`.
  */
-export function buildCursorAttachedArgs(nativeThreadId: string, cwd: string): string[] {
+export function buildCursorAttachedArgs(nativeThreadId: string, cwd: string, plan?: CursorContinuePlan): string[] {
+  if (!plan) {
+    return [
+      '-p',
+      '--mode', 'ask',
+      '--model', CURSOR_SLOT_MODEL_IDS['cursor-composer'],
+      '--output-format', 'stream-json',
+      '--stream-partial-output',
+      '--trust',
+      '--workspace', cwd,
+      '--resume', nativeThreadId,
+    ]
+  }
   return [
     '-p',
-    '--mode', 'ask',
-    '--model', CURSOR_SLOT_MODEL_IDS['cursor-composer'],
+    '--force',
+    '--model', plan.model,
     '--output-format', 'stream-json',
     '--stream-partial-output',
     '--trust',
@@ -567,13 +623,20 @@ export function buildCursorAttachedArgs(nativeThreadId: string, cwd: string): st
  * than returning a sentinel: there is no safe degraded argv, and the caller's
  * outer catch already maps a throw to a terminal refusal before any spawn.
  */
-function buildArgs(provider: AttachedProvider, nativeThreadId: string, cwd: string): string[] {
+export function buildAttachedArgs(
+  provider: AttachedProvider,
+  nativeThreadId: string,
+  cwd: string,
+  plan?: AttachedContinuePlan,
+  allowance?: PermissionAllowance,
+): string[] {
   const args = provider === 'claude'
     ? buildClaudeAttachedArgs(nativeThreadId)
     : provider === 'codex'
-      ? buildCodexAttachedArgs(nativeThreadId, cwd)
-      : buildCursorAttachedArgs(nativeThreadId, cwd)
-  const banned = findBannedPermissionArg(args)
+      ? buildCodexAttachedArgs(nativeThreadId, cwd, plan?.provider === 'codex' ? plan : undefined)
+      : buildCursorAttachedArgs(nativeThreadId, cwd, plan?.provider === 'cursor' ? plan : undefined)
+  // 6.62.0: the SAME allowance object the spawn boundary below receives (plan 3.1).
+  const banned = findBannedPermissionArg(args, allowance)
   if (banned !== null) {
     // The flag name only. Never the argv, which carries the thread id and cwd.
     throw new Error(`attached argv carries a banned permission flag: ${banned}`)
@@ -757,6 +820,17 @@ async function run(
     return fail('unsupported_policy', 'not_attempted', { ...base, durationMs: duration() })
   }
 
+  // 6.62.0: the plan, validated before anything is built from it. A wrong-provider or
+  // malformed plan is a wiring bug, and a wiring bug refuses rather than falling back to
+  // a different argv than the caller meant.
+  const checkedPlan = validateContinuePlan(provider, request.plan)
+  if (checkedPlan === 'invalid') {
+    return fail('unsupported_policy', 'not_attempted', { ...base, detail: 'invalid_plan', durationMs: duration() })
+  }
+  const plan: AttachedContinuePlan | undefined = checkedPlan ?? undefined
+  // ONE allowance, built once, handed to the builder AND the spawn-boundary recheck.
+  const allowance = continueAllowanceFor(plan)
+
   if (typeof request.prompt !== 'string' || request.prompt.length === 0) {
     return fail('invalid_prompt', 'not_attempted', { ...base, detail: 'empty', durationMs: duration() })
   }
@@ -832,14 +906,16 @@ async function run(
   // nowhere.
   let args: string[]
   try {
-    args = (deps.buildArgs ?? buildArgs)(provider, nativeThreadId, cwd)
+    args = deps.buildArgs
+      ? deps.buildArgs(provider, nativeThreadId, cwd, plan)
+      : buildAttachedArgs(provider, nativeThreadId, cwd, plan, allowance)
   } catch {
     return fail('unsupported_policy', 'not_attempted', { ...base, detail: 'argv_build_failed', durationMs: duration() })
   }
   // Plan 4.7, enforced against the argv that is about to be spawned rather than
   // against the source that builds it. No safe degraded argv exists, so this is a
   // terminal refusal before any process is created.
-  const bannedArg = findBannedPermissionArg(args)
+  const bannedArg = findBannedPermissionArg(args, allowance)
   if (bannedArg !== null) {
     return fail('unsupported_policy', 'not_attempted', { ...base, detail: `banned_arg:${bannedArg}`, durationMs: duration() })
   }
@@ -852,7 +928,7 @@ async function run(
   }
   let child: AttachedChildProcess
   try {
-    child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv() })
+    child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv(), provider })
   } catch {
     // Includes ENOENT. No process exists, so no turn can have landed.
     return fail('spawn_failed', 'not_attempted', { ...base, detail: 'threw', durationMs: duration() })
@@ -1764,14 +1840,24 @@ export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict):
       // after it. This is the floor that keeps group ownership (rule 4 above) from ever
       // claiming a process that predates the turn.
       const floor = Date.now() - OWNED_START_SLACK_MS
-      const child = nodeSpawn(request.binaryPath, [...request.args], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: request.cwd,
-        env: request.env,
-        // Group leader, so the whole provider tree can be signalled on timeout —
-        // matching what both ordinary bridges do.
-        detached: true,
-      })
+      // 6.62.0 (plan 3.4): a Cursor child gets a config dir of its own, so `--model` cannot
+      // rewrite the person's CLI default (C9). Child env only; removed when it exits.
+      const isolation = request.provider === 'cursor' ? cursorSpawnEnv({ baseEnv: request.env }) : null
+      let child: ReturnType<typeof nodeSpawn>
+      try {
+        child = nodeSpawn(request.binaryPath, [...request.args], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: request.cwd,
+          env: isolation ? isolation.env : request.env,
+          // Group leader, so the whole provider tree can be signalled on timeout —
+          // matching what both ordinary bridges do.
+          detached: true,
+        })
+      } catch (error) {
+        isolation?.release()
+        throw error
+      }
+      if (isolation) releaseCursorSpawnOnExit(child, isolation)
       const pid = child.pid
       if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) treeMemory.floorByRoot.set(pid, floor)
       return child as unknown as AttachedChildProcess

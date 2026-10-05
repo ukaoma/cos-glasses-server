@@ -494,3 +494,32 @@ it('does not report an empty queue when native Codex cannot be read', async () =
   expect(result.status).toBe(503)
   expect(result.json).not.toHaveProperty('turns')
 })
+
+describe('6.62.0 (W14): a parked Agent CLI chat turn drains once the chat is quiet', () => {
+  beforeEach(() => { threadId = `0000000${seq++}-0000-4000-8000-000000000000`.slice(0, 36); delivered = []; clock = 10_000 })
+  it('holds while the gate reads working, delivers when it reads free; composers still never drain here', async () => {
+    writeQueue('cursor', threadId, [{
+      clientTurnId: 'ct-cli-1', cosSessionId: 'cos-1', provider: 'cursor', threadId, prompt: 'next',
+      queuedAt: clock, status: 'waiting', attempts: 0,
+    }])
+    gate = { attachable: false, reason: 'native_thread_working' }
+    const cli = { ...deps(), cursorCliChat: () => true }
+    expect(await drainThread('cursor', threadId, cli)).toEqual({ delivered: 0, held: 1, retired: 0 })
+    gate = { attachable: true, reason: null }
+    ended = false; activity = 'working'
+    // The quiet window is the CLI chat's turn-ended signal: no transcript clock is needed.
+    expect((await drainThread('cursor', threadId, cli)).delivered).toBe(1)
+    expect(delivered).toEqual(['ct-cli-1'])
+
+    writeQueue('cursor', threadId, [{
+      clientTurnId: 'ct-composer', cosSessionId: 'cos-1', provider: 'cursor', threadId, prompt: 'x',
+      queuedAt: clock, status: 'waiting', attempts: 0,
+    }])
+    delivered = []
+    const composer = { ...deps(), cursorCliChat: () => false }
+    expect((await drainThread('cursor', threadId, composer)).delivered).toBe(0)
+    const throwing = { ...deps(), cursorCliChat: () => { throw new Error('x') } }
+    expect((await drainThread('cursor', threadId, throwing)).delivered).toBe(0)
+    expect(delivered).toEqual([])
+  })
+})

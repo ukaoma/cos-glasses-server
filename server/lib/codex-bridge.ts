@@ -770,11 +770,18 @@ export async function callCodexStreaming(
     })
   }, WALL_MAX_MS)
 
+  let nativeSessionAnnounced = false
   function handleEvent(event: any) {
     const nextThreadId = extractCodexThreadId(event)
     if (nextThreadId && nextThreadId !== codexThreadId) {
       codexThreadId = nextThreadId
       updateCodexRun(run.runId, { codexThreadId })
+    }
+    // 6.62.0 (plan 3.9): the job links to its native thread at the first event naming it,
+    // not only at completion.
+    if (nextThreadId && !nativeSessionAnnounced) {
+      nativeSessionAnnounced = true
+      try { callbacks.onNativeSession?.({ provider: 'codex', cliSessionId: nextThreadId }) } catch { /* linkage is best effort */ }
     }
 
     const status = toolStatus(event)

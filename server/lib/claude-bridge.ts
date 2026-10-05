@@ -346,7 +346,7 @@ export interface StreamCallbacks {
    * its session id in the first stream event; before this the id reached the job only with
    * the result, so COS Control could not show a New session from Work while it ran.
    */
-  onNativeSession?: (linkage: { cliSessionId: string }) => void
+  onNativeSession?: (linkage: { cliSessionId: string; provider?: 'claude' | 'codex' | 'cursor' }) => void
 }
 
 /** Claude CLI can emit `subtype: success` with `is_error: true`; the boolean

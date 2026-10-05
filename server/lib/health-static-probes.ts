@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { cursorSpawnEnv } from './cursor-spawn-env.js'
 import { resolveProviderBinary } from './provider-binary.js'
 import { PYTHON_BIN } from './python-bridge.js'
 import {
@@ -77,17 +78,26 @@ function cacheTtlMs(): number {
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_CACHE_TTL_MS
 }
 
-function execute(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function execute(file: string, args: string[], options: { cursorIsolation?: boolean } = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, {
-      encoding: 'utf8',
-      timeout: PROBE_TIMEOUT_MS,
-      maxBuffer: 256 * 1024,
-      killSignal: 'SIGKILL',
-    }, (error, stdout, stderr) => {
-      if (error) return reject(error)
-      resolve({ stdout: String(stdout), stderr: String(stderr) })
-    })
+    // 6.62.0 (plan 3.4): every `agent` spawn runs on a config dir of its own.
+    const isolation = options.cursorIsolation === true ? cursorSpawnEnv() : null
+    try {
+      execFile(file, args, {
+        encoding: 'utf8',
+        timeout: PROBE_TIMEOUT_MS,
+        maxBuffer: 256 * 1024,
+        killSignal: 'SIGKILL',
+        ...(isolation ? { env: isolation.env } : {}),
+      }, (error, stdout, stderr) => {
+        isolation?.release()
+        if (error) return reject(error)
+        resolve({ stdout: String(stdout), stderr: String(stderr) })
+      })
+    } catch (error) {
+      isolation?.release()
+      reject(error)
+    }
   })
 }
 
@@ -143,7 +153,7 @@ async function probeCursor(): Promise<{ value: string; available: boolean }> {
   const agentBinary = resolveAgentBinary()
   if (!agentBinary) return { value: 'error', available: false }
   try {
-    const result = await execute(agentBinary, ['about'])
+    const result = await execute(agentBinary, ['about'], { cursorIsolation: true })
     const combined = `${result.stdout}\n${result.stderr}`.trim()
     const version = parseCursorAboutVersion(combined)
     // Catalog discovery is authenticated downstream truth and can take up to

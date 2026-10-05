@@ -135,3 +135,21 @@ describe('Cursor composer turn signal in the gate', () => {
     expect(probes.cursorComposerTurnOpen!('not-an-id')).toBeNull()
   })
 })
+
+describe('6.62.0 (W14): an Agent CLI chat written in the last 30 s is working', () => {
+  const chat = () => ({ dir: '/cur/chats/h/x', cwd: '/w', hasConversation: true })
+  it('reads native_thread_working (queueable) inside the window and attachable after it', () => {
+    const busy = base({ cursorAgentSession: chat, cursorChatLastWriteMs: () => Date.now() - 10_000 })
+    expect(threadOccupancy('cursor', CURSOR, busy, dirs)).toEqual({ attachable: false, owners: [], reason: 'native_thread_working' })
+    const quiet = base({ cursorAgentSession: chat, cursorChatLastWriteMs: () => Date.now() - 31_000 })
+    expect(threadOccupancy('cursor', CURSOR, quiet, dirs)).toEqual({ attachable: true, owners: [], reason: null })
+  })
+  it('passes the chat dir and id, and a throwing or blind probe keeps the 6.61 verdict', () => {
+    const seen: string[] = []
+    const probes = base({ cursorAgentSession: chat, cursorChatLastWriteMs: (dir, id) => { seen.push(`${dir}|${id}`); return null } })
+    expect(threadOccupancy('cursor', CURSOR, probes, dirs).attachable).toBe(true)
+    expect(seen).toEqual([`/cur/chats/h/x|${CURSOR}`])
+    const throwing = base({ cursorAgentSession: chat, cursorChatLastWriteMs: () => { throw new Error('EACCES') } })
+    expect(threadOccupancy('cursor', CURSOR, throwing, dirs).attachable).toBe(true)
+  })
+})

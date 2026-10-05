@@ -3,10 +3,12 @@
 // Stable app slots (cursor-grok / cursor-composer) map to concrete CLI model
 // ids proven in Phase 0. `agent models` is text-only — parse + cache it.
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import {
   CURSOR_COMPOSER_MODEL,
   CURSOR_GROK_MODEL,
@@ -187,6 +189,21 @@ function unavailableCatalog(refreshError?: string, agentBinary?: string): Cursor
   return buildCursorModelCatalog([], 'unavailable', new Date().toISOString(), agentBinary, refreshError)
 }
 
+function readDiskModels(): CursorCatalogModel[] {
+  const path = catalogCachePath()
+  if (!existsSync(path)) return []
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { models?: CursorCatalogModel[] }
+    return Array.isArray(parsed.models)
+      ? parsed.models
+        .filter(m => typeof m?.id === 'string' && m.id)
+        .map(m => ({ id: m.id, displayName: normalizeCursorDisplayName(typeof m.displayName === 'string' ? m.displayName : '') }))
+      : []
+  } catch {
+    return []
+  }
+}
+
 function readDiskCatalog(): CursorModelCatalog | null {
   const path = catalogCachePath()
   if (!existsSync(path)) return null
@@ -244,10 +261,19 @@ async function fetchCliModels(agentBinary: string): Promise<CursorCatalogModel[]
   return new Promise((resolveModels, reject) => {
     const env = { ...process.env }
     delete env.CLAUDECODE
-    const child = spawn(agentBinary, ['models'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-    })
+    // 6.62.0 (plan 3.4): every `agent` spawn runs on a config dir of its own.
+    const isolation = cursorSpawnEnv({ baseEnv: env })
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawn(agentBinary, ['models'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: isolation.env,
+      })
+    } catch (error) {
+      isolation.release()
+      throw error
+    }
+    releaseCursorSpawnOnExit(child, isolation)
     let settled = false
     let stdout = ''
     let stderr = ''
@@ -282,6 +308,36 @@ async function fetchCliModels(agentBinary: string): Promise<CursorCatalogModel[]
 
 let catalogSnapshot = readDiskCatalog() ?? unavailableCatalog()
 let refreshPromise: Promise<CursorModelCatalog> | null = null
+
+/**
+ * 6.62.0 (plan 3.3, W17): EVERY model `agent models` listed, kept in memory beside the two
+ * slot `options`. The options stay two because the phone's slots read them
+ * (work-phone.ts); this list is what a Continue validates a session's own model against,
+ * so it can pass any model and modifier the installed Cursor offers.
+ */
+let fullModelList: CursorCatalogModel[] = readDiskModels()
+
+export function getFullCursorModelList(): readonly CursorCatalogModel[] {
+  return fullModelList
+}
+
+/** Exact, case-insensitive membership in the full list. */
+export function isKnownCursorModel(modelId: string): boolean {
+  const wanted = typeof modelId === 'string' ? modelId.trim().toLowerCase() : ''
+  return wanted.length > 0 && fullModelList.some(model => model.id.toLowerCase() === wanted)
+}
+
+/** The CLI's own display name for a listed model (normalized), or null. */
+export function cursorModelDisplayName(modelId: string): string | null {
+  const wanted = typeof modelId === 'string' ? modelId.trim().toLowerCase() : ''
+  const found = fullModelList.find(model => model.id.toLowerCase() === wanted)
+  return found ? normalizeCursorDisplayName(found.displayName) || null : null
+}
+
+/** Tests only. */
+export function __setFullCursorModelListForTests(models: CursorCatalogModel[]): void {
+  fullModelList = [...models]
+}
 
 export function getCursorModelCatalogSnapshot(): CursorModelCatalog {
   return catalogSnapshot
@@ -332,6 +388,7 @@ export async function getCursorModelCatalog(forceRefresh = false): Promise<Curso
     try {
       const models = await fetchCliModels(agentBinary)
       catalogSnapshot = buildCursorModelCatalog(models, 'cli', new Date().toISOString(), agentBinary)
+      fullModelList = models
       writeDiskCatalog(models, agentBinary)
     } catch (err) {
       const refreshError = err instanceof Error ? err.message : 'Live Cursor model discovery unavailable.'

@@ -36,6 +36,7 @@ import {
   buildClaudeAttachedArgs,
   buildCodexAttachedArgs,
   buildCursorAttachedArgs,
+  buildAttachedArgs,
   DEFAULT_ATTACHED_TIMEOUT_MS,
   CANCEL_KILL_GRACE_MS,
   KILL_GRACE_MS,
@@ -224,7 +225,7 @@ function deliver(
     nativeThreadId: TARGET,
     prompt: PROMPT,
     cwd: CWD,
-    policy: 'read_only',
+    policy: 'session_posture',
     deps: ctx.deps,
     ...over,
   } as any)
@@ -751,7 +752,7 @@ describe('request validation — every refusal happens before a process exists',
       nativeThreadId: TARGET,
       prompt: PROMPT,
       cwd: CWD,
-      policy: 'read_only',
+      policy: 'session_posture',
       deps: undefined as any,
     }))
     expect(result.reason).toBe('adapter_internal_error')
@@ -1622,5 +1623,143 @@ describe('6.53.3: a stopped turn waits for its whole tree by polling, and report
     // No byte was written, but a process of ours may be alive: fail closed.
     expect(classifyDelivery(result, true)).toEqual({ kind: 'ambiguous' })
     expect(ctx.ledger.snapshot().size).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6.62.0 (plan 3.1-3.3, D1): the Continue plan and the ONE allowance
+// ---------------------------------------------------------------------------
+
+describe('6.62.0: a Continue carries the session plan, and one allowance reaches both ban checks', () => {
+  const CODEX_DANGER = {
+    provider: 'codex', sandbox: 'danger-full-access', model: 'gpt-6.1-sol', effort: 'high',
+    networkAccess: true, source: 'session', note: "This Codex session's full access, GPT-6.1 Sol High.",
+  } as const
+  const CURSOR_FORCE = {
+    provider: 'cursor', mode: 'force', model: 'grok-4.7-xhigh-fast', matched: true,
+    note: 'Run Everything on Grok 4.7 Extra High Fast.',
+  } as const
+  const codexBin = () => ({ ok: true as const, path: '/Applications/ChatGPT.app/Contents/Resources/codex', source: 'absolute' as const })
+  const codexOk = (child: FakeChild) => {
+    child.emitStdout(`${JSON.stringify({ type: 'thread.started', thread_id: TARGET })}\n`)
+    child.close(0)
+  }
+
+  it('passes the Codex session model, effort and full access, every exec option before resume', async () => {
+    const ctx = harness({ resolveBinary: codexBin, script: codexOk })
+    const result = await deliver(ctx, { provider: 'codex', plan: CODEX_DANGER })
+    expect(result.ok).toBe(true)
+    const args = ctx.spawns[0]!.args
+    const resume = args.indexOf('resume')
+    expect(args.slice(0, resume)).toEqual([
+      'exec', '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="high"',
+      '--sandbox', 'danger-full-access', '--cd', CWD,
+    ])
+    expect(args.slice(resume)).toEqual(['resume', '--json', '--skip-git-repo-check', TARGET, '-'])
+  })
+
+  it('passes workspace-write with the session network access, and never -m for a null model', () => {
+    const args = buildCodexAttachedArgs(TARGET, CWD, {
+      provider: 'codex', sandbox: 'workspace-write', model: null, effort: 'low', networkAccess: false,
+      source: 'session', note: 'x',
+    })
+    expect(args).not.toContain('-m')
+    expect(args).toContain('sandbox_workspace_write.network_access=false')
+    expect(args[args.indexOf('--sandbox') + 1]).toBe('workspace-write')
+    expect(findBannedPermissionArg(args)).toBeNull()
+  })
+
+  it('keeps the 6.61 argv byte for byte when no plan is passed (the kill switch)', () => {
+    expect(buildCursorAttachedArgs(TARGET, CWD)).toEqual([
+      '-p', '--mode', 'ask', '--model', 'composer-2.5-fast', '--output-format', 'stream-json',
+      '--stream-partial-output', '--trust', '--workspace', CWD, '--resume', TARGET,
+    ])
+    expect(buildCodexAttachedArgs(TARGET, CWD)).toEqual([
+      'exec', '--sandbox', 'read-only', '--cd', CWD, 'resume', '--json', '--skip-git-repo-check', TARGET, '-',
+    ])
+  })
+
+  it('runs an attached Cursor Continue with --force on the session model', async () => {
+    const ctx = harness({ script: succeedWith(TARGET) })
+    const result = await deliver(ctx, { provider: 'cursor', plan: CURSOR_FORCE })
+    expect(result.ok).toBe(true)
+    const args = ctx.spawns[0]!.args
+    expect(args).toContain('--force')
+    expect(args).not.toContain('--mode')
+    expect(args[args.indexOf('--model') + 1]).toBe('grok-4.7-xhigh-fast')
+    expect(ctx.spawns[0]!.provider).toBe('cursor')
+  })
+
+  it('refuses at the BUILDER when the argv carries --force without the allowance', () => {
+    expect(() => buildAttachedArgs('cursor', TARGET, CWD, CURSOR_FORCE)).toThrow(/banned permission flag: --force/)
+    expect(() => buildAttachedArgs('cursor', TARGET, CWD, CURSOR_FORCE, { path: 'attached_continue', cursorForce: true })).not.toThrow()
+    expect(() => buildAttachedArgs('codex', TARGET, CWD, CODEX_DANGER)).toThrow(/danger-full-access/)
+    // The Cursor allowance does not open the Codex sandbox, nor the other way round.
+    expect(() => buildAttachedArgs('codex', TARGET, CWD, CODEX_DANGER, { path: 'attached_continue', cursorForce: true })).toThrow(/danger-full-access/)
+  })
+
+  it('refuses at the SPAWN BOUNDARY with the same allowance: a plan opens only its own slot', async () => {
+    // The seam hands back an argv carrying --force; the plan is a Codex one, whose allowance
+    // does not cover --force, so the boundary check must refuse with zero spawns.
+    const forced = harness({ resolveBinary: codexBin, script: codexOk })
+    const refused = expectFailure(await deliver(forced, {
+      provider: 'codex',
+      plan: CODEX_DANGER,
+      deps: { ...forced.deps, buildArgs: () => ['exec', '--force', '--sandbox', 'danger-full-access', 'resume', TARGET, '-'] },
+    }))
+    expect(refused.reason).toBe('unsupported_policy')
+    expect(refused.detail).toBe('banned_arg:--force')
+    expect(forced.spawns).toHaveLength(0)
+
+    // The same argv with the Cursor plan: --force is the one slot the allowance opens.
+    const allowed = harness({ script: succeedWith(TARGET) })
+    const ok = await deliver(allowed, {
+      provider: 'cursor',
+      plan: CURSOR_FORCE,
+      deps: { ...allowed.deps, buildArgs: () => ['-p', '--force', '--resume', TARGET] },
+    })
+    expect(ok.ok).toBe(true)
+    expect(allowed.spawns).toHaveLength(1)
+
+    // No plan, no allowance: the full ban, as in 6.61.
+    const none = harness({ script: succeedWith(TARGET) })
+    const bare = expectFailure(await deliver(none, {
+      provider: 'cursor',
+      deps: { ...none.deps, buildArgs: () => ['-p', '--force', '--resume', TARGET] },
+    }))
+    expect(bare.detail).toBe('banned_arg:--force')
+    expect(none.spawns).toHaveLength(0)
+  })
+
+  it('still bans every other bypass with the allowance in hand', () => {
+    const cursor = { path: 'attached_continue', cursorForce: true } as const
+    const codex = { path: 'attached_continue', codexSandbox: 'danger-full-access' } as const
+    expect(findBannedPermissionArg(['--force=true'], cursor)).toBe('--force')
+    expect(findBannedPermissionArg(['--yolo'], cursor)).toBe('--yolo')
+    expect(findBannedPermissionArg(['--sandbox=danger-full-access'], codex)).toBe('danger-full-access')
+    expect(findBannedPermissionArg(['--cd', '/x', 'danger-full-access'], codex)).toBe('danger-full-access')
+    expect(findBannedPermissionArg(['--dangerously-bypass-approvals-and-sandbox'], codex)).toBe('--dangerously-bypass-approvals-and-sandbox')
+    expect(findBannedPermissionArg(['-s', 'danger-full-access'], codex)).toBeNull()
+    // A forged allowance shape is no allowance.
+    expect(findBannedPermissionArg(['--force'], { path: 'fork', cursorForce: true } as any)).toBe('--force')
+  })
+
+  it('refuses a plan for another provider, a malformed plan, and the retired read_only word', async () => {
+    const wrong = harness({ script: succeedWith(TARGET) })
+    expect(expectFailure(await deliver(wrong, { provider: 'claude', plan: CURSOR_FORCE })).detail).toBe('invalid_plan')
+    const bad = harness({ resolveBinary: codexBin, script: codexOk })
+    expect(expectFailure(await deliver(bad, { provider: 'codex', plan: { ...CODEX_DANGER, model: '--yolo' } })).detail).toBe('invalid_plan')
+    const fallbackWide = harness({ resolveBinary: codexBin, script: codexOk })
+    expect(expectFailure(await deliver(fallbackWide, { provider: 'codex', plan: { ...CODEX_DANGER, source: 'fallback' } })).detail).toBe('invalid_plan')
+    const legacy = harness({ script: succeedWith(TARGET) })
+    expect(expectFailure(await deliver(legacy, { policy: 'read_only' })).reason).toBe('unsupported_policy')
+    for (const ctx of [wrong, bad, fallbackWide, legacy]) expect(ctx.spawns).toHaveLength(0)
+  })
+
+  it('keeps the Claude Continue argv unchanged whatever plan-shaped noise the request carries', async () => {
+    const ctx = harness({ script: succeedWith(TARGET) })
+    await deliver(ctx)
+    expect(ctx.spawns[0]!.args).toEqual(buildClaudeAttachedArgs(TARGET))
+    expect(buildClaudeAttachedArgs(TARGET)).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--resume', TARGET])
   })
 })

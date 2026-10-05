@@ -199,12 +199,20 @@ function normalizeAppServerModel(raw: any): CodexCatalogModel | null {
   }
 }
 
-function readDiskCatalog(): CodexModelCatalog | null {
+function readDiskModels(): CodexCatalogModel[] | null {
   const path = modelCachePath()
   if (!existsSync(path)) return null
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
-    const models = Array.isArray(parsed?.models)
+    const models = parseDiskModels(parsed)
+    return models.length > 0 ? models : null
+  } catch {
+    return null
+  }
+}
+
+function parseDiskModels(parsed: any): CodexCatalogModel[] {
+  return Array.isArray(parsed?.models)
       ? parsed.models.map((raw: any): CodexCatalogModel | null => {
         const id = typeof raw?.slug === 'string' ? raw.slug : ''
         if (!id) return null
@@ -230,6 +238,14 @@ function readDiskCatalog(): CodexModelCatalog | null {
         }
       }).filter((model: CodexCatalogModel | null): model is CodexCatalogModel => !!model)
       : []
+}
+
+function readDiskCatalog(): CodexModelCatalog | null {
+  const path = modelCachePath()
+  if (!existsSync(path)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const models = parseDiskModels(parsed)
     if (models.length === 0) return null
     const refreshedAt = typeof parsed?.fetched_at === 'string' ? parsed.fetched_at : new Date().toISOString()
     return buildCodexModelCatalog(models, 'disk-cache', refreshedAt)
@@ -337,6 +353,36 @@ async function fetchAppServerModels(): Promise<CodexCatalogModel[]> {
 
 let catalogSnapshot = readDiskCatalog() ?? cliDefaultCatalog()
 let refreshPromise: Promise<CodexModelCatalog> | null = null
+
+/**
+ * 6.62.0 (plan 3.2): EVERY model the last good discovery returned, kept in memory beside the
+ * two slot options. The slots stay two (the phone reads them); this list is what a Continue
+ * checks a session's own model against before it passes `-m`. Hidden models are excluded,
+ * exactly as `model/list` was asked (`includeHidden: false`).
+ */
+let fullModelList: CodexCatalogModel[] = readDiskModels() ?? []
+
+export function getFullCodexModelList(): readonly CodexCatalogModel[] {
+  return fullModelList
+}
+
+/** Is `modelId` one this Codex install lists? Exact id, case-insensitive. */
+export function isKnownCodexModel(modelId: string): boolean {
+  const wanted = typeof modelId === 'string' ? modelId.trim().toLowerCase() : ''
+  return wanted.length > 0 && fullModelList.some(model => model.id.toLowerCase() === wanted && !model.hidden)
+}
+
+/** The catalog's display name for a listed model, or null. */
+export function codexModelDisplayName(modelId: string): string | null {
+  const wanted = typeof modelId === 'string' ? modelId.trim().toLowerCase() : ''
+  const found = fullModelList.find(model => model.id.toLowerCase() === wanted)
+  return found ? formatDisplayName(found.displayName || found.id) : null
+}
+
+/** Tests only. */
+export function __setFullCodexModelListForTests(models: CodexCatalogModel[]): void {
+  fullModelList = [...models]
+}
 let periodicRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 export function getCodexModelCatalogSnapshot(): CodexModelCatalog {
@@ -352,6 +398,7 @@ export async function refreshCodexModelCatalog(
     const refreshed = buildCodexModelCatalog(models, 'app-server')
     if (refreshed.options.length === 0) throw new Error('No eligible GPT models')
     catalogSnapshot = refreshed
+    fullModelList = models.filter(model => !model.hidden)
   } catch {
     // Never downgrade a working app-server/disk catalog because one refresh
     // failed. A fresh disk read is useful only when there is no known model id.

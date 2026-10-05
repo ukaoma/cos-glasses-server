@@ -18,7 +18,8 @@
 // dictation cleaner ships (no `--tools ""`) wrote a 26.5k-token cache of tool definitions.
 // Codex and Cursor carry 11 to 17k tokens of their own harness on every call.
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -119,14 +120,24 @@ interface ProcessResult {
 export function runProcess(
   binary: string,
   args: string[],
-  opts: { stdin: string; cwd: string; timeoutMs: number; label: string },
+  opts: { stdin: string; cwd: string; timeoutMs: number; label: string; cursorIsolation?: boolean },
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     let stdout = ''
     let stderr = ''
     let settled = false
     let killTimer: NodeJS.Timeout | null = null
-    const proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: lensGistChildEnv(binary), cwd: opts.cwd })
+    // 6.62.0 (plan 3.4): a Cursor child gets its own config dir, so `--model` cannot
+    // rewrite the person's CLI default (C9). Removed when the child exits.
+    const isolation = opts.cursorIsolation === true ? cursorSpawnEnv({ baseEnv: lensGistChildEnv(binary) }) : null
+    let proc: ChildProcessWithoutNullStreams
+    try {
+      proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: isolation ? isolation.env : lensGistChildEnv(binary), cwd: opts.cwd })
+    } catch (error) {
+      isolation?.release()
+      throw error
+    }
+    if (isolation) releaseCursorSpawnOnExit(proc, isolation)
     const finish = (fn: () => void) => {
       if (settled) return
       settled = true
@@ -319,7 +330,7 @@ async function runCli(
 ): Promise<LensGistEngineRun> {
   const binary = binaryFor(provider)
   const result = await withScratchWorkspace(workspace =>
-    runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider }))
+    runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider, cursorIsolation: provider === 'cursor' }))
   const providerText = `${result.stdout}\n${result.stderr}`
   if (result.code !== 0) {
     // Codex reports its failure as a JSON event AND a non-zero exit; the event says why.
