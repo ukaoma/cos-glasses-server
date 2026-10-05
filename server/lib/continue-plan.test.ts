@@ -2,7 +2,7 @@
 // kill switch, and the one resolver every reader shares.
 
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -219,5 +219,12 @@ describe('continue_note width on the lens (integrator measurement, 2026-10-05)',
         }
       }
     }
+  })
+})
+
+describe('6.62.0 kill switch in the managed runtime contract', () => {
+  it('COS_CONTINUE_FULL_PERMISSIONS is an optional managed environment key, so Update Server carries it', () => {
+    const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
+    expect(contract.optionalEnvironment).toContain('COS_CONTINUE_FULL_PERMISSIONS')
   })
 })
