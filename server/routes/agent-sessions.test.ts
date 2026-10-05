@@ -796,6 +796,8 @@ describe('6.62.0 (plans 1.8, 3.12): reported_model and continue_note on rows and
     isKnownCodexModel: (id: string) => id === 'gpt-6.1-sol',
     codexModelLabel: (id: string) => (id === 'gpt-6.1-sol' ? 'GPT-6.1 Sol' : null),
     codexConfigText: () => `[projects."${home}/Ukaoma Chief Of Staff"]\ntrust_level = "trusted"\n`,
+    // K7: the session folder sits inside the trusted repo, whose root is the entry.
+    codexGitTrustRoot: async () => `${home}/Ukaoma Chief Of Staff`,
     isKnownCursorModel: () => false,
     cursorModelLabel: () => null,
     cursorChatDir: () => null,

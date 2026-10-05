@@ -252,7 +252,7 @@ describe('planCodexContinue', () => {
 
   it('omits -m for a model the app-server does not list, and says so', () => {
     const astra = parseTurnContextLine(turnContext({ model: 'gpt-6-astra' }))!
-    const plan = planCodexContinue(astra, cwd, deps())
+    const plan = planCodexContinue(astra, cwd, deps({ gitTrustRoot: '/Users/me/Documents/GitHub/Ukaoma Chief Of Staff' }))
     expect(plan.model).toBeNull()
     expect(plan.effort).toBe('high')
     expect(plan.note).toContain('Codex default model')
