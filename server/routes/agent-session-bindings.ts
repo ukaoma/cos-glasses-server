@@ -129,6 +129,7 @@ import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
+  DESK_RUN_EFFECT_COPY,
   cancelRefusalCopy,
   cancelTargetFor,
   type CancelFacts,
@@ -1718,6 +1719,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             cancelled: true,
             target,
             effective: 'next_tool_call',
+            effectCopy: DESK_RUN_EFFECT_COPY,
             ...common,
             settledPermissions: Number.isInteger(settledPermissions) && settledPermissions > 0 ? settledPermissions : 0,
           }
@@ -2057,7 +2059,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         activeEntry.controller.abort()
         // Noted as what the run becomes if the hop lands it: a desk run (Claude) or one only
         // its app can stop. Either way only the engine's own end discounts its open turn.
-        cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now, provider === 'claude' ? 'desk_run' : 'unsupported'), undefined)
+        // 6.62.0: a landed Codex or Cursor hop is a desk run COS can stop when that engine's
+        // hooks can (cancelTargetFor's own rule); Claude keeps its 6.53.3 answer unchanged.
+        const landedAs = provider === 'claude' ? 'desk_run'
+          : cancelTargetFor({ ...cancelFactsFor(provider, threadId, null), cosTurnInFlight: false, runningOutsideCos: true }) === 'desk_run' ? 'desk_run' : 'unsupported'
+        cancelProbe(() => cancelDeps.noteCancelled?.(provider, threadId, now, landedAs), undefined)
       }
       activeEntry.latched.replayKeys.push(replayKey)
       return answer(202, 'cos_turn', 'accepted', {
@@ -2102,6 +2108,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         cancelled: true,
         target,
         effective: 'next_tool_call',
+        // 6.62.0 (plan 3.8): the words for what the tap did, the same for every engine.
+        effectCopy: DESK_RUN_EFFECT_COPY,
         queuedHeld: queuedHeld(),
         queuedHoldMs: CANCEL_QUEUE_HOLD_MS,
         settledPermissions: Number.isInteger(settledPermissions) && settledPermissions > 0 ? settledPermissions : 0,

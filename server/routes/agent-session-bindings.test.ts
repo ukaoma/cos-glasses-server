@@ -4198,7 +4198,7 @@ describe('cancel a COS turn (6.53.0)', () => {
       for (const id of ['cc-claude-live-reached', 'cc-claude-live-reached-2']) {
         const replay = await postCancel(h.base, id)
         expect(replay.status, id).toBe(202)
-        expect(replay.body, id).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', turnId: replay.body.turnId, queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1, replayed: true })
+        expect(replay.body, id).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', effectCopy: 'Stops the run at its next command.', turnId: replay.body.turnId, queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1, replayed: true })
       }
     })
 
@@ -4369,7 +4369,7 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     const base = await start(deps({ cancel }))
     const res = await postCancel(base, 'cc-desk-0001')
     expect(res.status).toBe(202)
-    expect(res.body).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1 })
+    expect(res.body).toEqual({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', effectCopy: 'Stops the run at its next command.', queuedHeld: 2, queuedHoldMs: 120_000, settledPermissions: 1 })
     expect(calls.halt).toEqual([{ sessionId: SID, at: NOW, clientCancelId: 'cc-desk-0001' }])
     expect(calls.settle).toEqual([SID])
     expect(calls.noted).toEqual([['claude', SID, NOW, 'desk_run']])

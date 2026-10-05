@@ -70,11 +70,13 @@ export type KickPlan = { kind: 'kick' } | { kind: 'kick_when_registry_idle'; sto
  *  - a SubagentStop never kicks: a background sub-agent finishing after the Stop is
  *    answered by the model in a turn of its own, whose Stop kicks, and neither the hook
  *    short-circuit nor the B6 clause vouches for a session whose newest event is a
- *    SubagentStop, so a kick there could only fall through to the 30 s backstop.
+ *    SubagentStop, so a kick there could only fall through to the 30 s backstop;
+ *  - 6.62.0: a Codex `Interrupt` ends a turn the way a Stop does (Esc in Codex fires no
+ *    Stop), so it follows the same rule; no Claude or Cursor hook emits it.
  */
 export function kickPlanFor(signal: KickSignalFacts, event: string, eventTs: number, child: boolean): KickPlan {
   if (child) return event === 'SessionEnd' ? { kind: 'kick' } : null
-  if (event !== 'Stop') return null
+  if (event !== 'Stop' && event !== 'Interrupt') return null
   if (signal.turnOpen || signal.subagentsOpen > 0 || signal.ended) return null
   return { kind: 'kick_when_registry_idle', stopAt: typeof signal.stopAt === 'number' ? signal.stopAt : eventTs }
 }

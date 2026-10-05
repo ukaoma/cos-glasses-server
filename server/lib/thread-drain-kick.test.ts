@@ -105,6 +105,13 @@ describe('the Stop-driven drain kick', () => {
     expect(kickPlanFor({ ...closed, turnOpen: true }, 'SessionEnd', 5_001, true)).toEqual({ kind: 'kick' })
   })
 
+  it('6.62.0: a Codex Interrupt with the turn closed kicks like a Stop; with the turn open or from a child it asks nothing', () => {
+    const closed = { turnOpen: false, subagentsOpen: 0, ended: null, stopAt: null }
+    expect(kickPlanFor(closed, 'Interrupt', 7_000, false)).toEqual({ kind: 'kick_when_registry_idle', stopAt: 7_000 })
+    expect(kickPlanFor({ ...closed, turnOpen: true }, 'Interrupt', 7_000, false)).toBeNull()
+    expect(kickPlanFor(closed, 'Interrupt', 7_000, true)).toBeNull()
+  })
+
   it('a rejecting drain is swallowed and the next sweep still runs', async () => {
     let n = 0
     const kick = createDrainKick({ drain: async () => { n++; if (n === 1) throw new Error('boom'); return 0 }, queuedThreadIds: () => [FULL] })
