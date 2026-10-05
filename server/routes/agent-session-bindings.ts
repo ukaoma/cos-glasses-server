@@ -477,7 +477,7 @@ export interface CancelDeps {
    * have reached) the open session. Writes the halt marker, and re-arms it once when that
    * turn's own UserPromptSubmit deletes it (`haltHandedOffTurn`). False: not armed.
    */
-  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean; verbatim?: boolean }) => boolean
+  haltHandedOffTurn?: (sessionId: string, marker: { at: number; clientCancelId: string }, turn: { prompt: string; sentAt: number; unverified?: boolean; verbatim?: boolean; deferMarker?: boolean }) => boolean
   /** Append to `data/session-cancel.jsonl`. */
   ledger?: (row: SessionCancelLedgerRow) => void
 }
@@ -1684,7 +1684,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     provider: string,
     threadId: string,
     reached: 'none' | 'reached' | 'maybe',
-    turn: { prompt: string; sentAt: number },
+    turn: { prompt: string; sentAt: number; busy?: boolean },
   ): void => {
     const latch = entry.latched
     if (latch === null) return
@@ -1712,6 +1712,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // 6.62.0 (plan 3.6): a Codex turn went into the app's own queue, which hands its
           // text to the session's UserPromptSubmit as is: matched verbatim, no peer unwrap.
           ...(provider === 'codex' ? { verbatim: true } : {}),
+          // 6.62.0 /qa (W3): on a BUSY hop the session is still running Miles's OWN desk turn.
+          // A marker written now would stop that turn at its next tool, so only the re-arm is
+          // registered: the marker lands on the delivered turn's own UserPromptSubmit.
+          ...(turn.busy === true ? { deferMarker: true } : {}),
         }) === true, false)
         if (armed) {
           const settledPermissions = cancelProbe(() => cancelDeps.settlePermissions?.(threadId) ?? 0, 0)
@@ -1968,8 +1972,17 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // truncated-id hole opened. The tests pin the ordering behaviorally instead:
     // probes that throw on every call still return `unsupported_provider` /
     // `invalid_thread_id`, which is only possible if nothing was probed.
-    const verdictBody = withCancel(runOccupancy(provider, threadId))
-    res.json({ ...verdictBody, ...(await continueNoteFor(provider, threadId)) })
+    // 6.62.0 /qa (Q2): the busy Codex hop makes the verdict attachable, but a desk run IS
+    // working on that thread, so the cancel row reads the RAW reason. Built from the verdict's
+    // reason, the lens hid Cancel run on every busy Codex Desktop thread.
+    const detected = routeOccupancy(provider, threadId)
+    const verdictBody = projectAttachability(detected)
+    const cancelReason = detected.busyHolder === true ? 'native_thread_working' : verdictBody.reason
+    res.json({
+      ...verdictBody,
+      cancel: cancelFieldFor(provider, threadId, cancelReason),
+      ...(await continueNoteFor(provider, threadId)),
+    })
   })
 
   // ------------------------------------------------------------------ cancel
@@ -2901,7 +2914,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         if (live?.ok) {
           // 6.53.3: queued in the Codex app, which only the app can stop ("Stop it there").
           const latched = latchedHere()
-          if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt })
+          if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt, busy: busyCodexHop })
           console.log(`[agent-session-bindings] turn delivered live provider=codex turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} queuedId=${live.queuedId ?? 'null'}`)
           respond(200, {
             turnId,
@@ -2920,7 +2933,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // latched on the way that is the whole turn: cancelled, and no child.
         const codexLatched = latchedHere()
         if (codexLatched && live !== null && live.reason !== 'unverified') {
-          settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt })
+          settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'none', { prompt, sentAt: handOffAt, busy: busyCodexHop })
           console.log(`[agent-session-bindings] turn cancelled during live hand-off provider=codex turnId=${turnId} bindingId=${bindingId} hop=${live.reason}`)
           return refuseTurn('turn_cancelled', { retryable: false })
         }
@@ -2956,7 +2969,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             })
             console.warn(`[agent-session-bindings] fence set site=codex_live provider=codex target=${opaqueRevision(key)} turnId=${turnId} bindingId=${bindingId} headBefore=${head.digest} adapterReason=codex_queue_unverified`)
             // 6.53.3: a row MAY be in the Codex app's queue; a latched cancel says where to stop it.
-            if (codexLatched) settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt })
+            if (codexLatched) settleLatchedCancel(codexLatched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt, busy: busyCodexHop })
             return reportAmbiguous()
           }
           // Nothing was queued, and the child cannot run against a held thread. Not

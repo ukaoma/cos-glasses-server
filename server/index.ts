@@ -25,7 +25,7 @@ import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
 import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
-import { writeHaltMarker } from './lib/session-halt.js'
+import { clearingHaltOnSpawn, writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancel } from './lib/session-cancel.js'
 import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
@@ -619,7 +619,9 @@ const deliverAttachedTurnForRoute = async (request: {
       plan,
       abortSignal: request.abortSignal,
       deps: {
-        ...base,
+        // 6.62.0 /qa (Q4): the child is about to start, every gate passed (a Continue or a
+        // queue drain): no earlier desk-cancel marker may deny COS's own turn.
+        ...clearingHaltOnSpawn(base, request.nativeThreadId, 'continue'),
         // `startMs` is deliberately unused: the adapter already probed it as a GATE
         // (a null there aborts before this is reached), and the route probes again
         // as the recorder. One record, one authority.
@@ -699,7 +701,19 @@ const forkThreadForRoute = async (request: {
     ...request,
     prompt,
     ...(cursorModel ? { cursorModel } : {}),
-    deps: realForkDeps((provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps)),
+    deps: forkDepsClearingIdleHalt(request.provider, request.nativeThreadId),
+  })
+}
+
+/**
+ * 6.62.0 /qa (Q4): the fork deps, with the source thread's halt marker cleared at the spawn,
+ * but ONLY when no desk run is working there. A fork has no occupancy gate (it may run while
+ * the desk works), and clearing then would undo the person's own cancel.
+ */
+function forkDepsClearingIdleHalt(provider: 'claude' | 'codex' | 'cursor', threadId: string) {
+  return clearingHaltOnSpawn(realForkDeps((p, id) => nativeHead(p, id, nativeHeadDeps)), threadId, 'fork', () => {
+    const reason = threadOccupancy(provider, threadId, occupancyProbes, occupancyDirs).reason
+    return reason !== 'native_thread_working' && reason !== 'live_desktop_process'
   })
 }
 

@@ -13,6 +13,7 @@ import {
   __resetHaltRearmsForTests,
   clearHaltMarker,
   clearHaltMarkerOnSessionEnd,
+  clearingHaltOnSpawn,
   dropHaltRearm,
   haltDeliveredTurn,
   hasPendingHaltRearm,
@@ -300,5 +301,64 @@ describe('6.62.0 (plan 3.6): a Codex turn queued into the Codex app re-arms VERB
     haltDeliveredTurn(SID, marker, { prompt: PROMPT, after: NOW, rearm: true, now: NOW }, dir)
     clearHaltMarker(SID, dir)
     expect(rearmHaltOnPrompt(SID, NOW + 5, peer, dir, NOW + 5)).toBe(true)
+  })
+})
+
+describe('6.62.0 /qa (W3): a busy-hop cancel writes nothing until the delivered turn starts', () => {
+  afterEach(() => __resetHaltRearmsForTests())
+  const marker = { at: NOW, clientCancelId: 'cc-busy-hop' }
+  const PROMPT = 'then ship the build'
+
+  it('deferMarker registers the re-arm only; the marker lands on the delivered prompt', () => {
+    const dir = folder()
+    expect(haltDeliveredTurn(SID, marker, { prompt: PROMPT, after: NOW, rearm: true, now: NOW, verbatim: true, deferMarker: true }, dir)).toBe(true)
+    // Miles's own desk turn keeps running: no marker yet.
+    expect(hasHaltMarker(SID, dir)).toBe(false)
+    expect(hasPendingHaltRearm(SID)).toBe(true)
+    expect(rearmHaltOnPrompt(SID, NOW + 30_000, PROMPT, dir, NOW + 30_000)).toBe(true)
+    expect(JSON.parse(readFileSync(join(dir, SID), 'utf-8'))).toEqual(marker)
+  })
+
+  it('a delivered turn already started (rearm false) is ours: the marker is written at once', () => {
+    const dir = folder()
+    expect(haltDeliveredTurn(SID, marker, { prompt: PROMPT, after: NOW, rearm: false, now: NOW, deferMarker: true }, dir)).toBe(true)
+    expect(hasHaltMarker(SID, dir)).toBe(true)
+  })
+
+  it('without deferMarker the 6.53.3 behaviour is unchanged: written now and re-armed', () => {
+    const dir = folder()
+    haltDeliveredTurn(SID, marker, { prompt: PROMPT, after: NOW, rearm: true, now: NOW }, dir)
+    expect(hasHaltMarker(SID, dir)).toBe(true)
+    expect(hasPendingHaltRearm(SID)).toBe(true)
+  })
+
+  it('a deferred cancel for an id that is not a session id is refused', () => {
+    expect(haltDeliveredTurn('nope', marker, { prompt: PROMPT, after: NOW, rearm: true, now: NOW, deferMarker: true }, folder())).toBe(false)
+  })
+})
+
+describe('6.62.0 /qa (Q4): COS starting its own child clears a leftover marker', () => {
+  it('clears at the spawn, not before, and only when the probe says no desk run is working', () => {
+    const dir = folder()
+    const spawned: string[] = []
+    const deps = { spawn: (request: { id: string }) => { spawned.push(request.id); return { pid: 1 } }, other: 7 }
+    writeHaltMarker(SID, { at: NOW, clientCancelId: 'cc-left' }, dir)
+    const wrapped = clearingHaltOnSpawn(deps as never as typeof deps, SID, 'continue', () => true, dir)
+    expect(hasHaltMarker(SID, dir)).toBe(true)
+    expect(wrapped.other).toBe(7)
+    wrapped.spawn({ id: 'child-1' } as never)
+    expect(hasHaltMarker(SID, dir)).toBe(false)
+    expect(spawned).toEqual(['child-1'])
+
+    // A fork while the desk is working (or a probe that throws) keeps the person's cancel.
+    for (const mayClear of [() => false, () => { throw new Error('probe') }]) {
+      writeHaltMarker(SID, { at: NOW, clientCancelId: 'cc-desk' }, dir)
+      clearingHaltOnSpawn(deps as never as typeof deps, SID, 'fork', mayClear, dir).spawn({ id: 'fork' } as never)
+      expect(hasHaltMarker(SID, dir)).toBe(true)
+    }
+    // Another thread's marker is never touched.
+    writeHaltMarker(OTHER, { at: NOW, clientCancelId: 'cc-other' }, dir)
+    clearingHaltOnSpawn(deps as never as typeof deps, SID, 'continue', () => true, dir).spawn({ id: 'x' } as never)
+    expect(hasHaltMarker(OTHER, dir)).toBe(true)
   })
 })

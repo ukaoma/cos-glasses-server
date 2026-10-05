@@ -55,7 +55,7 @@ import { boundToMarker, targetKey, type NativeBinding } from '../lib/agent-sessi
 import { deliverAttachedTurn, CANCEL_KILL_GRACE_MS, type AttachedChildProcess } from '../lib/attached-provider-adapter.js'
 import { hasHaltMarker, writeHaltMarker } from '../lib/session-halt.js'
 import type { CancelDeps } from './agent-session-bindings.js'
-import { setCodexDeskCancelReady, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
+import { DESK_RUN_EFFECT_COPY, setCodexDeskCancelReady, type SessionCancelLedgerRow } from '../lib/session-cancel.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
@@ -4547,4 +4547,75 @@ describe('6.62.0 (plan 3.12): the attachability verdict carries continue_note', 
       expect(typeof body.attachable).toBe('boolean')
     }
   })
+})
+
+describe('6.62.0 /qa: Cancel run on a busy Codex hop (Q2) and a latched hop cancel (W3, Q1)', () => {
+  const heldBusy = () => probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() })
+  const heldIdle = () => probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() - 10 * 60_000 })
+  const turnBody = (a: { epoch: number; targetKey: string; boundTo: string }, clientTurnId: string) =>
+    ({ prompt: PROMPT, clientTurnId, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo })
+  async function codexAttached(base: string) {
+    const res = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    return { bindingId: res.body.bindingId, epoch: res.body.epoch, boundTo: res.body.boundTo, targetKey: targetKey('codex', CODEX_THREAD) }
+  }
+
+  it('Q2: a busy app-held Codex thread is attachable through the hop AND keeps the desk cancel row', async () => {
+    for (const ready of [true, false]) {
+      setCodexDeskCancelReady(() => ready)
+      try {
+        const { cancel } = recordingCancel()
+        const base = await start(writeDeps({
+          probes: heldBusy(),
+          cancel,
+          deliverCodexLiveTurn: async () => ({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue' }),
+          busyCodexHop: () => true,
+        }))
+        const body = await (await fetch(`${base}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
+        expect(body.attachable).toBe(true)
+        // What cancelTargetFor answers for a Codex desk run: desk_run with trusted hooks, else unsupported.
+        expect(body.cancel, String(ready)).toBe(ready ? 'desk_run' : 'unsupported')
+      } finally {
+        setCodexDeskCancelReady(() => false)
+      }
+    }
+  })
+
+  for (const [label, busy] of [['busy', true], ['idle', false]] as const) {
+    it(`a cancel latched on a ${label} Codex hop notes a desk run (trusted hooks) and ${busy ? 'DEFERS' : 'writes'} the marker`, async () => {
+      setCodexDeskCancelReady(() => true)
+      try {
+        let entered!: () => void
+        let release!: (value: { ok: boolean; reason: string; verifiedBy: string; queuedId: string }) => void
+        const liveEntered = new Promise<void>(resolve => { entered = resolve })
+        const heldLive = new Promise<{ ok: boolean; reason: string; verifiedBy: string; queuedId: string }>(resolve => { release = resolve })
+        const { cancel, calls } = recordingCancel({ deskRunning: () => false })
+        const base = await start(writeDeps({
+          probes: busy ? heldBusy() : heldIdle(),
+          cancel,
+          deliverCodexLiveTurn: async () => { entered(); return heldLive },
+          ...(busy ? { busyCodexHop: () => true } : {}),
+        }))
+        const a = await codexAttached(base)
+        const sent = fetch(`${base}${turnsPath(a.bindingId)}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(turnBody(a, `ct-latched-${label}`)),
+        })
+        await liveEntered
+        const stopped = await postCancel(base, `cc-latched-${label}`, 'codex', CODEX_THREAD)
+        expect(stopped.body).toMatchObject({ cancelled: true, target: 'cos_turn', state: 'stopping' })
+        expect(calls.noted).toEqual([['codex', CODEX_THREAD, NOW, 'desk_run']])
+        release({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-1' })
+        expect((await sent).status).toBe(200)
+        expect(calls.handed).toHaveLength(1)
+        expect(calls.handed[0]).toMatchObject({ sessionId: CODEX_THREAD, prompt: PROMPT, verbatim: true })
+        if (busy) expect(calls.handed[0]).toMatchObject({ deferMarker: true })
+        else expect('deferMarker' in calls.handed[0]!).toBe(false)
+        const replay = await postCancel(base, `cc-latched-${label}`, 'codex', CODEX_THREAD)
+        expect(replay.body).toMatchObject({ cancelled: true, target: 'desk_run', effective: 'next_tool_call', effectCopy: DESK_RUN_EFFECT_COPY, replayed: true })
+      } finally {
+        setCodexDeskCancelReady(() => false)
+      }
+    })
+  }
 })
