@@ -8,7 +8,11 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  CURSOR_ASK_UNACKED_NOTE,
   CURSOR_COMPOSER_NOTE,
+  CONTINUE_NOTE_HEADER,
+  continueNoteAcknowledged,
+  fallbackContinueNote,
   boundedContinueNote,
   continueAllowanceFor,
   continueFullPermissionsEnabled,
@@ -163,9 +167,18 @@ describe('resolveSessionContinueFacts', () => {
     const db = join(chatDir, 'store.db')
     execFileSync(SQLITE3_BIN, [db, 'CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);'])
     execFileSync(SQLITE3_BIN, [db, `INSERT INTO blobs VALUES ('a', CAST('{"providerOptions":{"cursor":{"modelName":"grok-4.7-low-fast"}}}' AS BLOB))`])
-    const facts = await resolveSessionContinueFacts({ provider: 'cursor', threadId: THREAD, transcriptPath: null, cwd: '/w' }, deps({ cursorChatDir: () => chatDir }))
+    const facts = await resolveSessionContinueFacts({ provider: 'cursor', threadId: THREAD, transcriptPath: null, cwd: '/w', noteAck: true }, deps({ cursorChatDir: () => chatDir }))
     expect(facts.plan).toEqual({ provider: 'cursor', mode: 'force', model: 'grok-4.7-low-fast', matched: true, note: 'Run Everything on Grok 4.7 Low Fast.' })
     expect(facts.reportedModel).toBe('grok-4.7-low-fast')
+    // 6.62.0 /qa (Q3): a client that does not show the note keeps the 6.61 Ask posture.
+    for (const noteAck of [false, undefined]) {
+      const unacked = await resolveSessionContinueFacts({ provider: 'cursor', threadId: THREAD, transcriptPath: null, cwd: '/w', noteAck }, deps({ cursorChatDir: () => chatDir }))
+      expect(unacked).toEqual({ note: CURSOR_ASK_UNACKED_NOTE, reportedModel: 'grok-4.7-low-fast' })
+    }
+    // The kill switch still wins over the acknowledgement.
+    const off = await resolveSessionContinueFacts({ provider: 'cursor', threadId: THREAD, transcriptPath: null, cwd: '/w', noteAck: true }, deps({ cursorChatDir: () => chatDir, env: { COS_CONTINUE_FULL_PERMISSIONS: '0' } }))
+    expect(off.plan).toBeUndefined()
+    expect(off.note).toBe(killSwitchNote('cursor', 'read-only'))
 
     const composer = await resolveSessionContinueFacts({ provider: 'cursor', threadId: THREAD, transcriptPath: null, cwd: null }, deps())
     expect(composer).toEqual({ note: CURSOR_COMPOSER_NOTE, reportedModel: null })
@@ -226,5 +239,27 @@ describe('6.62.0 kill switch in the managed runtime contract', () => {
   it('COS_CONTINUE_FULL_PERMISSIONS is an optional managed environment key, so Update Server carries it', () => {
     const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
     expect(contract.optionalEnvironment).toContain('COS_CONTINUE_FULL_PERMISSIONS')
+  })
+})
+
+describe('6.62.0 /qa: the Continue-note header (Q3) and the fixed fallback note (W9)', () => {
+  it('reads the header strictly: exactly 1', () => {
+    expect(CONTINUE_NOTE_HEADER).toBe('x-cos-continue-note')
+    expect(continueNoteAcknowledged('1')).toBe(true)
+    expect(continueNoteAcknowledged([' 1 '])).toBe(true)
+    for (const value of ['0', 'true', '', undefined, null, ['0', '1']]) expect(continueNoteAcknowledged(value), String(value)).toBe(false)
+  })
+
+  it('a missed budget still says what the Continue does; Claude has none', () => {
+    expect(fallbackContinueNote('cursor', { noteAck: true, env: {} })).toBe("Run Everything on this chat's model.")
+    expect(fallbackContinueNote('cursor', { noteAck: false, env: {} })).toBe(CURSOR_ASK_UNACKED_NOTE)
+    expect(fallbackContinueNote('codex', { noteAck: false, env: {} })).toBe("This Codex session's own access.")
+    expect(fallbackContinueNote('claude', { noteAck: true, env: {} })).toBeNull()
+    expect(fallbackContinueNote('cursor', { noteAck: true, env: { COS_CONTINUE_FULL_PERMISSIONS: '0' } })).toBe(killSwitchNote('cursor', 'read-only'))
+    expect(fallbackContinueNote('codex', { noteAck: true, env: { COS_CONTINUE_FULL_PERMISSIONS: '0' }, codexFallbackSandbox: 'workspace-write' }))
+      .toBe(killSwitchNote('codex', 'workspace-write'))
+    for (const note of [CURSOR_ASK_UNACKED_NOTE, fallbackContinueNote('cursor', { noteAck: true, env: {} }), fallbackContinueNote('codex', { noteAck: true, env: {} })]) {
+      expect(note!.length).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
+    }
   })
 })

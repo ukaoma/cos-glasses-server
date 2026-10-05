@@ -121,7 +121,7 @@ import {
   type BindingState,
   type NativeBinding,
 } from '../lib/agent-session-binding-store.js'
-import { boundedContinueNote } from '../lib/continue-plan.js'
+import { boundedContinueNote, CONTINUE_NOTE_HEADER, continueNoteAcknowledged, fallbackContinueNote } from '../lib/continue-plan.js'
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
@@ -260,6 +260,11 @@ export interface AttachedTurnRequest {
    */
   onSpawn: (pid: number) => boolean
   /**
+   * 6.62.0 /qa (Q3): the client sent `X-COS-Continue-Note: 1`, i.e. it shows `continue_note`.
+   * Only then may a Cursor Continue run Run Everything; otherwise it keeps the 6.61 Ask posture.
+   */
+  continueNoteAck?: boolean
+  /**
    * 6.53.0: aborted by POST .../cancel. The adapter checks it before the spawn and
    * before the prompt write, and stops the child's process group after. Optional so an
    * adapter that ignores it is byte-for-byte the 6.52 route.
@@ -386,7 +391,14 @@ export interface AgentSessionBindingsDeps {
    * `continue_note`. Optional; absent, null, slow (past `CONTINUE_NOTE_BUDGET_MS`) or a
    * throw omits the field, and the verdict is unchanged.
    */
-  continueNote?: (provider: BindableProvider, threadId: string) => Promise<string | null> | string | null
+  continueNote?: (provider: BindableProvider, threadId: string, options?: { noteAck: boolean }) => Promise<string | null> | string | null
+
+  /**
+   * 6.62.0 /qa (W9): the note when `continueNote` misses its budget, throws, or answers
+   * nothing usable, so a Cursor Continue never runs Run Everything unannounced. Defaults to
+   * `fallbackContinueNote` with this process's environment.
+   */
+  continueNoteFallback?: (provider: BindableProvider, options: { noteAck: boolean }) => string | null
 
   /**
    * The self-recursion ledger. Defaults to the real process-wide one.
@@ -1906,21 +1918,40 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     res.json({ released: true, target, provider: outcome.row.provider })
   })
 
-  /** 6.62.0 (plan 3.12): `continue_note` for the verdict, bounded in time and length. */
-  const continueNoteFor = async (provider: string, threadId: string): Promise<{ continue_note?: string }> => {
+  /**
+   * 6.62.0 (plan 3.12): `continue_note` for the verdict, bounded in time and length. 6.62.0
+   * /qa (W9): a read that misses the budget, throws, or answers nothing usable gets the
+   * provider's fixed note instead, never no note (Claude has none either way).
+   */
+  const continueNoteFor = async (provider: string, threadId: string, noteAck: boolean): Promise<{ continue_note?: string }> => {
     const read = deps.continueNote
     if (typeof read !== 'function' || !isBindableProvider(provider) || !isValidNativeThreadId(threadId)) return {}
-    let timer: ReturnType<typeof setTimeout> | null = null
-    try {
-      const note = await Promise.race([
-        Promise.resolve(read(provider, threadId)),
-        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTINUE_NOTE_BUDGET_MS) }),
-      ])
+    const fallback = (): { continue_note?: string } => {
+      let note: string | null = null
+      try {
+        note = deps.continueNoteFallback
+          ? deps.continueNoteFallback(provider, { noteAck })
+          : fallbackContinueNote(provider, { noteAck })
+      } catch {
+        note = null
+      }
       const bounded = boundedContinueNote(note)
       return bounded ? { continue_note: bounded } : {}
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let missed = false
+    try {
+      const note = await Promise.race([
+        Promise.resolve(read(provider, threadId, { noteAck })),
+        new Promise<null>(resolve => { timer = setTimeout(() => { missed = true; resolve(null) }, CONTINUE_NOTE_BUDGET_MS) }),
+      ])
+      const bounded = boundedContinueNote(note)
+      if (bounded) return { continue_note: bounded }
+      if (missed) console.warn(`[agent-session-bindings] continue note missed its ${CONTINUE_NOTE_BUDGET_MS} ms budget provider=${provider}: fixed note sent`)
+      return fallback()
     } catch (error) {
       console.error(`[agent-session-bindings] continue note failed: ${error instanceof Error ? error.message : error}`)
-      return {}
+      return fallback()
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -1981,7 +2012,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     res.json({
       ...verdictBody,
       cancel: cancelFieldFor(provider, threadId, cancelReason),
-      ...(await continueNoteFor(provider, threadId)),
+      ...(await continueNoteFor(provider, threadId, continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]))),
     })
   })
 
@@ -3021,6 +3052,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           expectedNativeHead: head.raw,
           prompt,
           abortSignal: cancelController.signal,
+          // 6.62.0 /qa (Q3): only a client that shows `continue_note` gets Cursor Run Everything.
+          continueNoteAck: continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]),
           onSpawn: (pid: number): boolean => {
             // THE SELF-RECURSION ORDER. The child registers itself against the id
             // we are targeting, so unless it is in the ledger the next occupancy

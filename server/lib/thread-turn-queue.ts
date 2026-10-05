@@ -87,6 +87,12 @@ export interface QueuedThreadTurn {
   /** The SERVER's reason for a terminal outcome. Never the client's wording. */
   reason?: string
   settledAt?: number
+  /**
+   * 6.62.0 /qa (Q3): the client that parked this turn sent `X-COS-Continue-Note: 1` (it shows
+   * `continue_note`). The drain repeats the header, so a Cursor CLI chat runs Run Everything
+   * only for a client that said it would show it. Absent: the 6.61 Ask posture.
+   */
+  continueNoteAck?: true
 }
 
 /**

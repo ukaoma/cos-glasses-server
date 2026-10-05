@@ -57,6 +57,7 @@ import { codexLiveQueueEnabled } from './lib/codex-live-queue.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { resolveSessionContinueFacts } from './lib/session-continue-facts.js'
+import { fallbackContinueNote } from './lib/continue-plan.js'
 import { realContinueFactsDeps } from './lib/session-continue-facts-real.js'
 import { prepareCursorFork, resolveCursorForkWorkspace } from './lib/cursor-fork-context.js'
 import { readComposerFacts } from './lib/cursor-session-model.js'
@@ -553,6 +554,8 @@ const deliverAttachedTurnForRoute = async (request: {
   onSpawn: (pid: number) => boolean
   /** 6.53.0: the cancel from the lens, passed straight through to the adapter. */
   abortSignal?: AbortSignal
+  /** 6.62.0 /qa (Q3): the client shows `continue_note`; only then Cursor Run Everything. */
+  continueNoteAck?: boolean
 }): Promise<unknown> => {
   // Resolved here, not stored on the binding: the cwd is read from the transcript,
   // which records it verbatim. Decoding the project slug is lossy — this Mac's own
@@ -593,6 +596,7 @@ const deliverAttachedTurnForRoute = async (request: {
         threadId: request.nativeThreadId,
         transcriptPath: attachedWorkspaceDeps.transcriptPath(request.provider, request.nativeThreadId),
         cwd: workspace.path,
+        noteAck: request.continueNoteAck === true,
       }, continueFactsDeps)
       plan = facts.plan
     } catch (error) {
@@ -966,12 +970,15 @@ app.use('/api', createAgentSessionBindingsRouter({
   busyCodexHop: (threadId: string) => codexLiveQueueEnabled()
     && readQueue('codex', threadId, Date.now()).every(turn => turn.status !== 'waiting' && turn.status !== 'delivering'),
   // 6.62.0 (plan 3.12): the attach verdict says what a Continue would run with.
-  continueNote: async (provider, threadId) => (await resolveSessionContinueFacts({
+  continueNote: async (provider, threadId, options) => (await resolveSessionContinueFacts({
     provider,
     threadId,
     transcriptPath: attachedWorkspaceDeps.transcriptPath(provider, threadId),
     cwd: resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)?.path ?? null,
+    noteAck: options?.noteAck === true,
   }, continueFactsDeps)).note,
+  // 6.62.0 /qa (W9): the fixed note when the read misses its budget.
+  continueNoteFallback: (provider, options) => fallbackContinueNote(provider, { noteAck: options.noteAck, codexFallbackSandbox: continueFactsDeps.codexFallbackSandbox() }),
   forkThread: forkThreadForRoute,
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path

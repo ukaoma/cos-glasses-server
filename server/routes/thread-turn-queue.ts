@@ -16,6 +16,7 @@
 // EVERY DEPENDENCY IS INJECTED so the whole path is testable without a live server.
 
 import { Router, type Request, type Response } from 'express'
+import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 import { nativeQueueControl, plainQueueText, type NativeQueueControl } from '../lib/codex-queue-control.js'
 import { COS_SESSION_ID_RE, DEFAULT_MAX_PROMPT_CHARS } from './agent-session-bindings.js'
 import {
@@ -307,6 +308,8 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     const admitted = admitToQueue(queue, {
       clientTurnId, cosSessionId, provider, threadId, prompt,
       queuedAt: now, status: 'waiting', attempts: 0,
+      // 6.62.0 /qa (Q3): the acknowledgement travels with the row to its drain.
+      ...(continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]) ? { continueNoteAck: true as const } : {}),
     })
     if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
 

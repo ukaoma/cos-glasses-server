@@ -1,9 +1,10 @@
-// `reported_model` and `continue_note` for session rows and the detail route (6.62.0, plans
-// 1.8 and 3.12). The route calls these two helpers and nothing else, so its own row shape
-// (owned by the observation work) is untouched.
+// `reported_model` and `continue_note` for the DETAIL route (6.62.0, plans 1.8 and 3.12).
+// The route calls these two helpers and nothing else, so its own row shape (owned by the
+// observation work) is untouched.
 //
-// One read per row, bounded in concurrency, and every failure is an omitted field: a list
-// must never be slower or emptier because a model could not be read.
+// 6.62.0 /qa (W11): list rows carry neither field. The lens reads both from the detail and
+// the attach verdict only, and the list used to wait on these reads (transcript tails,
+// rollout scans, sqlite) with no budget. Every failure here is an omitted field.
 
 import { mapWithConcurrency, ACTIVITY_READ_CONCURRENCY } from './agent-session-activity.js'
 import { readComposerFacts, type ComposerFacts } from './cursor-session-model.js'
@@ -28,7 +29,7 @@ export interface SessionActRow {
 }
 
 /** The facts for each row, in order. Composer models for the whole page come from ONE query. */
-export async function sessionActFactsFor(rows: readonly SessionActRow[]): Promise<Array<SessionContinueFacts | null>> {
+export async function sessionActFactsFor(rows: readonly SessionActRow[], options: { noteAck?: boolean } = {}): Promise<Array<SessionContinueFacts | null>> {
   const d = liveDeps()
   let composerFacts: Map<string, ComposerFacts | null> | undefined
   const cursorIds = rows.filter(row => row.provider === 'cursor').map(row => row.session_id)
@@ -47,6 +48,7 @@ export async function sessionActFactsFor(rows: readonly SessionActRow[]): Promis
         transcriptPath: row.file ?? null,
         cwd: null,
         composerFacts,
+        noteAck: options.noteAck === true,
       }, d)
     } catch {
       return null

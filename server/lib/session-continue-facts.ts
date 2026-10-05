@@ -22,6 +22,7 @@ import {
   continueFullPermissionsEnabled,
   killSwitchNote,
   planCursorContinue,
+  CURSOR_ASK_UNACKED_NOTE,
   CURSOR_COMPOSER_NOTE,
   type AttachedContinuePlan,
 } from './continue-plan.js'
@@ -152,6 +153,11 @@ export interface ContinueFactsInput {
   cwd: string | null
   /** Pre-read composer facts for list pages (one query for the whole page). */
   composerFacts?: Map<string, import('./cursor-session-model.js').ComposerFacts | null>
+  /**
+   * 6.62.0 /qa (Q3): the client sent `X-COS-Continue-Note: 1` (it shows this note). Without
+   * it a Cursor Continue gets NO plan (the 6.61 Ask posture) and a note that says so.
+   */
+  noteAck?: boolean
 }
 
 export async function resolveSessionContinueFacts(
@@ -189,6 +195,7 @@ export async function resolveSessionContinueFacts(
       const chat = await readCliChatFacts(chatDir)
       const reportedModel = sanitizeReportedModel(chat?.model ?? null)
       if (!full) return { note: killSwitchNote('cursor', 'read-only'), reportedModel }
+      if (input.noteAck !== true) return { note: CURSOR_ASK_UNACKED_NOTE, reportedModel }
       const plan = planCursorContinue({
         candidates: chat?.model ? [chat.model] : [],
         isKnown: deps.isKnownCursorModel,

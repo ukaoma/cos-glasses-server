@@ -71,6 +71,7 @@ import type { OccupancyDirs } from '../lib/thread-occupancy.js'
 import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead } from '../lib/agent-session-turns.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
+import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 
 export const agentSessionsRouter = Router()
 
@@ -510,8 +511,6 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     }
     const queuedOf = await allQueuedWaitingLookup(now)
     const subagents = await readCodexSubagents(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), roots.codexSessions, now)
-    // 6.62.0 (plans 1.8, 3.12): `reported_model` and `continue_note`, one bounded read per row.
-    const actFacts = await sessionActFactsFor(sessions)
     res.json({
       sessions: sessions.map((row, index) => {
         const derived = derivedById.get(row.session_id)
@@ -524,7 +523,6 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
           ...(row.provider === 'codex'
             ? { ...(subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}), ...codexCompactionFields(workObservationFor(row.session_id), facts, now) }
             : workObservationFields(workObservationFor(row.session_id), now)),
-          ...sessionActFields(actFacts[index]),
         }
       }),
       total: sessions.length,
@@ -723,7 +721,11 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       ...(activity.lastTool ? { last_tool: activity.lastTool } : {}),
       ...(recentTurns ? { recent_turns: recentTurns.turns, recent_turns_more: recentTurns.more } : {}),
       // 6.62.0 (plans 1.8, 3.12): the lens reads both from the DETAIL (display-pages.ts).
-      ...sessionActFields((await sessionActFactsFor([{ provider, session_id: parsed.session_id, file: found }]))[0]),
+      // 6.62.0 /qa (W11): detail and the attach verdict only; list rows never wait on model reads.
+      // Q3: the note says Ask unless this client declared it shows the note.
+      ...sessionActFields((await sessionActFactsFor([{ provider, session_id: parsed.session_id, file: found }], {
+        noteAck: continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]),
+      }))[0]),
     })
   } catch (error) {
     console.error(`[agent-sessions] detail failed: ${error instanceof Error ? error.message : error}`)

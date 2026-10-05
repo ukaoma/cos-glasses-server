@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import { agentSessionsRouter, withRunning } from './agent-sessions.js'
+import { REPORTED_MODEL_RE } from '../lib/session-continue-facts.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { OccupiedScan } from '../lib/occupied-threads.js'
 import { lockSnapshotStats, resetLockSnapshot } from '../lib/occupancy-probes.js'
@@ -831,12 +832,14 @@ describe('6.62.0 (plans 1.8, 3.12): reported_model and continue_note on rows and
       expect(codex.reported_model).toBe('gpt-6.1-sol high')
       expect(codex.continue_note).toBe("This Codex session's full access, gpt-6.1-sol high.")
 
+      expect(codex.reported_model).toMatch(REPORTED_MODEL_RE)
+      // 6.62.0 /qa (W11): list rows carry neither field; the lens reads them from detail.
       const list = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as { sessions: Array<Record<string, unknown>> }
       const row = list.sessions.find(s => s.session_id === codexId)
-      expect(row).toMatchObject({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, gpt-6.1-sol high." })
+      expect(row).toBeTruthy()
       for (const entry of list.sessions) {
-        if (typeof entry.continue_note === 'string') expect(entry.continue_note.length).toBeLessThan(61)
-        if (typeof entry.reported_model === 'string') expect(entry.reported_model).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._:/ -]*$/)
+        expect(entry).not.toHaveProperty('continue_note')
+        expect(entry).not.toHaveProperty('reported_model')
       }
     } finally {
       __setSessionActDepsForTests(null)

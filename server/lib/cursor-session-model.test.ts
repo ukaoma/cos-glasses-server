@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
+  COMPOSER_MODEL_TTL_MS,
   SQLITE3_BIN,
   __resetCursorSessionModelCachesForTests,
   cliChatLastWriteMs,
@@ -120,10 +121,27 @@ describe('readComposerFacts (state.vscdb, exact keys)', () => {
   it('answers empty, never throws, for a missing database or a failing reader', async () => {
     expect((await readComposerFacts([COMPOSER], join(root, 'nope.vscdb'))).size).toBe(0)
     const db = composerDb()
-    const failed = await readComposerFacts([COMPOSER], db, { run: async () => { throw new Error('timeout') } })
-    expect(failed.size).toBe(0)
-    // A timeout is not cached: the next poll asks again.
-    expect((await readComposerFacts([COMPOSER], db)).get(COMPOSER)?.modelConfig).toEqual(GROK_XHIGH_FAST)
+    const failed = await readComposerFacts([COMPOSER], db, { now: 1_000, run: async () => { throw new Error('timeout') } })
+    expect(failed.get(COMPOSER)).toBeNull()
+    // 6.62.0 /qa (W11): a failure is cached for the same 60 s as an answer: no second
+    // query inside the window, a fresh one after it.
+    expect((await readComposerFacts([COMPOSER], db, { now: 1_000 + COMPOSER_MODEL_TTL_MS - 1 })).get(COMPOSER)).toBeNull()
+    expect(cursorModelReadStats.composerQueries).toBe(1)
+    expect((await readComposerFacts([COMPOSER], db, { now: 1_000 + COMPOSER_MODEL_TTL_MS })).get(COMPOSER)?.modelConfig).toEqual(GROK_XHIGH_FAST)
+    expect(cursorModelReadStats.composerFailures).toBe(1)
+  })
+
+  it('caches a failed CLI chat read for 60 s too (W11)', async () => {
+    const dir = join(root, '.cursor', 'chats', 'h', OTHER)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'store.db'), 'not a database')
+    let runs = 0
+    const run = async () => { runs += 1; throw new Error('SQLITE_NOTADB') }
+    expect(await readCliChatFacts(dir, { run, now: 5_000 })).toBeNull()
+    expect(await readCliChatFacts(dir, { run, now: 5_000 + COMPOSER_MODEL_TTL_MS - 1 })).toBeNull()
+    expect(runs).toBe(1)
+    expect(await readCliChatFacts(dir, { run, now: 5_000 + COMPOSER_MODEL_TTL_MS })).toBeNull()
+    expect(runs).toBe(2)
   })
 })
 

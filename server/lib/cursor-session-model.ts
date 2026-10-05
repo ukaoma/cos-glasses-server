@@ -117,9 +117,12 @@ export function __resetCursorSessionModelCachesForTests(): void {
   chatCache.clear()
   cursorModelReadStats.composerQueries = 0
   cursorModelReadStats.chatQueries = 0
+  cursorModelReadStats.composerFailures = 0
+  cursorModelReadStats.chatFailures = 0
+  chatFailures.clear()
 }
 
-export const cursorModelReadStats = { composerQueries: 0, chatQueries: 0 }
+export const cursorModelReadStats = { composerQueries: 0, chatQueries: 0, composerFailures: 0, chatFailures: 0 }
 
 export type SqliteRunner = (args: readonly string[], timeoutMs: number) => Promise<string>
 
@@ -166,13 +169,23 @@ export async function readComposerFacts(
   }
   const keys = wanted.map(id => `'composerData:${id}'`).join(',')
   const sql = `SELECT key AS k, json_extract(value, '$.modelConfig') AS mc, json_extract(value, '$.workspaceIdentifier.uri.fsPath') AS ws FROM cursorDiskKV WHERE key IN (${keys})`
+  // 6.62.0 /qa (W11): a FAILED read is cached for the same 60 s as an answer, so a locked
+  // or slow database costs one 2 s wait per minute, not one per poll.
+  const rememberMiss = (): Map<string, ComposerFacts | null> => {
+    cursorModelReadStats.composerFailures += 1
+    for (const id of wanted) {
+      composerCache.delete(id)
+      composerCache.set(id, { at: now, facts: null })
+      out.set(id, null)
+    }
+    return out
+  }
   let stdout: string
   try {
     cursorModelReadStats.composerQueries += 1
     stdout = await (options.run ?? realSqliteRunner)(['-readonly', '-json', dbPath, sql], COMPOSER_MODEL_TIMEOUT_MS)
   } catch {
-    // Not cached: a timeout on a busy database should be retried on the next poll.
-    return out
+    return rememberMiss()
   }
   const found = new Map<string, ComposerFacts>()
   try {
@@ -188,7 +201,7 @@ export async function readComposerFacts(
       })
     }
   } catch {
-    return out
+    return rememberMiss()
   }
   for (const id of wanted) {
     const facts = found.get(id) ?? null
@@ -216,6 +229,8 @@ export interface CliChatFacts {
 }
 
 const chatCache = new Map<string, { mtimeMs: number; size: number; facts: CliChatFacts | null }>()
+/** 6.62.0 /qa (W11): when a chat's read last FAILED; a failure is not retried for 60 s. */
+const chatFailures = new Map<string, number>()
 const MODEL_NAME_RE = /"modelName"\s*:\s*"([^"\\]{1,100})"/g
 
 function hexToText(hex: string): string | null {
@@ -231,7 +246,7 @@ function hexToText(hex: string): string | null {
 /** The chat's model and mode, or null when `store.db` cannot be read. */
 export async function readCliChatFacts(
   chatDir: string,
-  options: { run?: SqliteRunner } = {},
+  options: { run?: SqliteRunner; now?: number } = {},
 ): Promise<CliChatFacts | null> {
   if (typeof chatDir !== 'string' || !chatDir.startsWith('/')) return null
   const dbPath = join(chatDir, 'store.db')
@@ -247,6 +262,9 @@ export async function readCliChatFacts(
   }
   const hit = chatCache.get(dbPath)
   if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.facts
+  const failedAt = chatFailures.get(dbPath)
+  const now = options.now ?? Date.now()
+  if (failedAt !== undefined && now - failedAt < COMPOSER_MODEL_TTL_MS) return null
   // A URI, so the path is percent-encoded: a chat dir under a folder with spaces is ordinary.
   const uri = `file:${encodeURI(dbPath).replace(/\?/g, '%3F').replace(/#/g, '%23')}?mode=ro&immutable=1`
   const run = options.run ?? realSqliteRunner
@@ -272,8 +290,17 @@ export async function readCliChatFacts(
     }
     facts = { model, mode }
   } catch {
+    cursorModelReadStats.chatFailures += 1
+    chatFailures.delete(dbPath)
+    chatFailures.set(dbPath, now)
+    while (chatFailures.size > MAX_CACHE_ENTRIES) {
+      const oldest = chatFailures.keys().next()
+      if (oldest.done) break
+      chatFailures.delete(oldest.value)
+    }
     return null
   }
+  chatFailures.delete(dbPath)
   chatCache.delete(dbPath)
   chatCache.set(dbPath, { mtimeMs, size, facts })
   while (chatCache.size > MAX_CACHE_ENTRIES) {
