@@ -2540,7 +2540,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // in the copy's transcript; nothing reached the server log. Enums and numbers
         // only: no prompt, no provider text, no thread id.
         const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
-        console.log(`[agent-session-bindings] fork outcome provider=${providerParam} outcome=${outcome.kind} reason=${String(r.reason ?? 'none')} cause=${String(r.detail ?? 'none')} forkState=${String(r.forkState ?? 'unknown')} exit=${String(r.exitCode ?? 'none')} stderr=${String(r.stderrClass ?? 'none')} ms=${String(r.durationMs ?? 'unknown')}`)
+        console.log(`[agent-session-bindings] fork outcome provider=${providerParam} outcome=${outcome.kind} cause=${forkProviderFailure(r.detail) ?? 'none'} exit=${typeof r.exitCode === 'number' && Number.isFinite(r.exitCode) ? r.exitCode : 'none'} ms=${typeof r.durationMs === 'number' && Number.isFinite(r.durationMs) ? r.durationMs : 'unknown'}`)
       }
 
       if (outcome.kind === 'mutated') {

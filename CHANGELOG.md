@@ -1,3 +1,10 @@
+# 6.62.1 — Combined provider parity and handoff hardening
+
+- Includes the 6.62.0 provider parity, cancellation, hook readiness, and safe Cursor continuation updates.
+- A failed fork names its copy when available and distinguishes usage limits, authentication, and context overflow.
+- Claude, Codex, and Cursor prompt hooks receive a private, short-lived binding to the current user request.
+- Compatible with existing glasses; build 6.10.600 displays the server continuation note and opts into the matching Cursor behavior.
+
 ## 6.62.0 — 2026-10-05 — Provider parity: Claude, Codex and Cursor session visibility and continuation
 
 Candidate first: published under the `next` dist-tag, promoted to `latest` only after the regression matrix in the plan passes. Pairs with glasses 6.10.600 (copy only); older glasses keep working.
