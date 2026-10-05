@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, afterAll } from 'vitest'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
+  DESK_RUN_EFFECT_COPY,
   __resetThreadCancelsForTests,
   appendSessionCancelLedger,
   cancelEndsTurn,
@@ -18,6 +19,7 @@ import {
   cancelVoidsOpenTurn,
   noteThreadCancelled,
   sessionCancelFeature,
+  setCodexDeskCancelReady,
   threadCancel,
   threadCancelledAt,
   type CancelFacts,
@@ -53,9 +55,32 @@ describe('cancelTargetFor', () => {
     expect(cancelTargetFor({ ...base, provider: 'codex', runningOutsideCos: false })).toBeNull()
   })
 
-  it('Codex and Cursor outside COS are unsupported, even with hooks ready', () => {
+  // 6.62.0 (plan 3.8): Cursor runs the Claude hooks, so the Claude halt readiness decides; Codex
+  // needs its OWN hooks installed and trusted (`codexHooksReady`). Otherwise only their app can.
+  it('Codex and Cursor outside COS: desk_run with hooks that can stop them, else unsupported', () => {
+    expect(cancelTargetFor({ ...base, provider: 'cursor' })).toBe('desk_run')
+    expect(cancelTargetFor({ ...base, provider: 'cursor', hooksReady: false })).toBe('unsupported')
+    expect(cancelTargetFor({ ...base, provider: 'cursor', hooksEnabled: false })).toBe('unsupported')
+    // Claude's hooks being ready says nothing about Codex's.
     expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('unsupported')
-    expect(cancelTargetFor({ ...base, provider: 'cursor' })).toBe('unsupported')
+    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: true })).toBe('desk_run')
+    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: true, hooksEnabled: false })).toBe('unsupported')
+    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: true, hooksReady: false })).toBe('desk_run')
+    expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: 'yes' as unknown as boolean })).toBe('unsupported')
+    expect(cancelTargetFor({ ...base, provider: 'ollama' })).toBe('unsupported')
+  })
+
+  it('6.62.0: with no fact given, Codex readiness comes from the registered reader, and a throwing one is no', () => {
+    try {
+      expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('unsupported')
+      setCodexDeskCancelReady(() => true)
+      expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('desk_run')
+      expect(cancelTargetFor({ ...base, provider: 'codex', codexHooksReady: false })).toBe('unsupported')
+      setCodexDeskCancelReady(() => { throw new Error('read failed') })
+      expect(cancelTargetFor({ ...base, provider: 'codex' })).toBe('unsupported')
+    } finally {
+      setCodexDeskCancelReady(() => false)
+    }
   })
 
   it('a desk Claude run needs the hooks applied, then the new script, in that order', () => {
@@ -142,10 +167,14 @@ describe('the ledger', () => {
 
 describe('features.sessionCancel', () => {
   it('a COS turn is always cancellable; a desk run only with the hooks applied AND installed', () => {
-    expect(sessionCancelFeature(true, true)).toEqual({ cosTurn: true, deskClaude: true })
-    expect(sessionCancelFeature(true, false)).toEqual({ cosTurn: true, deskClaude: false })
-    expect(sessionCancelFeature(false, true)).toEqual({ cosTurn: true, deskClaude: false })
-    expect(sessionCancelFeature(false, false)).toEqual({ cosTurn: true, deskClaude: false })
+    // 6.62.0: deskCursor follows the Claude hooks Cursor runs; deskCodex its own trusted hooks.
+    expect(sessionCancelFeature(true, true)).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+    expect(sessionCancelFeature(true, false)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
+    expect(sessionCancelFeature(false, true)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
+    expect(sessionCancelFeature(false, false)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
+    expect(sessionCancelFeature(true, false, true)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: true, deskCursor: false })
+    expect(sessionCancelFeature(false, true, true)).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
+    expect(DESK_RUN_EFFECT_COPY).toBe('Stops the run at its next command.')
   })
 })
 

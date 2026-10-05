@@ -44,7 +44,10 @@ import { searchAgentSessions, type AgentSessionSearchHit } from '../lib/agent-se
 import { claudeSessionNamesVisible, claudeSessionsDir, claudeSessionsEnabled, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
 import type { ClaudePeerRecord } from '../lib/claude-session-registry.js'
 import { deriveForRow, signalFor, workObservationFor } from '../lib/session-hooks-runtime.js'
-import { derivedRowFields, type DerivedSessionState } from '../lib/session-state-derive.js'
+import { derivedRowFields, type DerivedSessionState, type RegistryFacts } from '../lib/session-state-derive.js'
+import type { WorkObservation } from '../lib/session-work-observation.js'
+import type { SessionSignal } from '../lib/session-signal-store.js'
+import { HOOK_ACTIVE_CAP_MS, codexRolloutFacts, type CodexRolloutFacts } from '../lib/codex-rollout-state.js'
 import { queuedTurnsFields, allQueuedWaitingLookup } from '../lib/thread-turn-queue-store.js'
 import { isAttachedTurnActive, sessionStreamKey } from '../lib/session-stream-bus.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
@@ -202,22 +205,119 @@ async function transcriptMtimes(
  * rename here is silent on this side and renders every session as merely open on
  * the lens. Pure: it takes the scan, it does no I/O.
  */
-export function withRunning<T extends { session_id: string }>(entry: T, scan: OccupiedScan) {
+export function withRunning<T extends { session_id: string }>(entry: T, scan: OccupiedScan, hint: RunningHint | null = null) {
   const occ = scan.occupied.get(entry.session_id)
+  // 6.62.0: a Cursor row with hook evidence is decided by it (there is no process occupancy
+  // for Cursor, and its file time says nothing once the hooks have spoken).
+  const decides = hint?.decides === true
   return {
     ...entry,
     // A process HOLDS this thread open, whoever started it. Not "is generating":
     // a Claude record for an open window outlives the work by however long the
     // window stays up, which is why `running_active` exists below.
-    running: occ !== undefined,
+    running: decides ? hint!.running : occ !== undefined || hint?.running === true,
     // Held by something that is not COS, so a Continue would be refused. The
     // badge reads `running`; the Continue affordance reads this.
-    running_foreign: (occ?.foreignOwners ?? 0) > 0,
+    running_foreign: (occ?.foreignOwners ?? 0) > 0 || hint?.foreign === true,
     // The transcript was WRITTEN in the last few seconds: an agent is generating
     // here, not just holding the file. This is the only one of the three that
     // clears on its own when the work stops. Still a display hint, never a gate.
-    running_active: occ?.activeRecently === true,
+    // 6.62.0: or the engine's own hooks (or a Codex rollout) say a turn is open and the
+    // last event is inside HOOK_ACTIVE_CAP_MS (plan 1.1-1.3).
+    running_active: decides ? hint!.active : occ?.activeRecently === true || hint?.active === true,
   }
+}
+
+/**
+ * 6.62.0 (plan 1.1-1.3): what the engine's own evidence says about working, for `withRunning`.
+ *
+ * A DISPLAY HINT, NEVER A GATE: the write gate (`thread-occupancy.ts`) is untouched. An open
+ * turn reads active only while its last event is inside HOOK_ACTIVE_CAP_MS: an Esc with no
+ * Stop, a crash, a Cursor abort leave a turn open, and the half-hour open-turn ceiling would
+ * otherwise show a ghost "working" row for thirty minutes (W5).
+ *
+ *   hook running, last event inside the cap   running, active (every provider)
+ *   hook waiting                               running, not active
+ *   Codex rollout turn open inside the cap     running, active (no Codex hooks yet)
+ *   Cursor, any other hook state               not running, not active (`decides`)
+ *
+ * For Claude and Codex the hint only ADDS to occupancy (a held, freshly written thread still
+ * reads as it did). For Cursor, whose list has no occupancy at all, a hook signal decides, and
+ * a running Cursor turn is the user's own (an IDE composer or their terminal; COS's own child
+ * is kept out of the phase), so it is foreign.
+ */
+export interface RunningHint {
+  running: boolean
+  active: boolean
+  foreign: boolean
+  /** Cursor with hook evidence: this hint IS the answer, occupancy and file time are not read. */
+  decides: boolean
+}
+
+export function runningHintFor(provider: AgentProvider, derived: DerivedSessionState | undefined, lastEventAt: number | null, now: number): RunningHint | null {
+  const cursor = provider === 'cursor'
+  const quiet: RunningHint | null = cursor ? { running: false, active: false, foreign: false, decides: true } : null
+  if (!derived) return null
+  const inCap = lastEventAt !== null && now - lastEventAt <= HOOK_ACTIVE_CAP_MS && lastEventAt <= now + 5_000
+  if (derived.state_source === 'hook') {
+    if (derived.agent_state === 'waiting') return { running: true, active: false, foreign: cursor, decides: cursor }
+    if (derived.agent_state === 'running' && inCap) return { running: true, active: true, foreign: cursor, decides: cursor }
+    return quiet
+  }
+  if (provider === 'codex' && derived.state_source === 'transcript' && derived.agent_state === 'running' && inCap) {
+    return { running: true, active: true, foreign: false, decides: false }
+  }
+  return null
+}
+
+/** The newest thing a signal heard: an event, or (Cursor) a thought. */
+function signalLastAt(signal: SessionSignal | undefined): number | null {
+  if (!signal) return null
+  return Math.max(signal.lastEventAt, signal.lastThought?.at ?? 0)
+}
+
+/** A Codex thread with a writer-lock holder: alive, with no status of its own (W6). */
+const CODEX_HOLDER_FACTS: RegistryFacts = { alive: true, status: null, waitingFor: null, statusUpdatedAt: null, lastActiveAt: null }
+
+/**
+ * 6.62.0 (plan 1.3): one derivation for a Codex row. The hooks when they have spoken; else the
+ * rollout's own turn markers, read for a thread written inside the cap. Registry facts only
+ * when a writer-lock holder exists: passing "dead" facts for every unloaded thread would end
+ * each of them after two scans (session-state-derive.ts).
+ */
+function deriveCodexRow(sessionId: string, held: boolean, facts: CodexRolloutFacts | null, now: number, remember = true): DerivedSessionState | undefined {
+  return deriveForRow({
+    sessionId,
+    registry: held ? CODEX_HOLDER_FACTS : undefined,
+    transcript: facts ? { inFlight: facts.open, lastActivityAt: facts.mtimeMs } : undefined,
+    now,
+    remember,
+    attachedTurn: isAttachedTurnActive(sessionStreamKey('codex', sessionId)),
+  })
+}
+
+/** The evidence clock a row's hint is judged by: the hooks, else (Codex) the rollout write. */
+function hintClock(signal: SessionSignal | undefined, derived: DerivedSessionState | undefined, facts: CodexRolloutFacts | null): number | null {
+  if (derived?.state_source === 'hook') return signalLastAt(signal)
+  return facts?.mtimeMs ?? null
+}
+
+/**
+ * 6.62.0 (plan 1.9): Codex compaction. Codex's PreCompact hook opens it; the rollout's
+ * `ContextCompaction` item, written when it is over, closes it (as does the PostCompact hook).
+ */
+function codexCompactionFields(observation: WorkObservation | undefined, facts: CodexRolloutFacts | null, now: number): ReturnType<typeof workObservationFields> {
+  if (!observation || observation.compactingAt === null) return {}
+  if (facts?.compactedAt != null && facts.compactedAt >= observation.compactingAt) return {}
+  const { compaction } = workObservationFields({ ...observation, agents: [], partial: false }, now)
+  return compaction ? { compaction } : {}
+}
+
+/** 6.62.0 (plan 1.1): a Cursor row's last activity is its last hook event; the transcript has no clock. */
+function cursorActivityFields(provider: AgentProvider, signal: SessionSignal | undefined): { last_activity_at?: string } {
+  if (provider !== 'cursor') return {}
+  const at = signalLastAt(signal)
+  return at ? { last_activity_at: new Date(at).toISOString() } : {}
 }
 
 /**
@@ -399,11 +499,30 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       if (row.provider !== 'cursor' || !signalFor(row.session_id)) continue
       derivedById.set(row.session_id, deriveForRow({ sessionId: row.session_id, now, remember: false }))
     }
+    // 6.62.0 (plan 1.3): Codex rows get the one derivation too, from the hooks or the rollout.
+    const rolloutById = new Map<string, CodexRolloutFacts | null>()
+    for (const row of sessions) {
+      if (row.provider !== 'codex') continue
+      const facts = codexRolloutFacts(row.file, now)
+      rolloutById.set(row.session_id, facts)
+      derivedById.set(row.session_id, deriveCodexRow(row.session_id, running.occupied.has(row.session_id), facts, now))
+    }
     const queuedOf = await allQueuedWaitingLookup(now)
     const subagents = await readCodexSubagents(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), roots.codexSessions, now)
     res.json({
-      sessions: sessions.map((row, index) => ({ ...withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running),
-        ...(row.provider === 'codex' ? (subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}) : workObservationFields(workObservationFor(row.session_id), now)) })),
+      sessions: sessions.map((row, index) => {
+        const derived = derivedById.get(row.session_id)
+        const signal = signalFor(row.session_id)
+        const facts = rolloutById.get(row.session_id) ?? null
+        const hint = runningHintFor(row.provider, derived, hintClock(signal, derived, facts), now)
+        return {
+          ...withRunning(toEntry(row, activity[index], derived, queuedOf(row.provider, row.session_id)), running, hint),
+          ...cursorActivityFields(row.provider, signal),
+          ...(row.provider === 'codex'
+            ? { ...(subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}), ...codexCompactionFields(workObservationFor(row.session_id), facts, now) }
+            : workObservationFields(workObservationFor(row.session_id), now)),
+        }
+      }),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
@@ -442,7 +561,9 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
       if (!peersByPrefix.has(prefix)) peersByPrefix.set(prefix, peer)
     }
     const derivedFor = (hit: AgentSessionSearchHit): DerivedSessionState | undefined => {
-      if (hit.provider !== 'claude') return undefined
+      // 6.62.0 (plan 1.3): a Codex or Cursor hit the hooks have spoken for gets the same state
+      // as its row, from the signal alone (a hit has no transcript walk).
+      if (hit.provider !== 'claude') return signalFor(hit.session_id) ? deriveForRow({ sessionId: hit.session_id, remember: false, attachedTurn: isAttachedTurnActive(sessionStreamKey(hit.provider, hit.session_id)) }) : undefined
       const peer = peersByPrefix.get(hit.session_id.slice(0, 8).toLowerCase())
       return deriveForRow({
         sessionId: hit.session_id,
@@ -515,7 +636,9 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       const named = names.get(parsed.session_id) || names.get(sessionId)
       if (named) parsed.display_label = named
     }
-    const observed = provider === 'codex' ? {} : workObservationFields(workObservationFor(parsed.session_id))
+    const now = Date.now()
+    const rollout = provider === 'codex' ? codexRolloutFacts(found, now) : null
+    const observed = provider === 'codex' ? codexCompactionFields(workObservationFor(parsed.session_id), rollout, now) : workObservationFields(workObservationFor(parsed.session_id))
     const subagents = provider === 'codex' ? (await readCodexSubagents([sessionId], agentSessionRoots().codexSessions)).get(sessionId.toLowerCase()) : observed.subagent_activity
     const modified = st.mtime.toISOString()
     const activity = await readSessionActivity(provider, found)
@@ -534,9 +657,14 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     } else if (provider === 'cursor' && signalFor(parsed.session_id)) {
       // 6.51.0: the detail agrees with its list row (hook-grounded Cursor state).
       derived = deriveForRow({ sessionId: parsed.session_id, remember: false })
+    } else if (provider === 'codex') {
+      // 6.62.0 (plan 1.3): as its list row: the hooks, else the rollout's turn markers.
+      derived = deriveCodexRow(parsed.session_id, running.occupied.has(parsed.session_id), rollout, now, false)
     }
+    const signal = signalFor(parsed.session_id)
+    const hint = runningHintFor(provider, derived, hintClock(signal, derived, rollout), now)
     res.json({
-      ...withRunning({ session_id: parsed.session_id }, running),
+      ...withRunning({ session_id: parsed.session_id }, running, hint),
       ...derivedRowFields(derived),
       ...queuedTurnsFields((await allQueuedWaitingLookup(Date.now()))(provider, parsed.session_id)),
       // The client must be able to tell "this server stamped nothing" from "this
@@ -587,6 +715,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       file_size_bytes: parsed.file_size_bytes,
       omitted_tools: parsed.omitted_tools,
       ...(activity.lastActivityAt ? { last_activity_at: activity.lastActivityAt } : {}),
+      ...cursorActivityFields(provider, signal),
       ...(activity.lastTool ? { last_tool: activity.lastTool } : {}),
       ...(recentTurns ? { recent_turns: recentTurns.turns, recent_turns_more: recentTurns.more } : {}),
     })

@@ -158,7 +158,8 @@ export function currentHookPaths(): HookPaths {
 
 type HookBlock = { matcher?: unknown; hooks?: unknown }
 
-function hookIsOurs(h: unknown): boolean {
+/** Exported (6.62.0) so the Codex installer names our hooks by the same script path. */
+export function hookIsOurs(h: unknown): boolean {
   return !!h && typeof h === 'object' && typeof (h as { command?: unknown }).command === 'string'
     && ((h as { command: string }).command.includes(HOOK_SCRIPT_MARKER) || (h as { command: string }).command.includes(HOOK_SCRIPT_NAME + ' '))
 }
@@ -381,12 +382,16 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
  *     (7433b7f), and it carries the same halt check.
  *   - df54677f...: the script 6.53.3 through 6.59.0 shipped. 6.60.0 changed it only for the
  *     away hold (the PermissionRequest wait); its halt check is the same.
+ *   - 0e1bbb98...: the script 6.60.0 through 6.61.7 shipped (B1). 6.62.0 changed it for Codex
+ *     and Cursor (provider stamp, Codex deny-only reply, Cursor `conversation_id`); its Claude
+ *     halt reply is byte for byte the same, so a Mac still on it stops desk Claude runs.
  * Each is pinned against its bytes in `server/lib/__fixtures__/`.
  */
 export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
   '1158bb06297550128f01fc47caa68806a5287d6da2d05b0d1c812e8ae20764e7',
   'c0b41bf8581cfea498e1e1ac5220fe4e148bd97448d13b60a88879ee5992cc51',
   'df54677f79908893509ee87608cfe3f4a53ced03f88f337f16a63741d6b3d547',
+  '0e1bbb9816c9475436f89f6326d5504eccc9aa6519ff5e466b949d53a73d8439',
 ]
 
 /**
@@ -471,7 +476,8 @@ export interface InstallResult {
 
 const BACKUPS_KEPT = 3
 
-function backupSettings(settingsPath: string): string | null {
+/** Exported (6.62.0) for the Codex installer: the same backup, the same three kept. */
+export function backupSettings(settingsPath: string): string | null {
   if (!existsSync(settingsPath)) return null
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const backup = `${settingsPath}.cos-backup-${stamp}`

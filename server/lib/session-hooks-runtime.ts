@@ -20,6 +20,7 @@ import { OPEN_TURN_CEILING_MS, deriveSessionState, type DerivedSessionState, typ
 import { HALT_MARKER_TTL_MS, HALT_REARM_UNVERIFIED_MS, clearHaltMarkerOnSessionEnd, dropHaltRearm, haltDeliveredTurn, rearmHaltOnPrompt, sweepHaltMarkers, type HaltMarker } from './session-halt.js'
 import { cancelVoidsOpenTurn, threadCancel } from './session-cancel.js'
 import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatus, type HookStatus } from './claude-hooks-installer.js'
+import { codexHooksHealthField, cursorObserverHealthField, type CodexHooksHealth, type CursorObserverHealth } from './provider-observe.js'
 
 export function sessionHooksEnabled(): boolean {
   const raw = process.env.COS_SESSION_HOOKS
@@ -277,7 +278,8 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
     ledger,
     seenKeys: replay.keys,
     isChild: env => isCosSpawnedPid(env.ppid),
-    entrypointOf: enabled ? (env, child) => entrypointFor(env.sessionId, child) : undefined,
+    // 6.62.0: only a Claude session has a `~/.claude/sessions` record to read.
+    entrypointOf: enabled ? (env, child) => (env.provider === undefined || env.provider === 'claude' ? entrypointFor(env.sessionId, child) : null) : undefined,
     apply: enabled ? (env, child, entrypoint) => {
       sessionSignalStore.apply(env, child)
       if (entrypoint) sessionSignalStore.setEntrypoint(env.sessionId, entrypoint)
@@ -354,6 +356,14 @@ export interface SessionHooksHealth {
   signals: number
   replayed: { rows: number; applied: number } | null
   spool: SpoolStats | null
+  /**
+   * 6.62.0: the Codex hooks, APART from the Claude fields above (B2): `state`, `installed` and
+   * `hookHaltReady` stay Claude's alone, because Control 0.5.254 keys its banner and its
+   * Install check off them. No Codex banner this release.
+   */
+  codex: CodexHooksHealth
+  /** 6.62.0: the native Cursor observer (`~/.cursor/hooks.json`). */
+  cursorObserver: CursorObserverHealth
 }
 
 // Health is polled by three clients every few seconds; the status read (settings parse,
@@ -397,6 +407,8 @@ export function sessionHooksHealthFields(): { sessionHooks: SessionHooksHealth }
       signals: sessionSignalStore.size(),
       replayed,
       spool,
+      codex: codexHooksHealthField(),
+      cursorObserver: cursorObserverHealthField(),
     },
   }
 }

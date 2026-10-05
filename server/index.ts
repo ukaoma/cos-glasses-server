@@ -26,6 +26,7 @@ import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
 import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { writeHaltMarker } from './lib/session-halt.js'
+import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancel } from './lib/session-cancel.js'
 import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
 import {
@@ -507,6 +508,9 @@ const occupancyProbes = withCursorComposerTurn(withCodexTurnClock(sessionHooksEn
 // before any router is registered so the first list request already sees the replayed
 // ledger. With COS_SESSION_HOOKS off it still drains and stamps the spool (see the module).
 const sessionHooksRuntime = startSessionHooksRuntime({ port: PORT })
+// 6.62.0: the Codex hooks, their trust and the Cursor observer, read in the background for
+// health and the desk cancel (never on a request path; see lib/provider-observe.ts).
+startProviderObserveRefresh()
 
 /**
  * The shim between the route's request shape and the adapter's.

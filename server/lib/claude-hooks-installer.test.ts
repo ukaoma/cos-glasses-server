@@ -59,6 +59,8 @@ const SCRIPT_6_53_0 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtur
 const SCRIPT_6_53_3_PREQA = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.3-preqa')
 /** The script 6.53.3 through 6.59.0 shipped, byte for byte (6.60.0 changed it for the away hold). */
 const SCRIPT_6_53_3 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.53.3')
+/** 6.62.0 (B1): the script 6.60.0 through 6.61.7 shipped, sha 0e1bbb98. */
+const SCRIPT_6_61_7 = resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7')
 
 function merged(current: unknown, paths = PATHS): { settings: Record<string, unknown>; changed: boolean } {
   const result = mergeHookSettings(current, SCRIPT, paths)
@@ -436,6 +438,26 @@ describe('after the 6.53.3 script change', () => {
       expect(bytes.toString('utf8')).toContain('"permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"')
       const status = onScript(bytes)
       expect(status.state).toBe('script_outdated')
+      expect(hookHaltReady(status)).toBe(true)
+      expect(hookStatusAdvice(status)).toContain('still stops desk runs')
+    } finally {
+      delete process.env.COS_GLASSES_HOME
+    }
+  })
+
+  it('6.62.0 (B1): the 6.61.7 script next to the 6.62.0 package stays halt-ready, so deskClaude stays true', () => {
+    try {
+      const bytes = readFileSync(SCRIPT_6_61_7)
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toContain(createHash('sha256').update(bytes).digest('hex'))
+      // The package's script is newer; the installed one is the 6.61.7 one, byte for byte.
+      expect(readFileSync(packagedHookScriptPath()).equals(bytes)).toBe(false)
+      // Its Claude halt reply is byte for byte the one the 6.62.0 script prints for Claude.
+      const claudeDeny = '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
+      expect(bytes.toString('utf8')).toContain(claudeDeny)
+      expect(readFileSync(packagedHookScriptPath(), 'utf8')).toContain(claudeDeny)
+      const status = onScript(bytes)
+      expect(status.state).toBe('script_outdated')
+      expect(status.installed).toBe(false)
       expect(hookHaltReady(status)).toBe(true)
       expect(hookStatusAdvice(status)).toContain('still stops desk runs')
     } finally {

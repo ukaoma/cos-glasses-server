@@ -565,6 +565,37 @@ export function promptDrafts(message: Record<string, unknown>): SessionStreamDra
   return [{ kind: 'prompt', text: flat }]
 }
 
+/**
+ * Cursor (6.62.0, plan 1.5): the user's words are the inside of `<user_query>`; the rest of a
+ * Cursor user row is scaffolding (attached files, rules). Until 6.62.0 the whole row was
+ * dropped, so a Cursor feed never showed what it was working on. Everything else is the
+ * Claude-shaped content the two share.
+ */
+function draftsFromCursorRecord(record: Record<string, unknown>): SessionStreamDraft[] {
+  if (record.role === 'user' && record.type === undefined) {
+    const message = asRecord(record.message)
+    if (!message) return []
+    const blocks = Array.isArray(message.content) ? message.content : typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : []
+    if (blocks.some(b => asRecord(b)?.type === 'tool_result')) return []
+    const text = blocks.map(b => asRecord(b)).filter(b => b && (b.type === 'text' || b.type === undefined) && typeof b.text === 'string').map(b => b!.text as string).join(' ')
+    const start = text.indexOf('<user_query>')
+    const end = text.indexOf('</user_query>')
+    const query = start >= 0 && end > start ? text.slice(start + '<user_query>'.length, end) : text
+    return promptDrafts({ content: [{ type: 'text', text: query }] })
+  }
+  return draftsFromClaudeRecord(record)
+}
+
+/**
+ * Cursor (6.62.0, plan 1.7): the observer's newest agent thought, as the reasoning line. The
+ * same shape Codex's reasoning headline rides (`CodexReasoningStatus`): an extra field on a
+ * `status: working` draft, one line, as long as a target.
+ */
+export function cursorThoughtStatus(text: unknown): CodexReasoningStatus | null {
+  const reasoning = typeof text === 'string' ? oneLine(text, TARGET_MAX_CHARS) : ''
+  return reasoning ? { kind: 'status', state: 'working', reasoning } : null
+}
+
 function draftsFromClaudeRecord(record: Record<string, unknown>): SessionStreamDraft[] {
   const type = typeof record.type === 'string' ? record.type : ''
 
@@ -1262,7 +1293,7 @@ export function draftsFromRecord(
   const obj = asRecord(record)
   if (!obj) return []
   try {
-    const drafts = provider === 'codex' ? draftsFromCodexRecord(obj) : draftsFromClaudeRecord(obj)
+    const drafts = provider === 'codex' ? draftsFromCodexRecord(obj) : provider === 'cursor' ? draftsFromCursorRecord(obj) : draftsFromClaudeRecord(obj)
     return stampPromptTurnStart(drafts, obj)
   } catch {
     // A malformed record costs one line of the trail. It must never cost the stream.

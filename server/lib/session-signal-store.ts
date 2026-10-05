@@ -25,8 +25,8 @@ import { observeWork, type WorkObservation } from './session-work-observation.js
 //  3. `ended` is recorded here but RANKED in the deriver, which also sees the registry:
 //     an ended signal with an alive registry record is a child that ended, not the tab.
 
-import type { HookEnvelope, HookEventName } from './session-hook-events.js'
-import { clipText, toolFingerprint, toolTarget } from './session-hook-events.js'
+import type { HookEnvelope, HookEventName, HookProvider } from './session-hook-events.js'
+import { AGENT_THOUGHT_MAX, clipText, toolFingerprint, toolTarget } from './session-hook-events.js'
 import { isKeepWarmSessionTitle } from './agent-session-store.js'
 
 export type WaitingKind = 'permission' | 'question' | 'plan' | 'mcp_input'
@@ -51,6 +51,16 @@ export interface FailureSignal {
 export interface SessionSignal {
   workObservation?: WorkObservation
   observationOnly?: boolean
+  /**
+   * 6.62.0: the engine whose hooks these are (`inferHookProvider`). Absent on a record built
+   * from envelopes that never carried one (an older ledger row), which is read as Claude.
+   */
+  provider?: HookProvider
+  /**
+   * 6.62.0: the newest agent thought the Cursor observer reported, capped at
+   * AGENT_THOUGHT_MAX. MEMORY ONLY: the ledger keeps no thought text, so a restart forgets it.
+   */
+  lastThought?: { text: string; at: number }
   sessionId: string
   firstSeenAt: number
   lastEventAt: number
@@ -107,6 +117,7 @@ function toolFacts(p: Record<string, unknown>): { name: string; target: string; 
 
 function fresh(env: HookEnvelope): SessionSignal {
   return {
+    ...(env.provider ? { provider: env.provider } : {}),
     sessionId: env.sessionId,
     firstSeenAt: env.ts,
     lastEventAt: env.ts,
@@ -135,6 +146,25 @@ function fresh(env: HookEnvelope): SessionSignal {
 }
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null)
+
+/**
+ * Observer evidence: never a phase, never a listener. 6.62.0: an AgentThought is display only
+ * whatever its payload says, so a thought can never open, close or reopen a turn.
+ */
+export function isDisplayOnly(env: HookEnvelope): boolean {
+  return env.payload.display_only === true || env.event === 'AgentThought'
+}
+
+/**
+ * 6.62.0: an AgentThought with text becomes the record's `lastThought`, unless an older one
+ * arrived late. A replayed row carries no text (the ledger drops it) and changes nothing.
+ */
+function thoughtOf(base: SessionSignal, env: HookEnvelope): Pick<SessionSignal, 'lastThought'> {
+  if (env.event !== 'AgentThought') return {}
+  const text = clipText(env.payload.text, AGENT_THOUGHT_MAX)
+  if (!text || (base.lastThought && base.lastThought.at > env.ts)) return {}
+  return { lastThought: { text, at: env.ts } }
+}
 
 /**
  * 6.48.1. A tool runs only inside a turn, so a MAIN-THREAD tool event (no `agent_id`) is
@@ -181,8 +211,9 @@ function resolvesWaiting(waiting: WaitingSignal, event: HookEventName, toolName:
  */
 export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelope, ctx: ReducerContext, child?: boolean): SessionSignal {
   const base = prev ? { ...prev } : fresh(env)
+  if (env.provider) base.provider = env.provider
   const p = env.payload
-  if (p.display_only === true) return { ...base, ...(prev?.observationOnly !== false ? { lastEventAt: Math.max(base.lastEventAt, env.ts) } : {}), observationOnly: prev?.observationOnly ?? !prev, workObservation: observeWork(base.workObservation, env) }
+  if (isDisplayOnly(env)) return { ...base, ...(prev?.observationOnly !== false ? { lastEventAt: Math.max(base.lastEventAt, env.ts) } : {}), observationOnly: prev?.observationOnly ?? !prev, workObservation: observeWork(base.workObservation, env), ...thoughtOf(base, env) }
   const common = {
     observationOnly: false,
     workObservation: observeWork(base.workObservation, env),
@@ -212,6 +243,11 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
       const prompt = clipText(p.prompt)
       return {
         ...next,
+        // 6.62.0: Codex and Cursor have no registry to say a session lives on after its
+        // SessionEnd (a composer the hooks saw end and then reopened; a Codex thread resumed
+        // in the app without a SessionStart). A prompt after the end is a new life. Claude's
+        // own resume fires SessionStart, so its rows keep the 6.61 rule.
+        ...(next.provider === 'codex' || next.provider === 'cursor' ? { ended: null } : {}),
         turnOpen: true,
         turnStartedAt: env.ts,
         promptId: str(p.prompt_id),
@@ -280,6 +316,11 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
         waiting: null,
         lastReply: clipText(p.last_assistant_message) || next.lastReply,
       }
+    // 6.62.0: Codex's Interrupt (Esc) ends the turn with no Stop and no reply.
+    case 'Interrupt':
+      return { ...next, turnOpen: false, stopAt: env.ts, waiting: null }
+    case 'AgentThought': // display only (`isDisplayOnly`); never reaches here
+      return next
     case 'StopFailure':
       return {
         ...next,
@@ -303,6 +344,8 @@ export function applyHookEvent(prev: SessionSignal | undefined, env: HookEnvelop
 }
 
 export type SignalListener = (signal: SessionSignal, env: HookEnvelope, child: boolean) => void
+/** 6.62.0: told of each new agent thought (display only; the drain, permission and halt listeners never are). */
+export type ThoughtListener = (signal: SessionSignal, thought: { text: string; at: number }) => void
 
 /** Records older than this after a SessionEnd are dropped; Control keeps its own ledger. */
 export const SIGNAL_PRUNE_AFTER_END_MS = 6 * 60 * 60_000
@@ -312,6 +355,7 @@ export const SIGNAL_PRUNE_SILENT_MS = 24 * 60 * 60_000
 export class SessionSignalStore {
   private readonly signals = new Map<string, SessionSignal>()
   private readonly listeners = new Set<SignalListener>()
+  private readonly thoughtListeners = new Set<ThoughtListener>()
   private readonly ctx: ReducerContext
 
   constructor(ctx: ReducerContext) {
@@ -319,9 +363,21 @@ export class SessionSignalStore {
   }
 
   apply(env: HookEnvelope, child?: boolean): SessionSignal {
-    const next = applyHookEvent(this.signals.get(env.sessionId), env, this.ctx, child)
+    const prev = this.signals.get(env.sessionId)
+    const next = applyHookEvent(prev, env, this.ctx, child)
     this.signals.set(env.sessionId, next)
-    if (env.payload.display_only === true) return next // no drain, permission or halt listeners
+    if (isDisplayOnly(env)) {
+      // No drain, permission or halt listeners. A NEW thought reaches the live feed only.
+      const thought = next.lastThought
+      if (env.event === 'AgentThought' && thought && thought !== prev?.lastThought) {
+        for (const listener of this.thoughtListeners) {
+          try { listener(next, thought) } catch (error) {
+            console.error(`[session-signals] thought listener failed: ${error instanceof Error ? error.message : error}`)
+          }
+        }
+      }
+      return next
+    }
     const isChild = child ?? this.ctx.isCosSpawnedPid(env.ppid)
     for (const listener of this.listeners) {
       try { listener(next, env, isChild) } catch (error) {
@@ -392,6 +448,12 @@ export class SessionSignalStore {
     return () => { this.listeners.delete(listener) }
   }
 
+  /** 6.62.0: new agent thoughts, for the live feed. Display only. */
+  subscribeThoughts(listener: ThoughtListener): () => void {
+    this.thoughtListeners.add(listener)
+    return () => { this.thoughtListeners.delete(listener) }
+  }
+
   /** Drop records that ended long ago, and records silent for a day (a tab that died with no SessionEnd). */
   prune(nowMs = Date.now()): number {
     let dropped = 0
@@ -426,5 +488,6 @@ export class SessionSignalStore {
   __resetForTests(): void {
     this.signals.clear()
     this.listeners.clear()
+    this.thoughtListeners.clear()
   }
 }

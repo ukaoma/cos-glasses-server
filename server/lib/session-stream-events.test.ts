@@ -17,6 +17,7 @@ import {
   PROSE_MAX_CHARS,
   TARGET_MAX_CHARS,
   basename,
+  cursorThoughtStatus,
   detailForTool,
   draftsFromLine,
   draftsFromRecord,
@@ -28,6 +29,7 @@ import {
   statusDraftWithDerived,
   outcomeForToolResult,
   foldSeedOutcomes,
+  isCodexReasoningStatus,
   unwrapPeerMessage,
   type ToolOutcome,
 } from './session-stream-events'
@@ -418,11 +420,33 @@ describe('Cursor records', () => {
     })).toEqual([{ kind: 'tool', verb: 'edit', target: 'session-poll-tiers.ts', detail: '+2 -1' }])
   })
 
-  it('drops the user turn', () => {
+  // 6.62.0 (plan 1.5): the user's words are the inside of <user_query>; until 6.62.0 a Cursor
+  // feed dropped the whole row and never showed what it was working on.
+  it('keeps the user query as the prompt, without its scaffolding', () => {
     expect(draftsFromRecord('cursor', {
       role: 'user',
       message: { content: [{ type: 'text', text: '<user_query>do the thing</user_query>' }] },
-    })).toEqual([])
+    })).toEqual([{ kind: 'prompt', text: 'do the thing' }])
+    expect(draftsFromRecord('cursor', {
+      role: 'user',
+      message: { content: [{ type: 'text', text: '<attached_files>\n/a.ts\n</attached_files>\n<user_query>\nfix   the\nqueue\n</user_query>' }] },
+    })).toEqual([{ kind: 'prompt', text: 'fix the queue' }])
+    // Scaffolding alone, a tool result, or an empty query: no prompt line.
+    expect(draftsFromRecord('cursor', { role: 'user', message: { content: [{ type: 'text', text: '<system-reminder>x</system-reminder>' }] } })).toEqual([])
+    expect(draftsFromRecord('cursor', { role: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u1', content: 'ok' }] } })).toEqual([])
+    expect(draftsFromRecord('cursor', { role: 'user', message: { content: [{ type: 'text', text: '<user_query>  </user_query>' }] } })).toEqual([])
+    // A Claude user row keeps its own rule (the shapes differ: Claude writes `type`).
+    expect(draftsFromRecord('claude', { role: 'user', message: { content: [{ type: 'text', text: '<user_query>x</user_query>' }] } })).toEqual([])
+  })
+
+  it('6.62.0 (plan 1.7): a thought is a reasoning line on a working status, one line, target-sized', () => {
+    expect(cursorThoughtStatus('I will read the queue store first.')).toEqual({ kind: 'status', state: 'working', reasoning: 'I will read the queue store first.' })
+    const long = cursorThoughtStatus(`Planning\n${'w'.repeat(500)}`)!
+    expect(long.reasoning.length).toBeLessThanOrEqual(80)
+    expect(long.reasoning).not.toContain('\n')
+    expect(cursorThoughtStatus('   ')).toBeNull()
+    expect(cursorThoughtStatus(undefined)).toBeNull()
+    expect(isCodexReasoningStatus(long)).toBe(true)
   })
 })
 

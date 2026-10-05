@@ -3,12 +3,15 @@ import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { DISPLAY_TICKET_TTL_SECONDS, verifyDisplayTicket } from '../lib/display-ticket.js'
-import { copyFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installClaudeHooks } from '../lib/claude-hooks-installer.js'
 import { invalidateHookStatus } from '../lib/session-hooks-runtime.js'
+import { installCodexHooks } from '../lib/codex-hooks-installer.js'
+import { installCursorObserver } from '../lib/cursor-observer-installer.js'
+import { __resetProviderObserveForTests, refreshProviderHookFiles } from '../lib/provider-observe.js'
 import { healthRouter } from './health.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
@@ -112,11 +115,13 @@ describe('features.sessionCancel (6.53.0)', () => {
     try {
       invalidateHookStatus()
       const before = await (await fetch(`${base}/api/health`)).json()
-      expect(before.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })
+      // 6.62.0: deskCursor follows the Claude hooks Cursor runs; deskCodex needs Codex's own
+      // trusted hooks, which nothing here installs.
+      expect(before.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
       expect(installClaudeHooks({ port: 3999 }).status.state).toBe('installed')
       invalidateHookStatus()
       const installed = await (await fetch(`${base}/api/health`)).json()
-      expect(installed.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true })
+      expect(installed.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
       // 6.53.3: the update changed the script. An install still on the 6.53.0 script reads
       // script_outdated (Control's banner asks for Install hooks) but can stop desk runs,
       // so deskClaude stays true; a script older than the halt check cannot.
@@ -125,17 +130,94 @@ describe('features.sessionCancel (6.53.0)', () => {
       invalidateHookStatus()
       const prior = await (await fetch(`${base}/api/health`)).json()
       expect(prior.sessionHooks.state).toBe('script_outdated')
-      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true })
+      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+      // 6.62.0 (B1): the 6.61.7 script next to this package is the Mac right after Update
+      // Server and before Install hooks. Desk cancel must not turn off in that window.
+      copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', '__fixtures__', 'cos-session-hook-6.61.7'), stable)
+      invalidateHookStatus()
+      const upgraded = await (await fetch(`${base}/api/health`)).json()
+      expect(upgraded.sessionHooks.state).toBe('script_outdated')
+      expect(upgraded.sessionHooks.installed).toBe(false)
+      expect(upgraded.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
       writeFileSync(stable, '#!/bin/sh\n# a 6.51 script, no halt check\nexit 0\n')
       invalidateHookStatus()
       const older = await (await fetch(`${base}/api/health`)).json()
       expect(older.sessionHooks.state).toBe('script_outdated')
-      expect(older.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })
+      expect(older.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
       process.env.COS_SESSION_HOOKS = '0'
       const off = await (await fetch(`${base}/api/health`)).json()
-      expect(off.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false })
+      expect(off.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: false, deskCodex: false, deskCursor: false })
     } finally {
       for (const k of keys) { if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k] }
+      invalidateHookStatus()
+    }
+  }, 20_000)
+})
+
+// 6.62.0 (B2, plan 1.10): Codex and the Cursor observer are reported APART from Claude's
+// fields, and `providers.<engine>.observe` names where each observation comes from. With no
+// background refresh started (no test starts one) nothing is read from a home directory.
+describe('provider observation on health (6.62.0)', () => {
+  it('sessionHooks.codex and cursorObserver sit beside the Claude fields; providers.*.observe has the five sources', async () => {
+    __resetProviderObserveForTests()
+    const body = await (await fetch(`${base}/api/health`)).json() as any
+    expect(body.sessionHooks.codex).toEqual({ present: false, installed: false, state: null, trust: 'unknown', scriptOk: false, checkedAt: null, trustCheckedAt: null })
+    expect(body.sessionHooks.cursorObserver).toEqual({ installed: false, nodeOk: false, checkedAt: null })
+    // Claude's own words are exactly where and what they were.
+    expect(['installed', 'drift', 'missing', 'script_outdated', 'disabled_by_settings', 'settings_unparseable', 'settings_symlink', 'settings_unreadable']).toContain(body.sessionHooks.state)
+    expect(body.sessionHooks.installed).toBe(body.sessionHooks.state === 'installed')
+    for (const provider of ['claude', 'codex', 'cursor']) {
+      expect(Object.keys(body.providers[provider].observe).sort()).toEqual(['children', 'compaction', 'hooks', 'liveState', 'reasoning'])
+      for (const v of Object.values(body.providers[provider].observe)) expect(typeof v).toBe('string')
+    }
+    expect(body.providers.claude.observe.reasoning).toBe('none')
+    expect(body.providers.codex.observe).toMatchObject({ hooks: 'absent', liveState: 'transcript', children: 'state_db', compaction: 'rollout_end', reasoning: 'rollout' })
+    expect(body.providers.cursor.observe).toMatchObject({ children: 'none', reasoning: 'none' })
+  }, 20_000)
+
+  it('the snapshot, once refreshed against scratch homes, says installed and the sources follow', async () => {
+    const keys = ['CODEX_HOME', 'CURSOR_CONFIG_DIR', 'COS_GLASSES_HOME', 'CLAUDE_CONFIG_DIR', 'COS_SESSION_HOOKS', 'COS_CODEX_BIN'] as const
+    const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]))
+    const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-health-observe-')))
+    const home = join(root, 'Ukaoma Chief Of Staff')
+    // A stand-in Codex binary, so "Codex is present" does not depend on this Mac. It is never run.
+    const fakeCodex = join(home, 'Fake Codex', 'codex')
+    mkdirSync(dirname(fakeCodex), { recursive: true })
+    writeFileSync(fakeCodex, '#!/bin/sh\nexit 1\n')
+    chmodSync(fakeCodex, 0o755)
+    process.env.COS_CODEX_BIN = fakeCodex
+    process.env.CODEX_HOME = join(home, '.codex')
+    process.env.CURSOR_CONFIG_DIR = join(home, '.cursor')
+    process.env.COS_GLASSES_HOME = join(home, '.cos-glasses')
+    process.env.CLAUDE_CONFIG_DIR = join(home, '.claude')
+    process.env.COS_SESSION_HOOKS = '1'
+    mkdirSync(process.env.CODEX_HOME, { recursive: true })
+    try {
+      __resetProviderObserveForTests()
+      expect(installCursorObserver().ok).toBe(true)
+      expect(installCodexHooks().ok).toBe(true)
+      invalidateHookStatus()
+      refreshProviderHookFiles()
+      // Codex installed, Claude not yet: Claude's words stay Claude's (B2), nothing leaks across.
+      const codexOnly = await (await fetch(`${base}/api/health`)).json() as any
+      expect(codexOnly.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown' })
+      expect(codexOnly.sessionHooks.state).toBe('missing')
+      expect(codexOnly.sessionHooks.installed).toBe(false)
+      expect(codexOnly.features.sessionCancel).toMatchObject({ deskClaude: false, deskCodex: false, deskCursor: false })
+      expect(installClaudeHooks({ port: 3999 }).ok).toBe(true)
+      invalidateHookStatus()
+      const body = await (await fetch(`${base}/api/health`)).json() as any
+      expect(body.sessionHooks.cursorObserver).toMatchObject({ installed: true, nodeOk: true })
+      expect(typeof body.sessionHooks.cursorObserver.checkedAt).toBe('string')
+      expect(body.providers.cursor.observe).toEqual({ hooks: 'claude_hooks', liveState: 'hook', children: 'observer', compaction: 'observer', reasoning: 'observer' })
+      // Installed but not yet trusted by Codex: never a desk cancel, and said as `unknown`.
+      expect(body.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown' })
+      expect(body.providers.codex.observe).toMatchObject({ hooks: 'unknown', liveState: 'transcript', compaction: 'rollout_end' })
+      expect(body.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+      expect(body.sessionHooks.state).toBe('installed')
+    } finally {
+      for (const k of keys) { if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k] }
+      __resetProviderObserveForTests()
       invalidateHookStatus()
     }
   }, 20_000)

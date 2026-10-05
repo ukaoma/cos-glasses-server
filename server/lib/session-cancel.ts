@@ -10,7 +10,11 @@
 //   desk_run     Claude Code at the desk (a Desktop tab, a terminal, a Continue delivered
 //                live into the open window). A halt marker plus the synchronous PreToolUse
 //                hook stops it at its NEXT tool call (canaries C1b, C5, C10).
-//   unsupported  the Codex app or Cursor. Nothing outside the app can reach the run.
+//                6.62.0: also Cursor (it runs the Claude hooks, so the same marker stops it,
+//                C10), and Codex once the COS hooks are installed in Codex AND Codex trusts
+//                them (its deny-only reply, C10/C12). A pure `js` Codex step is not a tool
+//                call, so a Codex run stops at its next COMMAND (W20).
+//   unsupported  the Codex app or Cursor without hooks that can reach the run.
 //   hooks_*      a desk Claude run on a Mac whose hooks cannot stop it yet.
 //
 // `cancelTargetFor` is the ONE function that decides, and both the cancel route and the
@@ -33,6 +37,24 @@ export interface CancelFacts {
   hooksEnabled: boolean
   /** The hooks installed on this Mac carry the 6.53.0 script and subscription. */
   hooksReady: boolean
+  /**
+   * 6.62.0: the COS hooks in `~/.codex/hooks.json` can stop a desk Codex run: installed, trusted
+   * by Codex itself, and this package's script. Absent: the registered reader answers
+   * (`setCodexDeskCancelReady`), and with none registered, no.
+   */
+  codexHooksReady?: boolean
+}
+
+let codexDeskCancelReady: () => boolean = () => false
+
+/** 6.62.0: the composition root registers how to read Codex hook readiness (`provider-observe.ts`). */
+export function setCodexDeskCancelReady(read: () => boolean): void {
+  codexDeskCancelReady = read
+}
+
+function codexReady(facts: CancelFacts): boolean {
+  if (typeof facts.codexHooksReady === 'boolean') return facts.codexHooksReady
+  try { return codexDeskCancelReady() === true } catch { return false }
 }
 
 /**
@@ -40,13 +62,16 @@ export interface CancelFacts {
  *   1. COS's own turn first. It is the one run COS can end at once, and a marker would
  *      also stop it only at its next tool (R3), so aborting the child is always better.
  *   2. Nothing running: null. The lens shows no row at all.
- *   3. Codex and Cursor cannot be stopped from outside their app.
+ *   3. 6.62.0: Cursor stops through the Claude hooks it runs (`hooksReady`), and Codex through
+ *      its own trusted hooks (`codexHooksReady`); without them, still only from their app.
  *   4. A desk Claude run needs the hooks applied AND the new script installed; either
  *      missing is its own answer, because the fixes differ (a setting vs Install hooks).
  */
 export function cancelTargetFor(facts: CancelFacts): CancelTarget | null {
   if (facts.cosTurnInFlight === true) return 'cos_turn'
   if (facts.runningOutsideCos !== true) return null
+  if (facts.provider === 'cursor') return facts.hooksEnabled === true && facts.hooksReady === true ? 'desk_run' : 'unsupported'
+  if (facts.provider === 'codex') return facts.hooksEnabled === true && codexReady(facts) ? 'desk_run' : 'unsupported'
   if (facts.provider !== 'claude') return 'unsupported'
   if (facts.hooksEnabled !== true) return 'hooks_disabled'
   if (facts.hooksReady !== true) return 'hooks_outdated'
@@ -59,9 +84,21 @@ export function cancelTargetFor(facts: CancelFacts): CancelTarget | null {
  * NOW: the hooks applied AND the 6.53 script and subscription installed. False until
  * Install hooks after the update, which is the rollout step Control's banner asks for.
  */
-export function sessionCancelFeature(hooksEnabled: boolean, hooksInstalled: boolean): { cosTurn: true; deskClaude: boolean } {
-  return { cosTurn: true, deskClaude: hooksEnabled === true && hooksInstalled === true }
+export function sessionCancelFeature(hooksEnabled: boolean, hooksInstalled: boolean, codexHooksReady = false): { cosTurn: true; deskClaude: boolean; deskCodex: boolean; deskCursor: boolean } {
+  return {
+    cosTurn: true,
+    deskClaude: hooksEnabled === true && hooksInstalled === true,
+    // 6.62.0: Codex through its own trusted hooks; Cursor through the Claude hooks it runs.
+    deskCodex: hooksEnabled === true && codexHooksReady === true,
+    deskCursor: hooksEnabled === true && hooksInstalled === true,
+  }
 }
+
+/**
+ * 6.62.0 (W20): what an accepted desk cancel does, in the lens's words. A Codex `js` step is not
+ * a tool call, so a run stops at its next command, not at once; so does every desk run.
+ */
+export const DESK_RUN_EFFECT_COPY = 'Stops the run at its next command.'
 
 /** Refusal codes on the cancel route, with the lens's own words (app 6.9.529 matches). */
 export type CancelRefusal = 'not_running' | 'cancel_unsupported' | 'hooks_outdated' | 'hooks_disabled' | 'cancel_failed' | 'invalid_request'

@@ -79,12 +79,12 @@ import {
   transcriptWatcherDegraded,
   readTranscriptSeedLines,
 } from '../lib/session-transcript-watcher.js'
-import { foldSeedOutcomes, draftsFromLine, statusDraftWithDerived, type DerivedStatusFields } from '../lib/session-stream-events.js'
+import { cursorThoughtStatus, foldSeedOutcomes, draftsFromLine, statusDraftWithDerived, type DerivedStatusFields } from '../lib/session-stream-events.js'
 import type { SessionStreamState } from '../lib/session-stream-events.js'
 import { RING_EPOCH, replaySessionStream, ringBounds } from '../lib/session-stream-bus.js'
 import { claudeSessionsDir, readClaudePeerRecords, registryFacts } from './claude-sessions.js'
 import type { RegistryFacts } from '../lib/session-state-derive.js'
-import { deriveForRow, sessionHooksEnabled, sessionSignalStore } from '../lib/session-hooks-runtime.js'
+import { deriveForRow, sessionHooksEnabled, sessionSignalStore, signalFor } from '../lib/session-hooks-runtime.js'
 import { derivedStatusFields } from '../lib/session-state-derive.js'
 
 export const agentSessionStreamRouter = Router()
@@ -121,9 +121,12 @@ export const REGISTRY_REFRESH_MS = 5_000
 type RegistryReader = () => Promise<RegistryFacts | undefined>
 
 function derivedForStream(provider: AgentProvider, sessionId: string, key: string, registry: RegistryFacts | undefined): DerivedStatusFields | undefined {
-  if (provider !== 'claude' || !sessionHookSseEnabled()) return undefined
+  if (!sessionHookSseEnabled()) return undefined
+  // 6.62.0 (plan 1.3): Codex and Cursor too, once their hooks have spoken for the session. A
+  // session they have not stays exactly as before: the transcript's own status lines narrate it.
+  if (provider !== 'claude' && !signalFor(sessionId)) return undefined
   try {
-    const derived = deriveForRow({ sessionId, registry, remember: false, attachedTurn: isAttachedTurnActive(key) })
+    const derived = deriveForRow({ sessionId, registry: provider === 'claude' ? registry : undefined, remember: false, attachedTurn: isAttachedTurnActive(key) })
     return derived ? derivedStatusFields(derived) : undefined
   } catch {
     return undefined
@@ -278,7 +281,8 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // opening state (nothing awaits once the headers are out, so a close can never slip
   // between a write and the `close` listener), refreshed at most every REGISTRY_REFRESH_MS.
   const readRegistry = registryReaderFor(sessionId)
-  let registry: RegistryFacts | undefined = await readRegistry()
+  // Only a Claude session has a `~/.claude/sessions` record (6.62.0: the feed now derives for all three).
+  let registry: RegistryFacts | undefined = provider === 'claude' ? await readRegistry() : undefined
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -300,6 +304,7 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   let closed = false
 
   let releaseSignals: (() => void) | null = null
+  let releaseThoughts: (() => void) | null = null
 
   const teardown = (): void => {
     if (closed) return
@@ -308,6 +313,7 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
     unsubscribe()
     releaseWatcher?.()
     releaseSignals?.()
+    releaseThoughts?.()
     try { res.end() } catch { /* already gone */ }
   }
 
@@ -437,7 +443,8 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
   // client's state line moves on the engine's own events (prompt, permission prompt,
   // Stop, end) rather than on the transcript clock. Filtered to this session (the
   // client may have addressed it by the registry's 8-character form).
-  if (provider === 'claude' && sessionHookSseEnabled() && !closed) {
+  // 6.62.0 (plan 1.3): Codex and Cursor sessions as well, now that their hooks reach the store.
+  if (sessionHookSseEnabled() && !closed) {
     const wanted = sessionId.toLowerCase()
     // `lastStamp` is whatever the OPENING status actually wrote (set inside `write`), so a
     // change during the seed read is emitted as the first live line, not lost.
@@ -446,7 +453,7 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
       if (signal.sessionId !== wanted && !signal.sessionId.startsWith(wanted)) return
       // The registry may have moved with the hooks (an Esc flips it idle); refresh it
       // off the hot path and let the next event read the new facts.
-      void readRegistry().then(facts => { registry = facts })
+      if (provider === 'claude') void readRegistry().then(facts => { registry = facts })
       const derived = derivedForStream(provider, sessionId, key, registry)
       if (!derived) return
       // Only a CHANGE of state is a line; tool events inside a running turn are narrated
@@ -454,6 +461,16 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
       if (stampOf(derived) === lastStamp) return
       write({ kind: 'status', state: 'working', at: Date.now() })
     })
+    // 6.62.0 (plan 1.7): a Cursor session's newest agent thought is its reasoning line, the
+    // way Codex's reasoning headline is. Memory and this feed only; never the ledger.
+    if (provider === 'cursor') {
+      releaseThoughts = sessionSignalStore.subscribeThoughts((signal, thought) => {
+        if (closed) return
+        if (signal.sessionId !== wanted && !signal.sessionId.startsWith(wanted)) return
+        const draft = cursorThoughtStatus(thought.text)
+        if (draft) write({ ...draft, at: Date.now() })
+      })
+    }
   }
 
   releaseWatcher = path === null
@@ -466,6 +483,8 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
     releaseWatcher = null
     releaseSignals?.()
     releaseSignals = null
+    releaseThoughts?.()
+    releaseThoughts = null
     return
   }
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0; single entry 6.53.3; away hold wait 6.60.0; Codex and Cursor parity 6.62.0). Installed into ~/.claude/settings.json by
+# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0; single entry 6.53.3; away hold wait 6.60.0). Installed into ~/.claude/settings.json by
 # `--hooks install`; Claude Code runs it with the hook event name as $1 and the event
 # payload on stdin. It spools one JSON file per event into the hook spool and exits 0
 # on every path. Only PermissionRequest ever talks to the server, and only when the
@@ -19,18 +19,10 @@
 #
 # The installer bakes COS_GLASSES_HOME and COS_HOOK_SPOOL into the command, so this
 # script and the server can never disagree about where the token or the spool is.
-#
-# 6.62.0: the same script also runs from ~/.codex/hooks.json, whose command adds
-# COS_HOOK_PROVIDER=codex. It changes three things only: the halt reply is deny-only (Codex
-# rejects `continue:false` in a PreToolUse reply and then RUNS the tool, canary C10; the
-# deny alone blocks it, C12), the spooled envelope says `"provider":"codex"`, and the Cursor
-# Stop follow-up below never runs. Claude and Cursor share the Claude command and keep
-# today's bytes; the server tells them apart by the payload.
 PATH=/usr/bin:/bin:/usr/sbin; umask 077; trap '' PIPE
 HOME=${HOME:-$(cd ~ 2>/dev/null && pwd)}; [ -n "$HOME" ] || exit 0
 GH=${COS_GLASSES_HOME:-$HOME/.cos-glasses}
 SPOOL=${COS_HOOK_SPOOL:-$GH/data/hook-spool}; EVENT="$1"
-PROV=${COS_HOOK_PROVIDER:-}; case "$PROV" in claude|codex|cursor) ;; *) PROV='' ;; esac
 # 6.53.0, the halt check; 6.53.3, one entry for both synchronous events (review A, option a).
 # FIRST, before mkdir, perl and the B8 guard below: a full spool or a stale drain stamp must
 # never stop a cancel. The marker folder sits beside the spool, like the Cursor queue
@@ -46,17 +38,13 @@ case "$EVENT" in PreToolUse|UserPromptSubmit)
   HALT="${SPOOL%/*}/session-halt"
   # Any marker at all? A glob is a builtin, and it runs before stdin is touched.
   ANY=''; for F in "$HALT"/*; do [ -e "$F" ] && ANY=1; break; done
-  # The FIRST session_id is the payload's own: Claude and Codex write it first, and a tool's
-  # input that happens to carry one comes later. 6.62.0 (W7): Cursor writes
-  # "conversation_id" FIRST (byte 1, the same id) and its session_id ~600 bytes in, behind
-  # tool_input, so a large edit pushed it out of this read and an input naming another
-  # session matched first. Whichever of the two keys comes first is the payload's own. Any
-  # JSON spacing; 36 hex-and-dash characters inside a closed string, or nothing.
+  # The FIRST session_id is the payload's own: Claude writes it first, and a tool's input
+  # that happens to carry one comes later. Any JSON spacing; 36 hex-and-dash characters
+  # inside a closed string, or nothing.
   sid_of() {
-    SID=''; KEY='"session_id"'; PRE=${HEAD%%'"session_id"'*}
-    case "$PRE" in *'"conversation_id"'*) KEY='"conversation_id"' ;; esac
-    case "$HEAD" in *"$KEY"*)
-      SID=${HEAD#*"$KEY"}; SID=${SID#"${SID%%[!:[:space:]]*}"}
+    SID=''
+    case "$HEAD" in *'"session_id"'*)
+      SID=${HEAD#*'"session_id"'}; SID=${SID#"${SID%%[!:[:space:]]*}"}
       case "$SID" in '"'*'"'*) SID=${SID#?}; SID=${SID%%'"'*} ;; *) SID='' ;; esac ;;
     esac
     case "$SID" in *[!0-9A-Fa-f-]*) SID='' ;; esac
@@ -94,12 +82,7 @@ case "$EVENT" in PreToolUse|UserPromptSubmit)
     # reading the id and clearing it. Then the prompt is spooled as before.
     rm -f "$HALT/$SID" 2>/dev/null
   elif [ -f "$HALT/$SID" ]; then
-    if [ "$PROV" = codex ]; then
-      # 6.62.0 (C10, C12): deny only, and a reason that tells the model to stop.
-      printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS. Stop and do not work around this."}}'
-    else
-      printf '%s' '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
-    fi
+    printf '%s' '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
     exec cat >/dev/null
   fi
   # Every other tool call ends here with nothing written and nothing printed.
@@ -142,17 +125,14 @@ if [ "$EVENT" = PermissionRequest ]; then
     if [ ${#2} -le 4 ] && [ "$2" -ge 20 ] && [ "$2" -le 3600 ]; then WAIT=$2; STAMP_WAIT=",\"hookWaitS\":$2"; fi ;;
   esac
 fi
-# 6.62.0: the provider, when the command said it (only the Codex command does).
-STAMP_PROV=''; [ -z "$PROV" ] || STAMP_PROV=",\"provider\":\"$PROV\""
-{ printf '{"ts":%s,"ppid":%s,"event":"%s"%s%s,"payload":' "$TS" "$PPID" "$EVENT" "$STAMP_WAIT" "$STAMP_PROV"; cat "$T.in"; printf '}\n'; } > "$T"
+{ printf '{"ts":%s,"ppid":%s,"event":"%s"%s,"payload":' "$TS" "$PPID" "$EVENT" "$STAMP_WAIT"; cat "$T.in"; printf '}\n'; } > "$T"
 rm -f "$T.in"
 # 6.51.0, CURSOR ONLY. Cursor runs this hook from ~/.claude/settings.json for its own
 # composers, and submits a Stop hook's {"followup_message":...} as that composer's next
 # message. A turn COS queued for the composer is handed over here, at the end of its turn.
 # Claude Code sets no CURSOR_VERSION and sends no cursor_version, so a Claude Stop takes
-# the line below this block exactly as before and never touches the network. 6.62.0: nor
-# does a Codex Stop, whatever its environment says: a follow-up is Cursor-only output.
-if [ "$EVENT" = Stop ] && [ "$PROV" != codex ] && [ -n "${CURSOR_VERSION:-}" ] && grep -Eq '"cursor_version"[[:space:]]*:[[:space:]]*"' "$T" 2>/dev/null; then
+# the line below this block exactly as before and never touches the network.
+if [ "$EVENT" = Stop ] && [ -n "${CURSOR_VERSION:-}" ] && grep -Eq '"cursor_version"[[:space:]]*:[[:space:]]*"' "$T" 2>/dev/null; then
   cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
   # Nothing queued for this composer (almost every Stop): no request at all. The queue
   # folder sits beside the spool. If it is not there, or the id cannot be read here,

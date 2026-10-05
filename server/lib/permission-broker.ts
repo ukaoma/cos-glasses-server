@@ -112,7 +112,7 @@
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { boundForRedaction } from './activity-preview.js'
-import { toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
+import { inferHookProvider, toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
 import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signal-store.js'
 
 // ---------------------------------------------------------------------------
@@ -302,6 +302,11 @@ export interface PermissionRequestFacts {
    * received it (its second argument). Null for an earlier script or block: `holdCeilingS`.
    */
   hookWaitS: number | null
+  /**
+   * 6.62.0 (plan 3.10): the engine that asked, from the envelope's stamp (the Codex command
+   * writes one) or the payload. Cursor never reaches here (`cursor` refusal above).
+   */
+  provider?: 'claude' | 'codex'
 }
 
 export type EnvelopeVerdict =
@@ -329,7 +334,7 @@ function readPermissionRequestEnvelope(body: unknown): EnvelopeRead {
   const hookWaitS = typeof wait === 'number' && Number.isInteger(wait) && wait > 0 && wait <= HOOK_WAIT_STAMP_MAX_S ? wait : null
   return {
     ok: true,
-    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts, hookWaitS },
+    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts, hookWaitS, provider: inferHookProvider(body.provider, p) === 'codex' ? 'codex' : 'claude' },
   }
 }
 
@@ -457,9 +462,16 @@ export const CANCEL_DENY_MESSAGE = 'Cancelled from COS'
  * 6.53.0: a held prompt whose run was cancelled from the lens. Deny with `interrupt: true`,
  * so Claude ends the RUN rather than trying something else in place of this tool. The one
  * case where a broker reply interrupts, and only ever from `cancelSession`.
+ *
+ * 6.62.0 (W20, C2): never for Codex. Its PermissionRequest refuses `interrupt` (it fails
+ * closed on the field), so a Codex prompt gets the plain deny; the halt marker stops the run
+ * at its next command.
  */
-export function cancelHookOutput(): Record<string, unknown> {
-  return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: CANCEL_DENY_MESSAGE, interrupt: true } } }
+export function cancelHookOutput(provider: 'claude' | 'codex' = 'claude'): Record<string, unknown> {
+  const decision = provider === 'codex'
+    ? { behavior: 'deny', message: CANCEL_DENY_MESSAGE }
+    : { behavior: 'deny', message: CANCEL_DENY_MESSAGE, interrupt: true }
+  return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } }
 }
 
 /** A tool approval: allow once, or deny with the one message. Never a rule. */
@@ -819,6 +831,8 @@ type Chosen = { answers: Record<string, string[]> } | { decision: 'allow' | 'den
 interface BrokerItem {
   id: string
   sessionId: string
+  /** 6.62.0: the engine that asked (plan 3.10); every view says it. */
+  provider: 'claude' | 'codex'
   kind: BrokerItemKind
   toolName: string
   toolInput: Record<string, unknown>
@@ -849,7 +863,7 @@ interface BrokerItem {
 export interface SessionQuestionView {
   id: string
   sessionId: string
-  provider: 'claude'
+  provider: 'claude' | 'codex'
   kind: BrokerItemKind
   tool: string
   createdAt: string
@@ -872,7 +886,7 @@ export interface SessionQuestionView {
 export interface SettledQuestionView {
   id: string
   sessionId: string
-  provider: 'claude'
+  provider: 'claude' | 'codex'
   kind: BrokerItemKind
   tool: string
   createdAt: string
@@ -1213,6 +1227,7 @@ export class PermissionBroker {
     const item: BrokerItem = {
       id,
       sessionId: facts.sessionId,
+      provider: facts.provider ?? 'claude',
       kind: request.kind,
       toolName: facts.toolName,
       // Only a question needs its input again (the answer is built on it). An approval's
@@ -1289,7 +1304,7 @@ export class PermissionBroker {
       views.push({
         id: item.id,
         sessionId: item.sessionId,
-        provider: 'claude',
+        provider: item.provider,
         kind: item.kind,
         tool: item.toolName,
         createdAt: new Date(item.createdAt).toISOString(),
@@ -1321,7 +1336,7 @@ export class PermissionBroker {
     return listed.map(item => ({
       id: item.id,
       sessionId: item.sessionId,
-      provider: 'claude' as const,
+      provider: item.provider,
       kind: item.kind,
       tool: item.toolName,
       createdAt: new Date(item.createdAt).toISOString(),
@@ -1444,7 +1459,7 @@ export class PermissionBroker {
     let denied = 0
     for (const item of [...this.items.values()]) {
       if (item.state !== 'pending' || item.sessionId !== wanted) continue
-      if (!item.channel || !item.channel.writable() || !item.channel.reply(cancelHookOutput())) {
+      if (!item.channel || !item.channel.writable() || !item.channel.reply(cancelHookOutput(item.provider))) {
         this.settle(item, 'hook_gone')
         continue
       }
