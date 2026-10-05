@@ -415,6 +415,16 @@ export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | '
   return false
 }
 
+/**
+ * 6.62.0 (QA W1): can these hooks stop a desk CURSOR run? Halt-ready, AND the installed script is
+ * this package's, byte for byte. Every earlier script reads the first `session_id`, which Cursor
+ * writes behind `tool_input`: a large tool call is missed, and one naming another session stops
+ * the wrong run. Claude's own readiness (`hookHaltReady`) is unchanged.
+ */
+export function cursorDeskHaltReady(status: Parameters<typeof hookHaltReady>[0]): boolean {
+  return hookHaltReady(status) && typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha
+}
+
 const INSTALL_COMMAND = 'npx --yes @gotcos/glasses-server@latest --hooks install'
 
 /**

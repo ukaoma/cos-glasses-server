@@ -24,10 +24,10 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
-import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, threadCancel } from './lib/session-cancel.js'
+import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, setDeskCancelReaders, threadCancel } from './lib/session-cancel.js'
 import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
 import {
   PermissionBroker,
@@ -174,7 +174,7 @@ const app = express()
 import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
 import { createCursorStopFollowupRouter } from './routes/cursor-stop-followup.js'
 import { queuedThreadKeys, readQueue, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
-import { hookHaltReady, readHookToken } from './lib/claude-hooks-installer.js'
+import { cursorDeskHaltReady, hookHaltReady, readHookToken } from './lib/claude-hooks-installer.js'
 import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
 import { createDrainKick, kickPlanFor } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
@@ -520,6 +520,12 @@ const sessionHooksRuntime = startSessionHooksRuntime({ port: PORT })
 // 6.62.0: the Codex hooks, their trust and the Cursor observer, read in the background for
 // health and the desk cancel (never on a request path; see lib/provider-observe.ts).
 startProviderObserveRefresh()
+// 6.62.0 (QA W1, W2): a desk Cursor cancel needs the CURRENT script, and a Codex or Cursor one
+// needs that engine's hooks already seen for the thread (see lib/session-cancel.ts).
+setDeskCancelReaders({
+  cursorReady: () => cursorDeskHaltReady(cachedHookStatus()),
+  threadHookSeen: (provider, threadId) => providerHookSeen(provider, threadId),
+})
 
 /**
  * The shim between the route's request shape and the adapter's.

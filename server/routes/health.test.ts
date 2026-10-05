@@ -130,7 +130,9 @@ describe('features.sessionCancel (6.53.0)', () => {
       invalidateHookStatus()
       const prior = await (await fetch(`${base}/api/health`)).json()
       expect(prior.sessionHooks.state).toBe('script_outdated')
-      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+      // QA W1: a halt-capable EARLIER script stops desk Claude runs, never Cursor ones: it reads
+      // the first session_id, which Cursor writes behind tool_input.
+      expect(prior.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: false })
       // 6.62.0 (B1): the 6.61.7 script next to this package is the Mac right after Update
       // Server and before Install hooks. Desk cancel must not turn off in that window.
       copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', '__fixtures__', 'cos-session-hook-6.61.7'), stable)
@@ -138,7 +140,7 @@ describe('features.sessionCancel (6.53.0)', () => {
       const upgraded = await (await fetch(`${base}/api/health`)).json()
       expect(upgraded.sessionHooks.state).toBe('script_outdated')
       expect(upgraded.sessionHooks.installed).toBe(false)
-      expect(upgraded.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
+      expect(upgraded.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: false })
       writeFileSync(stable, '#!/bin/sh\n# a 6.51 script, no halt check\nexit 0\n')
       invalidateHookStatus()
       const older = await (await fetch(`${base}/api/health`)).json()

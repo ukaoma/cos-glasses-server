@@ -89,7 +89,7 @@ import { cachedHookStatus, sessionHooksEnabled, sessionHooksHealthFields } from 
 import { sessionCancelFeature } from '../lib/session-cancel.js'
 import { codexDeskHaltReady, providerObserveFields } from '../lib/provider-observe.js'
 import { liveProviderActInput, mergeProviderSections, providerActSections } from '../lib/provider-actions.js'
-import { hookHaltReady } from '../lib/claude-hooks-installer.js'
+import { cursorDeskHaltReady, hookHaltReady } from '../lib/claude-hooks-installer.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
@@ -309,7 +309,7 @@ healthRouter.get('/health', async (_req, res) => {
     // The status read is the same cached one `sessionHooks` below reports.
     // 6.62.0: `deskCodex` (the Codex hooks installed AND trusted by Codex) and `deskCursor` (it
     // runs the Claude hooks). `deskClaude` reads exactly as before.
-    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady()),
+    sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady(), cursorDeskHaltReady(cachedHookStatus())),
   }
   const voice = {
     available: keyStatus.hasKey || tts_local.ready,
@@ -568,7 +568,7 @@ healthRouter.get('/models', async (req, res) => {
     providers: mergeProviderSections(providerActSections(liveProviderActInput({
       attachEnabled: threadAttach.enabled,
       forkProviders: threadAttach.forkProviders ?? [],
-      sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady()),
+      sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady(), cursorDeskHaltReady(cachedHookStatus())),
     })), providerObserveFields({ state: cachedHookStatus().state, ready: hookHaltReady(cachedHookStatus()) })),
     options: [
       ...(catalog.options ?? []),

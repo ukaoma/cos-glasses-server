@@ -12,6 +12,7 @@ import { AGENT_THOUGHT_MAX, inferHookProvider, parseHookEnvelope, projectHookPay
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { applyHookEvent, SessionSignalStore, type SessionSignal } from './session-signal-store.js'
 import { deriveSessionState } from './session-state-derive.js'
+import { __resetSessionHooksForTests, providerHookSeen, sessionSignalStore } from './session-hooks-runtime.js'
 
 const roots: string[] = []
 afterAll(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -161,5 +162,59 @@ describe('AgentThought: memory and live feed only (plan 1.7, W18)', () => {
     const store = new SessionSignalStore(noSpawn)
     ledger.replay(0, env => { store.apply(env) })
     expect(store.get(CURSOR)?.lastThought).toBeUndefined()
+  })
+})
+
+describe('6.62.0 (QA W2): the per-thread hook evidence a desk cancel needs', () => {
+  const saved = process.env.COS_SESSION_HOOKS
+  afterAll(() => { if (saved === undefined) delete process.env.COS_SESSION_HOOKS; else process.env.COS_SESSION_HOOKS = saved; __resetSessionHooksForTests() })
+
+  it('Codex needs a STAMPED phase event; inferred-only, observer-only or another thread is no evidence', () => {
+    process.env.COS_SESSION_HOOKS = '1'
+    __resetSessionHooksForTests()
+    // An inferred Codex event (an older script, no stamp): its halt reply fails open, so no.
+    const inferred = parseHookEnvelope(line({ ts: 1_000, ppid: 7, event: 'UserPromptSubmit', payload: { session_id: CODEX, transcript_path: '/Users/x/.codex/sessions/r.jsonl', prompt: 'x' } }))
+    if (!inferred.ok) throw new Error(inferred.reason)
+    expect(inferred.envelope).toMatchObject({ provider: 'codex' })
+    expect(inferred.envelope).not.toHaveProperty('stamped')
+    sessionSignalStore.apply(inferred.envelope)
+    expect(providerHookSeen('codex', CODEX)).toBe(false)
+    const stamped = parseHookEnvelope(line({ ts: 2_000, ppid: 7, event: 'PostToolUse', provider: 'codex', payload: { session_id: CODEX, tool_name: 'Bash', tool_input: { command: 'ls' } } }))
+    if (!stamped.ok) throw new Error(stamped.reason)
+    expect(stamped.envelope.stamped).toBe(true)
+    sessionSignalStore.apply(stamped.envelope)
+    expect(providerHookSeen('codex', CODEX)).toBe(true)
+    expect(providerHookSeen('cursor', CODEX)).toBe(false)
+    expect(providerHookSeen('codex', CURSOR)).toBe(false)
+  })
+
+  it('Cursor needs an event from the Claude-compatible hook; observer events alone are not it', () => {
+    process.env.COS_SESSION_HOOKS = '1'
+    __resetSessionHooksForTests()
+    sessionSignalStore.apply({ ts: 1_000, ppid: null, event: 'SubagentStart', sessionId: CURSOR, provider: 'cursor', stamped: true, payload: { session_id: CURSOR, display_only: true, agent_id: 'w1' } })
+    expect(providerHookSeen('cursor', CURSOR)).toBe(false)
+    const real = parseHookEnvelope(line({ ts: 2_000, ppid: 7, event: 'UserPromptSubmit', payload: { conversation_id: CURSOR, session_id: CURSOR, cursor_version: '2026.10.01', prompt: 'x' } }))
+    if (!real.ok) throw new Error(real.reason)
+    sessionSignalStore.apply(real.envelope)
+    expect(providerHookSeen('cursor', CURSOR)).toBe(true)
+    // With the hooks switched off nothing is evidence.
+    process.env.COS_SESSION_HOOKS = '0'
+    expect(providerHookSeen('cursor', CURSOR)).toBe(false)
+  })
+
+  it('the stamp survives the ledger, so a restart keeps the evidence', () => {
+    const ledger = new SessionHookLedger(join(dataDir(), 'session-hook-events.jsonl'))
+    const stamped = parseHookEnvelope(line({ ts: 2_000, ppid: 7, event: 'Stop', provider: 'codex', payload: { session_id: CODEX } }))
+    const inferred = parseHookEnvelope(line({ ts: 3_000, ppid: 7, event: 'Stop', payload: { session_id: CLAUDE } }))
+    if (!stamped.ok || !inferred.ok) throw new Error('parse')
+    ledger.append('s', stamped.envelope)
+    ledger.append('i', inferred.envelope)
+    const replayed: HookEnvelope[] = []
+    ledger.replay(0, env => { replayed.push(env) })
+    expect(replayed.map(e => e.stamped)).toEqual([true, undefined])
+    const store = new SessionSignalStore(noSpawn)
+    for (const env of replayed) store.apply(env)
+    expect(store.get(CODEX)?.stampedAt).toBe(2_000)
+    expect(store.get(CLAUDE)?.stampedAt).toBeUndefined()
   })
 })

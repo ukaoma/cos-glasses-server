@@ -43,18 +43,68 @@ export interface CancelFacts {
    * (`setCodexDeskCancelReady`), and with none registered, no.
    */
   codexHooksReady?: boolean
+  /**
+   * 6.62.0 (QA W1): the Claude hooks Cursor runs carry THIS package's script, not merely a
+   * halt-capable earlier one: the 6.61.7 script reads the first `session_id`, which a Cursor
+   * payload writes behind `tool_input`, so it misses or mis-stops Cursor runs. Absent: the
+   * registered reader answers (`setDeskCancelReaders`), and with none registered, no.
+   */
+  cursorHooksReady?: boolean
+  /** 6.62.0 (QA W2): the thread the cancel is for, so the hooks can be seen to fire for IT. */
+  threadId?: string
+  /**
+   * 6.62.0 (QA W2): a hook event from this engine has already reached COS for this thread:
+   * positive evidence the hooks run there (a freshly trusted Codex hook may not be loaded by a
+   * long-running app; a Cursor IDE halt was canaried in `-p` only). Absent: read through the
+   * registered reader for `threadId`; with neither, no.
+   */
+  threadHookSeen?: boolean
 }
 
-let codexDeskCancelReady: () => boolean = () => false
+export interface DeskCancelReaders {
+  codexReady: () => boolean
+  cursorReady: () => boolean
+  threadHookSeen: (provider: 'codex' | 'cursor', threadId: string) => boolean
+}
 
-/** 6.62.0: the composition root registers how to read Codex hook readiness (`provider-observe.ts`). */
+const NO_READERS: DeskCancelReaders = { codexReady: () => false, cursorReady: () => false, threadHookSeen: () => false }
+let readers: DeskCancelReaders = { ...NO_READERS }
+
+/**
+ * 6.62.0: the composition root registers how to read Codex and Cursor readiness and the
+ * per-thread hook evidence (`index.ts`, `provider-observe.ts`). Unregistered reads are "no".
+ */
+export function setDeskCancelReaders(next: Partial<DeskCancelReaders>): void {
+  readers = { ...readers, ...next }
+}
+
+/** 6.62.0: the Codex half of `setDeskCancelReaders`, kept for its callers. */
 export function setCodexDeskCancelReady(read: () => boolean): void {
-  codexDeskCancelReady = read
+  setDeskCancelReaders({ codexReady: read })
+}
+
+export function __resetDeskCancelReadersForTests(): void {
+  readers = { ...NO_READERS }
+}
+
+function readerSays(read: () => boolean): boolean {
+  try { return read() === true } catch { return false }
 }
 
 function codexReady(facts: CancelFacts): boolean {
   if (typeof facts.codexHooksReady === 'boolean') return facts.codexHooksReady
-  try { return codexDeskCancelReady() === true } catch { return false }
+  return readerSays(readers.codexReady)
+}
+
+function cursorReady(facts: CancelFacts): boolean {
+  if (typeof facts.cursorHooksReady === 'boolean') return facts.cursorHooksReady
+  return readerSays(readers.cursorReady)
+}
+
+function hookSeen(facts: CancelFacts, provider: 'codex' | 'cursor'): boolean {
+  if (typeof facts.threadHookSeen === 'boolean') return facts.threadHookSeen
+  const threadId = facts.threadId
+  return typeof threadId === 'string' && threadId.length > 0 && readerSays(() => readers.threadHookSeen(provider, threadId))
 }
 
 /**
@@ -62,16 +112,18 @@ function codexReady(facts: CancelFacts): boolean {
  *   1. COS's own turn first. It is the one run COS can end at once, and a marker would
  *      also stop it only at its next tool (R3), so aborting the child is always better.
  *   2. Nothing running: null. The lens shows no row at all.
- *   3. 6.62.0: Cursor stops through the Claude hooks it runs (`hooksReady`), and Codex through
- *      its own trusted hooks (`codexHooksReady`); without them, still only from their app.
+ *   3. 6.62.0: Cursor stops through the Claude hooks it runs, with THIS package's script
+ *      (`cursorHooksReady`, QA W1), and Codex through its own installed, trusted, current hooks
+ *      (`codexHooksReady`); either only once a hook event of that engine has been seen for the
+ *      thread (`threadHookSeen`, QA W2). Without all of it, still only from their app.
  *   4. A desk Claude run needs the hooks applied AND the new script installed; either
  *      missing is its own answer, because the fixes differ (a setting vs Install hooks).
  */
 export function cancelTargetFor(facts: CancelFacts): CancelTarget | null {
   if (facts.cosTurnInFlight === true) return 'cos_turn'
   if (facts.runningOutsideCos !== true) return null
-  if (facts.provider === 'cursor') return facts.hooksEnabled === true && facts.hooksReady === true ? 'desk_run' : 'unsupported'
-  if (facts.provider === 'codex') return facts.hooksEnabled === true && codexReady(facts) ? 'desk_run' : 'unsupported'
+  if (facts.provider === 'cursor') return facts.hooksEnabled === true && cursorReady(facts) && hookSeen(facts, 'cursor') ? 'desk_run' : 'unsupported'
+  if (facts.provider === 'codex') return facts.hooksEnabled === true && codexReady(facts) && hookSeen(facts, 'codex') ? 'desk_run' : 'unsupported'
   if (facts.provider !== 'claude') return 'unsupported'
   if (facts.hooksEnabled !== true) return 'hooks_disabled'
   if (facts.hooksReady !== true) return 'hooks_outdated'
@@ -84,13 +136,15 @@ export function cancelTargetFor(facts: CancelFacts): CancelTarget | null {
  * NOW: the hooks applied AND the 6.53 script and subscription installed. False until
  * Install hooks after the update, which is the rollout step Control's banner asks for.
  */
-export function sessionCancelFeature(hooksEnabled: boolean, hooksInstalled: boolean, codexHooksReady = false): { cosTurn: true; deskClaude: boolean; deskCodex: boolean; deskCursor: boolean } {
+export function sessionCancelFeature(hooksEnabled: boolean, hooksInstalled: boolean, codexHooksReady = false, cursorHooksReady = false): { cosTurn: true; deskClaude: boolean; deskCodex: boolean; deskCursor: boolean } {
   return {
     cosTurn: true,
     deskClaude: hooksEnabled === true && hooksInstalled === true,
-    // 6.62.0: Codex through its own trusted hooks; Cursor through the Claude hooks it runs.
+    // 6.62.0: whether THIS MAC can stop a desk Codex or Cursor run at all: Codex through its own
+    // installed, trusted, current hooks; Cursor through the Claude hooks with the current script
+    // (QA W1). Each thread's `cancel` field also needs that engine's hooks seen for it (QA W2).
     deskCodex: hooksEnabled === true && codexHooksReady === true,
-    deskCursor: hooksEnabled === true && hooksInstalled === true,
+    deskCursor: hooksEnabled === true && cursorHooksReady === true,
   }
 }
 

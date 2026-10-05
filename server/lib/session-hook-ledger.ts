@@ -28,6 +28,8 @@ export interface LedgerRow {
    * it. A row from an older server has none and replays exactly as it did.
    */
   provider?: HookProvider
+  /** 6.62.0 (QA W2): the envelope carried the provider stamp; a replay keeps the evidence. */
+  stamped?: true
   payload: Record<string, unknown>
 }
 
@@ -74,6 +76,7 @@ export class SessionHookLedger {
         ...(child ? { child: true } : {}),
         ...(entrypoint ? { entrypoint } : {}),
         ...(env.provider ? { provider: env.provider } : {}),
+        ...(env.stamped ? { stamped: true as const } : {}),
         payload: projectHookPayload(env.event, env.payload),
       }
     } catch (error) {
@@ -133,6 +136,7 @@ export class SessionHookLedger {
         sessionId: r.session_id.toLowerCase(),
         payload: { session_id: r.session_id, ...payload },
         ...(isHookProvider(r.provider) ? { provider: r.provider } : {}),
+        ...(r.stamped === true && isHookProvider(r.provider) ? { stamped: true as const } : {}),
       }, r.key, r.child === true, entrypoint)
       applied++
     }

@@ -99,6 +99,11 @@ export interface HookEnvelope {
   payload: Record<string, unknown>
   /** 6.62.0: set by `parseHookEnvelope` and a 6.62 ledger row; absent on older rows and hand-built envelopes. */
   provider?: HookProvider
+  /**
+   * 6.62.0 (QA W2): the envelope itself named the provider: a 6.62 hook script (from the Codex
+   * command, or from a Codex payload) or the Cursor observer wrote it. Inferred is not stamped.
+   */
+  stamped?: true
 }
 
 /**
@@ -154,6 +159,7 @@ export function parseHookEnvelope(text: string): ParsedHookEnvelope {
       sessionId,
       payload: p,
       provider: inferHookProvider(r.provider, p),
+      ...(isHookProvider(r.provider) ? { stamped: true as const } : {}),
     },
   }
 }
