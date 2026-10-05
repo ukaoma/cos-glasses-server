@@ -502,6 +502,16 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: Codex and Cursor (6.62.0)',
     expect(parsed.map(e => e.event).sort()).toEqual(['Interrupt', 'SessionStart', 'UserPromptSubmit'])
     expect(parsed.every(e => e.provider === 'codex' && e.sessionId === CODEX)).toBe(true)
     expect(parsed.find(e => e.event === 'SessionStart')?.payload.model).toBe('gpt-6.1-sol')
+    // Only a known provider is stamped: a junk value (or one that would break the JSON) is no
+    // stamp at all, and the envelope still parses.
+    for (const junk of ['gemini', 'codex","event":"Stop', '']) {
+      const r = halted()
+      expect(runAs('Stop', JSON.stringify({ ...base, hook_event_name: 'Stop', turn_id: 't1' }), r, { COS_HOOK_PROVIDER: junk }).status).toBe(0)
+      const text = readFileSync(join(r.spool, spooled(r.spool)[0]!), 'utf-8')
+      expect(text, junk).not.toContain('"provider"')
+      const e = parseHookEnvelope(text)
+      expect(e.ok, junk).toBe(true)
+    }
     // The Claude command stamps nothing: the server infers from the payload.
     const q = halted()
     expect(runAs('Stop', JSON.stringify({ session_id: 'a1b2c3d4-0000-4000-8000-00000000abcd', hook_event_name: 'Stop' }), q).status).toBe(0)
