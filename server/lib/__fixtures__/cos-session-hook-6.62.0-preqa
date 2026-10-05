@@ -20,13 +20,12 @@
 # The installer bakes COS_GLASSES_HOME and COS_HOOK_SPOOL into the command, so this
 # script and the server can never disagree about where the token or the spool is.
 #
-# 6.62.0: the same bytes also run from ~/.codex/hooks.json (as their own copy,
-# cos-session-hook-codex), whose command adds COS_HOOK_PROVIDER=codex; a Codex payload
-# reaching the Claude command is recognised too (codex_of, below). Codex changes three things
-# only: the halt reply is deny-only (Codex rejects `continue:false` in a PreToolUse reply and
-# then RUNS the tool, canary C10; the deny alone blocks it, C12), the spooled envelope says
-# `"provider":"codex"`, and the Cursor Stop follow-up below never runs. Claude and Cursor
-# share the Claude command and keep today's bytes; the server tells them apart by the payload.
+# 6.62.0: the same script also runs from ~/.codex/hooks.json, whose command adds
+# COS_HOOK_PROVIDER=codex. It changes three things only: the halt reply is deny-only (Codex
+# rejects `continue:false` in a PreToolUse reply and then RUNS the tool, canary C10; the
+# deny alone blocks it, C12), the spooled envelope says `"provider":"codex"`, and the Cursor
+# Stop follow-up below never runs. Claude and Cursor share the Claude command and keep
+# today's bytes; the server tells them apart by the payload.
 PATH=/usr/bin:/bin:/usr/sbin; umask 077; trap '' PIPE
 HOME=${HOME:-$(cd ~ 2>/dev/null && pwd)}; [ -n "$HOME" ] || exit 0
 GH=${COS_GLASSES_HOME:-$HOME/.cos-glasses}
@@ -86,20 +85,6 @@ case "$EVENT" in PreToolUse|UserPromptSubmit)
       case "$TN" in '"AskUserQuestion"'*|'"ExitPlanMode"'*) NEED=1 ;; esac ;;
     esac
   fi
-  # 6.62.0 (QA W13): a COS block Codex imported from the Claude settings runs with no
-  # COS_HOOK_PROVIDER, and the Claude reply makes Codex fail open. Codex writes its rollout as
-  # the payload's SECOND key, right behind session_id; Claude writes its own transcript there,
-  # and the same key further in (a tool that reads a rollout) is not the payload's. Read only
-  # when a marker or a spool needs it, so a plain tool call stays one read and a `case`.
-  codex_of() {
-    case "$HEAD" in *'"session_id"'*'"transcript_path"'*) ;; *) return ;; esac
-    A=${HEAD#*'"session_id"'}; B=${A%%'"transcript_path"'*}
-    [ ${#B} -le 64 ] || return
-    TP=${A#*'"transcript_path"'}; TP=${TP#"${TP%%[!:[:space:]]*}"}
-    case "$TP" in '"'*) TP=${TP#?}; TP=${TP%%'"'*} ;; *) return ;; esac
-    case "$TP" in */.codex/sessions/*) PROV=codex ;; esac
-  }
-  [ -n "$PROV" ] || { [ -z "$ANY" ] && [ -z "$NEED" ]; } || codex_of
   case "$SID" in *[A-F]*) SID=$(printf '%s' "$SID" | tr 'A-F' 'a-f') ;; esac
   if [ -z "$SID" ]; then :
   elif [ "$EVENT" = UserPromptSubmit ]; then

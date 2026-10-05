@@ -15,6 +15,7 @@ import {
   CODEX_HOOK_SUBSCRIPTIONS,
   __resetCodexHookTrustForTests,
   cachedCodexHookTrust,
+  codexHookAdvice,
   codexHookCommand,
   codexHookStatus,
   foldCodexTrust,
@@ -22,6 +23,7 @@ import {
   mergeCodexHooks,
   readCodexHookTrust,
   refreshCodexHookTrust,
+  stableCodexHookScriptPath,
   uninstallCodexHooks,
 } from './codex-hooks-installer.js'
 import { createSessionHooksRouter, type SessionHooksCodexDeps } from '../routes/session-hooks.js'
@@ -122,19 +124,55 @@ describe('the merge replaces our blocks IN PLACE and keeps every user block inde
     expect(written.PreToolUse[0]).toEqual(user('a', 'Bash'))
     expect(written.PreToolUse[2]).toEqual(user('b', 'Edit'))
 
-    // A second block of ours (a hand edit) is removed; a user block that ALSO calls our script
-    // is not ours to rewrite: left alone, and the event reads drift.
+    // QA W13: a SECOND block of ours (a hand edit, or a COS block Codex imported from the
+    // Claude settings) is left where it stands: removing it would move the user block after it.
+    // A user block that ALSO calls our script is not ours to rewrite either. Both read drift.
+    const imported = { hooks: [{ type: 'command', command: `COS_GLASSES_HOME=x '${f.scriptPath}' PreToolUse`, timeout: 5 }] }
     const mixed = { hooks: [{ type: 'command', command: `'${f.scriptPath}' Stop` }, { type: 'command', command: `'/Users/me/bin/mine'` }] }
-    const twice = { hooks: { ...written, PreToolUse: [...written.PreToolUse, written.PreToolUse[1]], Stop: [...written.Stop, mixed] } }
+    const twice = { hooks: { ...written, PreToolUse: [...written.PreToolUse, imported, user('after', 'Read')], Stop: [...written.Stop, mixed] } }
     const again = mergeCodexHooks(twice, f.scriptPath, f.hookPaths)
     if (!again.ok) throw new Error(again.reason)
     const againHooks = again.settings.hooks as Record<string, unknown[]>
-    expect(againHooks.PreToolUse).toHaveLength(3)
+    expect(againHooks.PreToolUse).toEqual([user('a', 'Bash'), written.PreToolUse[1], user('b', 'Edit'), imported, user('after', 'Read')])
     expect(againHooks.Stop).toEqual([user('c'), written.Stop[1], mixed])
     writeFileSync(f.hooksPath, JSON.stringify(again.settings))
     const status = codexHookStatus(f)
     expect(status.state).toBe('drift')
-    expect(status.drifted).toEqual(['Stop'])
+    // In subscription order (CODEX_HOOK_SUBSCRIPTIONS): Stop is listed before PreToolUse.
+    expect(status.drifted).toEqual(['Stop', 'PreToolUse'])
+    expect(status.duplicated).toEqual(['Stop', 'PreToolUse'])
+    expect(codexHookAdvice(status, 'unknown')).toContain('more than once for Stop, PreToolUse')
+  })
+
+  it('6.62.0 (QA W12): Codex runs its OWN copy of the script, so rolling the Claude script back changes nothing for Codex', () => {
+    const f = fixture()
+    const prev = process.env.COS_GLASSES_HOME
+    process.env.COS_GLASSES_HOME = f.hookPaths.home
+    try {
+      expect(stableCodexHookScriptPath()).toBe(join(f.hookPaths.home, 'bin', 'cos-session-hook-codex'))
+      const result = installCodexHooks({ hooksPath: f.hooksPath, hookPaths: f.hookPaths })
+      expect(result.ok).toBe(true)
+      expect(result.status).toMatchObject({ state: 'installed', scriptOk: true, scriptPath: stableCodexHookScriptPath() })
+      const command = JSON.parse(readFileSync(f.hooksPath, 'utf8')).hooks.Stop[0].hooks[0].command as string
+      expect(command).toContain(`'${stableCodexHookScriptPath()}' Stop`)
+      expect(readFileSync(stableCodexHookScriptPath()).equals(readFileSync(f.packageScriptPath))).toBe(true)
+      // A rollback reinstalls the 6.61.7 script at the CLAUDE stable path: Codex is unaffected.
+      mkdirSync(join(f.hookPaths.home, 'bin'), { recursive: true })
+      copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7'), join(f.hookPaths.home, 'bin', 'cos-session-hook'))
+      expect(codexHookStatus({ hooksPath: f.hooksPath, hookPaths: f.hookPaths })).toMatchObject({ state: 'installed', scriptOk: true })
+      // An older copy at the CODEX path is not ok: its halt reply makes Codex fail open.
+      copyFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.61.7'), stableCodexHookScriptPath())
+      expect(codexHookStatus({ hooksPath: f.hooksPath, hookPaths: f.hookPaths })).toMatchObject({ state: 'script_outdated', scriptOk: false })
+      // Hooks pointing at the shared script (a pre-W12 install) are ours, rewritten in place.
+      const legacy = { hooks: { Stop: [user('c'), { hooks: [{ type: 'command', command: `COS_HOOK_PROVIDER=codex '${join(f.hookPaths.home, 'bin', 'cos-session-hook')}' Stop`, timeoutSec: 5, async: false }] }] } }
+      const merged = mergeCodexHooks(legacy, stableCodexHookScriptPath(), f.hookPaths)
+      if (!merged.ok) throw new Error(merged.reason)
+      expect((merged.settings.hooks as Record<string, unknown[]>).Stop).toHaveLength(2)
+      expect(JSON.stringify((merged.settings.hooks as Record<string, unknown[]>).Stop[1])).toContain('cos-session-hook-codex')
+    } finally {
+      if (prev === undefined) delete process.env.COS_GLASSES_HOME
+      else process.env.COS_GLASSES_HOME = prev
+    }
   })
 
   it('refuses a hooks shape it would have to destroy, and writes nothing', () => {
