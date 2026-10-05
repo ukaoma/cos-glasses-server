@@ -27,6 +27,8 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   buildClaudeForkArgs,
   buildCodexForkArgs,
+  buildCursorForkArgs,
+  CURSOR_FORK_FALLBACK_MODEL,
   compareWatermarks,
   forkOrphanPossible,
   forkThread,
@@ -35,6 +37,16 @@ import {
   type ForkResult,
 } from './fork-thread.js'
 import type { AttachedChildProcess } from './attached-provider-adapter.js'
+import { findBannedPermissionArg } from './banned-permission-args.js'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  buildCursorForkPrompt,
+  prepareCursorFork,
+  resolveCursorForkWorkspace,
+} from './cursor-fork-context.js'
+import { MAX_PROMPT_CHARS } from './attached-provider-adapter.js'
 
 afterEach(() => {
   delete process.env.COS_CODEX_EXTRA_ARGS
@@ -750,7 +762,7 @@ describe('binary resolution', () => {
 
 describe('every unknown resolves to a refusal', () => {
   const cases: [string, Partial<Parameters<typeof forkThread>[0]>, string][] = [
-    ['an unsupported provider', { provider: 'cursor' }, 'invalid_provider'],
+    ['an unsupported provider', { provider: 'gemini' }, 'invalid_provider'],
     ['a truncated thread id', { nativeThreadId: '6d12ff82' }, 'invalid_thread_id'],
     ['a path-shaped thread id', { nativeThreadId: '../../etc/passwd' }, 'invalid_thread_id'],
     ['a non-string thread id', { nativeThreadId: 42 }, 'invalid_thread_id'],
@@ -912,5 +924,118 @@ describe('forkOrphanPossible is total', () => {
     // defaults to warning the user rather than staying silent.
     const invented = { ok: false, forkState: 'something_new' } as unknown as ForkResult
     expect(forkOrphanPossible(invented)).toBe(true)
+  })
+})
+
+// =============================================================================
+// 6.62.0 (D4, plan 3.7, B3, W9): Cursor "New session with this context"
+// =============================================================================
+
+const CURSOR_SOURCE = 'cb97612a-8a47-455d-b2e0-65b394fbbb1d'
+const CURSOR_NEW = 'da2e661c-293a-4c7f-a8d6-6cd788b84c2e'
+const CURSOR_BIN = '/Users/me/.local/bin/agent'
+const SPACED = '/Users/me/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff'
+
+/** Cursor stream-json: `session_id` (the NEW chat) on every event. */
+const cursorStdout = (sessionId: string): string[] => [
+  `${JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'Grok 4.7' })}\n`,
+  `${JSON.stringify({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'text', text: 'ok' }] } })}\n`,
+  `${JSON.stringify({ type: 'result', subtype: 'success', session_id: sessionId, is_error: false })}\n`,
+]
+
+describe('6.62.0: the Cursor fork is a NEW read-only chat', () => {
+  it('runs agent -p --mode ask on the session model, never --force, never --resume, in a folder with spaces', async () => {
+    const h = harness({}, { stdout: cursorStdout(CURSOR_NEW) }, CURSOR_BIN)
+    const result = await run(h, { provider: 'cursor', nativeThreadId: CURSOR_SOURCE, cwd: SPACED, cursorModel: 'grok-4.7-xhigh-fast' })
+    expect(result).toMatchObject({ ok: true, newNativeThreadId: CURSOR_NEW, sourceNativeThreadId: CURSOR_SOURCE })
+    expect(h.spawns[0]!.args).toEqual([
+      '-p', '--mode', 'ask', '--model', 'grok-4.7-xhigh-fast', '--output-format', 'stream-json', '--trust', '--workspace', SPACED,
+    ])
+    expect(h.spawns[0]!.cwd).toBe(SPACED)
+    expect(h.spawns[0]!.args).not.toContain('--force')
+    expect(h.spawns[0]!.args).not.toContain('--resume')
+    expect(h.fake.written()).toBe(PROMPT)
+  })
+
+  it('falls back to composer-2.5-fast for a missing or non-slug model', async () => {
+    for (const cursorModel of [undefined, '--force', 'grok 4.7']) {
+      const h = harness({}, { stdout: cursorStdout(CURSOR_NEW) }, CURSOR_BIN)
+      await run(h, { provider: 'cursor', nativeThreadId: CURSOR_SOURCE, cwd: SPACED, cursorModel })
+      const args = h.spawns[0]!.args
+      expect(args[args.indexOf('--model') + 1]).toBe(CURSOR_FORK_FALLBACK_MODEL)
+    }
+  })
+
+  it('stays under the FULL ban: an argv seam carrying --force is refused with zero spawns', async () => {
+    expect(findBannedPermissionArg(buildCursorForkArgs(SPACED, 'grok-4.7-high-fast'))).toBeNull()
+    const h = harness({ buildArgs: () => ['-p', '--force', '--workspace', SPACED] }, { stdout: cursorStdout(CURSOR_NEW) }, CURSOR_BIN)
+    const result = await run(h, { provider: 'cursor', nativeThreadId: CURSOR_SOURCE, cwd: SPACED })
+    expect(result).toMatchObject({ ok: false, reason: 'unsupported_policy', detail: 'banned_arg:--force' })
+    expect(h.spawns).toHaveLength(0)
+  })
+
+  it('refuses a new chat that comes back with the SOURCE id: that would be an append', async () => {
+    const h = harness({}, { stdout: cursorStdout(CURSOR_SOURCE) }, CURSOR_BIN)
+    const result = await run(h, { provider: 'cursor', nativeThreadId: CURSOR_SOURCE, cwd: SPACED })
+    expect(result).toMatchObject({ ok: false, reason: 'fork_returned_source_id' })
+  })
+
+  it('still runs the Codex fork down its own path (the old ternary sent every non-Claude there)', async () => {
+    const h = codexRun()
+    await run(h, { provider: 'codex', nativeThreadId: CODEX_SOURCE })
+    expect(h.spawns[0]!.args[0]).toBe('exec')
+    expect(h.spawns[0]!.args).toContain('read-only')
+  })
+})
+
+describe('6.62.0: the Cursor fork context bundle', () => {
+  const turns = Array.from({ length: 30 }, (_, i) => ({ role: (i % 2 ? 'assistant' : 'user') as 'user' | 'assistant', text: `turn ${i} ${'x'.repeat(3_000)}` }))
+
+  it('keeps the message whole and last, and drops the OLDEST turns to fit', () => {
+    const prompt = buildCursorForkPrompt({ title: 'The title', firstPrompt: 'First ask', turns, message: 'Now do this.', maxChars: 20_000 })
+    expect(prompt.length).toBeLessThanOrEqual(20_000)
+    expect(prompt.endsWith('New message:\nNow do this.')).toBe(true)
+    expect(prompt).toContain('Title: The title')
+    expect(prompt).toContain('turn 29 ')
+    expect(prompt).not.toContain('turn 0 ')
+  })
+
+  it('never exceeds MAX_PROMPT_CHARS, and a message with no room goes alone', () => {
+    const big = buildCursorForkPrompt({ title: 't', firstPrompt: 'f', turns, message: 'm', maxChars: MAX_PROMPT_CHARS })
+    expect(big.length).toBeLessThanOrEqual(MAX_PROMPT_CHARS)
+    const message = 'y'.repeat(150)
+    expect(buildCursorForkPrompt({ title: 't', firstPrompt: 'f', turns, message, maxChars: 160 })).toBe(message)
+  })
+
+  it('prepares a fork from a failed read with the message alone and no model', async () => {
+    const prepared = await prepareCursorFork(CURSOR_SOURCE, 'hello', {
+      transcriptPath: () => { throw new Error('EIO') },
+      readTurns: async () => [],
+      readTitle: async () => ({ title: null, firstPrompt: null }),
+      sessionModel: async () => { throw new Error('sqlite') },
+      maxChars: MAX_PROMPT_CHARS,
+    })
+    expect(prepared.cursorModel).toBeNull()
+    expect(prepared.prompt).toContain('New message:\nhello')
+  })
+})
+
+describe('6.62.0: where a Cursor fork runs (W9)', () => {
+  let root = ''
+  afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = '' })
+
+  it('signal cwd first, then the composer folder, then the spawn spelling; a path with spaces works', async () => {
+    root = mkdtempSync(join(tmpdir(), 'fork ws '))
+    const spaced = join(root, 'Ukaoma Chief Of Staff', 'MU-Chief-Staff')
+    mkdirSync(spaced, { recursive: true })
+    const exists = (path: string) => path === spaced
+    const base = { signalCwd: () => null, composerWorkspace: async () => null, spawnWorkspace: () => null, dirExists: exists }
+    expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, signalCwd: () => spaced })).toBe(spaced)
+    expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, composerWorkspace: async () => spaced })).toBe(spaced)
+    expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, spawnWorkspace: () => spaced })).toBe(spaced)
+    // A recorded folder that no longer exists, a relative one, or a throw: the next source.
+    expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, signalCwd: () => '/gone', composerWorkspace: async () => spaced })).toBe(spaced)
+    expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, signalCwd: () => 'relative', spawnWorkspace: () => spaced })).toBe(spaced)
+    expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, composerWorkspace: async () => { throw new Error('x') } })).toBeNull()
   })
 })

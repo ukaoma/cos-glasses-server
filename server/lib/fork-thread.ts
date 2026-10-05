@@ -88,13 +88,18 @@ import { findBannedPermissionArg } from './banned-permission-args.js'
 import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 
 /**
- * Providers that can be forked. A strict subset of the attached set.
+ * Providers that can be forked.
  *
- * Cursor can Continue (ask-mode resume) and cannot Fork: Agent CLI has no
- * `--fork-session` equivalent, and advertising Fork on Cursor would 404 the
- * only remaining write path for that row if Continue were also hidden.
+ * 6.62.0 (D4, plan 3.7): Cursor's Agent CLI has no `--fork-session`, so its "fork" is a
+ * NEW chat seeded with a bounded context bundle the caller built ("New session with this
+ * context"). It is read-only (`--mode ask`, never `--force`) and stays under the full ban,
+ * like every other fork (B3).
  */
 export type ForkProvider = ForkableProvider
+
+/** The model a Cursor fork runs when the caller names none (or one that is not a slug). */
+export const CURSOR_FORK_FALLBACK_MODEL = 'composer-2.5-fast'
+const CURSOR_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/i
 
 /**
  * One member, and it stays `read_only` (plan v3, B3): D1 widened CONTINUE to the session's
@@ -259,6 +264,25 @@ export function buildClaudeForkArgs(nativeThreadId: string): string[] {
  * `--ephemeral` is deliberately absent: a fork that is not written to disk is not a
  * thread the user can go back to, which is the entire deliverable.
  */
+/**
+ * Cursor: `agent -p --mode ask --model <slug> --output-format stream-json --trust
+ * --workspace <ws>`, prompt (the context bundle, then the message) on stdin.
+ *
+ * NO `--resume`: there is nothing to resume into, the source chat is only read (by the
+ * caller, for the bundle). NO `--force`: a fork is read-only (B3). The new chat's id comes
+ * back as `session_id` on the stream, and the exactly-one-new-id rule below holds as is.
+ */
+export function buildCursorForkArgs(cwd: string, model: string): string[] {
+  return [
+    '-p',
+    '--mode', 'ask',
+    '--model', model,
+    '--output-format', 'stream-json',
+    '--trust',
+    '--workspace', cwd,
+  ]
+}
+
 export function buildCodexForkArgs(nativeThreadId: string, cwd: string): string[] {
   return [
     'exec',
@@ -282,10 +306,15 @@ export function buildCodexForkArgs(nativeThreadId: string, cwd: string): string[
  * model against the user's workspace, so it needs the same list the attached path
  * has — and needs it to keep being the same list after someone edits one of them.
  */
-function buildForkArgs(provider: ForkProvider, nativeThreadId: string, cwd: string): string[] {
-  const args = provider === 'claude'
-    ? buildClaudeForkArgs(nativeThreadId)
-    : buildCodexForkArgs(nativeThreadId, cwd)
+function buildForkArgs(provider: ForkProvider, nativeThreadId: string, cwd: string, cursorModel?: string): string[] {
+  // An explicit branch per provider: until 6.62.0 a ternary sent anything that was not
+  // Claude down the Codex path, which for Cursor would have been a `codex` argv.
+  let args: string[]
+  if (provider === 'claude') args = buildClaudeForkArgs(nativeThreadId)
+  else if (provider === 'codex') args = buildCodexForkArgs(nativeThreadId, cwd)
+  else if (provider === 'cursor') args = buildCursorForkArgs(cwd, cursorModel ?? CURSOR_FORK_FALLBACK_MODEL)
+  else throw new Error('fork argv: unknown provider')
+  // NO allowance, ever: every fork stays under the full ban.
   const banned = findBannedPermissionArg(args)
   if (banned !== null) {
     // The flag name only. Never the argv, which carries the thread id and the cwd.
@@ -403,7 +432,7 @@ export interface ForkDeps {
    * Exists ONLY so a test can hand back an argv carrying a banned permission flag
    * and prove the fork is refused with zero spawns. Production never sets it.
    */
-  buildArgs?: (provider: ForkProvider, nativeThreadId: string, cwd: string) => string[]
+  buildArgs?: (provider: ForkProvider, nativeThreadId: string, cwd: string, cursorModel?: string) => string[]
 }
 
 export interface ForkRequest {
@@ -412,6 +441,12 @@ export interface ForkRequest {
   prompt: unknown
   cwd: unknown
   policy: unknown
+  /**
+   * 6.62.0: the Cursor fork's model, a flat slug (the session's own, validated by the
+   * caller against the installed list). Ignored for Claude and Codex, whose forks keep
+   * their source's model. Absent or not a slug: `CURSOR_FORK_FALLBACK_MODEL`.
+   */
+  cursorModel?: unknown
   deps: ForkDeps
   /** Wall-clock budget for the provider run. Omitted uses the attached default. */
   timeoutMs?: number
@@ -610,9 +645,12 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
   const watermarkBefore = readWatermark(deps, provider, sourceNativeThreadId)
 
   // --- 4. Spawn ---------------------------------------------------------------
+  const cursorModel = provider === 'cursor' && typeof request.cursorModel === 'string' && CURSOR_SLUG_RE.test(request.cursorModel)
+    ? request.cursorModel
+    : undefined
   let args: string[]
   try {
-    args = (deps.buildArgs ?? buildForkArgs)(provider, sourceNativeThreadId, cwd)
+    args = (deps.buildArgs ?? buildForkArgs)(provider, sourceNativeThreadId, cwd, cursorModel)
   } catch {
     return fail('unsupported_policy', 'none', { ...base, detail: 'argv_build_failed', durationMs: duration() })
   }
@@ -625,7 +663,7 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
 
   let child: AttachedChildProcess
   try {
-    child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv() })
+    child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv(), provider })
   } catch {
     // Includes ENOENT. No process exists, so no thread can have been created.
     return fail('spawn_failed', 'none', { ...base, detail: 'threw', durationMs: duration() })

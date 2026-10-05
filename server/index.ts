@@ -57,6 +57,11 @@ import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attac
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { resolveSessionContinueFacts } from './lib/session-continue-facts.js'
 import { realContinueFactsDeps } from './lib/session-continue-facts-real.js'
+import { prepareCursorFork, resolveCursorForkWorkspace } from './lib/cursor-fork-context.js'
+import { readComposerFacts } from './lib/cursor-session-model.js'
+import { MAX_PROMPT_CHARS } from './lib/attached-provider-adapter.js'
+import { readRecentSessionTurns } from './lib/agent-session-turns.js'
+import { parseAgentSession } from './lib/agent-session-store.js'
 import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
 import { makeCodexLiveDeliverer } from './lib/codex-live-queue-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
@@ -656,16 +661,43 @@ const deliverAttachedTurnForRoute = async (request: {
  *    ever report `unverified`, and it would report that honestly rather than
  *    claiming a verification it never performed.
  */
-const forkThreadForRoute = (request: {
-  provider: 'claude' | 'codex'
+const forkThreadForRoute = async (request: {
+  provider: 'claude' | 'codex' | 'cursor'
   nativeThreadId: string
   prompt: string
   cwd: string
   policy: 'read_only'
-}): Promise<unknown> => forkThread({
-  ...request,
-  deps: realForkDeps((provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps)),
-})
+}): Promise<unknown> => {
+  // 6.62.0 (D4, plan 3.7): Cursor has no native fork, so its "fork" is a NEW read-only chat
+  // whose first prompt carries a bounded bundle of the source, then the message, on the
+  // session's own model. Claude and Codex are unchanged.
+  let prompt = request.prompt
+  let cursorModel: string | null = null
+  if (request.provider === 'cursor') {
+    const prepared = await prepareCursorFork(request.nativeThreadId, request.prompt, {
+      transcriptPath: threadId => attachedWorkspaceDeps.transcriptPath('cursor', threadId),
+      readTurns: async (path, limit) => (await readRecentSessionTurns('cursor', path, limit)).turns,
+      readTitle: async path => {
+        const parsed = await parseAgentSession('cursor', path)
+        return { title: parsed.display_label || null, firstPrompt: parsed.first_prompt || null }
+      },
+      sessionModel: async (threadId, path) => {
+        const facts = await resolveSessionContinueFacts({ provider: 'cursor', threadId, transcriptPath: path, cwd: request.cwd }, continueFactsDeps)
+        if (facts.plan?.provider === 'cursor' && facts.plan.matched) return facts.plan.model
+        return facts.reportedModel && continueFactsDeps.isKnownCursorModel(facts.reportedModel) ? facts.reportedModel : null
+      },
+      maxChars: MAX_PROMPT_CHARS,
+    })
+    prompt = prepared.prompt
+    cursorModel = prepared.cursorModel
+  }
+  return forkThread({
+    ...request,
+    prompt,
+    ...(cursorModel ? { cursorModel } : {}),
+    deps: realForkDeps((provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps)),
+  })
+}
 
 // API routes
 app.use('/api', healthRouter)
@@ -915,8 +947,16 @@ app.use('/api', createAgentSessionBindingsRouter({
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path
   // off anything client-visible. Null refuses: never fall back to the server's own
   // working directory, which is wherever the LaunchAgent happened to start.
-  resolveForkWorkspace: (provider, threadId) =>
-    resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)?.path ?? null,
+  // 6.62.0 (W9): a Cursor IDE composer has no spawn spelling; its fork runs in the hook
+  // signal's cwd, else the composer's own recorded folder, else the CLI chat's spelling.
+  resolveForkWorkspace: (provider, threadId) => provider === 'cursor'
+    ? resolveCursorForkWorkspace(threadId, {
+        signalCwd: id => signalFor(id)?.cwd ?? null,
+        composerWorkspace: async id => (await readComposerFacts([id], continueFactsDeps.cursorComposerDb)).get(id)?.workspace ?? null,
+        spawnWorkspace: id => attachedWorkspaceDeps.cursorSpawnWorkspace?.(id) ?? null,
+        dirExists: path => attachedWorkspaceDeps.dirExists(path),
+      })
+    : resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)?.path ?? null,
   // One instance per process. The epoch high-water mark is only monotonic if a
   // single reader owns the durable store, so this must never be constructed twice.
   // `open()` never throws: an unreadable store yields a DEGRADED registry whose

@@ -406,7 +406,7 @@ export interface AgentSessionBindingsDeps {
    * write a NEW session rather than the one asked for, which for a fork means the
    * copy silently lands in the wrong project.
    */
-  resolveForkWorkspace?: (provider: BindableProvider, nativeThreadId: string) => string | null
+  resolveForkWorkspace?: (provider: BindableProvider, nativeThreadId: string) => string | null | Promise<string | null>
 
   /**
    * Where an opaque fork reference is exchanged for the thread it names.
@@ -2331,7 +2331,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (typeof resolveWorkspace !== 'function') return refuseFork('fork_workspace_unresolvable')
       let cwd: string | null = null
       try {
-        cwd = resolveWorkspace(providerParam, threadIdParam)
+        // 6.62.0: may answer later (a Cursor IDE composer's folder is read from Cursor's own
+        // store). Still before the claim below, which stays the last synchronous step.
+        cwd = await resolveWorkspace(providerParam, threadIdParam)
       } catch (error) {
         console.error(`[agent-session-bindings] fork workspace resolve threw: ${error instanceof Error ? error.message : error}`)
         cwd = null

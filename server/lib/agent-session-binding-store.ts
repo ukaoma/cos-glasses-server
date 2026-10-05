@@ -39,12 +39,18 @@ import type { AgentProvider } from './agent-session-store.js'
 
 export type BindingState = 'staging' | 'active' | 'detaching' | 'detached'
 
-/** Providers that can carry a Continue binding. Cursor is bindable, not forkable. */
+/** Providers that can carry a Continue binding. */
 export const BINDABLE_PROVIDERS = ['claude', 'codex', 'cursor'] as const
 export type BindableProvider = (typeof BINDABLE_PROVIDERS)[number]
 
-/** Providers that can fork. Cursor Agent has no `--fork-session` equivalent. */
-export const FORKABLE_PROVIDERS = ['claude', 'codex'] as const
+/**
+ * Providers the fork route serves. 6.62.0 (D4, plan 3.7): Cursor Agent has no
+ * `--fork-session`, so a Cursor "fork" is a NEW read-only chat seeded with a bounded
+ * context bundle ("New session with this context"). Work's own fork list
+ * (`work-activity.ts` FORK_PROVIDERS) and the Jev recommender stay Claude and Codex until
+ * the Control release (W9).
+ */
+export const FORKABLE_PROVIDERS = ['claude', 'codex', 'cursor'] as const
 export type ForkableProvider = (typeof FORKABLE_PROVIDERS)[number]
 
 export interface NativeBinding {

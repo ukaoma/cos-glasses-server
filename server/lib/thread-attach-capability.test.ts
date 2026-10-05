@@ -354,3 +354,13 @@ describe('the detector reads the same gate the routes do', () => {
     expect(offenders).toEqual([])
   })
 })
+
+describe('6.62.0: threadForkProviders beside the threadForkSupported boolean', () => {
+  it('publishes which providers the fork route serves, gate on or off, and keeps the boolean a boolean', () => {
+    for (const gate of [() => true, () => false]) {
+      const fields = threadAttachHealthFields(threadAttachCapability(gate))
+      expect(fields.threadForkSupported).toBe(true)
+      expect(fields.threadForkProviders).toEqual(['claude', 'codex', 'cursor'])
+    }
+  })
+})

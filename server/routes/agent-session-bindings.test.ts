@@ -2293,7 +2293,7 @@ describe('every way a write can be refused reaches the wire with words', () => {
     },
     // ------------------------------------------------------------------ fork
     { reason: 'fork_unwired', run: () => forkOnce({ forkThread: undefined }) },
-    { reason: 'fork_unsupported_provider', run: () => forkOnce({}, 'cursor') },
+    { reason: 'fork_unsupported_provider', run: () => forkOnce({}, 'gemini') },
     { reason: 'fork_invalid_thread_id', run: () => forkOnce({}, 'claude', '6d12ff82') },
     { reason: 'fork_workspace_unresolvable', run: () => forkOnce({ resolveForkWorkspace: () => null }) },
     {
