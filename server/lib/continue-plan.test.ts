@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   CURSOR_ASK_UNACKED_NOTE,
@@ -20,9 +20,11 @@ import {
   planCursorContinue,
   validateContinuePlan,
 } from './continue-plan'
-import { CONTINUE_NOTE_MAX, __resetCodexPostureCacheForTests } from './codex-session-posture'
+import { CONTINUE_NOTE_MAX, CONTINUE_NOTE_SOFT_MAX, __resetCodexPostureCacheForTests } from './codex-session-posture'
 import { SQLITE3_BIN, __resetCursorSessionModelCachesForTests } from './cursor-session-model'
 import {
+  FALLBACK_LOG_EVERY_MS,
+  logContinueFallback,
   __resetSessionContinueFactsForTests,
   continueFactsFields,
   readClaudeReportedModel,
@@ -150,8 +152,15 @@ describe('resolveSessionContinueFacts', () => {
     const rollout = join(root, '.codex', 'r.jsonl')
     mkdirSync(join(root, '.codex'), { recursive: true })
     writeFileSync(rollout, `${JSON.stringify({ type: 'turn_context', payload: { cwd: `${root}/work tree`, sandbox_policy: { type: 'danger-full-access' }, model: 'gpt-6.1-sol', effort: 'high', approval_policy: 'never' } })}\n`)
-    const facts = await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: rollout, cwd: `${root}/work tree/sub` }, deps())
+    // W5 (K7): `sub` is inside the trusted repo, so its git trust root is the entry.
+    const asked: string[] = []
+    const rooted = deps({ codexGitTrustRoot: async cwd => { asked.push(cwd); return `${root}/work tree` } })
+    const facts = await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: rollout, cwd: `${root}/work tree/sub` }, rooted)
     expect(facts.plan).toMatchObject({ sandbox: 'danger-full-access', model: 'gpt-6.1-sol', effort: 'high' })
+    expect(asked).toEqual([`${root}/work tree/sub`])
+    // Without a git root the trusted PARENT covers nothing: workspace write, said plainly.
+    const parentOnly = await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: rollout, cwd: `${root}/work tree/sub` }, deps())
+    expect(parentOnly.plan).toMatchObject({ sandbox: 'workspace-write' })
     expect(continueFactsFields(facts)).toEqual({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, gpt-6.1-sol high." })
     const off = await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: rollout, cwd: null }, deps({ env: { COS_CONTINUE_FULL_PERMISSIONS: '0' } }))
     expect(off.plan).toBeUndefined()
@@ -208,7 +217,7 @@ describe('continue_note width on the lens (integrator measurement, 2026-10-05)',
       for (const askModeChat of [false, true]) {
         const plan = planCursorContinue({ candidates: [id], isKnown: () => true, label: () => display, askModeChat })
         expect(plan.note.length, plan.note).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
-        if (plan.note.includes(display)) expect(plan.note.length, plan.note).toBeLessThanOrEqual(45)
+        if (plan.note.includes(display)) expect(plan.note.length, plan.note).toBeLessThanOrEqual(CONTINUE_NOTE_SOFT_MAX)
       }
     }
     expect(planCursorContinue({ candidates: ['grok-4.7-xhigh-fast'], isKnown: () => true, label: () => 'Grok 4.7 Extra High Fast', askModeChat: false }).note)
@@ -228,7 +237,7 @@ describe('continue_note width on the lens (integrator measurement, 2026-10-05)',
             isKnownModel: () => true, modelLabel: () => label,
           }).note
           expect(note.length, note).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
-          if (note.includes(label)) expect(note.length, note).toBeLessThanOrEqual(45)
+          if (note.includes(label)) expect(note.length, note).toBeLessThanOrEqual(CONTINUE_NOTE_SOFT_MAX)
         }
       }
     }
@@ -260,6 +269,34 @@ describe('6.62.0 /qa: the Continue-note header (Q3) and the fixed fallback note 
       .toBe(killSwitchNote('codex', 'workspace-write'))
     for (const note of [CURSOR_ASK_UNACKED_NOTE, fallbackContinueNote('cursor', { noteAck: true, env: {} }), fallbackContinueNote('codex', { noteAck: true, env: {} })]) {
       expect(note!.length).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
+    }
+  })
+})
+
+describe('6.62.0 /qa (W17): silent fallbacks get one server log line per thread per window', () => {
+  it('logs once, then again only after the window', () => {
+    const lines: string[] = []
+    const spy = vi.spyOn(console, 'warn').mockImplementation((line: unknown) => { lines.push(String(line)) })
+    try {
+      expect(logContinueFallback('codex posture unreadable', THREAD, 'fallback=read-only', 1_000)).toBe(true)
+      expect(logContinueFallback('codex posture unreadable', THREAD, 'fallback=read-only', 1_000 + FALLBACK_LOG_EVERY_MS - 1)).toBe(false)
+      expect(logContinueFallback('cursor model unmatched', THREAD, 'model=unread', 1_001)).toBe(true)
+      expect(logContinueFallback('codex posture unreadable', THREAD, 'fallback=read-only', 1_000 + FALLBACK_LOG_EVERY_MS)).toBe(true)
+      expect(lines).toHaveLength(3)
+      expect(lines[0]).toBe(`[continue-plan] codex posture unreadable thread=${THREAD.slice(0, 8)} fallback=read-only`)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('the resolver logs an unreadable Codex posture', async () => {
+    const lines: string[] = []
+    const spy = vi.spyOn(console, 'warn').mockImplementation((line: unknown) => { lines.push(String(line)) })
+    try {
+      await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: null, cwd: '/w' }, deps())
+      expect(lines.some(line => line.includes('codex posture unreadable'))).toBe(true)
+    } finally {
+      spy.mockRestore()
     }
   })
 })

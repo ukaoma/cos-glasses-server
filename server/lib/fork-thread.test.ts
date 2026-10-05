@@ -991,6 +991,11 @@ describe('6.62.0: the Cursor fork is a NEW read-only chat', () => {
 describe('6.62.0: the Cursor fork context bundle', () => {
   const turns = Array.from({ length: 30 }, (_, i) => ({ role: (i % 2 ? 'assistant' : 'user') as 'user' | 'assistant', text: `turn ${i} ${'x'.repeat(3_000)}` }))
 
+  it('W10: the FIRST line is the source title (else the message), so forks are not all titled alike', () => {
+    expect(buildCursorForkPrompt({ title: 'Hardware page\nsecond line', firstPrompt: 'f', turns: [], message: 'm', maxChars: 5_000 }).split('\n')[0]).toBe('Hardware page')
+    expect(buildCursorForkPrompt({ title: null, firstPrompt: 'f', turns: [], message: '\nShip the pricing fix\nthen tests', maxChars: 5_000 }).split('\n')[0]).toBe('Ship the pricing fix')
+  })
+
   it('keeps the message whole and last, and drops the OLDEST turns to fit', () => {
     const prompt = buildCursorForkPrompt({ title: 'The title', firstPrompt: 'First ask', turns, message: 'Now do this.', maxChars: 20_000 })
     expect(prompt.length).toBeLessThanOrEqual(20_000)

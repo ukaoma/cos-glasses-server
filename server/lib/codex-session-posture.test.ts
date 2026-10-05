@@ -4,7 +4,8 @@
 // `~/Documents/GitHub/Ukaoma Chief Of Staff` and `~/.codex`. Nothing here reads the live
 // ~/.codex.
 
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -14,7 +15,10 @@ import {
   POSTURE_CHUNK_BYTES,
   POSTURE_SCAN_CAP_BYTES,
   __resetCodexPostureCacheForTests,
-  codexCwdTrusted,
+  codexFolderTrusted,
+  codexGitTrustRoot,
+  gitTrustRootFrom,
+  __resetCodexGitRootCacheForTests,
   codexReportedModel,
   parseTurnContextLine,
   planCodexContinue,
@@ -131,7 +135,16 @@ describe('readCodexSessionPosture', () => {
     expect(await readCodexSessionPosture('relative/path.jsonl')).toBeNull()
     expect(parseTurnContextLine('{"type":"turn_context","payload":')).toBeNull()
     expect(parseTurnContextLine(turnContext({ sandbox_policy: { type: 'external-sandbox' } }))?.sandboxType).toBeNull()
-    expect(POSTURE_SCAN_CAP_BYTES).toBe(64 * 1024 * 1024)
+  })
+
+  it('the cap BOUNDS the scan: a turn_context past it is not found, one inside it is (W19)', async () => {
+    const cap = 2 * POSTURE_CHUNK_BYTES
+    const path = rollout('capped.jsonl', [turnContext({ model: 'gpt-5.6-luna' }), filler(cap + POSTURE_CHUNK_BYTES)])
+    expect(await readCodexSessionPosture(path, { capBytes: cap })).toBeNull()
+    __resetCodexPostureCacheForTests()
+    // The production cap is far wider than this fixture, so the same row is found.
+    expect(POSTURE_SCAN_CAP_BYTES).toBeGreaterThan(cap + 2 * POSTURE_CHUNK_BYTES)
+    expect((await readCodexSessionPosture(path))?.model).toBe('gpt-5.6-luna')
   })
 
   it('refuses a model value that could not be an argv model id', () => {
@@ -148,12 +161,61 @@ describe('Codex trust, read-only from config.toml', () => {
     ])
   })
 
-  it('covers the folder and what is under it, by whole path segments only', () => {
-    expect(codexCwdTrusted('/Users/me/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff', trustedConfig)).toBe(true)
-    expect(codexCwdTrusted('/Users/me/Documents/GitHub/Ukaoma Chief Of Staff', trustedConfig)).toBe(true)
-    expect(codexCwdTrusted('/Users/me/Documents/GitHub/Ukaoma Chief Of Staff 2', trustedConfig)).toBe(false)
-    expect(codexCwdTrusted('/Users/me/scratch', trustedConfig)).toBe(false)
-    expect(codexCwdTrusted('/Users/me/Documents/GitHub/Ukaoma Chief Of Staff', null)).toBe(false)
+  it('K7: the cwd or its git trust root must BE an entry; a trusted parent covers nothing', () => {
+    const parent = '/Users/me/Documents/GitHub/Ukaoma Chief Of Staff'
+    expect(codexFolderTrusted(parent, null, trustedConfig)).toBe(true)
+    expect(codexFolderTrusted(`${parent}/`, null, trustedConfig)).toBe(true)
+    // A repo nested under the trusted folder is NOT trusted (Codex wrote it its own entry, K7).
+    expect(codexFolderTrusted(`${parent}/MU-Chief-Staff`, `${parent}/MU-Chief-Staff`, trustedConfig)).toBe(false)
+    // A plain folder inside the trusted repo IS: its git root is the entry.
+    expect(codexFolderTrusted(`${parent}/sub plain`, parent, trustedConfig)).toBe(true)
+    expect(codexFolderTrusted(`${parent} 2`, null, trustedConfig)).toBe(false)
+    expect(codexFolderTrusted('/Users/me/scratch', '/Users/me/scratch', trustedConfig)).toBe(false)
+    expect(codexFolderTrusted(parent, parent, null)).toBe(false)
+    expect(codexFolderTrusted('relative', parent, trustedConfig)).toBe(false)
+  })
+
+  it('a linked worktree resolves to its MAIN worktree, never the toplevel it reports', () => {
+    expect(gitTrustRootFrom('/w/repo\n', 'worktree /w/repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /w/wt\nHEAD def\n')).toBe('/w/repo')
+    expect(gitTrustRootFrom('/w/wt\n', 'worktree /w/repo\nHEAD abc\n\nworktree /w/wt\nHEAD def\n')).toBe('/w/repo')
+    expect(gitTrustRootFrom('/w/repo\n', null)).toBe('/w/repo')
+    expect(gitTrustRootFrom('not a path', null)).toBeNull()
+  })
+})
+
+describe('K7 against a real git repo and linked worktree (paths with spaces)', () => {
+  const git = (args: string[], cwd: string) => execFileSync('git', args, { cwd, stdio: 'ignore', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })
+  const realRun = (args: readonly string[], cwd: string, timeoutMs: number) => new Promise<string>((resolve, reject) => {
+    execFile('git', [...args], { cwd, timeout: timeoutMs, encoding: 'utf8' }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))))
+  })
+
+  it('resolves a sub folder to its repo, a worktree to the main repo, and a plain folder to nothing', async () => {
+    __resetCodexGitRootCacheForTests()
+    mkdirSync(join(root, 'main repo'), { recursive: true })
+    const main = realpathSync(join(root, 'main repo'))
+    git(['init', '-q', '-b', 'main'], main)
+    writeFileSync(join(main, 'a.txt'), 'a')
+    git(['add', 'a.txt'], main)
+    git(['commit', '-q', '-m', 'a'], main)
+    mkdirSync(join(main, 'sub plain'))
+    const worktree = join(realpathSync(root), 'linked tree')
+    git(['worktree', 'add', '-q', worktree, '-b', 'side'], main)
+    mkdirSync(join(root, 'not a repo'), { recursive: true })
+    const plain = realpathSync(join(root, 'not a repo'))
+    expect(await codexGitTrustRoot(join(main, 'sub plain'), realRun)).toBe(main)
+    expect(await codexGitTrustRoot(worktree, realRun)).toBe(main)
+    expect(await codexGitTrustRoot(plain, realRun)).toBeNull()
+    const config = `[projects."${main}"]\ntrust_level = "trusted"\n`
+    expect(codexFolderTrusted(worktree, await codexGitTrustRoot(worktree, realRun), config)).toBe(true)
+  })
+
+  it('a git that never answers resolves to no root within its budget, and is cached', async () => {
+    __resetCodexGitRootCacheForTests()
+    let calls = 0
+    const stuck = (_a: readonly string[], _c: string, timeoutMs: number) => { calls += 1; return new Promise<string>((_r, reject) => setTimeout(() => reject(new Error('timeout')), Math.min(timeoutMs, 20))) }
+    expect(await codexGitTrustRoot('/somewhere', stuck, 1_000)).toBeNull()
+    expect(await codexGitTrustRoot('/somewhere', stuck, 2_000)).toBeNull()
+    expect(calls).toBe(1)
   })
 })
 
@@ -162,16 +224,20 @@ describe('planCodexContinue', () => {
   const posture = parseTurnContextLine(turnContext())!
 
   it('passes danger-full-access only with the session posture AND a trusted cwd', () => {
-    expect(planCodexContinue(posture, cwd, deps())).toMatchObject({
+    // MU-Chief-Staff's git trust root is the trusted entry here.
+    const rooted = deps({ gitTrustRoot: '/Users/me/Documents/GitHub/Ukaoma Chief Of Staff' })
+    expect(planCodexContinue(posture, cwd, rooted)).toMatchObject({
       sandbox: 'danger-full-access', model: 'gpt-6.1-sol', effort: 'high', source: 'session',
       note: "This Codex session's full access, gpt-6.1-sol high.",
     })
     const untrusted = planCodexContinue(posture, '/Users/me/scratch/repo', deps())
     expect(untrusted).toMatchObject({ sandbox: 'workspace-write', networkAccess: true, note: 'Workspace write: Codex has not trusted this folder.' })
-    const noConfig = planCodexContinue(posture, cwd, deps({ configText: () => null }))
+    const noConfig = planCodexContinue(posture, cwd, deps({ configText: () => null, gitTrustRoot: '/Users/me/Documents/GitHub/Ukaoma Chief Of Staff' }))
     expect(noConfig.sandbox).toBe('workspace-write')
-    const throwing = planCodexContinue(posture, cwd, deps({ configText: () => { throw new Error('EACCES') } }))
+    const throwing = planCodexContinue(posture, cwd, deps({ configText: () => { throw new Error('EACCES') }, gitTrustRoot: '/Users/me/Documents/GitHub/Ukaoma Chief Of Staff' }))
     expect(throwing.sandbox).toBe('workspace-write')
+    // K7: a trusted PARENT with no matching git root no longer counts.
+    expect(planCodexContinue(posture, cwd, deps()).sandbox).toBe('workspace-write')
   })
 
   it('fails closed to the 6.61 sandbox with an honest note when there is no posture', () => {
@@ -211,7 +277,7 @@ describe('planCodexContinue', () => {
         }
       }
     }
-    expect(planCodexContinue(null, cwd, deps()).note.length).toBeLessThan(61)
+    expect(planCodexContinue(null, cwd, deps()).note.length).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
   })
 
   it('formats reported_model as <model> <effort>', () => {

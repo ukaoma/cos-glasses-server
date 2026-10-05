@@ -1647,7 +1647,7 @@ describe('6.62.0: a Continue carries the session plan, and one allowance reaches
 
   it('passes the Codex session model, effort and full access, every exec option before resume', async () => {
     const ctx = harness({ resolveBinary: codexBin, script: codexOk })
-    const result = await deliver(ctx, { provider: 'codex', plan: CODEX_DANGER })
+    const result = await deliver(ctx, { provider: 'codex', plan: CODEX_DANGER, deps: { ...ctx.deps, codexFolderTrusted: () => true } })
     expect(result.ok).toBe(true)
     const args = ctx.spawns[0]!.args
     const resume = args.indexOf('resume')
@@ -1705,7 +1705,7 @@ describe('6.62.0: a Continue carries the session plan, and one allowance reaches
     const refused = expectFailure(await deliver(forced, {
       provider: 'codex',
       plan: CODEX_DANGER,
-      deps: { ...forced.deps, buildArgs: () => ['exec', '--force', '--sandbox', 'danger-full-access', 'resume', TARGET, '-'] },
+      deps: { ...forced.deps, codexFolderTrusted: () => true, buildArgs: () => ['exec', '--force', '--sandbox', 'danger-full-access', 'resume', TARGET, '-'] },
     }))
     expect(refused.reason).toBe('unsupported_policy')
     expect(refused.detail).toBe('banned_arg:--force')
@@ -1761,5 +1761,41 @@ describe('6.62.0: a Continue carries the session plan, and one allowance reaches
     await deliver(ctx)
     expect(ctx.spawns[0]!.args).toEqual(buildClaudeAttachedArgs(TARGET))
     expect(buildClaudeAttachedArgs(TARGET)).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--resume', TARGET])
+  })
+})
+
+describe('6.62.0 /qa (W5, N1): full access is re-checked against Codex trust at the spawn', () => {
+  const DANGER = {
+    provider: 'codex', sandbox: 'danger-full-access', model: 'gpt-6.1-sol', effort: 'high',
+    networkAccess: true, source: 'session', note: 'n',
+  } as const
+  const codexBin = () => ({ ok: true as const, path: '/Applications/ChatGPT.app/Contents/Resources/codex', source: 'absolute' as const })
+  const codexOk = (child: FakeChild) => {
+    child.emitStdout(`${JSON.stringify({ type: 'thread.started', thread_id: TARGET })}\n`)
+    child.close(0)
+  }
+
+  it('refuses a full-access plan, with zero spawns, when the folder is not trusted now (or nobody can say)', async () => {
+    for (const trust of [undefined, () => false, () => { throw new Error('git') }]) {
+      const ctx = harness({ resolveBinary: codexBin, script: codexOk })
+      const asked: string[] = []
+      const deps = trust === undefined ? ctx.deps : { ...ctx.deps, codexFolderTrusted: (cwd: string) => { asked.push(cwd); return trust() } }
+      const result = expectFailure(await deliver(ctx, { provider: 'codex', plan: DANGER, deps }))
+      expect(result).toMatchObject({ reason: 'unsupported_policy', detail: 'codex_folder_untrusted', delivery: 'not_attempted' })
+      expect(ctx.spawns).toHaveLength(0)
+      if (trust !== undefined) expect(asked).toEqual([CWD])
+    }
+  })
+
+  it('asks only for full access: a workspace-write plan never consults trust', async () => {
+    const ctx = harness({ resolveBinary: codexBin, script: codexOk })
+    let asked = 0
+    const result = await deliver(ctx, {
+      provider: 'codex',
+      plan: { ...DANGER, sandbox: 'workspace-write' },
+      deps: { ...ctx.deps, codexFolderTrusted: () => { asked += 1; return false } },
+    })
+    expect(result.ok).toBe(true)
+    expect(asked).toBe(0)
   })
 })

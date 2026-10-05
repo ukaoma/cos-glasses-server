@@ -16,10 +16,17 @@
 // WHAT IT NEVER DOES. It never broadens. No posture, or a posture this build does not
 // recognise, plans the 6.61 sandbox (`getCodexTrustMode()`, normally read-only) with an
 // honest note. `danger-full-access` passes through ONLY when the session ran with it AND
-// the cwd sits under a folder Codex itself already trusts in `~/.codex/config.toml`
-// (canaries C11/C12: in an untrusted folder `-s danger-full-access` makes Codex write a
-// permanent `[projects."…"] trust_level = "trusted"` entry, which then loads that repo's
-// own hooks and config). The config is parsed read-only, with a regex, and never written.
+// Codex itself already trusts the folder in `~/.codex/config.toml`. Codex writes a permanent
+// `[projects."…"] trust_level = "trusted"` entry when a NEW session starts with a writable
+// sandbox in an untrusted folder (canaries C11/C12/K4; a resume does not write one, K4), and
+// a trusted entry loads that repo's own hooks and config, so COS never relies on it.
+//
+// WHICH FOLDER (6.62.0 /qa W5, canary K7). Codex trusts the cwd itself or its GIT ROOT, not
+// any parent: a session in a nested repo under a trusted folder wrote its own entry. So the
+// rule is: trusted iff the cwd, or its `git rev-parse --show-toplevel`, is a trusted entry;
+// a LINKED worktree resolves to its MAIN worktree (`git worktree list --porcelain`, first
+// entry), never `--git-common-dir`'s parent (this repo's git dir lives outside the tree).
+// The config is parsed read-only, with a regex, and never written.
 
 import { open, stat } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
@@ -165,7 +172,12 @@ export const postureReadStats = { reads: 0, bytes: 0 }
  * The session's newest posture, or null when the rollout carries none within the cap or
  * cannot be read. Never throws.
  */
-export async function readCodexSessionPosture(path: string | null | undefined): Promise<CodexSessionPosture | null> {
+export async function readCodexSessionPosture(
+  path: string | null | undefined,
+  options: { capBytes?: number } = {},
+): Promise<CodexSessionPosture | null> {
+  // The cap is injectable so a test can prove it bounds the scan without a 64 MB fixture.
+  const cap = typeof options.capBytes === 'number' && options.capBytes > 0 ? options.capBytes : POSTURE_SCAN_CAP_BYTES
   if (typeof path !== 'string' || !path.startsWith('/')) return null
   let size: number
   try {
@@ -178,7 +190,7 @@ export async function readCodexSessionPosture(path: string | null | undefined): 
   const cached = postureCache.get(path)
   if (cached && cached.size === size) return cached.posture
 
-  let lower = Math.max(0, size - POSTURE_SCAN_CAP_BYTES)
+  let lower = Math.max(0, size - cap)
   // Grown since the last read: only the new bytes (plus the overlap) can hold a newer row.
   const incremental = !!cached && cached.size < size
   if (incremental) lower = Math.max(lower, cached!.size - POSTURE_REREAD_OVERLAP_BYTES)
@@ -251,11 +263,95 @@ export function trustedCodexProjects(configText: string | null): string[] {
   return trusted
 }
 
-/** Is `cwd` that folder or inside it? Whole path segments only: `/a/b` does not cover `/a/bc`. */
-export function codexCwdTrusted(cwd: string, configText: string | null): boolean {
+const normalizeFolder = (path: string): string => path.replace(/\/+$/, '') || '/'
+
+/**
+ * K7's rule: trusted iff the cwd itself, or its git trust root (the repo's top level, or the
+ * MAIN worktree for a linked one; `codexGitTrustRoot`), is a trusted `[projects]` entry.
+ * Exact folders only: a trusted parent does not cover a repo nested under it.
+ */
+export function codexFolderTrusted(cwd: string, gitTrustRoot: string | null, configText: string | null): boolean {
   if (typeof cwd !== 'string' || !cwd.startsWith('/')) return false
-  const target = cwd.replace(/\/+$/, '') || '/'
-  return trustedCodexProjects(configText).some(root => target === root || target.startsWith(root === '/' ? '/' : `${root}/`))
+  const trusted = new Set(trustedCodexProjects(configText).map(normalizeFolder))
+  if (trusted.has(normalizeFolder(cwd))) return true
+  return typeof gitTrustRoot === 'string' && gitTrustRoot.startsWith('/') && trusted.has(normalizeFolder(gitTrustRoot))
+}
+
+// ---------------------------------------------------------------------------
+// The git trust root (K7), bounded in time and cached
+// ---------------------------------------------------------------------------
+
+/** One git call's budget. A folder git cannot answer for in this long is not a repo here. */
+export const CODEX_GIT_TIMEOUT_MS = 2_000
+const GIT_ROOT_TTL_MS = 60_000
+export type GitRunner = (args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>
+export type GitRunnerSync = (args: readonly string[], cwd: string, timeoutMs: number) => string
+
+const gitRootCache = new Map<string, { at: number; root: string | null }>()
+
+/** Tests only. */
+export function __resetCodexGitRootCacheForTests(): void {
+  gitRootCache.clear()
+}
+
+/** From `git rev-parse --show-toplevel` and `git worktree list --porcelain` output to the root. */
+export function gitTrustRootFrom(toplevel: string, worktreeList: string | null): string | null {
+  const top = toplevel.trim()
+  if (!top.startsWith('/')) return null
+  // The first `worktree <path>` record is the MAIN worktree, whichever one asked.
+  const main = typeof worktreeList === 'string' ? /^worktree (.+)$/m.exec(worktreeList)?.[1]?.trim() : undefined
+  return main && main.startsWith('/') ? main : top
+}
+
+function cachedRoot(cwd: string, now: number): { hit: boolean; root: string | null } {
+  const entry = gitRootCache.get(cwd)
+  if (entry && now - entry.at < GIT_ROOT_TTL_MS) return { hit: true, root: entry.root }
+  return { hit: false, root: null }
+}
+
+function rememberRoot(cwd: string, root: string | null, now: number): string | null {
+  gitRootCache.delete(cwd)
+  gitRootCache.set(cwd, { at: now, root })
+  while (gitRootCache.size > 256) {
+    const oldest = gitRootCache.keys().next()
+    if (oldest.done) break
+    gitRootCache.delete(oldest.value)
+  }
+  return root
+}
+
+/** The git trust root for `cwd`, or null (not a repo, git missing, or too slow). Never throws. */
+export async function codexGitTrustRoot(cwd: string, run: GitRunner, now = Date.now()): Promise<string | null> {
+  if (typeof cwd !== 'string' || !cwd.startsWith('/')) return null
+  const hit = cachedRoot(cwd, now)
+  if (hit.hit) return hit.root
+  let root: string | null = null
+  try {
+    const top = await run(['rev-parse', '--show-toplevel'], cwd, CODEX_GIT_TIMEOUT_MS)
+    let list: string | null = null
+    try { list = await run(['worktree', 'list', '--porcelain'], cwd, CODEX_GIT_TIMEOUT_MS) } catch { list = null }
+    root = gitTrustRootFrom(top, list)
+  } catch {
+    root = null
+  }
+  return rememberRoot(cwd, root, now)
+}
+
+/** The same, synchronously, for the adapter's spawn-time re-check (a fresh cache entry answers). */
+export function codexGitTrustRootSync(cwd: string, run: GitRunnerSync, now = Date.now()): string | null {
+  if (typeof cwd !== 'string' || !cwd.startsWith('/')) return null
+  const hit = cachedRoot(cwd, now)
+  if (hit.hit) return hit.root
+  let root: string | null = null
+  try {
+    const top = run(['rev-parse', '--show-toplevel'], cwd, CODEX_GIT_TIMEOUT_MS)
+    let list: string | null = null
+    try { list = run(['worktree', 'list', '--porcelain'], cwd, CODEX_GIT_TIMEOUT_MS) } catch { list = null }
+    root = gitTrustRootFrom(top, list)
+  } catch {
+    root = null
+  }
+  return rememberRoot(cwd, root, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +378,8 @@ export interface CodexPlanDeps {
   fallbackSandbox: () => 'read-only' | 'workspace-write'
   /** The config text, read at plan time (never cached across turns). */
   configText: () => string | null
+  /** 6.62.0 /qa (W5): the cwd's git trust root, already resolved (`codexGitTrustRoot`). */
+  gitTrustRoot?: string | null
   /** Is this model in the full app-server list? */
   isKnownModel: (model: string) => boolean
   /** A display name for a known model (`gpt-6.1-sol` to `GPT-6.1 Sol`). */
@@ -393,7 +491,7 @@ export function planCodexContinue(posture: CodexSessionPosture | null, cwd: stri
   if (posture.sandboxType === 'danger-full-access') {
     let trusted = false
     try {
-      trusted = codexCwdTrusted(cwd, deps.configText())
+      trusted = codexFolderTrusted(cwd, deps.gitTrustRoot ?? null, deps.configText())
     } catch {
       trusted = false
     }

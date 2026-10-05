@@ -377,6 +377,13 @@ export interface AttachedTurnDeps {
    * future edit can let it modify what the scan sees.
    */
   observeStdout?: (chunk: string) => void
+  /**
+   * 6.62.0 /qa (W5, N1): does Codex itself trust this cwd RIGHT NOW (the cwd or its git
+   * root is a trusted `[projects]` entry)? Asked at the spawn for a full-access plan only;
+   * absent, false, or a throw refuses that plan. The plan was built from the same rule
+   * seconds earlier; this is the second check, so the allowance never outlives the trust.
+   */
+  codexFolderTrusted?: (cwd: string) => boolean
 }
 
 export interface AttachedTurnRequest {
@@ -896,6 +903,21 @@ async function run(
       ? verdict.reason
       : 'unspecified'
     return fail('native_owner_appeared', 'not_attempted', { ...base, detail: reasonText, durationMs: duration() })
+  }
+
+  // 6.62.0 /qa (W5, N1): a full-access Codex plan is re-checked against Codex's own trust at
+  // the spawn. A folder that stopped being trusted (or never was) refuses, never downgrades:
+  // the note promised full access, and a quieter posture would make the note a lie.
+  if (plan?.provider === 'codex' && plan.sandbox === 'danger-full-access') {
+    let trusted = false
+    try {
+      trusted = typeof deps.codexFolderTrusted === 'function' && deps.codexFolderTrusted(cwd) === true
+    } catch {
+      trusted = false
+    }
+    if (!trusted) {
+      return fail('unsupported_policy', 'not_attempted', { ...base, detail: 'codex_folder_untrusted', durationMs: duration() })
+    }
   }
 
   // --- 4. Spawn ---------------------------------------------------------------

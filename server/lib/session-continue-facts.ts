@@ -55,6 +55,7 @@ const MAX_MEMO = 512
 /** Tests only. */
 export function __resetSessionContinueFactsForTests(): void {
   claudeModelMemo.clear()
+  fallbackLogged.clear()
 }
 
 function newestClaudeModel(text: string): string | null {
@@ -116,6 +117,29 @@ export async function readClaudeReportedModel(path: string | null | undefined): 
 }
 
 // ---------------------------------------------------------------------------
+// 6.62.0 /qa (W17): every silent fallback gets a server log line, once per thread per window
+// ---------------------------------------------------------------------------
+
+export const FALLBACK_LOG_EVERY_MS = 10 * 60_000
+const fallbackLogged = new Map<string, number>()
+
+/** Logs `[continue-plan] <what> thread=<8> <detail>` unless the same pair logged recently. */
+export function logContinueFallback(what: string, threadId: string, detail: string, now = Date.now()): boolean {
+  const key = `${what}:${threadId}`
+  const last = fallbackLogged.get(key)
+  if (last !== undefined && now - last < FALLBACK_LOG_EVERY_MS) return false
+  fallbackLogged.delete(key)
+  fallbackLogged.set(key, now)
+  while (fallbackLogged.size > 512) {
+    const oldest = fallbackLogged.keys().next()
+    if (oldest.done) break
+    fallbackLogged.delete(oldest.value)
+  }
+  console.warn(`[continue-plan] ${what} thread=${String(threadId).slice(0, 8)} ${detail}`)
+  return true
+}
+
+// ---------------------------------------------------------------------------
 // The resolver
 // ---------------------------------------------------------------------------
 
@@ -127,6 +151,8 @@ export interface ContinueFactsDeps {
   codexModelLabel: (id: string) => string | null
   /** `~/.codex/config.toml` text. Defaults to the live, read-only reader. */
   codexConfigText?: () => string | null
+  /** 6.62.0 /qa (W5): the cwd's git trust root (K7), bounded; absent means no git lookup. */
+  codexGitTrustRoot?: (cwd: string) => Promise<string | null>
   isKnownCursorModel: (id: string) => boolean
   cursorModelLabel: (id: string) => string | null
   /** The CLI chat dir for this id (`~/.cursor/chats/<hash>/<id>`), or null for an IDE composer. */
@@ -179,12 +205,20 @@ export async function resolveSessionContinueFacts(
     let fallback: 'read-only' | 'workspace-write' = 'read-only'
     try { fallback = deps.codexFallbackSandbox() === 'workspace-write' ? 'workspace-write' : 'read-only' } catch { fallback = 'read-only' }
     if (!full) return { note: killSwitchNote('codex', fallback), reportedModel }
-    const plan = planCodexContinue(posture, input.cwd ?? posture?.cwd ?? '', {
+    const cwd = input.cwd ?? posture?.cwd ?? ''
+    // Only full access needs the trust question, and only it pays for the git lookup.
+    let gitTrustRoot: string | null = null
+    if (posture?.sandboxType === 'danger-full-access' && typeof deps.codexGitTrustRoot === 'function') {
+      try { gitTrustRoot = await deps.codexGitTrustRoot(cwd) } catch { gitTrustRoot = null }
+    }
+    const plan = planCodexContinue(posture, cwd, {
       fallbackSandbox: () => fallback,
       configText: deps.codexConfigText ?? (() => readCodexConfigText()),
+      gitTrustRoot,
       isKnownModel: deps.isKnownCodexModel,
       modelLabel: deps.codexModelLabel,
     })
+    if (plan.source === 'fallback') logContinueFallback('codex posture unreadable', input.threadId, `fallback=${plan.sandbox}`)
     return { plan, note: plan.note, reportedModel }
   }
   if (input.provider === 'cursor') {
@@ -202,6 +236,7 @@ export async function resolveSessionContinueFacts(
         label: deps.cursorModelLabel,
         askModeChat: chat?.mode === 'ask',
       })
+      if (!plan.matched) logContinueFallback('cursor model unmatched', input.threadId, `model=${chat?.model ?? 'unread'} fallback=${plan.model}`)
       return { plan, note: plan.note, reportedModel }
     }
     // An IDE composer: no plan (it is never resumed from outside), and its model is read

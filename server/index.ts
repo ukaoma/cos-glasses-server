@@ -58,7 +58,7 @@ import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attac
 import { deliverAttachedTurn, realAttachedTurnDeps } from './lib/attached-provider-adapter.js'
 import { resolveSessionContinueFacts } from './lib/session-continue-facts.js'
 import { fallbackContinueNote } from './lib/continue-plan.js'
-import { realContinueFactsDeps } from './lib/session-continue-facts-real.js'
+import { codexFolderTrustedNow, realContinueFactsDeps } from './lib/session-continue-facts-real.js'
 import { prepareCursorFork, resolveCursorForkWorkspace } from './lib/cursor-fork-context.js'
 import { readComposerFacts } from './lib/cursor-session-model.js'
 import { MAX_PROMPT_CHARS } from './lib/attached-provider-adapter.js'
@@ -626,6 +626,8 @@ const deliverAttachedTurnForRoute = async (request: {
         // 6.62.0 /qa (Q4): the child is about to start, every gate passed (a Continue or a
         // queue drain): no earlier desk-cancel marker may deny COS's own turn.
         ...clearingHaltOnSpawn(base, request.nativeThreadId, 'continue'),
+        // 6.62.0 /qa (W5): full access is re-checked against Codex's own trust at the spawn.
+        codexFolderTrusted: cwd => codexFolderTrustedNow(cwd),
         // `startMs` is deliberately unused: the adapter already probed it as a GATE
         // (a null there aborts before this is reached), and the route probes again
         // as the recorder. One record, one authority.
