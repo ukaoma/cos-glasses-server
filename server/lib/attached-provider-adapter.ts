@@ -101,7 +101,7 @@ import { recordCosSpawn, releaseCosSpawn } from './agent-session-ownership-store
 import { interpretPsLstart, processStartMs as realProcessStartMs } from './occupancy-probes.js'
 import { getCodexTrustMode } from './codex-run-ledger.js'
 import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
-import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
+import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import type { PermissionAllowance } from './banned-permission-args.js'
 import {
   continueAllowanceFor,
@@ -951,9 +951,10 @@ async function run(
   let child: AttachedChildProcess
   try {
     child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv(), provider })
-  } catch {
+  } catch (error) {
     // Includes ENOENT. No process exists, so no turn can have landed.
-    return fail('spawn_failed', 'not_attempted', { ...base, detail: 'threw', durationMs: duration() })
+    const detail = isCursorIsolationUnavailable(error) ? 'cursor_isolation_unavailable' : 'threw'
+    return fail('spawn_failed', 'not_attempted', { ...base, detail, durationMs: duration() })
   }
   if (!child || typeof child !== 'object' || typeof child.on !== 'function') {
     return fail('spawn_failed', 'not_attempted', { ...base, detail: 'no_child', durationMs: duration() })
@@ -1865,6 +1866,8 @@ export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict):
       // 6.62.0 (plan 3.4): a Cursor child gets a config dir of its own, so `--model` cannot
       // rewrite the person's CLI default (C9). Child env only; removed when it exits.
       const isolation = request.provider === 'cursor' ? cursorSpawnEnv({ baseEnv: request.env }) : null
+      // 6.62.0 /qa (W6): a Continue never falls back to the shared Cursor config.
+      if (isolation && !isolation.isolated) throw cursorIsolationUnavailableError()
       let child: ReturnType<typeof nodeSpawn>
       try {
         child = nodeSpawn(request.binaryPath, [...request.args], {

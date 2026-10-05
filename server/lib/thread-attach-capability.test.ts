@@ -305,6 +305,18 @@ describe('the live /api/health and /api/models surfaces', () => {
     expect(models.providers).toEqual(health.providers)
   }, 30_000)
 
+  it('6.62.0 /qa (W6): /api/health publishes the Continue read counters', async () => {
+    const health = await (await fetch(`${base}/api/health`)).json() as any
+    for (const [group, keys] of [
+      ['cursorSpawn', ['created', 'released', 'failed', 'swept']],
+      ['codexPosture', ['reads', 'bytes']],
+      ['cursorModel', ['composerQueries', 'chatQueries', 'composerFailures', 'chatFailures']],
+      ['cursorChatHolders', ['probes', 'held', 'failed']],
+    ] as const) {
+      for (const key of keys) expect(typeof health.continueReads?.[group]?.[key], `${group}.${key}`).toBe('number')
+    }
+  }, 30_000)
+
   it('leaves the existing health contract intact', async () => {
     // Other clients depend on these. Adding fields must not move them.
     const body = await (await fetch(`${base}/api/health`)).json() as any

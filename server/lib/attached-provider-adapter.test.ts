@@ -1799,3 +1799,14 @@ describe('6.62.0 /qa (W5, N1): full access is re-checked against Codex trust at 
     expect(asked).toBe(0)
   })
 })
+
+describe('6.62.0 /qa (W6): an isolation refusal is named, and nothing was delivered', () => {
+  it('maps the isolation code to cursor_isolation_unavailable, not_attempted', async () => {
+    const { cursorIsolationUnavailableError } = await import('./cursor-spawn-env')
+    const ctx = harness({ spawn: () => { throw cursorIsolationUnavailableError() } })
+    const result = expectFailure(await deliver(ctx, { provider: 'cursor' }))
+    expect(result).toMatchObject({ reason: 'spawn_failed', delivery: 'not_attempted', detail: 'cursor_isolation_unavailable' })
+    const other = harness({ spawn: () => { throw new Error('ENOENT') } })
+    expect(expectFailure(await deliver(other, { provider: 'cursor' })).detail).toBe('threw')
+  })
+})

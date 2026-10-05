@@ -85,7 +85,7 @@ import {
   type BinaryResolution,
 } from './attached-provider-adapter.js'
 import { findBannedPermissionArg } from './banned-permission-args.js'
-import { cursorSpawnEnv, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
+import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 
 /**
  * Providers that can be forked.
@@ -664,9 +664,10 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
   let child: AttachedChildProcess
   try {
     child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv(), provider })
-  } catch {
+  } catch (error) {
     // Includes ENOENT. No process exists, so no thread can have been created.
-    return fail('spawn_failed', 'none', { ...base, detail: 'threw', durationMs: duration() })
+    const detail = isCursorIsolationUnavailable(error) ? 'cursor_isolation_unavailable' : 'threw'
+    return fail('spawn_failed', 'none', { ...base, detail, durationMs: duration() })
   }
   if (!child || typeof child !== 'object' || typeof child.on !== 'function') {
     return fail('spawn_failed', 'none', { ...base, detail: 'no_child', durationMs: duration() })
@@ -979,6 +980,8 @@ export function realForkDeps(
     spawn: request => {
       // 6.62.0 (plan 3.4): the Cursor fork's `--model` must not rewrite the CLI default.
       const isolation = request.provider === 'cursor' ? cursorSpawnEnv({ baseEnv: request.env }) : null
+      // 6.62.0 /qa (W6): a fork never falls back to the shared Cursor config.
+      if (isolation && !isolation.isolated) throw cursorIsolationUnavailableError()
       try {
         const child = nodeSpawn(request.binaryPath, [...request.args], {
           stdio: ['pipe', 'pipe', 'pipe'],

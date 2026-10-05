@@ -54,7 +54,7 @@ import { NATIVE_THREAD_ID_RE } from './native-thread-id.js'
 import { transcriptPathFor, type NativeHeadDeps } from './native-head.js'
 import { parseProcStartUtcMs, type OccupancyDirs, type OccupancyProbes } from './thread-occupancy.js'
 import { cursorTranscriptPath, resolveCursorAgentSession } from './cursor-agent-store.js'
-import { cliChatLastWriteMs } from './cursor-session-model.js'
+import { activeSqliteReaderPids, cliChatLastWriteMs } from './cursor-session-model.js'
 
 // Re-exported rather than reimplemented. `claudeSessionsDir` already encodes the
 // COS_CLAUDE_SESSIONS_DIR -> CLAUDE_CONFIG_DIR -> ~/.claude precedence AND is the
@@ -349,6 +349,39 @@ export function readFile(path: string): string | null {
  * other id validator (`SAFE_ID_RE`) permits `/` and `.`. If that validation is
  * ever dropped upstream, this refuses rather than probing an arbitrary path.
  */
+/**
+ * 6.62.0 /qa (W7): one bounded `lsof` on a Cursor CLI chat's `store.db`. A process that
+ * holds it open and is not COS (not the server, not a COS child, not one of COS's own
+ * short sqlite3 reads) is a run working that chat right now, at the desk or in a terminal
+ * `agent`, even when it has written nothing for 30 s. Null: lsof could not tell (timeout,
+ * missing, refused); the caller then falls back to the 30 s write rule and this logs it.
+ */
+export const CURSOR_CHAT_HOLDER_TIMEOUT_MS = 3_000
+export const cursorChatHolderStats = { probes: 0, held: 0, failed: 0 }
+
+export function cursorChatForeignHolder(
+  chatDir: string,
+  ownPids: () => Iterable<number>,
+  run: (bin: string, args: string[], timeoutMs: number) => ProbeOutcome = runProbe,
+): boolean | null {
+  if (typeof chatDir !== 'string' || !chatDir.startsWith('/') || chatDir.includes('\0')) return null
+  const path = join(chatDir, 'store.db')
+  cursorChatHolderStats.probes += 1
+  let pids: number[]
+  try {
+    pids = interpretLockHolders(run(LSOF_BIN, ['-w', '-t', '--', path], CURSOR_CHAT_HOLDER_TIMEOUT_MS), path)
+  } catch (error) {
+    cursorChatHolderStats.failed += 1
+    console.warn(`[occupancy-probes] cursor chat holder probe failed, the 30 s write rule decides: ${error instanceof Error ? error.message : error}`)
+    return null
+  }
+  const own = new Set<number>([process.pid])
+  try { for (const pid of ownPids()) own.add(pid) } catch { /* the ledger is advisory here */ }
+  const held = pids.some(pid => !own.has(pid))
+  if (held) cursorChatHolderStats.held += 1
+  return held
+}
+
 export function lockHolders(path: string): number[] {
   if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
     throw new Error('lockHolders: refusing an unusable path')
@@ -729,6 +762,11 @@ export function realOccupancyProbes(ledger: SpawnLedgerAccessor): OccupancyProbe
     lockHolders,
     cosSpawnedPids: () => sanitizeLedger(ledger()),
     cursorAgentSession: (threadId, chatsDir) => resolveCursorAgentSession(threadId, chatsDir),
+    // 6.62.0 /qa (W7): positive evidence first: a non-COS process holding the chat open.
+    cursorChatForeignHolder: chatDir => cursorChatForeignHolder(chatDir, () => [
+      ...sanitizeLedger(ledger()).keys(),
+      ...activeSqliteReaderPids(),
+    ]),
     // 6.62.0 (W14): the CLI chat busy window reads the chat's own files.
     cursorChatLastWriteMs: (chatDir, threadId) => cliChatLastWriteMs(
       chatDir,

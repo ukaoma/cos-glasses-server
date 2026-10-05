@@ -207,6 +207,12 @@ export interface OccupancyProbes {
    * keeps the 6.61 verdict.
    */
   cursorChatLastWriteMs?: (chatDir: string, threadId: string) => number | null
+  /**
+   * 6.62.0 /qa (W7): does a process that is NOT COS hold this CLI chat's `store.db` open?
+   * True is positive evidence of a run (a terminal `agent`, a desk run quiet past 30 s).
+   * Null or a throw: cannot tell, and the 30 s write window alone decides.
+   */
+  cursorChatForeignHolder?: (chatDir: string) => boolean | null
 }
 
 /** 6.62.0 (W14): a CLI chat written this recently is working; a turn for it queues. */
@@ -668,6 +674,13 @@ export function threadOccupancy(
     if (typeof lastWrite === 'number' && Number.isFinite(lastWrite) && Date.now() - lastWrite < CURSOR_CHAT_BUSY_WINDOW_MS) {
       return { attachable: false, owners: [], reason: 'native_thread_working' }
     }
+    let held: boolean | null = null
+    try {
+      held = typeof probes.cursorChatForeignHolder === 'function' ? probes.cursorChatForeignHolder(session.dir) : null
+    } catch {
+      held = null
+    }
+    if (held === true) return { attachable: false, owners: [], reason: 'native_thread_working' }
     return { attachable: true, owners: [], reason: null }
   }
   if (provider !== 'claude' && provider !== 'codex') {

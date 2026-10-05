@@ -26,10 +26,8 @@ import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { isValidNativeThreadId } from './native-thread-id.js'
 
-const execFileAsync = promisify(execFile)
 
 export const SQLITE3_BIN = '/usr/bin/sqlite3'
 export const COMPOSER_MODEL_TTL_MS = 60_000
@@ -126,10 +124,23 @@ export const cursorModelReadStats = { composerQueries: 0, chatQueries: 0, compos
 
 export type SqliteRunner = (args: readonly string[], timeoutMs: number) => Promise<string>
 
-export const realSqliteRunner: SqliteRunner = async (args, timeoutMs) => {
-  const { stdout } = await execFileAsync(SQLITE3_BIN, [...args], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 })
-  return stdout
+/**
+ * 6.62.0 /qa (W7): the sqlite3 children COS has running right now. They hold a chat's
+ * `store.db` open for a moment, and the busy probe must not mistake COS's own read for a run.
+ */
+const sqliteReaders = new Set<number>()
+export function activeSqliteReaderPids(): number[] {
+  return [...sqliteReaders]
 }
+
+export const realSqliteRunner: SqliteRunner = (args, timeoutMs) => new Promise((resolve, reject) => {
+  const child = execFile(SQLITE3_BIN, [...args], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }, (error, stdout) => {
+    if (typeof child.pid === 'number') sqliteReaders.delete(child.pid)
+    if (error) reject(error)
+    else resolve(String(stdout))
+  })
+  if (typeof child.pid === 'number') sqliteReaders.add(child.pid)
+})
 
 function parseJsonText(value: unknown): unknown {
   if (typeof value !== 'string' || value.length === 0) return null
