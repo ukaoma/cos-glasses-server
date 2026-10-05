@@ -164,7 +164,7 @@ describe('planCodexContinue', () => {
   it('passes danger-full-access only with the session posture AND a trusted cwd', () => {
     expect(planCodexContinue(posture, cwd, deps())).toMatchObject({
       sandbox: 'danger-full-access', model: 'gpt-6.1-sol', effort: 'high', source: 'session',
-      note: "This Codex session's full access, GPT-6.1 Sol High.",
+      note: "This Codex session's full access, gpt-6.1-sol high.",
     })
     const untrusted = planCodexContinue(posture, '/Users/me/scratch/repo', deps())
     expect(untrusted).toMatchObject({ sandbox: 'workspace-write', networkAccess: true, note: 'Workspace write: Codex has not trusted this folder.' })

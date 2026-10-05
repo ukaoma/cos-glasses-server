@@ -4894,6 +4894,13 @@ const CASES = [
     tests: ["server/lib/provider-actions.test.ts"],
   },
   {
+    name: "6620-note-width-rule-ignored",
+    file: "server/lib/codex-session-posture.ts",
+    find: "  if (pretty && pretty.length <= CONTINUE_NOTE_SOFT_MAX) return pretty\n",
+    replace: "  if (pretty && pretty.length <= CONTINUE_NOTE_MAX) return pretty\n",
+    tests: ["server/lib/continue-plan.test.ts"],
+  },
+  {
     name: "6620-recommender-forks-cursor",
     file: "server/lib/session-recommendation.ts",
     find: "export const FORKABLE = new Set<string>(FORKABLE_PROVIDERS.filter(provider => provider !== 'cursor'))\n",

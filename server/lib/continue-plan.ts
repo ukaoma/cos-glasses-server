@@ -19,7 +19,7 @@
 // 0.5.254's provider allowlist does not carry the key, so it belongs in `.env`.
 
 import type { PermissionAllowance } from './banned-permission-args.js'
-import { CONTINUE_NOTE_MAX, fitNote, type CodexContinuePlan } from './codex-session-posture.js'
+import { CONTINUE_NOTE_MAX, fitModelNote, type CodexContinuePlan } from './codex-session-posture.js'
 import { CURSOR_CONTINUE_FALLBACK_MODEL } from './cursor-session-model.js'
 
 export type { CodexContinuePlan } from './codex-session-posture.js'
@@ -116,12 +116,13 @@ export function planCursorContinue(input: CursorPlanInput): CursorContinuePlan {
   } catch {
     label = null
   }
-  const shown = label || (matched ? chosen : 'Composer 2.5 Fast')
+  // The CLI's display name when the note stays short; else the slug itself (lens width).
+  const display = label || (matched ? null : 'Composer 2.5 Fast')
   const note = input.askModeChat
-    ? fitNote(`Now Run Everything (was Ask), ${shown}.`, 'Now Run Everything (was Ask).')
+    ? fitModelNote(m => `Now Run Everything (was Ask), ${m}.`, display, chosen, 'Now Run Everything (was Ask).')
     : matched
-      ? fitNote(`Run Everything on ${shown}.`, 'Run Everything on this session\'s model.')
-      : fitNote(`Run Everything on ${shown}; model unread.`, 'Run Everything; session model unread.')
+      ? fitModelNote(m => `Run Everything on ${m}.`, display, chosen, 'Run Everything on this session\'s model.')
+      : fitModelNote(m => `Run Everything on ${m}; model unread.`, display, chosen, 'Run Everything; session model unread.')
   return { provider: 'cursor', mode: 'force', model: chosen, matched, note }
 }
 

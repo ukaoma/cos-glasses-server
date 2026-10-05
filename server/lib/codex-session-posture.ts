@@ -290,6 +290,32 @@ export interface CodexPlanDeps {
 
 export const CONTINUE_NOTE_MAX = 60
 
+/**
+ * Measured on the lens (integrator, 2026-10-05): a real note fits one line (the longest,
+ * "This Codex session's full access, GPT-6.1 Sol High.", is 440 of ~546 px), but 60
+ * characters of wide glyphs can wrap two or three. So a note that would pass this many
+ * characters with the model's DISPLAY name names the model by its short id instead.
+ */
+export const CONTINUE_NOTE_SOFT_MAX = 45
+
+/**
+ * A note that names a model: the display-name form when it stays within the soft budget,
+ * else the short-id form, else the model-free fallback. Never past CONTINUE_NOTE_MAX.
+ */
+export function fitModelNote(
+  template: (model: string) => string,
+  display: string | null,
+  shortId: string | null,
+  fallback: string,
+): string {
+  const pretty = display ? template(display) : null
+  if (pretty && pretty.length <= CONTINUE_NOTE_SOFT_MAX) return pretty
+  const short = shortId ? template(shortId) : null
+  if (short && short.length <= CONTINUE_NOTE_MAX) return short
+  if (!shortId && pretty && pretty.length <= CONTINUE_NOTE_MAX) return pretty
+  return fitNote(fallback)
+}
+
 /** The first candidate that fits the lens budget. The last one must always fit. */
 export function fitNote(...candidates: Array<string | null | undefined>): string {
   for (const candidate of candidates) {
@@ -360,8 +386,9 @@ export function planCodexContinue(posture: CodexSessionPosture | null, cwd: stri
     }
     label = label || defaultCodexModelLabel(model)
   }
-  const settings = [label, effortLabel(effort)].filter(Boolean).join(' ')
-  const tail = model ? settings : 'Codex default model'
+  // Display form (`GPT-6.1 Sol High`) and short form (`gpt-6.1-sol high`), for fitModelNote.
+  const display = model ? [label, effortLabel(effort)].filter(Boolean).join(' ') : 'Codex default model'
+  const shortId = model ? [model, effort].filter(Boolean).join(' ') : null
 
   if (posture.sandboxType === 'danger-full-access') {
     let trusted = false
@@ -373,7 +400,7 @@ export function planCodexContinue(posture: CodexSessionPosture | null, cwd: stri
     if (trusted) {
       return {
         provider: 'codex', sandbox: 'danger-full-access', model, effort, networkAccess: true, source: 'session',
-        note: fitNote(`This Codex session's full access, ${tail}.`, "This Codex session's full access."),
+        note: fitModelNote(m => `This Codex session's full access, ${m}.`, display, shortId, "This Codex session's full access."),
       }
     }
     // The session ran with full access, but Codex has not trusted this folder: passing it
@@ -387,12 +414,12 @@ export function planCodexContinue(posture: CodexSessionPosture | null, cwd: stri
     return {
       provider: 'codex', sandbox: 'workspace-write', model, effort,
       networkAccess: posture.networkAccess, source: 'session',
-      note: fitNote(`This Codex session's workspace access, ${tail}.`, "This Codex session's workspace access."),
+      note: fitModelNote(m => `This Codex session's workspace access, ${m}.`, display, shortId, "This Codex session's workspace access."),
     }
   }
   return {
     provider: 'codex', sandbox: 'read-only', model, effort, networkAccess: null, source: 'session',
-    note: fitNote(`Read-only, as this Codex session runs, ${tail}.`, 'Read-only, as this Codex session runs.'),
+    note: fitModelNote(m => `Read-only, as this Codex session runs, ${m}.`, display, shortId, 'Read-only, as this Codex session runs.'),
   }
 }
 

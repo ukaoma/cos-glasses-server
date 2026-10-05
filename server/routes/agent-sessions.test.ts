@@ -829,11 +829,11 @@ describe('6.62.0 (plans 1.8, 3.12): reported_model and continue_note on rows and
 
       const codex = await (await fetch(`${base}/api/agent-sessions/codex/${codexId}`)).json() as Record<string, unknown>
       expect(codex.reported_model).toBe('gpt-6.1-sol high')
-      expect(codex.continue_note).toBe("This Codex session's full access, GPT-6.1 Sol High.")
+      expect(codex.continue_note).toBe("This Codex session's full access, gpt-6.1-sol high.")
 
       const list = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as { sessions: Array<Record<string, unknown>> }
       const row = list.sessions.find(s => s.session_id === codexId)
-      expect(row).toMatchObject({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, GPT-6.1 Sol High." })
+      expect(row).toMatchObject({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, gpt-6.1-sol high." })
       for (const entry of list.sessions) {
         if (typeof entry.continue_note === 'string') expect(entry.continue_note.length).toBeLessThan(61)
         if (typeof entry.reported_model === 'string') expect(entry.reported_model).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._:/ -]*$/)

@@ -85,7 +85,7 @@ describe('planCursorContinue', () => {
 
   it('falls back to composer-2.5-fast with a note when the model is unread or unlisted', () => {
     const plan = planCursorContinue({ candidates: ['gpt-9-unlisted'], isKnown: id => listed.has(id), label: id => labels[id] ?? null, askModeChat: false })
-    expect(plan).toMatchObject({ model: 'composer-2.5-fast', matched: false, note: 'Run Everything on Composer 2.5 Fast; model unread.' })
+    expect(plan).toMatchObject({ model: 'composer-2.5-fast', matched: false, note: 'Run Everything on composer-2.5-fast; model unread.' })
   })
 
   it('names the escalation for a chat COS created in Ask mode', () => {
@@ -148,7 +148,7 @@ describe('resolveSessionContinueFacts', () => {
     writeFileSync(rollout, `${JSON.stringify({ type: 'turn_context', payload: { cwd: `${root}/work tree`, sandbox_policy: { type: 'danger-full-access' }, model: 'gpt-6.1-sol', effort: 'high', approval_policy: 'never' } })}\n`)
     const facts = await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: rollout, cwd: `${root}/work tree/sub` }, deps())
     expect(facts.plan).toMatchObject({ sandbox: 'danger-full-access', model: 'gpt-6.1-sol', effort: 'high' })
-    expect(continueFactsFields(facts)).toEqual({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, GPT-6.1 Sol High." })
+    expect(continueFactsFields(facts)).toEqual({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, gpt-6.1-sol high." })
     const off = await resolveSessionContinueFacts({ provider: 'codex', threadId: THREAD, transcriptPath: rollout, cwd: null }, deps({ env: { COS_CONTINUE_FULL_PERMISSIONS: '0' } }))
     expect(off.plan).toBeUndefined()
     expect(off.note).toBe('Read-only: full permissions switched off.')
@@ -177,5 +177,47 @@ describe('resolveSessionContinueFacts', () => {
     expect(sanitizeReportedModel('claude-opus-4-8[1m]')).toBeNull()
     expect(sanitizeReportedModel('x'.repeat(101))).toBeNull()
     expect(sanitizeReportedModel('')).toBeNull()
+  })
+})
+
+describe('continue_note width on the lens (integrator measurement, 2026-10-05)', () => {
+  // The longest names the installed CLIs list today (Cursor `agent models` cache, Codex
+  // models_cache): the display names are what would wrap on the lens.
+  const cursorLongest = [
+    ['claude-fable-5-1-thinking-xhigh', 'Claude Fable 5.1 1M Extra High Thinking (NO ZDR)'],
+    ['claude-opus-4-8-thinking-medium-fast', 'Claude Opus 4.8 1M Medium Thinking Fast'],
+    ['grok-4.7-xhigh-fast', 'Grok 4.7 Extra High Fast'],
+    ['composer-2.5-fast', 'Composer 2.5 Fast'],
+  ] as const
+
+  it('names a long model by its short id, keeps a short display name, and never passes 60', () => {
+    for (const [id, display] of cursorLongest) {
+      for (const askModeChat of [false, true]) {
+        const plan = planCursorContinue({ candidates: [id], isKnown: () => true, label: () => display, askModeChat })
+        expect(plan.note.length, plan.note).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
+        if (plan.note.includes(display)) expect(plan.note.length, plan.note).toBeLessThanOrEqual(45)
+      }
+    }
+    expect(planCursorContinue({ candidates: ['grok-4.7-xhigh-fast'], isKnown: () => true, label: () => 'Grok 4.7 Extra High Fast', askModeChat: false }).note)
+      .toBe('Run Everything on Grok 4.7 Extra High Fast.')
+    expect(planCursorContinue({ candidates: ['claude-fable-5-1-thinking-xhigh'], isKnown: () => true, label: () => cursorLongest[0][1], askModeChat: false }).note)
+      .toBe('Run Everything on claude-fable-5-1-thinking-xhigh.')
+  })
+
+  it('every Codex template with the longest listed model and effort stays within 60', async () => {
+    const { planCodexContinue, parseTurnContextLine } = await import('./codex-session-posture')
+    for (const sandbox of ['danger-full-access', 'workspace-write', 'read-only']) {
+      for (const [model, label] of [['gpt-5.6-terra', 'GPT-5.6-Terra'], ['gpt-6.1-sol', 'GPT-6.1-Sol']]) {
+        for (const effort of ['minimal', 'medium', 'xhigh', 'ultra']) {
+          const posture = parseTurnContextLine(JSON.stringify({ type: 'turn_context', payload: { sandbox_policy: { type: sandbox }, model, effort } }))
+          const note = planCodexContinue(posture, '/w', {
+            fallbackSandbox: () => 'read-only', configText: () => '[projects."/w"]\ntrust_level = "trusted"\n',
+            isKnownModel: () => true, modelLabel: () => label,
+          }).note
+          expect(note.length, note).toBeLessThanOrEqual(CONTINUE_NOTE_MAX)
+          if (note.includes(label)) expect(note.length, note).toBeLessThanOrEqual(45)
+        }
+      }
+    }
   })
 })
