@@ -1,13 +1,13 @@
-# 6.62.1 — Combined provider parity and handoff hardening
+## 6.62.1 — 2026-10-05 — Combined provider parity and handoff hardening
 
 - Includes the 6.62.0 provider parity, cancellation, hook readiness, and safe Cursor continuation updates.
 - A failed fork names its copy when available and distinguishes usage limits, authentication, and context overflow.
 - Claude, Codex, and Cursor prompt hooks receive a private, short-lived binding to the current user request.
 - Compatible with existing glasses; build 6.10.600 displays the server continuation note and opts into the matching Cursor behavior.
 
-## 6.62.0 — 2026-10-05 — Provider parity: Claude, Codex and Cursor session visibility and continuation
+### Included 6.62.0 candidate work — Provider parity: Claude, Codex and Cursor session visibility and continuation
 
-Candidate first: published under the `next` dist-tag, promoted to `latest` only after the regression matrix in the plan passes. Pairs with glasses 6.10.600 (copy only); older glasses keep working.
+Originally prepared for a candidate release; these changes are included in 6.62.1. The standalone 6.62.0 npm release was skipped. Pairs with glasses 6.10.600 (copy only); older glasses keep working.
 
 **Permission change on Continue (read this).** A Continue now carries the session's OWN permissions:
 - Codex: the session's model, effort and sandbox from its latest `turn_context`. A Desktop thread recorded as `danger-full-access` resumes with it, but only when its folder is already trusted in `~/.codex/config.toml`; otherwise `workspace-write` (network as the session had it). Unreadable settings fall back to the 6.61 posture with a note. 6.61 resumed every Codex Continue read-only.
