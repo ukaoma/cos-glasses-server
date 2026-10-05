@@ -947,6 +947,13 @@ app.use('/api', createAgentSessionBindingsRouter({
   // turn route's clientTurnId ledger is the one idempotency key per turn.
   busyCodexHop: (threadId: string) => codexLiveQueueEnabled()
     && readQueue('codex', threadId, Date.now()).every(turn => turn.status !== 'waiting' && turn.status !== 'delivering'),
+  // 6.62.0 (plan 3.12): the attach verdict says what a Continue would run with.
+  continueNote: async (provider, threadId) => (await resolveSessionContinueFacts({
+    provider,
+    threadId,
+    transcriptPath: attachedWorkspaceDeps.transcriptPath(provider, threadId),
+    cwd: resolveAttachedWorkspace(provider, threadId, attachedWorkspaceDeps)?.path ?? null,
+  }, continueFactsDeps)).note,
   forkThread: forkThreadForRoute,
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path

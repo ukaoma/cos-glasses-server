@@ -784,3 +784,66 @@ it('exposes Claude and native Cursor agent/compaction observations through HTTP 
   if(previous===undefined)delete process.env.COS_AGENT_SESSIONS_HOME;else process.env.COS_AGENT_SESSIONS_HOME=previous
  }
 })
+
+describe('6.62.0 (plans 1.8, 3.12): reported_model and continue_note on rows and detail', async () => {
+  const { __setSessionActDepsForTests } = await import('../lib/session-act-fields.js')
+  const claudeId = 'aaaaaaaa-bbbb-cccc-dddd-888888888888'
+  const codexId = '01a10c5f-6c47-7030-beaa-569c74d2f352'
+  const fakeDeps = (home: string) => ({
+    env: {},
+    codexFallbackSandbox: () => 'read-only' as const,
+    isKnownCodexModel: (id: string) => id === 'gpt-6.1-sol',
+    codexModelLabel: (id: string) => (id === 'gpt-6.1-sol' ? 'GPT-6.1 Sol' : null),
+    codexConfigText: () => `[projects."${home}/Ukaoma Chief Of Staff"]\ntrust_level = "trusted"\n`,
+    isKnownCursorModel: () => false,
+    cursorModelLabel: () => null,
+    cursorChatDir: () => null,
+    cursorComposerDb: join(home, 'missing.vscdb'),
+  })
+
+  it('a Claude detail carries the newest real model and no note; a Codex row and detail carry both', async () => {
+    const { home, roots } = fixtureHome()
+    writeJsonl(join(roots.claudeProjects, '-repo', `${claudeId}.jsonl`), [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Which model is this?' }] } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'Opus.' }] } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'API Error' }] } }),
+    ])
+    const now = new Date()
+    const day = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')}`
+    const rollout = join(roots.codexSessions, day, `rollout-2026-10-05T09-02-22-${codexId}.jsonl`)
+    writeJsonl(rollout, [
+      `{"type":"session_meta","payload":{"id":"${codexId}","cwd":"${home}/Ukaoma Chief Of Staff/MU-Chief-Staff","timestamp":"2026-10-05T14:02:22.000Z"}}`,
+      '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Ship the parity build"}]}}',
+      JSON.stringify({ type: 'turn_context', payload: { cwd: `${home}/Ukaoma Chief Of Staff/MU-Chief-Staff`, approval_policy: 'never', sandbox_policy: { type: 'danger-full-access' }, model: 'gpt-6.1-sol', effort: 'high' } }),
+    ])
+    const previous = process.env.COS_AGENT_SESSIONS_HOME
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    process.env.CODEX_HOME = join(home, '.codex')
+    __setSessionActDepsForTests(fakeDeps(home))
+    try {
+      const base = await startSearchServer()
+      const claude = await (await fetch(`${base}/api/agent-sessions/claude/${claudeId}`)).json() as Record<string, unknown>
+      expect(claude.reported_model).toBe('claude-opus-5-5')
+      expect('continue_note' in claude).toBe(false)
+
+      const codex = await (await fetch(`${base}/api/agent-sessions/codex/${codexId}`)).json() as Record<string, unknown>
+      expect(codex.reported_model).toBe('gpt-6.1-sol high')
+      expect(codex.continue_note).toBe("This Codex session's full access, GPT-6.1 Sol High.")
+
+      const list = await (await fetch(`${base}/api/agent-sessions?limit=20`)).json() as { sessions: Array<Record<string, unknown>> }
+      const row = list.sessions.find(s => s.session_id === codexId)
+      expect(row).toMatchObject({ reported_model: 'gpt-6.1-sol high', continue_note: "This Codex session's full access, GPT-6.1 Sol High." })
+      for (const entry of list.sessions) {
+        if (typeof entry.continue_note === 'string') expect(entry.continue_note.length).toBeLessThan(61)
+        if (typeof entry.reported_model === 'string') expect(entry.reported_model).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._:/ -]*$/)
+      }
+    } finally {
+      __setSessionActDepsForTests(null)
+      if (previous === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previous
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previousCodexHome
+    }
+  })
+})

@@ -30,6 +30,7 @@ import {
   ATTACHABLE_COPY,
   CANCEL_FENCE_RECHECK_MS,
   LIVE_VERIFY_BUDGET_MS,
+  CONTINUE_NOTE_BUDGET_MS,
   REASON_COPY,
   TURN_SENT_CODEX_QUEUE_COPY,
   UNKNOWN_REASON_COPY,
@@ -4499,5 +4500,30 @@ describe('cancel a desk run, and the refusals (6.53.0)', () => {
     // A malformed id names no thread, so there is nothing to cancel.
     expect(await read(deps({ cancel: recordingCancel().cancel }), 'claude', 'nope')).toBeNull()
     expect(await read(deps({ cancel: recordingCancel().cancel }), 'gemini')).toBeNull()
+  })
+})
+
+describe('6.62.0 (plan 3.12): the attachability verdict carries continue_note', () => {
+  it('adds a bounded note, and omits one that is too long, too slow, thrown, or for an invalid target', async () => {
+    const note = 'Run Everything on Grok 4.7 Extra High Fast.'
+    const seen: string[] = []
+    const base = await start(writeDeps({ continueNote: (provider, threadId) => { seen.push(`${provider}:${threadId}`); return note } }))
+    const ok = await (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json()
+    expect(ok.continue_note).toBe(note)
+    expect(seen).toEqual([`claude:${SID}`])
+    const bad = await (await fetch(`${base}/api/agent-sessions/claude/6d12ff82/attachability`)).json()
+    expect('continue_note' in bad).toBe(false)
+    expect(seen).toHaveLength(1)
+
+    for (const continueNote of [
+      () => 'x'.repeat(61),
+      () => { throw new Error('EIO') },
+      () => new Promise<string>(resolve => setTimeout(() => resolve(note), CONTINUE_NOTE_BUDGET_MS + 500)),
+    ]) {
+      const other = await start(writeDeps({ continueNote }))
+      const body = await (await fetch(`${other}/api/agent-sessions/claude/${SID}/attachability`)).json()
+      expect('continue_note' in body).toBe(false)
+      expect(typeof body.attachable).toBe('boolean')
+    }
   })
 })

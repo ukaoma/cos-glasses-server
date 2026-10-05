@@ -67,6 +67,7 @@ import {
 import type { OccupancyDirs } from '../lib/thread-occupancy.js'
 import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead } from '../lib/agent-session-turns.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
+import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
 
 export const agentSessionsRouter = Router()
 
@@ -401,9 +402,12 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     }
     const queuedOf = await allQueuedWaitingLookup(now)
     const subagents = await readCodexSubagents(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), roots.codexSessions, now)
+    // 6.62.0 (plans 1.8, 3.12): `reported_model` and `continue_note`, one bounded read per row.
+    const actFacts = await sessionActFactsFor(sessions)
     res.json({
       sessions: sessions.map((row, index) => ({ ...withRunning(toEntry(row, activity[index], derivedById.get(row.session_id), queuedOf(row.provider, row.session_id)), running),
-        ...(row.provider === 'codex' ? (subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}) : workObservationFields(workObservationFor(row.session_id), now)) })),
+        ...(row.provider === 'codex' ? (subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}) : workObservationFields(workObservationFor(row.session_id), now)),
+        ...sessionActFields(actFacts[index]) })),
       total: sessions.length,
       windowHours: AGENT_SESSION_WINDOW_HOURS,
       sort,
@@ -589,6 +593,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       ...(activity.lastActivityAt ? { last_activity_at: activity.lastActivityAt } : {}),
       ...(activity.lastTool ? { last_tool: activity.lastTool } : {}),
       ...(recentTurns ? { recent_turns: recentTurns.turns, recent_turns_more: recentTurns.more } : {}),
+      // 6.62.0 (plans 1.8, 3.12): the lens reads both from the DETAIL (display-pages.ts).
+      ...sessionActFields((await sessionActFactsFor([{ provider, session_id: parsed.session_id, file: found }]))[0]),
     })
   } catch (error) {
     console.error(`[agent-sessions] detail failed: ${error instanceof Error ? error.message : error}`)

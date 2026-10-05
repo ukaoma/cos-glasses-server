@@ -87,6 +87,7 @@ import {
 } from '../lib/thread-attach-capability.js'
 import { cachedHookStatus, sessionHooksEnabled, sessionHooksHealthFields } from '../lib/session-hooks-runtime.js'
 import { sessionCancelFeature } from '../lib/session-cancel.js'
+import { liveProviderActInput, mergeProviderSections, providerActSections } from '../lib/provider-actions.js'
 import { hookHaltReady } from '../lib/claude-hooks-installer.js'
 import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib/permission-broker.js'
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
@@ -415,6 +416,12 @@ healthRouter.get('/health', async (_req, res) => {
     // how many are held (that is on the authenticated questions route).
     ...permissionBrokerHealthFields(),
     ...continueLiveHealthFields(),
+    // 6.62.0 (plan 3.11): what each provider can do, with a reason for every "no".
+    providers: mergeProviderSections(providerActSections(liveProviderActInput({
+      attachEnabled: threadAttach.enabled,
+      forkProviders: threadAttach.forkProviders ?? [],
+      sessionCancel: features.sessionCancel,
+    }))),
     server_instance_id: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),
@@ -548,6 +555,14 @@ healthRouter.get('/models', async (req, res) => {
   res.json({
     ...catalog,
     ...threadAttachHealthFields(threadAttach),
+    // 6.62.0 (plans 3.5, 3.11): the phone reads THIS surface, so the live-Continue counters
+    // and the per-provider action contract are published here too, same helpers as health.
+    ...continueLiveHealthFields(),
+    providers: mergeProviderSections(providerActSections(liveProviderActInput({
+      attachEnabled: threadAttach.enabled,
+      forkProviders: threadAttach.forkProviders ?? [],
+      sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus())),
+    }))),
     options: [
       ...(catalog.options ?? []),
       ...cursorOptions,

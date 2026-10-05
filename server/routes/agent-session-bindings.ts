@@ -121,6 +121,7 @@ import {
   type BindingState,
   type NativeBinding,
 } from '../lib/agent-session-binding-store.js'
+import { boundedContinueNote } from '../lib/continue-plan.js'
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
@@ -377,6 +378,14 @@ export interface AgentSessionBindingsDeps {
    * or anything but `true`: a busy holder refuses `native_thread_working`, as in 6.61.
    */
   busyCodexHop?: (threadId: string) => boolean
+
+  /**
+   * 6.62.0 (plan 3.12): what a Continue on this thread would run with, in 60 characters
+   * or less (`session-continue-facts.ts`). Added to the attachability verdict as
+   * `continue_note`. Optional; absent, null, slow (past `CONTINUE_NOTE_BUDGET_MS`) or a
+   * throw omits the field, and the verdict is unchanged.
+   */
+  continueNote?: (provider: BindableProvider, threadId: string) => Promise<string | null> | string | null
 
   /**
    * The self-recursion ledger. Defaults to the real process-wide one.
@@ -1509,6 +1518,12 @@ export const TURN_SENT_CODEX_QUEUE_COPY = 'Queued in the Codex app. It runs when
 export const LIVE_VERIFY_BUDGET_MS = PEER_VERIFY_TIMEOUT_MS
 
 /**
+ * 6.62.0: how long the attachability verdict waits for its `continue_note`. The verdict is
+ * a menu-open read; a cold Codex posture scan or a busy Cursor database must not hold it.
+ */
+export const CONTINUE_NOTE_BUDGET_MS = 1_500
+
+/**
  * The 202 copy. Says QUEUED and not sent, because at this instant the provider has
  * not been spawned — claiming otherwise would be the same silent-success lie the
  * ambiguous path exists to avoid.
@@ -1885,7 +1900,27 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     res.json({ released: true, target, provider: outcome.row.provider })
   })
 
-  router.get('/agent-sessions/:provider/:threadId/attachability', (req, res) => {
+  /** 6.62.0 (plan 3.12): `continue_note` for the verdict, bounded in time and length. */
+  const continueNoteFor = async (provider: string, threadId: string): Promise<{ continue_note?: string }> => {
+    const read = deps.continueNote
+    if (typeof read !== 'function' || !isBindableProvider(provider) || !isValidNativeThreadId(threadId)) return {}
+    let timer: ReturnType<typeof setTimeout> | null = null
+    try {
+      const note = await Promise.race([
+        Promise.resolve(read(provider, threadId)),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), CONTINUE_NOTE_BUDGET_MS) }),
+      ])
+      const bounded = boundedContinueNote(note)
+      return bounded ? { continue_note: bounded } : {}
+    } catch (error) {
+      console.error(`[agent-session-bindings] continue note failed: ${error instanceof Error ? error.message : error}`)
+      return {}
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  router.get('/agent-sessions/:provider/:threadId/attachability', async (req, res) => {
     // An occupancy verdict is a liveness answer with a lifetime of roughly now.
     // A cached `attachable: true` is indistinguishable from a stale one, which is
     // the whole failure this feature exists to prevent.
@@ -1931,7 +1966,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     // truncated-id hole opened. The tests pin the ordering behaviorally instead:
     // probes that throw on every call still return `unsupported_provider` /
     // `invalid_thread_id`, which is only possible if nothing was probed.
-    res.json(withCancel(runOccupancy(provider, threadId)))
+    const verdictBody = withCancel(runOccupancy(provider, threadId))
+    res.json({ ...verdictBody, ...(await continueNoteFor(provider, threadId)) })
   })
 
   // ------------------------------------------------------------------ cancel
