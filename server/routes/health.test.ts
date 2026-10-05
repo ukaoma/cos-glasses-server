@@ -3,7 +3,7 @@ import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { DISPLAY_TICKET_TTL_SECONDS, verifyDisplayTicket } from '../lib/display-ticket.js'
-import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -176,10 +176,16 @@ describe('provider observation on health (6.62.0)', () => {
   }, 20_000)
 
   it('the snapshot, once refreshed against scratch homes, says installed and the sources follow', async () => {
-    const keys = ['CODEX_HOME', 'CURSOR_CONFIG_DIR', 'COS_GLASSES_HOME', 'CLAUDE_CONFIG_DIR', 'COS_SESSION_HOOKS'] as const
+    const keys = ['CODEX_HOME', 'CURSOR_CONFIG_DIR', 'COS_GLASSES_HOME', 'CLAUDE_CONFIG_DIR', 'COS_SESSION_HOOKS', 'COS_CODEX_BIN'] as const
     const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]))
     const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-health-observe-')))
     const home = join(root, 'Ukaoma Chief Of Staff')
+    // A stand-in Codex binary, so "Codex is present" does not depend on this Mac. It is never run.
+    const fakeCodex = join(home, 'Fake Codex', 'codex')
+    mkdirSync(dirname(fakeCodex), { recursive: true })
+    writeFileSync(fakeCodex, '#!/bin/sh\nexit 1\n')
+    chmodSync(fakeCodex, 0o755)
+    process.env.COS_CODEX_BIN = fakeCodex
     process.env.CODEX_HOME = join(home, '.codex')
     process.env.CURSOR_CONFIG_DIR = join(home, '.cursor')
     process.env.COS_GLASSES_HOME = join(home, '.cos-glasses')
@@ -190,20 +196,24 @@ describe('provider observation on health (6.62.0)', () => {
       __resetProviderObserveForTests()
       expect(installCursorObserver().ok).toBe(true)
       expect(installCodexHooks().ok).toBe(true)
-      expect(installClaudeHooks({ port: 3999 }).ok).toBe(true)
       invalidateHookStatus()
       refreshProviderHookFiles()
+      // Codex installed, Claude not yet: Claude's words stay Claude's (B2), nothing leaks across.
+      const codexOnly = await (await fetch(`${base}/api/health`)).json() as any
+      expect(codexOnly.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown' })
+      expect(codexOnly.sessionHooks.state).toBe('missing')
+      expect(codexOnly.sessionHooks.installed).toBe(false)
+      expect(codexOnly.features.sessionCancel).toMatchObject({ deskClaude: false, deskCodex: false, deskCursor: false })
+      expect(installClaudeHooks({ port: 3999 }).ok).toBe(true)
+      invalidateHookStatus()
       const body = await (await fetch(`${base}/api/health`)).json() as any
       expect(body.sessionHooks.cursorObserver).toMatchObject({ installed: true, nodeOk: true })
       expect(typeof body.sessionHooks.cursorObserver.checkedAt).toBe('string')
       expect(body.providers.cursor.observe).toEqual({ hooks: 'claude_hooks', liveState: 'hook', children: 'observer', compaction: 'observer', reasoning: 'observer' })
-      // Codex is present only where its binary resolves; either way, installed but not yet
-      // trusted is never a desk cancel and never Claude's banner state.
-      if (body.sessionHooks.codex.present) {
-        expect(body.sessionHooks.codex).toMatchObject({ installed: true, scriptOk: true, trust: 'unknown' })
-        expect(body.providers.codex.observe.hooks).toBe('unknown')
-      }
-      expect(body.features.sessionCancel.deskCodex).toBe(false)
+      // Installed but not yet trusted by Codex: never a desk cancel, and said as `unknown`.
+      expect(body.sessionHooks.codex).toMatchObject({ present: true, installed: true, scriptOk: true, trust: 'unknown' })
+      expect(body.providers.codex.observe).toMatchObject({ hooks: 'unknown', liveState: 'transcript', compaction: 'rollout_end' })
+      expect(body.features.sessionCancel).toEqual({ cosTurn: true, deskClaude: true, deskCodex: false, deskCursor: true })
       expect(body.sessionHooks.state).toBe('installed')
     } finally {
       for (const k of keys) { if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k] }
