@@ -85,6 +85,7 @@ import {
   type BinaryResolution,
 } from './attached-provider-adapter.js'
 import { findBannedPermissionArg } from './banned-permission-args.js'
+import { PROVIDER_AUTH_RE, PROVIDER_OVERFLOW_RE, PROVIDER_QUOTA_RE } from './provider-failure-text.js'
 import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 
 /**
@@ -204,6 +205,51 @@ export interface ForkFailureResult {
 }
 
 export type ForkResult = ForkSuccess | ForkFailureResult
+
+/**
+ * Why the provider itself refused the turn, read from its own error event. An enum
+ * only: the provider's sentence never leaves this module. On 2026-10-05 a complete
+ * 14.8 MB copy's first turn was refused "Prompt is too long", and the route could
+ * only say "COS lost track of the copy": every refusal after the prompt was
+ * written looked the same.
+ */
+export type ForkProviderFailure = 'context_too_long' | 'provider_limit' | 'provider_auth'
+export const FORK_PROVIDER_FAILURES: readonly ForkProviderFailure[] = ['context_too_long', 'provider_limit', 'provider_auth']
+
+export function classifyProviderErrorText(text: string): ForkProviderFailure | null {
+  const sample = text.slice(0, 8_000)
+  // Overflow first: "Prompt is too long" can share a line with a usage hint.
+  if (PROVIDER_OVERFLOW_RE.test(sample)) return 'context_too_long'
+  if (PROVIDER_QUOTA_RE.test(sample)) return 'provider_limit'
+  if (PROVIDER_AUTH_RE.test(sample)) return 'provider_auth'
+  return null
+}
+
+/**
+ * One stdout line, judged only when it is an error carrier: Claude's stream-json
+ * `result` with `is_error`, an assistant event with `error` / `isApiErrorMessage`,
+ * or a Codex/Cursor `error` / `turn.failed` event. Ordinary assistant text that
+ * merely mentions a limit is never read.
+ */
+export function classifyProviderOutputLine(line: string): ForkProviderFailure | null {
+  if (!line || line.length > 2_000_000 || line[0] !== '{') return null
+  let j: any
+  try { j = JSON.parse(line) } catch { return null }
+  if (!j || typeof j !== 'object') return null
+  const carrier = (j.type === 'result' && j.is_error === true) || j.isApiErrorMessage === true
+    || typeof j.error === 'string' || j.type === 'error' || j.type === 'turn.failed'
+  if (!carrier) return null
+  if (j.error === 'rate_limit' || j.apiErrorStatus === 429) return 'provider_limit'
+  if (j.error === 'authentication_failed') return 'provider_auth'
+  const parts: string[] = []
+  const add = (v: unknown) => { if (typeof v === 'string') parts.push(v.slice(0, 2_000)) }
+  add(j.result); add(j.error); add(j.message)
+  if (j.error && typeof j.error === 'object') add(j.error.message)
+  const content = j.message && typeof j.message === 'object' ? j.message.content : null
+  if (typeof content === 'string') add(content)
+  else if (Array.isArray(content)) for (const c of content.slice(0, 8)) add(c?.text)
+  return classifyProviderErrorText(parts.join('\n'))
+}
 
 /**
  * Might this call have left a thread behind that nobody can name?
@@ -777,6 +823,7 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
     let stderrSample = ''
     let forkState: ForkState = 'none'
     let exitCode: number | null = null
+    let providerFailure: ForkProviderFailure | null = null
     let settled = false
     let timedOut = false
     let spawnErrored = false
@@ -826,6 +873,7 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
           for (const id of extractNativeIdsFromLine(line)) {
             if (!observedIds.includes(id)) observedIds.push(id)
           }
+          providerFailure ??= classifyProviderOutputLine(line)
         }
         // Deliberately nothing else: no text, no tool calls, no transcript. This
         // module cannot leak what it never held.
@@ -852,12 +900,22 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
         for (const id of extractNativeIdsFromLine(stdoutTail)) {
           if (!observedIds.includes(id)) observedIds.push(id)
         }
+        providerFailure ??= classifyProviderOutputLine(stdoutTail)
         stdoutTail = ''
       }
 
-      if (timedOut) return settleFailure('timeout')
+      // After the prompt was written a copy may exist. When the provider named exactly
+      // one new thread, carry it, so the route can point at the copy instead of
+      // telling the user it may exist somewhere (2026-10-05).
+      const copyId = (): string | null => {
+        if (forkState !== 'possible') return null
+        const verdict = selectForkedId(observedIds, sourceNativeThreadId)
+        return verdict.ok ? verdict.newNativeThreadId : null
+      }
+      const cause = (): string | null => providerFailure ?? classifyProviderErrorText(stderrSample)
+      if (timedOut) return settleFailure('timeout', { newNativeThreadId: copyId() })
       if (spawnErrored) return settleFailure('spawn_failed', { detail: 'child_error' })
-      if (exitCode !== 0) return settleFailure('provider_exit_nonzero')
+      if (exitCode !== 0) return settleFailure('provider_exit_nonzero', { newNativeThreadId: copyId(), detail: cause() })
 
       const verdict = selectForkedId(observedIds, sourceNativeThreadId)
       if (!verdict.ok) {

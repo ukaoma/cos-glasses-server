@@ -28,6 +28,7 @@ import {
   buildClaudeForkArgs,
   buildCodexForkArgs,
   buildCursorForkArgs,
+  classifyProviderOutputLine,
   CURSOR_FORK_FALLBACK_MODEL,
   compareWatermarks,
   forkOrphanPossible,
@@ -1042,5 +1043,58 @@ describe('6.62.0: where a Cursor fork runs (W9)', () => {
     expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, signalCwd: () => '/gone', composerWorkspace: async () => spaced })).toBe(spaced)
     expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, signalCwd: () => 'relative', spawnWorkspace: () => spaced })).toBe(spaced)
     expect(await resolveCursorForkWorkspace(CURSOR_SOURCE, { ...base, composerWorkspace: async () => { throw new Error('x') } })).toBeNull()
+  })
+})
+
+// 6.62.1 (2026-10-05): the shapes Claude actually wrote that day, from the two transcripts.
+const claudeRefused = (sessionId: string, text: string, extra: Record<string, unknown> = {}): string[] => [
+  `${JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, cwd: CWD, model: 'claude-opus-5', permissionMode: 'plan' })}\n`,
+  `${JSON.stringify({ type: 'assistant', session_id: sessionId, isApiErrorMessage: true, message: { model: '<synthetic>', content: [{ type: 'text', text }] }, ...extra })}\n`,
+  `${JSON.stringify({ type: 'result', subtype: 'success', session_id: sessionId, is_error: true, result: text })}\n`,
+]
+
+describe('6.62.1: a copy whose first turn the provider refused', () => {
+  it('names the copy and the cause for "Prompt is too long", without carrying the text', async () => {
+    const h = harness({}, { stdout: claudeRefused(CLAUDE_FORK, 'Prompt is too long', { error: 'invalid_request' }), exitCode: 1 })
+    const result = await run(h)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('provider_exit_nonzero')
+    expect(result.forkState).toBe('possible')
+    expect(result.newNativeThreadId).toBe(CLAUDE_FORK)
+    expect(result.detail).toBe('context_too_long')
+    expect(JSON.stringify(result)).not.toContain('too long')
+  })
+  it('names a session limit as provider_limit', async () => {
+    const h = harness({}, { stdout: claudeRefused(CLAUDE_FORK, "You've hit your session limit · resets 4pm (America/Chicago)", { error: 'rate_limit', apiErrorStatus: 429 }), exitCode: 1 })
+    const result = await run(h)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.detail).toBe('provider_limit')
+    expect(result.newNativeThreadId).toBe(CLAUDE_FORK)
+  })
+  it('never offers the SOURCE id as the copy', async () => {
+    const h = harness({}, { stdout: claudeRefused(CLAUDE_SOURCE, 'Prompt is too long'), exitCode: 1 })
+    const result = await run(h)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.newNativeThreadId).toBeNull()
+  })
+  it('falls back to stderr when stdout carries no error event', async () => {
+    const h = harness({}, { stdout: claudeStdout(CLAUDE_FORK).slice(0, 1), stderr: 'Claude AI usage limit reached|1791201659', exitCode: 1 })
+    const result = await run(h)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.detail).toBe('provider_limit')
+  })
+})
+
+describe('6.62.1: classifyProviderOutputLine reads only error carriers', () => {
+  it('ignores ordinary assistant text that mentions a limit', () => {
+    const line = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'The usage limit on the API is 429 per minute.' }] } })
+    expect(classifyProviderOutputLine(line)).toBeNull()
+    expect(classifyProviderOutputLine(JSON.stringify({ type: 'result', is_error: false, result: 'Prompt is too long' }))).toBeNull()
+  })
+  it('reads a Codex error event and Claude auth', () => {
+    expect(classifyProviderOutputLine(JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit." } }))).toBe('provider_limit')
+    expect(classifyProviderOutputLine(JSON.stringify({ type: 'assistant', error: 'authentication_failed' }))).toBe('provider_auth')
+    expect(classifyProviderOutputLine('not json')).toBeNull()
   })
 })

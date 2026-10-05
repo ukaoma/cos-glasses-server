@@ -509,3 +509,14 @@ describe('QueryJobStore durable journal', () => {
     expect(current.getHealth().retainedIdentities).toBe(0)
   })
 })
+
+describe('6.62.1: a provider limit gets a code a client can act on', () => {
+  it('upgrades only generic codes, from the provider message', async () => {
+    const { normalizeQueryJobError } = await import('./query-job-types.js')
+    expect(normalizeQueryJobError({ code: 'query_job_failed', message: "claude-bridge: You've hit your session limit · resets 4pm" }).code).toBe('provider_limit')
+    expect(normalizeQueryJobError({ code: 'claude.error', message: 'Prompt is too long' }).code).toBe('provider_context_too_long')
+    expect(normalizeQueryJobError(new Error('Please run /login · not logged in')).code).toBe('provider_auth')
+    expect(normalizeQueryJobError({ code: 'job_cancelled', message: 'usage limit' }).code).toBe('job_cancelled')
+    expect(normalizeQueryJobError({ code: 'query_job_failed', message: 'disk full' }).code).toBe('query_job_failed')
+  })
+})

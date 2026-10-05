@@ -125,6 +125,7 @@ import { boundedContinueNote, CONTINUE_NOTE_HEADER, continueNoteAcknowledged, fa
 import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
+import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-thread.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -627,6 +628,13 @@ export type WriteRefusal =
   | 'fork_failed'
   | 'fork_source_mutated'
   | 'fork_orphan_possible'
+  // 6.62.1 (2026-10-05): the copy exists and is named, but the provider refused its
+  // first turn. Each says WHY, because the next step differs: a smaller source, a
+  // reset, or a sign-in. None is retryable: a retry makes another full copy.
+  | 'fork_turn_failed'
+  | 'fork_context_too_long'
+  | 'fork_provider_limit'
+  | 'fork_provider_auth'
 
 /**
  * Footer copy for the refusals that are not occupancy reasons.
@@ -710,8 +718,18 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
   // touches it.
   fork_source_mutated:
     'The original thread changed while COS was copying it. Open the original on your Mac and check it before doing anything else.',
+  // 6.62.1: no "untouched" here. This outcome is reached exactly when COS could not
+  // read the copy's result, so it cannot vouch for anything after the spawn either.
   fork_orphan_possible:
-    'COS lost track of the copy it was making. Your original is untouched, but a partial copy may exist on your Mac.',
+    'COS did not get an answer from the copy it was making. A copy may exist on your Mac; check your sessions before forking again.',
+  fork_turn_failed:
+    'COS made the copy, but the assistant did not answer in it. Open the copy to see why before trying again.',
+  fork_context_too_long:
+    'This conversation is too long to continue in a copy: the assistant refused it as too long. Start a new session with the task instead.',
+  fork_provider_limit:
+    'The assistant hit its usage limit, so the copy got no answer. Try again after the limit resets, or start a new session with another assistant.',
+  fork_provider_auth:
+    'The assistant needs you to sign in again on this Mac before COS can copy this conversation.',
 }
 
 export function writeReasonCopy(reason: WriteRefusal): string {
@@ -1442,8 +1460,22 @@ export class ForkRefStore {
 export type ForkOutcome =
   | { kind: 'created'; newNativeThreadId: string; integrity: 'verified_unchanged' | 'unverified' }
   | { kind: 'mutated' }
-  | { kind: 'orphan_possible' }
+  // 6.62.1: the copy is named but its first turn failed; `cause` is the provider's own
+  // reason when its error event said one.
+  | { kind: 'turn_failed'; newNativeThreadId: string; cause: ForkProviderFailure | null }
+  | { kind: 'orphan_possible'; cause?: ForkProviderFailure | null }
   | { kind: 'failed' }
+
+const forkProviderFailure = (detail: unknown): ForkProviderFailure | null =>
+  typeof detail === 'string' && (FORK_PROVIDER_FAILURES as readonly string[]).includes(detail) ? detail as ForkProviderFailure : null
+
+/** The refusal reason for a provider-stated cause, or the generic one. */
+export function forkFailureReason(cause: ForkProviderFailure | null | undefined, generic: WriteRefusal): WriteRefusal {
+  if (cause === 'context_too_long') return 'fork_context_too_long'
+  if (cause === 'provider_limit') return 'fork_provider_limit'
+  if (cause === 'provider_auth') return 'fork_provider_auth'
+  return generic
+}
 
 /**
  * Read a fork result without believing anything it did not say.
@@ -1457,7 +1489,7 @@ export type ForkOutcome =
  */
 export function classifyFork(result: unknown, sourceNativeThreadId: string): ForkOutcome {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return { kind: 'orphan_possible' }
-  const { ok, newNativeThreadId, sourceIntegrity, forkState, reason } = result as Record<string, unknown>
+  const { ok, newNativeThreadId, sourceIntegrity, forkState, reason, detail } = result as Record<string, unknown>
 
   if (ok === true) {
     // The single invariant this route re-checks itself rather than inheriting.
@@ -1479,11 +1511,19 @@ export function classifyFork(result: unknown, sourceNativeThreadId: string): For
     if (reason === 'source_thread_mutated' || sourceIntegrity === 'mutated') return { kind: 'mutated' }
     // Only an explicit "no child was created" earns the clean failure.
     if (forkState === 'none') return { kind: 'failed' }
+    // 6.62.1: a named copy is not an orphan. Same id rules as success: valid, and
+    // never the source (that would be an append reported as a copy).
+    if (isValidNativeThreadId(newNativeThreadId) && newNativeThreadId !== sourceNativeThreadId) {
+      return { kind: 'turn_failed', newNativeThreadId, cause: forkProviderFailure(detail) }
+    }
+    return { kind: 'orphan_possible', cause: forkProviderFailure(detail) }
   }
   return { kind: 'orphan_possible' }
 }
 
 export const FORKED_COPY = 'Copied into a new thread. Your original is untouched.'
+/** 6.62.1: `unverified` must never be rendered as confirmed untouched (see the success body). */
+export const FORKED_COPY_UNVERIFIED = 'Copied into a new thread. COS could not re-read your original afterwards to confirm it is unchanged.'
 
 /**
  * Both fingerprints present, bounded, and strings.
@@ -2495,14 +2535,32 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
 
       const outcome = classifyFork(raw, threadIdParam)
+      {
+        // 6.62.1: one line per attempt. On 2026-10-05 a fork's real cause existed only
+        // in the copy's transcript; nothing reached the server log. Enums and numbers
+        // only: no prompt, no provider text, no thread id.
+        const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+        console.log(`[agent-session-bindings] fork outcome provider=${providerParam} outcome=${outcome.kind} reason=${String(r.reason ?? 'none')} cause=${String(r.detail ?? 'none')} forkState=${String(r.forkState ?? 'unknown')} exit=${String(r.exitCode ?? 'none')} stderr=${String(r.stderrClass ?? 'none')} ms=${String(r.durationMs ?? 'unknown')}`)
+      }
 
       if (outcome.kind === 'mutated') {
         // The original moved. Loudest outcome in the feature, and not retryable:
         // the user needs to look at their own thread before anything else touches it.
         return refuseFork('fork_source_mutated', { orphanPossible: true, retryable: false })
       }
+      if (outcome.kind === 'turn_failed') {
+        // The copy exists and Control can open it (the helper resolves the digest to the
+        // local transcript). Not an orphan, and not retryable: another try copies again.
+        const copyRef = forkRefs.remember(providerParam, outcome.newNativeThreadId, now)
+        return refuseFork(forkFailureReason(outcome.cause, 'fork_turn_failed'), {
+          forkRef: copyRef, turnFailed: true, failureClass: outcome.cause, orphanPossible: false, retryable: false,
+        })
+      }
       if (outcome.kind === 'orphan_possible') {
-        return refuseFork('fork_orphan_possible', { orphanPossible: true })
+        const cause = outcome.cause ?? null
+        return refuseFork(forkFailureReason(cause, 'fork_orphan_possible'), {
+          orphanPossible: true, failureClass: cause, retryable: cause === null,
+        })
       }
       if (outcome.kind === 'failed') return refuseFork('fork_failed')
 
@@ -2513,7 +2571,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       res.status(201).json({
         forked: true,
         reason: null,
-        reasonCopy: FORKED_COPY,
+        reasonCopy: outcome.integrity === 'verified_unchanged' ? FORKED_COPY : FORKED_COPY_UNVERIFIED,
         forkRef,
         // Reported, never assumed. `unverified` means COS could not read the
         // original at both ends — which is not the same as, and must never be

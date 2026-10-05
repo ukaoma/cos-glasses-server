@@ -32,6 +32,9 @@ import {
   LIVE_VERIFY_BUDGET_MS,
   CONTINUE_NOTE_BUDGET_MS,
   REASON_COPY,
+  FORKED_COPY,
+  FORKED_COPY_UNVERIFIED,
+  writeReasonCopy,
   TURN_SENT_CODEX_QUEUE_COPY,
   UNKNOWN_REASON_COPY,
   WRITE_REASON_COPY,
@@ -1706,6 +1709,22 @@ const FORK_CLEAN_FAILURE = {
   durationMs: 4,
 } as const
 
+/** 6.62.1: the copy was made and named, but the provider refused its first turn
+ * (2026-10-05: "Prompt is too long" on a complete 14.8 MB copy). */
+const forkTurnFailed = (detail: string | null) => ({
+  ok: false,
+  provider: 'claude',
+  sourceNativeThreadId: SID,
+  newNativeThreadId: FORKED_SID,
+  forkState: 'possible',
+  sourceIntegrity: 'verified_unchanged',
+  reason: 'provider_exit_nonzero',
+  detail,
+  exitCode: 1,
+  stderrClass: 'none',
+  durationMs: 4_100,
+})
+
 /** The worst outcome the feature has: the ORIGINAL moved while we copied it. */
 const FORK_MUTATED = {
   ok: false,
@@ -2316,6 +2335,10 @@ describe('every way a write can be refused reaches the wire with words', () => {
     { reason: 'fork_failed', run: () => forkOnce({ forkThread: () => FORK_CLEAN_FAILURE }) },
     { reason: 'fork_source_mutated', run: () => forkOnce({ forkThread: () => FORK_MUTATED }) },
     { reason: 'fork_orphan_possible', run: () => forkOnce({ forkThread: () => ({ ok: false, forkState: 'possible' }) }) },
+    { reason: 'fork_turn_failed', run: () => forkOnce({ forkThread: () => forkTurnFailed(null) }) },
+    { reason: 'fork_context_too_long', run: () => forkOnce({ forkThread: () => forkTurnFailed('context_too_long') }) },
+    { reason: 'fork_provider_limit', run: () => forkOnce({ forkThread: () => forkTurnFailed('provider_limit') }) },
+    { reason: 'fork_provider_auth', run: () => forkOnce({ forkThread: () => forkTurnFailed('provider_auth') }) },
   ]
 
   async function turnOnFake(bindings: BindingRegistry): Promise<PostResult> {
@@ -4690,4 +4713,46 @@ describe('6.62.0 /qa: the Continue-note header (Q3) and the fixed verdict note (
       expect('continue_note' in claude).toBe(false)
     }
   }, 15_000)
+})
+
+
+describe('6.62.1: a fork whose copy exists but whose first turn failed', () => {
+  async function fork(result: unknown): Promise<PostResult> {
+    return post(await start(forkDeps({ forkThread: () => result as never })), forkPath(), FORK_BODY)
+  }
+  it('names the copy and says why, instead of "lost track of a partial copy"', async () => {
+    const { status, body } = await fork(forkTurnFailed('context_too_long'))
+    expect(status).toBeGreaterThanOrEqual(400)
+    expect(body.forked).toBe(false)
+    expect(body.reason).toBe('fork_context_too_long')
+    expect(body.turnFailed).toBe(true)
+    expect(body.failureClass).toBe('context_too_long')
+    expect(typeof body.forkRef).toBe('string')
+    expect(body.forkRef).toMatch(/^[0-9a-f]{32}$/)
+    expect(body.orphanPossible).toBe(false)
+    expect(body.retryable).toBe(false)
+    expect(body.reasonCopy).not.toMatch(/lost track|partial/)
+  })
+  it('a provider limit with no named copy stays a possible orphan, but says limit and is not retryable', async () => {
+    const { body } = await fork({ ...forkTurnFailed('provider_limit'), newNativeThreadId: null })
+    expect(body.reason).toBe('fork_provider_limit')
+    expect(body.orphanPossible).toBe(true)
+    expect(body.retryable).toBe(false)
+    expect(body.forkRef).toBeNull()
+  })
+  it('a copy id equal to the source is never offered as the copy', async () => {
+    const { body } = await fork({ ...forkTurnFailed(null), newNativeThreadId: SID })
+    expect(body.reason).toBe('fork_orphan_possible')
+    expect(body.forkRef).toBeNull()
+  })
+  it('the orphan copy no longer vouches for the original', () => {
+    expect(writeReasonCopy('fork_orphan_possible')).not.toMatch(/untouched|partial/)
+  })
+  it('an unverified success never says the original is untouched', async () => {
+    const verified = await fork(FORK_SUCCESS)
+    expect(verified.body.reasonCopy).toBe(FORKED_COPY)
+    const unverified = await fork({ ...FORK_SUCCESS, sourceIntegrity: 'unverified' })
+    expect(unverified.body.reasonCopy).toBe(FORKED_COPY_UNVERIFIED)
+    expect(unverified.body.reasonCopy).not.toMatch(/untouched/)
+  })
 })

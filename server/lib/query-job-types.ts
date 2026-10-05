@@ -1,3 +1,4 @@
+import { providerFailureCode } from './provider-failure-text.js'
 import { createHash } from 'node:crypto'
 import {
   parseMediaAttachmentRefs,
@@ -587,7 +588,7 @@ export function normalizeQueryJobError(error: unknown, fallbackCode = 'query_job
       : typeof error === 'string' ? error : fallbackCode
   const safe = sanitizeQueryJobActivity(rawMessage)
   return {
-    code,
+    code: providerFailureCode(code, typeof rawMessage === 'string' ? rawMessage : ''),
     message: safe.text,
     ...(candidate.retryable === true ? { retryable: true } : {}),
     ...(typeof candidate.retryAfterMs === 'number' && Number.isFinite(candidate.retryAfterMs)

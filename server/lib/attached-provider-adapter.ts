@@ -90,6 +90,7 @@
 //     process and lets a RECYCLED pid inherit our self-ownership claim, which
 //     is the one input that can turn a live foreign owner into `attachable`.
 
+import { PROVIDER_QUOTA_RE } from './provider-failure-text.js'
 import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -714,7 +715,8 @@ export function classifyStderr(text: string): AttachedStderrClass {
     return 'thread_not_found'
   }
   if (/unauthor|forbidden|not logged in|sign in|login|auth|credential|token expired/.test(sample)) return 'auth'
-  if (/rate limit|too many requests|quota|overloaded/.test(sample)) return 'rate_limit'
+  // 6.62.1: the shared pattern, so "hit your session limit" / "usage limit" class as a limit here too.
+  if (/rate limit|too many requests|quota|overloaded/.test(sample) || PROVIDER_QUOTA_RE.test(sample)) return 'rate_limit'
   if (/permission|denied|read-only|sandbox|operation not permitted|eacces/.test(sample)) return 'permission'
   return 'unclassified'
 }
