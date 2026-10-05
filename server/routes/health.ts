@@ -569,7 +569,7 @@ healthRouter.get('/models', async (req, res) => {
       attachEnabled: threadAttach.enabled,
       forkProviders: threadAttach.forkProviders ?? [],
       sessionCancel: sessionCancelFeature(sessionHooksEnabled(), hookHaltReady(cachedHookStatus()), codexDeskHaltReady()),
-    }))),
+    })), providerObserveFields({ state: cachedHookStatus().state, ready: hookHaltReady(cachedHookStatus()) })),
     options: [
       ...(catalog.options ?? []),
       ...cursorOptions,
