@@ -3793,6 +3793,108 @@ describe('6.51.0: Codex Continue into a thread the Codex app holds', () => {
   })
 })
 
+describe('6.62.0 (plan 3.6, W8): a BUSY Codex thread goes straight into the Codex app queue', () => {
+  // Working: the transcript was written this instant, and the Codex app holds the lock.
+  const heldBusy = (over: Partial<OccupancyProbes> = {}) =>
+    probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now(), ...over })
+  const turnBody = (a: { epoch: number; targetKey: string; boundTo: string }, clientTurnId: string) =>
+    ({ prompt: PROMPT, clientTurnId, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo })
+  async function codexAttached(base: string) {
+    const res = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+    expect(res.status, JSON.stringify(res.body)).toBe(201)
+    return { bindingId: res.body.bindingId, epoch: res.body.epoch, boundTo: res.body.boundTo, targetKey: targetKey('codex', CODEX_THREAD) }
+  }
+
+  it('reads attachable, binds, and queues into the app on an empty COS queue; never a child; replay-safe', async () => {
+    const spawns: AttachedTurnRequest[] = []
+    const codex: Array<Record<string, unknown>> = []
+    const base = await start(writeDeps({
+      probes: heldBusy(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-1' } },
+      busyCodexHop: () => true,
+    }))
+    const verdict = await (await fetch(`${base}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
+    expect(verdict).toMatchObject({ attachable: true, reason: null })
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-busy-0001'))
+    expect(res.body).toMatchObject({ outcome: 'completed', via: 'live', reasonCopy: TURN_SENT_CODEX_QUEUE_COPY })
+    expect(codex).toEqual([{ provider: 'codex', sessionId: CODEX_THREAD, prompt: PROMPT, foreignHolder: true }])
+    expect(spawns).toHaveLength(0)
+    const again = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-busy-0001'))
+    expect(again.body).toMatchObject({ outcome: 'completed', replayed: true })
+    expect(codex).toHaveLength(1)
+  })
+
+  it('a turn already waiting in the COS queue (or a throwing check) keeps the 6.61 refusal, so nothing jumps it', async () => {
+    for (const hop of [() => false, () => { throw new Error('EIO') }]) {
+      const base = await start(writeDeps({
+        probes: heldBusy(),
+        deliverCodexLiveTurn: async () => ({ ok: true, reason: 'delivered' }),
+        busyCodexHop: hop,
+      }))
+      const busy = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+      expect(busy.status).toBe(409)
+      expect(busy.body.reason).toBe('native_thread_working')
+    }
+  })
+
+  it('a moving head does not refuse the busy hop: the app queue appends after the running turn', async () => {
+    let head = 'native-head-1'
+    const codex: unknown[] = []
+    const base = await start(writeDeps({
+      probes: heldBusy(),
+      nativeHead: () => head,
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered', verifiedBy: 'codex-queue' } },
+      busyCodexHop: () => true,
+    }))
+    const a = await codexAttached(base)
+    head = 'native-head-2'
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-busy-0002'))
+    expect(res.body).toMatchObject({ outcome: 'completed', via: 'live' })
+    expect(codex).toHaveLength(1)
+  })
+
+  it.each(['disabled', 'refused', 'binary_not_found'])('a busy hop that queued nothing (%s) refuses working, never spawns', async reason => {
+    const spawns: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      probes: heldBusy(),
+      deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed' } },
+      deliverCodexLiveTurn: async () => ({ ok: false, reason }),
+      busyCodexHop: () => true,
+    }))
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, `ct-busy-${reason}`))
+    expect(res.body, reason).toMatchObject({ outcome: 'refused', reason: 'native_thread_working', deliveryState: 'not_delivered' })
+    expect(spawns, reason).toHaveLength(0)
+  })
+
+  it('a busy hand-off that MAY have queued is the ambiguous fence, as for an idle holder', async () => {
+    const base = await start(writeDeps({
+      probes: heldBusy(),
+      deliverCodexLiveTurn: async () => ({ ok: false, reason: 'unverified' }),
+      busyCodexHop: () => true,
+    }))
+    const a = await codexAttached(base)
+    const res = await post(base, turnsPath(a.bindingId), turnBody(a, 'ct-busy-0003'))
+    expect(res.body).toMatchObject({ outcome: 'ambiguous', reason: 'delivery_ambiguous' })
+  })
+
+  it('never applies to Claude, nor without the Codex transport wired', async () => {
+    const claude = await start(writeDeps({
+      probes: probes({ transcriptMtimeMs: () => Date.now() }),
+      deliverCodexLiveTurn: async () => ({ ok: true, reason: 'delivered' }),
+      busyCodexHop: () => true,
+    }))
+    const verdict = await (await fetch(`${claude}/api/agent-sessions/claude/${SID}/attachability`)).json()
+    expect(verdict).toMatchObject({ attachable: false, reason: 'native_thread_working' })
+    // Unwired transport: no hop, whatever the check says.
+    const unwired = await start(writeDeps({ probes: heldBusy(), busyCodexHop: () => true }))
+    const refused = await (await fetch(`${unwired}/api/agent-sessions/codex/${CODEX_THREAD}/attachability`)).json()
+    expect(refused).toMatchObject({ attachable: false, reason: 'native_thread_working' })
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 6.49.1: the turn timing line is written on EVERY exit that answers the client
 // ---------------------------------------------------------------------------

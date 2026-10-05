@@ -93,6 +93,14 @@ export interface Occupancy {
    * Absent (not false) on every other verdict, so `=== true` is the only test.
    */
   idleHolder?: true
+  /**
+   * 6.62.0 (plan 3.6, W8): attachable DESPITE a foreign owner that is WORKING, because the
+   * owner is the Codex app and the turn goes into that app's own queue (`codex queue`),
+   * which runs it at the end of the running turn. Never set by `threadOccupancy`: only the
+   * bindings route declares it, and only when the hop is wired, on, and COS holds no turn
+   * of its own for the thread. Same `=== true` contract as `idleHolder`.
+   */
+  busyHolder?: true
 }
 
 /**

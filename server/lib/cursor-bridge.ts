@@ -617,11 +617,17 @@ export async function callCursorStreaming(
     }
   }, WALL_MAX_MS)
 
+  let nativeSessionAnnounced = false
   function handleEvent(event: any) {
     const nextSessionId = extractCursorSessionId(event)
     if (nextSessionId && nextSessionId !== cursorChatId) {
       cursorChatId = nextSessionId
       updateCursorRun(run.runId, { cursorChatId })
+    }
+    // 6.62.0 (plan 3.9): the job links to its native chat at the first event naming it.
+    if (nextSessionId && !nativeSessionAnnounced) {
+      nativeSessionAnnounced = true
+      try { callbacks.onNativeSession?.({ provider: 'cursor', cliSessionId: nextSessionId }) } catch { /* best effort */ }
     }
 
     if (event?.type === 'system' && event?.subtype === 'init') {

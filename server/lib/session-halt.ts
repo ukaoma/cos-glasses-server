@@ -149,6 +149,11 @@ export function clearHaltMarkerOnSessionEnd(sessionId: string, endedAt: number, 
 //     a halted desk run is the worse error, and the lens already said "at its next step".
 //   - LIMIT, stated: a desk prompt with exactly the delivered words, typed after the send and
 //     taken first, is indistinguishable from the delivered turn and re-arms.
+//
+// 6.62.0 (plan 3.6, W8): a Codex turn queued into the Codex app (`codex queue`, from the busy
+// fast path or the idle hop) is re-armed too. Codex hands the queued text to its own
+// UserPromptSubmit unchanged, with no peer wrapper, so that comparison is VERBATIM (only the
+// ends trimmed): no wrapper is taken off and no inner whitespace is collapsed.
 
 interface PendingRearm {
   marker: HaltMarker
@@ -157,6 +162,10 @@ interface PendingRearm {
   /** Prompts submitted before this are someone else's. */
   after: number
   until: number
+  /** 6.62.0: a Codex queued turn, compared verbatim (no peer unwrap). */
+  verbatim: boolean
+  /** The delivered text as sent, for the verbatim comparison. */
+  text: string
 }
 
 const pendingRearms = new Map<string, PendingRearm>()
@@ -171,7 +180,7 @@ const MAX_PENDING_REARMS = 64
 export function haltDeliveredTurn(
   sessionId: string,
   marker: HaltMarker,
-  turn: { prompt: string; after: number; rearm: boolean; now?: number; windowMs?: number },
+  turn: { prompt: string; after: number; rearm: boolean; now?: number; windowMs?: number; verbatim?: boolean },
   dir = haltDir(),
 ): boolean {
   if (!writeHaltMarker(sessionId, marker, dir)) return false
@@ -186,7 +195,7 @@ export function haltDeliveredTurn(
     ? Math.min(turn.windowMs, HALT_MARKER_TTL_MS)
     : HALT_MARKER_TTL_MS
   pendingRearms.delete(id)
-  pendingRearms.set(id, { marker, words, after: turn.after, until: now + windowMs })
+  pendingRearms.set(id, { marker, words, after: turn.after, until: now + windowMs, verbatim: turn.verbatim === true, text: turn.prompt })
   while (pendingRearms.size > MAX_PENDING_REARMS) {
     const oldest = pendingRearms.keys().next()
     if (oldest.done) break
@@ -204,7 +213,12 @@ export function normalizePromptWords(text: unknown): string {
  * Is `prompt` (a UserPromptSubmit's `prompt`) the delivered prompt? Equal words, compared
  * whole, after taking off Claude Code's peer wrapper when the prompt arrived in one.
  */
-export function isDeliveredPrompt(prompt: unknown, delivered: string): boolean {
+export function isDeliveredPrompt(prompt: unknown, delivered: string, options: { verbatim?: boolean } = {}): boolean {
+  if (options.verbatim === true) {
+    // 6.62.0: Codex's queued turn arrives as its own text. No wrapper to take off.
+    const want = typeof delivered === 'string' ? delivered.trim() : ''
+    return want.length > 0 && typeof prompt === 'string' && prompt.trim() === want
+  }
   const want = normalizePromptWords(delivered)
   if (want.length === 0 || typeof prompt !== 'string') return false
   return normalizePromptWords(unwrapPeerMessage(prompt) ?? prompt) === want
@@ -226,7 +240,7 @@ export function rearmHaltOnPrompt(sessionId: string, promptAt: number, prompt: u
   }
   if (!Number.isFinite(promptAt) || promptAt < pending.after) return false
   pendingRearms.delete(id)
-  if (!isDeliveredPrompt(prompt, pending.words)) {
+  if (!(pending.verbatim ? isDeliveredPrompt(prompt, pending.text, { verbatim: true }) : isDeliveredPrompt(prompt, pending.words))) {
     console.warn(`[session-halt] re-arm dropped: the first prompt after the hand-off was not the delivered turn session=${id.slice(0, 8)} clientCancelId=${pending.marker.clientCancelId}`)
     return false
   }

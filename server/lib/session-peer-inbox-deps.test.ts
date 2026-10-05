@@ -69,9 +69,10 @@ describe('readPeerToken', () => {
 })
 
 describe('the flag and the liveness probe', () => {
-  it('continueLiveEnabled is the literal 1 and nothing else', () => {
-    expect(continueLiveEnabled({ COS_CONTINUE_LIVE: '1' })).toBe(true)
-    for (const v of ['true', 'yes', 'on', '0', '', undefined]) expect(continueLiveEnabled({ COS_CONTINUE_LIVE: v })).toBe(false)
+  it('continueLiveEnabled is on unless the literal 0 (6.62.0, D3)', () => {
+    expect(continueLiveEnabled({ COS_CONTINUE_LIVE: '0' })).toBe(false)
+    for (const v of ['1', 'true', 'yes', 'on', 'off', '', undefined]) expect(continueLiveEnabled({ COS_CONTINUE_LIVE: v })).toBe(true)
+    expect(continueLiveEnabled({})).toBe(true)
   })
 
   it('pidAlive: this process is alive; a pid nobody has is not', () => {

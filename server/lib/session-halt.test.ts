@@ -271,3 +271,34 @@ describe('the re-arm matches the delivered prompt exactly, and only the first pr
     expect(rearmHaltOnPrompt(SID, NOW + 60_000, 'yes', dir, NOW + 60_000)).toBe(true)
   })
 })
+
+describe('6.62.0 (plan 3.6): a Codex turn queued into the Codex app re-arms VERBATIM', () => {
+  afterEach(() => __resetHaltRearmsForTests())
+  const marker = { at: NOW, clientCancelId: 'cc-codex-queue' }
+  const PROMPT = 'keep going on the parser, then  run the tests'
+  const peer = `Another Claude session sent a message:\n${PROMPT}\n\nThis came from another Claude session — not typed by your user.`
+
+  it('re-arms on the identical text (ends trimmed) and on nothing else: no peer unwrap, no inner re-spacing', () => {
+    for (const [seen, expected] of [
+      [PROMPT, true],
+      [`  ${PROMPT}\n`, true],
+      [peer, false],
+      ['keep going on the parser, then run the tests', false],
+      ['keep going on the parser', false],
+    ] as const) {
+      __resetHaltRearmsForTests()
+      const dir = folder()
+      expect(haltDeliveredTurn(SID, marker, { prompt: PROMPT, after: NOW, rearm: true, now: NOW, verbatim: true }, dir)).toBe(true)
+      clearHaltMarker(SID, dir)
+      expect(rearmHaltOnPrompt(SID, NOW + 5, seen, dir, NOW + 5), JSON.stringify(seen)).toBe(expected)
+      expect(hasHaltMarker(SID, dir)).toBe(expected)
+    }
+  })
+
+  it('the Claude path still unwraps the peer frame (unchanged)', () => {
+    const dir = folder()
+    haltDeliveredTurn(SID, marker, { prompt: PROMPT, after: NOW, rearm: true, now: NOW }, dir)
+    clearHaltMarker(SID, dir)
+    expect(rearmHaltOnPrompt(SID, NOW + 5, peer, dir, NOW + 5)).toBe(true)
+  })
+})

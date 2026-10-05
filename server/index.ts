@@ -942,6 +942,11 @@ app.use('/api', createAgentSessionBindingsRouter({
   // (`codex queue`), never into a resume child that cannot open a held thread.
   // `COS_CODEX_LIVE_QUEUE=0` restores the 6.50 path.
   deliverCodexLiveTurn: makeCodexLiveDeliverer(),
+  // 6.62.0 (plan 3.6, W8): a BUSY thread the Codex app holds takes the same hop, but only
+  // while the COS queue holds nothing for it, so a new turn never jumps a parked one. The
+  // turn route's clientTurnId ledger is the one idempotency key per turn.
+  busyCodexHop: (threadId: string) => codexLiveQueueEnabled()
+    && readQueue('codex', threadId, Date.now()).every(turn => turn.status !== 'waiting' && turn.status !== 'delivering'),
   forkThread: forkThreadForRoute,
   // The fork's real spawn directory. Separate from `resolveTarget` above, which
   // deliberately yields only fingerprints because plan 3.3 keeps a filesystem path

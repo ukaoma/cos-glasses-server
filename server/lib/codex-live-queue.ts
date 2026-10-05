@@ -222,7 +222,7 @@ export async function deliverOverCodexQueue(request: CodexLiveRequest, deps: Cod
 /**
  * `COS_CODEX_LIVE_QUEUE`. ON unless set to `0`.
  *
- * Default-on, unlike `COS_CONTINUE_LIVE`, because the path it replaces cannot work: for a
+ * Default-on (as `COS_CONTINUE_LIVE` also is since 6.62.0), because the path it replaces cannot work: for a
  * thread the Codex app holds, the spawn fails every time and leaves a fence. Only a
  * thread with a foreign writer ever reaches this module, so a thread nobody holds keeps
  * the 6.50 path exactly.
