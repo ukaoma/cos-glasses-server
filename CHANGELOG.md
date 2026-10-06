@@ -1,4 +1,4 @@
-## Unreleased (next: 6.63.1)
+## 6.63.1 — 2026-10-06 — Weather survives a restart
 
 - Home weather survives a server restart. The last good weather and place are kept in `<data>/welcome-weather.json`; when a forecast lookup fails (timeout, HTTP error, bad payload), the route answers with that saved weather if it is under 3 hours old, never older. A failed forecast or place lookup is now logged once per kind per 10 minutes, with the cause and whether a saved weather was served. Before, after a restart the first failed lookup sent the glasses no weather and nothing said why. Pairs with glasses 6.10.603, which also retries on Home and keeps its own last good weather.
 
