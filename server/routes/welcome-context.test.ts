@@ -3,7 +3,9 @@ import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   _resetWelcomeContextCachesForTests,
+  WEATHER_PERSIST_MAX_AGE_MS,
   fetchWeather,
+  setWeatherPersistence,
   parseCoord,
   resolveWeatherCoords,
   wmoDescription,
@@ -115,5 +117,34 @@ describe('welcome-context public package', () => {
 
   it('returns null weather when no coords and no env default', async () => {
     expect(await fetchWeather(undefined, undefined)).toBeNull()
+  })
+
+  it('6.63.1: a failed lookup after a restart serves the saved weather (under 3 h) and logs why', async () => {
+    let saved: unknown = null
+    setWeatherPersistence({ load: () => saved, save: v => { saved = v } })
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('open-meteo')
+      ? new Response(JSON.stringify({ current: { temperature_2m: 75.2, weather_code: 0 } }), { status: 200 })
+      : new Response(JSON.stringify({ city: 'Springfield', principalSubdivisionCode: 'US-IL' }), { status: 200 })))
+    expect(await fetchWeather(39.8, -89.6)).toMatchObject({ temp: '75°F', location: 'Springfield, IL' })
+    expect(saved).toMatchObject({ city: 'Springfield, IL', weather: { temp: '75°F' } })
+    // The server restarts: module state is gone, the file is not. The forecast now times out.
+    const file = saved
+    _resetWelcomeContextCachesForTests()
+    setWeatherPersistence({ load: () => file, save: () => {} })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.stubGlobal('fetch', vi.fn(async () => { throw Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' }) }))
+    expect(await fetchWeather(39.8, -89.6)).toMatchObject({ temp: '75°F', location: 'Springfield, IL' })
+    expect(warn.mock.calls.some(([m]) => String(m).includes('forecast lookup failed: timeout (serving the last good weather)'))).toBe(true)
+    warn.mockRestore()
+  })
+
+  it('6.63.1: saved weather older than 3 hours is never served after a restart', async () => {
+    const old = { lat: 39.8, lon: -89.6, city: 'Springfield, IL', weather: { temp: '75°F', desc: 'Clear', location: 'Springfield, IL' }, fetchedAt: Date.now() - WEATHER_PERSIST_MAX_AGE_MS - 1 }
+    setWeatherPersistence({ load: () => old, save: () => {} })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.stubGlobal('fetch', vi.fn(async () => { throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }) }))
+    expect(await fetchWeather(39.8, -89.6)).toBeNull()
+    expect(warn.mock.calls.some(([m]) => String(m).includes('(no weather to serve)'))).toBe(true)
+    warn.mockRestore()
   })
 })

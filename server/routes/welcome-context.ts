@@ -25,6 +25,72 @@ let lastKnownCity = ''
 let cachedNextEvent: NextEventPayload | null = null
 let calendarFetchedAt = 0
 
+// 6.63.1: after a server restart the first forecast lookup can fail and, with nothing cached, the
+// glasses Home got no weather until the app was relaunched. The last good weather and
+// place now survive a restart, and a failed lookup says why in the log (it was silent).
+/** A saved weather older than this is never served after a restart. */
+export const WEATHER_PERSIST_MAX_AGE_MS = 3 * 60 * 60_000
+const WEATHER_FAILURE_LOG_MS = 10 * 60_000
+
+export interface WeatherPersistence {
+  load(): unknown
+  save(value: unknown): void
+}
+let weatherPersistence: WeatherPersistence | null = null
+let weatherRestored = false
+const lastFailureLogAt = new Map<string, number>()
+
+/** Wired by the server (index.ts, `<data>/welcome-weather.json`); off by default so tests touch nothing. */
+export function setWeatherPersistence(p: WeatherPersistence | null): void {
+  weatherPersistence = p
+  weatherRestored = false
+}
+
+function restoreWeatherOnce(): void {
+  if (weatherRestored || !weatherPersistence) return
+  weatherRestored = true
+  try {
+    const v = weatherPersistence.load() as Record<string, unknown> | null
+    if (!v || typeof v !== 'object') return
+    const at = typeof v.fetchedAt === 'number' ? v.fetchedAt : 0
+    const w = v.weather as WeatherPayload | undefined
+    if (typeof v.lat === 'number' && typeof v.lon === 'number' && lastKnownLat == null) { lastKnownLat = v.lat; lastKnownLon = v.lon }
+    if (typeof v.city === 'string' && !lastKnownCity) lastKnownCity = v.city
+    const fresh = at > 0 && at <= Date.now() + 60_000 && Date.now() - at <= WEATHER_PERSIST_MAX_AGE_MS
+    if (fresh && w && typeof w.temp === 'string' && typeof w.desc === 'string' && !cachedWeather) {
+      cachedWeather = { temp: w.temp, desc: w.desc, location: typeof w.location === 'string' ? w.location : '' }
+      // Expired for the TTL check, so the next request still tries a fresh lookup; kept as the fallback.
+      weatherFetchedAt = 0
+    }
+  } catch (error) {
+    console.warn(`[welcome-context] saved weather unreadable: ${error instanceof Error ? error.message : error}`)
+  }
+}
+
+function persistWeather(): void {
+  if (!weatherPersistence) return
+  try {
+    weatherPersistence.save({ lat: lastKnownLat ?? null, lon: lastKnownLon ?? null, city: lastKnownCity, weather: cachedWeather, fetchedAt: weatherFetchedAt })
+  } catch (error) {
+    console.warn(`[welcome-context] saving weather failed: ${error instanceof Error ? error.message : error}`)
+  }
+}
+
+/** One line per failure kind per 10 minutes: the cause, never the coordinates. */
+function noteWeatherFailure(kind: 'forecast' | 'geocode', reason: string): void {
+  const key = `${kind}:${reason}`
+  const now = Date.now()
+  if (now - (lastFailureLogAt.get(key) ?? 0) < WEATHER_FAILURE_LOG_MS) return
+  lastFailureLogAt.set(key, now)
+  console.warn(`[welcome-context] ${kind} lookup failed: ${reason}${cachedWeather ? ' (serving the last good weather)' : ' (no weather to serve)'}`)
+}
+
+function failureReason(error: unknown): string {
+  const name = error instanceof Error ? error.name : ''
+  if (name === 'TimeoutError' || name === 'AbortError') return 'timeout'
+  return error instanceof Error ? (error.message.slice(0, 80) || name || 'error') : 'error'
+}
+
 /** Full WMO 4677 — discrete codes, exact match required. */
 export const WMO_CODES: Record<number, string> = {
   0: 'Clear',
@@ -108,7 +174,7 @@ async function reverseGeocode(lat: number, lon: number): Promise<string> {
       `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`,
       { signal: AbortSignal.timeout(GEOCODE_TIMEOUT_MS) },
     )
-    if (!res.ok) return lastKnownCity
+    if (!res.ok) { noteWeatherFailure('geocode', `http ${res.status}`); return lastKnownCity }
     const data = await res.json() as {
       city?: string
       locality?: string
@@ -122,7 +188,8 @@ async function reverseGeocode(lat: number, lon: number): Promise<string> {
       lastKnownCity = region ? `${city}, ${region}` : city
     }
     return lastKnownCity
-  } catch {
+  } catch (error) {
+    noteWeatherFailure('geocode', failureReason(error))
     return lastKnownCity
   }
 }
@@ -144,6 +211,7 @@ export async function fetchWeather(
   queryLat?: number,
   queryLon?: number,
 ): Promise<WeatherPayload | null> {
+  restoreWeatherOnce()
   const resolved = resolveWeatherCoords(queryLat, queryLon)
   if (!resolved) return null
 
@@ -183,14 +251,14 @@ export async function fetchWeather(
       `https://api.open-meteo.com/v1/forecast?latitude=${useLat}&longitude=${useLon}&current=temperature_2m,weather_code&temperature_unit=fahrenheit&timezone=auto`,
       { signal: AbortSignal.timeout(FORECAST_TIMEOUT_MS) },
     )
-    if (!res.ok) return cachedWeather
+    if (!res.ok) { noteWeatherFailure('forecast', `http ${res.status}`); return cachedWeather }
 
     const data = await res.json() as {
       current?: { temperature_2m?: number; weather_code?: number }
     }
     const temp = data.current?.temperature_2m
     const code = data.current?.weather_code
-    if (typeof temp !== 'number' || typeof code !== 'number') return cachedWeather
+    if (typeof temp !== 'number' || typeof code !== 'number') { noteWeatherFailure('forecast', 'bad payload'); return cachedWeather }
 
     await ensureCityLabel(useLat, useLon, source)
 
@@ -200,8 +268,10 @@ export async function fetchWeather(
       location: lastKnownCity || `${useLat.toFixed(2)}, ${useLon.toFixed(2)}`,
     }
     weatherFetchedAt = Date.now()
+    persistWeather()
     return cachedWeather
-  } catch {
+  } catch (error) {
+    noteWeatherFailure('forecast', failureReason(error))
     return cachedWeather
   }
 }
@@ -272,6 +342,9 @@ export function _resetWelcomeContextCachesForTests(): void {
   lastKnownCity = ''
   cachedNextEvent = null
   calendarFetchedAt = 0
+  weatherPersistence = null
+  weatherRestored = false
+  lastFailureLogAt.clear()
 }
 
 welcomeContextRouter.get('/welcome-context', async (req, res) => {

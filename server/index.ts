@@ -106,7 +106,7 @@ import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
 import { lensGistRouter } from './routes/lens-gist.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
-import { welcomeContextRouter } from './routes/welcome-context.js'
+import { setWeatherPersistence, welcomeContextRouter } from './routes/welcome-context.js'
 import { liveCuesRouter } from './routes/live-cues.js'
 import { tasksRouter } from './routes/tasks.js'
 import { memoryRouter } from './routes/memory.js'
@@ -143,6 +143,7 @@ import { createWorkIntakeRouter } from './routes/work-intake.js'
 import { createWorkHandoffRequestsRouter } from './routes/work-handoff-requests.js'
 import { createJevRouter } from './routes/jev.js'
 import { dataPath } from './lib/data-dir.js'
+import { loadJsonOrQuarantine, durableAtomicWriteFileSync } from './lib/atomic-fs.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
 import { WorkHandoffRequestStore, createOptionalWorkHandoffRequestStore, handoffRequestCapabilities } from './lib/work-handoff-requests.js'
 import { createWorkBoardReader } from './lib/work-board-reader.js'
@@ -1065,6 +1066,11 @@ app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
 app.use('/api', lensGistRouter)
 app.use('/api', bookmarksRouter)
+// 6.63.1: the last good weather and place survive a restart (<data>/welcome-weather.json).
+setWeatherPersistence({
+  load: () => { const r = loadJsonOrQuarantine<unknown>(dataPath('welcome-weather.json')); return r.status === 'ok' ? r.data : null },
+  save: (value) => durableAtomicWriteFileSync(dataPath('welcome-weather.json'), `${JSON.stringify(value)}\n`),
+})
 app.use('/api', welcomeContextRouter)
 app.use('/api', liveCuesRouter)
 app.use('/api', tasksRouter)
