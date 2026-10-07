@@ -36,7 +36,10 @@ runtime does not. `createdOn` is the first `YYYY-MM-DD` in the source label, els
 day the task's words first appeared in the git history of its `tasks.md`.
 `lineChangedAt` is the git blame time of a committed line. Each is null when unknown,
 including every git-derived value when no git repository tracks the `tasks.md`.
-Nothing is written into `tasks.md`.
+All git work for one read (rev-parse, blame, first-seen lookups) shares a 1.5 s
+deadline; what is still unknown then comes back null, and the git work finishes in the
+background for a later read. Git runs only when a `.git` exists at or above the
+`tasks.md` folder. Nothing is written into `tasks.md`.
 
 The default lock namespace remains `~/Library/Application Support/COS/.task_locks.json`
 and canonical `file:<domain>` entries. `COS_TASK_LOCK_STORE` is an explicit override

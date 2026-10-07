@@ -143,6 +143,7 @@ import { createWorkIntakeRouter } from './routes/work-intake.js'
 import { createWorkHandoffRequestsRouter } from './routes/work-handoff-requests.js'
 import { createJevRouter } from './routes/jev.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
+import { isReadOnlyApiPost } from './lib/work-search.js'
 import { dataPath } from './lib/data-dir.js'
 import { loadJsonOrQuarantine, durableAtomicWriteFileSync } from './lib/atomic-fs.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
@@ -325,6 +326,9 @@ app.use('/api', requireApiToken(API_TOKEN))
 // through their true terminal boundary.
 app.use('/api', (req, res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+  // 6.65.0: a POST that only reads (Work search: a board read and one Jev question) is not a mutation. See
+  // lib/work-search.ts isReadOnlyApiPost for why holding the lease would hurt and why skipping it is safe.
+  if (isReadOnlyApiPost(req.method, req.path)) return next()
   // V2 video original chunks are bounded to the advertised session size (1 MiB
   // on new sessions, 256 KiB on leftover drafts) and commit through the upload
   // registry's own generation lock. Holding the global mutation lease while

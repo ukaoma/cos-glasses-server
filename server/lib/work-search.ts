@@ -18,12 +18,16 @@
 import { createHash } from 'node:crypto'
 import { dataPath } from './data-dir.js'
 import { estimateJevTokens, JevClient, JevError } from './jev.js'
+import { boundForRedaction, redactSecretText } from './activity-preview.js'
+import { redactSecrets } from './lens-gist-engines.js'
 
 export const WORK_SEARCH_LIMITS = {
   queryMin: 2, queryMax: 200,
   /** A Jev Choice holds 255 options; one is `none`. */
   maxCandidates: 254,
   optionChars: 300,
+  /** How much of a task's text the redaction reads: four times what Jev gets, so no pattern ever scans a long input. */
+  optionScanChars: 1_200,
   minP: 0.02, maxResults: 20,
   cacheMs: 10 * 60_000, cacheEntries: 200,
   defaultDailyTokens: 1_000_000,
@@ -36,12 +40,15 @@ export const WORK_SEARCH_INSTRUCTIONS = 'The user typed `query` into the search 
   + 'to find? Pick the task they mean even when it uses different words, or none if no task fits.'
 export const WORK_SEARCH_NONE = 'None of these tasks is what the user is looking for.'
 
-export type WorkSearchReason = 'jev_not_configured' | 'jev_cap_reached' | 'jev_breaker_open' | 'jev_unavailable' | 'search_off' | 'too_many_candidates'
+export type WorkSearchReason = 'jev_not_configured' | 'jev_key_rejected' | 'jev_cap_reached' | 'jev_breaker_open' | 'jev_request_rejected'
+  | 'jev_unavailable' | 'search_off' | 'too_many_candidates'
 export const WORK_SEARCH_MESSAGES: Record<WorkSearchReason, string> = {
   jev_not_configured: 'Meaning search needs a TypeSafe key. Add one in Settings.',
-  jev_cap_reached: 'Meaning search has used today’s budget. Word search still works.',
+  jev_key_rejected: 'TypeSafe did not accept the saved key. Check it in Settings. Word search still works.',
+  jev_cap_reached: 'Meaning search has used today’s budget. It resets at midnight UTC. Word search still works.',
   jev_breaker_open: 'Meaning search is paused for an hour after repeated failures. Word search still works.',
-  jev_unavailable: 'Meaning search could not reach Jev. Word search still works.',
+  jev_request_rejected: 'Jev refused this search request. Word search still works.',
+  jev_unavailable: 'Meaning search got no answer from Jev. Word search still works.',
   search_off: 'Meaning search is turned off on this server.',
   too_many_candidates: `Meaning search covers up to ${WORK_SEARCH_LIMITS.maxCandidates} cards. Pick a domain to search this view.`,
 }
@@ -55,13 +62,17 @@ export function unavailable(reason: WorkSearchReason): Extract<WorkSearchResult,
   return { available: false, reason, message: WORK_SEARCH_MESSAGES[reason] }
 }
 
-/** The daily input-token cap for search alone. */
+/** The daily input-token cap for search alone. The ledger day is UTC, so the budget resets at midnight UTC. */
 export function workSearchDailyCap(): number {
   const raw = Number(process.env.COS_JEV_SEARCH_DAILY_TOKENS)
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : WORK_SEARCH_LIMITS.defaultDailyTokens
 }
 
-/** On unless COS_JEV_SEARCH says off (0, false, no, off). Read on every request, so a change needs no restart. */
+/**
+ * On unless COS_JEV_SEARCH says off (0, false, no, off). The value comes from the server's environment, which is fixed
+ * when the server starts (the LaunchAgent plist, or ~/.cos-glasses/.env read at boot), so changing it takes a restart.
+ * The cap, COS_JEV_SEARCH_DAILY_TOKENS, is the same.
+ */
 export function workSearchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !['0', 'false', 'no', 'off'].includes((env.COS_JEV_SEARCH ?? '').trim().toLowerCase())
 }
@@ -76,10 +87,42 @@ let sharedSearchClient: JevClient | null = null
 /** One search client per process: it owns search's breaker. Saving a new key resets it (routes/jev.ts). */
 export function sharedWorkSearchJevClient(): JevClient { return sharedSearchClient ??= createWorkSearchJevClient() }
 
-/** What Jev reads for one card: the task text without `[Work details](…)` links, one line, at most 300 characters. */
+const WORK_DETAILS_RE = /\[Work details\]\([^)]*\)/gi
+const MARKDOWN_LINK_RE = /\[([^\]]*)\]\([^)\s]*\)/g
+// Bounded scheme, as in activity-preview.ts: an unbounded one is retried from every position of a long run.
+const SCHEME_URL_RE = /\b(?:[a-z][a-z0-9+.-]{0,31}:\/\/|www\.)\S+/gi
+const EMAIL_RE = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}\b/g
+// A host with a path (docs.google.com/document/d/…). A bare domain stays: it is usually a brand name people search for.
+const PATH_URL_RE = /\b(?:[a-z0-9-]{1,63}\.){1,8}[a-z]{2,24}\/\S*/gi
+const LONG_RUN_RE = /[A-Za-z0-9_-]{24,}/g
+
+/**
+ * What Jev reads for one card (6.65.0 QA, S-W6): the task text with `[Work details](…)` links dropped, other markdown
+ * links reduced to their label, credentials masked by the server's secret redaction (redactSecretText, then
+ * redactSecrets), and URLs, email addresses and opaque ids (24 or more letters, digits, `-` or `_` with both a letter and
+ * a digit, the shape of a key or a document id) removed. They add nothing to finding a card, and TypeSafe is a third
+ * party. One line, at most 300 characters.
+ */
 export function searchOptionText(text: string): string {
-  return text.replace(/\[Work details\]\([^)]*\)/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, WORK_SEARCH_LIMITS.optionChars).trim()
+  let out = boundForRedaction(text, WORK_SEARCH_LIMITS.optionScanChars).head.replace(WORK_DETAILS_RE, ' ')
+  out = redactSecrets(redactSecretText(out))
+  out = out.replace(MARKDOWN_LINK_RE, '$1').replace(SCHEME_URL_RE, ' ').replace(EMAIL_RE, ' ').replace(PATH_URL_RE, ' ')
+  out = out.replace(LONG_RUN_RE, run => /\d/.test(run) && /[A-Za-z]/.test(run) ? ' ' : run)
+  return out.replace(/\s+/g, ' ').trim().slice(0, WORK_SEARCH_LIMITS.optionChars).trim()
 }
+
+/**
+ * API POSTs that only read (6.65.0 QA). index.ts lets them past the global mutation lease. POST /work/search reads the
+ * board and asks Jev one question; it writes nothing but its own token ledger (one atomic write). Under the lease, a
+ * drain for an update or restart would wait up to 20 s (the Jev timeout) for a search, and a drain would answer every
+ * search 503. Outside it, a restart mid-search loses at most that search's token count.
+ */
+export function isReadOnlyApiPost(method: string, path: string): boolean {
+  return method === 'POST' && path === '/work/search'
+}
+
+/** A query's length as people count it: code points, not UTF-16 units, so 150 emoji are 150 (Control counts characters). */
+export function queryLength(query: string): number { return [...query].length }
 
 export interface SearchableRow { id: string; domain: string; text: string; checked: boolean; workIdentity?: string }
 export interface CandidateRequest { domain?: string; scope?: WorkSearchScope; ids?: string[] }
@@ -132,6 +175,8 @@ export function normalizeQuery(query: string): string {
   return query.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
+const PASSED_THROUGH = new Set<string>(['jev_not_configured', 'jev_key_rejected', 'jev_cap_reached', 'jev_breaker_open', 'jev_request_rejected'])
+
 export class WorkSearcher {
   private cache = new Map<string, { at: number; results: WorkSearchHit[]; none: number | null }>()
   private inflight = new Map<string, Promise<WorkSearchResult>>()
@@ -170,8 +215,10 @@ export class WorkSearcher {
       return { available: true, results, none, cached: false, tokens: reply.inputTokens }
     } catch (e) {
       if (!(e instanceof JevError)) throw e
-      if (e.code === 'jev_not_configured' || e.code === 'jev_cap_reached' || e.code === 'jev_breaker_open') return unavailable(e.code)
-      // A rejected key, a refused request and a malformed answer all mean the same thing to the person searching.
+      // Each says what happened. A 400, 413 or 422 is jev_request_rejected: the request itself was refused, which does
+      // not count toward the breaker (jev.ts), because the same cards would be refused again and an outage pause would
+      // only hide search for every other board. Unreachable, 5xx and a malformed answer are jev_unavailable.
+      if (PASSED_THROUGH.has(e.code)) return unavailable(e.code as WorkSearchReason)
       console.warn('[work-search] Jev failed:', e.code)
       return unavailable('jev_unavailable')
     }

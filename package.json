@@ -46,6 +46,7 @@
     "!server/scripts/work-review-mutation-gate.mjs",
     "!server/scripts/work-intake-mutation-gate.mjs",
     "!server/scripts/work-progress-mutation-gate.mjs",
+    "!server/scripts/work-search-mutation-gate.mjs",
     "!server/scripts/away-hold-mutation-gate.mjs",
     "!server/scripts/nemotron-mutation-gate.mjs",
     "!server/scripts/merged-scribe-mutation-gate.mjs",

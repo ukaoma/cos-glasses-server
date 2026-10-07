@@ -10,7 +10,8 @@ import {
 } from './morning-brief-config.js'
 import { localClock, shiftDay, taskInstant } from './morning-brief-schedule.js'
 import { callTaskBridge, taskBridgeAvailable, taskOperationsRoot, taskBridgeUnavailableMessage } from './task-bridge.js'
-import { NO_TASK_DATES, sharedTaskDateResolver, taskDateKey, type TaskDateFields, type TaskDateResolver } from './task-dates.js'
+import { NO_TASK_DATES, TASK_DATE_LIMITS, resolveTaskDatesWithin, sharedTaskDateResolver, taskDateKey, type TaskDateFields,
+  type TaskDateResolver } from './task-dates.js'
 import { taskDomainNames, isSafeDomainName } from './domains.js'
 import { isClientJobId } from './query-job-types.js'
 import { DEFAULT_MODEL, isClaudeModel } from '../../shared/model-preference.js'
@@ -490,16 +491,20 @@ export async function listBoard(columnFilter?: string, nowMs = Date.now()): Prom
 
 /**
  * GET /api/tasks and GET /api/work-board rows (6.65.0): the board plus `createdOn`, `createdFrom` and `lineChangedAt`
- * (lib/task-dates.ts). The glasses' bounded board reads and Jev advice keep using listBoard, which does no git work.
+ * (lib/task-dates.ts). Every caller of those two routes pays for the dated read, the glasses' and the phone's /api/tasks
+ * reads included: its git work is bounded by TASK_DATE_LIMITS.deadlineMs (1.5 s, under the phone's 4 s timeout), past
+ * which the dates come back null. The shared Work board reader (the glasses' activity, open-work and request glances)
+ * and Jev advice use listBoard, which does no git work.
  * Additive: every existing field is unchanged, and older Controls ignore the new ones. The dates come from the source
  * label and from git, read-only, for both the configured COS bridge and the packaged task runtime; a date that cannot
  * be known is null, and a failure to date never fails the board.
  */
 export async function listBoardWithDates(columnFilter?: string, nowMs = Date.now(),
-                                         resolver: Pick<TaskDateResolver, 'resolve'> = sharedTaskDateResolver()): Promise<Array<TaskBoardRow & TaskDateFields>> {
+                                         resolver: Pick<TaskDateResolver, 'resolve'> = sharedTaskDateResolver(),
+                                         deadlineMs: number = TASK_DATE_LIMITS.deadlineMs): Promise<Array<TaskBoardRow & TaskDateFields>> {
   const pairs = await boardPairs(columnFilter, nowMs)
   let dates = new Map<string, TaskDateFields>()
-  try { dates = await resolver.resolve(pairs.map(pair => pair.source), taskOperationsRoot()) } catch (e) {
+  try { dates = await resolveTaskDatesWithin(resolver, pairs.map(pair => pair.source), taskOperationsRoot(), deadlineMs) } catch (e) {
     console.warn('[tasks] dates unavailable:', e instanceof Error ? e.message : e)
   }
   return pairs.map(({ row }) => ({ ...row, ...(dates.get(taskDateKey(row.domain, row.id)) ?? NO_TASK_DATES) }))

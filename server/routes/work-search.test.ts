@@ -4,8 +4,9 @@ import type { Server } from 'node:http'
 import { existsSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createWorkSearchRouter } from './work-search.js'
-import { JEV_KEY_FILE, JEV_MODEL } from '../lib/jev.js'
+import { createWorkSearchRouter, WORK_SEARCH_LOG_EVERY_MS } from './work-search.js'
+import { readFileSync } from 'node:fs'
+import { JEV_KEY_FILE, JEV_LIMITS, JEV_MODEL } from '../lib/jev.js'
 import { WORK_SEARCH_LIMITS, WorkSearcher, createWorkSearchJevClient } from '../lib/work-search.js'
 
 const KEY = 'ts_live_' + 'k'.repeat(32)
@@ -36,6 +37,7 @@ async function setup(overrides: Record<string, unknown> = {}) {
   const post = (body: unknown, token = 't') => fetch(base + '/work/search', { method: 'POST', headers: { 'X-COS-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   return { deps, post }
 }
+const { queryMin: MIN, queryMax: MAX, maxCandidates: CAP } = WORK_SEARCH_LIMITS
 const searched = (deps: any) => (deps.searcher.search.mock.calls.at(-1)?.[1] as Array<{ id: string }>).map(r => r.id)
 
 it('is authenticated like the task routes and not cached by clients', async () => {
@@ -48,7 +50,7 @@ it('is authenticated like the task routes and not cached by clients', async () =
 
 it('validates the body: a 2 to 200 character query, a safe domain, a known scope, 12-hex ids, nothing else', async () => {
   const s = await setup()
-  for (const bad of [{}, { query: 'a' }, { query: ' a ' }, { query: 'x'.repeat(201) }, { query: 7 }, { query: 'ok', domain: '../x' },
+  for (const bad of [{}, { query: 'a' }, { query: ' a ' }, { query: 'x'.repeat(MAX + 1) }, { query: 'x'.repeat(MIN - 1) }, { query: 7 }, { query: 'ok', domain: '../x' },
     { query: 'ok', scope: 'everything' }, { query: 'ok', ids: 'abc' }, { query: 'ok', ids: ['XYZ'] }, { query: 'ok', text: 'client task text' }, []]) {
     const res = await s.post(bad)
     expect(res.status).toBe(400)
@@ -56,8 +58,18 @@ it('validates the body: a 2 to 200 character query, a safe domain, a known scope
   }
   expect(s.deps.searcher.search).not.toHaveBeenCalled()
   expect((await s.post({ query: 'ok' })).status).toBe(200)
-  expect((await s.post({ query: 'x'.repeat(200) })).status).toBe(200)
-  expect(s.deps.searcher.search).toHaveBeenLastCalledWith('x'.repeat(200), expect.any(Array))
+  expect((await s.post({ query: 'x'.repeat(MAX) })).status).toBe(200)
+  expect(s.deps.searcher.search).toHaveBeenLastCalledWith('x'.repeat(MAX), expect.any(Array))
+})
+
+it('counts the query in code points: 150 emoji (300 UTF-16 units) are accepted, as Control counts them', async () => {
+  const s = await setup()
+  for (const ok of ['😀'.repeat(150), '😀'.repeat(MAX), '😀'.repeat(MIN)]) {
+    const res = await s.post({ query: ok })
+    expect(res.status).toBe(200)
+    expect(s.deps.searcher.search).toHaveBeenLastCalledWith(ok, expect.any(Array))
+  }
+  for (const bad of ['😀'.repeat(MAX + 1), '😀'.repeat(MIN - 1)]) expect((await s.post({ query: bad })).status).toBe(400)
 })
 
 it('searches the board the view shows: domain, All work, Completed, or exact ids', async () => {
@@ -71,10 +83,10 @@ it('searches the board the view shows: domain, All work, Completed, or exact ids
 
 it('refuses more than 254 cards as too_many_candidates (HTTP 200), from ids or from the board', async () => {
   const s = await setup()
-  const tooMany = Array.from({ length: WORK_SEARCH_LIMITS.maxCandidates + 1 }, (_, i) => ID(i + 100))
+  const tooMany = Array.from({ length: CAP + 1 }, (_, i) => ID(i + 100))
   const res = await s.post({ query: 'nick', ids: tooMany })
   expect(res.status).toBe(200)
-  expect(await res.json()).toMatchObject({ available: false, reason: 'too_many_candidates', message: expect.stringContaining('254') })
+  expect(await res.json()).toMatchObject({ available: false, reason: 'too_many_candidates', message: expect.stringContaining(String(CAP)) })
   expect(s.deps.list).not.toHaveBeenCalled()  // refused before reading the board
   expect((await (await s.post({ query: 'nick', ids: tooMany.slice(1) })).json()).available).toBe(true)
   const big = await setup({ list: vi.fn(async () => tooMany.map(id => ({ id, domain: 'quilt', text: `Task ${id}`, checked: false }))) })
@@ -111,9 +123,10 @@ it('every degrade reason reaches the client as HTTP 200 { available: false, reas
     { reason: 'jev_cap_reached', arrange: () => { process.env.COS_JEV_SEARCH_DAILY_TOKENS = '5'; return { fetchImpl: async () => ok() } } },
     { reason: 'jev_unavailable', arrange: () => ({ fetchImpl: async () => new Response('', { status: 503 }) }) },
     { reason: 'jev_unavailable', arrange: () => ({ fetchImpl: async () => { throw new Error('offline') } }) },
-    { reason: 'jev_unavailable', arrange: () => ({ fetchImpl: async () => new Response('', { status: 401 }) }) },
+    { reason: 'jev_key_rejected', arrange: () => ({ fetchImpl: async () => new Response('', { status: 401 }) }) },
+    { reason: 'jev_request_rejected', arrange: () => ({ fetchImpl: async () => new Response('', { status: 413 }) }) },
     { reason: 'search_off', arrange: () => { process.env.COS_JEV_SEARCH = 'off'; return { fetchImpl: async () => ok() } } },
-    { reason: 'too_many_candidates', arrange: () => ({ fetchImpl: async () => ok(), body: { ids: Array.from({ length: 255 }, (_, i) => ID(i + 1000)) } }) },
+    { reason: 'too_many_candidates', arrange: () => ({ fetchImpl: async () => ok(), body: { ids: Array.from({ length: CAP + 1 }, (_, i) => ID(i + 1000)) } }) },
   ]
   for (const { reason, arrange } of cases) {
     process.env.TYPESAFE_API_KEY = KEY; delete process.env.COS_JEV_SEARCH; delete process.env.COS_JEV_SEARCH_DAILY_TOKENS
@@ -130,11 +143,11 @@ it('every degrade reason reaches the client as HTTP 200 { available: false, reas
   process.env.TYPESAFE_API_KEY = KEY; delete process.env.COS_JEV_SEARCH; delete process.env.COS_JEV_SEARCH_DAILY_TOKENS
   const down = vi.fn(async () => new Response('', { status: 503 }))
   const s = await setup({ searcher: new WorkSearcher(createWorkSearchJevClient(down as unknown as typeof fetch, () => new Date('2026-10-06T23:00:00Z'), join(dir, 'breaker.json'))) })
-  for (let i = 0; i < 3; i++) expect((await (await s.post({ query: `pet ${i}` })).json()).reason).toBe('jev_unavailable')
-  const open = await s.post({ query: 'pet 4' })
+  for (let i = 0; i < JEV_LIMITS.breakerFailures; i++) expect((await (await s.post({ query: `pet ${i}` })).json()).reason).toBe('jev_unavailable')
+  const open = await s.post({ query: 'pet again' })
   expect(open.status).toBe(200)
   expect(await open.json()).toEqual({ available: false, reason: 'jev_breaker_open', message: expect.any(String) })
-  expect(down).toHaveBeenCalledTimes(3)
+  expect(down).toHaveBeenCalledTimes(JEV_LIMITS.breakerFailures)
   delete process.env.COS_JEV_SEARCH_DAILY_TOKENS
 })
 
@@ -150,4 +163,27 @@ it('end to end with a fake Jev: results by card id, then the cache, then each de
   expect(fetchImpl).toHaveBeenCalledTimes(1)
   delete process.env.TYPESAFE_API_KEY
   expect(await (await s.post({ query: 'dentist' })).json()).toMatchObject({ available: false, reason: 'jev_not_configured' })
+})
+
+it('logs each degrade reason once per 10 minutes, so a quiet fallback in Control still leaves a trace', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const now = vi.spyOn(Date, 'now')
+  try {
+    now.mockReturnValue(1_000_000)
+    const s = await setup()
+    process.env.COS_JEV_SEARCH = '0'
+    await s.post({ query: 'nick' }); await s.post({ query: 'nick again' })
+    const lines = () => warn.mock.calls.filter(c => c[0] === '[work-search] meaning search unavailable: search_off').length
+    expect(lines()).toBe(1)
+    now.mockReturnValue(1_000_000 + WORK_SEARCH_LOG_EVERY_MS - 1); await s.post({ query: 'nick' }); expect(lines()).toBe(1)
+    now.mockReturnValue(1_000_000 + WORK_SEARCH_LOG_EVERY_MS); await s.post({ query: 'nick' }); expect(lines()).toBe(2)
+  } finally { now.mockRestore() }
+})
+
+it('index.ts lets Work search past the mutation lease, before the lease is taken (source check: index.ts boots the server)', () => {
+  const index = readFileSync(join(process.cwd(), 'server/index.ts'), 'utf8')
+  const middleware = index.slice(index.indexOf("app.use('/api', (req, res, next) => {\n  if (req.method === 'GET'"), index.indexOf("acquireMaintenanceWork('api_mutation'"))
+  expect(middleware.length).toBeGreaterThan(0)
+  expect(middleware).toContain('if (isReadOnlyApiPost(req.method, req.path)) return next()')
+  expect(index.split('isReadOnlyApiPost(').length - 1).toBe(1)
 })

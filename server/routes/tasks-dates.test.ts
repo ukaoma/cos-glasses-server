@@ -81,6 +81,14 @@ it('outside any git repository the git-derived fields are null; a source date st
   expect(by(rows, 'Order the trade show banners')).toMatchObject({ createdOn: null, createdFrom: null, lineChangedAt: null })
 })
 
+it('a dating that hangs never holds the board past the deadline: null dates instead', async () => {
+  const started = Date.now()
+  const rows = await listBoardWithDates(undefined, Date.now(), { resolve: () => new Promise(() => {}) }, 50)
+  expect(Date.now() - started).toBeLessThan(1_000)
+  expect(rows).toHaveLength(4)
+  expect(rows.every(r => r.createdOn === null && r.createdFrom === null && r.lineChangedAt === null)).toBe(true)
+})
+
 it('a dating failure never fails the board', async () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   const rows = await listBoardWithDates(undefined, Date.now(), { resolve: async () => { throw new Error('git exploded') } })

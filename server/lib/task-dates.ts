@@ -7,14 +7,20 @@
  *      meeting date). `createdFrom: 'source'`.
  *   2. Else the day the task's text first appeared in the git history of its tasks.md
  *      (`git log --reverse -S<text> -- tasks.md`, author date). `createdFrom: 'git'`. Each lookup is one git process,
- *      so they are cached on disk by (file, text hash) and bounded per request: what does not finish inside the time
- *      budget keeps running and answers on a later call.
+ *      so they are cached on disk by (file, text hash). A lookup that times out or fails is never cached as "not in
+ *      history"; it rests (TASK_DATE_LIMITS.lookupBackoffMs) and is tried again.
  *   3. Else null.
  * lineChangedAt is `git blame` of the line (author time), for committed lines only: an uncommitted line is null, never
  * "now". tasks.md is auto-committed by the COS sync, so this is a coarse floor. Blame runs once per (HEAD, file mtime).
  *
- * Git runs only for a tasks.md inside a git work tree that tracks it. A public install keeps its tasks under the data
- * folder, outside any repository, so its git-derived fields are null and no git process starts.
+ * Every dated read keeps ALL of its git work (rev-parse, blame, first-seen lookups) inside one deadline,
+ * TASK_DATE_LIMITS.deadlineMs (1.5 s, derived from the phone's 4 s request timeout below). Past it the read answers with
+ * what it has, and git work already started keeps running to fill the caches for a later read.
+ *
+ * Git runs only when a `.git` exists at or above the tasks.md folder. A public install keeps its tasks under
+ * ~/.cos-glasses/data, normally outside any repository, so no git process starts and the git-derived fields are null.
+ * If the home folder itself is a git repository, git does run: rev-parse on each dated read and blame once per HEAD or
+ * file change. Blame finds tasks.md untracked, so the git-derived fields stay null and no first-seen lookup runs.
  */
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -32,10 +38,25 @@ export interface TaskDateFields {
 }
 export const NO_TASK_DATES: Readonly<TaskDateFields> = Object.freeze({ createdOn: null, createdFrom: null, lineChangedAt: null })
 
+/**
+ * The phone and the glasses give up on a request after 4 s. A dated board read keeps all of its git work (rev-parse,
+ * blame, first-seen lookups) inside half of that, less an allowance for the board read itself (the task bridge answers
+ * in about 0.1 s) and the answer: 4,000 / 2 - 500 = 1,500 ms.
+ */
+const CLIENT_TIMEOUT_MS = 4_000
+const BOARD_READ_ALLOWANCE_MS = 500
+
 export const TASK_DATE_LIMITS = {
-  /** First-seen lookups a request may start; the rest wait for a later call. */
-  budgetMs: 1_500,
+  /** All git work for one request, overall. What does not finish keeps running and answers on a later call. */
+  deadlineMs: CLIENT_TIMEOUT_MS / 2 - BOARD_READ_ALLOWANCE_MS,
+  /** resolveTaskDatesWithin's grace past the deadline before it answers null dates for every row. */
+  answerSlackMs: 100,
+  /** One git process. It may outlive the request (it fills the caches); it is killed after this. */
   gitTimeoutMs: 8_000,
+  /** A first-seen lookup that failed is not retried for this long; it is never cached as "not in history". */
+  lookupBackoffMs: 10 * 60_000,
+  /** A file whose rev-parse or blame timed out gets no git work for this long. */
+  fileBackoffMs: 60_000,
   concurrency: 2,
   cacheEntries: 5_000,
   blameFiles: 32,
@@ -126,10 +147,17 @@ interface FileState { file: string; dir: string; head: string; lines: Map<number
 interface CreatedEntry { d: string | null; h?: string }
 interface PickaxeJob { key: string; needle: string; state: FileState }
 
+/** execFile kills a git that outlives its timeout: a timeout says nothing about the history or the file. */
+export function isGitTimeout(error: unknown): boolean {
+  const e = error as { killed?: unknown; signal?: unknown; code?: unknown } | null
+  return !!e && (e.killed === true || (typeof e.signal === 'string' && e.signal.length > 0) || e.code === 'ETIMEDOUT')
+}
+
 export interface TaskDateResolverOptions {
   git?: DateGitRunner
   cacheFile?: string
-  budgetMs?: number
+  /** The overall deadline for one resolve (TASK_DATE_LIMITS.deadlineMs). */
+  deadlineMs?: number
   now?: () => number
   findRepo?: (dir: string) => string | null
 }
@@ -137,31 +165,39 @@ export interface TaskDateResolverOptions {
 export class TaskDateResolver {
   private readonly git: DateGitRunner
   private readonly cacheFile: string
-  private readonly budgetMs: number
+  private readonly deadlineMs: number
   private readonly now: () => number
   private readonly findRepo: (dir: string) => string | null
   private blame = new Map<string, { key: string; lines: Promise<Map<number, BlameLine> | null> }>()
   private created: Map<string, CreatedEntry> | null = null
   private pending = new Map<string, Promise<void>>()
+  /** A first-seen lookup that failed (a timeout, a git error): not "absent", and not retried until this time. */
+  private lookupBackoff = new Map<string, number>()
+  /** A file whose rev-parse or blame timed out: no git for it until this time. */
+  private fileBackoff = new Map<string, number>()
   private dirty = false
   private flushTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(options: TaskDateResolverOptions = {}) {
     this.git = options.git ?? realDateGitRunner
     this.cacheFile = options.cacheFile ?? TASK_DATES_CACHE_FILE
-    this.budgetMs = options.budgetMs ?? TASK_DATE_LIMITS.budgetMs
+    this.deadlineMs = options.deadlineMs ?? TASK_DATE_LIMITS.deadlineMs
     this.now = options.now ?? Date.now
     this.findRepo = options.findRepo ?? findGitWorkTree
   }
 
-  /** Date fields for every row, keyed by taskDateKey(domain, id). Never throws; an unknown is null. */
+  /**
+   * Date fields for every row, keyed by taskDateKey(domain, id). Never throws; an unknown is null. Everything git does
+   * for this call (rev-parse, blame, first-seen lookups) shares ONE deadline: past it the call answers with what it
+   * has, source dates included, and git work already started keeps running to fill the caches for a later call.
+   */
   async resolve(rows: readonly DateSourceRow[], root: string): Promise<Map<string, TaskDateFields>> {
-    const started = this.now()
+    const deadline = this.now() + this.deadlineMs
     const out = new Map<string, TaskDateFields>()
     const states = new Map<string, FileState | null>()
-    await Promise.all([...new Set(rows.map(row => row.domain))].map(async domain => {
-      states.set(domain, await this.fileState(join(root, domain, 'tasks.md')).catch(() => null))
-    }))
+    const reads = [...new Set(rows.map(row => row.domain))].map(domain =>
+      this.fileState(join(root, domain, 'tasks.md')).catch(() => null).then(state => { states.set(domain, state) }))
+    await this.until(Promise.all(reads), deadline)
     const jobs = new Map<string, PickaxeJob>()
     const waiting: Array<{ fields: TaskDateFields; key: string }> = []
     for (const row of rows) {
@@ -182,7 +218,7 @@ export class TaskDateResolver {
       else if (known) { fields.createdOn = known; fields.createdFrom = 'git' }
     }
     if (jobs.size) {
-      await this.runWithin([...jobs.values()], started + this.budgetMs)
+      await this.runWithin([...jobs.values()], deadline)
       for (const { fields, key } of waiting) {
         const day = this.created?.get(key)?.d
         if (day) { fields.createdOn = day; fields.createdFrom = 'git' }
@@ -203,22 +239,45 @@ export class TaskDateResolver {
   }
 
   /** Lookups still running in the background (tests). */
-  async settled(): Promise<void> { while (this.pending.size) await Promise.allSettled([...this.pending.values()]) }
+  async settled(): Promise<void> {
+    while (this.pending.size) await Promise.allSettled([...this.pending.values()])
+    await Promise.allSettled([...this.blame.values()].map(entry => entry.lines))
+  }
+
+  /** Wait for `work` or the deadline, whichever comes first. */
+  private async until(work: Promise<unknown>, deadline: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<void>(resolve => { timer = setTimeout(resolve, Math.max(0, deadline - this.now())) })
+    try { await Promise.race([work, late]) } finally { clearTimeout(timer) }
+  }
 
   private async fileState(file: string): Promise<FileState | null> {
     const dir = dirname(file)
     if (!this.findRepo(dir)) return null
+    if ((this.fileBackoff.get(file) ?? 0) > this.now()) return null
     let stat: ReturnType<typeof statSync>
     try { stat = statSync(file) } catch { return null }
     if (!stat.isFile()) return null
-    const head = (await this.git(['rev-parse', '--verify', '-q', 'HEAD'], dir, TASK_DATE_LIMITS.gitTimeoutMs)).trim()
+    let head: string
+    try { head = (await this.git(['rev-parse', '--verify', '-q', 'HEAD'], dir, TASK_DATE_LIMITS.gitTimeoutMs)).trim() } catch (e) {
+      if (isGitTimeout(e)) this.fileBackoff.set(file, this.now() + TASK_DATE_LIMITS.fileBackoffMs)
+      return null
+    }
     if (!/^[0-9a-f]{40,64}$/.test(head)) return null
     const key = `${head}|${stat.mtimeMs}|${stat.size}`
     let entry = this.blame.get(file)
     if (!entry || entry.key !== key) {
-      // An untracked file fails blame: then nothing about it comes from git.
-      entry = { key, lines: this.git(['blame', '--line-porcelain', '--', basename(file)], dir, TASK_DATE_LIMITS.gitTimeoutMs)
-        .then(parseBlamePorcelain, () => null) }
+      // An untracked file fails blame: nothing about it comes from git, until HEAD or the file changes. A blame that
+      // timed out says nothing about the file, so it is forgotten (and the file rests) rather than kept as "untracked".
+      const blamed = { key, lines: this.git(['blame', '--line-porcelain', '--', basename(file)], dir, TASK_DATE_LIMITS.gitTimeoutMs)
+        .then(parseBlamePorcelain, (e: unknown) => {
+          if (isGitTimeout(e)) {
+            this.fileBackoff.set(file, this.now() + TASK_DATE_LIMITS.fileBackoffMs)
+            if (this.blame.get(file) === blamed) this.blame.delete(file)
+          }
+          return null
+        }) }
+      entry = blamed
       this.blame.delete(file)
       this.blame.set(file, entry)
       while (this.blame.size > TASK_DATE_LIMITS.blameFiles) this.blame.delete(this.blame.keys().next().value!)
@@ -230,9 +289,11 @@ export class TaskDateResolver {
   /** The cached day, null when history had no such text at this HEAD, or undefined when it must be looked up. */
   private lookup(key: string, head: string): string | null | undefined {
     const entry = this.cache().get(key)
-    if (!entry) return undefined
-    if (entry.d) return entry.d
-    return entry.h === head ? null : undefined
+    if (entry?.d) return entry.d
+    if (entry && entry.h === head) return null
+    // A lookup that failed recently is neither known nor retried yet: the field stays null for now.
+    if ((this.lookupBackoff.get(key) ?? 0) > this.now()) return null
+    return undefined
   }
 
   /** Start lookups until the deadline, then answer with what landed. Lookups already started keep running. */
@@ -241,10 +302,7 @@ export class TaskDateResolver {
     const worker = async () => {
       while (next < jobs.length && this.now() < deadline) await this.pickaxe(jobs[next++])
     }
-    const all = Promise.all(Array.from({ length: Math.min(TASK_DATE_LIMITS.concurrency, jobs.length) }, worker))
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const budget = new Promise<void>(resolve => { timer = setTimeout(resolve, Math.max(0, deadline - this.now())) })
-    try { await Promise.race([all, budget]) } finally { clearTimeout(timer) }
+    await this.until(Promise.all(Array.from({ length: Math.min(TASK_DATE_LIMITS.concurrency, jobs.length) }, worker)), deadline)
   }
 
   private pickaxe(job: PickaxeJob): Promise<void> {
@@ -252,8 +310,14 @@ export class TaskDateResolver {
     if (running) return running
     const work = this.git(['log', '--reverse', '--format=%ad', '--date=short', `-S${job.needle}`, '--', basename(job.state.file)],
       job.state.dir, TASK_DATE_LIMITS.gitTimeoutMs)
-      .then(out => out.split('\n').map(line => line.trim()).find(line => /^\d{4}-\d{2}-\d{2}$/.test(line)) ?? null, () => null)
-      .then(day => this.remember(job.key, day ? { d: day } : { d: null, h: job.state.head }))
+      .then(out => {
+        const day = out.split('\n').map(line => line.trim()).find(line => /^\d{4}-\d{2}-\d{2}$/.test(line)) ?? null
+        this.lookupBackoff.delete(job.key)
+        this.remember(job.key, day ? { d: day } : { d: null, h: job.state.head })
+      }, () => {
+        // A timeout or a git error is not "not in history": nothing is cached, and the lookup rests before a retry.
+        this.lookupBackoff.set(job.key, this.now() + TASK_DATE_LIMITS.lookupBackoffMs)
+      })
       .finally(() => this.pending.delete(job.key))
     this.pending.set(job.key, work)
     return work
@@ -286,6 +350,19 @@ export class TaskDateResolver {
       this.flushTimer.unref?.()
     }
   }
+}
+
+/**
+ * The resolver, bounded from outside as well: if it has not answered by the deadline (plus a moment for the answer
+ * itself), every row gets null dates. A dated board read is never held past the deadline by git.
+ */
+export async function resolveTaskDatesWithin(resolver: Pick<TaskDateResolver, 'resolve'>, rows: readonly DateSourceRow[], root: string,
+                                             deadlineMs: number = TASK_DATE_LIMITS.deadlineMs): Promise<Map<string, TaskDateFields>> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<Map<string, TaskDateFields>>(resolve => {
+    timer = setTimeout(() => resolve(new Map()), deadlineMs + TASK_DATE_LIMITS.answerSlackMs)
+  })
+  try { return await Promise.race([resolver.resolve(rows, root), late]) } finally { clearTimeout(timer) }
 }
 
 let shared: TaskDateResolver | null = null

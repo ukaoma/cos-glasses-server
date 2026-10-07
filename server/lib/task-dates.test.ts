@@ -3,8 +3,8 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realp
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { TaskDateResolver, findGitWorkTree, lineHolds, parseBlamePorcelain, pickaxeNeedle, realDateGitRunner, sourceDate, taskDateKey,
-  type DateGitRunner, type DateSourceRow } from './task-dates.js'
+import { TASK_DATE_LIMITS, TaskDateResolver, findGitWorkTree, isGitTimeout, lineHolds, parseBlamePorcelain, pickaxeNeedle, realDateGitRunner,
+  resolveTaskDatesWithin, sourceDate, taskDateKey, type DateGitRunner, type DateSourceRow } from './task-dates.js'
 
 // Real paths carry spaces and dots ("Ukaoma Chief Of Staff", "~/.cos-glasses"); so does every fixture here.
 let base = '', repo = '', ops = ''
@@ -55,7 +55,7 @@ function spyGit(inner: DateGitRunner = realDateGitRunner) {
   return { run, calls, count: (sub: string) => calls.filter(a => a[0] === sub).length }
 }
 const resolver = (options: ConstructorParameters<typeof TaskDateResolver>[0] = {}) =>
-  new TaskDateResolver({ cacheFile: join(base, 'cache dir.d', 'created.json'), budgetMs: 10_000, ...options })
+  new TaskDateResolver({ cacheFile: join(base, 'cache dir.d', 'created.json'), deadlineMs: 10_000, ...options })
 
 describe('against a real git history', () => {
   it('createdOn from the source label first, else the first commit holding the text; lineChangedAt from blame; uncommitted is null', async () => {
@@ -174,7 +174,7 @@ it('bounds first-seen lookups by a time budget per request and finishes the rest
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cos budget.')))
   try {
     mkdirSync(join(dir, 'quilt')); writeFileSync(join(dir, 'quilt', 'tasks.md'), 'x')
-    const r = new TaskDateResolver({ git: run, cacheFile: join(dir, 'c.json'), budgetMs: 50, findRepo: () => dir })
+    const r = new TaskDateResolver({ git: run, cacheFile: join(dir, 'c.json'), deadlineMs: 50, findRepo: () => dir })
     const rows = Array.from({ length: 6 }, (_, i) => row('quilt', i + 1, `Task number ${i + 1} words`))
     const started = Date.now()
     const first = await r.resolve(rows, dir)
@@ -214,5 +214,101 @@ describe('pure helpers', () => {
     // Not contiguous on the line (say a marker sits inside it): the leading words that are.
     expect(pickaxeNeedle('Ship the release notes to the partner list today', '- [ ] Ship the release notes to the partner list [stage: active] today'))
       .toBe('Ship the release notes to the partner li')
+  })
+})
+
+describe('one deadline for all git work (QA S-W3)', () => {
+  const SHA = 'c'.repeat(40)
+  const porcelain = (n: number) => Array.from({ length: n }, (_, i) => `${SHA} ${i + 1} ${i + 1} 1\nauthor x\nauthor-time 1772359200\nfilename tasks.md\n\t- [ ] Task number ${i + 1} words`).join('\n')
+  const timeout = () => Object.assign(new Error('Command failed: git'), { killed: true, signal: 'SIGTERM' })
+  let dir = ''
+  beforeEach(() => { dir = realpathSync(mkdtempSync(join(tmpdir(), 'cos deadline.'))); mkdirSync(join(dir, 'quilt')); writeFileSync(join(dir, 'quilt', 'tasks.md'), 'x') })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+  const rows = (n: number, source: string | null = null) => Array.from({ length: n }, (_, i) => row('quilt', i + 1, `Task number ${i + 1} words`, source))
+
+  it('the deadline is derived from the phone\'s 4 s timeout and leaves most of it for the board read', () => {
+    expect(TASK_DATE_LIMITS.deadlineMs).toBe(1_500)
+    expect(TASK_DATE_LIMITS.deadlineMs + TASK_DATE_LIMITS.answerSlackMs).toBeLessThanOrEqual(4_000 / 2)
+  })
+
+  for (const stuck of ['rev-parse', 'blame'] as const) {
+    it(`a ${stuck} that hangs cannot hold the read past the deadline; source dates still come back, git fields are null`, async () => {
+      let release!: () => void
+      const gate = new Promise<void>(r => { release = r })
+      const run: DateGitRunner = async args => {
+        if (args[0] === stuck) await gate
+        if (args[0] === 'rev-parse') return SHA + '\n'
+        if (args[0] === 'blame') return porcelain(3)
+        return '2026-03-01\n'
+      }
+      const r = new TaskDateResolver({ git: run, cacheFile: join(dir, 'c.json'), deadlineMs: 80, findRepo: () => dir })
+      const started = Date.now()
+      const out = await r.resolve(rows(3, 'Kickoff [2026-02-20]'), dir)
+      expect(Date.now() - started).toBeLessThan(400)
+      expect([...out.values()]).toEqual(Array(3).fill({ createdOn: '2026-02-20', createdFrom: 'source', lineChangedAt: null }))
+      release(); await r.settled()
+      const later = await r.resolve(rows(3, 'Kickoff [2026-02-20]'), dir)
+      expect([...later.values()].every(f => f.lineChangedAt === '2026-03-01T10:00:00.000Z')).toBe(true)  // the work kept running and landed
+    })
+  }
+
+  it('a resolver that never answers is cut off from outside: every row gets null dates at the deadline', async () => {
+    const never = { resolve: () => new Promise<Map<string, any>>(() => {}) }
+    const started = Date.now()
+    const out = await resolveTaskDatesWithin(never, rows(2), dir, 60)
+    expect(Date.now() - started).toBeLessThan(60 + TASK_DATE_LIMITS.answerSlackMs + 250)
+    expect(out.size).toBe(0)
+  })
+
+  it('a git log that times out is never cached as "not in history": it rests, then is tried again', async () => {
+    let clock = 1_000_000, logs = 0, fail = true
+    const run: DateGitRunner = async args => {
+      if (args[0] === 'rev-parse') return SHA + '\n'
+      if (args[0] === 'blame') return porcelain(1)
+      logs++
+      if (fail) throw timeout()
+      return '2026-03-01\n'
+    }
+    const cacheFile = join(dir, 'c.json')
+    const r = new TaskDateResolver({ git: run, cacheFile, deadlineMs: 5_000, now: () => clock, findRepo: () => dir })
+    expect((await r.resolve(rows(1), dir)).get(taskDateKey('quilt', 'quilt:1'))).toMatchObject({ createdOn: null })
+    await r.settled(); r.flush()
+    expect(existsSync(cacheFile) ? Object.keys(JSON.parse(readFileSync(cacheFile, 'utf8')).created) : []).toEqual([])
+    await r.resolve(rows(1), dir)
+    expect(logs).toBe(1)  // resting: not retried yet
+    fail = false
+    clock += TASK_DATE_LIMITS.lookupBackoffMs
+    expect((await r.resolve(rows(1), dir)).get(taskDateKey('quilt', 'quilt:1'))).toMatchObject({ createdOn: '2026-03-01', createdFrom: 'git' })
+    expect(logs).toBe(2)
+    expect(isGitTimeout(timeout())).toBe(true); expect(isGitTimeout(new Error('exit 128'))).toBe(false)
+  })
+
+  it('a blame that times out is not kept as "untracked": the file rests, then is blamed again', async () => {
+    let clock = 1_000_000, blames = 0, fail = true
+    const run: DateGitRunner = async args => {
+      if (args[0] === 'rev-parse') return SHA + '\n'
+      if (args[0] === 'blame') { blames++; if (fail) throw timeout(); return porcelain(1) }
+      return '2026-03-01\n'
+    }
+    const r = new TaskDateResolver({ git: run, cacheFile: join(dir, 'c.json'), deadlineMs: 5_000, now: () => clock, findRepo: () => dir })
+    expect((await r.resolve(rows(1), dir)).get(taskDateKey('quilt', 'quilt:1'))?.lineChangedAt).toBeNull()
+    await r.resolve(rows(1), dir)
+    expect(blames).toBe(1)
+    fail = false
+    clock += TASK_DATE_LIMITS.fileBackoffMs
+    expect((await r.resolve(rows(1), dir)).get(taskDateKey('quilt', 'quilt:1'))?.lineChangedAt).toBe('2026-03-01T10:00:00.000Z')
+    expect(blames).toBe(2)
+  })
+
+  it('keeps at most 5,000 first-seen days on disk, dropping the oldest', async () => {
+    const cacheFile = join(dir, 'c.json')
+    const seeded = Object.fromEntries(Array.from({ length: TASK_DATE_LIMITS.cacheEntries }, (_, i) => [`seed${i}`, { d: '2026-01-01' }]))
+    writeFileSync(cacheFile, JSON.stringify({ version: 1, created: seeded }))
+    const run: DateGitRunner = async args => args[0] === 'rev-parse' ? SHA + '\n' : args[0] === 'blame' ? porcelain(2) : '2026-03-01\n'
+    const r = new TaskDateResolver({ git: run, cacheFile, deadlineMs: 5_000, findRepo: () => dir })
+    await r.resolve(rows(2), dir); await r.settled(); r.flush()
+    const keys = Object.keys(JSON.parse(readFileSync(cacheFile, 'utf8')).created)
+    expect(keys).toHaveLength(TASK_DATE_LIMITS.cacheEntries)
+    expect(keys).not.toContain('seed0'); expect(keys).not.toContain('seed1'); expect(keys).toContain('seed2')
   })
 })

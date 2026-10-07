@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { JEV_KEY_FILE, JEV_LIMITS, JEV_MODEL, JEV_USAGE_FILE, JevClient } from './jev.js'
-import { WORK_SEARCH_INSTRUCTIONS, WORK_SEARCH_LIMITS, WORK_SEARCH_NONE, WORK_SEARCH_USAGE_FILE, WorkSearcher, createWorkSearchJevClient, normalizeQuery, rankHits,
+import { WORK_SEARCH_INSTRUCTIONS, WORK_SEARCH_LIMITS, WORK_SEARCH_MESSAGES, WORK_SEARCH_NONE, WORK_SEARCH_USAGE_FILE, WorkSearcher, isReadOnlyApiPost, queryLength, createWorkSearchJevClient, normalizeQuery, rankHits,
   searchOptionText, selectCandidates, workSearchDailyCap, workSearchEnabled, type SearchableRow } from './work-search.js'
 
 const KEY = 'ts_live_' + 'k'.repeat(32)
@@ -39,6 +39,40 @@ describe('option text', () => {
     const long = searchOptionText('word '.repeat(200))
     expect(long.length).toBeLessThanOrEqual(WORK_SEARCH_LIMITS.optionChars)
     expect(long.endsWith(' ')).toBe(false)
+  })
+})
+
+describe('what leaves for TypeSafe (S-W6)', () => {
+  const EMAIL = 'jessie.smith+cos@gmail.com'
+  const DOC = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abc/edit?usp=sharing'
+  const KEYS = ['sk-proj-AbCdEfGh12345678ZyXw', 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8', 'AKIA' + 'ABCDEFGHIJKLMNOP']
+  it('removes email addresses, URLs, key-shaped strings and opaque ids; keeps the words, link labels and bare domains', () => {
+    const text = `Email ${EMAIL} the [launch brief](https://x.io/brief) from ${DOC} and rotate ${KEYS.join(' ')} `
+      + 'set password: hunter2-very-secret, see docs.google.com/spreadsheets/d/1zz9 and www.example.org/x, id 1AbCdEfGhIjKlMnOpQrStUvWx99 for bottlepos.com'
+    const out = searchOptionText(text)
+    for (const gone of [EMAIL, 'gmail', 'docs.google.com', '1AbCdEfGh', 'usp=sharing', 'x.io', ...KEYS, 'hunter2', 'www.example.org', 'spreadsheets']) expect(out).not.toContain(gone)
+    for (const kept of ['Email', 'the launch brief', 'and rotate', 'bottlepos.com']) expect(out).toContain(kept)
+    expect(out).not.toMatch(/https?:|@/)
+    expect(searchOptionText('Ask a@b.co about COS_JEV_SEARCH_DAILY_TOKENS limits')).toBe('Ask about COS_JEV_SEARCH_DAILY_TOKENS limits')  // no digit: a word, kept
+  })
+  it('Jev never receives them, end to end', async () => {
+    const f = vi.fn(async () => answer({ t0: 1, none: 0 }))
+    await searcher(f).search.search('brief', [row(ID(1), `Send ${EMAIL} the doc ${DOC} with key ${KEYS[0]}`)])
+    const sent = String((f.mock.calls[0] as unknown as [string, RequestInit])[1].body)
+    for (const gone of [EMAIL, 'docs.google.com', KEYS[0]]) expect(sent).not.toContain(gone)
+    expect(JSON.parse(sent).questions.c.criteria.t0).toBe('Send the doc with key [redacted-token]')  // the redaction's own mask
+  })
+  it('reads only the first 1,200 characters, cut where a token ends: words past it are never read', () => {
+    const head = 'word '.repeat(10).trim()
+    // The cut falls inside the long URL, so the URL is left out whole and nothing after it is read.
+    expect(searchOptionText(`${head} https://x.io/${'p'.repeat(WORK_SEARCH_LIMITS.optionScanChars)} tail words`)).toBe(head)
+    expect(searchOptionText(`${head} https://x.io/${'p'.repeat(100)} tail words`)).toBe(`${head} tail words`)
+  })
+  it('reads a bounded head of a long task, so no pattern scans an unbounded input', () => {
+    const started = Date.now()
+    const out = searchOptionText('a'.repeat(50_000) + ' tail@example.com')
+    expect(Date.now() - started).toBeLessThan(500)
+    expect(out.length).toBeLessThanOrEqual(WORK_SEARCH_LIMITS.optionChars)
   })
 })
 
@@ -191,9 +225,27 @@ describe('WorkSearcher with a fake Jev', () => {
     expect(f).not.toHaveBeenCalled()
     process.env.TYPESAFE_API_KEY = KEY
     vi.spyOn(console, 'warn').mockImplementation(() => {})
-    for (const reply of [() => new Response('', { status: 503 }), () => new Response('', { status: 401 }), () => answer({ t9: 1 }), () => { throw new Error('offline') }]) {
-      expect(await searcher(vi.fn(async () => reply())).search.search('slides', rows)).toMatchObject({ available: false, reason: 'jev_unavailable' })
+    const cases: Array<[() => Response, string]> = [
+      [() => new Response('', { status: 503 }), 'jev_unavailable'], [() => answer({ t9: 1 }), 'jev_unavailable'], [() => { throw new Error('offline') }, 'jev_unavailable'],
+      [() => new Response('', { status: 401 }), 'jev_key_rejected'], [() => new Response('', { status: 402 }), 'jev_key_rejected'], [() => new Response('', { status: 403 }), 'jev_key_rejected'],
+      [() => new Response('', { status: 400 }), 'jev_request_rejected'], [() => new Response('', { status: 413 }), 'jev_request_rejected'], [() => new Response('', { status: 422 }), 'jev_request_rejected'],
+    ]
+    for (const [reply, reason] of cases) {
+      const out = await searcher(vi.fn(async () => reply())).search.search('slides', rows)
+      expect(out).toEqual({ available: false, reason, message: expect.any(String) })
     }
+    // Honest words: only an unreachable or broken answer says it got no answer.
+    expect(WORK_SEARCH_MESSAGES.jev_request_rejected).toContain('refused')
+    expect(WORK_SEARCH_MESSAGES.jev_key_rejected).toContain('did not accept')
+    expect(WORK_SEARCH_MESSAGES.jev_unavailable).toContain('no answer')
+  })
+
+  it('a refused request (400, 413, 422) never opens the breaker: the same cards would only be refused again', async () => {
+    const f = vi.fn(async () => new Response('', { status: 413 }))
+    const { search, jev } = searcher(f)
+    for (let i = 0; i < JEV_LIMITS.breakerFailures + 2; i++) expect(await search.search(`big ${i}`, rows)).toMatchObject({ reason: 'jev_request_rejected' })
+    expect(f).toHaveBeenCalledTimes(JEV_LIMITS.breakerFailures + 2)
+    expect(jev.status().breakerOpenUntil).toBeNull()
   })
 
   it('has its own daily cap (COS_JEV_SEARCH_DAILY_TOKENS), its own ledger, and refuses before sending', async () => {
@@ -245,6 +297,19 @@ it('search spends from its own ledger file, never the one Work intake and sessio
     expect(JSON.parse(readFileSync(WORK_SEARCH_USAGE_FILE, 'utf8'))['2026-10-06']).toBeGreaterThanOrEqual(777)
     expect(shared.usedToday()).toBe(before)
   } finally { rmSync(WORK_SEARCH_USAGE_FILE, { force: true }) }
+})
+
+it('counts query length in code points, as people count characters', () => {
+  expect(queryLength('😀'.repeat(150))).toBe(150)
+  expect('😀'.repeat(150).length).toBe(300)  // UTF-16 units: what the old count used
+  expect(queryLength('ab')).toBe(2)
+})
+
+it('only Work search is a read-only POST for the mutation lease', () => {
+  expect(isReadOnlyApiPost('POST', '/work/search')).toBe(true)
+  for (const [method, path] of [['PUT', '/work/search'], ['DELETE', '/work/search'], ['POST', '/work/search/x'], ['POST', '/work-board/stage'], ['POST', '/tasks/capture']]) {
+    expect(isReadOnlyApiPost(method, path)).toBe(false)
+  }
 })
 
 it('normalizes case, spacing and Unicode form in the cache key', () => {
