@@ -70,16 +70,23 @@ describe('subscription CLI dictation cleanup', () => {
     expect(existsSync(scratchWorkspace)).toBe(false)
     expect(existsSync(opts.env.CURSOR_CONFIG_DIR)).toBe(false)
   })
-  it('defaults to Sonnet and disables Claude tools, MCP and hooks', async () => {
+  it('defaults to Haiku and disables Claude tools, MCP and hooks', async () => {
     output = 'Do not send this yet.'
     expect(await autoCleanDictation('do not send this yet', [])).toBe(output)
     const [binary, args, opts] = mocks.spawn.mock.calls[0]
     expect(binary).toBe('/fixture/claude')
-    expect(args).toContain('sonnet')
+    expect(args).toContain('haiku')
     expect(args[args.indexOf('--tools') + 1]).toBe('')
     expect(args[args.indexOf('--settings') + 1]).toBe('{"disableAllHooks":true}')
     expect(args).toContain('--strict-mcp-config')
     expect(opts.detached).toBe(true)
+  })
+  it.each(['haiku', 'sonnet'])('honors explicit %s instead of the configured default', async (model) => {
+    vi.stubEnv('COS_DICTATION_AUTOCLEAN_MODEL', model === 'haiku' ? 'sonnet' : 'haiku')
+    output = 'Keep the original.'
+    await autoCleanDictation('keep the original', [], { model })
+    const args = mocks.spawn.mock.calls[0][1]
+    expect(args[args.indexOf('--model') + 1]).toBe(model)
   })
   it.each([
     [JSON.stringify({ subtype: 'success', is_error: true, result: 'Failure' }), 0],

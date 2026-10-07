@@ -136,7 +136,7 @@ async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { s
     console.warn(`[prompt-draft] Fuzzy correction failed (non-fatal): ${fuzzyErr?.message ?? fuzzyErr}`)
   }
   if (!(opts.enabled ?? autoCleanDefaultEnabled())) return cleaned
-  const model = opts.model ?? 'sonnet'
+  const model = opts.model ?? 'haiku'
   const autoCleanBreaker = autoCleanBreakers[model]
   if (cleaned.length > AUTOCLEAN_MAX_CHARS || autoCleanBreaker.isOpen() || autoCleanCountToday() >= autoCleanDailyCap()) return cleaned
   const startedAt = Date.now()

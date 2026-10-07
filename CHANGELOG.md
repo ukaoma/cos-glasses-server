@@ -1,3 +1,8 @@
+## Unreleased — Haiku default for final dictation polish
+
+- Advertise Haiku, Sonnet and GPT-5.6 Luna Fast. Default omitted-model polish to Haiku for lower cost, while honoring explicit model choices and retaining the transcript on failure.
+- Glasses app 6.10.616 explicitly sends the chosen model and already works with server 6.65.0. These server changes are prepared for the next npm release; no managed runtime update is required for the new app selector.
+
 ## 6.65.0 — 2026-10-07 — Work search by meaning, and task dates
 
 - `POST /api/work/search` `{ query, domain?, scope?, ids? }` finds the Work card the user means, not only the words they typed. Pairs with COS Control 0.5.259, which shows its own word matches at once and asks this after a pause.

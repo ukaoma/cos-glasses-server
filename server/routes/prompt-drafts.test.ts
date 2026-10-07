@@ -188,13 +188,13 @@ describe('public prompt draft recovery contract', () => {
     expect(autoCleanDictation).toHaveBeenCalledTimes(2)
   })
 
-  it('routes Luna explicitly, defaults to Sonnet, and rejects unknown text models', async () => {
+  it('routes Luna explicitly, defaults to Haiku, and rejects unknown text models', async () => {
     for (const model of ['luna-5.6-fast', undefined]) {
       const result = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
         text: 'Keep this draft.', surface: 'message', autocleanModel: model,
       }))
       expect(result.status).toBe(200)
-      expect(autoCleanDictation).toHaveBeenLastCalledWith('Keep this draft.', expect.any(Array), expect.objectContaining({ model: model ?? 'sonnet' }))
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('Keep this draft.', expect.any(Array), expect.objectContaining({ model: model ?? 'haiku' }))
     }
     const invalid = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
       text: 'Keep this draft.', surface: 'meeting', autocleanModel: 'unknown',

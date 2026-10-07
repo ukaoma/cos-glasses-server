@@ -646,18 +646,24 @@ and counts only, never a speaker name, path or error text; those stay in
 
 ## Final dictation polish (6.61.5)
 
-With glasses app 6.10.573, **Settings → Voice → Polish model** offers **Sonnet**
-(the default, using your Claude CLI sign-in) and **GPT-5.6 Luna Fast** (using your
-Cursor CLI sign-in). Luna uses `gpt-5.6-luna-none-fast`; it needs server 6.61.5.
-Both phone text and recovered audio drafts honor the choice. The server advertises
-these options in `capabilities.dictationCleanup.models` on health and models.
+With glasses app 6.10.616, **Settings → Voice → Polish model** offers **Haiku 5.5**
+(the lower-cost default), **Sonnet 5.5** (higher-quality polish), and **GPT-5.6 Luna Fast**.
+Haiku and Sonnet use your Claude CLI sign-in; Luna uses your Cursor CLI sign-in.
+Luna uses `gpt-5.6-luna-none-fast` and needs server 6.61.5. Existing explicit choices
+are preserved. Unset or unknown app preferences use Haiku. Both phone text and
+recovered audio drafts honor the choice. Existing server 6.65.0 already accepts
+explicit Haiku requests, so the new app does not require a server update.
+
+The next server release also defaults omitted-model requests to Haiku and advertises
+all three options in `capabilities.dictationCleanup.models`. Until that release,
+6.65.0 still defaults requests without a model to Sonnet; 6.10.616 sends its choice
+explicitly. This is a polish-model change, not a change to the speech recognition engine.
 
 Cleanup uses subscription CLIs only, with no API-key fallback or automatic model
 substitution. A failed or unavailable cleanup keeps the glossary-corrected
 transcript. Turn **Final polish (AI)** off to skip the model call. Claude tools
 and hooks are disabled; Cursor runs in read-only ask mode with a temporary profile
 and empty workspace. Live preview and canonical meeting transcription are unchanged.
-Older clients may still explicitly request Haiku.
 
 ## HQ dictation
 

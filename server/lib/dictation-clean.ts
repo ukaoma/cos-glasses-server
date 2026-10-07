@@ -32,7 +32,7 @@ export async function autoCleanDictation(
   opts: { model?: string; signal?: AbortSignal } = {},
 ): Promise<string> {
   if (opts.signal?.aborted) throw new Error('Auto-clean aborted')
-  const model = (opts.model || process.env.COS_DICTATION_AUTOCLEAN_MODEL || 'sonnet').toLowerCase()
+  const model = (opts.model || process.env.COS_DICTATION_AUTOCLEAN_MODEL || 'haiku').toLowerCase()
   if (!isDictationCleanModel(model)) throw new Error('Unsupported dictation cleanup model')
   const cursor = model === 'luna-5.6-fast'
   const binary = resolveProviderBinary(cursor ? 'cursor' : 'claude')
