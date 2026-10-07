@@ -88,8 +88,10 @@ export class JevClient {
   private failures = 0
   private breakerUntil = 0
   private lastError: string | null = null
+  /** `cap` is the daily input-token cap for THIS client's ledger. Work search (6.65.0) passes its own; the default is
+   *  COS_JEV_DAILY_TOKENS, shared by Work intake advice, session recommendations and completion checks. */
   constructor(private readonly fetchImpl: Fetch = fetch, private readonly now: () => Date = () => new Date(),
-              private readonly usageFile = JEV_USAGE_FILE) {}
+              private readonly usageFile = JEV_USAGE_FILE, private readonly cap: () => number = dailyCap) {}
 
   usedToday(): number {
     try {
@@ -121,7 +123,7 @@ export class JevClient {
   status(): { configured: boolean; source: JevKeySource; savedAt?: string; validatedAt?: string; usedToday: number; dailyCap: number; breakerOpenUntil: string | null; lastError: string | null } {
     const key = resolveJevKey()
     return { configured: !!key, source: key?.source ?? 'none', savedAt: key?.savedAt, validatedAt: key?.validatedAt,
-      usedToday: this.usedToday(), dailyCap: dailyCap(),
+      usedToday: this.usedToday(), dailyCap: this.cap(),
       breakerOpenUntil: this.breakerUntil > this.now().getTime() ? new Date(this.breakerUntil).toISOString() : null, lastError: this.lastError }
   }
 
@@ -130,7 +132,7 @@ export class JevClient {
     const key = resolveJevKey()
     if (!key) throw new JevError('jev_not_configured')
     if (this.breakerUntil > this.now().getTime()) throw new JevError('jev_breaker_open')
-    if (this.usedToday() + estimate > dailyCap()) this.fail('jev_cap_reached', false)
+    if (this.usedToday() + estimate > this.cap()) this.fail('jev_cap_reached', false)
     let res: Response
     try {
       res = await this.fetchImpl(`${JEV_ENDPOINT}/systemone`, { method: 'POST', signal: AbortSignal.timeout(JEV_LIMITS.timeoutMs),

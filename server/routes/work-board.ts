@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { readWorkJournal, projectWorkActivity, projectOpenWork, savedDestinationFor, controlSnapshotRevision,
   type WorkActivityCapabilities, type WorkActivityResult } from '../lib/work-activity.js'
-import { listBoard, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, editWorkTask, TaskRunError, TaskBridgeError,
+import { listBoard, listBoardWithDates, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, editWorkTask, TaskRunError, TaskBridgeError,
   WORK_STAGES, type WorkStage, type WorkMeetingRef, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader, WORK_BOARD_READ_LIMITS, WorkBoardTimeoutError, type WorkBoardReader } from '../lib/work-board-reader.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
@@ -13,6 +13,10 @@ export interface WorkBoardDependencies {
   /** The native journal reader. It takes no request-derived argument: there is no request-supplied path. */
   journal: () => ReturnType<typeof readWorkJournal>
   list: typeof listBoard
+  /** 6.65.0: the rows GET /api/work-board serves, with createdOn, createdFrom and lineChangedAt (task-store.ts
+   *  listBoardWithDates). COS Control reads this route for its Work board and reads /api/tasks only from an older
+   *  server, so the dates must be here too. Defaults to the dated read unless a caller supplies its own `list`. */
+  listDated?: () => Promise<TaskBoardRow[]>
   capabilities: typeof workBoardCapabilities
   stage: typeof setTaskWorkStage
   link: typeof linkTaskMeeting
@@ -33,6 +37,7 @@ export const WORK_GLANCE_BOARD_AGE_MS = 10_000
 /** Auth is supplied by the parent /api mount. No provider execution occurs here. */
 export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> = {}): Router {
   const deps = { ...defaults, ...overrides }, router = Router()
+  const listForBoard = overrides.listDated ?? (overrides.list ? deps.list : () => listBoardWithDates())
   const board = deps.readBoard ?? createWorkBoardReader(() => deps.list())
   router.use('/work-board', (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
   const fail = (res: import('express').Response, e: unknown) => {
@@ -80,7 +85,7 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
   router.get('/work-board', async (_req, res) => {
     try {
       const read = board.begin()
-      const [raw, capabilities] = await Promise.all([deps.list(), deps.capabilities()])
+      const [raw, capabilities] = await Promise.all([listForBoard(), deps.capabilities()])
       board.prime(raw, read)
       // 6.59.0: taskRevision is this task's own revision (COS Control's taskSnapshot), what a handoff request names.
       const tasks = raw.map(row => ({ ...row, workStage: row.checked ? 'complete' : row.workStage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'), workIdentity: row.workIdentity || row.id, meetingRefs: row.meetingRefs ?? [], taskRevision: controlSnapshotRevision(row) }))

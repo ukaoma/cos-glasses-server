@@ -39,7 +39,7 @@ const mutations = [
   ['fork-forkable-only', REC, 'p > 0 && FORKABLE.has(sessions[Number(k.slice(1))].provider)', 'p > 0'],
   ['fork-confidence-own', REC, 'confidence: round(forkP)', 'confidence: round(covered)'],
   ['work-identity-first', JEV_ROUTE, 'rows.find(r => r.workIdentity === id) ?? rows.find(r => r.id === id)', 'rows.find(r => r.id === id || r.workIdentity === id)'],
-  ['jev-cap-before-send', JEV, "if (this.usedToday() + estimate > dailyCap()) this.fail('jev_cap_reached', false)", ''],
+  ['jev-cap-before-send', JEV, "if (this.usedToday() + estimate > this.cap()) this.fail('jev_cap_reached', false)", ''],
   ['jev-breaker-opens', JEV, 'if (countsTowardBreaker && ++this.failures >= JEV_LIMITS.breakerFailures) {', 'if (false) {'],
   ['jev-rejected-not-counted', JEV, "return this.fail('jev_request_rejected', false)", "return this.fail('jev_request_rejected', true)"],
   ['jev-usage-recorded', JEV, '    this.record(used)\n', ''],

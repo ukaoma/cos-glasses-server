@@ -40,6 +40,16 @@ it('requires auth, validates the key live before saving, and never echoes it', a
   expect(await (await s.call('GET', '/jev-key/status')).json()).toEqual(status)
 })
 
+it('6.65.0: a newly saved key also clears Work search\'s own breaker; a refused key does not', async () => {
+  const searchJev = { resetForNewKey: vi.fn() }
+  const s = await setup({ searchJev })
+  expect((await s.call('POST', '/jev-key/set', { key: KEY })).status).toBe(200)
+  expect(searchJev.resetForNewKey).toHaveBeenCalledTimes(1)
+  const refused = await setup({ searchJev, validate: vi.fn(async () => ({ ok: false, status: 401, reason: 'no' })) })
+  expect((await refused.call('POST', '/jev-key/set', { key: KEY })).status).toBe(400)
+  expect(searchJev.resetForNewKey).toHaveBeenCalledTimes(1)
+})
+
 it('recommends from the board task, not client text, and never blocks the workspace', async () => {
   const s = await setup()
   const sessions = [{ id: 'claude:a', provider: 'claude', title: 'Server work' }]

@@ -142,6 +142,7 @@ import { createWorkBoardRouter } from './routes/work-board.js'
 import { createWorkIntakeRouter } from './routes/work-intake.js'
 import { createWorkHandoffRequestsRouter } from './routes/work-handoff-requests.js'
 import { createJevRouter } from './routes/jev.js'
+import { createWorkSearchRouter } from './routes/work-search.js'
 import { dataPath } from './lib/data-dir.js'
 import { loadJsonOrQuarantine, durableAtomicWriteFileSync } from './lib/atomic-fs.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
@@ -756,6 +757,8 @@ app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
 // Jev key (Control Settings), Continue/Fork/New session recommendations for Work tasks (6.57.0) and meeting reviews
 // (6.57.1), and the Work completion check (6.58.0).
 app.use('/api', createJevRouter(workReviewRuntime ? { review: async id => workReviewRuntime.peek(id) } : {}))
+// Work search by meaning (6.65.0, Control 0.5.259): one Jev Choice over the board's cards, with its own cap, switch and breaker.
+app.use('/api', createWorkSearchRouter())
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.

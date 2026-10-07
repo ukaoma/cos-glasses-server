@@ -10,6 +10,7 @@ import {
 } from './morning-brief-config.js'
 import { localClock, shiftDay, taskInstant } from './morning-brief-schedule.js'
 import { callTaskBridge, taskBridgeAvailable, taskOperationsRoot, taskBridgeUnavailableMessage } from './task-bridge.js'
+import { NO_TASK_DATES, sharedTaskDateResolver, taskDateKey, type TaskDateFields, type TaskDateResolver } from './task-dates.js'
 import { taskDomainNames, isSafeDomainName } from './domains.js'
 import { isClientJobId } from './query-job-types.js'
 import { DEFAULT_MODEL, isClaudeModel } from '../../shared/model-preference.js'
@@ -469,7 +470,7 @@ export function projectRow(
   }
 }
 
-export async function listBoard(columnFilter?: string, nowMs = Date.now()): Promise<TaskBoardRow[]> {
+async function boardPairs(columnFilter: string | undefined, nowMs: number): Promise<Array<{ source: BridgeTaskRow; row: TaskBoardRow }>> {
   if (!taskBridgeAvailable()) {
     throw new TaskRunError(503, 'cos_pipeline_not_configured', taskBridgeUnavailableMessage())
   }
@@ -479,8 +480,29 @@ export async function listBoard(columnFilter?: string, nowMs = Date.now()): Prom
     Promise.resolve(loadTaskLedger(taskStorePaths())),
   ])
   return rows
-    .map(row => projectRow(row, ledger, clock.day, nowMs, config.timezone, config.taskCatchUpMinutes))
-    .filter((row): row is TaskBoardRow => !!row && (!columnFilter || row.column === columnFilter))
+    .map(source => ({ source, row: projectRow(source, ledger, clock.day, nowMs, config.timezone, config.taskCatchUpMinutes) }))
+    .filter((pair): pair is { source: BridgeTaskRow; row: TaskBoardRow } => !!pair.row && (!columnFilter || pair.row.column === columnFilter))
+}
+
+export async function listBoard(columnFilter?: string, nowMs = Date.now()): Promise<TaskBoardRow[]> {
+  return (await boardPairs(columnFilter, nowMs)).map(pair => pair.row)
+}
+
+/**
+ * GET /api/tasks and GET /api/work-board rows (6.65.0): the board plus `createdOn`, `createdFrom` and `lineChangedAt`
+ * (lib/task-dates.ts). The glasses' bounded board reads and Jev advice keep using listBoard, which does no git work.
+ * Additive: every existing field is unchanged, and older Controls ignore the new ones. The dates come from the source
+ * label and from git, read-only, for both the configured COS bridge and the packaged task runtime; a date that cannot
+ * be known is null, and a failure to date never fails the board.
+ */
+export async function listBoardWithDates(columnFilter?: string, nowMs = Date.now(),
+                                         resolver: Pick<TaskDateResolver, 'resolve'> = sharedTaskDateResolver()): Promise<Array<TaskBoardRow & TaskDateFields>> {
+  const pairs = await boardPairs(columnFilter, nowMs)
+  let dates = new Map<string, TaskDateFields>()
+  try { dates = await resolver.resolve(pairs.map(pair => pair.source), taskOperationsRoot()) } catch (e) {
+    console.warn('[tasks] dates unavailable:', e instanceof Error ? e.message : e)
+  }
+  return pairs.map(({ row }) => ({ ...row, ...(dates.get(taskDateKey(row.domain, row.id)) ?? NO_TASK_DATES) }))
 }
 
 export function workBadgeCount(rows: readonly TaskBoardRow[]): number {

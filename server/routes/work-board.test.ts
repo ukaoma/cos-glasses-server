@@ -28,6 +28,17 @@ it('requires auth and retains additive fields and explicit capability',async()=>
   const body=await(await fetch(s.base,{headers:{'X-COS-Token':'fixture-token'}})).json()
   expect(body.capabilities).toEqual({version:1,writable:true});expect(body.tasks[0]).toMatchObject({workStage:'built',workIdentity:'stable',workRevision:target.expectedRevision})
 })
+it('6.65.0: serves the dated rows (createdOn, createdFrom, lineChangedAt) with an unchanged task revision',async()=>{
+  const row={ id:'a'.repeat(12), domain:'personal', text:'Exact task', checked:false, workStage:'built', workIdentity:'stable', meetingRefs:[] }
+  const dated={...row,createdOn:'2026-03-01',createdFrom:'git',lineChangedAt:'2026-04-15T12:00:00.000Z'}
+  const plain=await setup(true,{list:vi.fn(async()=>[row])})
+  const before=(await(await fetch(plain.base,{headers:{'X-COS-Token':'fixture-token'}})).json()).tasks[0]
+  const s=await setup(true,{listDated:vi.fn(async()=>[dated])})
+  const after=(await(await fetch(s.base,{headers:{'X-COS-Token':'fixture-token'}})).json()).tasks[0]
+  expect(after).toMatchObject({createdOn:'2026-03-01',createdFrom:'git',lineChangedAt:'2026-04-15T12:00:00.000Z'})
+  expect(after.taskRevision).toBe(before.taskRevision)  // what a handoff request names does not move
+  expect(s.deps.list).not.toHaveBeenCalled()
+})
 it('passes one atomic stage operation including completion and exact CAS snapshot',async()=>{
   const s=await setup();expect((await s.post('/stage',{...target,workStage:'complete'})).status).toBe(200)
   expect(s.deps.stage).toHaveBeenCalledExactlyOnceWith(target.domain,target.id,'complete',target.expectedText,target.expectedRevision)

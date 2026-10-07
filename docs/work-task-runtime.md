@@ -30,6 +30,14 @@ single-command child pins its domain as cwd instead of relying on unsupported
 atomic replacement writes use exclusive no-follow temporary files. Same-user
 modification of the installed package/manifest is outside this integrity boundary.
 
+Since 6.65.0 `GET /api/tasks` and `GET /api/work-board` rows also carry `createdOn`,
+`createdFrom` and `lineChangedAt`, for both the COS bridge and this runtime. The server reads them; the
+runtime does not. `createdOn` is the first `YYYY-MM-DD` in the source label, else the
+day the task's words first appeared in the git history of its `tasks.md`.
+`lineChangedAt` is the git blame time of a committed line. Each is null when unknown,
+including every git-derived value when no git repository tracks the `tasks.md`.
+Nothing is written into `tasks.md`.
+
 The default lock namespace remains `~/Library/Application Support/COS/.task_locks.json`
 and canonical `file:<domain>` entries. `COS_TASK_LOCK_STORE` is an explicit override
 for isolated fixtures. Existing COS bridge calls keep their original environment

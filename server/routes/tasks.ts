@@ -10,6 +10,7 @@ import {
   captureTask,
   checkTask,
   listBoard,
+  listBoardWithDates,
   listProjectedTaskRuns,
   loadDispatchCap,
   moveTask,
@@ -175,7 +176,8 @@ tasksRouter.put('/domains', (req, res) => {
 tasksRouter.get('/tasks', async (req, res) => {
   try {
     const column = typeof req.query.column === 'string' ? req.query.column : undefined
-    const rows = await listBoard(column)
+    // 6.65.0: rows carry createdOn, createdFrom and lineChangedAt (null when unknown), as GET /api/work-board rows do.
+    const rows = await listBoardWithDates(column)
     res.json({ tasks: rows, workBadge: workBadgeCount(rows), gate: tasksGate() })
   } catch (error) {
     sendError(res, error)

@@ -12,6 +12,7 @@ import { SessionRecommender, parseCandidates } from '../lib/session-recommendati
 import { CompletionChecker, readRepliesSince } from '../lib/work-completion.js'
 import { isSafeSessionId, type AgentProvider } from '../lib/agent-session-store.js'
 import { listBoard } from '../lib/task-store.js'
+import { sharedWorkSearchJevClient } from '../lib/work-search.js'
 import { isSafeDomainName } from '../lib/domains.js'
 
 /** What the route reads from a meeting review (6.57.1): the server's own record, never client text. */
@@ -30,6 +31,8 @@ export interface JevRouteDependencies {
   /** 6.58.0: a session's replies since a time (or its newest reply) from this server's transcripts; null when the
    *  session is not on this Mac. */
   replies: (provider: AgentProvider, sessionId: string, afterMs: number | null) => Promise<string | null>
+  /** 6.65.0: Work search keeps its own client and breaker; a newly saved key clears that breaker too. */
+  searchJev: Pick<JevClient, 'resetForNewKey'>
 }
 
 /** Work identity first: it survives a rename, while a new card's id could equal an old identity's text hash. */
@@ -40,7 +43,8 @@ function findTask<T extends { id: string; workIdentity?: string }>(rows: T[], id
 export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): Router {
   const jev = overrides.jev ?? sharedJevClient()
   const deps: JevRouteDependencies = { jev, recommender: new SessionRecommender(jev), list: listBoard, validate: validateJevKey, save: saveJevKey,
-    completion: new CompletionChecker(jev), replies: (provider, sessionId, afterMs) => readRepliesSince(provider, sessionId, afterMs), ...overrides }
+    completion: new CompletionChecker(jev), replies: (provider, sessionId, afterMs) => readRepliesSince(provider, sessionId, afterMs),
+    searchJev: sharedWorkSearchJevClient(), ...overrides }
   const router = Router()
   router.use(['/jev-key', '/work-board/session-recommendation', '/work-board/completion-check'], (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
 
@@ -61,6 +65,7 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
       return res.status(500).json({ error: { code: 'jev_key_not_saved', message: 'The key was valid but could not be saved. Check the server data folder.' } })
     }
     deps.jev.resetForNewKey()
+    deps.searchJev.resetForNewKey()
     return res.json({ ok: true, ...deps.jev.status() })
   })
 
