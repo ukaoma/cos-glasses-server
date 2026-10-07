@@ -305,9 +305,11 @@ it('counts query length in code points, as people count characters', () => {
   expect(queryLength('ab')).toBe(2)
 })
 
-it('only Work search is a read-only POST for the mutation lease', () => {
+it('only Work search and the 6.66.0 evidence check are read-only POSTs for the mutation lease', () => {
   expect(isReadOnlyApiPost('POST', '/work/search')).toBe(true)
-  for (const [method, path] of [['PUT', '/work/search'], ['DELETE', '/work/search'], ['POST', '/work/search/x'], ['POST', '/work-board/stage'], ['POST', '/tasks/capture']]) {
+  expect(isReadOnlyApiPost('POST', '/work-board/evidence-check')).toBe(true)
+  for (const [method, path] of [['PUT', '/work/search'], ['DELETE', '/work/search'], ['POST', '/work/search/x'], ['POST', '/work-board/stage'], ['POST', '/tasks/capture'],
+    ['PUT', '/work-board/evidence-check'], ['POST', '/work-board/evidence-check/x'], ['POST', '/work-board/completion-check'], ['POST', '/work-board/edit']]) {
     expect(isReadOnlyApiPost(method, path)).toBe(false)
   }
 })

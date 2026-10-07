@@ -73,7 +73,8 @@ import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
-import { meetingsRouter } from './routes/meetings.js'
+import { meetingsRouter, resolveSavedMeetingDetail } from './routes/meetings.js'
+import { defaultWorkEvidenceDeps, WorkEvidenceChecker } from './lib/work-evidence.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
 import { firefliesKeyRouter } from './routes/fireflies-key.js'
@@ -760,7 +761,14 @@ const workIntakeStore = createOptionalWorkIntakeStore(() => new WorkIntakeStore(
 app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
 // Jev key (Control Settings), Continue/Fork/New session recommendations for Work tasks (6.57.0) and meeting reviews
 // (6.57.1), and the Work completion check (6.58.0).
-app.use('/api', createJevRouter(workReviewRuntime ? { review: async id => workReviewRuntime.peek(id) } : {}))
+// 6.66.0: the Work evidence check reads a card's linked meetings through the same resolver the meeting link uses.
+const workEvidence = new WorkEvidenceChecker(defaultWorkEvidenceDeps({
+  meeting: async ref => {
+    const detail = await resolveSavedMeetingDetail({ domain: ref.domain, month: ref.month, filename: ref.filename })
+    return { recordId: detail.recordId ?? '', title: detail.title, date: detail.date, summary: detail.summary, decisions: detail.decisions, actionItems: detail.actionItems }
+  },
+}))
+app.use('/api', createJevRouter({ evidence: workEvidence, ...(workReviewRuntime ? { review: async id => workReviewRuntime.peek(id) } : {}) }))
 // Work search by meaning (6.65.0, Control 0.5.259): one Jev Choice over the board's cards, with its own cap, switch and breaker.
 app.use('/api', createWorkSearchRouter())
 app.use('/api', queryRouter)

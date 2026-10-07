@@ -89,7 +89,9 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
       board.prime(raw, read)
       // 6.59.0: taskRevision is this task's own revision (COS Control's taskSnapshot), what a handoff request names.
       const tasks = raw.map(row => ({ ...row, workStage: row.checked ? 'complete' : row.workStage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'), workIdentity: row.workIdentity || row.id, meetingRefs: row.meetingRefs ?? [], taskRevision: controlSnapshotRevision(row) }))
-      res.json({ tasks, capabilities, complete: true })
+      // 6.66.0: evidenceCheck says POST /api/work-board/evidence-check exists (routes/jev.ts). Control falls back to the
+      // completion check without it.
+      res.json({ tasks, capabilities: { ...capabilities, evidenceCheck: true }, complete: true })
     }
     catch (e) { fail(res, e) }
   })

@@ -26,7 +26,7 @@ const meeting={recordId:'meeting:one',domain:'personal',month:'2026-09',filename
 it('requires auth and retains additive fields and explicit capability',async()=>{
   const s=await setup();expect((await fetch(s.base)).status).toBe(401)
   const body=await(await fetch(s.base,{headers:{'X-COS-Token':'fixture-token'}})).json()
-  expect(body.capabilities).toEqual({version:1,writable:true});expect(body.tasks[0]).toMatchObject({workStage:'built',workIdentity:'stable',workRevision:target.expectedRevision})
+  expect(body.capabilities).toEqual({version:1,writable:true,evidenceCheck:true});expect(body.tasks[0]).toMatchObject({workStage:'built',workIdentity:'stable',workRevision:target.expectedRevision})
 })
 it('6.65.0: serves the dated rows (createdOn, createdFrom, lineChangedAt) with an unchanged task revision',async()=>{
   const row={ id:'a'.repeat(12), domain:'personal', text:'Exact task', checked:false, workStage:'built', workIdentity:'stable', meetingRefs:[] }

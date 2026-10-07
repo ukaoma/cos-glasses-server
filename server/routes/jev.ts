@@ -14,6 +14,7 @@ import { isSafeSessionId, type AgentProvider } from '../lib/agent-session-store.
 import { listBoard } from '../lib/task-store.js'
 import { sharedWorkSearchJevClient } from '../lib/work-search.js'
 import { isSafeDomainName } from '../lib/domains.js'
+import { defaultWorkEvidenceDeps, parseEvidenceRequest, sharedWorkEvidenceJevClient, WorkEvidenceChecker } from '../lib/work-evidence.js'
 
 /** What the route reads from a meeting review (6.57.1): the server's own record, never client text. */
 export interface ReviewForAdvice { source: { title: string; domain: string }; markdown?: string }
@@ -33,6 +34,9 @@ export interface JevRouteDependencies {
   replies: (provider: AgentProvider, sessionId: string, afterMs: number | null) => Promise<string | null>
   /** 6.65.0: Work search keeps its own client and breaker; a newly saved key clears that breaker too. */
   searchJev: Pick<JevClient, 'resetForNewKey'>
+  /** 6.66.0: the Work evidence check (lib/work-evidence.ts), with its own Jev client, ledger and breaker. */
+  evidence: Pick<WorkEvidenceChecker, 'check' | 'enabled'>
+  evidenceJev: Pick<JevClient, 'resetForNewKey'>
 }
 
 /** Work identity first: it survives a rename, while a new card's id could equal an old identity's text hash. */
@@ -44,9 +48,10 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
   const jev = overrides.jev ?? sharedJevClient()
   const deps: JevRouteDependencies = { jev, recommender: new SessionRecommender(jev), list: listBoard, validate: validateJevKey, save: saveJevKey,
     completion: new CompletionChecker(jev), replies: (provider, sessionId, afterMs) => readRepliesSince(provider, sessionId, afterMs),
-    searchJev: sharedWorkSearchJevClient(), ...overrides }
+    searchJev: sharedWorkSearchJevClient(), evidenceJev: sharedWorkEvidenceJevClient(),
+    evidence: overrides.evidence ?? new WorkEvidenceChecker(defaultWorkEvidenceDeps()), ...overrides }
   const router = Router()
-  router.use(['/jev-key', '/work-board/session-recommendation', '/work-board/completion-check'], (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
+  router.use(['/jev-key', '/work-board/session-recommendation', '/work-board/completion-check', '/work-board/evidence-check'], (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
 
   router.get('/jev-key/status', (_req, res) => res.json(deps.jev.status()))
 
@@ -66,6 +71,7 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
     }
     deps.jev.resetForNewKey()
     deps.searchJev.resetForNewKey()
+    deps.evidenceJev.resetForNewKey()
     return res.json({ ok: true, ...deps.jev.status() })
   })
 
@@ -143,6 +149,26 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
     } catch (e) {
       console.error('[jev] completion check failed:', e instanceof Error ? e.message : e)
       return res.json({ provider: 'none', reason: 'completion_unavailable' })  // advice only: tracking goes on without it
+    }
+  })
+  /** 6.66.0 (Control 0.5.262): is each clause of a card's finish line true yet, and which item shows it? The card, its
+   *  meetings and the session transcripts are this server's; the client names the card, its follows (with the cursors
+   *  this route handed back), the clauses and a time. Read-only and advice only: Control is the only mover. Outside the
+   *  mutation lease (lib/work-search.ts isReadOnlyApiPost): it writes nothing but its own token ledger. */
+  router.post('/work-board/evidence-check', async (req, res) => {
+    const parsed = parseEvidenceRequest(req.body)
+    if (!parsed) {
+      return res.status(400).json({ error: { code: 'invalid_evidence_request', message: 'Select an exact task, at most 4 follows and at most 6 clauses of up to 300 characters.' } })
+    }
+    if (!deps.evidence.enabled()) return res.json({ provider: 'none', reason: 'evidence_disabled' })
+    try {
+      const rows = (await deps.list()).filter(r => r.domain === parsed.domain)
+      const row = findTask(rows, parsed.id)
+      if (!row) return res.status(404).json({ error: { code: 'task_not_found', message: 'That task changed or was removed. Refresh Work.' } })
+      return res.json(await deps.evidence.check(parsed, { id: row.id, workIdentity: row.workIdentity, title: row.title || '', text: row.text || '', meetingRefs: row.meetingRefs ?? [] }))
+    } catch (e) {
+      console.error('[jev] evidence check failed:', e instanceof Error ? e.message : e)
+      return res.json({ provider: 'none', reason: 'evidence_unavailable' })  // advice only: Control keeps tracking
     }
   })
   return router

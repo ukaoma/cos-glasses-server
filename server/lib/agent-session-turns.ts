@@ -29,6 +29,7 @@ import {
   codexUserText,
   latestAssistantReply,
   isWrapperPrompt,
+  LATEST_REPLY_MAX,
   parseJsonLine,
   payloadText,
   type AgentProvider,
@@ -75,10 +76,10 @@ function cursorQuery(text: string): string {
  */
 const NOT_TYPED_BY_THE_USER = /^\s*(?:\[Request interrupted by user|# AGENTS\.md instructions\b)/
 
-function shaped(role: SessionTurn['role'], raw: string, at: string | undefined): SessionTurn | null {
+function shaped(role: SessionTurn['role'], raw: string, at: string | undefined, maxChars: number): SessionTurn | null {
   if (isWrapperPrompt(raw)) return null
   if (role === 'user' && NOT_TYPED_BY_THE_USER.test(raw)) return null
-  const text = latestAssistantReply(raw)
+  const text = latestAssistantReply(raw, maxChars)
   if (!text) return null
   return at ? { role, text, at } : { role, text }
 }
@@ -86,9 +87,10 @@ function shaped(role: SessionTurn['role'], raw: string, at: string | undefined):
 /**
  * One transcript record as a message a person reads, or null.
  *
- * Pure. The per-provider shapes are the ones `parseAgentSession` reads.
+ * Pure. The per-provider shapes are the ones `parseAgentSession` reads. `maxChars` (6.66.0) lets the Work evidence
+ * check keep more of a long reply than the lens does; every other caller keeps the 4,000-character default.
  */
-export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<string, unknown>): SessionTurn | null {
+export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<string, unknown>, maxChars: number = LATEST_REPLY_MAX): SessionTurn | null {
   if (provider === 'claude') {
     if (obj.isSidechain === true) return null
     if (obj.type !== 'user' && obj.type !== 'assistant') return null
@@ -97,16 +99,16 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
     const text = message ? payloadText(message) : null
     if (!text) return null
     const at = iso(obj.timestamp)
-    if (obj.type === 'assistant') return shaped('assistant', text, at)
+    if (obj.type === 'assistant') return shaped('assistant', text, at, maxChars)
     // A peer-inbox message. Only a live Continue (`origin.kind: 'peer'`, 6.49.x) is the
     // user's own words; every other message in that frame is another agent talking
     // (a teammate's report, an idle notification, another session's SendMessage),
     // written as a plain user row with no origin. QA found 20 of those in one session
     // rendering as "YOU".
     const peer = unwrapPeerMessage(text)
-    if (peer !== null) return (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? shaped('user', peer, at) : null
+    if (peer !== null) return (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? shaped('user', peer, at, maxChars) : null
     if (obj.isMeta === true || obj.isCompactSummary === true) return null
-    return shaped('user', text, at)
+    return shaped('user', text, at, maxChars)
   }
   if (provider === 'codex') {
     if (obj.type !== 'response_item' || !obj.payload || typeof obj.payload !== 'object') return null
@@ -117,13 +119,13 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
     // and an attached-file message reads as the request that was typed.
     const text = payload.role === 'user' ? codexUserText(payload) : payloadText(payload)
     if (!text) return null
-    return shaped(payload.role, text, iso(obj.timestamp))
+    return shaped(payload.role, text, iso(obj.timestamp), maxChars)
   }
   if (obj.role !== 'user' && obj.role !== 'assistant') return null
   const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null
   const text = message ? payloadText(message) : null
   if (!text) return null
-  return shaped(obj.role, obj.role === 'user' ? cursorQuery(text) : text, iso(obj.timestamp))
+  return shaped(obj.role, obj.role === 'user' ? cursorQuery(text) : text, iso(obj.timestamp), maxChars)
 }
 
 /** The newest `limit` messages among these lines (file order in, file order out). */

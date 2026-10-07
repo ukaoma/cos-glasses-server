@@ -68,7 +68,7 @@ const mutations = [
   ['query-code-points', SEARCH, 'export function queryLength(query: string): number { return [...query].length }', 'export function queryLength(query: string): number { return query.length }'],
   // QA S-N (5): search is read-only, outside the mutation lease.
   ['search-skips-mutation-lease', INDEX, '  if (isReadOnlyApiPost(req.method, req.path)) return next()\n', ''],
-  ['read-only-post-exact', SEARCH, "return method === 'POST' && path === '/work/search'", "return path.startsWith('/work')"],
+  ['read-only-post-exact', SEARCH, "return method === 'POST' && READ_ONLY_API_POSTS.has(path)", "return path.startsWith('/work')"],
   // Cache.
   ['cache-ten-minutes', SEARCH, 'if (hit && this.now() - hit.at < WORK_SEARCH_LIMITS.cacheMs) {', 'if (hit) {'],
   ['cache-keyed-by-cards', SEARCH, "normalizeQuery(query) + '\\0' + set", 'normalizeQuery(query)'],

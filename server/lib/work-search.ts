@@ -116,9 +116,14 @@ export function searchOptionText(text: string): string {
  * board and asks Jev one question; it writes nothing but its own token ledger (one atomic write). Under the lease, a
  * drain for an update or restart would wait up to 20 s (the Jev timeout) for a search, and a drain would answer every
  * search 503. Outside it, a restart mid-search loses at most that search's token count.
+ *
+ * 6.66.0: POST /work-board/evidence-check (lib/work-evidence.ts) for the same reasons. It reads the board, transcripts,
+ * linked meetings, the Slack cache and public pages, and writes only its own token ledger; under the lease a drain
+ * would wait for its page fetches (5 s each) and its Jev call (20 s).
  */
+const READ_ONLY_API_POSTS: ReadonlySet<string> = new Set(['/work/search', '/work-board/evidence-check'])
 export function isReadOnlyApiPost(method: string, path: string): boolean {
-  return method === 'POST' && path === '/work/search'
+  return method === 'POST' && READ_ONLY_API_POSTS.has(path)
 }
 
 /** A query's length as people count it: code points, not UTF-16 units, so 150 emoji are 150 (Control counts characters). */
