@@ -1,3 +1,22 @@
+## 6.64.0 — 2026-10-06 — Meeting context keys
+
+- Meeting rows and details carry `contextKeys`, `contextSupported`, and, when files can't be added, `contextReason` (plus `contextAmbiguous`). The fields are additive and read-only. They are the keys COS Control 0.5.258 files a meeting's dropped screenshots, slides and documents under, so the files go to every Work card linked to the meeting.
+  - The keys are read from ids the meeting already carries: `g2:<sessionId>` from its `.g2-chunks.json` (or the server's own recordings copy), `ff:<id>` from its `.fireflies.json` (the top-level id, in the first 4 KB), then `g2:<id>` for every `<!-- g2-session -->` it declares.
+  - Nothing is written into a meeting. Identity is an exact id, never a title or a date.
+  - Two live meetings whose own sidecars give the same primary key are `ambiguous`. A merged scribe that only declares its captures never counts as a second claimant, so a merge whose captures are not yet retired is not ambiguous.
+  - Files also can't be added to:
+    - an iCloud conflict copy (`conflict_copy`);
+    - a meeting with no source id (`no_source_id`);
+    - an imported, re-derived or direct-library record (`read_only_record`).
+  - A standalone recording is keyed by its session, and its detail keeps its old shape (no `librarySource`).
+- `GET /api/meetings/context-keys?recordId=…` (1 to 50 ids, read-only) answers the keys behind a Work card's saved meeting links.
+  - A `standalone:` id gives its session.
+  - An `ops:` id is found at its path, after the G2 rename (same month, by the date and time in the filename), or under the same name in another domain of the same month.
+  - Two candidates give no answer.
+  - Control asks before each send, so a card finds the files whichever record id it was linked under.
+- The primary-key index reads only sidecar heads (4 KB), never a meeting body. It is rebuilt per month when that folder changes, and at least once a minute. Measured on 2026-10-06: 649 of 656 meetings from August to October carry a key; an earlier build of the index, which also read meeting bodies, took 376 ms cold and 1 ms warm over the whole tree on the author's Mac (a read-only scratch script).
+- Pairs with COS Control 0.5.258. Older clients ignore the fields.
+
 ## 6.63.1 — 2026-10-06 — Weather survives a restart
 
 - Home weather survives a server restart. The last good weather and place are kept in `<data>/welcome-weather.json`; when a forecast lookup fails (timeout, HTTP error, bad payload), the route answers with that saved weather if it is under 3 hours old, never older. A failed forecast or place lookup is now logged once per kind per 10 minutes, with the cause and whether a saved weather was served. Before, after a restart the first failed lookup sent the glasses no weather and nothing said why. Pairs with glasses 6.10.603, which also retries on Home and keeps its own last good weather.

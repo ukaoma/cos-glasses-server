@@ -477,3 +477,67 @@ describe('meetings list with imports and derived records', () => {
     }
   })
 })
+
+// 6.64.0 context keys on every layout. The operations tree keys its own rows (meeting-context-keys.test.ts); this pins
+// what the ROUTE adds: a standalone recording is keyed by its session, an import, a direct-library meeting and a
+// re-derived record are read-only, and a standalone detail keeps its pinned shape (no librarySource).
+describe('meeting context keys on every source (6.64.0)', () => {
+  it('keys a standalone recording by its session, list and detail alike', async () => {
+    const h = setup({ layout: 'standalone' })
+    const filename = `${DATE}_Launch_Review_G2.md`
+    writeCapture(h.storeMonthDir, filename, SESSION, 'Launch review (G2)')
+    const api = await serve(h.store, h.library)
+    const row = (await api('/api/meetings?limit=50&domain=all')).json.meetings[0]
+    expect(row).toMatchObject({ librarySource: 'standalone_recordings', contextKeys: [`g2:${SESSION}`], contextSupported: true })
+    const detail = (await api(`/api/meetings/personal/${MONTH}/${filename}`)).json
+    expect(detail).toMatchObject({ contextKeys: [`g2:${SESSION}`], contextSupported: true })
+    expect(detail.librarySource).toBeUndefined()
+  })
+
+  it('an import and a merged (blended) record are read-only', async () => {
+    const h = setup({ layout: 'standalone' })
+    writeCapture(h.storeMonthDir, `${DATE}_Launch_Review_G2.md`, SESSION, 'Launch review (G2)')
+    writeImportAndMerge(h.library, [SESSION], dateMs)
+    const api = await serve(h.store, h.library)
+    let readOnly = 0
+    for (const row of (await api('/api/meetings?limit=50&domain=all')).json.meetings) {
+      if (row.librarySource === 'standalone_recordings') continue
+      expect(row).toMatchObject({ contextKeys: [], contextSupported: false, contextReason: 'read_only_record' })
+      readOnly++
+    }
+    expect(readOnly).toBeGreaterThan(0)
+    const filename = importedFilename('merged', DATE, mergedHash(FIREFLIES_ID, [SESSION]))
+    expect((await api(`/api/meetings/imported/${MONTH}/${filename}`)).json).toMatchObject({ contextSupported: false, contextReason: 'read_only_record' })
+  })
+
+  it('a direct-library meeting is read-only; an operations meeting keeps the keys the tree gave it', async () => {
+    const direct = setup({ layout: 'direct' })
+    writeCapture(direct.directMonthDir, `${DATE}_Direct_G2.md`, SECOND_SESSION, 'Direct')
+    const api = await serve(direct.store, direct.library)
+    const row = (await api('/api/meetings?limit=50&domain=all')).json.meetings.find((m: any) => m.librarySource === 'direct_library')
+    expect(row).toMatchObject({ contextKeys: [], contextSupported: false, contextReason: 'read_only_record' })
+
+    const ops = setup({ layout: 'multi_domain', pipeline: true })
+    writeCapture(ops.operationsMonthDir, `${DATE}_Ops_G2.md`, SESSION, 'Ops')
+    const opsApi = await serve(ops.store, ops.library)
+    const opsRow = (await opsApi('/api/meetings?limit=50&domain=all')).json.meetings[0]
+    expect(opsRow).toMatchObject({ librarySource: 'cos_operations', contextKeys: [`g2:${SESSION}`], contextSupported: true })
+    expect((await opsApi(`/api/meetings/detail?domain=personal&month=${MONTH}&filename=${DATE}_Ops_G2.md`)).json.contextKeys).toEqual([`g2:${SESSION}`])
+  })
+})
+
+describe('GET /api/meetings/context-keys (6.64.0)', () => {
+  it('answers each record id, and refuses none or more than fifty', async () => {
+    const h = setup({ layout: 'multi_domain', pipeline: true })
+    writeCapture(h.operationsMonthDir, `${DATE}_Ops_G2.md`, SESSION, 'Ops')
+    const api = await serve(h.store, h.library)
+    const ok = await api(`/api/meetings/context-keys?recordId=${encodeURIComponent(`ops:personal:${MONTH}:${DATE}_Ops_G2.md`)}&recordId=${encodeURIComponent(`standalone:${SECOND_SESSION}`)}&recordId=imported%3Afireflies%3Aabc`)
+    expect(ok.status).toBe(200)
+    expect(ok.json.keys[`ops:personal:${MONTH}:${DATE}_Ops_G2.md`]).toEqual({ contextKeys: [`g2:${SESSION}`], contextSupported: true })
+    expect(ok.json.keys[`standalone:${SECOND_SESSION}`].contextKeys).toEqual([`g2:${SECOND_SESSION}`])
+    expect(ok.json.keys['imported:fireflies:abc'].contextReason).toBe('read_only_record')
+    expect((await api('/api/meetings/context-keys')).status).toBe(400)
+    const many = Array.from({ length: 51 }, (_, i) => `recordId=standalone%3Ameeting_${i}xx`).join('&')
+    expect((await api(`/api/meetings/context-keys?${many}`)).status).toBe(400)
+  })
+})

@@ -10,11 +10,13 @@ import {
   listDirectLibraryMeetingMonths,
   listCosOperationsMeetings,
   listCosOperationsMeetingMonths,
+  meetingContextForRecord,
   resolveMeetingLibrary,
 } from '../lib/cos-operations-meetings.js'
 import type { MeetingMeta, MeetingDetail } from '../lib/meeting-store.js'
 import { meetingListLimit } from '../lib/meeting-store.js'
 import { searchMeetingLibrary } from '../lib/meeting-library-search.js'
+import { meetingContextFields, meetingContextKeys, readOnlyContext } from '../lib/meeting-context-keys.js'
 import { g2RecordingsReachOperations } from '../lib/g2-ops-handoff.js'
 import {
   type ImportedMeetingLibrary,
@@ -55,6 +57,19 @@ function withStandaloneIdentity(meeting: MeetingMeta): MeetingMeta {
     recordId: `standalone:${meeting.sessionId || `${meeting.domain}:${meeting.month}:${meeting.filename}`}`,
     mutable: true,
   }
+}
+
+/**
+ * 6.64.0 context keys for a row or detail the operations tree did not key. A standalone recording is keyed by its own
+ * session (it is a capture this server holds); a direct library, an import and a re-derived record are read-only here.
+ * A row the operations tree keyed already carries its fields and is left alone.
+ */
+export function withMeetingContext<T extends MeetingMeta>(meeting: T, source: MeetingMeta['librarySource'] = meeting.librarySource): T {
+  if (meeting.contextKeys !== undefined) return meeting
+  if (source === 'standalone_recordings') {
+    return { ...meeting, ...meetingContextFields(meetingContextKeys({ g2SessionId: meeting.sessionId })) }
+  }
+  return { ...meeting, ...readOnlyContext() }
 }
 
 function mergeMeetingSources(groups: MeetingMeta[][], limit: number, max = 50): MeetingMeta[] {
@@ -187,6 +202,22 @@ export function resolveSavedMeetingDetail(
   return { ...detail, recordId: withStandaloneIdentity(detail).recordId }
 }
 
+/** The detail the routes answer with: `resolveSavedMeetingDetail` plus its 6.64.0 context keys. */
+function savedMeetingDetailWithContext(
+  descriptor: { domain: string; month: string; filename: string },
+  store: MeetingStore,
+  importsLibrary: ImportedMeetingLibrary,
+): MeetingDetail {
+  const detail = resolveSavedMeetingDetail(descriptor, store, importsLibrary)
+  // The store's detail carries no librarySource (a pinned contract); the identity above made its recordId `standalone:`.
+  const source = detail.librarySource ?? (detail.recordId?.startsWith('standalone:') ? 'standalone_recordings' : undefined)
+  if (source === 'standalone_recordings' && detail.contextKeys === undefined) {
+    const sessionId = detail.sessionId || store.storedSessionId(descriptor.month, detail.filename || descriptor.filename)
+    return { ...detail, ...meetingContextFields(meetingContextKeys({ g2SessionId: sessionId })) }
+  }
+  return withMeetingContext(detail, source)
+}
+
 export function createMeetingsRouter(
   store: MeetingStore = getMeetingStore(),
   // Injectable so a test can drive a whole imports library without reaching the
@@ -255,7 +286,7 @@ export function createMeetingsRouter(
           ? supersededDayCounts(filters.month, 'direct', { domain, store, library: importsLibrary })
           : []
         res.json({
-          meetings,
+          meetings: meetings.map(meeting => withMeetingContext(meeting)),
           months,
           days,
           source: operations.length > 0 || imported.present ? 'mixed_library' : 'direct_library',
@@ -288,7 +319,7 @@ export function createMeetingsRouter(
           // back above the row. A capped page pays for the scan instead.
           const listSawWholeMonth = rows.length < limit
           res.json({
-            meetings,
+            meetings: meetings.map(meeting => withMeetingContext(meeting)),
             months: listCosOperationsMeetingMonths(domain),
             // The rows above already read every scribe in this month and told us which
             // sessions the merged ones hold. Handing that over is the difference between
@@ -329,7 +360,7 @@ export function createMeetingsRouter(
           ? supersededDayCounts(filters.month, 'multi_domain', { domain, store, library: importsLibrary, pipeline: false })
           : []
         res.json({
-          meetings,
+          meetings: meetings.map(meeting => withMeetingContext(meeting)),
           months: uniqueSortedMonths([
             listCosOperationsMeetingMonths(domain),
             store.listMonths(),
@@ -359,13 +390,33 @@ export function createMeetingsRouter(
         imported.drop(imported.imports),
       ], limit, sourceLimit)
       res.json({
-        meetings,
+        meetings: meetings.map(meeting => withMeetingContext(meeting)),
         months: uniqueSortedMonths([store.listMonths(), importedLibraryMonths(importsLibrary)]),
         days: filters.month ? supersededDayCounts(filters.month, 'standalone', { domain, store, library: importsLibrary }) : [],
         source: imported.present ? 'mixed_library' : 'standalone_recordings',
         layout: 'standalone',
         meetingCount: meetings.length,
       })
+    } catch (error) {
+      sendMeetingStoreError(res, error)
+    }
+  })
+
+  // 6.64.0: the context keys behind a Work card's saved meeting links, by record id (at most 50 per call). Read-only and
+  // body-free: COS Control asks for every link a card carries, so a card finds the files dropped on its meetings
+  // whichever record id it was linked under (`meetingContextForRecord`).
+  router.get('/meetings/context-keys', (req, res) => {
+    const raw = req.query.recordId
+    const ids = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).filter((id): id is string => typeof id === 'string')
+    if (ids.length === 0 || ids.length > 50 || ids.some(id => id.length === 0 || id.length > 2048 || /[\u0000-\u001f]/.test(id))) {
+      res.status(400).json({ error: 'one to fifty recordId values are required', reason: 'invalid_record_ids' })
+      return
+    }
+    res.set('Cache-Control', 'private, no-store')
+    try {
+      const keys: Record<string, ReturnType<typeof meetingContextForRecord>> = {}
+      for (const id of [...new Set(ids)]) keys[id] = meetingContextForRecord(id)
+      res.json({ keys })
     } catch (error) {
       sendMeetingStoreError(res, error)
     }
@@ -406,7 +457,7 @@ export function createMeetingsRouter(
       }
       res.set('Cache-Control', 'private, no-store')
 
-      res.json(resolveSavedMeetingDetail({ domain, month, filename }, store, importsLibrary))
+      res.json(savedMeetingDetailWithContext({ domain, month, filename }, store, importsLibrary))
     } catch (error) {
       sendMeetingStoreError(res, error)
     }
@@ -418,7 +469,7 @@ export function createMeetingsRouter(
     try {
       res.set('Cache-Control', 'private, no-store')
 
-      res.json(resolveSavedMeetingDetail({ domain: String(req.params.domain), month: String(req.params.month), filename: String(req.params.filename) }, store, importsLibrary))
+      res.json(savedMeetingDetailWithContext({ domain: String(req.params.domain), month: String(req.params.month), filename: String(req.params.filename) }, store, importsLibrary))
     } catch (error) {
       sendMeetingStoreError(res, error)
     }

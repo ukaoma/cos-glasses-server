@@ -212,6 +212,23 @@ through that stamp, and the merged scribe declares its sessions with
 orphan sidecar. What does not happen is the merged transcript's speaker LABELS
 changing retroactively from a later voice match.
 
+### Context keys (6.64.0)
+
+Every row and every detail also carries `contextKeys: string[]` (first is the primary), `contextSupported: boolean`, and,
+when files cannot be added, `contextReason`: `no_source_id`, `read_only_record`, `conflict_copy` or `ambiguous`
+(`contextAmbiguous: true`). The keys come from the meeting's own ids and are never written into it:
+
+| Source | Key |
+|---|---|
+| `.g2-chunks.json` beside the meeting (or the server's recordings copy by the same stem) | `g2:<sessionId>` |
+| `.fireflies.json` beside the meeting (top-level `id`, first 4 KB) | `ff:<id>` |
+| each `<!-- g2-session: <id> -->` in the meeting | `g2:<id>` |
+
+Imported, blended and direct-library records are `read_only_record`. A standalone recording is `g2:<sessionId>`.
+Two live operations meetings whose primary key is the same are both `ambiguous`; month folders are matched strictly and
+iCloud conflict copies never count. COS Control files a meeting's dropped files under these keys
+(`~/cos-data/meeting-context`, Control 0.5.258).
+
 ## Detail
 
 `GET /api/meetings/:domain/:month/:filename` and `GET /api/meetings/detail`

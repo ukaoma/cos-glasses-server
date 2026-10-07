@@ -136,6 +136,16 @@ export interface MeetingMeta {
   sources?: Array<{ kind: 'g2' | 'fireflies'; id: string; recordId?: string }>
   /** Present only when the server can state a truthful local record. */
   canonicalRecord?: string
+  /** 6.64.0, additive and read-only. The keys COS Control files a meeting's dropped files under, from source ids the
+   *  meeting already carries (`g2:<sessionId>`, `ff:<firefliesId>`, then every `<!-- g2-session -->` it declares).
+   *  First = primary. Never computed from a title or a date, and nothing is written into the meeting. See
+   *  `meeting-context-keys.ts`. */
+  contextKeys?: string[]
+  /** False when files cannot be added here: a re-derived or read-only record, a conflict copy, a meeting with no
+   *  source id, or two meetings claiming one key. `contextReason` says which. */
+  contextSupported?: boolean
+  contextAmbiguous?: boolean
+  contextReason?: 'no_source_id' | 'read_only_record' | 'conflict_copy' | 'ambiguous'
   /** Additive. Unique sidecar speakers + whether a human correction landed. */
   voiceReview?: {
     voices: number
@@ -577,6 +587,18 @@ export class MeetingStore {
     const detail = parseMeeting(content, filename, month)
     if (detail.domain !== domain) throw new MeetingStoreError('Meeting not found', 404, 'meeting_not_found')
     return detail
+  }
+
+  /** 6.64.0: the session in a stored recording's sidecar, for its context key only. The detail itself keeps its shape
+   *  (no sessionId, its recordId unchanged). Undefined when the month, the file or the sidecar is not readable. */
+  storedSessionId(month: string, filename: string): string | undefined {
+    if (!MONTH_PATTERN.test(month) || !SAFE_FILENAME_PATTERN.test(filename) || basename(filename) !== filename) return undefined
+    const rootReal = this.rootRealpath()
+    if (!rootReal) return undefined
+    const monthDir = join(this.root, month)
+    const monthReal = safeDirectoryRealpath(monthDir, rootReal)
+    if (!monthReal) return undefined
+    return this.sidecarSessionId(monthDir, monthReal, filename)
   }
 
   private rootRealpath(): string | null {

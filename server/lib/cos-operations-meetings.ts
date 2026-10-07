@@ -20,6 +20,7 @@ import type { MeetingDetail, MeetingMeta } from './meeting-store.js'
 import { MEETING_SOURCE_MAX_BYTES, meetingDayCountsFromNames, meetingListLimit } from './meeting-store.js'
 import { meetingVoiceReview, parseSidecarListHead } from './meeting-voice-review.js'
 import { dataPath } from './data-dir.js'
+import { firefliesSidecarId, meetingContextFields, meetingContextKeys, type MeetingContextFields } from './meeting-context-keys.js'
 
 /**
  * The four domains of ONE user's COS. Retained as the documented example layout
@@ -743,6 +744,102 @@ export function resolveMergedScribe(
   return { status: 'resolved', ...only, path, content }
 }
 
+// ── Meeting context keys (6.64.0) ───────────────────────────────────────────
+//
+// What a meeting's dropped files are filed under in COS Control. See `meeting-context-keys.ts` for why the key is read
+// from source ids and never written. Two live meetings with the same PRIMARY key are ambiguous, so the list and the
+// detail both need to know how many meetings claim each primary key across every domain: that index is kept per month
+// folder and recomputed only when the folder's own stamp moves (every writer of meetings renames into place, so a new or
+// renamed meeting moves it). A warm read is one stat per month folder.
+
+/** The ordered keys for one canonical meeting, from what sits beside it and what it declares. */
+function meetingKeysFor(monthDir: string, filename: string, content: string | null, recordingsRoot: string | null, month: string): string[] {
+  let sessionId = sidecarListHints(monthDir, filename).sessionId
+  if (!sessionId && recordingsRoot) {
+    const fallbackDir = join(recordingsRoot, month)
+    if (existsSync(fallbackDir)) sessionId = sidecarListHints(fallbackDir, filename).sessionId
+  }
+  const firefliesId = firefliesSidecarId(monthDir, filename)
+  // The file is read for its markers only when neither sidecar names it: the primary key is then the first it declares.
+  let declared: string[] = []
+  if (content !== null) declared = mergedScribeSessions(content)
+  else if (!sessionId && !firefliesId) {
+    try { declared = mergedScribeSessions(readFileSync(join(monthDir, filename), 'utf-8')) } catch { declared = [] }
+  }
+  return meetingContextKeys({ g2SessionId: sessionId, firefliesId, declared })
+}
+
+interface PrimaryKeyMonth { stamp: string; primaries: string[]; builtAt: number }
+const primaryKeyCache = new Map<string, PrimaryKeyMonth>()
+let primaryKeyReads = 0
+/** A month is re-read at least this often even when its folder's stamp has not moved: a sidecar rewritten in place
+ *  leaves the folder alone (QA 2026-10-06). One month re-read costs about 3 ms. */
+const PRIMARY_KEY_MAX_AGE_MS = 60_000
+
+/** The primary key a meeting's OWN sidecars give it, or undefined. A meeting that only declares `<!-- g2-session -->`
+ *  markers (a merged scribe with no sidecar) claims nothing here: it holds those captures, and counting it would make
+ *  every merge whose captures are not yet retired read as two meetings fighting over one key (QA 2026-10-06). It also
+ *  means the index never reads a meeting body, so a cold build costs 4 KB heads only. */
+function sidecarPrimaryKey(monthDir: string, filename: string, recordingsRoot: string | null, month: string): string | undefined {
+  let sessionId = sidecarListHints(monthDir, filename).sessionId
+  if (!sessionId && recordingsRoot) {
+    const fallbackDir = join(recordingsRoot, month)
+    if (existsSync(fallbackDir)) sessionId = sidecarListHints(fallbackDir, filename).sessionId
+  }
+  return meetingContextKeys({ g2SessionId: sessionId, firefliesId: firefliesSidecarId(monthDir, filename) })[0]
+}
+
+/** How many live, canonical meetings take each key as their PRIMARY key from their own sidecars, across every domain. */
+export function meetingPrimaryKeyClaims(operationsDir: string, recordingsRoot: string | null = dataPath('recordings')): Map<string, number> {
+  const claims = new Map<string, number>()
+  for (const domain of discoverMeetingDomains(operationsDir)) {
+    const meetingsBase = join(operationsDir, domain, 'meetings')
+    let months: string[]
+    try { months = readdirSync(meetingsBase).filter(name => MONTH_PATTERN.test(name)) } catch { continue }
+    for (const month of months) {
+      const monthDir = join(meetingsBase, month)
+      let stamp: string
+      try { stamp = statStamp(statSync(monthDir)) } catch { primaryKeyCache.delete(monthDir); continue }
+      let entry = primaryKeyCache.get(monthDir)
+      if (!entry || entry.stamp !== stamp || Date.now() - entry.builtAt > PRIMARY_KEY_MAX_AGE_MS) {
+        let names: string[] = []
+        try {
+          names = readdirSync(monthDir).filter(name => name.endsWith('.md') && !ICLOUD_CONFLICT_COPY.test(name)).slice(0, MAX_LIST_CANDIDATES)
+        } catch { names = [] }
+        const primaries: string[] = []
+        for (const name of names) {
+          primaryKeyReads++
+          const key = sidecarPrimaryKey(monthDir, name, recordingsRoot, month)
+          if (key) primaries.push(key)
+        }
+        entry = { stamp, primaries, builtAt: Date.now() }
+        primaryKeyCache.set(monthDir, entry)
+      }
+      for (const key of entry.primaries) claims.set(key, (claims.get(key) ?? 0) + 1)
+    }
+  }
+  return claims
+}
+
+/** Diagnostics and the cost tests. */
+export function meetingPrimaryKeyCacheStats(): { months: number; reads: number } {
+  return { months: primaryKeyCache.size, reads: primaryKeyReads }
+}
+export function resetMeetingPrimaryKeyCache(): void {
+  primaryKeyCache.clear()
+  primaryKeyReads = 0
+}
+
+/** A meeting's context fields, given its keys and the claims index. The index counts meetings whose OWN sidecar gives
+ *  the key; a markers-only scribe is not in it, so beside its one live capture it reads 1 (fine), and beside two live
+ *  copies of that capture it reads 2: its key is contested, so it is ambiguous too. */
+function contextFieldsFor(filename: string, keys: string[], claims: Map<string, number>): MeetingContextFields {
+  return meetingContextFields(keys, {
+    conflictCopy: ICLOUD_CONFLICT_COPY.test(filename),
+    claimants: keys.length > 0 ? claims.get(keys[0]) ?? 1 : 1,
+  })
+}
+
 export type MeetingLibraryRecord = NonNullable<ReturnType<typeof findCosOperationsMeetingBySessionId>> & {
   recordId?: string
   librarySource?: 'direct_library' | 'cos_operations'
@@ -799,6 +896,7 @@ export function listCosOperationsMeetings(options: {
     : discovered.includes(domainFilter) ? [domainFilter] : []
 
   const allMeetings: CosOperationsMeetingMeta[] = []
+  let claims: Map<string, number> | undefined
 
   for (const domain of domains) {
     const meetingsBase = join(operationsDir, domain, 'meetings')
@@ -857,6 +955,11 @@ export function listCosOperationsMeetings(options: {
                 if (actionId) meta.actionId = actionId
               }
               if (options.day && meta.date !== options.day) continue
+              // 6.64.0: the keys this meeting's dropped files are filed under, from the ids just read (no extra read but
+              // the Fireflies sidecar's 4 KB head).
+              const firefliesId = firefliesSidecarId(monthDir, file)
+              const keys = meetingContextKeys({ g2SessionId: hints.sessionId, firefliesId, declared })
+              Object.assign(meta, contextFieldsFor(file, keys, claims ??= meetingPrimaryKeyClaims(operationsDir, recordingsRoot)))
               allMeetings.push(meta)
             } catch { /* skip unreadable files */ }
           }
@@ -1013,9 +1116,14 @@ export function getCosOperationsMeetingDetail(
   meta.mutable = true
   meta.canonicalRecord = `operations/${domain}/meetings/${month}/${resolvedFilename}`
   const source = boundedMeetingSource(content)
+  // 6.64.0: the same keys the list row carries, so Control files a drop from either surface under one key.
+  const recordingsRoot = dataPath('recordings')
+  const keys = meetingKeysFor(monthDir, resolvedFilename, content, recordingsRoot, month)
+  const context = contextFieldsFor(resolvedFilename, keys, meetingPrimaryKeyClaims(operationsDir, recordingsRoot))
 
   return {
     ...meta,
+    ...context,
     summary: extractSummary(content),
     topics: extractTopics(content),
     decisions: extractDecisions(content),
@@ -1024,6 +1132,73 @@ export function getCosOperationsMeetingDetail(
     transcript: content,
     ...source,
   }
+}
+
+/**
+ * 6.64.0: the context keys a Work card's saved meeting link answers to, without reading the meeting's body.
+ *
+ * WHY. A card links a meeting by record id, and a meeting's record id changes over its life: a fresh capture is
+ * `standalone:<sessionId>`, sync files it as `ops:<domain>:<month>:<file>`, the G2 enrichment renames the file, and a
+ * refile moves it to another domain. The files Miles dropped are filed under the meeting's KEY, which does not change.
+ * COS Control asks here for the keys of every link a card carries, so a card finds its meetings' files whichever record
+ * id it was linked under (QA, 2026-10-06).
+ *
+ * Exact ids only, as everywhere in this module: a `standalone:` id names its session; an `ops:` id is found at its own
+ * path, then by the rename rule the detail route already uses (the date and time in a G2 filename, in the same month),
+ * then by the SAME filename in another domain of the same month (a domain move keeps the name). Two candidates are no
+ * answer. Imported, re-derived and direct-library records are read-only.
+ */
+export function meetingContextForRecord(recordId: string, recordingsRoot: string | null = dataPath('recordings')): MeetingContextFields & { resolvedRecordId?: string } {
+  const standalone = /^standalone:([A-Za-z0-9_-]{3,96})$/.exec(recordId)
+  const operationsDir = resolveCosOperationsDir()
+  if (standalone) {
+    // A capture two operations meetings both carry is contested here too (QA round 2, N3).
+    const keys = meetingContextKeys({ g2SessionId: standalone[1] })
+    const claimants = operationsDir && keys.length > 0 ? meetingPrimaryKeyClaims(operationsDir, recordingsRoot).get(keys[0]) ?? 1 : 1
+    return meetingContextFields(keys, { claimants })
+  }
+  const ops = /^ops:([^:/\\]+):(\d{4}-\d{2}):([^/\\]+\.md)$/.exec(recordId)
+  if (!ops || !operationsDir) return { contextKeys: [], contextSupported: false, contextReason: 'read_only_record' }
+  const [, domain, month, filename] = ops
+  const domains = discoverMeetingDomains(operationsDir)
+  if (!safeName(domain) || !MONTH_PATTERN.test(month) || basename(filename) !== filename) {
+    return { contextKeys: [], contextSupported: false, contextReason: 'no_source_id' }
+  }
+  const at = (d: string, f: string) => join(operationsDir, d, 'meetings', month, f)
+  const isFile = (path: string) => { try { return statSync(path).isFile() } catch { return false } }
+  let found: { domain: string; filename: string } | null = domains.includes(domain) && isFile(at(domain, filename)) ? { domain, filename } : null
+  if (!found) {
+    const heads = (d: string) => {
+      try {
+        return readdirSync(join(operationsDir, d, 'meetings', month))
+          .filter(name => name.endsWith('.md') && !ICLOUD_CONFLICT_COPY.test(name))
+          .slice(0, MAX_LIST_CANDIDATES)
+          .map(name => ({ filename: name, content: safeRegularFile(realpathSync(join(operationsDir, d, 'meetings', month)), join(operationsDir, d, 'meetings', month, name), 4_000) ?? '' }))
+      } catch { return [] }
+    }
+    // Renamed in its own domain, then the same name in another domain, then renamed in another domain: one answer only.
+    const ownRename = domains.includes(domain) ? matchRenamedMeetingFilename(filename, heads(domain)) : undefined
+    if (ownRename) found = { domain, filename: ownRename }
+    else {
+      const sameName = domains.filter(d => d !== domain && isFile(at(d, filename)))
+      if (sameName.length === 1) found = { domain: sameName[0], filename }
+      else if (sameName.length === 0) {
+        const renamed = domains.filter(d => d !== domain)
+          .map(d => ({ domain: d, filename: matchRenamedMeetingFilename(filename, heads(d)) }))
+          .filter((hit): hit is { domain: string; filename: string } => Boolean(hit.filename))
+        if (renamed.length === 1) found = renamed[0]
+      }
+    }
+  }
+  if (!found) return { contextKeys: [], contextSupported: false, contextReason: 'no_source_id' }
+  const monthDir = join(operationsDir, found.domain, 'meetings', month)
+  // The same keys the row and the detail carry: the markers too, so the file is read (as the detail reads it).
+  let content: string | null = null
+  try { content = readFileSync(join(monthDir, found.filename), 'utf-8') } catch { content = null }
+  const keys = meetingKeysFor(monthDir, found.filename, content, recordingsRoot, month)
+  const fields = contextFieldsFor(found.filename, keys, meetingPrimaryKeyClaims(operationsDir, recordingsRoot))
+  const resolved = `ops:${found.domain}:${month}:${found.filename}`
+  return resolved === recordId ? fields : { ...fields, resolvedRecordId: resolved }
 }
 
 export function getDirectLibraryMeetingDetail(month: string, filename: string): MeetingDetail | null {
