@@ -22,7 +22,7 @@
 import express from 'express'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from 'vitest'
 import { defaultPidStartProbe } from '../lib/fence-liveness.js'
@@ -66,6 +66,7 @@ import { fallbackContinueNote } from '../lib/continue-plan.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
+import { describeG2Turn, g2TurnFooter, G2TurnLedger, G2TurnProvenance, stripG2TurnFooter, turnTextSha256 } from '../lib/g2-turn-provenance.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -4923,5 +4924,182 @@ describe('fork job ledger', () => {
     const ledger = new ForkJobLedger('a', { load: () => rows, save: () => {} })
     expect(ledger.get('cf-ledger-0003')?.state).toBe('running')
     expect(ledger.runningCount()).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// G2 authority Tier 1 (unreleased): every path that hands a session text ledgers the turn,
+// and only a turn from the glasses or the phone carries the verify footer.
+// ---------------------------------------------------------------------------
+
+const G2_LAN_V4 = Object.values(networkInterfaces()).flat().find(e => e && e.family === 'IPv4' && !e.internal)?.address ?? null
+
+describe.skipIf(!G2_LAN_V4)('G2 authority Tier 1: the turn and fork routes', () => {
+  const INSTANCE = 'muytwk3t-lafw'
+  const G2H = { 'x-cos-client-instance': INSTANCE, 'x-cos-client': 'glasses' }
+
+  function g2(paired = true): G2TurnProvenance {
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'g2-prov-')))
+    return new G2TurnProvenance({
+      ledger: new G2TurnLedger(join(dir, 'g2-turn-ledger.jsonl')),
+      pairedInstance: device => (paired && device === G2_LAN_V4 ? INSTANCE : null),
+      // The LAN address stands in for the phone. In the real server it is this Mac's own (and
+      // `originOf` would call it local); here the socket is real and only the list is narrowed.
+      ownAddresses: () => ({ addresses: new Set(['127.0.0.1', '::1']), bridgeSubnets: [] }),
+    })
+  }
+
+  async function startOn(d: AgentSessionBindingsDeps, host: string): Promise<string> {
+    const app = express()
+    app.use(express.json({ limit: '10mb' }))
+    app.use('/api', createAgentSessionBindingsRouter(d))
+    const server = await new Promise<ReturnType<typeof app.listen>>(r => { const l = app.listen(0, host, () => r(l)) })
+    closers.push(() => new Promise<void>((res, rej) => server.close(e => (e ? rej(e) : res()))))
+    return `http://${host}:${(server.address() as AddressInfo).port}`
+  }
+
+  async function postH(base: string, path: string, body: unknown, headers: Record<string, string>): Promise<PostResult> {
+    const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })
+    const text = await res.text()
+    return { status: res.status, body: text ? JSON.parse(text) : null, text }
+  }
+
+  async function turnVia(base: string, clientTurnId: string, headers: Record<string, string>, threadId = SID, provider = 'claude') {
+    const a = provider === 'claude'
+      ? await attached(base, threadId)
+      : await (async () => {
+        const res = await post(base, attachPath(provider, threadId), { cosSessionId: 'cos/chat:42' })
+        return { bindingId: res.body.bindingId, epoch: res.body.epoch, boundTo: res.body.boundTo, targetKey: targetKey(provider as 'codex', threadId) }
+      })()
+    const res = await postH(base, turnsPath(a.bindingId), { prompt: PROMPT, clientTurnId, epoch: a.epoch, targetKey: a.targetKey, boundTo: a.boundTo }, headers)
+    if (res.status === 202) return { res, final: await settled(base, a.bindingId, clientTurnId) }
+    return { res, final: res.body }
+  }
+
+  const footed = (id: string) => `${PROMPT}\n${g2TurnFooter(id)}`
+
+  it('live: a verified G2 turn reaches the session footed, and is ledgered verified with the hash of the words', async () => {
+    const p = g2()
+    const live: Array<{ prompt: string }> = []
+    const base = await startOn(writeDeps({ provenance: p, deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } } }), G2_LAN_V4!)
+    const { res } = await turnVia(base, 'ct-g2-live-0001', G2H)
+    expect(res.status, res.text).toBe(200)
+    expect(live.map(l => l.prompt)).toEqual([footed('ct-g2-live-0001')])
+    const answer = await describeG2Turn(p, 'ct-g2-live-0001', Date.now())
+    expect(answer).toMatchObject({
+      found: true, verifiedOrigin: true, sealed: true, via: 'live', textSha256: turnTextSha256(PROMPT),
+      target: { provider: 'claude', sessionId: SID },
+      origin: { remote: G2_LAN_V4, loopback: false, ownAddress: false, clientInstance: INSTANCE, client: 'glasses' },
+    })
+    // The hash excludes the footer: strip it back and the words hash the same.
+    expect(turnTextSha256(stripG2TurnFooter(live[0].prompt).text)).toBe(answer!.textSha256)
+  })
+
+  it('live: a loopback turn is ledgered local and unverified, and gets no footer whatever it claims', async () => {
+    const p = g2()
+    const live: Array<{ prompt: string }> = []
+    const base = await startOn(writeDeps({ provenance: p, deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } } }), '127.0.0.1')
+    await turnVia(base, 'ct-g2-live-0002', G2H)
+    expect(live.map(l => l.prompt)).toEqual([PROMPT])
+    expect(await describeG2Turn(p, 'ct-g2-live-0002', Date.now())).toMatchObject({
+      verifiedOrigin: false, origin: { loopback: true, client: 'local', clientInstance: INSTANCE },
+    })
+  })
+
+  it('an instance the referee does not know: footed (the app said glasses) but never verified', async () => {
+    const p = g2(false)
+    const live: Array<{ prompt: string }> = []
+    const base = await startOn(writeDeps({ provenance: p, deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } } }), G2_LAN_V4!)
+    await turnVia(base, 'ct-g2-live-0003', G2H)
+    expect(live.map(l => l.prompt)).toEqual([footed('ct-g2-live-0003')])
+    expect(await describeG2Turn(p, 'ct-g2-live-0003', Date.now())).toMatchObject({ verifiedOrigin: false, origin: { client: 'glasses' } })
+  })
+
+  it('live but unverified: the text may be in the session, so it is ledgered', async () => {
+    const p = g2()
+    const base = await startOn(writeDeps({ provenance: p, deliverLiveTurn: async () => ({ ok: false, reason: 'unverified' }) }), G2_LAN_V4!)
+    await turnVia(base, 'ct-g2-live-0004', G2H)
+    expect(await describeG2Turn(p, 'ct-g2-live-0004', Date.now())).toMatchObject({ via: 'live-unverified', verifiedOrigin: true })
+  })
+
+  it('a refusal before any hop ledgers nothing', async () => {
+    const p = g2()
+    let free = true
+    const live: unknown[] = []
+    const base = await startOn(writeDeps({
+      provenance: p,
+      probes: probes({ readFile: () => (free ? FREE_THREAD_RECORD() : JSON.stringify(record())) }),
+      deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } },
+    }), G2_LAN_V4!)
+    const a = await attached(base)
+    free = false
+    const res = await postH(base, turnsPath(a.bindingId), { prompt: PROMPT, clientTurnId: 'ct-g2-none-0001', epoch: a.epoch, targetKey: a.targetKey }, G2H)
+    expect(res.body.reason).toBe('live_desktop_process')
+    expect(live).toHaveLength(0)
+    expect(await describeG2Turn(p, 'ct-g2-none-0001', Date.now())).toBeNull()
+  })
+
+  it('spawn: the child gets the footed prompt, ledgered as spawn', async () => {
+    const p = g2()
+    const spawns: AttachedTurnRequest[] = []
+    const base = await startOn(writeDeps({ provenance: p, deliverAttachedTurn: async req => { spawns.push(req); return { status: 'completed', nativeRevisionAfter: 'native-head-1' } } }), G2_LAN_V4!)
+    const { final } = await turnVia(base, 'ct-g2-spawn-001', G2H)
+    expect(final).toMatchObject({ outcome: 'completed' })
+    expect(spawns.map(s => s.prompt)).toEqual([footed('ct-g2-spawn-001')])
+    expect(await describeG2Turn(p, 'ct-g2-spawn-001', Date.now())).toMatchObject({ via: 'spawn', verifiedOrigin: true })
+  })
+
+  it('codex live: the Codex app queue gets the footed prompt, ledgered as codex-live', async () => {
+    const p = g2()
+    const codex: Array<{ prompt: string }> = []
+    const base = await startOn(writeDeps({
+      provenance: p,
+      probes: probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() - 10 * 60_000 }),
+      deliverCodexLiveTurn: async req => { codex.push(req); return { ok: true, reason: 'delivered', queuedId: 'q-1' } },
+    }), G2_LAN_V4!)
+    const { res } = await turnVia(base, 'ct-g2-codex-001', G2H, CODEX_THREAD, 'codex')
+    expect(res.status, res.text).toBe(200)
+    expect(codex.map(c => c.prompt)).toEqual([footed('ct-g2-codex-001')])
+    expect(await describeG2Turn(p, 'ct-g2-codex-001', Date.now())).toMatchObject({ via: 'codex-live', verifiedOrigin: true, target: { provider: 'codex', sessionId: CODEX_THREAD } })
+  })
+
+  it('a drained turn: a valid carry token restores the parked origin over loopback; a forged one does not', async () => {
+    const p = g2()
+    const live: Array<{ prompt: string }> = []
+    const base = await startOn(writeDeps({ provenance: p, deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } } }), '127.0.0.1')
+    p.noteQueued('claude', SID, 'ct-g2-drain-001', PROMPT, p.originOf({ socket: { remoteAddress: G2_LAN_V4! }, headers: G2H }))
+    const token = p.issueCarry({ provider: 'claude', threadId: SID, clientTurnId: 'ct-g2-drain-001', prompt: PROMPT })!
+    await turnVia(base, 'ct-g2-drain-001', { 'x-cos-turn-carry': token })
+    expect(live.map(l => l.prompt)).toEqual([footed('ct-g2-drain-001')])
+    expect(await describeG2Turn(p, 'ct-g2-drain-001', Date.now())).toMatchObject({ via: 'drain-live', verifiedOrigin: true, origin: { remote: G2_LAN_V4 } })
+  })
+
+  it('a forged carry token is judged by its loopback socket', async () => {
+    const p = g2()
+    const live: Array<{ prompt: string }> = []
+    const base = await startOn(writeDeps({ provenance: p, deliverLiveTurn: async req => { live.push(req); return { ok: true, reason: 'delivered' } } }), '127.0.0.1')
+    await turnVia(base, 'ct-g2-drain-002', { ...G2H, 'x-cos-turn-carry': 'f'.repeat(64) })
+    expect(live.map(l => l.prompt)).toEqual([PROMPT])
+    expect(await describeG2Turn(p, 'ct-g2-drain-002', Date.now())).toMatchObject({ via: 'live', verifiedOrigin: false, origin: { client: 'local' } })
+  })
+
+  it('fork: the copy is handed the footed prompt, ledgered against the source thread', async () => {
+    const p = g2()
+    const forks: Array<{ prompt: string }> = []
+    const base = await startOn(forkDeps({ provenance: p, forkThread: (req: { prompt: string }) => { forks.push(req); return FORK_SUCCESS } }), G2_LAN_V4!)
+    const res = await postH(base, forkPath(), { cosSessionId: 'cos/chat:42', prompt: PROMPT, clientForkId: 'cf-g2-fork-0001' }, G2H)
+    expect(res.status, res.text).toBeLessThan(300)
+    expect(forks.map(f => f.prompt)).toEqual([footed('cf-g2-fork-0001')])
+    expect(await describeG2Turn(p, 'cf-g2-fork-0001', Date.now())).toMatchObject({ via: 'fork', verifiedOrigin: true, target: { provider: 'claude', sessionId: SID, fork: true } })
+  })
+
+  it('fork without a client id: one is minted, and the footer names it', async () => {
+    const p = g2()
+    const forks: Array<{ prompt: string }> = []
+    const base = await startOn(forkDeps({ provenance: p, forkThread: (req: { prompt: string }) => { forks.push(req); return FORK_SUCCESS } }), G2_LAN_V4!)
+    await postH(base, forkPath(), { cosSessionId: 'cos/chat:42', prompt: PROMPT }, G2H)
+    const id = stripG2TurnFooter(forks[0].prompt).turnId
+    expect(id).toMatch(/^fork-[0-9a-f]{24}$/)
+    expect(await describeG2Turn(p, id!, Date.now())).toMatchObject({ via: 'fork', verifiedOrigin: true })
   })
 })

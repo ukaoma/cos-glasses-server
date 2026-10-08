@@ -27,6 +27,7 @@
 import { request } from 'node:http'
 import type { QueuedThreadTurn } from './thread-turn-queue.js'
 import { targetKey } from './agent-session-binding-store.js'
+import { TURN_CARRY_HEADER } from './g2-turn-provenance.js'
 
 /** Per-request ceiling. Attach and turn both answer immediately; the turn route
  *  admits with 202 and does the long work in the background. */
@@ -77,6 +78,12 @@ export async function deliverQueuedTurnOverLoopback(
   turn: QueuedThreadTurn,
   port: number,
   token: string,
+  /**
+   * G2 authority Tier 1, optional: a single-use token that carries this turn's parked origin
+   * across the hop (`G2TurnProvenance.issueCarry`). Null or absent: the turn route judges the
+   * hop by its own loopback socket, which is local.
+   */
+  carry?: (turn: QueuedThreadTurn) => string | null,
 ): Promise<{ ok: boolean; reason?: string; serverRetryable?: boolean }> {
   // 6.62.0 /qa (Q3): repeat the parking client's acknowledgement, and only that.
   const noteHeaders: Record<string, string> = turn.continueNoteAck === true ? { 'X-COS-Continue-Note': '1' } : {}
@@ -111,6 +118,8 @@ export async function deliverQueuedTurnOverLoopback(
     const epoch = typeof attach.body.epoch === 'number' && Number.isInteger(attach.body.epoch) && attach.body.epoch >= 1 ? attach.body.epoch : null
     if (epoch === null) return { ok: false, reason: 'attach_no_epoch' }
     const boundTo = typeof attach.body.boundTo === 'string' ? attach.body.boundTo : undefined
+    let carryToken: string | null = null
+    try { carryToken = carry ? carry(turn) : null } catch { carryToken = null }
     const sent = await post(
       port, token,
       `/api/agent-sessions/bindings/${encodeURIComponent(bindingId)}/turns`,
@@ -121,7 +130,7 @@ export async function deliverQueuedTurnOverLoopback(
         targetKey: targetKey(turn.provider, turn.threadId),
         ...(boundTo ? { boundTo } : {}),
       },
-      noteHeaders,
+      carryToken ? { ...noteHeaders, [TURN_CARRY_HEADER]: carryToken } : noteHeaders,
     )
     if (sent.status === 202 || sent.status === 200) return { ok: true }
     // Same defect on the turn leg: `refuseTurn` emits `reason`/`reasonCopy`/`retryable`

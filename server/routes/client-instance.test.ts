@@ -136,7 +136,10 @@ describe('mounting', () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN))")
-    const mount = index.indexOf("app.use('/api', createClientInstanceRouter())")
+    // G2 authority Tier 1: the owner map is shared with the turn provenance.
+    const mount = index.indexOf("app.use('/api', createClientInstanceRouter({ owners: clientInstanceOwners }))")
+    // The provenance endpoint sits behind the same gate.
+    expect(auth).toBeLessThan(index.indexOf("app.use('/api', createG2TurnsRouter({ provenance: g2Provenance }))"))
     // It notes each meeting chunk on the way past, so it must see them before the chunk route answers.
     const chunks = index.indexOf("app.use('/api', transcribeStreamRouter)")
     expect(auth).toBeGreaterThan(-1)
@@ -146,6 +149,7 @@ describe('mounting', () => {
     expect(mount).toBeLessThan(chunks)
     const auth2 = readFileSync(new URL('../lib/api-auth.ts', import.meta.url), 'utf8')
     expect(auth2).not.toContain("'/client-instance")
+    expect(auth2).not.toContain('g2-turns')
   })
 })
 

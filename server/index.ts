@@ -14,7 +14,10 @@ import { execSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { diagRouter } from './routes/diag.js'
-import { createClientInstanceRouter } from './routes/client-instance.js'
+import { createClientInstanceRouter, pairedInstanceFrom } from './routes/client-instance.js'
+import type { ClientInstanceOwner } from './lib/client-instance-claim.js'
+import { G2TurnLedger, G2TurnProvenance, G2_TURN_LEDGER_FILE } from './lib/g2-turn-provenance.js'
+import { createG2TurnsRouter } from './routes/g2-turns.js'
 import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
@@ -300,6 +303,16 @@ onSessionRowEnded(sessionId => { permissionBroker.sessionRowEnded(sessionId) })
 // registered exactly when it always was (`threadAttachEnabled()`), only earlier, so a
 // request without the hook token no longer costs a 10 MB parse.
 app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))
+
+// G2 authority Tier 1 (unreleased): which app copy holds the ring per device (shared with the
+// client-instance referee), and the provenance every session-delivery route records into. One
+// per process: the ledger's in-memory seal is what makes a record vouch (lib/g2-turn-provenance.ts).
+const clientInstanceOwners = new Map<string, ClientInstanceOwner>()
+const g2Provenance = new G2TurnProvenance({
+  ledger: new G2TurnLedger(dataPath(G2_TURN_LEDGER_FILE)),
+  pairedInstance: (device, now, freshMs) => pairedInstanceFrom(clientInstanceOwners, device, now, freshMs),
+})
+
 if (threadAttachEnabled()) {
   // 6.51.0: a queued Cursor turn leaves ONLY through the composer's own Stop hook (the
   // drainer skips Cursor, see `drainThread`).
@@ -307,6 +320,7 @@ if (threadAttachEnabled()) {
     hookToken: readHookToken,
     readQueue,
     writeQueue,
+    provenance: g2Provenance,
     now: () => Date.now(),
   }))
 }
@@ -742,7 +756,9 @@ app.use('/api', healthRouter)
 app.use('/api', diagRouter)
 // 6.50.3: the referee between copies of the COS Glasses app (routes/client-instance.ts).
 // Mounted BEFORE transcribeStreamRouter: it notes each meeting chunk on its way past.
-app.use('/api', createClientInstanceRouter())
+app.use('/api', createClientInstanceRouter({ owners: clientInstanceOwners }))
+// G2 authority Tier 1: read-only provenance for one delivered turn (verify_g2_turn.py asks it).
+app.use('/api', createG2TurnsRouter({ provenance: g2Provenance }))
 app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
@@ -897,7 +913,8 @@ if (threadAttachEnabled()) {
         return 'unknown'
       }
     },
-    deliver: (turn: QueuedThreadTurn) => deliverQueuedTurnOverLoopback(turn, PORT, API_TOKEN),
+    deliver: (turn: QueuedThreadTurn) => deliverQueuedTurnOverLoopback(turn, PORT, API_TOKEN, t => g2Provenance.issueCarry(t)),
+    provenance: g2Provenance,
     // 6.53.0: parked turns hold for two minutes after a cancel on their thread.
     cancelHoldUntil: (provider: string, threadId: string) => cancelHoldUntilFor(provider, threadId),
     // 6.62.0 (W14): a busy Agent CLI chat's parked turn drains here (no Stop hook fires for `-p`).
@@ -940,6 +957,7 @@ if (threadAttachEnabled()) {
 }
 
 app.use('/api', createAgentSessionBindingsRouter({
+  provenance: g2Provenance,
   // Durable fences (6.36.10), OFF BY DEFAULT.
   //
   // The fence is the one piece of state whose loss writes twice into a real

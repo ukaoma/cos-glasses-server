@@ -15,6 +15,7 @@
 //
 // EVERY DEPENDENCY IS INJECTED so the whole path is testable without a live server.
 
+import { randomBytes } from 'node:crypto'
 import { Router, type Request, type Response } from 'express'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 import { nativeQueueControl, plainQueueText, type NativeQueueControl } from '../lib/codex-queue-control.js'
@@ -24,6 +25,7 @@ import {
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
 } from '../lib/thread-turn-queue.js'
 import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queue-store.js'
+import { stripG2TurnFooter, type G2TurnProvenance } from '../lib/g2-turn-provenance.js'
 
 export interface ThreadTurnQueueDeps {
   /** Re-runs the FULL occupancy gate. The drainer never decides attachability itself. */
@@ -57,6 +59,12 @@ export interface ThreadTurnQueueDeps {
    * Stop hook. Absent: no Cursor turn is ever drained here, exactly as in 6.61.
    */
   cursorCliChat?: (threadId: string) => boolean
+  /**
+   * G2 authority Tier 1 (unreleased), optional: the origin of each parked turn is captured here
+   * (and again on an edit) and carried to its drain; a native Codex queue edit is ledgered and
+   * footed like a turn. Absent: the 6.65 behaviour.
+   */
+  provenance?: G2TurnProvenance
   now: () => number
 }
 
@@ -314,6 +322,11 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
 
     writeQueue(provider, threadId, admitted.queue)
+    if (deps.provenance) {
+      const verdict = deps.provenance.originOf(req)
+      deps.provenance.noteQueued(provider, threadId, clientTurnId, prompt, verdict)
+      deps.provenance.record({ turnId: clientTurnId, prompt, verdict, provider, sessionId: threadId, via: 'queue' })
+    }
     return res.status(202).json({
       queued: true,
       clientTurnId,
@@ -332,7 +345,9 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (provider === 'codex') {
       try {
         native = (await (deps.nativeQueue ?? nativeQueueControl).list(threadId)).map((row, position) => {
-          const text = plainQueueText(row)
+          // G2 authority Tier 1: the lens shows (and edits) the words, never the verify footer.
+          const plain = plainQueueText(row)
+          const text = plain === null ? null : stripG2TurnFooter(plain).text
           return { clientTurnId: `codex-native:${row.id}`, status: 'waiting', position, queuedAt: 0,
             attempts: 0, preview: text?.slice(0, 80) ?? 'Message with attachments · manage in Codex',
             ...(text !== null ? { prompt: text } : {}), editable: text !== null, owner: 'codex' }
@@ -352,7 +367,16 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > DEFAULT_MAX_PROMPT_CHARS) return res.status(400).json({ error: 'invalid_prompt' })
     if (provider === 'codex' && id.startsWith('codex-native:')) {
       try {
-        await (deps.nativeQueue ?? nativeQueueControl).update(threadId, id.slice(13), prompt)
+        // G2 authority Tier 1: the edit replaces the text in the Codex app's own queue, so it is
+        // a delivery of its own, under an id minted here (the native row id is not ours).
+        let sent = prompt
+        if (deps.provenance) {
+          const verdict = deps.provenance.originOf(req)
+          const editId = `cnedit-${randomBytes(12).toString('hex')}`
+          sent = deps.provenance.footed(prompt, editId, verdict)
+          deps.provenance.record({ turnId: editId, prompt, verdict, provider, sessionId: threadId, via: 'codex-native-edit' })
+        }
+        await (deps.nativeQueue ?? nativeQueueControl).update(threadId, id.slice(13), sent)
         return res.json({ updated: true })
       } catch { return res.status(409).json({ error: 'queue_edit_unconfirmed' }) }
     }
@@ -361,6 +385,12 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!row || row.status !== 'waiting') return res.status(409).json({ error: 'already_delivering' })
     row.prompt = prompt
     writeQueue(provider, threadId, queue)
+    // The words are now whoever edited them: their origin replaces the parked one.
+    if (deps.provenance) {
+      const verdict = deps.provenance.originOf(req)
+      deps.provenance.noteQueued(provider, threadId, id, prompt, verdict)
+      deps.provenance.record({ turnId: id, prompt, verdict, provider, sessionId: threadId, via: 'queue-edit' })
+    }
     return res.json({ updated: true })
   })
 
@@ -387,6 +417,7 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       row.status = 'cancelled'
       row.settledAt = now
       writeQueue(provider, threadId, queue)
+      deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
     }
     return res.json({ cancelled: true, clientTurnId, status: row.status })
   })
