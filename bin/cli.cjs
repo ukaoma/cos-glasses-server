@@ -25,7 +25,12 @@ const { homedir } = require('os')
 const PKG_ROOT = resolve(__dirname, '..')
 const CONFIG_DIR = join(homedir(), '.cos-glasses')
 const PREPARE_ONLY = process.argv.includes('--prepare-only')
+const VOICE_BENCHMARK_PREPARE = process.argv.includes('--voice-benchmark-prepare')
 const SETUP_TRANSCRIPTION = process.argv.includes('--setup-transcription')
+if ((VOICE_BENCHMARK_PREPARE || process.argv.includes('--preserve-voice-settings')) && !(SETUP_TRANSCRIPTION && PREPARE_ONLY)) {
+  console.error('Voice preparation flags require --setup-transcription --prepare-only.');
+  process.exit(64)
+}
 const SETUP_SPEAKER_MODEL = process.argv.includes('--setup-speaker-model')
 const HOOKS_ACTION = process.argv.includes('--hooks') ? process.argv[process.argv.indexOf('--hooks') + 1] : undefined
 function optionValue(name) {
@@ -540,12 +545,15 @@ function upsertEnvValue(file, key, value) {
   chmodSync(file, 0o600)
 }
 
-if (SETUP_TRANSCRIPTION) {
+if (SETUP_TRANSCRIPTION && !VOICE_BENCHMARK_PREPARE) {
+  const preserveVoiceSettings = process.argv.includes('--preserve-voice-settings')
   const previewModel = TRANSCRIPTION_TIER === 'max' ? 'turbo' : 'small.en'
   const commitModel = TRANSCRIPTION_TIER === 'max' ? 'large-v3' : 'turbo'
-  upsertEnvValue(ENV_FILE, 'COS_WHISPER_TRANSCRIPTION_TIER', TRANSCRIPTION_TIER)
-  upsertEnvValue(ENV_FILE, 'COS_WHISPER_PREVIEW_MODEL', previewModel)
-  upsertEnvValue(ENV_FILE, 'COS_WHISPER_COMMIT_MODEL', commitModel)
+  if (!preserveVoiceSettings) {
+    upsertEnvValue(ENV_FILE, 'COS_WHISPER_TRANSCRIPTION_TIER', TRANSCRIPTION_TIER)
+    upsertEnvValue(ENV_FILE, 'COS_WHISPER_PREVIEW_MODEL', previewModel)
+    upsertEnvValue(ENV_FILE, 'COS_WHISPER_COMMIT_MODEL', commitModel)
+  }
   process.env.COS_WHISPER_TRANSCRIPTION_TIER = TRANSCRIPTION_TIER
   process.env.COS_WHISPER_PREVIEW_MODEL = previewModel
   process.env.COS_WHISPER_COMMIT_MODEL = commitModel
@@ -573,8 +581,7 @@ if (!process.env.COS_PROFILE_PATH) process.env.COS_PROFILE_PATH = PROFILE_FILE
 
 // Step 5: local Whisper detection + model download. Voice stays local-only by
 // default; cloud fallback requires an explicit flag plus a configured key.
-const WHISPER_KNOWN_PATHS = ['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli']
-const WHISPER_SERVER_KNOWN_PATHS = ['/opt/homebrew/bin/whisper-server', '/usr/local/bin/whisper-server']
+const { resolveWhisperBinary } = require('./whisper-runtime.cjs')
 const WHISPER_MODEL_DIR = join(homedir(), '.local/share/whisper-models')
 const WHISPER_MODEL_PATH = join(WHISPER_MODEL_DIR, 'ggml-large-v3-turbo.bin')
 const WHISPER_MODEL_PARTIAL = WHISPER_MODEL_PATH + '.partial'
@@ -591,24 +598,8 @@ const WHISPER_LARGE_MODEL_MIN_BYTES = 2_800_000_000
 const WHISPER_MODEL_EXPECTED_BYTES = 1_624_555_275
 const WHISPER_SMALL_MODEL_EXPECTED_BYTES = 487_614_201
 const WHISPER_LARGE_MODEL_EXPECTED_BYTES = 3_095_033_483
-function findWhisperCli() {
-  for (const p of WHISPER_KNOWN_PATHS) { if (existsSync(p)) return p }
-  try {
-    const found = execSync('command -v whisper-cli 2>/dev/null', { shell: '/bin/sh', stdio: 'pipe', timeout: 2000 }).toString().trim()
-    return found || null
-  } catch {
-    return null
-  }
-}
-function findWhisperServer() {
-  for (const p of WHISPER_SERVER_KNOWN_PATHS) { if (existsSync(p)) return p }
-  try {
-    const found = execSync('command -v whisper-server 2>/dev/null', { shell: '/bin/sh', stdio: 'pipe', timeout: 2000 }).toString().trim()
-    return found || null
-  } catch {
-    return null
-  }
-}
+function findWhisperCli() { return resolveWhisperBinary('whisper-cli') }
+function findWhisperServer() { return resolveWhisperBinary('whisper-server') }
 function isValidWhisperModel(p, minBytes = WHISPER_MODEL_MIN_BYTES) {
   if (!existsSync(p)) return false
   try { return statSync(p).size >= minBytes } catch { return false }
@@ -652,10 +643,10 @@ if (SETUP_TRANSCRIPTION && process.env.SKIP_WHISPER_DOWNLOAD !== '1') {
   mkdirSync(WHISPER_MODEL_DIR, { recursive: true })
   const targets = [
     [WHISPER_MODEL_PATH, WHISPER_MODEL_PARTIAL, WHISPER_MODEL_MIN_BYTES, WHISPER_MODEL_EXPECTED_BYTES],
-    ...(TRANSCRIPTION_TIER === 'balanced'
+    ...(!VOICE_BENCHMARK_PREPARE && TRANSCRIPTION_TIER === 'balanced'
       ? [[WHISPER_SMALL_MODEL_PATH, WHISPER_SMALL_MODEL_PARTIAL, WHISPER_SMALL_MODEL_MIN_BYTES, WHISPER_SMALL_MODEL_EXPECTED_BYTES]]
       : []),
-    [WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_PARTIAL, WHISPER_LARGE_MODEL_MIN_BYTES, WHISPER_LARGE_MODEL_EXPECTED_BYTES],
+    ...(!VOICE_BENCHMARK_PREPARE ? [[WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_PARTIAL, WHISPER_LARGE_MODEL_MIN_BYTES, WHISPER_LARGE_MODEL_EXPECTED_BYTES]] : []),
   ]
   const missingBytes = targets.reduce((sum, [path, , minimum, expected]) =>
     sum + (isValidWhisperModel(path, minimum) ? 0 : expected), 0)
@@ -716,7 +707,7 @@ if (process.env.COS_OPENAI_WHISPER_FALLBACK === '1') {
 
 const previewChoice = (process.env.COS_WHISPER_PREVIEW_MODEL || process.env.COS_WHISPER_REALTIME_MODEL || 'auto').trim().toLowerCase()
 const wantsSmallPreview = ['small', 'small.en', 'ggml-small.en.bin'].includes(previewChoice)
-if (whisperCliPath && wantsSmallPreview) {
+if (whisperCliPath && wantsSmallPreview && !VOICE_BENCHMARK_PREPARE) {
   if (isValidWhisperModel(WHISPER_SMALL_MODEL_PATH, WHISPER_SMALL_MODEL_MIN_BYTES)) {
     console.log(green('  ✓') + ' Small.en preview model ready ' + dim('— Turbo remains authoritative'))
   } else {
@@ -745,7 +736,7 @@ if (whisperCliPath && wantsSmallPreview) {
   }
 }
 
-if (whisperCliPath && SETUP_TRANSCRIPTION) {
+if (whisperCliPath && SETUP_TRANSCRIPTION && !VOICE_BENCHMARK_PREPARE) {
   if (isValidWhisperModel(WHISPER_LARGE_MODEL_PATH, WHISPER_LARGE_MODEL_MIN_BYTES)) {
     const largeRole = TRANSCRIPTION_TIER === 'max'
       ? 'live preview + commit and saved-meeting polish'
@@ -789,7 +780,7 @@ if (whisperCliPath && SETUP_TRANSCRIPTION) {
 // -- sixty times larger -- downloaded here with SKIP_WHISPER_DOWNLOAD as the
 // escape hatch. Same shape, same opt-out, so nobody on a metered or restricted
 // network is forced into it.
-if (!SETUP_SPEAKER_MODEL && process.env.SKIP_SPEAKER_MODEL_DOWNLOAD !== '1') {
+if (!VOICE_BENCHMARK_PREPARE && !SETUP_SPEAKER_MODEL && process.env.SKIP_SPEAKER_MODEL_DOWNLOAD !== '1') {
   const spkDest = join(CONFIG_DIR, 'models', SPEAKER_MODEL.filename)
   if (existsSync(spkDest) && sha256File(spkDest) === SPEAKER_MODEL.sha256) {
     console.log(green('  ✓') + ' Voiceprint model ready ' + dim('— named speakers available'))

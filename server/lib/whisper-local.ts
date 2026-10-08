@@ -1,3 +1,4 @@
+import { resolveWhisperBinary } from '../../bin/whisper-runtime.cjs'
 // Local Whisper transcription via whisper-server (persistent) or whisper-cli (fallback)
 // Eliminates 1-3s OpenAI API round-trip by running inference on M3 Ultra locally.
 //
@@ -130,17 +131,9 @@ interface WhisperJsonResponse {
   text?: unknown
 }
 
-// Resolve whisper.cpp binaries across Homebrew prefixes (Apple Silicon
-// /opt/homebrew, Intel /usr/local). Downstream code existsSync-guards these
-// before use, so a missing binary degrades to CLI/cloud rather than crashing.
-function resolveWhisperBin(name: string): string {
-  for (const prefix of ['/opt/homebrew/bin', '/usr/local/bin']) {
-    if (existsSync(`${prefix}/${name}`)) return `${prefix}/${name}`
-  }
-  return `/opt/homebrew/bin/${name}`
-}
-const WHISPER_CLI = resolveWhisperBin('whisper-cli')
-const WHISPER_SERVER = resolveWhisperBin('whisper-server')
+// Same resolution as setup and preview; a broken explicit override never falls through to Homebrew.
+const WHISPER_CLI = resolveWhisperBinary('whisper-cli') ?? '/__cos_whisper_unavailable__/whisper-cli'
+const WHISPER_SERVER = resolveWhisperBinary('whisper-server') ?? '/__cos_whisper_unavailable__/whisper-server'
 const MODEL_DIR = join(process.env.HOME ?? homedir(), '.local/share/whisper-models')
 export const WHISPER_TURBO_MODEL_PATH = join(MODEL_DIR, 'ggml-large-v3-turbo.bin')
 export const WHISPER_LARGE_V3_MODEL_PATH = join(MODEL_DIR, 'ggml-large-v3.bin')

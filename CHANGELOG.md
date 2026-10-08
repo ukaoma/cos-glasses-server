@@ -1,7 +1,10 @@
-## Unreleased — Haiku default for final dictation polish
+## 6.66.0 — 2026-10-08 — Managed voice setup and Haiku polish
 
 - Advertise Haiku, Sonnet and GPT-5.6 Luna Fast. Default omitted-model polish to Haiku for lower cost, while honoring explicit model choices and retaining the transcript on failure.
-- Glasses app 6.10.616 explicitly sends the chosen model and already works with server 6.65.0. These server changes are prepared for the next npm release; no managed runtime update is required for the new app selector.
+- Glasses app 6.10.616 explicitly sends the chosen model and already works with server 6.65.0.
+- Setup, live preview, committed transcription and HQ share explicit `COS_WHISPER_CLI_BIN` / `COS_WHISPER_SERVER_BIN` resolution. A broken explicit path fails closed; existing Homebrew/PATH detection remains the fallback.
+- COS Control can prepare Turbo first for a local benchmark, then the chosen tier, without overwriting saved voice settings. Both preparation flags require `--setup-transcription --prepare-only`.
+- Pairs with the COS Control 0.5.272 candidate and the signed/notarized whisper.cpp 1.9.1 runtime. Distribution status: candidate only; awaiting promotion.
 
 ## 6.65.0 — 2026-10-07 — Work search by meaning, and task dates
 

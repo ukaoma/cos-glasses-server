@@ -1,3 +1,4 @@
+import { resolveWhisperBinary } from '../../bin/whisper-runtime.cjs'
 // Adaptive provisional transcription:
 //   Balanced -> isolated Small.en cosmetic preview + Turbo live commit
 //   Max      -> isolated Turbo cosmetic preview + Large-v3 live commit
@@ -55,8 +56,7 @@ export const WHISPER_SMALL_EN_MODEL_PATH = join(MODEL_DIR, 'ggml-small.en.bin')
 const WHISPER_TURBO_MODEL_PATH = join(MODEL_DIR, 'ggml-large-v3-turbo.bin')
 const VAD_MODEL_PATH = join(MODEL_DIR, 'ggml-silero-v5.1.2.bin')
 const VAD_ENABLED = process.env.COS_WHISPER_VAD !== '0'
-const WHISPER_SERVER = ['/opt/homebrew/bin/whisper-server', '/usr/local/bin/whisper-server']
-  .find(existsSync) ?? '/opt/homebrew/bin/whisper-server'
+const WHISPER_SERVER = resolveWhisperBinary('whisper-server') ?? '/__cos_whisper_unavailable__/whisper-server'
 const PREVIEW_PORT = 8177
 const PREVIEW_URL = `http://127.0.0.1:${PREVIEW_PORT}`
 const PROCESS_PROBE_TIMEOUT_MS = 2_000

@@ -46,6 +46,7 @@ describe('public adaptive transcription setup', () => {
         HOME: root,
         PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
         SKIP_WHISPER_DOWNLOAD: '1',
+        SKIP_SPEAKER_MODEL_DOWNLOAD: '1',
         COS_CURSOR_AGENT_BIN: join(root, 'missing-agent'),
       },
       encoding: 'utf8',
@@ -146,6 +147,7 @@ truncate -s 487614201 "$output"
         HOME: root,
         PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
         SKIP_WHISPER_DOWNLOAD: '1',
+        SKIP_SPEAKER_MODEL_DOWNLOAD: '1',
         COS_CURSOR_AGENT_BIN: join(root, 'missing-agent'),
       },
       encoding: 'utf8',
@@ -182,5 +184,29 @@ truncate -s 487614201 "$output"
     expect(result.status).toBe(64)
     expect(result.stderr).toContain('Missing value for --transcription-tier')
     expect(existsSync(join(root, '.cos-glasses/.env'))).toBe(false)
+  })
+})
+
+describe('managed Whisper voice preparation', () => {
+  it('uses explicit binaries without global tools and never changes an existing Max tier', () => {
+    const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-managed-whisper-')))
+    const bin = join(home, 'private tools'); mkdirSync(bin)
+    for (const name of ['codex', 'whisper-cli', 'whisper-server']) {
+      writeFileSync(join(bin, name), '#!/bin/sh\necho "codex-cli 1.0.0"\n'); chmodSync(join(bin, name), 0o700)
+    }
+    mkdirSync(join(home, '.cos-glasses'))
+    const config = join(home, '.cos-glasses/.env')
+    const saved = 'COS_WHISPER_TRANSCRIPTION_TIER=max\nCOS_WHISPER_PREVIEW_MODEL=turbo\nCOS_WHISPER_COMMIT_MODEL=large-v3\nKEEP_THIS=yes\n'
+    writeFileSync(config, saved)
+    const env = { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin`, COS_CODEX_BIN: join(bin, 'codex'), COS_WHISPER_CLI_BIN: join(bin, 'whisper-cli'), COS_WHISPER_SERVER_BIN: join(bin, 'whisper-server'), SKIP_WHISPER_DOWNLOAD: '1',
+        SKIP_SPEAKER_MODEL_DOWNLOAD: '1' }
+    for (const extra of ['--voice-benchmark-prepare', '--preserve-voice-settings']) {
+      const result = spawnSync(process.execPath, [resolve('bin/cli.cjs'), '--setup-transcription', '--transcription-tier', 'balanced', '--prepare-only', extra], { env, encoding: 'utf8', timeout: 30_000 })
+      expect(result.status, result.stdout + result.stderr).toBe(0)
+      expect(readFileSync(config, 'utf8')).toBe(saved)
+    }
+    const bad = spawnSync(process.execPath, [resolve('bin/cli.cjs'), '--setup-transcription', '--prepare-only', '--preserve-voice-settings'], { env: { ...env, COS_WHISPER_SERVER_BIN: join(home, 'missing') }, encoding: 'utf8', timeout: 30_000 })
+    expect(bad.status).toBe(1)
+    expect(readFileSync(config, 'utf8')).toBe(saved)
   })
 })

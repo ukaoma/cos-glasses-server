@@ -923,3 +923,23 @@ This is a local owner instance, separate from app.gotcos.com tenants and hosted 
 ## Provider parity in 6.62.0
 
 See [provider capabilities and limits](docs/provider-parity.md) for Continue permissions, client compatibility, hook trust, observation limits and rollback. Glasses 6.10.600 shows the server's Continue note. Older clients retain Cursor Ask behavior; forks remain read-only.
+
+### Managed Whisper runtime (6.66.0 candidate)
+
+COS Control 0.5.272 prepares a signed, notarized whisper.cpp 1.9.1 runtime during
+voice setup on Apple silicon. It supplies absolute `COS_WHISPER_CLI_BIN` and
+`COS_WHISPER_SERVER_BIN` paths to the server; Homebrew is not needed for that flow.
+Direct server installs still fall back to Homebrew and then PATH when overrides
+are unset. A configured but missing/non-executable override is an error, never a
+silent change of runtime.
+
+`--setup-transcription --prepare-only --voice-benchmark-prepare` prepares Turbo
+without changing saved tier keys. Control measures the device and follows with
+`--setup-transcription --prepare-only --transcription-tier balanced|max
+--preserve-voice-settings`. The latter prepares all required models, including
+Large-v3 for saved-meeting HQ in both tiers. Applying a tier remains Control's
+transactional action. Downloading or cancelling preparation does not change it.
+Runtime/model setup is local; the existing provider sign-in requirements remain.
+
+Candidate only: publish the versioned runtime asset and server package before
+promoting the matching Control appcast entry.
