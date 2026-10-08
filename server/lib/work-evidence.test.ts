@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { JEV_KEY_FILE, JEV_USAGE_FILE, JevClient } from './jev.js'
+import { JEV_KEY_FILE, JEV_USAGE_FILE, JevClient, JevError } from './jev.js'
 import { LATEST_REPLY_MAX } from './agent-session-store.js'
 import { SESSION_TURNS_MAX } from './agent-session-turns.js'
 import { SafeFetchError, type SafeFetchResult } from './safe-fetch.js'
 import {
-  EVIDENCE_LIMITS, WORK_EVIDENCE_USAGE_FILE, WorkEvidenceChecker, clauseUrls, createWorkEvidenceJevClient, decodeCursor, defaultWorkEvidenceDeps,
-  distinctiveWords, encodeCursor, markersFor, parseEvidenceRequest, readSessionSince, sameUrl, statusLines, workEvidenceDailyCap, workEvidenceEnabled,
+  EVIDENCE_LIMITS, EVIDENCE_REFUSALS, EVIDENCE_REQUEST_LIMITS, WORK_EVIDENCE_USAGE_FILE, WorkEvidenceChecker, clauseUrls, createWorkEvidenceJevClient, decodeCursor, defaultWorkEvidenceDeps,
+  distinctiveWords, encodeCursor, markersFor, parseEvidenceRequest, readSessionSince, sameUrl, statusLines, workEvidenceAvailable, workEvidenceDailyCap, workEvidenceEnabled,
   type EvidenceCard, type EvidenceRequest, type WorkEvidenceDeps,
 } from './work-evidence.js'
 
@@ -215,13 +215,16 @@ describe('judging', () => {
     expect(result).toMatchObject({ provider: 'jev', model: 'jev-1.13.0', basis: 'clauses', sources: ['session', 'url'], truncated: false, cached: false, skipped: null })
     if (result.provider !== 'jev') throw new Error('no verdict')
     expect(result.clauses[0]).toEqual({ text: CLAUSES[0], verdict: 'met', confidence: 0.93, kind: 'fact', deterministic: true,
-      evidence: { source: 'url', ref: OFFER, excerpt: '200 · Switch to Bottle POS: $3,000 + Free Hardware', at: '2026-10-07T21:32:00.000Z' } })
-    expect(result.clauses[1]).toMatchObject({ text: CLAUSES[1], verdict: 'not_met', kind: 'intent', deterministic: false, evidence: { source: 'session' } })
+      evidence: { source: 'url', ref: OFFER, excerpt: '200 · Switch to Bottle POS: $3,000 + Free Hardware', at: '2026-10-07T21:32:00.000Z' },
+      supporting: [{ source: 'url', ref: OFFER, at: '2026-10-07T21:32:00.000Z' }] })
+    expect(result.clauses[1]).toMatchObject({ text: CLAUSES[1], verdict: 'not_met', kind: 'intent', deterministic: false, evidence: { source: 'session' }, supporting: [] })
     expect(result.cursors).toEqual([{ provider: 'claude', sessionId: SESSION, cursor: expect.any(String) }])
-    // One Jev call, three choices per clause, the evidence choice over the numbered items plus none.
+    // One Jev call, four choices per clause; the evidence and support choices are over the numbered items plus none.
     expect(jev.ask).toHaveBeenCalledTimes(1)
-    expect(Object.keys(calls[0]!.questions).sort()).toEqual(['e0', 'e1', 'k0', 'k1', 'v0', 'v1'])
+    expect(Object.keys(calls[0]!.questions).sort()).toEqual(['e0', 'e1', 'k0', 'k1', 's0', 's1', 'v0', 'v1'])
     expect(Object.keys(calls[0]!.questions.e0.criteria)).toEqual(['e0', 'e1', 'none'])
+    expect(Object.keys(calls[0]!.questions.s1.criteria)).toEqual(['e0', 'e1', 'none'])
+    expect(calls[0]!.questions.s1.instructions).toContain('clauses[1]')
     expect(Object.keys(calls[0]!.questions.k1.criteria)).toEqual(['fact', 'intent', 'draft', 'none'])
     expect(Object.keys(calls[0]!.questions.v0.criteria)).toEqual(['met', 'not_met', 'unclear'])
     expect(calls[0]!.state.clauses).toEqual(CLAUSES)
@@ -537,8 +540,14 @@ describe('cost controls', () => {
     vi.stubEnv('COS_WORK_EVIDENCE_DAILY_TOKENS', '5100')
     okFetch.mockClear()
     const capped = checker({ jev: client })
-    expect(await capped.c.check(req({ follows: [], clauses: ['Facebook ads are running', CLAUSES[0]!] }), card)).toEqual({ provider: 'none', reason: 'jev_cap' })
+    expect(await capped.c.check(req({ follows: [], clauses: ['Facebook ads are running', CLAUSES[0]!] }), card)).toEqual({ provider: 'none', reason: 'jev_cap', retryAt: '2026-10-08T00:00:00.000Z' })
     expect(okFetch).not.toHaveBeenCalled()
+    // A spent day is refused before anything is read.
+    vi.stubEnv('COS_WORK_EVIDENCE_DAILY_TOKENS', '5000')
+    const fetchUrl = vi.fn(async () => LIVE), slack = vi.fn(async () => ({ available: false })), findSession = vi.fn(async () => null)
+    const spent = checker({ jev: client, fetchUrl, slack, findSession })
+    expect(await spent.c.check(req(), card)).toEqual({ provider: 'none', reason: 'jev_cap', retryAt: '2026-10-08T00:00:00.000Z' })
+    expect(fetchUrl).not.toHaveBeenCalled(); expect(slack).not.toHaveBeenCalled(); expect(findSession).not.toHaveBeenCalled()
   })
 
   it('opens its own breaker after three failures and says jev_breaker', async () => {
@@ -548,10 +557,257 @@ describe('cost controls', () => {
       const { c } = checker({ jev: client })
       expect(await c.check(req({ follows: [], clauses: [CLAUSES[0]!] }), card)).toEqual({ provider: 'none', reason: 'jev_unavailable' })
     }
-    const { c } = checker({ jev: client })
-    expect(await c.check(req({ follows: [], clauses: [CLAUSES[0]!] }), card)).toEqual({ provider: 'none', reason: 'jev_breaker' })
+    const fetchUrl = vi.fn(async () => LIVE), slack = vi.fn(async () => ({ available: false }))
+    const { c } = checker({ jev: client, fetchUrl, slack })
+    expect(await c.check(req({ follows: [], clauses: [CLAUSES[0]!] }), card)).toEqual({ provider: 'none', reason: 'jev_breaker', retryAt: '2026-10-07T13:00:00.000Z' })
     expect(down).toHaveBeenCalledTimes(3)
+    // An open breaker is refused before the page check or the Slack read.
+    expect(fetchUrl).not.toHaveBeenCalled(); expect(slack).not.toHaveBeenCalled()
     // The shared Jev client is a different object with a different ledger.
     expect(client).not.toBe(new JevClient())
+  })
+})
+
+// --- QA round (2026-10-07): limits, capability, refusals, gap walking, supporting items ------------------------------
+describe('limits (one module; COS Control must match these)', () => {
+  it('pins the request limits, the UTF-16 unit, the cursor bound and the 4 KB cursor prefix', () => {
+    expect(EVIDENCE_REQUEST_LIMITS).toEqual({ follows: 4, clauses: 6, clauseChars: 300, clauseUnit: 'utf16', cursorChars: 512, supporting: 4 })
+    expect(Object.isFrozen(EVIDENCE_REQUEST_LIMITS)).toBe(true)
+    expect(EVIDENCE_LIMITS).toMatchObject({ follows: 4, clauses: 6, clauseChars: 300, cursorChars: 512, supporting: 4, prefixBytes: 4096 })
+  })
+  it('counts a clause in UTF-16 units: 150 emoji fit, 150 emoji and a letter do not', () => {
+    const body = { domain: 'quilt', id: CARD_ID, follows: [], since: '2026-10-02T23:52:00Z' }
+    expect('😀'.repeat(150).length).toBe(300)
+    expect(parseEvidenceRequest({ ...body, clauses: ['😀'.repeat(150)] })).not.toBeNull()
+    expect(parseEvidenceRequest({ ...body, clauses: ['😀'.repeat(150) + 'a'] })).toBeNull()
+    expect(parseEvidenceRequest({ ...body, clauses: ['é'.repeat(300)] })).not.toBeNull()  // 300 BMP characters are 300 units
+  })
+  it('the widest cursor the format can produce is far inside cursorChars, and a bad anchor flag is refused', () => {
+    const widest = encodeCursor({ v: 1, id: 'f'.repeat(12), o: Number.MAX_SAFE_INTEGER, t: new Date(8.64e15).toISOString(), p: 'f'.repeat(16), a: 1 })
+    expect(widest.length).toBeLessThan(200)
+    expect(decodeCursor(widest)).toMatchObject({ a: 1 })
+    expect(decodeCursor(encodeCursor({ v: 1, id: 'x', o: 1, t: null, p: '', a: 2 } as any))).toBeNull()
+  })
+  it('the npm package leaves out every mutation gate, this one included', () => {
+    const root = join(import.meta.dirname, '..', '..')
+    const files: string[] = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).files
+    const gates = readdirSync(join(root, 'server', 'scripts')).filter(f => f.endsWith('-mutation-gate.mjs') || f === 'mutation-gate.mjs')
+    expect(gates).toContain('work-evidence-mutation-gate.mjs')
+    for (const gate of gates) expect(files, gate).toContain(`!server/scripts/${gate}`)
+  })
+})
+
+describe('capability and refusals', () => {
+  it('advertises the check only when the switch is on and a key resolves', () => {
+    expect(workEvidenceAvailable({} as NodeJS.ProcessEnv, () => true)).toBe(true)
+    expect(workEvidenceAvailable({} as NodeJS.ProcessEnv, () => false)).toBe(false)
+    expect(workEvidenceAvailable({ COS_WORK_EVIDENCE: '0' } as NodeJS.ProcessEnv, () => true)).toBe(false)
+    expect(EVIDENCE_REFUSALS).toEqual({ disabled: 'evidence_disabled', notConfigured: 'jev_not_configured', cap: 'jev_cap', breaker: 'jev_breaker' })
+  })
+  it('with no key, refuses before reading any source', async () => {
+    const findSession = vi.fn(async () => null), fetchUrl = vi.fn(async () => LIVE), slack = vi.fn(async () => ({ available: false }))
+    const ask = vi.fn()
+    const status = () => ({ configured: false, source: 'none' as const, usedToday: 0, dailyCap: 300_000, breakerOpenUntil: null, lastError: null })
+    const { c } = checker({ jev: { ask, status } as any, findSession, fetchUrl, slack })
+    expect(await c.check(req(), card)).toEqual({ provider: 'none', reason: 'jev_not_configured' })
+    expect(findSession).not.toHaveBeenCalled(); expect(fetchUrl).not.toHaveBeenCalled(); expect(slack).not.toHaveBeenCalled(); expect(ask).not.toHaveBeenCalled()
+  })
+  it('a breaker that opens during the call says when to ask again', async () => {
+    const ok = { configured: true, source: 'env' as const, usedToday: 0, dailyCap: 300_000, breakerOpenUntil: null, lastError: null }
+    const status = vi.fn().mockReturnValueOnce(ok).mockReturnValue({ ...ok, breakerOpenUntil: '2026-10-07T22:32:00.000Z' })
+    const ask = vi.fn(async () => { throw new JevError('jev_breaker_open') })
+    const { c } = checker({ jev: { ask, status } as any })
+    expect(await c.check(req({ follows: [], clauses: [CLAUSES[0]!] }), card)).toEqual({ provider: 'none', reason: 'jev_breaker', retryAt: '2026-10-07T22:32:00.000Z' })
+    expect(ask).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('truncated reads walk forward through the gap', () => {
+  const small = [2_048, 8_192]
+  /** Every read until one is not truncated; each truncated cursor must point inside the file, never at its end. */
+  async function walk(provider: 'claude' | 'cursor', path: string, cursor: string | null, sinceMs: number) {
+    const size = statSync(path).size, reads = []
+    for (let i = 0; i < 400; i++) {
+      const read = await readSessionSince(provider, SESSION, path, cursor, sinceMs, TAGS, small)
+      reads.push(read)
+      if (read.truncated) expect(decodeCursor(read.cursor)!.o, `read ${i}`).toBeLessThan(size)
+      if (read.truncated) expect(decodeCursor(read.cursor)!.o, `read ${i} moved`).toBeGreaterThan(cursor ? decodeCursor(cursor)!.o : -1)
+      cursor = read.cursor
+      if (!read.truncated) return reads
+    }
+    throw new Error('the walk never finished')
+  }
+
+  it('from a cursor far behind: every reply exactly once, in order, over several checks', async () => {
+    const path = claude300()
+    const start = await readSessionSince('claude', SESSION, write('tiny.jsonl', [claudeReply('only', minute(1))]), null, 0, TAGS)
+    const behind = encodeCursor({ ...decodeCursor(start.cursor)!, o: 0, p: '' })
+    const reads = await walk('claude', path, behind, 0)
+    expect(reads.length).toBeGreaterThan(2)
+    expect(reads.flatMap(r => r.replies.map(x => x.text))).toEqual(Array.from({ length: 300 }, (_, i) => `Reply number ${i + 1}.`))
+    expect(decodeCursor(reads.at(-1)!.cursor)!.o).toBe(statSync(path).size)
+  })
+
+  it('from `since` older than the largest window: starts at `since` (found by bisection), not at the newest window', async () => {
+    const path = claude300()
+    const reads = await walk('claude', path, null, Date.parse(minute(100)))
+    expect(reads[0]!.truncated).toBe(true)
+    expect(reads[0]!.replies[0]!.text).toBe('Reply number 100.')
+    expect(reads.flatMap(r => r.replies.map(x => x.text))).toEqual(Array.from({ length: 201 }, (_, i) => `Reply number ${i + 100}.`))
+  })
+
+  it('a stale cursor with a time older than the largest window resumes after that time', async () => {
+    const path = claude300()
+    const stale = encodeCursor({ v: 1, id: decodeCursor((await readSessionSince('claude', SESSION, path, null, 0, TAGS)).cursor)!.id, o: 10, t: minute(200), p: 'nope' })
+    const reads = await walk('claude', path, stale, 0)
+    expect(reads.flatMap(r => r.replies.map(x => x.text))).toEqual(Array.from({ length: 100 }, (_, i) => `Reply number ${i + 201}.`))
+  })
+
+  it('a Cursor transcript whose handoff is older than the newest window: walks from the top, counting only after the handoff', async () => {
+    const filler = Array.from({ length: 60 }, (_, i) => cursorReply(`Before the handoff ${i}. ` + 'x'.repeat(150)))
+    const after = Array.from({ length: 80 }, (_, i) => cursorReply(`After ${i}. ` + 'y'.repeat(150)))
+    const path = write('cursor-big.jsonl', [...filler, cursorUser(`Do the card.\nCOS-WORK ${CARD_ID}: <done, needs input or blocked>: <x>`), ...after])
+    const reads = await walk('cursor', path, null, 0)
+    // The first read is still before the handoff: nothing untagged counts, and the cursor says the anchor is pending.
+    expect(reads[0]).toMatchObject({ anchored: false, truncated: true })
+    expect(decodeCursor(reads[0]!.cursor)!.a).toBe(1)
+    const anchoredAt = reads.findIndex(r => r.anchored && r.replies.some(x => x.text.startsWith('After')))
+    expect(anchoredAt).toBeGreaterThan(0)
+    expect(reads.slice(anchoredAt).flatMap(r => r.replies.map(x => x.text.split('.')[0]))).toEqual(Array.from({ length: 80 }, (_, i) => `After ${i}`))
+    // Once the handoff is read, the flag is gone.
+    expect(decodeCursor(reads.at(-1)!.cursor)!.a).toBeUndefined()
+  })
+
+  it('a line longer than the window is stepped over, and the walk still reaches what follows it', async () => {
+    const path = write('giant.jsonl', [claudeReply('First.', minute(1)), claudeReply('G'.repeat(20_000), minute(2)), claudeReply('After the giant.', minute(3))])
+    const start = await readSessionSince('claude', SESSION, write('tiny.jsonl', [claudeReply('only', minute(1))]), null, 0, TAGS)
+    const reads = await walk('claude', path, encodeCursor({ ...decodeCursor(start.cursor)!, o: 0, p: '' }), 0)
+    expect(reads.flatMap(r => r.replies.map(x => x.text))).toEqual(['First.', 'After the giant.'])
+  })
+
+  it('the cursor fits only while the 4 KB before it are unchanged', async () => {
+    const path = write('prefix.jsonl', Array.from({ length: 10 }, (_, i) => claudeReply(`Old ${i + 1}.`, minute(i + 1))))
+    const first = await readSessionSince('claude', SESSION, path, null, 0, TAGS)
+    const bytes = readFileSync(path, 'utf8')
+    const at = bytes.indexOf('Old 5.')
+    expect(bytes.length - at).toBeGreaterThan(64)
+    expect(bytes.length - at).toBeLessThan(4096)
+    // Same length: reply 5 reworded and re-timed after the cursor's time. Only a check of more than 64 bytes sees it.
+    writeFileSync(path, bytes.replace('Old 5.', 'New 5.').replace(minute(5), minute(20)))
+    expect(readFileSync(path).length).toBe(Buffer.byteLength(bytes))
+    expect((await readSessionSince('claude', SESSION, path, first.cursor, 0, TAGS)).replies.map(r => r.text)).toEqual(['New 5.'])
+  })
+
+  it('the checker passes the gap cursor back, so the next check continues inside it', async () => {
+    const path = claude300()
+    const { c } = checker({ jev: fakeJev(() => [['unclear', 'none', 'none']]).jev as any, sessions: { [SESSION]: path }, windows: small })
+    const result = await c.check(req({ clauses: ['Facebook ads are running'], since: minute(100) }), card)
+    expect(result).toMatchObject({ provider: 'jev', truncated: true })
+    if (result.provider !== 'jev') throw new Error('no verdict')
+    expect(decodeCursor(result.cursors[0]!.cursor)!.o).toBeLessThan(statSync(path).size)
+  })
+})
+
+describe('supporting items and evidence times', () => {
+  /** Jev answers clause 0 with [verdict, kind, picked] and the support distribution given (item index to probability). */
+  function supportJev(v: string, k: string, e: number | 'none', support: (state: any) => Record<string, number>) {
+    return { ask: vi.fn(async (state: any) => ({ model: 'jev-1.13.0', inputTokens: 1, answers: {
+      v0: { probabilities: { met: v === 'met' ? 0.92 : 0.04, not_met: v === 'not_met' ? 0.9 : 0.03, unclear: v === 'unclear' ? 0.9 : 0.04 } },
+      k0: { probabilities: { [k]: 0.9 } }, e0: { probabilities: { [e === 'none' ? 'none' : `e${e}`]: 0.9 } }, s0: { probabilities: support(state) } } })) }
+  }
+  const sources = (meeting: boolean) => ({
+    meeting: async () => meeting ? { recordId: 'rec-1', title: 'Pete sync', date: '2026-10-06', summary: 'The ads went live Monday.' } : null,
+    slack: async () => ({ available: true, items: [{ text: 'ads are live', user: 'Miles', channel: 'mkt', ts: '1791331200', permalink: 'https://quilt.slack.com/archives/C1/p2' }] }),
+  })
+  const idx = (state: any, source: string) => state.evidence.findIndex((e: any) => e.source === source)
+
+  it('a met clause lists the picked item first, then each item Jev names above the floor; never a failed page check', async () => {
+    const path = write('s.jsonl', [claudeReply(`COS-WORK ${CARD_ID}: done: the Facebook ads are live`, minute(5))])
+    const jev = supportJev('met', 'fact', 0, state => ({ [`e${idx(state, 'slack')}`]: 0.4, [`e${idx(state, 'meeting')}`]: 0.3, [`e${idx(state, 'url')}`]: 0.2, e0: 0.05, none: 0.05 }))
+    const { c } = checker({ jev: jev as any, sessions: { [SESSION]: path }, fetchUrl: async () => ({ ...LIVE, status: 404 }), ...sources(true) })
+    const result = await c.check(req({ clauses: [`Facebook ads are running and ${OFFER} still answers`] }), card)
+    if (result.provider !== 'jev') throw new Error('no verdict')
+    // url_not_passed: the clause names a page whose check failed, so it is not met and supports nothing.
+    expect(result.clauses[0]).toMatchObject({ verdict: 'unclear', reason: 'url_not_passed', supporting: [] })
+    // No page in the clause: the picked session line first, then Slack (0.4), then the meeting (0.3); e0 again is not repeated.
+    const met = checker({ jev: supportJev('met', 'fact', 0, state => ({ [`e${idx(state, 'slack')}`]: 0.4, [`e${idx(state, 'meeting')}`]: 0.3, e0: 0.2, none: 0.1 })) as any,
+      sessions: { [SESSION]: path }, ...sources(true) })
+    const ok = await met.c.check(req({ clauses: ['Facebook ads are running'] }), card)
+    if (ok.provider !== 'jev') throw new Error('no verdict')
+    expect(ok.clauses[0]!.verdict).toBe('met')
+    expect(ok.clauses[0]!.supporting).toEqual([
+      { source: 'session', ref: `claude:${SESSION}`, at: minute(5) },
+      { source: 'slack', ref: 'https://quilt.slack.com/archives/C1/p2', at: '2026-10-07T00:00:00.000Z' },
+      { source: 'meeting', ref: 'meeting:quilt/2026-10/pete.md', at: '2026-10-06T00:00:00.000Z' },
+    ])
+  })
+
+  it('supporting names each item once, at most 4, skips answers below the floor, and is empty unless met', async () => {
+    const lines = Array.from({ length: 7 }, (_, i) => claudeReply(`Ads report ${i}: the Facebook ads are running.`, minute(i + 1)))
+    const path = write('many.jsonl', lines)
+    const many = (state: any) => Object.fromEntries(state.evidence.map((e: any, i: number) => [`e${e.n}`, i === 6 ? 0.1 : 0.15]))
+    const { c } = checker({ jev: supportJev('met', 'fact', 2, many) as any, sessions: { [SESSION]: path } })
+    const result = await c.check(req({ clauses: ['Facebook ads are running'] }), card)
+    if (result.provider !== 'jev') throw new Error('no verdict')
+    const s0 = result.clauses[0]!.supporting
+    expect(s0).toHaveLength(4)
+    expect(s0[0]).toEqual({ source: 'session', ref: `claude:${SESSION}`, at: minute(3) })   // the picked item, once
+    expect(new Set(s0.map(x => x.at)).size).toBe(4)
+    expect(s0.map(x => x.at)).not.toContain(minute(7))   // p 0.10 is under the 0.15 floor
+    // Two items, one below the floor: only the picked one and the one above it.
+    const few = checker({ jev: supportJev('met', 'fact', 0, () => ({ e1: 0.5, e2: 0.14 })) as any, sessions: { [SESSION]: path } })
+    const r2 = await few.c.check(req({ clauses: ['Facebook ads are running'] }), card)
+    if (r2.provider !== 'jev') throw new Error('no verdict')
+    expect(r2.clauses[0]!.supporting.map(x => x.at)).toEqual([minute(1), minute(2)])
+    for (const [v, k] of [['not_met', 'intent'], ['unclear', 'none'], ['met', 'draft']] as const) {
+      const other = checker({ jev: supportJev(v, k, 0, () => ({ e1: 0.9 })) as any, sessions: { [SESSION]: path } })
+      const r = await other.c.check(req({ clauses: ['Facebook ads are running'] }), card)
+      if (r.provider !== 'jev') throw new Error('no verdict')
+      expect(r.clauses[0]!.supporting, `${v}/${k}`).toEqual([])
+    }
+  })
+
+  it('a met page check supports, a failed one never does even when Jev names it', async () => {
+    const path = write('s.jsonl', [claudeReply('The offer page is live.', minute(5))])
+    // Two pages: the clause names one that passes; the other (failing) page is named in another clause.
+    const fetchUrl = async (url: string) => url === OFFER ? LIVE : { ...LIVE, finalUrl: url, status: 500 }
+    const { c } = checker({ jev: { ask: vi.fn(async (state: any) => {
+      const pass = state.evidence.findIndex((e: any) => e.source === 'url' && e.text.includes(OFFER)), fail = state.evidence.findIndex((e: any) => e.source === 'url' && e.text.includes('/pricing'))
+      return { inputTokens: 1, model: 'jev', answers: {
+        v0: { probabilities: { met: 0.9, not_met: 0.05, unclear: 0.05 } }, k0: { probabilities: { fact: 0.9 } }, e0: { probabilities: { e0: 0.9 } },
+        s0: { probabilities: { [`e${pass}`]: 0.4, [`e${fail}`]: 0.4 } },
+        v1: { probabilities: { met: 0.1, not_met: 0.8, unclear: 0.1 } }, k1: { probabilities: { none: 0.9 } }, e1: { probabilities: { none: 0.9 } } } }
+    }) } as any, fetchUrl, sessions: { [SESSION]: path } })
+    const result = await c.check(req({ clauses: [`${OFFER} page is live`, 'https://bottlepos.com/pricing shows the offer'] }), card)
+    if (result.provider !== 'jev') throw new Error(JSON.stringify(result))
+    expect(result.clauses[0]!.verdict).toBe('met')
+    expect(result.clauses[0]!.supporting.map(x => `${x.source} ${x.ref}`)).toEqual([`session claude:${SESSION}`, `url ${OFFER}`])
+  })
+
+  it('evidence with no time of its own carries the time of the check that judged it, and a replay keeps it', async () => {
+    const path = write('c.jsonl', [cursorUser(`Do the card.\nCOS-WORK ${CARD_ID}: <done, needs input or blocked>: <x>`), cursorReply('The Facebook ads are running now.')])
+    let now = Date.parse('2026-10-07T21:32:00Z')
+    const { c } = checker({ jev: supportJev('met', 'fact', 0, () => ({ e0: 0.9 })) as any, sessions: { [SESSION]: path }, now: () => now })
+    const follows = [{ provider: 'cursor' as const, sessionId: SESSION, cursor: null }]
+    const first = await c.check(req({ follows, clauses: ['Facebook ads are running'], since: '2000-01-01T00:00:00Z' }), card)
+    if (first.provider !== 'jev') throw new Error('no verdict')
+    expect(first.clauses[0]!.evidence!.at).toBe('2026-10-07T21:32:00.000Z')
+    expect(first.clauses[0]!.supporting).toEqual([{ source: 'session', ref: `cursor:${SESSION}`, at: '2026-10-07T21:32:00.000Z' }])
+    now += 3_600_000
+    const again = await c.check(req({ follows, clauses: ['Facebook ads are running'], since: '2000-01-01T00:00:00Z' }), card)
+    expect(again).toMatchObject({ skipped: 'no_new_evidence' })
+    if (again.provider !== 'jev') throw new Error('no verdict')
+    expect(again.clauses[0]!.evidence!.at).toBe('2026-10-07T21:32:00.000Z')
+  })
+
+  it('a support answer outside the offered options is jev_bad_answer; an absent one means only the picked item', async () => {
+    const path = write('s.jsonl', [claudeReply('The Facebook ads are running.', minute(5))])
+    const bad = checker({ jev: supportJev('met', 'fact', 0, () => ({ e9: 0.9 })) as any, sessions: { [SESSION]: path } })
+    expect(await bad.c.check(req({ clauses: ['Facebook ads are running'] }), card)).toEqual({ provider: 'none', reason: 'jev_bad_answer' })
+    const { jev } = fakeJev(() => [['met', 'fact', 0]])
+    const absent = checker({ jev: jev as any, sessions: { [SESSION]: path } })
+    const r = await absent.c.check(req({ clauses: ['Facebook ads are running'] }), card)
+    if (r.provider !== 'jev') throw new Error('no verdict')
+    expect(r.clauses[0]!.supporting).toEqual([{ source: 'session', ref: `claude:${SESSION}`, at: minute(5) }])
   })
 })

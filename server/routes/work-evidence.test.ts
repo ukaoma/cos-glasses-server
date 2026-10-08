@@ -49,7 +49,9 @@ it('refuses any body that is not exactly the contract', async () => {
     { ...body, follows: [{ ...body.follows[0], sessionId: '../x' }] }, { ...body, follows: Array(5).fill(0).map((_, i) => ({ ...body.follows[0], sessionId: `${i}0000000-aaaa` })) }]) {
     const res = await s.post(bad)
     expect(res.status).toBe(400)
-    expect((await res.json()).error.code).toBe('invalid_evidence_request')
+    const error = (await res.json()).error
+    expect(error.code).toBe('invalid_evidence_request')
+    expect(error.limits).toEqual({ follows: 4, clauses: 6, clauseChars: 300, clauseUnit: 'utf16', cursorChars: 512, supporting: 4 })
   }
   expect(s.deps.evidence.check).not.toHaveBeenCalled()
   expect(s.deps.list).not.toHaveBeenCalled()

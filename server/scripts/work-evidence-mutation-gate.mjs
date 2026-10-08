@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Work evidence check mutation gate (6.66.0): the SSRF guard, tag scoping, only-fact-counts, skip-on-unchanged, the
-// cap, the switch and the request contract. Mutations run only in a disposable copy of server/ and shared/; the live
+// cap, the switch and the request contract; since the 2026-10-07 QA also gap walking, the capability, the refusals
+// before reading, supporting items and evidence times. Mutations run only in a disposable copy of server/ and shared/; the live
 // checkout (which a candidate may be running) is never rewritten.
 //
 // What it proves, in order:
@@ -20,7 +21,7 @@ import { spawnSync } from 'node:child_process'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const tests = ['server/lib/safe-fetch.test.ts', 'server/lib/work-evidence.test.ts', 'server/routes/work-evidence.test.ts',
   'server/routes/work-board.test.ts', 'server/lib/work-search.test.ts', 'server/routes/jev.test.ts']
-const SF = 'server/lib/safe-fetch.ts', EV = 'server/lib/work-evidence.ts', JR = 'server/routes/jev.ts', WS = 'server/lib/work-search.ts', WB = 'server/routes/work-board.ts'
+const SF = 'server/lib/safe-fetch.ts', EV = 'server/lib/work-evidence.ts', JR = 'server/routes/jev.ts', WS = 'server/lib/work-search.ts', WB = 'server/routes/work-board.ts', PK = 'package.json'
 const mutations = [
   // SSRF: the URL.
   ['https-only', SF, "  if (url.protocol !== 'https:') throw new SafeFetchError('not_https')\n", ''],
@@ -102,8 +103,20 @@ const mutations = [
   // Cursors and truncation.
   ['cursor-prefix-checked', EV, 'const fits = !!cursor && cursor.o <= size && await prefixHash(path, cursor.o) === cursor.p', 'const fits = !!cursor && cursor.o <= size'],
   ['foreign-cursor-ignored', EV, 'cursor = decoded && decoded.id === id ? decoded : null', 'cursor = decoded'],
-  ['truncated-past-cursor', EV, 'truncated = from > cursor!.o', 'truncated = false'],
-  ['truncated-before-since', EV, 'truncated = start > 0 && !records.some(reachesFloor)', 'truncated = false'],
+  // QA 2026-10-07: a truncated read walks forward through the gap, never an end-of-file cursor.
+  ['truncated-when-more-unread', EV, '  const truncated = to < size\n', '  const truncated = false\n'],
+  ['gap-cursor-not-eof', EV, 'return { records, end: truncated && end <= from ? to : end, truncated }', 'return { records, end: truncated ? size : end, truncated }'],
+  ['giant-line-stepped-over', EV, 'return { records, end: truncated && end <= from ? to : end, truncated }', 'return { records, end, truncated }'],
+  ['cursor-reads-forward', EV, ';({ records, end, truncated } = await readForward(path, cursor!.o, size, largest))',
+    ';({ records, end, truncated } = await readForward(path, Math.max(cursor!.o, size - largest), size, largest))'],
+  ['since-found-by-bisection', EV, 'const from = await seekBeforeTime(path, floorMs!, start, size, largest)', 'const from = start'],
+  ['since-gap-read', EV, '    } else if (start > 0 && !records.some(reachesFloor)) {', '    } else if (false) {'],
+  ['bisection-needs-older', EV, '    if (t !== null && t < floorMs) lo = mid', '    if (t !== null) lo = mid'],
+  ['cursor-handoff-walk-from-top', EV, '      if (!anchored && start > 0) {', '      if (false) {'],
+  ['anchor-pending-flag', EV, '...(anchorPending ? { a: 1 as const } : {})', '...({})'],
+  ['anchor-pending-honoured', EV, '    if (cursor!.a) { afterAnchor(); anchorPending = !anchored }', '    if (false) { afterAnchor(); anchorPending = !anchored }'],
+  ['anchor-flag-validated', EV, ' || (body.a !== undefined && body.a !== 1)) return null', ') return null'],
+  ['prefix-4k', EV, 'prefixBytes: 4096,', 'prefixBytes: 64,'],
   ['since-floor', EV, '      if (at !== null && (exclusive ? at <= floorMs : at < floorMs)) continue\n', ''],
   ['partial-line-waits', EV, 'return { records, end: readFrom + lastNewline + 1 }', 'return { records, end: size }'],
   // Sources.
@@ -119,7 +132,33 @@ const mutations = [
   ['no-duplicate-follows', EV, '    if (seen.has(key)) return null\n', ''],
   ['cursor-syntax', EV, '    if (!isWellFormedCursor(r.cursor)) return null\n', ''],
   ['outside-mutation-lease', WS, "new Set(['/work/search', '/work-board/evidence-check'])", "new Set(['/work/search'])"],
-  ['capability-flag', WB, 'capabilities: { ...capabilities, evidenceCheck: true }', 'capabilities'],
+  ['capability-flag', WB, 'capabilities: { ...capabilities, evidenceCheck: deps.evidenceCheck() }', 'capabilities: { ...capabilities, evidenceCheck: true }'],
+  ['capability-default-wired', WB, 'evidenceCheck: () => workEvidenceAvailable() }', 'evidenceCheck: () => true }'],
+  ['capability-needs-switch', EV, '  return workEvidenceEnabled(env) && hasKey()\n', '  return hasKey()\n'],
+  ['capability-needs-key', EV, '  return workEvidenceEnabled(env) && hasKey()\n', '  return workEvidenceEnabled(env)\n'],
+  // QA 2026-10-07: refuse before reading when Jev certainly cannot answer, and say when to ask again.
+  ['preflight-wired', EV, '    const refused = this.preflight()\n    if (refused) return refused\n', ''],
+  ['preflight-no-key', EV, "    if (!status.configured) return { provider: 'none', reason: EVIDENCE_REFUSALS.notConfigured }\n", ''],
+  ['preflight-breaker', EV, "    if (status.breakerOpenUntil) return { provider: 'none', reason: EVIDENCE_REFUSALS.breaker, retryAt: status.breakerOpenUntil }\n", ''],
+  ['preflight-cap', EV, "    if (status.usedToday >= status.dailyCap) return { provider: 'none', reason: EVIDENCE_REFUSALS.cap, retryAt: nextUtcDay(this.deps.now()) }\n", ''],
+  ['breaker-retry-at', EV, 'const retryAt = reason === EVIDENCE_REFUSALS.breaker ? this.deps.jev.status?.().breakerOpenUntil ?? undefined', 'const retryAt = reason === EVIDENCE_REFUSALS.breaker ? undefined'],
+  ['cap-retry-at', EV, '      : reason === EVIDENCE_REFUSALS.cap ? nextUtcDay(this.deps.now()) : undefined', '      : undefined'],
+  // QA 2026-10-07: supporting items and evidence times.
+  ['support-question-asked', EV, "      questions[`s${i}`] = { type: 'choice', instructions: SUPPORT_TEXT.replaceAll('{i}', String(i)), criteria: { ...supportOptions, none: 'No item reports it as already true.' } }\n", ''],
+  ['support-answer-validated', EV, '  if (rows.some(([k, v]) => !allowed.includes(k)', '  if (false && rows.some(([k, v]) => !allowed.includes(k)'],
+  ['supporting-only-met', EV, "  if (verdict === 'met' && item) {", '  if (item) {'],
+  ['supporting-min-p', EV, "k !== 'none' && p >= EVIDENCE_LIMITS.supportMinP", "k !== 'none' && p >= 0"],
+  ['supporting-min-p-value', EV, 'supportMinP: 0.15,', 'supportMinP: 0.1,'],
+  ['supporting-distinct', EV, 'if (other && !chosen.includes(other)) chosen.push(other)', 'if (other) chosen.push(other)'],
+  ['supporting-cap-4', EV, '      if (supporting.length >= EVIDENCE_LIMITS.supporting) break\n', ''],
+  ['supporting-no-failed-url', EV, "      if (it.source === 'url' && it.urlPass !== true) continue  // a page check that did not pass supports nothing\n", ''],
+  ['supporting-at-fallback', EV, 'supporting.push({ source: it.source, ref: it.ref, at: it.at ?? observedAt })', 'supporting.push({ source: it.source, ref: it.ref, at: it.at })'],
+  ['evidence-at-fallback', EV, 'excerpt: clip(item.excerpt, EVIDENCE_LIMITS.excerptChars), at: item.at ?? observedAt }', 'excerpt: clip(item.excerpt, EVIDENCE_LIMITS.excerptChars), at: item.at }'],
+  // QA 2026-10-07: one set of limits, UTF-16 clause length, the 400 carries them, the gate stays out of the package.
+  ['request-limits-pinned', EV, 'follows: 4, clauses: 6, clauseChars: 300,', 'follows: 4, clauses: 6, clauseChars: 301,'],
+  ['clause-utf16', EV, "typeof c !== 'string' || c.length > EVIDENCE_LIMITS.clauseChars", "typeof c !== 'string' || [...c].length > EVIDENCE_LIMITS.clauseChars"],
+  ['route-400-limits', JR, '        limits: L } })', '      } })'],
+  ['npm-excludes-this-gate', PK, '    "!server/scripts/work-evidence-mutation-gate.mjs",\n', ''],
 ]
 
 const args = process.argv.slice(2)

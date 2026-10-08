@@ -14,7 +14,7 @@ import { isSafeSessionId, type AgentProvider } from '../lib/agent-session-store.
 import { listBoard } from '../lib/task-store.js'
 import { sharedWorkSearchJevClient } from '../lib/work-search.js'
 import { isSafeDomainName } from '../lib/domains.js'
-import { defaultWorkEvidenceDeps, parseEvidenceRequest, sharedWorkEvidenceJevClient, WorkEvidenceChecker } from '../lib/work-evidence.js'
+import { defaultWorkEvidenceDeps, EVIDENCE_REQUEST_LIMITS, parseEvidenceRequest, sharedWorkEvidenceJevClient, WorkEvidenceChecker } from '../lib/work-evidence.js'
 
 /** What the route reads from a meeting review (6.57.1): the server's own record, never client text. */
 export interface ReviewForAdvice { source: { title: string; domain: string }; markdown?: string }
@@ -151,14 +151,17 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
       return res.json({ provider: 'none', reason: 'completion_unavailable' })  // advice only: tracking goes on without it
     }
   })
-  /** 6.66.0 (Control 0.5.262): is each clause of a card's finish line true yet, and which item shows it? The card, its
+  /** 6.66.0 (the next COS Control release): is each clause of a card's finish line true yet, and which item shows it? The card, its
    *  meetings and the session transcripts are this server's; the client names the card, its follows (with the cursors
    *  this route handed back), the clauses and a time. Read-only and advice only: Control is the only mover. Outside the
    *  mutation lease (lib/work-search.ts isReadOnlyApiPost): it writes nothing but its own token ledger. */
   router.post('/work-board/evidence-check', async (req, res) => {
     const parsed = parseEvidenceRequest(req.body)
     if (!parsed) {
-      return res.status(400).json({ error: { code: 'invalid_evidence_request', message: 'Select an exact task, at most 4 follows and at most 6 clauses of up to 300 characters.' } })
+      const L = EVIDENCE_REQUEST_LIMITS
+      return res.status(400).json({ error: { code: 'invalid_evidence_request',
+        message: `Select an exact task, at most ${L.follows} follows and at most ${L.clauses} clauses of up to ${L.clauseChars} characters (UTF-16 units).`,
+        limits: L } })
     }
     if (!deps.evidence.enabled()) return res.json({ provider: 'none', reason: 'evidence_disabled' })
     try {

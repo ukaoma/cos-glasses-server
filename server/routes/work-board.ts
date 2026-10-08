@@ -8,6 +8,7 @@ import type { MeetingDescriptor } from '../lib/work-review-store.js'
 import { isSafeDomainName } from '../lib/domains.js'
 import { resolveSavedMeetingDetail } from './meetings.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
+import { workEvidenceAvailable } from '../lib/work-evidence.js'
 
 export interface WorkBoardDependencies {
   /** The native journal reader. It takes no request-derived argument: there is no request-supplied path. */
@@ -27,10 +28,13 @@ export interface WorkBoardDependencies {
   /** 6.59.0: the bounded, shared board read (5 s). Defaults to one over `list`. */
   readBoard?: WorkBoardReader<TaskBoardRow>
   now: () => number
+  /** 6.66.0: whether POST /api/work-board/evidence-check can answer at all (lib/work-evidence.ts workEvidenceAvailable:
+   *  the switch is on and a TypeSafe key resolves). The cap and breaker are transient and do not turn it off. */
+  evidenceCheck: () => boolean
 }
 const defaults: WorkBoardDependencies = { journal: () => readWorkJournal(), list: listBoard, capabilities: workBoardCapabilities,
   stage: setTaskWorkStage, link: linkTaskMeeting, edit: editWorkTask, resolveMeeting: resolveSavedMeetingDetail,
-  requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), now: () => Date.now() }
+  requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), now: () => Date.now(), evidenceCheck: () => workEvidenceAvailable() }
 /** How old a board read the activity and open-work glances accept (the reader shares one read between them). */
 export const WORK_GLANCE_BOARD_AGE_MS = 10_000
 
@@ -89,9 +93,9 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
       board.prime(raw, read)
       // 6.59.0: taskRevision is this task's own revision (COS Control's taskSnapshot), what a handoff request names.
       const tasks = raw.map(row => ({ ...row, workStage: row.checked ? 'complete' : row.workStage ?? (row.stage === 'active' ? 'draft' : row.stage === 'review' ? 'qa' : 'planned'), workIdentity: row.workIdentity || row.id, meetingRefs: row.meetingRefs ?? [], taskRevision: controlSnapshotRevision(row) }))
-      // 6.66.0: evidenceCheck says POST /api/work-board/evidence-check exists (routes/jev.ts). Control falls back to the
-      // completion check without it.
-      res.json({ tasks, capabilities: { ...capabilities, evidenceCheck: true }, complete: true })
+      // 6.66.0: evidenceCheck says POST /api/work-board/evidence-check can answer (routes/jev.ts): false when the switch is
+      // off or no key resolves. Control falls back to the completion check without it.
+      res.json({ tasks, capabilities: { ...capabilities, evidenceCheck: deps.evidenceCheck() }, complete: true })
     }
     catch (e) { fail(res, e) }
   })

@@ -1,5 +1,5 @@
 /**
- * Work evidence check (6.66.0, Control 0.5.262): is each part of a card's finish line true yet, and what shows it?
+ * Work evidence check (6.66.0, with the next COS Control release): is each part of a card's finish line true yet, and what shows it?
  *
  * WHY. The completion check (work-completion.ts, 6.58.0) reads one session's newest 40 turns, keeps the newest 4,000
  * characters, and asks Jev one question against the whole Done when. On 7 real cards (canary 2026-10-07) it moved none
@@ -9,11 +9,15 @@
  *
  * SOURCES, each read-only:
  * - Sessions (the card's follows, at most 4). An INCREMENTAL read: only replies after the follow's cursor (or after
- *   `since` when it has none), and a new cursor back, so evidence never ages out of a fixed window. The cursor is a byte
- *   offset plus the newest record time, checked against the bytes before it, so a rewritten transcript falls back to
- *   time instead of reading garbage. Cursor transcripts carry no times: with no cursor they count from the last handoff
- *   prompt for this card (`COS-WORK <tag>` in a user message). A read that hits its byte limit before reaching the
- *   cursor says `truncated`, which Control reads as unclear.
+ *   `since` when it has none), and a new cursor back. Each reply is offered to Jev ONCE, on the check that first reads
+ *   it: the next check starts after it, so a met verdict this server gave is not repeated later unless the same item is
+ *   offered again. Keeping a met clause met is Control's job (it merges per-clause verdicts, newest evidence `at` wins);
+ *   this server makes sure every met clause carries its evidence time. The cursor is a byte offset plus the newest
+ *   record time, checked against the 4 KB before it, so a rewritten transcript falls back to time instead of reading
+ *   garbage. Cursor transcripts carry no times: with no cursor they count from the last handoff prompt for this card
+ *   (`COS-WORK <tag>` in a user message). One check reads at most the largest window (24 MiB) of a transcript. When
+ *   more is unread, the answer says `truncated` and its cursor points INSIDE the unread part, never at the end, so the
+ *   following checks walk forward through it and nothing in the gap is skipped.
  *   Tag scoping: with one follow, untagged replies count. With several, only `COS-WORK <tag>` lines for this card count.
  *   A reply whose status lines name only OTHER cards never counts (the thread is serving several cards).
  * - URLs in a clause, fetched through safe-fetch.ts. A pass is a 200, the final URL equal to the one asked for, and the
@@ -36,7 +40,7 @@
 import { createHash } from 'node:crypto'
 import { open, stat } from 'node:fs/promises'
 import { dataPath } from './data-dir.js'
-import { estimateJevTokens, JevClient, JevError } from './jev.js'
+import { estimateJevTokens, JevClient, JevError, resolveJevKey } from './jev.js'
 import { agentSessionRoots, findAgentSessionFile, isSafeSessionId, parseJsonLine, type AgentProvider } from './agent-session-store.js'
 import { isSafeDomainName } from './domains.js'
 import { callPython } from './python-bridge.js'
@@ -45,8 +49,24 @@ import { boundForRedaction, redactSecretText } from './activity-preview.js'
 import { redactSecrets } from './lens-gist-engines.js'
 import { safeFetch, SafeFetchError, type SafeFetchMarkers, type SafeFetchResult } from './safe-fetch.js'
 
+/**
+ * The request limits COS Control must match (one place; work-evidence.test.ts pins every value).
+ * - `clauseChars` is counted in UTF-16 code units (JavaScript `String.length`, Swift `String.utf16.count`), never in
+ *   graphemes or code points: one emoji outside the BMP is 2. A clause over the limit is refused with 400.
+ * - `cursorChars` bounds the opaque cursor this route hands back. The longest cursor the format can produce (an offset
+ *   up to 2^53, the widest ISO time, the anchor flag) is under 200 characters, so 512 is a parse guard, not a size a
+ *   real cursor approaches. Control should use 512 too rather than 2048.
+ * - `supporting` is the most supporting items one clause reports.
+ */
+export const EVIDENCE_REQUEST_LIMITS = Object.freeze({ follows: 4, clauses: 6, clauseChars: 300, clauseUnit: 'utf16' as const, cursorChars: 512, supporting: 4 })
+
 export const EVIDENCE_LIMITS = {
-  follows: 4, clauses: 6, clauseChars: 300, cursorChars: 512,
+  follows: EVIDENCE_REQUEST_LIMITS.follows, clauses: EVIDENCE_REQUEST_LIMITS.clauses, clauseChars: EVIDENCE_REQUEST_LIMITS.clauseChars,
+  cursorChars: EVIDENCE_REQUEST_LIMITS.cursorChars, supporting: EVIDENCE_REQUEST_LIMITS.supporting,
+  /** A support answer at or above this probability names a supporting item (besides the one Jev picked). */
+  supportMinP: 0.15,
+  /** The bytes before a cursor's offset that must be unchanged for the cursor to fit. */
+  prefixBytes: 4096,
   /** A reply is read up to this many characters before it is excerpted. */
   replyChars: 12_000,
   /** Per follow, and for all session items together. */
@@ -74,6 +94,12 @@ export function workEvidenceDailyCap(env: NodeJS.ProcessEnv = process.env): numb
 /** On unless COS_WORK_EVIDENCE says off. Read from the server's environment, so changing it takes a restart. */
 export function workEvidenceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !['0', 'false', 'no', 'off'].includes((env.COS_WORK_EVIDENCE ?? '').trim().toLowerCase())
+}
+/** What `GET /api/work-board` advertises as `capabilities.evidenceCheck`: the switch is on AND a TypeSafe key resolves.
+ *  A key lookup is a small file read, so this stays cheap per board read. The cap and the breaker are transient and do
+ *  NOT turn it off: the check answers `jev_cap` / `jev_breaker` with `retryAt`, and Control backs off until then. */
+export function workEvidenceAvailable(env: NodeJS.ProcessEnv = process.env, hasKey: () => boolean = () => resolveJevKey() !== null): boolean {
+  return workEvidenceEnabled(env) && hasKey()
 }
 /** The evidence check's own Jev client: its own ledger, cap and breaker. jev.ts supplies the key and the timeout. */
 export function createWorkEvidenceJevClient(fetchImpl: typeof fetch = fetch, now: () => Date = () => new Date(),
@@ -166,7 +192,9 @@ function mentionsTag(text: string, tags: ReadonlySet<string>): boolean {
 // ---------------------------------------------------------------------------------------------------------------------
 // Cursors
 
-interface CursorBody { v: 1; id: string; o: number; t: string | null; p: string }
+/** v1: the session key, the byte offset read to, the newest record time seen, a hash of the bytes before the offset, and
+ *  `a: 1` while a Cursor transcript is still being walked forward looking for this card's handoff prompt. */
+interface CursorBody { v: 1; id: string; o: number; t: string | null; p: string; a?: 1 }
 const sessionKey = (provider: AgentProvider, sessionId: string) => createHash('sha256').update(`${provider}:${sessionId.trim().toLowerCase()}`).digest('hex').slice(0, 12)
 
 export function encodeCursor(body: CursorBody): string { return Buffer.from(JSON.stringify(body)).toString('base64url') }
@@ -175,16 +203,15 @@ export function decodeCursor(raw: string | null): CursorBody | null {
   try {
     const body = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as Partial<CursorBody>
     if (body.v !== 1 || typeof body.id !== 'string' || !Number.isSafeInteger(body.o) || body.o! < 0 || typeof body.p !== 'string'
-      || (body.t !== null && (typeof body.t !== 'string' || Number.isNaN(Date.parse(body.t))))) return null
+      || (body.t !== null && (typeof body.t !== 'string' || Number.isNaN(Date.parse(body.t)))) || (body.a !== undefined && body.a !== 1)) return null
     return body as CursorBody
   } catch { return null }
 }
 /** A cursor's syntax only (the route refuses a malformed one; a stale one is handled on read). */
 export function isWellFormedCursor(raw: unknown): boolean { return raw === null || (typeof raw === 'string' && decodeCursor(raw) !== null) }
 
-const PREFIX_BYTES = 64
 async function prefixHash(path: string, offset: number): Promise<string> {
-  const from = Math.max(0, offset - PREFIX_BYTES), length = offset - from
+  const from = Math.max(0, offset - EVIDENCE_LIMITS.prefixBytes), length = offset - from
   if (length === 0) return ''
   const handle = await open(path, 'r')
   try {
@@ -201,7 +228,8 @@ export interface SessionReply { text: string; at?: string }
 export interface SessionRead {
   replies: SessionReply[]
   cursor: string
-  /** The read hit its byte limit before reaching the cursor (or `since`, or the handoff prompt). */
+  /** More of the transcript is unread past `cursor` (one read is at most the largest window). The cursor is inside the
+   *  unread part, so the next read continues from it; it is never the end of the file while this is true. */
   truncated: boolean
   /** Untimed transcripts with no cursor: whether the handoff prompt for this card was found. Untagged replies need it. */
   anchored: boolean
@@ -240,16 +268,56 @@ const recordTime = (obj: Record<string, unknown>): number | null => {
 }
 
 /**
+ * At most `max` bytes forward from `from`. `truncated` when the transcript goes on past them. The end offset is always
+ * past `from` when truncated: a single line longer than the window is stepped over (the next read drops its partial
+ * head), so a walk forward through a gap can never stall.
+ */
+async function readForward(path: string, from: number, size: number, max: number): Promise<{ records: Record_[]; end: number; truncated: boolean }> {
+  const to = Math.min(size, from + max)
+  const { records, end } = await readLines(path, from, to, false)
+  const truncated = to < size
+  return { records, end: truncated && end <= from ? to : end, truncated }
+}
+
+/** The time of the first timed record that starts in [offset, offset + probe), or null when the probe finds none. */
+async function firstTimeFrom(path: string, offset: number, size: number, probe: number): Promise<number | null> {
+  const { records } = await readLines(path, offset, Math.min(size, offset + probe), offset === 0)
+  for (const r of records) { const t = recordTime(r.obj); if (t !== null) return t }
+  return null
+}
+
+/**
+ * A byte offset at or before the place a timed transcript crosses `floorMs`, found by bisection over [0, hi] with small
+ * probes. The offset returned always holds a record older than the floor (or is 0), so reading forward from it can only
+ * read too much (older replies are then dropped by the floor), never skip a reply newer than the floor. A probe that
+ * finds no timed record counts as "maybe newer", which moves the answer earlier: the safe direction.
+ */
+async function seekBeforeTime(path: string, floorMs: number, hi: number, size: number, largest: number): Promise<number> {
+  const probe = Math.min(1024 * 1024, largest), grain = Math.max(1, Math.floor(largest / 8))
+  let lo = 0
+  while (hi - lo > grain) {
+    const mid = lo + Math.floor((hi - lo) / 2)
+    const t = await firstTimeFrom(path, mid, size, probe)
+    if (t !== null && t < floorMs) lo = mid
+    else hi = mid
+  }
+  return lo
+}
+
+/**
  * The assistant replies of one transcript that came after `cursor` (or after `sinceMs` when the cursor is null or no
- * longer fits the file), and the cursor for next time.
+ * longer fits the file), and the cursor for next time. One call reads at most the largest window forward; when the
+ * transcript goes on past it, `truncated` is true and the cursor points at the end of what was read, INSIDE the unread
+ * part, so the next call continues from there. A truncated answer never carries an end-of-file cursor.
  *
- * - A cursor that fits (the bytes before its offset unchanged): everything from its offset to the end, unless that is
- *   more than the largest window, in which case the newest window and `truncated`.
- * - Times (Claude, Codex): backward in growing windows until a record older than the floor is in the window; if the
- *   largest window still has none and the file goes back further, `truncated`.
- * - No times (Cursor) and no cursor: replies after the newest user message carrying this card's `COS-WORK` tag; none
- *   found means `anchored: false` (untagged replies then do not count). Nothing at all when the file was last written
- *   before `sinceMs`.
+ * - A cursor that fits (the 4 KB before its offset unchanged): forward from its offset.
+ * - Times (Claude, Codex): backward in growing windows until a record older than the floor is in the window. If even the
+ *   largest window has none and the file goes back further, the floor is found by bisection and the read goes forward
+ *   from there.
+ * - No times (Cursor) and no cursor: replies after the newest user message carrying this card's `COS-WORK` tag. When
+ *   the newest window has none and the file goes back further, the walk starts at the top of the file with the cursor
+ *   flag `a: 1` (anchor pending): until the handoff prompt is read, `anchored` is false (untagged replies do not count,
+ *   this card's tagged lines do). Nothing at all when the file was last written before `sinceMs`.
  */
 export async function readSessionSince(provider: AgentProvider, sessionId: string, path: string, cursorRaw: string | null, sinceMs: number,
                                        tags: ReadonlySet<string>, windows: readonly number[] = SESSION_TURNS_WINDOWS): Promise<SessionRead> {
@@ -259,23 +327,28 @@ export async function readSessionSince(provider: AgentProvider, sessionId: strin
   // Another session's cursor is no cursor at all: neither its offset nor its time says anything about this file.
   const decoded = decodeCursor(cursorRaw), cursor = decoded && decoded.id === id ? decoded : null
   const fits = !!cursor && cursor.o <= size && await prefixHash(path, cursor.o) === cursor.p
-  let records: Record_[] = [], end = 0, truncated = false, anchored = true
+  let records: Record_[] = [], end = 0, truncated = false, anchored = true, anchorPending = false
   // Which floor applies when the cursor does not fit: its own time (exclusive), else `since` for a timed transcript,
   // else (Cursor writes no times) the handoff prompt for this card.
   let floorMs: number | null = null, exclusive = false
   const anchorMode = !fits && !cursor?.t && provider === 'cursor'
+  const isAnchor = (r: Record_) => { const t = sessionTurnFromRecord(provider, r.obj, EVIDENCE_LIMITS.replyChars); return t?.role === 'user' && mentionsTag(t.text, tags) }
+  /** Keep what follows the newest handoff prompt in `records`; with none, keep all and say so. */
+  const afterAnchor = () => {
+    let anchorAt = -1
+    records.forEach((r, i) => { if (isAnchor(r)) anchorAt = i })
+    anchored = anchorAt >= 0
+    records = anchored ? records.slice(anchorAt + 1) : records
+  }
 
   if (fits) {
-    const from = size - cursor!.o > largest ? size - largest : cursor!.o
-    truncated = from > cursor!.o
-    ;({ records, end } = await readLines(path, from, size, !truncated))
-    if (end < cursor!.o) end = cursor!.o
+    ;({ records, end, truncated } = await readForward(path, cursor!.o, size, largest))
+    if (cursor!.a) { afterAnchor(); anchorPending = !anchored }
   } else if (anchorMode && mtimeMs < sinceMs) {
     // Not written since the handoff: nothing new.
     end = size
   } else {
     if (!anchorMode) { floorMs = cursor?.t ? Date.parse(cursor.t) : sinceMs; exclusive = !!cursor?.t }
-    const isAnchor = (r: Record_) => { const t = sessionTurnFromRecord(provider, r.obj, EVIDENCE_LIMITS.replyChars); return t?.role === 'user' && mentionsTag(t.text, tags) }
     const reachesFloor = (r: Record_) => { const t = recordTime(r.obj); return t !== null && t < floorMs! }
     let start = size
     for (const window of windows) {
@@ -284,13 +357,17 @@ export async function readSessionSince(provider: AgentProvider, sessionId: strin
       if (start === 0 || records.some(anchorMode ? isAnchor : reachesFloor)) break
     }
     if (anchorMode) {
-      let anchorAt = -1
-      records.forEach((r, i) => { if (isAnchor(r)) anchorAt = i })
-      anchored = anchorAt >= 0
-      truncated = !anchored && start > 0
-      records = anchored ? records.slice(anchorAt + 1) : records
-    } else {
-      truncated = start > 0 && !records.some(reachesFloor)
+      afterAnchor()
+      if (!anchored && start > 0) {
+        // The handoff prompt, if there is one, is older than the newest window: walk the transcript from the top.
+        ;({ records, end, truncated } = await readForward(path, 0, size, largest))
+        afterAnchor()
+        anchorPending = !anchored
+      }
+    } else if (start > 0 && !records.some(reachesFloor)) {
+      // The floor is older than the newest window: find it, and read forward from there.
+      const from = await seekBeforeTime(path, floorMs!, start, size, largest)
+      ;({ records, end, truncated } = await readForward(path, from, size, largest))
     }
   }
 
@@ -309,25 +386,46 @@ export async function readSessionSince(provider: AgentProvider, sessionId: strin
     }
     replies.push(turn.at ? { text: turn.text, at: turn.at } : { text: turn.text })
   }
-  return { replies, cursor: encodeCursor({ v: 1, id, o: end, t: newest, p: await prefixHash(path, end) }), truncated, anchored }
+  const body: CursorBody = { v: 1, id, o: end, t: newest, p: await prefixHash(path, end), ...(anchorPending ? { a: 1 as const } : {}) }
+  return { replies, cursor: encodeCursor(body), truncated, anchored }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The check
 
 export interface EvidenceItem { n: number; source: EvidenceSource; ref: string; excerpt: string; at?: string; text: string; urlPass?: boolean }
+/** One item that supports a met clause. `at` is always set (see ClauseVerdict.evidence). */
+export interface SupportingItem { source: EvidenceSource; ref: string; at: string }
 export interface ClauseVerdict {
   text: string; verdict: Verdict; confidence: number; kind: EvidenceKind
-  evidence: { source: EvidenceSource; ref: string; excerpt: string; at?: string } | null
+  /** The item Jev picked. `at` is the item's own time when it has one (a session reply, a Slack post, a dated meeting,
+   *  a page check's time), else the time of the check that first judged it; a replayed (`cached`) answer keeps it. */
+  evidence: { source: EvidenceSource; ref: string; excerpt: string; at: string } | null
   deterministic: boolean
   /** Why a met answer was reported as unclear: not_fact, no_evidence, url_not_passed. */
   reason?: string
+  /** Only for a met clause, else empty: the picked item first, then each other item Jev names (support question, p >=
+   *  supportMinP) as reporting the clause true as a fact, at most EVIDENCE_REQUEST_LIMITS.supporting, distinct items.
+   *  A page check that did not pass is never here. Control counts distinct `source` values for the title path. */
+  supporting: SupportingItem[]
 }
 export interface CursorOut { provider: AgentProvider; sessionId: string; cursor: string | null; missing?: true }
+/**
+ * The answer. Beyond the contract's first version (CONTRACT_work_evidence_check_2026-10-07.md, "v2 (2026-10-07 QA)"):
+ * - `sessionItemsOmitted`: session replies read but not offered to Jev (over 8 per follow or 10,000 characters). They
+ *   are NOT re-offered later: the cursor has moved past them.
+ * - `clauses[].supporting` and a guaranteed `clauses[].evidence.at` (above).
+ * - `truncated`: more transcript is unread; the returned cursor is inside it. Save the cursor and check again soon;
+ *   the verdicts cover only what was read.
+ * - On `provider: "none"`: `cursors` and `truncated` appear when sessions were already read (reason `no_evidence`): save
+ *   those cursors as on a verdict. A refusal before reading (`evidence_disabled`, `jev_not_configured`, `jev_cap`,
+ *   `jev_breaker`, `no_task_text`) has no cursors: keep the old ones. `retryAt` (ISO) comes with `jev_cap` (the next UTC
+ *   day, when the ledger resets) and `jev_breaker` (when the breaker closes): do not ask again before it.
+ */
 export type EvidenceResult =
   | { provider: 'jev'; model: string; basis: 'clauses' | 'title'; clauses: ClauseVerdict[]; sources: EvidenceSource[]; cursors: CursorOut[]
       truncated: boolean; cached: boolean; skipped: 'no_new_evidence' | null; sessionItemsOmitted: number }
-  | { provider: 'none'; reason: string; cursors?: CursorOut[]; truncated?: boolean }
+  | { provider: 'none'; reason: string; cursors?: CursorOut[]; truncated?: boolean; retryAt?: string }
 
 export interface EvidenceFollow { provider: AgentProvider; sessionId: string; cursor: string | null }
 export interface EvidenceRequest { domain: string; id: string; follows: EvidenceFollow[]; clauses: string[]; since: string }
@@ -335,7 +433,9 @@ export interface EvidenceCard { id: string; workIdentity?: string; title: string
 export interface MeetingEvidence { recordId: string; title: string; date?: string; summary?: string; decisions?: string[]; actionItems?: Array<{ task: string; owner?: string }> }
 
 export interface WorkEvidenceDeps {
-  jev: Pick<JevClient, 'ask'>
+  /** `status`, when there, lets a check refuse BEFORE reading anything when no key resolves, the breaker is open, or
+   *  today's ledger is spent (the cap or breaker otherwise costs a full evidence gather per retry). */
+  jev: Pick<JevClient, 'ask'> & Partial<Pick<JevClient, 'status'>>
   findSession: (provider: AgentProvider, sessionId: string) => Promise<string | null>
   fetchUrl: (url: string, markers: SafeFetchMarkers) => Promise<SafeFetchResult>
   meeting: (ref: NonNullable<EvidenceCard['meetingRefs']>[number]) => Promise<MeetingEvidence | null>
@@ -351,7 +451,9 @@ const VERDICT_TEXT = 'Is the finish-line clause in `clauses[{i}]` true now for t
   + 'Choose unclear when no item says enough to tell. An item about a different task, page or campaign does not count.'
 const KIND_TEXT = 'What does the strongest item in `evidence` about `clauses[{i}]` actually report?'
 const PICK_TEXT = 'Which single item in `evidence` best shows whether `clauses[{i}]` is true? Choose none when no item is about it.'
-export const EVIDENCE_QUESTIONS = { VERDICT_TEXT, KIND_TEXT, PICK_TEXT }
+const SUPPORT_TEXT = 'Which single item in `evidence` most clearly reports, as a fact, that `clauses[{i}]` is already true? '
+  + 'A plan, a draft, a promise or a check that did not pass is not that. Choose none when no item does.'
+export const EVIDENCE_QUESTIONS = { VERDICT_TEXT, KIND_TEXT, PICK_TEXT, SUPPORT_TEXT }
 
 /** The most probable option and its probability, refusing an answer outside the offered options. */
 export function argmax(probabilities: Record<string, number> | undefined, allowed: readonly string[]): [string, number] {
@@ -363,6 +465,13 @@ export function argmax(probabilities: Record<string, number> | undefined, allowe
 }
 
 const JEV_REASONS: Record<string, string> = { jev_cap_reached: 'jev_cap', jev_breaker_open: 'jev_breaker' }
+/** The reasons a check is refused before or instead of Jev, as Control should treat them:
+ *  - `evidence_disabled`: COS_WORK_EVIDENCE is off. Stop asking; use the completion check. Capability is false.
+ *  - `jev_not_configured`: no TypeSafe key. Capability is false.
+ *  - `jev_cap`, `jev_breaker`: transient. Capability stays true; back off until `retryAt`.
+ *  - `no_evidence`, `no_task_text`, `jev_*` others, `evidence_unavailable`: this check only; keep tracking. */
+export const EVIDENCE_REFUSALS = Object.freeze({ disabled: 'evidence_disabled', notConfigured: 'jev_not_configured', cap: 'jev_cap', breaker: 'jev_breaker' })
+const nextUtcDay = (ms: number) => { const d = new Date(ms); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString() }
 
 interface CardState { judge: string; keys: Set<string>; clauses: ClauseVerdict[]; model: string; basis: 'clauses' | 'title' }
 
@@ -375,6 +484,8 @@ export class WorkEvidenceChecker {
 
   async check(req: EvidenceRequest, card: EvidenceCard): Promise<EvidenceResult> {
     if (!this.deps.enabled()) return { provider: 'none', reason: 'evidence_disabled' }
+    const refused = this.preflight()
+    if (refused) return refused
     const title = clip(card.title || card.text, EVIDENCE_LIMITS.titleChars)
     const taskText = clip(card.text || card.title, EVIDENCE_LIMITS.taskChars)
     if (!title && !taskText) return { provider: 'none', reason: 'no_task_text' }
@@ -412,6 +523,7 @@ export class WorkEvidenceChecker {
       evidence: numbered.map(i => ({ n: i.n, source: i.source, ...(i.at ? { at: i.at } : {}), text: i.text })),
     }
     const pick: Record<string, string> = Object.fromEntries(numbered.map(i => [`e${i.n}`, `evidence[${i.n}]: ${i.source}, ${clip(i.excerpt, 90)}`]))
+    const supportOptions: Record<string, string> = Object.fromEntries(numbered.map(i => [`e${i.n}`, `evidence[${i.n}]`]))
     const questions: Record<string, unknown> = {}
     judged.forEach((_, i) => {
       questions[`v${i}`] = { type: 'choice', instructions: VERDICT_TEXT.replaceAll('{i}', String(i)), criteria: {
@@ -426,14 +538,16 @@ export class WorkEvidenceChecker {
         none: 'No item is about this clause.',
       } }
       questions[`e${i}`] = { type: 'choice', instructions: PICK_TEXT.replaceAll('{i}', String(i)), criteria: { ...pick, none: 'No item is about this clause.' } }
+      questions[`s${i}`] = { type: 'choice', instructions: SUPPORT_TEXT.replaceAll('{i}', String(i)), criteria: { ...supportOptions, none: 'No item reports it as already true.' } }
     })
     let answers: Awaited<ReturnType<JevClient['ask']>>
     try { answers = await this.deps.jev.ask(state, questions, estimateJevTokens({ state, questions })) } catch (e) {
-      if (e instanceof JevError) return { provider: 'none', reason: JEV_REASONS[e.code] ?? e.code }
+      if (e instanceof JevError) return this.refusal(JEV_REASONS[e.code] ?? e.code)
       throw e
     }
+    const checkedAt = new Date(this.deps.now()).toISOString()
     let clauses: ClauseVerdict[]
-    try { clauses = judged.map((_, i) => decideClause(shown[i]!, judged[i]!, numbered, answers.answers, i)) } catch (e) {
+    try { clauses = judged.map((_, i) => decideClause(shown[i]!, judged[i]!, numbered, answers.answers, i, checkedAt)) } catch (e) {
       if (e instanceof JevError) return { provider: 'none', reason: e.code }
       throw e
     }
@@ -442,6 +556,22 @@ export class WorkEvidenceChecker {
     this.state.delete(stateKey)
     this.state.set(stateKey, { judge, keys: new Set(keys), clauses, model, basis })
     return { provider: 'jev', model, basis, clauses, sources, cursors, truncated, cached: false, skipped: null, sessionItemsOmitted: sessions.omitted }
+  }
+
+  /** Refuse before reading anything when Jev certainly cannot answer: no key, an open breaker, or a spent ledger. */
+  private preflight(): EvidenceResult | null {
+    const status = this.deps.jev.status?.()
+    if (!status) return null
+    if (!status.configured) return { provider: 'none', reason: EVIDENCE_REFUSALS.notConfigured }
+    if (status.breakerOpenUntil) return { provider: 'none', reason: EVIDENCE_REFUSALS.breaker, retryAt: status.breakerOpenUntil }
+    if (status.usedToday >= status.dailyCap) return { provider: 'none', reason: EVIDENCE_REFUSALS.cap, retryAt: nextUtcDay(this.deps.now()) }
+    return null
+  }
+  /** A Jev refusal, with when to ask again for the transient ones. */
+  private refusal(reason: string): EvidenceResult {
+    const retryAt = reason === EVIDENCE_REFUSALS.breaker ? this.deps.jev.status?.().breakerOpenUntil ?? undefined
+      : reason === EVIDENCE_REFUSALS.cap ? nextUtcDay(this.deps.now()) : undefined
+    return { provider: 'none', reason, ...(retryAt ? { retryAt } : {}) }
   }
 
   private async sessionItems(req: EvidenceRequest, tags: ReadonlySet<string>, sinceMs: number, keywords: ReadonlySet<string>) {
@@ -566,13 +696,26 @@ function itemKey(item: EvidenceItem): string {
   return createHash('sha256').update(`${item.source}\u0000${item.ref}\u0000${item.excerpt}\u0000${item.source === 'url' ? '' : item.at ?? ''}`).digest('hex')
 }
 
-/** One clause's answer from Jev's three choices, under the rules Jev cannot be trusted to apply. */
+/** A choice answer's probabilities, refusing an answer outside the offered options; an absent answer is no answer. */
+function optionalProbabilities(probabilities: Record<string, number> | undefined, allowed: readonly string[]): Array<[string, number]> {
+  if (probabilities === undefined) return []
+  const rows = Object.entries(probabilities)
+  if (rows.some(([k, v]) => !allowed.includes(k) || typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1)) {
+    throw new JevError('jev_bad_answer', 'Jev answered outside the offered options')
+  }
+  return rows
+}
+
+/** One clause's answer from Jev's choices, under the rules Jev cannot be trusted to apply. `observedAt` is the time of
+ *  this check: the `at` of evidence that carries no time of its own. */
 export function decideClause(shownText: string, judgedText: string, items: readonly EvidenceItem[],
-                             answers: Record<string, { probabilities?: Record<string, number> }>, i: number): ClauseVerdict {
+                             answers: Record<string, { probabilities?: Record<string, number> }>, i: number, observedAt: string): ClauseVerdict {
   const verdictP = answers[`v${i}`]?.probabilities
   let [verdict, confidence] = argmax(verdictP, VERDICTS) as [Verdict, number]
   const [kind] = argmax(answers[`k${i}`]?.probabilities, KINDS) as [EvidenceKind, number]
-  const [picked] = argmax(answers[`e${i}`]?.probabilities, [...items.map(it => `e${it.n}`), 'none'])
+  const options = [...items.map(it => `e${it.n}`), 'none']
+  const [picked] = argmax(answers[`e${i}`]?.probabilities, options)
+  const support = optionalProbabilities(answers[`s${i}`]?.probabilities, options)
   const item = picked === 'none' ? null : items.find(it => `e${it.n}` === picked) ?? null
   let reason: string | undefined
   const ownUrls = clauseUrls(judgedText)
@@ -583,11 +726,25 @@ export function decideClause(shownText: string, judgedText: string, items: reado
     else if ((item.source === 'url' && !item.urlPass) || ownUrls.some(u => !items.some(it => it.source === 'url' && it.ref === u && it.urlPass))) reason = 'url_not_passed'
     if (reason) { verdict = 'unclear'; confidence = Number(verdictP?.unclear ?? 0) }
   }
+  const supporting: SupportingItem[] = []
+  if (verdict === 'met' && item) {
+    const chosen: EvidenceItem[] = [item]
+    for (const [option] of support.filter(([k, p]) => k !== 'none' && p >= EVIDENCE_LIMITS.supportMinP).sort((a, b) => b[1] - a[1])) {
+      const other = items.find(it => `e${it.n}` === option)
+      if (other && !chosen.includes(other)) chosen.push(other)
+    }
+    for (const it of chosen) {
+      if (supporting.length >= EVIDENCE_LIMITS.supporting) break
+      if (it.source === 'url' && it.urlPass !== true) continue  // a page check that did not pass supports nothing
+      supporting.push({ source: it.source, ref: it.ref, at: it.at ?? observedAt })
+    }
+  }
   return {
     text: shownText, verdict, confidence, kind,
-    evidence: item ? { source: item.source, ref: item.ref, excerpt: clip(item.excerpt, EVIDENCE_LIMITS.excerptChars), ...(item.at ? { at: item.at } : {}) } : null,
+    evidence: item ? { source: item.source, ref: item.ref, excerpt: clip(item.excerpt, EVIDENCE_LIMITS.excerptChars), at: item.at ?? observedAt } : null,
     deterministic: !!item && item.source === 'url' && item.urlPass === true,
     ...(reason ? { reason } : {}),
+    supporting,
   }
 }
 
@@ -622,6 +779,7 @@ export function parseEvidenceRequest(body: unknown): EvidenceRequest | null {
   }
   const clauses: string[] = []
   for (const c of b.clauses as unknown[]) {
+    // `length` is UTF-16 code units: the unit EVIDENCE_REQUEST_LIMITS names, and the one Control must count in.
     if (typeof c !== 'string' || c.length > EVIDENCE_LIMITS.clauseChars || !c.trim() || /[\x00-\x08\x0b-\x1f\x7f]/.test(c)) return null
     clauses.push(c.trim())
   }

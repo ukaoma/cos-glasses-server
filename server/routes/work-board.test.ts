@@ -24,9 +24,18 @@ async function setup(writable = true, overrides: Record<string, unknown> = {}) {
 const target={domain:'personal',id:'a'.repeat(12),expectedText:'Exact task',expectedRevision:'b'.repeat(64)}
 const meeting={recordId:'meeting:one',domain:'personal',month:'2026-09',filename:'meeting.md',title:'Untrusted submitted title'}
 it('requires auth and retains additive fields and explicit capability',async()=>{
-  const s=await setup();expect((await fetch(s.base)).status).toBe(401)
+  const s=await setup(true,{evidenceCheck:()=>true});expect((await fetch(s.base)).status).toBe(401)
   const body=await(await fetch(s.base,{headers:{'X-COS-Token':'fixture-token'}})).json()
   expect(body.capabilities).toEqual({version:1,writable:true,evidenceCheck:true});expect(body.tasks[0]).toMatchObject({workStage:'built',workIdentity:'stable',workRevision:target.expectedRevision})
+})
+it('6.66.0: evidenceCheck says false when the check cannot answer (switch off or no key), by default from the server environment',async()=>{
+  const off=await setup(true,{evidenceCheck:()=>false})
+  expect((await(await fetch(off.base,{headers:{'X-COS-Token':'fixture-token'}})).json()).capabilities).toEqual({version:1,writable:true,evidenceCheck:false})
+  vi.stubEnv('COS_WORK_EVIDENCE','0')
+  try {
+    const dflt=await setup(true)
+    expect((await(await fetch(dflt.base,{headers:{'X-COS-Token':'fixture-token'}})).json()).capabilities.evidenceCheck).toBe(false)
+  } finally { vi.unstubAllEnvs() }
 })
 it('6.65.0: serves the dated rows (createdOn, createdFrom, lineChangedAt) with an unchanged task revision',async()=>{
   const row={ id:'a'.repeat(12), domain:'personal', text:'Exact task', checked:false, workStage:'built', workIdentity:'stable', meetingRefs:[] }
