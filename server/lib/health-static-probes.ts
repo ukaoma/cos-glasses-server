@@ -123,9 +123,11 @@ async function probePython(): Promise<string> {
   }
 }
 
-async function probeClaude(): Promise<{ value: string; available: boolean }> {
+export async function probeClaude(): Promise<{ value: string; available: boolean }> {
   try {
-    const result = await execute('claude', ['--version'])
+    const resolved = resolveProviderBinary('claude')
+    if (!resolved.ok) return { value: `unresolved (${resolved.detail})`, available: false }
+    const result = await execute(resolved.path, ['--version'])
     return { value: firstNonemptyLine(result.stdout) ?? 'available', available: true }
   } catch {
     return { value: 'error', available: false }

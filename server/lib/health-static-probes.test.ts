@@ -1,5 +1,8 @@
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { createStaticProbeCache, parseCursorAboutVersion } from './health-static-probes.js'
+import { createStaticProbeCache, parseCursorAboutVersion, probeClaude } from './health-static-probes.js'
 
 describe('health static probes', () => {
   it('extracts the real Cursor version instead of the About heading', () => {
@@ -38,5 +41,27 @@ describe('health static probes', () => {
 
     now += 1
     await expect(cache.get()).resolves.toBe(2)
+  })
+})
+
+
+describe('Claude managed-service health', () => {
+  it('finds an explicit binary outside PATH and reports invalid overrides honestly', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-claude-health-'))
+    const binary = join(root, 'claude')
+    const oldPath = process.env.PATH
+    const oldBinary = process.env.COS_CLAUDE_BIN
+    try {
+      writeFileSync(binary, '#!/bin/sh\necho "2.1.294 (Claude Code)"\n', { mode: 0o755 })
+      process.env.PATH = '/usr/bin:/bin'
+      process.env.COS_CLAUDE_BIN = binary
+      await expect(probeClaude()).resolves.toEqual({ value: '2.1.294 (Claude Code)', available: true })
+      process.env.COS_CLAUDE_BIN = join(root, 'missing')
+      await expect(probeClaude()).resolves.toEqual({ value: 'unresolved (env_override_unusable)', available: false })
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath
+      if (oldBinary === undefined) delete process.env.COS_CLAUDE_BIN; else process.env.COS_CLAUDE_BIN = oldBinary
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
