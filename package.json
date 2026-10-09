@@ -47,6 +47,7 @@
     "!server/scripts/work-intake-mutation-gate.mjs",
     "!server/scripts/work-progress-mutation-gate.mjs",
     "!server/scripts/work-search-mutation-gate.mjs",
+    "!server/scripts/pairing-mutation-gate.mjs",
     "!server/scripts/away-hold-mutation-gate.mjs",
     "!server/scripts/nemotron-mutation-gate.mjs",
     "!server/scripts/merged-scribe-mutation-gate.mjs",
@@ -78,6 +79,8 @@
     "!server/scripts/build-work-task-runtime.py",
     "bin/hooks/cos-cursor-observer.cjs",
     "docs/provider-parity.md",
+    "docs/pairing-contract.md",
+    "docs/pairing-fixture.json",
     "bin/whisper-runtime.cjs",
     "bin/whisper-runtime.d.cts"
   ],

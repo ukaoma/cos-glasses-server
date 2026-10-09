@@ -1,0 +1,94 @@
+{
+  "$comment": "Server-generated parity fixture for glasses pairing (docs/pairing-contract.md). server/lib/glasses-pairing.test.ts fails if any value here stops matching what the server produces. Clients copy it; never hand-edit it.",
+  "protocolVersion": 1,
+  "capability": {
+    "pairing": {
+      "version": 1
+    }
+  },
+  "alphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+  "codeLength": 8,
+  "noncePattern": "^[A-Za-z0-9_-]{16,64}$",
+  "qrHostSeparator": "+",
+  "qrPattern": "^COS1\\/MAC\\/[0-9A-HJKMNP-TV-Z]{8}\\/(?:\\d{1,3}(?:\\.\\d{1,3}){3}:\\d{1,5})(?:\\+\\d{1,3}(?:\\.\\d{1,3}){3}:\\d{1,5})*\\/[0-9A-Z]+$",
+  "qrCharset": "^[0-9A-Z/:+.]+$",
+  "normalize": {
+    "abcd-efgh": "ABCDEFGH",
+    " oOil LI10 ": "00111110",
+    "7k3m 9pqr": "7K3M9PQR",
+    "ABCD-EFGU": null,
+    "ABCD-EFG": null
+  },
+  "examples": [
+    {
+      "code": "7K3M9PQR",
+      "display": "7K3M-9PQR",
+      "expiresAtMs": 1791547500000,
+      "hosts": [
+        {
+          "host": "100.100.10.20",
+          "port": 3141,
+          "kind": "tailscale"
+        }
+      ],
+      "qr": "COS1/MAC/7K3M9PQR/100.100.10.20:3141/TMN2WC"
+    },
+    {
+      "code": "7K3M9PQR",
+      "display": "7K3M-9PQR",
+      "expiresAtMs": 1791547500000,
+      "hosts": [
+        {
+          "host": "100.100.10.20",
+          "port": 3141,
+          "kind": "tailscale"
+        },
+        {
+          "host": "192.168.1.20",
+          "port": 3141,
+          "kind": "lan"
+        }
+      ],
+      "qr": "COS1/MAC/7K3M9PQR/100.100.10.20:3141+192.168.1.20:3141/TMN2WC"
+    }
+  ],
+  "reasons": {
+    "bad_request": 400,
+    "not_loopback": 403,
+    "not_allowed_network": 403,
+    "denied": 403,
+    "unknown_code": 404,
+    "used": 409,
+    "locked": 409,
+    "expired": 410,
+    "rate_limited": 429,
+    "draining": 503
+  },
+  "reasonMessages": {
+    "bad_request": "That pairing request was not understood. Scan the code again.",
+    "not_loopback": "Pairing codes are made only by COS Control on this Mac.",
+    "not_allowed_network": "Connect over Tailscale, or turn on \"Allow pairing on this Wi-Fi\" in COS Control.",
+    "denied": "Pairing was denied on the Mac.",
+    "unknown_code": "This code is not current. Show a new one in COS Control.",
+    "used": "This code was already used. Show a new one in COS Control.",
+    "locked": "Too many tries, or another device is waiting. Show a new code in COS Control.",
+    "expired": "Code expired: show a new one in COS Control.",
+    "rate_limited": "Too many tries. Wait a minute and try again.",
+    "draining": "Your Mac is updating. Try again in a minute."
+  },
+  "pollStates": [
+    "pending",
+    "allowed",
+    "denied",
+    "expired",
+    "delivered"
+  ],
+  "limits": {
+    "codeTtlMs": 300000,
+    "pendingTtlMs": 60000,
+    "lanArmMs": 600000,
+    "claimsPerIpPerMinute": 5,
+    "attemptsPerCode": 20,
+    "maxQrHosts": 3
+  }
+}

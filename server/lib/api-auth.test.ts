@@ -94,7 +94,7 @@ describe('global API authentication boundary', () => {
       error: 'unauthorized',
       reason: 'pairing_token_rejected',
     })
-    expect(missingBody.message).toBe('Scan the code in COS Control, or paste the pairing token.')
+    expect(missingBody.message).toBe('Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer.')
     expect(JSON.stringify(missingBody)).not.toContain(TOKEN)
   })
 
@@ -119,6 +119,8 @@ describe('global API authentication boundary', () => {
     ['GET', `/api/pairing/claim/${'a'.repeat(65)}`],
     ['GET', `/api/pairing/claim/${NONCE}/extra`],
     ['GET', '/api/pairing/claim/has.dot.in.it.0123456789'],
+    ['GET', `/api/evil/pairing/claim/${NONCE}`],
+    ['GET', `/api/x/pairing/claim/${NONCE}`],
   ])('keeps %s %s behind the token', async (method, path) => {
     expect((await request(path, { method })).status).toBe(401)
   })

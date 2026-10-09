@@ -16,8 +16,8 @@ This is the single source of truth for the three builders. Design and reasons: `
 - **Code:** 8 characters, Crockford base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`).
   - Normalize input: uppercase it, map O→0, I and L→1, and strip spaces and dashes.
   - Display it as `XXXX-XXXX`.
-- **QR text:** `COS1/MAC/<CODE>/<host>:<port>[,<host>:<port>]/<EXP>`
-  - All uppercase alphanumeric plus `/ : , .`, so the QR stays at version 3 or 4.
+- **QR text:** `COS1/MAC/<CODE>/<host>:<port>[+<host>:<port>]/<EXP>`
+  - All uppercase alphanumeric plus `/ : + .`, so the QR stays at version 3 or 4. (Changed from `,` after QA round 1: a comma is not in the QR alphanumeric set. The server writes `+`; clients accept `+` and `,`.)
   - `<EXP>` is the expiry, in unix seconds, written in base36 uppercase.
   - Hosts are IPv4 only, http. Tailscale (100.64.0.0/10) comes first; a LAN address (RFC1918) is included only while LAN pairing is armed.
   - `MAC` is the kind. `CLOUD` is reserved for later. Any other kind, or a version other than `COS1`, is refused with "Update COS to use this code".
@@ -44,13 +44,13 @@ All under `/api/pairing`. Every response carries a `reason` string on failure. T
   - 20 attempts per code, then the code is `locked` until a new code is made.
   - The limiter keys on the socket IP. Trust-proxy is never enabled.
 - **State:** in memory only. A restart loses codes, so a claim with an old code gets `unknown_code`, and `bootId` changes.
-- **Drain:** the pairing routes are exempt from the mutation lease, since they write no files. When shutting down they return 503 `draining`.
+- **Drain:** the pairing routes are exempt from the mutation lease, since they write no files. When shutting down, `code`, `claim`, `status` and `decision` return 503 `draining`. The poll `GET /pairing/claim/:nonce` is still served (QA round 1), so a token already allowed reaches the phone even if the update gate closes before the next poll.
 - **First authenticated call:** when a request passes `requireApiToken` and its socket IP equals an allowed `lastClaim.ip`, stamp `firstAuthAfterClaimAt` once.
 - **Logging:** never the code, nonce, token or QR text. Log the IP, the result, and the first 2 characters of a sha256 of the code. A test must fail if any of those values appear in log output.
 - **Docs:**
   - SECURITY.md: the pairing token is still the only standing credential; pairing codes are short-lived and single use.
   - `docs/pairing-contract.md`: a copy of this file.
-  - Change the 401 copy to "Scan the code in COS Control, or paste the pairing token". The `reason` value stays `pairing_token_rejected`.
+  - Change the 401 copy to "Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer." (QA round 1: older glasses show it word for word.) The `reason` value stays `pairing_token_rejected`.
 
 ## Glasses 6.10.621
 - **Parser:** `src/lib/pair-code.ts` parses the QR grammar, normalizes codes and orders hosts. It is unit tested and exposed to the ES5 wizard as `window.__COS_PAIR`.
@@ -107,11 +107,12 @@ All under `/api/pairing`. Every response carries a `reason` string on failure. T
 - **Hosts:** at most 3, Tailscale first. LAN addresses come only from RFC1918 on interfaces a phone can reach (never `utun` VPNs that are not Tailscale, `bridge`, `awdl`, `llw`, `vmnet`, `vboxnet`).
 - **allowLan:** `true` arms LAN for 10 minutes; a mint without it disarms LAN, so Control's toggle is the source of truth.
 - **Failures** are `{ reason, message }`: 400 `bad_request`, 403 `not_loopback` / `not_allowed_network` / `denied`, 404 `unknown_code`, 409 `used` / `locked`, 410 `expired`, 429 `rate_limited` (with `Retry-After`), 503 `draining`.
-- **Poll:** an unknown nonce (for example after a restart) is 404 `unknown_code`; a poll from a different socket IP is 403 `not_allowed_network` and does not spend the token. `serverName` comes with the token and with `delivered`.
+- **Poll:** an unknown nonce (for example after a restart) is 404 `unknown_code`; a poll from a different socket IP is 403 `not_allowed_network` and does not spend the token. `serverName` comes with the token and with `delivered`. Only a real GET may read the token: a HEAD (which needs the token header to get past the gate at all) is answered 405.
 - **Status:** `code` is present while the current code is unexpired and carries an extra `state: 'active'|'used'|'locked'`.
 - **Decision** on a nonce that is not pending: 404 `unknown_code`, 410 `expired`, or 409 `used` (already decided).
-- **Per-code limit:** every claim attempt while a code is live counts against it, right code or wrong. The 21st attempt locks it.
+- **Per-code limit:** every claim attempt while a code is active counts against it, right code or wrong; the 21st attempt locks it. Once a code is `used`, later attempts neither count nor lock it: the right code answers `locked` while its claim waits for Allow and `used` after, a wrong one `unknown_code`. Codes are compared in constant time.
 - **firstAuthAfterClaimAt** is stamped only after the allowed claim's token was delivered, on the first token-authenticated request from that claim's IP. A new Allow clears it.
-- **Draining** means the server is shutting down or the maintenance gate is closed (an update in progress, including the startup gate before Control releases it).
+- **Draining** means the server is shutting down or the maintenance gate is closed (an update in progress, including the startup gate before Control releases it). The poll is never refused for draining.
 - **Loopback** accepts any 127.0.0.0/8, `::1` and `::ffff:127.x` socket at the pairing check, but the server's global network allowlist (unchanged) admits only `127.0.0.1` and `::1` exactly, so another 127.x address is refused before pairing sees it.
-- **QR alphabet:** the comma between hosts is not in the QR alphanumeric set (`0-9 A-Z space $ % * + - . / :`), so a two-host QR is encoded in byte mode, one or two versions larger. A one-host QR stays alphanumeric.
+- **QR alphabet:** hosts are joined with `+`, which is in the QR alphanumeric set (`0-9 A-Z space $ % * + - . / :`), so every QR the server writes can be encoded in alphanumeric mode.
+- **Parity fixture:** `docs/pairing-fixture.json` holds the alphabet, nonce pattern, QR pattern and charset, normalization cases, two real `buildPairingQr` outputs (one and two hosts), the reason list with statuses and messages, the poll states and the limits. `server/lib/glasses-pairing.test.ts` recomputes every value, so it fails if the fixture drifts. Clients copy it; nobody edits it by hand.

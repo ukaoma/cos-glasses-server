@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   CROCKFORD_ALPHABET,
@@ -5,7 +6,12 @@ import {
   PAIRING_CODE_TTL_MS,
   PAIRING_LAN_ARM_MS,
   PAIRING_PENDING_TTL_MS,
+  PAIRING_QR_CHARSET,
   PAIRING_QR_PATTERN,
+  PAIRING_NONCE_PATTERN,
+  PAIRING_REASON_MESSAGE,
+  PAIRING_REASON_STATUS,
+  pairingCodesEqual,
   PairingError,
   PairingState,
   buildPairingQr,
@@ -15,7 +21,7 @@ import {
   pairingCodeTag,
   pairingHostsFrom,
   type PairingHost,
-} from './pairing.js'
+} from './glasses-pairing.js'
 import { isLoopbackAddress, isLoopbackSocket, reachableIpv4Addresses } from './network-policy.js'
 
 const TOKEN = 'standing-pairing-token-abcdefghijklmnop'
@@ -86,9 +92,13 @@ describe('pairing code grammar', () => {
       { host: '100.81.195.27', port: 3141, kind: 'tailscale' },
       { host: '192.168.1.204', port: 3141, kind: 'lan' },
     ], exp)
-    expect(qr).toBe(`COS1/MAC/7K3M9PQR/100.81.195.27:3141,192.168.1.204:3141/${(1_791_000_000).toString(36).toUpperCase()}`)
+    expect(qr).toBe(`COS1/MAC/7K3M9PQR/100.81.195.27:3141+192.168.1.204:3141/${(1_791_000_000).toString(36).toUpperCase()}`)
     expect(qr).toMatch(PAIRING_QR_PATTERN)
-    expect(qr).toMatch(/^[A-Z0-9/:,.]+$/)
+    expect(qr).toMatch(/^[A-Z0-9/:+.]+$/)
+    expect(qr).toMatch(PAIRING_QR_CHARSET)
+    // Every character is in the QR alphanumeric set, so the code never falls back to byte mode.
+    for (const ch of qr) expect('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:').toContain(ch)
+    expect(qr).not.toContain(',')
     expect(parseInt(qr.split('/').pop()!, 36)).toBe(1_791_000_000)
   })
 
@@ -271,6 +281,30 @@ describe('pairing state machine', () => {
     expect(reasonOf(() => state.claim({ code: 'ZZZZZZZZ', nonce: `${NONCE}x` }, TS_IP))).toBe('rate_limited')
   })
 
+  it('a used code is not locked by later attempts, and they do not count', () => {
+    const { state } = makeState()
+    const { code } = state.mint()
+    state.claim({ code, nonce: NONCE }, TS_IP)
+    // 30 more attempts from other tailnet peers while the claim waits for Allow.
+    for (let i = 0; i < 30; i++) {
+      const reason = reasonOf(() => state.claim({ code: i % 2 ? code : 'ZZZZZZZZ', nonce: `${NONCE_2}${i}` }, `100.70.1.${i + 1}`))
+      expect(reason).toBe(i % 2 ? 'locked' : 'unknown_code')
+    }
+    expect(state.status().code?.state).toBe('used')
+    // The waiting claim is untouched and still completes.
+    state.decide(NONCE, true)
+    expect(state.poll(NONCE, TS_IP).token).toBe(TOKEN)
+    // After the decision the right code reads `used`, not `locked`.
+    expect(reasonOf(() => state.claim({ code, nonce: `${NONCE_2}zz` }, '100.70.2.1'))).toBe('used')
+    expect(state.status().code?.state).toBe('used')
+  })
+
+  it('compares codes in constant time over equal-length buffers', () => {
+    expect(pairingCodesEqual('7K3M9PQR', '7K3M9PQR')).toBe(true)
+    expect(pairingCodesEqual('7K3M9PQR', '7K3M9PQS')).toBe(false)
+    expect(pairingCodesEqual('7K3M9PQR', '7K3M9PQ')).toBe(false)
+  })
+
   it('locks a code after 20 attempts until a new code is made', () => {
     const { state } = makeState()
     const { code } = state.mint()
@@ -299,7 +333,7 @@ describe('pairing state machine', () => {
     const { state, advance } = makeState()
     const minted = state.mint({ allowLan: true })
     expect(minted.hosts.map(h => h.kind)).toEqual(['tailscale', 'lan'])
-    expect(minted.qr).toContain('100.64.1.1:3141,192.168.1.204:3141')
+    expect(minted.qr).toContain('100.64.1.1:3141+192.168.1.204:3141')
     expect(minted.lanArmedUntil).not.toBeNull()
     advance(PAIRING_LAN_ARM_MS - 1)
     expect(reasonOf(() => state.claim({ code: 'ZZZZZZZZ', nonce: NONCE }, LAN_IP))).toBe('unknown_code')
@@ -415,5 +449,50 @@ describe('pairing state machine', () => {
     }
     expect(joined).toContain(`code#=${pairingCodeTag(minted.code)}`)
     expect(joined).toContain(`ip=${TS_IP}`)
+  })
+})
+
+// docs/pairing-fixture.json is what the glasses repo copies for parity. Every value is
+// recomputed here from the server's own code, so the fixture cannot drift from it.
+describe('pairing parity fixture', () => {
+  const fixturePath = new URL('../../docs/pairing-fixture.json', import.meta.url)
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
+
+  it('matches the grammar constants', () => {
+    expect(fixture.alphabet).toBe(CROCKFORD_ALPHABET)
+    expect(fixture.codeLength).toBe(8)
+    expect(fixture.noncePattern).toBe(PAIRING_NONCE_PATTERN.source)
+    expect(fixture.qrHostSeparator).toBe('+')
+    expect(fixture.qrPattern).toBe(PAIRING_QR_PATTERN.source)
+    expect(fixture.qrCharset).toBe(PAIRING_QR_CHARSET.source)
+    expect(fixture.capability).toEqual({ pairing: { version: 1 } })
+  })
+
+  it('matches normalization and real buildPairingQr output', () => {
+    for (const [input, out] of Object.entries(fixture.normalize)) expect(normalizePairingCode(input)).toBe(out)
+    expect(fixture.examples).toHaveLength(2)
+    for (const example of fixture.examples) {
+      expect(displayPairingCode(example.code)).toBe(example.display)
+      expect(buildPairingQr(example.code, example.hosts, example.expiresAtMs)).toBe(example.qr)
+      expect(example.qr).toMatch(PAIRING_QR_PATTERN)
+    }
+    expect(fixture.examples[1].qr).toContain('+')
+  })
+
+  it('matches the reason list, statuses and limits', () => {
+    expect(fixture.reasons).toEqual(PAIRING_REASON_STATUS)
+    expect(fixture.reasonMessages).toEqual(PAIRING_REASON_MESSAGE)
+    expect(Object.keys(fixture.reasons).sort()).toEqual([
+      'bad_request', 'denied', 'draining', 'expired', 'locked', 'not_allowed_network', 'not_loopback', 'rate_limited', 'unknown_code', 'used',
+    ])
+    expect(fixture.pollStates).toEqual(['pending', 'allowed', 'denied', 'expired', 'delivered'])
+    expect(fixture.limits).toEqual({
+      codeTtlMs: PAIRING_CODE_TTL_MS,
+      pendingTtlMs: PAIRING_PENDING_TTL_MS,
+      lanArmMs: PAIRING_LAN_ARM_MS,
+      claimsPerIpPerMinute: 5,
+      attemptsPerCode: PAIRING_CODE_ATTEMPT_LIMIT,
+      maxQrHosts: 3,
+    })
   })
 })

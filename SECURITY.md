@@ -35,6 +35,14 @@ reproduction you have. Do not include real transcripts.
   10 minutes. Limits: 5 claims a minute per connection address, 20 tries per code.
   Codes, nonces, tokens and QR text are never logged. The pairing token is still the
   only standing credential.
+- A device on your tailnet can lock a live pairing code by guessing at it 20 times.
+  This is accepted: COS Control says why and offers a new code, and a code already
+  claimed is never locked by later guesses.
+- While "Allow pairing on this Wi-Fi" is on, the pairing token reaches the phone over
+  plain HTTP on that Wi-Fi, as the pasted token always has. Use it only at home; it
+  turns itself off after 10 minutes. Over Tailscale the traffic is encrypted.
+- Behind `tailscale serve` or `funnel`, requests arrive from a loopback proxy, so
+  every claim is refused (`not_allowed_network`): pairing fails closed there.
 - `GET /api/display-stream` is public by design and returns lifecycle events
   only. Content requires a ticket or the token header. See
   `server/routes/display.ts` for the allowlist.

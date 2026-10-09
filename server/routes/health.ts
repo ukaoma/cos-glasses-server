@@ -1,5 +1,5 @@
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
-import { PAIRING_PROTOCOL_VERSION } from '../lib/pairing.js'
+import { PAIRING_PROTOCOL_VERSION } from '../lib/glasses-pairing.js'
 import { taskBridgeAvailable } from '../lib/task-bridge.js'
 import { Router } from 'express'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'

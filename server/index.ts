@@ -166,7 +166,7 @@ import {
   reachableIpv4Addresses,
 } from './lib/network-policy.js'
 import { requireApiToken } from './lib/api-auth.js'
-import { PairingState, pairingHostsFrom } from './lib/pairing.js'
+import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'

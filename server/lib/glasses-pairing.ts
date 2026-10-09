@@ -9,7 +9,7 @@
 // This module is pure. The clock, the random source, the token, the host list and
 // the server name are injected so every rule in the contract is testable.
 
-import { createHash, randomInt as cryptoRandomInt, randomUUID } from 'node:crypto'
+import { createHash, randomInt as cryptoRandomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { isRfc1918Ipv4, isTailscaleIpv4, normalizeRemoteIp } from './network-policy.js'
 
 export const PAIRING_PROTOCOL_VERSION = 1
@@ -25,9 +25,18 @@ export const PAIRING_CODE_ATTEMPT_LIMIT = 20
 export const PAIRING_CLAIM_RETENTION_MS = 10 * 60_000
 /** At most this many hosts in a QR, Tailscale first, so the QR stays small. */
 export const PAIRING_MAX_QR_HOSTS = 3
-export const PAIRING_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
+/** The nonce body, unanchored. The single source for the route check and the public door in api-auth.ts. */
+export const PAIRING_NONCE_BODY = '[A-Za-z0-9_-]{16,64}'
+export const PAIRING_NONCE_PATTERN = new RegExp(`^${PAIRING_NONCE_BODY}$`)
+/**
+ * Between hosts in the QR. `+` is in the QR alphanumeric set (`0-9 A-Z space $ % * + - . / :`);
+ * a comma is not, and would push a two-host code into byte mode. Clients accept `+` and `,`.
+ */
+export const PAIRING_QR_HOST_SEPARATOR = '+'
 /** The QR grammar. Clients parse it; the server is the only writer. */
-export const PAIRING_QR_PATTERN = /^COS1\/MAC\/[0-9A-HJKMNP-TV-Z]{8}\/(?:\d{1,3}(?:\.\d{1,3}){3}:\d{1,5})(?:,\d{1,3}(?:\.\d{1,3}){3}:\d{1,5})*\/[0-9A-Z]+$/
+export const PAIRING_QR_PATTERN = /^COS1\/MAC\/[0-9A-HJKMNP-TV-Z]{8}\/(?:\d{1,3}(?:\.\d{1,3}){3}:\d{1,5})(?:\+\d{1,3}(?:\.\d{1,3}){3}:\d{1,5})*\/[0-9A-Z]+$/
+/** Every character the server ever writes into a QR: QR alphanumeric mode, so the code stays small. */
+export const PAIRING_QR_CHARSET = /^[0-9A-Z/:+.]+$/
 
 export type PairingReason =
   | 'expired'
@@ -109,11 +118,18 @@ export function displayPairingCode(code: string): string {
   return `${code.slice(0, 4)}-${code.slice(4)}`
 }
 
-/** `COS1/MAC/<CODE>/<host>:<port>[,<host>:<port>]/<EXP>`, EXP = unix seconds in base36 uppercase. */
+/** `COS1/MAC/<CODE>/<host>:<port>[+<host>:<port>]/<EXP>`, EXP = unix seconds in base36 uppercase. */
 export function buildPairingQr(code: string, hosts: readonly PairingHost[], expiresAtMs: number): string {
-  const hostList = hosts.map(h => `${h.host}:${h.port}`).join(',')
+  const hostList = hosts.map(h => `${h.host}:${h.port}`).join(PAIRING_QR_HOST_SEPARATOR)
   const exp = Math.floor(expiresAtMs / 1000).toString(36).toUpperCase()
   return `COS1/MAC/${code}/${hostList}/${exp}`
+}
+
+/** Constant-time compare of two normalized codes. */
+export function pairingCodesEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8')
+  const right = Buffer.from(b, 'utf8')
+  return left.length === right.length && timingSafeEqual(left, right)
 }
 
 /** First 2 hex characters of sha256(code): the only form of a code that is ever logged. */
@@ -322,7 +338,7 @@ export class PairingState {
     // Idempotent for the same nonce and code from the same socket IP.
     const existing = this.claims.get(nonce)
     if (existing) {
-      if (existing.code !== code || existing.ip !== ip) refuse('locked')
+      if (!pairingCodesEqual(existing.code, code) || existing.ip !== ip) refuse('locked')
       if (existing.state === 'pending') return
       if (existing.state === 'denied') refuse('denied')
       if (existing.state === 'expired') refuse('expired')
@@ -333,18 +349,22 @@ export class PairingState {
     const current = this.current
     if (!current) refuse('unknown_code')
     const record = current as CodeRecord
-    if (at >= record.expiresAt) refuse(record.code === code ? 'expired' : 'unknown_code')
+    const matches = pairingCodesEqual(record.code, code)
+    if (at >= record.expiresAt) refuse(matches ? 'expired' : 'unknown_code')
     if (record.status === 'locked') refuse('locked')
+    // A used code has nothing left to guess: further attempts neither count nor lock it,
+    // so a tailnet peer cannot turn "used" into "locked" under the claim that won.
+    if (record.status === 'used') {
+      if (!matches) refuse('unknown_code')
+      refuse(this.pendingNonce ? 'locked' : 'used')
+    }
     // Every attempt while a code is live counts against it, right or wrong.
     record.attempts++
     if (record.attempts > PAIRING_CODE_ATTEMPT_LIMIT) {
-      // A pending claim keeps waiting for its decision; only new claims are locked out.
       record.status = 'locked'
       refuse('locked')
     }
-    if (record.code !== code) refuse('unknown_code')
-    if (this.pendingNonce) refuse('locked')
-    if (record.status === 'used') refuse('used')
+    if (!matches) refuse('unknown_code')
 
     record.status = 'used'
     this.claims.set(nonce, { nonce, code, ip, at, state: 'pending', decidedAt: null, deliveredAt: null })

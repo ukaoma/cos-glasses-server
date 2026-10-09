@@ -5,11 +5,13 @@
 // - POST /pairing/claim and GET /pairing/claim/:nonce are public (exact matches in
 //   isPublicApiRequest); everything else here needs the token AND a loopback socket.
 // - The routes write no files, so they never take the mutation lease. During a drain or
-//   shutdown they answer 503 `draining` instead.
+//   shutdown, minting, claiming, status and decisions answer 503 `draining`. The poll is
+//   still served: it writes nothing, and a token the user already allowed must still
+//   reach the phone if the update gate closes between Allow and the next poll.
 // - Each route parses its own body with a 1 KB cap.
 //
 // Every address decision reads `req.socket.remoteAddress`, never `req.ip` or
-// X-Forwarded-For. Codes, nonces, tokens and QR text are never logged (lib/pairing.ts
+// X-Forwarded-For. Codes, nonces, tokens and QR text are never logged (lib/glasses-pairing.ts
 // logs the IP, the result and a 2-character hash of the code).
 
 import express, { Router, type ErrorRequestHandler, type Request, type RequestHandler, type Response } from 'express'
@@ -21,7 +23,7 @@ import {
   PairingError,
   type PairingReason,
   type PairingState,
-} from '../lib/pairing.js'
+} from '../lib/glasses-pairing.js'
 
 export interface PairingRouterOptions {
   /** Read per request so a restart created after mount is honoured in tests. */
@@ -30,9 +32,9 @@ export interface PairingRouterOptions {
   isDraining: () => boolean
 }
 
-function sendReason(res: Response, reason: PairingReason, retryAfterSeconds?: number): void {
+function sendReason(res: Response, reason: PairingReason, retryAfterSeconds?: number, status?: number): void {
   if (retryAfterSeconds != null) res.setHeader('Retry-After', String(retryAfterSeconds))
-  res.status(PAIRING_REASON_STATUS[reason]).json({ reason, message: PAIRING_REASON_MESSAGE[reason] })
+  res.status(status ?? PAIRING_REASON_STATUS[reason]).json({ reason, message: PAIRING_REASON_MESSAGE[reason] })
 }
 
 function sendError(res: Response, error: unknown): void {
@@ -76,7 +78,13 @@ export function createPairingRouter(options: PairingRouterOptions): Router {
     } catch (error) { sendError(res, error) }
   })
 
-  router.get('/pairing/claim/:nonce', notDraining, (req, res) => {
+  router.get('/pairing/claim/:nonce', (req, res) => {
+    // Express routes HEAD to a GET handler. Only a real GET may read (and so spend) the
+    // token; api-auth.ts already keeps HEAD behind the token, this holds it here too.
+    if (req.method !== 'GET') {
+      res.setHeader('Allow', 'GET')
+      return sendReason(res, 'bad_request', undefined, 405)
+    }
     const nonce = req.params.nonce
     if (typeof nonce !== 'string' || !PAIRING_NONCE_PATTERN.test(nonce)) return sendReason(res, 'bad_request')
     try {

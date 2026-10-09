@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { requireApiToken } from '../lib/api-auth.js'
 import { isAllowedNetworkIp } from '../lib/network-policy.js'
-import { PAIRING_QR_PATTERN, PairingState } from '../lib/pairing.js'
+import { PAIRING_QR_PATTERN, PairingState } from '../lib/glasses-pairing.js'
 import { createPairingRouter } from './pairing.js'
 
 const TOKEN = 'route-test-pairing-token-0123456789abcdef'
@@ -128,7 +128,7 @@ describe('POST /api/pairing/code', () => {
     const minted = await mint()
     expect(Object.keys(minted).sort()).toEqual(['bootId', 'code', 'display', 'expiresAt', 'hosts', 'lanArmedUntil', 'qr'])
     expect(minted.qr).toMatch(PAIRING_QR_PATTERN)
-    expect(minted.qr).toMatch(/^[A-Z0-9/:,.]+$/)
+    expect(minted.qr).toMatch(/^[A-Z0-9/:+.]+$/)
     expect(minted.hosts).toEqual([{ host: '100.64.1.1', port: 3141, kind: 'tailscale' }])
     expect(minted.bootId).toBe(state.bootId)
   })
@@ -141,7 +141,7 @@ describe('POST /api/pairing/code', () => {
   it('arms LAN with allowLan', async () => {
     const minted = await mint({ allowLan: true })
     expect(minted.lanArmedUntil).not.toBeNull()
-    expect(minted.qr).toContain(',192.168.1.204:3141/')
+    expect(minted.qr).toContain('+192.168.1.204:3141/')
   })
 
   it.each([TS_IP, LAN_IP])('refuses a non-loopback socket (%s) even with the token', async ip => {
@@ -207,6 +207,19 @@ describe('POST /api/pairing/claim and GET /api/pairing/claim/:nonce', () => {
     await call('/api/pairing/decision', { method: 'POST', token: true, body: { nonce: NONCE, allow: false } })
     const polled = await call(`/api/pairing/claim/${NONCE}`, { ip: TS_IP })
     expect(polled.json).toEqual({ state: 'denied' })
+  })
+
+  it('a HEAD poll never spends the token, even with the token header', async () => {
+    const { code } = await mint()
+    await claim(code, NONCE, TS_IP)
+    await call('/api/pairing/decision', { method: 'POST', token: true, body: { nonce: NONCE, allow: true } })
+    // Without the token, HEAD is not a public door at all.
+    expect((await call(`/api/pairing/claim/${NONCE}`, { method: 'HEAD', ip: TS_IP })).status).toBe(401)
+    // With it, the handler refuses anything but GET.
+    const head = await call(`/api/pairing/claim/${NONCE}`, { method: 'HEAD', ip: TS_IP, token: true })
+    expect(head.status).toBe(405)
+    expect(head.headers.get('allow')).toBe('GET')
+    expect((await call(`/api/pairing/claim/${NONCE}`, { ip: TS_IP })).json.token).toBe(TOKEN)
   })
 
   it('refuses a poll from a different socket IP and does not spend the token', async () => {
@@ -346,10 +359,20 @@ describe('drain and the mutation lease', () => {
     expect(leaseHits).toBe(1)
   })
 
+  it('still serves the poll while draining, so an allowed token reaches the phone', async () => {
+    const { code } = await mint()
+    await claim(code, NONCE, TS_IP)
+    await call('/api/pairing/decision', { method: 'POST', token: true, body: { nonce: NONCE, allow: true } })
+    draining = true // the update gate closes between Allow and the next poll
+    const polled = await call(`/api/pairing/claim/${NONCE}`, { ip: TS_IP })
+    expect(polled.status).toBe(200)
+    expect(polled.json).toEqual({ state: 'allowed', token: TOKEN, serverName: 'Test-Mac' })
+    expect((await call(`/api/pairing/claim/${NONCE}`, { ip: TS_IP })).json).toEqual({ state: 'delivered', serverName: 'Test-Mac' })
+  })
+
   it.each([
     ['POST', '/api/pairing/code', true, undefined],
     ['POST', '/api/pairing/claim', false, TS_IP],
-    ['GET', `/api/pairing/claim/${NONCE}`, false, TS_IP],
     ['GET', '/api/pairing/status', true, undefined],
     ['POST', '/api/pairing/decision', true, undefined],
   ])('%s %s answers 503 draining while shutting down', async (method, path, token, ip) => {

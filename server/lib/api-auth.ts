@@ -1,5 +1,6 @@
 import type { RequestHandler } from 'express'
 import { timingSafeTokenEqual } from './token-auth.js'
+import { PAIRING_NONCE_BODY } from './glasses-pairing.js'
 
 // Recovery/setup clients need these availability surfaces before they have a
 // usable token. Keep private provider state and every mutation route out.
@@ -40,7 +41,7 @@ const DISPLAY_STREAM_CAPABILITY_PATH = /^\/display-stream\/\d{1,15}\.[0-9a-f]{64
 // - GET /pairing/claim/<nonce>: the same phone polls for the decision. The route binds
 //   the poll to the claim's socket IP, and the token is released only after Allow.
 // Minting, status and decisions stay behind the token AND a loopback socket.
-const PAIRING_POLL_PATH = /^\/pairing\/claim\/[A-Za-z0-9_-]{16,64}$/
+const PAIRING_POLL_PATH = new RegExp(`^/pairing/claim/${PAIRING_NONCE_BODY}$`)
 
 export function isPublicApiRequest(method: string, path: string): boolean {
   if (PUBLIC_API_PATHS.has(path)) return true
@@ -69,7 +70,8 @@ export function requireApiToken(apiToken: string, options: RequireApiTokenOption
         error: 'unauthorized',
         // Stable on purpose: clients key off this value, not the message.
         reason: 'pairing_token_rejected',
-        message: 'Scan the code in COS Control, or paste the pairing token.',
+        // Older COS Glasses builds, which cannot scan, show this message word for word.
+        message: 'Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer.',
       })
     }
     if (options.onAuthenticated) {
