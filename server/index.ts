@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer as createHttpsServer } from 'node:https'
 import { createServer as createHttpServer } from 'node:http'
 import { readFileSync, existsSync } from 'node:fs'
-import { networkInterfaces, homedir } from 'node:os'
+import { networkInterfaces, homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -162,9 +162,12 @@ import {
 import {
   isAllowedNetworkIp,
   isAllowedNetworkOrigin,
-  isTailscaleIpv4,
+  isLoopbackSocket,
+  reachableIpv4Addresses,
 } from './lib/network-policy.js'
 import { requireApiToken } from './lib/api-auth.js'
+import { PairingState, pairingHostsFrom } from './lib/pairing.js'
+import { createPairingRouter } from './routes/pairing.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -317,7 +320,27 @@ if (threadAttachEnabled()) {
 // authenticated /tts/prepare for native audio players) and
 // /display-stream/<exp>.<hmac> GET/HEAD (minted on authenticated /api/models for
 // EventSource, which cannot set X-Cos-Token either). See api-auth.ts.
-app.use('/api', requireApiToken(API_TOKEN))
+// 6.67.0 glasses pairing state: in memory only, so a restart loses every code and
+// claim and `bootId` changes (docs/pairing-contract.md).
+const pairingState = new PairingState({
+  token: () => API_TOKEN,
+  // The Mac's name as the phone shows it ("Paired with <name>").
+  serverName: () => hostname().replace(/\.local$/i, ''),
+  hosts: lanArmed => pairingHostsFrom(reachableIpv4Addresses(networkInterfaces()), PORT, lanArmed),
+})
+app.use('/api', requireApiToken(API_TOKEN, {
+  onAuthenticated: req => pairingState.noteAuthenticated(req.socket?.remoteAddress),
+}))
+
+// Pairing routes sit HERE on purpose: after the token gate (mint, status and decision
+// need it; the claim and its poll are exact public doors in api-auth.ts), and BEFORE the
+// mutation-lease catch-all and the global 10 MB parser. They write no files, so they
+// never hold the lease, and each parses its own body at 1 KB. During a drain or
+// shutdown they answer 503 `draining`.
+app.use('/api', createPairingRouter({
+  state: () => pairingState,
+  isDraining: () => gracefulShutdownStarted || !maintenanceAdmissionsOpen(),
+}))
 
 // Fail-closed catch-all for mutation routes that do not own a more specific
 // lifecycle lease below. This closes the admission/drain race for secondary
@@ -375,9 +398,7 @@ app.use('/api', (req, res, next) => {
   // still closed. Permit only its two bounded loopback proofs, and only with
   // the controller-held operation receipt. Normal phone/LAN admissions stay
   // closed throughout the update.
-  const address = req.socket.remoteAddress ?? ''
-  const loopback = address === '::1' || address === '127.0.0.1'
-    || address.startsWith('127.') || address.startsWith('::ffff:127.')
+  const loopback = isLoopbackSocket(req)
   const controllerProofPath = req.path === '/diagnostics/provider-proof'
     || req.path === '/tts/prepare'
   const controllerProof = loopback && controllerProofPath
@@ -1225,17 +1246,11 @@ listenRequiredServers(listeners).then(() => {
   // Print ADDRESSES THE PHONE CAN ACTUALLY REACH. The bind address (0.0.0.0) is
   // not paste-able — enumerate real interfaces and label the Tailscale one.
   try {
-    const nets = networkInterfaces()
-    const addrs: Array<{ ip: string; label: string }> = []
-    for (const [name, infos] of Object.entries(nets)) {
-      for (const info of infos ?? []) {
-        if (info.family !== 'IPv4' || info.internal) continue
-        const isTailscale = isTailscaleIpv4(info.address) || name.startsWith('tailscale')
-        addrs.push({ ip: info.address, label: isTailscale ? 'Tailscale — works from anywhere' : `${name} — same Wi-Fi only` })
-      }
-    }
+    const addrs = reachableIpv4Addresses(networkInterfaces()).map(entry => ({
+      ip: entry.address,
+      label: entry.kind === 'tailscale' ? 'Tailscale — works from anywhere' : `${entry.name} — same Wi-Fi only`,
+    }))
     if (addrs.length > 0) {
-      addrs.sort((a, b) => Number(b.label.startsWith('Tailscale')) - Number(a.label.startsWith('Tailscale')))
       console.log('')
       console.log('[COS API] Server URL for the COS Glasses app:')
       for (const a of addrs) console.log(`[COS API]   http://${a.ip}:${PORT}   (${a.label})`)

@@ -83,6 +83,14 @@ describe('health capability contract', () => {
     expect(typeof body.cli_session_available).toBe('boolean')
     expect(body).not.toHaveProperty('cli_session_id')
   }, 20_000)
+
+  // 6.67.0: clients check this before any pairing call; an older server omits it.
+  it('advertises glasses pairing version 1 on the public health route', async () => {
+    const response = await fetch(`${base}/api/health`)
+    expect(response.status).toBe(200)
+    const body = await response.json() as any
+    expect(body.capabilities?.pairing).toEqual({ version: 1 })
+  }, 20_000)
 })
 
 describe('morning brief capability', () => {

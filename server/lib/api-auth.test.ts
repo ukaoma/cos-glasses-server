@@ -94,8 +94,54 @@ describe('global API authentication boundary', () => {
       error: 'unauthorized',
       reason: 'pairing_token_rejected',
     })
-    expect(missingBody.message).toContain('Copy Pairing Token')
+    expect(missingBody.message).toBe('Scan the code in COS Control, or paste the pairing token.')
     expect(JSON.stringify(missingBody)).not.toContain(TOKEN)
+  })
+
+  // 6.67.0 pairing: exactly two public doors, each exact on METHOD and path.
+  const NONCE = 'phone-nonce_0123456789'
+  it('admits POST /api/pairing/claim and GET /api/pairing/claim/<nonce> without a token', async () => {
+    expect((await request('/api/pairing/claim', { method: 'POST' })).status).toBe(204)
+    expect((await request(`/api/pairing/claim/${NONCE}`)).status).toBe(204)
+  })
+
+  it.each([
+    ['GET', '/api/pairing/code'],
+    ['POST', '/api/pairing/code'],
+    ['GET', '/api/pairing/status'],
+    ['POST', '/api/pairing/decision'],
+    ['GET', '/api/pairing/claim'],
+    ['PUT', '/api/pairing/claim'],
+    ['DELETE', '/api/pairing/claim'],
+    ['POST', `/api/pairing/claim/${NONCE}`],
+    ['HEAD', `/api/pairing/claim/${NONCE}`],
+    ['GET', '/api/pairing/claim/short'],
+    ['GET', `/api/pairing/claim/${'a'.repeat(65)}`],
+    ['GET', `/api/pairing/claim/${NONCE}/extra`],
+    ['GET', '/api/pairing/claim/has.dot.in.it.0123456789'],
+  ])('keeps %s %s behind the token', async (method, path) => {
+    expect((await request(path, { method })).status).toBe(401)
+  })
+
+  it('calls onAuthenticated only for requests that passed the token check', async () => {
+    const seen: string[] = []
+    const app = express()
+    app.use('/api', requireApiToken(TOKEN, { onAuthenticated: req => { seen.push(req.path) } }))
+    app.all('/api/*path', (_req, res) => res.status(204).end())
+    const local = await new Promise<Server>(resolve => {
+      const listener = app.listen(0, '127.0.0.1', () => resolve(listener))
+    })
+    try {
+      const address = local.address()
+      const url = typeof address === 'object' && address ? `http://127.0.0.1:${address.port}` : ''
+      await fetch(`${url}/api/health`)
+      await fetch(`${url}/api/models`)
+      await fetch(`${url}/api/models`, { headers: { 'x-cos-token': 'wrong-token' } })
+      await fetch(`${url}/api/models`, { headers: { 'x-cos-token': TOKEN } })
+      expect(seen).toEqual(['/models'])
+    } finally {
+      await new Promise<void>(resolve => local.close(() => resolve()))
+    }
   })
 
   it('continues to accept X-Cos-Token on protected routes', async () => {

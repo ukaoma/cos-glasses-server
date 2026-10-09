@@ -27,6 +27,14 @@ reproduction you have. Do not include real transcripts.
 
 - The pairing token (`X-Cos-Token`) is the only credential. Rotating it
   invalidates every display-stream ticket; there is no server-side ticket store.
+- Pairing codes (6.67.0, `docs/pairing-contract.md`) are not credentials. A code
+  lives 5 minutes in memory, works once, is made only over loopback with the token,
+  and releases the pairing token only after someone presses Allow on the Mac, and
+  then only once, to the address that claimed it. Claims are accepted over Tailscale
+  (100.64.0.0/10), or a private Wi-Fi address only while the user has allowed it for
+  10 minutes. Limits: 5 claims a minute per connection address, 20 tries per code.
+  Codes, nonces, tokens and QR text are never logged. The pairing token is still the
+  only standing credential.
 - `GET /api/display-stream` is public by design and returns lifecycle events
   only. Content requires a ticket or the token header. See
   `server/routes/display.ts` for the allowlist.

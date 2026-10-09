@@ -1,3 +1,16 @@
+## 6.67.0 — 2026-10-09 — glasses pairing
+
+- Pair COS Glasses with your Mac by scanning a code instead of pasting the pairing token. COS Control shows a QR and a short code; the phone claims it, and nothing happens until you press Allow on the Mac. Pairs with COS Glasses 6.10.621 and the COS Control pairing release. Contract: `docs/pairing-contract.md`.
+  - `GET /api/health` adds `capabilities.pairing = { version: 1 }`. An older server leaves it out, which is how the phone knows to say "Update COS on your Mac".
+  - `POST /api/pairing/code` (token, and only from this Mac) makes an 8-character code, good for 5 minutes and one use, plus the QR text `COS1/MAC/<CODE>/<host>:<port>[,…]/<EXP>`. Tailscale addresses come first. A Wi-Fi address is offered only when "Allow pairing on this Wi-Fi" is on, and that lasts 10 minutes. A new code cancels the old one and any claim waiting for Allow.
+  - `POST /api/pairing/claim` and `GET /api/pairing/claim/<nonce>` need no token. A claim is accepted over Tailscale, or over the home Wi-Fi only while that is allowed. It waits up to 60 seconds for Allow. The phone then reads the pairing token once; a second read says `delivered` without it. The poll must come from the same address as the claim.
+  - `GET /api/pairing/status` and `POST /api/pairing/decision` (token, and only from this Mac) are how Control shows "wants to pair: Allow / Deny" and turns green, which happens only when the new phone makes its first signed-in request.
+  - Limits: 5 claims a minute per address, 20 tries per code (then it locks until a new code). The limits use the real connection address, never `X-Forwarded-For`.
+  - Everything is kept in memory. A restart forgets every code (`unknown_code`, a new `bootId`). The pairing routes write no files, so they never hold up an update; during one they answer `draining`.
+  - Logs carry the address, the result and a 2-character hash of the code, never the code, the nonce, the token or the QR text.
+- A rejected token now says "Scan the code in COS Control, or paste the pairing token." The `reason` stays `pairing_token_rejected`.
+- The pairing token is still the only standing credential. See SECURITY.md.
+
 ## 6.66.0 — 2026-10-08 — Managed voice setup and Haiku polish
 
 - Advertise Haiku, Sonnet and GPT-5.6 Luna Fast. Default omitted-model polish to Haiku for lower cost, while honoring explicit model choices and retaining the transcript on failure.

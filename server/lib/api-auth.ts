@@ -34,23 +34,46 @@ const TTS_PLAYBACK_CAPABILITY_PATH = /^\/tts\/play\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-
 // callers that can send one; the ticket exists only for the ones that cannot.
 const DISPLAY_STREAM_CAPABILITY_PATH = /^\/display-stream\/\d{1,15}\.[0-9a-f]{64}$/
 
+// 6.67.0 glasses pairing (docs/pairing-contract.md). Exactly two public doors, each
+// matched on METHOD and path, never through the method-agnostic set above:
+// - POST /pairing/claim: a phone with no token yet presents the short-lived code.
+// - GET /pairing/claim/<nonce>: the same phone polls for the decision. The route binds
+//   the poll to the claim's socket IP, and the token is released only after Allow.
+// Minting, status and decisions stay behind the token AND a loopback socket.
+const PAIRING_POLL_PATH = /^\/pairing\/claim\/[A-Za-z0-9_-]{16,64}$/
+
 export function isPublicApiRequest(method: string, path: string): boolean {
   if (PUBLIC_API_PATHS.has(path)) return true
+  if (method === 'POST' && path === '/pairing/claim') return true
+  if (method === 'GET' && PAIRING_POLL_PATH.test(path)) return true
   if (method !== 'GET' && method !== 'HEAD') return false
   return TTS_PLAYBACK_CAPABILITY_PATH.test(path)
     || DISPLAY_STREAM_CAPABILITY_PATH.test(path)
 }
 
+export interface RequireApiTokenOptions {
+  /**
+   * Called once per request that passed the token check (never for a public path).
+   * Pairing uses it to stamp `firstAuthAfterClaimAt`. A throw here is swallowed: an
+   * observer must never turn an authenticated request into a failure.
+   */
+  onAuthenticated?: (req: Parameters<RequestHandler>[0]) => void
+}
+
 /** Global /api authentication boundary. Mount before all body parsers. */
-export function requireApiToken(apiToken: string): RequestHandler {
+export function requireApiToken(apiToken: string, options: RequireApiTokenOptions = {}): RequestHandler {
   return (req, res, next) => {
     if (isPublicApiRequest(req.method, req.path)) return next()
     if (!timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)) {
       return res.status(401).json({
         error: 'unauthorized',
+        // Stable on purpose: clients key off this value, not the message.
         reason: 'pairing_token_rejected',
-        message: 'In COS Control choose Copy Pairing Token, then paste the complete value into COS Glasses.',
+        message: 'Scan the code in COS Control, or paste the pairing token.',
       })
+    }
+    if (options.onAuthenticated) {
+      try { options.onAuthenticated(req) } catch { /* observer only */ }
     }
     next()
   }

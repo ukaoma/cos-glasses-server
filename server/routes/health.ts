@@ -1,4 +1,5 @@
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
+import { PAIRING_PROTOCOL_VERSION } from '../lib/pairing.js'
 import { taskBridgeAvailable } from '../lib/task-bridge.js'
 import { Router } from 'express'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
@@ -465,6 +466,10 @@ healthRouter.get('/health', async (_req, res) => {
     ...(voiceProvenance ? { voice_provenance: voiceProvenance } : {}),
     capabilities: {
       dictationCleanup: { models: DICTATION_CLEAN_MODELS },
+      // 6.67.0: glasses pairing (docs/pairing-contract.md). Public on purpose: the phone
+      // reads it before it holds a token, and an older server omits it, which is how
+      // the phone knows to say "Update COS on your Mac (server 6.67 or newer)".
+      pairing: { version: PAIRING_PROTOCOL_VERSION },
       // Advertised on the PUBLIC health route on purpose: a client deciding whether
       // to request a display ticket may not hold a usable token yet, and an old
       // server simply omits this key, which is how a new client detects it.

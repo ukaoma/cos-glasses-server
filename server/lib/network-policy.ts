@@ -40,3 +40,67 @@ export function isAllowedNetworkOrigin(origin: string): boolean {
     return false
   }
 }
+
+/** True for RFC1918 private IPv4 (10/8, 172.16/12, 192.168/16). */
+export function isRfc1918Ipv4(value: string): boolean {
+  const octets = parseIpv4(normalizeRemoteIp(value))
+  if (!octets) return false
+  return octets[0] === 10 ||
+    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 168)
+}
+
+/** Loopback in every form a Node socket reports it: 127.0.0.0/8, ::1, ::ffff:127.x. */
+export function isLoopbackAddress(value: string | undefined | null): boolean {
+  const address = value ?? ''
+  return address === '::1' || address === '127.0.0.1'
+    || address.startsWith('127.') || address.startsWith('::ffff:127.')
+}
+
+/**
+ * Loopback check on the SOCKET, never `req.ip` or `X-Forwarded-For`. The server never
+ * enables trust-proxy, but reading the socket keeps this true even if someone does.
+ */
+export function isLoopbackSocket(req: { socket?: { remoteAddress?: string | undefined } | null }): boolean {
+  return isLoopbackAddress(req.socket?.remoteAddress)
+}
+
+export type ReachableIpv4Kind = 'tailscale' | 'lan' | 'other'
+export interface ReachableIpv4 {
+  name: string
+  address: string
+  kind: ReachableIpv4Kind
+}
+type InterfaceInfo = { address: string; family: string | number; internal: boolean }
+
+// Interfaces a phone can never reach: macOS VPN tunnels that are not Tailscale's
+// address, Internet Sharing / VM bridges, AirDrop (awdl) and low-latency WLAN (llw),
+// and VM host-only networks.
+const UNREACHABLE_INTERFACE = /^(utun|bridge|awdl|llw|vmnet|vboxnet)/
+
+/**
+ * Every external IPv4 address on this machine, Tailscale first. `kind` is
+ * `tailscale` for 100.64/10 (or a Linux `tailscale*` interface), `lan` for RFC1918 on
+ * an interface a phone can reach, `other` for the rest. Shared by the startup print
+ * and the pairing host list.
+ */
+export function reachableIpv4Addresses(
+  nets: Record<string, InterfaceInfo[] | undefined>,
+): ReachableIpv4[] {
+  const out: ReachableIpv4[] = []
+  for (const [name, infos] of Object.entries(nets)) {
+    for (const info of infos ?? []) {
+      const family = typeof info.family === 'number' ? (info.family === 4 ? 'IPv4' : 'IPv6') : info.family
+      if (family !== 'IPv4' || info.internal) continue
+      const kind: ReachableIpv4Kind = isTailscaleIpv4(info.address) || name.startsWith('tailscale')
+        ? 'tailscale'
+        : isRfc1918Ipv4(info.address) && !UNREACHABLE_INTERFACE.test(name) ? 'lan' : 'other'
+      out.push({ name, address: info.address, kind })
+    }
+  }
+  const rank = (kind: ReachableIpv4Kind) => (kind === 'tailscale' ? 0 : kind === 'lan' ? 1 : 2)
+  return out
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => rank(a.entry.kind) - rank(b.entry.kind) || a.index - b.index)
+    .map(({ entry }) => entry)
+}
