@@ -560,7 +560,7 @@ describe('liveness and the mount', () => {
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     const hook = index.indexOf('app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: permissionBroker }))')
     const cursor = index.indexOf('  app.use(createCursorStopFollowupRouter({')
-    const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN))")
+    const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN, {")
     const parser = index.indexOf("app.use(express.json({ limit: '10mb' }))")
     const api = index.indexOf("app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN }))")
     const gate = index.indexOf('if (threadAttachEnabled()) {\n  // 6.51.0: a queued Cursor turn')

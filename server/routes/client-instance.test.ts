@@ -135,7 +135,7 @@ describe('mounting', () => {
   it('the referee is mounted AFTER the API token check and is not a public path', async () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
-    const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN))")
+    const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN, {")
     const mount = index.indexOf("app.use('/api', createClientInstanceRouter())")
     // It notes each meeting chunk on the way past, so it must see them before the chunk route answers.
     const chunks = index.indexOf("app.use('/api', transcribeStreamRouter)")
