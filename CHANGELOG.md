@@ -1,4 +1,4 @@
-## Unreleased
+## 6.68.0 — private test candidate
 
 - Add an authenticated, on-demand Live COS Ask endpoint for Control: Haiku answers from the current meeting snapshot, with optional bounded COS history searches for free-form questions, source citations, cancellation and no background model calls. Uses the existing isolated Claude CLI runner and stored sign-in.
 
