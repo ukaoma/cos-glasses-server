@@ -104,6 +104,7 @@ import { glossaryRouter } from './routes/glossary.js'
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
+import { liveCosAskRouter } from './routes/live-cos-ask.js'
 import { lensGistRouter } from './routes/lens-gist.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
 import { setWeatherPersistence, welcomeContextRouter } from './routes/welcome-context.js'
@@ -1093,6 +1094,7 @@ app.use('/api', handoffsRouter)
 app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
 app.use('/api', lensGistRouter)
+app.use('/api', liveCosAskRouter)
 app.use('/api', bookmarksRouter)
 // 6.63.1: the last good weather and place survive a restart (<data>/welcome-weather.json).
 setWeatherPersistence({

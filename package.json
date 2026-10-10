@@ -41,6 +41,7 @@
     "shared",
     "!server/**/*.test.ts",
     "!server/scripts/engine-canary.ts",
+    "!server/scripts/live-cos-ask-canary.ts",
     "!server/scripts/work-review-candidate.ts",
     "!server/scripts/work-hardening-fixture.ts",
     "!server/scripts/work-review-mutation-gate.mjs",

@@ -1,3 +1,7 @@
+## Unreleased
+
+- Add an authenticated, on-demand Live COS Ask endpoint for Control: Haiku answers from the current meeting snapshot, with optional bounded COS history searches for free-form questions, source citations, cancellation and no background model calls. Uses the existing isolated Claude CLI runner and stored sign-in.
+
 ## 6.67.0 — 2026-10-09 — glasses pairing
 
 - Pair COS Glasses with your Mac by scanning a code instead of pasting the pairing token. COS Control shows a QR and a short code; the phone claims it, and nothing happens until you press Allow on the Mac. Pairs with COS Glasses 6.10.621 and the COS Control pairing release. Contract: `docs/pairing-contract.md`.

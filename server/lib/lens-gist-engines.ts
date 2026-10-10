@@ -62,6 +62,10 @@ export interface LensGistEngineRun {
 export interface LensGistRunOptions {
   timeoutMs: number
   system: string
+  /** Bounded on-demand consumers can share this isolated runner. */
+  source?: string
+  maxOutputTokens?: number
+  signal?: AbortSignal
 }
 
 /** Replaces Claude Code's own system prompt, so the call carries none of it. */
@@ -120,9 +124,10 @@ interface ProcessResult {
 export function runProcess(
   binary: string,
   args: string[],
-  opts: { stdin: string; cwd: string; timeoutMs: number; label: string; cursorIsolation?: boolean },
+  opts: { stdin: string; cwd: string; timeoutMs: number; label: string; cursorIsolation?: boolean; maxOutputTokens?: number; signal?: AbortSignal },
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
+    if (opts.signal?.aborted) { reject(new Error('cancelled')); return }
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -132,7 +137,7 @@ export function runProcess(
     const isolation = opts.cursorIsolation === true ? cursorSpawnEnv({ baseEnv: lensGistChildEnv(binary) }) : null
     let proc: ChildProcessWithoutNullStreams
     try {
-      proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: isolation ? isolation.env : lensGistChildEnv(binary), cwd: opts.cwd })
+      proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...(isolation ? isolation.env : lensGistChildEnv(binary)), ...(opts.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(opts.maxOutputTokens), MAX_THINKING_TOKENS: '0' } : {}) }, cwd: opts.cwd })
     } catch (error) {
       isolation?.release()
       throw error
@@ -142,6 +147,7 @@ export function runProcess(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      opts.signal?.removeEventListener('abort', abort)
       fn()
     }
     const terminate = () => {
@@ -153,8 +159,11 @@ export function runProcess(
       terminate()
       reject(new Error(`${opts.label} timed out after ${opts.timeoutMs} ms${stderr ? `: ${redactSecrets(stderr).slice(-200)}` : ''}`))
     }), opts.timeoutMs)
-    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+    const abort = () => finish(() => { terminate(); reject(new Error('cancelled')) })
+    opts.signal?.addEventListener('abort', abort, { once: true })
+    if (opts.signal?.aborted) abort()
+    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); if (stdout.length > 1_000_000) finish(() => { terminate(); reject(new Error('output_limit')) }) })
+    proc.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-8_000) })
     proc.on('error', err => finish(() => reject(err)))
     proc.on('close', code => {
       if (killTimer) clearTimeout(killTimer)
@@ -330,7 +339,7 @@ async function runCli(
 ): Promise<LensGistEngineRun> {
   const binary = binaryFor(provider)
   const result = await withScratchWorkspace(workspace =>
-    runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider, cursorIsolation: provider === 'cursor' }))
+    runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider, cursorIsolation: provider === 'cursor', maxOutputTokens: opts.maxOutputTokens, signal: opts.signal }))
   const providerText = `${result.stdout}\n${result.stderr}`
   if (result.code !== 0) {
     // Codex reports its failure as a JSON event AND a non-zero exit; the event says why.
@@ -416,8 +425,8 @@ export async function runLensGistEngine(
     return run
   } finally {
     logTokenAudit({
-      source: 'g2-lens-gist',
-      caller: 'lens_gist',
+      source: opts.source ?? 'g2-lens-gist',
+      caller: opts.source ?? 'lens_gist',
       model: `${engine}:${resolvedModel || 'default'}`,
       inputChars: prompt.length + opts.system.length,
       outputChars,

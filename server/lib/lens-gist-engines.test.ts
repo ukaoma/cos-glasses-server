@@ -23,6 +23,23 @@ describe('runProcess', () => {
     expect(Date.now() - started).toBeLessThan(2_000)
   })
 
+  it('cancels a real child and bounds its output', async () => {
+    const { runProcess } = await import('./lens-gist-engines.js')
+    const controller = new AbortController()
+    const pending = runProcess('/bin/sleep', ['5'], { stdin: '', cwd: '/tmp', timeoutMs: 5000, label: 'sleep', signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toThrow('cancelled')
+    await expect(runProcess(process.execPath, ['-e', 'process.stdout.write("x".repeat(1100000))'], { stdin: '', cwd: '/tmp', timeoutMs: 5000, label: 'node' })).rejects.toThrow('output_limit')
+  })
+
+  it('sets the per-request output cap without changing the parent environment', async () => {
+    const { runProcess } = await import('./lens-gist-engines.js')
+    const original = process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    const result = await runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS)'], {stdin:'',cwd:'/tmp',timeoutMs:5000,label:'node',maxOutputTokens:1400})
+    expect(result.stdout).toBe('1400')
+    expect(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(original)
+  })
+
   it('returns a non-zero exit with its output, for the caller to judge', async () => {
     const { runProcess } = await import('./lens-gist-engines.js')
     const result = await runProcess('/bin/sh', ['-c', 'cat; echo err >&2; exit 3'], { stdin: 'hello', cwd: '/tmp', timeoutMs: 5_000, label: 'sh' })

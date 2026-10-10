@@ -305,8 +305,10 @@ it('counts query length in code points, as people count characters', () => {
   expect(queryLength('ab')).toBe(2)
 })
 
-it('only Work search is a read-only POST for the mutation lease', () => {
+it('only explicit read-only searches bypass the mutation lease', () => {
   expect(isReadOnlyApiPost('POST', '/work/search')).toBe(true)
+  expect(isReadOnlyApiPost('POST', '/meetings/live-ask')).toBe(true)
+  expect(isReadOnlyApiPost('POST', '/meetings/live-ask/write')).toBe(false)
   for (const [method, path] of [['PUT', '/work/search'], ['DELETE', '/work/search'], ['POST', '/work/search/x'], ['POST', '/work-board/stage'], ['POST', '/tasks/capture']]) {
     expect(isReadOnlyApiPost(method, path)).toBe(false)
   }

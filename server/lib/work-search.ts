@@ -116,9 +116,10 @@ export function searchOptionText(text: string): string {
  * board and asks Jev one question; it writes nothing but its own token ledger (one atomic write). Under the lease, a
  * drain for an update or restart would wait up to 20 s (the Jev timeout) for a search, and a drain would answer every
  * search 503. Outside it, a restart mid-search loses at most that search's token count.
+ * Live COS Ask is also read-only and cancellable, with no durable tasks or conversation writes.
  */
 export function isReadOnlyApiPost(method: string, path: string): boolean {
-  return method === 'POST' && path === '/work/search'
+  return method === 'POST' && (path === '/work/search' || path === '/meetings/live-ask')
 }
 
 /** A query's length as people count it: code points, not UTF-16 units, so 150 emoji are 150 (Control counts characters). */
