@@ -56,7 +56,7 @@ catch {
  *   5. no_public_subject  nothing specific left to search, only connecting or request words.
  *
  * my, our, we, us, client and customer used to block the whole question (6.69.0), so "What's the
- * latest news on our competitor Lightspeed?" could never search. They name the user's own side,
+ * latest news on our competitor Acme?" could never search. They name the user's own side,
  * not a private detail, so they no longer block anything. They are dropped from the query instead:
  * "our client Acme" searches "Acme". Acme is still allowed because the user typed it.
  */

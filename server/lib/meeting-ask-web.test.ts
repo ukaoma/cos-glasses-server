@@ -8,7 +8,7 @@ import { runBoundedSearch } from './meeting-ask-search-process.js';
 describe('bounded public meeting search', () => {
     it('only accepts public http links, no credentials/private addresses', () => { for (const u of ['file:///tmp/x', 'http://localhost', 'http://127.0.0.1', 'https://10.1.1.1', 'http://[::1]', 'https://user:pass@example.com', 'https://foo.local', 'http://192.168.0.1', 'http://example.com:8080'])
         expect(publicWebUrl(u)).toBeNull(); expect(publicWebUrl('https://developer.apple.com/documentation')).toBe('https://developer.apple.com/documentation'); });
-    it('will not turn private names or evidence into public queries', () => { expect(publicSearchQueryAllowed("When is Queen birthday?", 'Queen birthday')).toBe(false); expect(publicSearchQueryAllowed('Search web for Apple documentation', 'Apple documentation')).toBe(true); expect(publicSearchQueryAllowed('Search web for Apple documentation', 'Queen salary Apple documentation')).toBe(false); expect(publicSearchQueryAllowed('What did we decide?', 'Apple documentation')).toBe(false); });
+    it('will not turn private names or evidence into public queries', () => { expect(publicSearchQueryAllowed("When is Taylor birthday?", 'Taylor birthday')).toBe(false); expect(publicSearchQueryAllowed('Search web for Apple documentation', 'Apple documentation')).toBe(true); expect(publicSearchQueryAllowed('Search web for Apple documentation', 'Taylor salary Apple documentation')).toBe(false); expect(publicSearchQueryAllowed('What did we decide?', 'Apple documentation')).toBe(false); });
     it('keeps generated search summary separate from authoritative observed result links', () => { const sources = parseWebEvidence({ results: [{ content: [{ title: 'Apple doc', url: 'https://developer.apple.com/' }] }, 'Search summary mentions facts.'] }, 'Apple docs'); expect(sources).toHaveLength(2); expect(sources[0].url).toBeUndefined(); expect(sources[1].text).toContain('page not fetched'); expect(sources[1].retrievalId).toBe(sources[0].retrievalId); });
     it('enforces single WebSearch before tool execution and rejects every other tool', () => { const d = mkdtempSync(join(tmpdir(), 'web-hook-test-')); try {
         const p = join(d, 'hook.cjs');
@@ -24,19 +24,19 @@ describe('bounded public meeting search', () => {
     } });
     it('cancels retrieval process and confirms its group exited promptly', async () => { const c = new AbortController(); const at = Date.now(); const p = runBoundedSearch(process.execPath, ['-e', 'setInterval(()=>{},10000)'], tmpdir(), c.signal); setTimeout(() => c.abort(), 30); await expect(p).rejects.toThrow('cancelled'); expect(Date.now() - at).toBeLessThan(1500); });
 });
-// 6.70.0. Each "observed" row is a question Miles asked on 6.69.0 that was withheld.
+// 6.70.0. Each "observed" row is a question asked in the Oct 10 live test on 6.69.0 that was withheld.
 const OBSERVED_ALLOWED: Array<[name: string, question: string, query: string, prior: string[], sent: string]> = [
     ['observed 1: "who is" with a split brand name', 'Who is alt coin daily?', 'Altcoin Daily', [], 'Altcoin Daily'],
     ['observed 1: model switch sentence before the question', "Let's try with sonnet. Who is alt coin daily?", 'Altcoin Daily YouTube channel', [], 'Altcoin Daily YouTube channel'],
-    ['observed 2: "our competitor" no longer blocks', "What's the latest news on our competitor Lightspeed?", 'Lightspeed latest news', [], 'Lightspeed latest news'],
-    ['observed 2: the possessive is dropped, not sent', "What's the latest news on our competitor Lightspeed?", 'our competitor Lightspeed news', [], 'competitor Lightspeed news'],
+    ['observed 2: "our competitor" no longer blocks', "What's the latest news on our competitor Acme?", 'Acme latest news', [], 'Acme latest news'],
+    ['observed 2: the possessive is dropped, not sent', "What's the latest news on our competitor Acme?", 'our competitor Acme news', [], 'competitor Acme news'],
     ['observed 3: follow-up borrows the user\'s earlier question', 'Run the web search', 'Altcoin Daily', ['Who are these people?', 'Who is alt coin daily?'], 'Altcoin Daily'],
     ['our client X searches X', 'Search the web for our client Acme Corp', 'our client Acme Corp', [], 'Acme Corp'],
     ['follow-up "look it up"', 'look it up', 'alt coin daily', ['Who is alt coin daily?'], 'alt coin daily'],
     ['follow-up "Google it"', 'Google it', 'Altcoin Daily', ['Who is alt coin daily?'], 'Altcoin Daily'],
     ['followers and "how many"', 'How many subscribers does Altcoin Daily have?', 'Altcoin Daily subscribers', [], 'Altcoin Daily subscribers'],
     ['founded', 'Who founded Shopify?', 'Shopify founder', [], 'Shopify founder'],
-    ['known for', 'What is Lightspeed known for?', 'Lightspeed', [], 'Lightspeed'],
+    ['known for', 'What is Acme known for?', 'Acme', [], 'Acme'],
     ['a typed word the query splits', 'Search the web for altcoin daily', 'alt coin daily', [], 'alt coin daily'],
     ['6.69.0 allowed case still allowed', 'Search web for Apple documentation', 'Apple documentation', [], 'Apple documentation'],
 ];
@@ -44,7 +44,7 @@ const WITHHELD: Array<[name: string, question: string, query: string, prior: str
     ['transcript-only name in query', 'Who are these people?', 'Joseph Wharton Charles Elliot', [], 'not_user_words'],
     ['screenshot OCR-only words in query', 'Who is alt coin daily?', 'Altcoin Daily MASSIVE WARNING', [], 'not_user_words'],
     ['follow-up never lends transcript names', 'Run the web search', 'Joseph Wharton', ['Who are these people?', 'Who is alt coin daily?'], 'not_user_words'],
-    ['follow-up reads only the last three questions', 'Run the web search', 'Lightspeed', ['Who is Lightspeed?', 'Who are they?', 'Who is that?', 'And them?'], 'not_user_words'],
+    ['follow-up reads only the last three questions', 'Run the web search', 'Acme', ['Who is Acme?', 'Who are they?', 'Who is that?', 'And them?'], 'not_user_words'],
     ['a question that names something does not borrow', 'Who is Shopify?', 'Altcoin Daily', ['Who is alt coin daily?'], 'not_user_words'],
     ['6.69.0 meeting question still withheld', 'What did we decide?', 'Apple documentation', [], 'not_user_words'],
     ['secret in the question', 'Search the web for sk-abcdefghijklmnop', 'sk-abcdefghijklmnop', [], 'secret'],
@@ -53,11 +53,11 @@ const WITHHELD: Array<[name: string, question: string, query: string, prior: str
     ['secret in a borrowed earlier question', 'Run the web search', 'docs', ['Search the web for sk-REDACTED docs'], 'secret'],
     ['salary', 'What is the average salary at Apple?', 'Apple salary', [], 'personal'],
     ['medical', 'Search the web for my medical diagnosis', 'medical diagnosis', [], 'personal'],
-    ['address', "What is Jeremy's address?", 'Jeremy address', [], 'personal'],
-    ['family term', "Who is Miles's wife?", 'Miles wife', [], 'personal'],
-    ['birthday (6.69.0 case)', 'When is Queen birthday?', 'Queen birthday', [], 'personal'],
-    ['personal word in a borrowed earlier question', 'Run the web search', 'Queen', ['When is Queen birthday?'], 'personal'],
-    ['salary added by the query', 'Search web for Apple documentation', 'Queen salary Apple documentation', [], 'personal'],
+    ['address', "What is Jordan's address?", 'Jordan address', [], 'personal'],
+    ['family term', "Who is Sam's wife?", 'Sam wife', [], 'personal'],
+    ['birthday (6.69.0 case)', 'When is Taylor birthday?', 'Taylor birthday', [], 'personal'],
+    ['personal word in a borrowed earlier question', 'Run the web search', 'Taylor', ['When is Taylor birthday?'], 'personal'],
+    ['salary added by the query', 'Search web for Apple documentation', 'Taylor salary Apple documentation', [], 'personal'],
     ['no public intent', 'Thanks, that helps', 'Altcoin Daily', [], 'no_public_intent'],
     ['nothing specific to search', 'Run the web search', 'latest news', [], 'no_public_subject'],
 ];
@@ -90,7 +90,7 @@ describe('public search gate (6.70.0)', () => {
         expect(new Set(notices.values()).size).toBe(5);
     });
     it('recognizes public intent by one rule and not meeting chatter', () => {
-        for (const q of ['Who is alt coin daily?', "What's Shopify?", 'Where was it founded', 'How does Square work', 'How many followers does it have', 'When did Toast go public', 'Which is cheaper', 'What is Lightspeed known for', 'look it up', 'Find Altcoin Daily', 'Who is the CEO', 'Their website?'])
+        for (const q of ['Who is alt coin daily?', "What's Shopify?", 'Where was it founded', 'How does Square work', 'How many followers does it have', 'When did Toast go public', 'Which is cheaper', 'What is Acme known for', 'look it up', 'Find Altcoin Daily', 'Who is the CEO', 'Their website?'])
             expect(publicIntent(q), q).toBe(true);
         for (const q of ['Thanks, that helps', 'Summarize the decisions', 'Did Maya send the draft', 'Who should own this', 'Catch me up'])
             expect(publicIntent(q), q).toBe(false);
@@ -105,7 +105,7 @@ describe('public search gate (6.70.0)', () => {
         expect(userWebQuery('Run the web search', ['Who are these people?', "Let's try with sonnet. Who is alt coin daily?"])).toBe('alt coin daily');
         expect(userWebQuery('Search the web for Google Cloud pricing')).toBe('Google Cloud pricing');
         expect(userWebQuery('Search the web for our client Acme Corp')).toBe('Acme Corp');
-        expect(userWebQuery('Run the web search', ['Who is Lightspeed?', 'Who are they?', 'Who is that?', 'And them?'])).toBeNull();
+        expect(userWebQuery('Run the web search', ['Who is Acme?', 'Who are they?', 'Who is that?', 'And them?'])).toBeNull();
         expect(userWebQuery('Run the web search')).toBeNull();
     });
     it('substitutes the user\'s words only for an explicit request whose query added words, never past a personal or secret check', () => {
@@ -113,9 +113,9 @@ describe('public search gate (6.70.0)', () => {
         expect(swapped.query).toBe('alt coin daily');
         expect(swapped.notices.join(' ')).toContain('your words "alt coin daily"');
         expect(resolveMeetingWebQuery({ question: 'Who is alt coin daily?', query: 'Altcoin Daily crypto' })).toEqual({ query: null, notices: [expect.stringContaining('words you did not type')] });
-        expect(resolveMeetingWebQuery({ question: 'Search the web for my wife Queen', query: 'Queen', explicitQuery: 'Queen' }).query).toBeNull();
+        expect(resolveMeetingWebQuery({ question: 'Search the web for my wife Taylor', query: 'Taylor', explicitQuery: 'Taylor' }).query).toBeNull();
         expect(resolveMeetingWebQuery({ question: 'Search the web for sk-REDACTED', query: 'pricing', explicitQuery: 'pricing' }).query).toBeNull();
         // The substitute passes the same gate: a bad explicit query is refused even when the planner's query only added words.
-        expect(resolveMeetingWebQuery({ question: 'Search the web for alt coin daily', query: 'crypto', explicitQuery: 'Queen birthday' })).toEqual({ query: null, notices: [expect.stringContaining('words you did not type')] });
+        expect(resolveMeetingWebQuery({ question: 'Search the web for alt coin daily', query: 'crypto', explicitQuery: 'Taylor birthday' })).toEqual({ query: null, notices: [expect.stringContaining('words you did not type')] });
     });
 });

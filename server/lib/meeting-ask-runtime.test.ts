@@ -179,11 +179,11 @@ describe('meeting Ask public web lookups', () => {
             expect(f.run.mock.calls[0][2]).toContain(MEETING_ASK_WEB_SYSTEM);
         } finally { f.cleanup(); }
     });
-    it('observed 2: "our competitor Lightspeed" searches without the possessive', async () => {
-        const f = webFixture([webAsk('our competitor Lightspeed latest news'), JSON.stringify({ answer: 'News. [W1]', searchQuery: null })]);
+    it('observed 2: "our competitor Acme" searches without the possessive', async () => {
+        const f = webFixture([webAsk('our competitor Acme latest news'), JSON.stringify({ answer: 'News. [W1]', searchQuery: null })]);
         try {
-            await settle(f, "What's the latest news on our competitor Lightspeed?");
-            expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['competitor Lightspeed latest news']);
+            await settle(f, "What's the latest news on our competitor Acme?");
+            expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['competitor Acme latest news']);
         } finally { f.cleanup(); }
     });
     it('observed 3: "Run the web search" borrows the user\'s earlier question from the journal', async () => {
@@ -233,15 +233,15 @@ describe('meeting Ask public web lookups', () => {
     });
     it('borrows only this meeting\'s last three completed or failed free-form questions', async () => {
         const cases: Array<[string, (f: ReturnType<typeof fixture>) => void, boolean]> = [
-            ['failed question counts', f => seed(f, 'Who is Lightspeed?', { status: 'failed' }), true],
-            ['cancelled question does not', f => seed(f, 'Who is Lightspeed?', { status: 'cancelled' }), false],
-            ['interrupted question does not', f => seed(f, 'Who is Lightspeed?', { status: 'interrupted' }), false],
-            ['another meeting does not', f => seed(f, 'Who is Lightspeed?', { sessionId: 'meeting_other' }), false],
-            ['a preset row does not', f => seed(f, 'Who is Lightspeed?', { action: 'summary' }), false],
-            ['older than the last three does not', f => { seed(f, 'Who is Lightspeed?'); seed(f, 'Who are they?'); seed(f, 'Who is that?'); seed(f, 'And them?'); }, false],
+            ['failed question counts', f => seed(f, 'Who is Acme?', { status: 'failed' }), true],
+            ['cancelled question does not', f => seed(f, 'Who is Acme?', { status: 'cancelled' }), false],
+            ['interrupted question does not', f => seed(f, 'Who is Acme?', { status: 'interrupted' }), false],
+            ['another meeting does not', f => seed(f, 'Who is Acme?', { sessionId: 'meeting_other' }), false],
+            ['a preset row does not', f => seed(f, 'Who is Acme?', { action: 'summary' }), false],
+            ['older than the last three does not', f => { seed(f, 'Who is Acme?'); seed(f, 'Who are they?'); seed(f, 'Who is that?'); seed(f, 'And them?'); }, false],
         ];
         for (const [name, prepare, searched] of cases) {
-            const f = webFixture([webAsk('Lightspeed'), JSON.stringify({ answer: 'Answer. [T1]', searchQuery: null })]);
+            const f = webFixture([webAsk('Acme'), JSON.stringify({ answer: 'Answer. [T1]', searchQuery: null })]);
             try {
                 prepare(f);
                 await settle(f, 'search that');
@@ -262,7 +262,7 @@ describe('meeting Ask public web lookups', () => {
         }
     });
     it('still withholds secrets and personal categories, with the reason', async () => {
-        for (const [question, query, phrase] of [['Search the web for sk-abcdefghijklmnop docs', 'docs', 'key or token'], ['What is the average salary at Apple?', 'Apple salary', 'personal detail'], ["Who is Miles's wife?", 'Miles wife', 'personal detail']]) {
+        for (const [question, query, phrase] of [['Search the web for sk-abcdefghijklmnop docs', 'docs', 'key or token'], ['What is the average salary at Apple?', 'Apple salary', 'personal detail'], ["Who is Sam's wife?", 'Sam wife', 'personal detail']]) {
             const f = webFixture([webAsk(query), JSON.stringify({ answer: 'No. [T1]', searchQuery: null })]);
             try {
                 const e = await settle(f, question);
