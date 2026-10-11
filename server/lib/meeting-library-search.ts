@@ -577,12 +577,14 @@ export async function searchMeetingLibrary(options: {
   domain?: string
   limit?: number
   signal?: AbortSignal
+  /** false (6.71.1, Meeting Ask "keyword only") skips the embedding search. */
+  semantic?: boolean
 }, store: MeetingStore = getMeetingStore()): Promise<MeetingSearchResult> {
   const query = options.query.trim()
   const domain = options.domain || 'all'
   const limit = Math.max(1, Math.min(options.limit ?? 20, 50))
   const keywordHits = keywordSearchMeetings(query, domain, store)
-  const semantic = await semanticSearchMeetings(query, domain, limit, options.signal)
+  const semantic = options.semantic === false ? { hits: [], reason: 'keyword_only' } : await semanticSearchMeetings(query, domain, limit, options.signal)
   const hits = mergeMeetingSearchHits(keywordHits, semantic.hits, limit)
   return {
     hits,

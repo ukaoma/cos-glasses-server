@@ -44,6 +44,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
  */
 const CASES = [
   {
+    name: 'asr-merge-ended-overlay', file: 'server/routes/meeting-ask.ts',
+    find: "snapshot.source === 'live' && process.env.COS_MEETING_ASK_HQ_EVIDENCE === '1'",
+    replace: "process.env.COS_MEETING_ASK_HQ_EVIDENCE === '1'", tests: ['server/routes/meeting-ask.test.ts'],
+  },
+  {
+    name: 'asr-merge-lost-source', file: 'server/routes/meeting-ask.ts',
+    find: 'res.json({ ...snapshot, turns: refined.input.turns, notices: [...snapshot.notices, ...refined.notices] });',
+    replace: 'res.json({ elapsedMs: snapshot.elapsedMs, turns: refined.input.turns, notices: [...snapshot.notices, ...refined.notices] });', tests: ['server/routes/meeting-ask.test.ts'],
+  },
+  {
     name: 'asr-canary-raw-clock', file: 'server/lib/whisper-batch-timing.ts',
     find: 'const start = useVad ? mapVadTime(word.start, table) : word.start',
     replace: 'const start = word.start', tests: ['server/lib/whisper-batch-timing.test.ts'],

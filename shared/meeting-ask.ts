@@ -11,6 +11,20 @@ export interface MeetingAskTurn {
     speaker: string;
     text: string;
 }
+/**
+ * GET /api/meeting-ask/transcript. A live meeting answers from memory. A meeting that has ended (6.71.1)
+ * answers from its saved record with ended: true, so it stays askable. 404 meeting_transcript_unavailable
+ * only when no source holds its words.
+ */
+export interface MeetingAskTranscript {
+    turns: MeetingAskTurn[];
+    elapsedMs: number;
+    notices: string[];
+    ended?: true;
+    /** When the recording stopped, if known. */
+    endedAt?: string;
+    source?: 'live' | 'active_file' | 'saved';
+}
 export interface MeetingAskFile {
     id: string;
     revision: string;
@@ -18,6 +32,8 @@ export interface MeetingAskFile {
     status: 'ready' | 'pending' | 'unsupported' | 'failed' | 'removed' | 'secret-held';
     text: string;
     notice?: string;
+    /** "phone" for a file the phone attached through POST files/media (6.71.1). Control's rows omit it. */
+    origin?: 'phone';
 }
 export interface MeetingAskSource {
     id: string;
@@ -155,11 +171,23 @@ export interface MeetingAskCapabilities {
     durableHistory: true;
     attachmentContext: true;
     webRetrieval: boolean;
+    /** 6.71.1: POST /api/meeting-ask/files/media turns uploaded media into meeting files. */
+    phoneFiles?: true;
+    /** 6.71.1: config carries cosSearch and PUT config {cosSearch} changes it. */
+    cosSearchMode?: true;
 }
+/**
+ * How Meeting Ask searches COS memory and earlier meetings (6.71.1). 'meaning' (default) adds the embedding
+ * search, which sends the search phrase to the COS install's embedding provider; 'keyword' matches words
+ * locally only, with no embedding request and no tokens.
+ */
+export type MeetingAskCosSearch = 'meaning' | 'keyword';
 export interface MeetingAskConfig {
     protocolVersion: 2;
     serverInstanceId: string;
     selected: MeetingAskModel;
+    /** 6.71.1. Missing on older servers, which always used 'meaning'. */
+    cosSearch?: MeetingAskCosSearch;
     models: Array<MeetingAskModel & {
         available: boolean;
         reason?: string;
@@ -171,11 +199,13 @@ export interface MeetingAskConfig {
     };
     capabilities: MeetingAskCapabilities;
 }
-/** All paths under /api/meeting-ask. GET config; PUT config {engine,model}.
+/** All paths under /api/meeting-ask. GET config; PUT config {engine,model} and/or {cosSearch} (6.71.1); either part may come alone.
  * POST requests MeetingAskSubmit -> 202 {exchange}; GET requests/:requestId -> {exchange}.
  * POST requests/:requestId/cancel {serverInstanceId} -> {exchange}.
  * GET history?sessionId=...&serverInstanceId=...&offset=0&limit=50&order=asc|desc -> {exchanges,nextOffset,files}.
  * PUT files {sessionId,serverInstanceId,files:MeetingAskFile[]} -> {files}. Upsert only; removed is explicit.
+ * POST files/media {sessionId,serverInstanceId,media:[{id,name?}]} -> {files} (6.71.1, capabilities.phoneFiles):
+ * media already uploaded through /api/media joins the meeting's file list as id "phone_<mediaId>", origin "phone".
  * GET export?sessionId=...&serverInstanceId=... -> {text}; composes persisted Ask/file context,
  * client prepends its current canonical transcript. All operations use X-Cos-Token.
  * GET config is the capability probe (404 means old server); health.capabilities.meetingAsk mirrors capabilities.

@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { durableAtomicWriteFileSync } from './atomic-fs.js';
 import { dataPath } from './data-dir.js';
-import type { MeetingAskExchange, MeetingAskFile, MeetingAskSubmit, MeetingAskModel } from '../../shared/meeting-ask.js';
+import type { MeetingAskExchange, MeetingAskFile, MeetingAskSubmit, MeetingAskModel, MeetingAskCosSearch } from '../../shared/meeting-ask.js';
 import { AskError } from './live-cos-ask.js';
 export const ASK_ID = /^[A-Za-z0-9_-]{8,100}$/;
 export const ASK_SESSION = /^meeting_[A-Za-z0-9_-]{1,89}$/;
@@ -116,4 +116,14 @@ export class MeetingAskStore {
     }
     config(): MeetingAskModel { return this.read<MeetingAskModel>(join(this.dir('config'), 'model.json')) ?? { engine: 'claude', model: 'haiku' }; }
     setConfig(model: MeetingAskModel): void { durableAtomicWriteFileSync(join(this.dir('config'), 'model.json'), JSON.stringify(model), { mode: 0o600 }); }
+    /** 6.71.1. Anything but an explicit 'keyword' reads as the default, 'meaning'. */
+    cosSearch(): MeetingAskCosSearch { return this.read<{ cosSearch?: unknown }>(join(this.dir('config'), 'search.json'))?.cosSearch === 'keyword' ? 'keyword' : 'meaning'; }
+    setCosSearch(mode: MeetingAskCosSearch): void { try {
+        durableAtomicWriteFileSync(join(this.dir('config'), 'search.json'), JSON.stringify({ cosSearch: mode }), { mode: 0o600 });
+    }
+    catch (e) {
+        if (e instanceof AskError)
+            throw e;
+        throw new AskError('journal_write_failed', 507);
+    } }
 }

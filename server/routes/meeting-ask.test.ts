@@ -3,19 +3,24 @@ import type { Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 vi.mock('./transcribe-stream.js', () => ({ getSessionChunkEntries: () => [{ chunkIndex: 2, chunk: { elapsed: 100, text: 'Review on Friday', speaker: 'Nina' } }], getSessionStartTime: () => Date.now() - 1000 }));
+vi.mock('../lib/meeting-ask-refinement.js', () => ({ refineActiveMeetingAsk: vi.fn((input) => ({ input, notices: [] })) }));
+import { refineActiveMeetingAsk } from '../lib/meeting-ask-refinement.js';
+afterEach(() => { vi.unstubAllEnvs(); vi.mocked(refineActiveMeetingAsk).mockReset().mockImplementation(input => ({ input, notices: [] })); });
 import { createMeetingAskRouter } from './meeting-ask.js';
 import { MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
 import { MeetingAskStore } from '../lib/meeting-ask-store.js';
 import { requireApiToken } from '../lib/api-auth.js';
+import type { AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
+import { MediaStoreError } from '../lib/media-store.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
-async function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }) });
+async function fixture(transcripts?: AskTranscriptSources, media?: () => any) {
+    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
-    app.use('/api', createMeetingAskRouter(runtime));
+    app.use('/api', createMeetingAskRouter(runtime, transcripts));
     let server: Server;
     await new Promise<void>(r => { server = app.listen(0, '127.0.0.1', () => r()); });
     const address = server!.address() as any;
@@ -80,6 +85,104 @@ describe('Meeting Ask v2 HTTP contract', () => {
     finally {
         await f.close();
     } });
+    it('with HQ disabled, returns the released live snapshot without consulting refinement', async () => {
+        vi.stubEnv('COS_MEETING_ASK_HQ_EVIDENCE', '0');
+        const sources: AskTranscriptSources = { live: () => ({ entries: [{ chunkIndex: 7, chunk: { text: 'Friday, not Monday', speaker: 'Nina', elapsed: 100 } }], startTime: 1000 }), now: () => 2000, status: () => ({ state: 'active' }), activeFile: () => null, saved: () => null, read: () => null };
+        const f = await fixture(sources);
+        try {
+            const r = await f.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server');
+            expect(r.status).toBe(200);
+            expect(await r.json()).toEqual({ turns: [{ id: 7, elapsedMs: 100, text: 'Friday, not Monday', speaker: 'Nina' }], elapsedMs: 1000, notices: [], source: 'live' });
+            expect(refineActiveMeetingAsk).not.toHaveBeenCalled();
+        } finally { await f.close(); }
+    });
+    it('an opted-in live overlay preserves the released source, cutoff and new live tail', async () => {
+        vi.stubEnv('COS_MEETING_ASK_HQ_EVIDENCE', '1');
+        const turns = [{ id: 7, elapsedMs: 100, speaker: 'Nina', text: 'Friday, not Monday' }, { id: 8, elapsedMs: 900, speaker: 'Nina', text: 'The budget is 59.' }];
+        const sources: AskTranscriptSources = { live: () => ({ entries: turns.map(t => ({ chunkIndex: t.id, chunk: { text: t.text, speaker: t.speaker, elapsed: t.elapsedMs } })), startTime: 1000 }), now: () => 2000, status: () => ({ state: 'active' }), activeFile: () => null, saved: () => null, read: () => null };
+        vi.mocked(refineActiveMeetingAsk).mockImplementationOnce(input => ({ input: { ...input, turns: [{ ...input.turns[0], text: 'Nina reviews Friday, not Monday.' }, input.turns[1]] }, notices: ['Earlier passage refined.'] }));
+        const f = await fixture(sources);
+        try {
+            const r = await f.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server');
+            expect(r.status).toBe(200);
+            expect(await r.json()).toEqual({ turns: [{ ...turns[0], text: 'Nina reviews Friday, not Monday.' }, turns[1]], elapsedMs: 1000, notices: ['Earlier passage refined.'], source: 'live' });
+            expect(refineActiveMeetingAsk).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'meeting_test', elapsedMs: 1000, turns }));
+        } finally { await f.close(); }
+    });
+    it('an ended meeting answers /transcript from its saved record; a gone one is 404 meeting_transcript_unavailable', async () => {
+        vi.stubEnv('COS_MEETING_ASK_HQ_EVIDENCE', '1');
+        const sidecar = JSON.stringify({ sessionId: 'meeting_test', startTime: 1000, durationMs: 60000, chunkEntries: [{ chunkIndex: 4, chunk: { text: 'Saved words', speaker: 'Nina', elapsed: 5000 } }] });
+        const base = { live: () => null, status: () => ({ state: 'closed', lastActivityAt: '2026-10-11T15:42:00.000Z' }), activeFile: () => null, now: Date.now };
+        const f = await fixture({ ...base, saved: () => ({ sidecarPath: 's.json', filepath: 'm.md' }), read: (p: string) => p === 's.json' ? sidecar : null });
+        try {
+            const r = await f.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server');
+            expect(r.status).toBe(200);
+            expect(await r.json()).toMatchObject({ turns: [{ id: 4, elapsedMs: 5000, speaker: 'Nina', text: 'Saved words' }], elapsedMs: 60000, ended: true, endedAt: '2026-10-11T15:42:00.000Z', source: 'saved' });
+            expect(refineActiveMeetingAsk).not.toHaveBeenCalled();
+        }
+        finally {
+            await f.close();
+        }
+        const g = await fixture({ ...base, saved: () => null, read: () => null });
+        try {
+            const r = await g.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server');
+            expect(r.status).toBe(404);
+            expect(await r.json()).toEqual({ error: 'meeting_transcript_unavailable' });
+        }
+        finally {
+            await g.close();
+        }
+    });
+    it('POST files/media adds a phone upload to the meeting file list and config advertises phoneFiles', async () => {
+        const id = 'm_' + 'a'.repeat(24), record = { ref: { id, kind: 'user_document', category: 'document', mime: 'text/plain', width: 0, height: 0, createdAt: '2026-10-11T00:00:00Z', label: 'notes.txt' }, sha256: 'feedface00', createdAtMs: 1 };
+        const media = () => ({ resolveUsable: (m: string) => { if (m !== id) throw new MediaStoreError('media_not_found', m); return { record, path: '/x' }; }, resolveModelDerivatives: () => ({ record, originalPath: '/x', text: 'Phone notes', imagePaths: [] }) });
+        const f = await fixture(undefined, media);
+        try {
+            expect((await (await f.request('/config')).json()).capabilities.phoneFiles).toBe(true);
+            const body = { sessionId: 'meeting_test', serverInstanceId: 'test-server', media: [{ id, name: 'Notes from phone' }] };
+            const ok = await f.request('/files/media', body);
+            expect(ok.status).toBe(200);
+            expect(ok.headers.get('cache-control')).toBe('no-store');
+            expect((await ok.json()).files).toEqual([{ id: 'phone_' + id, revision: 'feedface00', name: 'Notes from phone', status: 'ready', text: 'Phone notes', origin: 'phone' }]);
+            const missing = await f.request('/files/media', { ...body, media: [{ id: 'm_' + 'b'.repeat(24) }] });
+            expect(missing.status).toBe(404);
+            expect(await missing.json()).toEqual({ error: 'media_not_found' });
+            expect((await f.request('/files/media', { ...body, media: [] })).status).toBe(400);
+            expect((await f.request('/files/media', body, 'POST', false)).status).toBe(401);
+            expect(f.run).not.toHaveBeenCalled();
+        }
+        finally {
+            await f.close();
+        }
+    });
+    it('an unknown upload id is 404 media_not_found through the real media store, not a generic 503', async () => {
+        const f = await fixture();
+        try {
+            const r = await f.request('/files/media', { sessionId: 'meeting_test', serverInstanceId: 'test-server', media: [{ id: 'm_000000000000000000000000' }] });
+            expect(r.status).toBe(404);
+            expect(await r.json()).toEqual({ error: 'media_not_found' });
+        }
+        finally {
+            await f.close();
+        }
+    });
+    it('PUT config {cosSearch} alone sets the COS search mode and GET config returns it', async () => {
+        const f = await fixture();
+        try {
+            expect((await (await f.request('/config')).json())).toMatchObject({ cosSearch: 'meaning', capabilities: { cosSearchMode: true } });
+            const put = await f.request('/config', { cosSearch: 'keyword' }, 'PUT');
+            expect(put.status).toBe(200);
+            expect(await put.json()).toMatchObject({ cosSearch: 'keyword', selected: { engine: 'claude', model: 'haiku' } });
+            expect((await (await f.request('/config')).json()).cosSearch).toBe('keyword');
+            const bad = await f.request('/config', { cosSearch: 'vector' }, 'PUT');
+            expect(bad.status).toBe(400);
+            expect(await bad.json()).toEqual({ error: 'invalid_cos_search' });
+            expect((await f.request('/config', { cosSearch: 'meaning' }, 'PUT', false)).status).toBe(401);
+        }
+        finally {
+            await f.close();
+        }
+    });
     it('exports admitted file bytes after a same-revision removal and includes later revisions', async () => {
         const f = await fixture();
         try {

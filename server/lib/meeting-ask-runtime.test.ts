@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MeetingAskRuntime, normalizeAskFiles, MEETING_ASK_WEB_SYSTEM } from './meeting-ask-runtime.js';
+import { MeetingAskRuntime, normalizeAskFiles, MEETING_ASK_WEB_SYSTEM, meetingAskSearchTarget, explicitWebAllowed } from './meeting-ask-runtime.js';
 import { MeetingAskStore } from './meeting-ask-store.js';
 import { exportMeetingAsk } from '../routes/meeting-ask.js';
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'We will review Friday.' }] };
@@ -246,6 +246,33 @@ describe('meeting Ask public web lookups', () => {
             expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['Altcoin Daily']);
             expect(e.answer).toContain('[W1]');
         } finally { f.cleanup(); }
+    });
+    it('backstop: only a typed question may route to the web or have an explicit web request honored', () => {
+        for (const action of ['catch_up', 'summary', 'questions', 'actions'] as const) {
+            expect(meetingAskSearchTarget(action, 'web', true)).toBe('cos');
+            expect(explicitWebAllowed(action, true, 'Search the web for Altcoin Daily')).toBe(false);
+        }
+        expect(meetingAskSearchTarget('ask', 'web', true)).toBe('web');
+        expect(meetingAskSearchTarget('ask', 'web', false)).toBe('cos');
+        expect(meetingAskSearchTarget('ask', 'cos', true)).toBe('cos');
+        expect(explicitWebAllowed('ask', true, 'Search the web for Altcoin Daily')).toBe(true);
+        expect(explicitWebAllowed('ask', false, 'Search the web for Altcoin Daily')).toBe(false);
+    });
+    it('What to ask never reaches the web: a web-scoped plan is searched in COS only, even beside an explicit web question', async () => {
+        const search = vi.fn(async (_q: string, _s?: string, _signal?: AbortSignal) => ({ sources: [{ id: 'H0', kind: 'memory' as const, title: 'Prior note', text: 'Earlier case.' }], notices: [] }));
+        const f = webFixture([webAsk('Altcoin Daily'), JSON.stringify({ sections: [{ label: 'So what', text: 'Use the prior note [H1].' }, { label: 'Ask', text: 'Same as before? [H1] [T1]' }], searchQuery: null })], { search });
+        try {
+            await f.runtime.submit({ ...base, action: 'questions', question: 'Search the web for Altcoin Daily' });
+            const e = await terminal(f);
+            expect(e.status).toBe('completed');
+            expect(f.webSearch).not.toHaveBeenCalled();
+            expect(search).toHaveBeenCalledTimes(1);
+            expect(e.sources.map(s => s.kind)).toEqual(['transcript', 'memory']);
+            expect(e.notices.join(' ')).not.toContain('You asked for the web');
+        }
+        finally {
+            f.cleanup();
+        }
     });
     it('an explicit follow-up searches the user\'s own words when the planner answers without the web', async () => {
         const f = webFixture([JSON.stringify({ sections: [{ label: 'So what', text: 'I cannot search.' }], searchQuery: null }), JSON.stringify({ sections: [{ label: 'So what', text: 'A crypto news channel. [W1]' }], searchQuery: null })]);

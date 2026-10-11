@@ -1,9 +1,12 @@
 import { Router, type Response } from 'express';
 import { AskError } from '../lib/live-cos-ask.js';
 import { meetingAskRuntime, type MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
-import { getSessionChunkEntries, getSessionStartTime, getSessionAudioDirectory, getSessionAsrCompletedIndices } from './transcribe-stream.js';
-import { readProgressiveAskRefinements } from '../lib/meeting-batch-transcribe.js';
-import { meetingAskTranscript } from '../lib/meeting-ask-hq-transcript.js';
+import { refineActiveMeetingAsk } from '../lib/meeting-ask-refinement.js';
+import { getSessionChunkEntries, getSessionStartTime, getMeetingSessionStatus } from './transcribe-stream.js';
+import { resolveAskTranscript, readBoundedFile, type AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
+import { getMeetingStore } from '../lib/meeting-store.js';
+import { dataPath } from '../lib/data-dir.js';
+import { join } from 'node:path';
 import { ASK_SESSION } from '../lib/meeting-ask-store.js';
 import type { MeetingAskExchange, MeetingAskFile } from '../../shared/meeting-ask.js';
 function failure(res: Response, error: unknown) { res.status(error instanceof AskError ? error.status : 503).json({ error: error instanceof AskError ? error.reason : 'meeting_assistant_unavailable' }); }
@@ -42,7 +45,15 @@ export function exportMeetingAsk(exchanges: MeetingAskExchange[], files: Meeting
         throw new AskError('export_too_large', 413);
     return text;
 }
-export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRuntime) {
+const transcriptSources: AskTranscriptSources = {
+    live: id => { const entries = getSessionChunkEntries(id), startTime = getSessionStartTime(id); return entries && startTime !== null ? { entries, startTime } : null; },
+    status: id => getMeetingSessionStatus(id),
+    activeFile: id => readBoundedFile(join(dataPath('active-sessions'), `${id}.json`)),
+    saved: id => getMeetingStore().findBySessionId(id),
+    read: readBoundedFile,
+    now: Date.now,
+};
+export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRuntime, transcripts: AskTranscriptSources = transcriptSources) {
     const router = Router();
     router.use((_q, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
     router.get('/meeting-ask/config', async (_q, res) => { try {
@@ -91,6 +102,12 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
     catch (e) {
         failure(res, e);
     } });
+    router.post('/meeting-ask/files/media', (req, res) => { try {
+        res.json({ files: runtime.attachMedia(String(req.body?.sessionId ?? ''), req.body?.serverInstanceId, req.body?.media) });
+    }
+    catch (e) {
+        failure(res, e);
+    } });
     router.get('/meeting-ask/export', (req, res) => {
         try {
             const exchanges: MeetingAskExchange[] = [];
@@ -114,13 +131,14 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
             const sessionId = String(req.query.sessionId ?? '');
             if (!ASK_SESSION.test(sessionId))
                 throw new AskError('invalid_session_id');
-            const chunks = getSessionChunkEntries(sessionId), start = getSessionStartTime(sessionId);
-            if (!chunks || start === null)
-                throw new AskError('session_not_available', 404);
-            const audioDir = process.env.COS_MEETING_ASK_HQ_EVIDENCE === '1' ? getSessionAudioDirectory(sessionId) : null;
-            const refined = audioDir ? readProgressiveAskRefinements(audioDir, sessionId, chunks, getSessionAsrCompletedIndices(sessionId)) : [];
-            const snapshot = meetingAskTranscript(chunks, refined);
-            res.json({ ...snapshot, elapsedMs: Math.max(Date.now() - start, ...snapshot.turns.map(t => t.elapsedMs), 0) });
+            const snapshot = resolveAskTranscript(sessionId, transcripts);
+            // Ended/saved transcripts keep the released resolver and source metadata.
+            // Only a live snapshot may use the default-off HQ cache overlay.
+            if (snapshot.source === 'live' && process.env.COS_MEETING_ASK_HQ_EVIDENCE === '1') {
+                const refined = refineActiveMeetingAsk({ sessionId, action: 'catch_up', question: '',
+                    elapsedMs: snapshot.elapsedMs, turns: snapshot.turns, history: [] });
+                res.json({ ...snapshot, turns: refined.input.turns, notices: [...snapshot.notices, ...refined.notices] });
+            } else res.json(snapshot);
         }
         catch (e) {
             failure(res, e);
