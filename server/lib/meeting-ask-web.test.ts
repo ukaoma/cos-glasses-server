@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { publicWebUrl, publicSearchQueryAllowed, parseWebEvidence, WEB_HOOK_SOURCE } from './meeting-ask-web.js';
+import { publicWebUrl, publicSearchQueryAllowed, parseWebEvidence, WEB_HOOK_SOURCE, publicSearchGate, publicIntent, explicitWebRequest, userWebQuery, resolveMeetingWebQuery, type WebGateReason } from './meeting-ask-web.js';
 import { runBoundedSearch } from './meeting-ask-search-process.js';
 describe('bounded public meeting search', () => {
     it('only accepts public http links, no credentials/private addresses', () => { for (const u of ['file:///tmp/x', 'http://localhost', 'http://127.0.0.1', 'https://10.1.1.1', 'http://[::1]', 'https://user:pass@example.com', 'https://foo.local', 'http://192.168.0.1', 'http://example.com:8080'])
@@ -23,4 +23,99 @@ describe('bounded public meeting search', () => {
         rmSync(d, { recursive: true, force: true });
     } });
     it('cancels retrieval process and confirms its group exited promptly', async () => { const c = new AbortController(); const at = Date.now(); const p = runBoundedSearch(process.execPath, ['-e', 'setInterval(()=>{},10000)'], tmpdir(), c.signal); setTimeout(() => c.abort(), 30); await expect(p).rejects.toThrow('cancelled'); expect(Date.now() - at).toBeLessThan(1500); });
+});
+// 6.70.0. Each "observed" row is a question Miles asked on 6.69.0 that was withheld.
+const OBSERVED_ALLOWED: Array<[name: string, question: string, query: string, prior: string[], sent: string]> = [
+    ['observed 1: "who is" with a split brand name', 'Who is alt coin daily?', 'Altcoin Daily', [], 'Altcoin Daily'],
+    ['observed 1: model switch sentence before the question', "Let's try with sonnet. Who is alt coin daily?", 'Altcoin Daily YouTube channel', [], 'Altcoin Daily YouTube channel'],
+    ['observed 2: "our competitor" no longer blocks', "What's the latest news on our competitor Lightspeed?", 'Lightspeed latest news', [], 'Lightspeed latest news'],
+    ['observed 2: the possessive is dropped, not sent', "What's the latest news on our competitor Lightspeed?", 'our competitor Lightspeed news', [], 'competitor Lightspeed news'],
+    ['observed 3: follow-up borrows the user\'s earlier question', 'Run the web search', 'Altcoin Daily', ['Who are these people?', 'Who is alt coin daily?'], 'Altcoin Daily'],
+    ['our client X searches X', 'Search the web for our client Acme Corp', 'our client Acme Corp', [], 'Acme Corp'],
+    ['follow-up "look it up"', 'look it up', 'alt coin daily', ['Who is alt coin daily?'], 'alt coin daily'],
+    ['follow-up "Google it"', 'Google it', 'Altcoin Daily', ['Who is alt coin daily?'], 'Altcoin Daily'],
+    ['followers and "how many"', 'How many subscribers does Altcoin Daily have?', 'Altcoin Daily subscribers', [], 'Altcoin Daily subscribers'],
+    ['founded', 'Who founded Shopify?', 'Shopify founder', [], 'Shopify founder'],
+    ['known for', 'What is Lightspeed known for?', 'Lightspeed', [], 'Lightspeed'],
+    ['a typed word the query splits', 'Search the web for altcoin daily', 'alt coin daily', [], 'alt coin daily'],
+    ['6.69.0 allowed case still allowed', 'Search web for Apple documentation', 'Apple documentation', [], 'Apple documentation'],
+];
+const WITHHELD: Array<[name: string, question: string, query: string, prior: string[], reason: WebGateReason]> = [
+    ['transcript-only name in query', 'Who are these people?', 'Joseph Wharton Charles Elliot', [], 'not_user_words'],
+    ['screenshot OCR-only words in query', 'Who is alt coin daily?', 'Altcoin Daily MASSIVE WARNING', [], 'not_user_words'],
+    ['follow-up never lends transcript names', 'Run the web search', 'Joseph Wharton', ['Who are these people?', 'Who is alt coin daily?'], 'not_user_words'],
+    ['follow-up reads only the last three questions', 'Run the web search', 'Lightspeed', ['Who is Lightspeed?', 'Who are they?', 'Who is that?', 'And them?'], 'not_user_words'],
+    ['a question that names something does not borrow', 'Who is Shopify?', 'Altcoin Daily', ['Who is alt coin daily?'], 'not_user_words'],
+    ['6.69.0 meeting question still withheld', 'What did we decide?', 'Apple documentation', [], 'not_user_words'],
+    ['secret in the question', 'Search the web for sk-abcdefghijklmnop', 'sk-abcdefghijklmnop', [], 'secret'],
+    ['secret already redacted in the stored question', 'Search the web for sk-REDACTED pricing', 'pricing', [], 'secret'],
+    ['secret in the query only', 'Search the web for Apple documentation', 'Apple documentation ghp_abcdefghijklmnopqrstuvwxyz0123', [], 'secret'],
+    ['secret in a borrowed earlier question', 'Run the web search', 'docs', ['Search the web for sk-REDACTED docs'], 'secret'],
+    ['salary', 'What is the average salary at Apple?', 'Apple salary', [], 'personal'],
+    ['medical', 'Search the web for my medical diagnosis', 'medical diagnosis', [], 'personal'],
+    ['address', "What is Jeremy's address?", 'Jeremy address', [], 'personal'],
+    ['family term', "Who is Miles's wife?", 'Miles wife', [], 'personal'],
+    ['birthday (6.69.0 case)', 'When is Queen birthday?', 'Queen birthday', [], 'personal'],
+    ['personal word in a borrowed earlier question', 'Run the web search', 'Queen', ['When is Queen birthday?'], 'personal'],
+    ['salary added by the query', 'Search web for Apple documentation', 'Queen salary Apple documentation', [], 'personal'],
+    ['no public intent', 'Thanks, that helps', 'Altcoin Daily', [], 'no_public_intent'],
+    ['nothing specific to search', 'Run the web search', 'latest news', [], 'no_public_subject'],
+];
+describe('public search gate (6.70.0)', () => {
+    it.each(OBSERVED_ALLOWED)('allows %s', (_name, question, query, prior, sent) => {
+        expect(publicSearchGate({ question, query, priorQuestions: prior })).toEqual({ ok: true, query: sent });
+        expect(publicSearchQueryAllowed(question, query, prior)).toBe(true);
+    });
+    it.each(WITHHELD)('withholds %s', (_name, question, query, prior, reason) => {
+        const d = publicSearchGate({ question, query, priorQuestions: prior });
+        expect(d.ok).toBe(false);
+        expect(d.ok === false && d.reason).toBe(reason);
+        expect(publicSearchQueryAllowed(question, query, prior)).toBe(false);
+    });
+    it('names the reason and an example in every withheld notice, without em dashes or arrows', () => {
+        const notices = new Map<WebGateReason, string>();
+        for (const [, question, query, prior, reason] of WITHHELD) {
+            const d = publicSearchGate({ question, query, priorQuestions: prior });
+            if (d.ok === false)
+                notices.set(reason, d.notice);
+        }
+        expect([...notices.keys()].sort()).toEqual(['no_public_intent', 'no_public_subject', 'not_user_words', 'personal', 'secret']);
+        const phrase: Record<WebGateReason, string> = { secret: 'key or token', personal: 'personal detail', no_public_intent: 'did not ask for public information', not_user_words: 'words you did not type', no_public_subject: 'nothing specific to search' };
+        for (const [reason, notice] of notices) {
+            expect(notice).toMatch(/^Public search was withheld: /);
+            expect(notice).toContain(phrase[reason]);
+            expect(notice).toContain('for example "');
+            expect(notice).not.toMatch(/[—→]/);
+        }
+        expect(new Set(notices.values()).size).toBe(5);
+    });
+    it('recognizes public intent by one rule and not meeting chatter', () => {
+        for (const q of ['Who is alt coin daily?', "What's Shopify?", 'Where was it founded', 'How does Square work', 'How many followers does it have', 'When did Toast go public', 'Which is cheaper', 'What is Lightspeed known for', 'look it up', 'Find Altcoin Daily', 'Who is the CEO', 'Their website?'])
+            expect(publicIntent(q), q).toBe(true);
+        for (const q of ['Thanks, that helps', 'Summarize the decisions', 'Did Maya send the draft', 'Who should own this', 'Catch me up'])
+            expect(publicIntent(q), q).toBe(false);
+    });
+    it('treats only a plain request for the web as explicit', () => {
+        for (const q of ['Run the web search', 'Search the web for Altcoin Daily', 'Can you google Altcoin Daily?', 'Google it', 'look it up online', 'Find it on the web', 'Search the internet for Toast'])
+            expect(explicitWebRequest(q), q).toBe(true);
+        for (const q of ['What does our web team think?', 'What is our Google Ads spend?', 'Who is alt coin daily?', 'look it up', 'search that'])
+            expect(explicitWebRequest(q), q).toBe(false);
+    });
+    it('builds the explicit query from the user\'s own words only, newest earlier question first, last three only', () => {
+        expect(userWebQuery('Run the web search', ['Who are these people?', "Let's try with sonnet. Who is alt coin daily?"])).toBe('alt coin daily');
+        expect(userWebQuery('Search the web for Google Cloud pricing')).toBe('Google Cloud pricing');
+        expect(userWebQuery('Search the web for our client Acme Corp')).toBe('Acme Corp');
+        expect(userWebQuery('Run the web search', ['Who is Lightspeed?', 'Who are they?', 'Who is that?', 'And them?'])).toBeNull();
+        expect(userWebQuery('Run the web search')).toBeNull();
+    });
+    it('substitutes the user\'s words only for an explicit request whose query added words, never past a personal or secret check', () => {
+        const swapped = resolveMeetingWebQuery({ question: 'Search the web for alt coin daily', query: 'Altcoin Daily crypto MASSIVE WARNING 2026', explicitQuery: 'alt coin daily' });
+        expect(swapped.query).toBe('alt coin daily');
+        expect(swapped.notices.join(' ')).toContain('your words "alt coin daily"');
+        expect(resolveMeetingWebQuery({ question: 'Who is alt coin daily?', query: 'Altcoin Daily crypto' })).toEqual({ query: null, notices: [expect.stringContaining('words you did not type')] });
+        expect(resolveMeetingWebQuery({ question: 'Search the web for my wife Queen', query: 'Queen', explicitQuery: 'Queen' }).query).toBeNull();
+        expect(resolveMeetingWebQuery({ question: 'Search the web for sk-REDACTED', query: 'pricing', explicitQuery: 'pricing' }).query).toBeNull();
+        // The substitute passes the same gate: a bad explicit query is refused even when the planner's query only added words.
+        expect(resolveMeetingWebQuery({ question: 'Search the web for alt coin daily', query: 'crypto', explicitQuery: 'Queen birthday' })).toEqual({ query: null, notices: [expect.stringContaining('words you did not type')] });
+    });
 });

@@ -86,6 +86,8 @@ export interface LiveAskDeps {
   extraSources?: AskSource[]
   extraNotices?: string[]
   webAvailable?: boolean
+  /** Set only when the user explicitly asked for the web: the user's own words, searched if the planner does not search the web itself. */
+  explicitWebQuery?: string | null
 }
 export async function searchAskHistory(query: string, excludeSessionId?: string, signal?: AbortSignal): Promise<{ sources: AskSource[]; notices: string[] }> {
   const results = await Promise.allSettled([searchMemories({ query, limit: 3, ...(signal?{signal}:{}) }), searchMeetingLibrary({ query, limit: 3, ...(signal?{signal}:{}) })])
@@ -125,7 +127,13 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
       evidence.notices.push(...(deps.extraNotices ?? []))
       if (!evidence.sources.some(s => s.text.trim())) throw new AskError('no_recent_words', 422)
       let model = 'haiku'
-      // At most two searches and three Haiku calls, only after one explicit Ask.
+      let webAsked = false
+      const absorb = (found: { sources: AskSource[]; notices: string[] }) => {
+        // Stable IDs across hops; do not relabel first-hop evidence in follow-up answers.
+        for (const source of found.sources) if (!evidence.sources.some(s => s.kind === source.kind && s.title === source.title && s.text === source.text)) evidence.sources.push({ ...source, id: `${source.kind === 'web' ? 'W' : 'H'}${evidence.sources.filter(s => s.kind !== 'transcript').length + 1}` })
+        evidence.notices.push(...found.notices)
+      }
+      // At most two searches and three model calls, only after one explicit Ask.
       for (let hop = 0; hop < 3; hop++) {
         if (signal?.aborted) throw new AskError('cancelled', 499)
         const searchAllowed = input.action === 'ask' && hop < 2
@@ -137,13 +145,24 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
         let output: any
         try { output = JSON.parse(run.text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')) } catch { throw new AskError('invalid_answer', 502) }
         if (searchAllowed && typeof output?.searchQuery === 'string' && output.searchQuery.trim()) {
-          const found = await deps.search(output.searchQuery.trim().slice(0, 240), input.sessionId, output.searchScope === 'web' && deps.webAvailable ? 'web' : 'cos')
-          // Stable IDs across hops; do not relabel first-hop evidence in follow-up answers.
-          for (const source of found.sources) if (!evidence.sources.some(s => s.kind === source.kind && s.title === source.title && s.text === source.text)) evidence.sources.push({ ...source, id: `${source.kind === 'web' ? 'W' : 'H'}${evidence.sources.filter(s => s.kind !== 'transcript').length + 1}` })
-          evidence.notices.push(...found.notices)
+          // The planner decides the scope. A request with no scope goes to the web only when the user explicitly asked for it.
+          const scope = deps.webAvailable && (output.searchScope === 'web' || (output.searchScope == null && !!deps.explicitWebQuery)) ? 'web' : 'cos'
+          if (scope === 'web') webAsked = true
+          absorb(await deps.search(output.searchQuery.trim().slice(0, 240), input.sessionId, scope))
           continue
         }
         if (typeof output?.answer !== 'string' || !output.answer.trim()) throw new AskError('invalid_answer', 502)
+        // An explicit web request is honored even when the planner answers without searching the web.
+        // The planner's choice is not reliable enough to carry an explicit ask: in the 6.69.0 field run
+        // Haiku answered "Who is alt coin daily?" from a screenshot and never asked for the web.
+        // The caller sets explicitWebQuery only to the user's own words after its gate passed them.
+        // This uses one of the same two lookups; the presets never reach it (searchAllowed is false).
+        if (searchAllowed && deps.webAvailable && deps.explicitWebQuery && !webAsked) {
+          webAsked = true
+          evidence.notices.push(`You asked for the web, so COS searched it for "${deps.explicitWebQuery}" using only your words.`)
+          absorb(await deps.search(deps.explicitWebQuery, input.sessionId, 'web'))
+          continue
+        }
         let answer = redactSecrets(output.answer).slice(0, 10_000)
         const allowed = new Set(evidence.sources.map(s => s.id))
         answer = answer.replace(/\[([THFW]\d+)\]/g, (match, id) => allowed.has(id) ? match : '[source unavailable]')
