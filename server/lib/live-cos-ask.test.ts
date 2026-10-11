@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createLiveAsk, normalizeAsk, meetingEvidence, type AskInput } from './live-cos-ask.js'
 const input = (extra: Record<string, unknown> = {}): AskInput => normalizeAsk({ sessionId: 'meeting_123_test', action: 'ask', question: 'What did Maya commit to?', elapsedMs: 120000, turns: [{ id: 1, speaker: 'Maya', elapsedMs: 65000, text: 'I will send the draft Friday.' }], ...extra })
-const reply = (answer = 'Maya will send the draft Friday. [T1]') => ({ text: JSON.stringify({ answer, searchQuery: null }), model: 'claude-haiku' })
+const reply = (answer = 'Maya will send the draft Friday. [T1]') => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: answer }], searchQuery: null }), model: 'claude-haiku' })
 describe('Live COS Ask', () => {
   it('rejects malformed, oversized, duplicate and out-of-time transcript input', () => {
     for (const bad of [{sessionId:'../secret'}, {action:'execute'}, {question:''}, {elapsedMs:-1}, {turns:[]}, {history:[{}]}, {turns:[{id:1,speaker:'M',elapsedMs:150000,text:'x'}]}, {turns:[{id:1,speaker:'M',elapsedMs:1,text:'x'},{id:1,speaker:'M',elapsedMs:2,text:'y'}]}]) expect(() => input(bad)).toThrow()
@@ -15,7 +15,7 @@ describe('Live COS Ask', () => {
     }
   })
   it('retrieves history only when Haiku requests it for a user question and bounds hops', async () => {
-    const run = vi.fn().mockResolvedValueOnce({text:'{"answer":"","searchQuery":"Maya draft earlier meeting"}'}).mockResolvedValueOnce({text:'{"answer":"","searchQuery":"Maya prior decision"}'}).mockResolvedValueOnce(reply('Previously agreed in an earlier meeting. [H1]'))
+    const run = vi.fn().mockResolvedValueOnce({text:'{"sections":[],"searchQuery":"Maya draft earlier meeting"}'}).mockResolvedValueOnce({text:'{"sections":[],"searchQuery":"Maya prior decision"}'}).mockResolvedValueOnce(reply('Previously agreed in an earlier meeting. [H1]'))
     const search = vi.fn(async () => ({ sources:[{id:'H1',kind:'meeting' as const,title:'Earlier review',text:'Maya owns draft.'}], notices:[] }))
     const result = await createLiveAsk({run,search,now:()=>5000})(input())
     expect(search).toHaveBeenCalledTimes(2); expect(run).toHaveBeenCalledTimes(3)
@@ -54,10 +54,41 @@ describe('Live COS Ask', () => {
     const run = vi.fn(); await expect(createLiveAsk({run,search:vi.fn(),now:()=>5000})(input(),controller.signal)).rejects.toMatchObject({reason:'cancelled'})
     expect(run).not.toHaveBeenCalled()
   })
-  it('last minute uses recording time and includes only the boundary passage, never old silent speech', () => {
-    const turns = [0,30000,59000,65000,90000].map((ms,i)=>({id:i,speaker:'M',elapsedMs:ms,text:'text'}))
-    expect(meetingEvidence(input({action:'catch_up',turns})).sources.map(s=>s.elapsedMs)).toEqual([59000,65000,90000])
-    expect(meetingEvidence(input({action:'catch_up',elapsedMs:300000,turns})).sources).toHaveLength(0)
+  it('catch_up reads the whole meeting: a fact from minute 1 of a 30-minute meeting reaches the model', async () => {
+    const turns = Array.from({ length: 30 }, (_, i) => ({ id: i, speaker: i % 2 ? 'Person B' : 'Person A', elapsedMs: i * 60_000 + 1000, text: i === 0 ? 'Budget is capped at forty thousand.' : `Filler point ${i}.` }))
+    const evidence = meetingEvidence(input({ action: 'catch_up', elapsedMs: 30 * 60_000, turns }))
+    expect(evidence.sources).toHaveLength(30); expect(evidence.notices).toEqual([])
+    expect(evidence.sources[0]).toMatchObject({ id: 'T1', turnId: 0, text: 'Budget is capped at forty thousand.' })
+    const run = vi.fn(async (_prompt: string) => reply('Budget capped [T1].'))
+    await createLiveAsk({ run, search: vi.fn(), now: () => 5000 })(input({ action: 'catch_up', elapsedMs: 30 * 60_000, turns }))
+    const prompt = JSON.parse(run.mock.calls[0][0])
+    expect(prompt.question).toBe('Catch me up on the meeting so far.')
+    expect(prompt.labels).toEqual(['So what', 'Decided', 'Open', 'You owe', 'Next'])
+    expect(prompt.evidence.find((e: any) => e.turnId === 0).text).toBe('Budget is capped at forty thousand.')
+  })
+  it('catch_up on a long meeting keeps the 32K budget, samples the whole recording and says so', () => {
+    const turns = Array.from({ length: 1800 }, (_, i) => ({ id: i, speaker: 'M', elapsedMs: i * 1000, text: `point ${i} `.padEnd(100, 'x') }))
+    const result = meetingEvidence(input({ action: 'catch_up', elapsedMs: 1800 * 1000, turns }))
+    expect(result.notices.join()).toContain('selected passages')
+    expect(result.sources.reduce((n, s) => n + s.text.length + s.title.length + 160, 0)).toBeLessThanOrEqual(34_000)
+    expect(result.sources[0].elapsedMs).toBe(0)
+    expect(Math.max(...result.sources.map(s => s.elapsedMs ?? 0))).toBeGreaterThan(1700 * 1000)
+    // Sampled across the recording, not a single contiguous tail or head.
+    const firstHalf = result.sources.filter(s => (s.elapsedMs ?? 0) < 900_000).length
+    expect(firstHalf).toBeGreaterThan(result.sources.length / 4); expect(firstHalf).toBeLessThan(result.sources.length * 3 / 4)
+  })
+  it('catch_up reuses a result for under 10 seconds of the same speech; a new turn or a new 10-second bucket runs again', async () => {
+    let clock = 5000
+    const run = vi.fn(async (_prompt: string) => reply())
+    const ask = createLiveAsk({ run, search: vi.fn(), now: () => (clock += 2500) })
+    const turns = [{ id: 1, speaker: 'Maya', elapsedMs: 65000, text: 'I will send the draft Friday.' }]
+    await ask(input({ action: 'catch_up', elapsedMs: 120000, turns }))
+    expect((await ask(input({ action: 'catch_up', elapsedMs: 125000, turns }))).cached).toBe(true)
+    expect(run).toHaveBeenCalledTimes(1)
+    expect((await ask(input({ action: 'catch_up', elapsedMs: 131000, turns }))).cached).toBeUndefined()
+    expect(run).toHaveBeenCalledTimes(2)
+    expect((await ask(input({ action: 'catch_up', elapsedMs: 131000, turns: [...turns, { id: 2, speaker: 'Lee', elapsedMs: 130500, text: 'Agreed.' }] }))).cached).toBeUndefined()
+    expect(run).toHaveBeenCalledTimes(3)
   })
   it('bounds long meetings and clearly reports partial coverage', () => {
     const turns = Array.from({length:100},(_,i)=>({id:i,speaker:'M',elapsedMs:i*1000,text:'z'.repeat(1000)}))
@@ -94,25 +125,25 @@ describe('Live COS Ask', () => {
     expect(result.notices.join(' ')).toContain('You asked for the web, so COS searched it for "alt coin daily"')
   })
   it('does not add a second web search when the planner already asked for the web', async () => {
-    const run = vi.fn().mockResolvedValueOnce({ text: '{"answer":"","searchQuery":"Altcoin Daily","searchScope":"web"}' }).mockResolvedValueOnce(reply('A crypto channel. [W1]'))
+    const run = vi.fn().mockResolvedValueOnce({ text: '{"sections":[],"searchQuery":"Altcoin Daily","searchScope":"web"}' }).mockResolvedValueOnce(reply('A crypto channel. [W1]'))
     const search = vi.fn(async () => web)
     await createLiveAsk({ run, search, now: () => 5000, webAvailable: true, explicitWebQuery: 'alt coin daily' })(input({ question: 'Run the web search' }))
     expect(search).toHaveBeenCalledTimes(1); expect(search).toHaveBeenCalledWith('Altcoin Daily', 'meeting_123_test', 'web')
   })
   it('sends a search with no scope to the web only for an explicit web request', async () => {
     for (const [explicitWebQuery, scope] of [['alt coin daily', 'web'], [null, 'cos']] as const) {
-      const run = vi.fn().mockResolvedValueOnce({ text: '{"answer":"","searchQuery":"Altcoin Daily"}' }).mockResolvedValueOnce(reply())
+      const run = vi.fn().mockResolvedValueOnce({ text: '{"sections":[],"searchQuery":"Altcoin Daily"}' }).mockResolvedValueOnce(reply())
       const search = vi.fn(async (_q: string, _s?: string, _scope?: string) => ({ sources: [], notices: [] }))
       await createLiveAsk({ run, search, now: () => 5000, webAvailable: true, explicitWebQuery })(input({ question: 'Search the web for alt coin daily' }))
       expect(search.mock.calls[0][2]).toBe(scope)
     }
   })
   it('keeps the planner\'s cos scope, then honors the explicit web request within two lookups and three calls', async () => {
-    const run = vi.fn().mockResolvedValueOnce({ text: '{"answer":"","searchQuery":"alt coin daily","searchScope":"cos"}' }).mockResolvedValueOnce(reply('Nothing in COS.')).mockResolvedValueOnce(reply('A crypto channel. [W2]'))
+    const run = vi.fn().mockResolvedValueOnce({ text: '{"sections":[],"searchQuery":"alt coin daily","searchScope":"cos"}' }).mockResolvedValueOnce(reply('Nothing in COS.')).mockResolvedValueOnce(reply('A crypto channel. [W2]'))
     const search = vi.fn(async (_q: string, _s?: string, scope?: string) => scope === 'web' ? web : { sources: [], notices: [] })
     await createLiveAsk({ run, search, now: () => 5000, webAvailable: true, explicitWebQuery: 'alt coin daily' })(input({ question: 'Check COS and the web for alt coin daily' }))
     expect(search.mock.calls.map(c => c[2])).toEqual(['cos', 'web']); expect(run).toHaveBeenCalledTimes(3)
-    const bounded = vi.fn().mockResolvedValueOnce({ text: '{"answer":"","searchQuery":"a","searchScope":"cos"}' }).mockResolvedValueOnce({ text: '{"answer":"","searchQuery":"b","searchScope":"cos"}' }).mockResolvedValueOnce(reply())
+    const bounded = vi.fn().mockResolvedValueOnce({ text: '{"sections":[],"searchQuery":"a","searchScope":"cos"}' }).mockResolvedValueOnce({ text: '{"sections":[],"searchQuery":"b","searchScope":"cos"}' }).mockResolvedValueOnce(reply())
     const s2 = vi.fn(async () => ({ sources: [], notices: [] }))
     await createLiveAsk({ run: bounded, search: s2, now: () => 5000, webAvailable: true, explicitWebQuery: 'alt coin daily' })(input({ question: 'Run the web search' }))
     expect(s2).toHaveBeenCalledTimes(2); expect(bounded).toHaveBeenCalledTimes(3)

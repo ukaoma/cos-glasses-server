@@ -11,7 +11,7 @@ import { MeetingAskStore } from '../lib/meeting-ask-store.js';
 import { requireApiToken } from '../lib/api-auth.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
 async function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"answer":"Nina [T1]"}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }) });
+    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
@@ -39,13 +39,30 @@ describe('Meeting Ask v2 HTTP contract', () => {
         await new Promise(r => setTimeout(r, 10));
         const path = '?sessionId=meeting_test&serverInstanceId=test-server';
         const h = await (await f.request('/history' + path)).json();
-        expect(h.exchanges[0].answer).toBe('Nina [T1]');
+        expect(h.exchanges[0].answer).toBe('**So what:** Nina [T1]');
         expect((await f.request('/requests', input)).status).toBe(202);
         expect(f.run).toHaveBeenCalledTimes(1);
         const exported = await (await f.request('/export' + path)).json();
         expect(exported.text).toContain('[request_abcdefgh:T1]');
         expect((await f.request('/history?sessionId=meeting_test&serverInstanceId=wrong')).status).toBe(409);
         expect((await f.request('/requests', { ...input, question: 'Changed' })).status).toBe(409);
+    }
+    finally {
+        await f.close();
+    } });
+    it('returns sections from the request, history and a restarted server; answer stays the composed markdown', async () => { const f = await fixture(); try {
+        f.run.mockResolvedValueOnce({ text: JSON.stringify({ sections: [{ label: 'decided', text: 'Friday review [T1].' }, { label: 'So what', text: 'Nina reviews [T1].' }], searchQuery: null }), model: 'haiku' });
+        expect((await f.request('/requests', { ...input, action: 'summary', question: '' })).status).toBe(202);
+        await new Promise(r => setTimeout(r, 10));
+        const expected = [{ label: 'So what', text: 'Nina reviews [T1].', sources: ['T1'] }, { label: 'Decided', text: 'Friday review [T1].', sources: ['T1'] }];
+        const one = (await (await f.request('/requests/' + input.requestId)).json()).exchange;
+        expect(one.status).toBe('completed');
+        expect(one.sections).toEqual(expected);
+        expect(one.answer).toBe('**So what:** Nina reviews [T1].\n**Decided:** Friday review [T1].');
+        const h = await (await f.request('/history?sessionId=meeting_test&serverInstanceId=test-server')).json();
+        expect(h.exchanges[0].sections).toEqual(expected);
+        const reload = new MeetingAskRuntime({ store: (f.runtime as any).deps.store, identity: () => 'test-server' });
+        expect(reload.get(input.requestId).sections).toEqual(expected);
     }
     finally {
         await f.close();

@@ -7,7 +7,7 @@ import { MeetingAskStore } from './meeting-ask-store.js';
 import { exportMeetingAsk } from '../routes/meeting-ask.js';
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'We will review Friday.' }] };
 function fixture(overrides: Record<string, unknown> = {}) {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-test-')), store = new MeetingAskStore(dir), release = vi.fn(), run = vi.fn(async (_model: unknown, _prompt: string) => ({ text: JSON.stringify({ answer: 'Review Friday [T1]', searchQuery: null }), model: 'claude-haiku-5-5' }));
+    const dir = mkdtempSync(join(tmpdir(), 'ask-test-')), store = new MeetingAskStore(dir), release = vi.fn(), run = vi.fn(async (_model: unknown, _prompt: string) => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Review Friday [T1]' }], searchQuery: null }), model: 'claude-haiku-5-5' }));
     const runtime = new MeetingAskRuntime({ store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
     return { runtime, store, run, release, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -61,10 +61,22 @@ describe('meeting Ask durable ownership', () => {
         await new Promise(r => setTimeout(r, 0));
         expect(f.runtime.cancel(base.requestId, 'server-one').status).toBe('cancelled');
         expect(f.release).not.toHaveBeenCalled();
-        resolve({ text: '{"answer":"late [T1]"}', model: 'haiku' });
+        resolve({ text: '{"sections":[{"label":"So what","text":"late [T1]"}]}', model: 'haiku' });
         await new Promise(r => setTimeout(r, 10));
         expect(f.runtime.get(base.requestId).status).toBe('cancelled');
         expect(f.release).toHaveBeenCalledTimes(1);
+    }
+    finally {
+        f.cleanup();
+    } });
+    it('legacy Ask returns sections and passes the wearer to the model', async () => { const f = fixture({ wearer: () => 'Sam Rivera' }); try {
+        const result = await f.runtime.legacy({ ...base, history: [] }, new AbortController().signal);
+        expect(result.sections).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(result.answer).toBe('**So what:** Review Friday [T1]');
+        expect(JSON.parse(f.run.mock.calls[0][1]).wearer).toBe('Sam Rivera');
+        await f.runtime.submit(base);
+        expect(JSON.parse(f.run.mock.calls[1][1]).wearer).toBe('Sam Rivera');
+        expect((await terminal(f)).sections).toEqual(result.sections);
     }
     finally {
         f.cleanup();
@@ -73,7 +85,7 @@ describe('meeting Ask durable ownership', () => {
         await f.runtime.submit(base);
         await expect(f.runtime.legacy({ ...base, history: [] }, new AbortController().signal)).rejects.toThrow('busy');
         await expect(f.runtime.submit({ ...base, requestId: 'request_98765432' })).rejects.toThrow('busy');
-        resolve({ text: '{"answer":"yes [T1]"}', model: 'haiku' });
+        resolve({ text: '{"sections":[{"label":"So what","text":"yes [T1]"}]}', model: 'haiku' });
         await terminal(f);
     }
     finally {
@@ -130,6 +142,7 @@ describe('meeting Ask durable ownership', () => {
         const e = await terminal(f);
         expect(e.error).toBe('journal_write_failed');
         expect(e.answer).toContain('Review Friday');
+        expect(e.sections).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
         expect(f.run).toHaveBeenCalledTimes(1);
         expect(f.release).not.toHaveBeenCalled();
     }
@@ -153,7 +166,7 @@ describe('meeting Ask durable ownership', () => {
 describe('meeting Ask public web lookups', () => {
     const webSources = (query: string) => ({ sources: [{ id: 'W0', kind: 'web' as const, title: `Web search summary: ${query}`, text: 'Altcoin Daily is a crypto news YouTube channel.', retrievedAt: '2026-10-10T00:00:00.000Z', retrievalId: 'r1' }, { id: 'W1', kind: 'web' as const, title: 'Altcoin Daily - YouTube', url: 'https://www.youtube.com/@AltcoinDaily', text: 'Crypto news channel.', retrievedAt: '2026-10-10T00:00:00.000Z', retrievalId: 'r1' }], notices: [] });
     function webFixture(replies: string[], extra: Record<string, unknown> = {}) {
-        const run = vi.fn(async (_model: unknown, _prompt: string, _system?: string) => ({ text: replies.shift() ?? JSON.stringify({ answer: 'Done [T1]', searchQuery: null }), model: 'claude-sonnet-5-5' }));
+        const run = vi.fn(async (_model: unknown, _prompt: string, _system?: string) => ({ text: replies.shift() ?? JSON.stringify({ sections: [{ label: 'So what', text: 'Done [T1]' }], searchQuery: null }), model: 'claude-sonnet-5-5' }));
         const webSearch = vi.fn(async (query: string) => webSources(query));
         const f = fixture({ run, webSearch, webCapability: () => ({ available: true, engine: 'claude:haiku' }), ...extra });
         return { ...f, run, webSearch };
@@ -166,10 +179,10 @@ describe('meeting Ask public web lookups', () => {
         f.store.write({ version: 2, fingerprint: 'seed', input, exchange: { requestId, sessionId: input.sessionId, serverInstanceId: 'server-one', action: input.action, question, status: (opts.status ?? 'completed') as any, createdAt: at, updatedAt: at, selectedModel: input.model, sources: [], notices: [], throughMs: 0, files: [], ...(opts.answer ? { answer: opts.answer } : {}) } });
     }
     const ask = (question: string, extra: Record<string, unknown> = {}) => ({ ...base, requestId: `request_${Math.random().toString(36).slice(2, 12)}`, question, model: { engine: 'claude', model: 'sonnet' }, ...extra });
-    const webAsk = (searchQuery: string) => JSON.stringify({ answer: '', searchQuery, searchScope: 'web' });
+    const webAsk = (searchQuery: string) => JSON.stringify({ sections: [], searchQuery, searchScope: 'web' });
     async function settle(f: ReturnType<typeof fixture>, question: string, extra: Record<string, unknown> = {}) { const a = ask(question, extra); await f.runtime.submit(a); return terminal(f, a.requestId); }
     it('observed 1: "Let\'s try with sonnet. Who is alt coin daily?" reaches the web with the planner\'s query', async () => {
-        const f = webFixture([webAsk('Altcoin Daily'), JSON.stringify({ answer: 'A crypto news channel. [W1]', searchQuery: null })]);
+        const f = webFixture([webAsk('Altcoin Daily'), JSON.stringify({ sections: [{ label: 'So what', text: 'A crypto news channel. [W1]' }], searchQuery: null })]);
         try {
             const e = await settle(f, "Let's try with sonnet. Who is alt coin daily?");
             expect(e.status).toBe('completed');
@@ -180,14 +193,14 @@ describe('meeting Ask public web lookups', () => {
         } finally { f.cleanup(); }
     });
     it('observed 2: "our competitor Acme" searches without the possessive', async () => {
-        const f = webFixture([webAsk('our competitor Acme latest news'), JSON.stringify({ answer: 'News. [W1]', searchQuery: null })]);
+        const f = webFixture([webAsk('our competitor Acme latest news'), JSON.stringify({ sections: [{ label: 'So what', text: 'News. [W1]' }], searchQuery: null })]);
         try {
             await settle(f, "What's the latest news on our competitor Acme?");
             expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['competitor Acme latest news']);
         } finally { f.cleanup(); }
     });
     it('observed 3: "Run the web search" borrows the user\'s earlier question from the journal', async () => {
-        const f = webFixture([JSON.stringify({ answer: 'From the screenshot only. [T1]', searchQuery: null }), webAsk('Altcoin Daily'), JSON.stringify({ answer: 'A crypto news channel. [W1]', searchQuery: null })]);
+        const f = webFixture([JSON.stringify({ sections: [{ label: 'So what', text: 'From the screenshot only. [T1]' }], searchQuery: null }), webAsk('Altcoin Daily'), JSON.stringify({ sections: [{ label: 'So what', text: 'A crypto news channel. [W1]' }], searchQuery: null })]);
         try {
             expect((await settle(f, 'Who is alt coin daily?')).status).toBe('completed');
             expect(f.webSearch).not.toHaveBeenCalled();
@@ -197,7 +210,7 @@ describe('meeting Ask public web lookups', () => {
         } finally { f.cleanup(); }
     });
     it('an explicit follow-up searches the user\'s own words when the planner answers without the web', async () => {
-        const f = webFixture([JSON.stringify({ answer: 'I cannot search.', searchQuery: null }), JSON.stringify({ answer: 'A crypto news channel. [W1]', searchQuery: null })]);
+        const f = webFixture([JSON.stringify({ sections: [{ label: 'So what', text: 'I cannot search.' }], searchQuery: null }), JSON.stringify({ sections: [{ label: 'So what', text: 'A crypto news channel. [W1]' }], searchQuery: null })]);
         try {
             seed(f, "Let's try with sonnet. Who is alt coin daily?", { status: 'failed' });
             const e = await settle(f, 'Run the web search');
@@ -207,7 +220,7 @@ describe('meeting Ask public web lookups', () => {
         } finally { f.cleanup(); }
     });
     it('an explicit request whose query added screenshot words searches only the user\'s words', async () => {
-        const f = webFixture([webAsk('Altcoin Daily crypto MASSIVE WARNING'), JSON.stringify({ answer: 'A channel. [W1]', searchQuery: null })]);
+        const f = webFixture([webAsk('Altcoin Daily crypto MASSIVE WARNING'), JSON.stringify({ sections: [{ label: 'So what', text: 'A channel. [W1]' }], searchQuery: null })]);
         try {
             f.runtime.putFiles(base.sessionId, 'server-one', [{ id: 'file_12345678', revision: '1', name: 'Screenshot', status: 'ready', text: 'Altcoin Daily MASSIVE WARNING 4.9K views crypto' }]);
             const e = await settle(f, 'Search the web for alt coin daily');
@@ -222,7 +235,7 @@ describe('meeting Ask public web lookups', () => {
             ['Run the web search', 'Joseph Wharton', f => seed(f, 'Who are these people?', { answer: 'The transcript names Joseph Wharton [T1].' }), {}],
         ];
         for (const [question, query, prepare, extra] of cases) {
-            const f = webFixture([webAsk(query), JSON.stringify({ answer: 'Not verified. [T1]', searchQuery: null })]);
+            const f = webFixture([webAsk(query), JSON.stringify({ sections: [{ label: 'So what', text: 'Not verified. [T1]' }], searchQuery: null })]);
             try {
                 prepare(f);
                 const e = await settle(f, question, extra);
@@ -241,7 +254,7 @@ describe('meeting Ask public web lookups', () => {
             ['older than the last three does not', f => { seed(f, 'Who is Acme?'); seed(f, 'Who are they?'); seed(f, 'Who is that?'); seed(f, 'And them?'); }, false],
         ];
         for (const [name, prepare, searched] of cases) {
-            const f = webFixture([webAsk('Acme'), JSON.stringify({ answer: 'Answer. [T1]', searchQuery: null })]);
+            const f = webFixture([webAsk('Acme'), JSON.stringify({ sections: [{ label: 'So what', text: 'Answer. [T1]' }], searchQuery: null })]);
             try {
                 prepare(f);
                 await settle(f, 'search that');
@@ -251,7 +264,7 @@ describe('meeting Ask public web lookups', () => {
     });
     it('an explicit web request that cannot be searched says why up front and searches nothing', async () => {
         for (const [question, phrase] of [['Search the web for sk-abcdefghijklmnop docs', 'key or token'], ["Search the web for my wife's birthday", 'personal detail'], ['Run the web search', 'nothing specific to search']]) {
-            const f = webFixture([JSON.stringify({ answer: 'Answered without the web. [T1]', searchQuery: null })]);
+            const f = webFixture([JSON.stringify({ sections: [{ label: 'So what', text: 'Answered without the web. [T1]' }], searchQuery: null })]);
             try {
                 const e = await settle(f, question);
                 expect(f.webSearch, question).not.toHaveBeenCalled();
@@ -263,7 +276,7 @@ describe('meeting Ask public web lookups', () => {
     });
     it('still withholds secrets and personal categories, with the reason', async () => {
         for (const [question, query, phrase] of [['Search the web for sk-abcdefghijklmnop docs', 'docs', 'key or token'], ['What is the average salary at Apple?', 'Apple salary', 'personal detail'], ["Who is Sam's wife?", 'Sam wife', 'personal detail']]) {
-            const f = webFixture([webAsk(query), JSON.stringify({ answer: 'No. [T1]', searchQuery: null })]);
+            const f = webFixture([webAsk(query), JSON.stringify({ sections: [{ label: 'So what', text: 'No. [T1]' }], searchQuery: null })]);
             try {
                 const e = await settle(f, question);
                 expect(f.webSearch, question).not.toHaveBeenCalled();
