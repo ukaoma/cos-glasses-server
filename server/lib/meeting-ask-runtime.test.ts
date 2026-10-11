@@ -45,6 +45,16 @@ describe('meeting Ask durable ownership', () => {
         }finally{f.cleanup()}
     });
 
+    it('uses an admitted subject benchmark when the proposed comparison query adds unsupported words',async()=>{
+        const webSearch=vi.fn(async(q:string)=>({sources:[{id:'W1',kind:'web' as const,title:q,text:'Public roof allocation and comparable cost',url:'https://example.com/roof'}],notices:[]}));
+        const run=vi.fn(async(_m:unknown,_p:string,system:string)=>({text:system.includes('Select only the public topic')?JSON.stringify({publicTopic:true,category:'public_project',evidenceTurnIds:[0],query:'New York firehouse roof repair 750000',benchmarkQuery:'New York firehouse roof structural engineering labor union benchmark cost'}):JSON.stringify({sections:[{label:'So what',text:'Scope differs [W1].'}]})}));
+        const f=fixture({run,webSearch,webCapability:()=>({available:true,engine:'claude'})});try{
+            f.store.setPublicTopics(true);await f.runtime.submit({...base,question:'Compare cost to other similar fixes in that area',turns:[{id:0,elapsedMs:0,speaker:'Blair Cooper',text:'New York firehouse roof repair cost $750,000.'}]});
+            expect((await terminal(f)).status).toBe('completed');expect(webSearch.mock.calls.map(c=>c[0])).toEqual(['new york firehouse roof repair 750000','new york firehouse roof repair average comparable cost']);
+            expect(JSON.parse(run.mock.calls.at(-1)![1]).searchAllowed).toBe(false);
+        }finally{f.cleanup()}
+    });
+
     it('freezes finalized quotations before async qualification; replay keeps original sources', async()=>{
         let text='She has not agreed to place an order.';
         const finalized=vi.fn(()=>({sources:[{id:'T2',kind:'transcript' as const,title:'Finalized meeting transcript',text,finalizedTranscript:true}],notices:['Finalized pass available.']}));

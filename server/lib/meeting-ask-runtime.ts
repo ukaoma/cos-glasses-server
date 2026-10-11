@@ -338,7 +338,8 @@ export class MeetingAskRuntime {
                     if(/\b(?:compar|average|typical|benchmark)/i.test(input.question)){
                         const proposed=typeof (raw as any)?.benchmarkQuery==='string' ? (raw as any).benchmarkQuery : contextualQuery.replace(/\b\d+\b/g,'')+' average comparable cost';
                         const comparisonGate=publicTopicLookupGate(proposed.replace(/\b(?:council|councilman|councilmember|allocation|allocated|funding|budget)\b/gi,''),contextualQuery);
-                        benchmarkQuery=comparisonGate.ok ? comparisonGate.query : null;
+                        const fallbackGate=publicTopicLookupGate(contextualQuery.replace(/\b\d+\b/g,'').replace(/\b(?:council|councilman|councilmember|allocation|allocated|funding|budget)\b/gi,'')+' average comparable cost',contextualQuery);
+                        benchmarkQuery=comparisonGate.ok ? comparisonGate.query : fallbackGate.ok ? fallbackGate.query : null;
                     }
                     extraNotices.push(`Public-topic selection: topic keywords "${contextualQuery}" from this meeting under your public-topic setting. Only the selected query is admitted to web search; the full transcript, speaker labels, files, calendar and memory are excluded.`);
                 } else extraNotices.push('No sufficiently clear public topic could be selected safely. Name the public article, project or product in your question.');

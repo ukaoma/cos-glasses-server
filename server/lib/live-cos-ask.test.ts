@@ -17,6 +17,14 @@ describe('Live COS Ask', () => {
     await expect(createLiveAsk({run:async()=>({text:corrected+'\n{"sections":['}),now:()=>5000})(input())).rejects.toThrow('invalid_answer');
   })
 
+  it('recovers a single missing sections closer without changing facts or accepting incomplete rows',async()=>{
+    const good=JSON.stringify({sections:[{label:'So what',text:'Allocation corroborated [T1].'},{label:'Details',text:'Scope unknown [T99].'}],confidence:{level:'limited',reason:'Scope is unknown.'},searchQuery:null});
+    const malformed=good.replace('],"confidence"',',"confidence"');
+    const run=vi.fn(async()=>({text:malformed}));const result=await createLiveAsk({run,now:()=>5000})(input());
+    expect(run).toHaveBeenCalledOnce();expect(result.answer).toContain('Allocation corroborated [T1]');expect(result.answer).toContain('[source unavailable]');expect(result.sections.at(-1)?.text).toContain('Limited');
+    for(const bad of [malformed.replace('"Details"','"Unsafe heading"'),malformed.slice(0,-1),malformed.replace('},{"label":"Details"',',{"label":"Details"')])await expect(createLiveAsk({run:async()=>({text:bad}),now:()=>5000})(input())).rejects.toThrow('invalid_answer');
+  })
+
   it('accepts a provider confidence row without retrying or relaxing unknown labels',async()=>{
     const run=vi.fn(async()=>({text:JSON.stringify({sections:[{label:'So what',text:'The cited allocation is not a contract [T1].'},{label:'Confidence',text:'Low: the project scope is unclear.'}],searchQuery:null})}));
     const result=await createLiveAsk({run,search:vi.fn(),now:()=>5000})(input());expect(run).toHaveBeenCalledOnce();expect(result.sections.filter(s=>s.label==='Confidence')).toHaveLength(1);expect(result.sections.at(-1)?.text).toContain('Low — the project scope is unclear.');

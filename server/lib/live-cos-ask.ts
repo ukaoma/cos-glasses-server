@@ -175,9 +175,28 @@ export function orderAsksByRecency(sections: MeetingAskSection[], sources: reado
 }
 /** Recover a provider's final complete JSON correction without another model call.
  * Every row and citation still goes through the same strict answer contract. */
+/** Recover only a missing sections-array closer before root confidence.
+ * No text, values, citations or section rows are generated or rewritten. */
+function parseReplyObject(text:string):any {
+  try{return JSON.parse(text)}catch{/* check one observed delimiter omission */}
+  if(!/^\s*\{\s*"sections"\s*:\s*\[/.test(text))throw new Error('invalid JSON')
+  let objects=0,arrays=0,quoted=false,escaped=false
+  for(let i=0;i<text.length;i++){
+    const c=text[i]
+    if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue}
+    if(c==='"'){quoted=true;continue}
+    if(c==='{' )objects++;else if(c==='}')objects--;else if(c==='[')arrays++;else if(c===']')arrays--
+    if(c===','&&objects===1&&arrays===1&&/^,\s*"confidence"\s*:/.test(text.slice(i))&&/}\s*$/.test(text.slice(0,i))){
+      const repaired=JSON.parse(text.slice(0,i)+']'+text.slice(i))
+      if(!Array.isArray(repaired.sections)||!repaired.sections.length||!repaired.confidence||typeof repaired.confidence!=='object')throw new Error('invalid JSON')
+      return repaired
+    }
+  }
+  throw new Error('invalid JSON')
+}
 export function parseAskReply(text:string):any {
   const clean=text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')
-  try{return JSON.parse(clean)}catch{/* a corrected object may follow an earlier draft */}
+  try{return parseReplyObject(clean)}catch{/* a corrected object may follow an earlier draft */}
   let start=-1,depth=0,quoted=false,escaped=false;const objects:any[]=[]
   for(let i=0;i<clean.length;i++){
     const c=clean[i]
@@ -185,7 +204,7 @@ export function parseAskReply(text:string):any {
     if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue}
     if(c==='"'){quoted=true;continue}
     if(c==='{')depth++
-    if(c==='}'&&--depth===0){try{objects.push(JSON.parse(clean.slice(start,i+1)))}catch{/* not a JSON object */}start=-1;if(objects.length>8)throw new AskError('invalid_answer',502)}
+    if(c==='}'&&--depth===0){try{objects.push(parseReplyObject(clean.slice(start,i+1)))}catch{/* not a JSON object */}start=-1;if(objects.length>8)throw new AskError('invalid_answer',502)}
   }
   if(start>=0||!objects.length)throw new AskError('invalid_answer',502)
   const last=objects.at(-1)
