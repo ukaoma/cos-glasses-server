@@ -32,6 +32,8 @@ export interface MeetingAskFile {
     status: 'ready' | 'pending' | 'unsupported' | 'failed' | 'removed' | 'secret-held';
     text: string;
     notice?: string;
+    /** "phone" for a file the phone attached through POST files/media (6.71.1). Control's rows omit it. */
+    origin?: 'phone';
 }
 export interface MeetingAskSource {
     id: string;
@@ -169,6 +171,8 @@ export interface MeetingAskCapabilities {
     durableHistory: true;
     attachmentContext: true;
     webRetrieval: boolean;
+    /** 6.71.1: POST /api/meeting-ask/files/media turns uploaded media into meeting files. */
+    phoneFiles?: true;
 }
 export interface MeetingAskConfig {
     protocolVersion: 2;
@@ -190,6 +194,8 @@ export interface MeetingAskConfig {
  * POST requests/:requestId/cancel {serverInstanceId} -> {exchange}.
  * GET history?sessionId=...&serverInstanceId=...&offset=0&limit=50&order=asc|desc -> {exchanges,nextOffset,files}.
  * PUT files {sessionId,serverInstanceId,files:MeetingAskFile[]} -> {files}. Upsert only; removed is explicit.
+ * POST files/media {sessionId,serverInstanceId,media:[{id,name?}]} -> {files} (6.71.1, capabilities.phoneFiles):
+ * media already uploaded through /api/media joins the meeting's file list as id "phone_<mediaId>", origin "phone".
  * GET export?sessionId=...&serverInstanceId=... -> {text}; composes persisted Ask/file context,
  * client prepends its current canonical transcript. All operations use X-Cos-Token.
  * GET config is the capability probe (404 means old server); health.capabilities.meetingAsk mirrors capabilities.

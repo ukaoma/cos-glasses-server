@@ -110,6 +110,8 @@ describe('public durable-query capability health', () => {
       managed: false,
       contractVersion: 2,
     })
+    // 6.71.1: the phone checks this before offering to attach files to a meeting.
+    expect(body.capabilities?.meetingAsk).toMatchObject({ protocolVersion: 2, attachmentContext: true, phoneFiles: true })
     expect(body.capabilities?.cliDebug).toEqual({
       schemaVersion: 1,
       providers: { claude: true, codex: true, cursor: true },

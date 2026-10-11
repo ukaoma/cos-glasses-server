@@ -101,6 +101,12 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
     catch (e) {
         failure(res, e);
     } });
+    router.post('/meeting-ask/files/media', (req, res) => { try {
+        res.json({ files: runtime.attachMedia(String(req.body?.sessionId ?? ''), req.body?.serverInstanceId, req.body?.media) });
+    }
+    catch (e) {
+        failure(res, e);
+    } });
     router.get('/meeting-ask/export', (req, res) => {
         try {
             const exchanges: MeetingAskExchange[] = [];

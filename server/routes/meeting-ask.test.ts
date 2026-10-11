@@ -10,9 +10,10 @@ import { MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
 import { MeetingAskStore } from '../lib/meeting-ask-store.js';
 import { requireApiToken } from '../lib/api-auth.js';
 import type { AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
+import { MediaStoreError } from '../lib/media-store.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
-async function fixture(transcripts?: AskTranscriptSources) {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }) });
+async function fixture(transcripts?: AskTranscriptSources, media?: () => any) {
+    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
@@ -101,6 +102,28 @@ describe('Meeting Ask v2 HTTP contract', () => {
         }
         finally {
             await g.close();
+        }
+    });
+    it('POST files/media adds a phone upload to the meeting file list and config advertises phoneFiles', async () => {
+        const id = 'm_' + 'a'.repeat(24), record = { ref: { id, kind: 'user_document', category: 'document', mime: 'text/plain', width: 0, height: 0, createdAt: '2026-10-11T00:00:00Z', label: 'notes.txt' }, sha256: 'feedface00', createdAtMs: 1 };
+        const media = () => ({ resolveUsable: (m: string) => { if (m !== id) throw new MediaStoreError('media_not_found', m); return { record, path: '/x' }; }, resolveModelDerivatives: () => ({ record, originalPath: '/x', text: 'Phone notes', imagePaths: [] }) });
+        const f = await fixture(undefined, media);
+        try {
+            expect((await (await f.request('/config')).json()).capabilities.phoneFiles).toBe(true);
+            const body = { sessionId: 'meeting_test', serverInstanceId: 'test-server', media: [{ id, name: 'Notes from phone' }] };
+            const ok = await f.request('/files/media', body);
+            expect(ok.status).toBe(200);
+            expect(ok.headers.get('cache-control')).toBe('no-store');
+            expect((await ok.json()).files).toEqual([{ id: 'phone_' + id, revision: 'feedface00', name: 'Notes from phone', status: 'ready', text: 'Phone notes', origin: 'phone' }]);
+            const missing = await f.request('/files/media', { ...body, media: [{ id: 'm_' + 'b'.repeat(24) }] });
+            expect(missing.status).toBe(404);
+            expect(await missing.json()).toEqual({ error: 'media_not_found' });
+            expect((await f.request('/files/media', { ...body, media: [] })).status).toBe(400);
+            expect((await f.request('/files/media', body, 'POST', false)).status).toBe(401);
+            expect(f.run).not.toHaveBeenCalled();
+        }
+        finally {
+            await f.close();
         }
     });
     it('exports admitted file bytes after a same-revision removal and includes later revisions', async () => {

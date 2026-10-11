@@ -8,7 +8,9 @@ import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWork
 import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate } from './meeting-ask-web.js';
 import { getServerInstanceId } from './server-instance-id.js';
 import { getOwnerName } from './profile.js';
-export const MEETING_ASK_CAPABILITIES: MeetingAskCapabilities = { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: false };
+import { getMediaStore, MediaStoreError } from './media-store.js';
+import { isValidMediaId, mediaCategoryOf } from '../../shared/media-attachment.js';
+export const MEETING_ASK_CAPABILITIES: MeetingAskCapabilities = { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: false, phoneFiles: true };
 /**
  * Replaces 'No web.' in LIVE_ASK_SYSTEM when the web is available. The planner decides whether to look
  * anything up; this tells it how to ask so the server's gate (meeting-ask-web.ts) can admit the query.
@@ -26,6 +28,8 @@ interface RuntimeDeps {
     webSearch: typeof searchMeetingWeb;
     /** The wearer's name for "You owe", or null when the profile has none. */
     wearer: () => string | null;
+    /** Uploaded media: the record and its upload-time text extract (POST files/media). */
+    media: () => Pick<ReturnType<typeof getMediaStore>, 'resolveUsable' | 'resolveModelDerivatives'>;
 }
 function profileWearer(): string | null { try {
     const name = getOwnerName();
@@ -34,12 +38,54 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer };
+const defaults: RuntimeDeps = { store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))
         throw new AskError('invalid_model');
     return { engine: m.engine, model: m.model };
+}
+const MEDIA_ERRORS: Record<string, number> = { media_not_found: 404, media_expired: 410, media_conflict: 409, media_unavailable: 503 };
+export const PHONE_FILE_TEXT_BYTES = 100000;
+/** The longest prefix of text within the byte cap, never splitting a character. */
+function byteSlice(text: string, max: number): string {
+    if (Buffer.byteLength(text, 'utf8') <= max)
+        return text;
+    let out = Buffer.from(text, 'utf8').subarray(0, max).toString('utf8');
+    while (Buffer.byteLength(out, 'utf8') > max || out.endsWith('\uFFFD'))
+        out = out.slice(0, -1);
+    return out;
+}
+/**
+ * One phone upload as a meeting file (6.71.1). Text comes from the media store's upload-time extract
+ * (TXT, MD, CSV, JSON and PDF text layers, 100,000 characters). The server has no OCR, so photos and
+ * videos are unsupported with a notice. The row then goes through normalizeAskFiles like Control's, so
+ * secret-held and the limits are the same.
+ */
+export function phoneMediaFile(media: RuntimeDeps['media'], item: { id: string; name?: string }): MeetingAskFile {
+    // Lifecycle and queue reservation are checked for every kind; only documents read their text extract.
+    const resolve = <T>(read: () => T): T => { try {
+        return read();
+    }
+    catch (e) {
+        const code = e instanceof MediaStoreError ? e.code : 'media_unavailable';
+        throw new AskError(code, MEDIA_ERRORS[code] ?? 503);
+    } };
+    const { record } = resolve(() => media().resolveUsable(item.id));
+    const category = mediaCategoryOf(record.ref);
+    const text = category === 'document' ? resolve(() => media().resolveModelDerivatives(item.id)).text : undefined;
+    const name = (item.name?.trim() || record.ref.label?.trim() || item.id).slice(0, 240);
+    const base = { id: `phone_${item.id}`, revision: (record.sha256 || String(record.createdAtMs)).replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 16) || 'r1', name, origin: 'phone' as const };
+    if (category === 'image')
+        return { ...base, status: 'unsupported', text: '', notice: 'Photos and screenshots are not read as meeting context yet. COS Control on your Mac can read the text in them.' };
+    if (category === 'video')
+        return { ...base, status: 'unsupported', text: '', notice: 'Videos are not read as meeting context yet.' };
+    if (text === undefined)
+        return { ...base, status: 'failed', text: '', notice: 'The text of this file is not available.' };
+    if (!text.trim())
+        return { ...base, status: 'unsupported', text: '', notice: 'No words were found in it.' };
+    const kept = byteSlice(text, PHONE_FILE_TEXT_BYTES);
+    return { ...base, status: 'ready', text: kept, ...(kept.length < text.length || record.ref.truncated ? { notice: 'Only the first part of this file is used.' } : {}) };
 }
 export function normalizeAskFiles(v: unknown): MeetingAskFile[] {
     if (!Array.isArray(v) || v.length > 50)
@@ -53,7 +99,7 @@ export function normalizeAskFiles(v: unknown): MeetingAskFile[] {
         seen.add(f.id);
         const text = redactSecrets(f.text);
         const secret = text !== f.text;
-        return { id: f.id, revision: f.revision, name: redactSecrets(f.name), status: secret ? 'secret-held' : f.status, text: secret || f.status !== 'ready' ? '' : text, ...(typeof f.notice === 'string' ? { notice: redactSecrets(f.notice).slice(0, 400) } : {}) };
+        return { id: f.id, revision: f.revision, name: redactSecrets(f.name), status: secret ? 'secret-held' : f.status, text: secret || f.status !== 'ready' ? '' : text, ...(typeof f.notice === 'string' ? { notice: redactSecrets(f.notice).slice(0, 400) } : {}), ...(f.origin === 'phone' ? { origin: 'phone' as const } : {}) };
     });
 }
 /**
@@ -120,6 +166,19 @@ export class MeetingAskRuntime {
     history(sessionId: string, serverId: unknown, offset = 0, limit = 50, order: 'asc' | 'desc' = 'asc') { this.identity(serverId); this.init(); if (!ASK_SESSION.test(sessionId))
         throw new AskError('invalid_session_id'); const rows = this.deps.store.list().filter(r => r.exchange.sessionId === sessionId && r.exchange.serverInstanceId === serverId).sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt) || a.exchange.requestId.localeCompare(b.exchange.requestId)).map(r => this.storageErrors.get(r.exchange.requestId) ?? r.exchange); if (order === 'desc')
         rows.reverse(); const start = Math.max(0, Math.trunc(offset)), count = Math.min(100, Math.max(1, Math.trunc(limit))); return { exchanges: rows.slice(start, start + count), nextOffset: start + count < rows.length ? start + count : null, files: this.deps.store.files(sessionId) }; }
+    /** POST files/media: uploaded media joins the meeting's file list, through the same rules as PUT files. */
+    attachMedia(sessionId: string, serverId: unknown, raw: unknown) {
+        this.identity(serverId);
+        if (!this.deps.admissions())
+            throw new AskError('maintenance', 503);
+        if (!ASK_SESSION.test(sessionId))
+            throw new AskError('invalid_session_id');
+        const items = raw as Array<{ id?: unknown; name?: unknown }>;
+        if (!Array.isArray(items) || items.length < 1 || items.length > 10 || items.some(m => !m || !isValidMediaId(m.id) || (m.name !== undefined && (typeof m.name !== 'string' || m.name.length > 240))) || new Set(items.map(m => m.id)).size !== items.length)
+            throw new AskError('invalid_media');
+        const files = items.map(m => phoneMediaFile(this.deps.media, { id: m.id as string, ...(typeof m.name === 'string' ? { name: m.name } : {}) }));
+        return this.deps.store.putFiles(sessionId, normalizeAskFiles(files));
+    }
     putFiles(sessionId: string, serverId: unknown, files: unknown) { this.identity(serverId); if (!this.deps.admissions())
         throw new AskError('maintenance', 503); return this.deps.store.putFiles(sessionId, normalizeAskFiles(files)); }
     async submit(raw: unknown): Promise<MeetingAskExchange> {
