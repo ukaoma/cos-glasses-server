@@ -34,3 +34,14 @@ During a 10-minute recording, scroll up in Transcript while fresh/refined chunks
 ## Outstanding physical gate
 
 WKWebView probes and the reproduced error-loop negative canary do not establish that the Even host will survive every iPhone/G2 background transition. Public companion promotion requires the device test above. Server and Control can ship independently while the versioned 628 companion remains a private candidate. The frozen 627 artifact and public companion 624 remain available for rollback.
+
+## Public release verification — October 11, 2026
+
+- Frozen runtime source: `85a3e61`. Full suite: 424 files, 6,562 passed / two existing skips. Typecheck passed; production dependency audit reported zero vulnerabilities.
+- Published `@gotcos/glasses-server@6.71.5` as latest after official npm web/passkey approval. Registry download and integrity verified; fresh-cache npx installation and launcher help passed.
+- Exact tested tarball: 422 files, 3,981,207 bytes; shasum `24c194244a9ee5ac0b8dbc8c95d379d57f77944c`; integrity `sha512-C9ucAmOVYiN4pB+p7gpKkO6ofw/E0PWXqTRPY8ql3J6sV9wSYsTNWzMQPTYXOfr26KIERegmHW+XpO6dMSl4pA==`.
+- Six actual-provider field replays passed. Haiku fact/compare/average: 27.102 / 39.132 / 33.127 seconds; Sonnet: 21.906 / 31.129 / 28.601 seconds. Both fact-checks found the matching article; both comparisons and average follow-ups executed two public searches, provided evidence confidence and calculated cited example comparisons without claiming an established average. These timings measure research-answer completion, not audio refinement.
+- Eight real-provider privacy/topic-selection canaries passed: six private or injected topics produced no public query; two public topics admitted only observed vocabulary. Classification is not a universal privacy guarantee.
+- The unchanged 624 phone/lens renderers displayed all six answers, confidence and linked article sources. The current Hub main alias remains byte-identical to 624; the repository is private and no anonymous Hub download is claimed.
+- Companion 628 strict suite: 6,949 passed / one skip; types and manufacturer contracts passed. Twenty WKWebView cases passed, including four transcript anchors at zero pixel drift. Final timer-failure and bridge-error feedback gates passed. The iPhone/G2 physical transition and audio-continuity gate remains pending; 628 is a private candidate.
+- Control 0.5.285/build338 is signed, notarized, stapled and publicly downloadable; its full source suite and isolated onboarding with public server 6.71.4 passed. The ZIP SHA-256 is `5dd189f9ce9f7b49a404327a8bf5087de814fc765035122b95a8ed1756173696`. A clean-Mac/TCC/updater-swap test is not claimed.
