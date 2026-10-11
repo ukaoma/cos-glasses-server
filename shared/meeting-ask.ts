@@ -60,9 +60,12 @@ export const MEETING_ASK_LABELS: Readonly<Record<MeetingAskAction, readonly stri
 export function meetingAskCitations(text: string): string[] {
     return [...new Set([...text.matchAll(/\[([THFW]\d+)\]/g)].map(m => m[1]))];
 }
-/** The legacy answer string: one `**Label:** text` line per section, inline citations kept. */
+/**
+ * The legacy answer string: one `**Label:** text` paragraph per section, inline citations kept. Rows are
+ * separated by a blank line so CommonMark clients keep one row per paragraph.
+ */
 export function meetingAskAnswerMarkdown(sections: readonly MeetingAskSection[]): string {
-    return sections.map(s => `**${s.label}:** ${s.text}`).join('\n');
+    return sections.map(s => `**${s.label}:** ${s.text}`).join('\n\n');
 }
 function monthDay(date: string): string | null {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);

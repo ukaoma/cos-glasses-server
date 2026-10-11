@@ -81,6 +81,16 @@ describe('meeting Ask durable ownership', () => {
     finally {
         f.cleanup();
     } });
+    it('a model answering in the old {"answer"} shape completes with one So what row and the skim notice', async () => { const f = fixture({ run: vi.fn(async () => ({ text: JSON.stringify({ answer: 'Review Friday [T1]' }), model: 'codex:gpt (requested)' })) }); try {
+        await f.runtime.submit(base);
+        const e = await terminal(f);
+        expect(e.status).toBe('completed');
+        expect(e.sections).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(e.notices).toContain('This answer was not in the skim format.');
+    }
+    finally {
+        f.cleanup();
+    } });
     it('legacy and v2 share single flight', async () => { let resolve!: (v: any) => void; const f = fixture({ run: () => new Promise(r => { resolve = r; }) }); try {
         await f.runtime.submit(base);
         await expect(f.runtime.legacy({ ...base, history: [] }, new AbortController().signal)).rejects.toThrow('busy');

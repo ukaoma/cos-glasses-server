@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createLiveAsk, normalizeAsk, normalizeSections, type AskInput } from './live-cos-ask.js'
+import { createLiveAsk, normalizeAsk, normalizeSections, sectionsFromAnswer, OFF_FORMAT_NOTICE, type AskInput } from './live-cos-ask.js'
 import { MEETING_ASK_LABELS } from '../../shared/meeting-ask.js'
 // 6.71.0: the model returns labeled sections; the server validates them and composes `answer`.
 const turns = [
@@ -75,7 +75,7 @@ describe('Meeting Ask sections: end to end through createLiveAsk', () => {
   it('composes answer as one **Label:** line per section and returns sections with sources', async () => {
     const { ask: run } = ask([row('Next', 'Confirm the owner [T3].'), row('So what', 'Annual plan chosen [T1].'), row('Decided', 'Annual plan [T1].'), row('Open', ''), row('You owe', 'Pricing sheet by Friday [T2].')])
     const result = await run(input('catch_up'))
-    expect(result.answer).toBe('**So what:** Annual plan chosen [T1].\n**Decided:** Annual plan [T1].\n**You owe:** Pricing sheet by Friday [T2].\n**Next:** Confirm the owner [T3].')
+    expect(result.answer).toBe('**So what:** Annual plan chosen [T1].\n\n**Decided:** Annual plan [T1].\n\n**You owe:** Pricing sheet by Friday [T2].\n\n**Next:** Confirm the owner [T3].')
     expect(result.sections).toEqual([
       { label: 'So what', text: 'Annual plan chosen [T1].', sources: ['T1'] },
       { label: 'Decided', text: 'Annual plan [T1].', sources: ['T1'] },
@@ -90,9 +90,6 @@ describe('Meeting Ask sections: end to end through createLiveAsk', () => {
       await expect(run(input('catch_up'))).rejects.toMatchObject({ reason: 'invalid_answer', status: 502 })
       expect(model).toHaveBeenCalledTimes(1)
     }
-    // The pre-6.71.0 free-markdown reply is no longer an answer.
-    const legacy = createLiveAsk({ run: async () => ({ text: '{"answer":"Annual plan [T1]","searchQuery":null}', model: 'claude-haiku' }), search: vi.fn(), now: () => 5000 })
-    await expect(legacy(input('summary'))).rejects.toMatchObject({ reason: 'invalid_answer' })
   })
   it('tells the model the labels, the task and the wearer', async () => {
     const run = vi.fn(async (_prompt: string) => ({ text: JSON.stringify({ sections: [row('So what', 'x [T1]')] }), model: 'claude-haiku' }))
@@ -109,5 +106,45 @@ describe('Meeting Ask sections: end to end through createLiveAsk', () => {
     const result = await createLiveAsk({ run, search, now: () => 5000 })(input('ask', 'Did we pick this before?'))
     expect(search).toHaveBeenCalledTimes(1)
     expect(result.sections.map(s => [s.label, s.sources])).toEqual([['So what', ['H1']], ['Details', ['H1', 'T1']]])
+  })
+})
+
+describe('Meeting Ask sections: a provider that still answers {"answer":"..."}', () => {
+  const old = (answer: unknown, extra: Record<string, unknown> = {}) => createLiveAsk({ run: async () => ({ text: JSON.stringify({ answer, searchQuery: null, ...extra }), model: 'claude-haiku' }), search: vi.fn(), now: () => 5000 })
+  it('reads **Label:** lines through the same rules, with no notice', async () => {
+    const result = await old('**Decided:** Annual plan [T1].\n\n**So what:** Annual plan chosen\nfor next year [T1].\n- **Open:** None\n**Next**: Confirm the owner [T3].')(input('catch_up'))
+    expect(result.sections).toEqual([
+      { label: 'So what', text: 'Annual plan chosen for next year [T1].', sources: ['T1'] },
+      { label: 'Decided', text: 'Annual plan [T1].', sources: ['T1'] },
+      { label: 'Next', text: 'Confirm the owner [T3].', sources: ['T3'] },
+    ])
+    expect(result.notices).not.toContain(OFF_FORMAT_NOTICE)
+  })
+  it('falls back to one So what row with a notice when the lines give no valid So what', async () => {
+    const cases: [string, AskInput['action']][] = [
+      ['Annual plan chosen [T1].\n\n- Rollout owner open [T3]\n- Invented [T9]', 'summary'], // plain markdown
+      ['Quick note first.\n**So what:** Annual plan [T1].', 'summary'], // prose above the first label
+      ['**So what:** Annual plan [T1].\n**Covered:** Plans [T1].', 'catch_up'], // a label this action does not allow
+      ['**Decided:** Annual plan [T1].', 'catch_up'], // labels but no So what
+    ]
+    for (const [answer, action] of cases) {
+      const result = await old(answer)(input(action))
+      const text = answer.replace('[T9]', '[source unavailable]')
+      expect(result.sections, answer).toEqual([{ label: 'So what', text, sources: [...new Set(text.match(/T\d+/g))] }])
+      expect(result.answer).toBe('**So what:** ' + text)
+      expect(result.notices).toContain(OFF_FORMAT_NOTICE)
+    }
+  })
+  it('still fails on empty or non-JSON output, and on an unknown label inside a real sections array', async () => {
+    for (const ask of [old(''), old('   '), old(null), createLiveAsk({ run: async () => ({ text: 'Annual plan [T1]', model: 'claude-haiku' }), search: vi.fn(), now: () => 5000 }), old('Annual plan [T1]', { sections: [row('So what', 'x [T1]'), row('Notes', 'y')] })]) {
+      await expect(ask(input('summary'))).rejects.toMatchObject({ reason: 'invalid_answer', status: 502 })
+    }
+  })
+  it('the parser refuses a blank answer itself', () => {
+    expect(() => sectionsFromAnswer('summary', ' \n ', ids)).toThrow('invalid_answer')
+  })
+  it('the parser redacts secrets in the fallback row', () => {
+    const out = sectionsFromAnswer('ask', 'Key is sk-abcdefghijklmnopqrstuvwx [T1]', ids)
+    expect(out.offFormat).toBe(true); expect(out.sections[0].text).not.toContain('sk-abcdefghijklmnopqrstuvwx')
   })
 })

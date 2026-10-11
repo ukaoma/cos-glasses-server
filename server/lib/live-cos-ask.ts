@@ -122,6 +122,31 @@ export function normalizeSections(action: AskAction, raw: unknown, allowed: Read
   }
   return sections
 }
+export const OFF_FORMAT_NOTICE = 'This answer was not in the skim format.'
+const LABEL_LINE = /^\s*(?:[-*]\s+)?\*\*([^*\n]{1,40}?)\s*:?\s*\*\*\s*:?\s*(.*)$/
+/**
+ * A reply in the pre-6.71.0 {"answer":"..."} shape. Codex, Cursor and Ollama can be picked for Meeting Ask
+ * and may keep it, so it is not refused. First, `**Label:** text` lines are read through the same
+ * normalizeSections rules (a line with no label continues the row above it). If that gives no valid
+ * So what, because there are no labels, text sits above the first label, or a label is unknown, the whole
+ * answer becomes one So what row, line breaks kept, and the caller adds OFF_FORMAT_NOTICE.
+ */
+export function sectionsFromAnswer(action: AskAction, answer: string, allowed: ReadonlySet<string>): { sections: MeetingAskSection[]; offFormat: boolean } {
+  const rows: { label: string; text: string }[] = []
+  let prose = false
+  for (const line of answer.split('\n')) {
+    const m = LABEL_LINE.exec(line)
+    if (m) rows.push({ label: m[1], text: m[2] })
+    else if (rows.length) rows[rows.length - 1].text += '\n' + line
+    else if (line.trim()) prose = true
+  }
+  if (rows.length && !prose) {
+    try { return { sections: normalizeSections(action, rows, allowed), offFormat: false } } catch { /* fall through to one So what row */ }
+  }
+  const text = redactSecrets(answer).trim().slice(0, 10_000).replace(/\[([THFW]\d+)\]/g, (match: string, id: string) => allowed.has(id) ? match : '[source unavailable]')
+  if (!text) throw new AskError('invalid_answer', 502)
+  return { sections: [{ label: 'So what', text, sources: meetingAskCitations(text) }], offFormat: true }
+}
 export async function searchAskHistory(query: string, excludeSessionId?: string, signal?: AbortSignal): Promise<{ sources: AskSource[]; notices: string[] }> {
   const results = await Promise.allSettled([searchMemories({ query, limit: 3, ...(signal?{signal}:{}) }), searchMeetingLibrary({ query, limit: 3, ...(signal?{signal}:{}) })])
   const sources: AskSource[] = [], notices: string[] = []
@@ -185,7 +210,9 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
           continue
         }
         const allowed = new Set(evidence.sources.map(s => s.id))
-        const sections = normalizeSections(input.action, output?.sections, allowed)
+        // A real sections array is held to the contract; only a reply with no sections falls back.
+        const legacy = !(Array.isArray(output?.sections) && output.sections.length) && typeof output?.answer === 'string' ? sectionsFromAnswer(input.action, output.answer, allowed) : null
+        const sections = legacy ? legacy.sections : normalizeSections(input.action, output?.sections, allowed)
         // An explicit web request is honored even when the planner answers without searching the web.
         // The planner's choice is not reliable enough to carry an explicit ask: in the 6.69.0 field run
         // Haiku answered "Who is alt coin daily?" from a screenshot and never asked for the web.
@@ -197,6 +224,7 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
           absorb(await deps.search(deps.explicitWebQuery, input.sessionId, 'web'))
           continue
         }
+        if (legacy?.offFormat) evidence.notices.push(OFF_FORMAT_NOTICE)
         const answer = meetingAskAnswerMarkdown(sections)
         const cited = new Set(sections.flatMap(s => s.sources))
         if (!cited.size) evidence.notices.push('The answer did not cite a transcript passage. Treat it as a suggestion.')

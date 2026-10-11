@@ -39,7 +39,7 @@ describe('lens From: line', () => {
 })
 describe('answer helpers', () => {
   it('composes one bold-label line per section', () => {
-    expect(meetingAskAnswerMarkdown([{ label: 'So what', text: 'A [T1].', sources: ['T1'] }, { label: 'Next', text: 'B.', sources: [] }])).toBe('**So what:** A [T1].\n**Next:** B.')
+    expect(meetingAskAnswerMarkdown([{ label: 'So what', text: 'A [T1].', sources: ['T1'] }, { label: 'Next', text: 'B.', sources: [] }])).toBe('**So what:** A [T1].\n\n**Next:** B.')
   })
   it('lists citations once, in first-cited order', () => {
     expect(meetingAskCitations('[T2] x [H1] [T2] [W3] [Z1] [T]')).toEqual(['T2', 'H1', 'W3'])

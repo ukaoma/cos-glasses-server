@@ -58,7 +58,7 @@ describe('Meeting Ask v2 HTTP contract', () => {
         const one = (await (await f.request('/requests/' + input.requestId)).json()).exchange;
         expect(one.status).toBe('completed');
         expect(one.sections).toEqual(expected);
-        expect(one.answer).toBe('**So what:** Nina reviews [T1].\n**Decided:** Friday review [T1].');
+        expect(one.answer).toBe('**So what:** Nina reviews [T1].\n\n**Decided:** Friday review [T1].');
         const h = await (await f.request('/history?sessionId=meeting_test&serverInstanceId=test-server')).json();
         expect(h.exchanges[0].sections).toEqual(expected);
         const reload = new MeetingAskRuntime({ store: (f.runtime as any).deps.store, identity: () => 'test-server' });
