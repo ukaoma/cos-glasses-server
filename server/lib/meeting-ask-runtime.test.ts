@@ -18,6 +18,34 @@ async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { fo
     await new Promise(r => setTimeout(r, 2));
 } throw Error('never terminal'); }
 describe('meeting Ask durable ownership', () => {
+    it('refines the direct Control payload once and freezes citations, files and retry identity', async () => {
+        const refine = vi.fn(input => ({ input: { ...input, turns: [
+            { id: 0, elapsedMs: 0, speaker: 'Unidentified', text: 'The budget is 14000. It has not been approved.' },
+            { id: 6, elapsedMs: 36000, speaker: 'Person', text: 'Latest correction: review Monday.' },
+        ] }, notices: ['Earlier passages were refined from recorded audio.'] }));
+        const f = fixture({ refine });
+        const submitted = { ...base, elapsedMs: 42000, turns: [
+            { id: 0, elapsedMs: 0, speaker: 'Person', text: 'The budget is 14000.' },
+            { id: 6, elapsedMs: 36000, speaker: 'Person', text: 'Latest correction: review Monday.' },
+        ] };
+        const original = JSON.stringify(submitted);
+        try {
+            f.runtime.putFiles(base.sessionId, 'server-one', [{ id: 'file_12345678', revision: '1', name: 'Plan', status: 'ready', text: 'Owner is Nina' }]);
+            await f.runtime.submit(submitted);
+            refine.mockImplementation(input => ({ input, notices: [] }));
+            const e = await terminal(f);
+            expect(f.run.mock.calls[0][1]).toContain('It has not been approved');
+            expect(f.run.mock.calls[0][1]).toContain('review Monday');
+            expect(f.run.mock.calls[0][1]).toContain('Owner is Nina');
+            expect(e.sources.find(s => s.kind === 'transcript' && s.turnId === 0)?.text).toContain('not been approved');
+            expect(e.notices).toContain('Earlier passages were refined from recorded audio.');
+            expect(f.store.get(base.requestId)?.input.turns).toEqual(submitted.turns);
+            expect((await f.runtime.submit(submitted)).sources).toEqual(e.sources);
+            expect(refine).toHaveBeenCalledTimes(1);
+            expect(f.run).toHaveBeenCalledTimes(1);
+            expect(JSON.stringify(submitted)).toBe(original);
+        } finally { f.cleanup(); }
+    });
     it('admits all 100 registered references from two valid 50-file batches and rejects 101', async () => {
         const f = fixture();
         try {

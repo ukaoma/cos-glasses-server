@@ -356,6 +356,42 @@ export const __progressiveHqTesting = {
   },
 }
 
+/** Read-only, default-off candidate for in-meeting Ask evidence. Does not
+ * rewrite canonical chunks, run a decoder, or include the open tail. A complete
+ * audio/config/context chain is required; any invalid checkpoint leaves the
+ * remaining live transcript untouched. */
+export function readProgressiveAskRefinements(
+  audioDir: string,
+  sessionId: string,
+  entries: IndexedTranscriptChunk[],
+  asrCompletedIndices: number[],
+): BatchResult[] {
+  if (process.env.COS_MEETING_ASK_HQ_EVIDENCE !== '1'
+    || process.env.COS_BATCH_HQ_TIMESTAMPS !== '1'
+    || !progressiveMeetingHqEnabled()) return []
+  const results: BatchResult[] = []
+  let previousText: string | undefined
+  for (const segment of segmentTranscriptChunks(entries, 30_000, false)) {
+    if (!segmentRangeIsComplete(segment, asrCompletedIndices)) break
+    const cached = readProgressiveCheckpoint(audioDir, segment, previousText, sessionId)
+    if (!cached) break
+    previousText = cached.text
+    const originals = entries.filter(e => e.chunkIndex >= segment.startChunkIdx && e.chunkIndex <= segment.endChunkIdx)
+    const baseline = originals.map(e => e.chunk.text).join(' ')
+    const count = baseline.trim().split(/\s+/).filter(Boolean).length
+    const quality = evaluateBatchQuality([cached], count)
+    // Runtime checks are conservative corruption guards, not proof of ASR
+    // accuracy. Human-corrected facts and latency remain qualification gates.
+    const numbers = baseline.match(/\b\d+(?:[.,]\d+)*\b/g) ?? []
+    const refinedNumbers = new Set(cached.text.match(/\b\d+(?:[.,]\d+)*\b/g) ?? [])
+    if (count >= 8 && quality.accepted && quality.coverageRatio >= 0.85
+      && quality.coverageRatio <= 1.75
+      && cached.words.filter(word => word.end > word.start).length >= quality.batchWordCount * 0.75
+      && numbers.every(number => refinedNumbers.has(number))) results.push(cached)
+  }
+  return results
+}
+
 export async function transcribeSegments(
   audioDir: string,
   segments: BatchSegment[],

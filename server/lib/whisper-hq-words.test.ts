@@ -2,10 +2,25 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   classifyHighQualityTranscriptionCapability,
+  getHighQualityCheckpointFingerprint,
   parseWhisperCliFullJson,
 } from './whisper-local.js'
 
 describe('batch HQ word restore (CPU whisper-cli -ojf)', () => {
+  it('partitions progressive caches by timestamp mode and supports rollback', () => {
+    const prior = process.env.COS_BATCH_HQ_TIMESTAMPS
+    try {
+      process.env.COS_BATCH_HQ_TIMESTAMPS = '0'
+      const legacy = getHighQualityCheckpointFingerprint()
+      process.env.COS_BATCH_HQ_TIMESTAMPS = '1'
+      expect(getHighQualityCheckpointFingerprint()).not.toBe(legacy)
+      process.env.COS_BATCH_HQ_TIMESTAMPS = '0'
+      expect(getHighQualityCheckpointFingerprint()).toBe(legacy)
+    } finally {
+      if (prior === undefined) delete process.env.COS_BATCH_HQ_TIMESTAMPS
+      else process.env.COS_BATCH_HQ_TIMESTAMPS = prior
+    }
+  })
   it('fails closed with a stable, path-free HQ capability reason', () => {
     expect(classifyHighQualityTranscriptionCapability({
       enabled: false, cliPresent: true, turboReady: true, largeV3Present: true,

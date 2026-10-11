@@ -13,6 +13,7 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync, statSync } from 'n
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
+import { batchTimestampCanaryEnabled, remapBatchWords } from './whisper-batch-timing.js'
 import { getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
 import { stripBrandUrls } from './hallucination-filter.js'
 import {
@@ -38,7 +39,7 @@ import {
 const PROMPT_V2 = process.env.COS_PROMPT_V2 === '1'
 const STRIP_BRAND_URLS = process.env.COS_WHISPER_STRIP_BRAND_URLS !== '0'
 
-// Word-level timestamp types (from whisper.cpp DTW alignment)
+// Word/token timing from the batch CLI; live HTTP does not request word clocks.
 export interface WhisperWord {
   word: string
   start: number   // seconds
@@ -76,12 +77,14 @@ export interface HighQualityTranscriptionResult {
 }
 
 let highQualityCheckpointFingerprint: string | null = null
+let highQualityCheckpointTimingMode: boolean | null = null
 
 /** Stable, path-free cache identity for progressive meeting HQ checkpoints.
  * Model/configuration is immutable for the lifetime of one server process, so
  * cache this instead of stat'ing multi-GB model files on every health poll. */
 export function getHighQualityCheckpointFingerprint(): string {
-  if (highQualityCheckpointFingerprint) return highQualityCheckpointFingerprint
+  const timingMode = batchTimestampCanaryEnabled()
+  if (highQualityCheckpointFingerprint && highQualityCheckpointTimingMode === timingMode) return highQualityCheckpointFingerprint
   const identity = (path: string): Record<string, number | boolean> => {
     try {
       const stat = statSync(path)
@@ -92,6 +95,8 @@ export function getHighQualityCheckpointFingerprint(): string {
   }
   highQualityCheckpointFingerprint = crypto.createHash('sha256').update(JSON.stringify({
     schema: 2,
+    // Keep the existing legacy identity byte-for-byte when the canary is off.
+    ...(timingMode ? { batchTiming: 'native-vad-timestamps-v1' } : {}),
     serverVersion: process.env.COS_SERVER_VERSION?.trim() || 'development',
     whisperCli: identity(WHISPER_CLI),
     model: identity(resolveBatchModel()),
@@ -103,6 +108,7 @@ export function getHighQualityCheckpointFingerprint(): string {
     prompt: buildWhisperPrompt(),
     corrections: getWhisperCorrections(),
   })).digest('hex')
+  highQualityCheckpointTimingMode = timingMode
   return highQualityCheckpointFingerprint
 }
 
@@ -966,9 +972,26 @@ export async function transcribeHighQuality(
   // Word clocks on post-meeting CPU polish, and on any decode that asks for
   // them (the prompt tail guard). Other live decodes stay compact JSON.
   const captureWords = opts.priority === 'batch' || opts.words === true
+  const timestampCanary = opts.priority === 'batch' && batchTimestampCanaryEnabled()
+  let nativeDiagnostics = ''
 
   const modelPath = resolveBatchModel()
   const useLargeV3 = modelPath === BATCH_MODEL_LARGE_V3
+
+  // A valid empty PCM WAV has nothing to decode. Some native CLI versions exit
+  // zero without writing JSON for it; distinguish it from malformed audio.
+  if (timestampCanary && audioBuffer.length === 44
+    && audioBuffer.toString('ascii', 0, 4) === 'RIFF'
+    && audioBuffer.readUInt32LE(4) === 36
+    && audioBuffer.toString('ascii', 8, 12) === 'WAVE'
+    && audioBuffer.toString('ascii', 12, 16) === 'fmt '
+    && audioBuffer.readUInt32LE(16) === 16
+    && audioBuffer.readUInt16LE(20) === 1 && audioBuffer.readUInt16LE(22) === 1
+    && audioBuffer.readUInt32LE(24) === 16000 && audioBuffer.readUInt32LE(28) === 32000
+    && audioBuffer.readUInt16LE(32) === 2 && audioBuffer.readUInt16LE(34) === 16
+    && audioBuffer.toString('ascii', 36, 40) === 'data' && audioBuffer.readUInt32LE(40) === 0) {
+    return { text: '', words: [], model: useLargeV3 ? 'large-v3' : 'turbo', backend: 'whisper-cli', actualQuality: useLargeV3 ? 'hq' : 'fast' }
+  }
 
   try {
     writeFileSync(tmpWav, audioBuffer)
@@ -1008,8 +1031,9 @@ export async function transcribeHighQuality(
         ...(useMetal ? ['-fa'] : ['-ng']),
         '-bs', String(beam),
         '-bo', String(bestOf),
-        '--no-timestamps',
-        '-np',
+        // The candidate needs native VAD diagnostics for the exact mapping.
+        // Ordinary timestamp decoding never enables DTW or live verbose JSON.
+        ...(timestampCanary ? [] : ['--no-timestamps', '-np']),
         '--prompt', buildPrompt(context),
       ]
       if (captureWords) {
@@ -1103,6 +1127,7 @@ export async function transcribeHighQuality(
           reject(new Error(`whisper-cli HQ exit ${code}: ${stderr.trim().slice(0, 200)}`))
           return
         }
+        nativeDiagnostics = stderr
         resolve(stdout.trim())
       })
 
@@ -1122,13 +1147,23 @@ export async function transcribeHighQuality(
     if (captureWords) {
       try {
         if (existsSync(jsonPath)) {
-          const parsed = parseWhisperCliFullJson(readFileSync(jsonPath, 'utf8'))
-          if (parsed.text) finalText = parsed.text
-          words = parsed.words.length > 0
-            ? parsed.words.map(w => ({ ...w, word: applyCorrections(w.word) }))
+          const raw = readFileSync(jsonPath, 'utf8')
+          if (timestampCanary && !Array.isArray(JSON.parse(raw)?.transcription)) {
+            throw new Error('HQ timestamp candidate returned invalid CLI JSON')
+          }
+          const parsed = parseWhisperCliFullJson(raw)
+          if (timestampCanary || parsed.text) finalText = parsed.text
+          const timed = timestampCanary ? remapBatchWords(parsed.words, nativeDiagnostics, useVad) : parsed.words
+          words = timed.length > 0
+            ? timed.map(w => ({ ...w, word: applyCorrections(w.word) }))
             : []
+        } else if (timestampCanary) {
+          throw new Error('HQ timestamp candidate did not produce CLI JSON')
         }
       } catch (err) {
+        // Timestamp-mode stdout contains display clocks. Missing mapping/JSON
+        // must preserve the prior transcript, never persist that stdout as text.
+        if (timestampCanary) throw err
         console.warn(
           `[whisper-hq] Batch word JSON parse failed; keeping text-only polish: ` +
           `${err instanceof Error ? err.message : String(err)}`,

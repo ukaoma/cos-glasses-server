@@ -8,6 +8,7 @@ import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWork
 import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate } from './meeting-ask-web.js';
 import { getServerInstanceId } from './server-instance-id.js';
 import { getOwnerName } from './profile.js';
+import { refineActiveMeetingAsk } from './meeting-ask-refinement.js';
 export const MEETING_ASK_CAPABILITIES: MeetingAskCapabilities = { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: false };
 /**
  * Replaces 'No web.' in LIVE_ASK_SYSTEM when the web is available. The planner decides whether to look
@@ -26,6 +27,7 @@ interface RuntimeDeps {
     webSearch: typeof searchMeetingWeb;
     /** The wearer's name for "You owe", or null when the profile has none. */
     wearer: () => string | null;
+    refine: typeof refineActiveMeetingAsk;
 }
 function profileWearer(): string | null { try {
     const name = getOwnerName();
@@ -34,7 +36,7 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer };
+const defaults: RuntimeDeps = { store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, refine: refineActiveMeetingAsk };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))
@@ -154,15 +156,16 @@ export class MeetingAskRuntime {
             const available = this.deps.store.files(input.sessionId);
             const files = (input.files ?? []).map(ref => { const f = available.find(f => f.id === ref.id && f.revision === ref.revision); if (!f)
                 throw new AskError('file_revision_changed', 409); return { ...f }; });
+            const refined = this.deps.refine(normal);
             const at = new Date().toISOString();
-            const exchange: MeetingAskExchange = { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, action: input.action, question: input.question, status: 'pending', createdAt: at, updatedAt: at, selectedModel: selected, sources: [], notices: [], throughMs: input.elapsedMs, files, ...(input.retryOf ? { retryOf: input.retryOf } : {}) };
+            const exchange: MeetingAskExchange = { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, action: input.action, question: input.question, status: 'pending', createdAt: at, updatedAt: at, selectedModel: selected, sources: [], notices: refined.notices, throughMs: input.elapsedMs, files, ...(input.retryOf ? { retryOf: input.retryOf } : {}) };
             lease = this.deps.lease();
             this.deps.store.write({ version: 2, fingerprint, input, exchange });
             const controller = new AbortController(), owned = lease;
             // Install ownership before starting any asynchronous provider work.
             const job = { id: input.requestId, controller, done: Promise.resolve(), lease: owned };
             this.active = job;
-            job.done = Promise.resolve().then(() => this.execute(input, normal, files, controller, owned));
+            job.done = Promise.resolve().then(() => this.execute(input, refined.input, files, controller, owned, refined.notices));
             return exchange;
         }
         catch (e) {
@@ -171,7 +174,7 @@ export class MeetingAskRuntime {
             throw e;
         }
     }
-    private async execute(input: MeetingAskSubmit, normal: AskInput, files: MeetingAskFile[], controller: AbortController, lease: MaintenanceWorkLease) {
+    private async execute(input: MeetingAskSubmit, normal: AskInput, files: MeetingAskFile[], controller: AbortController, lease: MaintenanceWorkLease, refinementNotices: string[] = []) {
         let release = true;
         let completedResult: AskResult | undefined;
         const deadline = setTimeout(() => controller.abort(), 145000);
@@ -185,7 +188,7 @@ export class MeetingAskRuntime {
             const history = journal.filter(r => r.exchange.sessionId === input.sessionId && r.exchange.serverInstanceId === input.serverInstanceId && r.exchange.status === 'completed').sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt)).slice(-4).map(r => ({ question: r.exchange.question, answer: r.exchange.answer ?? '' }));
             let remaining = 16000;
             const extraSources = files.filter(f => f.status === 'ready' && f.text.trim()).map((f, i) => { const text = f.text.slice(0, Math.max(0, remaining)); remaining -= text.length; return { id: `F${i + 1}`, kind: 'file' as const, title: f.name, text, fileId: f.id, revision: f.revision }; }).filter(f => f.text);
-            const extraNotices = files.filter(f => f.status !== 'ready').map(f => `${f.name}: ${f.status}; text not available.`);
+            const extraNotices = [...refinementNotices, ...files.filter(f => f.status !== 'ready').map(f => `${f.name}: ${f.status}; text not available.`)];
             if (files.reduce((n, f) => n + f.text.length, 0) > 16000)
                 extraNotices.push('Attachment context is limited to selected text (16,000 characters).');
             const webAvailable = this.deps.webCapability().available;

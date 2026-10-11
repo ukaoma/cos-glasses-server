@@ -1,3 +1,9 @@
+## Unreleased · transcription canary, disabled by default
+
+- An explicit `COS_BATCH_HQ_TIMESTAMPS=1` candidate enables ordinary timestamps for meeting batch CLI decoding and maps compressed VAD times through the table emitted by the same native process. Incomplete or inconsistent timing evidence rejects the candidate result. Empty PCM audio returns an empty result; missing JSON fails cleanly. Live ASR retains compact JSON and DTW remains disabled.
+- `COS_MEETING_ASK_HQ_EVIDENCE=1`, together with progressive HQ and the timestamp flag, can freeze verified sealed passages into a Meeting Ask request. It supports Control's direct transcript submissions, retains recent live turns, preserves source turn IDs and request idempotency, and withholds mixed speaker attribution. Corrupt, incomplete or changed caches leave the live transcript available. The canonical meeting transcript is untouched by an Ask.
+- Qualification is blocked: the production background CPU probe took 142.641 seconds after sealing, exceeding the accepted 30-second refinement delay. Human-corrected facts and a complete live pipeline replay remain pending. See `docs/asr-canaries.md`; this is not a rollout or accuracy claim.
+
 ## 6.71.0 · private test candidate
 
 - Meeting Ask answers come as labeled sections. The model returns `{"sections":[{"label","text"}],"searchQuery":null}` instead of free Markdown, and every answer leads with **So what**. Server only; additive to the 6.69.0 contract in `shared/meeting-ask.ts`. Pairs with the Meeting Ask polish round in COS Glasses and COS Control.

@@ -1,9 +1,10 @@
 import { Router, type Response } from 'express';
 import { AskError } from '../lib/live-cos-ask.js';
 import { meetingAskRuntime, type MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
-import { getSessionChunkEntries, getSessionStartTime } from './transcribe-stream.js';
+import { getSessionChunkEntries, getSessionStartTime, getSessionAudioDirectory, getSessionAsrCompletedIndices } from './transcribe-stream.js';
+import { readProgressiveAskRefinements } from '../lib/meeting-batch-transcribe.js';
+import { meetingAskTranscript } from '../lib/meeting-ask-transcript.js';
 import { ASK_SESSION } from '../lib/meeting-ask-store.js';
-import { redactSecrets } from '../lib/lens-gist-engines.js';
 import type { MeetingAskExchange, MeetingAskFile } from '../../shared/meeting-ask.js';
 function failure(res: Response, error: unknown) { res.status(error instanceof AskError ? error.status : 503).json({ error: error instanceof AskError ? error.reason : 'meeting_assistant_unavailable' }); }
 /** Safe Markdown export. Citations are namespaced to the request because T1 is answer-local. */
@@ -116,8 +117,10 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
             const chunks = getSessionChunkEntries(sessionId), start = getSessionStartTime(sessionId);
             if (!chunks || start === null)
                 throw new AskError('session_not_available', 404);
-            const turns = chunks.filter(e => e.chunk.text.trim()).map(e => ({ id: e.chunkIndex, elapsedMs: Math.max(0, e.chunk.elapsed), speaker: e.chunk.speaker, text: redactSecrets(e.chunk.text) }));
-            res.json({ turns, elapsedMs: Math.max(Date.now() - start, ...turns.map(t => t.elapsedMs), 0), notices: [] });
+            const audioDir = process.env.COS_MEETING_ASK_HQ_EVIDENCE === '1' ? getSessionAudioDirectory(sessionId) : null;
+            const refined = audioDir ? readProgressiveAskRefinements(audioDir, sessionId, chunks, getSessionAsrCompletedIndices(sessionId)) : [];
+            const snapshot = meetingAskTranscript(chunks, refined);
+            res.json({ ...snapshot, elapsedMs: Math.max(Date.now() - start, ...snapshot.turns.map(t => t.elapsedMs), 0) });
         }
         catch (e) {
             failure(res, e);

@@ -44,6 +44,41 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
  */
 const CASES = [
   {
+    name: 'asr-canary-raw-clock', file: 'server/lib/whisper-batch-timing.ts',
+    find: 'const start = useVad ? mapVadTime(word.start, table) : word.start',
+    replace: 'const start = word.start', tests: ['server/lib/whisper-batch-timing.test.ts'],
+  },
+  {
+    name: 'asr-canary-native-count', file: 'server/lib/whisper-batch-timing.ts',
+    find: 'rows.length !== Number(count[0][1]) || !rows.length',
+    replace: '!rows.length', tests: ['server/lib/whisper-batch-timing.test.ts'],
+  },
+  {
+    name: 'asr-canary-lost-tail', file: 'server/lib/meeting-ask-transcript.ts',
+    find: 'if (!covered.has(entry.chunkIndex) && entry.chunk.text.trim())',
+    replace: 'if (false)', tests: ['server/lib/meeting-ask-transcript.test.ts'],
+  },
+  {
+    name: 'asr-canary-changed-number', file: 'server/lib/meeting-batch-transcribe.ts',
+    find: '&& numbers.every(number => refinedNumbers.has(number))',
+    replace: '', tests: ['server/lib/meeting-ask-transcript.test.ts'],
+  },
+  {
+    name: 'asr-canary-control-bypasses-refinement', file: 'server/lib/meeting-ask-runtime.ts',
+    find: 'const refined = this.deps.refine(normal);',
+    replace: 'const refined = { input: normal, notices: [] };', tests: ['server/lib/meeting-ask-runtime.test.ts'],
+  },
+  {
+    name: 'asr-canary-future-evidence', file: 'server/lib/meeting-ask-refinement.ts',
+    find: '.filter(result => result.segment.endElapsed <= input.elapsedMs)',
+    replace: '.filter(() => true)', tests: ['server/lib/meeting-ask-refinement.test.ts'],
+  },
+  {
+    name: 'asr-canary-stale-cache', file: 'server/lib/whisper-local.ts',
+    find: "...(timingMode ? { batchTiming: 'native-vad-timestamps-v1' } : {}),",
+    replace: "...{},", tests: ['server/lib/whisper-hq-words.test.ts'],
+  },
+  {
     name: '6620-provider-merge-loses-actions',
     file: 'server/lib/provider-actions.ts',
     find: '      out[provider] = { ...(out[provider] ?? {}), ...fields }',
