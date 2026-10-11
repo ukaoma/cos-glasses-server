@@ -337,11 +337,12 @@ export function mergeContextSearchHits(
     .slice(0, Math.max(1, Math.min(limit, 50)))
 }
 
-export async function searchMemories(options: { query: string; limit?: number; signal?: AbortSignal }): Promise<ContextSearchResult> {
+/** `semantic: false` (6.71.1, Meeting Ask "keyword only") skips the embedding search: no query leaves the Mac. */
+export async function searchMemories(options: { query: string; limit?: number; signal?: AbortSignal; semantic?: boolean }): Promise<ContextSearchResult> {
   const query = options.query.trim()
   const limit = Math.max(1, Math.min(options.limit ?? 20, 50))
   const keywordHits = keywordSearchMemories(query)
-  const semantic = await semanticSearchMemories(query, limit, options.signal)
+  const semantic = options.semantic === false ? { hits: [], reason: 'keyword_only' } : await semanticSearchMemories(query, limit, options.signal)
   return {
     hits: mergeContextSearchHits(keywordHits, semantic.hits, limit),
     keywordCount: keywordHits.length,

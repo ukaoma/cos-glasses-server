@@ -53,8 +53,8 @@ describe('Meeting Ask phone files: statuses and limits', () => {
     const media = fake({ [M(1)]: { category: 'image', label: 'IMG_1.jpg' }, [M(2)]: { category: 'video' }, [M(3)]: { category: 'document', text: '  \n ' }, [M(4)]: { category: 'document' } })
     const rows = [1, 2, 3, 4].map(n => phoneMediaFile(media, { id: M(n) }))
     expect(rows.map(r => [r.status, r.notice])).toEqual([
-      ['unsupported', 'Photos and screenshots are not read as meeting context yet. COS Control on your Mac can read the text in them.'],
-      ['unsupported', 'Videos are not read as meeting context yet.'],
+      ['unsupported', "Photos can't be read from the phone yet. Add them from COS Control on your Mac."],
+      ['unsupported', "Videos can't be read from the phone yet. Add them from COS Control on your Mac."],
       ['unsupported', 'No words were found in it.'],
       ['failed', 'The text of this file is not available.'],
     ])

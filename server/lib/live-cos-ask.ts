@@ -194,12 +194,15 @@ export function sectionsFromAnswer(action: AskAction, answer: string, allowed: R
   if (!text) throw new AskError('invalid_answer', 502)
   return { sections: [{ label: 'So what', text, sources: meetingAskCitations(text) }], offFormat: true }
 }
-export async function searchAskHistory(query: string, excludeSessionId?: string, signal?: AbortSignal): Promise<{ sources: AskSource[]; notices: string[] }> {
-  const results = await Promise.allSettled([searchMemories({ query, limit: 3, ...(signal?{signal}:{}) }), searchMeetingLibrary({ query, limit: 3, ...(signal?{signal}:{}) })])
-  const sources: AskSource[] = [], notices: string[] = []
+/** 'meaning' adds the embedding search (default); 'keyword' stays on local keyword matching, so no query is embedded. */
+export type CosSearchMode = 'meaning' | 'keyword'
+export async function searchAskHistory(query: string, excludeSessionId?: string, signal?: AbortSignal, mode: CosSearchMode = 'meaning'): Promise<{ sources: AskSource[]; notices: string[] }> {
+  const semantic = mode !== 'keyword'
+  const results = await Promise.allSettled([searchMemories({ query, limit: 3, semantic, ...(signal?{signal}:{}) }), searchMeetingLibrary({ query, limit: 3, semantic, ...(signal?{signal}:{}) })])
+  const sources: AskSource[] = [], notices: string[] = semantic ? [] : ['COS search used keywords only, as set in Meeting assistant settings.']
   results.forEach((result, i) => {
     if (result.status === 'rejected') { if(result.reason instanceof AskProcessError)throw result.reason; notices.push(`${i === 0 ? 'COS memory' : 'Earlier meeting'} search is unavailable.`); return }
-    if (!result.value.semanticAvailable) notices.push(`${i === 0 ? 'COS memory' : 'Earlier meeting'} semantic search is unavailable; local keyword results are shown.`)
+    if (semantic && !result.value.semanticAvailable) notices.push(`${i === 0 ? 'COS memory' : 'Earlier meeting'} semantic search is unavailable; local keyword results are shown.`)
     result.value.hits.filter(h => (!excludeSessionId || !('sessionId' in h) || h.sessionId !== excludeSessionId) && Math.max(h.keywordScore, h.semanticScore) >= 0.35).slice(0, 3).forEach(h => {
       sources.push({ id: `H${sources.length + 1}`, kind: i === 0 ? 'memory' : 'meeting', title: redactSecrets(h.title + ('date' in h && h.date ? ' · ' + h.date : '')).slice(0, 180), text: redactSecrets(h.snippet).slice(0, 1500), ...('recordId' in h ? { recordId: h.recordId, sessionId: h.sessionId, domain: h.domain, month: h.month, filename: h.filename } : { memoryId: h.id }) })
     })

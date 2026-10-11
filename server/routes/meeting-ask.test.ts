@@ -126,6 +126,34 @@ describe('Meeting Ask v2 HTTP contract', () => {
             await f.close();
         }
     });
+    it('an unknown upload id is 404 media_not_found through the real media store, not a generic 503', async () => {
+        const f = await fixture();
+        try {
+            const r = await f.request('/files/media', { sessionId: 'meeting_test', serverInstanceId: 'test-server', media: [{ id: 'm_000000000000000000000000' }] });
+            expect(r.status).toBe(404);
+            expect(await r.json()).toEqual({ error: 'media_not_found' });
+        }
+        finally {
+            await f.close();
+        }
+    });
+    it('PUT config {cosSearch} alone sets the COS search mode and GET config returns it', async () => {
+        const f = await fixture();
+        try {
+            expect((await (await f.request('/config')).json())).toMatchObject({ cosSearch: 'meaning', capabilities: { cosSearchMode: true } });
+            const put = await f.request('/config', { cosSearch: 'keyword' }, 'PUT');
+            expect(put.status).toBe(200);
+            expect(await put.json()).toMatchObject({ cosSearch: 'keyword', selected: { engine: 'claude', model: 'haiku' } });
+            expect((await (await f.request('/config')).json()).cosSearch).toBe('keyword');
+            const bad = await f.request('/config', { cosSearch: 'vector' }, 'PUT');
+            expect(bad.status).toBe(400);
+            expect(await bad.json()).toEqual({ error: 'invalid_cos_search' });
+            expect((await f.request('/config', { cosSearch: 'meaning' }, 'PUT', false)).status).toBe(401);
+        }
+        finally {
+            await f.close();
+        }
+    });
     it('exports admitted file bytes after a same-revision removal and includes later revisions', async () => {
         const f = await fixture();
         try {
