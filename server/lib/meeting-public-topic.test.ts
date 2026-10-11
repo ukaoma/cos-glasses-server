@@ -1,8 +1,14 @@
 import {describe,it,expect} from 'vitest';
-import {admitPublicTopic,publicTopicContext} from './meeting-public-topic.js';
+import {admitPublicTopic,publicTopicContext,previousPublicTopic} from './meeting-public-topic.js';
 const input={history:[],sessionId:'meeting_test',question:'Can you fact check this',elapsedMs:400000,turns:[{id:1,elapsedMs:100,speaker:'Alex Rivera',text:'Private old family information'},{id:2,elapsedMs:350000,speaker:'Blair Cooper',text:'New York firehouse roof repair on City Island cost $750,000.'}],action:'ask' as const};
 const candidate={publicTopic:true,category:'public_project',evidenceTurnIds:[2],query:'New York firehouse roof repair City Island 750000'};
 describe('local public-topic admission',()=>{
+ it('keeps an admitted public topic for subjectless averages but never substitutes it for private or newly named subjects',()=>{
+  expect(previousPublicTopic({...input,question:'How much more is that than the average?'},candidate.query)).toBe(candidate.query);
+  expect(previousPublicTopic({...input,question:'Compare our private client contract to average'},candidate.query)).toBeNull();
+  expect(previousPublicTopic({...input,question:'Compare the cost of Tesla Model Y to average'},candidate.query)).toBeNull();
+ });
+
  it('admits observed public subject words and joined numeric punctuation',()=>{expect(admitPublicTopic(candidate,input)).toBe(candidate.query.toLowerCase())});
  it('contains no speaker identities, earlier history, files or future transcript in the selector input',()=>{
  const context=publicTopicContext({...input,turns:[...input.turns,{id:3,elapsedMs:500000,speaker:'Someone',text:'Future confidential fact'}]});
