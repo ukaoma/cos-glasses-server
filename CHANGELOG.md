@@ -1,3 +1,20 @@
+## 6.70.0 — private test candidate
+
+- Meeting Ask public web search works for ordinary public questions. 6.69.0 withheld every search tried in the Oct 10 live test: "Who is alt coin daily?", "What's the latest news on our competitor Lightspeed?" and the follow-up "Run the web search". Server only; no contract change. Works with COS Control 0.5.280 and later and COS Glasses 6.10.623 and later; COS Control 0.5.282 and COS Glasses 6.10.624 add a model control to the Ask chat.
+  - Public intent is one rule (`publicIntent` in `server/lib/meeting-ask-web.ts`): a question word followed by is, are, was, were, does, did, many or much ("who is", "what's", "how many"), a public-information word (web, search, google, find, latest, news, CEO, founder, founded, company, website, followers, subscribers, definition, price and the 6.69.0 words), "known for", or "look ... up".
+  - my, our, we, us, client and customer no longer withhold a question. They are dropped from the query: "our client Acme" searches "Acme".
+  - A follow-up that names nothing ("Run the web search", "search that", "look it up", "Google it") may use words from the user's own last three questions in the same meeting, read from the journal. Only completed or failed free-form Asks count.
+  - Typed words may be joined or split, so "alt coin" admits "Altcoin".
+- The privacy rule is unchanged: only words the user typed reach the web. Transcript turns, file and screenshot text, COS memory, earlier meetings and earlier answers never add a query word. A secret, including the mark redactSecrets leaves in a stored question, or a sensitive word (birthday, birthdate, address, phone, email, salary, medical, diagnosis, password, secret, confidential, wife, husband, daughter, son, family) in the question, the query or a borrowed question still withholds. Presets never search. Each Ask still gets at most two lookups and three model calls, the hook still allows one WebSearch, and only public URLs are kept.
+- A withheld search says why and gives an example: a key or token, a personal detail, no public question, words you did not type, or nothing specific to search. 6.69.0 showed one generic line for all of them.
+- An explicit web request is honored. When the question plainly asks for the web ("web search", "search the web", "on the web", "... online", google as a verb):
+  - if the answer model replies without searching the web, the server searches the user's own words once and asks again, with a notice;
+  - if the model's query added words the user did not type, the user's own words are searched instead, with a notice;
+  - if the user's words cannot be searched, the reason is shown and nothing is sent;
+  - a search request with no `searchScope` goes to the web; otherwise it goes to COS.
+- The answer prompt now spells out `{"answer":"","searchQuery":"...","searchScope":"web"}` and says to build the query only from the user's words.
+- Known limits: an implicit public question still searches only when the answer model asks; in the 6.69.0 field run Haiku answered "Who is alt coin daily?" from a screenshot instead. "look it up" and "search that" are not treated as explicit web requests, because they may mean COS. Sensitive words still withhold public questions that contain them ("Who is Masayoshi Son?").
+
 ## 6.69.0 — private test candidate
 
 - Meeting Ask, version 2. The server keeps each meeting's questions, answers, sources and file text in its own journal, apart from the meeting's Markdown, so a client can show them again after navigation or a restart. A Meeting assistant setting picks the answer model. Claude Haiku stays the default. A free-form question can also look in COS memory, earlier meetings and the public web. The four presets (`catch_up`, `summary`, `questions`, `actions`) read the current meeting only. Pairs with COS Control 0.5.280 and COS Glasses 6.10.623. Contract: `shared/meeting-ask.ts`.
