@@ -3,7 +3,7 @@ import { AskError } from '../lib/live-cos-ask.js';
 import { meetingAskRuntime, type MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
 import { getSessionChunkEntries, getSessionStartTime, getSessionAudioDirectory, getSessionAsrCompletedIndices } from './transcribe-stream.js';
 import { readProgressiveAskRefinements } from '../lib/meeting-batch-transcribe.js';
-import { meetingAskTranscript } from '../lib/meeting-ask-transcript.js';
+import { meetingAskTranscript } from '../lib/meeting-ask-hq-transcript.js';
 import { ASK_SESSION } from '../lib/meeting-ask-store.js';
 import type { MeetingAskExchange, MeetingAskFile } from '../../shared/meeting-ask.js';
 function failure(res: Response, error: unknown) { res.status(error instanceof AskError ? error.status : 503).json({ error: error instanceof AskError ? error.reason : 'meeting_assistant_unavailable' }); }

@@ -9,7 +9,7 @@ vi.mock('./whisper-local.js', () => ({
   transcribeHighQuality: vi.fn(() => { throw new Error('Ask must not decode audio') }),
 }))
 import { __progressiveHqTesting as cache, readProgressiveAskRefinements, segmentTranscriptChunks } from './meeting-batch-transcribe.js'
-import { meetingAskTranscript } from './meeting-ask-transcript.js'
+import { meetingAskTranscript } from './meeting-ask-hq-transcript.js'
 import { meetingEvidence } from './live-cos-ask.js'
 import type { IndexedTranscriptChunk } from '../routes/transcribe-stream.js'
 

@@ -54,14 +54,14 @@ const CASES = [
     replace: '!rows.length', tests: ['server/lib/whisper-batch-timing.test.ts'],
   },
   {
-    name: 'asr-canary-lost-tail', file: 'server/lib/meeting-ask-transcript.ts',
+    name: 'asr-canary-lost-tail', file: 'server/lib/meeting-ask-hq-transcript.ts',
     find: 'if (!covered.has(entry.chunkIndex) && entry.chunk.text.trim())',
-    replace: 'if (false)', tests: ['server/lib/meeting-ask-transcript.test.ts'],
+    replace: 'if (false)', tests: ['server/lib/meeting-ask-hq-transcript.test.ts'],
   },
   {
     name: 'asr-canary-changed-number', file: 'server/lib/meeting-batch-transcribe.ts',
     find: '&& numbers.every(number => refinedNumbers.has(number))',
-    replace: '', tests: ['server/lib/meeting-ask-transcript.test.ts'],
+    replace: '', tests: ['server/lib/meeting-ask-hq-transcript.test.ts'],
   },
   {
     name: 'asr-canary-control-bypasses-refinement', file: 'server/lib/meeting-ask-runtime.ts',

@@ -1,7 +1,7 @@
 import type { AskInput } from './live-cos-ask.js'
 import { getSessionAudioDirectory, getSessionAsrCompletedIndices, getSessionChunkEntries } from '../routes/transcribe-stream.js'
 import { readProgressiveAskRefinements } from './meeting-batch-transcribe.js'
-import { meetingAskTranscript } from './meeting-ask-transcript.js'
+import { meetingAskTranscript } from './meeting-ask-hq-transcript.js'
 
 /** Apply at request admission: current Control sends its live feed directly,
  * rather than calling /meeting-ask/transcript. Freeze the improved evidence
