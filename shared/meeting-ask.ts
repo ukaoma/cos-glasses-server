@@ -175,6 +175,7 @@ export interface MeetingAskCapabilities {
     phoneFiles?: true;
     /** 6.71.1: config carries cosSearch and PUT config {cosSearch} changes it. */
     cosSearchMode?: true;
+    meetingContext?: true;
 }
 /**
  * How Meeting Ask searches COS memory and earlier meetings (6.71.1). 'meaning' (default) adds the embedding
@@ -210,3 +211,15 @@ export interface MeetingAskConfig {
  * client prepends its current canonical transcript. All operations use X-Cos-Token.
  * GET config is the capability probe (404 means old server); health.capabilities.meetingAsk mirrors capabilities.
  */
+
+/** User-confirmed navigation context for one meeting, never canonical transcript evidence. */
+export type MeetingAskDomain = string;
+export interface MeetingAskCalendarMatch {
+    id: string; title: string; start: string; end: string; suggestedDomain?: MeetingAskDomain;
+}
+export interface MeetingAskOrientation {
+    revision: number; domain: MeetingAskDomain | null; calendar: MeetingAskCalendarMatch | null;
+}
+export interface MeetingAskContext {
+    orientation: MeetingAskOrientation; domains: Array<{id: string; label: string}>; candidates: MeetingAskCalendarMatch[]; notices: string[];
+}

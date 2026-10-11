@@ -16,7 +16,7 @@ import type { AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
 import { MediaStoreError } from '../lib/media-store.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
 async function fixture(transcripts?: AskTranscriptSources, media?: () => any) {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
+    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
@@ -44,7 +44,7 @@ describe('Meeting Ask v2 HTTP contract', () => {
         await new Promise(r => setTimeout(r, 10));
         const path = '?sessionId=meeting_test&serverInstanceId=test-server';
         const h = await (await f.request('/history' + path)).json();
-        expect(h.exchanges[0].answer).toBe('**So what:** Nina [T1]');
+        expect(h.exchanges[0].answer).toMatch(/^\*\*So what:\*\* Nina \[T1\]\n\n\*\*Confidence:\*\*/);
         expect((await f.request('/requests', input)).status).toBe(202);
         expect(f.run).toHaveBeenCalledTimes(1);
         const exported = await (await f.request('/export' + path)).json();
@@ -59,11 +59,11 @@ describe('Meeting Ask v2 HTTP contract', () => {
         f.run.mockResolvedValueOnce({ text: JSON.stringify({ sections: [{ label: 'decided', text: 'Friday review [T1].' }, { label: 'So what', text: 'Nina reviews [T1].' }], searchQuery: null }), model: 'haiku' });
         expect((await f.request('/requests', { ...input, action: 'summary', question: '' })).status).toBe(202);
         await new Promise(r => setTimeout(r, 10));
-        const expected = [{ label: 'So what', text: 'Nina reviews [T1].', sources: ['T1'] }, { label: 'Decided', text: 'Friday review [T1].', sources: ['T1'] }];
+        const expected = [{ label: 'So what', text: 'Nina reviews [T1].', sources: ['T1'] }, { label: 'Decided', text: 'Friday review [T1].', sources: ['T1'] }, {label:'Confidence',text:expect.stringMatching(/^Limited/),sources:[]}];
         const one = (await (await f.request('/requests/' + input.requestId)).json()).exchange;
         expect(one.status).toBe('completed');
         expect(one.sections).toEqual(expected);
-        expect(one.answer).toBe('**So what:** Nina reviews [T1].\n\n**Decided:** Friday review [T1].');
+        expect(one.answer).toMatch(/^\*\*So what:\*\* Nina reviews \[T1\].\n\n\*\*Decided:\*\* Friday review \[T1\].\n\n\*\*Confidence:\*\*/);
         const h = await (await f.request('/history?sessionId=meeting_test&serverInstanceId=test-server')).json();
         expect(h.exchanges[0].sections).toEqual(expected);
         const reload = new MeetingAskRuntime({ store: (f.runtime as any).deps.store, identity: () => 'test-server' });
@@ -72,6 +72,18 @@ describe('Meeting Ask v2 HTTP contract', () => {
     finally {
         await f.close();
     } });
+    it('confirms one meeting domain without AI, rejects stale and cross-server changes', async () => {
+        const f=await fixture(); try {
+            const value={sessionId:'meeting_test',serverInstanceId:'test-server',expectedRevision:0,domain:'quilt',calendarId:null};
+            const response=await f.request('/context',value,'PUT');
+            expect(response.status).toBe(200);
+            expect((await response.json()).orientation).toMatchObject({revision:1,domain:'quilt',calendar:null});
+            expect((await f.request('/context',value,'PUT')).status).toBe(409);
+            expect((await f.request('/context',{...value,expectedRevision:1,domain:'invented'},'PUT')).status).toBe(400);
+            expect((await f.request('/context',{...value,serverInstanceId:'wrong'},'PUT')).status).toBe(409);
+            expect(f.run).not.toHaveBeenCalled();
+        } finally { await f.close(); }
+    });
     it('returns canonical active transcript and persists attachment changes without invoking AI', async () => { const f = await fixture(); try {
         const t = await (await f.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server')).json();
         expect(t.turns[0].id).toBe(2);

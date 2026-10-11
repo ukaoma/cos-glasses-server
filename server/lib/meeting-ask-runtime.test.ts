@@ -8,7 +8,7 @@ import { exportMeetingAsk } from '../routes/meeting-ask.js';
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'We will review Friday.' }] };
 function fixture(overrides: Record<string, unknown> = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'ask-test-')), store = new MeetingAskStore(dir), release = vi.fn(), run = vi.fn(async (_model: unknown, _prompt: string) => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Review Friday [T1]' }], searchQuery: null }), model: 'claude-haiku-5-5' }));
-    const runtime = new MeetingAskRuntime({ store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
+    const runtime = new MeetingAskRuntime({ domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
     return { runtime, store, run, release, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { for (let i = 0; i < 100; i++) {
@@ -18,6 +18,24 @@ async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { fo
     await new Promise(r => setTimeout(r, 2));
 } throw Error('never terminal'); }
 describe('meeting Ask durable ownership', () => {
+    it('freezes the confirmed domain before provider work and keeps it on retry', async () => {
+        let complete!: (v: any) => void;
+        const search = vi.fn(async () => ({sources:[],notices:[]}));
+        const run = vi.fn().mockImplementationOnce(() => new Promise(r => { complete = r; })).mockResolvedValue({text:'{"sections":[{"label":"So what","text":"Review Friday [T1]"}],"confidence":{"level":"limited","reason":"The deadline is clear; ownership is unstated."}}'});
+        const f=fixture({run,search});
+        try {
+            f.store.putOrientation(base.sessionId,{revision:1,domain:'quilt',calendar:null});
+            await f.runtime.submit(base); await new Promise(r=>setTimeout(r,0));
+            f.store.putOrientation(base.sessionId,{revision:2,domain:'personal',calendar:null});
+            complete({text:'{"sections":[],"searchQuery":"prior review"}'});
+            const result=await terminal(f);
+            expect(search).toHaveBeenCalledWith('prior review',base.sessionId,expect.any(AbortSignal),'meaning','quilt');
+            expect(JSON.parse(run.mock.calls[0][1]).orientation.domain).toBe('quilt');
+            expect(result.sections?.at(-1)?.label).toBe('Confidence');
+            expect(f.store.get(base.requestId)?.orientation?.domain).toBe('quilt');
+            expect((await f.runtime.submit(base)).answer).toBe(result.answer);
+        } finally { f.cleanup(); }
+    });
     it('refines the direct Control payload once and freezes citations, files and retry identity', async () => {
         const refine = vi.fn(input => ({ input: { ...input, turns: [
             { id: 0, elapsedMs: 0, speaker: 'Unidentified', text: 'The budget is 14000. It has not been approved.' },
@@ -99,8 +117,9 @@ describe('meeting Ask durable ownership', () => {
     } });
     it('legacy Ask returns sections and passes the wearer to the model', async () => { const f = fixture({ wearer: () => 'Sam Rivera' }); try {
         const result = await f.runtime.legacy({ ...base, history: [] }, new AbortController().signal);
-        expect(result.sections).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
-        expect(result.answer).toBe('**So what:** Review Friday [T1]');
+        expect(result.sections.slice(0,-1)).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(result.sections.at(-1)).toMatchObject({label:'Confidence',text:expect.stringMatching(/^Limited/)});
+        expect(result.answer).toMatch(/^\*\*So what:\*\* Review Friday \[T1\]\n\n\*\*Confidence:\*\* Limited/);
         expect(JSON.parse(f.run.mock.calls[0][1]).wearer).toBe('Sam Rivera');
         await f.runtime.submit(base);
         expect(JSON.parse(f.run.mock.calls[1][1]).wearer).toBe('Sam Rivera');
@@ -113,7 +132,8 @@ describe('meeting Ask durable ownership', () => {
         await f.runtime.submit(base);
         const e = await terminal(f);
         expect(e.status).toBe('completed');
-        expect(e.sections).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(e.sections?.slice(0,-1)).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(e.sections?.at(-1)?.label).toBe('Confidence');
         expect(e.notices).toContain('This answer was not in the skim format.');
     }
     finally {
@@ -180,7 +200,8 @@ describe('meeting Ask durable ownership', () => {
         const e = await terminal(f);
         expect(e.error).toBe('journal_write_failed');
         expect(e.answer).toContain('Review Friday');
-        expect(e.sections).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(e.sections?.slice(0,-1)).toEqual([{ label: 'So what', text: 'Review Friday [T1]', sources: ['T1'] }]);
+        expect(e.sections?.at(-1)?.label).toBe('Confidence');
         expect(f.run).toHaveBeenCalledTimes(1);
         expect(f.release).not.toHaveBeenCalled();
     }

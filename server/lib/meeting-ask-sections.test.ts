@@ -75,13 +75,14 @@ describe('Meeting Ask sections: end to end through createLiveAsk', () => {
   it('composes answer as one **Label:** line per section and returns sections with sources', async () => {
     const { ask: run } = ask([row('Next', 'Confirm the owner [T3].'), row('So what', 'Annual plan chosen [T1].'), row('Decided', 'Annual plan [T1].'), row('Open', ''), row('You owe', 'Pricing sheet by Friday [T2].')])
     const result = await run(input('catch_up'))
-    expect(result.answer).toBe('**So what:** Annual plan chosen [T1].\n\n**Decided:** Annual plan [T1].\n\n**You owe:** Pricing sheet by Friday [T2].\n\n**Next:** Confirm the owner [T3].')
-    expect(result.sections).toEqual([
+    expect(result.answer.split('\n\n**Confidence:**')[0]).toBe('**So what:** Annual plan chosen [T1].\n\n**Decided:** Annual plan [T1].\n\n**You owe:** Pricing sheet by Friday [T2].\n\n**Next:** Confirm the owner [T3].')
+    expect(result.sections.slice(0, -1)).toEqual([
       { label: 'So what', text: 'Annual plan chosen [T1].', sources: ['T1'] },
       { label: 'Decided', text: 'Annual plan [T1].', sources: ['T1'] },
       { label: 'You owe', text: 'Pricing sheet by Friday [T2].', sources: ['T2'] },
       { label: 'Next', text: 'Confirm the owner [T3].', sources: ['T3'] },
     ])
+    expect(result.sections.at(-1)?.label).toBe('Confidence')
     expect(result.sources.map(s => s.id)).toEqual(['T1', 'T2', 'T3'])
   })
   it('an unknown label, a foreign label or a missing So what fails as invalid_answer with no retry', async () => {
@@ -105,7 +106,7 @@ describe('Meeting Ask sections: end to end through createLiveAsk', () => {
     const search = vi.fn(async () => ({ sources: [{ id: 'H1', kind: 'meeting' as const, title: 'Plan review · 2026-09-30', text: 'Annual plan agreed.' }], notices: [] }))
     const result = await createLiveAsk({ run, search, now: () => 5000 })(input('ask', 'Did we pick this before?'))
     expect(search).toHaveBeenCalledTimes(1)
-    expect(result.sections.map(s => [s.label, s.sources])).toEqual([['So what', ['H1']], ['Details', ['H1', 'T1']]])
+    expect(result.sections.slice(0, -1).map(s => [s.label, s.sources])).toEqual([['So what', ['H1']], ['Details', ['H1', 'T1']]])
   })
 })
 
@@ -113,7 +114,7 @@ describe('Meeting Ask sections: a provider that still answers {"answer":"..."}',
   const old = (answer: unknown, extra: Record<string, unknown> = {}) => createLiveAsk({ run: async () => ({ text: JSON.stringify({ answer, searchQuery: null, ...extra }), model: 'claude-haiku' }), search: vi.fn(), now: () => 5000 })
   it('reads **Label:** lines through the same rules, with no notice', async () => {
     const result = await old('**Decided:** Annual plan [T1].\n\n**So what:** Annual plan chosen\nfor next year [T1].\n- **Open:** None\n**Next**: Confirm the owner [T3].')(input('catch_up'))
-    expect(result.sections).toEqual([
+    expect(result.sections.slice(0, -1)).toEqual([
       { label: 'So what', text: 'Annual plan chosen for next year [T1].', sources: ['T1'] },
       { label: 'Decided', text: 'Annual plan [T1].', sources: ['T1'] },
       { label: 'Next', text: 'Confirm the owner [T3].', sources: ['T3'] },
@@ -130,8 +131,8 @@ describe('Meeting Ask sections: a provider that still answers {"answer":"..."}',
     for (const [answer, action] of cases) {
       const result = await old(answer)(input(action))
       const text = answer.replace('[T9]', '[source unavailable]')
-      expect(result.sections, answer).toEqual([{ label: 'So what', text, sources: [...new Set(text.match(/T\d+/g))] }])
-      expect(result.answer).toBe('**So what:** ' + text)
+      expect(result.sections.slice(0, -1), answer).toEqual([{ label: 'So what', text, sources: [...new Set(text.match(/T\d+/g))] }])
+      expect(result.answer.split('\n\n**Confidence:**')[0]).toBe('**So what:** ' + text)
       expect(result.notices).toContain(OFF_FORMAT_NOTICE)
     }
   })

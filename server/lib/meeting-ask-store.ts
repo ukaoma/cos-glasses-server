@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { durableAtomicWriteFileSync } from './atomic-fs.js';
 import { dataPath } from './data-dir.js';
 import type { MeetingAskExchange, MeetingAskFile, MeetingAskSubmit, MeetingAskModel, MeetingAskCosSearch } from '../../shared/meeting-ask.js';
+import { emptyOrientation } from './meeting-ask-orientation.js';
+import type { MeetingAskOrientation } from '../../shared/meeting-ask.js';
 import { AskError } from './live-cos-ask.js';
 export const ASK_ID = /^[A-Za-z0-9_-]{8,100}$/;
 export const ASK_SESSION = /^meeting_[A-Za-z0-9_-]{1,89}$/;
@@ -12,6 +14,7 @@ export interface AskRecord {
     fingerprint: string;
     input: MeetingAskSubmit;
     exchange: MeetingAskExchange;
+    orientation?: MeetingAskOrientation;
 }
 export function askFingerprint(input: MeetingAskSubmit): string { return createHash('sha256').update(JSON.stringify(input)).digest('hex'); }
 /** Synchronous fsync/rename transitions serialize inside the one server process. No await inside a write. */
@@ -113,6 +116,20 @@ export class MeetingAskStore {
             throw new AskError('journal_write_failed', 507);
         }
         return [...merged.values()];
+    }
+    orientation(sessionId: string): MeetingAskOrientation {
+        if (!ASK_SESSION.test(sessionId)) throw new AskError('invalid_session_id');
+        const result = this.read<MeetingAskOrientation>(join(this.dir('orientation'), sessionId + '.json'));
+        if (result && (!Number.isSafeInteger(result.revision) || result.revision < 0)) throw new AskError('journal_unreadable', 503);
+        return result ?? emptyOrientation();
+    }
+    putOrientation(sessionId: string, orientation: MeetingAskOrientation): MeetingAskOrientation {
+        this.orientation(sessionId);
+        const dir = this.dir('orientation');
+        if (readdirSync(dir).length >= 2000 && !this.read(join(dir, sessionId + '.json'))) throw new AskError('history_storage_limit', 507);
+        try { durableAtomicWriteFileSync(join(dir, sessionId + '.json'), JSON.stringify(orientation), { mode: 0o600 }); }
+        catch { throw new AskError('journal_write_failed', 507); }
+        return orientation;
     }
     config(): MeetingAskModel { return this.read<MeetingAskModel>(join(this.dir('config'), 'model.json')) ?? { engine: 'claude', model: 'haiku' }; }
     setConfig(model: MeetingAskModel): void { durableAtomicWriteFileSync(join(this.dir('config'), 'model.json'), JSON.stringify(model), { mode: 0o600 }); }

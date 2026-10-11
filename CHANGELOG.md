@@ -1,3 +1,10 @@
+## 6.71.3 · private meeting evidence candidate
+
+- Every completed Meeting Ask answer includes a qualitative evidence-confidence row. G2 microphone/ASR limitations guide reasoning; names remain unverified when unclear, explicit later corrections resolve the earlier value, and evidenced rehearsals are not treated as real commitments.
+- Per-meeting calendar suggestions match recording start. A user explicitly confirms a configured domain and optional calendar match; COS searches then focus on that domain. Context freezes at request admission, survives navigation/restart, and stale edits cannot overwrite newer confirmations. Calendar context never lends words to web queries or proves meeting decisions.
+- Includes every 6.71.2 saved-Ask, file, search and canary change. Timestamp and HQ refinement canaries remain disabled: prior live latency exceeded 30 seconds. No claim of improved raw ASR accuracy.
+- Plan: `docs/test-plan-6.71.3.md`. Old clients still receive sections and composed Markdown; the context capability is additive.
+
 ## 6.71.2 · private combined candidate · transcription canary, disabled by default
 
 - Combines the 6.71.1 Meeting Ask changes with disabled transcription canaries. Saved meeting fallback, recent-topic questions, phone files and COS search settings are retained. See `docs/test-plan-6.71.2.md` for the combined acceptance gates.

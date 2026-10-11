@@ -68,6 +68,14 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
     catch (e) {
         failure(res, e);
     } });
+    router.get('/meeting-ask/context', async (req, res) => { try {
+        const sessionId = String(req.query.sessionId ?? '');
+        res.json(await runtime.context(sessionId, req.query.serverInstanceId, transcripts.live(sessionId)?.startTime ?? null));
+    } catch (e) { failure(res, e); } });
+    router.put('/meeting-ask/context', async (req, res) => { try {
+        const sessionId = String(req.body?.sessionId ?? '');
+        res.json({ orientation: await runtime.setContext(sessionId, req.body?.serverInstanceId, transcripts.live(sessionId)?.startTime ?? null, req.body) });
+    } catch (e) { failure(res, e); } });
     router.post('/meeting-ask/requests', async (req, res) => { try {
         res.status(202).json({ exchange: await runtime.submit(req.body) });
     }

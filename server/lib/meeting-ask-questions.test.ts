@@ -63,13 +63,13 @@ describe('What to ask: Ask rows newest first', () => {
     const input = meeting(30, 1, 50)
     const run = vi.fn(async (_p: string) => json({ sections: [ask('So what', 'Topic changed [T30].'), ask('Ask', 'About the start? [T1]'), ask('Ask', 'About the middle? [T15]'), ask('Ask', 'About now? [T30]')] }))
     const result = await createLiveAsk({ run, search: vi.fn(), now: () => 5000 })(input)
-    expect(result.sections.map(s => s.text)).toEqual(['Topic changed [T30].', 'About now? [T30]', 'About the middle? [T15]', 'About the start? [T1]'])
+    expect(result.sections.slice(0,-1).map(s => s.text)).toEqual(['Topic changed [T30].', 'About now? [T30]', 'About the middle? [T15]', 'About the start? [T1]'])
     expect(result.answer.split('\n\n')[1]).toBe('**Ask:** About now? [T30]')
   })
   it('leaves other actions in label order', async () => {
     const input = { ...meeting(30, 1, 50), action: 'summary' as const }
     const run = vi.fn(async (_p: string) => json({ sections: [ask('So what', 'x [T1]'), ask('Covered', 'old [T1]'), ask('Next', 'new [T30]')] }))
-    expect((await createLiveAsk({ run, search: vi.fn(), now: () => 5000 })(input)).sections.map(s => s.label)).toEqual(['So what', 'Covered', 'Next'])
+    expect((await createLiveAsk({ run, search: vi.fn(), now: () => 5000 })(input)).sections.slice(0,-1).map(s => s.label)).toEqual(['So what', 'Covered', 'Next'])
   })
 })
 
