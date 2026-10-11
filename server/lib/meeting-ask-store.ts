@@ -15,6 +15,7 @@ export interface AskRecord {
     input: MeetingAskSubmit;
     exchange: MeetingAskExchange;
     orientation?: MeetingAskOrientation;
+    publicTopics?: boolean;
     finalizedEvidence?: import('./meeting-ask-transcript.js').FinalizedAskEvidence;
 }
 export function askFingerprint(input: MeetingAskSubmit): string { return createHash('sha256').update(JSON.stringify(input)).digest('hex'); }
@@ -132,6 +133,8 @@ export class MeetingAskStore {
         catch { throw new AskError('journal_write_failed', 507); }
         return orientation;
     }
+    publicTopics(): boolean { return this.read<{enabled?:unknown}>(join(this.dir('config'),'public-topics.json'))?.enabled === true; }
+    setPublicTopics(enabled:boolean): void { durableAtomicWriteFileSync(join(this.dir('config'),'public-topics.json'),JSON.stringify({enabled}),{mode:0o600}); }
     config(): MeetingAskModel { return this.read<MeetingAskModel>(join(this.dir('config'), 'model.json')) ?? { engine: 'claude', model: 'haiku' }; }
     setConfig(model: MeetingAskModel): void { durableAtomicWriteFileSync(join(this.dir('config'), 'model.json'), JSON.stringify(model), { mode: 0o600 }); }
     /** 6.71.1. Anything but an explicit 'keyword' reads as the default, 'meaning'. */

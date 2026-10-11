@@ -1,3 +1,10 @@
+## 6.71.5 · public-topic meeting fact-checks
+
+- Meeting Ask can use recent public-topic passages for fact-checks and cost comparisons after an explicit persisted opt-in. It defaults off; private topics, speaker identities, unrelated passages, files, calendar and memory cannot lend search vocabulary. Older companion builds remain compatible.
+- A consented fact-check retrieves the admitted claim before answering. Questions about average costs reserve a further bounded lookup, cite available benchmarks, and distinguish an actual average from one comparable project. Missing dimensions limit precision rather than stopping research.
+- Read at most two linked text pages per search with bounded excerpts, time and bytes. Every destination and redirect is checked and DNS is pinned to the actual connection; no cookies or credentials are sent.
+- Timestamp and HQ transcription canaries remain disabled. This release improves retrieval and interpretation; it does not claim a passed 30-second audio-refinement gate.
+
 ## 6.71.4 · public meeting evidence release
 
 - New questions about completed G2 recordings receive accepted finalized transcript passages alongside original live evidence. Earlier answer quotations and turn targets stay unchanged. Final passages are frozen at admission, bounded, redacted and restricted to the requested audio cutoff.

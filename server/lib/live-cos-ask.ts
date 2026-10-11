@@ -122,6 +122,8 @@ export interface LiveAskDeps {
   webAvailable?: boolean
   /** Set only when the user explicitly asked for the web: the user's own words, searched if the planner does not search the web itself. */
   explicitWebQuery?: string | null
+  publicTopicQuery?: boolean
+  benchmarkWebQuery?: string | null
   /** The wearer's name, so "You owe" can match a line that names them. null when unknown. */
   wearer?: () => string | null
 }
@@ -170,6 +172,25 @@ export function orderAsksByRecency(sections: MeetingAskSection[], sources: reado
   const newest = (row: MeetingAskSection) => Math.max(-1, ...row.sources.filter(id => at.has(id)).map(id => at.get(id)!))
   const asks = sections.map((row, i) => ({ row, i, t: newest(row) })).filter(x => x.row.label === 'Ask').sort((a, b) => b.t - a.t || a.i - b.i).map(x => x.row)
   return [...sections.filter(row => row.label !== 'Ask'), ...asks]
+}
+/** Recover a provider's final complete JSON correction without another model call.
+ * Every row and citation still goes through the same strict answer contract. */
+export function parseAskReply(text:string):any {
+  const clean=text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')
+  try{return JSON.parse(clean)}catch{/* a corrected object may follow an earlier draft */}
+  let start=-1,depth=0,quoted=false,escaped=false;const objects:any[]=[]
+  for(let i=0;i<clean.length;i++){
+    const c=clean[i]
+    if(start<0){if(c==='{'){start=i;depth=1;quoted=false;escaped=false}continue}
+    if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;continue}
+    if(c==='"'){quoted=true;continue}
+    if(c==='{')depth++
+    if(c==='}'&&--depth===0){try{objects.push(JSON.parse(clean.slice(start,i+1)))}catch{/* not a JSON object */}start=-1;if(objects.length>8)throw new AskError('invalid_answer',502)}
+  }
+  if(start>=0||!objects.length)throw new AskError('invalid_answer',502)
+  const last=objects.at(-1)
+  if(!Array.isArray(last?.sections)&&typeof last?.answer!=='string'&&typeof last?.searchQuery!=='string')throw new AskError('invalid_answer',502)
+  return last
 }
 export const OFF_FORMAT_NOTICE = 'This answer was not in the skim format.'
 const LABEL_LINE = /^\s*(?:[-*]\s+)?\*\*([^*\n]{1,40}?)\s*:?\s*\*\*\s*:?\s*(.*)$/
@@ -244,25 +265,46 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
         for (const source of found.sources) if (!evidence.sources.some(s => s.kind === source.kind && s.title === source.title && s.text === source.text)) evidence.sources.push({ ...source, id: `${source.kind === 'web' ? 'W' : 'H'}${evidence.sources.filter(s => s.kind !== 'transcript').length + 1}` })
         evidence.notices.push(...found.notices)
       }
+      // A consented transcript fact-check first retrieves its admitted public claim.
+      // Do this before the answer planner so it cannot substitute a benchmark for
+      // the original article. One further lookup remains for a comparison.
+      const preloadedWeb = input.action === 'ask' && !!deps.publicTopicQuery && !!deps.explicitWebQuery && !!deps.webAvailable
+      if(preloadedWeb){webAsked=true;absorb(await deps.search(deps.explicitWebQuery!,input.sessionId,'web'));if(deps.benchmarkWebQuery)absorb(await deps.search(deps.benchmarkWebQuery,input.sessionId,'web'))}
       // At most two searches and three model calls, only after one explicit Ask.
       for (let hop = 0; hop < 3; hop++) {
         if (signal?.aborted) throw new AskError('cancelled', 499)
         // A typed question may look up twice (COS or web). What to ask may look up once, in COS only.
-        const searchAllowed = input.action === 'ask' ? hop < 2 : input.action === 'questions' && hop < 1
+        const searchAllowed = input.action === 'ask' ? hop < (preloadedWeb ? deps.benchmarkWebQuery ? 0 : 1 : 2) : input.action === 'questions' && hop < 1
         const prompt = JSON.stringify({ question: input.action === 'ask' ? input.question : TASKS[input.action], labels: MEETING_ASK_LABELS[input.action], wearer: deps.wearer?.() ?? null, ...(input.action === 'questions' ? { recentSinceMs: recentSinceMs(input) } : {}), history: input.action === 'ask' ? input.history : [], searchAllowed, orientation: deps.orientation ?? null, evidence: evidence.sources, coverage: evidence.notices })
         const run = await deps.run(prompt, signal)
         if (signal?.aborted) throw new AskError('cancelled', 499)
         if (deps.requireHaiku !== false && run.model && !run.model.toLowerCase().includes('haiku')) throw new AskError('haiku_unavailable', 503)
         model = run.model ?? model
         let output: any
-        try { output = JSON.parse(run.text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')) } catch { throw new AskError('invalid_answer', 502) }
+        try { output = parseAskReply(run.text) } catch { throw new AskError('invalid_answer', 502) }
         if (searchAllowed && typeof output?.searchQuery === 'string' && output.searchQuery.trim()) {
           // The planner decides the scope. A request with no scope goes to the web only when the user explicitly asked for it.
           // Only a typed question reaches the web. A preset never sends meeting-derived words there.
-          const scope = input.action === 'ask' && deps.webAvailable && (output.searchScope === 'web' || (output.searchScope == null && !!deps.explicitWebQuery)) ? 'web' : 'cos'
+          let scope: 'web' | 'cos' = input.action === 'ask' && deps.webAvailable && (output.searchScope === 'web' || (output.searchScope == null && !!deps.explicitWebQuery)) ? 'web' : 'cos'
+          // Reserve the last lookup for an explicitly requested public check.
+          // Two COS plans must not silently exhaust the budget before that search.
+          const reservedWeb = hop === 1 && input.action === 'ask' && deps.webAvailable && !!deps.explicitWebQuery && !webAsked && scope === 'cos'
+          if (reservedWeb) scope = 'web'
           if (scope === 'web') webAsked = true
-          absorb(await deps.search(output.searchQuery.trim().slice(0, 240), input.sessionId, scope))
+          absorb(await deps.search(reservedWeb ? deps.explicitWebQuery! : output.searchQuery.trim().slice(0, 240), input.sessionId, scope))
           continue
+        }
+        // Providers sometimes put the requested confidence assessment in a
+        // labeled row. Normalize that known shape without another inference;
+        // all other unknown labels still fail the strict section contract.
+        if(input.action==='ask' && Array.isArray(output?.sections))output.sections=output.sections.map((row:any)=>typeof row?.label==='string' && /^ask:?$/i.test(row.label.trim()) ? {...row,label:'Details'} : row)
+        let confidence = output?.confidence
+        if(Array.isArray(output?.sections) && output.sections.length<=12){
+          const confidenceRows=output.sections.filter((r:any)=>typeof r?.label==='string' && /^confidence:?$/i.test(r.label.trim()) && typeof r.text==='string')
+          if(confidenceRows.length){
+            output.sections=output.sections.filter((r:any)=>!confidenceRows.includes(r))
+            if(!confidence){const text=confidenceRows.map((r:any)=>r.text).join(' ');const parsed=/^(supported|limited|low)\s*[:—-]\s*(.*)$/i.exec(text.trim());confidence=parsed?{level:parsed[1].toLowerCase(),reason:parsed[2]}:null}
+          }
         }
         const allowed = new Set(evidence.sources.map(s => s.id))
         // A real sections array is held to the contract; only a reply with no sections falls back.
@@ -276,12 +318,14 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
         // This uses one of the same two lookups; the presets never reach it (searchAllowed is false).
         if (searchAllowed && input.action === 'ask' && deps.webAvailable && deps.explicitWebQuery && !webAsked) {
           webAsked = true
-          evidence.notices.push(`You asked for the web, so COS searched it for "${deps.explicitWebQuery}" using only your words.`)
+          evidence.notices.push(deps.publicTopicQuery
+            ? `COS searched the public topic "${deps.explicitWebQuery}" selected from this meeting under your public-topic setting.`
+            : `You asked for the web, so COS searched it for "${deps.explicitWebQuery}" using only your words.`)
           absorb(await deps.search(deps.explicitWebQuery, input.sessionId, 'web'))
           continue
         }
         if (legacy?.offFormat) evidence.notices.push(OFF_FORMAT_NOTICE)
-        sections.push(answerConfidence(output?.confidence, sections, evidence.notices))
+        sections.push(answerConfidence(confidence, sections, evidence.notices))
         const answer = meetingAskAnswerMarkdown(sections)
         const cited = new Set(sections.flatMap(s => s.sources))
         if (!cited.size) evidence.notices.push('The answer did not cite a transcript passage. Treat it as a suggestion.')

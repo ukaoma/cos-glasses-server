@@ -3,6 +3,34 @@ import { createLiveAsk, normalizeAsk, meetingEvidence, type AskInput } from './l
 const input = (extra: Record<string, unknown> = {}): AskInput => normalizeAsk({ sessionId: 'meeting_123_test', action: 'ask', question: 'What did Maya commit to?', elapsedMs: 120000, turns: [{ id: 1, speaker: 'Maya', elapsedMs: 65000, text: 'I will send the draft Friday.' }], ...extra })
 const reply = (answer = 'Maya will send the draft Friday. [T1]') => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: answer }], searchQuery: null }), model: 'claude-haiku' })
 describe('Live COS Ask', () => {
+  it('retrieves the original claim and benchmark before a comparison answer without asking permission',async()=>{
+    const search=vi.fn(async(q:string)=>({sources:[{id:'W1',kind:'web' as const,title:q,text:q,url:'https://example.com'}],notices:[]}));
+    const run=vi.fn(async(p:string)=>{expect(JSON.parse(p).searchAllowed).toBe(false);return {text:JSON.stringify({sections:[{label:'So what',text:'The public allocation exceeds the cited example [W1].'},{label:'Ask',text:'Confirm the roof area before a per-square-foot comparison.'}]})}});
+    const result=await createLiveAsk({run,search,now:()=>5000,webAvailable:true,publicTopicQuery:true,explicitWebQuery:'fire station roof 750000',benchmarkWebQuery:'fire station roof average cost'})(input({question:'How much more is that than average?'}));
+    expect(search).toHaveBeenCalledTimes(2);expect(run).toHaveBeenCalledOnce();expect(result.sections.find(s=>s.label==='Details')?.text).toContain('Confirm the roof area');
+  })
+
+  it('uses the final complete provider JSON correction with strict citations and no retry',async()=>{
+    const corrected=JSON.stringify({sections:[{label:'So what',text:'Final corrected fact [T1].'}],confidence:{level:'limited',reason:'Scope is unknown.'}});
+    const run=vi.fn(async()=>({text:'{"sections":[{"label":"Wrong","text":"placeholder"}]}\nCorrection, valid JSON follows:\n'+corrected}));
+    const result=await createLiveAsk({run,search:vi.fn(),now:()=>5000})(input());expect(result.answer).toContain('Final corrected fact');expect(result.answer).not.toContain('placeholder');expect(run).toHaveBeenCalledOnce();
+    await expect(createLiveAsk({run:async()=>({text:corrected+'\n{"sections":['}),now:()=>5000})(input())).rejects.toThrow('invalid_answer');
+  })
+
+  it('accepts a provider confidence row without retrying or relaxing unknown labels',async()=>{
+    const run=vi.fn(async()=>({text:JSON.stringify({sections:[{label:'So what',text:'The cited allocation is not a contract [T1].'},{label:'Confidence',text:'Low: the project scope is unclear.'}],searchQuery:null})}));
+    const result=await createLiveAsk({run,search:vi.fn(),now:()=>5000})(input());expect(run).toHaveBeenCalledOnce();expect(result.sections.filter(s=>s.label==='Confidence')).toHaveLength(1);expect(result.sections.at(-1)?.text).toContain('Low — the project scope is unclear.');
+    await expect(createLiveAsk({run:async()=>({text:'{"sections":[{"label":"So what","text":"Good [T1]"},{"label":"Unsafe custom heading","text":"No"}]}'}),now:()=>5000})(input())).rejects.toThrow('invalid_answer');
+  })
+
+  it('retrieves the consented public claim before planning, then allows one benchmark hop',async()=>{
+    const calls:string[]=[];
+    const search=vi.fn(async(q:string)=>{calls.push('search:'+q);return {sources:[{id:'W1',kind:'web' as const,title:q,text:q,url:'https://example.com/claim'}],notices:[]}});
+    const run=vi.fn(async(p:string)=>{calls.push('answer');const prompt=JSON.parse(p);if(run.mock.calls.length===1){expect(prompt.evidence.some((e:any)=>e.kind==='web')).toBe(true);return {text:'{"sections":[],"searchQuery":"fire station roof average cost","searchScope":"web"}'}}expect(prompt.searchAllowed).toBe(false);return reply('The allocated price is higher than the cited example [W1].')});
+    await createLiveAsk({run,search,now:()=>5000,webAvailable:true,explicitWebQuery:'fire station roof 750000',publicTopicQuery:true})(input({question:'How much more is that than average?'}));
+    expect(calls).toEqual(['search:fire station roof 750000','answer','search:fire station roof average cost','answer']);expect(search).toHaveBeenCalledTimes(2);
+  })
+
   it('rejects malformed, oversized, duplicate and out-of-time transcript input', () => {
     for (const bad of [{sessionId:'../secret'}, {action:'execute'}, {question:''}, {elapsedMs:-1}, {turns:[]}, {history:[{}]}, {turns:[{id:1,speaker:'M',elapsedMs:150000,text:'x'}]}, {turns:[{id:1,speaker:'M',elapsedMs:1,text:'x'},{id:1,speaker:'M',elapsedMs:2,text:'y'}]}]) expect(() => input(bad)).toThrow()
   })
@@ -147,6 +175,7 @@ describe('Live COS Ask', () => {
     const s2 = vi.fn(async () => ({ sources: [], notices: [] }))
     await createLiveAsk({ run: bounded, search: s2, now: () => 5000, webAvailable: true, explicitWebQuery: 'alt coin daily' })(input({ question: 'Run the web search' }))
     expect(s2).toHaveBeenCalledTimes(2); expect(bounded).toHaveBeenCalledTimes(3)
+    expect(s2.mock.calls[1]).toEqual(['alt coin daily', 'meeting_123_test', 'web'])
   })
   it('never searches for a preset or when the web is unavailable, even with an explicit query', async () => {
     for (const [action, webAvailable] of [['summary', true], ['actions', true], ['ask', false]] as const) {

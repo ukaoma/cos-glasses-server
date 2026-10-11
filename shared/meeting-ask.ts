@@ -163,6 +163,8 @@ export interface MeetingAskExchange {
     sections?: MeetingAskSection[];
     sources: MeetingAskSource[];
     notices: string[];
+    /** Audited public query actually admitted for this answer, if any. */
+    publicWebQuery?: string;
     throughMs: number;
     files: MeetingAskFile[];
     error?: string;
@@ -173,6 +175,7 @@ export interface MeetingAskCapabilities {
     durableHistory: true;
     attachmentContext: true;
     webRetrieval: boolean;
+    publicTopics?: true;
     /** 6.71.1: POST /api/meeting-ask/files/media turns uploaded media into meeting files. */
     phoneFiles?: true;
     /** 6.71.1: config carries cosSearch and PUT config {cosSearch} changes it. */
@@ -191,6 +194,8 @@ export interface MeetingAskConfig {
     selected: MeetingAskModel;
     /** 6.71.1. Missing on older servers, which always used 'meaning'. */
     cosSearch?: MeetingAskCosSearch;
+    /** Explicit opt-in to public-topic selection from recent transcript for fact checks. */
+    publicTopics?: boolean;
     models: Array<MeetingAskModel & {
         available: boolean;
         reason?: string;

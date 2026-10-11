@@ -949,3 +949,11 @@ promoting the matching Control appcast entry.
 Meeting Ask includes a qualitative evidence-confidence note. New questions about completed G2 recordings can use accepted final transcript passages alongside preliminary live evidence. Those final quotations are frozen at admission and bounded by the submitted audio cutoff; earlier answer quotations and original turn IDs stay unchanged. Final quotations have no precise word timestamp or live turn target.
 
 Transcription can mishear names, numbers, negations and speakers. Missing or incomplete words do not prove a refusal or commitment. Calendar and user-confirmed meeting context guide retrieval, without proving what was said. Timestamp and progressive-refinement canaries remain disabled by default; this release does not claim improved raw ASR accuracy or a passed 30-second refinement gate. Existing companion clients remain compatible.
+
+### Public-topic fact-checks in server 6.71.5
+
+Meeting Ask supports an explicit `publicTopics` choice in `/api/meeting-ask/config`. It defaults false; companion 6.10.628 exposes the choice in its Model sheet. Enabling it applies to the next Ask on that paired Mac, including COS Control. A bare “fact-check this” can select a public claim from recent transcript quotations. “How much more is that than the average?” retrieves public cost benchmarks using the previously admitted public topic. Summaries and action presets do not send transcript topics to the web.
+
+A tools-off selector proposes the public topic locally through the configured meeting provider. Admission requires selected supporting transcript passages and adjacent ASR fragments, a public category, observed subject words and amounts, and no sensitive details or speaker identity. Generic research terms may be added; unsupported descriptive words are dropped. Only the admitted query reaches web search. Linked pages are untrusted bounded excerpts; answers cite them and state confidence. The selector is semantic, so ambiguous topics are withheld rather than treated as public.
+
+The new companion also removes the native-console feedback loop observed during stale bridge errors. Physical iPhone/Even app crash recovery still requires device acceptance. Timestamp/HQ flags remain disabled.

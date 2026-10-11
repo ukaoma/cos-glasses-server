@@ -9,6 +9,7 @@ import { runMeetingAskModel, AskProcessError } from './meeting-ask-runner.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { resolveProviderBinary } from './provider-binary.js';
 import type { MeetingAskSource } from '../../shared/meeting-ask.js';
+import { fetchPublicArticle } from './meeting-web-page.js';
 export function publicAddress(host: string): boolean {
     const h = host.toLowerCase().replace(/^\[|\]$/g, '');
     if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal'))
@@ -75,6 +76,7 @@ export interface WebGateInput {
     /** The user's own earlier questions in this meeting, oldest first. Never answers, transcript or files. */
     priorQuestions?: readonly string[];
 }
+const PRIVATE_COST = /\b(?:private|internal|employee)\b|\b(?:our|my|client|customer)\b.*\b(?:budget|contract|salary|quote)\b/i;
 const SENSITIVE = /\b(?:birthday|birthdate|address|phone|email|salary|medical|diagnosis|password|secret|confidential|wife|husband|daughter|son|family)\b/i;
 /** normalizeAsk redacts before the journal write, so a stored question shows a secret only as the mark it left. */
 const REDACTION_MARK = /REDACTED|\[private key\]/;
@@ -82,12 +84,12 @@ const REDACTION_MARK = /REDACTED|\[private key\]/;
 export const WEB_FOLLOW_UP_QUESTIONS = 3;
 const PRIVATE_REFERENCE = new Set(['my', 'mine', 'our', 'ours', 'we', 'us', 'client', 'clients', 'customer', 'customers']);
 const FUNCTION_WORDS = ['a', 'an', 'the', 'and', 'or', 'of', 'for', 'in', 'on', 'at', 'to', 'by', 'with', 'from', 'about', 'as', 'vs', 'versus', 'is', 'are', 'was', 'were', 'be', 'been', 'does', 'did', 'do', 'who', 'what', 'when', 'where', 'which', 'how', 'why'];
-const MODIFIERS = ['latest', 'current', 'recent', 'news', 'official', 'website', 'site', 'company', 'founder', 'founders', 'founded', 'ceo', 'owner', 'history', 'biography', 'bio', 'profile', 'wikipedia', 'youtube', 'channel', 'podcast', 'definition', 'meaning', 'documentation', 'docs', 'price', 'pricing', 'review', 'reviews', 'followers', 'following', 'subscribers'];
+const MODIFIERS = ['latest', 'current', 'recent', 'news', 'official', 'website', 'site', 'company', 'founder', 'founders', 'founded', 'ceo', 'owner', 'history', 'biography', 'bio', 'profile', 'wikipedia', 'youtube', 'channel', 'podcast', 'definition', 'meaning', 'documentation', 'docs', 'price', 'pricing', 'average', 'typical', 'benchmark', 'benchmarks', 'comparable', 'comparison', 'cost', 'costs', 'review', 'reviews', 'followers', 'following', 'subscribers'];
 /** Allowed in any query. Static and generic: no names. */
 const CONNECTING = new Set([...FUNCTION_WORDS, ...MODIFIERS]);
 const MODIFIER = new Set(MODIFIERS);
 /** Words that ask for a search or point back at something. Never the thing to search for. */
-const REQUEST_OR_POINTER = new Set(['search', 'searching', 'web', 'online', 'internet', 'googled', 'googling', 'look', 'lookup', 'up', 'find', 'check', 'run', 'please', 'can', 'could', 'would', 'will', 'should', 'you', 'tell', 'me', 'i', 'show', 'give', 'get', 'try', 'again', 'now', 'let', 'just', 'also', 'then', 'that', 'this', 'these', 'those', 'it', 'they', 'them', 'their', 'he', 'him', 'his', 'she', 'her', 'hers', 'its', 'there', 'here', 'people', 'person', 'someone', 'somebody', 'anyone', 'everyone', 'thing', 'things', 'one', 'ones', 'guy', 'guys', 'stuff', 'info', 'information', 'more', 'some', 'any', 'all', 'know', 'known', 'so', 'yes', 'ok', 'okay', 'sure', 'instead', 'same', 'other', 'result', 'results', 'query', 'public', 'explain', 'define', 'have', 'has', 'had', 'am', 'not', 'no', 'thanks', 'thank']);
+const REQUEST_OR_POINTER = new Set(['search', 'searching', 'web', 'online', 'internet', 'googled', 'googling', 'look', 'lookup', 'up', 'find', 'check', 'run', 'please', 'can', 'could', 'would', 'will', 'should', 'you', 'tell', 'me', 'i', 'show', 'give', 'get', 'try', 'again', 'now', 'let', 'just', 'also', 'then', 'that', 'this', 'these', 'those', 'it', 'they', 'them', 'their', 'he', 'him', 'his', 'she', 'her', 'hers', 'its', 'there', 'here', 'people', 'person', 'someone', 'somebody', 'anyone', 'everyone', 'thing', 'things', 'one', 'ones', 'guy', 'guys', 'stuff', 'info', 'information', 'more', 'some', 'any', 'all', 'know', 'known', 'so', 'yes', 'ok', 'okay', 'sure', 'instead', 'same', 'other', 'result', 'results', 'query', 'fact', 'facts', 'verify', 'verification', 'compare', 'comparison', 'cost', 'costs', 'similar', 'fixes', 'area', 'true', 'accurate', 'claim', 'claims', 'public', 'explain', 'define', 'have', 'has', 'had', 'am', 'much', 'than', 'above', 'below', 'less', 'higher', 'lower', 'expensive', 'cheaper', 'not', 'no', 'thanks', 'thank']);
 const INTERROGATIVE = new Set(['who', 'what', 'when', 'where', 'which', 'how']);
 const INTENT_FOLLOWER = new Set(['is', 'are', 'was', 'were', 'does', 'did', 'many', 'much']);
 const INTENT_WORDS = new Set(['web', 'online', 'internet', 'public', 'search', 'google', 'googled', 'googling', 'find', 'lookup', 'latest', 'current', 'news', 'documentation', 'docs', 'weather', 'definition', 'define', 'meaning', 'price', 'pricing', 'official', 'regulation', 'regulations', 'standard', 'standards', 'explain', 'ceo', 'founder', 'founded', 'company', 'website', 'followers', 'following', 'subscribers']);
@@ -142,6 +144,7 @@ export function publicIntent(question: string): boolean {
     if (w.some(x => INTENT_WORDS.has(x)))
         return true;
     const s = w.join(' ');
+    if (factCheckRequest(question)) return true;
     return /\bknown for\b/.test(s) || /\blook (?:\S+ ){0,2}up\b/.test(s);
 }
 /**
@@ -155,7 +158,15 @@ export function publicIntent(question: string): boolean {
  *   - google as a verb: the sentence starts with it, "you/to/and/just/please google", or
  *     "google it/that/this/them/him/her/for"
  */
+/** Verification and public cost comparisons require external evidence, even without the word web. */
+export function factCheckRequest(question: string): boolean {
+    const s = words(question).join(' ');
+    return /\bfact check(?:ing)?\b|\bverify (?:this|that|the claim|whether)\b|\bis (?:this|that) (?:true|accurate)\b/.test(s)
+        || /\bcompar(?:e|ison)\b.*\b(?:cost|costs|price|prices|similar|average|typical)\b/.test(s)
+        || /\b(?:how much|more|less|higher|lower|expensive|cheaper|above|below)\b.*\b(?:average|typical|benchmark)\b/.test(s);
+}
 export function explicitWebRequest(question: string): boolean {
+    if (factCheckRequest(question)) return true;
     return sentences(question).some(sentence => {
         const s = words(sentence).join(' ');
         return /\b(?:web|internet) search/.test(s) || /\bsearch (?:the )?(?:web|internet|online)\b/.test(s) || /\b(?:on|from|across) the (?:web|internet)\b/.test(s)
@@ -189,7 +200,7 @@ export function publicSearchGate({ question, query, priorQuestions = [] }: WebGa
     const texts = [question, query, ...earlier];
     if (texts.some(t => t !== redactSecrets(t) || REDACTION_MARK.test(t)))
         return withheld('secret');
-    if (texts.some(t => SENSITIVE.test(t)))
+    if (texts.some(t => SENSITIVE.test(t)) || factCheckRequest(question) && texts.some(t=>PRIVATE_COST.test(t)))
         return withheld('personal');
     if (!publicIntent(question))
         return withheld('no_public_intent');
@@ -307,7 +318,14 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
         const sources = approved.filter((s): s is MeetingAskSource => s !== null);
         if (!sources.some(s => s.url))
             throw new AskProcessError('web_sources_unavailable');
-        return { sources, notices: ['Public web evidence includes a search-engine summary and observed result links. Pages were not fetched; the search summary is not an excerpt from any single page. Search provider: Claude Haiku.'] };
+        let fetched = 0;
+        // Read at most two observed result pages. A unavailable/oversize page
+        // keeps its honest search-result description, never a fabricated excerpt.
+        await Promise.all(sources.filter(s => s.url).slice(0,2).map(async source => {
+            const page = await fetchPublicArticle(source.url!, publicAddress, signal);
+            if (page) { source.text = 'Retrieved page excerpt (may be partial): ' + redactSecrets(page.text); source.url=page.url; if(page.title) source.title=redactSecrets(page.title); fetched++; }
+        }));
+        return { sources, notices: [`Public web: ${fetched} result page${fetched === 1 ? '' : 's'} read (at most two, bounded excerpts). Other links have search-result evidence only. The search summary describes the search, not any single page. Search provider: Claude Haiku.`] };
     }
     catch (e) {
         if (e instanceof AskProcessError && e.terminationUnconfirmed) {

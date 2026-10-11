@@ -18,6 +18,33 @@ async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { fo
     await new Promise(r => setTimeout(r, 2));
 } throw Error('never terminal'); }
 describe('meeting Ask durable ownership', () => {
+    it('defaults public-topic consent off and validates updates before writing',async()=>{
+        const f=fixture();try {
+            expect((await f.runtime.config()).publicTopics).toBe(false);
+            expect((await f.runtime.config()).capabilities.publicTopics).toBe(true);
+            await expect(f.runtime.setConfig({publicTopics:'yes'})).rejects.toThrow('invalid_public_topics');
+            await expect(f.runtime.setConfig({publicTopics:true,cosSearch:'invalid'})).rejects.toThrow('invalid_cos_search');
+            expect(f.store.publicTopics()).toBe(false);
+            expect((await f.runtime.setConfig({publicTopics:true})).publicTopics).toBe(true);
+            expect(new MeetingAskStore(f.store.root).publicTopics()).toBe(true);
+        }finally{f.cleanup()}
+    });
+    it.each([false,true])('selects a public transcript topic only with consent=%s; forces one bounded web lookup',async(enabled)=>{
+        const webSearch=vi.fn(async(_query:string)=>({sources:[{id:'W1',kind:'web' as const,title:'Public project',text:'750000 allocated for roof work',url:'https://example.com/roof'}],notices:[]}));
+        const run=vi.fn(async(_model:unknown,_prompt:string,system:string)=>({text:system.includes('Select only the public topic')?JSON.stringify({publicTopic:true,category:'public_project',evidenceTurnIds:[0],query:'New York firehouse roof repair 750000'}):JSON.stringify({sections:[{label:'So what',text:'Funds allocated for roof work [T1]'}],searchQuery:null,confidence:{level:'limited',reason:'Scope is unstated.'}})}));
+        const f=fixture({run,webSearch,webCapability:()=>({available:true,engine:'claude'})});
+        try {
+            f.store.setPublicTopics(enabled);
+            const request={...base,question:'Can you fact check this',turns:[{id:0,elapsedMs:0,speaker:'Blair Cooper',text:'New York firehouse roof repair cost $750,000.'}]};
+            await f.runtime.submit(request);f.store.setPublicTopics(!enabled);
+            const e=await terminal(f);
+            expect(e.status).toBe('completed');expect(webSearch).toHaveBeenCalledTimes(enabled?1:0);
+            expect(f.store.get(base.requestId)?.publicTopics).toBe(enabled);
+            if(enabled){expect(webSearch.mock.calls[0][0]).toBe('new york firehouse roof repair 750000');expect(run.mock.calls[0][1]).not.toContain('Blair');expect(e.publicWebQuery).toBe('new york firehouse roof repair 750000');expect(e.notices.join(' ')).not.toContain('no public subject');}
+            await f.runtime.submit(request);expect(webSearch).toHaveBeenCalledTimes(enabled?1:0);
+        }finally{f.cleanup()}
+    });
+
     it('freezes finalized quotations before async qualification; replay keeps original sources', async()=>{
         let text='She has not agreed to place an order.';
         const finalized=vi.fn(()=>({sources:[{id:'T2',kind:'transcript' as const,title:'Finalized meeting transcript',text,finalizedTranscript:true}],notices:['Finalized pass available.']}));

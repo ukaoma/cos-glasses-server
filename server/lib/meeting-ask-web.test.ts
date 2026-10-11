@@ -6,6 +6,17 @@ import { spawnSync } from 'node:child_process';
 import { publicWebUrl, publicSearchQueryAllowed, parseWebEvidence, WEB_HOOK_SOURCE, publicSearchGate, publicIntent, explicitWebRequest, userWebQuery, resolveMeetingWebQuery, type WebGateReason } from './meeting-ask-web.js';
 import { runBoundedSearch } from './meeting-ask-search-process.js';
 describe('bounded public meeting search', () => {
+    it('fact checks and public comparisons request retrieval and retain the typed public subject', () => {
+        expect(explicitWebRequest('Can you fact check this')).toBe(true);
+        expect(publicIntent('Compare cost to other similar fixes in that area')).toBe(true);
+        expect(userWebQuery('Can you fact check this')).toBeNull();
+        expect(publicSearchGate({question:'Can you fact check this',query:'New York firehouse 750000'}).ok).toBe(false);
+        const priorQuestions=['Fact-check New York firehouse roof repair 750000'];
+        expect(userWebQuery('Compare cost to other similar fixes in that area',priorQuestions)).toBe('New York firehouse roof repair 750000');
+        expect(publicSearchGate({question:'Compare cost to other similar fixes in that area',query:'New York firehouse roof repair cost',priorQuestions})).toEqual({ok:true,query:'New York firehouse roof repair cost'});
+        expect(publicSearchGate({question:'Fact-check my confidential client budget',query:'client budget'}).ok).toBe(false);
+        expect(explicitWebRequest('Summarize the decisions')).toBe(false);
+    });
     it('only accepts public http links, no credentials/private addresses', () => { for (const u of ['file:///tmp/x', 'http://localhost', 'http://127.0.0.1', 'https://10.1.1.1', 'http://[::1]', 'https://user:pass@example.com', 'https://foo.local', 'http://192.168.0.1', 'http://example.com:8080'])
         expect(publicWebUrl(u)).toBeNull(); expect(publicWebUrl('https://developer.apple.com/documentation')).toBe('https://developer.apple.com/documentation'); });
     it('will not turn private names or evidence into public queries', () => { expect(publicSearchQueryAllowed("When is Taylor birthday?", 'Taylor birthday')).toBe(false); expect(publicSearchQueryAllowed('Search web for Apple documentation', 'Apple documentation')).toBe(true); expect(publicSearchQueryAllowed('Search web for Apple documentation', 'Taylor salary Apple documentation')).toBe(false); expect(publicSearchQueryAllowed('What did we decide?', 'Apple documentation')).toBe(false); });
@@ -118,4 +129,17 @@ describe('public search gate (6.70.0)', () => {
         // The substitute passes the same gate: a bad explicit query is refused even when the planner's query only added words.
         expect(resolveMeetingWebQuery({ question: 'Search the web for alt coin daily', query: 'crypto', explicitQuery: 'Taylor birthday' })).toEqual({ query: null, notices: [expect.stringContaining('words you did not type')] });
     });
+});
+
+
+describe('average comparison follow-ups',()=>{
+ it('treats how much more than average as external verification, with no bare subject exported',()=>{
+  expect(publicIntent('How much more is that than the average?')).toBe(true);
+  expect(explicitWebRequest('How much more is that than the average?')).toBe(true);
+  expect(userWebQuery('How much more is that than the average?')).toBeNull();
+ });
+});
+
+describe('private cost claims',()=>{
+ it.each(['Fact check our client contract for 25000','Compare our internal budget with the average','Fact check my employee salary'])('does not export typed private details: %s',question=>expect(publicSearchGate({question,query:question}).ok).toBe(false));
 });
