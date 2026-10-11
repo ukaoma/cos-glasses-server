@@ -9,13 +9,14 @@ import { createMeetingAskRouter } from './meeting-ask.js';
 import { MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
 import { MeetingAskStore } from '../lib/meeting-ask-store.js';
 import { requireApiToken } from '../lib/api-auth.js';
+import type { AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
-async function fixture() {
+async function fixture(transcripts?: AskTranscriptSources) {
     const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
-    app.use('/api', createMeetingAskRouter(runtime));
+    app.use('/api', createMeetingAskRouter(runtime, transcripts));
     let server: Server;
     await new Promise<void>(r => { server = app.listen(0, '127.0.0.1', () => r()); });
     const address = server!.address() as any;
@@ -80,6 +81,28 @@ describe('Meeting Ask v2 HTTP contract', () => {
     finally {
         await f.close();
     } });
+    it('an ended meeting answers /transcript from its saved record; a gone one is 404 meeting_transcript_unavailable', async () => {
+        const sidecar = JSON.stringify({ sessionId: 'meeting_test', startTime: 1000, durationMs: 60000, chunkEntries: [{ chunkIndex: 4, chunk: { text: 'Saved words', speaker: 'Nina', elapsed: 5000 } }] });
+        const base = { live: () => null, status: () => ({ state: 'closed', lastActivityAt: '2026-10-11T15:42:00.000Z' }), activeFile: () => null, now: Date.now };
+        const f = await fixture({ ...base, saved: () => ({ sidecarPath: 's.json', filepath: 'm.md' }), read: (p: string) => p === 's.json' ? sidecar : null });
+        try {
+            const r = await f.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server');
+            expect(r.status).toBe(200);
+            expect(await r.json()).toMatchObject({ turns: [{ id: 4, elapsedMs: 5000, speaker: 'Nina', text: 'Saved words' }], elapsedMs: 60000, ended: true, endedAt: '2026-10-11T15:42:00.000Z', source: 'saved' });
+        }
+        finally {
+            await f.close();
+        }
+        const g = await fixture({ ...base, saved: () => null, read: () => null });
+        try {
+            const r = await g.request('/transcript?sessionId=meeting_test&serverInstanceId=test-server');
+            expect(r.status).toBe(404);
+            expect(await r.json()).toEqual({ error: 'meeting_transcript_unavailable' });
+        }
+        finally {
+            await g.close();
+        }
+    });
     it('exports admitted file bytes after a same-revision removal and includes later revisions', async () => {
         const f = await fixture();
         try {

@@ -11,6 +11,20 @@ export interface MeetingAskTurn {
     speaker: string;
     text: string;
 }
+/**
+ * GET /api/meeting-ask/transcript. A live meeting answers from memory. A meeting that has ended (6.71.1)
+ * answers from its saved record with ended: true, so it stays askable. 404 meeting_transcript_unavailable
+ * only when no source holds its words.
+ */
+export interface MeetingAskTranscript {
+    turns: MeetingAskTurn[];
+    elapsedMs: number;
+    notices: string[];
+    ended?: true;
+    /** When the recording stopped, if known. */
+    endedAt?: string;
+    source?: 'live' | 'active_file' | 'saved';
+}
 export interface MeetingAskFile {
     id: string;
     revision: string;

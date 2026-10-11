@@ -1,9 +1,12 @@
 import { Router, type Response } from 'express';
 import { AskError } from '../lib/live-cos-ask.js';
 import { meetingAskRuntime, type MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
-import { getSessionChunkEntries, getSessionStartTime } from './transcribe-stream.js';
+import { getSessionChunkEntries, getSessionStartTime, getMeetingSessionStatus } from './transcribe-stream.js';
+import { resolveAskTranscript, readBoundedFile, type AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
+import { getMeetingStore } from '../lib/meeting-store.js';
+import { dataPath } from '../lib/data-dir.js';
+import { join } from 'node:path';
 import { ASK_SESSION } from '../lib/meeting-ask-store.js';
-import { redactSecrets } from '../lib/lens-gist-engines.js';
 import type { MeetingAskExchange, MeetingAskFile } from '../../shared/meeting-ask.js';
 function failure(res: Response, error: unknown) { res.status(error instanceof AskError ? error.status : 503).json({ error: error instanceof AskError ? error.reason : 'meeting_assistant_unavailable' }); }
 /** Safe Markdown export. Citations are namespaced to the request because T1 is answer-local. */
@@ -41,7 +44,15 @@ export function exportMeetingAsk(exchanges: MeetingAskExchange[], files: Meeting
         throw new AskError('export_too_large', 413);
     return text;
 }
-export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRuntime) {
+const transcriptSources: AskTranscriptSources = {
+    live: id => { const entries = getSessionChunkEntries(id), startTime = getSessionStartTime(id); return entries && startTime !== null ? { entries, startTime } : null; },
+    status: id => getMeetingSessionStatus(id),
+    activeFile: id => readBoundedFile(join(dataPath('active-sessions'), `${id}.json`)),
+    saved: id => getMeetingStore().findBySessionId(id),
+    read: readBoundedFile,
+    now: Date.now,
+};
+export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRuntime, transcripts: AskTranscriptSources = transcriptSources) {
     const router = Router();
     router.use((_q, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
     router.get('/meeting-ask/config', async (_q, res) => { try {
@@ -113,11 +124,7 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
             const sessionId = String(req.query.sessionId ?? '');
             if (!ASK_SESSION.test(sessionId))
                 throw new AskError('invalid_session_id');
-            const chunks = getSessionChunkEntries(sessionId), start = getSessionStartTime(sessionId);
-            if (!chunks || start === null)
-                throw new AskError('session_not_available', 404);
-            const turns = chunks.filter(e => e.chunk.text.trim()).map(e => ({ id: e.chunkIndex, elapsedMs: Math.max(0, e.chunk.elapsed), speaker: e.chunk.speaker, text: redactSecrets(e.chunk.text) }));
-            res.json({ turns, elapsedMs: Math.max(Date.now() - start, ...turns.map(t => t.elapsedMs), 0), notices: [] });
+            res.json(resolveAskTranscript(sessionId, transcripts));
         }
         catch (e) {
             failure(res, e);

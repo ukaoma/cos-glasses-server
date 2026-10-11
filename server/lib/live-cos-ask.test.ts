@@ -6,12 +6,12 @@ describe('Live COS Ask', () => {
   it('rejects malformed, oversized, duplicate and out-of-time transcript input', () => {
     for (const bad of [{sessionId:'../secret'}, {action:'execute'}, {question:''}, {elapsedMs:-1}, {turns:[]}, {history:[{}]}, {turns:[{id:1,speaker:'M',elapsedMs:150000,text:'x'}]}, {turns:[{id:1,speaker:'M',elapsedMs:1,text:'x'},{id:1,speaker:'M',elapsedMs:2,text:'y'}]}]) expect(() => input(bad)).toThrow()
   })
-  it('uses no search for the four preset actions', async () => {
+  it('uses no search for the presets unless asked; only What to ask may ask for one', async () => {
     for (const action of ['summary','catch_up','questions','actions']) {
       const run = vi.fn(async (_prompt: string) => reply()), search = vi.fn()
       const result = await createLiveAsk({run,search,now:()=>5000})(input({action}))
       expect(run).toHaveBeenCalledTimes(1); expect(search).not.toHaveBeenCalled(); expect(result.sources[0].turnId).toBe(1)
-      expect(JSON.parse(run.mock.calls[0][0]).searchAllowed).toBe(false)
+      expect(JSON.parse(run.mock.calls[0][0]).searchAllowed).toBe(action === 'questions')
     }
   })
   it('retrieves history only when Haiku requests it for a user question and bounds hops', async () => {
