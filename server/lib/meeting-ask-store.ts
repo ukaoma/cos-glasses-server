@@ -15,6 +15,7 @@ export interface AskRecord {
     input: MeetingAskSubmit;
     exchange: MeetingAskExchange;
     orientation?: MeetingAskOrientation;
+    finalizedEvidence?: import('./meeting-ask-transcript.js').FinalizedAskEvidence;
 }
 export function askFingerprint(input: MeetingAskSubmit): string { return createHash('sha256').update(JSON.stringify(input)).digest('hex'); }
 /** Synchronous fsync/rename transitions serialize inside the one server process. No await inside a write. */

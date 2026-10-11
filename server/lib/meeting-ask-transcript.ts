@@ -10,7 +10,7 @@
  */
 import { lstatSync, readFileSync } from 'node:fs'
 import type { MeetingAskTranscript, MeetingAskTurn } from '../../shared/meeting-ask.js'
-import { AskError } from './live-cos-ask.js'
+import { AskError, meetingEvidence, type AskInput, type AskSource } from './live-cos-ask.js'
 import { redactSecrets } from './lens-gist-engines.js'
 
 interface ChunkLike { text?: unknown; speaker?: unknown; elapsed?: unknown }
@@ -88,10 +88,45 @@ export function resolveAskTranscript(sessionId: string, deps: AskTranscriptSourc
     const endedAt = Number.isFinite(closedAt) ? closedAt : start !== null && duration !== null ? start + duration : null
     if (sidecar && sidecar.sessionId === sessionId) {
       const turns = toTurns(fileEntries(sidecar))
-      if (turns.length) return ended(turns, duration, endedAt, [], 'saved')
+      if (turns.length) {
+        const final = acceptedFinalSegments(sidecar, sessionId)
+        return ended(turns, Math.max(duration ?? 0, ...(final?.map(s => s.end) ?? [])), endedAt, final ? ['Accepted finalized passages will also be supplied to new answers.'] : [], 'saved')
+      }
     }
     const turns = markdownTurns(deps.read(saved.filepath))
     if (turns.length) return ended(turns, duration, endedAt, ['Turn times are not available for this saved transcript.'], 'saved')
   }
   throw new AskError('meeting_transcript_unavailable', 404)
+}
+
+/** Accepted post-stop decoding only. Bounds use existing audio chunk clocks, never word timestamps. */
+export function acceptedFinalSegments(doc: Record<string, unknown> | null, sessionId: string): { text: string; start: number; end: number }[] | null {
+  if (!doc || doc.sessionId !== sessionId || doc.finalizationState !== 'complete' || doc.batchApplied !== true || doc.transcriptionQuality !== 'batch' || (doc.batchQualityReport as any)?.accepted !== true || !Array.isArray(doc.batchSegments) || !doc.batchSegments.length || doc.batchSegments.length > 2000) return null
+  const rows: { text: string; start: number; end: number }[] = []
+  let previous = -1, size = 0
+  for (const segment of doc.batchSegments) {
+    if (!segment || typeof segment.text !== 'string' || !Number.isFinite(segment.startElapsed) || !Number.isFinite(segment.endElapsed) || segment.startElapsed < 0 || segment.endElapsed < segment.startElapsed || segment.endElapsed > 7 * 86400_000 || segment.startElapsed < previous || !Number.isSafeInteger(segment.startChunkIdx) || !Number.isSafeInteger(segment.endChunkIdx) || segment.startChunkIdx < 0 || segment.endChunkIdx < segment.startChunkIdx) return null
+    size += segment.text.length
+    if (size > 400000 || segment.text.length > 50000) return null
+    previous = segment.endElapsed
+    rows.push({ text: redactSecrets(segment.text), start: segment.startElapsed, end: segment.endElapsed })
+  }
+  return rows
+}
+export interface FinalizedAskEvidence { sources: AskSource[]; notices: string[] }
+/** Separate frozen quotations: do not replace the original live turns or their citation targets. */
+export function captureFinalizedAskEvidence(input: AskInput, deps: AskTranscriptSources): FinalizedAskEvidence {
+  const empty = { sources: [], notices: [] }
+  if (deps.live(input.sessionId)) return empty
+  const saved = deps.saved(input.sessionId)
+  if (!saved) return empty
+  const segments = acceptedFinalSegments(parseJson(deps.read(saved.sidecarPath)), input.sessionId)
+  if (!segments) return empty
+  const turns = segments.flatMap((s, id) => s.end <= input.elapsedMs && s.text.trim() ? [{ id, elapsedMs: s.start, speaker: 'Unidentified', text: s.text }] : [])
+  if (!turns.length) return empty
+  const selected = meetingEvidence({ ...input, turns }, 16000)
+  return {
+    sources: selected.sources.map((s, i) => ({ id: `T${input.turns.length + i + 1}`, kind: 'transcript', title: 'Finalized meeting transcript', text: s.text, finalizedTranscript: true })),
+    notices: ['Accepted finalized transcript passages are available for this answer; original live quotations remain unchanged.', ...selected.notices],
+  }
 }

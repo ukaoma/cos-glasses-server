@@ -1,12 +1,9 @@
+import { transcriptSources } from '../lib/meeting-ask-transcript-sources.js';
 import { Router, type Response } from 'express';
 import { AskError } from '../lib/live-cos-ask.js';
 import { meetingAskRuntime, type MeetingAskRuntime } from '../lib/meeting-ask-runtime.js';
 import { refineActiveMeetingAsk } from '../lib/meeting-ask-refinement.js';
-import { getSessionChunkEntries, getSessionStartTime, getMeetingSessionStatus } from './transcribe-stream.js';
-import { resolveAskTranscript, readBoundedFile, type AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
-import { getMeetingStore } from '../lib/meeting-store.js';
-import { dataPath } from '../lib/data-dir.js';
-import { join } from 'node:path';
+import { resolveAskTranscript, type AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
 import { ASK_SESSION } from '../lib/meeting-ask-store.js';
 import type { MeetingAskExchange, MeetingAskFile } from '../../shared/meeting-ask.js';
 function failure(res: Response, error: unknown) { res.status(error instanceof AskError ? error.status : 503).json({ error: error instanceof AskError ? error.reason : 'meeting_assistant_unavailable' }); }
@@ -45,14 +42,6 @@ export function exportMeetingAsk(exchanges: MeetingAskExchange[], files: Meeting
         throw new AskError('export_too_large', 413);
     return text;
 }
-const transcriptSources: AskTranscriptSources = {
-    live: id => { const entries = getSessionChunkEntries(id), startTime = getSessionStartTime(id); return entries && startTime !== null ? { entries, startTime } : null; },
-    status: id => getMeetingSessionStatus(id),
-    activeFile: id => readBoundedFile(join(dataPath('active-sessions'), `${id}.json`)),
-    saved: id => getMeetingStore().findBySessionId(id),
-    read: readBoundedFile,
-    now: Date.now,
-};
 export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRuntime, transcripts: AskTranscriptSources = transcriptSources) {
     const router = Router();
     router.use((_q, res, next) => { res.set('Cache-Control', 'no-store'); next(); });

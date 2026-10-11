@@ -8,7 +8,7 @@ import { exportMeetingAsk } from '../routes/meeting-ask.js';
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'We will review Friday.' }] };
 function fixture(overrides: Record<string, unknown> = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'ask-test-')), store = new MeetingAskStore(dir), release = vi.fn(), run = vi.fn(async (_model: unknown, _prompt: string) => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Review Friday [T1]' }], searchQuery: null }), model: 'claude-haiku-5-5' }));
-    const runtime = new MeetingAskRuntime({ domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
+    const runtime = new MeetingAskRuntime({ finalized:()=>({sources:[],notices:[]}), domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
     return { runtime, store, run, release, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { for (let i = 0; i < 100; i++) {
@@ -18,6 +18,22 @@ async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { fo
     await new Promise(r => setTimeout(r, 2));
 } throw Error('never terminal'); }
 describe('meeting Ask durable ownership', () => {
+    it('freezes finalized quotations before async qualification; replay keeps original sources', async()=>{
+        let text='She has not agreed to place an order.';
+        const finalized=vi.fn(()=>({sources:[{id:'T2',kind:'transcript' as const,title:'Finalized meeting transcript',text,finalizedTranscript:true}],notices:['Finalized pass available.']}));
+        const f=fixture({finalized});
+        try {
+            await f.runtime.submit(base); text='Later changed text';
+            const result=await terminal(f);
+            const prompt=JSON.parse(f.run.mock.calls[0][1]);
+            expect(prompt.evidence.find((s:any)=>s.id==='T2').text).toBe('She has not agreed to place an order.');
+            expect(f.store.get(base.requestId)?.finalizedEvidence?.sources[0].text).toBe('She has not agreed to place an order.');
+            expect(f.store.get(base.requestId)?.input.turns).toEqual(base.turns);
+            expect((await f.runtime.submit(base)).sources).toEqual(result.sources);
+            expect(finalized).toHaveBeenCalledTimes(1);expect(f.run).toHaveBeenCalledTimes(1);
+        }finally{f.cleanup()}
+    });
+
     it('freezes the confirmed domain before provider work and keeps it on retry', async () => {
         let complete!: (v: any) => void;
         const search = vi.fn(async () => ({sources:[],notices:[]}));

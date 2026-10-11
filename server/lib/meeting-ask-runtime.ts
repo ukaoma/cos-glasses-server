@@ -1,3 +1,5 @@
+import { captureFinalizedAskEvidence, type FinalizedAskEvidence } from './meeting-ask-transcript.js';
+import { transcriptSources } from './meeting-ask-transcript-sources.js';
 import { confirmOrientation, meetingCalendar, meetingDomains, validateOrientationChange } from './meeting-ask-orientation.js';
 import type { MeetingAskOrientation } from '../../shared/meeting-ask.js';
 import type { MeetingAskSubmit, MeetingAskExchange, MeetingAskModel, MeetingAskFile, MeetingAskConfig, MeetingAskCapabilities, MeetingAskCosSearch } from '../../shared/meeting-ask.js';
@@ -33,6 +35,7 @@ interface RuntimeDeps {
     /** The wearer's name for "You owe", or null when the profile has none. */
     wearer: () => string | null;
     refine: typeof refineActiveMeetingAsk;
+    finalized: (input: AskInput) => FinalizedAskEvidence;
     /** Uploaded media: the record and its upload-time text extract (POST files/media). */
     media: () => Pick<ReturnType<typeof getMediaStore>, 'resolveUsable' | 'resolveModelDerivatives'>;
 }
@@ -43,7 +46,7 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, refine: refineActiveMeetingAsk };
+const defaults: RuntimeDeps = { domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources) };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))
@@ -246,6 +249,7 @@ export class MeetingAskRuntime {
         this.enter();
         let lease: MaintenanceWorkLease | undefined;
         try {
+            const finalized = this.deps.finalized(normal);
             await this.qualify(selected);
             if (!this.deps.admissions())
                 throw new AskError('maintenance', 503);
@@ -263,15 +267,15 @@ export class MeetingAskRuntime {
                 throw new AskError('file_revision_changed', 409); return { ...f }; });
             const refined = this.deps.refine(normal);
             const at = new Date().toISOString();
-            const exchange: MeetingAskExchange = { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, action: input.action, question: input.question, status: 'pending', createdAt: at, updatedAt: at, selectedModel: selected, sources: [], notices: refined.notices, throughMs: input.elapsedMs, files, ...(input.retryOf ? { retryOf: input.retryOf } : {}) };
+            const exchange: MeetingAskExchange = { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, action: input.action, question: input.question, status: 'pending', createdAt: at, updatedAt: at, selectedModel: selected, sources: [], notices: [...refined.notices, ...finalized.notices], throughMs: input.elapsedMs, files, ...(input.retryOf ? { retryOf: input.retryOf } : {}) };
             lease = this.deps.lease();
             const orientation = this.deps.store.orientation(input.sessionId);
-            this.deps.store.write({ version: 2, fingerprint, input, exchange, orientation });
+            this.deps.store.write({ version: 2, fingerprint, input, exchange, orientation, finalizedEvidence: finalized });
             const controller = new AbortController(), owned = lease;
             // Install ownership before starting any asynchronous provider work.
             const job = { id: input.requestId, controller, done: Promise.resolve(), lease: owned };
             this.active = job;
-            job.done = Promise.resolve().then(() => this.execute(input, refined.input, files, controller, owned, refined.notices, orientation));
+            job.done = Promise.resolve().then(() => this.execute(input, refined.input, files, controller, owned, refined.notices, orientation, finalized));
             return exchange;
         }
         catch (e) {
@@ -280,7 +284,7 @@ export class MeetingAskRuntime {
             throw e;
         }
     }
-    private async execute(input: MeetingAskSubmit, normal: AskInput, files: MeetingAskFile[], controller: AbortController, lease: MaintenanceWorkLease, refinementNotices: string[] = [], orientation?: MeetingAskOrientation) {
+    private async execute(input: MeetingAskSubmit, normal: AskInput, files: MeetingAskFile[], controller: AbortController, lease: MaintenanceWorkLease, refinementNotices: string[] = [], orientation?: MeetingAskOrientation, finalized?: FinalizedAskEvidence) {
         let release = true;
         let completedResult: AskResult | undefined;
         const deadline = setTimeout(() => controller.abort(), 145000);
@@ -293,8 +297,9 @@ export class MeetingAskRuntime {
             const journal = this.deps.store.list();
             const history = journal.filter(r => r.exchange.sessionId === input.sessionId && r.exchange.serverInstanceId === input.serverInstanceId && r.exchange.status === 'completed').sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt)).slice(-4).map(r => ({ question: r.exchange.question, answer: r.exchange.answer ?? '' }));
             let remaining = 16000;
-            const extraSources = files.filter(f => f.status === 'ready' && f.text.trim()).map((f, i) => { const text = f.text.slice(0, Math.max(0, remaining)); remaining -= text.length; return { id: `F${i + 1}`, kind: 'file' as const, title: f.name, text, fileId: f.id, revision: f.revision }; }).filter(f => f.text);
-            const extraNotices = [...refinementNotices, ...files.filter(f => f.status !== 'ready').map(f => `${f.name}: ${f.status}; text not available.`)];
+            const extraSources: import('./live-cos-ask.js').AskSource[] = files.filter(f => f.status === 'ready' && f.text.trim()).map((f, i) => { const text = f.text.slice(0, Math.max(0, remaining)); remaining -= text.length; return { id: `F${i + 1}`, kind: 'file' as const, title: f.name, text, fileId: f.id, revision: f.revision }; }).filter(f => f.text);
+            extraSources.push(...(finalized?.sources ?? []));
+            const extraNotices = [...refinementNotices, ...(finalized?.notices ?? []), ...files.filter(f => f.status !== 'ready').map(f => `${f.name}: ${f.status}; text not available.`)];
             if (files.reduce((n, f) => n + f.text.length, 0) > 16000)
                 extraNotices.push('Attachment context is limited to selected text (16,000 characters).');
             const webAvailable = this.deps.webCapability().available;

@@ -2,7 +2,7 @@ import { afterAll, describe, it, expect } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { resolveAskTranscript, readBoundedFile, type AskTranscriptSources } from './meeting-ask-transcript.js'
+import { captureFinalizedAskEvidence, acceptedFinalSegments, resolveAskTranscript, readBoundedFile, type AskTranscriptSources } from './meeting-ask-transcript.js'
 import { MeetingStore } from './meeting-store.js'
 // 6.71.1: an ended meeting stays askable from its saved record.
 const ID = 'meeting_1791700000000_abcdef'
@@ -65,5 +65,38 @@ describe('Meeting Ask transcript sources', () => {
       expect(readBoundedFile(join(dir, 'link.json'))).toBeNull()
       expect(readBoundedFile(join(dir, 'f.json'))).toBe('{}'); expect(readBoundedFile(join(dir, 'missing'))).toBeNull(); expect(readBoundedFile(join(dir, 'd'))).toBeNull()
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+describe('accepted finalized Ask evidence', () => {
+  const doc = { sessionId: ID, finalizationState: 'complete', batchApplied: true, transcriptionQuality: 'batch', batchQualityReport: { accepted: true }, durationMs: 234574, chunkEntries: [{chunkIndex: 38, chunk: chunk('pilot.', 234574)}], batchSegments: [
+    {startChunkIdx: 30, endChunkIdx: 35, startElapsed: 186458, endElapsed: 216540, text: 'The Amber budget is not'},
+    {startChunkIdx: 36, endChunkIdx: 41, startElapsed: 222551, endElapsed: 252611, text: 'approved. Nora will review Friday. She has not agreed to place an order.'},
+  ] }
+  const deps = (value: unknown = doc): AskTranscriptSources => ({...none, saved:()=>({sidecarPath:'final.json',filepath:'final.md'}), read:()=>JSON.stringify(value)})
+  const input = {sessionId:ID, action:'ask' as const, question:'Did Nora agree to order?', history:[], elapsedMs:252611, turns:[{id:38,elapsedMs:234574,speaker:'Ext',text:'pilot.'}]}
+  it('adds final quotations with distinct IDs, no fabricated live target or word clock',()=>{
+    const result=captureFinalizedAskEvidence(input,deps())
+    expect(result.sources.map(s=>s.id)).toEqual(['T2','T3'])
+    expect(result.sources[1]).toMatchObject({kind:'transcript',finalizedTranscript:true,text:expect.stringContaining('has not agreed')})
+    expect(result.sources.every(s=>s.turnId===undefined && s.elapsedMs===undefined)).toBe(true)
+    expect(input.turns[0].text).toBe('pilot.')
+    const transcript=resolveAskTranscript(ID,deps())
+    expect(transcript.turns).toEqual([{id:38,elapsedMs:234574,speaker:'Person A',text:'pilot.'}])
+    expect(transcript.elapsedMs).toBe(252611)
+  })
+  it('does not leak a segment past the admitted cutoff or refine a live recording',()=>{
+    expect(captureFinalizedAskEvidence({...input,elapsedMs:237553},deps()).sources.map(s=>s.text).join(' ')).not.toContain('has not agreed')
+    expect(captureFinalizedAskEvidence(input,{...deps(),live:()=>({entries:[],startTime:START})})).toEqual({sources:[],notices:[]})
+  })
+  it('fails closed for rejected, unfinished, mismatched, malformed or oversized evidence',()=>{
+    const bad=[{...doc,sessionId:'meeting_other'},{...doc,batchApplied:false},{...doc,finalizationState:'pending'},{...doc,batchQualityReport:{accepted:false}},{...doc,batchSegments:[{...doc.batchSegments[0],startElapsed:-1}]},{...doc,batchSegments:[{...doc.batchSegments[0],text:'x'.repeat(50001)}]},{...doc,batchSegments:[doc.batchSegments[1],doc.batchSegments[0]]}]
+    for(const d of bad){expect(acceptedFinalSegments(d,ID)).toBeNull();expect(captureFinalizedAskEvidence(input,deps(d)).sources).toEqual([])}
+  })
+  it('redacts secrets and bounds long finalized excerpts',()=>{
+    const d={...doc,batchSegments:Array.from({length:30},(_,i)=>({startChunkIdx:i,endChunkIdx:i,startElapsed:i*1000,endElapsed:(i+1)*1000,text:'Amber '.repeat(900)+' sk-abcdefghijklmnopqrstuvwx'}))}
+    const sources=captureFinalizedAskEvidence(input,deps(d)).sources
+    expect(sources.reduce((n,s)=>n+s.text.length,0)).toBeLessThanOrEqual(16000)
+    expect(sources.map(s=>s.text).join(' ')).not.toContain('sk-abcdefghijklmnopqrstuvwx')
   })
 })

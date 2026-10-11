@@ -1,3 +1,9 @@
+## 6.71.4 · public meeting evidence release
+
+- New questions about completed G2 recordings receive accepted finalized transcript passages alongside original live evidence. Earlier answer quotations and turn targets stay unchanged. Final passages are frozen at admission, bounded, redacted and restricted to the requested audio cutoff.
+- Meeting Ask distinguishes an uncaptured commitment from an explicit refusal, recognizes evidenced fictional tests, and includes evidence confidence in each answer.
+- Includes 6.71.1 through 6.71.3 saved-Ask, file, model, COS search and confirmed meeting-context improvements. Live timestamp and progressive refinement canaries remain disabled by default; this release does not claim higher raw ASR accuracy or a passed 30-second refinement gate.
+
 ## 6.71.3 · private meeting evidence candidate
 
 - Every completed Meeting Ask answer includes a qualitative evidence-confidence row. G2 microphone/ASR limitations guide reasoning; names remain unverified when unclear, explicit later corrections resolve the earlier value, and evidenced rehearsals are not treated as real commitments.
@@ -4973,6 +4979,11 @@ unsaved capture, and makes batch status stop lying about finished work.
 - Add voice (TTS + speaker) and additive glasses routes to the public server: `tts`, `voice`, `glossary`, `handoffs`, `recovery`, `prompt-edit`, `bookmarks`. Brings server-side voice + companion utilities to public installs; COS-integration routes remain private.
 
 # Changelog
+
+## 6.71.4
+
+- New questions about completed G2 recordings receive accepted finalized transcript passages alongside the original live evidence. Earlier answer quotations and turn targets remain unchanged. Final passages are frozen at admission, bounded, redacted and restricted to the requested audio cutoff.
+- Meeting Ask distinguishes an uncaptured commitment from an explicit refusal and reports evidence confidence. Live high-quality timestamp and progressive refinement canaries remain disabled by default.
 
 ## [6.36.4] - 2026-08-17
 

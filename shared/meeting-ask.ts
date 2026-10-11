@@ -36,6 +36,8 @@ export interface MeetingAskFile {
     origin?: 'phone';
 }
 export interface MeetingAskSource {
+  /** Server-owned accepted post-stop quotation; no live turn target or precise word clock. */
+  finalizedTranscript?: boolean
     id: string;
     kind: 'transcript' | 'memory' | 'meeting' | 'file' | 'web';
     title: string;
