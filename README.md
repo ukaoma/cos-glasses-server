@@ -943,3 +943,9 @@ Runtime/model setup is local; the existing provider sign-in requirements remain.
 
 Candidate only: publish the versioned runtime asset and server package before
 promoting the matching Control appcast entry.
+
+### Meeting evidence in server 6.71.4
+
+Meeting Ask includes a qualitative evidence-confidence note. New questions about completed G2 recordings can use accepted final transcript passages alongside preliminary live evidence. Those final quotations are frozen at admission and bounded by the submitted audio cutoff; earlier answer quotations and original turn IDs stay unchanged. Final quotations have no precise word timestamp or live turn target.
+
+Transcription can mishear names, numbers, negations and speakers. Missing or incomplete words do not prove a refusal or commitment. Calendar and user-confirmed meeting context guide retrieval, without proving what was said. Timestamp and progressive-refinement canaries remain disabled by default; this release does not claim improved raw ASR accuracy or a passed 30-second refinement gate. Existing companion clients remain compatible.

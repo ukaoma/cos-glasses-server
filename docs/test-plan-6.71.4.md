@@ -1,6 +1,6 @@
 # Public server 6.71.4 acceptance
 
-Scope: compatible with public companion 6.10.626 and private unchanged 6.10.627; Control 0.5.285. No companion pack promotion in this release.
+Scope: compatible with public companion 6.10.624, versioned device-test companion 6.10.626 and private unchanged 6.10.627; Control 0.5.285. No companion pack promotion in this release.
 
 - Full server suite, typecheck, production dependency audit and frozen public tarball inventory must pass.
 - New ended-meeting requests get accepted batch passages through their admitted audio cutoff. Original live chunk IDs/text and old answer quotes stay unchanged. Retry cannot reread changed final evidence.
