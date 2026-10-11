@@ -4,7 +4,9 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-vi.mock('../lib/python-bridge.js', () => ({ callPython: vi.fn(), contextSourceAvailable: () => null, pythonBridgeState: () => 'not_configured' }))
+// The context-search cancellation runner now imports provider helpers too. Keep their
+// bridge constants explicitly standalone, matching this first-setup route fixture.
+vi.mock('../lib/python-bridge.js', () => ({ COS_SCRIPTS_DIR: null, PYTHON_BIN: null, callPython: vi.fn(), contextSourceAvailable: () => null, pythonBridgeState: () => 'not_configured' }))
 vi.mock('../lib/whisper-local.js', () => ({ resetDecoderCaches: vi.fn() }))
 vi.mock('../lib/hallucination-filter.js', () => ({ resetVocabEchoCache: vi.fn() }))
 import { memoryRouter } from './memory.js'

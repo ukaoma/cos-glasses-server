@@ -27,6 +27,7 @@ import {
 } from '../lib/whisper-local.js'
 import { getOpenAIWhisperBudgetState } from '../lib/openai-whisper-budget.js'
 import { getMeetingSummaryBudgetState } from '../lib/meeting-summary-budget.js'
+import { meetingWebCapability } from '../lib/meeting-ask-web.js'
 import { lensGistPublicHealth } from '../lib/lens-gist.js'
 import { meetingSummaryLLMEnabled } from '../lib/meeting-summary.js'
 import { getKeyStatus } from '../lib/openai-key.js'
@@ -465,6 +466,7 @@ healthRouter.get('/health', async (_req, res) => {
     review_audio: reviewAudio,
     ...(voiceProvenance ? { voice_provenance: voiceProvenance } : {}),
     capabilities: {
+      meetingAsk: { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: meetingWebCapability().available },
       dictationCleanup: { models: DICTATION_CLEAN_MODELS },
       // 6.67.0: glasses pairing (docs/pairing-contract.md). Public on purpose: the phone
       // reads it before it holds a token, and an older server omits it, which is how
@@ -630,6 +632,7 @@ healthRouter.get('/models', async (req, res) => {
     // Changing that is a breaking change that needs a client version gate first.
     ...(apiToken ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
     capabilities: {
+      meetingAsk: { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: meetingWebCapability().available },
       dictationCleanup: { models: DICTATION_CLEAN_MODELS },
       durableQueryJobs: {
         enabled: durableJobs.enabled,

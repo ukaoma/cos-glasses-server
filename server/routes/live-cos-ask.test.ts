@@ -4,7 +4,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import { requireApiToken } from '../lib/api-auth.js'
 const state = vi.hoisted(() => ({ open: true, run: vi.fn() }))
 vi.mock('../lib/maintenance-lifecycle.js', () => ({ maintenanceAdmissionsOpen: () => state.open }))
-vi.mock('../lib/live-cos-ask.js', async importOriginal => ({ ...await importOriginal<typeof import('../lib/live-cos-ask.js')>(), liveCosAsk: state.run }))
+vi.mock('../lib/meeting-ask-runtime.js',()=>({meetingAskRuntime:{legacy:state.run}}))
 import { liveCosAskRouter } from './live-cos-ask.js'
 let server: Server | undefined
 let url = ''

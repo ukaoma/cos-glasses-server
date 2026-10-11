@@ -8,6 +8,8 @@
  */
 
 import { execFile } from 'node:child_process'
+import { runBoundedSearch } from './meeting-ask-search-process.js'
+import { AskProcessError } from './meeting-ask-runner.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { COS_SCRIPTS_DIR, PYTHON_BIN } from './python-bridge.js'
@@ -251,13 +253,31 @@ function semanticHitFromMemory(raw: MemorySemanticRaw): ContextSearchHit | null 
   }
 }
 
-export function semanticSearchMemories(query: string, limit = 20): Promise<{
+export function semanticSearchMemories(query: string, limit = 20, signal?: AbortSignal): Promise<{
   hits: ContextSearchHit[]
   reason?: string
 }> {
   const available = memorySemanticAvailable()
   if (!available.ok) return Promise.resolve({ hits: [], reason: available.reason })
   const script = resolve(COS_SCRIPTS_DIR!, MEMORY_SEMANTIC_SCRIPT)
+  if (signal) {
+    return runBoundedSearch(PYTHON_BIN!, memorySemanticArgs(query, limit, script), COS_SCRIPTS_DIR!, signal)
+      .then(stdout => {
+        try {
+          const parsed = JSON.parse(stdout)
+          const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed.results) ? parsed.results : []
+          return { hits: rows.flatMap((row: MemorySemanticRaw) => {
+            const hit = semanticHitFromMemory(row)
+            return hit ? [hit] : []
+          }) }
+        } catch { return { hits: [], reason: 'memory_parse_error' } }
+      })
+      .catch(error => {
+        if (error instanceof AskProcessError) throw error
+        return { hits: [], reason: 'no_memory_embeddings' }
+      })
+  }
+
   return new Promise(resolvePromise => {
     execFile(
       PYTHON_BIN!,
@@ -317,11 +337,11 @@ export function mergeContextSearchHits(
     .slice(0, Math.max(1, Math.min(limit, 50)))
 }
 
-export async function searchMemories(options: { query: string; limit?: number }): Promise<ContextSearchResult> {
+export async function searchMemories(options: { query: string; limit?: number; signal?: AbortSignal }): Promise<ContextSearchResult> {
   const query = options.query.trim()
   const limit = Math.max(1, Math.min(options.limit ?? 20, 50))
   const keywordHits = keywordSearchMemories(query)
-  const semantic = await semanticSearchMemories(query, limit)
+  const semantic = await semanticSearchMemories(query, limit, options.signal)
   return {
     hits: mergeContextSearchHits(keywordHits, semantic.hits, limit),
     keywordCount: keywordHits.length,
@@ -331,7 +351,7 @@ export async function searchMemories(options: { query: string; limit?: number })
   }
 }
 
-export async function searchThreads(options: { query: string; limit?: number }): Promise<ContextSearchResult> {
+export async function searchThreads(options: { query: string; limit?: number; signal?: AbortSignal }): Promise<ContextSearchResult> {
   const query = options.query.trim()
   const limit = Math.max(1, Math.min(options.limit ?? 20, 50))
   const keywordHits = keywordSearchThreads(query)

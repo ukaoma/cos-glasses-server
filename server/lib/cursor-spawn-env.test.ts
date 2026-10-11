@@ -156,6 +156,8 @@ const REPO = resolve(dirname(new URL(import.meta.url).pathname), '..', '..')
 const EXEMPT: Record<string, string> = {
   // A STRICTER per-spawn profile of its own: no MCP, no hooks, no inherited permissions.
   'server/lib/dictation-clean.ts': 'own stricter isolated profile',
+  // Runtime guard excludes Cursor before binary resolution or spawn; meeting-ask-runner.test.ts verifies both.
+  'server/lib/meeting-ask-runner.ts': 'Claude/Codex-only admission; Cursor never reaches generic provider resolution',
 }
 
 /** The spawn sites plan 3.4 names, verified by grep at build time (6.62.0). */

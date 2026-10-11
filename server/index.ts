@@ -105,6 +105,8 @@ import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
 import { liveCosAskRouter } from './routes/live-cos-ask.js'
+import { meetingAskRouter } from './routes/meeting-ask.js'
+import { meetingAskRuntime } from './lib/meeting-ask-runtime.js'
 import { lensGistRouter } from './routes/lens-gist.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
 import { setWeatherPersistence, welcomeContextRouter } from './routes/welcome-context.js'
@@ -392,6 +394,9 @@ app.use('/api', (req, res, next) => {
     // the request lease. It refuses on its own while admissions are closed, and a queued
     // chain checks again before each engine (routes/lens-gist.ts, lib/lens-gist.ts).
     || req.path === '/lens-gist'
+    || req.path === '/meetings/live-ask'
+    || req.path === '/meeting-ask/requests'
+    || /^\/meeting-ask\/requests\/[A-Za-z0-9_-]+\/cancel$/.test(req.path)
     || req.path.startsWith('/maintenance/drain')
   if (lifecycleOwned) return next()
 
@@ -1095,6 +1100,7 @@ app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
 app.use('/api', lensGistRouter)
 app.use('/api', liveCosAskRouter)
+app.use('/api', meetingAskRouter)
 app.use('/api', bookmarksRouter)
 // 6.63.1: the last good weather and place survive a restart (<data>/welcome-weather.json).
 setWeatherPersistence({
@@ -1133,6 +1139,7 @@ async function gracefulShutdown(): Promise<void> {
   gracefulShutdownStarted = true
   const forceExit = setTimeout(() => process.exit(1), 8_000)
   forceExit.unref?.()
+  await meetingAskRuntime.shutdown()
   stopMorningBriefScheduler()
   await workReviewRuntime?.close()
   workIntakeStore?.close()

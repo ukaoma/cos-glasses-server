@@ -7,6 +7,8 @@
  */
 
 import { execFile } from 'node:child_process'
+import { runBoundedSearch } from './meeting-ask-search-process.js'
+import { AskProcessError } from './meeting-ask-runner.js'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { COS_SCRIPTS_DIR, PYTHON_BIN } from './python-bridge.js'
@@ -485,7 +487,7 @@ export function semanticSearchAvailable(): { ok: boolean; reason?: string } {
   return { ok: true }
 }
 
-export function semanticSearchMeetings(query: string, domain = 'all', limit = 20): Promise<{
+export function semanticSearchMeetings(query: string, domain = 'all', limit = 20, signal?: AbortSignal): Promise<{
   hits: MeetingSearchHit[]
   reason?: string
 }> {
@@ -494,6 +496,23 @@ export function semanticSearchMeetings(query: string, domain = 'all', limit = 20
   const script = resolve(COS_SCRIPTS_DIR!, 'semantic_search.py')
   const args = [script, query, '--json', '--limit', String(limit), '--min-score', '0.25', '--temporal-mode', 'off']
   if (domain !== 'all' && domain !== 'library') args.push('--domain', domain)
+  if (signal) {
+    return runBoundedSearch(PYTHON_BIN!, args, COS_SCRIPTS_DIR!, signal)
+      .then(stdout => {
+        try {
+          const parsed = JSON.parse(stdout)
+          return { hits: (Array.isArray(parsed) ? parsed : []).flatMap((row: SemanticRawHit) => {
+            const hit = semanticHitToLibrary(row)
+            return hit ? [hit] : []
+          }) }
+        } catch { return { hits: [], reason: 'qdrant_parse_error' } }
+      })
+      .catch(error => {
+        if (error instanceof AskProcessError) throw error
+        return { hits: [], reason: 'qdrant_unreachable' }
+      })
+  }
+
   return new Promise(resolvePromise => {
     execFile(
       PYTHON_BIN!,
@@ -557,12 +576,13 @@ export async function searchMeetingLibrary(options: {
   query: string
   domain?: string
   limit?: number
+  signal?: AbortSignal
 }, store: MeetingStore = getMeetingStore()): Promise<MeetingSearchResult> {
   const query = options.query.trim()
   const domain = options.domain || 'all'
   const limit = Math.max(1, Math.min(options.limit ?? 20, 50))
   const keywordHits = keywordSearchMeetings(query, domain, store)
-  const semantic = await semanticSearchMeetings(query, domain, limit)
+  const semantic = await semanticSearchMeetings(query, domain, limit, options.signal)
   const hits = mergeMeetingSearchHits(keywordHits, semantic.hits, limit)
   return {
     hits,

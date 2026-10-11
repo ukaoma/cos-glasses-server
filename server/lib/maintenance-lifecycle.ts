@@ -36,6 +36,7 @@ const DEFAULT_GATE_PATH = join(
 
 export type MaintenanceWorkKind =
   | 'api_mutation'
+  | 'meeting_ask'
   | 'durable_query'
   | 'legacy_query'
   | 'openai_query'
