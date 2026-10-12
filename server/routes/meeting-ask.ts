@@ -99,8 +99,8 @@ export function createMeetingAskRouter(runtime: MeetingAskRuntime = meetingAskRu
     catch (e) {
         failure(res, e);
     } });
-    router.post('/meeting-ask/files/media', (req, res) => { try {
-        res.json({ files: runtime.attachMedia(String(req.body?.sessionId ?? ''), req.body?.serverInstanceId, req.body?.media) });
+    router.post('/meeting-ask/files/media', async (req, res) => { try {
+        res.json({ files: await runtime.attachMediaReadable(String(req.body?.sessionId ?? ''), req.body?.serverInstanceId, req.body?.media) });
     }
     catch (e) {
         failure(res, e);

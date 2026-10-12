@@ -127,3 +127,61 @@ describe('Meeting Ask phone files: statuses and limits', () => {
     expect(MEETING_ASK_CAPABILITIES.phoneFiles).toBe(true)
   })
 })
+
+describe('Phone image evidence through the HTTP adapter', () => {
+  it('reads image text and preserves Control files; the next Ask freezes and cites the image revision', async () => {
+    const readImage = vi.fn(async () => ({text:'Rank | Name | Crit Value\n1 | Mavuika | 232.4 cv\n2 | Wanderer | 222.3 cv',lowConfidence:true}));
+    const {rt,run}=runtime(fake({[M(1)]:{category:'image',label:'stats.jpg'}}),{readImage});
+    const files=await rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]);
+    expect(files[0]).toMatchObject({status:'ready',origin:'phone'});
+    expect(files[0].text).toContain('1 | Mavuika | 232.4');
+    expect(files[0].notice).toContain('hard to read');
+    expect(files[0].revision).toHaveLength(32);
+    await rt.submit({requestId:'request_image001',sessionId:SESSION,serverInstanceId:'server-one',action:'ask',question:'Who is top by crit value?',elapsedMs:1000,turns:[{id:0,elapsedMs:0,speaker:'A',text:'See my character table.'}]});
+    for(let i=0;i<100&&['pending','running'].includes(rt.get('request_image001').status);i++)await new Promise(r=>setTimeout(r,2));
+    const e=rt.get('request_image001');expect(e.status).toBe('completed');expect(e.sources.some(s=>s.id==='F1'&&s.text.includes('Mavuika'))).toBe(true);
+    expect(run.mock.calls[0][1]).toContain('OCR may misread');
+    rt.putFiles(SESSION,'server-one',[{...files[0],status:'removed',text:''}]);
+    expect(rt.get('request_image001').files[0].status).toBe('ready');
+    await rt.shutdown();
+  });
+  it('holds credentials past the text cap and never sends or stores them',async()=>{
+    const readImage=vi.fn(async()=>({text:'a'.repeat(110000)+'\nAPI Key: secret123456',lowConfidence:false}));
+    const {rt}=runtime(fake({[M(1)]:{category:'image'}}),{readImage});
+    const [f]=await rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]);
+    expect(f.status).toBe('secret-held');expect(f.text).toBe('');
+    expect(JSON.stringify(rt.history(SESSION,'server-one'))).not.toContain('secret123456');
+  });
+  it('empty, unsupported-platform and timed-out OCR stay honest; a retry can succeed',async()=>{
+    const readImage=vi.fn().mockResolvedValueOnce({text:'',lowConfidence:false}).mockRejectedValueOnce(new Error('ocr_failed')).mockResolvedValue({text:'New text',lowConfidence:false});
+    const {rt}=runtime(fake({[M(1)]:{category:'image'}}),{readImage});
+    expect((await rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]))[0].status).toBe('unsupported');
+    expect((await rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]))[0].status).toBe('failed');
+    expect((await rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]))[0].status).toBe('ready');
+  });
+  it('rejects deletion and concurrent removal during OCR without reviving the file',async()=>{
+    const records:any={[M(1)]:{category:'image'}};
+    let release!:(v:any)=>void;
+    const {rt}=runtime(fake(records),{readImage:()=>new Promise(r=>{release=r})});
+    const promise=rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]);
+    delete records[M(1)];release({text:'Picture words',lowConfidence:false});
+    await expect(promise).rejects.toMatchObject({reason:'media_not_found'});
+    expect(rt.history(SESSION,'server-one').files).toEqual([]);
+    records[M(1)]={category:'image'};
+    const p2=rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]);
+    rt.putFiles(SESSION,'server-one',[{id:`phone_${M(1)}`,revision:'r1',name:'Removed',text:'',status:'removed'}]);
+    release({text:'Picture words',lowConfidence:false});
+    await expect(p2).rejects.toMatchObject({reason:'file_revision_conflict'});
+    expect(rt.history(SESSION,'server-one').files[0].status).toBe('removed');
+  });
+  it('draining or shutdown aborts image admission and releases the maintenance lease',async()=>{
+    const release=vi.fn();let admitted=true;
+    let finish!:(v:any)=>void;
+    const {rt}=runtime(fake({[M(1)]:{category:'image'}}),{admissions:()=>admitted,lease:()=>({release}),readImage:(_path:string,signal:AbortSignal)=>new Promise((r,reject)=>{finish=r;signal.addEventListener('abort',()=>reject(new Error('cancelled')),{once:true})})});
+    const p=rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]);admitted=false;finish({text:'Read text',lowConfidence:false});
+    await expect(p).rejects.toMatchObject({reason:'maintenance'});expect(release).toHaveBeenCalledOnce();
+    admitted=true;
+    const p2=rt.attachMediaReadable(SESSION,'server-one',[{id:M(1)}]);const rejection=expect(p2).rejects.toMatchObject({reason:'maintenance'});await rt.shutdown();
+    await rejection;expect(release).toHaveBeenCalledTimes(2);
+  });
+});

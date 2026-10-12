@@ -1,3 +1,10 @@
+## 6.71.9 · Phone image text in Meeting Ask (candidate)
+
+- Read text from phone screenshots and photos locally with Apple Vision on macOS, matching Control Meeting Ask's image-text path. Preserve table row positions and admit extracted text as revisioned F evidence. No extra model call or cloud OCR is introduced.
+- Check the full extract for credentials before truncation. Bound extraction concurrency/time/output; recheck media lifecycle and file revisions after extraction. Cancellation, removal and maintenance cannot revive image evidence. Saved answers keep their admitted revision.
+- Explain unreadable text and extraction failures. This supports image text, not general photo descriptions or video understanding. Small figures and skewed tables still require confirmation.
+- Includes 6.71.8 grounding and the pending 6.71.7 broker update. Existing 629 companions are compatible. Transcription/live-cue flags stay disabled. Acceptance gates: `docs/test-plan-6.71.9.md`.
+
 ## 6.71.8 · Grounded Meeting Ask follow-ups (candidate)
 
 - Select connected transcript passages so corrections, historical dates, units and hypothetical scenarios stay with their amounts. Broad financial questions retain relevant topics across the recording within the existing evidence budget.

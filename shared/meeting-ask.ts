@@ -214,6 +214,8 @@ export interface MeetingAskConfig {
  * PUT files {sessionId,serverInstanceId,files:MeetingAskFile[]} -> {files}. Upsert only; removed is explicit.
  * POST files/media {sessionId,serverInstanceId,media:[{id,name?}]} -> {files} (6.71.1, capabilities.phoneFiles):
  * media already uploaded through /api/media joins the meeting's file list as id "phone_<mediaId>", origin "phone".
+ * 6.71.9 on macOS: images containing text use local OCR and revisioned F evidence; no-word images
+ * remain unsupported and extraction errors are explicit failed rows. Historical evidence is immutable.
  * GET export?sessionId=...&serverInstanceId=... -> {text}; composes persisted Ask/file context,
  * client prepends its current canonical transcript. All operations use X-Cos-Token.
  * GET config is the capability probe (404 means old server); health.capabilities.meetingAsk mirrors capabilities.
