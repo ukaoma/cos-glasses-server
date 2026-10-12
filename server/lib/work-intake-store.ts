@@ -35,6 +35,9 @@ export interface WorkIntakeItem {
   task?: IntakeTask; relation?: 'originated' | 'advanced'
   text?: string; owner?: string | null; ownerIsMiles?: boolean; pull?: IntakePull | null; reason?: IntakeReason
   resolution?: IntakeResolution
+  askEvidence?: { requestId: string; sessionId: string; throughMs: number; question?: string; answer?: string; answerTruncated?: boolean; sources: Array<{
+    id: string; kind: string; title: string; text: string; truncated?: boolean; url?: string; elapsedMs?: number
+  }> }
 }
 
 export const INTAKE_LIMITS = { items: 5_000, batch: 200, text: 600, title: 300, owner: 80, model: 64, retainResolvedDays: 60 } as const
@@ -70,6 +73,24 @@ export function parseIntakeItem(raw: unknown, now = new Date().toISOString()): W
   if (!allowed.includes(status)) throw new WorkIntakeError('invalid_intake_status', 400)
   const item: WorkIntakeItem = { id, kind, status, meeting: meetingOf(r.meeting), confidence, model,
     producedAt: iso(r.producedAt) ?? now, updatedAt: iso(r.updatedAt) ?? now }
+  if (r.askEvidence !== undefined) {
+    const evidence = r.askEvidence as NonNullable<WorkIntakeItem['askEvidence']>
+    if (!evidence || !/^[A-Za-z0-9_-]{8,100}$/.test(evidence.requestId) || !/^meeting_[A-Za-z0-9_-]{1,89}$/.test(evidence.sessionId)
+      || (evidence.question !== undefined && (typeof evidence.question !== 'string' || evidence.question.length > 2000))
+      || (evidence.answer !== undefined && (typeof evidence.answer !== 'string' || evidence.answer.length > 6000))
+      || !Number.isSafeInteger(evidence.throughMs) || evidence.throughMs < 0 || !Array.isArray(evidence.sources) || evidence.sources.length > 8
+      || evidence.sources.some(s => !s || !/^[A-Za-z][0-9]+$/.test(s.id) || !['transcript', 'memory', 'meeting', 'file', 'web'].includes(s.kind)
+        || typeof s.title !== 'string' || s.title.length > 300 || typeof s.text !== 'string' || s.text.length > 600
+        || (s.url !== undefined && (typeof s.url !== 'string' || s.url.length > 2048 || !/^https?:\/\//.test(s.url)))
+        || (s.elapsedMs !== undefined && (!Number.isSafeInteger(s.elapsedMs) || s.elapsedMs < 0)))) throw new WorkIntakeError('invalid_intake_evidence', 400)
+    item.askEvidence = { requestId: evidence.requestId, sessionId: evidence.sessionId, throughMs: evidence.throughMs,
+      ...(evidence.question !== undefined ? { question: evidence.question } : {}),
+      ...(evidence.answer !== undefined ? { answer: evidence.answer } : {}),
+      ...(evidence.answerTruncated === true ? { answerTruncated: true } : {}),
+      sources: evidence.sources.map(s => ({ id: s.id, kind: s.kind, title: s.title, text: s.text,
+        ...(s.truncated === true ? { truncated: true } : {}), ...(s.url ? { url: s.url } : {}),
+        ...(s.elapsedMs !== undefined ? { elapsedMs: s.elapsedMs } : {}) })) }
+  }
   if (kind === 'link') {
     const t = r.task as Partial<IntakeTask> | null
     const domain = clean(t?.domain, 64), tid = clean(t?.id, 12), identity = clean(t?.workIdentity, 12), text = clean(t?.text, INTAKE_LIMITS.text)

@@ -18,7 +18,7 @@ import { getMediaStore, MediaStoreError } from './media-store.js';
 import { createHash } from 'node:crypto';
 import { readMeetingImage, imageTextHasSecrets } from './meeting-image-ocr.js';
 import { isValidMediaId, mediaCategoryOf } from '../../shared/media-attachment.js';
-export const MEETING_ASK_CAPABILITIES: MeetingAskCapabilities = { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: false, phoneFiles: true, cosSearchMode: true, meetingContext: true, publicTopics:true };
+export const MEETING_ASK_CAPABILITIES: MeetingAskCapabilities = { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: false, phoneFiles: true, cosSearchMode: true, meetingContext: true, followUpReview: true, publicTopics:true };
 /**
  * Replaces 'No web.' in LIVE_ASK_SYSTEM when the web is available. The planner decides whether to look
  * anything up; this tells it how to ask so the server's gate (meeting-ask-web.ts) can admit the query.

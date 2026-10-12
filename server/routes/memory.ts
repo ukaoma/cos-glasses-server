@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { callPython, contextSourceAvailable, pythonBridgeState } from '../lib/python-bridge.js'
+import { resolveContextFilesRoot, readFileMemoryById } from '../lib/context-files.js'
 import { searchMemories } from '../lib/context-library-search.js'
 import { getOwnerName, setProfileOwnerName } from '../lib/profile.js'
 import { resetDecoderCaches } from '../lib/whisper-local.js'
@@ -857,10 +858,20 @@ memoryRouter.get('/memory/overview', async (_req, res) => {
   }
 })
 
-memoryRouter.get('/memory/search', async (req, res) => {
+// A distinct route fails closed on older servers; they cannot silently run meaning search.
+memoryRouter.get(['/memory/search', '/memory/search/keyword'], async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : ''
-  if (query.length < 2) {
+  if (query.length < 2 || query.length > 300) {
     res.status(400).json({ error: 'q must be at least 2 characters', reason: 'invalid_query' })
+    return
+  }
+  const mode = req.path.endsWith('/keyword') ? 'keyword' : req.query.mode
+  if (mode !== undefined && mode !== 'keyword' && mode !== 'meaning') {
+    res.status(400).json({ error: 'invalid_search_mode', reason: 'invalid_search_mode' })
+    return
+  }
+  if (mode === 'keyword' && !contextConfigured()) {
+    res.status(503).json({ error: 'memory_search_unavailable', reason: 'memory_source_unavailable' })
     return
   }
   const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 20
@@ -869,11 +880,25 @@ memoryRouter.get('/memory/search', async (req, res) => {
     const result = await searchMemories({
       query,
       limit: Number.isFinite(rawLimit) ? rawLimit : 20,
+      ...(mode === 'keyword' ? { semantic: false } : {}),
     })
     res.json(result)
   } catch {
     res.status(503).json({ error: 'memory_search_unavailable', reason: 'memory_search_unavailable' })
   }
+})
+
+// Detail stays in the same file tier as keyword results, even if a Python bridge is configured.
+memoryRouter.get('/memory/search/keyword/:id', (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  if (!MEMORY_ID_PATTERN.test(req.params.id)) return res.status(400).json({ error: 'invalid_memory_id' })
+  const root = resolveContextFilesRoot()
+  if (!root) return res.status(503).json({ error: 'memory_source_unavailable' })
+  try {
+    const memory = readFileMemoryById(root, req.params.id)
+    if (!memory) return res.status(404).json({ error: 'memory_not_found' })
+    return res.json(memory)
+  } catch { return res.status(503).json({ error: 'memory_unavailable' }) }
 })
 
 memoryRouter.get('/memory/:id', async (req, res) => {

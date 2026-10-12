@@ -5,6 +5,8 @@ import { captureWorkItem, linkTaskMeeting, listBoard, workIntakeCapabilities, Ta
 import { resolveSavedMeetingDetail } from './meetings.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
+import { saveAskFollowUp } from '../lib/meeting-ask-follow-up.js'
+import { meetingAskRuntime } from '../lib/meeting-ask-runtime.js'
 
 export interface WorkIntakeDependencies {
   store: WorkIntakeStore | null
@@ -13,6 +15,8 @@ export interface WorkIntakeDependencies {
   link: typeof linkTaskMeeting
   capture: typeof captureWorkItem
   resolveMeeting: (descriptor: MeetingDescriptor) => MeetingDetail | Promise<MeetingDetail>
+  askGet: typeof meetingAskRuntime.get
+  askIdentity: typeof meetingAskRuntime.identity
 }
 const MAX_MEETING_REFS = 8 // task_work_metadata.MAX_REFS
 export const LINK_RACE_RETRIES = 2
@@ -32,7 +36,8 @@ export function intakeCardText(item: Pick<WorkIntakeItem, 'text' | 'owner' | 'ow
 /** Auth is supplied by the parent /api mount. Nothing here calls a model or starts an agent. */
 export function createWorkIntakeRouter(overrides: Partial<WorkIntakeDependencies> & Pick<WorkIntakeDependencies, 'store'>): Router {
   const deps: WorkIntakeDependencies = { list: listBoard, capabilities: workIntakeCapabilities, link: linkTaskMeeting,
-    capture: captureWorkItem, resolveMeeting: resolveSavedMeetingDetail, ...overrides }
+    capture: captureWorkItem, resolveMeeting: resolveSavedMeetingDetail,
+    askGet: id => meetingAskRuntime.get(id), askIdentity: value => meetingAskRuntime.identity(value), ...overrides }
   const router = Router()
   router.use('/work-intake', (_req, res, next) => {
     res.set('Cache-Control', 'private, no-store')
@@ -54,6 +59,11 @@ export function createWorkIntakeRouter(overrides: Partial<WorkIntakeDependencies
     return res.status(503).json({ error: { code: 'work_intake_unavailable', message: 'Work intake is unavailable. Refresh before trying again.' } })
   }
 
+  router.post('/work-intake/meeting-ask', async (req, res) => {
+    try { res.json({ ok: true, ...await saveAskFollowUp(req.body, { store: deps.store, identity: deps.askIdentity,
+      get: deps.askGet, resolveMeeting: deps.resolveMeeting }) }) }
+    catch (e) { fail(res, e, 'meeting-ask') }
+  })
   router.get('/work-intake', async (_req, res) => {
     try {
       const items = deps.store!.open()
