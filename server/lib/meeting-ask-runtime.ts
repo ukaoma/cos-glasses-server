@@ -300,7 +300,7 @@ export class MeetingAskRuntime {
                 throw new AskError('cancelled');
             this.deps.store.transition(input.requestId, 'running');
             const journal = this.deps.store.list();
-            const history = journal.filter(r => r.exchange.sessionId === input.sessionId && r.exchange.serverInstanceId === input.serverInstanceId && r.exchange.status === 'completed').sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt)).slice(-4).map(r => ({ question: r.exchange.question, answer: r.exchange.answer ?? '' }));
+            const history = journal.filter(r => r.exchange.sessionId === input.sessionId && r.exchange.serverInstanceId === input.serverInstanceId && r.exchange.status === 'completed' && r.exchange.throughMs <= input.elapsedMs).sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt)).slice(-4).map(r => ({ question: r.exchange.question, answer: r.exchange.answer ?? '', sources: r.exchange.sources }));
             let remaining = 16000;
             const extraSources: import('./live-cos-ask.js').AskSource[] = files.filter(f => f.status === 'ready' && f.text.trim()).map((f, i) => { const text = f.text.slice(0, Math.max(0, remaining)); remaining -= text.length; return { id: `F${i + 1}`, kind: 'file' as const, title: f.name, text, fileId: f.id, revision: f.revision }; }).filter(f => f.text);
             extraSources.push(...(finalized?.sources ?? []));

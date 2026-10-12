@@ -1,3 +1,11 @@
+## 6.71.8 · Grounded Meeting Ask follow-ups (candidate)
+
+- Select connected transcript passages so corrections, historical dates, units and hypothetical scenarios stay with their amounts. Broad financial questions retain relevant topics across the recording within the existing evidence budget.
+- Follow-ups recover bounded, server-owned transcript quotations and remove prior request-local citation labels. A later answer cannot lend evidence to an earlier cutoff; changed file revisions are not silently restored. Finalized quotations keep unique citation IDs after recovery.
+- A narrow cash guard withholds hypothetical proceeds presented as current balances, including scenarios split across adjacent audio chunks. Financial summaries distinguish participant reports from verified documents and omit unrelated purchasing boilerplate. No additional model call or automatic web lookup is introduced.
+- Includes the pending 6.71.7 question broker changes and its hook reinstall requirement. Existing companions remain compatible; this server change does not require another EHPK or Control build.
+- Experimental transcription and live-cue flags remain disabled. Candidate replay and release gates: `docs/test-plan-6.71.8.md`. This is not a published release or a claim of general financial fact-checking.
+
 ## 6.71.7 · Session questions stay answerable when you step away
 
 - After Reinstall hooks in COS Control, interactive AskUserQuestion requests from the new hook can stay pending while the native Mac dialog remains available. With an answering client connected, the glasses card appears when the Mac reaches its desk-idle threshold (90 seconds by default), then stays visible until answered, canceled, expired or handed back. First answer wins.

@@ -946,6 +946,19 @@ Meeting Ask includes a qualitative evidence-confidence note. New questions about
 
 Transcription can mishear names, numbers, negations and speakers. Missing or incomplete words do not prove a refusal or commitment. Calendar and user-confirmed meeting context guide retrieval, without proving what was said. Timestamp and progressive-refinement canaries remain disabled by default; this release does not claim improved raw ASR accuracy or a passed 30-second refinement gate. Existing companion clients remain compatible.
 
+### Meeting Ask grounding in server 6.71.8 (candidate)
+
+The candidate selects connected transcript passages and recovers bounded original
+quotations for follow-ups. Previous answers' citation labels are removed before
+reasoning so an older label cannot be mistaken for another passage in the new
+selection. Hypothetical cash proceeds are kept separate from current balances,
+including scenarios split across short audio chunks. The guard is deliberately
+narrow: confidence notes and citations do not constitute a financial audit or
+verified tax treatment. Later files enrich a new Ask without rewriting earlier
+answers. Existing companions and COS Control remain compatible; no new EHPK is
+needed for these server changes. Transcription experiments stay disabled. See
+`docs/test-plan-6.71.8.md` for replay, regression and combined release gates.
+
 ### Public-topic fact-checks in server 6.71.5
 
 Meeting Ask supports an explicit `publicTopics` choice in `/api/meeting-ask/config`. It defaults false; companion 6.10.628 exposes the choice in its Model sheet. Enabling it applies to the next Ask on that paired Mac, including COS Control. A bare “fact-check this” can select a public claim from recent transcript quotations. “How much more is that than the average?” retrieves public cost benchmarks using the previously admitted public topic. Summaries and action presets do not send transcript topics to the web.

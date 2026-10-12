@@ -424,3 +424,40 @@ describe('meeting Ask public web lookups', () => {
         }
     });
 });
+
+describe('follow-up grounding through durable request history', () => {
+    it('rehydrates scoped quotations, strips stale labels, and preserves new source identity', async () => {
+        const run = vi.fn(async (_model: unknown, prompt: string) => {
+            const p = JSON.parse(prompt);
+            if (p.question === 'First question') return { text: JSON.stringify({ sections: [{ label: 'So what', text: 'Reported savings $10K [T1].' }] }) };
+            expect(p.history[0].answer).not.toContain('[T1]');
+            const recovered = p.evidence.find((s: any) => s.turnId === 0);
+            expect(recovered.text).toBe('The tax correction saved $10K.');
+            expect(p.evidence.find((s: any) => s.turnId === 1).id).not.toBe(recovered.id);
+            return { text: JSON.stringify({ sections: [{ label: 'So what', text: `Reported savings $10K [${recovered.id}].` }] }) };
+        });
+        const f = fixture({ run });
+        try {
+            await f.runtime.submit({ ...base, question: 'First question', turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'The tax correction saved $10K.' }] });
+            await terminal(f);
+            await f.runtime.submit({ ...base, requestId: 'request_followup_1', question: 'Money highlights?', elapsedMs: 2000, turns: [{ id: 1, elapsedMs: 1500, speaker: 'Person', text: 'New topic.' }] });
+            const result = await terminal(f, 'request_followup_1');
+            expect(result.status).toBe('completed');
+            expect(result.sources.find(s => s.id === 'T1')?.turnId).toBe(0);
+            expect(result.answer).not.toContain('source unavailable');
+        } finally { f.cleanup(); }
+    });
+    it('never lets a later answer lend evidence to an earlier cutoff', async () => {
+        const run = vi.fn(async (_model: unknown, prompt: string) => {
+            const p = JSON.parse(prompt);
+            if (p.question === 'Earlier cutoff') expect(p.history).toEqual([]);
+            return { text: JSON.stringify({ sections: [{ label: 'So what', text: 'Review Friday [T1].' }] }) };
+        });
+        const f = fixture({ run });
+        try {
+            await f.runtime.submit({ ...base, question: 'Later cutoff', elapsedMs: 2000 }); await terminal(f);
+            await f.runtime.submit({ ...base, requestId: 'request_followup_2', question: 'Earlier cutoff' });
+            expect((await terminal(f, 'request_followup_2')).status).toBe('completed');
+        } finally { f.cleanup(); }
+    });
+});
