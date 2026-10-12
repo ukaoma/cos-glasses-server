@@ -966,3 +966,11 @@ Meeting Ask supports an explicit `publicTopics` choice in `/api/meeting-ask/conf
 A tools-off selector proposes the public topic locally through the configured meeting provider. Admission requires selected supporting transcript passages and adjacent ASR fragments, a public category, observed subject words and amounts, and no sensitive details or speaker identity. Generic research terms may be added; unsupported descriptive words are dropped. Only the admitted query reaches web search. Linked pages are untrusted bounded excerpts; answers cite them and state confidence. The selector is semantic, so ambiguous topics are withheld rather than treated as public.
 
 The new companion also removes the native-console feedback loop observed during stale bridge errors. Physical iPhone/Even app crash recovery still requires device acceptance. Timestamp/HQ flags remain disabled.
+
+### Meeting Ask phone image text (6.71.9 candidate)
+
+On macOS, phone screenshots and photos containing text now use local Apple Vision
+OCR, like Control Meeting Ask. Extracted words become cited file evidence.
+Small numbers and tables may be misread; photos without text are not visually
+interpreted. No new EHPK or Control build is required for existing 629 companions.
+[Acceptance plan](docs/test-plan-6.71.9.md). Experimental transcription flags remain off.
