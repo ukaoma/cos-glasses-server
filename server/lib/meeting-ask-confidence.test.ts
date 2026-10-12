@@ -12,8 +12,8 @@ describe('evidence confidence', () => {
       expect(answerConfidence(raw, rows, []).text).toMatch(/^Limited — Based on/)
     }
   })
-  it('does not let supported override missing sources or partial coverage', () => {
+  it('keeps claim confidence separate from context selection and never overrides missing sources', () => {
     expect(answerConfidence({level:'supported',reason:'Clear facts.'}, [], []).text).toMatch(/^Low — No cited/)
-    expect(answerConfidence({level:'supported',reason:'Clear facts.'}, rows, ['selected passages']).text).toContain('Context coverage is incomplete')
+    expect(answerConfidence({level:'supported',reason:'Clear facts.'}, rows, ['selected passages']).text).toMatch(/^Supported/)
   })
 })

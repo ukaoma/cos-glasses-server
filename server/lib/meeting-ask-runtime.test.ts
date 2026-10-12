@@ -342,7 +342,7 @@ describe('meeting Ask public web lookups', () => {
             expect(f.webSearch).not.toHaveBeenCalled();
             expect(search).toHaveBeenCalledTimes(1);
             expect(e.sources.map(s => s.kind)).toEqual(['transcript', 'memory']);
-            expect(e.notices.join(' ')).not.toContain('You asked for the web');
+            expect(e.notices.join(' ')).not.toContain('COS searched public information');
         }
         finally {
             f.cleanup();
@@ -355,7 +355,7 @@ describe('meeting Ask public web lookups', () => {
             const e = await settle(f, 'Run the web search');
             expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['alt coin daily']);
             expect(f.run).toHaveBeenCalledTimes(2);
-            expect(e.notices.join(' ')).toContain('You asked for the web');
+            expect(e.notices.join(' ')).toContain('COS searched public information');
         } finally { f.cleanup(); }
     });
     it('an explicit request whose query added screenshot words searches only the user\'s words', async () => {
@@ -409,7 +409,7 @@ describe('meeting Ask public web lookups', () => {
                 expect(f.webSearch, question).not.toHaveBeenCalled();
                 expect(f.run, question).toHaveBeenCalledTimes(1);
                 expect(e.notices.join(' '), question).toContain(phrase);
-                expect(e.notices.join(' '), question).not.toContain('You asked for the web');
+                expect(e.notices.join(' '), question).not.toContain('COS searched public information');
             } finally { f.cleanup(); }
         }
     });

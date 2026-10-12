@@ -165,7 +165,14 @@ export function factCheckRequest(question: string): boolean {
         || /\bcompar(?:e|ison)\b.*\b(?:cost|costs|price|prices|similar|average|typical)\b/.test(s)
         || /\b(?:how much|more|less|higher|lower|expensive|cheaper|above|below)\b.*\b(?:average|typical|benchmark)\b/.test(s);
 }
+/** Public resource requests should not require the user to say "web".
+ * Private/internal application and file lookups retain their COS routing. */
+export function publicResourceRequest(question: string): boolean {
+    return !/\b(?:private|internal|confidential|file|document|our app|our application|client application)\b/i.test(question)
+        && /\b(?:find|give|send|show|locate|get|look up)\b.{0,100}\b(?:application|apply|signup|sign up|official link|link|documentation|docs)\b/i.test(question);
+}
 export function explicitWebRequest(question: string): boolean {
+    if (publicResourceRequest(question) || /\b(?:what is|what does|define|meaning of)\b.*\b(?:opt|h1b|h 1b|f1|f 1)\b/i.test(question)) return true;
     if (factCheckRequest(question)) return true;
     return sentences(question).some(sentence => {
         const s = words(sentence).join(' ');
@@ -254,6 +261,19 @@ export function resolveMeetingWebQuery(input: WebGateInput & {
     }
     return { query: null, notices: [decision.notice] };
 }
+/** Only ranks URLs already observed in search; it never invents a source URL.
+ * Query/brand hostname matches precede aggregators when locating an official resource. */
+export function prioritizeWebPages(sources: MeetingAskSource[], query: string): MeetingAskSource[] {
+    const terms = words(query).filter(w => w.length > 2 && isSubject(w) && !['application','program','startup','startups','credit','credits','link'].includes(w));
+    const preferred = new Set(terms);
+    if (preferred.has('claude')) preferred.add('anthropic');
+    const score = (s: MeetingAskSource) => {
+        if (!s.url) return -1;
+        const host = new URL(s.url).hostname.toLowerCase().replace(/^www\./, '');
+        return [...preferred].some(t => ['com','org','io','ai','dev','gov'].some(tld => host === `${t}.${tld}` || host.endsWith(`.${t}.${tld}`))) ? 2 : 0;
+    };
+    return sources.filter(s => s.url).map((s,i)=>({s,i})).sort((a,b)=>score(b.s)-score(a.s)||a.i-b.i).map(x=>x.s);
+}
 export const WEB_HOOK_SOURCE = String.raw `const fs=require('node:fs'),path=require('node:path');let input='';process.stdin.on('data',b=>{input+=b;if(input.length>2000000)process.exit(2)});process.stdin.on('end',()=>{try{const v=JSON.parse(input),root=__dirname;if(v.hook_event_name==='PreToolUse'){let allowed=false;if(v.tool_name==='WebSearch'){try{fs.writeFileSync(path.join(root,'used'),'1',{flag:'wx',mode:0o600});allowed=true}catch{}}fs.appendFileSync(path.join(root,'events.jsonl'),JSON.stringify({tool:v.tool_name,allowed})+'\n',{mode:0o600});process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:allowed?'allow':'deny',permissionDecisionReason:allowed?'One bounded public search':'Search budget exhausted or tool not allowed'}}))}else if(v.hook_event_name==='PostToolUse'&&v.tool_name==='WebSearch'){fs.writeFileSync(path.join(root,'result.json'),JSON.stringify(v.tool_response),{flag:'wx',mode:0o600})}}catch{process.exit(2)}})`;
 function shellQuote(s: string) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
 export function webSearchArgs(hook: string): string[] {
@@ -294,6 +314,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
 }> {
     if (query !== redactSecrets(query))
         return { sources: [], notices: ['Public search was withheld because the query contained a secret.'] };
+    if (/\b(?:application|apply|signup|documentation|docs)\b/i.test(query) && !/\bofficial\b/i.test(query)) query += ' official';
     const root = mkdtempSync(join(tmpdir(), 'cos-ask-web-'));
     const hook = join(root, 'hook.cjs');
     writeFileSync(hook, WEB_HOOK_SOURCE, { mode: 0o600 });
@@ -321,7 +342,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
         let fetched = 0;
         // Read at most two observed result pages. A unavailable/oversize page
         // keeps its honest search-result description, never a fabricated excerpt.
-        await Promise.all(sources.filter(s => s.url).slice(0,2).map(async source => {
+        await Promise.all(prioritizeWebPages(sources, query).slice(0,2).map(async source => {
             const page = await fetchPublicArticle(source.url!, publicAddress, signal);
             if (page) { source.text = 'Retrieved page excerpt (may be partial): ' + redactSecrets(page.text); source.url=page.url; if(page.title) source.title=redactSecrets(page.title); fetched++; }
         }));

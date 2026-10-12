@@ -1,3 +1,10 @@
+## 6.71.10 · Concise, grounded meeting updates (candidate)
+
+- Prioritize transcript neighborhoods for a speaker named in the question within the existing evidence budget. Accept user account/project clarification as orientation while keeping decisions, figures and deadlines tied to their cited passages.
+- Default to one concise direct answer and a brief qualitative confidence assessment. Keep context-selection notices separate from uncertainty about a cited fact. Report time savings as participant claims; do not guess garbled counts or map names without evidence.
+- Honor public application/documentation requests and legal-term definitions without requiring the word web. Preserve the existing public-word/privacy gates, bounded lookups and tools-off answer runner. Prefer observed primary-source domains for the two bounded page reads. Displayed public links cite their observed URL source; unmatched links are withheld.
+- Includes 6.71.9 image-text support and earlier candidate broker fixes. Compatible with 629; clickable inline citations additionally require companion 630 and the pending Control citation change. Transcription and live-cue canaries stay disabled. Acceptance gates: `docs/test-plan-6.71.10.md`.
+
 ## 6.71.9 · Phone image text in Meeting Ask (candidate)
 
 - Read text from phone screenshots and photos locally with Apple Vision on macOS, matching Control Meeting Ask's image-text path. Preserve table row positions and admit extracted text as revisioned F evidence. No extra model call or cloud OCR is introduced.

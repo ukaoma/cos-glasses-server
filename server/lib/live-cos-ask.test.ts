@@ -158,7 +158,7 @@ describe('Live COS Ask', () => {
     const result = await createLiveAsk({ run, search, now: () => 5000, webAvailable: true, explicitWebQuery: 'alt coin daily' })(input({ question: 'Run the web search' }))
     expect(search).toHaveBeenCalledTimes(1); expect(search).toHaveBeenCalledWith('alt coin daily', 'meeting_123_test', 'web')
     expect(run).toHaveBeenCalledTimes(2); expect(result.answer).toContain('[W1]')
-    expect(result.notices.join(' ')).toContain('You asked for the web, so COS searched it for "alt coin daily"')
+    expect(result.notices.join(' ')).toContain('COS searched public information for "alt coin daily"')
   })
   it('does not add a second web search when the planner already asked for the web', async () => {
     const run = vi.fn().mockResolvedValueOnce({ text: '{"sections":[],"searchQuery":"Altcoin Daily","searchScope":"web"}' }).mockResolvedValueOnce(reply('A crypto channel. [W1]'))

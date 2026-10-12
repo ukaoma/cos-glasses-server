@@ -28,6 +28,23 @@ export function connectedEvidence(input: AskInput, budget: number, priorityIds: 
     if (used + size > cap) return
     fresh.forEach(j => selected.add(j)); used += size
   }
+  // A speaker named in the user's question is a retrieval hint, not identity proof.
+  // Reserve complete neighborhoods before old-answer quotes and broad time coverage.
+  if (input.action === 'ask') {
+    const requested = new Set(input.question.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [])
+    const named = rows.map((t, i) => ({t, i})).filter(({t}) =>
+      !/^(?:ext|you|speaker(?: \d+)?|mu)$/i.test(t.speaker.trim()) &&
+      (t.speaker.toLowerCase().match(/[a-z]{3,}/g) ?? []).some(w => requested.has(w)))
+    named.sort((a,b) => scores[b.i] - scores[a.i] || a.i - b.i)
+    const cap = Math.floor(budget * .7)
+    const neighborhood = [...new Set(named.flatMap(({i}) => window(i)))]
+    const core = named.map(({i}) => i)
+    const preferred = neighborhood.reduce((n,i)=>n+cost(rows[i]),0) <= cap ? neighborhood : core
+    if (preferred.reduce((n,i)=>n+cost(rows[i]),0) <= cap) {
+      preferred.forEach(i => { selected.add(i); used += cost(rows[i]) })
+    }
+    named.forEach(({i}) => add(i, cap))
+  }
   // Follow-up evidence has already been scoped and bounded by the server.
   priorityIds.forEach(id => add(rows.findIndex(t => t.id === id), Math.floor(budget / 5)))
   // Financial summaries must retain the setup of conditional proceeds and the
