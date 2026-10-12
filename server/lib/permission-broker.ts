@@ -1,3 +1,11 @@
+// 6.71.7 stamped interactive question rule: hold from ask-time with a connected
+// answerer/recent presence; show only once the desk reaches its idle threshold,
+// then latch visibility until a winner, cancellation, expiry or shutdown. The
+// native desk dialog remains available (Desktop D1 canary passed). A stamp is
+// admitted only for AskUserQuestion outside background/child sessions. Unstamped
+// questions and approvals follow the legacy gates documented below.
+// Reinstall hooks once; hook-ask-hold=0 restores unstamped behavior.
+//
 // The permission broker (6.52.0): a Claude session's question card (AskUserQuestion) or
 // tool approval, answered from the COS glasses or the phone while Miles is away from the
 // Mac, and handed straight back to the Mac's own dialog the moment he returns to it.
@@ -307,6 +315,8 @@ export interface PermissionRequestFacts {
    * writes one) or the payload. Cursor never reaches here (`cursor` refusal above).
    */
   provider?: 'claude' | 'codex'
+  askHold?: boolean
+  toolUseId?: string | null
 }
 
 export type EnvelopeVerdict =
@@ -334,7 +344,7 @@ function readPermissionRequestEnvelope(body: unknown): EnvelopeRead {
   const hookWaitS = typeof wait === 'number' && Number.isInteger(wait) && wait > 0 && wait <= HOOK_WAIT_STAMP_MAX_S ? wait : null
   return {
     ok: true,
-    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts, hookWaitS, provider: inferHookProvider(body.provider, p) === 'codex' ? 'codex' : 'claude' },
+    facts: { sessionId: p.session_id.toLowerCase(), toolName: p.tool_name, toolInput: p.tool_input, hookStartedAtMs: ts, hookWaitS, askHold: body.askHold === 1 && !p.agent_id, toolUseId: typeof p.tool_use_id === 'string' ? p.tool_use_id : null, provider: inferHookProvider(body.provider, p) === 'codex' ? 'codex' : 'claude' },
   }
 }
 
@@ -737,6 +747,8 @@ export interface PermissionBrokerDeps {
   lastLegacyPollAt?(): number | null
   /** 6.60.0: the newest counting poll WITH `hold=1` (`lastHoldQuestionsPollAt`). Absent: none. */
   lastHoldPollAt?(): number | null
+  /** Known print/background/COS-spawned requests keep the legacy admission rules. */
+  isBackgroundRequest?(body: unknown): boolean
   readDeskIdleSeconds(): Promise<number | null>
   deskIdleSeconds(): number
   timeoutMs(): number
@@ -821,6 +833,8 @@ export interface ParkRequest {
    * still does). False with the away hold off, or for a request built without it.
    */
   awayHold?: boolean
+  askHold?: boolean
+  lensVisible?: boolean
   hold?: HoldFacts
 }
 
@@ -852,6 +866,10 @@ interface BrokerItem {
   timer: ReturnType<typeof setTimeout> | null
   /** 6.60.0: held by the away hold (`ParkRequest.awayHold`). */
   awayHold: boolean
+  askHold: boolean
+  lensVisible: boolean
+  toolUseId: string | null
+  questionFingerprint: string
   /**
    * 6.60.0: settled with `{}` written to the hook (handed to the desk, expired, no client,
    * drained), so the Mac's own dialog is showing, and the session has not moved past the
@@ -975,13 +993,25 @@ const TURN_BOUNDARIES: ReadonlySet<string> = new Set(['Stop', 'StopFailure', 'Se
  * means the Mac is no longer waiting on it. A question's tool is AskUserQuestion; an
  * approval matches by fingerprint, or by tool name for a denial.
  */
-function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolName'>, env: HookEnvelope, toolName: string, fingerprint: string, strict = false): boolean {
-  if (TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && env.payload.source !== 'compact')) return true
+function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolName' | 'askHold' | 'toolUseId' | 'questionFingerprint'>, env: HookEnvelope, toolName: string, fingerprint: string, strict = false): boolean {
+  if ((item.askHold && env.event === 'Interrupt') || TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && env.payload.source !== 'compact')) return true
   if (env.event === 'PostToolUse' || env.event === 'PostToolUseFailure' || env.event === 'PermissionDenied') {
     // `strict` (QA round 1, N3), for "the Mac is no longer waiting": an approval only by its
     // own fingerprint, never by a denial of the same tool name, which may be another dialog
     // of the same session still on screen.
-    if (item.kind === 'question') return toolName === ASK_USER_QUESTION_TOOL
+    if (item.kind === 'question') {
+      if (toolName !== ASK_USER_QUESTION_TOOL) return false
+      if (!item.askHold) return true // old hook compatibility
+      if (item.toolUseId) return env.payload.tool_use_id === item.toolUseId
+      // Desktop can add answers to the original tool input on completion. Match the
+      // question payload itself so that a desk answer still closes exactly its card.
+      const completed = env.payload.tool_input
+      if (completed && typeof completed === 'object' && !Array.isArray(completed)) {
+        const questions = (completed as Record<string, unknown>).questions
+        if (Array.isArray(questions)) return toolFingerprint(ASK_USER_QUESTION_TOOL, { questions }) === item.questionFingerprint
+      }
+      return fingerprint === item.fingerprint
+    }
     if (strict) return fingerprint === item.fingerprint
     return fingerprint === item.fingerprint || (env.event === 'PermissionDenied' && toolName === item.toolName)
   }
@@ -1157,20 +1187,27 @@ export class PermissionBroker {
       if (this.deps.mode() !== 'all') return this.noteFastPath('approvals_off')
       if (UNBROKERED_TOOLS.has(facts.toolName)) return this.noteFastPath('unsupported_tool')
     }
+    let background = false
+    try { background = this.deps.isBackgroundRequest?.(body) === true } catch { background = true }
+    const askHold = isQuestion && facts.askHold === true && !background
     const now = this.deps.now()
     const presence = this.presence(now)
-    const clientLive = this.clientLive(now) || presence.holdLive
+    let holdPollAt: number | null = null
+    try { holdPollAt = this.deps.lastHoldPollAt?.() ?? null } catch { /* legacy only */ }
+    const connectedHoldClient = askHold && this.polledWithin(holdPollAt, now)
+    const clientLive = this.clientLive(now) || presence.holdLive || connectedHoldClient
     // 6.60.0: the away hold applies only when it is on, the installed hook waits longer than
     // the 6.59.0 broker could hold, and a `hold=1` client reported wearer presence within the
     // window (Miles, 19:54; QA round 1).
     const switchOn = this.awayHoldMs() > 0
     const ceilingAllowsAway = this.holdMs(facts.hookWaitS, false).ceilingAllowsAway
-    const away = switchOn && ceilingAllowsAway && presence.recent
+    const away = switchOn && ceilingAllowsAway && (askHold || presence.recent)
     const notAwayReason: NotAwayReason | null = away ? null
       : !switchOn ? 'hold_off'
       : !ceilingAllowsAway ? 'ceiling_at_base'
       : presence.ageMs === null ? 'no_hold_client'
       : 'stale_presence'
+    if (askHold && !clientLive && !presence.recent) return this.noteFastPath('no_client', { presence, clientLive })
     const hold = this.holdMs(facts.hookWaitS, away)
     // With it, a request is held whether or not a client is polling right now, so a lens or
     // phone that comes back can still answer it. Without it, no client is `{}`, as in 6.59.0.
@@ -1183,8 +1220,8 @@ export class PermissionBroker {
     if (this.pendingCount() >= MAX_PENDING) return this.noteFastPath('capacity')
     let idle: number | null = null
     try { idle = await this.deps.readDeskIdleSeconds() } catch { idle = null }
-    if (idle === null) return this.noteFastPath('desk_unknown')
-    if (idle < this.deskIdleThreshold()) return this.noteFastPath('desk_active', { notAway: 'desk_active', presence, clientLive })
+    if (!askHold && idle === null) return this.noteFastPath('desk_unknown')
+    if (!askHold && idle! < this.deskIdleThreshold()) return this.noteFastPath('desk_active', { notAway: 'desk_active', presence, clientLive })
     const mode = this.deps.mode()
     if (mode === 'off') return this.noteFastPath('broker_off')
     if (!this.deps.admissionsOpen()) return this.noteFastPath('draining')
@@ -1210,13 +1247,13 @@ export class PermissionBroker {
       awayHoldS: Math.round(hold.awayHoldMs / 1000),
       ceilingS: hold.ceilingS,
       effectiveDeadlineS: Math.round(hold.holdMs / 1000),
-      deskIdleMs: idle * 1000,
+      deskIdleMs: idle === null ? null : idle * 1000,
       clientLive,
       presenceAgeMs: presence.ageMs === null ? null : Math.round(presence.ageMs),
       recentWindowS: Math.round(presence.windowMs / 1000),
       notAwayReason,
     }
-    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, hold: holdFacts } }
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), hold: holdFacts } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -1246,6 +1283,10 @@ export class PermissionBroker {
       channel,
       timer: null,
       awayHold: request.awayHold === true,
+      askHold: request.askHold === true,
+      lensVisible: request.lensVisible !== false,
+      toolUseId: facts.toolUseId ?? null,
+      questionFingerprint: toolFingerprint(ASK_USER_QUESTION_TOOL, { questions: facts.toolInput.questions }),
       waitingAtMac: false,
     }
     this.items.set(id, item)
@@ -1293,6 +1334,8 @@ export class PermissionBroker {
     return true
   }
 
+  questionsPollIntervalMs(): number { return this.pendingCount() > 0 ? 3_000 : QUESTIONS_POLL_INTERVAL_MS }
+
   /** The pending items, oldest first, for `GET /api/session-questions`. */
   list(): SessionQuestionView[] {
     const now = this.deps.now()
@@ -1301,6 +1344,7 @@ export class PermissionBroker {
       if (item.state !== 'pending') continue
       // A deadline the timer has not caught yet is still a dead question.
       if (now >= item.deadlineAt) { this.settle(item, 'expired'); continue }
+      if (!item.lensVisible) continue
       views.push({
         id: item.id,
         sessionId: item.sessionId,
@@ -1359,10 +1403,10 @@ export class PermissionBroker {
     if (wanted.length < 8) return 0
     let cleared = 0
     for (const item of this.items.values()) {
-      if (!item.waitingAtMac) continue
       if (item.sessionId !== wanted && !(wanted.length < 36 && item.sessionId.startsWith(wanted))) continue
-      item.waitingAtMac = false
-      cleared++
+      if (item.askHold && item.state === 'pending') {
+        if (this.settle(item, 'retracted')) cleared++
+      } else if (item.waitingAtMac) { item.waitingAtMac = false; cleared++ }
     }
     if (cleared > 0) this.log(`session row ended: ${cleared} no longer waiting at the Mac session=${wanted.slice(0, 8)}`)
     return cleared
@@ -1440,6 +1484,7 @@ export class PermissionBroker {
     item.timer = null
     this.counters.answered++
     try { this.deps.signals?.decided(item.sessionId, item.id, item.fingerprint) } catch { /* rows are advisory */ }
+    if (item.kind === 'question') this.log(`glasses_won ${item.id}`)
     this.log(`answered ${item.id} kind=${item.kind} pending=${this.pendingCount()}`)
     this.prune()
     return { status: 200, body: { ok: true, id: item.id, kind: item.kind, ...chosen } }
@@ -1524,7 +1569,7 @@ export class PermissionBroker {
    * dialog was answered), or its turn ended. An event older than the request is history.
    */
   observeHookEvent(env: HookEnvelope, child: boolean): void {
-    if (child) return
+    if (child || env.payload.agent_id) return
     const p = env.payload
     const toolName = typeof p.tool_name === 'string' ? p.tool_name : ''
     const fingerprint = typeof p.tool_fingerprint === 'string' ? p.tool_fingerprint : toolFingerprint(toolName, p.tool_input ?? null)
@@ -1546,7 +1591,10 @@ export class PermissionBroker {
         continue
       }
       if (item.state !== 'pending' || env.ts < item.requestedAt) continue
-      if (sessionMovedPast(item, env, toolName, fingerprint)) this.settle(item, 'retracted')
+      if (sessionMovedPast(item, env, toolName, fingerprint)) {
+        if (env.event === 'PostToolUse' && item.kind === 'question') this.log(`desk_won ${item.id}`)
+        this.settle(item, 'retracted')
+      }
     }
   }
 
@@ -1578,9 +1626,10 @@ export class PermissionBroker {
       // the wearer's latest presence is still within the window (QA round 1, Skeptic W2: a
       // single glance must not hold a question 10 more minutes). The desk below still hands
       // it back.
-      this.settleAll('no_client', item => !item.awayHold || !presence.recent)
+      this.settleAll('no_client', item => !item.askHold && (!item.awayHold || !presence.recent))
       if (this.pendingCount() === 0) return
     }
+    if (![...this.items.values()].some(item => item.state === 'pending' && (!item.askHold || !item.lensVisible))) return
     if (this.pollInFlight) return
     this.pollInFlight = true
     let idle: number | null = null
@@ -1588,12 +1637,20 @@ export class PermissionBroker {
     if (idle === null) {
       this.counters.deskUnreadable++
       this.deskUnreadableStreak++
-      if (this.deskUnreadableStreak >= 2) this.settleAll('handed_to_desk')
+      if (this.deskUnreadableStreak >= 2) this.settleAll('handed_to_desk', item => !item.askHold)
       return
     }
     this.deskUnreadableStreak = 0
-    if (idle >= this.deskIdleThreshold()) return
-    this.settleAll('handed_to_desk')
+    if (idle >= this.deskIdleThreshold()) {
+      for (const item of this.items.values()) {
+        if (item.state === 'pending' && item.askHold && !item.lensVisible && now < item.deadlineAt) {
+          item.lensVisible = true
+          this.log(`lens_visible ${item.id}`)
+        }
+      }
+      return
+    }
+    this.settleAll('handed_to_desk', item => !item.askHold)
   }
 
   private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client', only: (item: BrokerItem) => boolean = () => true): void {

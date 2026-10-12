@@ -1,0 +1,215 @@
+#!/bin/sh
+# COS session hook (glasses-server 6.48.0; Cursor Stop follow-up 6.51.0; halt check 6.53.0; single entry 6.53.3; away hold wait 6.60.0; Codex and Cursor parity 6.62.0). Installed into ~/.claude/settings.json by
+# `--hooks install`; Claude Code runs it with the hook event name as $1 and the event
+# payload on stdin. It spools one JSON file per event into the hook spool and exits 0
+# on every path. Only PermissionRequest ever talks to the server, and only when the
+# desk has been idle. Everything else is a file write, so the server being down or
+# restarting never delays a Claude session.
+#
+# 6.53.0: PreToolUse is SYNCHRONOUS with no matcher, so the first branch below runs before
+# EVERY tool call in every Claude session on this Mac. It never contacts the server. For an
+# ordinary tool it writes nothing at all; it spools only AskUserQuestion and ExitPlanMode
+# (the two tools the reducer reads, the 6.48 matcher's set), and UserPromptSubmit, which
+# shares the branch, is always spooled. It prints nothing unless the server left a halt
+# marker for this session, when it prints the one reply that stops the run (canary C1b,
+# 2026-09-21: `continue:false` alone still ran the tool; with the deny it did not). It never
+# exits 2: exit 2 blocks the tool, while a timeout or any other code fails open (C6, C7).
+# Every path, every event, drains stdin before it exits, so Claude Code's writer never
+# EPIPEs whatever the payload's size (6.53.3; every other event since its /qa round).
+#
+# The installer bakes COS_GLASSES_HOME and COS_HOOK_SPOOL into the command, so this
+# script and the server can never disagree about where the token or the spool is.
+#
+# 6.62.0: the same bytes also run from ~/.codex/hooks.json (as their own copy,
+# cos-session-hook-codex), whose command adds COS_HOOK_PROVIDER=codex; a Codex payload
+# reaching the Claude command is recognised too (codex_of, below). Codex changes three things
+# only: the halt reply is deny-only (Codex rejects `continue:false` in a PreToolUse reply and
+# then RUNS the tool, canary C10; the deny alone blocks it, C12), the spooled envelope says
+# `"provider":"codex"`, and the Cursor Stop follow-up below never runs. Claude and Cursor
+# share the Claude command and keep today's bytes; the server tells them apart by the payload.
+PATH=/usr/bin:/bin:/usr/sbin; umask 077; trap '' PIPE
+HOME=${HOME:-$(cd ~ 2>/dev/null && pwd)}; [ -n "$HOME" ] || exit 0
+GH=${COS_GLASSES_HOME:-$HOME/.cos-glasses}
+SPOOL=${COS_HOOK_SPOOL:-$GH/data/hook-spool}; EVENT="$1"
+PROV=${COS_HOOK_PROVIDER:-}; case "$PROV" in claude|codex|cursor) ;; *) PROV='' ;; esac
+# 6.53.0, the halt check; 6.53.3, one entry for both synchronous events (review A, option a).
+# FIRST, before mkdir, perl and the B8 guard below: a full spool or a stale drain stamp must
+# never stop a cancel. The marker folder sits beside the spool, like the Cursor queue
+# folder; the server writes `<folder>/<session id>` (lib/session-halt.ts).
+#
+# The common path, a tool call with no marker anywhere on the Mac, is one glob, one 4 KiB
+# read, a shell `case`, and `exec cat` to drain the rest of stdin: no temp file, no grep,
+# no dirname, no mkdir (median 29 ms to 17 ms per tool call on the release Mac, 40 runs
+# each). Draining, not leaving stdin unread, keeps Claude Code's writer from EPIPE at any
+# payload size (a 2.5 MB tool input did EPIPE against the 6.53.0 script).
+FRONT=''
+case "$EVENT" in PreToolUse|UserPromptSubmit)
+  HALT="${SPOOL%/*}/session-halt"
+  # Any marker at all? A glob is a builtin, and it runs before stdin is touched.
+  ANY=''; for F in "$HALT"/*; do [ -e "$F" ] && ANY=1; break; done
+  # The FIRST session_id is the payload's own: Claude and Codex write it first, and a tool's
+  # input that happens to carry one comes later. 6.62.0 (W7): Cursor writes
+  # "conversation_id" FIRST (byte 1, the same id) and its session_id ~600 bytes in, behind
+  # tool_input, so a large edit pushed it out of this read and an input naming another
+  # session matched first. Whichever of the two keys comes first is the payload's own. Any
+  # JSON spacing; 36 hex-and-dash characters inside a closed string, or nothing.
+  sid_of() {
+    SID=''; KEY='"session_id"'; PRE=${HEAD%%'"session_id"'*}
+    case "$PRE" in *'"conversation_id"'*) KEY='"conversation_id"' ;; esac
+    case "$HEAD" in *"$KEY"*)
+      SID=${HEAD#*"$KEY"}; SID=${SID#"${SID%%[!:[:space:]]*}"}
+      case "$SID" in '"'*'"'*) SID=${SID#?}; SID=${SID%%'"'*} ;; *) SID='' ;; esac ;;
+    esac
+    case "$SID" in *[!0-9A-Fa-f-]*) SID='' ;; esac
+    [ ${#SID} -eq 36 ] || SID=''
+  }
+  # dd, never head: macOS head fills a 16 KiB buffer from a pipe and keeps only what -c
+  # asks for, so the bytes after 4 KiB would be lost to the spool below. dd does ONE
+  # read(2) of at most 4 KiB, and the `cat` after it starts at exactly the next byte.
+  HEAD=$(dd bs=4096 count=1 2>/dev/null)
+  SID=''; [ -z "$ANY" ] || sid_of
+  # Claude writes the session id first and a tool call's name within a few hundred bytes.
+  # If this read came back without what the event needs, the writer's bytes arrived in
+  # pieces: read once more rather than guess.
+  MORE=''; case "$EVENT$HEAD" in PreToolUse*'"tool_name"'*|UserPromptSubmit*) ;; *) MORE=1 ;; esac
+  if [ -n "$MORE" ] || { [ -n "$ANY" ] && [ -z "$SID" ]; }; then
+    HEAD="$HEAD$(dd bs=4096 count=1 2>/dev/null)"
+    [ -z "$ANY" ] || sid_of
+  fi
+  NEED=''
+  if [ "$EVENT" = UserPromptSubmit ]; then NEED=1
+  else
+    # Only the two tools the reducer reads are spooled (the 6.48 matcher). The FIRST
+    # "tool_name" is the payload's own; a tool's input that carries one comes later.
+    case "$HEAD" in *'"AskUserQuestion"'*|*'"ExitPlanMode"'*)
+      TN=${HEAD#*'"tool_name"'}; TN=${TN#"${TN%%[!:[:space:]]*}"}
+      case "$TN" in '"AskUserQuestion"'*|'"ExitPlanMode"'*) NEED=1 ;; esac ;;
+    esac
+  fi
+  # 6.62.0 (QA W13): a COS block Codex imported from the Claude settings runs with no
+  # COS_HOOK_PROVIDER, and the Claude reply makes Codex fail open. Codex writes its rollout as
+  # the payload's SECOND key, right behind session_id; Claude writes its own transcript there,
+  # and the same key further in (a tool that reads a rollout) is not the payload's. Read only
+  # when a marker or a spool needs it, so a plain tool call stays one read and a `case`.
+  codex_of() {
+    case "$HEAD" in *'"session_id"'*'"transcript_path"'*) ;; *) return ;; esac
+    A=${HEAD#*'"session_id"'}; B=${A%%'"transcript_path"'*}
+    [ ${#B} -le 64 ] || return
+    TP=${A#*'"transcript_path"'}; TP=${TP#"${TP%%[!:[:space:]]*}"}
+    case "$TP" in '"'*) TP=${TP#?}; TP=${TP%%'"'*} ;; *) return ;; esac
+    case "$TP" in */.codex/sessions/*) PROV=codex ;; esac
+  }
+  [ -n "$PROV" ] || { [ -z "$ANY" ] && [ -z "$NEED" ]; } || codex_of
+  case "$SID" in *[A-F]*) SID=$(printf '%s' "$SID" | tr 'A-F' 'a-f') ;; esac
+  if [ -z "$SID" ]; then :
+  elif [ "$EVENT" = UserPromptSubmit ]; then
+    # A new prompt is never stopped: the marker lives only within the run it was written
+    # for. This covers a prompt typed at the desk, a Continue delivered into the open
+    # session, and a COS `-p` turn. Nothing (no temp file, 6.53.3 review A10) stands between
+    # reading the id and clearing it. Then the prompt is spooled as before.
+    rm -f "$HALT/$SID" 2>/dev/null
+  elif [ -f "$HALT/$SID" ]; then
+    if [ "$PROV" = codex ]; then
+      # 6.62.0 (C10, C12): deny only, and a reason that tells the model to stop.
+      printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS. Stop and do not work around this."}}'
+    else
+      printf '%s' '{"continue":false,"stopReason":"Cancelled from COS","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cancelled from COS"}}'
+    fi
+    exec cat >/dev/null
+  fi
+  # Every other tool call ends here with nothing written and nothing printed.
+  [ -n "$NEED" ] || exec cat >/dev/null
+  FRONT=1
+  # Until the spool read below has taken stdin, any exit (a failed mkdir, the B8 guard)
+  # still drains it.
+  trap 'cat >/dev/null 2>&1' EXIT
+  ;;
+esac
+# Every other event: until the spool read below has taken stdin, any exit (a failed mkdir,
+# the B8 guard) drains it, as the front does.
+[ -n "$FRONT" ] || trap 'cat >/dev/null 2>&1' EXIT
+mkdir -p "$SPOOL/rejected" 2>/dev/null || exit 0
+TS=$(perl -MTime::HiRes -e 'printf "%.0f", Time::HiRes::time()*1000' 2>/dev/null || date +%s000)
+# B8 guard: a full spool or a stale drain stamp means nobody is reading; keep only permissions.
+if [ "$EVENT" != PermissionRequest ]; then
+  N=$(ls "$SPOOL" 2>/dev/null | wc -l | tr -d ' '); [ "${N:-0}" -lt 2000 ] || exit 0
+  STAMP="$SPOOL/.last-drain"; [ ! -f "$STAMP" ] || [ -z "$(find "$STAMP" -mmin +1440 2>/dev/null)" ] || exit 0   # -mtime +1 would mean two days
+fi
+T="$SPOOL/.tmp.$$.$TS"
+# Stdin to disk with a 1 MiB cap; whatever lies past the cap is drained, never left for the
+# writer to EPIPE on.
+trap - EXIT
+if [ -n "$FRONT" ]; then
+  # 6.53.3: the 4 KiB the halt check read, then the rest of stdin.
+  { printf '%s' "$HEAD"; exec cat; } | { head -c 1048576 > "$T.in"; exec cat >/dev/null; }
+else
+  # No `exec` here: this group runs in the script's own shell.
+  { head -c 1048576 > "$T.in"; cat >/dev/null; }
+fi
+case "$(head -c 1 "$T.in")" in '{') ;; *) EVENT=rejected ;; esac
+# 6.60.0: the installer passes the PermissionRequest block's own timeout as $2. Claude Code
+# stops this hook at that many seconds, so curl below gives up 5 s before it, and the
+# request carries it (`hookWaitS`) so the server never holds it longer. No usable $2 (an
+# earlier block) is the earlier wait, 130, with no stamp.
+WAIT=130; STAMP_WAIT=''
+if [ "$EVENT" = PermissionRequest ]; then
+  case "${2:-}" in ''|0*|*[!0-9]*) ;; *)
+    if [ ${#2} -le 4 ] && [ "$2" -ge 20 ] && [ "$2" -le 3600 ]; then WAIT=$2; STAMP_WAIT=",\"hookWaitS\":$2"; fi ;;
+  esac
+fi
+# 6.62.0: the provider, when the command said it (only the Codex command does).
+STAMP_PROV=''; [ -z "$PROV" ] || STAMP_PROV=",\"provider\":\"$PROV\""
+{ printf '{"ts":%s,"ppid":%s,"event":"%s"%s%s,"payload":' "$TS" "$PPID" "$EVENT" "$STAMP_WAIT" "$STAMP_PROV"; cat "$T.in"; printf '}\n'; } > "$T"
+rm -f "$T.in"
+# 6.51.0, CURSOR ONLY. Cursor runs this hook from ~/.claude/settings.json for its own
+# composers, and submits a Stop hook's {"followup_message":...} as that composer's next
+# message. A turn COS queued for the composer is handed over here, at the end of its turn.
+# Claude Code sets no CURSOR_VERSION and sends no cursor_version, so a Claude Stop takes
+# the line below this block exactly as before and never touches the network. 6.62.0: nor
+# does a Codex Stop, whatever its environment says: a follow-up is Cursor-only output.
+if [ "$EVENT" = Stop ] && [ "$PROV" != codex ] && [ -n "${CURSOR_VERSION:-}" ] && grep -Eq '"cursor_version"[[:space:]]*:[[:space:]]*"' "$T" 2>/dev/null; then
+  cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
+  # Nothing queued for this composer (almost every Stop): no request at all. The queue
+  # folder sits beside the spool. If it is not there, or the id cannot be read here,
+  # ask anyway rather than guess; the server reads the id the same way (conversation_id,
+  # then session_id).
+  QDIR="$(dirname "$SPOOL")/thread-turn-queue"
+  CONV=$(grep -Eo '"conversation_id"[[:space:]]*:[[:space:]]*"[0-9A-Fa-f-]{36}"' "$T.req" 2>/dev/null | grep -Eo '[0-9A-Fa-f-]{36}' | head -1 | tr 'A-F' 'a-f')
+  [ -n "$CONV" ] || CONV=$(grep -Eo '"session_id"[[:space:]]*:[[:space:]]*"[0-9A-Fa-f-]{36}"' "$T.req" 2>/dev/null | grep -Eo '[0-9A-Fa-f-]{36}' | head -1 | tr 'A-F' 'a-f')
+  if [ -d "$QDIR" ] && [ -n "$CONV" ] && [ ! -f "$QDIR/cursor-$CONV.json" ]; then rm -f "$T.req"; exit 0; fi
+  TOK=$(cat "$GH/hook-token" 2>/dev/null); PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
+  if [ -n "$TOK" ] && [ -f "$T.req" ]; then
+    OUT=$(curl -s --connect-timeout 1 --max-time 3 -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
+      --data-binary @"$T.req" "http://127.0.0.1:$PORT/hooks/cursor/stop-followup") || OUT=''
+    case "$OUT" in '{"followup_message"'*) printf '%s' "$OUT" ;; esac
+  fi
+  rm -f "$T.req"; exit 0
+fi
+if [ "$EVENT" != PermissionRequest ]; then mv "$T" "$SPOOL/$TS-$$-$EVENT.json"; exit 0; fi   # rename = publish
+# A permission request keeps its own copy: the server unlinks the published file within
+# milliseconds of the rename, and the request body below must outlive that.
+cp "$T" "$T.req" 2>/dev/null; mv "$T" "$SPOOL/$TS-$$-$EVENT.json"
+cleanup() { rm -f "$T.req"; }
+# Desk-active fast path decided HERE (about 30 ms): no HTTP at all when someone is at the
+# keyboard. An unreadable idle time fails the same way: nothing is contacted, the native
+# dialog shows.
+IDLE_NS=$(ioreg -c IOHIDSystem 2>/dev/null | awk -F'= ' '/HIDIdleTime/{print $2; exit}')
+DESK_S=$(cat "$GH/hook-desk-idle-s" 2>/dev/null || echo 90)
+{ [ -n "$IDLE_NS" ] && [ "$(( ${IDLE_NS%.*} / 1000000000 ))" -ge "$DESK_S" ]; } || { cleanup; exit 0; }
+TOK=$(cat "$GH/hook-token" 2>/dev/null); [ -n "$TOK" ] || { cleanup; exit 0; }   # no token, no request
+PORT=$(cat "$GH/hook-port" 2>/dev/null || echo 3141)
+# 6.60.0 (QA round 1, W7): curl runs as a tracked child, not only inside $(...), and this
+# script stops it when it is stopped itself (Claude Code's timeout, an interrupt). The
+# broker then sees the socket close at once (`hook_gone`) and never accepts an answer the
+# session can no longer receive.
+rm -f "$T.out"
+curl -s --connect-timeout 2 --max-time $((WAIT - 5)) -H "X-Cos-Hook-Token: $TOK" -H 'content-type: application/json' \
+  -o "$T.out" --data-binary @"$T.req" "http://127.0.0.1:$PORT/api/permission-requests/ask" &
+CURL=$!
+trap 'kill "$CURL" 2>/dev/null; rm -f "$T.req" "$T.out"; exit 0' TERM INT HUP
+wait "$CURL" || { trap - TERM INT HUP; cleanup; rm -f "$T.out"; exit 0; }
+trap - TERM INT HUP
+OUT=$(cat "$T.out" 2>/dev/null); rm -f "$T.out"
+cleanup
+case "$OUT" in '{"hookSpecificOutput"'*) printf '%s' "$OUT" ;; esac
+exit 0

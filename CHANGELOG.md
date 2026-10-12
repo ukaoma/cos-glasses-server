@@ -1,3 +1,10 @@
+## 6.71.7 · Session questions stay answerable when you step away
+
+- After Reinstall hooks in COS Control, interactive AskUserQuestion requests from the new hook can stay pending while the native Mac dialog remains available. With an answering client connected, the glasses card appears when the Mac reaches its desk-idle threshold (90 seconds by default), then stays visible until answered, canceled, expired or handed back. First answer wins.
+- A current hold-capable client poll qualifies the new questions without fresh wearer input. No connected client or recent presence still means Mac-only. Approvals, unstamped hooks and background sessions retain their existing rules. Pending questions poll every three seconds; idle polling remains ten seconds.
+- Disable the new hook rule without reinstalling with `echo 0 > ~/.cos-glasses/hook-ask-hold`. Downgrading to 6.71.5 requires Reinstall hooks afterward. Codex may ask to trust the reinstalled hooks.
+- No Control update or app reinstall is required for the question rule. Companion 6.10.629 separately fixes the Meeting Ask status-row layout jump and includes 628. Physical phone/glasses acceptance remains a release gate. All transcription and grounded-cue experiments stay disabled.
+
 ## 6.71.5 · public-topic meeting fact-checks
 
 - Meeting Ask can use recent public-topic passages for fact-checks and cost comparisons after an explicit persisted opt-in. It defaults off; private topics, speaker identities, unrelated passages, files, calendar and memory cannot lend search vocabulary. Older companion builds remain compatible.

@@ -24,7 +24,7 @@ import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { cachedHookStatus, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { cachedHookStatus, isCosSpawnedPid, registryEntrypointSync, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { clearingHaltOnSpawn, writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, setDeskCancelReaders, threadCancel } from './lib/session-cancel.js'
@@ -277,6 +277,10 @@ const permissionBroker = new PermissionBroker({
   mode: () => permissionBrokerMode(process.env, sessionHooksEnabled()),
   admissionsOpen: maintenanceAdmissionsOpen,
   lastQuestionsPollAt,
+  isBackgroundRequest: body => {
+    const b = body as { ppid?: number; payload?: {session_id?: string; agent_id?: unknown} }
+    return !!b.payload?.agent_id || isCosSpawnedPid(b.ppid ?? null) || registryEntrypointSync(b.payload?.session_id ?? '') === 'sdk-cli'
+  },
   readDeskIdleSeconds: readHidIdleSeconds,
   deskIdleSeconds,
   timeoutMs: () => permissionBrokerTimeoutMs(process.env),

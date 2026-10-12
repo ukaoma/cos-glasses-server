@@ -431,6 +431,20 @@ describe('after the 6.53.3 script change', () => {
     }
   })
 
+  it('6.71.5 fixture stays Claude halt-ready, reads outdated, and reinstall restores the current script', () => {
+    try {
+      const bytes = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__/cos-session-hook-6.71.5'))
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe('0fd4f98801333399625701bdc83ed1a5906bbf18c449d0586daa6b8e58ada7f3')
+      const old = onScript(bytes)
+      expect(old.state).toBe('script_outdated')
+      expect(hookHaltReady(old)).toBe(true)
+      expect(cursorDeskHaltReady(old)).toBe(false)
+      const current = onScript(readFileSync(packagedHookScriptPath()))
+      expect(current.state).toBe('installed')
+      expect(cursorDeskHaltReady(current)).toBe(true)
+    } finally { delete process.env.COS_GLASSES_HOME }
+  })
+
   it('the pre-QA 6.53.3 script (7433b7f): also halt-capable, pinned against its own bytes', () => {
     try {
       const bytes = readFileSync(SCRIPT_6_53_3_PREQA)

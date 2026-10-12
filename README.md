@@ -232,20 +232,16 @@ own) replays rather than repeats.
 sub-agents omitted) and `recent_turns_more` to the detail payload, read backward from
 the end of the transcript; without `turns` the payload is unchanged. The glasses use it
 to scroll back through a running session's conversation.
-Since 6.52.0 a session question (the AskUserQuestion card) or a tool approval can be
-answered from the glasses or the phone while you are away from the Mac. There is nothing
-to reinstall: the hook script is the 6.51.0 one, and the server now answers the URL it
-already calls, `POST /api/permission-requests/ask` (hook-token auth, checked before the
-body is read; that one method and path is exempt from the API token, nothing else is).
-The hook posts only after the desk has been idle 90 s; the server holds the request only
-while the desk stays idle and a client that can answer keeps polling, and answers `{}`
-(the Mac's own dialog) to everything else at once. A client that never polls (COS
-Glasses 6.9.511 and earlier, COS Control) changes nothing.
+Session questions (AskUserQuestion) and tool approvals can be answered from the glasses or phone through `POST /api/permission-requests/ask`. That route uses the per-install hook token checked before the body is read; other routes retain API-token authentication.
+
+**6.71.7: Reinstall hooks in COS Control after updating.** The new hook stamps interactive questions with `askHold:1`. When an answering client is connected (a qualifying poll in the last 30 seconds), or wearer presence is still recent, COS holds the question while its native Mac dialog stays available. The card appears on the glasses after the Mac is idle for 90 seconds (the configured desk threshold). Once visible, returning to the desk does not remove it mid-read. The first desk or glasses answer wins; a matching completion, cancellation, session end, expired deadline, disconnected hook or maintenance drain clears it. A connected hold-capable app counts without a fresh touch. Without a connected client or recent presence, the question stays Mac-only.
+
+The existing away-hold and hook timeout ceilings still apply; a question never outlives its hook. Approvals, unstamped hooks and background/child sessions keep the older desk-idle and presence rules described below. Roll back only the new question rule with `echo 0 > ~/.cos-glasses/hook-ask-hold` (no reinstall). Restore it with `echo 1 > ~/.cos-glasses/hook-ask-hold`. Downgrading the server requires **Reinstall hooks** again. Until reinstalling, Codex/ Cursor desk-cancel can be unavailable; Codex may request hook trust again. No Control release is needed.
 
 The client contract (also at `/api/models` `capabilities.sessionQuestions`):
 
 - Poll `GET /api/session-questions?client=glasses` (or `client=phone`) with X-Cos-Token
-  every `pollIntervalMs` (10,000). Only those two `client` values count as a live
+  every `pollIntervalMs` (3,000 while requests are pending; otherwise 10,000). Only those two `client` values count as a live
   answerer; a poll without `client`, or with any other value, is answered but never
   counts. A client quiet for `liveWindowMs` (30,000) hands every held request back,
   except one the away hold holds (6.60.0, below).
@@ -261,10 +257,10 @@ The client contract (also at `/api/models` `capabilities.sessionQuestions`):
   404 `not_found` after a server restart or once a settled item is pruned (10 minutes);
   503 during a maintenance drain, when every held item has already gone back to the Mac.
 
-Touching the Mac hands a held request back to its dialog at once; the deadline is 110 s,
+For approvals and unstamped questions, touching the Mac hands a held request back to its dialog at once; the deadline is 110 s,
 or the away hold's.
 
-**The away hold (6.60.0).** A request that starts while you are away (the desk idle 90 s,
+**The older away hold (6.60.0, retained for approvals and unstamped questions).** A request that starts while you are away (the desk idle 90 s,
 the same threshold as above) is held for up to 10 minutes, but only when the glasses or the
 phone that show held questions report that you touched them in the last 30 minutes.
 The client contract (COS Glasses 6.9.563 and later):
@@ -472,7 +468,7 @@ both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 `COS_PERMISSION_BROKER_AWAY_HOLD_S` (6.60.0: default 600, clamped to 30 through 600, never
 past the installed hook's wait; `0` turns the away hold off),
 `COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S` (6.60.0: default 1800; the away hold applies
-only when a `hold=1` client reported its wearer present within it; under 30 means the 30 s
+for unstamped questions/approvals only when a `hold=1` client reported its wearer present within it; under 30 means the 30 s
 live window),
 `COS_DIARIZER` (6.61.0: default `nemotron`; `embedding` keeps the voiceprint only),
 `COS_NEMOTRON_CLI` and `COS_NEMOTRON_MODELS` (6.61.0: the FluidAudio CLI and its
@@ -886,7 +882,7 @@ BIND_HOST=0.0.0.0 npm run start:server
   phone disconnects; COS Control's maintenance status counts it (`heldJobs`). The phone sends
   one prompt at a time, so anything you ask meanwhile waits on the phone behind it. The
   interrupted run itself is not re-run automatically; retry it if you want it.
-- *Session questions never reach the glasses?* The server holds one only when every
+- *Session questions never reach the glasses?* For 6.71.7 stamped questions, reinstall hooks, check the kill switch and a connected answering client; the card appears only after the desk-idle threshold. For older hooks the server holds one only when every
   gate passes. `/api/health` `permissionBroker.lastFastPath` names the last reason a
   request went straight to the Mac's dialog: `no_client` (no client could answer: no poll
   with `client=glasses|phone` and without `hold=1` in the last 30 s, no `hold=1` poll in the

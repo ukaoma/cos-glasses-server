@@ -70,6 +70,7 @@ const SCRIPT_6_62_0_PREQA_SHA256 = '1877c90c5359571dfc74c6d03395104a73925868147e
  * The pre-QA build is halt-capable for Claude (a local build could have installed it).
  */
 const SCRIPT_6_62_0_SHA256 = '0fd4f98801333399625701bdc83ed1a5906bbf18c449d0586daa6b8e58ada7f3'
+const SCRIPT_QUESTION_HOLD_SHA256 = 'ee32d7a6b051cc1b9250c0b732fbfe528a59b4930daaf27696830d5803d6687a'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -598,6 +599,24 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect(readdirSync(s.paths.spool).filter(n => n.endsWith('.req') || n.endsWith('.out'))).toEqual([])
     })
 
+    it('new question stamp bypasses the desk fast path; kill switch, approvals and unreadable names keep it', async () => {
+      const s = await server()
+      writeFileSync(join(s.paths.home, 'hook-desk-idle-s'), '2147483647')
+      const running = runAsync('PermissionRequest', askPayload(), s.paths)
+      const item = await firstPending(s.broker)
+      expect(s.broker.answer(item.id, { clientAnswerId: 'canary', answers: [{labels:['Bump']},{labels:['Blue']}] }).status).toBe(200)
+      expect((await running).stdout).toContain('hookSpecificOutput')
+      expect(spooled(s.paths.spool).map(name => JSON.parse(readFileSync(join(s.paths.spool, name), 'utf8'))).some(e => e.askHold === 1)).toBe(true)
+      const before = s.hits.length
+      writeFileSync(join(s.paths.home, 'hook-ask-hold'), '0')
+      expect((await runAsync('PermissionRequest', askPayload(), s.paths)).stdout).toBe('')
+      expect(s.hits).toHaveLength(before)
+      writeFileSync(join(s.paths.home, 'hook-ask-hold'), '1')
+      expect((await runAsync('PermissionRequest', payload({tool_name:'Bash',tool_input:{command:'echo harmless',tool_name:'AskUserQuestion'}}), s.paths)).stdout).toBe('')
+      expect((await runAsync('PermissionRequest', JSON.stringify({session_id:SESSION,padding:'x'.repeat(5000),tool_name:'AskUserQuestion',tool_input:ASK_INPUT}), s.paths)).stdout).toBe('')
+      expect(s.hits).toHaveLength(before)
+    })
+
     it('no questions poll (even with a live 6.9.511 claim), or the kill switch: {} at once and the script prints nothing (the native dialog, as today)', async () => {
       for (const opts of [{ live: false }, { live: false, claim: true }, { mode: 'off' as BrokerMode }]) {
         const s = await server(opts)
@@ -614,7 +633,7 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       }
     })
 
-    it('the shipped script is the 6.62.0 script, byte for byte (a change is a reinstall on every Mac)', () => {
+    it('the shipped script is the question-hold script, byte for byte (a change is a reinstall on every Mac)', () => {
       const bytes = readFileSync(SCRIPT)
       // 6.53.0 changed the script DELIBERATELY (the halt check), and with it the PreToolUse
       // subscription; 6.53.3 changed it again (the single-entry rewrite), subscription as it
@@ -624,15 +643,15 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       // `priorWaitOnly`; the 6.53.3 script stays halt-capable meanwhile. 6.62.0 changed it
       // again (Codex and Cursor), with no Claude subscription change: `script_outdated` until
       // Install hooks, and the 6.60.0 script stays halt-capable for Claude meanwhile (B1).
-      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_6_62_0_SHA256)
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(SCRIPT_QUESTION_HOLD_SHA256)
       expect(SCRIPT_6_62_0_SHA256).not.toBe(SCRIPT_6_60_0_SHA256)
       expect(SCRIPT_6_60_0_SHA256).not.toBe(SCRIPT_6_53_3_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_0_SHA256)
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_3_PREQA_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
       // The current script is never its own "prior"; every earlier halt-capable one is.
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256, SCRIPT_6_62_0_PREQA_SHA256])
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_6_62_0_SHA256)
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256, SCRIPT_6_62_0_PREQA_SHA256, SCRIPT_6_62_0_SHA256])
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_QUESTION_HOLD_SHA256)
       const preqa = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.62.0-preqa'))
       expect(createHash('sha256').update(preqa).digest('hex')).toBe(SCRIPT_6_62_0_PREQA_SHA256)
       // And the 6.61.7 fixture IS that 6.60.0 script, byte for byte.

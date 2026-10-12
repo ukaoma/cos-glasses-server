@@ -1,3 +1,8 @@
+// 6.71.7: new-hook stamped interactive questions also arrive while the desk is
+// active. The broker keeps their lens card hidden until the desk is idle and
+// then latches it. Native desk answers/cancels settle the same request. Legacy
+// hooks and approvals keep the gates below. GET polling is 3 s while pending.
+//
 // The permission broker's two doors (6.52.0). See `lib/permission-broker.ts` for the why.
 //
 // POST /api/permission-requests/ask -- the COS session hook, on a PermissionRequest at a
@@ -35,7 +40,6 @@ import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import {
   ANSWERING_CLIENTS,
   CLIENT_LIVE_WINDOW_MS,
-  QUESTIONS_POLL_INTERVAL_MS,
   SESSION_QUESTIONS_PROTOCOL_VERSION,
   type BrokerAdmission,
   type HookReplyChannel,
@@ -182,7 +186,7 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       enabled: health.enabled,
       mode: health.mode,
       protocolVersion: SESSION_QUESTIONS_PROTOCOL_VERSION,
-      pollIntervalMs: QUESTIONS_POLL_INTERVAL_MS,
+      pollIntervalMs: deps.broker.questionsPollIntervalMs(),
       liveWindowMs: CLIENT_LIVE_WINDOW_MS,
       pending: deps.broker.pendingCount(),
       stats: deps.broker.stats(),

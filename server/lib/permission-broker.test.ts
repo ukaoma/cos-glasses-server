@@ -248,7 +248,7 @@ describe('reading the envelope', () => {
     const verdict = parsePermissionRequestEnvelope(permissionEnvelope('AskUserQuestion', ASK_INPUT, {}, 5_000))
     expect(verdict.ok).toBe(true)
     if (!verdict.ok) return
-    expect(verdict.facts).toEqual({ sessionId: SESSION, toolName: 'AskUserQuestion', toolInput: ASK_INPUT, fingerprint: toolFingerprint('AskUserQuestion', ASK_INPUT), hookStartedAtMs: 5_000, hookWaitS: null, provider: 'claude' })
+    expect(verdict.facts).toEqual({ sessionId: SESSION, toolName: 'AskUserQuestion', toolInput: ASK_INPUT, fingerprint: toolFingerprint('AskUserQuestion', ASK_INPUT), hookStartedAtMs: 5_000, hookWaitS: null, provider: 'claude', askHold: false, toolUseId: null })
   })
 
   it('6.62.0 (plan 3.10): a Codex request is Codex, from the envelope stamp or its rollout path', () => {

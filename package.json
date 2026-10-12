@@ -1,6 +1,6 @@
 {
   "name": "@gotcos/glasses-server",
-  "version": "6.71.5",
+  "version": "6.71.7",
   "description": "COS Glasses: self-hosted AI heads-up-display server for Even G2 smart glasses, powered by Claude Code, Codex, Cursor Agent CLI, or local Ollama",
   "type": "module",
   "bin": {
@@ -90,7 +90,9 @@
     "docs/test-plan-6.71.2.md",
     "!server/scripts/meeting-evidence-canary.ts",
     "docs/test-plan-6.71.3.md",
-    "docs/test-plan-6.71.5.md"
+    "docs/test-plan-6.71.5.md",
+    "docs/test-plan-6.71.7.md",
+    "!server/scripts/question-hold-mutation-gate.mjs"
   ],
   "author": "COS Contributors",
   "license": "MIT",
