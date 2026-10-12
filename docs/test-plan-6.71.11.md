@@ -1,6 +1,6 @@
 # 6.71.11 candidate gates
 
-Use companion 6.10.631 and the matching Control candidate. Experimental flags remain disabled.
+Use companion 6.10.632 and the matching Control candidate. Experimental flags remain disabled.
 
 1. Reopen a saved meeting. Ask a follow-up. Verify its original capture cutoff, a retained citation, and history after restarting Control.
 2. On phone Memory, type at least two characters, tap the matching local record, then return to results. Typing is keyword-only. An older server must refuse the new route rather than run semantic search.
