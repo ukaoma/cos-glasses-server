@@ -22,7 +22,7 @@ export function moneyGroundingHints(sources: readonly AskSource[]): { conditiona
     // a new independently verified balance.
     return sources.some(s => s.kind === 'transcript' && s.elapsedMs != null && s.elapsedMs <= source.elapsedMs! && source.elapsedMs! - s.elapsedMs <= 45_000 && CONDITIONAL.test(s.text.replace(/\s+/g, ' ')))
   }
-  return { conditionalSources: sources.filter(s => s.kind === 'transcript' && isConditional(s)).map(s => s.id), explicitCorrectionSources: sources.filter(s => /\b(?:no,?\s*no,?|correction:)\s*\$\s*\d/i.test(s.text)).map(s => s.id) }
+  return { conditionalSources: sources.filter(s => s.kind === 'transcript' && isConditional(s)).map(s => s.id), explicitCorrectionSources: sources.filter(s => /\b(?:no,?\s*no,?|correction:)\s*\$\s*\d|\b\d[\d,]*(?:\s*(?:dollars?|thousand))?\s*[,.;]?\s*I mean\s*[,.;]?\s*\$?\d/i.test(s.text)).map(s => s.id) }
 }
 
 /** Narrow semantic backstop, not a general financial fact checker. Prevent a

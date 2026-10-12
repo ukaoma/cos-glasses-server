@@ -182,3 +182,12 @@ it('writes whose item an accepted ask was, ahead of any due date', () => {
   expect(intakeCardText({ text: 'Build the strip', owner: 'MU', ownerIsMiles: true })).toBe('Build the strip')
   expect(intakeCardText({ text: 'Book the venue', owner: null, ownerIsMiles: false })).toBe('Book the venue')
 })
+
+it('saves a completed Ask through the authenticated review route without committing Work or trusting client citations',async()=>{
+ const capture=vi.fn();const original:any={requestId:'request_review',sessionId:'meeting_fixture',serverInstanceId:'server1',status:'completed',question:'What changed?',answer:'Twelve replaces ten [T1].',throughMs:60000,sources:[{id:'T1',kind:'transcript',title:'Maya',text:'Twelve replaces ten.'}]};
+ const s=await setup({capture,askIdentity:(v:unknown)=>{if(v!=='server1')throw new Error('wrong');return 'server1'},askGet:()=>original,resolveMeeting:async()=>({...meeting,title:'Canonical title',g2SessionIds:['meeting_fixture']})});
+ const payload={requestId:original.requestId,serverInstanceId:'server1',meeting,text:'Review order'};
+ const first=await s.call('/meeting-ask',payload);expect(first.status).toBe(200);const saved=await first.json();expect(saved.item.status).toBe('review');expect(saved.item.askEvidence.sources[0].text).toBe('Twelve replaces ten.');expect(capture).not.toHaveBeenCalled();
+ expect((await s.call('/meeting-ask',{...payload,sources:[{id:'T1',text:'Injected'}]})).status).toBe(400);expect((await s.call('/meeting-ask',{...payload,serverInstanceId:'other'})).status).toBe(409);
+ expect((await (await s.call('/meeting-ask',payload)).json()).item.id).toBe(saved.item.id);expect(s.store!.open()).toHaveLength(1)
+})

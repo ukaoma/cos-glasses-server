@@ -193,3 +193,9 @@ describe('Live COS Ask', () => {
     }
   })
 })
+
+it('new What to ask produces at most one grounded question in one model call and preserves corrections',async()=>{
+ const run=vi.fn(async(_prompt:string)=>({text:JSON.stringify({sections:[{label:'So what',text:'Twelve supersedes ten [T1].'},{label:'Ask',text:'Who will place the twelve-headset order? [T1]'},{label:'Ask',text:'Can we change the quantity? [T1]'}]})}));
+ const result=await createLiveAsk({run,now:()=>5000})(input({action:'questions',turns:[{id:1,speaker:'Maya',elapsedMs:65000,text:'Order twelve headsets, replacing ten. The budget is approved.'}]}));
+ expect(run).toHaveBeenCalledOnce();expect(result.sections.filter(s=>s.label==='Ask')).toHaveLength(1);expect(run.mock.calls[0][0]).toContain('exactly one');expect(result.answer).toContain('Twelve supersedes ten');
+})

@@ -59,11 +59,11 @@ describe('What to ask: Ask rows newest first', () => {
     const out = orderAsksByRecency([row('So what', ['T1']), row('Ask', ['T1']), row('Ask', ['H1']), row('Ask', ['T2', 'T4']), row('Ask', ['T3']), row('Ask', ['T3', 'H1'])], sources)
     expect(out.map(r => `${r.label}:${r.sources.join('+')}`)).toEqual(['So what:T1', 'Ask:T2+T4', 'Ask:T3', 'Ask:T3+H1', 'Ask:T1', 'Ask:H1'])
   })
-  it('is applied to the answer: the model\'s oldest-first Asks come back newest first', async () => {
+  it('new answers retain only the most recent Ask; stored legacy ordering remains readable', async () => {
     const input = meeting(30, 1, 50)
     const run = vi.fn(async (_p: string) => json({ sections: [ask('So what', 'Topic changed [T30].'), ask('Ask', 'About the start? [T1]'), ask('Ask', 'About the middle? [T15]'), ask('Ask', 'About now? [T30]')] }))
     const result = await createLiveAsk({ run, search: vi.fn(), now: () => 5000 })(input)
-    expect(result.sections.slice(0,-1).map(s => s.text)).toEqual(['Topic changed [T30].', 'About now? [T30]', 'About the middle? [T15]', 'About the start? [T1]'])
+    expect(result.sections.slice(0,-1).map(s => s.text)).toEqual(['Topic changed [T30].', 'About now? [T30]'])
     expect(result.answer.split('\n\n')[1]).toBe('**Ask:** About now? [T30]')
   })
   it('leaves other actions in label order', async () => {

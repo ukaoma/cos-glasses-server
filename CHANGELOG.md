@@ -1,3 +1,10 @@
+## [6.71.11] - 2026-10-12 - Saved-meeting follow-ups and local phone memory search
+
+- Reviewed Ask follow-ups retain the canonical meeting, original capture, question, answer and bounded source excerpts. Saves enter Work Review; accepting a task remains explicit. Retries never reopen resolved items.
+- New keyword-only search and detail endpoints stay in the file tier and make no embedding or generation calls. Older endpoints keep their behavior.
+- Requested What to ask returns at most one question and respects settled corrections. Source health remains read-only. Transcription and automatic cue flags remain disabled.
+- Private candidate; phone and signed Control acceptance gates remain required.
+
 ## 6.71.10 · Concise, grounded meeting updates (candidate)
 
 - Prioritize transcript neighborhoods for a speaker named in the question within the existing evidence budget. Accept user account/project clarification as orientation while keeping decisions, figures and deadlines tied to their cited passages.

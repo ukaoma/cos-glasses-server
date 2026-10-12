@@ -181,6 +181,7 @@ export interface MeetingAskCapabilities {
     /** 6.71.1: config carries cosSearch and PUT config {cosSearch} changes it. */
     cosSearchMode?: true;
     meetingContext?: true;
+    followUpReview?: true;
 }
 /**
  * How Meeting Ask searches COS memory and earlier meetings (6.71.1). 'meaning' (default) adds the embedding
