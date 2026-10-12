@@ -102,9 +102,9 @@ function run(event: string, stdin: string | Buffer, paths: { home: string; spool
 }
 
 /** The same, asynchronously: the listener the script talks to lives in THIS process. */
-function runAsync(event: string, stdin: string, paths: { home: string; spool: string }, args: string[] = []): Promise<{ status: number | null; stdout: string }> {
+function runAsync(event: string, stdin: string, paths: { home: string; spool: string }, args: string[] = [], script = SCRIPT): Promise<{ status: number | null; stdout: string }> {
   return new Promise(resolvePromise => {
-    const child = spawn('/bin/sh', [SCRIPT, event, ...args], {
+    const child = spawn('/bin/sh', [script, event, ...args], {
       env: { HOME: dirname(paths.home), COS_GLASSES_HOME: paths.home, COS_HOOK_SPOOL: paths.spool, PATH: '/usr/bin:/bin' },
     })
     let stdout = ''
@@ -608,8 +608,13 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect((await running).stdout).toContain('hookSpecificOutput')
       expect(spooled(s.paths.spool).map(name => JSON.parse(readFileSync(join(s.paths.spool, name), 'utf8'))).some(e => e.askHold === 1)).toBe(true)
       const before = s.hits.length
+      // Compare the rollback path to the actual previously shipped bytes.
+      const prior = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__/cos-session-hook-6.71.5')
+      const old = await runAsync('PermissionRequest', askPayload(), s.paths, [], prior)
+      expect(old).toEqual({status:0,stdout:''})
+      expect(s.hits).toHaveLength(before)
       writeFileSync(join(s.paths.home, 'hook-ask-hold'), '0')
-      expect((await runAsync('PermissionRequest', askPayload(), s.paths)).stdout).toBe('')
+      expect(await runAsync('PermissionRequest', askPayload(), s.paths)).toEqual(old)
       expect(s.hits).toHaveLength(before)
       writeFileSync(join(s.paths.home, 'hook-ask-hold'), '1')
       expect((await runAsync('PermissionRequest', payload({tool_name:'Bash',tool_input:{command:'echo harmless',tool_name:'AskUserQuestion'}}), s.paths)).stdout).toBe('')
