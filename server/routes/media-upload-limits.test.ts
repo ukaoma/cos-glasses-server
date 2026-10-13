@@ -26,6 +26,11 @@ const ISOLATED_DATA_DIR = vi.hoisted(() => {
   return dir
 })
 
+// This file tests media limits, not installed provider processes. The cold
+// provider-health probe can itself take 5 seconds, equal to the test deadline.
+// Provider probing has its own real-process tests; keep this HTTP contract isolated.
+vi.mock('../lib/health-static-probes.js',()=>({getHealthStaticProbes:async()=>({python:'test',claude:'test',codex:'test',cursor:'test',ollama:'test',claudeAvailable:false,codexAvailable:false,cursorAvailable:false,ollamaAvailable:false})}))
+
 import express from 'express'
 import { execFileSync } from 'node:child_process'
 import { request as httpRequest } from 'node:http'

@@ -104,7 +104,7 @@ export const LIVE_ASK_SYSTEM = `You are Live COS Ask, a concise in-meeting assis
 export interface LiveAskDeps {
   /** Durable runtime only: one tools-off claim/citation review, within the same deadline. */
   evidenceQuestion?: string
-  review?: (prompt: string, system: string, signal?: AbortSignal) => Promise<{text: string}>
+  review?: (prompt: string, system: string, signal?: AbortSignal) => Promise<{text: string; model?: string}>
   run: (prompt: string, signal?: AbortSignal) => Promise<{ text: string; model?: string }>
   search: (query: string, excludeSessionId?: string, scope?: 'cos' | 'web') => Promise<{ sources: AskSource[]; notices: string[] }>
   now: () => number
@@ -284,6 +284,7 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
       if (!evidence.sources.some(s => s.text.trim())) throw new AskError('no_recent_words', 422)
       let model = 'haiku'
       let webAsked = false
+      let emptyCosLookup = false
       const absorb = (found: { sources: AskSource[]; notices: string[] }) => {
         // Stable IDs across hops; do not relabel first-hop evidence in follow-up answers.
         for (const source of found.sources) if (!evidence.sources.some(s => s.kind === source.kind && s.title === source.title && s.text === source.text)) evidence.sources.push({ ...source, id: `${source.kind === 'web' ? 'W' : 'H'}${evidence.sources.filter(s => s.kind !== 'transcript').length + 1}` })
@@ -298,15 +299,22 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
       for (let hop = 0; hop < 3; hop++) {
         if (signal?.aborted) throw new AskError('cancelled', 499)
         // A typed question may look up twice (COS or web). What to ask may look up once, in COS only.
-        const searchAllowed = input.action === 'ask' ? hop < (preloadedWeb ? deps.evidenceQuestion || deps.benchmarkWebQuery ? 0 : 1 : 2) : input.action === 'questions' && hop < 1
+        const searchAllowed = input.action === 'ask' ? !(emptyCosLookup&&!deps.explicitWebQuery) && hop < (preloadedWeb ? deps.evidenceQuestion || deps.benchmarkWebQuery ? 0 : 1 : 2) : input.action === 'questions' && hop < 1
         const detailed = input.action === 'ask' && /\b(?:detail(?:ed)?|comprehensive|thorough|deep dive)\b/i.test(input.question)
-        const prompt = JSON.stringify({ responsePolicy: { maxWords: detailed ? 220 : 120, targetWords: input.action === 'ask' ? 70 : 100, confidenceMaxWords: 16, detailsOptional: true, avoidRepeatedWarnings: true, userEntityClarificationIsOrientation: true }, question: input.action === 'ask' ? input.question : TASKS[input.action], labels: input.action === 'questions' ? ['So what', 'Ask'] : input.action === 'ask' && !detailed ? ['So what'] : MEETING_ASK_LABELS[input.action], wearer: deps.wearer?.() ?? null, ...(input.action === 'questions' ? { recentSinceMs: recentSinceMs(input) } : {}), history: input.action === 'ask' ? followup.history : [], searchAllowed, orientation: deps.orientation ?? null, evidence: evidence.sources, groundingHints: moneyGroundingHints(evidence.sources), coverage: evidence.notices, finalInstructions: detailed ? 'Give the requested detail with concise confidence.' : input.action === 'ask' ? 'Return only one So what row, 40–80 words (up to 100 for many updates), plus the confidence object with at most 16 words. Do not repeat the confidence in the row. Respect the user supplied account/project name; never equate it with another transcript name without evidence. Summarize direct speaker updates, not unrelated earlier client work. Do not infer done from worked on it or a behavior description. Keep an ambiguous deadline with its nearest feature or omit the deadline; never attach it to an earlier feature. If a count is garbled, state it is unclear rather than guessing a range.' : 'Use only essential nonempty rows, one short sentence per row. Aim for 90 words total; keep the entire response including confidence under 120 words.' })
+        const prompt = JSON.stringify({ responsePolicy: { maxWords: detailed ? 220 : input.action==='ask'?80:120, targetWords: input.action === 'ask' ? 50 : 90, confidenceMaxWords: 16, detailsOptional: true, avoidRepeatedWarnings: true, userEntityClarificationIsOrientation: true }, question: input.action === 'ask' ? input.question : TASKS[input.action], labels: input.action === 'questions' ? ['So what', 'Ask'] : input.action === 'ask' && !detailed ? ['So what'] : MEETING_ASK_LABELS[input.action], wearer: deps.wearer?.() ?? null, ...(input.action === 'questions' ? { recentSinceMs: recentSinceMs(input) } : {}), history: input.action === 'ask' ? followup.history : [], searchAllowed, orientation: deps.orientation ?? null, evidence: evidence.sources, groundingHints: moneyGroundingHints(evidence.sources), coverage: evidence.notices, finalInstructions: detailed ? 'Give the requested detail with concise confidence.' : input.action === 'ask' ? 'Return only one So what row, 40–80 words (up to 100 for many updates), plus the confidence object with at most 16 words. Do not repeat the confidence in the row. Respect the user supplied account/project name; never equate it with another transcript name without evidence. Summarize direct speaker updates, not unrelated earlier client work. Do not infer done from worked on it or a behavior description. Keep an ambiguous deadline with its nearest feature or omit the deadline; never attach it to an earlier feature. If a count is garbled, state it is unclear rather than guessing a range.' : 'Use only essential nonempty rows, one short sentence per row. Aim for 90 words total; keep the entire response including confidence under 120 words.' })
         const run = await deps.run(prompt, signal)
         if (signal?.aborted) throw new AskError('cancelled', 499)
         if (deps.requireHaiku !== false && run.model && !run.model.toLowerCase().includes('haiku')) throw new AskError('haiku_unavailable', 503)
         model = run.model ?? model
         let output: any
-        try { output = parseAskReply(run.text) } catch { throw new AskError('invalid_answer', 502) }
+        try { output = parseAskReply(run.text) } catch {
+          if(!deps.review)throw new AskError('invalid_answer',502)
+          // Malformed provider JSON remains untrusted draft data. Only the same
+          // bounded, source-checked review may reconstruct an answer; no search
+          // or action is recovered from an invalid response.
+          output={sections:[{label:'So what',text:run.text.slice(0,5000)}],confidence:{level:'low',reason:'The provider returned an invalid format.'}}
+          evidence.notices.push('The provider response needed a format repair before grounding review.')
+        }
         if (searchAllowed && typeof output?.searchQuery === 'string' && output.searchQuery.trim()) {
           // The planner decides the scope. A request with no scope goes to the web only when the user explicitly asked for it.
           // Only a typed question reaches the web. A preset never sends meeting-derived words there.
@@ -316,9 +324,12 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
           const reservedWeb = hop === 1 && input.action === 'ask' && deps.webAvailable && !!deps.explicitWebQuery && !webAsked && scope === 'cos'
           if (reservedWeb) scope = 'web'
           if (scope === 'web') webAsked = true
-          absorb(await deps.search(reservedWeb ? deps.explicitWebQuery! : output.searchQuery.trim().slice(0, 240), input.sessionId, scope))
+          const found=await deps.search(reservedWeb ? deps.explicitWebQuery! : output.searchQuery.trim().slice(0, 240), input.sessionId, scope)
+          if(scope==='cos'&&!found.sources.length)emptyCosLookup=true
+          absorb(found)
           continue
         }
+        if(!searchAllowed&&typeof output?.searchQuery==='string'&&!output?.sections?.length&&deps.review)output={sections:[{label:'So what',text:JSON.stringify(output).slice(0,2500)}],confidence:{level:'low',reason:'No supporting source was returned.'}}
         // Providers sometimes put the requested confidence assessment in a
         // labeled row. Normalize that known shape without another inference;
         // all other unknown labels still fail the strict section contract.
@@ -355,6 +366,7 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
           let reviewed:any,problem:string|null='invalid_answer'
           for(let attempt=0;attempt<2;attempt++){
             const checked=await deps.review(JSON.stringify({...reviewInput,...(attempt?{repairReason:problem,previousDraft:reviewed}: {})}),REVIEW_SYSTEM,signal)
+            if(checked.model&&checked.model!==model){evidence.notices.push(`Grounding review used ${checked.model}; the requested answer draft used ${model}.`);model=checked.model}
             try { reviewed=parseAskReply(checked.text);if(deps.evidenceQuestion && reviewed?.confidence)reviewed.confidence.reason="Only general rules can be checked; this plan's terms remain unverified.";if(typeof reviewed?.confidence?.reason==='string')reviewed.confidence.reason=reviewed.confidence.reason.split(/\s+/).slice(0,16).join(' ') } catch { reviewed=null }
             problem=reviewProblem(reviewed,evidence.sources,maxWords)
             if(!problem&&reviewInput.omitUnrequestedMoney&&/\$\s*\d|\b[0-9,]+\s+(?:dollars|grand)\b/i.test(JSON.stringify(reviewed.sections)))problem='unrequested_money'

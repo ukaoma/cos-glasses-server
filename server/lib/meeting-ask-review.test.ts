@@ -1,7 +1,7 @@
 import { it, expect } from 'vitest'
 import { reviewProblem, FACT_CHECK_QUESTION } from './meeting-ask-review.js'
 import { genericRetirementQuery, RETIREMENT_RULE_QUERY } from './meeting-public-topic.js'
-import { prioritizeWebPages, WEB_HOOK_SOURCE, recentPublicPages } from './meeting-ask-web.js'
+import { prioritizeWebPages, WEB_HOOK_SOURCE, recentPublicPages, webSearchArgs } from './meeting-ask-web.js'
 import { matchingText, evidenceRelevance } from './meeting-ask-evidence.js'
 import { createLiveAsk } from './live-cos-ask.js'
 import { mkdtempSync,writeFileSync,rmSync } from 'node:fs'
@@ -31,3 +31,12 @@ it('follow-up reuse is limited to recent read pages from the exact meeting and p
 })
 
 it('does not turn worked-on or behavior descriptions into completed work',()=>{const s={...source,text:'Manoj worked on weighted search. It filters using the override column.'};const raw=reviewed('Manoj built weighted search [T1].');raw.support=[{id:'T1',quote:s.text}];expect(reviewProblem(raw,[s],80)).toBe('unsupported_completion');raw.sections[0].text='Manoj worked on weighted search [T1].';expect(reviewProblem(raw,[s],80)).toBeNull()})
+
+it('discovery stops after captured tool results instead of writing a second answer',()=>{expect(webSearchArgs('/tmp/hook').at(-1)).toContain('respond only with {"done":true}');expect(webSearchArgs('/tmp/hook')).toContain('WebSearch')})
+
+it('malformed model JSON is repaired only through source-checked review',async()=>{const ask=createLiveAsk({requireHaiku:false,run:async()=>({text:'{"sections":[{"label":"So what","text":"Caller [T1]","}]}'}),review:async()=>({text:JSON.stringify(reviewed())})});const result=await ask(input);expect(result.answer).toContain('The caller claimed');expect(result.answer).not.toContain('"sections"');expect(result.notices.join(' ')).toContain('format repair')})
+
+
+it('reports the actual final reviewer model rather than silently labeling it Haiku',async()=>{const ask=createLiveAsk({requireHaiku:false,run:async()=>({text:JSON.stringify(reviewed()),model:'claude-haiku'}),review:async()=>({text:JSON.stringify(reviewed()),model:'claude-sonnet'})});const result=await ask(input);expect(result.model).toBe('claude-sonnet');expect(result.notices.join(' ')).toContain('requested answer draft used claude-haiku')})
+
+it('a fruitless COS lookup does not trigger repeated model/search loops',async()=>{let calls=0,searches=0;const ask=createLiveAsk({requireHaiku:false,run:async(prompt)=>{calls++;const p=JSON.parse(prompt);return{text:JSON.stringify(calls===1?{sections:[],searchQuery:'caller claim',searchScope:'cos'}:(expect(p.searchAllowed).toBe(false),reviewed()))}},search:async()=>{searches++;return{sources:[],notices:['No matches']}},review:async()=>({text:JSON.stringify(reviewed())})});expect((await ask(input)).answer).toContain('The caller claimed');expect(searches).toBe(1);expect(calls).toBe(2)})
