@@ -12,7 +12,7 @@ const temp = (prefix: string) => { const d = mkdtempSync(join(tmpdir(), prefix))
 afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true }) })
 function runtime(media: () => any, extra: Record<string, unknown> = {}) {
   const store = new MeetingAskStore(temp('ask-phone-'))
-  const rt = new MeetingAskRuntime({ reviewAnswers:false, store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {} } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }] as any, run: vi.fn(async () => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Uses the file [F1].' }] }), model: 'haiku' })), search: async () => ({ sources: [], notices: [] }), media, ...extra })
+  const rt = new MeetingAskRuntime({ reviewAnswers:false, store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {} } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }] as any, run: vi.fn(async () => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Uses the file [F1].' }] }), model: 'haiku' })), search: async () => ({ sources: [], notices: [] }), media, ...extra })
   return { rt, store, run: (rt as any).deps.run as ReturnType<typeof vi.fn> }
 }
 const ref = (id: string, category: 'image' | 'document' | 'video', label?: string) => ({ id, kind: category === 'image' ? 'user_photo' : category === 'video' ? 'user_video' : 'user_document', category, mime: 'text/plain', width: 0, height: 0, createdAt: '2026-10-11T00:00:00Z', ...(label ? { label } : {}) })

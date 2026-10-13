@@ -16,7 +16,7 @@ import type { AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
 import { MediaStoreError } from '../lib/media-store.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
 async function fixture(transcripts?: AskTranscriptSources, media?: () => any, reviewAnswers = false) {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ reviewAnswers, domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
+    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ reviewAnswers, domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
@@ -33,7 +33,7 @@ describe('Meeting Ask v2 HTTP contract', () => {
         expect((await f.request('/requests', input, 'POST', false)).status).toBe(401);
         const c = await f.request('/config');
         expect(c.headers.get('cache-control')).toBe('no-store');
-        expect((await c.json()).selected).toEqual({ engine: 'claude', model: 'haiku' });
+        expect((await c.json()).selected).toEqual({ engine: 'claude', model: 'sonnet' });
         expect(f.run).not.toHaveBeenCalled();
     }
     finally {
@@ -184,7 +184,7 @@ describe('Meeting Ask v2 HTTP contract', () => {
             expect((await (await f.request('/config')).json())).toMatchObject({ cosSearch: 'meaning', capabilities: { cosSearchMode: true } });
             const put = await f.request('/config', { cosSearch: 'keyword' }, 'PUT');
             expect(put.status).toBe(200);
-            expect(await put.json()).toMatchObject({ cosSearch: 'keyword', selected: { engine: 'claude', model: 'haiku' } });
+            expect(await put.json()).toMatchObject({ cosSearch: 'keyword', selected: { engine: 'claude', model: 'sonnet' } });
             expect((await (await f.request('/config')).json()).cosSearch).toBe('keyword');
             const bad = await f.request('/config', { cosSearch: 'vector' }, 'PUT');
             expect(bad.status).toBe(400);

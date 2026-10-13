@@ -4,6 +4,7 @@
 - Fuzzy local evidence matching, connected passage priority, tools-off claim/citation review and concise answers.
 - Read official retirement-rule sources without exporting personal plan details; readable web pages take precedence over PDF discovery hits.
 - One shared 30-second durable Ask budget; honest failed status on timeout. Stable ASR unchanged; experimental transcription and cue flags remain disabled.
+- Fresh Meeting Ask settings default to Sonnet; explicit saved provider/model choices are preserved. Draft and grounding review use the chosen model. Summary coverage stays in metadata; unsupported page counts are rejected and reported labor is kept distinct from verified savings.
 - Candidate pending field acceptance; no production promotion implied.
 
 ## [6.71.11] - 2026-10-12 - Saved-meeting follow-ups and local phone memory search

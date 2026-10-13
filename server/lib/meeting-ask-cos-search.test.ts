@@ -67,7 +67,7 @@ describe('COS search mode: the Meeting Ask setting', () => {
     for (const bad of [{ cosSearch: 'semantic' }, { cosSearch: null }, { engine: 'claude', model: 'sonnet', cosSearch: 'KEYWORD' }]) {
       await expect(rt.setConfig(bad)).rejects.toMatchObject({ reason: 'invalid_cos_search' })
     }
-    expect(await rt.config()).toMatchObject({ cosSearch: 'meaning', selected: { model: 'haiku' } })
+    expect(await rt.config()).toMatchObject({ cosSearch: 'meaning', selected: { model: 'sonnet' } })
     await expect(rt.setConfig({})).rejects.toMatchObject({ reason: 'invalid_model' })
     await expect(runtime(dir, { admissions: () => false }).rt.setConfig({ cosSearch: 'keyword' })).rejects.toMatchObject({ reason: 'maintenance' })
     expect((await rt.config()).cosSearch).toBe('meaning')

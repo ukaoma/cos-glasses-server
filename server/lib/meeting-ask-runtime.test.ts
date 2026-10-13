@@ -148,8 +148,8 @@ describe('meeting Ask durable ownership', () => {
     it('same ID changed question conflicts; default model change does not rerun old admission', async () => { const f = fixture(); try {
         await f.runtime.submit(base);
         await terminal(f);
-        await f.runtime.setConfig({ engine: 'claude', model: 'sonnet' });
-        expect((await f.runtime.submit(base)).selectedModel.model).toBe('haiku');
+        await f.runtime.setConfig({ engine: 'claude', model: 'haiku' });
+        expect((await f.runtime.submit(base)).selectedModel.model).toBe('sonnet');
         await expect(f.runtime.submit({ ...base, question: 'Different' })).rejects.toThrow('request_id_conflict');
     }
     finally {

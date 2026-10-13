@@ -135,7 +135,7 @@ export class MeetingAskStore {
     }
     publicTopics(): boolean { return this.read<{enabled?:unknown}>(join(this.dir('config'),'public-topics.json'))?.enabled === true; }
     setPublicTopics(enabled:boolean): void { durableAtomicWriteFileSync(join(this.dir('config'),'public-topics.json'),JSON.stringify({enabled}),{mode:0o600}); }
-    config(): MeetingAskModel { return this.read<MeetingAskModel>(join(this.dir('config'), 'model.json')) ?? { engine: 'claude', model: 'haiku' }; }
+    config(): MeetingAskModel { return this.read<MeetingAskModel>(join(this.dir('config'), 'model.json')) ?? { engine: 'claude', model: 'sonnet' }; }
     setConfig(model: MeetingAskModel): void { durableAtomicWriteFileSync(join(this.dir('config'), 'model.json'), JSON.stringify(model), { mode: 0o600 }); }
     /** 6.71.1. Anything but an explicit 'keyword' reads as the default, 'meaning'. */
     cosSearch(): MeetingAskCosSearch { return this.read<{ cosSearch?: unknown }>(join(this.dir('config'), 'search.json'))?.cosSearch === 'keyword' ? 'keyword' : 'meaning'; }

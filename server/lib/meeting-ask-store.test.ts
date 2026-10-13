@@ -30,3 +30,6 @@ describe('Meeting Ask aggregate file-context capacity', () => {
         } finally { rmSync(root, { recursive: true, force: true }); }
     });
 });
+
+// A fresh default must not overwrite a user's persisted provider/model choice.
+it('defaults fresh meeting settings to Sonnet and preserves an explicit Haiku choice',()=>{const root=mkdtempSync(join(tmpdir(),'ask-sonnet-default-'));try{const store=new MeetingAskStore(root);expect(store.config()).toEqual({engine:'claude',model:'sonnet'});store.setConfig({engine:'claude',model:'haiku'});expect(new MeetingAskStore(root).config()).toEqual({engine:'claude',model:'haiku'})}finally{rmSync(root,{recursive:true,force:true})}})
