@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resolveTypedOrigin, factCheckScopeRequest, factCheckWindow, factCheckScanTurns, admitFactCheckClaims, typedOrigin, continuationIntent, lastFactCheckLookup, alreadyCheckedClaims, factRowProblem, factCheckProblem, factCheckSummary, medicalDosingRequest, composeFactCheck, runMeetingFactCheck, focusExcerpt, originQuery, factCheckScopeEnabled, reusablePages, FACT_CHECK_PLANNER_SYSTEM, FACT_CHECK_SYSTEM, defaultOwnerArea } from './meeting-fact-check.js'
+import { hedgedRun, resolveTypedOrigin, factCheckScopeRequest, factCheckWindow, factCheckScanTurns, admitFactCheckClaims, typedOrigin, continuationIntent, lastFactCheckLookup, alreadyCheckedClaims, factRowProblem, factCheckProblem, factCheckSummary, medicalDosingRequest, composeFactCheck, runMeetingFactCheck, focusExcerpt, originQuery, factCheckScopeEnabled, reusablePages, FACT_CHECK_PLANNER_SYSTEM, FACT_CHECK_SYSTEM, defaultOwnerArea } from './meeting-fact-check.js'
 import { MEETING_FACT_CHECK_QUESTION, type MeetingAskExchange } from '../../shared/meeting-ask.js'
 import { userWebQuery } from './meeting-ask-web.js'
 import type { FactCheckClaim } from './meeting-ask-store.js'
@@ -211,6 +211,39 @@ describe('fact-check rows', () => {
   })
 })
 
+describe('hedged model calls', () => {
+  const answer = { text: '{"claims":[]}' }
+  it('starts a second call when the first is slow, keeps the first usable answer and stops the other', async () => {
+    const signals: AbortSignal[] = []
+    const call = vi.fn((signal: AbortSignal) => { signals.push(signal); return signals.length === 1 ? new Promise<typeof answer>((_r, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')))) : Promise.resolve(answer) })
+    const out = await hedgedRun(call, { hedgeMs: 10, timeoutMs: 2000, signal: new AbortController().signal })
+    expect(out).toEqual({ ...answer, hedged: true }); expect(call).toHaveBeenCalledTimes(2)
+    expect(signals[0].aborted).toBe(true)
+  })
+  it('retries a failed or unusable first answer at once, at most two calls in all', async () => {
+    const failed = vi.fn().mockRejectedValueOnce(new Error('provider_failed')).mockResolvedValueOnce(answer)
+    expect((await hedgedRun(failed, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).hedged).toBe(true)
+    const unusable = vi.fn().mockResolvedValueOnce({ text: 'nope' }).mockResolvedValueOnce(answer)
+    expect((await hedgedRun(unusable, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal, usable: r => r.text !== 'nope' })).text).toBe(answer.text)
+    const never = vi.fn().mockRejectedValue(new Error('provider_failed'))
+    await expect(hedgedRun(never, { hedgeMs: 1, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('provider_failed')
+    expect(never).toHaveBeenCalledTimes(2)
+    const fast = vi.fn().mockResolvedValue(answer)
+    expect((await hedgedRun(fast, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).hedged).toBe(false)
+    expect(fast).toHaveBeenCalledTimes(1)
+  })
+  it('fails the ask when a stopped call cannot be confirmed ended, and honours the caller\'s cancel', async () => {
+    const { AskProcessError } = await import('./meeting-ask-runner.js')
+    let n = 0
+    const orphan = vi.fn((signal: AbortSignal) => ++n === 1 ? new Promise<typeof answer>((_r, reject) => signal.addEventListener('abort', () => reject(new AskProcessError('child_exit_unconfirmed', true)))) : Promise.resolve(answer))
+    await expect(hedgedRun(orphan, { hedgeMs: 10, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('child_exit_unconfirmed')
+    const caller = new AbortController(); caller.abort()
+    const cancelled = vi.fn().mockRejectedValue(new Error('cancelled'))
+    await expect(hedgedRun(cancelled, { hedgeMs: 10, timeoutMs: 2000, signal: caller.signal })).rejects.toThrow('cancelled')
+    expect(cancelled).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('medical dosing', () => {
   it('recognizes a dose for a specific person, not a general product fact', () => {
     for (const q of ["How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?']) expect(medicalDosingRequest(q)).toBe(true)
@@ -238,10 +271,21 @@ describe('compose and run', () => {
     expect(bad).toHaveBeenCalledTimes(2)
     const late = vi.fn(async () => ({ text: 'not json' }))
     const salvaged = await composeFactCheck(args(late, () => 5000))
-    expect(late).toHaveBeenCalledTimes(1)
+    // One unusable answer is retried once inside the hedged call; no repair round after the repair deadline.
+    expect(late).toHaveBeenCalledTimes(2)
     expect(salvaged.rows.map(r => r.text)).toEqual(['Elephants often weigh more than a car: Unverified. The pages that could be read did not confirm it.', 'Average heart beats about a billion times in a lifetime: Unverified. The pages that could be read did not confirm it.'])
     const unread = await composeFactCheck({ ...args(late, () => 5000), web: [], webClaim: new Map() })
     expect(unread.rows[0].text).toBe('Elephants often weigh more than a car: Unverified. No readable page was found for it in time.')
+  })
+  it('repairs a draft that fails the checks only before the repair deadline', async () => {
+    const noVerdict = good.replace(': Supported.', '.')
+    const early = vi.fn().mockResolvedValueOnce({ text: noVerdict }).mockResolvedValueOnce({ text: good })
+    expect((await composeFactCheck(args(early, () => 0))).rows[0].text).toContain('Supported')
+    expect(early).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(early.mock.calls[1][0]).repairReason).toBe('missing_verdict')
+    const tooLate = vi.fn().mockResolvedValueOnce({ text: noVerdict }).mockResolvedValueOnce({ text: good })
+    expect((await composeFactCheck(args(tooLate, () => 5000))).rows[0].text).toContain('Unverified')
+    expect(tooLate).toHaveBeenCalledTimes(1)
   })
   it('reads a comma list of citations as separate citations', async () => {
     const listed = good.replace('Elephants outweigh a car [T1]: Supported. An adult elephant weighs about 6 tonnes [W1].', 'Elephants outweigh a car [T1, W1]: Supported. An adult elephant weighs about 6 tonnes.')
@@ -249,13 +293,13 @@ describe('compose and run', () => {
     expect(out.rows[0].text).toBe('Elephants outweigh a car [T1][W1]: Supported. An adult elephant weighs about 6 tonnes.')
     expect(out.rows[0].sources).toEqual(['T1', 'W1'])
   })
-  it('retries a stalled answer call once while time remains, and says so when it never returns', async () => {
+  it('retries a failed answer call once, and says so when it never returns', async () => {
     const stall = vi.fn().mockRejectedValueOnce(new Error('provider_timeout')).mockResolvedValueOnce({ text: good })
     const ok = await composeFactCheck({ ...args(stall, () => 0), answerUntil: 20_000 })
     expect(stall).toHaveBeenCalledTimes(2); expect(ok.rows[0].text).toContain('Supported'); expect(ok.notices).toEqual([])
     const late = vi.fn().mockRejectedValue(new Error('provider_timeout'))
-    const gone = await composeFactCheck({ ...args(late, () => 15_000), answerUntil: 20_000 })
-    expect(late).toHaveBeenCalledTimes(1)
+    const gone = await composeFactCheck({ ...args(late, () => 0), answerUntil: 20_000 })
+    expect(late).toHaveBeenCalledTimes(2)
     expect(gone.notices[0]).toContain('ran out of time')
     expect(gone.rows.every(r => r.text.includes('Unverified'))).toBe(true)
     const aborted = new AbortController(); aborted.abort()

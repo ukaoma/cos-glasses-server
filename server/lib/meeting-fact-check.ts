@@ -371,8 +371,12 @@ const SEARCH_UNTIL_MS = 19_500
 const REPAIR_UNTIL_MS = 21_000
 /** The answer call ends by this point; a late answer becomes honest Unverified rows, not a failed ask. */
 const ANSWER_UNTIL_MS = 28_500
-/** One answer call may take this long; a stalled call is retried once while time remains. */
+/** One answer round (at most two hedged calls) may take this long. */
 const ANSWER_CALL_MS = 13_000
+/** A second identical planner or answer call starts if the first has not answered by then (p90 is about 7 s). */
+const PLANNER_HEDGE_MS = 7_000
+const ANSWER_HEDGE_MS = 9_000
+const plannerList = (text: string): unknown => { const v = JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')); return v && typeof v === 'object' && Array.isArray((v as { claims?: unknown }).claims) ? v : null }
 const PAGE_PREFIX = 'Retrieved page excerpt (may be partial): '
 
 /** A read page trimmed to its passage that best matches the claim, verbatim, still marked as a read excerpt. */
@@ -388,6 +392,44 @@ export function focusExcerpt(text: string, query: string, max: number): string {
     if (score > bestScore) { bestScore = score; best = i }
   }
   return PAGE_PREFIX + body.slice(best, best + span)
+}
+
+/**
+ * One model call, with a second identical call started when the first has not answered (or answered unusably)
+ * within hedgeMs: provider latency spikes of 10-28 s were observed on single calls that normally take 5 s.
+ * The first usable answer wins and the other call is stopped. At most two calls, both inside timeoutMs and the
+ * caller's signal. A stopped call whose termination cannot be confirmed fails the ask, exactly as a single call.
+ */
+export async function hedgedRun(call: (signal: AbortSignal) => Promise<{ text: string; model?: string }>, opts: { hedgeMs: number; timeoutMs: number; signal: AbortSignal; usable?: (r: { text: string }) => boolean }): Promise<{ text: string; model?: string; hedged: boolean }> {
+  const deadline = AbortSignal.any([opts.signal, AbortSignal.timeout(Math.max(1, opts.timeoutMs))])
+  const stops: AbortController[] = [], attempts: Promise<{ text: string; model?: string }>[] = []
+  return await new Promise((resolve, reject) => {
+    let settled = false, failed = 0, last: unknown = new AskProcessError('provider_timeout')
+    let timer: NodeJS.Timeout | undefined
+    const close = async (win: { text: string; model?: string } | null) => {
+      settled = true; clearTimeout(timer)
+      for (const stop of stops) stop.abort()
+      const results = await Promise.allSettled(attempts)
+      const orphan = results.find(r => r.status === 'rejected' && r.reason instanceof AskProcessError && r.reason.terminationUnconfirmed)
+      if (orphan) reject((orphan as PromiseRejectedResult).reason)
+      else if (win) resolve({ ...win, hedged: attempts.length > 1 })
+      else reject(last)
+    }
+    const fail = (e: unknown) => {
+      failed++; last = e
+      if (opts.signal.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) { void close(null); return }
+      if (attempts.length < 2 && !deadline.aborted) { clearTimeout(timer); launch(); return }
+      if (failed >= attempts.length) void close(null)
+    }
+    const launch = () => {
+      const stop = new AbortController(); stops.push(stop)
+      const attempt = call(AbortSignal.any([deadline, stop.signal]))
+      attempts.push(attempt)
+      attempt.then(r => { if (settled) return; if (opts.usable && !opts.usable(r)) fail(new AskProcessError('invalid_provider_answer')); else void close(r) }, e => { if (!settled) fail(e) })
+    }
+    launch()
+    timer = setTimeout(() => { if (!settled && attempts.length < 2 && !deadline.aborted) launch() }, opts.hedgeMs)
+  })
 }
 
 const contentWords = (s: string) => new Set(factWords(s).filter(w => w.length > 2 && !FUNC.has(w)).map(stemWord))
@@ -422,17 +464,20 @@ export async function composeFactCheck(a: FactCheckComposeArgs): Promise<{ rows:
   let raw: any = null, rows: MeetingAskSection[] | null = null, problem: string | null = 'invalid_sections', model: string | undefined
   let stalled = false
   for (let attempt = 0; attempt < 2; attempt++) {
-    // A second call repairs a failed draft, or retries a stalled one, only while time remains.
-    if (attempt && (stalled ? !!a.answerUntil && a.answerUntil - a.now() < 8000 : a.now() > a.repairUntil)) break
-    const prompt = attempt && !stalled ? { ...base, repairReason: problem, repairDiagnostics: reviewRepairDiagnostics(raw, sources), previousDraft: raw } : base
+    // A second round repairs a draft that failed the checks, only while time remains. A stalled or unusable
+    // call was already retried inside hedgedRun, so it ends the loop instead.
+    if (attempt && a.now() > a.repairUntil) break
+    const prompt = attempt ? { ...base, repairReason: problem, repairDiagnostics: reviewRepairDiagnostics(raw, sources), previousDraft: raw } : base
     let out: { text: string; model?: string }
-    try { out = await a.run(JSON.stringify(prompt), FACT_CHECK_SYSTEM, a.answerUntil ? AbortSignal.any([a.signal, AbortSignal.timeout(Math.max(1, Math.min(ANSWER_CALL_MS, a.answerUntil - a.now())))]) : a.signal) }
+    try {
+      const text = JSON.stringify(prompt)
+      out = await hedgedRun(signal => a.run(text, FACT_CHECK_SYSTEM, signal), { hedgeMs: ANSWER_HEDGE_MS, timeoutMs: a.answerUntil ? Math.min(ANSWER_CALL_MS, a.answerUntil - a.now()) : ANSWER_CALL_MS, signal: a.signal, usable: r => { try { return Array.isArray(parseAskReply(r.text)?.sections) } catch { return false } } })
+    }
     catch (e) {
       if (a.signal.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) throw e
       stalled = true
-      continue
+      break
     }
-    stalled = false
     model = out.model ?? model
     try { raw = normalizeReviewConfidence(parseAskReply(out.text)) } catch { raw = null }
     rows = raw ? factRows(raw, label, allowed) : null
@@ -530,10 +575,11 @@ export async function runMeetingFactCheck(a: FactCheckRunArgs): Promise<FactChec
     const alreadyChecked = a.mode === 'scope' ? alreadyCheckedClaims(a.records, a.at) : []
     const previousRows = a.mode === 'scope' ? earlierResults(a.records, a.at) : []
     let plan: { text: string; model?: string } | null = null
-    try { plan = await a.run(factCheckPlannerPrompt(a.input, scan.turns, { mode: a.mode, alreadyChecked, earlierResults: previousRows, fromMs: window.fromMs, full: window.full }), FACT_CHECK_PLANNER_SYSTEM, AbortSignal.any([a.signal, AbortSignal.timeout(PLANNER_MS)])) }
+    const plannerPrompt = factCheckPlannerPrompt(a.input, scan.turns, { mode: a.mode, alreadyChecked, earlierResults: previousRows, fromMs: window.fromMs, full: window.full })
+    try { plan = await hedgedRun(signal => a.run(plannerPrompt, FACT_CHECK_PLANNER_SYSTEM, signal), { hedgeMs: PLANNER_HEDGE_MS, timeoutMs: PLANNER_MS, signal: a.signal, usable: r => { try { return !!plannerList(r.text) } catch { return false } } }) }
     catch (e) { if (a.signal.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) throw e }
     let parsed: unknown = null
-    try { parsed = plan ? JSON.parse(plan.text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')) : null } catch { parsed = null }
+    try { parsed = plan ? plannerList(plan.text) : null } catch { parsed = null }
     if (!parsed || typeof parsed !== 'object') {
       if (a.mode === 'named') return null
       // No range: the next Fact check retries this same span.
