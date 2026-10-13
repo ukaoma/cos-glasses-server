@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { hedgedRun, originClarification, namedOrigin, placeOrigin, factCheckRescanRequest, doseGuardEnabled, PHONE_AREA_MAX_AGE_MS, factCheckScopeRequest, factCheckWindow, factCheckScanTurns, admitFactCheckClaims, continuationIntent, lastFactCheckLookup, alreadyCheckedClaims, factRowProblem, factCheckProblem, factCheckSummary, medicalDosingRequest, composeFactCheck, runMeetingFactCheck, focusExcerpt, originQuery, factCheckScopeEnabled, reusablePages, FACT_CHECK_PLANNER_SYSTEM, FACT_CHECK_SYSTEM, defaultOwnerArea } from './meeting-fact-check.js'
+import { hedgedRun, originClarification, namedOrigin, placeOrigin, placeCodes, factCheckRescanRequest, doseGuardEnabled, PHONE_AREA_MAX_AGE_MS, factCheckScopeRequest, factCheckWindow, factCheckScanTurns, admitFactCheckClaims, continuationIntent, lastFactCheckLookup, alreadyCheckedClaims, factRowProblem, factCheckProblem, factCheckSummary, medicalDosingRequest, composeFactCheck, runMeetingFactCheck, focusExcerpt, originQuery, factCheckScopeEnabled, reusablePages, FACT_CHECK_PLANNER_SYSTEM, FACT_CHECK_SYSTEM, defaultOwnerArea } from './meeting-fact-check.js'
 import { MEETING_FACT_CHECK_QUESTION, type MeetingAskExchange } from '../../shared/meeting-ask.js'
 import { userWebQuery } from './meeting-ask-web.js'
 import type { FactCheckClaim } from './meeting-ask-store.js'
@@ -117,6 +117,10 @@ describe('claim admission', () => {
     expect(admitFactCheckClaims({ claims: [heart] }, input('Fact check'), scanned, { newAfterMs: 99_999 }).claims).toHaveLength(1)
     expect(admitFactCheckClaims({ claims: [{ ...heart, evidenceTurnIds: [3, 4] }] }, input('Fact check'), scanned, { newAfterMs: 100_000 }).claims).toHaveLength(1)
   })
+  it('keeps a tagged place only when its words are in the claim\'s passages and it is not a name', () => {
+    const raw = { claims: [{ claim: 'Flying to Kansas City takes 90 minutes', query: 'to Kansas City flight time', evidenceTurnIds: [5, 6], category: 'travel_time', place: 'implicit_origin', places: ['Kansas City', 'Paris', 'Dana', 12] }] }
+    expect(admitFactCheckClaims(raw, { turns: [...turns, { id: 8, elapsedMs: 607_000, speaker: 'Dana Ortiz', text: 'Dana here.' }] }, [...turns.slice(4, 6), { id: 8, elapsedMs: 607_000, speaker: 'Dana Ortiz', text: 'Dana here.' }]).claims[0].places).toEqual(['Kansas City'])
+  })
   it('caps the number of claims and drops duplicates', () => {
     const c = { claim: 'Elephants outweigh cars', query: 'elephant weight car', evidenceTurnIds: [1, 2], category: 'nature' }
     expect(admitFactCheckClaims({ claims: [c, c] }, input('Fact check'), scanned).claims).toHaveLength(1)
@@ -127,27 +131,41 @@ describe('claim admission', () => {
 })
 
 describe('pending fact-check continuation', () => {
-  const pending = { place: 'implicit_origin' as const, category: 'travel_time', claim: 'Flying from here to Kansas City takes 90 minutes to 2 hours', baseQuery: 'to kansas city flight time vs driving time' }
+  const pending = { place: 'implicit_origin' as const, category: 'travel_time', places: ['Kansas City'] }
   const ctx = { ownerArea: { text: 'Austin, TX', source: 'profile' as const }, blockedNames: new Set(['gina', 'silas', 'larson', 'miles', 'ukaoma']), ownerWords: new Set(['miles', 'ukaoma', 'mu']) }
-  const withClaim = { ...ctx, claimText: `${pending.claim} ${pending.baseQuery}` }
+  const withClaim = { ...ctx, places: pending.places }
   it('takes a starting place only from a pure clarification, never a name or an ordinary question (QA B1)', () => {
     expect(originClarification('From ATX where mu is based', withClaim)).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
     expect(originClarification('ATX to KC is the request', withClaim)).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
     expect(originClarification("I'm flying from Austin", withClaim)).toEqual({ text: 'Austin', source: 'user' })
     expect(originClarification('San Antonio, TX to KC', withClaim)).toEqual({ text: 'San Antonio TX', source: 'user' })
+    expect(originClarification('Austin to KC', withClaim)).toEqual({ text: 'Austin', source: 'user' })
+    expect(originClarification('from Austin, TX', withClaim)).toEqual({ text: 'Austin TX', source: 'user' })
+    // A state suffix must be a real state code, the city a listed one; people, labels and ordinary words are not places.
+    for (const q of ['Silas PM to KC', 'from Amira TX', 'HR to KC', 'time to Kansas', 'from MU', 'MU to KC', 'from Dallas, ZZ'])
+      expect(originClarification(q, withClaim)).toBeNull()
     for (const q of ['Gina to send the deck by Friday?', 'What did we hear from Silas Larson today?', 'From Silas', 'From Gina where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck', 'Send the deck from ATX', 'ATX to Paris is the request'])
       expect(originClarification(q, withClaim)).toBeNull()
     // Without a known owner area, an abbreviation is not a place.
     expect(originClarification('From ATX where mu is based', { ...withClaim, ownerArea: null })).toBeNull()
   })
   it('accepts only place-like origins in a named request', () => {
-    expect(namedOrigin('Fact check the flight from Dallas, TX to KC', { ...ctx, claimText: '' })).toEqual({ text: 'Dallas TX', source: 'user' })
-    expect(namedOrigin('Fact check what Gina said from Silas', { ...ctx, claimText: '' })).toBeNull()
-    expect(namedOrigin('Fact check the flight to kc', { ...ctx, claimText: '' })).toBeNull()
+    expect(namedOrigin('Fact check the flight from Dallas, TX to KC', { ...ctx, places: [] })).toEqual({ text: 'Dallas TX', source: 'user' })
+    expect(namedOrigin('Fact check what Gina said from Silas', { ...ctx, places: [] })).toBeNull()
+    expect(namedOrigin('Fact check the flight to kc', { ...ctx, places: [] })).toBeNull()
     expect(placeOrigin('DFW', withClaim)).toBeNull()
     expect(placeOrigin('ABQ', withClaim)).toBeNull()
     expect(placeOrigin('KC', withClaim)).toEqual({ text: 'KC', source: 'user' })
-    expect(placeOrigin('Gina', { ...withClaim, claimText: 'Gina said flights take 2 hours' })).toBeNull()
+    expect(placeOrigin('Kansas', withClaim)).toEqual({ text: 'Kansas', source: 'user' })
+    expect(placeOrigin('Gina', { ...withClaim, places: [], blockedNames: new Set(['gina']) })).toBeNull()
+    expect(placeOrigin('time', { ...withClaim, places: [] })).toBeNull()
+    expect(placeOrigin('KC', { ...withClaim, places: [] })).toBeNull()
+    expect(placeCodes('Austin, TX')).toEqual(new Set(['ATX'])); expect(placeCodes('Kansas City, MO')).toEqual(new Set(['KC', 'KCMO']))
+    expect(placeCodes('Austin, ZZ')).toEqual(new Set())
+    // Initials only: "KS" is not a code of Kansas City. The owner's own name is never a place, even if tagged.
+    expect(placeOrigin('KS', withClaim)).toBeNull()
+    expect(placeOrigin('Miles', { ownerArea: null, places: ['Miles'], blockedNames: new Set(), ownerWords: new Set(['miles']) })).toBeNull()
+    expect(placeOrigin('Miles', { ownerArea: null, places: ['Miles'], blockedNames: new Set() })).toEqual({ text: 'Miles', source: 'user' })
     expect(originQuery('to kansas city flight time', { text: 'ATX (Austin, TX)', source: 'user' })).toBe('atx austin tx to kansas city flight time')
   })
   it('re-runs on request words, clarifies a route origin, and leaves real questions alone', () => {
@@ -291,12 +309,14 @@ describe('hedged model calls', () => {
 })
 
 describe('medical dosing', () => {
-  it('recognizes a dose for a specific person, not a general product fact', () => {
-    for (const q of ["How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?', 'How many mg of Benadryl should I give a 30 lb toddler?', "What's the right dosage for a 6 year old?", 'How much amoxicillin for a 40 pound child'])
-      expect(medicalDosingRequest(q)).toBe(true)
-    // Money, counts, schedules and product facts are not dose questions (QA W4).
-    for (const q of ['How much did I spend on meds', 'How many pills are left in the bottle?', 'When should I take my meds?', 'How much does Tylenol cost?', 'How many people take insulin in the US?', 'How much ibuprofen is in one Advil tablet?', 'How much does the roof cost?', 'Fact check', 'How many doses of the vaccine did the county order?'])
-      expect(medicalDosingRequest(q)).toBe(false)
+  it('needs a named medicine plus dosing intent; POS work talk, money, counts and schedules never trigger it (QA W4)', () => {
+    for (const q of ['whats the dose of tylenol for a child', 'How much Tylenol for Isaiah?', "how much children's tylenol for 3 year old", 'Can I take 800 mg of ibuprofen?', 'how many advil is safe',
+      "How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?', 'How many mg of Benadryl should I give a 30 lb toddler?', 'How much amoxicillin for a 40 pound child'])
+      expect(medicalDosingRequest(q), q).toBe(true)
+    for (const q of ['how many tablets should we give the sales team for demos', 'how many units can we give each rep', 'how many units should I take for the demo',
+      'How much did I spend on meds', 'How many pills are left in the bottle?', 'When should I take my meds?', 'How much does Tylenol cost?', 'How many people take insulin in the US?',
+      'How much ibuprofen is in one Advil tablet?', 'How much does the roof cost?', 'Fact check', 'How many doses of the vaccine did the county order?', "What's the right dosage for a 6 year old?"])
+      expect(medicalDosingRequest(q), q).toBe(false)
   })
 })
 
@@ -426,6 +446,24 @@ describe('compose and run', () => {
     expect(stalled!.factCheckRange).toBeUndefined()
     expect(stalled!.sections[1].text).toContain('The answer ran out of time before this claim could be checked.')
     expect(stall.mock.calls.map(c => c[3])).toEqual(['meeting_fact_check_planner', 'meeting_fact_check_answer'])
+  })
+  it('on a partial failure keeps the range only up to the first unchecked claim and leaves it out of already-checked (QA W3 note 3)', async () => {
+    const plan = { claims: [
+      { claim: 'Elephants often weigh more than a car', query: 'elephant weight vs car weight', evidenceTurnIds: [1, 2], category: 'nature' },
+      { claim: 'Average heart beats about a billion times in a lifetime', query: 'average human heart beats lifetime', evidenceTurnIds: [3], category: 'science' },
+    ] }
+    const reply = JSON.stringify({ sections: [{ label: 'Claim', text: 'Elephants outweigh a car [T1]: Supported. An adult elephant weighs about 6 tonnes [W1].' }, { label: 'Claim', text: 'A billion heartbeats [T3]: Unverified. No page was read.' }], confidence: { level: 'limited', reason: 'One claim was checked.' }, support: [{ id: 'W1', quote: 'An adult African elephant weighs about 6 tonnes' }] })
+    const run = vi.fn(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? JSON.stringify(plan) : reply }))
+    const search = vi.fn(async (q: string) => q.startsWith('elephant') ? { sources: [page('W1', 'An adult African elephant weighs about 6 tonnes.')], notices: [] as string[] } : { sources: [] as AskSource[], notices: ['The public lookup ended before readable pages were returned. This claim remains unverified.'] })
+    const out = await runMeetingFactCheck({ mode: 'scope', input: input('Fact check', 126_414), at: at(126_414), records: [], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    expect(out!.factCheckRange).toEqual({ fromMs: 0, throughMs: 99_999, full: true, claims: 1 })
+    expect(out!.claims.map(c => c.checked)).toEqual([true, false])
+    expect(out!.notices).toContain('One claim could not be checked from a readable page; the next Fact check retries it.')
+    const record = { exchange: ex({ throughMs: 126_414, factCheckRange: out!.factCheckRange, sections: out!.sections }), factCheck: { claims: out!.claims } }
+    expect(alreadyCheckedClaims([record], at(200_000))).toEqual(['Elephants often weigh more than a car'])
+    // The next check starts before the unchecked claim, so it is listed again.
+    expect(factCheckWindow([record.exchange], at(200_000))).toEqual({ fromMs: 99_999, full: false })
+    expect(factCheckScanTurns(input('x', 200_000), factCheckWindow([record.exchange], at(200_000))).turns.map(t => t.id)).toContain(3)
   })
   it('skips a lookup once the search budget is spent, and a named check with no admissible claim falls back', async () => {
     const plan = { claims: [{ claim: 'Elephants outweigh cars', query: 'elephant weight vs car weight', evidenceTurnIds: [1, 2], category: 'nature' }] }

@@ -30,6 +30,10 @@ export interface FactCheckClaim {
     evidenceTurnIds: number[];
     category: string;
     place?: 'implicit_origin';
+    /** Places the claim itself names, as tagged by the planner and found in its passages ("Kansas City"). */
+    places?: string[];
+    /** False when the claim got no read page (timed out, unsearchable or the answer stalled): a later check retries it. */
+    checked?: boolean;
     origin?: { text: string; source: 'user' | 'profile' | 'phone_area' };
     atMs: number;
     verdict?: string;
