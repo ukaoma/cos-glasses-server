@@ -974,3 +974,9 @@ OCR, like Control Meeting Ask. Extracted words become cited file evidence.
 Small numbers and tables may be misread; photos without text are not visually
 interpreted. No new EHPK or Control build is required for existing 629 companions.
 [Acceptance plan](docs/test-plan-6.71.9.md). Experimental transcription flags remain off.
+
+### Fact check and Sonnet meeting defaults (6.71.12 candidate)
+
+Companion 6.10.635 and Control 0.5.287 expose a capability-gated **Fact check** action through the existing durable Ask route. Public-topic research remains opt-in and excludes private meeting details from search. A verdict needs a readable supporting source; missing scope or a usable average stays explicit.
+
+Fresh Meeting Ask settings default to Claude Sonnet. Existing explicit selections are preserved; select Sonnet in Meeting assistant settings to use the tested route. Draft and tools-off grounding review use the selected model. This adds a review call per requested answer and may use a bounded repair call, within the same 30-second request deadline. It does not change speech-recognition or polish defaults, run automatic cues, or enable experimental transcription flags.
