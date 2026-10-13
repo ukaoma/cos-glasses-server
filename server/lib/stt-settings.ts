@@ -116,7 +116,7 @@ export function previewOptions(c: SttCapabilities): SttOption[] {
   const parakeetNote = !c.parakeetInstalled
     ? 'Install Parakeet on this Mac first.'
     : c.parakeetPreviewWarm
-      ? 'Parakeet v2 on the Neural Engine, about 0.3 s per chunk. Experimental: compare it live yourself.'
+      ? 'Parakeet Ultra on the Neural Engine, about 0.3 s per chunk. Experimental: compare it live yourself.'
       : c.parakeetPreviewWarming
         ? 'Warming up (the first load takes 15 to 25 s). Whisper Turbo previews until it is ready.'
         : 'Warms up when selected. Whisper Turbo previews until it is ready.'

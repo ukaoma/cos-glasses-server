@@ -664,7 +664,7 @@ GET returns:
 {
   "preview": {"selected": "turbo", "effective": "turbo", "options": [{"id": "turbo", "label": "Whisper Turbo", "available": true, "experimental": false, "note": "..."}]},
   "hq": {"selected": "large-v3", "effective": "large-v3", "options": ["..."]},
-  "secondOpinion": {"selected": "parakeet-ultra", "effective": "off", "options": ["..."]},
+  "secondOpinion": {"selected": "parakeet-v2", "effective": "off", "options": ["..."]},
   "resolver": {"enabled": true, "effective": false},
   "frontEnd": {"selected": "highpass", "options": ["..."]},
   "quietGate": {"selected": "silero", "options": ["..."]},
@@ -678,7 +678,7 @@ GET returns:
 | --- | --- | --- |
 | `preview` | `turbo`, `large-v3` (Max tier only: it runs on the live Large-v3 worker at preview priority), `parakeet` (experimental, once installed; Whisper Turbo previews while it warms), `nemotron-560` (listed, `available: false`: FluidAudio 0.17.4 runs it only as a whole-file batch) | next live chunk |
 | `hq` | `large-v3` (timestamps on, mapped through Whisper's own VAD segments), `large-v3-legacy` (the pre-6.72 decoder), `parakeet-ultra` (experimental) | next saved meeting |
-| `secondOpinion` | `parakeet-ultra`, `off`, `large-v3` (for a Parakeet HQ) | next saved meeting |
+| `secondOpinion` | `parakeet-v2`, `off`, `parakeet-ultra`, `large-v3` (for a Parakeet HQ) | next saved meeting |
 | `resolver` | `true`, `false` | next saved meeting |
 | `frontEnd` | `highpass` (80 Hz highpass only), `full` (highpass, afftdn, loudnorm) | next live chunk and next saved meeting |
 | `quietGate` | `silero` (under 0.5 s of detected speech is quiet), `rms` (RMS below 150) | next live chunk |
@@ -720,16 +720,18 @@ compiled CoreML cache. No sandbox, no run. Nothing here calls a language model.
 HQ and second-opinion runs are queued one at a time at lower CPU priority, the
 first with a 180 s deadline (CoreML may compile) and later ones 30 s; a failed
 Parakeet HQ window is decoded by Large-v3 instead, and a failed second opinion
-leaves the primary exactly as heard. Second opinions run only inside the
-post-save HQ job, never during a live recording otherwise. The preview lane
+leaves the primary exactly as heard. Second opinions run only inside a saved
+meeting's HQ job (and orphan recovery, which uses the same plan), never as part
+of live capture. The preview lane
 runs one decode at a time with a 1.5 s deadline; a busy, slow or failed preview
 falls back to Whisper Turbo for that request.
 
 ### The resolver
 
 After the primary HQ decode of each window, the second opinion hears the same
-front-end audio. The two are aligned word by word (edit distance, and two words
-more than 2 s apart never pair). Where they disagree, the resolver takes the
+front-end audio. The two are aligned word by word by edit distance over
+normalized words; timestamps place the words taken and date each disagreement
+(a time-skew limit on pairing is available but off: it measured worse). Where they disagree, the resolver takes the
 second opinion only for: words a Large-v3 primary dropped (gap fill), or a
 profile vocabulary term the primary missed. It never changes a region where the
 two differ in a negation, a number or a unit, nor a short insertion carrying

@@ -65,6 +65,8 @@ const mutations = [
   ['sidecar-keeps-hypotheses', MP, '      ...(result.stt ? { stt: result.stt } : {}),\n', ''],
   // Preview.
   ['preview-parakeet-failure-is-turbo', RU, "      console.warn(`[stt] Parakeet preview missed, using Turbo: ${error instanceof Error ? error.message : error}`)\n", '      throw error\n'],
+  ['preview-parakeet-hears-highpass', RU, '      const r = await deps.parakeet(await deps.frontEnd(audio))', '      const r = await deps.parakeet(audio)'],
+  ['preview-turbo-hears-raw', RU, '  const t = await deps.turbo(audio)\n  return t ? { text: t.text, model: t.model, backend: t.backend } : null\n}', '  const t = await deps.turbo(await deps.frontEnd(audio))\n  return t ? { text: t.text, model: t.model, backend: t.backend } : null\n}'],
   ['preview-follows-effective-engine', RU, "  if (eff.preview.engine === 'parakeet') {", "  if (eff.settings.preview === 'parakeet') {"],
 ]
 

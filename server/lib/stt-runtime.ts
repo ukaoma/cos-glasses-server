@@ -21,8 +21,10 @@ import {
   type SttCapabilities,
 } from './stt-settings.js'
 
-/** The live preview's Parakeet model. v2 over Ultra on the live-lane evidence (docs/stt-672-evaluation.md). */
-export const PREVIEW_PARAKEET_MODEL: ParakeetModelId = 'parakeet-v2'
+/** The live preview's Parakeet model. Ultra over v2 on the live-lane evidence
+ *  (docs/stt-672-evaluation.md): lower WER, and v2 put text on 3 of 40 clean
+ *  non-speech units where Ultra put none. */
+export const PREVIEW_PARAKEET_MODEL: ParakeetModelId = 'parakeet-ultra'
 /** Above this a preview is late enough to be useless; the request is a miss. */
 export const PARAKEET_PREVIEW_TIMEOUT_MS = 1_500
 
@@ -118,8 +120,9 @@ const defaultPreviewDeps: PreviewDeps = {
     const result = await transcribeParakeet(audio, { model: PREVIEW_PARAKEET_MODEL, lane: 'preview', timeoutMs: PARAKEET_PREVIEW_TIMEOUT_MS })
     return { text: applyCorrections(result.text) }
   },
-  // Every preview engine hears the highpass front end. The full chain is never
-  // applied to a cosmetic preview (it lifts background speech and costs time).
+  // Parakeet's preview hears the highpass front end (how it was measured). The
+  // Whisper previews keep raw audio as before 6.72: highpass measured slightly
+  // worse for Turbo (+1.7% WER, 2 of 40 clean units with text against 1).
   frontEnd: audio => enhanceAudio(audio, { profile: 'light' }),
 }
 
@@ -134,26 +137,25 @@ export async function transcribeMeetingPreview(audio: Buffer, deps: PreviewDeps 
     console.warn(`[stt] preview settings unreadable, using Turbo: ${error instanceof Error ? error.message : error}`)
   }
   if (!eff) {
-    const t = await deps.turbo(await deps.frontEnd(audio))
+    const t = await deps.turbo(audio)
     return t ? { text: t.text, model: t.model, backend: t.backend } : null
   }
   if (eff.settings.preview === 'parakeet' && eff.preview.engine !== 'parakeet') ensurePreviewWarm()
-  const input = await deps.frontEnd(audio)
   if (eff.preview.engine === 'parakeet') {
     try {
-      const r = await deps.parakeet(input)
+      const r = await deps.parakeet(await deps.frontEnd(audio))
       if (r) return { text: r.text, model: PREVIEW_PARAKEET_MODEL, backend: 'fluidaudio-coreml' }
     } catch (error) {
       console.warn(`[stt] Parakeet preview missed, using Turbo: ${error instanceof Error ? error.message : error}`)
     }
   } else if (eff.preview.engine === 'large-v3') {
     try {
-      const r = await deps.largeV3(input)
+      const r = await deps.largeV3(audio)
       return r ? { text: r.text, model: 'large-v3', backend: 'whisper-server' } : null
     } catch (error) {
       console.warn(`[stt] Large-v3 preview missed, using Turbo: ${error instanceof Error ? error.message : error}`)
     }
   }
-  const t = await deps.turbo(input)
+  const t = await deps.turbo(audio)
   return t ? { text: t.text, model: t.model, backend: t.backend } : null
 }

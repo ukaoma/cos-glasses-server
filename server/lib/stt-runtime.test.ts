@@ -30,11 +30,11 @@ function deps(engine: 'turbo' | 'large-v3' | 'parakeet', over: Record<string, un
 }
 
 describe('meeting preview dispatch (6.72.0)', () => {
-  it('turbo is the default engine and hears the highpass audio', async () => {
+  it('turbo is the default engine and hears the raw audio, as before 6.72', async () => {
     const { transcribeMeetingPreview } = await import('./stt-runtime.js')
     const { d, seen } = deps('turbo')
     expect(await transcribeMeetingPreview(Buffer.from('a'), d)).toEqual({ text: 'turbo text', model: 'large-v3-turbo', backend: 'whisper-preview-server' })
-    expect(seen).toEqual(['turbo:hp(a)'])
+    expect(seen).toEqual(['turbo:a'])
   })
 
   it('parakeet when warm; any Parakeet failure is a Turbo preview for that request', async () => {
@@ -61,7 +61,7 @@ describe('meeting preview dispatch (6.72.0)', () => {
     const { d, seen } = deps('turbo')
     d.effective = () => ({ ...eff('turbo', 'parakeet'), preview: { engine: 'turbo', reason: 'parakeet_warming' } })
     expect((await transcribeMeetingPreview(Buffer.from('a'), d))!.text).toBe('turbo text')
-    expect(seen).toEqual(['turbo:hp(a)'])
+    expect(seen).toEqual(['turbo:a'])
   })
 
   it('unreadable settings never cost the preview: Turbo', async () => {
