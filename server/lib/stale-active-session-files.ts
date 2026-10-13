@@ -92,7 +92,8 @@ export function moveActiveSessionFileAside(
       base = `${sessionId}.${now}-${n}`
     }
     const target = resolve(targetDir, `${base}.json`)
-    atomicWriteFileSync(resolve(targetDir, `${base}${REASON_SUFFIX}`), `${JSON.stringify({
+    const reasonPath = resolve(targetDir, `${base}${REASON_SUFFIX}`)
+    atomicWriteFileSync(reasonPath, `${JSON.stringify({
       schemaVersion: 1,
       sessionId,
       reason,
@@ -100,7 +101,13 @@ export function moveActiveSessionFileAside(
       lastActivityAt: detail.lastActivityAt != null ? new Date(detail.lastActivityAt).toISOString() : null,
       ...(detail.note ? { note: detail.note } : {}),
     })}\n`, { mode: 0o600 })
-    renameSync(sourcePath, target)
+    try {
+      renameSync(sourcePath, target)
+    } catch (error) {
+      // No reason may outlive a move that did not happen.
+      try { rmSync(reasonPath, { force: true }) } catch { /* the next sweep's own reason supersedes it */ }
+      throw error
+    }
     return target
   } catch {
     return null

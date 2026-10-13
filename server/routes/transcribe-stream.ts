@@ -739,6 +739,34 @@ function logStaleMoveFailure(sessionId: string, message: string): void {
   console.error(message)
 }
 
+/**
+ * 6.71.14: is this active-session file the leftover of a capture that is already
+ * decoded (recovered or receipted no_speech), rather than a session that RESUMED
+ * under the same id after that capture was quarantined?
+ *
+ * A late chunk is accepted (the phone deletes its copy on a 410), so a session can
+ * restart under an id whose older quarantine dir is already receipted. Its file is
+ * then newer than the quarantine and its own audio sits in session-audio/<id>.
+ * Only a file that is no newer than the quarantine AND has no chunk audio of its
+ * own is the leftover; anything else is adopted as 6.71.13 would, so a meeting is
+ * never split across a restart.
+ */
+function isTerminalCaptureFile(sessionId: string, recordedLastActivityAt: unknown, filePath: string): boolean {
+  const disposition = readCaptureDisposition(sessionId)
+  if (!disposition || (disposition.kind !== 'no_speech' && disposition.kind !== 'recovered')) return false
+  const terminalAtIso = disposition.quarantinedAt ?? disposition.receiptedAt
+  const terminalAt = terminalAtIso ? Date.parse(terminalAtIso) : NaN
+  if (!Number.isFinite(terminalAt)) return false
+  let fileActivity = typeof recordedLastActivityAt === 'number' && Number.isFinite(recordedLastActivityAt)
+    ? recordedLastActivityAt
+    : NaN
+  if (!Number.isFinite(fileActivity)) {
+    try { fileActivity = statSync(filePath).mtimeMs } catch { return false }
+  }
+  if (terminalAt < fileActivity) return false
+  return countChunkWavs(resolve(SESSION_AUDIO_DIR, sessionId)) === 0
+}
+
 /** Recover sessions from disk on server restart */
 function recoverSessions(): void {
   try {
@@ -760,8 +788,8 @@ function recoverSessions(): void {
         // done: a crash between a chunk's first WAV write and its first
         // active-session persist quarantines the audio, and the phone's retry then
         // starts the session again. That file is adopted exactly as before.
-        const terminal = typeof data.sessionId === 'string' ? readCaptureDisposition(data.sessionId) : null
-        if (terminal && (terminal.kind === 'no_speech' || terminal.kind === 'recovered')) {
+        if (typeof data.sessionId === 'string' && isTerminalCaptureFile(data.sessionId, data.lastActivityAt, resolve(CHUNK_PERSIST_DIR, file))) {
+          const terminal = readCaptureDisposition(data.sessionId)!
           const target = moveActiveSessionFileAside(
             resolve(CHUNK_PERSIST_DIR, file), data.sessionId, STALE_ACTIVE_SESSION_DIR, 'terminal_capture', Date.now(),
             { lastActivityAt: typeof data.lastActivityAt === 'number' ? data.lastActivityAt : null },

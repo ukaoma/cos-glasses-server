@@ -118,6 +118,22 @@ describe('sweepStaleActiveSessionFiles', () => {
     expect(readdirSync(target)).toEqual([])
   })
 
+  it('a rename that fails after the reason was written leaves no reason behind', () => {
+    const root = temp(), dir = join(root, 'active-sessions'), target = join(root, 'stale')
+    writeActive(dir, SID, NOW - 5 * HOUR)
+    mkdirSync(target, { recursive: true })
+    const source = join(dir, `${SID}.json`)
+    // The target takes the reason file; a read-only SOURCE dir then fails the rename.
+    chmodSync(dir, 0o500)
+    try {
+      expect(moveActiveSessionFileAside(source, SID, target, 'not_live_idle_expired', NOW)).toBeNull()
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+    expect(existsSync(source)).toBe(true)
+    expect(readdirSync(target).filter(name => name.endsWith('.reason.json')), 'a reason outlived a failed move').toEqual([])
+  })
+
   it('two moves of the same id in the same millisecond do not overwrite each other', () => {
     const root = temp(), dir = join(root, 'active-sessions'), target = join(root, 'stale')
     const path = writeActive(dir, SID, NOW - 5 * HOUR)

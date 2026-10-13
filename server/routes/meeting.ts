@@ -542,6 +542,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const savingSessions = new Set<string>()
   setNamingSessionLiveness(id => sessions.getStartTime(id) !== null || savingSessions.has(id) || activeFinalizationJobs.has(id))
 
+  let recoveryPendingLogged = false
   router.get('/meeting/sessions/:sessionId/status', (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
@@ -566,6 +567,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // origin-loss recovery backs off), so say "not yet" instead. A saved meeting
     // is already authoritative and is answered as usual.
     if (!saved && !durableSessionRecoveryHasRun()) {
+      if (!recoveryPendingLogged) {
+        recoveryPendingLogged = true
+        console.warn('[meeting/status] Answering 503 recovery_pending: durable session recovery has not run (maintenance gate closed)')
+      }
       res.set('Cache-Control', 'private, no-store')
       res.set('Retry-After', '5')
       res.status(503).json({

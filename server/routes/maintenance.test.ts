@@ -53,6 +53,7 @@ let server: Server
 let base = ''
 let dataDir = ''
 let activeLease = ''
+const sharedGatePath = process.env.COS_MAINTENANCE_GATE_PATH
 const operationId = 'operation-route-test'
 const nonce = 'route_controller_nonce_0123456789abcdefABCDEF'
 const nonceSha256 = createHash('sha256').update(nonce, 'utf8').digest('hex')
@@ -66,6 +67,10 @@ const identity = {
 beforeAll(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'cos-maintenance-route-'))
   process.env.COS_DATA_DIR = dataDir
+  // 6.71.14: this file writes REAL drain gates. Its own path, so a gate left in the
+  // shared test path can never close admissions for another file (whose status
+  // route would then answer 503 recovery_pending).
+  process.env.COS_MAINTENANCE_GATE_PATH = join(dataDir, 'maintenance', 'maintenance-gate.json')
   process.env.COS_MANAGED = '1'
   process.env.COS_SERVER_VERSION = '6.13.0'
   process.env.COS_SERVER_GENERATION_ID = 'generation-test-42'
@@ -110,6 +115,8 @@ afterAll(async () => {
   delete process.env.COS_MANAGED
   delete process.env.COS_SERVER_VERSION
   delete process.env.COS_SERVER_GENERATION_ID
+  if (sharedGatePath === undefined) delete process.env.COS_MAINTENANCE_GATE_PATH
+  else process.env.COS_MAINTENANCE_GATE_PATH = sharedGatePath
 })
 
 async function beginDrain() {

@@ -190,14 +190,14 @@ function seedLiveCapture(id: string, lastActivityAt: number) {
 }
 
 /** A quarantine dir for the id; `receipt` null means held, not yet decoded. */
-function seedQuarantine(id: string, receipt: Record<string, unknown> | null, reason = 'idle_expiry_unsaved') {
+function seedQuarantine(id: string, receipt: Record<string, unknown> | null, reason = 'idle_expiry_unsaved', at = Date.now()) {
   const dir = join(dataDir, 'unsaved-audio', id)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'chunk_0000.wav'), Buffer.alloc(64))
   writeFileSync(join(dir, QUARANTINE_MANIFEST), JSON.stringify({
-    schemaVersion: 1, sessionId: id, quarantinedAt: new Date().toISOString(), reason, chunkFiles: 1, bytes: 64,
+    schemaVersion: 1, sessionId: id, quarantinedAt: new Date(at).toISOString(), reason, chunkFiles: 1, bytes: 64,
   }))
-  if (receipt) writeFileSync(join(dir, RECOVERED_RECEIPT), JSON.stringify({ schemaVersion: 1, recoveredAt: new Date().toISOString(), ...receipt }))
+  if (receipt) writeFileSync(join(dir, RECOVERED_RECEIPT), JSON.stringify({ schemaVersion: 1, recoveredAt: new Date(at + 1_000).toISOString(), ...receipt }))
   return dir
 }
 
@@ -259,7 +259,10 @@ describe('the real order: chunks persisted, restart behind a closed gate, then r
     const gate = realClosedGate()
     const { stream, statusRes, sessions } = await mount()
     expect(sessions.has(SID), 'recovered behind a closed gate').toBe(false)
+    const warn = vi.spyOn(console, 'warn')
     const pending = await statusRes(SID)
+    await statusRes(SID)
+    expect(messages(warn).filter(m => m.includes('Answering 503 recovery_pending')), 'logged on every poll, or never').toHaveLength(1)
     expect(pending.code).toBe(503)
     expect(pending.body).toMatchObject({ reason: 'recovery_pending', retryable: true })
     expect(pending.body.state, 'a 503 body must not carry a state the phone would read').toBeUndefined()
@@ -337,8 +340,45 @@ describe('the real order: chunks persisted, restart behind a closed gate, then r
     expect(existsSync(activeFile(SID))).toBe(true)
   })
 
+  it('a capture whose quarantine is not yet decoded is adopted, even when the file is older and has no audio of its own', async () => {
+    // Only a decoded outcome (recovered or no_speech) makes a file a leftover.
+    seedLiveCapture(SID, Date.now() - 10 * 60_000)
+    rmSync(audioDir(SID), { recursive: true, force: true })
+    seedQuarantine(SID, null, 'idle_expiry_unsaved', Date.now())
+    const { sessions } = await mount()
+    expect(sessions.has(SID), 'an undecoded quarantine was treated as finished').toBe(true)
+    expect(existsSync(staleDir()) ? readdirSync(staleDir()) : []).toEqual([])
+  })
+
+  it('late chunk after receipt, restart: the resumed session is adopted, not moved aside (no split meeting)', async () => {
+    // The capture was quarantined and receipted 30 minutes ago; a late chunk then
+    // started the session again under the same id, with its own audio, and the
+    // server restarted.
+    seedQuarantine(SID, NO_SPEECH, 'idle_expiry_unsaved', Date.now() - 30 * 60_000)
+    seedLiveCapture(SID, Date.now() - 60_000)
+    const { sessions } = await mount()
+    expect(sessions.has(SID), 'the resumed session was split off as a finished capture').toBe(true)
+    expect(existsSync(activeFile(SID))).toBe(true)
+  })
+
+  it('a file newer than the receipt is adopted even when its audio dir is gone', async () => {
+    seedQuarantine(SID, NO_SPEECH, 'idle_expiry_unsaved', Date.now() - 30 * 60_000)
+    seedLiveCapture(SID, Date.now() - 60_000)
+    rmSync(audioDir(SID), { recursive: true, force: true })
+    const { sessions } = await mount()
+    expect(sessions.has(SID), 'ordering ignored: a newer session file was treated as a leftover').toBe(true)
+  })
+
+  it('a file older than the receipt is still adopted when it has chunk audio of its own', async () => {
+    seedLiveCapture(SID, Date.now() - 60 * 60_000)
+    seedQuarantine(SID, NO_SPEECH, 'idle_expiry_unsaved', Date.now() - 5 * 60_000)
+    const { sessions } = await mount()
+    expect(sessions.has(SID), 'a session with its own audio was treated as a leftover').toBe(true)
+  })
+
   it('a failed terminal_capture move is logged once and the file is left, not adopted', async () => {
     seedLiveCapture(SID, Date.now() - 10 * 60_000)
+    rmSync(audioDir(SID), { recursive: true, force: true })
     seedQuarantine(SID, NO_SPEECH)
     mkdirSync(dataDir, { recursive: true })
     writeFileSync(staleDir(), 'not a directory')

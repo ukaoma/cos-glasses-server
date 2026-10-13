@@ -361,7 +361,7 @@ reads `missing` and the phone stops asking to save it. Saving a known meeting th
 transcript answers **404 `nothing_to_save`** (with its state); only an unknown id answers
 `session_not_found`. From 6.71.14 a `missing` or `closed` capture whose audio reached the
 unsaved-audio quarantine also carries an `outcome` (`receipted`, `recovered` or
-`quarantined`) and a `disposition`, and the status answers **503 `recovery_pending`**
+`quarantined`) and a `disposition`, and for an id with no saved meeting the status answers **503 `recovery_pending`**
 until boot recovery has run (see [Finished captures never read as live](#finished-captures-never-read-as-live-67114)).
 
 ## The summary behind the prompt box (6.54.0)
@@ -997,5 +997,5 @@ A server that boots behind a closed maintenance gate (every managed update) now 
 
 - `GET /api/meeting/sessions/:id/status` keeps `state` to `saved`, `active`, `closed` and `missing`, with the same precedence as before. When the quarantine holds the capture it adds `outcome` (`receipted`: decoded, no speech; `recovered`: decoded and saved; `quarantined`: held, not decoded yet) and `disposition` (`kind`, `reason`, `quarantinedAt`, `quarantineReason`, `receiptedAt`, `chunkFiles`, `savedFilename`, `recovering`, `audioRetainedUntil`). Both are null for a saved or live session.
 - Until recovery has run, a status for an id with no saved meeting answers `503 {"reason": "recovery_pending", "retryable": true}` with `Retry-After: 5`, instead of a `missing` that would tell the phone the Mac lost the meeting.
-- Late chunks are accepted as before. A chunk for a quarantined or receipted capture starts its own session, exactly as in 6.71.13; the phone treats a 410 as "already saved" and deletes its copy, so the server never refuses one.
+- No new chunk refusal: a chunk for a quarantined or receipted capture starts its own session, because the phone treats a 410 as "already saved" and deletes its copy. The existing 4-hour closed-session 410 still applies, now after a managed boot too. A session that resumed under a receipted id is adopted at the next boot, never split off.
 - Each minute, an `active-sessions/*.json` whose session is not live and has been idle for 4 hours (the earlier of its `lastActivityAt` and its file time) is moved to `data/stale-active-session-files/`, with a `.reason.json` written first. Moved files are removed 7 days after the move. Boot recovery also moves aside, rather than adopts, a file whose capture was already recovered or receipted.
