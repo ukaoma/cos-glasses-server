@@ -581,7 +581,9 @@ export async function runMeetingFactCheck(a: FactCheckRunArgs): Promise<FactChec
     let parsed: unknown = null
     try { parsed = plan ? plannerList(plan.text) : null } catch { parsed = null }
     if (!parsed || typeof parsed !== 'object') {
-      if (a.mode === 'named') return null
+      // A planner that never answered usably used the time a slower fallback would need: say so now rather
+      // than run the 6.71.12 path into the 30 s deadline.
+      if (a.mode === 'named') return fixedAnswer('I could not prepare that fact check in time, so nothing was searched. Ask again in a moment.', 'Low — The claim could not be located in time.', [...notices, 'Fact check claim selection did not answer in time.'], undefined)
       // No range: the next Fact check retries this same span.
       return fixedAnswer('The Fact check could not list the claims this time, so nothing was searched. Tap Fact check again.', 'Low — The claim list could not be prepared.', [...notices, 'Fact check claim selection did not return a usable list.'], undefined)
     }

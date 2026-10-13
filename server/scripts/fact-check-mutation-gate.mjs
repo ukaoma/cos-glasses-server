@@ -88,6 +88,7 @@ const mutations = [
   // Orchestration.
   ['no-range-when-selection-fails', FC, "'Fact check claim selection did not return a usable list.'], undefined)", "'Fact check claim selection did not return a usable list.'], range)"],
   ['named-falls-back', FC, "    if (a.mode === 'named' && !claims.length) return null\n", ''],
+  ['named-planner-failure-answers-fast', FC, "      if (a.mode === 'named') return fixedAnswer('I could not prepare that fact check in time", "      if (a.mode === 'named') return null; if (false) return fixedAnswer('I could not prepare that fact check in time"],
   ['nothing-new-skips-planner', FC, 'if (!scan.turns.length) return fixedAnswer(`Nothing new', 'if (false) return fixedAnswer(`Nothing new'],
   ['search-budget-spent', FC, 'if (budget <= 1000) return', 'if (false) return'],
   ['continuation-reuses-pages', FC, 'const reused = a.continuation ? reusablePages(a.continuation, c, now()) : []', 'const reused: AskSource[] = []'],

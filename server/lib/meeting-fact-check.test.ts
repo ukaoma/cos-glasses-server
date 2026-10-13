@@ -364,7 +364,9 @@ describe('compose and run', () => {
     const failed = await runMeetingFactCheck({ mode: 'scope', input: input('Fact check', 126_414), at: at(126_414), records: [], run, search: vi.fn(), ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
     expect(failed!.factCheckRange).toBeUndefined()
     expect(failed!.sections[0].text).toContain('could not list the claims')
-    expect(await runMeetingFactCheck({ mode: 'named', input: input('Fact check the flight to kc'), at: at(800_000), records: [], run, search: vi.fn(), ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })).toBeNull()
+    const named = await runMeetingFactCheck({ mode: 'named', input: input('Fact check the flight to kc'), at: at(800_000), records: [], run, search: vi.fn(), ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    expect(named!.sections[0].text).toContain('could not prepare that fact check in time')
+    expect(named!.factCheckRange).toBeUndefined(); expect(named!.claims).toEqual([])
   })
   it('continues a pending route check with the typed origin and reuses only pages read for that same query', async () => {
     const read = page('W9', 'Nonstop flights from Austin to Kansas City take about 1 hour 50 minutes.')
