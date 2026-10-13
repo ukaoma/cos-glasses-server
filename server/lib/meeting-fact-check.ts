@@ -48,7 +48,8 @@ export function factCheckStamp(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-const normalize = (s: string) => s.toLowerCase().replace(/[’‘]/g, "'")
+// "$750,000" is one number, 750000, on both the query side and the passage side.
+const normalize = (s: string) => s.toLowerCase().replace(/[’‘]/g, "'").replace(/\b\d{1,3}(?:,\d{3})+\b/g, n => n.replace(/,/g, ''))
   .replace(/\b([a-z]+)'(m|re|ve|ll|d|t|s)\b/g, (_m, a: string, b: string) => b === 's' ? a : a + b)
 export function factWords(s: string): string[] { return normalize(s).match(/[\p{L}\p{N}]+/gu) ?? [] }
 /** Plural-insensitive matching only ("elephants" matches "elephant"). Queries keep the planner's words. */
@@ -226,7 +227,9 @@ export function factCheckPlannerPrompt(input: Pick<AskInput, 'question' | 'elaps
 
 const CATEGORIES = new Set(['science', 'nature', 'health_fact', 'geography', 'travel_time', 'history', 'public_news', 'public_project', 'public_product', 'sports', 'culture'])
 /** Generic research words any claim query may use. Static: no names, places or amounts. */
-const CLAIM_GENERIC = new Set(['average', 'typical', 'weight', 'weigh', 'weighs', 'size', 'height', 'length', 'time', 'times', 'flight', 'flights', 'fly', 'flying', 'drive', 'driving', 'drives', 'distance', 'miles', 'mile', 'kilometers', 'km', 'hours', 'hour', 'minutes', 'minute', 'duration', 'lifetime', 'lifespan', 'speed', 'population', 'number', 'count', 'record', 'nonstop', 'direct', 'route', 'compared', 'comparison', 'cost', 'price'])
+const CLAIM_GENERIC = new Set(['average', 'typical', 'weight', 'weigh', 'weighs', 'size', 'height', 'length', 'time', 'times', 'flight', 'flights', 'fly', 'flying', 'drive', 'driving', 'drives', 'distance', 'miles', 'mile', 'kilometers', 'km', 'hours', 'hour', 'minutes', 'minute', 'duration', 'lifetime', 'lifespan', 'speed', 'population', 'number', 'count', 'record', 'nonstop', 'direct', 'route', 'compared', 'comparison', 'cost', 'price',
+  // The 6.71.12 public-topic research vocabulary (meeting-public-topic.ts), equally generic.
+  'replacement', 'replace', 'repair', 'funding', 'allocation', 'allocated', 'budget', 'council', 'councilmember', 'councilman', 'square', 'foot', 'feet', 'benchmark'])
 const PLACEHOLDER = new Set(['here', 'there'])
 const DOSING = /\b(?:dose|dosage|dosing|mg|milligrams?|medication|medications|medicine|painkillers?|prescription)\b/i
 const GENERIC_SPEAKERS = new Set(['You', 'Ext', 'Unidentified', 'Speaker', 'MU', 'Me'])
@@ -437,8 +440,10 @@ export async function composeFactCheck(a: FactCheckComposeArgs): Promise<{ rows:
     if (!problem) break
   }
   if (stalled) notices.push('The fact-check answer ran out of time; unconfirmed claims are shown as unverified.')
+  const readFor = (c: FactCheckClaim) => a.web.some(s => a.webClaim.get(s.id) === c.n && pageWasRead(s))
   const why = (c: FactCheckClaim) => c.place && !c.origin ? 'The starting city is not stated. Which city are you starting from? For example, say "From Austin".'
-    : !c.query ? 'It could not be searched using only words from the meeting.' : 'No readable source confirmed it in time.'
+    : !c.query ? 'It could not be searched using only words from the meeting.'
+      : readFor(c) ? 'The pages that could be read did not confirm it.' : 'No readable page was found for it in time.'
   let final: MeetingAskSection[]
   if (!problem) final = rows!
   else {

@@ -91,6 +91,10 @@ describe('claim admission', () => {
     expect(heart('how many heartbeats average human lifetime')).toBe('how many heartbeats average human lifetime')
     expect(heart('how many heartattacks average human lifetime')).toBeUndefined()
   })
+  it('reads a number with thousands separators as one number', () => {
+    const roof = [{ id: 20, elapsedMs: 1000, speaker: 'Ext', text: 'The city allocated $750,000 to replace the fire station roof.' }]
+    expect(admitFactCheckClaims({ claims: [{ claim: 'City allocated $750,000 for a fire station roof', query: 'city fire station roof 750,000 allocation', evidenceTurnIds: [20], category: 'public_project' }] }, { turns: roof }, roof).claims[0].query).toBe('city fire station roof 750000 allocation')
+  })
   it('caps the number of claims and drops duplicates', () => {
     const c = { claim: 'Elephants outweigh cars', query: 'elephant weight car', evidenceTurnIds: [1, 2], category: 'nature' }
     expect(admitFactCheckClaims({ claims: [c, c] }, input('Fact check'), scanned).claims).toHaveLength(1)
@@ -225,7 +229,9 @@ describe('compose and run', () => {
     const late = vi.fn(async () => ({ text: 'not json' }))
     const salvaged = await composeFactCheck(args(late, () => 5000))
     expect(late).toHaveBeenCalledTimes(1)
-    expect(salvaged.rows.map(r => r.text)).toEqual(['Elephants often weigh more than a car: Unverified. No readable source confirmed it in time.', 'Average heart beats about a billion times in a lifetime: Unverified. No readable source confirmed it in time.'])
+    expect(salvaged.rows.map(r => r.text)).toEqual(['Elephants often weigh more than a car: Unverified. The pages that could be read did not confirm it.', 'Average heart beats about a billion times in a lifetime: Unverified. The pages that could be read did not confirm it.'])
+    const unread = await composeFactCheck({ ...args(late, () => 5000), web: [], webClaim: new Map() })
+    expect(unread.rows[0].text).toBe('Elephants often weigh more than a car: Unverified. No readable page was found for it in time.')
   })
   it('retries a stalled answer call once while time remains, and says so when it never returns', async () => {
     const stall = vi.fn().mockRejectedValueOnce(new Error('provider_timeout')).mockResolvedValueOnce({ text: good })

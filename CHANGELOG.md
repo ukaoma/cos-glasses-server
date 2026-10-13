@@ -1,3 +1,13 @@
+## [6.71.13] - 2026-10-13 - Meeting-wide Fact check and follow-ups (candidate)
+
+- Fact check (the CTA, or a typed bare "Fact check") checks every checkable public claim in the meeting the first time, at most five, each in its own "Claim" row with a verdict (Supported, Mostly supported, Mixed, Contradicted, Unverified) and citations. Each later Fact check scans only what was said after the previous completed check. The span is on the durable exchange as `factCheckRange {fromMs, throughMs, full, claims}` in meeting-elapsed ms; `capabilities.factCheckScope: 1` advertises it. Older clients ignore both; transport stays `action=ask`. A named claim ("Fact check the flight to KC") checks that claim only.
+- Follow-ups ("check it now", "run it", "I'm asking you to fact check the claim", "From ATX") continue the meeting's pending fact check under the same public-topic authorization and reuse pages read for the same query in the last 15 minutes. The user's meta-words are never searched.
+- A claim that leaves its starting point implicit ("flying from here") uses the owner's home area: profile `home_city` (for example "Austin, TX"), else the phone's last weather area. The answer and a notice state the assumption; only that place name is added to the public query.
+- Medication doses for a specific person get fixed general safety information; no model call and no web search.
+- Public pages: up to four candidates are tried in parallel and two reads kept, the longest article (or the page body) is read in the window naming the claim, results from hosts that refuse the reader are excluded, and the search model stops once its result is written.
+- Privacy gates unchanged: claim selection is local and tools-off; every query word comes from the claim's own passages, the user's typed words, static generic research words, or the disclosed owner area. Speaker names, files, calendar and memory never reach search. The narrow retirement-rule catalog route keeps precedence. Kill switch: `COS_MEETING_FACT_CHECK_SCOPE=0`.
+- Candidate only; no production promotion implied.
+
 ## [6.71.12] - 2026-10-12
 
 - Add capability-gated Fact check, while keeping the existing durable Ask transport.
