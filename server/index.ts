@@ -101,6 +101,7 @@ import { ttsRouter } from './routes/tts.js'
 import { recoverInterruptedNaming } from './lib/held-naming-batches.js'
 import { voiceRouter } from './routes/voice.js'
 import { glossaryRouter } from './routes/glossary.js'
+import { homeAreaRouter } from './routes/home-area.js'
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
@@ -1099,6 +1100,7 @@ app.use('/api', ttsRouter)
 recoverInterruptedNaming()
 app.use('/api', voiceRouter)
 app.use('/api', glossaryRouter)
+app.use('/api', homeAreaRouter)
 app.use('/api', handoffsRouter)
 app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
