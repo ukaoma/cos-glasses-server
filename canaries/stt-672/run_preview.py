@@ -6,9 +6,10 @@ ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff'); EVAL = Path('/Users/ukaoma/co
 HERE = Path(__file__).resolve().parent
 
 def diarizer_timeouts():
+    """Live-impact signal from the user's public health: diarizer timeouts plus live Whisper failures."""
     try:
         d = json.load(urllib.request.urlopen('http://127.0.0.1:3141/api/health', timeout=3))
-        return d['readiness']['diarizer']['chunks']['reasons'].get('timeout', 0)
+        return d['readiness']['diarizer']['chunks']['reasons'].get('timeout', 0) + 100 * d['whisper_health'].get('consecutiveFailures', 0)
     except Exception:
         return None
 
@@ -19,7 +20,7 @@ def main(arm, sets, pace):
         for l in open(out):
             if l.startswith('{'):
                 d = json.loads(l)
-                if 'error' not in d or d['error'] not in ('busy',): done.add(d['id'])
+                if 'error' not in d: done.add(d['id'])
     jobs = []
     for ds in sets:
         W = json.load(open(ROOT / f'refs/{ds}_set.json'))['windows']

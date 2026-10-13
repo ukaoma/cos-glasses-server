@@ -2,8 +2,9 @@
 // call, no network, no LLM. Transcription must never call `claude -p`.
 //
 // Two decoders hear the same window. Their words are aligned (edit distance
-// over normalized words, constrained by timestamps when both sides carry
-// them), and every place they disagree is recorded. The resolver then applies
+// over normalized words; timestamps place the words taken and date every
+// disagreement, and can optionally constrain pairing), and every place they
+// disagree is recorded. The resolver then applies
 // two measured rules, and nothing else:
 //
 //   1. Gap fill. Large-v3 is deletion-prone on G2 audio (silver deletions 6.1%
@@ -53,8 +54,11 @@ export interface ResolveOptions {
   primaryDeletionProne: boolean
   /** false: report disagreements, change nothing. */
   apply: boolean
-  /** Two words more than this far apart in time never align. */
-  maxSkewSec?: number
+  /** When set, two words more than this far apart in time never align. Off by
+   *  default: on the production-path silver decode every limit tried (2, 3, 5,
+   *  10 s) made the resolver worse than plain text alignment, because Large-v3's
+   *  remapped token clocks have a heavy tail (median skew 0.23 s, p90 1.0 s). */
+  maxSkewSec?: number | null
 }
 
 export interface ResolveResult {
@@ -71,7 +75,7 @@ export interface ResolveResult {
 export const RESOLVER_VERSION = 'stt-resolver-v1'
 /** Alignment is quadratic; a 30 s window is about 100 words a side. */
 export const MAX_ALIGNMENT_CELLS = 2_000_000
-export const DEFAULT_MAX_SKEW_SEC = 2
+export const DEFAULT_MAX_SKEW_SEC: number | null = null
 /** Agreed words each side of a region that a vocabulary match may span. */
 export const CONTEXT_WORDS = 3
 
@@ -163,7 +167,7 @@ function mid(t: Token): number | null {
 type Op = { kind: '=' | 's' | 'p' | 'q'; i: number | null; j: number | null }
 
 /** Edit-distance alignment. Two words far apart in time cannot pair. */
-function align(a: Token[], b: Token[], maxSkew: number): Op[] {
+function align(a: Token[], b: Token[], maxSkew: number | null): Op[] {
   const n = a.length, m = b.length
   const INF = 1e9
   const D = new Float64Array((n + 1) * (m + 1))
@@ -173,7 +177,7 @@ function align(a: Token[], b: Token[], maxSkew: number): Op[] {
   const pairCost = (i: number, j: number): number => {
     const ta = a[i], tb = b[j]
     const ma = mid(ta), mb = mid(tb)
-    if (ma !== null && mb !== null && Math.abs(ma - mb) > maxSkew) return INF
+    if (maxSkew !== null && ma !== null && mb !== null && Math.abs(ma - mb) > maxSkew) return INF
     return ta.key === tb.key ? 0 : 1
   }
   for (let i = 1; i <= n; i++) {

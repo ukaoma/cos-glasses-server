@@ -16,7 +16,7 @@ import { dataPath } from './data-dir.js'
 
 export const PREVIEW_IDS = ['turbo', 'large-v3', 'parakeet', 'nemotron-560'] as const
 export const HQ_IDS = ['large-v3', 'large-v3-legacy', 'parakeet-ultra'] as const
-export const SECOND_OPINION_IDS = ['off', 'parakeet-ultra', 'large-v3'] as const
+export const SECOND_OPINION_IDS = ['off', 'parakeet-v2', 'parakeet-ultra', 'large-v3'] as const
 export const FRONT_END_IDS = ['highpass', 'full'] as const
 export const QUIET_GATE_IDS = ['silero', 'rms'] as const
 
@@ -35,12 +35,14 @@ export interface SttSettings {
   quietGate: QuietGateId
 }
 
-/** Items 1 to 3 on; Parakeet as the second opinion with the resolver on (it
- *  passed the adoption rule against large-v3 alone; see the evaluation doc). */
+/** Items 1 to 3 on. Parakeet v2 as the second opinion with the resolver on: on
+ *  the shipped Large-v3 path it passed the adoption rule (silver WER -11.1%,
+ *  CI -19.7 to -2.8; entities +3.0 pts); with Ultra as the second opinion it did
+ *  not (-7.3%, CI includes zero). See docs/stt-672-evaluation.md. */
 export const DEFAULT_STT_SETTINGS: Readonly<SttSettings> = Object.freeze({
   preview: 'turbo',
   hq: 'large-v3',
-  secondOpinion: 'parakeet-ultra',
+  secondOpinion: 'parakeet-v2',
   resolver: true,
   frontEnd: 'highpass',
   quietGate: 'silero',
@@ -142,8 +144,10 @@ export function hqOptions(c: SttCapabilities): SttOption[] {
 export function secondOpinionOptions(c: SttCapabilities): SttOption[] {
   return [
     { id: 'off', label: 'Off', available: true, experimental: false, note: 'One engine only.' },
+    { id: 'parakeet-v2', label: 'Parakeet v2', available: c.parakeetInstalled, experimental: false,
+      note: c.parakeetInstalled ? 'Hears every HQ window again on the Neural Engine. Disagreements are saved with the meeting. The measured best second opinion for Large-v3.' : 'Install Parakeet on this Mac first.' },
     { id: 'parakeet-ultra', label: 'Parakeet Ultra', available: c.parakeetInstalled, experimental: false,
-      note: c.parakeetInstalled ? 'Hears every HQ window again on the Neural Engine. Disagreements are saved with the meeting.' : 'Install Parakeet on this Mac first.' },
+      note: c.parakeetInstalled ? 'Hears every HQ window again on the Neural Engine. Inserts more words than v2 when it refines Large-v3.' : 'Install Parakeet on this Mac first.' },
     { id: 'large-v3', label: 'Whisper Large-v3', available: c.hqLargeV3, experimental: false, note: 'For a Parakeet HQ model. Adds a full Large-v3 pass.' },
   ]
 }
@@ -204,7 +208,7 @@ export function applySettingsPatch(current: SttSettings, body: unknown, c: SttCa
   if (typeof patch.resolver === 'boolean') next.resolver = patch.resolver
   if (engineFamily(next.hq) === engineFamily(next.secondOpinion)) {
     if (second) throw new SttSettingsError('The second opinion must be a different engine from the HQ model.')
-    const other: SecondOpinionId = engineFamily(next.hq) === 'parakeet' ? 'large-v3' : 'parakeet-ultra'
+    const other: SecondOpinionId = engineFamily(next.hq) === 'parakeet' ? 'large-v3' : 'parakeet-v2'
     const otherOk = secondOpinionOptions(c).find(o => o.id === other)?.available
     next.secondOpinion = otherOk ? other : 'off'
   }
@@ -236,7 +240,7 @@ export function effectiveStt(settings: SttSettings, c: SttCapabilities): Effecti
   let hq: EffectiveStt['hq'] = { engine: settings.hq, reason: null }
   if (settings.hq === 'parakeet-ultra' && !c.parakeetInstalled) hq = { engine: 'large-v3', reason: 'parakeet_not_installed' }
   let second: EffectiveStt['secondOpinion'] = { engine: settings.secondOpinion, reason: null }
-  if (second.engine === 'parakeet-ultra' && !c.parakeetInstalled) second = { engine: 'off', reason: 'parakeet_not_installed' }
+  if (engineFamily(second.engine) === 'parakeet' && !c.parakeetInstalled) second = { engine: 'off', reason: 'parakeet_not_installed' }
   if (second.engine === 'large-v3' && !c.hqLargeV3) second = { engine: 'off', reason: 'large_v3_unavailable' }
   if (second.engine !== 'off' && engineFamily(second.engine) === engineFamily(hq.engine)) second = { engine: 'off', reason: 'same_engine_as_hq' }
   return {

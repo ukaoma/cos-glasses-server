@@ -12,7 +12,9 @@ import bk  # stripOverlap replica used by the bake-off H0 arms
 
 def main(sets):
     env = dict(os.environ, COS_DATA_DIR=str(EVAL / 'data'), COS_PROFILE_PATH=str(ROOT / 'tmp/profile/.cos-profile.json'),
-               REAL_ACTIVE_DIR=str(Path.home() / '.cos-glasses/data/active-sessions'))
+               REAL_ACTIVE_DIR=str(Path.home() / '.cos-glasses/data/active-sessions'),
+               # Same production code path; Metal is its opt-in device (COS_BATCH_HQ_METAL=1), as in the bake-off H0ts arm.
+               COS_BATCH_HQ_METAL=os.environ.get('COS_BATCH_HQ_METAL', '1'))
     p = subprocess.Popen(['nice', '-n', '10', 'node', '--import', 'tsx/esm', str(HERE / 'decode.mts')], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          text=True, env=env, cwd=str(HERE.parent.parent), bufsize=1)
     for ds in sets:

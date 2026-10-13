@@ -25,6 +25,7 @@ for await (const line of rl) {
     vocabulary,
     primaryDeletionProne: isDeletionProneEngine(job.primary.engine),
     apply: job.apply !== false,
+    ...(typeof job.maxSkewSec === 'number' ? { maxSkewSec: job.maxSkewSec } : {}),
   })
   process.stdout.write(JSON.stringify({
     id: job.id, text: applyCorrections(r.text), wordsFromSecond: r.wordsFromSecond, timed: r.timed,

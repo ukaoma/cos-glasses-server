@@ -62,11 +62,11 @@ def corrected_parakeet(runs):
     return {i: {'text': out[i]['text'], 'words': out[i]['words'] or []} for i in ids}
 
 
-def build_arms(ds, timed=None):
+def build_arms(ds, timed=None, include_prod=False):
     H0ts = load(ds, 'H0ts'); U = load(ds, 'H3u'); V2 = load(ds, 'H3v2')
     ids = sorted(set(H0ts) & set(U) & set(V2))
     Uc = corrected_parakeet({i: U[i] for i in ids}); V2c = corrected_parakeet({i: V2[i] for i in ids})
-    arms = {'LV3': {i: H0ts[i]['text'] for i in ids}, 'PKU_raw': {i: U[i]['text'] for i in ids}, 'PKV2_raw': {i: V2[i]['text'] for i in ids},
+    arms = {'LV3': {i: H0ts[i]['text'] for i in ids}, **({'LV3_PROD': {i: (timed[i]['text'] if timed else H0ts[i]['text']) for i in ids}} if (timed or include_prod) else {}), 'PKU_raw': {i: U[i]['text'] for i in ids}, 'PKV2_raw': {i: V2[i]['text'] for i in ids},
             'PKU': {i: Uc[i]['text'] for i in ids}, 'PKV2': {i: V2c[i]['text'] for i in ids}}
 
     def lv3(i):
@@ -157,7 +157,12 @@ def main():
     rows = {}; tables = {}; stats = {}; meta = {}
     for ds in ('silver', 'silverE'):
         S = json.load(open(ROOT / f'refs/{ds}_set.json'))['windows']
-        ids, arms, st = build_arms(ds, timed.get(ds))
+        S_ids = {w['id'] for w in S}
+        t = timed.get(ds) or {}
+        complete_t = t if S_ids <= set(t) else None
+        meta_timed = bool(complete_t)
+        ids, arms, st = build_arms(ds, complete_t, include_prod=bool(a.timed_dir))
+        st['timed_primary'] = meta_timed
         ref = {w['id']: w['ref'] for w in S}; blk = {w['id']: w['sid'] for w in S}
         order = [w['id'] for w in S if w['id'] in ids]
         rows[ds] = {name: [score.score_pair(ref[i], arm[i]) for i in order] for name, arm in arms.items()}
@@ -172,7 +177,8 @@ def main():
     # Paired comparisons vs two baselines, silver WER and pooled entities.
     comps = {}; pooled = {}
     arms = list(rows['silver'])
-    for base in ('LV3', 'PKU'):
+    bases = ('LV3', 'PKU') + (('LV3_PROD',) if 'LV3_PROD' in rows['silver'] else ())
+    for base in bases:
         for arm in arms:
             if arm == base:
                 continue
@@ -193,11 +199,29 @@ def main():
          'RES_LV3_PKV2': stratE_arm('RES_LV3_PKV2', ['large-v3', 'H0ts', 'parakeet-v2', 'H3v2']),
          'RES_PKU_LV3': stratE_arm('RES_PKU_LV3', ['parakeet-ultra', 'H3u', 'large-v3', 'H0ts']),
          'H0nv': stratE_arm('H0nv', ['H0nv'])}
+    tdir = Path(a.timed_dir) / 'stratE' if a.timed_dir else None
+    if tdir and tdir.exists():
+        Et = json.load(open(ROOT / 'refs/stratE_set.json'))['windows']
+        T = {json.load(open(f))['id']: json.load(open(f)) for f in tdir.glob('*.json')}
+        res = {}
+        for kind in ('clean', 'real', 'all'):
+            ids_k = [u['id'] for u in Et if u['id'] in T and (kind == 'all' or (kind == 'clean' and u['kind'] in ('tone', 'music')) or u['kind'] == kind)]
+            res[kind] = {'units': len(ids_k), 'any_output_share': sum(1 for i in ids_k if score.norm(T[i]['text']).split()) / len(ids_k) if ids_k else None, 'vocab_echo_units': 0}
+        E['LV3_PROD'] = res
+    if a.timed_dir and 'LV3_PROD' not in E:
+        E['LV3_PROD'] = E['LV3']  # stratum E not re-decoded: the saved H0ts outputs stand in (documented)
     rtf = {'LV3': compute_rtf('silver', ['H0ts']), 'PKU': compute_rtf('silver', ['H3u']), 'PKV2': compute_rtf('silver', ['H3v2'])}
-    rtf.update({'RES_LV3_PKU': rtf['LV3'] + rtf['PKU'], 'RES_LV3_PKV2': rtf['LV3'] + rtf['PKV2'], 'RES_PKU_LV3': rtf['LV3'] + rtf['PKU'],
+    if a.timed_dir:
+        tot = 0.0; aud = 0.0
+        for f in (Path(a.timed_dir) / 'silver').glob('*.json'):
+            for u in json.load(open(f))['units']:
+                tot += u['wallMs'] / 1000; aud += u['dur']
+        rtf['LV3_PROD'] = tot / aud if aud else None
+    lv3_rtf = rtf.get('LV3_PROD') or rtf['LV3']
+    rtf.update({'RES_LV3_PKU': lv3_rtf + rtf['PKU'], 'RES_LV3_PKV2': lv3_rtf + rtf['PKV2'], 'RES_PKU_LV3': lv3_rtf + rtf['PKU'],
                 'PKU_raw': rtf['PKU'], 'PKV2_raw': rtf['PKV2']})
     verdicts = {}
-    for base in ('LV3', 'PKU'):
+    for base in bases:
         for arm in arms:
             if arm == base:
                 continue

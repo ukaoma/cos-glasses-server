@@ -8,7 +8,8 @@ M=$HOME/.local/share/whisper-models
 SRV=$!
 echo "private turbo pid $SRV"
 until curl -s -m 1 http://127.0.0.1:18377/health | grep -q ok; do sleep 1; if ! kill -0 $SRV 2>/dev/null; then echo "server died"; exit 1; fi; done
-for arm in turbo-raw turbo-hp; do
-  PRIVATE_TURBO_PORT=18377 python3 canaries/stt-672/run_preview.py $arm silver,silverE,stratE 0.3 > $E/runs/preview_$arm.log 2>&1
-done
+# Scope while a recording may be live: turbo-raw needs SILVER-E and stratum E only (SILVER uses
+# the saved bake-off L4 arm, same server args); turbo-hp runs everywhere. Paced to keep GPU duty low.
+PRIVATE_TURBO_PORT=18377 python3 canaries/stt-672/run_preview.py turbo-raw silverE,stratE ${PACE:-0.6} > $E/runs/preview_turbo-raw.log 2>&1
+PRIVATE_TURBO_PORT=18377 python3 canaries/stt-672/run_preview.py turbo-hp silver,stratE,silverE ${PACE:-0.6} > $E/runs/preview_turbo-hp.log 2>&1
 kill $SRV; wait $SRV 2>/dev/null; echo "private turbo stopped"

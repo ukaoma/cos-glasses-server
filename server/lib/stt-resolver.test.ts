@@ -76,11 +76,13 @@ describe('stt resolver', () => {
     expect(r.applied).toBe(false)
   })
 
-  it('never pairs words that are far apart in time', () => {
+  it('with a skew limit, never pairs words that are far apart in time', () => {
     const p = [{ word: 'alpha', start: 0, end: 0.3 }, { word: 'beta', start: 0.4, end: 0.6 }]
     const q = [{ word: 'alpha', start: 9, end: 9.3 }, { word: 'beta', start: 9.4, end: 9.6 }]
-    const r = resolveHypotheses({ engine: 'large-v3', text: 'alpha beta', words: p }, { engine: 'parakeet-ultra', text: 'alpha beta', words: q }, opts())
+    const r = resolveHypotheses({ engine: 'large-v3', text: 'alpha beta', words: p }, { engine: 'parakeet-ultra', text: 'alpha beta', words: q }, opts({ maxSkewSec: 2 }))
     expect(r.disagreements.length).toBeGreaterThan(0)
+    // Off by default (measured: any limit made the resolver worse on real clocks).
+    expect(resolveHypotheses({ engine: 'large-v3', text: 'alpha beta', words: p }, { engine: 'parakeet-ultra', text: 'alpha beta', words: q }, opts()).disagreements).toEqual([])
     const same = resolveHypotheses({ engine: 'large-v3', text: 'alpha beta', words: p }, { engine: 'parakeet-ultra', text: 'alpha beta', words: p }, opts())
     expect(same.disagreements).toEqual([])
   })

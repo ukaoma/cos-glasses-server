@@ -5,7 +5,7 @@ WER on SILVER (39 windows, 13 meetings) with paired meeting bootstrap vs turbo-r
 preview); entity recall pooled with SILVER-E; CLEAN stratum E any-output share; per-chunk compute
 p50/p95 (spawn + highpass + decode, wall clock); estimated word emission delay (chunk end minus the
 word's start, using Parakeet v2 word starts as the timing reference for every arm, plus that arm's
-compute for the chunk). Gates: canaries/gates.py live lane with turbo-raw as the baseline.
+compute for the chunk), over SILVER and SILVER-E chunks each arm decoded. Gates: canaries/gates.py live lane with turbo-raw as the baseline.
 Usage: venv/bin/python evaluate_preview.py OUT.json [contention.json]
 """
 import json, sys
@@ -45,21 +45,22 @@ def main(out, contention=None):
     ref_t = runs.get('parakeet-v2', {})
     res = {'arms': list(runs), 'tables': {}, 'comparisons': {}, 'pooled_entities': {}, 'stratE': {}, 'latency': {}, 'gates': {}}
     rows = {}
+    # turbo-raw on SILVER is the saved bake-off L4 arm (same private-server args, raw audio, no prompt).
+    L4 = {}
+    for f in (ROOT / 'runs/silver/L4').glob('*.json'):
+        if f.name != 'RECEIPT.json':
+            j = json.load(open(f)); L4[j['id']] = j['text']
+    use_l4 = lambda a, ds: a == 'turbo-raw' and ds == 'silver'
     for ds in ('silver', 'silverE'):
         S = sets[ds]
-        ids = [w for w in S if all(complete(r, ds, w) for r in runs.values())]
-        rows[ds] = {a: [score.score_pair(w['ref'], window_text(r, ds, w)) for w in ids] for a, r in runs.items()}
+        ids = [w for w in S if all((w['id'] in L4) if use_l4(a, ds) else complete(r, ds, w) for a, r in runs.items())]
+        rows[ds] = {a: [score.score_pair(w['ref'], L4[w['id']] if use_l4(a, ds) else window_text(r, ds, w)) for w in ids] for a, r in runs.items()}
         rows[ds + '_blocks'] = [w['sid'] for w in ids]
         res['tables'][ds] = {}
         for a in runs:
             A = score.agg(rows[ds][a]); A['windows'] = len(ids); A['complete'] = len(ids) == len(S)
             A['WER_ci'] = score.bootstrap_ci(rows[ds][a], rows[ds + '_blocks'], 'WER', reps=REPS)
             res['tables'][ds][a] = A
-    # saved bake-off L4 on silver, as a reproduction check of turbo-raw
-    L4 = {}
-    for f in (ROOT / 'runs/silver/L4').glob('*.json'):
-        if f.name != 'RECEIPT.json':
-            j = json.load(open(f)); L4[j['id']] = j['text']
     res['L4_saved_silver_WER'] = score.agg([score.score_pair(w['ref'], L4[w['id']]) for w in sets['silver'] if w['id'] in L4])['WER']
     base = 'turbo-raw'
     for a in runs:
@@ -88,16 +89,17 @@ def main(out, contention=None):
         res['stratE'][a] = out_e
     # latency
     for a, r in runs.items():
-        ms = [d['ms'] / 1000 for k, d in r.items() if 'error' not in d and k.startswith('silver|')]
+        ms = [d['ms'] / 1000 for k, d in r.items() if 'error' not in d and (k.startswith('silver|') or (a == 'turbo-raw' and k.startswith('silverE|')))]
         errs = sum(1 for d in r.values() if 'error' in d)
         delays = []
-        for w in sets['silver']:
-            for c in w['chunks']:
-                k = f"silver|{w['id']}|{c['idx']}"
-                if k not in r or 'error' in r[k] or k not in ref_t:
-                    continue
-                for wd in ref_t[k].get('words') or []:
-                    delays.append(max(0.0, c['dur'] - wd['start']) + r[k]['ms'] / 1000)
+        for ds in ('silver', 'silverE'):
+            for w in sets[ds]:
+                for c in w['chunks']:
+                    k = f"{ds}|{w['id']}|{c['idx']}"
+                    if k not in r or 'error' in r[k] or k not in ref_t:
+                        continue
+                    for wd in ref_t[k].get('words') or []:
+                        delays.append(max(0.0, c['dur'] - wd['start']) + r[k]['ms'] / 1000)
         res['latency'][a] = {'chunks': len(ms), 'errors': errs, 'unit_compute_p50': float(np.percentile(ms, 50)), 'unit_compute_p95': float(np.percentile(ms, 95)),
                              'unit_compute_max': float(max(ms)), 'emission_delay_p50': float(np.percentile(delays, 50)) if delays else None,
                              'emission_delay_p95': float(np.percentile(delays, 95)) if delays else None}

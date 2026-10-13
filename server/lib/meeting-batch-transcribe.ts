@@ -449,7 +449,7 @@ export const PARAKEET_FIRST_WINDOW_TIMEOUT_MS = 180_000
 export const PARAKEET_WINDOW_TIMEOUT_MS = 30_000
 
 interface WholeDecode {
-  engine: 'large-v3' | 'large-v3-legacy' | 'parakeet-ultra'
+  engine: 'large-v3' | 'large-v3-legacy' | 'parakeet-ultra' | 'parakeet-v2'
   text: string
   /** What BatchResult.words carries (Whisper tokens, or Parakeet words). */
   words: WhisperWord[]
@@ -503,11 +503,13 @@ async function decodeWhisperWindow(
   }
 }
 
-async function decodeParakeetWindow(deps: HqDecodeDeps, input: Buffer, timeoutMs: number): Promise<WholeDecode> {
-  const r = await deps.parakeet(input, { model: 'parakeet-ultra', lane: 'batch', timeoutMs })
+async function decodeParakeetWindow(deps: HqDecodeDeps, input: Buffer, timeoutMs: number, model: 'parakeet-ultra' | 'parakeet-v2' = 'parakeet-ultra'): Promise<WholeDecode> {
+  const r = await deps.parakeet(input, { model, lane: 'batch', timeoutMs })
   const words = r.words.map(w => ({ word: applyCorrections(w.word), start: w.start, end: w.end, probability: w.probability ?? 0 }))
-  return { engine: 'parakeet-ultra', text: applyCorrections(r.text), words, spoken: words, timestamps: true }
+  return { engine: model, text: applyCorrections(r.text), words, spoken: words, timestamps: true }
 }
+
+const isParakeet = (engine: string): boolean => engine.startsWith('parakeet')
 
 function asHypothesis(d: WholeDecode): Hypothesis {
   return { engine: d.engine, text: d.text, ...(d.spoken ? { words: d.spoken } : {}) }
@@ -557,11 +559,11 @@ async function decodeHqWindow(
   let second: WholeDecode | null = null
   let secondError: string | undefined
   const secondEngine = plan.secondOpinion
-  const sameFamily = secondEngine !== 'off' && (secondEngine === 'parakeet-ultra') === (primary.engine === 'parakeet-ultra')
+  const sameFamily = secondEngine !== 'off' && isParakeet(secondEngine) === isParakeet(primary.engine)
   if (secondEngine !== 'off' && !sameFamily) {
     try {
-      second = secondEngine === 'parakeet-ultra'
-        ? await decodeParakeetWindow(deps, input, parakeetTimeout())
+      second = secondEngine !== 'large-v3'
+        ? await decodeParakeetWindow(deps, input, parakeetTimeout(), secondEngine)
         : await decodeWhisperWindow(deps, input, previousText, 'large-v3', segment, audioDir)
     } catch (error) {
       secondError = errorReason(error)
@@ -592,7 +594,7 @@ async function decodeHqWindow(
     }
   }
   // Only a prompted Whisper decode can echo the previous window's text.
-  if (previousText && primary.engine !== 'parakeet-ultra') text = stripOverlap(text, previousText)
+  if (previousText && !isParakeet(primary.engine)) text = stripOverlap(text, previousText)
 
   const stt: SegmentStt = {
     engine: primary.engine,
