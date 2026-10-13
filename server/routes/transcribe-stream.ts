@@ -715,46 +715,28 @@ export function sweepStaleActiveSessionFilesNow(now: number): StaleActiveSession
     idleRetentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
   })
   for (const move of moves) {
-    console.warn(
-      `[cleanup] Moved stale active-session file aside: ${move.sessionId} `
-      + `(${move.reason}, idle ${Math.round((move.idleMs ?? 0) / 60_000)}m, not live) \u2192 ${move.target}`,
-    )
+    if (move.target) {
+      staleMoveFailuresLogged.delete(move.sessionId)
+      console.warn(
+        `[cleanup] Moved stale active-session file aside: ${move.sessionId} `
+        + `(${move.reason}, idle ${Math.round((move.idleMs ?? 0) / 60_000)}m, not live) \u2192 ${move.target}`,
+      )
+    } else {
+      logStaleMoveFailure(move.sessionId, `[cleanup] Could not move stale active-session file aside for ${move.sessionId} (${move.reason}); it stays in active-sessions`)
+    }
   }
-  purgeExpiredStaleActiveSessionFiles(STALE_ACTIVE_SESSION_DIR, now)
+  const purged = purgeExpiredStaleActiveSessionFiles(STALE_ACTIVE_SESSION_DIR, now)
+  if (purged > 0) console.log(`[cleanup] Purged ${purged} stale active-session file(s) past retention`)
   return moves
 }
 
-/**
- * 6.71.14: a chunk for a capture that is already quarantined, recovered or
- * receipted must not recreate a live session.
- *
- * Before this, a session missing from the map was simply created by
- * getSession(), so a late or replayed chunk for a finished capture minted a new
- * live record (and a new active-session file and session-audio dir) beside the
- * capture's own terminal outcome. The chunk is DROPPED with the same 410
- * `session_closed` a tombstoned session answers, which every client already
- * handles. It is not attached to the recovered capture: that capture was decoded
- * once into a saved meeting or a no_speech receipt, and re-opening a terminal
- * outcome for one chunk would mutate a meeting the user may already have. The
- * phone keeps its own copy until it holds a save receipt, so the refusal loses
- * nothing on the server side that was ever accepted.
- */
-const lateChunkRefusalsLogged = new Set<string>()
-function refuseChunkForTerminalCapture(sessionId: string, chunkIndex: number | null, route: string): void {
-  if (sessions.has(sessionId)) return
-  const disposition = readCaptureDisposition(sessionId)
-  if (!disposition) return
-  const key = `${sessionId}:${chunkIndex ?? 'start'}`
-  if (!lateChunkRefusalsLogged.has(key)) {
-    lateChunkRefusalsLogged.add(key)
-    if (lateChunkRefusalsLogged.size > 500) lateChunkRefusalsLogged.delete(lateChunkRefusalsLogged.values().next().value as string)
-    console.warn(
-      `[transcribe-stream] Refused late ${route} for ${sessionId}`
-      + `${chunkIndex == null ? '' : ` chunk ${chunkIndex}`}: capture already ${disposition.kind}`
-      + `${disposition.savedFilename ? ` (${disposition.savedFilename})` : ''}; no live session recreated (410 session_closed)`,
-    )
-  }
-  throw makeHttpError(410, `session is closed (capture ${disposition.kind})`, 'session_closed')
+/** A failed move repeats every minute; say so once per session id, not every tick. */
+const staleMoveFailuresLogged = new Set<string>()
+function logStaleMoveFailure(sessionId: string, message: string): void {
+  if (staleMoveFailuresLogged.has(sessionId)) return
+  staleMoveFailuresLogged.add(sessionId)
+  if (staleMoveFailuresLogged.size > 500) staleMoveFailuresLogged.delete(staleMoveFailuresLogged.values().next().value as string)
+  console.error(message)
 }
 
 /** Recover sessions from disk on server restart */
@@ -771,15 +753,21 @@ function recoverSessions(): void {
         // maintenance gate). A session already in memory owns its file; the disk
         // copy must never overwrite it.
         if (typeof data.sessionId === 'string' && sessions.has(data.sessionId)) continue
-        // A capture whose audio already reached quarantine (and maybe a recovery
-        // receipt) is done. Adopting its file would bring back a live session for
-        // it; tombstoning would delete the file. Move it aside instead.
-        if (typeof data.sessionId === 'string' && readCaptureDisposition(data.sessionId)) {
+        // A capture whose quarantined audio was already decoded to a terminal
+        // outcome (a saved recovery or a no_speech receipt) is done. Adopting its
+        // file would bring back a live session for it; tombstoning would delete the
+        // file. Move it aside instead. Plain `quarantined` (never decoded) is NOT
+        // done: a crash between a chunk's first WAV write and its first
+        // active-session persist quarantines the audio, and the phone's retry then
+        // starts the session again. That file is adopted exactly as before.
+        const terminal = typeof data.sessionId === 'string' ? readCaptureDisposition(data.sessionId) : null
+        if (terminal && (terminal.kind === 'no_speech' || terminal.kind === 'recovered')) {
           const target = moveActiveSessionFileAside(
             resolve(CHUNK_PERSIST_DIR, file), data.sessionId, STALE_ACTIVE_SESSION_DIR, 'terminal_capture', Date.now(),
             { lastActivityAt: typeof data.lastActivityAt === 'number' ? data.lastActivityAt : null },
           )
-          if (target) console.warn(`[session-recovery] ${data.sessionId} was already quarantined or recovered; moved its active-session file aside: ${target}`)
+          if (target) console.warn(`[session-recovery] ${data.sessionId} was already ${terminal.kind}; moved its active-session file aside: ${target}`)
+          else logStaleMoveFailure(data.sessionId, `[session-recovery] Could not move the active-session file aside for ${data.sessionId} (already ${terminal.kind}); left in place, not adopted`)
           continue
         }
         // Reconstruct the (sparse) chunk array. New format keeps original
@@ -940,7 +928,9 @@ function recoverSessions(): void {
     try {
       if (existsSync(SESSION_AUDIO_DIR)) {
         const actions = sweepOrphanedSessionAudio(SESSION_AUDIO_DIR, {
-          isLive: id => recoveredIds.has(id),
+          // `|| sessions.has`: deferred recovery (6.71.14) can run while sessions
+          // are live in memory; their audio is not orphaned.
+          isLive: id => recoveredIds.has(id) || sessions.has(id),
           hasFreshPreservedMarker: hasFreshPreservedAudioMarker,
           reason: 'boot_sweep_unsaved',
         })
@@ -1003,8 +993,13 @@ if (maintenanceAdmissionsOpen()) {
   onMaintenanceAdmissionsOpen(() => runDurableSessionRecovery('admissions_open'))
 }
 
-/** 6.71.14: has boot recovery run in this process yet? For tests only. */
-export function __durableSessionRecoveryRanForTests(): boolean {
+/**
+ * 6.71.14: has durable session recovery run in this process yet? Until it has, the
+ * in-memory map does not yet hold the persisted sessions, so "not in memory" is not
+ * evidence of anything. The status route answers 503 `recovery_pending` instead of
+ * `missing` while this is false.
+ */
+export function durableSessionRecoveryHasRun(): boolean {
   return durableSessionRecoveryRan
 }
 
@@ -2130,7 +2125,6 @@ async function processStreamChunk(opts: {
   validateSessionId(sessionId)
   validateChunkIndex(chunkIndex)
   if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
-  refuseChunkForTerminalCapture(sessionId, chunkIndex, 'chunk')
   if (audioBuffer.length < 100) throw makeHttpError(400, 'audio too short', 'audio_too_short')
 
   const audioSha256 = sha256Hex(audioBuffer)
@@ -2508,7 +2502,6 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (
       allowDuringDrain: sessions.has(sessionId),
     })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
-    refuseChunkForTerminalCapture(sessionId, null, 'offline session start')
     const session = getSession(sessionId)
     const startTime = typeof body.startTime === 'number' && Number.isFinite(body.startTime)
       ? Number(body.startTime)

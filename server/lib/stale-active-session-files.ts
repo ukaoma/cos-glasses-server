@@ -17,8 +17,9 @@
 // itself would be promoted or tombstoned at, so this can never act earlier than the
 // server's own definition of "done".
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { atomicWriteFileSync } from './atomic-fs.js'
 
 export const STALE_ACTIVE_SESSION_DIR_NAME = 'stale-active-session-files'
 
@@ -28,37 +29,51 @@ export const STALE_ACTIVE_SESSION_FILE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 export type StaleActiveSessionReason =
   /** Not in the live session map and idle past the retention horizon. */
   | 'not_live_idle_expired'
-  /** Boot recovery found the capture already quarantined, recovered or receipted. */
+  /** Boot recovery found the capture already recovered or receipted no_speech. */
   | 'terminal_capture'
 
 export interface StaleActiveSessionMove {
   sessionId: string
   reason: StaleActiveSessionReason
-  target: string
+  /** Where the file went, or null when the move failed and the file stayed put. */
+  target: string | null
   lastActivityAt: number | null
   idleMs: number | null
 }
 
 const SESSION_FILE_RE = /^([A-Za-z0-9:_-]{3,96})\.json$/
+/** `<id>.<move ms>[-n].json` and its `.reason.json`. The move time is in the NAME. */
+const MOVED_FILE_RE = /^[A-Za-z0-9:_-]{3,96}\.(\d{13})(?:-\d+)?(?:\.reason)?\.json$/
 const REASON_SUFFIX = '.reason.json'
 
-/** lastActivityAt from the file, else its mtime; null when neither can be read. */
+/**
+ * When the session in this file was last active, for staleness: the EARLIER of its
+ * own `lastActivityAt` and the file's mtime. The file is rewritten on every accepted
+ * chunk, so its mtime is a true upper bound; a future-dated or corrupt
+ * `lastActivityAt` therefore cannot pin a dead file forever. Null when neither can
+ * be read.
+ */
 export function activeSessionFileActivity(filePath: string): number | null {
+  let mtimeMs: number | null = null
+  try {
+    const stat = statSync(filePath)
+    if (Number.isFinite(stat.mtimeMs)) mtimeMs = stat.mtimeMs
+  } catch { /* fall through: a missing file has no age */ }
+  let recorded: number | null = null
   try {
     const data = JSON.parse(readFileSync(filePath, 'utf8')) as { lastActivityAt?: unknown }
-    if (typeof data?.lastActivityAt === 'number' && Number.isFinite(data.lastActivityAt)) return data.lastActivityAt
-  } catch { /* fall back to mtime: a torn or legacy file still has an age */ }
-  try {
-    const { mtimeMs } = statSync(filePath)
-    return Number.isFinite(mtimeMs) ? mtimeMs : null
-  } catch {
-    return null
-  }
+    if (typeof data?.lastActivityAt === 'number' && Number.isFinite(data.lastActivityAt)) recorded = data.lastActivityAt
+  } catch { /* torn or legacy file: the mtime still gives it an age */ }
+  if (recorded == null) return mtimeMs
+  if (mtimeMs == null) return recorded
+  return Math.min(recorded, mtimeMs)
 }
 
 /**
- * Move one active-session file into the stale directory with a reason beside it.
- * Returns the new path, or null when the move failed (the source then stays put).
+ * Move one active-session file into the stale directory. The reason is written
+ * FIRST and atomically, so a moved file never exists without its reason; if the
+ * reason cannot be written nothing is moved. Returns the new path, or null when the
+ * move did not happen (the source then stays exactly where it was).
  */
 export function moveActiveSessionFileAside(
   sourcePath: string,
@@ -71,27 +86,21 @@ export function moveActiveSessionFileAside(
   try {
     if (!existsSync(sourcePath)) return null
     mkdirSync(targetDir, { recursive: true, mode: 0o700 })
-    const base = `${sessionId}.${now}`
+    // Two moves in the same millisecond must not overwrite each other.
+    let base = `${sessionId}.${now}`
+    for (let n = 1; existsSync(resolve(targetDir, `${base}.json`)) || existsSync(resolve(targetDir, `${base}${REASON_SUFFIX}`)); n++) {
+      base = `${sessionId}.${now}-${n}`
+    }
     const target = resolve(targetDir, `${base}.json`)
+    atomicWriteFileSync(resolve(targetDir, `${base}${REASON_SUFFIX}`), `${JSON.stringify({
+      schemaVersion: 1,
+      sessionId,
+      reason,
+      movedAt: new Date(now).toISOString(),
+      lastActivityAt: detail.lastActivityAt != null ? new Date(detail.lastActivityAt).toISOString() : null,
+      ...(detail.note ? { note: detail.note } : {}),
+    })}\n`, { mode: 0o600 })
     renameSync(sourcePath, target)
-    // A rename keeps the old mtime, and the purge below ages files by mtime. Without
-    // this a file idle for longer than the retention would be purged on the next tick,
-    // which would make the "move, not delete" rule a delete with one minute's delay.
-    try { const at = new Date(now); utimesSync(target, at, at) } catch { /* best effort: the file is still moved, not deleted */ }
-    const reasonPath = resolve(targetDir, `${base}${REASON_SUFFIX}`)
-    try {
-      writeFileSync(reasonPath, `${JSON.stringify({
-        schemaVersion: 1,
-        sessionId,
-        reason,
-        movedAt: new Date(now).toISOString(),
-        lastActivityAt: detail.lastActivityAt != null ? new Date(detail.lastActivityAt).toISOString() : null,
-        ...(detail.note ? { note: detail.note } : {}),
-      })}\n`, { encoding: 'utf8', mode: 0o600 })
-      // Same clock as the moved file, so the pair ages out together.
-      const at = new Date(now)
-      utimesSync(reasonPath, at, at)
-    } catch { /* the reason is observability; the move already happened */ }
     return target
   } catch {
     return null
@@ -101,7 +110,8 @@ export function moveActiveSessionFileAside(
 /**
  * One pass over the active-sessions directory. A file is moved aside only when its
  * session is NOT live and it has been idle for at least `idleRetentionMs`. A live
- * session's file is never touched, however old it looks.
+ * session's file is never touched, however old it looks. A failed move is returned
+ * with `target: null` so the caller can say so.
  */
 export function sweepStaleActiveSessionFiles(opts: {
   dir: string
@@ -119,6 +129,9 @@ export function sweepStaleActiveSessionFiles(opts: {
     const sessionId = match[1]
     if (opts.isLive(sessionId)) continue
     const filePath = resolve(opts.dir, name)
+    // The mtime bound inside activeSessionFileActivity is what defeats a
+    // future-dated value. A further min(..., now) would change no decision: a
+    // future activity is negative idle, and zero idle is just as far from the horizon.
     const lastActivityAt = activeSessionFileActivity(filePath)
     if (lastActivityAt == null) continue
     const idleMs = opts.now - lastActivityAt
@@ -126,12 +139,17 @@ export function sweepStaleActiveSessionFiles(opts: {
     const target = moveActiveSessionFileAside(filePath, sessionId, opts.targetDir, 'not_live_idle_expired', opts.now, {
       lastActivityAt,
     })
-    if (target) moves.push({ sessionId, reason: 'not_live_idle_expired', target, lastActivityAt, idleMs })
+    moves.push({ sessionId, reason: 'not_live_idle_expired', target, lastActivityAt, idleMs })
   }
   return moves
 }
 
-/** Remove moved files (and their reasons) older than the retention. Returns the count. */
+/**
+ * Remove moved files (and their reasons) whose move time, read from the file NAME,
+ * is older than the retention. Ages never come from mtime: a rename keeps the old
+ * mtime, which would turn "move" into "delete a minute later". A name that does not
+ * carry a move time is never removed. Returns the count removed.
+ */
 export function purgeExpiredStaleActiveSessionFiles(
   targetDir: string,
   now: number,
@@ -141,11 +159,11 @@ export function purgeExpiredStaleActiveSessionFiles(
   let entries: string[]
   try { entries = readdirSync(targetDir) } catch { return 0 }
   for (const name of entries) {
-    if (!name.endsWith('.json')) continue
-    const path = resolve(targetDir, name)
+    const match = MOVED_FILE_RE.exec(name)
+    if (!match) continue
+    if (now - Number(match[1]) <= retentionMs) continue
     try {
-      if (now - statSync(path).mtimeMs <= retentionMs) continue
-      rmSync(path, { force: true })
+      rmSync(resolve(targetDir, name), { force: true })
       removed++
     } catch { /* next sweep retries */ }
   }

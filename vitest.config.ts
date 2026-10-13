@@ -65,6 +65,10 @@ export default defineConfig({
       // isolated home, never the live ~/.cursor or ~/.cos-glasses.
       COS_CURSOR_SPAWN_ROOT: join(isolatedDataDir, 'cursor-cli'),
       COS_CURSOR_SPAWN_SOURCE: join(isolatedDataDir, 'cursor-home'),
+      // 6.71.14: the maintenance gate defaults to the LIVE path under ~/Library. A
+      // test must never read (or, through a same-boot expiry, remove) the running
+      // server's gate, and boot recovery and the status route now depend on it.
+      COS_MAINTENANCE_GATE_PATH: join(isolatedDataDir, 'maintenance', 'maintenance-gate.json'),
     },
   },
 })

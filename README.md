@@ -359,7 +359,10 @@ the false fences 6.53.1 left, and never releases a fence when `ps` cannot answer
 Meetings: a closed meeting's record ages out after **4 hours**, after which its status
 reads `missing` and the phone stops asking to save it. Saving a known meeting that has no
 transcript answers **404 `nothing_to_save`** (with its state); only an unknown id answers
-`session_not_found`.
+`session_not_found`. From 6.71.14 a `missing` or `closed` capture whose audio reached the
+unsaved-audio quarantine also carries an `outcome` (`receipted`, `recovered` or
+`quarantined`) and a `disposition`, and the status answers **503 `recovery_pending`**
+until boot recovery has run (see [Finished captures never read as live](#finished-captures-never-read-as-live-67114)).
 
 ## The summary behind the prompt box (6.54.0)
 
@@ -987,3 +990,12 @@ Release receipt (2026-10-12): 6.71.12 is published to npm `latest`; registry int
 ### Meeting-wide Fact check (6.71.13 candidate)
 
 Fact check checks every checkable public claim in the meeting the first time (at most five, one `Claim` row each), then only what was said after the previous completed check. A completed check records `factCheckRange {fromMs, throughMs, full, claims}` on the exchange in meeting-elapsed milliseconds; `capabilities.factCheckScope: 1` advertises it. Follow-ups such as "check it now" continue the pending check. A claim with an implicit starting point uses the profile `home_city` (for example `"home_city": "Austin, TX"` in `.cos-profile.json`), else the phone's weather area from the last 24 hours, and says so. `COS_MEETING_FACT_CHECK_SCOPE=0` returns Fact check to the 6.71.12 latest-claim path; `COS_MEETING_ASK_DOSE_GUARD=0` turns off the fixed answer to medication-dose questions.
+
+### Finished captures never read as live (6.71.14)
+
+A server that boots behind a closed maintenance gate (every managed update) now runs meeting-session recovery once, when the gate opens. Until 6.71.13 that recovery was skipped for the life of the process, so a persisted `active-sessions/<id>.json` could outlive its capture and COS Control showed it as a live recording. Recovery never overwrites a session already live in memory, and the minute sweep waits for it.
+
+- `GET /api/meeting/sessions/:id/status` keeps `state` to `saved`, `active`, `closed` and `missing`, with the same precedence as before. When the quarantine holds the capture it adds `outcome` (`receipted`: decoded, no speech; `recovered`: decoded and saved; `quarantined`: held, not decoded yet) and `disposition` (`kind`, `reason`, `quarantinedAt`, `quarantineReason`, `receiptedAt`, `chunkFiles`, `savedFilename`, `recovering`, `audioRetainedUntil`). Both are null for a saved or live session.
+- Until recovery has run, a status for an id with no saved meeting answers `503 {"reason": "recovery_pending", "retryable": true}` with `Retry-After: 5`, instead of a `missing` that would tell the phone the Mac lost the meeting.
+- Late chunks are accepted as before. A chunk for a quarantined or receipted capture starts its own session, exactly as in 6.71.13; the phone treats a 410 as "already saved" and deletes its copy, so the server never refuses one.
+- Each minute, an `active-sessions/*.json` whose session is not live and has been idle for 4 hours (the earlier of its `lastActivityAt` and its file time) is moved to `data/stale-active-session-files/`, with a `.reason.json` written first. Moved files are removed 7 days after the move. Boot recovery also moves aside, rather than adopts, a file whose capture was already recovered or receipted.

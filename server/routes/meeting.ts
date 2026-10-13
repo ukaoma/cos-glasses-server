@@ -103,6 +103,7 @@ import {
   analyzeTranscriptGaps,
   deleteSession,
   drainSessionAudioWrites,
+  durableSessionRecoveryHasRun,
   getSessionChunkEntries,
   getSessionChunks,
   getSessionProviderCandidates,
@@ -478,40 +479,29 @@ function publicSaveResponse(saved: SavedMeeting, replayed = false): Record<strin
 }
 
 /**
- * 6.71.14: the status a capture reports once its live session is gone.
+ * 6.71.14: what became of a capture whose live session is gone, as an ADDITIVE
+ * field beside `state`.
  *
- * Until 6.71.13 the route knew only the live map, the closed-session tombstones and
- * the saved store, so a capture the server itself quarantined and then recovered
- * or receipted as no_speech read `missing` ("the server never heard of it"), and
- * COS Control drew "Recording ended without saving". The quarantine knows better.
- *
- * Precedence, most authoritative first:
- *   saved       a durable meeting exists for this session id (unchanged)
- *   active      the session is live in memory (unchanged)
- *   receipted   recovery finished and found no speech; `disposition.reason` is `no_speech`
- *   recovered   recovery saved a meeting the store no longer finds by session id
- *   closed      a tombstone within retention (unchanged)
- *   quarantined the audio is held and a recovery has not finished yet
- *   missing     truly unknown (unchanged)
- * `receipted` outranks `closed` on purpose: a stranded session closes as expired,
- * its audio is quarantined and then receipted, and "closed" would still read as an
- * unsaved loss.
+ * `state` keeps its 6.71.13 values and precedence (saved > active > closed >
+ * missing) on purpose. Phones branch on it (`missing` is recovery-required or a
+ * collision, `closed` is terminal-unsaved), and a new value would fall through to
+ * their resume path. So the quarantine's answer rides alongside:
+ *   receipted    recovery finished and found no speech
+ *   recovered    recovery saved a meeting (the store may no longer find it by id)
+ *   quarantined  the audio is held and no recovery has finished yet
+ * Null when `state` is saved (the receipt is the answer) or active (a live session
+ * reports itself), and when the quarantine holds nothing for the id.
  */
-export type MeetingSessionReportedState =
-  | 'saved' | 'active' | 'receipted' | 'recovered' | 'closed' | 'quarantined' | 'missing'
+export type MeetingCaptureOutcome = 'receipted' | 'recovered' | 'quarantined'
 
-export function reportedSessionState(
-  saved: boolean,
-  liveState: 'active' | 'closed' | 'missing',
+export function captureOutcome(
+  state: 'saved' | 'active' | 'closed' | 'missing',
   disposition: Pick<CaptureDisposition, 'kind'> | null,
-): MeetingSessionReportedState {
-  if (saved) return 'saved'
-  if (liveState === 'active') return 'active'
-  if (disposition?.kind === 'no_speech') return 'receipted'
-  if (disposition?.kind === 'recovered') return 'recovered'
-  if (liveState === 'closed') return 'closed'
-  if (disposition?.kind === 'quarantined') return 'quarantined'
-  return 'missing'
+): MeetingCaptureOutcome | null {
+  if (state === 'saved' || state === 'active' || !disposition) return null
+  if (disposition.kind === 'no_speech') return 'receipted'
+  if (disposition.kind === 'recovered') return 'recovered'
+  return 'quarantined'
 }
 
 function publicDisposition(disposition: CaptureDisposition | null): Record<string, unknown> | null {
@@ -569,10 +559,27 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
     const saved = store.findBySessionId(sessionId)
+    // 6.71.14: before durable recovery has run (a boot behind a closed or stuck
+    // maintenance gate), a persisted meeting is not in memory YET, and answering
+    // `missing` would tell the phone the Mac lost it. Every phone status caller
+    // treats a thrown non-2xx as defer-and-retry (the uploader's finalize defers;
+    // origin-loss recovery backs off), so say "not yet" instead. A saved meeting
+    // is already authoritative and is answered as usual.
+    if (!saved && !durableSessionRecoveryHasRun()) {
+      res.set('Cache-Control', 'private, no-store')
+      res.set('Retry-After', '5')
+      res.status(503).json({
+        error: 'Meeting session recovery has not run yet; retry shortly',
+        reason: 'recovery_pending',
+        retryable: true,
+      })
+      return
+    }
     const live = getMeetingSessionStatus(sessionId)
-    // A live session is the truth for itself; the quarantine is read only when it is not.
-    const disposition = live.state === 'active' ? null : readCaptureDisposition(sessionId)
-    const state = reportedSessionState(Boolean(saved), live.state, disposition)
+    const state = saved ? 'saved' : live.state
+    // A saved meeting or a live session is the truth for itself; the quarantine is
+    // read only when neither is.
+    const disposition = state === 'saved' || state === 'active' ? null : readCaptureDisposition(sessionId)
     res.set('Cache-Control', 'private, no-store')
     res.json({
       sessionId,
@@ -589,7 +596,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       retainedUntil: saved ? null : live.retainedUntil,
       saveReceipt: saved ? publicSaveResponse(saved) : null,
       // 6.71.14, additive: what became of a capture whose audio reached quarantine
-      // (null otherwise). Older clients ignore it.
+      // (null otherwise). Older clients ignore both.
+      outcome: captureOutcome(state, disposition),
       disposition: publicDisposition(disposition),
     })
   })

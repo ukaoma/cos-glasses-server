@@ -396,22 +396,21 @@ function readRecoveredReceipt(dirPath: string): RecoveredReceipt | null {
   }
 }
 
-/**
- * What became of a capture whose audio reached quarantine, or null when the
- * quarantine holds nothing for this session id.
- *
- * `no_speech` and `recovered` are terminal: the capture was decoded once and its
- * outcome receipted. `quarantined` is held audio that a recovery has not finished
- * yet (the sweep picks one per minute, or a person presses Recover).
- */
-export function readCaptureDisposition(
-  sessionId: string,
-  root: string = unsavedAudioRoot(),
-  retentionMs: number = unsavedAudioRetentionMs(),
-): CaptureDisposition | null {
-  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
-  const dirPath = findQuarantineDir(sessionId, root)
-  if (!dirPath) return null
+/** Every quarantine dir for a session id: the exact name and any `<id>.<ms>` copies. */
+function quarantineDirsFor(sessionId: string, root: string): string[] {
+  const dirs: string[] = []
+  let entries: string[] = []
+  try { entries = readdirSync(root) } catch { return dirs }
+  for (const dir of entries) {
+    // Same match as findQuarantineDir: session ids carry no dots, so `<id>.` is this id.
+    if (dir !== sessionId && !dir.startsWith(`${sessionId}.`)) continue
+    const dirPath = resolve(root, dir)
+    try { if (statSync(dirPath).isDirectory()) dirs.push(dirPath) } catch { /* vanished: skip */ }
+  }
+  return dirs.sort()
+}
+
+function dispositionOf(sessionId: string, dirPath: string, retentionMs: number): CaptureDisposition {
   const manifest = readManifest(dirPath)
   const atMs = quarantinedAtMs(dirPath, manifest)
   const receipt = readRecoveredReceipt(dirPath)
@@ -436,4 +435,29 @@ export function readCaptureDisposition(
     recovering: isRecoveryActive(basename(dirPath)),
     retainedUntil: atMs != null ? new Date(atMs + retentionMs).toISOString() : null,
   }
+}
+
+const DISPOSITION_RANK: Record<CaptureDispositionKind, number> = { quarantined: 0, recovered: 1, no_speech: 2 }
+
+/**
+ * What became of a capture whose audio reached quarantine, or null when the
+ * quarantine holds nothing for this session id.
+ *
+ * `no_speech` and `recovered` are terminal: the capture was decoded once and its
+ * outcome receipted. `quarantined` is held audio that a recovery has not finished
+ * yet (the sweep picks one per minute, or a person presses Recover).
+ *
+ * One id can own SEVERAL dirs (`<id>` and `<id>.<ms>`, when the same id was
+ * quarantined twice). The answer covers all of them: ANY unrecovered dir means the
+ * capture is still `quarantined`; otherwise a saved recovery outranks no_speech.
+ */
+export function readCaptureDisposition(
+  sessionId: string,
+  root: string = unsavedAudioRoot(),
+  retentionMs: number = unsavedAudioRetentionMs(),
+): CaptureDisposition | null {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
+  const all = quarantineDirsFor(sessionId, root).map(dir => dispositionOf(sessionId, dir, retentionMs))
+  if (all.length === 0) return null
+  return all.reduce((best, next) => DISPOSITION_RANK[next.kind] < DISPOSITION_RANK[best.kind] ? next : best)
 }

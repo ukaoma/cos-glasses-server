@@ -2,7 +2,7 @@
 // status route read. Pure lib tests over temp dirs; the wiring into the real module
 // is covered by routes/transcribe-stream-stale-session.test.ts.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -10,6 +10,7 @@ import { LOCAL_FIRST_MEETING_IDLE_RETENTION_MS } from './local-first-meetings-co
 import {
   STALE_ACTIVE_SESSION_FILE_RETENTION_MS,
   activeSessionFileActivity,
+  moveActiveSessionFileAside,
   purgeExpiredStaleActiveSessionFiles,
   sweepStaleActiveSessionFiles,
 } from './stale-active-session-files.js'
@@ -29,7 +30,9 @@ function temp(): string {
 afterAll(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 const HOUR = 60 * 60 * 1000
-const NOW = Date.parse('2026-10-13T12:00:00Z')
+// The real clock, not a fixed date: the sweep reads real file mtimes, so a fixed NOW
+// would make these tests depend on when they run.
+const NOW = Date.now()
 const SID = 'meeting_1791831725740_e5c1fv'
 
 function writeActive(dir: string, sessionId: string, lastActivityAt: number | undefined): string {
@@ -83,22 +86,63 @@ describe('sweepStaleActiveSessionFiles', () => {
     const old = new Date(NOW - 5 * HOUR)
     utimesSync(legacy, old, old)
     writeFileSync(join(dir, 'meeting_x.json.tmp-123'), '{}')
-    expect(activeSessionFileActivity(legacy)).toBe(old.getTime())
+    // mtime is float ms; utimes can land a fraction of a ms below the requested time.
+    expect(Math.round(activeSessionFileActivity(legacy)!)).toBe(old.getTime())
     const moves = sweepStaleActiveSessionFiles({ dir, targetDir: target, isLive: () => false, now: NOW, idleRetentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS })
     expect(moves.map(m => m.sessionId)).toEqual(['meeting_legacy_one'])
     expect(existsSync(join(dir, 'meeting_x.json.tmp-123'))).toBe(true)
   })
 
-  it('a moved file is stamped at move time, so the purge keeps it for the full retention', () => {
+  it('a future-dated lastActivityAt cannot pin a dead file: the earlier of it and the file mtime is used', () => {
     const root = temp(), dir = join(root, 'active-sessions'), target = join(root, 'stale')
-    const path = writeActive(dir, SID, NOW - 30 * 24 * HOUR)
-    const ancient = new Date(NOW - 30 * 24 * HOUR)
-    utimesSync(path, ancient, ancient)
-    sweepStaleActiveSessionFiles({ dir, targetDir: target, isLive: () => false, now: NOW, idleRetentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS })
-    expect(statSync(join(target, `${SID}.${NOW}.json`)).mtimeMs).toBe(NOW)
-    expect(purgeExpiredStaleActiveSessionFiles(target, NOW + 60_000), 'purged on the next tick: a move became a delete').toBe(0)
-    expect(purgeExpiredStaleActiveSessionFiles(target, NOW + STALE_ACTIVE_SESSION_FILE_RETENTION_MS + 1)).toBe(2)
+    const path = writeActive(dir, SID, NOW + 365 * 24 * HOUR)
+    const old = new Date(NOW - LOCAL_FIRST_MEETING_IDLE_RETENTION_MS - 60_000)
+    utimesSync(path, old, old)
+    expect(Math.round(activeSessionFileActivity(path)!)).toBe(old.getTime())
+    expect(sweepStaleActiveSessionFiles({ dir, targetDir: target, isLive: () => false, now: NOW, idleRetentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS })
+      .map(m => m.sessionId)).toEqual([SID])
+  })
+
+  it('the reason is written atomically BEFORE the move; if it cannot be written nothing moves', () => {
+    const root = temp(), dir = join(root, 'active-sessions'), target = join(root, 'stale')
+    writeActive(dir, SID, NOW - 5 * HOUR)
+    mkdirSync(target, { recursive: true })
+    chmodSync(target, 0o500)
+    try {
+      const path = join(dir, `${SID}.json`)
+      expect(moveActiveSessionFileAside(path, SID, target, 'not_live_idle_expired', NOW)).toBeNull()
+      expect(existsSync(path), 'the source must stay when the reason could not be written').toBe(true)
+    } finally {
+      chmodSync(target, 0o700)
+    }
     expect(readdirSync(target)).toEqual([])
+  })
+
+  it('two moves of the same id in the same millisecond do not overwrite each other', () => {
+    const root = temp(), dir = join(root, 'active-sessions'), target = join(root, 'stale')
+    const path = writeActive(dir, SID, NOW - 5 * HOUR)
+    const first = moveActiveSessionFileAside(path, SID, target, 'not_live_idle_expired', NOW)
+    writeActive(dir, SID, NOW - 5 * HOUR)
+    const second = moveActiveSessionFileAside(path, SID, target, 'not_live_idle_expired', NOW)
+    expect(first).not.toBe(second)
+    expect(readdirSync(target).sort()).toEqual([`${SID}.${NOW}-1.json`, `${SID}.${NOW}-1.reason.json`, `${SID}.${NOW}.json`, `${SID}.${NOW}.reason.json`])
+  })
+
+  it('the purge ages by the move time in the NAME, never mtime, and leaves names it cannot date', () => {
+    const root = temp(), target = join(root, 'stale')
+    mkdirSync(target, { recursive: true })
+    const moved = NOW - STALE_ACTIVE_SESSION_FILE_RETENTION_MS - 1
+    for (const name of [`${SID}.${moved}.json`, `${SID}.${moved}.reason.json`, `${SID}.${NOW}.json`, 'unknown.json']) {
+      writeFileSync(join(target, name), '{}')
+    }
+    // Fresh mtimes everywhere: a mtime-based purge would remove nothing.
+    expect(purgeExpiredStaleActiveSessionFiles(target, NOW)).toBe(2)
+    expect(readdirSync(target).sort()).toEqual([`${SID}.${NOW}.json`, 'unknown.json'])
+    // An ancient mtime on a freshly moved file does not get it purged.
+    const ancient = new Date(NOW - 30 * 24 * HOUR)
+    utimesSync(join(target, `${SID}.${NOW}.json`), ancient, ancient)
+    utimesSync(join(target, 'unknown.json'), ancient, ancient)
+    expect(purgeExpiredStaleActiveSessionFiles(target, NOW + 60_000)).toBe(0)
   })
 })
 
@@ -133,6 +177,20 @@ describe('readCaptureDisposition', () => {
     const other = quarantine(root, 'meeting_saved_one')
     markRecovered(other, '2026-10-12_Recovered_capture.md')
     expect(readCaptureDisposition('meeting_saved_one', root)).toMatchObject({ kind: 'recovered', savedFilename: '2026-10-12_Recovered_capture.md' })
+  })
+
+  it('covers EVERY dir for the id: any unrecovered one means quarantined; else a saved recovery outranks no_speech', () => {
+    const root = temp()
+    markRecoveredNoSpeech(quarantine(root, SID), 1)
+    expect(readCaptureDisposition(SID, root)?.kind).toBe('no_speech')
+    const second = quarantine(root, SID, `${SID}.1791900000000`)
+    expect(readCaptureDisposition(SID, root)).toMatchObject({ kind: 'quarantined', dirName: `${SID}.1791900000000` })
+    markRecovered(second, 'saved.md')
+    expect(readCaptureDisposition(SID, root)).toMatchObject({ kind: 'recovered', savedFilename: 'saved.md' })
+    // A different id that merely shares the prefix is not this capture.
+    quarantine(root, `${SID}x`)
+    expect(readCaptureDisposition(`${SID}x`, root)?.kind).toBe('quarantined')
+    expect(readCaptureDisposition(SID, root)?.kind, 'a prefix-sharing id leaked in').toBe('recovered')
   })
 
   it('finds a timestamp-suffixed quarantine dir, and counts an unreadable receipt as finished', () => {
