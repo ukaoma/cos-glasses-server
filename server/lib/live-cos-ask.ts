@@ -1,6 +1,6 @@
 // On-demand meeting assistance. No poll, background summary, chat persistence or write tools.
 import { connectedEvidence } from './meeting-ask-evidence.js'
-import { REVIEW_SYSTEM, normalizeReviewConfidence, reviewProblem, unverifiedReview, isFactCheckCTA, pageWasRead } from './meeting-ask-review.js'
+import { REVIEW_SYSTEM, normalizeReviewConfidence, reviewRepairDiagnostics, reviewProblem, unverifiedReview, isFactCheckCTA, pageWasRead } from './meeting-ask-review.js'
 import { followupContext } from './meeting-ask-followup.js'
 import { groundMoneySections, moneyGroundingHints, MONEY_GROUNDING_SYSTEM } from './meeting-ask-grounding.js'
 import { groundWebLinks } from './meeting-ask-links.js'
@@ -140,7 +140,7 @@ export function normalizeSections(action: AskAction, raw: unknown, allowed: Read
     if (!label) throw new AskError('invalid_answer', 502)
     const text = redactSecrets(row.text).replace(/\s*\n\s*/g, ' ').trim().slice(0, 2500)
       .replace(/\[([THFW]\d+)\]/g, (match: string, id: string) => allowed.has(id) ? match : '[source unavailable]')
-    if (!text || PADDING.test(text) || label!=='So what' && /^No (?:decisions|next steps|actions|action items) (?:(?:are|were|have been) )?(?:stated|captured|recorded|identified)\.?$/i.test(text)) continue
+    if (!text || PADDING.test(text) || label!=='So what' && /^No (?:firm |explicit |owned )?(?:decisions|next steps|actions|action items) (?:(?:are|were|have been) )?(?:clearly )?(?:stated|captured|recorded|identified)(?: in (?:these|the supplied) passages)?\.?$/i.test(text)) continue
     rows.set(label, [...(rows.get(label) ?? []), text])
   }
   if (!rows.has('So what')) throw new AskError('invalid_answer', 502)
@@ -365,9 +365,9 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
           const reviewInput={question:input.action==='ask'?input.question:TASKS[input.action],labels:input.action==='ask'&&!detailed?['So what']:MEETING_ASK_LABELS[input.action],maxWords:maxWords-18,targetWords:Math.max(30,maxWords-30),omitUnrequestedMoney:!!deps.evidenceQuestion || input.action==='ask' && /401|403|retirement/i.test(input.question) && !/\b(?:balance|amount|fee|cost|money|savings)\b/i.test(input.question),draft:{sections:normalized,confidence},sources:evidence.sources.map(s=>({...s,pageRead:pageWasRead(s)}))}
           let reviewed:any,problem:string|null='invalid_answer'
           for(let attempt=0;attempt<2;attempt++){
-            const checked=await deps.review(JSON.stringify({...reviewInput,...(attempt?{repairReason:problem,previousDraft:reviewed}: {})}),REVIEW_SYSTEM,signal)
+            const checked=await deps.review(JSON.stringify({...reviewInput,...(attempt?{repairReason:problem,repairDiagnostics:reviewRepairDiagnostics(reviewed,evidence.sources),previousDraft:reviewed}: {})}),REVIEW_SYSTEM,signal)
             if(checked.model&&checked.model!==model){evidence.notices.push(`Grounding review used ${checked.model}; the requested answer draft used ${model}.`);model=checked.model}
-            try { reviewed=normalizeReviewConfidence(parseAskReply(checked.text));if(deps.evidenceQuestion && reviewed?.confidence)reviewed.confidence.reason="Only general rules can be checked; this plan's terms remain unverified." } catch { reviewed=null }
+            try { reviewed=normalizeReviewConfidence(parseAskReply(checked.text));reviewed.sections=normalizeSections(input.action,reviewed.sections,allowed);if(deps.evidenceQuestion && reviewed?.confidence)reviewed.confidence.reason="Only general rules can be checked; this plan's terms remain unverified." } catch { reviewed=null }
             problem=reviewProblem(reviewed,evidence.sources,maxWords)
             if(!problem&&reviewInput.omitUnrequestedMoney&&/\$\s*\d|\b[0-9,]+\s+(?:dollars|grand)\b/i.test(JSON.stringify(reviewed.sections)))problem='unrequested_money'
             if(!problem&&input.action==='ask'&&!detailed&&reviewed.sections.some((s:any)=>s.label!=='So what'))problem='extra_sections'
