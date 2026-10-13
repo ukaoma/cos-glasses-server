@@ -182,3 +182,44 @@ export function trimSilence(wavBuffer: Buffer): TrimResult {
     return fallback
   }
 }
+
+/**
+ * Seconds of speech Silero hears in a WAV (6.72.0 quiet gate).
+ *
+ * Feeds the detector one 512-sample window at a time and drains finished
+ * segments after each window. Handing sherpa-onnx the whole chunk in one
+ * acceptWaveform call (as trimSilence does) keeps only the last segment:
+ * measured 2026-10-13, a 6 s chunk of continuous speech read 0.32 s that way
+ * and 5.03 s windowed. Null when the detector is unavailable or the audio is
+ * too short to measure: a caller must never read null as silence.
+ */
+export function measureSpeechSeconds(wavBuffer: Buffer): number | null {
+  if (!available || !vadInstance) return null
+  try {
+    if (wavBuffer.length <= WAV_HEADER_SIZE + MIN_SAMPLES * BYTES_PER_SAMPLE) return null
+    const pcmBytes = wavBuffer.buffer.slice(wavBuffer.byteOffset + WAV_HEADER_SIZE, wavBuffer.byteOffset + wavBuffer.length - ((wavBuffer.length - WAV_HEADER_SIZE) % 2))
+    const int16 = new Int16Array(pcmBytes)
+    if (int16.length < MIN_SAMPLES) return null
+    const float32 = new Float32Array(int16.length)
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
+    vadInstance.reset()
+    let speechSamples = 0
+    const drain = () => {
+      while (!vadInstance.isEmpty()) {
+        speechSamples += vadInstance.front().samples.length
+        vadInstance.pop()
+      }
+    }
+    for (let offset = 0; offset + MIN_SAMPLES <= float32.length; offset += MIN_SAMPLES) {
+      vadInstance.acceptWaveform(float32.subarray(offset, offset + MIN_SAMPLES))
+      drain()
+    }
+    vadInstance.flush()
+    drain()
+    vadInstance.reset()
+    return speechSamples / SAMPLE_RATE
+  } catch (err: any) {
+    console.error('[silero-vad] measureSpeechSeconds error:', err.message)
+    return null
+  }
+}

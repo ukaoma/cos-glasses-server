@@ -2,7 +2,7 @@
 // decoders so the live route imports only audio code.
 
 import { enhanceAudio } from './audio-enhance.js'
-import { isSileroAvailable, trimSilence } from './vad-silero.js'
+import { isSileroAvailable, measureSpeechSeconds } from './vad-silero.js'
 import type { FrontEndId, QuietGateId } from './stt-settings.js'
 
 /** Under this many seconds of Silero speech a chunk is quiet (bake-off canary 5). */
@@ -28,16 +28,14 @@ export function chunkRms(wav: Buffer): number {
 /**
  * Quiet means "do not prompt, do not enhance, drop silence echoes". RMS 150
  * fired on 1% of G2 chunks while Silero found no speech in 9.3%, so 6.72.0
- * gates on Silero speech seconds (the in-process sherpa Silero, about 11 ms a
- * chunk). Silero unavailable or the clip too short: the old RMS gate.
+ * gates on Silero speech seconds (the in-process sherpa Silero, about 17 ms a
+ * 6 s chunk). Silero unavailable or the clip too short: the old RMS gate.
  */
-export function decideQuiet(wav: Buffer, gate: QuietGateId, vad: { available: () => boolean; trim: typeof trimSilence } = { available: isSileroAvailable, trim: trimSilence }): QuietDecision {
+export function decideQuiet(wav: Buffer, gate: QuietGateId, vad: { available: () => boolean; speechSeconds: (wav: Buffer) => number | null } = { available: () => isSileroAvailable(), speechSeconds: w => measureSpeechSeconds(w) }): QuietDecision {
   const rms = chunkRms(wav)
   if (gate === 'silero' && vad.available()) {
-    const result = vad.trim(wav)
-    if (result.measured) {
-      const seconds = Math.max(0, (wav.length - 44) / 2 / 16_000)
-      const speechSec = result.speechRatio * seconds
+    const speechSec = vad.speechSeconds(wav)
+    if (speechSec !== null && Number.isFinite(speechSec)) {
       return { isQuiet: speechSec < QUIET_SPEECH_SEC, rms, speechSec, gate: 'silero' }
     }
     return { isQuiet: rms < QUIET_RMS, rms, speechSec: null, gate: 'rms_fallback' }

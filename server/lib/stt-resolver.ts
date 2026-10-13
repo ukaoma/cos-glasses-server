@@ -72,6 +72,8 @@ export const RESOLVER_VERSION = 'stt-resolver-v1'
 /** Alignment is quadratic; a 30 s window is about 100 words a side. */
 export const MAX_ALIGNMENT_CELLS = 2_000_000
 export const DEFAULT_MAX_SKEW_SEC = 2
+/** Agreed words each side of a region that a vocabulary match may span. */
+export const CONTEXT_WORDS = 3
 
 const NEGATIONS = new Set([
   'not', 'no', 'never', 'none', 'nor', 'nothing', 'nobody', 'neither', 'without', 'cannot',
@@ -236,16 +238,24 @@ export function resolveHypotheses(primary: Hypothesis, second: Hypothesis, optio
   while (k < ops.length) {
     if (ops[k].kind === '=') { out.push(P[ops[k].i!]); k++; continue }
     const p: Token[] = [], q: Token[] = []
+    const regionStart = k
     while (k < ops.length && ops[k].kind !== '=') {
       if (ops[k].i !== null) p.push(P[ops[k].i!])
       if (ops[k].j !== null) q.push(Q[ops[k].j!])
       k++
     }
+    // Agreed words on both sides, so a term split across the edge of the
+    // region ("drift cart" vs "thrift cart") is still seen whole.
+    const before: string[] = [], after: string[] = []
+    for (let b = regionStart - 1; b >= 0 && before.length < CONTEXT_WORDS && ops[b].kind === '='; b--) before.unshift(P[ops[b].i!].key)
+    for (let a = k; a < ops.length && after.length < CONTEXT_WORDS && ops[a].kind === '='; a++) after.push(P[ops[a].i!].key)
     const kind: DisagreementKind = !p.length ? 'second_only' : !q.length ? 'primary_only' : 'substitution'
     let take: 'primary' | 'second' = 'primary'
     let reason: ResolutionReason = null
     if (q.length) {
-      const newTerms = [...termsIn(q.map(t => t.key), sequences)].filter(t => !termsIn(p.map(x => x.key), sequences).has(t))
+      const withContext = (side: Token[]) => [...before, ...side.map(t => t.key), ...after]
+      const primaryTerms = termsIn(withContext(p), sequences)
+      const newTerms = [...termsIn(withContext(q), sequences)].filter(t => !primaryTerms.has(t))
       const wantGap = kind === 'second_only' && options.primaryDeletionProne
       const wantVocab = newTerms.length > 0
       if (wantGap || wantVocab) {
