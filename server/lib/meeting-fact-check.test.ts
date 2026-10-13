@@ -135,7 +135,7 @@ describe('pending fact-check continuation', () => {
     expect(originClarification('ATX to KC is the request', withClaim)).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
     expect(originClarification("I'm flying from Austin", withClaim)).toEqual({ text: 'Austin', source: 'user' })
     expect(originClarification('San Antonio, TX to KC', withClaim)).toEqual({ text: 'San Antonio TX', source: 'user' })
-    for (const q of ['Gina to send the deck by Friday?', 'What did we hear from Silas Larson today?', 'From Silas', 'From Gina where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck'])
+    for (const q of ['Gina to send the deck by Friday?', 'What did we hear from Silas Larson today?', 'From Silas', 'From Gina where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck', 'Send the deck from ATX', 'ATX to Paris is the request'])
       expect(originClarification(q, withClaim)).toBeNull()
     // Without a known owner area, an abbreviation is not a place.
     expect(originClarification('From ATX where mu is based', { ...withClaim, ownerArea: null })).toBeNull()
@@ -277,6 +277,12 @@ describe('hedged model calls', () => {
     const lost = vi.fn().mockRejectedValue(new AskProcessError('child_exit_unconfirmed', true))
     await expect(hedgedRun(lost, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('child_exit_unconfirmed')
     expect(lost).toHaveBeenCalledTimes(1)
+    // An orphaned first call fails the ask at once, without waiting for a still-running hedge.
+    let m = 0
+    const orphanFirst = vi.fn((signal: AbortSignal) => ++m === 1 ? new Promise<typeof answer>((_r, reject) => setTimeout(() => reject(new AskProcessError('child_exit_unconfirmed', true)), 30)) : new Promise<typeof answer>((_r, reject) => signal.addEventListener('abort', () => setTimeout(() => reject(new Error('cancelled')), 5))))
+    const t0 = Date.now()
+    await expect(hedgedRun(orphanFirst, { hedgeMs: 5, timeoutMs: 3000, signal: new AbortController().signal })).rejects.toThrow('child_exit_unconfirmed')
+    expect(Date.now() - t0).toBeLessThan(1000)
     const caller = new AbortController(); caller.abort()
     const cancelled = vi.fn().mockRejectedValue(new Error('cancelled'))
     await expect(hedgedRun(cancelled, { hedgeMs: 10, timeoutMs: 2000, signal: caller.signal })).rejects.toThrow('cancelled')
