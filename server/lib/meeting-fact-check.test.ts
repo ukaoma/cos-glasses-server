@@ -216,9 +216,11 @@ describe('hedged model calls', () => {
   it('starts a second call when the first is slow, keeps the first usable answer and stops the other', async () => {
     const signals: AbortSignal[] = []
     const call = vi.fn((signal: AbortSignal) => { signals.push(signal); return signals.length === 1 ? new Promise<typeof answer>((_r, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')))) : Promise.resolve(answer) })
-    const out = await hedgedRun(call, { hedgeMs: 10, timeoutMs: 2000, signal: new AbortController().signal })
+    const started = Date.now()
+    const out = await hedgedRun(call, { hedgeMs: 10, timeoutMs: 5000, signal: new AbortController().signal })
     expect(out).toEqual({ ...answer, hedged: true }); expect(call).toHaveBeenCalledTimes(2)
-    expect(signals[0].aborted).toBe(true)
+    // The slow call is stopped at once, not left to run into the deadline.
+    expect(signals[0].aborted).toBe(true); expect(Date.now() - started).toBeLessThan(1000)
   })
   it('retries a failed or unusable first answer at once, at most two calls in all', async () => {
     const failed = vi.fn().mockRejectedValueOnce(new Error('provider_failed')).mockResolvedValueOnce(answer)
@@ -237,6 +239,10 @@ describe('hedged model calls', () => {
     let n = 0
     const orphan = vi.fn((signal: AbortSignal) => ++n === 1 ? new Promise<typeof answer>((_r, reject) => signal.addEventListener('abort', () => reject(new AskProcessError('child_exit_unconfirmed', true)))) : Promise.resolve(answer))
     await expect(hedgedRun(orphan, { hedgeMs: 10, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('child_exit_unconfirmed')
+    // A first call whose end cannot be confirmed never gets a second call started beside it.
+    const lost = vi.fn().mockRejectedValue(new AskProcessError('child_exit_unconfirmed', true))
+    await expect(hedgedRun(lost, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('child_exit_unconfirmed')
+    expect(lost).toHaveBeenCalledTimes(1)
     const caller = new AbortController(); caller.abort()
     const cancelled = vi.fn().mockRejectedValue(new Error('cancelled'))
     await expect(hedgedRun(cancelled, { hedgeMs: 10, timeoutMs: 2000, signal: caller.signal })).rejects.toThrow('cancelled')

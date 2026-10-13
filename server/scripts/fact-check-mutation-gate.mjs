@@ -81,7 +81,7 @@ const mutations = [
   ['hedge-stops-loser', FC, '      for (const stop of stops) stop.abort()\n', ''],
   ['hedge-orphan-fails-ask', FC, '      if (orphan) reject((orphan as PromiseRejectedResult).reason)\n      else if (win)', '      if (win)'],
   ['hedge-at-most-two', FC, '      if (attempts.length < 2 && !deadline.aborted) { clearTimeout(timer); launch(); return }', '      if (attempts.length < 3 && !deadline.aborted) { clearTimeout(timer); launch(); return }'],
-  ['hedge-caller-cancel-stops', FC, '      if (opts.signal.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) { void close(null); return }\n', ''],
+  ['hedge-no-second-call-after-orphan', FC, '      if (opts.signal.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) { void close(null); return }\n', ''],
   ['stall-noticed', FC, "  if (stalled) notices.push('The fact-check answer ran out of time", "  if (false) notices.push('The fact-check answer ran out of time"],
   ['salvage-by-claim-words', FC, '[...contentWords(r.text)].filter(w => words.has(w)).length >= 2', 'true'],
   ['assumption-always-stated', FC, 'return o && named.length && !named.some(w => said.has(w)) ?', 'return false ?'],
