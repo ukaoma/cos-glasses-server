@@ -35,7 +35,7 @@ export type ParakeetModelId = 'parakeet-ultra'
 export const PARAKEET_TMP_PREFIX = 'cos-parakeet-'
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec'
 /** At most 40 characters (Control truncates there). */
-export const PARAKEET_VERSION_LABEL = `Parakeet Ultra ${PARAKEET_MODELS[0].revision.slice(0, 8)}, CLI ${PARAKEET_CLI.version}`
+export const PARAKEET_VERSION_LABEL = `Ultra ${PARAKEET_MODELS[0].revision.slice(0, 8)}, CLI ${PARAKEET_CLI.version}`
 
 export function parakeetRoot(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.COS_PARAKEET_DIR?.trim()

@@ -109,7 +109,7 @@ export function parakeetStatus(live: boolean): ParakeetStatus {
             ? 'Checking this Mac for the FluidAudio CLI.'
             : live
               ? 'Install after the live recording is saved.'
-              : 'About 1.1 GB. Installs the pinned models and checks every file.'
+              : 'About 654 MB. Installs the pinned model and checks every file.'
   return {
     installed: installed.installed,
     installable,

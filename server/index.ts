@@ -104,7 +104,7 @@ import { glossaryRouter } from './routes/glossary.js'
 import { homeAreaRouter } from './routes/home-area.js'
 import { createSttSettingsRouter } from './routes/stt-settings.js'
 import { setRecordingLiveProbe, startPreviewWarmLoop, stopPreviewWarmLoop } from './lib/stt-runtime.js'
-import { killParakeetChildren, sweepParakeetStaging, sweepStaleParakeetTmp } from './lib/parakeet.js'
+import { findPinnedCli, killParakeetChildren, sweepParakeetStaging, sweepStaleParakeetTmp } from './lib/parakeet.js'
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
@@ -1349,6 +1349,8 @@ listenRequiredServers(listeners).then(() => {
       sweepStaleParakeetTmp()
     } catch { /* best effort */ }
     setRecordingLiveProbe(() => getActiveTranscriptionSessionCount() > 0)
+    // Hash the pinned FluidAudio CLI once at boot so the first Settings GET already knows `installable`.
+    void findPinnedCli().catch(() => null)
     startPreviewWarmLoop()
   }
 

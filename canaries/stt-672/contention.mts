@@ -28,7 +28,7 @@ const diar = async (path: string) => {
 const preview = async (wav: Buffer) => {
   const t = performance.now()
   const input = await asrFrontEnd(wav, 'highpass')
-  await transcribeParakeet(input, { model: (process.env.PREVIEW_MODEL ?? 'parakeet-v2') as any, lane: 'preview', timeoutMs: 1500 })
+  await transcribeParakeet(input, { model: (process.env.PREVIEW_MODEL ?? 'parakeet-ultra') as any, lane: 'preview', timeoutMs: 1500 })
   return performance.now() - t
 }
 const pct = (xs: number[], p: number) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : null }
@@ -45,7 +45,7 @@ async function arm(name: string, kinds: Array<'live' | 'diar' | 'preview'>) {
   return Object.fromEntries(kinds.map(k => [k, summary(out[k], fails[k])]))
 }
 // warm everything first (CoreML compile, Metal load)
-for (const p of chunks.slice(0, 2)) { const w = readFileSync(p); await live(w).catch(() => 0); await runNemotronCli({ cli: process.env.DIAR_CLI!, modelsDir: process.env.DIAR_MODELS!, wavPath: p, timeoutMs: 120_000, computeUnits: 'ane' }).catch(e => console.error('diar warm', String(e))); await transcribeParakeet(await asrFrontEnd(w, 'highpass'), { model: (process.env.PREVIEW_MODEL ?? 'parakeet-v2') as any, lane: 'warmup', timeoutMs: 120_000 }).catch(e => console.error('pk warm', String(e))) }
+for (const p of chunks.slice(0, 2)) { const w = readFileSync(p); await live(w).catch(() => 0); await runNemotronCli({ cli: process.env.DIAR_CLI!, modelsDir: process.env.DIAR_MODELS!, wavPath: p, timeoutMs: 120_000, computeUnits: 'ane' }).catch(e => console.error('diar warm', String(e))); await transcribeParakeet(await asrFrontEnd(w, 'highpass'), { model: (process.env.PREVIEW_MODEL ?? 'parakeet-ultra') as any, lane: 'warmup', timeoutMs: 120_000 }).catch(e => console.error('pk warm', String(e))) }
 const result = {
   chunks: chunks.length,
   solo: { live: (await arm('live', ['live'])).live, diar: (await arm('diar', ['diar'])).diar, preview: (await arm('preview', ['preview'])).preview },
