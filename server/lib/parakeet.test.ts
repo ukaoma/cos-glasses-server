@@ -143,7 +143,19 @@ describe('Parakeet runs (offline, bounded)', () => {
     expect(seen!.env.HOME).toBe(P.parakeetHome())
     expect(r.text).toBe('hello there')
     expect(r.words).toEqual([{ word: 'hello', start: 0.1, end: 0.4, probability: 0.9 }, { word: 'there', start: 0.5, end: 0.5 }])
-    expect(readdirSync(tmpdir()).filter(n => n.startsWith(P.PARAKEET_TMP_PREFIX) && existsSync(join(tmpdir(), n, 'in.wav')))).toEqual([])
+    const input = seen!.args[seen!.args.indexOf('transcribe') + 1]
+    expect(input.includes(P.PARAKEET_TMP_PREFIX)).toBe(true)
+    expect(existsSync(input)).toBe(false) // the run's temp directory is gone
+  })
+
+  it('never runs without the sandbox (no proof of offline, no run)', async () => {
+    await installed()
+    process.env.COS_PARAKEET_SANDBOX_EXEC = join(dir, 'no-such-sandbox-exec')
+    const spawnImpl = vi.fn()
+    try {
+      await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 1000, spawnImpl: spawnImpl as any })).rejects.toMatchObject({ reason: 'sandbox_unavailable' })
+      expect(spawnImpl).not.toHaveBeenCalled()
+    } finally { delete process.env.COS_PARAKEET_SANDBOX_EXEC }
   })
 
   it('kills a run past its deadline and fails closed', async () => {
@@ -187,4 +199,15 @@ describe('Parakeet runs (offline, bounded)', () => {
     expect(calls).toBe(2)
     expect(P.parakeetWarmState('parakeet-v2').state).toBe('warm')
   })
+
+  it('a warm decode slower than the budget leaves the preview model not warm', async () => {
+    await installed()
+    const spawnImpl = ((_c: string, args: string[]) => {
+      const child = new FakeChild()
+      setTimeout(() => { writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify({ text: '' })); child.emit('close', 0, null) }, P.WARM_DECODE_BUDGET_MS + 150)
+      return child
+    }) as any
+    expect(await P.warmParakeet('parakeet-ultra', spawnImpl)).toBe(false)
+    expect(P.parakeetWarmState('parakeet-ultra')).toMatchObject({ state: 'failed', error: expect.stringMatching(/warm decode took/) })
+  }, 10_000)
 })

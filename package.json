@@ -52,6 +52,7 @@
     "!server/scripts/work-search-mutation-gate.mjs",
     "!server/scripts/fact-check-mutation-gate.mjs",
     "!server/scripts/stale-session-mutation-gate.mjs",
+    "!server/scripts/stt-mutation-gate.mjs",
     "!server/scripts/pairing-mutation-gate.mjs",
     "!server/scripts/away-hold-mutation-gate.mjs",
     "!server/scripts/nemotron-mutation-gate.mjs",

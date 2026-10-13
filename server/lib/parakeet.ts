@@ -376,7 +376,8 @@ export function transcribeParakeet(wav: Buffer, options: ParakeetRunOptions): Pr
 function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
   const started = Date.now()
   if (!parakeetInstalled().installed) return Promise.reject(new ParakeetError('not_installed', 'Parakeet is not installed'))
-  if (!existsSync(SANDBOX_EXEC)) return Promise.reject(new ParakeetError('sandbox_unavailable', 'sandbox-exec is missing, so Parakeet cannot be proven offline and does not run'))
+  const sandbox = process.env.COS_PARAKEET_SANDBOX_EXEC || SANDBOX_EXEC
+  if (!existsSync(sandbox)) return Promise.reject(new ParakeetError('sandbox_unavailable', 'sandbox-exec is missing, so Parakeet cannot be proven offline and does not run'))
   if (options.signal?.aborted) return Promise.reject(new ParakeetError('aborted', 'aborted before start'))
   const model = pinned(options.model)
   let work: string
@@ -410,7 +411,7 @@ function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<Parakeet
     }
     let child: ChildProcess
     try {
-      child = spawnImpl(SANDBOX_EXEC, args, { stdio: ['ignore', 'pipe', 'pipe'], env: parakeetChildEnv(parakeetHome(), work) })
+      child = spawnImpl(sandbox, args, { stdio: ['ignore', 'pipe', 'pipe'], env: parakeetChildEnv(parakeetHome(), work) })
     } catch (error) {
       cleanup()
       reject(new ParakeetError('spawn_failed', error instanceof Error ? error.message : String(error)))

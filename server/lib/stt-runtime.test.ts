@@ -56,6 +56,14 @@ describe('meeting preview dispatch (6.72.0)', () => {
     expect((await transcribeMeetingPreview(Buffer.from('a'), broken.d))!.text).toBe('turbo text')
   })
 
+  it('selected but still warming: Turbo previews, Parakeet is never called', async () => {
+    const { transcribeMeetingPreview } = await import('./stt-runtime.js')
+    const { d, seen } = deps('turbo')
+    d.effective = () => ({ ...eff('turbo', 'parakeet'), preview: { engine: 'turbo', reason: 'parakeet_warming' } })
+    expect((await transcribeMeetingPreview(Buffer.from('a'), d))!.text).toBe('turbo text')
+    expect(seen).toEqual(['turbo:hp(a)'])
+  })
+
   it('unreadable settings never cost the preview: Turbo', async () => {
     const { transcribeMeetingPreview } = await import('./stt-runtime.js')
     const { d } = deps('parakeet', { effective: () => { throw new Error('boom') } })
@@ -79,5 +87,15 @@ describe('sidecar keeps both hypotheses (additive)', () => {
     expect(saved.stt).toEqual({ plan: { engine: 'large-v3' }, windows: 1 })
     persistBatchDecisionSidecar(path, result, false)
     expect(JSON.parse(readFileSync(path, 'utf8')).stt).toBeUndefined()
+  })
+})
+
+describe('HQ checkpoint identity (6.72.0)', () => {
+  it('differs by front end and by timestamps, so a checkpoint is never reused across settings', async () => {
+    const { getHighQualityCheckpointFingerprint } = await import('./whisper-local.js')
+    const a = getHighQualityCheckpointFingerprint({ timestamps: false, frontEnd: 'full' })
+    expect(getHighQualityCheckpointFingerprint({ timestamps: false, frontEnd: 'highpass' })).not.toBe(a)
+    expect(getHighQualityCheckpointFingerprint({ timestamps: true, frontEnd: 'full' })).not.toBe(a)
+    expect(getHighQualityCheckpointFingerprint({ timestamps: false, frontEnd: 'full' })).toBe(a)
   })
 })
