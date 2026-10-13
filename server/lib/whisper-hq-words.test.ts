@@ -64,7 +64,7 @@ describe('batch HQ word restore (CPU whisper-cli -ojf)', () => {
       result: { language: 'en' },
       transcription: [],
     }))
-    expect(parsed).toEqual({ text: '', words: [] })
+    expect(parsed).toEqual({ text: '', words: [], spokenWords: [] })
   })
 
   it('keeps batch word capture on whisper-cli JSON, never live verbose_json', () => {

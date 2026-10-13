@@ -37,7 +37,6 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
 import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
-import { enhanceAudio } from '../lib/audio-enhance.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
 import { identifySpeaker, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
 import { nemotronLive, resolveLiveLabels, resplitSegments, type ChunkSpeakerSegment } from '../lib/nemotron-live.js'
@@ -56,7 +55,9 @@ import {
   streamSilenceDropReason,
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
-import { transcribeWhisperMeetingPreview } from '../lib/whisper-preview.js'
+import { transcribeMeetingPreview } from '../lib/stt-runtime.js'
+import { decideQuiet, asrFrontEnd } from '../lib/stt-live.js'
+import { readSttSettings } from '../lib/stt-settings.js'
 import { dataPath } from '../lib/data-dir.js'
 import { ageHours, partitionExpiredAudio } from '../lib/audio-retention.js'
 import {
@@ -2219,16 +2220,16 @@ async function processStreamChunk(opts: {
     resolve(SESSION_AUDIO_DIR, sessionId, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`),
   )
 
-  const pcmData = audioBuffer.subarray(44)
-  let sumSq = 0
-  const nSamples = Math.floor(pcmData.length / 2)
-  for (let i = 0; i < nSamples; i++) {
-    const s = pcmData.readInt16LE(i * 2)
-    sumSq += s * s
-  }
-  const rms = Math.sqrt(sumSq / Math.max(1, nSamples))
-  const isQuiet = rms < 150
-  const whisperAudio = isQuiet ? audioBuffer : await enhanceAudio(audioBuffer)
+  // 6.72.0: the quiet gate and the ASR front end follow the STT settings, read
+  // per chunk so a change applies from the next chunk. Defaults: Silero speech
+  // seconds (RMS 150 fired on 1% of G2 chunks) and highpass only (the full
+  // chain lifted faint background speech over the VAD). Playback audio is
+  // separate and unchanged.
+  const stt = readSttSettings()
+  const quiet = decideQuiet(audioBuffer, stt.quietGate)
+  const rms = quiet.rms
+  const isQuiet = quiet.isQuiet
+  const whisperAudio = isQuiet ? audioBuffer : await asrFrontEnd(audioBuffer, stt.frontEnd)
   const whisperContext = recentWhisperContext(sessionId, session)
   console.log(`[perf] whisperContext: ${whisperContext.length}b | session.chunks: ${session.chunks.length}`)
 
@@ -2393,7 +2394,7 @@ async function processStreamChunk(opts: {
   // throws on by default. All gates live inside the feed.
   void feedLiveCueTranscript(sessionId, trimmedText, Boolean(fallbackReason)).catch(() => {})
 
-  console.log(`[perf] TOTAL request: ${(performance.now() - tReq).toFixed(1)}ms | chunk #${chunkIndex} | ${audioBuffer.length}b | rms=${Math.round(rms)} q=${isQuiet ? 1 : 0} | ${asrProvider} | "${trimmedText.slice(0, 50)}"`)
+  console.log(`[perf] TOTAL request: ${(performance.now() - tReq).toFixed(1)}ms | chunk #${chunkIndex} | ${audioBuffer.length}b | rms=${Math.round(rms)} q=${isQuiet ? 1 : 0} gate=${quiet.gate}${quiet.speechSec === null ? '' : ` speech=${quiet.speechSec.toFixed(2)}s`} fe=${stt.frontEnd} | ${asrProvider} | "${trimmedText.slice(0, 50)}"`)
   return canonicalChunkResponse(chunk, sessionId, chunkIndex)
 }
 
@@ -2459,7 +2460,7 @@ transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
 
     meetingPreviewBusy = true
     try {
-      const result = await transcribeWhisperMeetingPreview(audio)
+      const result = await transcribeMeetingPreview(audio)
       if (!result) return void res.status(204).send()
       const cleaned = stripInlineHallucinationsOneShot(result.text.trim()).trim()
       if (!cleaned || sharedIsFullHallucination(cleaned)) {

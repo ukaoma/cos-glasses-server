@@ -1,4 +1,5 @@
 import type { WhisperWord } from './whisper-local.js'
+import type { Disagreement } from './stt-resolver.js'
 
 export interface BatchSegment {
   startChunkIdx: number
@@ -8,11 +9,45 @@ export interface BatchSegment {
   speakers: string[]
 }
 
+/** One hypothesis as an engine heard it, before any resolution (6.72.0). */
+export interface SttHypothesis {
+  engine: string
+  text: string
+  /** Spoken words, seconds from the start of the window. Absent for an untimed decode. */
+  words?: Array<{ word: string; start: number; end: number; probability?: number }>
+  error?: string
+}
+
+/** Additive per-window record (6.72.0). Older clients ignore it. */
+export interface SegmentStt {
+  engine: string
+  requestedEngine: string
+  fallbackReason?: string
+  frontEnd: string
+  timestamps: boolean
+  primary: SttHypothesis
+  secondOpinion?: SttHypothesis
+  resolver: { version: string; enabled: boolean; applied: boolean; wordsFromSecond: number }
+  disagreements: Disagreement[]
+}
+
 export interface BatchResult {
   segment: BatchSegment
   text: string
   words: WhisperWord[]
   speakerWords: Array<{ word: string; start: number; end: number; speaker: string; similarity: number }>
+  stt?: SegmentStt
+}
+
+/** Meeting-level summary of the STT plan an HQ job ran with (6.72.0). */
+export interface BatchSttSummary {
+  plan: { engine: string; secondOpinion: string; resolver: boolean; frontEnd: string; timestamps: boolean }
+  resolverVersion: string
+  windows: number
+  disagreements: number
+  wordsFromSecond: number
+  secondOpinionFailures: number
+  primaryFallbacks: number
 }
 
 export interface BatchTranscription {
@@ -20,6 +55,7 @@ export interface BatchTranscription {
   batchTranscript?: string
   batchSegments?: BatchResult[]
   qualityReport?: BatchQualityReport
+  stt?: BatchSttSummary
 }
 
 export interface BatchTranscriptSelection {

@@ -13,7 +13,8 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync, statSync } from 'n
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
-import { batchTimestampCanaryEnabled, remapBatchWords } from './whisper-batch-timing.js'
+import { batchTimestampsEnabled, remapBatchWords } from './whisper-batch-timing.js'
+import { readSttSettings, type FrontEndId } from './stt-settings.js'
 import { getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
 import { stripBrandUrls } from './hallucination-filter.js'
 import {
@@ -70,21 +71,32 @@ export interface HighQualityTranscriptionCapability {
 export interface HighQualityTranscriptionResult {
   text: string
   words?: WhisperWord[]
+  /** Sub-word tokens merged into spoken words (6.72.0). Clocks are only
+   *  meaningful when the decode ran with timestamps. */
+  spokenWords?: WhisperWord[]
+  /** True when this decode ran with timestamps and the VAD remap. */
+  timestamps?: boolean
   model: 'large-v3' | 'turbo'
   backend: 'whisper-cli' | 'whisper-server'
   actualQuality: 'hq' | 'fast'
   degradationReason?: HighQualityUnavailableReason
 }
 
-let highQualityCheckpointFingerprint: string | null = null
-let highQualityCheckpointTimingMode: boolean | null = null
+const highQualityCheckpointFingerprints = new Map<string, string>()
 
 /** Stable, path-free cache identity for progressive meeting HQ checkpoints.
  * Model/configuration is immutable for the lifetime of one server process, so
- * cache this instead of stat'ing multi-GB model files on every health poll. */
-export function getHighQualityCheckpointFingerprint(): string {
-  const timingMode = batchTimestampCanaryEnabled()
-  if (highQualityCheckpointFingerprint && highQualityCheckpointTimingMode === timingMode) return highQualityCheckpointFingerprint
+ * cache this instead of stat'ing multi-GB model files on every health poll.
+ * 6.72.0: the timing mode and the ASR front end are part of the identity, so a
+ * checkpoint decoded under one setting is never reused under another. With
+ * timestamps off and the full front end the identity is the pre-6.72 one, byte
+ * for byte. */
+export function getHighQualityCheckpointFingerprint(opts: { timestamps?: boolean; frontEnd?: FrontEndId } = {}): string {
+  const timingMode = opts.timestamps ?? batchTimestampsEnabled()
+  const frontEnd: FrontEndId = opts.frontEnd ?? readSttSettings().frontEnd
+  const cacheKey = `${timingMode ? 1 : 0}|${frontEnd}`
+  const cached = highQualityCheckpointFingerprints.get(cacheKey)
+  if (cached) return cached
   const identity = (path: string): Record<string, number | boolean> => {
     try {
       const stat = statSync(path)
@@ -93,9 +105,9 @@ export function getHighQualityCheckpointFingerprint(): string {
       return { present: false, size: 0, mtimeMs: 0 }
     }
   }
-  highQualityCheckpointFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
     schema: 2,
-    // Keep the existing legacy identity byte-for-byte when the canary is off.
+    // Keep the existing legacy identity byte-for-byte when timestamps are off.
     ...(timingMode ? { batchTiming: 'native-vad-timestamps-v1' } : {}),
     serverVersion: process.env.COS_SERVER_VERSION?.trim() || 'development',
     whisperCli: identity(WHISPER_CLI),
@@ -104,12 +116,12 @@ export function getHighQualityCheckpointFingerprint(): string {
     beam: 5,
     bestOf: 5,
     vadEnabled: hqCliVadEnabled('batch'),
-    enhancement: 'audio-enhance-v1',
+    enhancement: frontEnd === 'full' ? 'audio-enhance-v1' : 'audio-enhance-highpass-v1',
     prompt: buildWhisperPrompt(),
     corrections: getWhisperCorrections(),
   })).digest('hex')
-  highQualityCheckpointTimingMode = timingMode
-  return highQualityCheckpointFingerprint
+  highQualityCheckpointFingerprints.set(cacheKey, fingerprint)
+  return fingerprint
 }
 
 export function classifyHighQualityTranscriptionCapability(input: {
@@ -882,7 +894,7 @@ async function reconcileWhisperServerHealth(): Promise<boolean> {
  * Batch/save path only. Never uses whisper-server `verbose_json` (the live
  * VAD-empty crash vector). Special tokens like `[_BEG_]` / `<|...|>` are dropped.
  */
-export function parseWhisperCliFullJson(raw: string): { text: string; words: WhisperWord[] } {
+export function parseWhisperCliFullJson(raw: string): { text: string; words: WhisperWord[]; spokenWords: WhisperWord[] } {
   const data = JSON.parse(raw) as {
     transcription?: Array<{
       text?: unknown
@@ -896,6 +908,7 @@ export function parseWhisperCliFullJson(raw: string): { text: string; words: Whi
   const segments = Array.isArray(data.transcription) ? data.transcription : []
   const texts: string[] = []
   const words: WhisperWord[] = []
+  const spokenWords: WhisperWord[] = []
 
   for (const segment of segments) {
     if (typeof segment.text === 'string' && segment.text.trim()) {
@@ -909,18 +922,30 @@ export function parseWhisperCliFullJson(raw: string): { text: string; words: Whi
       const fromMs = typeof token.offsets?.from === 'number' ? token.offsets.from : Number(token.offsets?.from)
       const toMs = typeof token.offsets?.to === 'number' ? token.offsets.to : Number(token.offsets?.to)
       if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) continue
-      words.push({
+      const word: WhisperWord = {
         word: tokenText,
         start: fromMs / 1000,
         end: toMs / 1000,
         probability: typeof token.p === 'number' && Number.isFinite(token.p) ? token.p : 0,
-      })
+      }
+      words.push(word)
+      // A token without a leading space continues the previous word ("I" + "'m").
+      const rawText = typeof token.text === 'string' ? token.text : ''
+      const last = spokenWords.at(-1)
+      if (last && !/^\s/.test(rawText) && !/^[\s]*$/.test(rawText)) {
+        last.word += tokenText
+        last.end = Math.max(last.end, word.end)
+        last.probability = Math.min(last.probability, word.probability)
+      } else {
+        spokenWords.push({ ...word })
+      }
     }
   }
 
   return {
     text: texts.join(' ').replace(/\s+/g, ' ').trim(),
     words,
+    spokenWords,
   }
 }
 
@@ -949,6 +974,8 @@ export async function transcribeHighQuality(
     threads?: number
     backgroundCpu?: boolean
     signal?: AbortSignal
+    /** Meeting batch only: timestamps on/off for this decode (the job's snapshot). */
+    timestamps?: boolean
   } = {},
 ): Promise<HighQualityTranscriptionResult> {
   if (!cliAvailable) {
@@ -972,7 +999,9 @@ export async function transcribeHighQuality(
   // Word clocks on post-meeting CPU polish, and on any decode that asks for
   // them (the prompt tail guard). Other live decodes stay compact JSON.
   const captureWords = opts.priority === 'batch' || opts.words === true
-  const timestampCanary = opts.priority === 'batch' && batchTimestampCanaryEnabled()
+  // 6.72.0: on by default for meeting batch (HQ setting "large-v3"); the job
+  // passes its own snapshot so a settings change never lands mid-meeting.
+  const timestampCanary = opts.priority === 'batch' && (opts.timestamps ?? batchTimestampsEnabled())
   let nativeDiagnostics = ''
 
   const modelPath = resolveBatchModel()
@@ -1144,6 +1173,7 @@ export async function transcribeHighQuality(
 
     let finalText = text
     let words: WhisperWord[] | undefined
+    let spokenWords: WhisperWord[] | undefined
     if (captureWords) {
       try {
         if (existsSync(jsonPath)) {
@@ -1157,6 +1187,8 @@ export async function transcribeHighQuality(
           words = timed.length > 0
             ? timed.map(w => ({ ...w, word: applyCorrections(w.word) }))
             : []
+          const spoken = timestampCanary ? remapBatchWords(parsed.spokenWords, nativeDiagnostics, useVad) : parsed.spokenWords
+          spokenWords = spoken.map(w => ({ ...w, word: applyCorrections(w.word) }))
         } else if (timestampCanary) {
           throw new Error('HQ timestamp candidate did not produce CLI JSON')
         }
@@ -1193,7 +1225,10 @@ export async function transcribeHighQuality(
             ? 'large_v3_model_missing' as const
             : 'hq_disabled' as const,
         }
-    return words ? { text: corrected, words, ...metadata } : { text: corrected, ...metadata }
+    const timing = isBatch ? { timestamps: timestampCanary } : {}
+    return words
+      ? { text: corrected, words, ...(spokenWords ? { spokenWords } : {}), ...timing, ...metadata }
+      : { text: corrected, ...timing, ...metadata }
   } finally {
     try { unlinkSync(tmpWav) } catch { /* cleanup */ }
     if (captureWords) {

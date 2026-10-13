@@ -71,7 +71,7 @@ import { ForkJobLedger, fileForkJobPersistence } from './lib/fork-job-ledger.js'
 import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
-import { transcribeStreamRouter } from './routes/transcribe-stream.js'
+import { transcribeStreamRouter, getActiveTranscriptionSessionCount } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
@@ -102,6 +102,9 @@ import { recoverInterruptedNaming } from './lib/held-naming-batches.js'
 import { voiceRouter } from './routes/voice.js'
 import { glossaryRouter } from './routes/glossary.js'
 import { homeAreaRouter } from './routes/home-area.js'
+import { createSttSettingsRouter } from './routes/stt-settings.js'
+import { ensurePreviewWarm } from './lib/stt-runtime.js'
+import { sweepParakeetStaging, sweepStaleParakeetTmp } from './lib/parakeet.js'
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
@@ -1101,6 +1104,7 @@ recoverInterruptedNaming()
 app.use('/api', voiceRouter)
 app.use('/api', glossaryRouter)
 app.use('/api', homeAreaRouter)
+app.use('/api', createSttSettingsRouter({ recordingLive: () => getActiveTranscriptionSessionCount() > 0 }))
 app.use('/api', handoffsRouter)
 app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
@@ -1335,6 +1339,9 @@ listenRequiredServers(listeners).then(() => {
     // 6.61.0: warm Nemotron in the background (the first Neural Engine compile
     // takes 15-30 s). Chunks use the voiceprint until it is warm; never awaited.
     startNemotronWarmup()
+    // 6.72.0: leftovers of an interrupted Parakeet install or run, then the preview warm-up if selected.
+    try { sweepParakeetStaging(); sweepStaleParakeetTmp() } catch { /* best effort */ }
+    ensurePreviewWarm()
   }
 
   // Durable recovery starts with the admitted runtime by default. A literal

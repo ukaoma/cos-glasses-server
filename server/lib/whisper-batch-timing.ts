@@ -1,10 +1,20 @@
 import type { WhisperWord } from './whisper-local.js'
+import { readSttSettings } from './stt-settings.js'
 
-/** Canary-only until human-corrected meeting/fact and native contention gates pass.
+/** Meeting batch HQ timestamps (6.72.0 default: on). The HQ setting decides:
+ * "large-v3" decodes with timestamps and remaps them through Whisper's own VAD
+ * table; "large-v3-legacy" keeps the pre-6.72 `--no-timestamps` decoder.
+ * COS_BATCH_HQ_TIMESTAMPS still overrides: "1" forces timestamps on, "0" off.
  * Live HTTP keeps compact JSON; interactive HQ and DTW are unchanged. */
-export function batchTimestampCanaryEnabled(): boolean {
-  return process.env.COS_BATCH_HQ_TIMESTAMPS === '1'
+export function batchTimestampsEnabled(hq?: string): boolean {
+  const flag = process.env.COS_BATCH_HQ_TIMESTAMPS
+  if (flag === '1') return true
+  if (flag === '0') return false
+  return (hq ?? readSttSettings().hq) !== 'large-v3-legacy'
 }
+
+/** Pre-6.72 name, kept for callers and tests. */
+export const batchTimestampCanaryEnabled = (): boolean => batchTimestampsEnabled()
 
 export interface VadTimeSegment {
   originalStart: number

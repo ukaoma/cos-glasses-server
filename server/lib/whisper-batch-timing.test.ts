@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { batchTimestampCanaryEnabled, mapVadTime, parseNativeVadTimeline, remapBatchWords } from './whisper-batch-timing.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { batchTimestampCanaryEnabled, batchTimestampsEnabled, mapVadTime, parseNativeVadTimeline, remapBatchWords } from './whisper-batch-timing.js'
 
 const log = `whisper_vad: detected 2 speech segments
 whisper_vad: vad_segment_info: orig_start: 2.00, orig_end: 3.00, vad_start: 0.00, vad_end: 1.00
@@ -12,14 +15,37 @@ afterEach(() => {
   else process.env.COS_BATCH_HQ_TIMESTAMPS = originalFlag
 })
 describe('batch timestamp canary', () => {
-  it('requires explicit opt-in; rollback and unknown values retain the baseline', () => {
-    for (const value of [undefined, '', '0', 'true', '2']) {
+  it('is on by default (6.72.0) and the env flag still overrides both ways', () => {
+    for (const value of [undefined, '', 'true', '2']) {
       if (value === undefined) delete process.env.COS_BATCH_HQ_TIMESTAMPS
       else process.env.COS_BATCH_HQ_TIMESTAMPS = value
-      expect(batchTimestampCanaryEnabled()).toBe(false)
+      expect(batchTimestampCanaryEnabled()).toBe(true)
+      expect(batchTimestampsEnabled('large-v3')).toBe(true)
+      expect(batchTimestampsEnabled('large-v3-legacy')).toBe(false)
     }
+    process.env.COS_BATCH_HQ_TIMESTAMPS = '0'
+    expect(batchTimestampCanaryEnabled()).toBe(false)
+    expect(batchTimestampsEnabled('large-v3')).toBe(false)
     process.env.COS_BATCH_HQ_TIMESTAMPS = '1'
     expect(batchTimestampCanaryEnabled()).toBe(true)
+    expect(batchTimestampsEnabled('large-v3-legacy')).toBe(true)
+  })
+  it('follows the stored HQ setting when no override is given', async () => {
+    delete process.env.COS_BATCH_HQ_TIMESTAMPS
+    const prior = process.env.COS_DATA_DIR
+    const dir = mkdtempSync(join(tmpdir(), 'cos-batch-timing-'))
+    process.env.COS_DATA_DIR = dir
+    try {
+      vi.resetModules()
+      const fresh = await import('./whisper-batch-timing.js')
+      expect(fresh.batchTimestampsEnabled()).toBe(true)
+      writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ hq: 'large-v3-legacy' }))
+      expect(fresh.batchTimestampsEnabled()).toBe(false)
+    } finally {
+      if (prior === undefined) delete process.env.COS_DATA_DIR
+      else process.env.COS_DATA_DIR = prior
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
   it('uses native overlap and maps gap tokens to speech boundaries', () => {
     const table = parseNativeVadTimeline(log)

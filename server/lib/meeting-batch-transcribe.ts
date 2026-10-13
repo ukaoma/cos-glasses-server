@@ -6,14 +6,22 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { basename, join, resolve } from 'node:path'
-import { enhanceAudio } from './audio-enhance.js'
 import {
+  applyCorrections,
   getHighQualityCheckpointFingerprint,
   getHighQualityTranscriptionCapability,
   getWhisperCommitCapability,
   transcribeHighQuality,
+  type HighQualityTranscriptionResult,
   type WhisperWord,
 } from './whisper-local.js'
+import { asrFrontEnd } from './stt-live.js'
+import { batchTimestampsEnabled } from './whisper-batch-timing.js'
+import { readSttSettings, type FrontEndId, type HqId, type SecondOpinionId } from './stt-settings.js'
+import { currentEffectiveStt } from './stt-runtime.js'
+import { transcribeParakeet, type ParakeetResult, type ParakeetRunOptions } from './parakeet.js'
+import { isDeletionProneEngine, resolveHypotheses, RESOLVER_VERSION, type Hypothesis } from './stt-resolver.js'
+import { getVocabulary } from './profile.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { isMetalBatchPreempted } from './whisper-metal-gate.js'
 import {
@@ -27,7 +35,9 @@ import {
   evaluateBatchQuality,
   type BatchResult,
   type BatchSegment,
+  type BatchSttSummary,
   type BatchTranscription,
+  type SegmentStt,
 } from './batch-transcript-quality.js'
 
 const WAV_HEADER_SIZE = 44
@@ -223,15 +233,22 @@ function segmentSourceHash(audioDir: string, segment: BatchSegment): string | nu
   return hash.digest('hex')
 }
 
+/** The decoder identity a checkpoint was made under: timestamps and front end (6.72.0). */
+export interface CheckpointIdentity { timestamps: boolean; frontEnd: FrontEndId }
+function currentCheckpointIdentity(): CheckpointIdentity {
+  return { timestamps: batchTimestampsEnabled(), frontEnd: readSttSettings().frontEnd }
+}
+
 function progressiveFailureIdentity(
   audioDir: string,
   segment: BatchSegment,
   previousText?: string,
+  identity: CheckpointIdentity = currentCheckpointIdentity(),
 ): string | null {
   const sourceHash = segmentSourceHash(audioDir, segment)
   if (!sourceHash) return null
   return createHash('sha256').update([
-    checkpointKey(segment), sourceHash, contextHash(previousText), getHighQualityCheckpointFingerprint(),
+    checkpointKey(segment), sourceHash, contextHash(previousText), getHighQualityCheckpointFingerprint(identity),
   ].join('\0')).digest('hex')
 }
 
@@ -250,8 +267,9 @@ function readProgressiveCheckpoint(
   segment: BatchSegment,
   previousText?: string,
   expectedSessionId?: string,
+  identity: CheckpointIdentity = currentCheckpointIdentity(),
 ): BatchResult | null {
-  const cached = readProgressiveCheckpointMetadata(audioDir, segment, previousText, undefined, expectedSessionId)
+  const cached = readProgressiveCheckpointMetadata(audioDir, segment, previousText, undefined, expectedSessionId, identity)
   if (!cached) return null
   const manifest = loadProgressiveManifest(audioDir)
   const checkpoint = manifest?.checkpoints?.[checkpointKey(segment)]
@@ -270,13 +288,14 @@ function readProgressiveCheckpointMetadata(
   previousText?: string,
   manifest = loadProgressiveManifest(audioDir),
   expectedSessionId?: string,
+  identity: CheckpointIdentity = currentCheckpointIdentity(),
 ): BatchResult | null {
   if (expectedSessionId && manifest?.sessionId !== expectedSessionId) return null
   const checkpoint = manifest?.checkpoints?.[checkpointKey(segment)]
   if (
     !checkpoint
     || checkpoint.contextHash !== contextHash(previousText)
-    || checkpoint.configFingerprint !== getHighQualityCheckpointFingerprint()
+    || checkpoint.configFingerprint !== getHighQualityCheckpointFingerprint(identity)
   ) return null
   const cached = checkpoint.result
   const validWord = (word: unknown, speakerRequired: boolean): boolean => {
@@ -392,14 +411,218 @@ export function readProgressiveAskRefinements(
   return results
 }
 
+/** The STT plan one HQ job runs with, frozen when the job starts (6.72.0). A
+ *  settings change applies to the next saved meeting, never mid-job. */
+export interface HqJobPlan {
+  engine: HqId
+  secondOpinion: SecondOpinionId
+  resolver: boolean
+  frontEnd: FrontEndId
+}
+
+export function currentHqJobPlan(): HqJobPlan {
+  const eff = currentEffectiveStt()
+  return { engine: eff.hq.engine, secondOpinion: eff.secondOpinion.engine, resolver: eff.resolver, frontEnd: eff.frontEnd }
+}
+
+/** Legacy pre-6.72 behaviour, for callers and tests that pass no plan. */
+export const LEGACY_HQ_PLAN: Readonly<HqJobPlan> = Object.freeze({ engine: 'large-v3-legacy', secondOpinion: 'off', resolver: false, frontEnd: 'full' })
+
+export interface HqDecodeDeps {
+  whisper: typeof transcribeHighQuality
+  parakeet: (wav: Buffer, options: ParakeetRunOptions) => Promise<ParakeetResult>
+  frontEnd: (audio: Buffer, frontEnd: FrontEndId) => Promise<Buffer>
+  vocabulary: () => string[]
+}
+
+// Arrow wrappers, not references: a test that mocks one of these modules
+// without every export must still be able to import this one.
+const defaultHqDeps: HqDecodeDeps = {
+  whisper: (...args) => transcribeHighQuality(...args),
+  parakeet: (wav, options) => transcribeParakeet(wav, options),
+  frontEnd: (audio, frontEnd) => asrFrontEnd(audio, frontEnd),
+  vocabulary: () => getVocabulary(),
+}
+
+/** A first Parakeet run in a process may compile CoreML (12 to 25 s); later runs are well under a second. */
+export const PARAKEET_FIRST_WINDOW_TIMEOUT_MS = 180_000
+export const PARAKEET_WINDOW_TIMEOUT_MS = 30_000
+
+interface WholeDecode {
+  engine: 'large-v3' | 'large-v3-legacy' | 'parakeet-ultra'
+  text: string
+  /** What BatchResult.words carries (Whisper tokens, or Parakeet words). */
+  words: WhisperWord[]
+  /** Spoken words for the resolver; absent when the clocks are not trustworthy. */
+  spoken?: WhisperWord[]
+  timestamps: boolean
+}
+
+function errorReason(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 200) : String(error).slice(0, 200)
+}
+
+async function decodeWhisperWindow(
+  deps: HqDecodeDeps,
+  input: Buffer,
+  previousText: string | undefined,
+  engine: 'large-v3' | 'large-v3-legacy',
+  segment: BatchSegment,
+  audioDir: string,
+): Promise<WholeDecode> {
+  const timestamps = batchTimestampsEnabled(engine)
+  let result: HighQualityTranscriptionResult
+  try {
+    result = await deps.whisper(input, previousText?.slice(-250), { priority: 'batch', timestamps })
+  } catch (error) {
+    // A live meeting took the GPU mid-segment. The truncated Metal output
+    // was already discarded upstream (BLOCKER contract) — it is never
+    // accepted. Retry this SAME segment once on CPU, which cannot itself be
+    // preempted, so a busy day degrades to slow rather than to a silently
+    // missing stretch of transcript.
+    if (!isMetalBatchPreempted(error)) throw error
+    console.log(
+      `[meeting-batch] Segment ${segment.startChunkIdx}-${segment.endChunkIdx} preempted off Metal; `
+      + 'retrying once on CPU',
+    )
+    refreshPendingLease(audioDir)
+    result = await deps.whisper(input, previousText?.slice(-250), {
+      priority: 'batch',
+      forceCpu: true,
+      forceCpuReason: 'preempt_retry',
+      timestamps,
+    })
+  }
+  const ran = result.timestamps ?? timestamps
+  return {
+    engine,
+    text: result.text,
+    words: result.words ?? [],
+    ...(ran && result.spokenWords ? { spoken: result.spokenWords } : {}),
+    timestamps: ran,
+  }
+}
+
+async function decodeParakeetWindow(deps: HqDecodeDeps, input: Buffer, timeoutMs: number): Promise<WholeDecode> {
+  const r = await deps.parakeet(input, { model: 'parakeet-ultra', lane: 'batch', timeoutMs })
+  const words = r.words.map(w => ({ word: applyCorrections(w.word), start: w.start, end: w.end, probability: w.probability ?? 0 }))
+  return { engine: 'parakeet-ultra', text: applyCorrections(r.text), words, spoken: words, timestamps: true }
+}
+
+function asHypothesis(d: WholeDecode): Hypothesis {
+  return { engine: d.engine, text: d.text, ...(d.spoken ? { words: d.spoken } : {}) }
+}
+
+function hypothesisRecord(d: WholeDecode): SegmentStt['primary'] {
+  return { engine: d.engine, text: d.text, ...(d.spoken ? { words: d.spoken.map(w => ({ word: w.word, start: w.start, end: w.end, probability: w.probability })) } : {}) }
+}
+
+interface JobParakeetState { ran: boolean }
+
+/**
+ * One HQ window under the job's plan: the primary engine, then (if planned)
+ * the second opinion on the SAME front-end audio, then the resolver.
+ * A Parakeet primary that fails falls back to Large-v3 for this window; a
+ * second opinion that fails or overruns leaves the primary exactly as heard.
+ */
+async function decodeHqWindow(
+  input: Buffer,
+  previousText: string | undefined,
+  segment: BatchSegment,
+  entries: IndexedTranscriptChunk[],
+  plan: HqJobPlan,
+  deps: HqDecodeDeps,
+  job: JobParakeetState,
+  audioDir: string,
+): Promise<BatchResult> {
+  const parakeetTimeout = () => {
+    const t = job.ran ? PARAKEET_WINDOW_TIMEOUT_MS : PARAKEET_FIRST_WINDOW_TIMEOUT_MS
+    job.ran = true
+    return t
+  }
+  let primary: WholeDecode
+  let fallbackReason: string | undefined
+  if (plan.engine === 'parakeet-ultra') {
+    try {
+      primary = await decodeParakeetWindow(deps, input, parakeetTimeout())
+    } catch (error) {
+      fallbackReason = `parakeet_failed: ${errorReason(error)}`
+      console.warn(`[meeting-batch] Parakeet HQ failed for ${segment.startChunkIdx}-${segment.endChunkIdx}; using Large-v3: ${errorReason(error)}`)
+      primary = await decodeWhisperWindow(deps, input, previousText, 'large-v3', segment, audioDir)
+    }
+  } else {
+    primary = await decodeWhisperWindow(deps, input, previousText, plan.engine, segment, audioDir)
+  }
+
+  let second: WholeDecode | null = null
+  let secondError: string | undefined
+  const secondEngine = plan.secondOpinion
+  const sameFamily = secondEngine !== 'off' && (secondEngine === 'parakeet-ultra') === (primary.engine === 'parakeet-ultra')
+  if (secondEngine !== 'off' && !sameFamily) {
+    try {
+      second = secondEngine === 'parakeet-ultra'
+        ? await decodeParakeetWindow(deps, input, parakeetTimeout())
+        : await decodeWhisperWindow(deps, input, previousText, 'large-v3', segment, audioDir)
+    } catch (error) {
+      secondError = errorReason(error)
+      console.warn(`[meeting-batch] Second opinion (${secondEngine}) failed for ${segment.startChunkIdx}-${segment.endChunkIdx}; keeping the primary: ${secondError}`)
+    }
+  }
+
+  let text = primary.text
+  let words = primary.words
+  let applied = false
+  let wordsFromSecond = 0
+  let disagreements: SegmentStt['disagreements'] = []
+  if (second) {
+    // The resolver may change words only when the primary's clocks are real
+    // (timestamps on, or Parakeet); otherwise it only records disagreements.
+    const apply = plan.resolver && primary.spoken !== undefined
+    const resolved = resolveHypotheses(asHypothesis(primary), asHypothesis(second), {
+      vocabulary: deps.vocabulary(),
+      primaryDeletionProne: isDeletionProneEngine(primary.engine),
+      apply,
+    })
+    disagreements = resolved.disagreements
+    if (apply && resolved.wordsFromSecond > 0 && resolved.timed) {
+      applied = true
+      wordsFromSecond = resolved.wordsFromSecond
+      text = applyCorrections(resolved.text)
+      words = resolved.words.map(w => ({ word: w.word, start: w.start, end: w.end, probability: w.probability ?? 0 }))
+    }
+  }
+  // Only a prompted Whisper decode can echo the previous window's text.
+  if (previousText && primary.engine !== 'parakeet-ultra') text = stripOverlap(text, previousText)
+
+  const stt: SegmentStt = {
+    engine: primary.engine,
+    requestedEngine: plan.engine,
+    ...(fallbackReason ? { fallbackReason } : {}),
+    frontEnd: plan.frontEnd,
+    timestamps: primary.timestamps,
+    primary: hypothesisRecord(primary),
+    ...(second ? { secondOpinion: hypothesisRecord(second) } : secondError ? { secondOpinion: { engine: secondEngine, text: '', error: secondError } } : {}),
+    resolver: { version: RESOLVER_VERSION, enabled: plan.resolver, applied, wordsFromSecond },
+    disagreements,
+  }
+  return { segment, text, words, speakerWords: mapWordsToSpeakers(words, segment, entries), stt }
+}
+
 export async function transcribeSegments(
   audioDir: string,
   segments: BatchSegment[],
   entries: IndexedTranscriptChunk[],
   expectedSessionId?: string,
+  plan: HqJobPlan = LEGACY_HQ_PLAN,
+  deps: HqDecodeDeps = defaultHqDeps,
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = []
   const meetingId = basename(audioDir)
+  const job: JobParakeetState = { ran: false }
+  // A progressive checkpoint holds one Whisper decode. It stands in only for a
+  // plan that would decode exactly that: a Whisper engine and no second opinion.
+  const identity: CheckpointIdentity = { timestamps: batchTimestampsEnabled(plan.engine === 'parakeet-ultra' ? 'large-v3' : plan.engine), frontEnd: plan.frontEnd }
+  const checkpointsUsable = plan.engine !== 'parakeet-ultra' && plan.secondOpinion === 'off'
   writeMeetingBatchProgress(audioDir, {
     phase: 'hq_polish',
     segmentsDone: 0,
@@ -410,8 +633,8 @@ export async function transcribeSegments(
     try {
       refreshPendingLease(audioDir)
       const previousText = results.at(-1)?.text
-      const cached = progressiveMeetingHqEnabled()
-        ? readProgressiveCheckpoint(audioDir, segment, previousText, expectedSessionId)
+      const cached = checkpointsUsable && progressiveMeetingHqEnabled()
+        ? readProgressiveCheckpoint(audioDir, segment, previousText, expectedSessionId, identity)
         : null
       if (cached) {
         results.push(cached)
@@ -424,36 +647,8 @@ export async function transcribeSegments(
         continue
       }
       const combined = concatenateWavChunks(audioDir, segment.startChunkIdx, segment.endChunkIdx)
-      const enhanced = await enhanceAudio(combined)
-      let result
-      try {
-        result = await transcribeHighQuality(enhanced, previousText?.slice(-250), { priority: 'batch' })
-      } catch (error) {
-        // A live meeting took the GPU mid-segment. The truncated Metal output
-        // was already discarded upstream (BLOCKER contract) — it is never
-        // accepted. Retry this SAME segment once on CPU, which cannot itself be
-        // preempted, so a busy day degrades to slow rather than to a silently
-        // missing stretch of transcript.
-        if (!isMetalBatchPreempted(error)) throw error
-        console.log(
-          `[meeting-batch] Segment ${segment.startChunkIdx}-${segment.endChunkIdx} preempted off Metal; `
-          + 'retrying once on CPU',
-        )
-        refreshPendingLease(audioDir)
-        result = await transcribeHighQuality(enhanced, previousText?.slice(-250), {
-          priority: 'batch',
-          forceCpu: true,
-          forceCpuReason: 'preempt_retry',
-        })
-      }
-      const text = previousText ? stripOverlap(result.text, previousText) : result.text
-      const words = result.words ?? []
-      results.push({
-        segment,
-        text,
-        words,
-        speakerWords: mapWordsToSpeakers(words, segment, entries),
-      })
+      const input = await deps.frontEnd(combined, plan.frontEnd)
+      results.push(await decodeHqWindow(input, previousText, segment, entries, plan, deps, job, audioDir))
       refreshPendingLease(audioDir)
       writeMeetingBatchProgress(audioDir, {
         phase: 'hq_polish',
@@ -475,6 +670,19 @@ export async function transcribeSegments(
     }
   }
   return results
+}
+
+export function summarizeStt(plan: HqJobPlan, results: readonly BatchResult[]): BatchSttSummary {
+  return {
+    plan: { engine: plan.engine, secondOpinion: plan.secondOpinion, resolver: plan.resolver, frontEnd: plan.frontEnd,
+      timestamps: batchTimestampsEnabled(plan.engine === 'parakeet-ultra' ? 'large-v3' : plan.engine) },
+    resolverVersion: RESOLVER_VERSION,
+    windows: results.length,
+    disagreements: results.reduce((n, r) => n + (r.stt?.disagreements.length ?? 0), 0),
+    wordsFromSecond: results.reduce((n, r) => n + (r.stt?.resolver.wordsFromSecond ?? 0), 0),
+    secondOpinionFailures: results.filter(r => r.stt?.secondOpinion?.error).length,
+    primaryFallbacks: results.filter(r => r.stt?.fallbackReason).length,
+  }
 }
 
 let batchQueueTail: Promise<void> = Promise.resolve()
@@ -650,7 +858,8 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
         pending.segment.startChunkIdx,
         pending.segment.endChunkIdx,
       )
-      const enhanced = await enhanceAudio(combined)
+      const identity = currentCheckpointIdentity()
+      const enhanced = await asrFrontEnd(combined, identity.frontEnd)
       if (controller.signal.aborted || state.closed) return
       const decoded = await transcribeHighQuality(enhanced, pending.previousText?.slice(-250), {
         priority: 'batch',
@@ -659,6 +868,7 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
         threads: progressiveThreads(),
         backgroundCpu: true,
         signal: controller.signal,
+        timestamps: identity.timestamps,
       })
       if (controller.signal.aborted || state.closed) return
       const text = pending.previousText
@@ -675,7 +885,7 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
         key: checkpointKey(pending.segment),
         sourceHash,
         contextHash: contextHash(pending.previousText),
-        configFingerprint: getHighQualityCheckpointFingerprint(),
+        configFingerprint: getHighQualityCheckpointFingerprint(identity),
         completedAt: new Date().toISOString(),
         wallTimeMs: Date.now() - started,
         result,
@@ -885,7 +1095,10 @@ async function runMeetingBatchPipelineNow(
       segmentsTotal: segments.length,
       meetingId: basename(audioDir),
     })
-    const batchSegments = await transcribeSegments(audioDir, segments, entries, sessionId)
+    // Frozen here, when the job starts: a settings change applies to the next meeting.
+    const plan = currentHqJobPlan()
+    console.log(`[meeting-batch] STT plan: ${JSON.stringify(plan)}`)
+    const batchSegments = await transcribeSegments(audioDir, segments, entries, sessionId, plan)
     writeMeetingBatchProgress(audioDir, {
       phase: 'quality_check',
       segmentsDone: segments.length,
@@ -908,7 +1121,7 @@ async function runMeetingBatchPipelineNow(
       return { transcriptionQuality: 'streaming', qualityReport }
     }
 
-    return { transcriptionQuality: 'batch', batchTranscript, batchSegments, qualityReport }
+    return { transcriptionQuality: 'batch', batchTranscript, batchSegments, qualityReport, stt: summarizeStt(plan, batchSegments) }
   } catch (error) {
     console.error(`[meeting-batch] Pipeline failed: ${error instanceof Error ? error.message : String(error)}`)
     writeMeetingBatchTerminal(audioDir, {

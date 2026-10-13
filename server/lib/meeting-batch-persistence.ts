@@ -38,10 +38,15 @@ export function persistBatchDecisionSidecar(
       text: result.text,
       words: result.words,
       speakerWords: result.speakerWords,
+      // 6.72.0, additive: both raw hypotheses and every disagreement.
+      ...(result.stt ? { stt: result.stt } : {}),
     }))
+    if (batchResult.stt) sidecar.stt = batchResult.stt
+    else delete sidecar.stt
   } else {
     delete sidecar.batchTranscript
     delete sidecar.batchSegments
+    delete sidecar.stt
   }
 
   durableAtomicWriteFileSync(sidecarPath, JSON.stringify(sidecar, null, 2), { mode: 0o600 })
