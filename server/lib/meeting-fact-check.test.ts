@@ -86,6 +86,15 @@ describe('claim admission', () => {
     expect(admitFactCheckClaims({ claims: [{ ...raw.claims[0], place: 'none' }] }, input('Fact check'), scanned, { origin: { text: 'Austin, TX', source: 'profile' } }).claims[0].query).toBe('to kansas city flight time 90 minutes vs driving 10 hours')
     expect(originQuery('to kansas city flight time', { text: 'Austin', source: 'user' })).toBe('austin to kansas city flight time')
   })
+  it('drops a claim whose own evidence passage is private even when a neighbour has the words', () => {
+    const scannedPrivate = [
+      { id: 30, elapsedMs: 1000, speaker: 'Ext', text: 'Elephants often outweigh a car.' },
+      { id: 31, elapsedMs: 2000, speaker: 'Ext', text: 'My wife says elephants outweigh a car.' },
+    ]
+    const claim = (ids: number[]) => admitFactCheckClaims({ claims: [{ claim: 'Elephants outweigh cars', query: 'elephant outweigh car', evidenceTurnIds: ids, category: 'nature' }] }, { turns: scannedPrivate }, scannedPrivate).claims.length
+    expect(claim([30])).toBe(1)
+    expect(claim([31])).toBe(0)
+  })
   it('accepts a compound of two passage words, never new letters', () => {
     const heart = (query: string) => admitFactCheckClaims({ claims: [{ claim: 'Heart', query, evidenceTurnIds: [3], category: 'science' }] }, input('Fact check'), scanned).claims[0]?.query
     expect(heart('how many heartbeats average human lifetime')).toBe('how many heartbeats average human lifetime')
@@ -129,6 +138,7 @@ describe('pending fact-check continuation', () => {
   it('reads an abbreviation of the owner area as that area, still the user\'s words', () => {
     expect(resolveTypedOrigin('ATX', { text: 'Austin, TX', source: 'profile' })).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
     expect(resolveTypedOrigin('DFW', { text: 'Austin, TX', source: 'profile' })).toEqual({ text: 'DFW', source: 'user' })
+    expect(resolveTypedOrigin('ABQ', { text: 'Austin, TX', source: 'profile' })).toEqual({ text: 'ABQ', source: 'user' })
     expect(resolveTypedOrigin('ATX', null)).toEqual({ text: 'ATX', source: 'user' })
     expect(resolveTypedOrigin('Dallas', { text: 'Dallas, TX', source: 'profile' })).toEqual({ text: 'Dallas', source: 'user' })
     expect(originQuery('to kansas city flight time', { text: 'ATX (Austin, TX)', source: 'user' })).toBe('atx austin tx to kansas city flight time')
@@ -232,6 +242,12 @@ describe('compose and run', () => {
     expect(salvaged.rows.map(r => r.text)).toEqual(['Elephants often weigh more than a car: Unverified. The pages that could be read did not confirm it.', 'Average heart beats about a billion times in a lifetime: Unverified. The pages that could be read did not confirm it.'])
     const unread = await composeFactCheck({ ...args(late, () => 5000), web: [], webClaim: new Map() })
     expect(unread.rows[0].text).toBe('Elephants often weigh more than a car: Unverified. No readable page was found for it in time.')
+  })
+  it('reads a comma list of citations as separate citations', async () => {
+    const listed = good.replace('Elephants outweigh a car [T1]: Supported. An adult elephant weighs about 6 tonnes [W1].', 'Elephants outweigh a car [T1, W1]: Supported. An adult elephant weighs about 6 tonnes.')
+    const out = await composeFactCheck(args(vi.fn(async () => ({ text: listed })), () => 5000))
+    expect(out.rows[0].text).toBe('Elephants outweigh a car [T1][W1]: Supported. An adult elephant weighs about 6 tonnes.')
+    expect(out.rows[0].sources).toEqual(['T1', 'W1'])
   })
   it('retries a stalled answer call once while time remains, and says so when it never returns', async () => {
     const stall = vi.fn().mockRejectedValueOnce(new Error('provider_timeout')).mockResolvedValueOnce({ text: good })

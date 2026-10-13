@@ -57,6 +57,14 @@ describe('6.71.13 public page reading', () => {
     const out = await Promise.race([searchMeetingWeb('elephant weight car', AbortSignal.timeout(5000)), new Promise(r => setTimeout(() => r('hung'), 2000))])
     expect(out).not.toBe('hung'); expect(stopped).toBe(true)
     expect((out as any).sources.some((s: any) => s.text.startsWith('Retrieved page excerpt'))).toBe(true)
+    // A caller who cancels while the search model is being stopped still gets a cancellation, not results.
+    const caller = new AbortController()
+    mocks.run.mockImplementation((_m: unknown, _p: string, _s: string, signal: AbortSignal, adapter: { workspace: string; stdin: string }) => new Promise((_resolve, reject) => {
+      writeFileSync(join(adapter.workspace, 'events.jsonl'), JSON.stringify({ tool: 'WebSearch', allowed: true, query: JSON.parse(adapter.stdin).query }) + '\n')
+      writeFileSync(join(adapter.workspace, 'result.json'), JSON.stringify(hits(['https://a.example.org/1'])))
+      signal.addEventListener('abort', () => { caller.abort(); reject(new AskProcessError('cancelled')) })
+    }))
+    await expect(searchMeetingWeb('elephant weight car', caller.signal)).rejects.toThrow()
     // A caller's own cancellation still cancels.
     const cancelled = new AbortController(); cancelled.abort()
     mocks.run.mockRejectedValue(new AskProcessError('cancelled'))
@@ -83,6 +91,7 @@ describe('6.71.13 public page reading', () => {
   it('extracts the longest article, falls back to the body, and keeps the window that names the claim', () => {
     expect(articleText('<article>tiny card</article><main>' + 'Elephants weigh about six tonnes. '.repeat(20) + '</main>')).toContain('Elephants weigh about six tonnes.')
     expect(articleText('<article>card</article><div>' + 'Body text about heartbeats over a lifetime. '.repeat(20) + '</div>')).toContain('heartbeats over a lifetime')
+    expect(articleText('<article>' + 'Related story teaser. '.repeat(30) + '</article><article>' + 'An adult elephant weighs about six tonnes, far more than a car. '.repeat(20) + '</article>')).toContain('six tonnes')
     const long = '<main>' + 'Filler sentence here. '.repeat(600) + 'The drive from Austin to Kansas City is about 730 miles. ' + 'More filler words. '.repeat(600) + '</main>'
     expect(articleText(long)).not.toContain('730 miles')
     expect(articleText(long, ['austin', 'kansas', 'miles'])).toContain('730 miles')

@@ -140,6 +140,7 @@ try {
   const skip = new Set(['data', 'models', 'certs', 'node_modules'])
   cpSync(join(root, 'server'), join(scratch, 'server'), { recursive: true, filter: src => !(skip.has(basename(src)) && dirname(src) === join(root, 'server')) })
   cpSync(join(root, 'shared'), join(scratch, 'shared'), { recursive: true })
+  cpSync(join(root, 'bin'), join(scratch, 'bin'), { recursive: true })
   cpSync(join(root, 'vitest.config.ts'), join(scratch, 'vitest.config.ts'))
   cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
   symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'), 'dir')
