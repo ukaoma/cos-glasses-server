@@ -22,6 +22,11 @@ export interface PromptDraftTranscriptRecord {
   degraded: boolean
   degradationReason?: string
   acceptedDegraded?: boolean
+  /** 6.73.0: the setting this decode followed ("fast:parakeet", "final:large-v3").
+   *  Absent on older records, which were all made under the 6.72.0 defaults. */
+  sttKey?: string
+  engine?: 'whisper' | 'parakeet-ultra'
+  engineReason?: string
 }
 
 /** Higher wins. Fast warm must never replace an HQ/cloud decode for the same audio. */

@@ -280,6 +280,19 @@ describe('Parakeet runs (offline, bounded)', () => {
     await expect(first).rejects.toMatchObject({ reason: 'timeout' })
   })
 
+  it('6.73.0: the interactive (dictation) lane runs two at once, a third is busy, and it is never queued', async () => {
+    await installed()
+    const a = new FakeChild(), b = new FakeChild()
+    const first = P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'interactive', timeoutMs: 200, spawnImpl: (() => a) as any })
+    const second = P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'interactive', timeoutMs: 200, spawnImpl: (() => b) as any })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'interactive', timeoutMs: 200, spawnImpl: (() => new FakeChild()) as any })).rejects.toMatchObject({ reason: 'busy' })
+    await expect(first).rejects.toMatchObject({ reason: 'timeout' })
+    await expect(second).rejects.toMatchObject({ reason: 'timeout' })
+    // The slots free up after a run ends.
+    const done = ((_c: string, args: string[]) => { const child = new FakeChild(); setImmediate(() => { writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify({ text: 'ok' })); child.emit('close', 0, null) }); return child }) as any
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'interactive', timeoutMs: 2000, spawnImpl: done })).resolves.toMatchObject({ text: 'ok' })
+  })
+
   it('is warm only after a warm decode fits the budget', async () => {
     await installed()
     let calls = 0

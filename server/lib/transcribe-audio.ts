@@ -22,6 +22,8 @@ import {
 } from './hallucination-filter.js'
 import { getOpenAIKey, tryGetOpenAIKey } from './openai-key.js'
 import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from './transcription-policy.js'
+import { currentDictationPlan, runParakeetDictation, type DictationParakeetOutcome } from './dictation-stt.js'
+import { dictationSlotForMode, type DictationEngine, type DictationPlan, type DictationSlot } from './stt-settings.js'
 
 export { OpenAIWhisperBudgetExhaustedError, estimateAudioSeconds }
 
@@ -39,6 +41,22 @@ export interface TranscribeAudioResult {
   degradationReason?: string
   elapsedMs: number
   audioBytes: number
+  /** 6.73.0: the engine that decoded this audio. */
+  engine: DictationEngine
+  /** Why the selected engine did not run (a reason code), when it did not. */
+  engineReason?: string
+  /** The setting this decode followed (see DictationPlan.key). */
+  dictationKey: string
+}
+
+/** Injected by tests; production reads the settings and runs Parakeet. */
+export interface DictationSttDeps {
+  plan: (slot: DictationSlot) => DictationPlan
+  parakeet: (audio: Buffer, plan: DictationPlan) => Promise<DictationParakeetOutcome>
+}
+export const defaultDictationSttDeps: DictationSttDeps = {
+  plan: slot => currentDictationPlan(slot),
+  parakeet: (audio, plan) => runParakeetDictation(audio, plan, 'interactive'),
 }
 
 export type TranscriptionBackendPolicy = 'automatic' | 'local-only'
@@ -147,6 +165,9 @@ export async function transcribeAudioBuffer(
     policy?: TranscriptionBackendPolicy
     /** When false, turbo/server failures do not move the shared meeting circuit breaker. */
     affectsCircuit?: boolean
+    /** A plan snapshot taken by the caller (prompt finalize takes one for every chunk). */
+    dictationPlan?: DictationPlan
+    sttDeps?: DictationSttDeps
   } = {},
 ): Promise<TranscribeAudioResult> {
   const requestedMode = opts.mode ?? 'hq'
@@ -160,14 +181,39 @@ export async function transcribeAudioBuffer(
     console.log(`[transcribe] mode downgrade: hq → fast (audio ${audioSeconds.toFixed(1)}s > cap ${HQ_MAX_SECONDS}s)`)
   }
 
-  let text: string
+  let text!: string
   let words: WhisperWord[] | undefined
-  let backend: string
-  let actualQuality: 'hq' | 'fast' | 'cloud'
+  let backend!: string
+  let actualQuality!: 'hq' | 'fast' | 'cloud'
   let degradationReason: string | undefined = effectiveMode !== requestedMode ? 'audio_too_long' : undefined
   const tStart = performance.now()
 
-  if (effectiveMode === 'hq') {
+  // 6.73.0: Fast mode follows the Preview model, otherwise the HQ model. One plan
+  // per decode; a long clip downgraded to Fast is planned for the Fast slot.
+  const sttDeps = opts.sttDeps ?? defaultDictationSttDeps
+  const slot = dictationSlotForMode(effectiveMode)
+  const plan = opts.dictationPlan && opts.dictationPlan.slot === slot ? opts.dictationPlan : sttDeps.plan(slot)
+  let engine: DictationEngine = 'whisper'
+  let engineReason: string | null = plan.reason
+  let decoded = false
+  if (plan.engine === 'parakeet-ultra') {
+    const outcome = await sttDeps.parakeet(audioBuffer, plan)
+    if (outcome.ok) {
+      text = outcome.text
+      backend = 'parakeet-ultra'
+      actualQuality = effectiveMode
+      engine = 'parakeet-ultra'
+      engineReason = null
+      decoded = true
+    } else {
+      engineReason = outcome.reason
+    }
+  }
+
+  if (decoded) {
+    // Parakeet ran: nothing below. Its word clocks are not passed to the prompt tail
+    // guard, whose confidence rule is calibrated on Whisper token probabilities.
+  } else if (effectiveMode === 'hq') {
     try {
       // A0 (2026-07-30): ffmpeg enhance light (highpass=f=80) was measured dropping
       // leading speech on compose ("device just for your awareness"). Meeting batch
@@ -286,5 +332,8 @@ export async function transcribeAudioBuffer(
     ...(degradationReason ? { degradationReason } : {}),
     elapsedMs,
     audioBytes: audioBuffer.length,
+    engine,
+    ...(engineReason ? { engineReason } : {}),
+    dictationKey: plan.key,
   }
 }

@@ -139,7 +139,7 @@ describe('public prompt draft recovery contract', () => {
     }))
     await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
-      { mode: 'hq', policy: 'local-only' },
+      expect.objectContaining({ mode: 'hq', policy: 'local-only' }),
     ))
 
     const beforeFinalize = transcribeAudioBuffer.mock.calls.length
@@ -148,8 +148,8 @@ describe('public prompt draft recovery contract', () => {
     expect(finalized.json).toMatchObject({ text: 'hq polished text', recovered: true, chunkCount: 1, missingChunks: [] })
     // Finalize reused HQ warm cache — no extra automatic decode.
     expect(transcribeAudioBuffer.mock.calls.length).toBe(beforeFinalize)
-    expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), { mode: 'fast', policy: 'local-only' })
-    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'automatic' })
+    expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), expect.objectContaining({ mode: 'fast', policy: 'local-only' }))
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), expect.objectContaining({ mode: 'hq', policy: 'automatic' }))
     // HQ text never painted to HUD
     expect(emitDisplay).not.toHaveBeenCalledWith({
       type: 'prompt_transcript',
@@ -303,8 +303,8 @@ describe('public prompt draft recovery contract', () => {
     await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
     await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
     await new Promise(r => setTimeout(r, 50))
-    expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), { mode: 'fast', policy: 'local-only' })
-    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'local-only' })
+    expect(transcribeAudioBuffer).toHaveBeenCalledWith(expect.any(Buffer), expect.objectContaining({ mode: 'fast', policy: 'local-only' }))
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), expect.objectContaining({ mode: 'hq', policy: 'local-only' }))
   })
 
   it('retries finalize when HQ warm degraded but large-v3 is still available', async () => {
@@ -331,7 +331,7 @@ describe('public prompt draft recovery contract', () => {
     await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
     await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
-      { mode: 'hq', policy: 'local-only' },
+      expect.objectContaining({ mode: 'hq', policy: 'local-only' }),
     ))
     const finalized = await httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
 
@@ -346,7 +346,7 @@ describe('public prompt draft recovery contract', () => {
     expect(hqCalls).toBeGreaterThanOrEqual(2)
     expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
-      { mode: 'hq', policy: 'automatic' },
+      expect.objectContaining({ mode: 'hq', policy: 'automatic' }),
     )
   })
 
@@ -367,7 +367,7 @@ describe('public prompt draft recovery contract', () => {
     await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
     await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
-      { mode: 'hq', policy: 'local-only' },
+      expect.objectContaining({ mode: 'hq', policy: 'local-only' }),
     ))
 
     const finalized = await httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
@@ -401,7 +401,7 @@ describe('public prompt draft recovery contract', () => {
     await httpRequest('POST', `/api/prompt-drafts/${draftId}/chunks?chunkIndex=0`, Buffer.alloc(3200, 1))
     await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
-      { mode: 'hq', policy: 'local-only' },
+      expect.objectContaining({ mode: 'hq', policy: 'local-only' }),
     ))
 
     // Late Fast warm resolves after HQ is already cached.
@@ -440,7 +440,7 @@ describe('public prompt draft recovery contract', () => {
     await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
     await vi.waitFor(() => expect(transcribeAudioBuffer).toHaveBeenCalledWith(
       expect.any(Buffer),
-      { mode: 'hq', policy: 'local-only' },
+      expect.objectContaining({ mode: 'hq', policy: 'local-only' }),
     ))
 
     const finalizePromise = httpRequest('POST', `/api/prompt-drafts/${draftId}/finalize`)
@@ -456,7 +456,7 @@ describe('public prompt draft recovery contract', () => {
     expect(finalized.json.text).toBe('hq from warm')
     // No second HQ decode with automatic while warm was in flight
     expect(transcribeAudioBuffer.mock.calls.length).toBe(callsWhileWaiting)
-    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), { mode: 'hq', policy: 'automatic' })
+    expect(transcribeAudioBuffer).not.toHaveBeenCalledWith(expect.any(Buffer), expect.objectContaining({ mode: 'hq', policy: 'automatic' }))
   })
 
   it('keeps acknowledged audio retryable when every transcription backend is unavailable', async () => {
@@ -526,7 +526,7 @@ describe('public prompt draft recovery contract', () => {
 
     await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalledWith({
       type: 'prompt_transcript',
-      data: { draftId, chunkIndex: 0, text: 'peek words', provisional: true, peekGen: 1 },
+      data: { draftId, chunkIndex: 0, text: 'peek words', provisional: true, peekGen: 1, engine: 'whisper' },
     }))
     expect(transcribeWhisperPreview).toHaveBeenCalledWith(expect.any(Buffer))
     expect(transcribeAudioBuffer).not.toHaveBeenCalled()

@@ -148,7 +148,7 @@ range is the exact Tailscale/CGNAT allocation (`100.64.0.0/10`), not all of
   `COS_OPENAI_WHISPER_FALLBACK=1` opt-in and a configured key; a key alone never
   uploads audio.
 - HQ prompt dictation is requested by default; the phone's **Fast mode** switch
-  opts into turbo. Server 6.16.0 reports whether full local large-v3 actually
+  opts into the fast engine (the STT Preview model since 6.73.0). Server 6.16.0 reports whether full local large-v3 actually
   ran, and compatible companions alert once if an HQ request used Fast or
   Cloud instead of silently claiming HQ.
 - Local-first spoken reply playback through Kokoro on Apple silicon. The first
@@ -679,7 +679,11 @@ GET returns (abridged):
                "progress": {"state": "idle", "bytesDone": 0, "bytesTotal": 654356591, "error": null},
                "warm": {"preview": "cold"}, "preview": {"breaker": {"open": false, "retryAt": null, "misses": 0}, "counters": {}}, "note": "..."},
   "lastJob": {"at": "...", "meeting": "...", "outcome": "batch", "summary": {"windows": 12, "primaryFallbacks": 0, "timestampFallbacks": 0, "secondOpinionFailures": 0, "windowsLost": 0}},
-  "appliesTo": {"preview": "next live chunk", "hq": "next saved meeting"}
+  "dictation": {"preview": {"engine": "whisper", "follows": "preview", "reason": null, "reasonCode": null},
+                "fast": {"engine": "whisper", "follows": "preview", "reason": null, "reasonCode": null},
+                "final": {"engine": "whisper", "follows": "hq", "reason": null, "reasonCode": null},
+                "frontEnd": "raw", "quietGate": "none", "secondOpinion": "off", "note": "..."},
+  "appliesTo": {"preview": "next live chunk", "hq": "next saved meeting", "dictation": "next dictation chunk"}
 }
 ```
 
@@ -711,18 +715,51 @@ GET returns (abridged):
   never gets gap fill). See the evaluation for what each measured.
 - `COS_BATCH_HQ_TIMESTAMPS` still overrides HQ timestamps: `1` forces them on,
   `0` off. `COS_WHISPER_MEETING_PREVIEW=0` still turns the meeting preview off.
-- The `preview` setting drives only the meeting preview lane
-  (`POST /api/transcribe-stream/preview`). A client gets a non-Turbo preview
-  only if it lists that model in the `previewModels` query parameter
-  (comma-separated; COS Glasses 6.10.639 sends it); every other client gets
-  Whisper Turbo, so a phone that only accepts Turbo never sees another model.
-  Dictation's provisional words, prompt HQ and Fast mode are unchanged, and so
-  are playback audio filters. The Whisper previews keep raw audio; the Parakeet
-  preview hears the selected front end.
+- On the meeting preview lane (`POST /api/transcribe-stream/preview`) a client
+  gets a non-Turbo preview only if it lists that model in the `previewModels`
+  query parameter (comma-separated; COS Glasses 6.10.639 sends it); every other
+  client gets Whisper Turbo, so a phone that only accepts Turbo never sees
+  another model. Playback audio filters are unchanged. The Whisper previews keep
+  raw audio; the Parakeet preview hears the selected front end.
+- Since 6.73.0 the settings drive dictation too; see "Dictation" below.
 - The quiet gate decides the prompt and the front end of a live chunk. The
   silence-hallucination text drops (URL-only, repeated thank-you, a quiet
   vocabulary echo) stay on the pre-6.72 RMS test, because a chunk holding one
   short real name can be Silero-quiet.
+
+### Dictation (6.73.0)
+
+Prompts and dictation (Record Message, hold-to-talk, edit instructions, Quick
+VOICE) follow the same settings. Contract and measurements:
+`docs/dictation-stt-contract.md`.
+
+| Dictation decode | Follows | Whisper choice (default) | `parakeet` / `parakeet-ultra` |
+| --- | --- | --- | --- |
+| Live provisional words (`/api/prompt-drafts/:id/peek`) | Preview model | the 6.72.0 preview sidecar | Parakeet Ultra |
+| Closed-chunk HUD text and the Fast mode final | Preview model | the live worker (Turbo, or Large-v3 on a Max-tier Mac) | Parakeet Ultra |
+| Final text with Fast mode off, and the HQ warm | HQ model | whisper-cli Large-v3 | Parakeet Ultra |
+
+- Fast mode means "the fast engine you picked": the Preview model. With Fast
+  mode off the final text comes from the HQ model.
+- Parakeet runs for a prompt only when installed, warm, and with the breaker
+  closed. Otherwise, and when a Parakeet decode fails, is busy, or the audio is
+  not 16 kHz WAV (the browser recorder posts WebM), the 6.72.0 Whisper engine
+  decodes that audio and the response says why (`engineReason`). Selecting a
+  Parakeet HQ model also warms Parakeet. Dictation Parakeet failures count on
+  the same breaker as the meeting preview.
+- The engine is chosen when each decode starts. A finalize takes one snapshot
+  for all its chunks, and a chunk decoded under another selection is decoded
+  again rather than reused.
+- Second opinion and resolver never run on dictation. The quiet gate never
+  drops dictation audio. The front end applies to Parakeet dictation decodes;
+  Whisper dictation decodes keep raw audio, as before.
+- Responses gain `engine` (`whisper`, `parakeet-ultra`, or `mixed` on a
+  finalize) and `engineReason`; `prompt_transcript` events gain `engine`.
+  `actualQuality` keeps its values, so a Parakeet HQ prompt is not "degraded".
+  No phone needs a new request field: the phone never checks a model on
+  dictation text.
+- `COS_DICTATION_FOLLOWS_STT=0` holds every dictation decode on its 6.72.0
+  Whisper engine.
 
 ### Parakeet (FluidAudio CoreML, offline)
 
@@ -814,8 +851,9 @@ and empty workspace. Live preview and canonical meeting transcription are unchan
 ## HQ dictation
 
 Prompt dictation defaults to HQ. The phone owns the preference: **Fast mode
-OFF** requests HQ, and **Fast mode ON** requests turbo. The Mac performs all
-decoding; the phone does not run Whisper.
+OFF** requests HQ, and **Fast mode ON** requests the fast engine (the live
+worker, or Parakeet Ultra when it is the Preview model; see "Dictation (6.73.0)").
+The Mac performs all decoding; the phone does not run Whisper.
 
 For the recommended **Balanced** setup, run:
 

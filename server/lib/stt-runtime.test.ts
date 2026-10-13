@@ -126,6 +126,25 @@ describe('preview warm-up scheduling', () => {
   })
 })
 
+describe('6.73.0: a Parakeet HQ model warms Parakeet too (dictation final uses it only warm)', () => {
+  it('starts a warm-up for hq parakeet-ultra with a Turbo preview, and skips when neither slot is Parakeet', async () => {
+    vi.doMock('./parakeet.js', async (orig) => {
+      const real: any = await orig()
+      return { ...real, parakeetInstalled: () => ({ installed: true, bytes: 1 }), parakeetWarmState: () => ({ state: 'cold', at: 0 }), warmParakeet: vi.fn(async () => true) }
+    })
+    writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ preview: 'turbo', hq: 'parakeet-ultra' }))
+    const R = await import('./stt-runtime.js')
+    const S = await import('./stt-settings.js')
+    R.setRecordingLiveProbe(() => false)
+    expect(R.ensurePreviewWarm()).toBe('started')
+    writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ preview: 'turbo', hq: 'large-v3' }))
+    S.__resetSttSettingsCacheForTests()
+    expect(R.ensurePreviewWarm()).toBe('skipped')
+    vi.doUnmock('./parakeet.js')
+    R.__resetPreviewForTests()
+  })
+})
+
 describe('sidecar keeps both hypotheses (additive)', () => {
   it('writes segment stt and the meeting summary, and drops them when the batch is rejected', async () => {
     const { persistBatchDecisionSidecar } = await import('./meeting-batch-persistence.js')

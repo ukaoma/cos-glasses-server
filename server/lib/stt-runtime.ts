@@ -59,6 +59,11 @@ function notePreviewMiss(now = Date.now()): void {
 }
 function notePreviewHit(): void { breaker = { misses: 0, openUntil: 0, backoffMs: PREVIEW_BREAKER_BASE_MS } }
 
+/** 6.73.0: dictation Parakeet decodes share the preview breaker, so a Parakeet that keeps
+ *  failing stops being tried for prompts and meetings alike. A busy lane is not a miss. */
+export function noteParakeetDictationMiss(now = Date.now()): void { notePreviewMiss(now) }
+export function noteParakeetDictationHit(): void { notePreviewHit() }
+
 export function __resetPreviewForTests(): void {
   for (const k of Object.keys(previewStats) as Array<keyof typeof previewStats>) previewStats[k] = 0
   breaker = { misses: 0, openUntil: 0, backoffMs: PREVIEW_BREAKER_BASE_MS }
@@ -80,6 +85,7 @@ export function currentSttCapabilities(): SttCapabilities {
     parakeetPreviewWarmFailed: installed && warm === 'failed',
     parakeetPreviewBreakerOpen: installed && previewBreakerState().open,
     previewDisabledByEnv: process.env.COS_WHISPER_MEETING_PREVIEW === '0',
+    dictationDisabledByEnv: process.env.COS_DICTATION_FOLLOWS_STT === '0',
   }
 }
 
@@ -132,7 +138,9 @@ export const WARM_RETRY_MS = 120_000
  */
 export function ensurePreviewWarm(now = Date.now()): 'started' | 'skipped' | 'deferred' {
   const settings = readSttSettings()
-  if (settings.preview !== 'parakeet' || !parakeetInstalled().installed) return 'skipped'
+  // 6.73.0: a Parakeet HQ model also warms, because dictation final text uses it only warm.
+  const wanted = settings.preview === 'parakeet' || settings.hq === 'parakeet-ultra'
+  if (!wanted || !parakeetInstalled().installed) return 'skipped'
   const w = parakeetWarmState(PREVIEW_PARAKEET_MODEL)
   if (w.state === 'warm' || w.state === 'warming') return 'skipped'
   if (w.state === 'failed' && now - w.at < WARM_RETRY_MS) return 'skipped'
@@ -144,7 +152,7 @@ export function ensurePreviewWarm(now = Date.now()): 'started' | 'skipped' | 'de
 }
 
 let warmTimer: ReturnType<typeof setInterval> | null = null
-/** Server start: one try now, then every minute (a no-op unless Parakeet preview is selected and cold). */
+/** Server start: one try now, then every minute (a no-op unless a Parakeet preview or HQ model is selected and cold). */
 export function startPreviewWarmLoop(): void {
   ensurePreviewWarm()
   if (warmTimer) return

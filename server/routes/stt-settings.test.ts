@@ -56,7 +56,9 @@ describe('STT settings route (6.72.0)', () => {
     expect(DEFAULT_STT_SETTINGS).toMatchObject({ secondOpinion: 'off', resolver: false, preview: 'turbo', hq: 'large-v3', frontEnd: 'highpass', quietGate: 'silero' })
     expect(json.frontEnd.selected).toBe('highpass')
     expect(json.quietGate.selected).toBe('silero')
-    expect(json.appliesTo).toEqual({ preview: 'next live chunk', hq: 'next saved meeting' })
+    // 6.73.0 adds dictation; the 6.72.0 keys keep their values.
+    expect(json.appliesTo).toEqual({ preview: 'next live chunk', hq: 'next saved meeting', dictation: 'next dictation chunk' })
+    expect(json.dictation).toMatchObject({ preview: { engine: 'whisper', follows: 'preview' }, fast: { engine: 'whisper' }, final: { engine: 'whisper', follows: 'hq' }, quietGate: 'none', secondOpinion: 'off' })
     expect(json.preview.options.map((o: any) => o.id)).toEqual(['turbo', 'large-v3', 'parakeet', 'nemotron-560'])
     expect(json.hq.options.map((o: any) => o.id)).toEqual(['large-v3', 'large-v3-legacy', 'parakeet-ultra'])
     const { SECOND_OPINION_IDS } = await import('../lib/stt-settings.js')

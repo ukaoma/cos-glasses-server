@@ -130,6 +130,8 @@ export interface SttCapabilities {
   /** Repeated preview misses opened the preview breaker: Turbo until it closes. */
   parakeetPreviewBreakerOpen?: boolean
   previewDisabledByEnv: boolean
+  /** 6.73.0: COS_DICTATION_FOLLOWS_STT=0 keeps every dictation decode on its 6.72.0 Whisper engine. */
+  dictationDisabledByEnv?: boolean
 }
 
 export interface SttOption {
@@ -153,7 +155,7 @@ export function previewOptions(c: SttCapabilities): SttOption[] {
     : c.parakeetPreviewBreakerOpen
       ? 'Parakeet missed several previews in a row; Whisper Turbo previews for a few minutes, then Parakeet is tried again.'
       : c.parakeetPreviewWarm
-        ? 'Parakeet Ultra on the Neural Engine, about 0.3 s per chunk. Experimental: compare it live yourself. Needs COS Glasses 6.10.639; older phones keep Whisper Turbo.'
+        ? 'Parakeet Ultra on the Neural Engine, about 0.3 s per chunk. Experimental: compare it live yourself. Meeting previews need COS Glasses 6.10.639 (older phones keep Whisper Turbo there). Dictation previews and Fast mode use it on every phone.'
         : c.parakeetPreviewWarmFailed
           ? 'Parakeet could not start; Whisper Turbo previews. It is tried again every 2 minutes.'
           : c.parakeetPreviewWarming
@@ -306,6 +308,92 @@ export function effectiveStt(settings: SttSettings, c: SttCapabilities): Effecti
   }
 }
 
+// ── Dictation (6.73.0) ────────────────────────────────────────────────────────
+//
+// Prompting and dictation follow the same choices (docs/dictation-stt-contract.md):
+// the live preview and Fast mode follow the Preview model, the final text follows
+// the HQ model. Second opinion and resolver never run on dictation.
+
+export type DictationSlot = 'preview' | 'fast' | 'final'
+export type DictationEngine = 'whisper' | 'parakeet-ultra'
+
+export interface DictationPlan {
+  slot: DictationSlot
+  engine: DictationEngine
+  /** Why the selection could not run, as a REASON_TEXT code; null when it runs as chosen. */
+  reason: string | null
+  /** What a Parakeet decode hears. Whisper dictation always decodes raw audio. */
+  frontEnd: FrontEndId
+  /** The decode path this follows: "preview:" or "fast:" plus turbo or parakeet, or
+   *  "final:" plus large-v3 or parakeet-ultra. A cached decode is reused only under the same key. */
+  key: string
+}
+
+/** Which slot a decode is in: Fast mode follows the Preview model, otherwise the HQ model. */
+export function dictationSlotForMode(mode: 'hq' | 'fast'): DictationSlot {
+  return mode === 'fast' ? 'fast' : 'final'
+}
+
+/** The 6.72.0 key every pre-6.73 cached decode was made under. */
+export function legacyDictationKey(mode: 'hq' | 'fast'): string {
+  return mode === 'fast' ? `fast:${DEFAULT_STT_SETTINGS.preview}` : `final:${DEFAULT_STT_SETTINGS.hq}`
+}
+
+/** Pure: what a dictation decode in this slot will use, given the settings and this Mac. */
+export function dictationPlan(slot: DictationSlot, settings: SttSettings, c: SttCapabilities): DictationPlan {
+  if (c.dictationDisabledByEnv) {
+    return { slot, engine: 'whisper', reason: 'dictation_disabled_by_env', frontEnd: settings.frontEnd, key: slot === 'final' ? 'final:large-v3' : `${slot}:turbo` }
+  }
+  const wantsParakeet = slot === 'final' ? settings.hq === 'parakeet-ultra' : settings.preview === 'parakeet'
+  // The key names the dictation decode path, not the raw id: every Whisper choice in a
+  // slot is the same 6.72.0 decode for a prompt, so switching among them re-decodes nothing.
+  const key = slot === 'final' ? (wantsParakeet ? 'final:parakeet-ultra' : 'final:large-v3') : `${slot}:${wantsParakeet ? 'parakeet' : 'turbo'}`
+  const base = { slot, frontEnd: settings.frontEnd, key }
+  if (!wantsParakeet) {
+    // large-v3 and nemotron-560 previews are not offered; dictation keeps its Whisper engine.
+    const reason = slot !== 'final' && settings.preview === 'large-v3' ? 'large_v3_preview_not_offered'
+      : slot !== 'final' && settings.preview === 'nemotron-560' ? 'nemotron_not_wired' : null
+    return { ...base, engine: 'whisper', reason }
+  }
+  const reason = !c.parakeetInstalled ? 'parakeet_not_installed'
+    : c.parakeetPreviewBreakerOpen ? 'parakeet_breaker_open'
+      : c.parakeetPreviewWarm ? null
+        : c.parakeetPreviewWarmFailed ? 'parakeet_warm_failed'
+          : 'parakeet_warming'
+  return { ...base, engine: reason ? 'whisper' : 'parakeet-ultra', reason }
+}
+
+export const DICTATION_REASON_TEXT: Record<string, string> = {
+  parakeet_busy: 'Parakeet was busy with another decode; Whisper decoded this one.',
+  parakeet_failed: 'Parakeet failed on this audio; Whisper decoded it instead.',
+  audio_not_pcm_wav: 'This audio is not 16 kHz WAV, which Parakeet needs; Whisper decoded it.',
+  dictation_disabled_by_env: 'Dictation is held on Whisper on this server (COS_DICTATION_FOLLOWS_STT=0).',
+}
+
+function dictationSlotView(plan: DictationPlan, follows: 'preview' | 'hq') {
+  const code = plan.reason
+  return { engine: plan.engine, follows, reason: code ? (REASON_TEXT[code] ?? DICTATION_REASON_TEXT[code] ?? code) : null, reasonCode: code }
+}
+
+export function dictationView(settings: SttSettings, c: SttCapabilities) {
+  const preview = dictationPlan('preview', settings, c)
+  const fast = dictationPlan('fast', settings, c)
+  const final = dictationPlan('final', settings, c)
+  const anyParakeet = settings.preview === 'parakeet' || settings.hq === 'parakeet-ultra'
+  const name = (p: DictationPlan) => p.engine === 'parakeet-ultra' ? 'Parakeet Ultra' : 'Whisper'
+  const note = `Dictation follows these settings: the live preview and Fast mode use the Preview model (now ${name(preview)}), the final text uses the HQ model (now ${name(final)}). `
+    + 'Dictation never runs the second opinion or the resolver, and the quiet gate never drops a spoken prompt.'
+  return {
+    preview: dictationSlotView(preview, 'preview'),
+    fast: dictationSlotView(fast, 'preview'),
+    final: dictationSlotView(final, 'hq'),
+    frontEnd: anyParakeet ? settings.frontEnd : 'raw' as const,
+    quietGate: 'none' as const,
+    secondOpinion: 'off' as const,
+    note,
+  }
+}
+
 export interface ParakeetStatus {
   installed: boolean
   installable: boolean
@@ -337,6 +425,7 @@ export function settingsView(settings: SttSettings, c: SttCapabilities, parakeet
     quietGate: { selected: settings.quietGate, options: QUIET_GATE_OPTIONS },
     parakeet,
     lastJob,
-    appliesTo: { preview: 'next live chunk', hq: 'next saved meeting' },
+    dictation: dictationView(settings, c),
+    appliesTo: { preview: 'next live chunk', hq: 'next saved meeting', dictation: 'next dictation chunk' },
   }
 }

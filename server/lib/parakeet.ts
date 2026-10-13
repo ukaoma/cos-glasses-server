@@ -383,8 +383,10 @@ type SpawnLike = (command: string, args: string[], options: SpawnOptions) => Chi
 
 export interface ParakeetRunOptions {
   model: ParakeetModelId
-  /** preview: one at a time, a busy lane is a miss. batch: queued, lower CPU priority. */
-  lane: 'preview' | 'batch' | 'warmup'
+  /** preview: one at a time, a busy lane is a miss. batch: queued, lower CPU priority.
+   *  interactive (6.73.0, dictation final and Fast mode): normal priority, never queued
+   *  behind a meeting batch, at most INTERACTIVE_LANE_MAX at once; beyond that it is busy. */
+  lane: 'preview' | 'batch' | 'warmup' | 'interactive'
   timeoutMs: number
   signal?: AbortSignal
   spawnImpl?: SpawnLike
@@ -510,12 +512,20 @@ export function padShortWav(wav: Buffer, minSec = MIN_PARAKEET_AUDIO_SEC): Buffe
 
 let previewBusy = false
 let batchTail: Promise<unknown> = Promise.resolve()
+/** A prompt's Fast warm and HQ warm can overlap for one chunk; a third waits for Whisper. */
+export const INTERACTIVE_LANE_MAX = 2
+let interactiveRunning = 0
 
 export function transcribeParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
   if (options.lane === 'preview') {
     if (previewBusy) return Promise.reject(new ParakeetError('busy', 'a preview decode is already running'))
     previewBusy = true
     return runParakeet(wav, options).finally(() => { previewBusy = false })
+  }
+  if (options.lane === 'interactive') {
+    if (interactiveRunning >= INTERACTIVE_LANE_MAX) return Promise.reject(new ParakeetError('busy', 'the interactive lane is full'))
+    interactiveRunning++
+    return runParakeet(wav, options).finally(() => { interactiveRunning-- })
   }
   if (options.lane === 'batch') {
     const job = batchTail.then(() => runParakeet(wav, options))
@@ -581,7 +591,7 @@ function runParakeetChecked(wav: Buffer, options: ParakeetRunOptions): Promise<P
     options.signal?.addEventListener('abort', onAbort, { once: true })
     liveChildren.add(child)
     child.once('close', () => liveChildren.delete(child))
-    if (child.pid && options.lane !== 'preview') {
+    if (child.pid && options.lane !== 'preview' && options.lane !== 'interactive') {
       try { setPriority(child.pid, 10) } catch { /* runs at normal priority */ }
     }
     let stderr = ''
@@ -659,7 +669,7 @@ export function warmParakeet(model: ParakeetModelId, spawnImpl?: SpawnLike): Pro
 }
 
 export function __resetParakeetForTests(): void {
-  warm.clear(); warming.clear(); previewBusy = false; batchTail = Promise.resolve(); installing = null
+  warm.clear(); warming.clear(); previewBusy = false; interactiveRunning = 0; batchTail = Promise.resolve(); installing = null
   progress = { state: 'idle', bytesDone: 0, bytesTotal: TOTAL_BYTES, error: null }
   installedCache = null
 }

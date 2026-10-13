@@ -1,4 +1,5 @@
-// POST /api/transcribe — Whisper transcription endpoint (message-query / one-shot path).
+// POST /api/transcribe: one-shot transcription (message-query path). 6.73.0: the engine
+// follows the STT settings (docs/dictation-stt-contract.md); Whisper is the fallback.
 //
 // The actual Whisper + cleanup pipeline lives in server/lib/transcribe-audio.ts so
 // prompt-draft recovery and the legacy one-shot path share exactly the same behavior.
@@ -43,7 +44,7 @@ transcribeRouter.post('/transcribe', async (req, res) => {
     }
 
     const result = await transcribeAudioBuffer(audioBuffer, { mode: resolveMode(req) })
-    console.log(`[perf] /transcribe: ${result.elapsedMs.toFixed(1)}ms | mode=${result.mode} | ${result.backend} | ${result.audioBytes}b | ${result.text.length} chars`)
+    console.log(`[perf] /transcribe: ${result.elapsedMs.toFixed(1)}ms | mode=${result.mode} | ${result.backend}${result.engineReason ? ` (${result.engineReason})` : ''} | ${result.audioBytes}b | ${result.text.length} chars`)
     res.json({
       text: result.text,
       backend: result.backend,
@@ -52,6 +53,9 @@ transcribeRouter.post('/transcribe', async (req, res) => {
       actualQuality: result.actualQuality,
       degraded: result.degraded,
       ...(result.degradationReason ? { degradationReason: result.degradationReason } : {}),
+      // 6.73.0, additive: which engine decoded it and, when the selection could not run, why.
+      engine: result.engine,
+      ...(result.engineReason ? { engineReason: result.engineReason } : {}),
     })
   } catch (err: any) {
     if (err instanceof MaintenanceLifecycleError) {

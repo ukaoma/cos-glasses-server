@@ -40,6 +40,8 @@ import { applyCorrections } from '../lib/whisper-local.js'
 import { applyFuzzyCorrections } from '../lib/fuzzy-correct.js'
 import { getAllSpeakerNames } from '../lib/speaker-embeddings.js'
 import { transcribeWhisperPreview } from '../lib/whisper-preview.js'
+import { currentDictationPlan, runParakeetDictation } from '../lib/dictation-stt.js'
+import { dictationSlotForMode, legacyDictationKey, type DictationPlan } from '../lib/stt-settings.js'
 import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
 import { getVocabulary } from '../lib/profile.js'
 import { createBreaker } from '../lib/claude-circuit.js'
@@ -240,14 +242,25 @@ async function sendDraftError(res: Response, draftId: string, err: any): Promise
   res.status(err.status ?? 500).json({ error: err.message })
 }
 
-function modeQualityKey(draftId: string, chunkIndex: number, mode: 'hq' | 'fast', hash: string): string {
-  return `${draftId}:${chunkIndex}:${mode}:${hash}`
+// 6.73.0: the setting key is part of every decode key, so a decode made under
+// one STT selection is never shared with or reused for another.
+function modeQualityKey(draftId: string, chunkIndex: number, mode: 'hq' | 'fast', hash: string, sttKey: string): string {
+  return `${draftId}:${chunkIndex}:${mode}:${hash}:${sttKey}`
 }
 
-async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffer, mode: 'hq' | 'fast', purpose: 'warm' | 'final'): Promise<string> {
+/** The setting key a stored record was made under (pre-6.73 records: the 6.72.0 defaults). */
+export function recordSttKey(record: PromptDraftTranscriptRecord): string {
+  return record.sttKey ?? legacyDictationKey(record.requestedMode)
+}
+
+function planFor(mode: 'hq' | 'fast'): DictationPlan {
+  return currentDictationPlan(dictationSlotForMode(mode))
+}
+
+async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffer, mode: 'hq' | 'fast', purpose: 'warm' | 'final', plan: DictationPlan = planFor(mode)): Promise<string> {
   const hash = audioHash(audio)
-  const purposeKey = `${draftId}:${chunkIndex}:${purpose}:${mode}:${hash}`
-  const sharedKey = modeQualityKey(draftId, chunkIndex, mode, hash)
+  const purposeKey = `${draftId}:${chunkIndex}:${purpose}:${mode}:${hash}:${plan.key}`
+  const sharedKey = modeQualityKey(draftId, chunkIndex, mode, hash, plan.key)
 
   // HQ warm and HQ finalize must share one decode (plan step 8a).
   const existingShared = modeQualityJobs.get(sharedKey)
@@ -276,6 +289,9 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
           backend: warmMatches ? warm!.backend : 'shared-inflight',
           degraded: warmMatches ? warm!.degraded : false,
           ...(warmMatches && warm!.degradationReason ? { degradationReason: warm!.degradationReason } : {}),
+          sttKey: plan.key,
+          ...(warmMatches && warm!.engine ? { engine: warm!.engine } : {}),
+          ...(warmMatches && warm!.engineReason ? { engineReason: warm!.engineReason } : {}),
         }
         if (
           !cachedFinal
@@ -298,7 +314,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
     try {
       // Speculative warm is always local-only. Finalize may use automatic cloud fallback.
       const policy = purpose === 'warm' ? 'local-only' as const : 'automatic' as const
-      const result = await transcribeAudioBuffer(audio, { mode, policy })
+      const result = await transcribeAudioBuffer(audio, { mode, policy, dictationPlan: plan })
       if (!isCurrentChunk(draftId, chunkIndex, audio)) return ''
       // 6.45.4 — the sentence Whisper invents after the speaker stops. Never trims
       // audio; drops a trailing sentence only on the junk lexicon or on silence
@@ -313,9 +329,11 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
         text, hash, requestedMode: result.requestedMode, actualQuality: result.actualQuality,
         backend: result.backend, degraded: result.degraded,
         ...(result.degradationReason ? { degradationReason: result.degradationReason } : {}),
+        sttKey: result.dictationKey, engine: result.engine,
+        ...(result.engineReason ? { engineReason: result.engineReason } : {}),
       }
       await markPromptDraftChunkTranscript(draftId, chunkIndex, record, purpose)
-      console.log(`[prompt-draft] chunk ${draftId}/${chunkIndex}: ${result.elapsedMs.toFixed(1)}ms | ${result.backend} | ${purpose}/${mode} | ${text.length} chars`)
+      console.log(`[prompt-draft] chunk ${draftId}/${chunkIndex}: ${result.elapsedMs.toFixed(1)}ms | ${result.backend}${result.engineReason ? ` (${result.engineReason})` : ''} | ${purpose}/${mode} | ${text.length} chars`)
       return text
     } catch (err) {
       if (err instanceof NoSpeechDetectedError) {
@@ -324,7 +342,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
         // recognized failure shape instead of persisting either the artifact
         // or an empty gap. Other no-speech results retain existing behavior.
         if (mode === 'hq' && isCaptionCreditHallucination(err.rawText)) {
-          const fastJob = modeQualityJobs.get(modeQualityKey(draftId, chunkIndex, 'fast', hash))
+          const fastJob = [...modeQualityJobs.entries()].find(([key]) => key.startsWith(`${draftId}:${chunkIndex}:fast:${hash}:`))?.[1]
           if (fastJob) {
             try { await fastJob } catch { /* normal no-speech path below */ }
           }
@@ -342,6 +360,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
                 requestedMode: 'hq',
                 degraded: true,
                 degradationReason: 'hq_caption_credit_hallucination',
+                sttKey: plan.key,
               }, 'final')
             }
             console.warn(`[prompt-draft] dropped HQ caption-credit hallucination ${draftId}/${chunkIndex}; retained Fast text`)
@@ -349,7 +368,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
           }
         }
         await markPromptDraftChunkTranscript(draftId, chunkIndex, {
-          text: '', hash, requestedMode: mode, actualQuality: mode, backend: 'no-speech', degraded: false,
+          text: '', hash, requestedMode: mode, actualQuality: mode, backend: 'no-speech', degraded: false, sttKey: plan.key,
         }, purpose)
         return ''
       }
@@ -364,12 +383,15 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
   return job
 }
 
-function isReusableTranscript(
+export function isReusableTranscript(
   cached: PromptDraftTranscriptRecord | undefined,
   hash: string,
   mode: 'hq' | 'fast',
+  sttKey: string,
 ): boolean {
   if (!cached || cached.hash !== hash || cached.requestedMode !== mode) return false
+  // 6.73.0: a decode made under a different STT selection is decoded again.
+  if (recordSttKey(cached) !== sttKey) return false
   if (cached.backend.startsWith('legacy')) return false
   if (mode === 'fast') return cached.actualQuality === 'fast' || cached.actualQuality === 'cloud'
   // mode === 'hq'
@@ -385,12 +407,14 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
   if (!meta) throw Object.assign(new Error('draft not found'), { status: 404 })
   const texts: string[] = []
   const transcriptRecords: PromptDraftTranscriptRecord[] = []
+  // One STT snapshot for the whole finalize: a settings change mid-finalize never mixes selections.
+  const plan = planFor(mode)
   for (const chunk of readPromptDraftChunks(draftId)) {
     try {
       const hash = audioHash(chunk.audioBuffer)
       // Await in-flight HQ warm before deciding cache miss (plan step 8b belt).
       if (mode === 'hq') {
-        const inflight = modeQualityJobs.get(modeQualityKey(draftId, chunk.chunkIndex, 'hq', hash))
+        const inflight = modeQualityJobs.get(modeQualityKey(draftId, chunk.chunkIndex, 'hq', hash, plan.key))
         if (inflight) {
           try { await inflight } catch { /* finalize may retry with automatic below */ }
         }
@@ -401,8 +425,8 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
       // When Settings HQ is available, never treat a degraded turbo warm as final
       // — that left finished chats on Fast text while REVIEW looked "HQ ready".
       // Legacy records stay excluded (reconstructed provenance).
-      const reusable = isReusableTranscript(cached, hash, mode)
-      const raw = reusable ? cached!.text : await transcribeChunk(draftId, chunk.chunkIndex, chunk.audioBuffer, mode, 'final')
+      const reusable = isReusableTranscript(cached, hash, mode, plan.key)
+      const raw = reusable ? cached!.text : await transcribeChunk(draftId, chunk.chunkIndex, chunk.audioBuffer, mode, 'final', plan)
       const text = sanitizeTranscript(draftId, raw, !reusable)
       if (text.trim()) {
         texts.push(text.trim())
@@ -433,6 +457,8 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
   const degraded = mode === 'hq' && (actualQuality !== 'hq' || transcriptRecords.some(record => record.degraded))
   const backends = [...new Set(transcriptRecords.map(record => record.backend))]
   const degradationReason = transcriptRecords.find(record => record.degradationReason)?.degradationReason
+  const engines = [...new Set(transcriptRecords.map(record => record.engine ?? 'whisper'))]
+  const engineReason = transcriptRecords.find(record => record.engineReason)?.engineReason
   return {
     draftId,
     text: finalText,
@@ -445,6 +471,9 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
     degraded,
     backend: backends.length === 1 ? backends[0] : 'mixed',
     ...(degradationReason ? { degradationReason } : {}),
+    // 6.73.0, additive.
+    engine: engines.length === 1 ? engines[0] : engines.length === 0 ? plan.engine : 'mixed',
+    ...(engineReason ? { engineReason } : {}),
   }
 }
 
@@ -513,15 +542,24 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/peek', async (req, res) => {
     peekTail = peekTail.then(async () => {
       lease.setPhase('active')
       try {
-        const result = await transcribeWhisperPreview(audio)
+        // 6.73.0: the live preview follows the Preview model. Parakeet runs on the
+        // shared one-at-a-time preview lane; any miss is the 6.72.0 Whisper peek.
+        const plan = currentDictationPlan('preview')
+        let raw: string | null = null
+        let engine: 'whisper' | 'parakeet-ultra' = 'whisper'
+        if (plan.engine === 'parakeet-ultra') {
+          const outcome = await runParakeetDictation(audio, plan, 'preview')
+          if (outcome.ok) { raw = applyCorrections(outcome.text); engine = 'parakeet-ultra' }
+        }
+        if (raw === null) raw = (await transcribeWhisperPreview(audio)).text
         // 6.45.4: the same whole-sentence filler rule as the commit path, so an
         // invented closing line never paints on the lens only to vanish later.
-        const text = sanitizeTranscript(draftId, guardPromptTail({ text: result.text, speech: SPEECH_UNKNOWN }).text, false)
+        const text = sanitizeTranscript(draftId, guardPromptTail({ text: raw, speech: SPEECH_UNKNOWN }).text, false)
         if (!text) return
         if (!loadPromptDraftMeta(draftId)) return
         emitDisplay({
           type: 'prompt_transcript',
-          data: { draftId, chunkIndex, text, provisional: true, peekGen },
+          data: { draftId, chunkIndex, text, provisional: true, peekGen, engine },
         })
       } catch (err: any) {
         if (!(err instanceof NoSpeechDetectedError)) {
@@ -575,9 +613,10 @@ promptDraftsRouter.post('/prompt-drafts/:draftId/chunks', async (req, res) => {
       // transcript only after rechecking that this exact audio still owns the
       // chunk index; a retry/replacement must never paint stale words.
       if (!isCurrentChunk(req.params.draftId, chunkIndex, audio)) return
+      const warm = loadPromptDraftMeta(req.params.draftId)?.warmTranscripts?.[String(chunkIndex)]
       emitDisplay({
         type: 'prompt_transcript',
-        data: { draftId: req.params.draftId, chunkIndex, text },
+        data: { draftId: req.params.draftId, chunkIndex, text, ...(warm?.requestedMode === 'fast' && warm.engine ? { engine: warm.engine } : {}) },
       })
     }).catch(err => {
       console.warn(`[prompt-draft] warm transcription failed ${req.params.draftId}/${chunkIndex}: ${err.message}`)
