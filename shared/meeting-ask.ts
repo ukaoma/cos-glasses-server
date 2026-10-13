@@ -170,6 +170,19 @@ export interface MeetingAskExchange {
     files: MeetingAskFile[];
     error?: string;
     retryOf?: string;
+    /** Server 6.71.13 (capabilities.factCheckScope): what a completed Fact check covered. Named-claim checks and follow-ups carry none. */
+    factCheckRange?: MeetingAskFactCheckRange;
+}
+/**
+ * What one Fact check covered, in meeting-elapsed ms (the clock of throughMs and turn.elapsedMs). The first
+ * check covers the whole meeting (full); each later one covers only what is new since the last completed
+ * check's throughMs. A check that found nothing new still completes with claims 0, so the next one moves on.
+ */
+export interface MeetingAskFactCheckRange {
+    fromMs: number;
+    throughMs: number;
+    full: boolean;
+    claims: number;
 }
 export interface MeetingAskCapabilities {
     protocolVersion: 2;
@@ -179,6 +192,8 @@ export interface MeetingAskCapabilities {
     publicTopics?: true;
     /** Explicit recent-claim Fact check CTA; transport remains action=ask. */
     factCheck?: true;
+    /** 6.71.13: the server checks the whole meeting first, then only what is new, and says which in factCheckRange. */
+    factCheckScope?: 1;
     /** 6.71.1: POST /api/meeting-ask/files/media turns uploaded media into meeting files. */
     phoneFiles?: true;
     /** 6.71.1: config carries cosSearch and PUT config {cosSearch} changes it. */

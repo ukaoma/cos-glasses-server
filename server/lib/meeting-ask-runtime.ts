@@ -1,5 +1,7 @@
 import { PUBLIC_TOPIC_SYSTEM, publicTopicContext, admitPublicTopic, publicTopicLookupGate, previousPublicTopic, genericRetirementQuery } from './meeting-public-topic.js';
 import { isFactCheckCTA } from './meeting-ask-review.js';
+import { factCheckScopeEnabled, factCheckScopeRequest, lastFactCheckLookup, continuationIntent, runMeetingFactCheck, defaultOwnerArea, medicalDosingRequest, MEDICAL_DOSING_ANSWER, type OwnerOrigin } from './meeting-fact-check.js';
+import { meetingAskAnswerMarkdown } from '../../shared/meeting-ask.js';
 import { captureFinalizedAskEvidence, type FinalizedAskEvidence } from './meeting-ask-transcript.js';
 import { transcriptSources } from './meeting-ask-transcript-sources.js';
 import { confirmOrientation, meetingCalendar, meetingDomains, validateOrientationChange } from './meeting-ask-orientation.js';
@@ -20,6 +22,8 @@ import { createHash } from 'node:crypto';
 import { readMeetingImage, imageTextHasSecrets } from './meeting-image-ocr.js';
 import { isValidMediaId, mediaCategoryOf } from '../../shared/media-attachment.js';
 export const MEETING_ASK_CAPABILITIES: MeetingAskCapabilities = { protocolVersion: 2, durableHistory: true, attachmentContext: true, webRetrieval: false, phoneFiles: true, cosSearchMode: true, meetingContext: true, followUpReview: true, publicTopics:true, factCheck:true };
+/** The advertised capabilities: 6.71.13 adds factCheckScope unless COS_MEETING_FACT_CHECK_SCOPE=0. */
+export function meetingAskCapabilities(): MeetingAskCapabilities { return { ...MEETING_ASK_CAPABILITIES, ...(factCheckScopeEnabled() ? { factCheckScope: 1 as const } : {}) }; }
 /**
  * Replaces 'No web.' in LIVE_ASK_SYSTEM when the web is available. The planner decides whether to look
  * anything up; this tells it how to ask so the server's gate (meeting-ask-web.ts) can admit the query.
@@ -45,6 +49,8 @@ interface RuntimeDeps {
     /** Uploaded media: the record and its upload-time text extract (POST files/media). */
     readImage: typeof readMeetingImage;
     media: () => Pick<ReturnType<typeof getMediaStore>, 'resolveUsable' | 'resolveModelDerivatives'>;
+    /** Where the owner is based (profile home_city, else the phone's last weather area), for a disclosed origin assumption. */
+    ownerArea: () => OwnerOrigin | null;
 }
 function profileWearer(): string | null { try {
     const name = getOwnerName();
@@ -53,7 +59,7 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources) };
+const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: defaultOwnerArea };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))
@@ -169,7 +175,7 @@ export class MeetingAskRuntime {
         if (!serverInstanceId)
             throw new AskError('server_not_ready', 503);
         const catalog = await this.deps.catalog();
-        return { protocolVersion: 2, serverInstanceId, selected: this.deps.store.config(), cosSearch: this.deps.store.cosSearch(), publicTopics:this.deps.store.publicTopics(), capabilities: { ...MEETING_ASK_CAPABILITIES, webRetrieval: this.deps.webCapability().available },
+        return { protocolVersion: 2, serverInstanceId, selected: this.deps.store.config(), cosSearch: this.deps.store.cosSearch(), publicTopics:this.deps.store.publicTopics(), capabilities: { ...meetingAskCapabilities(), webRetrieval: this.deps.webCapability().available },
             models: catalog.flatMap(e => (e.models.length ? e.models : [e.defaultModel]).filter(Boolean).map(model => ({ engine: e.engine, model, available: e.available && (e.engine === 'claude' || e.engine === 'codex'), ...(!e.available ? { reason: e.detail ?? 'provider_unavailable' } : e.engine !== 'claude' && e.engine !== 'codex' ? { reason: 'meeting_adapter_not_qualified' } : {}) }))),
             web: this.deps.webCapability() };
     }
@@ -354,6 +360,12 @@ export class MeetingAskRuntime {
             if (controller.signal.aborted)
                 throw new AskError('cancelled');
             this.deps.store.transition(input.requestId, 'running');
+            if (input.action === 'ask' && medicalDosingRequest(input.question)) {
+                // A dose for a specific person is never generated or searched: fixed general safety information.
+                const sections = [{ label: 'So what', text: MEDICAL_DOSING_ANSWER, sources: [] }, { label: 'Confidence', text: 'Limited — General safety information; a dose needs the exact drug and a clinician.', sources: [] }];
+                this.deps.store.transition(input.requestId, 'completed', { answer: meetingAskAnswerMarkdown(sections), sections, sources: [], notices: [...refinementNotices, 'A medication dose for a specific person is not given. General safety information only; nothing was searched.'] });
+                return;
+            }
             const journal = this.deps.store.list();
             const history = journal.filter(r => r.exchange.sessionId === input.sessionId && r.exchange.serverInstanceId === input.serverInstanceId && r.exchange.status === 'completed' && r.exchange.throughMs <= input.elapsedMs).sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt)).slice(-4).map(r => ({ question: r.exchange.question, answer: r.exchange.answer ?? '', sources: r.exchange.sources }));
             let remaining = 16000;
@@ -371,6 +383,19 @@ export class MeetingAskRuntime {
                 extraNotices.push('Public web lookup is unavailable: Claude search provider is not connected.');
             // Only the user's own typed questions from this meeting, newest last. Answers, transcript and files never lend words.
             const priorQuestions = priorUserQuestions(journal, input);
+            // 6.71.13: meeting-wide Fact check, named claim checks and their follow-ups. The narrow
+            // retirement-rule catalog route keeps precedence, unchanged.
+            const factMode = factCheckScopeEnabled() && publicTopics && webAvailable && input.action === 'ask' && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input) : null;
+            if (factMode) {
+                const fact = await runMeetingFactCheck({ ...factMode, input: normal, at: { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs }, records: journal, run: (prompt, system, signal) => this.deps.run(input.model!, prompt, system, signal), search: (query, signal) => this.deps.webSearch(query, signal), ownerArea: this.deps.ownerArea, nameWords: [this.deps.wearer() ?? ''], signal: controller.signal, startedAt: executionStarted });
+                if (fact) {
+                    completedResult = { answer: fact.answer, sections: fact.sections, sources: fact.sources, notices: fact.notices, model: fact.model ?? '', throughMs: input.elapsedMs };
+                    if (controller.signal.aborted)
+                        throw new AskError('cancelled');
+                    this.deps.store.transition(input.requestId, 'completed', { answer: fact.answer, sections: fact.sections, sources: fact.sources.map(s => s.kind === 'transcript' ? { ...s, sessionId: input.sessionId } : s), ...(fact.model ? { model: fact.model } : {}), notices: [...new Set([...refinementNotices, ...(finalized?.notices ?? []), ...fact.notices])], ...(fact.publicWebQuery ? { publicWebQuery: fact.publicWebQuery } : {}), ...(fact.factCheckRange ? { factCheckRange: fact.factCheckRange } : {}) }, { factCheck: { claims: fact.claims } });
+                    return;
+                }
+            }
             // An explicit web request gets the user's own words as a fallback query, or, when those cannot be
             // searched, the reason up front, so "Search the web" never ends silently without a search.
             let explicitWebQuery: string | null = null;
@@ -461,6 +486,19 @@ export class MeetingAskRuntime {
                 this.active = null;
             }
         }
+    }
+    /** Which 6.71.13 fact-check path this question takes, or null for the ordinary Ask path. */
+    private factCheckMode(journal: AskRecord[], input: MeetingAskSubmit) {
+        const at = { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs };
+        if (factCheckScopeRequest(input.question))
+            return { mode: 'scope' as const };
+        const pending = lastFactCheckLookup(journal, at);
+        const intent = continuationIntent(input.question, pending?.claim ?? null);
+        if (pending && intent)
+            return { mode: 'continue' as const, continuation: { ...pending, intent } };
+        if (factCheckRequest(input.question) && userWebQuery(input.question) !== null)
+            return { mode: 'named' as const };
+        return null;
     }
     cancel(id: string, serverId: unknown): MeetingAskExchange { this.identity(serverId); const row = this.get(id); if (row.serverInstanceId !== serverId)
         throw new AskError('server_instance_mismatch', 409); if (this.active?.id === id)

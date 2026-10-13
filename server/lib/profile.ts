@@ -226,3 +226,16 @@ export function getNegativeRules(): string[] {
     ? (profile.negative_rules as unknown[]).filter((r): r is string => typeof r === 'string')
     : []
 }
+
+/** A coarse place label: letters, spaces and . , ' - only. No digits, so never a street address. */
+export const HOME_AREA_LABEL = /^\p{L}[\p{L} .,'-]{1,59}$/u
+
+/**
+ * The owner's home city or metro (profile `home_city`, e.g. "Austin, TX"), or null. 6.71.13 Meeting Ask uses
+ * it only to fill an origin a claim leaves implicit ("flying from here"), always disclosed as an assumption.
+ * A value with digits or other characters is ignored, so an address can never be read from it.
+ */
+export function getOwnerHomeArea(): string | null {
+  const value = loadProfileField('home_city', '').replace(/\s+/g, ' ').trim()
+  return HOME_AREA_LABEL.test(value) ? value : null
+}

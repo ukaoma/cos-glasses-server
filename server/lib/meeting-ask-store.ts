@@ -17,6 +17,25 @@ export interface AskRecord {
     orientation?: MeetingAskOrientation;
     publicTopics?: boolean;
     finalizedEvidence?: import('./meeting-ask-transcript.js').FinalizedAskEvidence;
+    /** 6.71.13, server-only: the claims a fact check checked, for continuation and the next scan's exclusions. */
+    factCheck?: { claims: FactCheckClaim[] };
+}
+/** One checked (or pending) public claim. Its words already passed the public-topic admission gate. */
+export interface FactCheckClaim {
+    n: number;
+    claim: string;
+    baseQuery: string;
+    /** The admitted query, or null when it could not be searched (for example a missing starting city). */
+    query: string | null;
+    evidenceTurnIds: number[];
+    category: string;
+    place?: 'implicit_origin';
+    origin?: { text: string; source: 'user' | 'profile' | 'phone_area' };
+    atMs: number;
+    verdict?: string;
+    retrievalIds?: string[];
+    /** Pages read for this claim's query (at most two), reusable by a follow-up within 15 minutes. */
+    pages?: import('../../shared/meeting-ask.js').MeetingAskSource[];
 }
 export function askFingerprint(input: MeetingAskSubmit): string { return createHash('sha256').update(JSON.stringify(input)).digest('hex'); }
 /** Synchronous fsync/rename transitions serialize inside the one server process. No await inside a write. */
@@ -68,7 +87,7 @@ export class MeetingAskStore {
     /** Never silently evict user history. 2000 exchanges is a visible admission ceiling. */
     checkCapacity(): void { const names = readdirSync(this.dir('requests')).filter(n => n.endsWith('.json')); if (names.length >= 2000 || names.reduce((n, f) => n + lstatSync(join(this.dir('requests'), f)).size, 0) > 200000000)
         throw new AskError('history_storage_limit', 507); }
-    transition(id: string, status: MeetingAskExchange['status'], patch: Partial<MeetingAskExchange> = {}): AskRecord {
+    transition(id: string, status: MeetingAskExchange['status'], patch: Partial<MeetingAskExchange> = {}, recordPatch: Pick<AskRecord, 'factCheck'> = {}): AskRecord {
         const record = this.get(id);
         if (!record)
             throw new AskError('request_not_found', 404);
@@ -76,6 +95,7 @@ export class MeetingAskStore {
             return record;
         const at = new Date().toISOString();
         record.exchange = { ...record.exchange, ...patch, status, updatedAt: at, ...(!['pending', 'running'].includes(status) ? { completedAt: at } : {}) };
+        if (recordPatch.factCheck) record.factCheck = recordPatch.factCheck;
         this.write(record);
         return record;
     }

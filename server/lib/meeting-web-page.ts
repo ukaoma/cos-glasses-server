@@ -6,21 +6,38 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 
-export function articleText(html: string): string {
-    const article = /<article\b[^>]*>([\s\S]*?)<\/article>/i.exec(html)?.[1]
-        ?? /<main\b[^>]*>([\s\S]*?)<\/main>/i.exec(html)?.[1] ?? html;
-    return article.replace(/<(script|style|nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+function cleanText(html: string): string {
+    return html.replace(/<(script|style|nav|header|footer|aside|noscript|svg|form)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
         .replace(/<!--[\s\S]*?-->/g, ' ').replace(/<[^>]*>/g, ' ')
         .replace(/&#(x[\da-f]+|\d+);/gi, (_, n: string) => {
             const code = n[0].toLowerCase() === 'x' ? parseInt(n.slice(1),16) : Number(n);
             return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ' ';
         })
         .replace(/&(nbsp|amp|quot|apos|lt|gt);/gi, (_, n: string) => ({nbsp:' ',amp:'&',quot:'"',apos:"'",lt:'<',gt:'>'}[n.toLowerCase()] ?? ' '))
-        .replace(/\s+/g, ' ').trim().slice(0, 6000);
+        .replace(/\s+/g, ' ').trim();
 }
-
+/**
+ * Readable text of a page, at most 6000 characters. 6.71.13: the longest <article> or <main> wins (a page's
+ * first <article> is often an empty card), the whole page body is used when those hold almost nothing, and
+ * with focus words the 6000-character window that names the most of them is kept, so the claim's paragraph
+ * survives on a long page. The window is a verbatim slice of the cleaned text.
+ */
+export function articleText(html: string, focus: readonly string[] = []): string {
+    const blocks = [...html.matchAll(/<(article|main)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map(m => cleanText(m[2]));
+    const best = blocks.reduce((a, b) => b.length > a.length ? b : a, '');
+    const text = (best.length >= 400 ? best : cleanText(html)).slice(0, 200000);
+    if (text.length <= 6000 || !focus.length) return text.slice(0, 6000);
+    const lower = text.toLowerCase(), terms = [...new Set(focus.map(f => f.toLowerCase()).filter(f => f.length > 2))];
+    let start = 0, top = -1;
+    for (let i = 0; i < text.length; i += 500) {
+        const segment = lower.slice(i, i + 6000);
+        const score = terms.reduce((n, t) => n + (segment.includes(t) ? 1 : 0), 0);
+        if (score > top) { top = score; start = i; }
+    }
+    return text.slice(start, start + 6000);
+}
 export interface PublicArticle { url:string; text:string; title?:string }
-export async function fetchPublicArticle(url: string, allowedAddress: (address: string) => boolean, signal?: AbortSignal): Promise<PublicArticle | null> {
+export async function fetchPublicArticle(url: string, allowedAddress: (address: string) => boolean, signal?: AbortSignal, focus: readonly string[] = []): Promise<PublicArticle | null> {
     const controller = new AbortController();
     const abort = () => controller.abort();
     const timer = setTimeout(abort, 5000);
@@ -66,7 +83,7 @@ export async function fetchPublicArticle(url: string, allowedAddress: (address: 
                 response.on('aborted', () => finish(null));
                 response.on('end', () => {
                     const raw = Buffer.concat(chunks).toString('utf8');
-                    const text = type.startsWith('text/html') ? articleText(raw) : raw.slice(0,6000);
+                    const text = type.startsWith('text/html') ? articleText(raw, focus) : raw.slice(0,6000);
                     const title = type.startsWith('text/html') ? articleText(/<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(raw)?.[1] ?? '').slice(0,240) : '';
                     finish(text.length >= 160 ? {url:u.href,text,...(title ? {title} : {})} : null);
                 });
