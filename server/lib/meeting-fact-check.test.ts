@@ -215,6 +215,18 @@ describe('compose and run', () => {
     expect(late).toHaveBeenCalledTimes(1)
     expect(salvaged.rows.map(r => r.text)).toEqual(['Elephants often weigh more than a car: Unverified. No readable source confirmed it in time.', 'Average heart beats about a billion times in a lifetime: Unverified. No readable source confirmed it in time.'])
   })
+  it('retries a stalled answer call once while time remains, and says so when it never returns', async () => {
+    const stall = vi.fn().mockRejectedValueOnce(new Error('provider_timeout')).mockResolvedValueOnce({ text: good })
+    const ok = await composeFactCheck({ ...args(stall, () => 0), answerUntil: 20_000 })
+    expect(stall).toHaveBeenCalledTimes(2); expect(ok.rows[0].text).toContain('Supported'); expect(ok.notices).toEqual([])
+    const late = vi.fn().mockRejectedValue(new Error('provider_timeout'))
+    const gone = await composeFactCheck({ ...args(late, () => 15_000), answerUntil: 20_000 })
+    expect(late).toHaveBeenCalledTimes(1)
+    expect(gone.notices[0]).toContain('ran out of time')
+    expect(gone.rows.every(r => r.text.includes('Unverified'))).toBe(true)
+    const aborted = new AbortController(); aborted.abort()
+    await expect(composeFactCheck({ ...args(vi.fn().mockRejectedValue(new Error('cancelled'))), signal: aborted.signal })).rejects.toThrow('cancelled')
+  })
   it('salvages valid rows by their words, replaces invalid ones, and always states an assumed origin', async () => {
     const partial = JSON.stringify({ sections: [{ label: 'Claim', text: 'A billion heartbeats lifetime [T2]: Contradicted. About 3 billion in a lifetime [W2].' }], support: [{ id: 'T2', quote: 'heart beats about a billion times' }, { id: 'W2', quote: 'beats about 3 billion times in a lifetime' }] })
     const out = await composeFactCheck(args(vi.fn(async () => ({ text: partial })), () => 5000))

@@ -362,13 +362,15 @@ export function factCheckSummary(rows: readonly MeetingAskSection[], range: Meet
 
 const PLANNER_MS = 11_000
 /** One public lookup (Haiku WebSearch plus bounded page reads) may take this long. */
-const SEARCH_MS = 15_000
+const SEARCH_MS = 17_000
 /** Public lookups end by this point of the 30 s budget, leaving room for the source-checked answer. */
 const SEARCH_UNTIL_MS = 19_500
 /** A second (repair) answer call starts only before this point. */
 const REPAIR_UNTIL_MS = 17_000
 /** The answer call ends by this point; a late answer becomes honest Unverified rows, not a failed ask. */
 const ANSWER_UNTIL_MS = 28_500
+/** One answer call may take this long; a stalled call is retried once while time remains. */
+const ANSWER_CALL_MS = 13_000
 const PAGE_PREFIX = 'Retrieved page excerpt (may be partial): '
 
 /** A read page trimmed to its passage that best matches the claim, verbatim, still marked as a read excerpt. */
@@ -416,22 +418,26 @@ export async function composeFactCheck(a: FactCheckComposeArgs): Promise<{ rows:
   const notices: string[] = []
   const attribution = new Set(base.claims.flatMap(c => c.saidIn))
   let raw: any = null, rows: MeetingAskSection[] | null = null, problem: string | null = 'invalid_sections', model: string | undefined
+  let stalled = false
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt && a.now() > a.repairUntil) break
-    const prompt = attempt ? { ...base, repairReason: problem, repairDiagnostics: reviewRepairDiagnostics(raw, sources), previousDraft: raw } : base
+    // A second call repairs a failed draft, or retries a stalled one, only while time remains.
+    if (attempt && (stalled ? !!a.answerUntil && a.answerUntil - a.now() < 8000 : a.now() > a.repairUntil)) break
+    const prompt = attempt && !stalled ? { ...base, repairReason: problem, repairDiagnostics: reviewRepairDiagnostics(raw, sources), previousDraft: raw } : base
     let out: { text: string; model?: string }
-    try { out = await a.run(JSON.stringify(prompt), FACT_CHECK_SYSTEM, a.answerUntil ? AbortSignal.any([a.signal, AbortSignal.timeout(Math.max(1, a.answerUntil - a.now()))]) : a.signal) }
+    try { out = await a.run(JSON.stringify(prompt), FACT_CHECK_SYSTEM, a.answerUntil ? AbortSignal.any([a.signal, AbortSignal.timeout(Math.max(1, Math.min(ANSWER_CALL_MS, a.answerUntil - a.now())))]) : a.signal) }
     catch (e) {
       if (a.signal.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) throw e
-      notices.push('The fact-check answer ran out of time; unconfirmed claims are shown as unverified.')
-      break
+      stalled = true
+      continue
     }
+    stalled = false
     model = out.model ?? model
     try { raw = normalizeReviewConfidence(parseAskReply(out.text)) } catch { raw = null }
     rows = raw ? factRows(raw, label, allowed) : null
     problem = factCheckProblem(raw, rows, a.claims.length, sources, attribution)
     if (!problem) break
   }
+  if (stalled) notices.push('The fact-check answer ran out of time; unconfirmed claims are shown as unverified.')
   const why = (c: FactCheckClaim) => c.place && !c.origin ? 'The starting city is not stated. Which city are you starting from? For example, say "From Austin".'
     : !c.query ? 'It could not be searched using only words from the meeting.' : 'No readable source confirmed it in time.'
   let final: MeetingAskSection[]
@@ -452,8 +458,9 @@ export async function composeFactCheck(a: FactCheckComposeArgs): Promise<{ rows:
   // The assumed starting point is always stated in its row.
   final = final.map((r, i) => {
     const o = a.claims[i]?.origin
-    const first = o ? factWords(o.text)[0] : ''
-    return o && first && !factWords(r.text).includes(first) ? { ...r, text: `${originPhrase(o)} ${r.text}` } : r
+    const said = new Set(factWords(r.text))
+    const named = o ? factWords(o.text).filter(w => w.length > 2) : []
+    return o && named.length && !named.some(w => said.has(w)) ? { ...r, text: `${originPhrase(o)} ${r.text}` } : r
   })
   const confidence = problem ? { level: 'limited', reason: 'Some claims could not be confirmed from readable sources.' } : raw?.confidence
   return { rows: final, confidence, model, notices }
