@@ -22,7 +22,8 @@ import { getVocabulary } from '../../server/lib/profile.js'
 const realFetch = globalThis.fetch
 globalThis.fetch = (async (input: any, init?: any) => {
   const url = String(input?.url ?? input)
-  if (/127\.0\.0\.1:(8177|8178|3141|3143)/.test(url)) throw new Error(`refused live endpoint ${url}`)
+  // Only the user's public health read is allowed (the live-impact guard below).
+  if (/127\.0\.0\.1:(8177|8178|3141|3143)/.test(url) && !/127\.0\.0\.1:3141\/api\/health$/.test(url)) throw new Error(`refused live endpoint ${url}`)
   return realFetch(input, init)
 }) as typeof fetch
 
@@ -67,24 +68,46 @@ const deps: HqDecodeDeps = {
   vocabulary: () => getVocabulary(),
 }
 
+// Live-impact guard for runs during a recording: the user's diarizer timeouts and live
+// Whisper failures must not rise; if they do, pause two minutes (three strikes: stop).
+async function liveSignal(): Promise<number | null> {
+  try {
+    const d: any = await (await realFetch('http://127.0.0.1:3141/api/health', { signal: AbortSignal.timeout(3000) })).json()
+    return (d?.readiness?.diarizer?.chunks?.reasons?.timeout ?? 0) + 100 * (d?.whisper_health?.consecutiveFailures ?? 0)
+  } catch { return null }
+}
+let baseline = await liveSignal(), strikes = 0
+async function guard(): Promise<void> {
+  const now = await liveSignal()
+  if (baseline !== null && now !== null && now > baseline) {
+    strikes++
+    console.error(`live signal rose ${baseline} -> ${now}; pausing 120 s (strike ${strikes})`)
+    if (strikes >= 3) { console.error('stopping: three strikes'); process.exit(4) }
+    await new Promise(r => setTimeout(r, 120_000))
+    baseline = await liveSignal()
+  }
+}
+
 const sets = (process.env.SETS ?? 'silver,silverE').split(',')
 const arms: Array<[string, HqJobPlan]> = JSON.parse(process.env.ARMS ?? '[["LV3",{"engine":"large-v3","secondOpinion":"off","resolver":false,"frontEnd":"highpass"}]]')
 const out: Record<string, Record<string, Record<string, unknown>>> = {}
 for (const ds of sets) {
-  const W = JSON.parse(readFileSync(join(ROOT, 'refs', `${ds}_set.json`), 'utf8')).windows
+  // A set name, or file:/abs/path.json for an ad hoc set (chunk files absolute).
+  const W = JSON.parse(readFileSync(ds.startsWith('file:') ? ds.slice(5) : join(ROOT, 'refs', `${ds}_set.json`), 'utf8')).windows
   for (const w of W) {
+    if (MODE === 'decode') await guard()
     const dir = mkdtempSync(join(tmpdir(), 'stt672-shipped-'))
     try {
       const t0 = w.chunks[0].start
       const entries = w.chunks.map((c: any) => {
-        symlinkSync(join(ROOT, c.file), join(dir, `chunk_${String(c.idx).padStart(4, '0')}.wav`))
+        symlinkSync(c.file.startsWith('/') ? c.file : join(ROOT, c.file), join(dir, `chunk_${String(c.idx).padStart(4, '0')}.wav`))
         return { chunkIndex: c.idx, chunk: { text: 'x', speaker: 'MU', elapsed: Math.round((c.start - t0 + c.dur) * 1000), similarity: 1 } }
       })
       const segments = segmentTranscriptChunks(entries as any)
       for (const [name, plan] of arms) {
         const results = await transcribeSegments(dir, segments, entries as any, undefined, plan, deps)
         const stt = results.map(r => r.stt)
-        ;((out[name] ??= {})[ds] ??= {})[w.id] = {
+        ;((out[name] ??= {})[ds.startsWith('file:') ? 'fixtures' : ds] ??= {})[w.id] = {
           text: results.map(r => r.text).join(' '),
           segments: segments.length, decoded: results.length,
           fallbacks: stt.filter(s => s?.fallbackReason).length,
@@ -95,7 +118,7 @@ for (const ds of sets) {
         }
       }
     } finally { rmSync(dir, { recursive: true, force: true }) }
-    console.error(`${ds} ${w.id} done`)
+    console.error(`${ds.startsWith('file:') ? 'fixtures' : ds} ${w.id} done`)
   }
 }
 writeFileSync(process.env.OUT ?? join(EVAL, 'runs', `shipped_${MODE}.json`), JSON.stringify({ arms: out, timing }))

@@ -240,3 +240,44 @@ describe('progressive checkpoints under a second opinion', () => {
   })
 })
 
+
+describe('the plan the production call sites use', () => {
+  it('runMeetingBatchPipeline freezes the stored settings at save time and records the job', async () => {
+    vi.resetModules()
+    const seen: any[] = []
+    vi.doMock('./whisper-local.js', async (orig) => ({ ...(await orig() as any),
+      transcribeHighQuality: vi.fn(async (_w: Buffer, _c: any, opts: any) => { seen.push(opts); return { text: 'hello there friend', words: words('hello there friend'), spokenWords: words('hello there friend'), timestamps: !!opts.timestamps, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' } }) }))
+    vi.doMock('./stt-live.js', async (orig) => ({ ...(await orig() as any), asrFrontEnd: async (a: Buffer) => a }))
+    try {
+      const { mkdirSync } = await import('node:fs')
+      mkdirSync(join(dir, 'data'), { recursive: true })
+      writeFileSync(join(dir, 'data', 'stt-settings.json'), JSON.stringify({ hq: 'large-v3', secondOpinion: 'off', frontEnd: 'highpass' }))
+      const MM = await import('./meeting-batch-transcribe.js')
+      const job = MM.runMeetingBatchPipeline(dir, entries, 3, 's1')
+      // A change after the save must not reach this job.
+      writeFileSync(join(dir, 'data', 'stt-settings.json'), JSON.stringify({ hq: 'large-v3-legacy', secondOpinion: 'off', frontEnd: 'full' }))
+      const out = await job
+      expect(out.stt?.plan).toMatchObject({ engine: 'large-v3', frontEnd: 'highpass', timestamps: true })
+      expect(seen.every(o => o.timestamps === true)).toBe(true)
+      const { readLastSttJob } = await import('./stt-settings.js')
+      expect(readLastSttJob()).toMatchObject({ outcome: 'batch', summary: { plan: { engine: 'large-v3' } } })
+    } finally {
+      vi.doUnmock('./whisper-local.js'); vi.doUnmock('./stt-live.js')
+    }
+  })
+
+  it('orphan recovery takes the stored plan once and decodes with it', async () => {
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(join(dir, 'data'), { recursive: true })
+    writeFileSync(join(dir, 'data', 'stt-settings.json'), JSON.stringify({ hq: 'large-v3', secondOpinion: 'off', frontEnd: 'highpass' }))
+    vi.resetModules()
+    const MM = await import('./meeting-batch-transcribe.js')
+    const { d, calls } = deps()
+    const job = MM.recoveryHqJob(dir, [segment], entries, d)
+    expect(job.plan).toMatchObject({ engine: 'large-v3', frontEnd: 'highpass', secondOpinion: 'off' })
+    writeFileSync(join(dir, 'data', 'stt-settings.json'), JSON.stringify({ hq: 'large-v3-legacy', frontEnd: 'full' }))
+    const [r] = await job.run()
+    expect(calls).toEqual(['fe:highpass', 'whisper:ts'])
+    expect(r.stt).toMatchObject({ engine: 'large-v3', frontEnd: 'highpass' })
+  })
+})

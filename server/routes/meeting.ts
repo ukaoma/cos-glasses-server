@@ -78,7 +78,7 @@ import {
 import {
   enqueueSerializedHqWork,
   runMeetingBatchPipeline,
-  currentHqJobPlan,
+  recoveryHqJob,
   summarizeStt,
   segmentTranscriptChunks,
   stopProgressiveHqSession,
@@ -2181,10 +2181,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // decoder serialization — that lives in the queue tail. Chain onto it,
       // or two back-to-back recoveries plus a live post-meeting batch would
       // run parallel 16-thread large-v3 decoders on the user's Mac.
-      const plan = currentHqJobPlan()
-      const results = await enqueueSerializedHqWork(
-        () => transcribeSegments(quarantineDir, segments, entries, undefined, plan),
-      )
+      const hqJob = recoveryHqJob(quarantineDir, segments, entries)
+      const plan = hqJob.plan
+      const results = await enqueueSerializedHqWork(hqJob.run)
       // Batch whisper over a dead session has no streaming baseline to
       // compare against (evaluateBatchQuality needs one), but the inline
       // hallucination filter needs none — run the same two-pass the boot

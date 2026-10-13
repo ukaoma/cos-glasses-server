@@ -798,6 +798,18 @@ export async function transcribeSegments(
   return results
 }
 
+/** Orphan recovery's HQ work: the plan is taken when the recovery is accepted
+ *  (like a save), and the same plan both decodes and summarizes. */
+export function recoveryHqJob(
+  quarantineDir: string,
+  segments: BatchSegment[],
+  entries: IndexedTranscriptChunk[],
+  deps: HqDecodeDeps = defaultHqDeps,
+): { plan: HqJobPlan; run: () => Promise<BatchResult[]> } {
+  const plan = currentHqJobPlan()
+  return { plan, run: () => transcribeSegments(quarantineDir, segments, entries, undefined, plan, deps) }
+}
+
 export function summarizeStt(plan: HqJobPlan, results: readonly BatchResult[], segmentsPlanned = results.length): BatchSttSummary {
   return {
     plan: { engine: plan.engine, secondOpinion: plan.secondOpinion, resolver: plan.resolver, frontEnd: plan.frontEnd,

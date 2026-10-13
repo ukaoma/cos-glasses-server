@@ -169,7 +169,7 @@ export interface PreviewDeps {
   now?: () => number
 }
 
-const defaultPreviewDeps: PreviewDeps = {
+export const defaultPreviewDeps: PreviewDeps = {
   effective: () => currentEffectiveStt(),
   turbo: audio => transcribeWhisperMeetingPreview(audio),
   parakeet: async audio => {
