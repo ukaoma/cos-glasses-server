@@ -158,6 +158,21 @@ describe('Parakeet runs (offline, bounded)', () => {
     } finally { delete process.env.COS_PARAKEET_SANDBOX_EXEC }
   })
 
+  it('the CLI is handed the padded clip, never one too short for FluidAudio', async () => {
+    await installed()
+    const { readFileSync: rf } = await import('node:fs')
+    let size = 0
+    const spawnImpl = ((_c: string, args: string[]) => {
+      size = rf(args[args.indexOf('transcribe') + 1]).length
+      const child = new FakeChild()
+      setImmediate(() => { writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify({ text: '' })); child.emit('close', 0, null) })
+      return child
+    }) as any
+    const short = Buffer.from(P.warmupWav().subarray(0, 44 + 3200)); short.writeUInt32LE(3200, 40); short.writeUInt32LE(36 + 3200, 4)
+    await P.transcribeParakeet(short, { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl })
+    expect(size).toBe(44 + 32_000)
+  })
+
   it('kills a run past its deadline and fails closed', async () => {
     await installed()
     const child = new FakeChild()
@@ -174,6 +189,7 @@ describe('Parakeet runs (offline, bounded)', () => {
       return child
     }) as any
     await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('Unknown option --x', { text: 'a' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('[ERROR] Batch transcription failed: invalidAudioData', { text: 'stale' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
     await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { text: 'a', wordTimings: [{ word: 'a', startTime: -1, endTime: 1 }] }) })).rejects.toMatchObject({ reason: 'bad_output' })
     await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { nope: 1 }) })).rejects.toMatchObject({ reason: 'bad_output' })
   })
@@ -210,4 +226,20 @@ describe('Parakeet runs (offline, bounded)', () => {
     expect(await P.warmParakeet('parakeet-ultra', spawnImpl)).toBe(false)
     expect(P.parakeetWarmState('parakeet-ultra')).toMatchObject({ state: 'failed', error: expect.stringMatching(/warm decode took/) })
   }, 10_000)
+})
+
+describe('short clips', () => {
+  it('pads a clip under a second with silence, and leaves longer or foreign audio alone', () => {
+    const short = P.warmupWav().subarray(0, 44 + 3200) // 0.1 s, header still says 2 s
+    const fixed = Buffer.from(short); fixed.writeUInt32LE(3200, 40); fixed.writeUInt32LE(36 + 3200, 4)
+    const padded = P.padShortWav(fixed)
+    expect(padded.length).toBe(44 + 32_000)
+    expect(padded.readUInt32LE(40)).toBe(32_000)
+    expect(padded.subarray(44, 44 + 3200).equals(fixed.subarray(44))).toBe(true)
+    expect(padded.subarray(44 + 3200).every(b => b === 0)).toBe(true)
+    const long = P.warmupWav()
+    expect(P.padShortWav(long)).toBe(long)
+    const notWav = Buffer.from('not a wav at all')
+    expect(P.padShortWav(notWav)).toBe(notWav)
+  })
 })

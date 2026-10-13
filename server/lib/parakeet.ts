@@ -356,6 +356,38 @@ export function parseParakeetJson(raw: string): { text: string; words: HypWord[]
   return { text: data.text.trim().replace(/\s+/g, ' '), words, processingSec: Number.isFinite(processingSec) ? processingSec : null }
 }
 
+/** FluidAudio 0.17.4 fails a clip under about 0.3 s ("invalidAudioData", exit 0, no
+ *  JSON); a meeting's last chunk is often 0.1 to 0.2 s. Pad with silence to this length. */
+export const MIN_PARAKEET_AUDIO_SEC = 1.0
+
+/** Zero-pad a 16 kHz mono PCM16 WAV shorter than minSec. Anything else is returned as is. */
+export function padShortWav(wav: Buffer, minSec = MIN_PARAKEET_AUDIO_SEC): Buffer {
+  if (wav.length < 12 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') return wav
+  let offset = 12, fmtOk = false
+  while (offset + 8 <= wav.length) {
+    const id = wav.toString('ascii', offset, offset + 4)
+    const size = wav.readUInt32LE(offset + 4)
+    const body = offset + 8
+    if (id === 'fmt ' && body + 16 <= wav.length) {
+      fmtOk = wav.readUInt16LE(body) === 1 && wav.readUInt16LE(body + 2) === 1 && wav.readUInt32LE(body + 4) === 16_000 && wav.readUInt16LE(body + 14) === 16
+    }
+    if (id === 'data') {
+      if (!fmtOk) return wav
+      const pcm = wav.subarray(body, Math.min(wav.length, body + size))
+      const want = Math.round(minSec * 16_000) * 2
+      if (pcm.length >= want) return wav
+      const padded = Buffer.concat([pcm, Buffer.alloc(want - pcm.length)])
+      const header = Buffer.alloc(44)
+      header.write('RIFF', 0); header.writeUInt32LE(36 + padded.length, 4); header.write('WAVE', 8); header.write('fmt ', 12)
+      header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22); header.writeUInt32LE(16_000, 24)
+      header.writeUInt32LE(32_000, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write('data', 36); header.writeUInt32LE(padded.length, 40)
+      return Buffer.concat([header, padded])
+    }
+    offset = body + size + (size % 2)
+  }
+  return wav
+}
+
 let previewBusy = false
 let batchTail: Promise<unknown> = Promise.resolve()
 
@@ -391,7 +423,7 @@ function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<Parakeet
   installExitHook()
   liveDirs.add(work)
   const input = join(work, 'in.wav'), output = join(work, 'out.json')
-  writeFileSync(input, wav, { mode: 0o600 })
+  writeFileSync(input, padShortWav(wav), { mode: 0o600 })
   const cleanup = () => { liveDirs.delete(work); try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort */ } }
   const spawnImpl: SpawnLike = options.spawnImpl ?? (nodeSpawn as unknown as SpawnLike)
   const args = ['-p', parakeetSandboxProfile(currentDir()), parakeetCliPath(), 'transcribe', input,
@@ -437,7 +469,7 @@ function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<Parakeet
     child.on('close', (code, signal) => {
       if (settled) return
       if (code !== 0) { finish(new ParakeetError('cli_failed', `exit ${code ?? signal}: ${stderr.trim().split('\n').slice(-2).join(' | ').slice(0, 240)}`)); return }
-      if (/Unknown option|not supported/i.test(stderr)) { finish(new ParakeetError('cli_failed', 'the CLI rejected an option')); return }
+      if (/Unknown option|not supported|transcription failed/i.test(stderr)) { finish(new ParakeetError('cli_failed', 'the CLI rejected an option')); return }
       try {
         const parsed = parseParakeetJson(readFileSync(output, 'utf8'))
         finish(null, { model: options.model, ...parsed, wallMs: Date.now() - started })

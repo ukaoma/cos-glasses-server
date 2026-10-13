@@ -39,6 +39,8 @@ const mutations = [
   ['preview-lane-busy-is-miss', P, "    if (previewBusy) return Promise.reject(new ParakeetError('busy', 'a preview decode is already running'))\n", ''],
   ['warm-needs-budget', P, '      const ok = second.wallMs <= WARM_DECODE_BUDGET_MS', '      const ok = true'],
   ['cli-option-rejection', P, '      if (/Unknown option|not supported/i.test(stderr)) {', '      if (false) {'],
+  ['short-clips-padded', P, '  writeFileSync(input, padShortWav(wav), { mode: 0o600 })', '  writeFileSync(input, wav, { mode: 0o600 })'],
+  ['cli-failure-text-rejected', P, '/Unknown option|not supported|transcription failed/i', '/Unknown option|not supported/i'],
   ['child-env-has-no-keys', P, '  const out: NodeJS.ProcessEnv = { HOME: home, CFFIXED_USER_HOME: home, TMPDIR: work }', '  const out: NodeJS.ProcessEnv = { ...env, HOME: home, CFFIXED_USER_HOME: home, TMPDIR: work }'],
   // Settings contract.
   ['unknown-key-400', S, '  if (unknown.length) throw new SttSettingsError(', '  if (false) throw new SttSettingsError('],
