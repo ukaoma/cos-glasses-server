@@ -111,13 +111,6 @@ describe('meeting HQ under the STT plan (6.72.0)', () => {
       `parakeet:parakeet-ultra:batch:${M.PARAKEET_FIRST_WINDOW_TIMEOUT_MS}`, `parakeet:parakeet-ultra:batch:${M.PARAKEET_WINDOW_TIMEOUT_MS}`])
   })
 
-  it('Parakeet v2 as the second opinion decodes with the v2 model', async () => {
-    const { d, calls } = deps()
-    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ secondOpinion: 'parakeet-v2' }), d)
-    expect(calls).toContain(`parakeet:parakeet-v2:batch:${M.PARAKEET_FIRST_WINDOW_TIMEOUT_MS}`)
-    expect(r.stt).toMatchObject({ secondOpinion: { engine: 'parakeet-v2' }, resolver: { applied: true } })
-  })
-
   it('second opinion off: one engine, no second decode, front end follows the plan', async () => {
     const { d, calls } = deps()
     const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ secondOpinion: 'off', frontEnd: 'full' }), d)

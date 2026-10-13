@@ -13,9 +13,8 @@ vi.mock('./parakeet-manifest.js', () => ({
   PARAKEET_CLI: { version: '0.17.4', sha256: sha(files.cli), size: files.cli.length },
   PARAKEET_MODELS: [
     { id: 'parakeet-ultra', repo: 'FluidInference/parakeet-ultra-coreml', revision: '95eaa59a39d4394f047a4dc5cce480388a60d1b6', modelVersion: 'ultra',
-      files: [{ path: 'Encoder.mlmodelc/weights/weight.bin', size: files.a.length, sha256: sha(files.a) }] },
-    { id: 'parakeet-v2', repo: 'FluidInference/parakeet-tdt-0.6b-v2-coreml', revision: 'ee09c569f73759e6d44c9bd16766f477b2b36d39', modelVersion: 'v2',
-      files: [{ path: 'parakeet_vocab.json', size: files.b.length, sha256: sha(files.b) }] },
+      files: [{ path: 'Encoder.mlmodelc/weights/weight.bin', size: files.a.length, sha256: sha(files.a) },
+        { path: 'parakeet_vocab.json', size: files.b.length, sha256: sha(files.b) }] },
   ],
 }))
 
@@ -26,8 +25,7 @@ function seedSources(root: string, opts: { corruptB?: boolean } = {}): { models:
   const models = join(root, 'src-models')
   mkdirSync(join(models, 'parakeet-ultra', 'Encoder.mlmodelc', 'weights'), { recursive: true })
   writeFileSync(join(models, 'parakeet-ultra', 'Encoder.mlmodelc', 'weights', 'weight.bin'), files.a)
-  mkdirSync(join(models, 'parakeet-tdt-0.6b-v2'), { recursive: true })
-  writeFileSync(join(models, 'parakeet-tdt-0.6b-v2', 'parakeet_vocab.json'), opts.corruptB ? Buffer.from('model b bytes, a little LONGER') : files.b)
+  writeFileSync(join(models, 'parakeet-ultra', 'parakeet_vocab.json'), opts.corruptB ? Buffer.from('model b bytes, a little LONGER') : files.b)
   const cli = join(root, 'fluidaudiocli-copy')
   writeFileSync(cli, files.cli)
   return { models, cli }
@@ -69,7 +67,7 @@ describe('Parakeet install (pinned, hash-checked)', () => {
       return { ok: true, status: 200, body: s }
     }
     await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl })
-    expect(urls).toEqual(['https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml/resolve/ee09c569f73759e6d44c9bd16766f477b2b36d39/parakeet_vocab.json'])
+    expect(urls).toEqual(['https://huggingface.co/FluidInference/parakeet-ultra-coreml/resolve/95eaa59a39d4394f047a4dc5cce480388a60d1b6/parakeet_vocab.json'])
     expect(P.parakeetInstalled(Date.now() + 10_000).installed).toBe(true)
   })
 
@@ -97,7 +95,7 @@ describe('Parakeet install (pinned, hash-checked)', () => {
   it('reads a truncated model file as not installed', async () => {
     const src = seedSources(dir)
     await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork })
-    writeFileSync(join(P.parakeetModelDir('parakeet-v2'), 'parakeet_vocab.json'), 'short')
+    writeFileSync(join(P.parakeetModelDir('parakeet-ultra'), 'parakeet_vocab.json'), 'short')
     P.resetParakeetInstallCache()
     expect(P.parakeetInstalled().installed).toBe(false)
   })
@@ -113,14 +111,14 @@ describe('Parakeet install: local-only, stalls, cancel, join, crash restore', ()
   it('a named local source that lacks a file fails plainly instead of downloading', async () => {
     const src = seedSources(dir, { corruptB: true })
     await expect(P.installParakeet({ localSources: [src.models], requireLocal: true, cliCandidates: [src.cli], fetchImpl: noNetwork }))
-      .rejects.toThrow(/No copy of parakeet-v2 parakeet_vocab.json with the pinned SHA-256 was found in .*src-models.*allowDownload/)
+      .rejects.toThrow(/No copy of parakeet-ultra parakeet_vocab.json with the pinned SHA-256 was found in .*src-models.*allowDownload/)
     expect(noNetwork).not.toHaveBeenCalled()
   })
 
   it('reports where the bytes came from', async () => {
     const src = seedSources(dir)
     await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork })
-    expect(P.getInstallProgress().source).toEqual({ filesLocal: 2, filesDownloaded: 0, localSources: [join(src.models, 'parakeet-ultra'), join(src.models, 'parakeet-tdt-0.6b-v2')] })
+    expect(P.getInstallProgress().source).toEqual({ filesLocal: 2, filesDownloaded: 0, localSources: [join(src.models, 'parakeet-ultra')] })
   })
 
   it('a download that stops sending bytes is abandoned with a plain error', async () => {
@@ -227,13 +225,13 @@ describe('Parakeet runs (offline, bounded)', () => {
   it('never runs without the sandbox (no proof of offline, no run)', async () => {
     await installed()
     const spawnImpl = vi.fn()
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 1000, spawnImpl: spawnImpl as any, sandboxExec: join(dir, 'no-such-sandbox-exec') })).rejects.toMatchObject({ reason: 'sandbox_unavailable' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 1000, spawnImpl: spawnImpl as any, sandboxExec: join(dir, 'no-such-sandbox-exec') })).rejects.toMatchObject({ reason: 'sandbox_unavailable' })
     expect(spawnImpl).not.toHaveBeenCalled()
     process.env.COS_PARAKEET_SANDBOX_EXEC = join(dir, 'no-such-sandbox-exec') // no environment override exists
     try {
       let cmd = ''
       const spawn2 = ((c: string, args: string[]) => { cmd = c; const child = new FakeChild(); setImmediate(() => { writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify({ text: '' })); child.emit('close', 0, null) }); return child }) as any
-      await P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 1000, spawnImpl: spawn2 })
+      await P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 1000, spawnImpl: spawn2 })
       expect(cmd).toBe('/usr/bin/sandbox-exec')
     } finally { delete process.env.COS_PARAKEET_SANDBOX_EXEC }
   })
@@ -249,7 +247,7 @@ describe('Parakeet runs (offline, bounded)', () => {
       return child
     }) as any
     const short = Buffer.from(P.warmupWav().subarray(0, 44 + 3200)); short.writeUInt32LE(3200, 40); short.writeUInt32LE(36 + 3200, 4)
-    await P.transcribeParakeet(short, { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl })
+    await P.transcribeParakeet(short, { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl })
     expect(size).toBe(44 + 32_000)
   })
 
@@ -257,7 +255,7 @@ describe('Parakeet runs (offline, bounded)', () => {
     await installed()
     const child = new FakeChild()
     const spawnImpl = (() => child) as any
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 30, spawnImpl })).rejects.toMatchObject({ reason: 'timeout' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 30, spawnImpl })).rejects.toMatchObject({ reason: 'timeout' })
     expect(child.killed).toContain('SIGKILL')
   })
 
@@ -268,17 +266,17 @@ describe('Parakeet runs (offline, bounded)', () => {
       setImmediate(() => { child.stderr.write(stderr); writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify(json)); child.emit('close', 0, null) })
       return child
     }) as any
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('Unknown option --x', { text: 'a' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('[ERROR] Batch transcription failed: invalidAudioData', { text: 'stale' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { text: 'a', wordTimings: [{ word: 'a', startTime: -1, endTime: 1 }] }) })).rejects.toMatchObject({ reason: 'bad_output' })
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { nope: 1 }) })).rejects.toMatchObject({ reason: 'bad_output' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('Unknown option --x', { text: 'a' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('[ERROR] Batch transcription failed: invalidAudioData', { text: 'stale' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { text: 'a', wordTimings: [{ word: 'a', startTime: -1, endTime: 1 }] }) })).rejects.toMatchObject({ reason: 'bad_output' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { nope: 1 }) })).rejects.toMatchObject({ reason: 'bad_output' })
   })
 
   it('a busy preview lane is a miss, never a queue', async () => {
     await installed()
     const child = new FakeChild()
-    const first = P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'preview', timeoutMs: 200, spawnImpl: (() => child) as any })
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'preview', timeoutMs: 200, spawnImpl: (() => new FakeChild()) as any })).rejects.toMatchObject({ reason: 'busy' })
+    const first = P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'preview', timeoutMs: 200, spawnImpl: (() => child) as any })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'preview', timeoutMs: 200, spawnImpl: (() => new FakeChild()) as any })).rejects.toMatchObject({ reason: 'busy' })
     await expect(first).rejects.toMatchObject({ reason: 'timeout' })
   })
 
@@ -290,10 +288,10 @@ describe('Parakeet runs (offline, bounded)', () => {
       setImmediate(() => { writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify({ text: '' })); child.emit('close', 0, null) })
       return child
     }) as any
-    expect(P.parakeetWarmState('parakeet-v2').state).toBe('cold')
-    expect(await P.warmParakeet('parakeet-v2', spawnImpl)).toBe(true)
+    expect(P.parakeetWarmState('parakeet-ultra').state).toBe('cold')
+    expect(await P.warmParakeet('parakeet-ultra', spawnImpl)).toBe(true)
     expect(calls).toBe(2)
-    expect(P.parakeetWarmState('parakeet-v2').state).toBe('warm')
+    expect(P.parakeetWarmState('parakeet-ultra').state).toBe('warm')
   })
 
   it('a warm decode slower than the budget leaves the preview model not warm', async () => {
@@ -332,9 +330,10 @@ describe.runIf(process.platform === 'darwin')('the sandbox profile, enforced by 
     const srv = createServer((_q, r) => r.end('ok'))
     await new Promise<void>(res => srv.listen(0, '127.0.0.1', () => res()))
     const port = (srv.address() as any).port
-    const work = mkdtempSync(join(tmpdir(), 'cos-parakeet-sbx-')), home = mkdtempSync(join(tmpdir(), 'cos-parakeet-home-')), outside = mkdtempSync(join(tmpdir(), 'cos-parakeet-out-'))
+    const work = mkdtempSync(join(tmpdir(), 'cos-parakeet-sbx-')), home = mkdtempSync(join(tmpdir(), 'cos-parakeet-home-')), outside = mkdtempSync('/private/tmp/cos-parakeet-out-')
     try {
-      const profile = P.parakeetSandboxProfile(work, home)
+      const profile = P.parakeetSandboxProfile(work, home, null)
+      expect(P.parakeetSandboxProfile(work, home, '/private/var/folders/xx/T/')).toContain('(subpath "/private/var/folders/xx/T/")')
       // execFile, not spawnSync: the local server must keep answering while curl runs.
       const curl = (sandboxed: boolean) => sandboxed
         ? run('/usr/bin/sandbox-exec', ['-p', profile, '/usr/bin/curl', '-s', '-m', '3', `http://127.0.0.1:${port}/`])

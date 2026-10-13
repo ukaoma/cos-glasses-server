@@ -458,7 +458,7 @@ export const PARAKEET_FIRST_WINDOW_TIMEOUT_MS = 180_000
 export const PARAKEET_WINDOW_TIMEOUT_MS = 30_000
 
 interface WholeDecode {
-  engine: 'large-v3' | 'large-v3-legacy' | 'parakeet-ultra' | 'parakeet-v2'
+  engine: 'large-v3' | 'large-v3-legacy' | 'parakeet-ultra'
   /** Name-corrected text. */
   text: string
   /** What BatchResult.words carries (Whisper tokens, or Parakeet words), name-corrected. */
@@ -552,7 +552,7 @@ async function decodeParakeetWindow(
   deps: HqDecodeDeps,
   input: Buffer,
   timeoutMs: number,
-  model: 'parakeet-ultra' | 'parakeet-v2',
+  model: 'parakeet-ultra',
   requireWordsOverSpeech: boolean,
 ): Promise<WholeDecode> {
   const r = await deps.parakeet(input, { model, lane: 'batch', timeoutMs })
@@ -627,7 +627,7 @@ async function decodeHqWindow(
   let primary: WholeDecode
   let fallbackReason: string | undefined
   let usedSecondAsPrimary = false
-  const secondModel = plan.secondOpinion === 'parakeet-ultra' || plan.secondOpinion === 'parakeet-v2' ? plan.secondOpinion : null
+  const secondModel = plan.secondOpinion === 'parakeet-ultra' ? plan.secondOpinion : null
   if (reused) {
     const ts = batchTimestampsEnabled(plan.engine === 'large-v3-legacy' ? 'large-v3-legacy' : 'large-v3')
     primary = {

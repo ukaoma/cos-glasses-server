@@ -52,7 +52,8 @@ describe('STT settings route (6.72.0)', () => {
     expect(json.hq.selected).toBe('large-v3')
     const { DEFAULT_STT_SETTINGS } = await import('../lib/stt-settings.js')
     expect(json.secondOpinion.selected).toBe(DEFAULT_STT_SETTINGS.secondOpinion)
-    expect(json.resolver).toMatchObject({ enabled: true, effective: true, reason: null })
+    expect(json.resolver).toMatchObject({ enabled: DEFAULT_STT_SETTINGS.resolver, reason: null })
+    expect(DEFAULT_STT_SETTINGS).toMatchObject({ secondOpinion: 'off', resolver: false, preview: 'turbo', hq: 'large-v3', frontEnd: 'highpass', quietGate: 'silero' })
     expect(json.frontEnd.selected).toBe('highpass')
     expect(json.quietGate.selected).toBe('silero')
     expect(json.appliesTo).toEqual({ preview: 'next live chunk', hq: 'next saved meeting' })
@@ -122,6 +123,7 @@ describe('STT settings route (6.72.0)', () => {
   })
 
   it('moving HQ onto the second opinion engine moves the second opinion, unless both are set together', async () => {
+    expect((await call('PUT', undefined, { secondOpinion: 'parakeet-ultra' })).status).toBe(200)
     const swapped = await call('PUT', undefined, { hq: 'parakeet-ultra' })
     expect(swapped.status).toBe(200)
     expect(swapped.json.secondOpinion.selected).toBe('large-v3')
@@ -147,7 +149,7 @@ describe('STT settings route (6.72.0)', () => {
     expect((await call('GET')).json.preview).toMatchObject({ effective: 'turbo', reasonCode: 'parakeet_warm_failed', reason: 'Parakeet could not start; using Turbo.' })
     caps = allCaps({ parakeetPreviewWarm: true, parakeetPreviewBreakerOpen: true })
     expect((await call('GET')).json.preview).toMatchObject({ effective: 'turbo', reasonCode: 'parakeet_breaker_open' })
-    writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ hq: 'large-v3', secondOpinion: 'parakeet-ultra' }))
+    writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ hq: 'large-v3', secondOpinion: 'parakeet-ultra', resolver: true }))
     caps = allCaps({ parakeetInstalled: false })
     expect((await call('GET')).json.secondOpinion).toMatchObject({ effective: 'off', reasonCode: 'parakeet_not_installed', reason: 'Parakeet is not installed on this Mac.' })
     expect((await call('GET')).json.resolver).toMatchObject({ effective: false, reasonCode: 'no_second_opinion' })

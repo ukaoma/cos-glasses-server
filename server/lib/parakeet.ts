@@ -16,7 +16,7 @@
 // once compiled, against 12 to 17 s for the first, compiling run. Callers that
 // need a warm model (the live preview) check parakeetWarmState first.
 
-import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import {
   chmodSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync,
@@ -31,11 +31,11 @@ import { dataPath } from './data-dir.js'
 import { PARAKEET_CLI, PARAKEET_MODELS, type PinnedModel } from './parakeet-manifest.js'
 import type { HypWord } from './stt-resolver.js'
 
-export type ParakeetModelId = 'parakeet-ultra' | 'parakeet-v2'
+export type ParakeetModelId = 'parakeet-ultra'
 export const PARAKEET_TMP_PREFIX = 'cos-parakeet-'
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec'
 /** At most 40 characters (Control truncates there). */
-export const PARAKEET_VERSION_LABEL = `Ultra ${PARAKEET_MODELS[0].revision.slice(0, 8)}, v2 ${PARAKEET_MODELS[1].revision.slice(0, 8)}, CLI ${PARAKEET_CLI.version}`
+export const PARAKEET_VERSION_LABEL = `Parakeet Ultra ${PARAKEET_MODELS[0].revision.slice(0, 8)}, CLI ${PARAKEET_CLI.version}`
 
 export function parakeetRoot(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.COS_PARAKEET_DIR?.trim()
@@ -140,8 +140,8 @@ function knownPinnedCli(path: string): boolean | null {
 /**
  * Where an already-verified local copy of the models might be. Every candidate
  * must still match the pinned hash. `<data>/stt/parakeet-sources` is the
- * documented drop-in: link or copy a folder holding `parakeet-ultra/` and
- * `parakeet-v2/` (or FluidAudio's own repo folder names) there, and an install
+ * documented drop-in: link or copy a folder holding `parakeet-ultra/`
+ * (or FluidAudio's own repo folder name) there, and an install
  * started with an empty body uses it instead of downloading.
  */
 export function defaultLocalSources(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
@@ -176,11 +176,10 @@ export function pinnedCliKnown(candidates: string[] = defaultCliCandidates()): b
 
 function modelDirCandidates(model: PinnedModel, sources: string[]): string[] {
   const repoName = model.repo.split('/').pop()!
-  const legacy = model.id === 'parakeet-v2' ? 'parakeet-tdt-0.6b-v2' : model.id
   const out: string[] = []
   for (const src of sources) {
-    for (const name of [model.id, repoName, legacy]) out.push(join(src, name))
-    out.push(join(src, 'models', model.id), join(src, 'models', legacy))
+    for (const name of [model.id, repoName]) out.push(join(src, name))
+    out.push(join(src, 'models', model.id))
   }
   return [...new Set(out)]
 }
@@ -433,10 +432,24 @@ export function sweepStaleParakeetTmp(tmpRoot = tmpdir(), minAgeMs = 60_000, now
  * guarantee about what it could read. Paths are realpath'd: the sandbox matches
  * resolved paths, so a /tmp or symlinked data dir would otherwise never match.
  */
-export function parakeetSandboxProfile(workDir: string, homeDir: string): string {
+export function parakeetSandboxProfile(workDir: string, homeDir: string, userTempDir: string | null = darwinUserTempDir()): string {
   const q = (path: string) => { let real = path; try { real = realpathSync(path) } catch { /* not created yet */ } return real.replace(/\\/g, '\\\\').replace(/"/g, '\\"') }
+  // FluidAudio buffers audio over about 15 s in NSTemporaryDirectory (the per-user
+  // /var/folders/../T), not in TMPDIR; measured 2026-10-13, a 36 s HQ window failed without it.
+  const temp = userTempDir ? ` (subpath "${q(userTempDir)}")` : ''
   return `(version 1)(allow default)(deny network*)(deny file-write*)`
-    + `(allow file-write* (subpath "${q(workDir)}") (subpath "${q(homeDir)}") (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/") (regex #"^/dev/tty"))`
+    + `(allow file-write* (subpath "${q(workDir)}") (subpath "${q(homeDir)}")${temp} (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/") (regex #"^/dev/tty"))`
+}
+
+let userTempCache: string | null | undefined
+/** The per-user temp directory macOS gives NSTemporaryDirectory (confstr DARWIN_USER_TEMP_DIR). */
+export function darwinUserTempDir(): string | null {
+  if (userTempCache !== undefined) return userTempCache
+  try {
+    const out = execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    userTempCache = out.startsWith('/') ? out : null
+  } catch { userTempCache = null }
+  return userTempCache
 }
 
 /** The only variables the CLI sees. The server's tokens and keys never reach it. */
