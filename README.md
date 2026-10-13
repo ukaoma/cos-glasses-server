@@ -693,6 +693,12 @@ GET returns:
 - `effective` is what will actually run: a stored choice that is no longer
   possible (Parakeet removed, still warming, no Large-v3 live worker) falls back
   to the default engine for that slot.
+- To run Parakeet as the HQ engine with Large-v3 as its second opinion (the
+  configuration that measured best on silver, see the evaluation), send
+  `PUT {"hq":"parakeet-ultra","secondOpinion":"large-v3","resolver":true}`.
+  `{"hq":"parakeet-ultra"}` alone does the same, since the second opinion moves
+  off Parakeet automatically. The resolver then only rescues profile vocabulary
+  terms from Large-v3 (Parakeet is not deletion-prone, so no gap fill).
 - `COS_BATCH_HQ_TIMESTAMPS` still overrides HQ timestamps: `1` forces them on,
   `0` off. `COS_WHISPER_MEETING_PREVIEW=0` still turns the meeting preview off.
 - The `preview` setting drives only the meeting preview lane

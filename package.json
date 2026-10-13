@@ -86,6 +86,7 @@
     "bin/hooks/cos-cursor-observer.cjs",
     "docs/provider-parity.md",
     "docs/asr-canaries.md",
+    "docs/stt-672-evaluation.md",
     "docs/pairing-contract.md",
     "docs/pairing-fixture.json",
     "bin/whisper-runtime.cjs",
