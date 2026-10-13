@@ -335,7 +335,16 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
     writeFileSync(hook, WEB_HOOK_SOURCE, { mode: 0o600 });
     let safeCleanup = true;
     try {
-        await runMeetingAskModel({ engine: 'claude', model: 'haiku' }, '', '', signal, { workspace: root, args: webSearchArgs(hook), stdin: JSON.stringify({ query: query.slice(0, 240), blockedDomains: UNREADABLE_RESULT_HOSTS }) });
+        // 6.71.13: the search result is complete once the PostToolUse hook has written result.json as valid
+        // JSON. Stop the search model there instead of waiting for its closing message (1-3 s per lookup).
+        // A result still being written does not parse, so a half-written file is never read.
+        const early = new AbortController();
+        const poll = setInterval(() => { try { JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')); early.abort(); } catch { /* not written yet */ } }, 100);
+        try {
+            await runMeetingAskModel({ engine: 'claude', model: 'haiku' }, '', '', signal ? AbortSignal.any([signal, early.signal]) : early.signal, { workspace: root, args: webSearchArgs(hook), stdin: JSON.stringify({ query: query.slice(0, 240), blockedDomains: UNREADABLE_RESULT_HOSTS }) });
+        } catch (e) {
+            if (!early.signal.aborted || signal?.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) throw e;
+        } finally { clearInterval(poll); }
         const events = readFileSync(join(root, 'events.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
         if (events.filter(e => e.allowed === true).length !== 1 || events.some(e => e.allowed && e.tool !== 'WebSearch'))
             throw new AskProcessError('web_budget_not_enforced');

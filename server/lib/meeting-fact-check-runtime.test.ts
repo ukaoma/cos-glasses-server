@@ -128,6 +128,17 @@ describe('6.71.13 Fact check through the durable runtime', () => {
       expect(f.webSearch.mock.calls.flat().join(' ')).not.toMatch(/\b(?:asking|check it|omg|claim)\b/i)
     } finally { f.cleanup() }
   })
+  it('keeps the narrow retirement-rule route ahead of the meeting-wide check', async () => {
+    const f = fixture({ scope: scopePlan }, rowsFor)
+    try {
+      const r = { ...submit(MEETING_FACT_CHECK_QUESTION, 200_000), turns: [{ id: 9, elapsedMs: 150_000, speaker: 'Ext', text: 'He said you cannot leave your old 401k with a former employer.' }] }
+      await f.runtime.submit(r)
+      const e = await done(f, r.requestId)
+      expect(e.factCheckRange).toBeUndefined()
+      expect(f.run.mock.calls.some(c => c[2] === FACT_CHECK_PLANNER_SYSTEM)).toBe(false)
+      expect(f.webSearch.mock.calls[0][0]).toContain('leaving employer keep money in old retirement plan')
+    } finally { f.cleanup() }
+  })
   it('answers a dose question with fixed safety information and no model or web call', async () => {
     const f = fixture({}, rowsFor)
     try {

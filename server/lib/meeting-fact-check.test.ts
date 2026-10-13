@@ -24,7 +24,7 @@ describe('meeting-wide Fact check scope', () => {
   it('treats the CTA and a bare typed Fact check as meeting-wide, never a named or pointed check', () => {
     for (const q of [MEETING_FACT_CHECK_QUESTION, 'Fact check', 'fact-check', 'Run a fact check', 'Fact check the meeting', 'Can you fact check everything said so far?'])
       expect(factCheckScopeRequest(q)).toBe(true)
-    for (const q of ['Fact check the flight to kc', 'Can you fact check this', 'Fact check the claim', 'Fact check it', 'What was decided?', 'fact'])
+    for (const q of ['Fact check the flight to kc', 'Can you fact check this', 'Fact check the claim', 'Fact check it', 'What was decided?', 'fact', 'fact check ' + 'the '.repeat(12)])
       expect(factCheckScopeRequest(q)).toBe(false)
   })
   it('starts after the newest completed range at or before this ask, per meeting and server', () => {
@@ -33,6 +33,7 @@ describe('meeting-wide Fact check scope', () => {
     expect(factCheckWindow([done], at(500_000))).toEqual({ fromMs: 126_414, full: false })
     const later = ex({ throughMs: 300_000, factCheckRange: { fromMs: 126_414, throughMs: 300_000, full: false, claims: 0 } })
     expect(factCheckWindow([done, later], at(500_000))).toEqual({ fromMs: 300_000, full: false })
+    expect(factCheckWindow([later, done], at(500_000))).toEqual({ fromMs: 300_000, full: false })
     // A range past this ask position, another meeting, another server, a failed exchange or this request does not count.
     expect(factCheckWindow([done, { ...later, factCheckRange: { ...later.factCheckRange!, throughMs: 900_000 } }], at(500_000))).toEqual({ fromMs: 126_414, full: false })
     expect(factCheckWindow([{ ...done, sessionId: 'meeting_other' }], at(500_000)).full).toBe(true)
@@ -85,6 +86,11 @@ describe('claim admission', () => {
     expect(admitFactCheckClaims({ claims: [{ ...raw.claims[0], place: 'none' }] }, input('Fact check'), scanned, { origin: { text: 'Austin, TX', source: 'profile' } }).claims[0].query).toBe('to kansas city flight time 90 minutes vs driving 10 hours')
     expect(originQuery('to kansas city flight time', { text: 'Austin', source: 'user' })).toBe('austin to kansas city flight time')
   })
+  it('accepts a compound of two passage words, never new letters', () => {
+    const heart = (query: string) => admitFactCheckClaims({ claims: [{ claim: 'Heart', query, evidenceTurnIds: [3], category: 'science' }] }, input('Fact check'), scanned).claims[0]?.query
+    expect(heart('how many heartbeats average human lifetime')).toBe('how many heartbeats average human lifetime')
+    expect(heart('how many heartattacks average human lifetime')).toBeUndefined()
+  })
   it('caps the number of claims and drops duplicates', () => {
     const c = { claim: 'Elephants outweigh cars', query: 'elephant weight car', evidenceTurnIds: [1, 2], category: 'nature' }
     expect(admitFactCheckClaims({ claims: [c, c] }, input('Fact check'), scanned).claims).toHaveLength(1)
@@ -111,6 +117,8 @@ describe('pending fact-check continuation', () => {
     expect(continuationIntent('Can you fact check this', pending)).toBeNull()
     expect(continuationIntent('What did the caller say about pricing?', pending)).toBeNull()
     expect(continuationIntent('What is it?', pending)).toBeNull()
+    expect(continuationIntent('Check the weather in Paris', pending)).toBeNull()
+    expect(continuationIntent('check this now', pending)).toBeNull()
     expect(continuationIntent('Check it now', null)).toBeNull()
     expect(continuationIntent('check '.repeat(15), pending)).toBeNull()
   })
@@ -159,6 +167,10 @@ describe('fact-check rows', () => {
     expect(factRowProblem(row('Claim [source unavailable]: Unverified.'), support, sources)).toBe('unsupported_citation')
     expect(factRowProblem(row('Dose: Supported [W1]. Give 650 mg.'), support, sources)).toBe('medical_dose')
     expect(factRowProblem(row('Unverified. ' + 'word '.repeat(80)), support, sources)).toBe('too_verbose')
+    // A claim's own evidence passage is attribution: no quote needed. Any other transcript ID still needs one.
+    expect(factRowProblem(row('Elephants outweigh a car [T1]: Unverified.'), [], sources, new Set(['T1']))).toBeNull()
+    expect(factRowProblem(row('Elephants outweigh a car [T1]: Unverified.'), [], sources, new Set(['T9']))).toBe('unsupported_citation')
+    expect(factRowProblem(row('Elephants outweigh a car [W1]: Supported [W1].'), [], sources, new Set(['W1']))).toBe('unsupported_citation')
   })
   it('requires one row per claim and a short confidence without coverage talk', () => {
     const rows = [{ label: 'Claim', ...row('Elephants outweigh a car [T1]: Unverified. Not found.') }]
@@ -270,6 +282,16 @@ describe('compose and run', () => {
     const nothing = await runMeetingFactCheck({ mode: 'scope', input: input(MEETING_FACT_CHECK_QUESTION, 126_414), at: at(126_414), records: [record], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
     expect(nothing!.sections[0].text).toBe('Nothing new to check: nothing was said after the last Fact check at 2:06.')
     expect(run).not.toHaveBeenCalled()
+  })
+  it('skips a lookup once the search budget is spent, and a named check with no admissible claim falls back', async () => {
+    const plan = { claims: [{ claim: 'Elephants outweigh cars', query: 'elephant weight vs car weight', evidenceTurnIds: [1, 2], category: 'nature' }] }
+    const run = vi.fn(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? JSON.stringify(plan) : 'not json' }))
+    const search = vi.fn()
+    const late = await runMeetingFactCheck({ mode: 'scope', input: input('Fact check', 126_414), at: at(126_414), records: [], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() - 60_000 })
+    expect(search).not.toHaveBeenCalled()
+    expect(late!.notices.join(' ')).toContain('lookup budget ended')
+    const rejected = vi.fn(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? JSON.stringify({ claims: [{ ...plan.claims[0], query: 'dana elephant weight car' }] }) : 'not json' }))
+    expect(await runMeetingFactCheck({ mode: 'named', input: input('Fact check the elephants'), at: at(800_000), records: [], run: rejected, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })).toBeNull()
   })
   it('keeps no range when claim selection fails, and lets a named check fall back', async () => {
     const run = vi.fn(async () => ({ text: 'not json' }))

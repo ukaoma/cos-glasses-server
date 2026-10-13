@@ -59,7 +59,7 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: defaultOwnerArea };
+const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: () => defaultOwnerArea() };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))

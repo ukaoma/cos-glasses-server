@@ -101,10 +101,10 @@ export function factCheckScanTurns(input: Pick<AskInput, 'turns' | 'elapsedMs'>,
  * What COS knows about where the owner is based: the profile's home_city, else the phone's last reported weather
  * area. City-level labels only (no digits, so never an address), and only ever used as a disclosed assumption.
  */
-export function defaultOwnerArea(): OwnerOrigin | null {
-  try { const home = getOwnerHomeArea(); if (home) return { text: home, source: 'profile' } } catch { /* no profile */ }
+export function defaultOwnerArea(home: () => string | null = getOwnerHomeArea, weatherFile = dataPath('welcome-weather.json')): OwnerOrigin | null {
+  try { const area = home(); if (area) return { text: area, source: 'profile' } } catch { /* no profile */ }
   try {
-    const v = JSON.parse(readFileSync(dataPath('welcome-weather.json'), 'utf8')) as { city?: unknown }
+    const v = JSON.parse(readFileSync(weatherFile, 'utf8')) as { city?: unknown }
     const city = typeof v?.city === 'string' ? v.city.replace(/\s+/g, ' ').trim() : ''
     if (HOME_AREA_LABEL.test(city)) return { text: city, source: 'phone_area' }
   } catch { /* none recorded */ }
@@ -120,7 +120,6 @@ const FUNC = new Set(['a', 'an', 'the', 'and', 'or', 'of', 'for', 'in', 'on', 'a
 const ORIGIN_STOP = new Set(['here', 'there', 'home', 'me', 'my', 'where', 'what', 'it', 'this', 'that', 'now', 'work', 'us', 'our', 'them', 'you', 'your', 'i', 'im'])
 const CONTINUE_WORDS = new Set('i im am me my you your to the a an and it its now again please just go ahead yes yeah yep ok okay omg oh god come on already said told asked asking ask request requested is was what for can could would will why didnt did not dont do does run check checking checked try search searching verify verified look up fact facts claim redo rerun retry seriously literally real actually right man dude bro hey cos dumb b word'.split(' '))
 const CONTINUE_ACTIONS = new Set(['run', 'check', 'checking', 'try', 'search', 'verify', 'look', 'fact', 'redo', 'rerun', 'retry'])
-const DEICTIC = new Set(['this', 'that', 'these', 'those'])
 
 /** A starting place the user typed: "From ATX where I'm based" or "ATX to KC is the request". */
 export function typedOrigin(question: string): string | null {
@@ -156,7 +155,8 @@ export type Continuation = { kind: 'rerun' } | { kind: 'clarify'; origin: string
 /**
  * Does this question continue the pending fact check instead of asking something new? A starting place for a
  * route claim clarifies it. A short request made only of request words ("check it now", "run it omg",
- * "I'm asking you to fact check the claim") re-runs it. "this/that" points at the newest thing said, so not.
+ * "I'm asking you to fact check the claim") re-runs it. "this/that" are not request words: "fact check this"
+ * points at the newest thing said, so it never continues the pending check.
  */
 export function continuationIntent(question: string, pending: Pick<FactCheckClaim, 'place' | 'category'> | null): Continuation | null {
   if (!pending) return null
@@ -166,7 +166,6 @@ export function continuationIntent(question: string, pending: Pick<FactCheckClai
     const origin = typedOrigin(question)
     if (origin) return { kind: 'clarify', origin }
   }
-  if (t.some(w => DEICTIC.has(w))) return null
   const action = t.some(w => CONTINUE_ACTIONS.has(w)) || (t.includes('do') && t.includes('it')) || (t.includes('go') && t.includes('ahead'))
   return action && t.every(w => CONTINUE_WORDS.has(w)) ? { kind: 'rerun' } : null
 }
