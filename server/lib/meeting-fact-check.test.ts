@@ -166,6 +166,7 @@ describe('pending fact-check continuation', () => {
     expect(placeOrigin('KS', withClaim)).toBeNull()
     expect(placeOrigin('Miles', { ownerArea: null, places: ['Miles'], blockedNames: new Set(), ownerWords: new Set(['miles']) })).toBeNull()
     expect(placeOrigin('Miles', { ownerArea: null, places: ['Miles'], blockedNames: new Set() })).toEqual({ text: 'Miles', source: 'user' })
+    expect(placeOrigin('Gina', { ownerArea: null, places: ['Gina'], blockedNames: new Set(['gina']) })).toBeNull()
     expect(originQuery('to kansas city flight time', { text: 'ATX (Austin, TX)', source: 'user' })).toBe('atx austin tx to kansas city flight time')
   })
   it('re-runs on request words, clarifies a route origin, and leaves real questions alone', () => {
@@ -315,7 +316,8 @@ describe('medical dosing', () => {
       expect(medicalDosingRequest(q), q).toBe(true)
     for (const q of ['how many tablets should we give the sales team for demos', 'how many units can we give each rep', 'how many units should I take for the demo',
       'How much did I spend on meds', 'How many pills are left in the bottle?', 'When should I take my meds?', 'How much does Tylenol cost?', 'How many people take insulin in the US?',
-      'How much ibuprofen is in one Advil tablet?', 'How much does the roof cost?', 'Fact check', 'How many doses of the vaccine did the county order?', "What's the right dosage for a 6 year old?"])
+      'How much ibuprofen is in one Advil tablet?', 'How much does the roof cost?', 'Fact check', 'How many doses of the vaccine did the county order?', "What's the right dosage for a 6 year old?",
+      'How much do meds cost for my kid?', 'When can I give my son 2 Tylenol?'])
       expect(medicalDosingRequest(q), q).toBe(false)
   })
 })
