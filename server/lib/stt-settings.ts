@@ -69,6 +69,7 @@ export function normalizeStoredSettings(raw: unknown): SttSettings {
 }
 
 let cache: { mtimeMs: number; size: number; value: SttSettings } | null = null
+let warnedCorrupt = false
 
 /** Stored settings (no capability check). Cheap enough for every live chunk. */
 export function readSttSettings(): SttSettings {
@@ -78,7 +79,11 @@ export function readSttSettings(): SttSettings {
   if (!stat) { cache = null; return { ...DEFAULT_STT_SETTINGS } }
   if (cache && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) return { ...cache.value }
   let value: SttSettings
-  try { value = normalizeStoredSettings(JSON.parse(readFileSync(path, 'utf8'))) } catch { value = { ...DEFAULT_STT_SETTINGS } }
+  try { value = normalizeStoredSettings(JSON.parse(readFileSync(path, 'utf8'))) } catch (error) {
+    // Unreadable settings run the defaults; say so once, not on every chunk.
+    if (!warnedCorrupt) { warnedCorrupt = true; console.warn(`[stt] ${STT_SETTINGS_FILE} is unreadable (${error instanceof Error ? error.message : error}); using the defaults until it is rewritten`) }
+    value = { ...DEFAULT_STT_SETTINGS }
+  }
   cache = { ...stat, value }
   return { ...value }
 }
@@ -88,7 +93,25 @@ export function writeSttSettings(next: SttSettings): void {
   cache = null
 }
 
-export function __resetSttSettingsCacheForTests(): void { cache = null }
+export function __resetSttSettingsCacheForTests(): void { cache = null; warnedCorrupt = false }
+
+// ── Last HQ job (for GET: what actually happened, not only what was chosen) ──
+
+export interface LastSttJob {
+  at: string
+  meeting: string
+  outcome: 'batch' | 'rejected' | 'failed'
+  summary: unknown
+}
+const LAST_JOB_FILE = 'stt-last-job.json'
+
+export function recordLastSttJob(job: LastSttJob): void {
+  try { atomicWriteFileSync(dataPath(LAST_JOB_FILE), JSON.stringify(job, null, 2) + '\n', { mode: 0o600 }) } catch { /* telemetry only */ }
+}
+
+export function readLastSttJob(): LastSttJob | null {
+  try { return JSON.parse(readFileSync(dataPath(LAST_JOB_FILE), 'utf8')) as LastSttJob } catch { return null }
+}
 
 // ── Capabilities ──────────────────────────────────────────────────────────────
 
@@ -101,6 +124,10 @@ export interface SttCapabilities {
   parakeetInstalled: boolean
   parakeetPreviewWarm: boolean
   parakeetPreviewWarming: boolean
+  /** The warm-up ran and failed (distinct from still warming). */
+  parakeetPreviewWarmFailed?: boolean
+  /** Repeated preview misses opened the preview breaker: Turbo until it closes. */
+  parakeetPreviewBreakerOpen?: boolean
   previewDisabledByEnv: boolean
 }
 
@@ -112,20 +139,31 @@ export interface SttOption {
   note: string
 }
 
+/** Every preview `model` string this server can return (contract-tested;
+ *  a subset of what phone 6.10.639 accepts). */
+export const PREVIEW_MODEL_STRINGS = ['large-v3-turbo', 'parakeet-ultra'] as const
+/** The request parameter a client uses to say which preview models it accepts. */
+export const PREVIEW_MODELS_PARAM = 'previewModels'
+export const PREVIEW_REQUIRES_APP = '6.10.639'
+
 export function previewOptions(c: SttCapabilities): SttOption[] {
   const parakeetNote = !c.parakeetInstalled
     ? 'Install Parakeet on this Mac first.'
-    : c.parakeetPreviewWarm
-      ? 'Parakeet Ultra on the Neural Engine, about 0.3 s per chunk. Experimental: compare it live yourself.'
-      : c.parakeetPreviewWarming
-        ? 'Warming up (the first load takes 15 to 25 s). Whisper Turbo previews until it is ready.'
-        : 'Warms up when selected. Whisper Turbo previews until it is ready.'
+    : c.parakeetPreviewBreakerOpen
+      ? 'Parakeet missed several previews in a row; Whisper Turbo previews for a few minutes, then Parakeet is tried again.'
+      : c.parakeetPreviewWarm
+        ? 'Parakeet Ultra on the Neural Engine, about 0.3 s per chunk. Experimental: compare it live yourself. Needs COS Glasses 6.10.639; older phones keep Whisper Turbo.'
+        : c.parakeetPreviewWarmFailed
+          ? 'Parakeet could not start; Whisper Turbo previews. It is tried again every 2 minutes.'
+          : c.parakeetPreviewWarming
+            ? 'Warming up (the first load takes 15 to 25 s). Whisper Turbo previews until it is ready.'
+            : 'Warms up when selected and no recording is live. Whisper Turbo previews until it is ready.'
   return [
     { id: 'turbo', label: 'Whisper Turbo', available: c.turboModel && !c.previewDisabledByEnv, experimental: false,
       note: c.previewDisabledByEnv ? 'Meeting preview is turned off on this server (COS_WHISPER_MEETING_PREVIEW=0).' : c.turboModel ? 'Fast provisional text. Saved text never comes from the preview.' : 'Turbo weights are missing on this Mac.' },
-    { id: 'large-v3', label: 'Whisper Large-v3', available: c.liveLargeV3 && !c.previewDisabledByEnv, experimental: false,
-      note: c.liveLargeV3 ? 'Runs on the live Large-v3 worker at preview priority. Slower than Turbo.' : 'Needs the Max transcription tier (the live Large-v3 worker).' },
-    { id: 'parakeet', label: 'Parakeet (Neural Engine)', available: c.parakeetInstalled && !c.previewDisabledByEnv, experimental: true, note: parakeetNote },
+    { id: 'large-v3', label: 'Whisper Large-v3', available: false, experimental: false,
+      note: 'Not offered: a Large-v3 preview would share the live Large-v3 worker that writes the saved text.' },
+    { id: 'parakeet', label: 'Parakeet Ultra', available: c.parakeetInstalled && !c.previewDisabledByEnv, experimental: true, note: parakeetNote },
     { id: 'nemotron-560', label: 'Nemotron streaming 560 ms', available: false, experimental: true,
       note: 'Not wired in this server: FluidAudio 0.17.4 runs Nemotron only as a whole-file batch, so it cannot stream a live preview yet.' },
   ]
@@ -145,10 +183,10 @@ export function secondOpinionOptions(c: SttCapabilities): SttOption[] {
   return [
     { id: 'off', label: 'Off', available: true, experimental: false, note: 'One engine only.' },
     { id: 'parakeet-v2', label: 'Parakeet v2', available: c.parakeetInstalled, experimental: false,
-      note: c.parakeetInstalled ? 'Hears every HQ window again on the Neural Engine. Disagreements are saved with the meeting. The measured best second opinion for Large-v3.' : 'Install Parakeet on this Mac first.' },
+      note: c.parakeetInstalled ? 'Hears every saved meeting again on the Neural Engine, about 0.2 s per 30 s of audio, after the meeting is saved. Disagreements are saved with the meeting.' : 'Install Parakeet on this Mac first.' },
     { id: 'parakeet-ultra', label: 'Parakeet Ultra', available: c.parakeetInstalled, experimental: false,
-      note: c.parakeetInstalled ? 'Hears every HQ window again on the Neural Engine. Inserts more words than v2 when it refines Large-v3.' : 'Install Parakeet on this Mac first.' },
-    { id: 'large-v3', label: 'Whisper Large-v3', available: c.hqLargeV3, experimental: false, note: 'For a Parakeet HQ model. Adds a full Large-v3 pass.' },
+      note: c.parakeetInstalled ? 'Hears every saved meeting again on the Neural Engine, about 0.2 s per 30 s of audio. Inserts more words than v2 when it refines Large-v3.' : 'Install Parakeet on this Mac first.' },
+    { id: 'large-v3', label: 'Whisper Large-v3', available: c.hqLargeV3, experimental: false, note: 'For a Parakeet HQ model. Adds a full Large-v3 pass to every saved meeting (minutes per hour of audio on CPU).' },
   ]
 }
 
@@ -227,15 +265,30 @@ export interface EffectiveStt {
   quietGate: QuietGateId
 }
 
+export const REASON_TEXT: Record<string, string> = {
+  parakeet_not_installed: 'Parakeet is not installed on this Mac.',
+  parakeet_warming: 'Parakeet is warming up.',
+  parakeet_warm_failed: 'Parakeet could not start; using Turbo.',
+  parakeet_breaker_open: 'Parakeet missed several previews; using Turbo for a few minutes.',
+  large_v3_preview_not_offered: 'A Large-v3 preview is not offered; using Turbo.',
+  nemotron_not_wired: 'Nemotron preview is not available in this server; using Turbo.',
+  large_v3_unavailable: 'Large-v3 is not available on this Mac.',
+  same_engine_as_hq: 'Same engine as the HQ model.',
+  no_second_opinion: 'No second opinion is running, so nothing to refine with.',
+}
+
 /** What will actually run, given what is installed. A stored choice that is no
- *  longer possible falls back to the default engine and says why. */
+ *  longer possible falls back (preview to Turbo, HQ to Large-v3, second opinion
+ *  to off) and says why with a code. */
 export function effectiveStt(settings: SttSettings, c: SttCapabilities): EffectiveStt {
   let preview: EffectiveStt['preview'] = { engine: 'turbo', reason: null }
-  if (settings.preview === 'large-v3') preview = c.liveLargeV3 ? { engine: 'large-v3', reason: null } : { engine: 'turbo', reason: 'live_large_v3_unavailable' }
+  if (settings.preview === 'large-v3') preview = { engine: 'turbo', reason: 'large_v3_preview_not_offered' }
   else if (settings.preview === 'parakeet') {
     preview = !c.parakeetInstalled ? { engine: 'turbo', reason: 'parakeet_not_installed' }
-      : c.parakeetPreviewWarm ? { engine: 'parakeet', reason: null }
-        : { engine: 'turbo', reason: 'parakeet_warming' }
+      : c.parakeetPreviewBreakerOpen ? { engine: 'turbo', reason: 'parakeet_breaker_open' }
+        : c.parakeetPreviewWarm ? { engine: 'parakeet', reason: null }
+          : c.parakeetPreviewWarmFailed ? { engine: 'turbo', reason: 'parakeet_warm_failed' }
+            : { engine: 'turbo', reason: 'parakeet_warming' }
   } else if (settings.preview === 'nemotron-560') preview = { engine: 'turbo', reason: 'nemotron_not_wired' }
   let hq: EffectiveStt['hq'] = { engine: settings.hq, reason: null }
   if (settings.hq === 'parakeet-ultra' && !c.parakeetInstalled) hq = { engine: 'large-v3', reason: 'parakeet_not_installed' }
@@ -259,21 +312,32 @@ export interface ParakeetStatus {
   installable: boolean
   version: string
   bytes: number
-  progress: { state: string; bytesDone: number; bytesTotal: number; error: string | null }
-  warm: { preview: string }
+  progress: { state: string; bytesDone: number; bytesTotal: number; error: string | null; source?: unknown }
+  warm: { preview: string; error?: string; at?: string }
+  preview?: { breaker: { open: boolean; retryAt: string | null; misses: number }; counters: Record<string, number> }
   note: string
 }
 
-export function settingsView(settings: SttSettings, c: SttCapabilities, parakeet: ParakeetStatus) {
+function slotReason(code: string | null): { reason: string | null; reasonCode: string | null } {
+  return { reason: code ? (REASON_TEXT[code] ?? code) : null, reasonCode: code }
+}
+
+export function settingsView(settings: SttSettings, c: SttCapabilities, parakeet: ParakeetStatus, lastJob: LastSttJob | null = null) {
   const eff = effectiveStt(settings, c)
+  const resolverCode = settings.resolver && !eff.resolver ? 'no_second_opinion' : null
   return {
-    preview: { selected: settings.preview, effective: eff.preview.engine, options: previewOptions(c) },
-    hq: { selected: settings.hq, effective: eff.hq.engine, options: hqOptions(c) },
-    secondOpinion: { selected: settings.secondOpinion, effective: eff.secondOpinion.engine, options: secondOpinionOptions(c) },
-    resolver: { enabled: settings.resolver, effective: eff.resolver },
+    preview: {
+      selected: settings.preview, effective: eff.preview.engine, ...slotReason(eff.preview.reason), options: previewOptions(c),
+      models: [...PREVIEW_MODEL_STRINGS], clientParam: PREVIEW_MODELS_PARAM, requiresApp: PREVIEW_REQUIRES_APP,
+      note: `Only phones that list a preview model in ${PREVIEW_MODELS_PARAM} get it (COS Glasses ${PREVIEW_REQUIRES_APP} and later); every other client gets Whisper Turbo.`,
+    },
+    hq: { selected: settings.hq, effective: eff.hq.engine, ...slotReason(eff.hq.reason), options: hqOptions(c) },
+    secondOpinion: { selected: settings.secondOpinion, effective: eff.secondOpinion.engine, ...slotReason(eff.secondOpinion.reason), options: secondOpinionOptions(c) },
+    resolver: { enabled: settings.resolver, effective: eff.resolver, ...slotReason(resolverCode) },
     frontEnd: { selected: settings.frontEnd, options: FRONT_END_OPTIONS },
     quietGate: { selected: settings.quietGate, options: QUIET_GATE_OPTIONS },
     parakeet,
+    lastJob,
     appliesTo: { preview: 'next live chunk', hq: 'next saved meeting' },
   }
 }

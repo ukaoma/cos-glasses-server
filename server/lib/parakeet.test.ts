@@ -109,6 +109,81 @@ class FakeChild extends EventEmitter {
   kill(sig: string) { this.killed.push(sig); this.signalCode = sig; setImmediate(() => this.emit('close', null, sig)); return true }
 }
 
+describe('Parakeet install: local-only, stalls, cancel, join, crash restore', () => {
+  it('a named local source that lacks a file fails plainly instead of downloading', async () => {
+    const src = seedSources(dir, { corruptB: true })
+    await expect(P.installParakeet({ localSources: [src.models], requireLocal: true, cliCandidates: [src.cli], fetchImpl: noNetwork }))
+      .rejects.toThrow(/No copy of parakeet-v2 parakeet_vocab.json with the pinned SHA-256 was found in .*src-models.*allowDownload/)
+    expect(noNetwork).not.toHaveBeenCalled()
+  })
+
+  it('reports where the bytes came from', async () => {
+    const src = seedSources(dir)
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork })
+    expect(P.getInstallProgress().source).toEqual({ filesLocal: 2, filesDownloaded: 0, localSources: [join(src.models, 'parakeet-ultra'), join(src.models, 'parakeet-tdt-0.6b-v2')] })
+  })
+
+  it('a download that stops sending bytes is abandoned with a plain error', async () => {
+    const src = seedSources(dir, { corruptB: true })
+    const fetchImpl = async (_u: string, init?: { signal?: AbortSignal }) => ({ ok: true, status: 200, body: new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array([1])); init?.signal?.addEventListener('abort', () => c.error(init.signal!.reason)) } }) })
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl, idleTimeoutMs: 50 })).rejects.toThrow(/stalled \(no data for 0 s\)/)
+    expect(P.getInstallProgress().state).toBe('failed')
+    expect(existsSync(join(P.parakeetRoot(), 'current'))).toBe(false)
+  })
+
+  it('cancel stops a running install; a second start joins the running one', async () => {
+    const src = seedSources(dir, { corruptB: true })
+    let started!: () => void
+    const begun = new Promise<void>(r => { started = r })
+    const fetchImpl = async (_u: string, init?: { signal?: AbortSignal }) => { started(); return { ok: true, status: 200, body: new ReadableStream<Uint8Array>({ start(c) { init?.signal?.addEventListener('abort', () => c.error(init.signal!.reason)) } }) } }
+    const a = P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl })
+    const b = P.installParakeet({})
+    expect(b).toBe(a)
+    await begun
+    expect(P.cancelParakeetInstall()).toBe(true)
+    await expect(a).rejects.toThrow(/cancelled/)
+    expect(P.parakeetInstallRunning()).toBe(false)
+    expect(P.cancelParakeetInstall()).toBe(false)
+  })
+
+  it('boot puts back an install a crash left mid-swap, and removes staging leftovers', async () => {
+    const src = seedSources(dir)
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork })
+    const { renameSync, mkdirSync: mk } = await import('node:fs')
+    renameSync(join(P.parakeetRoot(), 'current'), join(P.parakeetRoot(), '.old-1-abc'))
+    mk(join(P.parakeetRoot(), '.staging-dead'))
+    P.resetParakeetInstallCache()
+    expect(P.parakeetInstalled().installed).toBe(false)
+    expect(P.sweepParakeetStaging()).toEqual({ removed: 1, restored: true })
+    expect(P.parakeetInstalled(Date.now() + 10_000).installed).toBe(true)
+    expect(readdirSync(P.parakeetRoot()).filter(n => n.startsWith('.'))).toEqual([])
+  })
+
+  it('finds the pinned CLI only, and says so without hashing on every read', async () => {
+    const src = seedSources(dir)
+    const other = join(dir, 'other-cli'); writeFileSync(other, Buffer.from('fake fluidaudiocli 0.17.5'))
+    expect(P.pinnedCliKnown([other, src.cli])).toBeNull() // unknown until checked; a check starts in the background
+    expect(await P.findPinnedCli([other, src.cli])).toBe(src.cli)
+    expect(P.pinnedCliKnown([other, src.cli])).toBe(true)
+    expect(await P.findPinnedCli([other])).toBeNull()
+    expect(P.pinnedCliKnown([other])).toBe(false)
+    expect(P.pinnedCliKnown([join(dir, 'missing')])).toBe(false)
+  })
+})
+
+describe('temp and staging sweeps', () => {
+  it('removes old Parakeet temp dirs only', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cos-sweep-'))
+    try {
+      const { utimesSync, mkdirSync: mk } = await import('node:fs')
+      mk(join(root, `${P.PARAKEET_TMP_PREFIX}old`)); mk(join(root, `${P.PARAKEET_TMP_PREFIX}new`)); mk(join(root, 'someone-else'))
+      const past = new Date(Date.now() - 120_000); utimesSync(join(root, `${P.PARAKEET_TMP_PREFIX}old`), past, past)
+      expect(P.sweepStaleParakeetTmp(root, 60_000)).toBe(1)
+      expect(readdirSync(root).sort()).toEqual([`${P.PARAKEET_TMP_PREFIX}new`, 'someone-else'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})
+
 describe('Parakeet runs (offline, bounded)', () => {
   async function installed() {
     const src = seedSources(dir)
@@ -135,7 +210,8 @@ describe('Parakeet runs (offline, bounded)', () => {
     expect(seen!.cmd).toBe('/usr/bin/sandbox-exec')
     expect(seen!.args[0]).toBe('-p')
     expect(seen!.args[1]).toContain('(deny network*)')
-    expect(seen!.args[1]).toContain('(deny file-write* (subpath')
+    expect(seen!.args[1]).toContain('(deny file-write*)(allow file-write* (subpath')
+    expect(seen!.args[1]).not.toContain(P.parakeetModelDir('parakeet-ultra'))
     expect(seen!.args).toContain('--local-model-dir')
     expect(seen!.args[seen!.args.indexOf('--local-model-dir') + 1]).toBe(P.parakeetModelDir('parakeet-ultra'))
     expect(seen!.args[seen!.args.indexOf('--model-version') + 1]).toBe('ultra')
@@ -150,11 +226,15 @@ describe('Parakeet runs (offline, bounded)', () => {
 
   it('never runs without the sandbox (no proof of offline, no run)', async () => {
     await installed()
-    process.env.COS_PARAKEET_SANDBOX_EXEC = join(dir, 'no-such-sandbox-exec')
     const spawnImpl = vi.fn()
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 1000, spawnImpl: spawnImpl as any, sandboxExec: join(dir, 'no-such-sandbox-exec') })).rejects.toMatchObject({ reason: 'sandbox_unavailable' })
+    expect(spawnImpl).not.toHaveBeenCalled()
+    process.env.COS_PARAKEET_SANDBOX_EXEC = join(dir, 'no-such-sandbox-exec') // no environment override exists
     try {
-      await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 1000, spawnImpl: spawnImpl as any })).rejects.toMatchObject({ reason: 'sandbox_unavailable' })
-      expect(spawnImpl).not.toHaveBeenCalled()
+      let cmd = ''
+      const spawn2 = ((c: string, args: string[]) => { cmd = c; const child = new FakeChild(); setImmediate(() => { writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify({ text: '' })); child.emit('close', 0, null) }); return child }) as any
+      await P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-v2', lane: 'batch', timeoutMs: 1000, spawnImpl: spawn2 })
+      expect(cmd).toBe('/usr/bin/sandbox-exec')
     } finally { delete process.env.COS_PARAKEET_SANDBOX_EXEC }
   })
 
@@ -230,7 +310,7 @@ describe('Parakeet runs (offline, bounded)', () => {
 
 describe('short clips', () => {
   it('pads a clip under a second with silence, and leaves longer or foreign audio alone', () => {
-    const short = P.warmupWav().subarray(0, 44 + 3200) // 0.1 s, header still says 2 s
+    const short = P.warmupWav().subarray(0, 44 + 3200) // 0.1 s, header still says 8 s
     const fixed = Buffer.from(short); fixed.writeUInt32LE(3200, 40); fixed.writeUInt32LE(36 + 3200, 4)
     const padded = P.padShortWav(fixed)
     expect(padded.length).toBe(44 + 32_000)
@@ -241,5 +321,36 @@ describe('short clips', () => {
     expect(P.padShortWav(long)).toBe(long)
     const notWav = Buffer.from('not a wav at all')
     expect(P.padShortWav(notWav)).toBe(notWav)
+  })
+})
+
+describe.runIf(process.platform === 'darwin')('the sandbox profile, enforced by the OS', () => {
+  it('denies a network connection and writes outside the run directory and the model cache', async () => {
+    const { createServer } = await import('node:http')
+    const { spawnSync, execFile } = await import('node:child_process')
+    const run = (cmd: string, args: string[]) => new Promise<{ status: number; stdout: string }>(res => execFile(cmd, args, { encoding: 'utf8' }, (err, stdout) => res({ status: err ? (typeof (err as any).code === 'number' ? (err as any).code : 1) : 0, stdout })))
+    const srv = createServer((_q, r) => r.end('ok'))
+    await new Promise<void>(res => srv.listen(0, '127.0.0.1', () => res()))
+    const port = (srv.address() as any).port
+    const work = mkdtempSync(join(tmpdir(), 'cos-parakeet-sbx-')), home = mkdtempSync(join(tmpdir(), 'cos-parakeet-home-')), outside = mkdtempSync(join(tmpdir(), 'cos-parakeet-out-'))
+    try {
+      const profile = P.parakeetSandboxProfile(work, home)
+      // execFile, not spawnSync: the local server must keep answering while curl runs.
+      const curl = (sandboxed: boolean) => sandboxed
+        ? run('/usr/bin/sandbox-exec', ['-p', profile, '/usr/bin/curl', '-s', '-m', '3', `http://127.0.0.1:${port}/`])
+        : run('/usr/bin/curl', ['-s', '-m', '3', `http://127.0.0.1:${port}/`])
+      expect((await curl(false)).stdout).toBe('ok') // the control: the request works unsandboxed
+      const denied = await curl(true)
+      expect(denied.status).not.toBe(0)
+      expect(denied.stdout).toBe('')
+      const touch = (path: string) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/usr/bin/touch', path]).status
+      expect(touch(join(work, 'ok'))).toBe(0)
+      expect(touch(join(home, 'ok'))).toBe(0)
+      expect(touch(join(outside, 'nope'))).not.toBe(0)
+      expect(existsSync(join(outside, 'nope'))).toBe(false)
+    } finally {
+      srv.close()
+      for (const d of [work, home, outside]) rmSync(d, { recursive: true, force: true })
+    }
   })
 })

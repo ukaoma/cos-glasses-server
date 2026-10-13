@@ -23,11 +23,12 @@ export interface SegmentStt {
   engine: string
   requestedEngine: string
   fallbackReason?: string
+  reusedCheckpoint?: boolean
   frontEnd: string
   timestamps: boolean
   primary: SttHypothesis
   secondOpinion?: SttHypothesis
-  resolver: { version: string; enabled: boolean; applied: boolean; wordsFromSecond: number }
+  resolver: { version: string; enabled: boolean; applied: boolean; wordsFromSecond: number; skipped?: string }
   disagreements: Disagreement[]
 }
 
@@ -36,6 +37,10 @@ export interface BatchResult {
   text: string
   words: WhisperWord[]
   speakerWords: Array<{ word: string; start: number; end: number; speaker: string; similarity: number }>
+  /** Uncorrected spoken words and the decode's own VAD speech spans (6.72.0), so a
+   *  progressive checkpoint can be reused as a resolver primary. */
+  spokenWords?: WhisperWord[]
+  speechSpans?: Array<[number, number]>
   stt?: SegmentStt
 }
 
@@ -44,10 +49,15 @@ export interface BatchSttSummary {
   plan: { engine: string; secondOpinion: string; resolver: boolean; frontEnd: string; timestamps: boolean }
   resolverVersion: string
   windows: number
+  /** Windows planned but not in the result (a decode failed both ways). */
+  windowsLost: number
   disagreements: number
   wordsFromSecond: number
   secondOpinionFailures: number
   primaryFallbacks: number
+  timestampFallbacks: number
+  checkpointsReused: number
+  resolverSkipped: number
 }
 
 export interface BatchTranscription {

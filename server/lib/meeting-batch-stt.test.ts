@@ -25,7 +25,8 @@ function deps(over: Partial<import('./meeting-batch-transcribe.js').HqDecodeDeps
   const d = {
     whisper: vi.fn(async (_wav: Buffer, _ctx: string | undefined, opts: any) => {
       calls.push(`whisper:${opts.timestamps ? 'ts' : 'legacy'}`)
-      return { text: 'we should ship', words: words('we should ship'), spokenWords: words('we should ship'), timestamps: !!opts.timestamps, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' } as any
+      return { text: 'we should ship', words: words('we should ship'), spokenWords: words('we should ship'), timestamps: !!opts.timestamps,
+        ...(opts.timestamps ? { speechSpans: [[0, 10]] } : {}), model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' } as any
     }),
     parakeet: vi.fn(async (_wav: Buffer, opts: any) => {
       calls.push(`parakeet:${opts.model}:${opts.lane}:${opts.timeoutMs}`)
@@ -33,6 +34,7 @@ function deps(over: Partial<import('./meeting-batch-transcribe.js').HqDecodeDeps
     }),
     frontEnd: vi.fn(async (audio: Buffer, fe: string) => { calls.push(`fe:${fe}`); return audio }),
     vocabulary: () => [],
+    speechSeconds: () => 3,
     ...over,
   }
   return { d, calls }
@@ -48,12 +50,12 @@ beforeEach(async () => {
 })
 afterEach(() => { delete process.env.COS_DATA_DIR; rmSync(dir, { recursive: true, force: true }) })
 
-const plan = (over: Partial<import('./meeting-batch-transcribe.js').HqJobPlan> = {}) => ({ engine: 'large-v3' as const, secondOpinion: 'parakeet-ultra' as const, resolver: true, frontEnd: 'highpass' as const, ...over })
+const plan = (over: Partial<import('./meeting-batch-transcribe.js').HqJobPlan> = {}): import('./meeting-batch-transcribe.js').HqJobPlan => ({ engine: 'large-v3', secondOpinion: 'parakeet-ultra', resolver: true, frontEnd: 'highpass', ...over })
 
 describe('meeting HQ under the STT plan (6.72.0)', () => {
   it('large-v3 with timestamps, Parakeet second opinion on the same audio, resolver fills the gap', async () => {
     const { d, calls } = deps()
-    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan(), d)
+    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ secondOpinion: 'parakeet-ultra' }), d)
     expect(calls).toEqual(['fe:highpass', 'whisper:ts', `parakeet:parakeet-ultra:batch:${M.PARAKEET_FIRST_WINDOW_TIMEOUT_MS}`])
     expect((d.parakeet as any).mock.calls[0][0]).toBe((d.whisper as any).mock.calls[0][0])
     expect(r.text).toBe('we should ship the build Friday')
@@ -146,6 +148,95 @@ describe('meeting HQ under the STT plan (6.72.0)', () => {
   it('summarizes the plan and the disagreements for the sidecar', async () => {
     const { d } = deps()
     const out = await M.transcribeSegments(dir, [segment], entries, undefined, plan(), d)
-    expect(M.summarizeStt(plan(), out)).toMatchObject({ plan: { engine: 'large-v3', timestamps: true }, windows: 1, disagreements: 1, wordsFromSecond: 3, secondOpinionFailures: 0, primaryFallbacks: 0 })
+    expect(M.summarizeStt(plan(), out, 2)).toMatchObject({ plan: { engine: 'large-v3', timestamps: true }, windows: 1, windowsLost: 1, disagreements: 1, wordsFromSecond: 3, secondOpinionFailures: 0, primaryFallbacks: 0, timestampFallbacks: 0, checkpointsReused: 0 })
+  })
+
+  it('a timestamp decode that fails is retried with the legacy decoder; the window keeps its text', async () => {
+    const { d, calls } = deps({ whisper: vi.fn(async (_w: Buffer, _c: any, opts: any) => {
+      calls.push(`whisper:${opts.timestamps ? 'ts' : 'legacy'}`)
+      if (opts.timestamps) throw new Error('HQ VAD timing evidence inconsistent')
+      return { text: 'legacy text', words: words('legacy text'), timestamps: false, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' } as any
+    }) })
+    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ secondOpinion: 'off' }), d)
+    expect(calls).toEqual(['fe:highpass', 'whisper:ts', 'whisper:legacy'])
+    expect(r.text).toBe('legacy text')
+    expect(r.stt).toMatchObject({ engine: 'large-v3-legacy', timestamps: false, fallbackReason: expect.stringContaining('timestamps_failed') })
+    expect(M.summarizeStt(plan(), [r]).timestampFallbacks).toBe(1)
+  })
+
+  it('Whisper failing both ways: the planned Parakeet second opinion becomes the primary', async () => {
+    const { d } = deps({ whisper: vi.fn(async () => { throw new Error('whisper-cli HQ exit 1') }) })
+    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ secondOpinion: 'parakeet-ultra' }), d)
+    expect(r.text).toBe('we should ship the build Friday')
+    expect(r.stt).toMatchObject({ engine: 'parakeet-ultra', fallbackReason: expect.stringContaining('whisper_failed') })
+    expect(r.stt!.secondOpinion).toBeUndefined()
+  })
+
+  it('an empty Parakeet primary over audio with speech is a failure: Large-v3 decodes the window', async () => {
+    const { d, calls } = deps({ parakeet: vi.fn(async (_w: Buffer, opts: any) => { calls.push('parakeet'); return { model: opts.model, text: '', words: [], processingSec: 0.1, wallMs: 10 } }) })
+    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ engine: 'parakeet-ultra', secondOpinion: 'off' }), d)
+    expect(calls).toContain('whisper:ts')
+    expect(r.stt).toMatchObject({ engine: 'large-v3', fallbackReason: expect.stringContaining('no words over 3.0 s of speech') })
+    // Silence really is silence: an empty Parakeet window stands.
+    const quiet = deps({ speechSeconds: () => 0.1, parakeet: vi.fn(async (_w: Buffer, opts: any) => ({ model: opts.model, text: '', words: [], processingSec: 0.1, wallMs: 10 })) })
+    const [q] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ engine: 'parakeet-ultra', secondOpinion: 'off' }), quiet.d)
+    expect(q.stt).toMatchObject({ engine: 'parakeet-ultra' })
+    expect(q.text).toBe('')
+  })
+
+  it('Parakeet is not called again in a job after two failures in a row', async () => {
+    let n = 0
+    const { d } = deps({ parakeet: vi.fn(async () => { n++; throw new Error('timeout') }) })
+    const three = [segment, { ...segment, startChunkIdx: 1, endChunkIdx: 1 }, { ...segment, startChunkIdx: 0, endChunkIdx: 0 }]
+    const out = await M.transcribeSegments(dir, three, entries, undefined, plan({ secondOpinion: 'parakeet-ultra' }), d)
+    expect(n).toBe(M.PARAKEET_JOB_BREAKER_FAILURES)
+    expect(out).toHaveLength(3)
+    expect(out[2].stt!.secondOpinion).toMatchObject({ error: expect.stringContaining('stopped for this job') })
+    expect(out.every(r => r.text === 'we should ship')).toBe(true)
+  })
+
+  it('records a skipped (too long) resolution and never claims second-opinion words it did not apply', async () => {
+    const { d } = deps({ whisper: vi.fn(async (_w: Buffer, _c: any, opts: any) => ({ text: 'we should ship', words: words('we should ship'), timestamps: !!opts.timestamps, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' }) as any) })
+    // No spoken words from Whisper: the resolver records but may not apply.
+    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan(), d)
+    expect(r.stt!.resolver.applied).toBe(false)
+    expect(r.stt!.disagreements.every(x => x.taken === 'primary')).toBe(true)
   })
 })
+
+describe('progressive checkpoints under a second opinion', () => {
+  it('reuse the checkpoint as the primary and decode only the second opinion', async () => {
+    process.env.COS_MEETING_PROGRESSIVE_HQ = '1'
+    try {
+      vi.resetModules()
+      vi.doMock('./whisper-local.js', async (orig) => ({ ...(await orig() as any), getHighQualityTranscriptionCapability: () => ({ hqAvailable: true, model: 'large-v3', backend: 'whisper-cli', reason: null }) }))
+      const MM = await import('./meeting-batch-transcribe.js')
+      const id = { timestamps: true, frontEnd: 'highpass' as const }
+      const { getHighQualityCheckpointFingerprint } = await import('./whisper-local.js')
+      MM.__progressiveHqTesting.writeProgressiveCheckpoint(dir, 's1', {
+        key: '0-1', sourceHash: MM.__progressiveHqTesting.segmentSourceHash(dir, segment)!, contextHash: MM.__progressiveHqTesting.contextHash(undefined),
+        configFingerprint: getHighQualityCheckpointFingerprint(id), completedAt: new Date().toISOString(), wallTimeMs: 1,
+        result: { segment, text: 'we should ship', words: words('we should ship'), spokenWords: words('we should ship'), speechSpans: [[0, 10]],
+          speakerWords: words('we should ship').map(w => ({ ...w, speaker: 'MU', similarity: 1 })) } as any,
+      })
+      const { d, calls } = deps()
+      const [r] = await MM.transcribeSegments(dir, [segment], entries, 's1', plan({ secondOpinion: 'parakeet-ultra' }), d)
+      expect(calls.filter(c => c.startsWith('whisper'))).toEqual([])
+      expect(calls.filter(c => c.startsWith('parakeet'))).toHaveLength(1)
+      expect(r.stt).toMatchObject({ reusedCheckpoint: true, resolver: { applied: true } })
+      expect(r.text).toBe('we should ship the build Friday')
+      const off = deps()
+      const [o] = await MM.transcribeSegments(dir, [segment], entries, 's1', plan({ secondOpinion: 'off' }), off.d)
+      expect(off.calls).toEqual([])
+      expect(o.stt).toMatchObject({ reusedCheckpoint: true })
+      // A Parakeet HQ plan never takes a Whisper checkpoint.
+      const pk = deps()
+      await MM.transcribeSegments(dir, [segment], entries, 's1', plan({ engine: 'parakeet-ultra', secondOpinion: 'off' }), pk.d)
+      expect(pk.calls.some(c => c.startsWith('parakeet'))).toBe(true)
+    } finally {
+      delete process.env.COS_MEETING_PROGRESSIVE_HQ
+      vi.doUnmock('./whisper-local.js')
+    }
+  })
+})
+

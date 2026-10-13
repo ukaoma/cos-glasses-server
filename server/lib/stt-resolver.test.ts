@@ -4,7 +4,7 @@ import { isDeletionProneEngine, isProtectedKey, MAX_ALIGNMENT_CELLS, resolveHypo
 const timed = (text: string, start = 0, step = 0.4): HypWord[] =>
   text.split(' ').map((word, i) => ({ word, start: start + i * step, end: start + i * step + step * 0.8 }))
 
-const opts = (over: Partial<Parameters<typeof resolveHypotheses>[2]> = {}) => ({ vocabulary: [], primaryDeletionProne: true, apply: true, ...over })
+const opts = (over: Partial<Parameters<typeof resolveHypotheses>[2]> = {}) => ({ vocabulary: [], primaryDeletionProne: true, apply: true, speechSpans: [[0, 100]] as Array<[number, number]>, ...over })
 
 describe('stt resolver', () => {
   it('fills a gap a deletion-prone primary left, and records it', () => {
@@ -63,13 +63,16 @@ describe('stt resolver', () => {
     expect(n.text).toBe('about dollars')
   })
 
-  it('accepts a long dropped run even when it holds a negation (new content, not a flip)', () => {
-    const r = resolveHypotheses({ engine: 'large-v3', text: 'okay then' }, { engine: 'parakeet-ultra', text: 'okay then we do not have the budget yet' }, opts())
-    expect(r.text).toBe('okay then we do not have the budget yet')
+  it('never takes a dropped run that adds a negation or a number, however long', () => {
+    const r = resolveHypotheses({ engine: 'large-v3', text: 'okay then', words: timed('okay then') }, { engine: 'parakeet-ultra', text: 'okay then we do not have the budget yet', words: timed('okay then we do not have the budget yet') }, opts())
+    expect(r.text).toBe('okay then')
+    expect(r.disagreements[0]).toMatchObject({ kind: 'second_only', taken: 'primary', reason: 'protected' })
+    const ok = resolveHypotheses({ engine: 'large-v3', text: 'okay then', words: timed('okay then') }, { engine: 'parakeet-ultra', text: 'okay then we have the budget for it', words: timed('okay then we have the budget for it') }, opts())
+    expect(ok.text).toBe('okay then we have the budget for it')
   })
 
   it('records disagreements but changes nothing when apply is false', () => {
-    const r = resolveHypotheses({ engine: 'large-v3', text: 'we should ship' }, { engine: 'parakeet-ultra', text: 'we should ship the build on Friday' }, opts({ apply: false }))
+    const r = resolveHypotheses({ engine: 'large-v3', text: 'we should ship', words: timed('we should ship') }, { engine: 'parakeet-ultra', text: 'we should ship the build on Friday', words: timed('we should ship the build on Friday') }, opts({ apply: false }))
     expect(r.text).toBe('we should ship')
     expect(r.wordsFromSecond).toBe(0)
     expect(r.disagreements[0]).toMatchObject({ taken: 'primary', reason: 'gap_fill' })
@@ -98,6 +101,25 @@ describe('stt resolver', () => {
     const r = resolveHypotheses({ engine: 'large-v3', text: long }, { engine: 'parakeet-ultra', text: `${long} extra` }, opts())
     expect(r.skipped).toBe('too_long')
     expect(r.text).toBe(long)
+  })
+
+  it('gap fill only inside the primary VAD speech spans, and only when the second opinion is confident', () => {
+    const P = { engine: 'large-v3', text: 'we should ship', words: timed('we should ship') }
+    const Q = { engine: 'parakeet-ultra', text: 'we should ship the build on Friday', words: timed('we should ship the build on Friday') }
+    // The extra words sit at 1.2 s to 2.7 s.
+    expect(resolveHypotheses(P, Q, opts({ speechSpans: [[0, 1.0]] })).disagreements[0]).toMatchObject({ taken: 'primary', reason: 'not_speech' })
+    expect(resolveHypotheses(P, Q, opts({ speechSpans: null })).disagreements[0]).toMatchObject({ taken: 'primary', reason: 'not_speech' })
+    expect(resolveHypotheses(P, Q, opts({ speechSpans: [[1.0, 3.0]] })).text).toBe('we should ship the build on Friday')
+    const lowQ = { ...Q, words: Q.words.map(w => ({ ...w, probability: 0.3 })) }
+    expect(resolveHypotheses(P, lowQ, opts()).disagreements[0]).toMatchObject({ taken: 'primary', reason: 'low_confidence' })
+    const highQ = { ...Q, words: Q.words.map(w => ({ ...w, probability: 0.9 })) }
+    expect(resolveHypotheses(P, highQ, opts()).text).toBe('we should ship the build on Friday')
+  })
+
+  it('vocabulary rescue replaces a short region only', () => {
+    const wide = resolveHypotheses({ engine: 'parakeet-ultra', text: 'so alpha beta gamma delta epsilon was fine' }, { engine: 'large-v3', text: 'so red green ThriftCart blue pink grey was fine' }, opts({ primaryDeletionProne: false, vocabulary: ['ThriftCart'] }))
+    expect(wide.text).toBe('so alpha beta gamma delta epsilon was fine')
+    expect(wide.disagreements[0]).toMatchObject({ taken: 'primary', reason: 'too_wide' })
   })
 
   it('knows which engines are deletion-prone and which words are protected', () => {

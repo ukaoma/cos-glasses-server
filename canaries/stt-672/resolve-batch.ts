@@ -21,10 +21,12 @@ for await (const line of rl) {
     process.stdout.write(JSON.stringify({ id: job.id, text: h.text, words: h.words ?? null }) + '\n')
     continue
   }
-  const r = resolveHypotheses(job.primary, fix(job.second), {
+  // As shipped: second-opinion words stay uncorrected; the joined text is corrected once.
+  const r = resolveHypotheses(job.primary, job.second, {
     vocabulary,
     primaryDeletionProne: isDeletionProneEngine(job.primary.engine),
     apply: job.apply !== false,
+    speechSpans: job.speechSpans ?? null,
     ...(typeof job.maxSkewSec === 'number' ? { maxSkewSec: job.maxSkewSec } : {}),
   })
   process.stdout.write(JSON.stringify({

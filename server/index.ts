@@ -103,8 +103,8 @@ import { voiceRouter } from './routes/voice.js'
 import { glossaryRouter } from './routes/glossary.js'
 import { homeAreaRouter } from './routes/home-area.js'
 import { createSttSettingsRouter } from './routes/stt-settings.js'
-import { ensurePreviewWarm } from './lib/stt-runtime.js'
-import { sweepParakeetStaging, sweepStaleParakeetTmp } from './lib/parakeet.js'
+import { setRecordingLiveProbe, startPreviewWarmLoop, stopPreviewWarmLoop } from './lib/stt-runtime.js'
+import { killParakeetChildren, sweepParakeetStaging, sweepStaleParakeetTmp } from './lib/parakeet.js'
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
@@ -1179,6 +1179,9 @@ async function gracefulShutdown(): Promise<void> {
   try {
     const nemotron = killNemotronChildren()
     if (nemotron.killed || nemotron.removed) console.log(`[diarizer] shutdown: killed ${nemotron.killed} Nemotron run(s), removed ${nemotron.removed} temp dir(s)`)
+    stopPreviewWarmLoop()
+    const parakeet = killParakeetChildren()
+    if (parakeet.killed || parakeet.removed) console.log(`[stt] shutdown: killed ${parakeet.killed} Parakeet run(s), removed ${parakeet.removed} temp dir(s)`)
   } catch { /* best effort */ }
   stopCodexModelCatalogRefresh()
   stopWhisperServer()
@@ -1340,8 +1343,13 @@ listenRequiredServers(listeners).then(() => {
     // takes 15-30 s). Chunks use the voiceprint until it is warm; never awaited.
     startNemotronWarmup()
     // 6.72.0: leftovers of an interrupted Parakeet install or run, then the preview warm-up if selected.
-    try { sweepParakeetStaging(); sweepStaleParakeetTmp() } catch { /* best effort */ }
-    ensurePreviewWarm()
+    try {
+      const swept = sweepParakeetStaging()
+      if (swept.restored) console.log('[stt] Restored the Parakeet install a crash left mid-swap')
+      sweepStaleParakeetTmp()
+    } catch { /* best effort */ }
+    setRecordingLiveProbe(() => getActiveTranscriptionSessionCount() > 0)
+    startPreviewWarmLoop()
   }
 
   // Durable recovery starts with the admitted runtime by default. A literal

@@ -20,7 +20,7 @@ import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:c
 import { createHash, randomBytes } from 'node:crypto'
 import {
   chmodSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync,
-  readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync,
+  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir, setPriority, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -34,7 +34,8 @@ import type { HypWord } from './stt-resolver.js'
 export type ParakeetModelId = 'parakeet-ultra' | 'parakeet-v2'
 export const PARAKEET_TMP_PREFIX = 'cos-parakeet-'
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec'
-export const PARAKEET_VERSION_LABEL = `FluidAudio ${PARAKEET_CLI.version}; Parakeet Ultra ${PARAKEET_MODELS[0].revision.slice(0, 8)}, v2 ${PARAKEET_MODELS[1].revision.slice(0, 8)}`
+/** At most 40 characters (Control truncates there). */
+export const PARAKEET_VERSION_LABEL = `Ultra ${PARAKEET_MODELS[0].revision.slice(0, 8)}, v2 ${PARAKEET_MODELS[1].revision.slice(0, 8)}, CLI ${PARAKEET_CLI.version}`
 
 export function parakeetRoot(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.COS_PARAKEET_DIR?.trim()
@@ -61,6 +62,8 @@ export interface InstallProgress {
   bytesDone: number
   bytesTotal: number
   error: string | null
+  /** Where the bytes came from: files copied from a verified local copy, and files downloaded. */
+  source?: { filesLocal: number; filesDownloaded: number; localSources: string[] }
 }
 
 export interface InstallReceipt {
@@ -74,15 +77,16 @@ export interface InstallReceipt {
 const TOTAL_BYTES = PARAKEET_CLI.size + PARAKEET_MODELS.reduce((n, m) => n + m.files.reduce((k, f) => k + f.size, 0), 0)
 let progress: InstallProgress = { state: 'idle', bytesDone: 0, bytesTotal: TOTAL_BYTES, error: null }
 let installing: Promise<void> | null = null
+let installAbort: AbortController | null = null
 let installedCache: { at: number; value: { installed: boolean; bytes: number } } | null = null
 
 export function getInstallProgress(): InstallProgress {
-  return { ...progress }
+  return { ...progress, ...(progress.source ? { source: { ...progress.source, localSources: [...progress.source.localSources] } } : {}) }
 }
 
 /**
  * Cheap: the receipt plus a size check of every pinned file. The full hash
- * check happens once, at install. Health and settings reads call this.
+ * check happens at install, and the CLI's hash once per process (cliVerified).
  */
 export function parakeetInstalled(now = Date.now()): { installed: boolean; bytes: number } {
   if (installedCache && now - installedCache.at < 5_000) return installedCache.value
@@ -100,7 +104,7 @@ export function parakeetInstalled(now = Date.now()): { installed: boolean; bytes
   return value
 }
 
-export function resetParakeetInstallCache(): void { installedCache = null }
+export function resetParakeetInstallCache(): void { installedCache = null; cliHashCache.clear() }
 
 async function sha256File(path: string): Promise<string> {
   const hash = createHash('sha256')
@@ -108,14 +112,41 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest('hex')
 }
 
-function fileSize(path: string): number | null {
-  try { const s = statSync(path); return s.isFile() ? s.size : null } catch { return null }
+function fileStat(path: string): { size: number; mtimeMs: number } | null {
+  try { const st = statSync(path); return st.isFile() ? { size: st.size, mtimeMs: st.mtimeMs } : null } catch { return null }
+}
+function fileSize(path: string): number | null { return fileStat(path)?.size ?? null }
+
+/** A pinned CLI hash, computed once per (path, size, mtime) for the life of the process. */
+const cliHashCache = new Map<string, boolean>()
+async function isPinnedCli(path: string): Promise<boolean> {
+  const st = fileStat(path)
+  if (!st || st.size !== PARAKEET_CLI.size) return false
+  const key = `${path}\0${st.size}\0${st.mtimeMs}`
+  const known = cliHashCache.get(key)
+  if (known !== undefined) return known
+  const ok = await sha256File(path).then(h => h === PARAKEET_CLI.sha256, () => false)
+  cliHashCache.set(key, ok)
+  return ok
 }
 
-/** Places an already-downloaded copy might be. Every candidate must still match the pinned hash. */
+/** Synchronous view of the CLI check for GET: true or false once checked, null while unknown. */
+function knownPinnedCli(path: string): boolean | null {
+  const st = fileStat(path)
+  if (!st || st.size !== PARAKEET_CLI.size) return false
+  return cliHashCache.get(`${path}\0${st.size}\0${st.mtimeMs}`) ?? null
+}
+
+/**
+ * Where an already-verified local copy of the models might be. Every candidate
+ * must still match the pinned hash. `<data>/stt/parakeet-sources` is the
+ * documented drop-in: link or copy a folder holding `parakeet-ultra/` and
+ * `parakeet-v2/` (or FluidAudio's own repo folder names) there, and an install
+ * started with an empty body uses it instead of downloading.
+ */
 export function defaultLocalSources(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
   const extra = (env.COS_PARAKEET_LOCAL_SOURCES ?? '').split(':').map(s => s.trim()).filter(Boolean)
-  return [...extra, join(home, 'Library', 'Application Support', 'FluidAudio', 'Models')]
+  return [...extra, join(parakeetRoot(env), '..', 'parakeet-sources'), join(home, 'Library', 'Application Support', 'FluidAudio', 'Models')]
 }
 
 export function defaultCliCandidates(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
@@ -123,6 +154,24 @@ export function defaultCliCandidates(env: NodeJS.ProcessEnv = process.env, home:
   if (env.COS_NEMOTRON_CLI) out.push(env.COS_NEMOTRON_CLI)
   out.push(join(home, '.cos-glasses', 'bin', 'fluidaudiocli'))
   return out
+}
+
+/** The first candidate CLI that is the pinned build, or null. */
+export async function findPinnedCli(candidates: string[] = defaultCliCandidates()): Promise<string | null> {
+  for (const c of candidates) if (await isPinnedCli(c)) return c
+  return null
+}
+
+/** For GET (no I/O beyond stat): is a pinned CLI known to be on this Mac? null until checked. */
+export function pinnedCliKnown(candidates: string[] = defaultCliCandidates()): boolean | null {
+  let unknown = false
+  for (const c of candidates) {
+    const k = knownPinnedCli(c)
+    if (k === true) return true
+    if (k === null) unknown = true
+  }
+  if (unknown) void findPinnedCli(candidates)
+  return unknown ? null : false
 }
 
 function modelDirCandidates(model: PinnedModel, sources: string[]): string[] {
@@ -142,54 +191,63 @@ export class ParakeetInstallError extends Error {
 
 type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; body: ReadableStream<Uint8Array> | null }>
 
+/** A download that delivers no bytes for this long is abandoned. */
+export const INSTALL_IDLE_TIMEOUT_MS = 60_000
+
 export interface InstallOptions {
   /** Extra directories or files to look in before downloading. */
   localSources?: string[]
+  /** Fail (plainly) instead of downloading a file the local sources lack. */
+  requireLocal?: boolean
   cliCandidates?: string[]
   fetchImpl?: FetchLike
-  signal?: AbortSignal
+  idleTimeoutMs?: number
 }
 
 /** Start the install, or join the one already running. */
 export function installParakeet(options: InstallOptions = {}): Promise<void> {
   if (installing) return installing
-  installing = runInstall(options).finally(() => { installing = null })
+  installAbort = new AbortController()
+  installing = runInstall(options, installAbort.signal).finally(() => { installing = null; installAbort = null })
   return installing
 }
 
 export function parakeetInstallRunning(): boolean { return installing !== null }
 
-async function runInstall(options: InstallOptions): Promise<void> {
+/** Stop a running install; nothing partial is kept. */
+export function cancelParakeetInstall(): boolean {
+  if (!installAbort) return false
+  installAbort.abort(new ParakeetInstallError('The install was cancelled.'))
+  return true
+}
+
+async function runInstall(options: InstallOptions, signal: AbortSignal): Promise<void> {
   const root = parakeetRoot()
-  progress = { state: 'verifying', bytesDone: 0, bytesTotal: TOTAL_BYTES, error: null }
+  const localSources = [...(options.localSources ?? []), ...defaultLocalSources()]
+  progress = { state: 'verifying', bytesDone: 0, bytesTotal: TOTAL_BYTES, error: null, source: { filesLocal: 0, filesDownloaded: 0, localSources: [] } }
   mkdirSync(root, { recursive: true, mode: 0o700 })
   const staging = join(root, `.staging-${randomBytes(6).toString('hex')}`)
   mkdirSync(join(staging, 'bin'), { recursive: true, mode: 0o700 })
+  const usedSources = new Set<string>()
   try {
     // 1. The CLI. FluidAudio publishes no binary, so a pinned local copy is the only source.
     const cliTarget = join(staging, 'bin', 'fluidaudiocli')
-    let cliFound = false
-    for (const candidate of [...(options.cliCandidates ?? []), ...(options.localSources ?? []).map(s => fileSize(s) !== null ? s : join(s, 'fluidaudiocli')), ...defaultCliCandidates()]) {
-      if (fileSize(candidate) !== PARAKEET_CLI.size) continue
-      if (await sha256File(candidate) !== PARAKEET_CLI.sha256) continue
-      copyFileSync(candidate, cliTarget)
-      if (await sha256File(cliTarget) !== PARAKEET_CLI.sha256) throw new ParakeetInstallError('The FluidAudio CLI changed while it was being copied. Try again.')
-      chmodSync(cliTarget, 0o755)
-      cliFound = true
-      break
-    }
-    if (!cliFound) {
+    const cli = await findPinnedCli([...(options.cliCandidates ?? []), ...(options.localSources ?? []).map(src => fileSize(src) !== null ? src : join(src, 'fluidaudiocli')), ...defaultCliCandidates()])
+    if (!cli) {
       throw new ParakeetInstallError(`FluidAudio CLI ${PARAKEET_CLI.version} is not on this Mac. It is the same tool speaker separation uses; put it at ~/.cos-glasses/bin/fluidaudiocli, then install again.`)
     }
+    copyFileSync(cli, cliTarget)
+    if (await sha256File(cliTarget) !== PARAKEET_CLI.sha256) throw new ParakeetInstallError('The FluidAudio CLI changed while it was being copied. Try again.')
+    chmodSync(cliTarget, 0o755)
     progress.bytesDone += PARAKEET_CLI.size
 
     // 2. The models: a matching local copy first, else the pinned Hugging Face revision.
-    const sources = [...(options.localSources ?? []), ...defaultLocalSources()]
     const fetchImpl: FetchLike = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike)
+    const idleMs = options.idleTimeoutMs ?? INSTALL_IDLE_TIMEOUT_MS
     for (const model of PARAKEET_MODELS) {
-      const candidates = modelDirCandidates(model, sources)
+      const candidates = modelDirCandidates(model, localSources)
       for (const file of model.files) {
-        if (options.signal?.aborted) throw new ParakeetInstallError('The install was cancelled.')
+        if (signal.aborted) throw new ParakeetInstallError('The install was cancelled.')
         const target = join(staging, 'models', model.id, file.path)
         mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
         let placed = false
@@ -199,24 +257,50 @@ async function runInstall(options: InstallOptions): Promise<void> {
           if (await sha256File(src) !== file.sha256) continue
           copyFileSync(src, target)
           placed = true
+          usedSources.add(dir)
+          progress.source!.filesLocal++
           break
+        }
+        if (!placed && options.requireLocal) {
+          throw new ParakeetInstallError(`No copy of ${model.id} ${file.path} with the pinned SHA-256 was found in ${(options.localSources ?? []).join(', ') || 'the local sources'}. Check the path, or install with allowDownload to fetch it.`)
         }
         if (!placed) {
           progress.state = 'downloading'
           const url = `https://huggingface.co/${model.repo}/resolve/${model.revision}/${file.path.split('/').map(encodeURIComponent).join('/')}`
-          const res = await fetchImpl(url, { signal: options.signal })
-          if (!res.ok || !res.body) throw new ParakeetInstallError(`Download failed (${res.status}) for ${model.id} ${file.path}.`)
+          // One controller per file: user cancel, or no bytes for idleMs.
+          const ctl = new AbortController()
+          const onCancel = () => ctl.abort(new ParakeetInstallError('The install was cancelled.'))
+          signal.addEventListener('abort', onCancel, { once: true })
+          let idle: ReturnType<typeof setTimeout> | null = null
+          const arm = () => {
+            if (idle) clearTimeout(idle)
+            idle = setTimeout(() => ctl.abort(new ParakeetInstallError(`The download stalled (no data for ${Math.round(idleMs / 1000)} s). Nothing was installed; try again.`)), idleMs)
+            idle.unref?.()
+          }
+          arm()
           const partial = `${target}.partial`
           let written = 0
-          const counter = new Transform({ transform(chunk, _e, cb) {
-            written += chunk.length
-            if (written > file.size) { cb(new ParakeetInstallError(`${model.id} ${file.path} is larger than the pinned size.`)); return }
-            progress.bytesDone += chunk.length
-            cb(null, chunk)
-          } })
-          await pipeline(Readable.fromWeb(res.body as any), counter, createWriteStream(partial, { mode: 0o600 }))
+          try {
+            const res = await fetchImpl(url, { signal: ctl.signal })
+            if (!res.ok || !res.body) throw new ParakeetInstallError(`Download failed (${res.status}) for ${model.id} ${file.path}.`)
+            const counter = new Transform({ transform(chunk, _e, cb) {
+              arm()
+              written += chunk.length
+              if (written > file.size) { cb(new ParakeetInstallError(`${model.id} ${file.path} is larger than the pinned size.`)); return }
+              progress.bytesDone += chunk.length
+              cb(null, chunk)
+            } })
+            await pipeline(Readable.fromWeb(res.body as any), counter, createWriteStream(partial, { mode: 0o600 }), { signal: ctl.signal })
+          } catch (error) {
+            const why = ctl.signal.reason
+            throw why instanceof ParakeetInstallError ? why : error
+          } finally {
+            if (idle) clearTimeout(idle)
+            signal.removeEventListener('abort', onCancel)
+            progress.bytesDone -= written // re-counted once below, after verification
+          }
           renameSync(partial, target)
-          progress.bytesDone -= written // re-counted once below, after verification
+          progress.source!.filesDownloaded++
         }
         progress.state = 'verifying'
         if (fileSize(target) !== file.size || await sha256File(target) !== file.sha256) {
@@ -225,6 +309,7 @@ async function runInstall(options: InstallOptions): Promise<void> {
         progress.bytesDone += file.size
       }
     }
+    progress.source!.localSources = [...usedSources]
 
     const receipt: InstallReceipt = {
       schema: 1,
@@ -235,35 +320,48 @@ async function runInstall(options: InstallOptions): Promise<void> {
     }
     durableAtomicWriteFileSync(join(staging, 'install.json'), JSON.stringify(receipt, null, 2), { mode: 0o600 })
 
-    // 3. Swap in one rename, so a half-installed copy is never "current".
+    // 3. Swap. A crash between the two renames leaves only `.old-*`; boot
+    //    (sweepParakeetStaging) puts it back as current.
     const current = currentDir()
-    const old = existsSync(current) ? join(root, `.old-${randomBytes(6).toString('hex')}`) : null
+    const old = existsSync(current) ? join(root, `.old-${Date.now()}-${randomBytes(3).toString('hex')}`) : null
     if (old) renameSync(current, old)
     renameSync(staging, current)
     if (old) rmSync(old, { recursive: true, force: true })
     mkdirSync(parakeetHome(), { recursive: true, mode: 0o700 })
     resetParakeetInstallCache()
     for (const id of warm.keys()) warm.delete(id)
-    progress = { state: 'installed', bytesDone: TOTAL_BYTES, bytesTotal: TOTAL_BYTES, error: null }
+    progress = { ...progress, state: 'installed', bytesDone: TOTAL_BYTES, bytesTotal: TOTAL_BYTES, error: null }
   } catch (error) {
     rmSync(staging, { recursive: true, force: true })
     const message = error instanceof ParakeetInstallError ? error.message : `Install failed: ${error instanceof Error ? error.message : String(error)}`
-    progress = { state: 'failed', bytesDone: progress.bytesDone, bytesTotal: TOTAL_BYTES, error: message }
+    progress = { ...progress, state: 'failed', bytesTotal: TOTAL_BYTES, error: message, source: progress.source ? { ...progress.source, localSources: [...usedSources] } : undefined }
     throw new ParakeetInstallError(message)
   }
 }
 
-/** A failed or interrupted install leaves staging directories; remove them at start. */
-export function sweepParakeetStaging(): number {
-  let removed = 0
+/**
+ * Boot: put back an install a crash left mid-swap (no `current`, an `.old-*`
+ * present), then remove staging and old directories.
+ */
+export function sweepParakeetStaging(): { removed: number; restored: boolean } {
+  let removed = 0, restored = false
   try {
-    for (const name of readdirSync(parakeetRoot())) {
-      if (!name.startsWith('.staging-') && !name.startsWith('.old-')) continue
-      rmSync(join(parakeetRoot(), name), { recursive: true, force: true })
+    const root = parakeetRoot()
+    const names = readdirSync(root)
+    const olds = names.filter(n => n.startsWith('.old-')).sort()
+    if (!existsSync(currentDir()) && olds.length) {
+      renameSync(join(root, olds.at(-1)!), currentDir())
+      restored = true
+      olds.pop()
+    }
+    for (const name of names) {
+      if (!name.startsWith('.staging-') && !(name.startsWith('.old-') && olds.includes(name))) continue
+      rmSync(join(root, name), { recursive: true, force: true })
       removed++
     }
   } catch { /* nothing installed yet */ }
-  return removed
+  if (restored) resetParakeetInstallCache()
+  return { removed, restored }
 }
 
 // ── Inference ─────────────────────────────────────────────────────────────────
@@ -291,6 +389,8 @@ export interface ParakeetRunOptions {
   timeoutMs: number
   signal?: AbortSignal
   spawnImpl?: SpawnLike
+  /** Tests only: a different sandbox-exec path. There is no environment override. */
+  sandboxExec?: string
 }
 
 const liveChildren = new Set<ChildProcess>()
@@ -326,10 +426,17 @@ export function sweepStaleParakeetTmp(tmpRoot = tmpdir(), minAgeMs = 60_000, now
   return removed
 }
 
-/** Sandbox profile: no network at all; the installed models and CLI are read-only. */
-export function parakeetSandboxProfile(installDir: string): string {
-  const quoted = installDir.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  return `(version 1)(allow default)(deny network*)(deny file-write* (subpath "${quoted}"))`
+/**
+ * Sandbox profile: no network at all, and writes only to this run's temp
+ * directory and the private CoreML cache HOME (plus /dev streams). Reads stay
+ * allowed (the CLI loads system frameworks); that is a documented limit, not a
+ * guarantee about what it could read. Paths are realpath'd: the sandbox matches
+ * resolved paths, so a /tmp or symlinked data dir would otherwise never match.
+ */
+export function parakeetSandboxProfile(workDir: string, homeDir: string): string {
+  const q = (path: string) => { let real = path; try { real = realpathSync(path) } catch { /* not created yet */ } return real.replace(/\\/g, '\\\\').replace(/"/g, '\\"') }
+  return `(version 1)(allow default)(deny network*)(deny file-write*)`
+    + `(allow file-write* (subpath "${q(workDir)}") (subpath "${q(homeDir)}") (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/") (regex #"^/dev/tty"))`
 }
 
 /** The only variables the CLI sees. The server's tokens and keys never reach it. */
@@ -405,10 +512,18 @@ export function transcribeParakeet(wav: Buffer, options: ParakeetRunOptions): Pr
   return runParakeet(wav, options)
 }
 
-function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
+async function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
+  // The installed CLI's full hash, once per process (and again if it changes on disk).
+  if (!options.spawnImpl && !(await isPinnedCli(parakeetCliPath()))) {
+    throw new ParakeetError('not_installed', 'the installed FluidAudio CLI no longer matches its pinned SHA-256')
+  }
+  return runParakeetChecked(wav, options)
+}
+
+function runParakeetChecked(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
   const started = Date.now()
   if (!parakeetInstalled().installed) return Promise.reject(new ParakeetError('not_installed', 'Parakeet is not installed'))
-  const sandbox = process.env.COS_PARAKEET_SANDBOX_EXEC || SANDBOX_EXEC
+  const sandbox = options.sandboxExec ?? SANDBOX_EXEC
   if (!existsSync(sandbox)) return Promise.reject(new ParakeetError('sandbox_unavailable', 'sandbox-exec is missing, so Parakeet cannot be proven offline and does not run'))
   if (options.signal?.aborted) return Promise.reject(new ParakeetError('aborted', 'aborted before start'))
   const model = pinned(options.model)
@@ -426,7 +541,7 @@ function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<Parakeet
   writeFileSync(input, padShortWav(wav), { mode: 0o600 })
   const cleanup = () => { liveDirs.delete(work); try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort */ } }
   const spawnImpl: SpawnLike = options.spawnImpl ?? (nodeSpawn as unknown as SpawnLike)
-  const args = ['-p', parakeetSandboxProfile(currentDir()), parakeetCliPath(), 'transcribe', input,
+  const args = ['-p', parakeetSandboxProfile(work, parakeetHome()), parakeetCliPath(), 'transcribe', input,
     '--local-model-dir', parakeetModelDir(options.model), '--model-version', model.modelVersion, '--output-json', output]
 
   return new Promise<ParakeetResult>((resolvePromise, reject) => {
@@ -486,7 +601,7 @@ export type WarmState = 'cold' | 'warming' | 'warm' | 'failed'
 interface WarmRecord { state: WarmState; at: number; firstMs?: number; warmMs?: number; error?: string }
 const warm = new Map<ParakeetModelId, WarmRecord>()
 const warming = new Map<ParakeetModelId, Promise<boolean>>()
-/** A warm decode of 2 s must come back inside this for the preview to use the model. */
+/** A warm decode of the 8 s warm-up clip must come back inside this for the preview to use the model. */
 export const WARM_DECODE_BUDGET_MS = 1_000
 export const FIRST_LOAD_TIMEOUT_MS = 180_000
 
@@ -494,9 +609,11 @@ export function parakeetWarmState(model: ParakeetModelId): WarmRecord {
   return warm.get(model) ?? { state: 'cold', at: 0 }
 }
 
-/** 2 s of very quiet noise: enough to load and run every CoreML stage. */
+/** 8 s of very quiet noise: the length of a typical preview phrase, so the
+ *  warm decode's time says something about a real preview. */
+export const WARMUP_SECONDS = 8
 export function warmupWav(): Buffer {
-  const samples = 32_000
+  const samples = WARMUP_SECONDS * 16_000
   const pcm = Buffer.alloc(samples * 2)
   let seed = 7
   for (let i = 0; i < samples; i++) { seed = (seed * 1103515245 + 12345) & 0x7fffffff; pcm.writeInt16LE((seed % 41) - 20, i * 2) }

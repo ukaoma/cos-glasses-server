@@ -59,6 +59,26 @@ describe('batch HQ word restore (CPU whisper-cli -ojf)', () => {
     ])
   })
 
+  it('merges sub-word tokens into spoken words on leading-space boundaries', () => {
+    const parsed = parseWhisperCliFullJson(JSON.stringify({ transcription: [
+      { text: " I'm Quilt-ing.", tokens: [
+        { text: '[_BEG_]', offsets: { from: 0, to: 0 }, p: 1 },
+        { text: ' I', offsets: { from: 20, to: 40 }, p: 0.8 },
+        { text: "'m", offsets: { from: 50, to: 150 }, p: 0.9 },
+        { text: ' Qu', offsets: { from: 150, to: 300 }, p: 0.7 },
+        { text: 'ilt', offsets: { from: 300, to: 400 }, p: 0.95 },
+        { text: '-ing.', offsets: { from: 400, to: 600 }, p: 0.6 },
+      ] },
+      { text: ' Next', tokens: [{ text: ' Next', offsets: { from: 700, to: 900 }, p: 0.5 }] },
+    ] }))
+    expect(parsed.words.map(w => w.word)).toEqual(['I', "'m", 'Qu', 'ilt', '-ing.', 'Next'])
+    expect(parsed.spokenWords).toEqual([
+      { word: "I'm", start: 0.02, end: 0.15, probability: 0.8 },
+      { word: 'Quilt-ing.', start: 0.15, end: 0.6, probability: 0.6 },
+      { word: 'Next', start: 0.7, end: 0.9, probability: 0.5 },
+    ])
+  })
+
   it('treats VAD-empty transcription arrays as safe empty results', () => {
     const parsed = parseWhisperCliFullJson(JSON.stringify({
       result: { language: 'en' },

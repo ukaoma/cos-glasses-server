@@ -1,25 +1,26 @@
 // Second-opinion resolver for meeting HQ (6.72.0). Algorithmic only: no model
 // call, no network, no LLM. Transcription must never call `claude -p`.
 //
-// Two decoders hear the same window. Their words are aligned (edit distance
-// over normalized words; timestamps place the words taken and date every
-// disagreement, and can optionally constrain pairing), and every place they
-// disagree is recorded. The resolver then applies
-// two measured rules, and nothing else:
+// Two decoders hear the same window. Their words are aligned by edit distance
+// over normalized words (an optional time-skew limit exists but is off: it
+// measured worse), and every place they disagree is recorded. The resolver
+// then applies two measured rules, and nothing else:
 //
-//   1. Gap fill. Large-v3 is deletion-prone on G2 audio (silver deletions 6.1%
-//      vs 2.1% for Parakeet Ultra), so where the primary is a Whisper engine and
-//      the second opinion heard words the primary has nothing for, those words
-//      are taken.
-//   2. Vocabulary rescue. Where the second opinion's side of a disagreement
+//   1. Gap fill. Large-v3 is deletion-prone on G2 audio (bake-off silver
+//      deletions 6.1% for the fixed Large-v3, 6.6% on the shipped path, against
+//      2.1% for Parakeet Ultra). Where the primary is a Whisper engine and the
+//      second opinion heard words the primary has nothing for, those words are
+//      taken, but only inside a span the primary's own VAD marked as speech and
+//      only when the second opinion's mean word confidence is at least 0.5.
+//   2. Vocabulary rescue. Where the second opinion's side of a short
+//      disagreement (at most 4 words, and the primary's side at most 2 longer)
 //      holds a profile vocabulary term the primary's side does not, the second
-//      opinion's words are taken. Whisper sees the vocabulary prompt; Parakeet
-//      does not, so this mostly helps a Parakeet primary.
+//      opinion's words are taken.
 //
-// Substitutions are otherwise left alone. A region whose two sides differ in a
-// negation, a number or a unit is never changed (the 2026-10-13 diagnostic saw
-// "born lacking" become "born having" and "18 months" become "18 minutes"); it
-// is kept as the primary heard it and listed as a protected disagreement.
+// Everything else stays as the primary heard it. No region whose two sides
+// differ in a negation, a number or a unit is ever changed, whatever its length
+// (the 2026-10-13 diagnostic saw "born lacking" become "born having" and
+// "18 months" become "18 minutes"); it is listed as a protected disagreement.
 
 export interface HypWord {
   word: string
@@ -36,7 +37,7 @@ export interface Hypothesis {
 }
 
 export type DisagreementKind = 'substitution' | 'primary_only' | 'second_only'
-export type ResolutionReason = 'gap_fill' | 'vocabulary' | 'protected' | null
+export type ResolutionReason = 'gap_fill' | 'vocabulary' | 'protected' | 'not_speech' | 'low_confidence' | 'too_wide' | null
 
 export interface Disagreement {
   kind: DisagreementKind
@@ -52,6 +53,12 @@ export interface ResolveOptions {
   vocabulary: readonly string[]
   /** Gap fill only for a deletion-prone primary (the Whisper engines). */
   primaryDeletionProne: boolean
+  /** Where the primary's own VAD heard speech, seconds on the window clock.
+   *  Gap fill needs it: a run outside every span is background the primary's VAD
+   *  rejected, and is not taken. Absent: no gap fill at all. */
+  speechSpans?: ReadonlyArray<readonly [number, number]> | null
+  /** Mean word confidence a gap-fill run needs (second opinion's own scores). */
+  minGapConfidence?: number
   /** false: report disagreements, change nothing. */
   apply: boolean
   /** When set, two words more than this far apart in time never align. Off by
@@ -78,6 +85,13 @@ export const MAX_ALIGNMENT_CELLS = 2_000_000
 export const DEFAULT_MAX_SKEW_SEC: number | null = null
 /** Agreed words each side of a region that a vocabulary match may span. */
 export const CONTEXT_WORDS = 3
+/** A vocabulary rescue replaces at most this many second-opinion words... */
+export const MAX_VOCAB_REGION_WORDS = 4
+/** ...and at most this many more primary words than it inserts. */
+export const MAX_VOCAB_REGION_SLACK = 2
+export const DEFAULT_MIN_GAP_CONFIDENCE = 0.5
+/** Share of a gap-fill run's words whose midpoint must lie in a speech span. */
+export const MIN_SPEECH_SHARE = 0.5
 
 const NEGATIONS = new Set([
   'not', 'no', 'never', 'none', 'nor', 'nothing', 'nobody', 'neither', 'without', 'cannot',
@@ -98,10 +112,7 @@ const NUMBER_WORDS = new Set([
   'nineteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',
   'hundred', 'half', 'quarter', 'twice',
 ])
-/** A gap fill this short lands inside a sentence the primary already heard, so
- *  a negation or number in it could flip that sentence. Longer runs are speech
- *  the primary dropped entirely. */
-export const SHORT_INSERTION_WORDS = 3
+
 
 /** Lowercase letters and digits only. "Don't," and "dont" are the same word. */
 export function wordKey(word: string): string {
@@ -215,6 +226,21 @@ function sameProtected(p: Token[], q: Token[]): boolean {
   return pk === qk
 }
 
+/** A second-opinion-only run is taken only where the primary's VAD heard
+ *  speech and the second opinion was confident. */
+function gapVerdict(q: Token[], options: ResolveOptions): ResolutionReason {
+  const spans = options.speechSpans
+  if (!spans || !spans.length) return 'not_speech'
+  const timed = q.filter(t => t.start !== null)
+  if (!timed.length) return 'not_speech'
+  const inside = timed.filter(t => { const m = mid(t)!; return spans.some(([a, b]) => m >= a && m <= b) }).length
+  if (inside / timed.length < MIN_SPEECH_SHARE) return 'not_speech'
+  const scored = q.filter(t => typeof t.probability === 'number' && Number.isFinite(t.probability))
+  const floor = options.minGapConfidence ?? DEFAULT_MIN_GAP_CONFIDENCE
+  if (scored.length && scored.reduce((n, t) => n + (t.probability as number), 0) / scored.length < floor) return 'low_confidence'
+  return 'gap_fill'
+}
+
 export function resolveHypotheses(primary: Hypothesis, second: Hypothesis, options: ResolveOptions): ResolveResult {
   const P = tokens(primary), Q = tokens(second)
   const toWords = (ts: Token[]): HypWord[] => ts.map(t => ({
@@ -263,9 +289,13 @@ export function resolveHypotheses(primary: Hypothesis, second: Hypothesis, optio
       const wantGap = kind === 'second_only' && options.primaryDeletionProne
       const wantVocab = newTerms.length > 0
       if (wantGap || wantVocab) {
-        const mayFlip = kind !== 'second_only' || q.length <= SHORT_INSERTION_WORDS
-        if (mayFlip && !sameProtected(p, q)) reason = 'protected'
-        else { take = 'second'; reason = wantVocab ? 'vocabulary' : 'gap_fill' }
+        if (!sameProtected(p, q)) reason = 'protected'
+        else if (wantVocab && (q.length > MAX_VOCAB_REGION_WORDS || p.length > q.length + MAX_VOCAB_REGION_SLACK)) {
+          // A term inside a long disagreement is not a reason to swap the whole region.
+          reason = wantGap ? gapVerdict(q, options) : 'too_wide'
+          if (reason === 'gap_fill') take = 'second'
+        } else if (wantVocab) { take = 'second'; reason = 'vocabulary' }
+        else { reason = gapVerdict(q, options); if (reason === 'gap_fill') take = 'second' }
       }
     }
     const where = span([...p, ...q])

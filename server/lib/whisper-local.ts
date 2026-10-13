@@ -13,7 +13,7 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync, statSync } from 'n
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import crypto from 'node:crypto'
-import { batchTimestampsEnabled, remapBatchWords } from './whisper-batch-timing.js'
+import { batchTimestampsEnabled, parseNativeVadTimeline, remapBatchWords } from './whisper-batch-timing.js'
 import { readSttSettings, type FrontEndId } from './stt-settings.js'
 import { getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
 import { stripBrandUrls } from './hallucination-filter.js'
@@ -71,11 +71,13 @@ export interface HighQualityTranscriptionCapability {
 export interface HighQualityTranscriptionResult {
   text: string
   words?: WhisperWord[]
-  /** Sub-word tokens merged into spoken words (6.72.0). Clocks are only
-   *  meaningful when the decode ran with timestamps. */
+  /** Sub-word tokens merged into spoken words (6.72.0), NOT name-corrected.
+   *  Clocks are only meaningful when the decode ran with timestamps. */
   spokenWords?: WhisperWord[]
   /** True when this decode ran with timestamps and the VAD remap. */
   timestamps?: boolean
+  /** Where this decode's own VAD heard speech (seconds, input clock). Timestamp mode only. */
+  speechSpans?: Array<[number, number]>
   model: 'large-v3' | 'turbo'
   backend: 'whisper-cli' | 'whisper-server'
   actualQuality: 'hq' | 'fast'
@@ -1174,6 +1176,7 @@ export async function transcribeHighQuality(
     let finalText = text
     let words: WhisperWord[] | undefined
     let spokenWords: WhisperWord[] | undefined
+    let speechSpans: Array<[number, number]> | undefined
     if (captureWords) {
       try {
         if (existsSync(jsonPath)) {
@@ -1187,8 +1190,11 @@ export async function transcribeHighQuality(
           words = timed.length > 0
             ? timed.map(w => ({ ...w, word: applyCorrections(w.word) }))
             : []
-          const spoken = timestampCanary ? remapBatchWords(parsed.spokenWords, nativeDiagnostics, useVad) : parsed.spokenWords
-          spokenWords = spoken.map(w => ({ ...w, word: applyCorrections(w.word) }))
+          // Spoken words stay uncorrected: the resolver joins them and corrects the text once.
+          spokenWords = timestampCanary ? remapBatchWords(parsed.spokenWords, nativeDiagnostics, useVad) : parsed.spokenWords
+          if (timestampCanary && useVad && parsed.words.length) {
+            speechSpans = parseNativeVadTimeline(nativeDiagnostics).map(s => [s.originalStart, s.originalEnd] as [number, number])
+          }
         } else if (timestampCanary) {
           throw new Error('HQ timestamp candidate did not produce CLI JSON')
         }
@@ -1227,7 +1233,7 @@ export async function transcribeHighQuality(
         }
     const timing = isBatch ? { timestamps: timestampCanary } : {}
     return words
-      ? { text: corrected, words, ...(spokenWords ? { spokenWords } : {}), ...timing, ...metadata }
+      ? { text: corrected, words, ...(spokenWords ? { spokenWords } : {}), ...(speechSpans ? { speechSpans } : {}), ...timing, ...metadata }
       : { text: corrected, ...timing, ...metadata }
   } finally {
     try { unlinkSync(tmpWav) } catch { /* cleanup */ }

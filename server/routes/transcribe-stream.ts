@@ -56,7 +56,7 @@ import {
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
 import { transcribeMeetingPreview } from '../lib/stt-runtime.js'
-import { decideQuiet, asrFrontEnd } from '../lib/stt-live.js'
+import { decideQuiet, asrFrontEnd, QUIET_RMS } from '../lib/stt-live.js'
 import { readSttSettings } from '../lib/stt-settings.js'
 import { dataPath } from '../lib/data-dir.js'
 import { ageHours, partitionExpiredAudio } from '../lib/audio-retention.js'
@@ -149,8 +149,12 @@ function ensurePrivateDirectory(path: string): void {
 
 // Silence-hallucination drops (2026-05-29, v5.9.73). Contract in streamSilenceDropReason:
 //   brand-URL-only -> dropped ALWAYS (vocab-seeded, never real speech).
-//   any-URL-only / repeated-thank-you -> dropped only when isQuiet (rms<150), so a real
-//   softly-spoken utterance or a clearly-dictated third-party URL is never dropped.
+//   any-URL-only / repeated-thank-you / quiet vocab echo -> dropped only when the chunk
+//   is RMS-quiet (rms<150), so a real softly-spoken utterance or a clearly-dictated
+//   third-party URL is never dropped. 6.72.0 keeps these TEXT drops on the RMS test on
+//   purpose: the Silero quiet gate (under 0.5 s of speech) also fires on a chunk holding
+//   one short real name, and dropping that as a "vocab echo" would delete real speech.
+//   The Silero gate decides only the prompt and the front end.
 // Rollback: COS_WHISPER_STRIP_BRAND_URLS=0 (URL drops), COS_WHISPER_THANKYOU_FILTER=0.
 const STRIP_BRAND_URLS = process.env.COS_WHISPER_STRIP_BRAND_URLS !== '0'
 const THANKYOU_FILTER = process.env.COS_WHISPER_THANKYOU_FILTER !== '0'
@@ -2266,7 +2270,9 @@ async function processStreamChunk(opts: {
   // uncorrected for those sources. Idempotent for the local path.
   rawText = applyCorrections(rawText)
 
-  let sanitized = sanitizeStreamTranscript(sessionId, session, rawText, isQuiet)
+  // Text drops stay on the pre-6.72 RMS test (see the contract above).
+  const dropQuiet = rms < QUIET_RMS
+  let sanitized = sanitizeStreamTranscript(sessionId, session, rawText, dropQuiet)
   if (candidate && (!sanitized.text || sanitized.fallbackReason)) {
     fallbackReason = sanitized.fallbackReason || 'empty_candidate'
     const result = await transcribeWithServerWhisper(audioBuffer, whisperAudio, whisperContext, isQuiet)
@@ -2274,7 +2280,7 @@ async function processStreamChunk(opts: {
     words = result.words
     backend = result.backend
     asrProvider = 'server-whisper'
-    sanitized = sanitizeStreamTranscript(sessionId, session, rawText, isQuiet)
+    sanitized = sanitizeStreamTranscript(sessionId, session, rawText, dropQuiet)
   }
 
   const voiceprint = await speakerPromise
@@ -2421,13 +2427,15 @@ function sendStreamError(res: { status: (code: number) => { json: (body: unknown
 }
 
 /**
- * Default-off meeting preview canary.
+ * Meeting preview (on unless COS_WHISPER_MEETING_PREVIEW=0).
  *
  * This route deliberately owns no meeting session, recovery ledger, speaker
  * attribution, or persistence. It accepts a pinned copy of the still-open
- * phrase and returns provisional Turbo text. Any contention or failure is a
- * 204 cosmetic miss; the canonical /transcribe-stream upload remains the only
- * durable and speaker-attributed result.
+ * phrase and returns provisional text from the preview engine the STT settings
+ * choose (6.72.0: Whisper Turbo, or Parakeet Ultra when selected, warm, and the
+ * client lists `parakeet-ultra` in `previewModels`; every other client gets
+ * Turbo). Any contention or failure is a 204 cosmetic miss; the canonical
+ * /transcribe-stream upload remains the only durable and speaker-attributed result.
  */
 transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
   try {
@@ -2460,7 +2468,10 @@ transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
 
     meetingPreviewBusy = true
     try {
-      const result = await transcribeMeetingPreview(audio)
+      // 6.72.0: the models this client accepts. Absent (every phone before 6.10.639): Turbo only.
+      const rawModels = typeof req.query.previewModels === 'string' ? req.query.previewModels.slice(0, 200) : ''
+      const accepted = rawModels.split(',').map(m => m.trim()).filter(Boolean).slice(0, 8)
+      const result = await transcribeMeetingPreview(audio, accepted)
       if (!result) return void res.status(204).send()
       const cleaned = stripInlineHallucinationsOneShot(result.text.trim()).trim()
       if (!cleaned || sharedIsFullHallucination(cleaned)) {

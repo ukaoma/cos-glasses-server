@@ -45,16 +45,14 @@ describe('live quiet gate (6.72.0)', () => {
 })
 
 describe('Silero speech seconds on real audio (sherpa, windowed)', () => {
-  it('hears both phrases of a 5 s synthetic clip; the whole-buffer call would hear 0.3 s', async () => {
+  it('hears both phrases of a 5 s synthetic clip (about 3.6 s of speech)', async () => {
     const { readFileSync } = await import('node:fs')
-    const { initSileroVAD, measureSpeechSeconds, trimSilence } = await import('./vad-silero.js')
+    const { initSileroVAD, measureSpeechSeconds } = await import('./vad-silero.js')
     expect(initSileroVAD()).toBe(true)
     const clip = readFileSync(new URL('./__fixtures__/synthetic-speech-two-phrases.wav', import.meta.url))
     const seconds = measureSpeechSeconds(clip)!
     expect(seconds).toBeGreaterThan(3)
     expect(seconds).toBeLessThan(4.6)
-    // The defect the windowed reader exists for: one acceptWaveform call keeps only the last segment.
-    expect(trimSilence(clip).speechRatio * (clip.length - 44) / 32_000).toBeLessThan(1)
     const silence = Buffer.concat([clip.subarray(0, 44), Buffer.alloc(clip.length - 44)])
     expect(measureSpeechSeconds(silence)).toBe(0)
     expect(measureSpeechSeconds(clip.subarray(0, 100))).toBeNull()

@@ -66,6 +66,7 @@ import {
 import {
   canDeletePendingBatchAudio,
   persistBatchDecisionSidecar,
+  persistSttSidecar,
   replaceMeetingTranscriptAtomic,
 } from '../lib/meeting-batch-persistence.js'
 import {
@@ -78,6 +79,7 @@ import {
   enqueueSerializedHqWork,
   runMeetingBatchPipeline,
   currentHqJobPlan,
+  summarizeStt,
   segmentTranscriptChunks,
   stopProgressiveHqSession,
   transcribeSegments,
@@ -2179,8 +2181,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // decoder serialization — that lives in the queue tail. Chain onto it,
       // or two back-to-back recoveries plus a live post-meeting batch would
       // run parallel 16-thread large-v3 decoders on the user's Mac.
+      const plan = currentHqJobPlan()
       const results = await enqueueSerializedHqWork(
-        () => transcribeSegments(quarantineDir, segments, entries, undefined, currentHqJobPlan()),
+        () => transcribeSegments(quarantineDir, segments, entries, undefined, plan),
       )
       // Batch whisper over a dead session has no streaming baseline to
       // compare against (evaluateBatchQuality needs one), but the inline
@@ -2241,6 +2244,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         })),
         transferIntegrity: null,
       })
+      try { persistSttSidecar(saved.sidecarPath, results, summarizeStt(plan, results, segments.length)) } catch (error) {
+        console.warn(`[meeting/orphans] ${sessionId}: STT hypotheses not saved: ${error instanceof Error ? error.message : error}`)
+      }
       markRecovered(quarantineDir, saved.filename)
       console.log(
         `[meeting/orphans] Recovered ${sessionId} → ${saved.filename} `

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
-import type { BatchTranscription } from './batch-transcript-quality.js'
+import type { BatchResult, BatchSttSummary, BatchTranscription } from './batch-transcript-quality.js'
 
 /** Replace only the final canonical transcript section. Missing markers fail closed. */
 export function replaceMeetingTranscriptAtomic(meetingPath: string, transcript: string): boolean {
@@ -56,4 +56,21 @@ export function persistBatchDecisionSidecar(
 /** Raw audio is disposable only after canonical text and decision metadata are durable. */
 export function canDeletePendingBatchAudio(batchApplied: boolean, metadataPersisted: boolean): boolean {
   return batchApplied && metadataPersisted
+}
+
+/** Orphan recovery (6.72.0): keep both hypotheses and the disagreements beside
+ *  the recovered text, additively. Recovery never sets batchApplied. */
+export function persistSttSidecar(sidecarPath: string, results: readonly BatchResult[], summary: BatchSttSummary): boolean {
+  if (!existsSync(sidecarPath)) return false
+  const parsed = JSON.parse(readFileSync(sidecarPath, 'utf8')) as unknown
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+  const sidecar = parsed as Record<string, unknown>
+  sidecar.stt = summary
+  sidecar.sttSegments = results.filter(r => r.stt).map(r => ({
+    startChunkIdx: r.segment.startChunkIdx,
+    endChunkIdx: r.segment.endChunkIdx,
+    stt: r.stt,
+  }))
+  durableAtomicWriteFileSync(sidecarPath, JSON.stringify(sidecar, null, 2), { mode: 0o600 })
+  return true
 }
