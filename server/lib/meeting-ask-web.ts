@@ -9,7 +9,7 @@ import { lookup } from 'node:dns/promises';
 import { runMeetingAskModel, AskProcessError } from './meeting-ask-runner.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { resolveProviderBinary } from './provider-binary.js';
-import { pageWasRead } from './meeting-ask-review.js';
+import { pageWasRead, READ_PAGE_PREFIX } from './meeting-ask-review.js';
 import type { MeetingAskExchange, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { fetchPublicArticle } from './meeting-web-page.js';
 export function publicAddress(host: string): boolean {
@@ -289,6 +289,13 @@ function shellQuote(s: string) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
  * read. Static and generic: no meeting words. A page from these hosts could never establish a verdict anyway.
  */
 export const UNREADABLE_RESULT_HOSTS = ['rome2rio.com', 'omio.com', 'kayak.com', 'flightsfrom.com', 'skyscanner.com', 'expedia.com', 'travelocity.com', 'orbitz.com', 'priceline.com', 'cheapflights.com', 'momondo.com', 'tripadvisor.com', 'booking.com', 'ixigo.com'];
+/** A result on one of UNREADABLE_RESULT_HOSTS (or a subdomain). Dropped in code; the prompt hint only saves slots. */
+export function unreadableResultHost(url: string): boolean {
+    try {
+        const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+        return UNREADABLE_RESULT_HOSTS.some(h => host === h || host.endsWith('.' + h));
+    } catch { return true; }
+}
 export function webSearchArgs(hook: string): string[] {
     const command = `${shellQuote(process.execPath)} ${shellQuote(hook)}`;
     const settings = { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command, timeout: 5 }] }], PostToolUse: [{ matcher: 'WebSearch', hooks: [{ type: 'command', command, timeout: 5 }] }] } };
@@ -351,7 +358,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
         const raw = readFileSync(join(root, 'result.json'), 'utf8');
         if (raw.length > 200000)
             throw new AskProcessError('web_result_too_large');
-        const all = parseWebEvidence(JSON.parse(raw), query);
+        const all = parseWebEvidence(JSON.parse(raw), query).filter(s => !s.url || !unreadableResultHost(s.url));
         const approved = await Promise.all(all.map(async (s) => { if (!s.url)
             return s; try {
             const addresses = await Promise.race([lookup(new URL(s.url).hostname, { all: true }), new Promise<never>((_, reject) => setTimeout(() => reject(Error('dns timeout')), 1500))]);
@@ -380,7 +387,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
         candidates.forEach((source, i) => {
             const page = pages[i];
             if (!page || fetched >= 2) return;
-            source.text = 'Retrieved page excerpt (may be partial): ' + redactSecrets(page.text); source.url=page.url; if(page.title) source.title=redactSecrets(page.title); fetched++;
+            source.text = READ_PAGE_PREFIX + redactSecrets(page.text); source.url=page.url; if(page.title) source.title=redactSecrets(page.title); fetched++;
         });
         return { sources, notices: [`Public web: ${fetched} result page${fetched === 1 ? '' : 's'} read (at most two, bounded excerpts). Other links have search-result evidence only. The search summary describes the search, not any single page. Search provider: Claude Haiku.`] };
     }

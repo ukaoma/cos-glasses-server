@@ -9,7 +9,7 @@ vi.mock('./meeting-web-page.js', async (actual) => ({ ...(await actual<typeof im
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]) }))
 const { searchMeetingWeb, prioritizeWebPages, UNREADABLE_RESULT_HOSTS, userWebQuery } = await import('./meeting-ask-web.js')
 const { articleText } = await import('./meeting-web-page.js')
-const { defaultOwnerArea } = await import('./meeting-fact-check.js')
+const { defaultOwnerArea, PHONE_AREA_MAX_AGE_MS } = await import('./meeting-fact-check.js')
 const { getOwnerHomeArea, clearProfileCache } = await import('./profile.js')
 
 const hits = (urls: string[]) => ({ results: ['Summary of the search.', { content: urls.map((url, i) => ({ title: `Result ${i}`, url })) }] })
@@ -32,6 +32,13 @@ describe('6.71.13 public page reading', () => {
     expect(seen.stdin.blockedDomains).toEqual(UNREADABLE_RESULT_HOSTS)
     expect(seen.stdin.blockedDomains).toContain('rome2rio.com')
     expect(seen.stdin.query).toBe('elephant weight car')
+  })
+  it('drops results from hosts the reader cannot open, in code, not only in the prompt (QA W5)', async () => {
+    fakeSearch(['https://www.rome2rio.com/s/Austin/Kansas-City', 'https://travel.kayak.com/x', 'https://a.example.org/1'], {})
+    mocks.fetch.mockResolvedValue(null)
+    const out = await searchMeetingWeb('austin kansas city drive time', AbortSignal.timeout(5000))
+    expect(out.sources.map(s => s.url).filter(Boolean)).toEqual(['https://a.example.org/1'])
+    expect(mocks.fetch.mock.calls.map(c => c[0])).toEqual(['https://a.example.org/1'])
   })
   it('tries four candidates and keeps two reads, so blocked pages no longer leave nothing read', async () => {
     fakeSearch(['https://a.example.org/1', 'https://b.example.org/2', 'https://c.example.org/3', 'https://d.example.org/4', 'https://e.example.org/5'], {})
@@ -115,10 +122,14 @@ describe('owner area', () => {
       writeFileSync(process.env.COS_PROFILE_PATH, JSON.stringify({ home_city: '1200 Main St, Austin' })); clearProfileCache()
       expect(getOwnerHomeArea()).toBeNull()
       const weather = join(dir, 'welcome-weather.json')
-      writeFileSync(weather, JSON.stringify({ lat: 30.1, lon: -97.1, city: 'Cedar Park, TX' }))
+      writeFileSync(weather, JSON.stringify({ lat: 30.1, lon: -97.1, city: 'Cedar Park, TX', fetchedAt: Date.now() - 60_000 }))
       expect(defaultOwnerArea(() => 'Austin, TX', weather)).toEqual({ text: 'Austin, TX', source: 'profile' })
       expect(defaultOwnerArea(() => null, weather)).toEqual({ text: 'Cedar Park, TX', source: 'phone_area' })
-      writeFileSync(weather, JSON.stringify({ city: '30.1, -97.1' }))
+      // The phone's area is only used while fresh (24 h), and never without a fetch time.
+      expect(defaultOwnerArea(() => null, weather, Date.now() + PHONE_AREA_MAX_AGE_MS)).toBeNull()
+      writeFileSync(weather, JSON.stringify({ city: 'Cedar Park, TX' }))
+      expect(defaultOwnerArea(() => null, weather)).toBeNull()
+      writeFileSync(weather, JSON.stringify({ city: '30.1, -97.1', fetchedAt: Date.now() }))
       expect(defaultOwnerArea(() => null, weather)).toBeNull()
       expect(defaultOwnerArea(() => null, join(dir, 'missing.json'))).toBeNull()
     } finally {

@@ -14,6 +14,9 @@ export function runMeetingAskModel(model: MeetingAskModel, prompt: string, syste
     workspace: string;
     args: string[];
     stdin: string;
+}, audit?: {
+    /** Token-audit caller label (6.71.13), e.g. meeting_fact_check_planner_hedge. A failed call appends ":<reason>". */
+    caller: string;
 }): Promise<{
     text: string;
     model?: string;
@@ -60,7 +63,7 @@ export function runMeetingAskModel(model: MeetingAskModel, prompt: string, syste
                 settle(unconfirmed);
             }
             finally {
-                logTokenAudit({ source: auditSource, caller: auditSource.replace(/-/g, '_'), model: answerModel,
+                logTokenAudit({ source: auditSource, caller: audit ? audit.caller + (unconfirmed ? ':child_exit_unconfirmed' : failure || code !== 0 ? ':' + (failure ?? 'provider_failed') : '') : auditSource.replace(/-/g, '_'), model: answerModel,
                     inputChars: stdin.length + (adapter ? args.join(' ').length : provider === 'claude' ? system.length : 0),
                     outputChars: answerChars, durationMs: Date.now() - started });
             }

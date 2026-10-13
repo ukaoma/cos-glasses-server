@@ -21,14 +21,14 @@ const submit = (question: string, elapsedMs: number) => ({ requestId: `request_f
 function fixture(plans: Record<string, unknown>, compose: (prompt: any) => unknown, overrides: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fc-runtime-')), store = new MeetingAskStore(dir)
   store.setPublicTopics(true)
-  const run = vi.fn(async (_m: unknown, prompt: string, system: string) => {
+  const run = vi.fn(async (_m: unknown, prompt: string, system: string, _signal?: AbortSignal, _adapter?: unknown, _audit?: unknown) => {
     if (system === FACT_CHECK_PLANNER_SYSTEM) return { text: JSON.stringify(plans[JSON.parse(prompt).mode] ?? { claims: [] }), model: 'claude-sonnet' }
     if (system === FACT_CHECK_SYSTEM) return { text: JSON.stringify(compose(JSON.parse(prompt))), model: 'claude-sonnet' }
     if (system === PUBLIC_TOPIC_SYSTEM) return { text: '{"publicTopic":false}', model: 'claude-sonnet' }
     return { text: JSON.stringify({ sections: [{ label: 'So what', text: 'Plain answer [T1]' }], confidence: { level: 'limited', reason: 'Only the transcript.' } }), model: 'claude-sonnet' }
   })
   const webSearch = vi.fn(async (query: string) => ({ sources: [page('https://example.org/' + query.split(' ')[0], `Reference page about ${query}. Nonstop flights take about 1 hour 50 minutes; elephants weigh about 6 tonnes; hearts beat about 3 billion times.`)], notices: [] as string[] }))
-  const runtime = new MeetingAskRuntime({ reviewAnswers: false, finalized: () => ({ sources: [], notices: [] }), domains: () => [], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {}, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'sonnet', models: ['sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), webSearch, webCapability: () => ({ available: true, engine: 'claude' }), ownerArea: () => ({ text: 'Austin, TX', source: 'profile' as const }), wearer: () => 'Pat Example', ...overrides } as any)
+  const runtime = new MeetingAskRuntime({ reviewAnswers: false, finalized: () => ({ sources: [], notices: [] }), domains: () => [], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {}, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'sonnet', models: ['sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), webSearch, webCapability: () => ({ available: true, engine: 'claude' }), ownerArea: () => ({ text: 'Austin, TX', source: 'profile' as const }), ownerLabel: () => 'MU', wearer: () => 'Pat Example', ...overrides } as any)
   return { runtime, store, run, webSearch, dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 async function done(f: ReturnType<typeof fixture>, id: string) {
@@ -59,22 +59,22 @@ describe('6.71.13 Fact check through the durable runtime', () => {
       await f.runtime.submit(first)
       const e = await done(f, first.requestId)
       expect(e.status).toBe('completed')
-      expect(e.factCheckRange).toEqual({ fromMs: 0, throughMs: 126_414, full: true, claims: 2 })
+      expect(e.factCheckRange).toEqual({ fromMs: 0, throughMs: 100_000, full: true, claims: 2 })
       expect(e.sections!.map(s => s.label)).toEqual(['So what', 'Claim', 'Claim', 'Confidence'])
       expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['elephant weight vs car weight', 'average human heart beats lifetime'])
       // Durable: a fresh store over the same directory reads the watermark and the server-only claims.
       const reread = new MeetingAskStore(f.dir).get(first.requestId)!
-      expect(reread.exchange.factCheckRange?.throughMs).toBe(126_414)
+      expect(reread.exchange.factCheckRange?.throughMs).toBe(100_000)
       expect(reread.factCheck?.claims.map(c => c.claim)).toEqual(['Elephants often weigh more than a car', 'Average heart beats about a billion times in a lifetime'])
       f.run.mockClear()
       const second = submit('Fact check', 700_000)
       await f.runtime.submit(second)
       const next = await done(f, second.requestId)
       const planner = JSON.parse(f.run.mock.calls.find(c => c[2] === FACT_CHECK_PLANNER_SYSTEM)![1])
-      expect(planner.window).toEqual({ from: '2:06', through: '11:40', wholeMeetingSoFar: false })
+      expect(planner.window).toEqual({ from: '1:40', through: '11:40', wholeMeetingSoFar: false })
       expect(planner.transcript).not.toContain('elephants')
       expect(planner.alreadyChecked).toHaveLength(2)
-      expect(next.factCheckRange).toEqual({ fromMs: 126_414, throughMs: 700_000, full: false, claims: 0 })
+      expect(next.factCheckRange).toEqual({ fromMs: 100_000, throughMs: 606_000, full: false, claims: 0 })
     } finally { f.cleanup() }
   })
   it('keeps the 6.71.12 path behind the kill switch and without public-topic consent', async () => {
@@ -137,6 +137,26 @@ describe('6.71.13 Fact check through the durable runtime', () => {
       expect(e.factCheckRange).toBeUndefined()
       expect(f.run.mock.calls.some(c => c[2] === FACT_CHECK_PLANNER_SYSTEM)).toBe(false)
       expect(f.webSearch.mock.calls[0][0]).toContain('leaving employer keep money in old retirement plan')
+    } finally { f.cleanup() }
+  })
+  it('follows its own dose flag, separate from the fact-check switch (QA W4)', async () => {
+    process.env.COS_MEETING_ASK_DOSE_GUARD = '0'
+    const f = fixture({}, rowsFor)
+    try {
+      const r = submit("How much pain medication for a 400 lb, 5'5 man", 700_000)
+      await f.runtime.submit(r)
+      const e = await done(f, r.requestId)
+      expect(e.sections![0].text).not.toBe(MEDICAL_DOSING_ANSWER)
+      expect(f.run).toHaveBeenCalled()
+    } finally { delete process.env.COS_MEETING_ASK_DOSE_GUARD; f.cleanup() }
+  })
+  it('passes caller labels to the provider runner for fact-check calls', async () => {
+    const f = fixture({ scope: scopePlan }, rowsFor)
+    try {
+      const r = submit(MEETING_FACT_CHECK_QUESTION, 126_414)
+      await f.runtime.submit(r)
+      await done(f, r.requestId)
+      expect(f.run.mock.calls.map(c => (c as unknown[])[5])).toEqual([{ caller: 'meeting_fact_check_planner' }, { caller: 'meeting_fact_check_answer' }])
     } finally { f.cleanup() }
   })
   it('answers a dose question with fixed safety information and no model or web call', async () => {

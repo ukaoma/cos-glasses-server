@@ -1,6 +1,6 @@
 import { PUBLIC_TOPIC_SYSTEM, publicTopicContext, admitPublicTopic, publicTopicLookupGate, previousPublicTopic, genericRetirementQuery } from './meeting-public-topic.js';
 import { isFactCheckCTA } from './meeting-ask-review.js';
-import { factCheckScopeEnabled, factCheckScopeRequest, lastFactCheckLookup, continuationIntent, runMeetingFactCheck, defaultOwnerArea, medicalDosingRequest, MEDICAL_DOSING_ANSWER, type OwnerOrigin } from './meeting-fact-check.js';
+import { factCheckScopeEnabled, factCheckScopeRequest, lastFactCheckLookup, continuationIntent, runMeetingFactCheck, defaultOwnerArea, medicalDosingRequest, MEDICAL_DOSING_ANSWER, doseGuardEnabled, speakerNameWords, type OwnerOrigin } from './meeting-fact-check.js';
 import { meetingAskAnswerMarkdown } from '../../shared/meeting-ask.js';
 import { captureFinalizedAskEvidence, type FinalizedAskEvidence } from './meeting-ask-transcript.js';
 import { transcriptSources } from './meeting-ask-transcript-sources.js';
@@ -15,7 +15,7 @@ import { listLensGistEngines } from './lens-gist.js';
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWorkLease } from './maintenance-lifecycle.js';
 import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages } from './meeting-ask-web.js';
 import { getServerInstanceId } from './server-instance-id.js';
-import { getOwnerName } from './profile.js';
+import { getOwnerName, getOwnerSpeakerLabel } from './profile.js';
 import { refineActiveMeetingAsk } from './meeting-ask-refinement.js';
 import { getMediaStore, MediaStoreError } from './media-store.js';
 import { createHash } from 'node:crypto';
@@ -51,6 +51,8 @@ interface RuntimeDeps {
     media: () => Pick<ReturnType<typeof getMediaStore>, 'resolveUsable' | 'resolveModelDerivatives'>;
     /** Where the owner is based (profile home_city, else the phone's last weather area), for a disclosed origin assumption. */
     ownerArea: () => OwnerOrigin | null;
+    /** The owner's speaker label (profile owner_speaker_label), allowed around a typed place ("where MU is based"). */
+    ownerLabel: () => string | null;
 }
 function profileWearer(): string | null { try {
     const name = getOwnerName();
@@ -59,7 +61,7 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: () => defaultOwnerArea() };
+const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: () => defaultOwnerArea(), ownerLabel: () => { try { return getOwnerSpeakerLabel(); } catch { return null; } } };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))
@@ -360,7 +362,7 @@ export class MeetingAskRuntime {
             if (controller.signal.aborted)
                 throw new AskError('cancelled');
             this.deps.store.transition(input.requestId, 'running');
-            if (input.action === 'ask' && medicalDosingRequest(input.question)) {
+            if (input.action === 'ask' && doseGuardEnabled() && medicalDosingRequest(input.question)) {
                 // A dose for a specific person is never generated or searched: fixed general safety information.
                 const sections = [{ label: 'So what', text: MEDICAL_DOSING_ANSWER, sources: [] }, { label: 'Confidence', text: 'Limited — General safety information; a dose needs the exact drug and a clinician.', sources: [] }];
                 this.deps.store.transition(input.requestId, 'completed', { answer: meetingAskAnswerMarkdown(sections), sections, sources: [], notices: [...refinementNotices, 'A medication dose for a specific person is not given. General safety information only; nothing was searched.'] });
@@ -387,7 +389,7 @@ export class MeetingAskRuntime {
             // retirement-rule catalog route keeps precedence, unchanged.
             const factMode = factCheckScopeEnabled() && publicTopics && webAvailable && input.action === 'ask' && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input) : null;
             if (factMode) {
-                const fact = await runMeetingFactCheck({ ...factMode, input: normal, at: { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs }, records: journal, run: (prompt, system, signal) => this.deps.run(input.model!, prompt, system, signal), search: (query, signal) => this.deps.webSearch(query, signal), ownerArea: this.deps.ownerArea, nameWords: [this.deps.wearer() ?? ''], signal: controller.signal, startedAt: executionStarted });
+                const fact = await runMeetingFactCheck({ ...factMode, input: normal, at: { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs }, records: journal, run: (prompt, system, signal, caller) => this.deps.run(input.model!, prompt, system, signal, undefined, caller ? { caller } : undefined), search: (query, signal) => this.deps.webSearch(query, signal), ownerArea: this.deps.ownerArea, nameWords: [this.deps.wearer() ?? ''], ownerWords: [this.deps.wearer() ?? '', this.deps.ownerLabel() ?? ''], signal: controller.signal, startedAt: executionStarted });
                 if (fact) {
                     completedResult = { answer: fact.answer, sections: fact.sections, sources: fact.sources, notices: fact.notices, model: fact.model ?? '', throughMs: input.elapsedMs };
                     if (controller.signal.aborted)
@@ -493,7 +495,8 @@ export class MeetingAskRuntime {
         if (factCheckScopeRequest(input.question))
             return { mode: 'scope' as const };
         const pending = lastFactCheckLookup(journal, at);
-        const intent = continuationIntent(input.question, pending?.claim ?? null);
+        const wearer = this.deps.wearer() ?? '';
+        const intent = continuationIntent(input.question, pending?.claim ?? null, { ownerArea: pending ? this.deps.ownerArea() : null, blockedNames: speakerNameWords(input.turns, [wearer]), ownerWords: new Set([wearer, this.deps.ownerLabel() ?? ''].join(' ').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) });
         if (pending && intent)
             return { mode: 'continue' as const, continuation: { ...pending, intent } };
         if (factCheckRequest(input.question) && userWebQuery(input.question) !== null)

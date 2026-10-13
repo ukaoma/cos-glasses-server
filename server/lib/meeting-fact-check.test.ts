@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { hedgedRun, resolveTypedOrigin, factCheckScopeRequest, factCheckWindow, factCheckScanTurns, admitFactCheckClaims, typedOrigin, continuationIntent, lastFactCheckLookup, alreadyCheckedClaims, factRowProblem, factCheckProblem, factCheckSummary, medicalDosingRequest, composeFactCheck, runMeetingFactCheck, focusExcerpt, originQuery, factCheckScopeEnabled, reusablePages, FACT_CHECK_PLANNER_SYSTEM, FACT_CHECK_SYSTEM, defaultOwnerArea } from './meeting-fact-check.js'
+import { hedgedRun, originClarification, namedOrigin, placeOrigin, factCheckRescanRequest, doseGuardEnabled, PHONE_AREA_MAX_AGE_MS, factCheckScopeRequest, factCheckWindow, factCheckScanTurns, admitFactCheckClaims, continuationIntent, lastFactCheckLookup, alreadyCheckedClaims, factRowProblem, factCheckProblem, factCheckSummary, medicalDosingRequest, composeFactCheck, runMeetingFactCheck, focusExcerpt, originQuery, factCheckScopeEnabled, reusablePages, FACT_CHECK_PLANNER_SYSTEM, FACT_CHECK_SYSTEM, defaultOwnerArea } from './meeting-fact-check.js'
 import { MEETING_FACT_CHECK_QUESTION, type MeetingAskExchange } from '../../shared/meeting-ask.js'
 import { userWebQuery } from './meeting-ask-web.js'
 import type { FactCheckClaim } from './meeting-ask-store.js'
@@ -43,7 +43,14 @@ describe('meeting-wide Fact check scope', () => {
     expect(factCheckWindow([ex({ throughMs: 126_414 })], at(500_000)).full).toBe(true)
   })
   it('scans only what was said after the watermark, newest first within the budget', () => {
-    expect(factCheckScanTurns(input('x'), { fromMs: 100_000, full: false }).turns.map(t => t.id)).toEqual([4, 5, 6, 7])
+    // Turns in the 15 s before the watermark come along as context; only later turns count as new (QA W2).
+    expect(factCheckScanTurns(input('x'), { fromMs: 100_000, full: false }).turns.map(t => t.id)).toEqual([3, 4, 5, 6, 7])
+    expect(factCheckScanTurns(input('x'), { fromMs: 100_000, full: false }).fresh).toBe(4)
+    expect(factCheckScanTurns(input('x'), { fromMs: 120_000, full: false }).turns.map(t => t.id)).toEqual([4, 5, 6, 7])
+    expect(factCheckScanTurns(input('x', 700_000), { fromMs: 700_000, full: false })).toEqual({ turns: [], scannedFromMs: 700_000, truncated: false, fresh: 0 })
+    // Dropping only overlap context is not a truncation of new content.
+    const contextOnly = factCheckScanTurns(input('x'), { fromMs: 100_000, full: false }, 240)
+    expect(contextOnly.turns.map(t => t.id)).toEqual([4, 5, 6, 7]); expect(contextOnly.truncated).toBe(false)
     expect(factCheckScanTurns(input('x'), { fromMs: 0, full: true }).turns.map(t => t.id)).toEqual([1, 2, 3, 4, 5, 6, 7])
     const small = factCheckScanTurns(input('x'), { fromMs: 0, full: true }, 140)
     expect(small.truncated).toBe(true)
@@ -104,6 +111,12 @@ describe('claim admission', () => {
     const roof = [{ id: 20, elapsedMs: 1000, speaker: 'Ext', text: 'The city allocated $750,000 to replace the fire station roof.' }]
     expect(admitFactCheckClaims({ claims: [{ claim: 'City allocated $750,000 for a fire station roof', query: 'city fire station roof 750,000 allocation', evidenceTurnIds: [20], category: 'public_project' }] }, { turns: roof }, roof).claims[0].query).toBe('city fire station roof 750000 allocation')
   })
+  it('drops a claim wholly inside the overlap before the watermark, keeps one that continues after it', () => {
+    const heart = { claim: 'Heart', query: 'average human heart beats lifetime', evidenceTurnIds: [3], category: 'science' }
+    expect(admitFactCheckClaims({ claims: [heart] }, input('Fact check'), scanned, { newAfterMs: 100_000 }).claims).toHaveLength(0)
+    expect(admitFactCheckClaims({ claims: [heart] }, input('Fact check'), scanned, { newAfterMs: 99_999 }).claims).toHaveLength(1)
+    expect(admitFactCheckClaims({ claims: [{ ...heart, evidenceTurnIds: [3, 4] }] }, input('Fact check'), scanned, { newAfterMs: 100_000 }).claims).toHaveLength(1)
+  })
   it('caps the number of claims and drops duplicates', () => {
     const c = { claim: 'Elephants outweigh cars', query: 'elephant weight car', evidenceTurnIds: [1, 2], category: 'nature' }
     expect(admitFactCheckClaims({ claims: [c, c] }, input('Fact check'), scanned).claims).toHaveLength(1)
@@ -114,40 +127,49 @@ describe('claim admission', () => {
 })
 
 describe('pending fact-check continuation', () => {
-  const pending: Pick<FactCheckClaim, 'place' | 'category'> = { place: 'implicit_origin', category: 'travel_time' }
-  it('reads a typed starting place, never a pointer word', () => {
-    expect(typedOrigin('From ATX where mu is based')).toBe('ATX')
-    expect(typedOrigin('ATX to KC is the request')).toBe('ATX')
-    expect(typedOrigin('San Antonio to KC')).toBe('San Antonio')
-    expect(typedOrigin('from here')).toBeNull()
-    expect(typedOrigin('What did we decide?')).toBeNull()
+  const pending = { place: 'implicit_origin' as const, category: 'travel_time', claim: 'Flying from here to Kansas City takes 90 minutes to 2 hours', baseQuery: 'to kansas city flight time vs driving time' }
+  const ctx = { ownerArea: { text: 'Austin, TX', source: 'profile' as const }, blockedNames: new Set(['gina', 'silas', 'larson', 'miles', 'ukaoma']), ownerWords: new Set(['miles', 'ukaoma', 'mu']) }
+  const withClaim = { ...ctx, claimText: `${pending.claim} ${pending.baseQuery}` }
+  it('takes a starting place only from a pure clarification, never a name or an ordinary question (QA B1)', () => {
+    expect(originClarification('From ATX where mu is based', withClaim)).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
+    expect(originClarification('ATX to KC is the request', withClaim)).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
+    expect(originClarification("I'm flying from Austin", withClaim)).toEqual({ text: 'Austin', source: 'user' })
+    expect(originClarification('San Antonio, TX to KC', withClaim)).toEqual({ text: 'San Antonio TX', source: 'user' })
+    for (const q of ['Gina to send the deck by Friday?', 'What did we hear from Silas Larson today?', 'From Silas', 'From Gina where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck'])
+      expect(originClarification(q, withClaim)).toBeNull()
+    // Without a known owner area, an abbreviation is not a place.
+    expect(originClarification('From ATX where mu is based', { ...withClaim, ownerArea: null })).toBeNull()
+  })
+  it('accepts only place-like origins in a named request', () => {
+    expect(namedOrigin('Fact check the flight from Dallas, TX to KC', { ...ctx, claimText: '' })).toEqual({ text: 'Dallas TX', source: 'user' })
+    expect(namedOrigin('Fact check what Gina said from Silas', { ...ctx, claimText: '' })).toBeNull()
+    expect(namedOrigin('Fact check the flight to kc', { ...ctx, claimText: '' })).toBeNull()
+    expect(placeOrigin('DFW', withClaim)).toBeNull()
+    expect(placeOrigin('ABQ', withClaim)).toBeNull()
+    expect(placeOrigin('KC', withClaim)).toEqual({ text: 'KC', source: 'user' })
+    expect(placeOrigin('Gina', { ...withClaim, claimText: 'Gina said flights take 2 hours' })).toBeNull()
+    expect(originQuery('to kansas city flight time', { text: 'ATX (Austin, TX)', source: 'user' })).toBe('atx austin tx to kansas city flight time')
   })
   it('re-runs on request words, clarifies a route origin, and leaves real questions alone', () => {
     for (const q of ['Check it now you', 'Run it omg', "I'm asking you to fact check the claim", 'Do it', 'go ahead and check again'])
-      expect(continuationIntent(q, pending)).toEqual({ kind: 'rerun' })
-    expect(continuationIntent('From ATX where mu is based', pending)).toEqual({ kind: 'clarify', origin: 'ATX' })
-    expect(continuationIntent('From ATX where mu is based', { category: 'nature' })).toBeNull()
-    expect(continuationIntent('Can you fact check this', pending)).toBeNull()
-    expect(continuationIntent('What did the caller say about pricing?', pending)).toBeNull()
-    expect(continuationIntent('What is it?', pending)).toBeNull()
-    expect(continuationIntent('Check the weather in Paris', pending)).toBeNull()
-    expect(continuationIntent('check this now', pending)).toBeNull()
-    expect(continuationIntent('Check it now', null)).toBeNull()
-    expect(continuationIntent('check '.repeat(15), pending)).toBeNull()
-  })
-  it('reads an abbreviation of the owner area as that area, still the user\'s words', () => {
-    expect(resolveTypedOrigin('ATX', { text: 'Austin, TX', source: 'profile' })).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
-    expect(resolveTypedOrigin('DFW', { text: 'Austin, TX', source: 'profile' })).toEqual({ text: 'DFW', source: 'user' })
-    expect(resolveTypedOrigin('ABQ', { text: 'Austin, TX', source: 'profile' })).toEqual({ text: 'ABQ', source: 'user' })
-    expect(resolveTypedOrigin('ATX', null)).toEqual({ text: 'ATX', source: 'user' })
-    expect(resolveTypedOrigin('Dallas', { text: 'Dallas, TX', source: 'profile' })).toEqual({ text: 'Dallas', source: 'user' })
-    expect(originQuery('to kansas city flight time', { text: 'ATX (Austin, TX)', source: 'user' })).toBe('atx austin tx to kansas city flight time')
+      expect(continuationIntent(q, pending, ctx)).toEqual({ kind: 'rerun' })
+    expect(continuationIntent('From ATX where mu is based', pending, ctx)).toEqual({ kind: 'clarify', origin: { text: 'ATX (Austin, TX)', source: 'user' } })
+    expect(continuationIntent('Gina to send the deck by Friday?', pending, ctx)).toBeNull()
+    expect(continuationIntent('What did we hear from Silas Larson today?', pending, ctx)).toBeNull()
+    expect(continuationIntent('From ATX where mu is based', { ...pending, place: undefined, category: 'travel_time' }, ctx)).toBeNull()
+    expect(continuationIntent('Can you fact check this', pending, ctx)).toBeNull()
+    expect(continuationIntent('What did the caller say about pricing?', pending, ctx)).toBeNull()
+    expect(continuationIntent('What is it?', pending, ctx)).toBeNull()
+    expect(continuationIntent('Check the weather in Paris', pending, ctx)).toBeNull()
+    expect(continuationIntent('check this now', pending, ctx)).toBeNull()
+    expect(continuationIntent('Check it now', null, ctx)).toBeNull()
+    expect(continuationIntent('check '.repeat(15), pending, ctx)).toBeNull()
   })
   it('never searches the meta-words of a follow-up', () => {
     expect(userWebQuery("I'm asking you to fact check the claim")).toBeNull()
     expect(userWebQuery('Fact check the flight to kc')).toBe('flight kc')
   })
-  it('finds the newest lookup within ten meeting minutes and prefers an unsearched or unverified claim', () => {
+  it('continues only when the fact check is the latest exchange, within ten meeting minutes, preferring an unsearched or unverified claim', () => {
     const claim = (o: Partial<FactCheckClaim>): FactCheckClaim => ({ n: 1, claim: 'c', baseQuery: 'b', query: 'q', evidenceTurnIds: [1], category: 'nature', atMs: 0, ...o })
     const old = { exchange: ex({ createdAt: '2026-10-13T02:00:00.000Z', throughMs: 100_000 }), factCheck: { claims: [claim({ claim: 'old' })] } }
     const recent = { exchange: ex({ createdAt: '2026-10-13T02:05:00.000Z', throughMs: 600_000 }), factCheck: { claims: [claim({ claim: 'first', atMs: 1, verdict: 'unverified' }), claim({ claim: 'second', atMs: 2, verdict: 'supported' })] } }
@@ -158,6 +180,9 @@ describe('pending fact-check continuation', () => {
     expect(lastFactCheckLookup([old], at(100_000 + 10 * 60_000 + 1))).toBeNull()
     expect(lastFactCheckLookup([old], at(650_000))?.claim.claim).toBe('old')
     expect(lastFactCheckLookup([{ ...recent, exchange: { ...recent.exchange, status: 'failed' } }], at(650_000))).toBeNull()
+    // An unrelated ask after the check ends the pending check (QA W3).
+    const unrelated = { exchange: ex({ createdAt: '2026-10-13T02:06:00.000Z', throughMs: 620_000, question: 'What did Gina say?' }) }
+    expect(lastFactCheckLookup([old, recent, unrelated], at(650_000))).toBeNull()
     expect(alreadyCheckedClaims([recent], at(650_000))).toEqual([])
     expect(alreadyCheckedClaims([{ ...recent, exchange: { ...recent.exchange, factCheckRange: { fromMs: 0, throughMs: 600_000, full: true, claims: 3 } } }], at(650_000))).toEqual(['first', 'second', 'pending'])
   })
@@ -222,17 +247,26 @@ describe('hedged model calls', () => {
     // The slow call is stopped at once, not left to run into the deadline.
     expect(signals[0].aborted).toBe(true); expect(Date.now() - started).toBeLessThan(1000)
   })
-  it('retries a failed or unusable first answer at once, at most two calls in all', async () => {
-    const failed = vi.fn().mockRejectedValueOnce(new Error('provider_failed')).mockResolvedValueOnce(answer)
-    expect((await hedgedRun(failed, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).hedged).toBe(true)
+  it('never retries a failure or an unusable answer at once; only a still-running call gets a second (QA W7)', async () => {
+    const failed = vi.fn().mockRejectedValueOnce(new Error('rate_limited')).mockResolvedValueOnce(answer)
+    await expect(hedgedRun(failed, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('rate_limited')
+    expect(failed).toHaveBeenCalledTimes(1)
     const unusable = vi.fn().mockResolvedValueOnce({ text: 'nope' }).mockResolvedValueOnce(answer)
-    expect((await hedgedRun(unusable, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal, usable: r => r.text !== 'nope' })).text).toBe(answer.text)
-    const never = vi.fn().mockRejectedValue(new Error('provider_failed'))
-    await expect(hedgedRun(never, { hedgeMs: 1, timeoutMs: 2000, signal: new AbortController().signal })).rejects.toThrow('provider_failed')
-    expect(never).toHaveBeenCalledTimes(2)
-    const fast = vi.fn().mockResolvedValue(answer)
+    expect(await hedgedRun(unusable, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal, usable: r => r.text !== 'nope' })).toEqual({ text: 'nope', hedged: false })
+    expect(unusable).toHaveBeenCalledTimes(1)
+    // A first call that failed while the hedge is running waits for the hedge.
+    let n = 0
+    const slowThenFail = vi.fn((signal: AbortSignal) => ++n === 1 ? new Promise<typeof answer>((_r, reject) => setTimeout(() => reject(new Error('provider_failed')), 30)) : new Promise<typeof answer>(r => setTimeout(() => r(answer), 60)))
+    expect((await hedgedRun(slowThenFail, { hedgeMs: 10, timeoutMs: 2000, signal: new AbortController().signal })).hedged).toBe(true)
+    // The second call is told it is the hedge, so its token-audit row says so.
+    const labels: string[] = []
+    const slow = vi.fn((signal: AbortSignal, attempt: number) => { labels.push(attempt ? 'x_hedge' : 'x'); return attempt ? Promise.resolve(answer) : new Promise<typeof answer>((_r, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')))) })
+    await hedgedRun(slow, { hedgeMs: 10, timeoutMs: 2000, signal: new AbortController().signal })
+    expect(labels).toEqual(['x', 'x_hedge'])
+    const attempts: number[] = []
+    const fast = vi.fn(async (_s: AbortSignal, attempt: number) => { attempts.push(attempt); return answer })
     expect((await hedgedRun(fast, { hedgeMs: 5000, timeoutMs: 2000, signal: new AbortController().signal })).hedged).toBe(false)
-    expect(fast).toHaveBeenCalledTimes(1)
+    expect(attempts).toEqual([0])
   })
   it('fails the ask when a stopped call cannot be confirmed ended, and honours the caller\'s cancel', async () => {
     const { AskProcessError } = await import('./meeting-ask-runner.js')
@@ -252,8 +286,11 @@ describe('hedged model calls', () => {
 
 describe('medical dosing', () => {
   it('recognizes a dose for a specific person, not a general product fact', () => {
-    for (const q of ["How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?']) expect(medicalDosingRequest(q)).toBe(true)
-    for (const q of ['How much ibuprofen is in one Advil tablet?', 'How much does the roof cost?', 'Fact check']) expect(medicalDosingRequest(q)).toBe(false)
+    for (const q of ["How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?', 'How many mg of Benadryl should I give a 30 lb toddler?', "What's the right dosage for a 6 year old?", 'How much amoxicillin for a 40 pound child'])
+      expect(medicalDosingRequest(q)).toBe(true)
+    // Money, counts, schedules and product facts are not dose questions (QA W4).
+    for (const q of ['How much did I spend on meds', 'How many pills are left in the bottle?', 'When should I take my meds?', 'How much does Tylenol cost?', 'How many people take insulin in the US?', 'How much ibuprofen is in one Advil tablet?', 'How much does the roof cost?', 'Fact check', 'How many doses of the vaccine did the county order?'])
+      expect(medicalDosingRequest(q)).toBe(false)
   })
 })
 
@@ -268,8 +305,9 @@ describe('compose and run', () => {
   const good = JSON.stringify({ sections: [{ label: 'Claim', text: 'Elephants outweigh a car [T1]: Supported. An adult elephant weighs about 6 tonnes [W1].' }, { label: 'Claim', text: 'A billion heartbeats [T2]: Contradicted. About 3 billion in a lifetime [W2].' }], confidence: { level: 'supported', reason: 'Both readable sources state the figures.' }, support: [{ id: 'T1', quote: 'elephants often grow to be over the' }, { id: 'W1', quote: 'An adult African elephant weighs about 6 tonnes' }, { id: 'T2', quote: 'heart beats about a billion times' }, { id: 'W2', quote: 'beats about 3 billion times in a lifetime' }] })
   const args = (run: any, now = () => 0) => ({ mode: 'scope' as const, question: 'Fact check', claims: claims(), transcript, web, webClaim, run, signal: new AbortController().signal, repairUntil: 1000, now })
   it('keeps rows that pass and repairs only while time allows', async () => {
-    const run = vi.fn(async (_p: string, _s: string) => ({ text: good, model: 'claude-sonnet' }))
+    const run = vi.fn(async (_p: string, _s: string, _signal?: AbortSignal, _caller?: string) => ({ text: good, model: 'claude-sonnet' }))
     const out = await composeFactCheck(args(run))
+    expect(run.mock.calls[0][3]).toBe('meeting_fact_check_answer')
     expect(out.rows.map(r => r.text.split(':')[0])).toEqual(['Elephants outweigh a car [T1]', 'A billion heartbeats [T2]'])
     expect(run).toHaveBeenCalledTimes(1); expect(run.mock.calls[0][1]).toBe(FACT_CHECK_SYSTEM)
     const bad = vi.fn().mockResolvedValueOnce({ text: 'not json' }).mockResolvedValueOnce({ text: good })
@@ -277,8 +315,8 @@ describe('compose and run', () => {
     expect(bad).toHaveBeenCalledTimes(2)
     const late = vi.fn(async () => ({ text: 'not json' }))
     const salvaged = await composeFactCheck(args(late, () => 5000))
-    // One unusable answer is retried once inside the hedged call; no repair round after the repair deadline.
-    expect(late).toHaveBeenCalledTimes(2)
+    // An unusable answer is not retried at once, and no repair round starts after the repair deadline.
+    expect(late).toHaveBeenCalledTimes(1)
     expect(salvaged.rows.map(r => r.text)).toEqual(['Elephants often weigh more than a car: Unverified. The pages that could be read did not confirm it.', 'Average heart beats about a billion times in a lifetime: Unverified. The pages that could be read did not confirm it.'])
     const unread = await composeFactCheck({ ...args(late, () => 5000), web: [], webClaim: new Map() })
     expect(unread.rows[0].text).toBe('Elephants often weigh more than a car: Unverified. No readable page was found for it in time.')
@@ -299,13 +337,12 @@ describe('compose and run', () => {
     expect(out.rows[0].text).toBe('Elephants outweigh a car [T1][W1]: Supported. An adult elephant weighs about 6 tonnes.')
     expect(out.rows[0].sources).toEqual(['T1', 'W1'])
   })
-  it('retries a failed answer call once, and says so when it never returns', async () => {
-    const stall = vi.fn().mockRejectedValueOnce(new Error('provider_timeout')).mockResolvedValueOnce({ text: good })
-    const ok = await composeFactCheck({ ...args(stall, () => 0), answerUntil: 20_000 })
-    expect(stall).toHaveBeenCalledTimes(2); expect(ok.rows[0].text).toContain('Supported'); expect(ok.notices).toEqual([])
+  it('gives a stalled answer its own reason and never claims pages it did not use (QA W1)', async () => {
     const late = vi.fn().mockRejectedValue(new Error('provider_timeout'))
     const gone = await composeFactCheck({ ...args(late, () => 0), answerUntil: 20_000 })
-    expect(late).toHaveBeenCalledTimes(2)
+    expect(late).toHaveBeenCalledTimes(1)
+    expect(gone.stalled).toBe(true)
+    expect(gone.rows[0].text).toBe('Elephants often weigh more than a car: Unverified. The answer ran out of time before this claim could be checked.')
     expect(gone.notices[0]).toContain('ran out of time')
     expect(gone.rows.every(r => r.text.includes('Unverified'))).toBe(true)
     const aborted = new AbortController(); aborted.abort()
@@ -332,28 +369,57 @@ describe('compose and run', () => {
     const run = vi.fn(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? JSON.stringify(plan) : goodRun, model: 'claude-sonnet' }))
     const search = vi.fn(async (q: string) => ({ sources: [q.startsWith('elephant') ? web[0] : web[1]], notices: [] }))
     const first = await runMeetingFactCheck({ mode: 'scope', input: input(MEETING_FACT_CHECK_QUESTION, 126_414), at: at(126_414), records: [], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
-    expect(first!.factCheckRange).toEqual({ fromMs: 0, throughMs: 126_414, full: true, claims: 2 })
+    // The watermark is the last scanned turn (1:40), not the ask position (QA W2).
+    expect(first!.factCheckRange).toEqual({ fromMs: 0, throughMs: 100_000, full: true, claims: 2 })
     expect(search.mock.calls.map(c => c[0])).toEqual(['elephant weight vs car weight', 'average human heart beats lifetime billion'])
     expect(first!.sections.map(s => s.label)).toEqual(['So what', 'Claim', 'Claim', 'Confidence'])
-    expect(first!.sections[0].text).toBe('Checked 2 public claims from 0:00 to 2:06: 1 supported, 1 contradicted.')
+    expect(first!.sections[0].text).toBe('Checked 2 public claims from 0:00 to 1:40: 1 supported, 1 contradicted.')
     expect(first!.publicWebQuery).toBe('elephant weight vs car weight | average human heart beats lifetime billion')
     expect(first!.claims.map(c => c.verdict)).toEqual(['supported', 'contradicted'])
     const planner = JSON.parse(run.mock.calls[0][0])
     expect(planner.transcript).not.toContain('Dana Ortiz')
     expect(planner.window).toEqual({ from: '0:00', through: '2:06', wholeMeetingSoFar: true })
-    const record = { exchange: ex({ throughMs: 126_414, factCheckRange: first!.factCheckRange }), factCheck: { claims: first!.claims } }
+    const record = { exchange: ex({ throughMs: 126_414, factCheckRange: first!.factCheckRange, sections: first!.sections }), factCheck: { claims: first!.claims } }
     run.mockClear(); search.mockClear()
     run.mockImplementation(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? '{"claims":[]}' : good, model: 'claude-sonnet' }))
     const second = await runMeetingFactCheck({ mode: 'scope', input: input(MEETING_FACT_CHECK_QUESTION, 140_000), at: at(140_000), records: [record], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
     expect(JSON.parse(run.mock.calls[0][0]).alreadyChecked).toEqual(['Elephants often weigh more than a car', 'Average heart beats about a billion times in a lifetime'])
     expect(JSON.parse(run.mock.calls[0][0]).transcript).not.toContain('elephants')
-    expect(second!.factCheckRange).toEqual({ fromMs: 126_414, throughMs: 140_000, full: false, claims: 0 })
-    expect(second!.sections[0].text).toBe('No new checkable public claim was found since 2:06.')
+    expect(JSON.parse(run.mock.calls[0][0]).earlierResults).toHaveLength(2)
+    expect(second!.factCheckRange).toEqual({ fromMs: 100_000, throughMs: 130_000, full: false, claims: 0 })
+    expect(second!.sections[0].text).toBe('No new checkable public claim was found since 1:40.')
     expect(search).not.toHaveBeenCalled()
     run.mockClear()
     const nothing = await runMeetingFactCheck({ mode: 'scope', input: input(MEETING_FACT_CHECK_QUESTION, 126_414), at: at(126_414), records: [record], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
-    expect(nothing!.sections[0].text).toBe('Nothing new to check: nothing was said after the last Fact check at 2:06.')
+    expect(nothing!.sections[0].text).toBe('Nothing new to check: nothing was said after the last Fact check at 1:40.')
     expect(run).not.toHaveBeenCalled()
+    // "Fact check the whole meeting" rescans from 0:00 and re-checks everything (QA W8).
+    run.mockImplementation(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? JSON.stringify(plan) : goodRun, model: 'claude-sonnet' }))
+    const again = await runMeetingFactCheck({ mode: 'scope', input: input('Fact check the whole meeting', 126_414), at: at(126_414), records: [record], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    expect(JSON.parse(run.mock.calls[0][0]).alreadyChecked).toEqual([])
+    expect(again!.factCheckRange).toEqual({ fromMs: 0, throughMs: 100_000, full: true, claims: 2 })
+    expect(again!.notices).toContain('Fact check rescanned the whole meeting, as asked.')
+    expect(factCheckRescanRequest('Fact check again')).toBe(true); expect(factCheckRescanRequest(MEETING_FACT_CHECK_QUESTION)).toBe(false)
+    // A first check with nothing said yet does not name a previous check.
+    run.mockClear()
+    const empty = await runMeetingFactCheck({ mode: 'scope', input: { ...input('Fact check', 5_000), turns: [] }, at: at(5_000), records: [], run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    expect(empty!.sections[0].text).toBe('Nothing has been said yet to check.')
+  })
+  it('keeps no range when the answer stalls or no page was read, so the next check covers the span again (QA W1)', async () => {
+    const plan = { claims: [{ claim: 'Elephants often weigh more than a car', query: 'elephant weight vs car weight', evidenceTurnIds: [1, 2], category: 'nature' }] }
+    const unread = vi.fn(async () => ({ sources: [{ id: 'W1', kind: 'web' as const, title: 'Web search summary: x', text: 'Summary only.' }], notices: [] as string[] }))
+    const draft = JSON.stringify({ sections: [{ label: 'Claim', text: 'Elephants outweigh a car [T2]: Unverified. No page was read.' }], confidence: { level: 'low', reason: 'No page was read.' }, support: [] })
+    const run = vi.fn(async (_p: string, system: string) => ({ text: system === FACT_CHECK_PLANNER_SYSTEM ? JSON.stringify(plan) : draft }))
+    const noRead = await runMeetingFactCheck({ mode: 'scope', input: input('Fact check', 126_414), at: at(126_414), records: [], run, search: unread, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    expect(noRead!.factCheckRange).toBeUndefined()
+    expect(noRead!.sections[0].text).toBe('Could not finish checking the claim; tap Fact check again.')
+    expect(noRead!.notices).toContain('This Fact check did not finish checking its claims, so the next Fact check covers the same part of the meeting again.')
+    const stall = vi.fn(async (_p: string, system: string, _signal?: AbortSignal, _caller?: string) => { if (system === FACT_CHECK_PLANNER_SYSTEM) return { text: JSON.stringify(plan) }; throw new Error('provider_timeout') })
+    const readPage = vi.fn(async () => ({ sources: [page('W1', 'An adult African elephant weighs about 6 tonnes.')], notices: [] as string[] }))
+    const stalled = await runMeetingFactCheck({ mode: 'scope', input: input('Fact check', 126_414), at: at(126_414), records: [], run: stall, search: readPage, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    expect(stalled!.factCheckRange).toBeUndefined()
+    expect(stalled!.sections[1].text).toContain('The answer ran out of time before this claim could be checked.')
+    expect(stall.mock.calls.map(c => c[3])).toEqual(['meeting_fact_check_planner', 'meeting_fact_check_answer'])
   })
   it('skips a lookup once the search budget is spent, and a named check with no admissible claim falls back', async () => {
     const plan = { claims: [{ claim: 'Elephants outweigh cars', query: 'elephant weight vs car weight', evidenceTurnIds: [1, 2], category: 'nature' }] }
@@ -381,21 +447,28 @@ describe('compose and run', () => {
     const search = vi.fn(async (_q: string) => ({ sources: [read], notices: [] as string[] }))
     const reply = JSON.stringify({ sections: [{ label: 'So what', text: 'Flight to Kansas City [T1]: Supported. About 1 hour 50 minutes nonstop [W1].' }], support: [{ id: 'T1', quote: 'flying from here to Kansas City' }, { id: 'W1', quote: 'take about 1 hour 50 minutes' }] })
     const run = vi.fn(async () => ({ text: reply }))
-    const clarified = await runMeetingFactCheck({ mode: 'continue', input: input('From ATX where mu is based', 855_689), at: at(855_689), records: [], continuation: { claim: pending, exchange, intent: { kind: 'clarify', origin: 'ATX' } }, run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
+    const clarified = await runMeetingFactCheck({ mode: 'continue', input: input('From ATX where mu is based', 855_689), at: at(855_689), records: [], continuation: { claim: pending, exchange, intent: { kind: 'clarify', origin: { text: 'ATX', source: 'user' } } }, run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
     expect(search.mock.calls[0][0]).toBe('atx to kansas city flight time')
     expect(clarified!.claims[0].origin).toEqual({ text: 'ATX', source: 'user' })
     expect(clarified!.sections[0].text.startsWith('Using ATX as the starting point, as you said.')).toBe(true)
     expect(clarified!.factCheckRange).toBeUndefined()
+    // The notice names the re-run claim and says the typed place went into the query (QA B1 notice).
+    expect(clarified!.notices.join(' ')).toContain('Re-running the fact check of "Flying to Kansas City takes 90 minutes" (said at 10:06) with the starting point you gave, ATX; only that place name was added')
+    expect(clarified!.notices.join(' ')).not.toContain('were not searched')
     search.mockClear()
     const rerun = await runMeetingFactCheck({ mode: 'continue', input: input('Run it omg', 900_000), at: at(900_000), records: [], continuation: { claim: pending, exchange, intent: { kind: 'rerun' } }, run, search, ownerArea: () => null, signal: new AbortController().signal, startedAt: Date.now() })
     expect(search).not.toHaveBeenCalled()
     expect(rerun!.notices.join(' ')).toContain('reused readable pages')
+    expect(rerun!.notices.join(' ')).toContain('Re-running the fact check of "Flying to Kansas City takes 90 minutes" (said at 10:06) under your public-topic setting. The words of your follow-up were not searched.')
     expect(reusablePages({ claim: pending, exchange }, { ...pending, query: 'other' }, Date.now())).toEqual([])
     expect(reusablePages({ claim: pending, exchange }, pending, Date.now() + 16 * 60_000)).toEqual([])
   })
   it('has a kill switch and reads the owner area from the profile only as a city label', () => {
     expect(factCheckScopeEnabled({})).toBe(true)
     expect(factCheckScopeEnabled({ COS_MEETING_FACT_CHECK_SCOPE: '0' })).toBe(false)
+    expect(doseGuardEnabled({})).toBe(true)
+    expect(doseGuardEnabled({ COS_MEETING_ASK_DOSE_GUARD: '0' })).toBe(false)
+    expect(doseGuardEnabled({ COS_MEETING_FACT_CHECK_SCOPE: '0' })).toBe(true)
     expect(typeof defaultOwnerArea).toBe('function')
   })
 })

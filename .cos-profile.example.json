@@ -1,6 +1,7 @@
 {
   "owner_name": "User",
   "owner_speaker_label": "Me",
+  "home_city": "",
   "vocabulary": [],
   "whisper_corrections": "{}",
   "negative_rules": []

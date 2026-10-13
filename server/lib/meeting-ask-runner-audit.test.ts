@@ -32,6 +32,14 @@ describe('Meeting Ask token audit', () => {
         expect(logTokenAudit).toHaveBeenCalledTimes(1);
         expect(vi.mocked(logTokenAudit).mock.calls[0][0]).toMatchObject({ source: 'meeting-ask', caller: 'meeting_ask', model: 'claude:haiku', outputChars: 0, inputChars: 'question'.length + 'system'.length });
     });
+    it('labels a fact-check call by its caller, with the failure reason, so hedges and stalls can be counted (6.71.13)', async () => {
+        await expect(runMeetingAskModel({ engine: 'claude', model: 'haiku' }, 'question', 'system', undefined, undefined, { caller: 'meeting_fact_check_planner_hedge' })).rejects.toThrow('provider_failed');
+        expect(vi.mocked(logTokenAudit).mock.calls[0][0]).toMatchObject({ source: 'meeting-ask', caller: 'meeting_fact_check_planner_hedge:provider_failed' });
+        const workspace = mkdtempSync(join(tmpdir(), 'cos-ask-audit-'));
+        roots.push(workspace);
+        await runMeetingAskModel({ engine: 'claude', model: 'haiku' }, '', '', undefined, { workspace, args: ['-c', 'cat >/dev/null; printf ok'], stdin: '{}' }, { caller: 'meeting_fact_check_answer' });
+        expect(vi.mocked(logTokenAudit).mock.calls[1][0]).toMatchObject({ caller: 'meeting_fact_check_answer' });
+    });
     it('logs nothing when no process was spawned', async () => {
         await expect(runMeetingAskModel({ engine: 'cursor', model: 'x' }, 'question', 'system')).rejects.toThrow('provider_not_qualified');
         expect(logTokenAudit).not.toHaveBeenCalled();
