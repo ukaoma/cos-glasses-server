@@ -27,6 +27,12 @@ const MIN_SAMPLES = 512
 let sherpaOnnx: any = null
 let available = false
 let vadInstance: any = null
+// 6.72.0 quiet gate: its own detector, stricter than the trimming one. Chosen on
+// bake-off canary 5 (docs/stt-672-evaluation.md): probability 0.8 with a 0.25 s
+// minimum, and quiet below 0.5 s of speech, fired on 80.8% of Silero-negative
+// chunks and 0.91% of speech chunks.
+export const QUIET_GATE_VAD = { threshold: 0.8, minSilenceDuration: 0.3, minSpeechDuration: 0.25 } as const
+let gateVad: any = null
 
 export interface TrimResult {
   trimmedWav: Buffer
@@ -60,6 +66,11 @@ export function initSileroVAD(): boolean {
       10,  // bufferSizeInSeconds — chunks are max 6s
     )
     vadInstance.reset()  // verify it works
+    gateVad = new sherpaOnnx.Vad(
+      { sileroVad: { model: MODEL_PATH, ...QUIET_GATE_VAD, windowSize: 512 }, sampleRate: SAMPLE_RATE, numThreads: 1, provider: 'cpu' },
+      10,
+    )
+    gateVad.reset()
     available = true
     console.log('[silero-vad] Initialized: Silero VAD active (reused instance, bufferSize=10s)')
     return true
@@ -184,7 +195,7 @@ export function trimSilence(wavBuffer: Buffer): TrimResult {
 }
 
 /**
- * Seconds of speech Silero hears in a WAV (6.72.0 quiet gate).
+ * Seconds of speech the quiet-gate Silero (QUIET_GATE_VAD) hears in a WAV (6.72.0).
  *
  * Feeds the detector one 512-sample window at a time and drains finished
  * segments after each window. Handing sherpa-onnx the whole chunk in one
@@ -194,7 +205,7 @@ export function trimSilence(wavBuffer: Buffer): TrimResult {
  * too short to measure: a caller must never read null as silence.
  */
 export function measureSpeechSeconds(wavBuffer: Buffer): number | null {
-  if (!available || !vadInstance) return null
+  if (!available || !gateVad) return null
   try {
     if (wavBuffer.length <= WAV_HEADER_SIZE + MIN_SAMPLES * BYTES_PER_SAMPLE) return null
     const pcmBytes = wavBuffer.buffer.slice(wavBuffer.byteOffset + WAV_HEADER_SIZE, wavBuffer.byteOffset + wavBuffer.length - ((wavBuffer.length - WAV_HEADER_SIZE) % 2))
@@ -202,21 +213,21 @@ export function measureSpeechSeconds(wavBuffer: Buffer): number | null {
     if (int16.length < MIN_SAMPLES) return null
     const float32 = new Float32Array(int16.length)
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
-    vadInstance.reset()
+    gateVad.reset()
     let speechSamples = 0
     const drain = () => {
-      while (!vadInstance.isEmpty()) {
-        speechSamples += vadInstance.front().samples.length
-        vadInstance.pop()
+      while (!gateVad.isEmpty()) {
+        speechSamples += gateVad.front().samples.length
+        gateVad.pop()
       }
     }
     for (let offset = 0; offset + MIN_SAMPLES <= float32.length; offset += MIN_SAMPLES) {
-      vadInstance.acceptWaveform(float32.subarray(offset, offset + MIN_SAMPLES))
+      gateVad.acceptWaveform(float32.subarray(offset, offset + MIN_SAMPLES))
       drain()
     }
-    vadInstance.flush()
+    gateVad.flush()
     drain()
-    vadInstance.reset()
+    gateVad.reset()
     return speechSamples / SAMPLE_RATE
   } catch (err: any) {
     console.error('[silero-vad] measureSpeechSeconds error:', err.message)
