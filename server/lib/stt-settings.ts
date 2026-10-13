@@ -185,7 +185,7 @@ export function secondOpinionOptions(c: SttCapabilities): SttOption[] {
     { id: 'off', label: 'Off', available: true, experimental: false, note: 'One engine only.' },
     { id: 'parakeet-ultra', label: 'Parakeet Ultra', available: c.parakeetInstalled, experimental: false,
       note: c.parakeetInstalled ? 'Hears every saved meeting again on the Neural Engine, about 0.6 s per 30 s of audio, after the meeting is saved. Disagreements are saved with the meeting.' : 'Install Parakeet on this Mac first.' },
-    { id: 'large-v3', label: 'Whisper Large-v3', available: c.hqLargeV3, experimental: false, note: 'For a Parakeet HQ model. Adds a full Large-v3 pass to every saved meeting (minutes per hour of audio on CPU).' },
+    { id: 'large-v3', label: 'Whisper Large-v3', available: c.hqLargeV3, experimental: false, note: 'For a Parakeet HQ model. Adds a full Large-v3 pass to every saved meeting: about 0.2x the audio length on Metal, about 1x on a busy CPU.' },
   ]
 }
 

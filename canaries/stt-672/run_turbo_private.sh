@@ -2,7 +2,7 @@
 # Private Turbo whisper-server on 18377 with the exact meeting-preview sidecar args, for the
 # preview-lane baseline. Never touches the user's 8177/8178. Stopped by PID when done.
 set -u
-E=/Users/ukaoma/cos-data/stt-672-eval
+E=${STT672_EVAL_DIR:-$HOME/cos-data/stt-672-eval}
 M=$HOME/.local/share/whisper-models
 /opt/homebrew/bin/whisper-server -m $M/ggml-large-v3-turbo.bin -t 16 -l en -fa --no-speech-thold 0.7 --host 127.0.0.1 --port 18377 --vad --vad-model $M/ggml-silero-v5.1.2.bin > $E/runs/private_turbo.log 2>&1 &
 SRV=$!

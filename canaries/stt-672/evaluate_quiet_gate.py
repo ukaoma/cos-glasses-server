@@ -8,9 +8,10 @@ Pass: fires on >= 80% of Silero-negative chunks and <= 2% of speech chunks; RMS-
 must fail (it is the 'must catch' control). Numbers only.
 """
 import json, os, subprocess, sys, tempfile
+import os
 from pathlib import Path
 
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff')))
 SRC = Path.home() / '.cos-glasses/data/meeting-audio'
 HERE = Path(__file__).resolve().parent
 

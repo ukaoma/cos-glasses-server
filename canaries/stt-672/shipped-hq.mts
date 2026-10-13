@@ -11,7 +11,7 @@
 // Never touches the user's live servers. Refuses during a recording unless ALLOW_LIVE=1.
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { segmentTranscriptChunks, transcribeSegments, type HqDecodeDeps, type HqJobPlan } from '../../server/lib/meeting-batch-transcribe.js'
 import { transcribeHighQuality } from '../../server/lib/whisper-local.js'
@@ -27,10 +27,10 @@ globalThis.fetch = (async (input: any, init?: any) => {
   return realFetch(input, init)
 }) as typeof fetch
 
-const ROOT = '/Users/ukaoma/cos-data/asr-bakeoff'
-const EVAL = '/Users/ukaoma/cos-data/stt-672-eval'
+const ROOT = process.env.ASR_BAKEOFF_ROOT ?? join(homedir(), 'cos-data/asr-bakeoff')
+const EVAL = process.env.STT672_EVAL_DIR ?? join(homedir(), 'cos-data/stt-672-eval')
 const CACHE = join(EVAL, 'runs', 'shipped_cache')
-const ACTIVE = join(process.env.REAL_HOME ?? '/Users/ukaoma', '.cos-glasses/data/active-sessions')
+const ACTIVE = join(process.env.REAL_HOME ?? homedir(), '.cos-glasses/data/active-sessions')
 const live = () => { try { return readdirSync(ACTIVE).length > 0 } catch { return true } }
 mkdirSync(CACHE, { recursive: true })
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex')

@@ -9,10 +9,11 @@ comparison is built with the chosen baseline under that key.
 Usage: venv/bin/python evaluate_hq.py --out results.json [--timed-dir DIR]
 """
 import argparse, json, os, subprocess, sys, tempfile
+import os
 from pathlib import Path
 
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff')
-GATES = Path('/Users/ukaoma/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff/operations/personal/wk41_2026/asr-bakeoff/canaries')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff')))
+GATES = Path(os.environ['ASR_GATES_DIR'])  # the bake-off canaries/ folder holding gates.py
 HERE = Path(__file__).resolve().parent
 WORKTREE = HERE.parent.parent
 sys.path.insert(0, str(ROOT / 'scripts')); sys.path.insert(0, str(GATES))

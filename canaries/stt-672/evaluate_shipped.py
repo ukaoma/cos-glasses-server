@@ -4,9 +4,10 @@ the two resolver second opinions (Ultra vs v2), CLEAN and REAL stratum E, collap
 CPU and Metal compute from the decode timings, and the negation/unit fixture tallies.
 Usage: venv/bin/python evaluate_shipped.py ARMS.json DECODE_TIMING.json [more timing files] OUT.json"""
 import json, re, sys
+import os
 from pathlib import Path
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff')
-GATES = Path('/Users/ukaoma/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff/operations/personal/wk41_2026/asr-bakeoff/canaries')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff')))
+GATES = Path(os.environ['ASR_GATES_DIR'])  # the bake-off canaries/ folder holding gates.py
 sys.path.insert(0, str(ROOT / 'scripts')); sys.path.insert(0, str(GATES))
 import score, bk, gates  # noqa: E402
 REPS = 4000

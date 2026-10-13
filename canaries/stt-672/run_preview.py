@@ -1,8 +1,9 @@
 """Drive preview-run.mts over silver / SILVER-E / stratum E chunks with a live-recording guard.
 Writes raw outputs (transcript text) ONLY to the private eval dir. Numbers come from evaluate_preview.py."""
 import json, os, subprocess, sys, time, urllib.request
+import os
 from pathlib import Path
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff'); EVAL = Path('/Users/ukaoma/cos-data/stt-672-eval')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff'))); EVAL = Path(os.environ.get('STT672_EVAL_DIR', str(Path.home() / 'cos-data/stt-672-eval')))
 HERE = Path(__file__).resolve().parent
 
 def diarizer_timeouts():

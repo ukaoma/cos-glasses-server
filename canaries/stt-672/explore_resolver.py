@@ -1,8 +1,9 @@
 """Exploration only: which disagreement classes between large-v3 (fixed) and Parakeet
 help or hurt against the silver reference. Numbers only to stdout."""
 import json, sys
+import os
 from pathlib import Path
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff')))
 sys.path.insert(0, str(ROOT / 'scripts'))
 import score
 

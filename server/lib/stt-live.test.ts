@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('./audio-enhance.js', () => ({ enhanceAudio: vi.fn(async (audio: Buffer, opts?: { profile?: string }) => Buffer.concat([audio, Buffer.from(opts?.profile ?? 'full')])) }))
-const { decideQuiet, asrFrontEnd, QUIET_SPEECH_SEC, chunkRms } = await import('./stt-live.js')
+const { decideQuiet, asrFrontEnd, QUIET_SPEECH_SEC, chunkRms, silenceDropsAllowed } = await import('./stt-live.js')
 
 function wav(amplitude: number, seconds = 6): Buffer {
   const n = seconds * 16_000
@@ -35,6 +35,13 @@ describe('live quiet gate (6.72.0)', () => {
     expect(decideQuiet(wav(151), 'rms', { available: () => true, speechSeconds })).toMatchObject({ isQuiet: false, gate: 'rms' })
     expect(speechSeconds).not.toHaveBeenCalled()
     expect(Math.round(chunkRms(wav(200)))).toBe(200)
+  })
+
+  it('silence text drops stay on RMS, even when Silero calls the chunk quiet', () => {
+    const loudShortName = decideQuiet(wav(3000), 'silero', vad(0.3))
+    expect(loudShortName.isQuiet).toBe(true)
+    expect(silenceDropsAllowed(loudShortName)).toBe(false)
+    expect(silenceDropsAllowed(decideQuiet(wav(100), 'silero', vad(0.1)))).toBe(true)
   })
 
   it('front end: highpass is the light profile, full is the old chain', async () => {

@@ -170,3 +170,18 @@ describe('orphan recovery keeps the hypotheses', () => {
   })
 })
 
+describe('Parakeet install offer', () => {
+  it.runIf(process.platform === 'darwin' && process.arch === 'arm64')('is never offered without the pinned CLI build on this Mac', async () => {
+    const prior = process.env.HOME
+    process.env.HOME = dir
+    try {
+      const R = await import('./stt-runtime.js')
+      const P = await import('./parakeet.js')
+      await P.findPinnedCli() // nothing at ~/.cos-glasses/bin under this HOME
+      const status = R.parakeetStatus(false)
+      expect(status.installable).toBe(false)
+      expect(status.note).toMatch(/fluidaudiocli 0\.17\.4/)
+    } finally { process.env.HOME = prior }
+  })
+})
+

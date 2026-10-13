@@ -2,9 +2,10 @@
 v5.1.2 (the model whisper-cli --vad loads, its default thresholds) over each HQ window after the
 highpass front end. Window clock: sub-window offsets accumulate as in run_hq_timed.py."""
 import json, re, subprocess, sys, tempfile
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff'); EVAL = Path('/Users/ukaoma/cos-data/stt-672-eval')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff'))); EVAL = Path(os.environ.get('STT672_EVAL_DIR', str(Path.home() / 'cos-data/stt-672-eval')))
 VM = str(Path.home() / '.local/share/whisper-models/ggml-silero-v5.1.2.bin')
 tmp = Path(tempfile.mkdtemp(prefix='stt672-spans-'))
 

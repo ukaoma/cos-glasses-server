@@ -13,10 +13,12 @@ import { effectiveStt, DEFAULT_STT_SETTINGS } from '../../server/lib/stt-setting
 const clean = (t: string) => { const c = stripInlineHallucinationsOneShot(t.trim()).trim(); return !c || isFullHallucination(c) ? '' : c }
 const caps = { turboModel: true, liveLargeV3: true, hqLargeV3: true, parakeetInstalled: true, parakeetPreviewWarm: true, parakeetPreviewWarming: false, previewDisabledByEnv: false }
 const eff = effectiveStt({ ...DEFAULT_STT_SETTINGS, preview: 'parakeet' }, caps)
+const done = new Set((process.env.DONE_IDS ?? '').split(',').filter(Boolean))
 const rl = createInterface({ input: process.stdin })
 for await (const line of rl) {
   if (!line.trim()) continue
   const job = JSON.parse(line)
+  if (done.has(job.id)) continue
   if (process.env.ARM === 'post') { // the route's cleaning (and the Turbo path's corrections) applied to saved text
     process.stdout.write(JSON.stringify({ id: job.id, text: clean(applyCorrections(job.text ?? '')) }) + '\n'); continue
   }
@@ -25,4 +27,5 @@ for await (const line of rl) {
     ...defaultPreviewDeps, effective: () => eff, turbo: async () => null,
   }).catch(e => ({ error: String(e) }) as any)
   process.stdout.write(JSON.stringify({ id: job.id, text: r && !r.error ? clean(r.text) : '', model: r?.model ?? null, error: r?.error, ms: performance.now() - t0 }) + '\n')
+  if (process.env.PACE_MS) await new Promise(res => setTimeout(res, Number(process.env.PACE_MS)))
 }

@@ -43,6 +43,16 @@ export function decideQuiet(wav: Buffer, gate: QuietGateId, vad: { available: ()
   return { isQuiet: rms < QUIET_RMS, rms, speechSec: null, gate: 'rms' }
 }
 
+/**
+ * Whether the silence-hallucination TEXT drops (URL-only, repeated thank-you,
+ * quiet vocabulary echo) may fire. They stay on the pre-6.72 RMS test: the
+ * Silero gate also calls a chunk holding one short real name quiet, and those
+ * drops would delete it.
+ */
+export function silenceDropsAllowed(decision: QuietDecision): boolean {
+  return decision.rms < QUIET_RMS
+}
+
 /** ASR input for a live chunk or an HQ window. Playback audio is never touched here. */
 export function asrFrontEnd(audio: Buffer, frontEnd: FrontEndId): Promise<Buffer> {
   return frontEnd === 'full' ? enhanceAudio(audio) : enhanceAudio(audio, { profile: 'light' })

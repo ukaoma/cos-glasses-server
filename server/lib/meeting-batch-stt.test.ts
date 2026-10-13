@@ -274,3 +274,35 @@ describe('the plan the production call sites use', () => {
     expect(r.stt).toMatchObject({ engine: 'large-v3', frontEnd: 'highpass' })
   })
 })
+
+describe('what the resolver saves', () => {
+  it('a rescue the resolver cannot apply (untimed second opinion) is saved as kept, not taken', async () => {
+    const { d } = deps({
+      whisper: vi.fn(async () => ({ text: 'we sell ThriftCart now', words: words('we sell ThriftCart now'), timestamps: false, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' }) as any),
+      parakeet: vi.fn(async (_w: Buffer, opts: any) => ({ model: opts.model, text: 'we sell drift card now', words: words('we sell drift card now'), processingSec: 0.1, wallMs: 10 })),
+      vocabulary: () => ['ThriftCart'],
+    })
+    const [r] = await M.transcribeSegments(dir, [segment], entries, undefined, plan({ engine: 'parakeet-ultra', secondOpinion: 'large-v3' }), d)
+    expect(r.text).toBe('we sell drift card now')
+    expect(r.stt!.resolver.applied).toBe(false)
+    expect(r.stt!.disagreements.length).toBeGreaterThan(0)
+    expect(r.stt!.disagreements.every(x => x.taken === 'primary')).toBe(true)
+  })
+
+  it('applies name corrections once, to the joined text (a two-word correction works, nothing doubles)', async () => {
+    const profile = join(dir, 'profile.json')
+    writeFileSync(profile, JSON.stringify({ whisper_corrections: JSON.stringify({ 'drift card': 'ThriftCart' }) }))
+    const prior = process.env.COS_PROFILE_PATH
+    process.env.COS_PROFILE_PATH = profile
+    try {
+      vi.resetModules()
+      const MM = await import('./meeting-batch-transcribe.js')
+      const { d } = deps({ parakeet: vi.fn(async (_w: Buffer, opts: any) => ({ model: opts.model, text: 'we should ship the drift card build', words: words('we should ship the drift card build'), processingSec: 0.1, wallMs: 10 })) })
+      const [r] = await MM.transcribeSegments(dir, [segment], entries, undefined, plan({ secondOpinion: 'parakeet-ultra' }), d)
+      expect(r.stt!.resolver.applied).toBe(true)
+      expect(r.text).toBe('we should ship the ThriftCart build')
+    } finally {
+      if (prior === undefined) delete process.env.COS_PROFILE_PATH; else process.env.COS_PROFILE_PATH = prior
+    }
+  })
+})

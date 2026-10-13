@@ -646,104 +646,148 @@ and counts only, never a speaker name, path or error text; those stay in
 ## Speech-to-text settings (6.72.0)
 
 One settings object chooses which engine previews live meeting speech, which
-engine writes the saved meeting (HQ), which engine gives HQ a second opinion,
-whether the resolver may use that second opinion, the ASR front end and the
-quiet gate. COS Control (Settings, Transcription) and the phone companion
-(Settings, Voice) show it; both hide it when `GET /api/stt-settings` answers 404
-(an older server). The routes are token-protected like every `/api` route.
+engine writes the saved meeting (HQ), whether a second engine gives HQ a second
+opinion, whether the resolver may use it, the ASR front end and the quiet gate.
+Paired clients: COS Control 0.5.289 (Settings, Transcription) and COS Glasses
+6.10.639 (Settings, Voice). Both hide the card when `GET /api/stt-settings`
+answers 404 (an older server). Older clients show no switcher at all, but the
+server's defaults below still apply to their meetings; change them with the
+routes, or by editing `<data>/stt-settings.json`. The routes are token-protected
+like every `/api` route.
 
 ```
-GET  /api/stt-settings
-PUT  /api/stt-settings                    partial body, e.g. {"hq":"parakeet-ultra"} or {"resolver":false}
-POST /api/stt-settings/parakeet/install   202 {started:true, ...GET}; poll GET for progress
+GET    /api/stt-settings
+PUT    /api/stt-settings                   partial body, e.g. {"hq":"parakeet-ultra"} or {"frontEnd":"full"}
+POST   /api/stt-settings/parakeet/install  202 {started:true, ...GET}; poll GET for progress
+                                           body {} | {"localSource":"/abs/path"} | {"localSource":"/abs/path","allowDownload":true}
+DELETE /api/stt-settings/parakeet/install  cancel a running install; nothing partial is kept
 ```
 
-GET returns:
+GET returns (abridged):
 
 ```json
 {
-  "preview": {"selected": "turbo", "effective": "turbo", "options": [{"id": "turbo", "label": "Whisper Turbo", "available": true, "experimental": false, "note": "..."}]},
-  "hq": {"selected": "large-v3", "effective": "large-v3", "options": ["..."]},
-  "secondOpinion": {"selected": "parakeet-v2", "effective": "off", "options": ["..."]},
-  "resolver": {"enabled": true, "effective": false},
+  "preview": {"selected": "turbo", "effective": "turbo", "reason": null, "reasonCode": null,
+              "models": ["large-v3-turbo", "parakeet-ultra"], "clientParam": "previewModels", "requiresApp": "6.10.639",
+              "note": "...", "options": [{"id": "turbo", "label": "Whisper Turbo", "available": true, "experimental": false, "note": "..."}]},
+  "hq": {"selected": "large-v3", "effective": "large-v3", "reason": null, "reasonCode": null, "options": ["..."]},
+  "secondOpinion": {"selected": "off", "effective": "off", "reason": null, "reasonCode": null, "options": ["..."]},
+  "resolver": {"enabled": false, "effective": false, "reason": null, "reasonCode": null},
   "frontEnd": {"selected": "highpass", "options": ["..."]},
   "quietGate": {"selected": "silero", "options": ["..."]},
-  "parakeet": {"installed": false, "installable": true, "version": "FluidAudio 0.17.4; Parakeet Ultra 95eaa59a, v2 ee09c569", "bytes": 0,
-               "progress": {"state": "idle", "bytesDone": 0, "bytesTotal": 1118771506, "error": null}, "warm": {"preview": "cold"}, "note": "..."},
+  "parakeet": {"installed": false, "installable": true, "version": "Parakeet Ultra 95eaa59a, CLI 0.17.4", "bytes": 0,
+               "progress": {"state": "idle", "bytesDone": 0, "bytesTotal": 654356591, "error": null},
+               "warm": {"preview": "cold"}, "preview": {"breaker": {"open": false, "retryAt": null, "misses": 0}, "counters": {}}, "note": "..."},
+  "lastJob": {"at": "...", "meeting": "...", "outcome": "batch", "summary": {"windows": 12, "primaryFallbacks": 0, "timestampFallbacks": 0, "secondOpinionFailures": 0, "windowsLost": 0}},
   "appliesTo": {"preview": "next live chunk", "hq": "next saved meeting"}
 }
 ```
 
 | Setting | Ids (default first) | Applies from |
 | --- | --- | --- |
-| `preview` | `turbo`, `large-v3` (Max tier only: it runs on the live Large-v3 worker at preview priority), `parakeet` (experimental, once installed; Whisper Turbo previews while it warms), `nemotron-560` (listed, `available: false`: FluidAudio 0.17.4 runs it only as a whole-file batch) | next live chunk |
+| `preview` | `turbo`; `parakeet` (Parakeet Ultra, experimental, once installed); `large-v3` and `nemotron-560` are listed with `available: false` (a Large-v3 preview would share the live worker that writes the saved text; FluidAudio 0.17.4 runs Nemotron only as a whole-file batch) | next live chunk |
 | `hq` | `large-v3` (timestamps on, mapped through Whisper's own VAD segments), `large-v3-legacy` (the pre-6.72 decoder), `parakeet-ultra` (experimental) | next saved meeting |
-| `secondOpinion` | `parakeet-v2`, `off`, `parakeet-ultra`, `large-v3` (for a Parakeet HQ) | next saved meeting |
-| `resolver` | `true`, `false` | next saved meeting |
+| `secondOpinion` | `off`, `parakeet-ultra`, `large-v3` (for a Parakeet HQ) | next saved meeting |
+| `resolver` | `false`, `true` | next saved meeting |
 | `frontEnd` | `highpass` (80 Hz highpass only), `full` (highpass, afftdn, loudnorm) | next live chunk and next saved meeting |
-| `quietGate` | `silero` (under 0.5 s of detected speech is quiet), `rms` (RMS below 150) | next live chunk |
+| `quietGate` | `silero` (under 0.5 s of detected speech), `rms` (RMS below 150) | next live chunk |
 
-- Stored in `<data>/stt-settings.json` (atomic write). Every read checks the
-  file, so nothing needs a restart. An HQ job freezes the settings when it
-  starts and never switches engines mid-job.
+- Stored atomically in `<data>/stt-settings.json` and read on every use, so
+  nothing needs a restart. An HQ job takes its plan when the meeting is saved
+  (or when an orphan recovery is accepted) and never switches engines mid-job.
+  An unreadable file runs the defaults and is logged once.
 - An unknown key or id, a wrong type, an unavailable choice, or a second opinion
   on the same engine as HQ answers `400 {"error": "..."}` in plain words.
   Setting HQ onto the second opinion's engine moves the second opinion to the
   other engine (or off) instead of failing.
-- `effective` is what will actually run: a stored choice that is no longer
-  possible (Parakeet removed, still warming, no Large-v3 live worker) falls back
-  to the default engine for that slot.
-- To run Parakeet as the HQ engine with Large-v3 as its second opinion (the
-  configuration that measured best on silver, see the evaluation), send
-  `PUT {"hq":"parakeet-ultra","secondOpinion":"large-v3","resolver":true}`.
-  `{"hq":"parakeet-ultra"}` alone does the same, since the second opinion moves
-  off Parakeet automatically. The resolver then only rescues profile vocabulary
-  terms from Large-v3 (Parakeet is not deletion-prone, so no gap fill).
+- `effective` is what will actually run. A stored choice that is no longer
+  possible falls back: the preview to Turbo, HQ to Large-v3, the second opinion
+  to off. `reason` (a plain sentence) and `reasonCode` say why.
+- `lastJob` is the last HQ job's outcome: windows decoded and lost, primary and
+  timestamp fallbacks, second-opinion failures, checkpoints reused.
+- To run Parakeet as the HQ engine, send `PUT {"hq":"parakeet-ultra"}`; with
+  `{"secondOpinion":"large-v3","resolver":true}` Large-v3 also hears every window
+  and the resolver may take profile vocabulary terms from it (a Parakeet primary
+  never gets gap fill). See the evaluation for what each measured.
 - `COS_BATCH_HQ_TIMESTAMPS` still overrides HQ timestamps: `1` forces them on,
   `0` off. `COS_WHISPER_MEETING_PREVIEW=0` still turns the meeting preview off.
 - The `preview` setting drives only the meeting preview lane
-  (`POST /api/transcribe-stream/preview`). Dictation's provisional words, prompt
-  HQ and Fast mode are unchanged, and so are playback audio filters.
+  (`POST /api/transcribe-stream/preview`). A client gets a non-Turbo preview
+  only if it lists that model in the `previewModels` query parameter
+  (comma-separated; COS Glasses 6.10.639 sends it); every other client gets
+  Whisper Turbo, so a phone that only accepts Turbo never sees another model.
+  Dictation's provisional words, prompt HQ and Fast mode are unchanged, and so
+  are playback audio filters. The Whisper previews keep raw audio; the Parakeet
+  preview hears the selected front end.
+- The quiet gate decides the prompt and the front end of a live chunk. The
+  silence-hallucination text drops (URL-only, repeated thank-you, a quiet
+  vocabulary echo) stay on the pre-6.72 RMS test, because a chunk holding one
+  short real name can be Silero-quiet.
 
 ### Parakeet (FluidAudio CoreML, offline)
 
 `POST /api/stt-settings/parakeet/install` installs FluidAudio's `fluidaudiocli`
-0.17.4 and two Parakeet CoreML models, pinned by Hugging Face revision and
-SHA-256 for every file (`server/lib/parakeet-manifest.ts`): Parakeet Ultra
-`95eaa59a` (632 MB) and Parakeet TDT v2 `ee09c569` (464 MB), under
-`<data>/stt/parakeet/current`. A local copy whose hash matches (FluidAudio's own
-cache, `COS_PARAKEET_LOCAL_SOURCES`, or `{"localSource": "/abs/path"}` in the
-body) is copied instead of downloaded; anything else comes from the pinned
-revision, and one mismatched byte fails the install with nothing installed.
-FluidAudio publishes no CLI binary, so the CLI must already be on the Mac at
-`~/.cos-glasses/bin/fluidaudiocli` (the speaker-separation install). The route
-answers 409 while a recording is live.
+0.17.4 and Parakeet Ultra (CoreML, `FluidInference/parakeet-ultra-coreml` at
+revision `95eaa59a`, 632 MB), pinned by SHA-256 for every file
+(`server/lib/parakeet-manifest.ts`), under `<data>/stt/parakeet/current`.
+- A local copy whose hash matches is copied instead of downloaded. Looked for,
+  in order: the body's `localSource`, `COS_PARAKEET_LOCAL_SOURCES`, the drop-in
+  folder `<data>/stt/parakeet-sources` (link or copy a folder holding
+  `parakeet-ultra/` there and an install started with `{}` uses it), and
+  FluidAudio's own cache. A named `localSource` that lacks a file fails with a
+  plain error unless `allowDownload` is true; otherwise missing files come from
+  the pinned revision. One mismatched byte fails the install with nothing
+  installed. A download that delivers no bytes for 60 s is abandoned.
+  `progress.source` says how many files were copied and downloaded, and from
+  which folders.
+- FluidAudio publishes no CLI binary, and the CLI is pinned to one build
+  (SHA-256 `47141546...`, the build speaker separation uses at
+  `~/.cos-glasses/bin/fluidaudiocli`). On a Mac without that build `installable`
+  is false and the note says why, so no client offers an install that cannot
+  succeed. Apple silicon only.
+- 409 while a recording is live. A crash between the two renames of a
+  reinstall leaves the old copy aside; the next start puts it back.
 
-Every decode runs under `sandbox-exec` with network denied and the installed
-models read-only, with `--local-model-dir` (FluidAudio's path that never
-downloads), a minimal environment (no tokens or keys) and a private HOME for the
-compiled CoreML cache. No sandbox, no run. Nothing here calls a language model.
-HQ and second-opinion runs are queued one at a time at lower CPU priority, the
-first with a 180 s deadline (CoreML may compile) and later ones 30 s; a failed
-Parakeet HQ window is decoded by Large-v3 instead, and a failed second opinion
-leaves the primary exactly as heard. Second opinions run only inside a saved
-meeting's HQ job (and orphan recovery, which uses the same plan), never as part
-of live capture. The preview lane
-runs one decode at a time with a 1.5 s deadline; a busy, slow or failed preview
-falls back to Whisper Turbo for that request.
+Every decode runs under `sandbox-exec`: network denied, and writes allowed only
+to the run's temp directory, the private CoreML cache HOME and the per-user
+temp directory FluidAudio buffers long audio in. Reads stay allowed (system
+frameworks); that is a stated limit. `--local-model-dir` (FluidAudio's path that
+never downloads), a key-free environment, and the CLI's full hash checked once
+per server process. No sandbox, no run. Nothing here calls a language model.
 
-### The resolver
+- HQ: runs are queued one at a time at lower CPU priority, the first with a
+  180 s deadline (CoreML may compile) and later ones 30 s. Two Parakeet failures
+  in a row stop Parakeet for the rest of that job. A Parakeet HQ window that
+  fails, or returns no words over at least 0.5 s of detected speech, is decoded
+  by Large-v3 instead. A failed second opinion leaves the primary exactly as
+  heard. Second opinions run only in a saved meeting's HQ job (and orphan
+  recovery), never as part of live capture.
+- Preview: one decode at a time, a 0.9 s deadline, then Turbo only while the
+  phone's 1.8 s budget allows (otherwise a quiet 204). Three misses in a row
+  open a breaker (Turbo for 1 minute, doubling to 10). The warm-up (an 8 s clip;
+  warm when it decodes within 1 s) is deferred while a recording is live and
+  retried at most every 2 minutes after a failure.
 
-After the primary HQ decode of each window, the second opinion hears the same
-front-end audio. The two are aligned word by word by edit distance over
-normalized words; timestamps place the words taken and date each disagreement
-(a time-skew limit on pairing is available but off: it measured worse). Where they disagree, the resolver takes the
-second opinion only for: words a Large-v3 primary dropped (gap fill), or a
-profile vocabulary term the primary missed. It never changes a region where the
-two differ in a negation, a number or a unit, nor a short insertion carrying
-one. Both raw hypotheses and every disagreement are saved with the meeting
-(additive: `batchSegments[].stt` and a meeting-level `stt` summary in the
-sidecar); older clients ignore them. The evaluation and the defaults' evidence:
+### The resolver and the second opinion
+
+With a second opinion planned, the second engine hears the same front-end audio
+as the primary. A progressive-HQ checkpoint made under the same settings is
+reused as the primary, so only the second opinion is decoded. The two
+hypotheses are aligned word by word by edit distance over normalized words
+(the resolver code has a time-skew pairing limit, not exposed and off: it
+measured worse). The resolver then takes the second opinion only for:
+- words a Whisper primary has nothing for (gap fill), and only inside a span
+  the primary's own VAD marked as speech, with the second opinion's mean word
+  confidence at least 0.5;
+- a profile vocabulary term the primary missed, inside a short disagreement
+  (at most 4 words, the primary's side at most 2 longer).
+
+It never changes a region whose two sides differ in a negation, a number or a
+unit, whatever its length. Both raw hypotheses and every disagreement (with
+what was actually kept) are saved with the meeting, additively:
+`batchSegments[].stt` and a meeting-level `stt` in the sidecar; an orphan
+recovery adds `stt` and `sttSegments`. Older clients ignore them. The
+evaluation and the defaults' evidence:
 [docs/stt-672-evaluation.md](docs/stt-672-evaluation.md).
 
 ## Final dictation polish (6.61.5)

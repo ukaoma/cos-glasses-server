@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const tests = ['server/lib/stt-resolver.test.ts', 'server/lib/parakeet.test.ts', 'server/routes/stt-settings.test.ts', 'server/lib/stt-live.test.ts',
-  'server/lib/meeting-batch-stt.test.ts', 'server/lib/stt-runtime.test.ts', 'server/lib/whisper-batch-timing.test.ts']
+  'server/lib/meeting-batch-stt.test.ts', 'server/lib/stt-runtime.test.ts', 'server/lib/whisper-batch-timing.test.ts', 'server/lib/whisper-hq-words.test.ts', 'server/routes/transcribe-stream-quiet-gate.test.ts']
 const R = 'server/lib/stt-resolver.ts', P = 'server/lib/parakeet.ts', S = 'server/lib/stt-settings.ts', RT = 'server/routes/stt-settings.ts'
 const L = 'server/lib/stt-live.ts', V = 'server/lib/vad-silero.ts', B = 'server/lib/meeting-batch-transcribe.ts', BT = 'server/lib/whisper-batch-timing.ts'
 const RU = 'server/lib/stt-runtime.ts', MP = 'server/lib/meeting-batch-persistence.ts', WL = 'server/lib/whisper-local.ts'
@@ -97,7 +97,8 @@ const mutations = [
   ['large-v3-preview-withdrawn', S, "    { id: 'large-v3', label: 'Whisper Large-v3', available: false,", "    { id: 'large-v3', label: 'Whisper Large-v3', available: true,"],
   ['corrupt-settings-logged-once', S, '    if (!warnedCorrupt) { warnedCorrupt = true;', '    if (true) { warnedCorrupt = true;'],
   ['slot-reason-surfaced', S, "      selected: settings.preview, effective: eff.preview.engine, ...slotReason(eff.preview.reason),", "      selected: settings.preview, effective: eff.preview.engine,"],
-  ['text-drops-stay-on-rms', TS, '  const dropQuiet = rms < QUIET_RMS\n', '  const dropQuiet = isQuiet\n'],
+  ['text-drops-stay-on-rms', L, '  return decision.rms < QUIET_RMS\n', '  return decision.isQuiet\n'],
+  ['route-uses-rms-drop-rule', TS, '  const dropQuiet = silenceDropsAllowed(quiet)\n', '  const dropQuiet = isQuiet\n'],
   ['spoken-words-merge', WL, "      if (last && !/^\\s/.test(rawText) && !/^[\\s]*$/.test(rawText)) {", '      if (false) {'],
   ['preview-follows-effective-engine', RU, "  if (eff.preview.engine === 'parakeet') {", "  if (eff.settings.preview === 'parakeet') {"],
 ]

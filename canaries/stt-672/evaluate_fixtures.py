@@ -3,9 +3,10 @@ through the shipped paths (decode.mts: large-v3 timestamps+highpass, Parakeet Ul
 resolved by the shipped resolver. Counts only: which windows carry the provisional caption's
 wording ("lacking", "months") and whether the resolver ever changed a negation or unit token."""
 import json, os, re, subprocess, sys, tempfile
+import os
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
-EVAL = Path('/Users/ukaoma/cos-data/stt-672-eval')
+EVAL = Path(os.environ.get('STT672_EVAL_DIR', str(Path.home() / 'cos-data/stt-672-eval')))
 rows = [json.loads(l) for l in open(EVAL / 'runs/fixtures.jsonl') if l.startswith('{')]
 by = {}
 for r in rows:
@@ -18,7 +19,7 @@ for i, d in sorted(by.items()):
     for sec in ('parakeet-v2', 'parakeet-ultra'):
         jobs.append({'id': f'{i}|lv3+{sec}', 'primary': {'engine': 'large-v3', 'text': p['text'], 'words': p['words']}, 'second': {'engine': sec, 'text': d[sec]['text'], 'words': d[sec]['words']}, 'correctSecond': True})
     jobs.append({'id': f'{i}|pku+lv3', 'primary': {'engine': 'parakeet-ultra', 'text': d['parakeet-ultra']['text'], 'words': d['parakeet-ultra']['words']}, 'second': {'engine': 'large-v3', 'text': p['text'], 'words': p['words']}})
-s = tempfile.mkdtemp(); env = dict(os.environ, COS_DATA_DIR=s, HOME=s, COS_PROFILE_PATH='/Users/ukaoma/cos-data/asr-bakeoff/tmp/profile/.cos-profile.json')
+s = tempfile.mkdtemp(); env = dict(os.environ, COS_DATA_DIR=s, HOME=s, COS_PROFILE_PATH=str(ROOT / 'tmp/profile/.cos-profile.json'))
 out = subprocess.run(['node', '--import', 'tsx/esm', str(HERE / 'resolve-batch.ts')], input='\n'.join(map(json.dumps, jobs)) + '\n', capture_output=True, text=True, env=env, cwd=str(HERE.parent.parent))
 res = {json.loads(l)['id']: json.loads(l) for l in out.stdout.splitlines() if l.startswith('{')}
 assert len(res) == len(jobs), out.stderr[-400:]

@@ -4,8 +4,9 @@ resolver can be evaluated with real primary word clocks. Windows are decoded in 
 previous window's text as context and stripOverlap applied, as meeting HQ does.
 Refuses to run while a real recording is live (decode.mts guard). Outputs stay private."""
 import json, os, subprocess, sys
+import os
 from pathlib import Path
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff'); EVAL = Path('/Users/ukaoma/cos-data/stt-672-eval')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff'))); EVAL = Path(os.environ.get('STT672_EVAL_DIR', str(Path.home() / 'cos-data/stt-672-eval')))
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'scripts'))
 import bk  # stripOverlap replica used by the bake-off H0 arms

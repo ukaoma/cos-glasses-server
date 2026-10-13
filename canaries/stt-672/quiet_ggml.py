@@ -1,9 +1,10 @@
 """Per-chunk ggml Silero v5.1.2 (the model whisper-server --vad loads) on canary-5 chunks:
 all Silero-negative chunks plus a fixed random sample of speech chunks. Read-only."""
 import json, random, re, subprocess, sys
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-rows = json.load(open('/Users/ukaoma/cos-data/asr-bakeoff/runs/qc_c/qc_c_chunks.json'))
+rows = json.load(open(str(ROOT / 'runs/qc_c/qc_c_chunks.json')))
 src = Path.home() / '.cos-glasses/data/meeting-audio'
 VM = str(Path.home() / '.local/share/whisper-models/ggml-silero-v5.1.2.bin')
 present = [r for r in rows if (src / r['sid'] / r['chunk']).exists()]

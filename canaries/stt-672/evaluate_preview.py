@@ -11,11 +11,14 @@ Usage: venv/bin/python evaluate_preview.py OUT.json [contention.json]
 import json, sys
 from pathlib import Path
 import numpy as np
-ROOT = Path('/Users/ukaoma/cos-data/asr-bakeoff'); EVAL = Path('/Users/ukaoma/cos-data/stt-672-eval')
-GATES = Path('/Users/ukaoma/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff/operations/personal/wk41_2026/asr-bakeoff/canaries')
+ROOT = Path(os.environ.get('ASR_BAKEOFF_ROOT', str(Path.home() / 'cos-data/asr-bakeoff'))); EVAL = Path(os.environ.get('STT672_EVAL_DIR', str(Path.home() / 'cos-data/stt-672-eval')))
+GATES = Path(os.environ['ASR_GATES_DIR'])  # the bake-off canaries/ folder holding gates.py
 sys.path.insert(0, str(ROOT / 'scripts')); sys.path.insert(0, str(GATES))
 import score, bk, gates  # noqa: E402
-ARMS = ['turbo-raw', 'turbo-hp', 'parakeet-v2', 'parakeet-ultra']
+import os
+ARMS = os.environ.get('ARMS', 'turbo-raw,turbo-hp,parakeet-v2,parakeet-ultra').split(',')
+BASE = os.environ.get('BASE', 'turbo-raw')
+TIMING_REF = os.environ.get('TIMING_REF', 'parakeet-v2')
 REPS = 4000
 
 
@@ -42,7 +45,7 @@ def main(out, contention=None):
     sets = {ds: json.load(open(ROOT / f'refs/{ds}_set.json'))['windows'] for ds in ('silver', 'silverE', 'stratE')}
     runs = {a: load(a) for a in ARMS}
     runs = {a: r for a, r in runs.items() if r}
-    ref_t = runs.get('parakeet-v2', {})
+    ref_t = runs.get(TIMING_REF) or (load(TIMING_REF) or {})
     res = {'arms': list(runs), 'tables': {}, 'comparisons': {}, 'pooled_entities': {}, 'stratE': {}, 'latency': {}, 'gates': {}}
     rows = {}
     # turbo-raw on SILVER is the saved bake-off L4 arm (same private-server args, raw audio, no prompt).
@@ -50,7 +53,7 @@ def main(out, contention=None):
     for f in (ROOT / 'runs/silver/L4').glob('*.json'):
         if f.name != 'RECEIPT.json':
             j = json.load(open(f)); L4[j['id']] = j['text']
-    use_l4 = lambda a, ds: a == 'turbo-raw' and ds == 'silver'
+    use_l4 = lambda a, ds: a == 'turbo-raw' and ds == 'silver'  # turbo-post carries its own cleaned L4 rows
     for ds in ('silver', 'silverE'):
         S = sets[ds]
         ids = [w for w in S if all((w['id'] in L4) if use_l4(a, ds) else complete(r, ds, w) for a, r in runs.items())]
@@ -62,7 +65,7 @@ def main(out, contention=None):
             A['WER_ci'] = score.bootstrap_ci(rows[ds][a], rows[ds + '_blocks'], 'WER', reps=REPS)
             res['tables'][ds][a] = A
     res['L4_saved_silver_WER'] = score.agg([score.score_pair(w['ref'], L4[w['id']]) for w in sets['silver'] if w['id'] in L4])['WER']
-    base = 'turbo-raw'
+    base = BASE
     for a in runs:
         if a == base or base not in runs:
             continue
@@ -89,7 +92,7 @@ def main(out, contention=None):
         res['stratE'][a] = out_e
     # latency
     for a, r in runs.items():
-        ms = [d['ms'] / 1000 for k, d in r.items() if 'error' not in d and (k.startswith('silver|') or (a == 'turbo-raw' and k.startswith('silverE|')))]
+        ms = [d['ms'] / 1000 for k, d in r.items() if 'error' not in d and 'ms' in d and (k.startswith('silver|') or k.startswith('silverE|'))]
         errs = sum(1 for d in r.values() if 'error' in d)
         delays = []
         for ds in ('silver', 'silverE'):
@@ -99,7 +102,10 @@ def main(out, contention=None):
                     if k not in r or 'error' in r[k] or k not in ref_t:
                         continue
                     for wd in ref_t[k].get('words') or []:
-                        delays.append(max(0.0, c['dur'] - wd['start']) + r[k]['ms'] / 1000)
+                        if 'ms' in r[k]: delays.append(max(0.0, c['dur'] - wd['start']) + r[k]['ms'] / 1000)
+        if not ms:
+            res['latency'][a] = {'chunks': 0, 'errors': errs}
+            continue
         res['latency'][a] = {'chunks': len(ms), 'errors': errs, 'unit_compute_p50': float(np.percentile(ms, 50)), 'unit_compute_p95': float(np.percentile(ms, 95)),
                              'unit_compute_max': float(max(ms)), 'emission_delay_p50': float(np.percentile(delays, 50)) if delays else None,
                              'emission_delay_p95': float(np.percentile(delays, 95)) if delays else None}

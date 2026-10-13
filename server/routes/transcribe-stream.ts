@@ -56,7 +56,7 @@ import {
   isVocabEchoOnly,
 } from '../lib/hallucination-filter.js'
 import { transcribeMeetingPreview } from '../lib/stt-runtime.js'
-import { decideQuiet, asrFrontEnd, QUIET_RMS } from '../lib/stt-live.js'
+import { decideQuiet, asrFrontEnd, silenceDropsAllowed } from '../lib/stt-live.js'
 import { readSttSettings } from '../lib/stt-settings.js'
 import { dataPath } from '../lib/data-dir.js'
 import { ageHours, partitionExpiredAudio } from '../lib/audio-retention.js'
@@ -2271,7 +2271,7 @@ async function processStreamChunk(opts: {
   rawText = applyCorrections(rawText)
 
   // Text drops stay on the pre-6.72 RMS test (see the contract above).
-  const dropQuiet = rms < QUIET_RMS
+  const dropQuiet = silenceDropsAllowed(quiet)
   let sanitized = sanitizeStreamTranscript(sessionId, session, rawText, dropQuiet)
   if (candidate && (!sanitized.text || sanitized.fallbackReason)) {
     fallbackReason = sanitized.fallbackReason || 'empty_candidate'
