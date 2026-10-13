@@ -77,8 +77,16 @@ import {
   listUnsavedCaptures,
   purgeExpiredQuarantine,
   quarantineSessionAudio,
+  readCaptureDisposition,
   sweepOrphanedSessionAudio,
 } from '../lib/unsaved-audio-quarantine.js'
+import {
+  STALE_ACTIVE_SESSION_DIR_NAME,
+  moveActiveSessionFileAside,
+  purgeExpiredStaleActiveSessionFiles,
+  sweepStaleActiveSessionFiles,
+  type StaleActiveSessionMove,
+} from '../lib/stale-active-session-files.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { saveTrainingAudioSample } from '../lib/training-audio-save.js'
 import {
@@ -92,6 +100,7 @@ import {
   acquireMaintenanceWork,
   maintenanceAdmissionsOpen,
   maintenanceLifecycle,
+  onMaintenanceAdmissionsOpen,
   type MaintenanceWorkLease,
 } from '../lib/maintenance-lifecycle.js'
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
@@ -542,6 +551,8 @@ export function getTranscriptionSessionLiveness(now = Date.now()): Transcription
 // Incremental chunk persistence — survive server restarts
 const CHUNK_PERSIST_DIR = dataPath('active-sessions')
 ensurePrivateDirectory(CHUNK_PERSIST_DIR)
+/** 6.71.14: where an active-session file the server no longer owns is moved, never deleted in place. */
+const STALE_ACTIVE_SESSION_DIR = dataPath(STALE_ACTIVE_SESSION_DIR_NAME)
 
 function readClosedSessions(): Record<string, ClosedTranscriptSession> {
   if (!existsSync(CLOSED_SESSIONS_FILE)) return {}
@@ -691,6 +702,61 @@ function persistSessionBestEffort(sessionId: string): void {
   try { persistSessionRequired(sessionId) } catch { /* recovery cleanup is non-admission work */ }
 }
 
+/**
+ * 6.71.14: one pass of the stale active-session sweep, against the real session
+ * map. Exported so a test drives the exact wiring the minute interval runs.
+ */
+export function sweepStaleActiveSessionFilesNow(now: number): StaleActiveSessionMove[] {
+  const moves = sweepStaleActiveSessionFiles({
+    dir: CHUNK_PERSIST_DIR,
+    targetDir: STALE_ACTIVE_SESSION_DIR,
+    isLive: id => sessions.has(id),
+    now,
+    idleRetentionMs: LOCAL_FIRST_MEETING_IDLE_RETENTION_MS,
+  })
+  for (const move of moves) {
+    console.warn(
+      `[cleanup] Moved stale active-session file aside: ${move.sessionId} `
+      + `(${move.reason}, idle ${Math.round((move.idleMs ?? 0) / 60_000)}m, not live) \u2192 ${move.target}`,
+    )
+  }
+  purgeExpiredStaleActiveSessionFiles(STALE_ACTIVE_SESSION_DIR, now)
+  return moves
+}
+
+/**
+ * 6.71.14: a chunk for a capture that is already quarantined, recovered or
+ * receipted must not recreate a live session.
+ *
+ * Before this, a session missing from the map was simply created by
+ * getSession(), so a late or replayed chunk for a finished capture minted a new
+ * live record (and a new active-session file and session-audio dir) beside the
+ * capture's own terminal outcome. The chunk is DROPPED with the same 410
+ * `session_closed` a tombstoned session answers, which every client already
+ * handles. It is not attached to the recovered capture: that capture was decoded
+ * once into a saved meeting or a no_speech receipt, and re-opening a terminal
+ * outcome for one chunk would mutate a meeting the user may already have. The
+ * phone keeps its own copy until it holds a save receipt, so the refusal loses
+ * nothing on the server side that was ever accepted.
+ */
+const lateChunkRefusalsLogged = new Set<string>()
+function refuseChunkForTerminalCapture(sessionId: string, chunkIndex: number | null, route: string): void {
+  if (sessions.has(sessionId)) return
+  const disposition = readCaptureDisposition(sessionId)
+  if (!disposition) return
+  const key = `${sessionId}:${chunkIndex ?? 'start'}`
+  if (!lateChunkRefusalsLogged.has(key)) {
+    lateChunkRefusalsLogged.add(key)
+    if (lateChunkRefusalsLogged.size > 500) lateChunkRefusalsLogged.delete(lateChunkRefusalsLogged.values().next().value as string)
+    console.warn(
+      `[transcribe-stream] Refused late ${route} for ${sessionId}`
+      + `${chunkIndex == null ? '' : ` chunk ${chunkIndex}`}: capture already ${disposition.kind}`
+      + `${disposition.savedFilename ? ` (${disposition.savedFilename})` : ''}; no live session recreated (410 session_closed)`,
+    )
+  }
+  throw makeHttpError(410, `session is closed (capture ${disposition.kind})`, 'session_closed')
+}
+
 /** Recover sessions from disk on server restart */
 function recoverSessions(): void {
   try {
@@ -701,6 +767,21 @@ function recoverSessions(): void {
       if (!file.endsWith('.json')) continue
       try {
         const data = JSON.parse(readFileSync(resolve(CHUNK_PERSIST_DIR, file), 'utf-8'))
+        // 6.71.14: recovery can now run after boot (deferred behind a closed
+        // maintenance gate). A session already in memory owns its file; the disk
+        // copy must never overwrite it.
+        if (typeof data.sessionId === 'string' && sessions.has(data.sessionId)) continue
+        // A capture whose audio already reached quarantine (and maybe a recovery
+        // receipt) is done. Adopting its file would bring back a live session for
+        // it; tombstoning would delete the file. Move it aside instead.
+        if (typeof data.sessionId === 'string' && readCaptureDisposition(data.sessionId)) {
+          const target = moveActiveSessionFileAside(
+            resolve(CHUNK_PERSIST_DIR, file), data.sessionId, STALE_ACTIVE_SESSION_DIR, 'terminal_capture', Date.now(),
+            { lastActivityAt: typeof data.lastActivityAt === 'number' ? data.lastActivityAt : null },
+          )
+          if (target) console.warn(`[session-recovery] ${data.sessionId} was already quarantined or recovered; moved its active-session file aside: ${target}`)
+          continue
+        }
         // Reconstruct the (sparse) chunk array. New format keeps original
         // indices via chunksIndexed; legacy format stored a dense `chunks`.
         const indexed: Array<{ i: number; c: TranscriptChunk }> | null =
@@ -896,9 +977,35 @@ export function isSessionDeleted(sessionId: string): boolean {
 // A committed cross-boot maintenance operation owns durable state until the
 // trusted controller adopts the candidate. Boot recovery must not mutate or
 // promote sessions while that gate is closed.
-if (maintenanceAdmissionsOpen()) {
+//
+// 6.71.14: and once that gate opens, recovery MUST still run. Until 6.71.13 this was
+// a module-scope `if` evaluated once at import: a boot behind a closed gate (every
+// managed update) skipped it for the life of the process. Persisted sessions were
+// never adopted or tombstoned, and the closed-session tombstones were never
+// restored. On 2026-10-12 that left `active-sessions/<id>.json` for a receipted
+// capture on disk for 17 hours, reported as live by COS Control and `missing` by
+// the status route.
+let durableSessionRecoveryRan = false
+function runDurableSessionRecovery(trigger: 'boot' | 'admissions_open'): void {
+  if (durableSessionRecoveryRan) return
+  durableSessionRecoveryRan = true
   recoverClosedSessions()
   recoverSessions()
+  if (trigger === 'admissions_open') {
+    console.log(`[session-recovery] Ran deferred durable recovery after the maintenance gate opened (${sessions.size} live session(s))`)
+  }
+}
+if (maintenanceAdmissionsOpen()) {
+  runDurableSessionRecovery('boot')
+} else {
+  // Delivered on every later open; the flag above makes every delivery after the
+  // first a no-op, so disk is never re-read over a live session map.
+  onMaintenanceAdmissionsOpen(() => runDurableSessionRecovery('admissions_open'))
+}
+
+/** 6.71.14: has boot recovery run in this process yet? For tests only. */
+export function __durableSessionRecoveryRanForTests(): boolean {
+  return durableSessionRecoveryRan
 }
 
 /**
@@ -1011,6 +1118,10 @@ function promoteStrandedCapture(sessionId: string, lastActivityAt: number): void
 // Auto-cleanup sessions idle for the advertised retention horizon.
 setInterval(() => {
   if (!maintenanceAdmissionsOpen()) return
+  // 6.71.14: the sweeps below judge a session dead by its absence from the
+  // in-memory map. Before recovery has adopted the persisted sessions that map is
+  // empty by construction, so sweeping then would quarantine a live capture.
+  if (!durableSessionRecoveryRan) return
   // A capture whose phone went away must still become a meeting. This loop used
   // to close every idle session as 'expired', which quarantined its audio and
   // produced NO meeting — recoverable for 72h, but only by whoever thought to
@@ -1052,6 +1163,15 @@ setInterval(() => {
     // undiagnosable: three minutes of watching a live server produced no recovery, no
     // log, and nothing to reason about, because any throw in this block vanished.
     console.error(`[cleanup] Orphan-audio sweep failed: ${error instanceof Error ? error.message : error}`)
+  }
+  // 6.71.14: its own try, for the same reason as auto-recovery below. An
+  // active-session file whose session is not live and has been idle past the
+  // retention horizon is moved aside; COS Control reads that directory directly
+  // and would otherwise show it as a live recording indefinitely.
+  try {
+    sweepStaleActiveSessionFilesNow(Date.now())
+  } catch (error) {
+    console.error(`[cleanup] Stale active-session sweep failed: ${error instanceof Error ? error.message : error}`)
   }
   // DELIBERATELY ITS OWN TRY. This used to sit inside the block above, one line after
   // purgeExpiredQuarantine, so a throw anywhere in that sweep meant auto-recovery
@@ -2010,6 +2130,7 @@ async function processStreamChunk(opts: {
   validateSessionId(sessionId)
   validateChunkIndex(chunkIndex)
   if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
+  refuseChunkForTerminalCapture(sessionId, chunkIndex, 'chunk')
   if (audioBuffer.length < 100) throw makeHttpError(400, 'audio too short', 'audio_too_short')
 
   const audioSha256 = sha256Hex(audioBuffer)
@@ -2387,6 +2508,7 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (
       allowDuringDrain: sessions.has(sessionId),
     })
     if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
+    refuseChunkForTerminalCapture(sessionId, null, 'offline session start')
     const session = getSession(sessionId)
     const startTime = typeof body.startTime === 'number' && Number.isFinite(body.startTime)
       ? Number(body.startTime)

@@ -87,7 +87,9 @@ import {
   listUnsavedCaptures,
   markRecovered,
   markRecoveredNoSpeech,
+  readCaptureDisposition,
   registerActiveRecovery,
+  type CaptureDisposition,
 } from '../lib/unsaved-audio-quarantine.js'
 import {
   clearSessionHallucinationState,
@@ -475,6 +477,59 @@ function publicSaveResponse(saved: SavedMeeting, replayed = false): Record<strin
   }
 }
 
+/**
+ * 6.71.14: the status a capture reports once its live session is gone.
+ *
+ * Until 6.71.13 the route knew only the live map, the closed-session tombstones and
+ * the saved store, so a capture the server itself quarantined and then recovered
+ * or receipted as no_speech read `missing` ("the server never heard of it"), and
+ * COS Control drew "Recording ended without saving". The quarantine knows better.
+ *
+ * Precedence, most authoritative first:
+ *   saved       a durable meeting exists for this session id (unchanged)
+ *   active      the session is live in memory (unchanged)
+ *   receipted   recovery finished and found no speech; `disposition.reason` is `no_speech`
+ *   recovered   recovery saved a meeting the store no longer finds by session id
+ *   closed      a tombstone within retention (unchanged)
+ *   quarantined the audio is held and a recovery has not finished yet
+ *   missing     truly unknown (unchanged)
+ * `receipted` outranks `closed` on purpose: a stranded session closes as expired,
+ * its audio is quarantined and then receipted, and "closed" would still read as an
+ * unsaved loss.
+ */
+export type MeetingSessionReportedState =
+  | 'saved' | 'active' | 'receipted' | 'recovered' | 'closed' | 'quarantined' | 'missing'
+
+export function reportedSessionState(
+  saved: boolean,
+  liveState: 'active' | 'closed' | 'missing',
+  disposition: Pick<CaptureDisposition, 'kind'> | null,
+): MeetingSessionReportedState {
+  if (saved) return 'saved'
+  if (liveState === 'active') return 'active'
+  if (disposition?.kind === 'no_speech') return 'receipted'
+  if (disposition?.kind === 'recovered') return 'recovered'
+  if (liveState === 'closed') return 'closed'
+  if (disposition?.kind === 'quarantined') return 'quarantined'
+  return 'missing'
+}
+
+function publicDisposition(disposition: CaptureDisposition | null): Record<string, unknown> | null {
+  if (!disposition) return null
+  return {
+    kind: disposition.kind,
+    // Why the capture is terminal: `no_speech` or `recovered`; null while it is only held.
+    reason: disposition.kind === 'quarantined' ? null : disposition.kind,
+    quarantinedAt: disposition.quarantinedAt,
+    quarantineReason: disposition.quarantineReason,
+    receiptedAt: disposition.receiptedAt,
+    chunkFiles: disposition.chunkFiles,
+    savedFilename: disposition.savedFilename,
+    recovering: disposition.recovering,
+    audioRetainedUntil: disposition.retainedUntil,
+  }
+}
+
 function suppliedServerPin(
   req: { get: (name: string) => string | undefined },
   fallback: unknown,
@@ -515,10 +570,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
     const saved = store.findBySessionId(sessionId)
     const live = getMeetingSessionStatus(sessionId)
+    // A live session is the truth for itself; the quarantine is read only when it is not.
+    const disposition = live.state === 'active' ? null : readCaptureDisposition(sessionId)
+    const state = reportedSessionState(Boolean(saved), live.state, disposition)
     res.set('Cache-Control', 'private, no-store')
     res.json({
       sessionId,
-      state: saved ? 'saved' : live.state,
+      state,
       serverInstanceId,
       receivedRanges: live.receivedRanges,
       receivedCount: live.receivedCount,
@@ -530,6 +588,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       lastActivityAt: live.lastActivityAt,
       retainedUntil: saved ? null : live.retainedUntil,
       saveReceipt: saved ? publicSaveResponse(saved) : null,
+      // 6.71.14, additive: what became of a capture whose audio reached quarantine
+      // (null otherwise). Older clients ignore it.
+      disposition: publicDisposition(disposition),
     })
   })
 

@@ -347,3 +347,93 @@ export function markRecovered(dirPath: string, savedFilename: string): void {
     )
   } catch { /* receipt is best-effort; findBySessionId remains the true guard */ }
 }
+
+// ── Terminal disposition of a capture the server no longer holds live ───────
+//
+// 6.71.14. The quarantine is the only record of what happened to a capture whose
+// live session is gone: its audio was quarantined, then recovered into a meeting or
+// receipted as no_speech. Two readers need that answer and used to get "missing":
+// the session status route (COS Control rendered "Recording ended without saving"
+// for a capture that had been recovered and receipted) and the chunk route, which
+// recreated a live session for a late chunk of a capture that was already done.
+
+export type CaptureDispositionKind = 'quarantined' | 'recovered' | 'no_speech'
+
+export interface CaptureDisposition {
+  kind: CaptureDispositionKind
+  sessionId: string
+  dirName: string
+  quarantinedAt: string | null
+  /** When the recovery receipt was written, for `recovered` and `no_speech`. */
+  receiptedAt: string | null
+  chunkFiles: number
+  /** The quarantine manifest's reason (why the audio was moved), when known. */
+  quarantineReason: string | null
+  /** Set for `recovered`: the meeting file the recovery saved. */
+  savedFilename: string | null
+  /** A recovery is decoding this capture right now. */
+  recovering: boolean
+  /** When quarantine retention removes the audio. */
+  retainedUntil: string | null
+}
+
+interface RecoveredReceipt {
+  recoveredAt?: unknown
+  outcome?: unknown
+  savedFilename?: unknown
+}
+
+function readRecoveredReceipt(dirPath: string): RecoveredReceipt | null {
+  const path = resolve(dirPath, RECOVERED_RECEIPT)
+  if (!existsSync(path)) return null
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown
+    return raw && typeof raw === 'object' ? raw as RecoveredReceipt : {}
+  } catch {
+    // Present but unreadable still means a recovery finished: the receipt is only
+    // ever written at the end of one (listUnsavedCaptures counts it the same way).
+    return {}
+  }
+}
+
+/**
+ * What became of a capture whose audio reached quarantine, or null when the
+ * quarantine holds nothing for this session id.
+ *
+ * `no_speech` and `recovered` are terminal: the capture was decoded once and its
+ * outcome receipted. `quarantined` is held audio that a recovery has not finished
+ * yet (the sweep picks one per minute, or a person presses Recover).
+ */
+export function readCaptureDisposition(
+  sessionId: string,
+  root: string = unsavedAudioRoot(),
+  retentionMs: number = unsavedAudioRetentionMs(),
+): CaptureDisposition | null {
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return null
+  const dirPath = findQuarantineDir(sessionId, root)
+  if (!dirPath) return null
+  const manifest = readManifest(dirPath)
+  const atMs = quarantinedAtMs(dirPath, manifest)
+  const receipt = readRecoveredReceipt(dirPath)
+  const receiptedMs = receipt && typeof receipt.recoveredAt === 'string' ? Date.parse(receipt.recoveredAt) : NaN
+  const savedFilename = receipt && typeof receipt.savedFilename === 'string' && receipt.savedFilename
+    ? receipt.savedFilename
+    : null
+  const kind: CaptureDispositionKind = !receipt
+    ? 'quarantined'
+    : receipt.outcome === 'no_speech'
+      ? 'no_speech'
+      : 'recovered'
+  return {
+    kind,
+    sessionId,
+    dirName: basename(dirPath),
+    quarantinedAt: atMs != null ? new Date(atMs).toISOString() : null,
+    receiptedAt: Number.isFinite(receiptedMs) ? new Date(receiptedMs).toISOString() : null,
+    chunkFiles: manifest?.chunkFiles ?? countChunkWavs(dirPath),
+    quarantineReason: manifest?.reason ?? null,
+    savedFilename,
+    recovering: isRecoveryActive(basename(dirPath)),
+    retainedUntil: atMs != null ? new Date(atMs + retentionMs).toISOString() : null,
+  }
+}
