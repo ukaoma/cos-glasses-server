@@ -1,3 +1,11 @@
+## [6.71.12] - 2026-10-12
+
+- Add capability-gated Fact check, while keeping the existing durable Ask transport.
+- Fuzzy local evidence matching, connected passage priority, tools-off claim/citation review and concise answers.
+- Read official retirement-rule sources without exporting personal plan details; readable web pages take precedence over PDF discovery hits.
+- One shared 30-second durable Ask budget; honest failed status on timeout. Stable ASR unchanged; experimental transcription and cue flags remain disabled.
+- Candidate pending field acceptance; no production promotion implied.
+
 ## [6.71.11] - 2026-10-12 - Saved-meeting follow-ups and local phone memory search
 
 - Reviewed Ask follow-ups retain the canonical meeting, original capture, question, answer and bounded source excerpts. Saves enter Work Review; accepting a task remains explicit. Retries never reopen resolved items.

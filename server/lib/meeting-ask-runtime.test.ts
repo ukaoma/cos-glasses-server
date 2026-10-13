@@ -8,7 +8,7 @@ import { exportMeetingAsk } from '../routes/meeting-ask.js';
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'We will review Friday.' }] };
 function fixture(overrides: Record<string, unknown> = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'ask-test-')), store = new MeetingAskStore(dir), release = vi.fn(), run = vi.fn(async (_model: unknown, _prompt: string) => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Review Friday [T1]' }], searchQuery: null }), model: 'claude-haiku-5-5' }));
-    const runtime = new MeetingAskRuntime({ finalized:()=>({sources:[],notices:[]}), domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
+    const runtime = new MeetingAskRuntime({ reviewAnswers:false, finalized:()=>({sources:[],notices:[]}), domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), ...overrides });
     return { runtime, store, run, release, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) { for (let i = 0; i < 100; i++) {
@@ -461,3 +461,9 @@ describe('follow-up grounding through durable request history', () => {
         } finally { f.cleanup(); }
     });
 });
+
+describe('durable Ask deadline',()=>{it('persists failed deadline status and releases the provider lease after abort',async()=>{
+ vi.useFakeTimers();const f=fixture({reviewAnswers:true,run:(_m:any,_p:any,_s:any,signal:AbortSignal)=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}))});try{
+  await f.runtime.submit(base);await vi.advanceTimersByTimeAsync(30001);const e=f.runtime.get(base.requestId);expect(e.status).toBe('failed');expect(e.error).toBe('answer_deadline_exceeded');expect(f.release).toHaveBeenCalledTimes(1)
+ }finally{vi.useRealTimers();await f.runtime.shutdown();f.cleanup()}
+})})

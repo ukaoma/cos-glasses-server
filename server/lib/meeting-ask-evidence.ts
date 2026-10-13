@@ -3,10 +3,23 @@ import type { AskInput, AskTurn } from './live-cos-ask.js'
 const STOP = new Set('what are the is a an this that it we our you your so far about tell me give summarize highlights highliights'.split(' '))
 const FINANCE = /\b(?:money|financ\w*|cash|balances?|assets?|net worth|invest\w*|tax\w*|crypto|mortgage|budget|cost\w*)\b/i
 const FINANCE_WORDS = /\b(?:cash|balance|assets?|net worth|roth|ira|tax\w*|withdraw\w*|contribut\w*|mortgage|owe|owed|paid off|bitcoin|crypto|gains?|bill|expense|saved|grocer\w*|conver\w*|allocat\w*)\b/gi
+/** Matching aliases only. Canonical evidence and quotes always retain original ASR. */
+export function matchingText(text: string): string {
+  return text.toLowerCase().replace(/401\s*\(?k\)?/g, '401k').replace(/4013403b|4013b|four\s+(?:or\s+)?3b|four\s+oh\s+three\s+b|403\s*\(?b\)?/g, '403b')
+}
+const RULE_QUESTION = /(?:401k|403b|retirement).{0,160}\b(?:leave|leaving|keep|allowed|rule|true|claim)|\b(?:leave|leaving|keep|allowed|rule|true|claim).{0,160}(?:401k|403b|retirement)/i
+function similar(a: string, b: string): boolean {
+  if(a.length<5||b.length<5||Math.abs(a.length-b.length)>3)return false
+  const grams=(s:string)=>new Set(Array.from({length:s.length-2},(_,i)=>s.slice(i,i+3)))
+  const x=grams(a),y=grams(b);let same=0;for(const g of x)if(y.has(g))same++
+  return 2*same/(x.size+y.size)>=.7
+}
 export function evidenceRelevance(question: string, text: string): number {
-  const words = [...new Set(question.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [])].filter(w => !STOP.has(w))
-  const lexical = words.reduce((n, w) => n + (text.toLowerCase().includes(w) ? 2 : 0), 0)
-  return lexical + (FINANCE.test(question) ? Math.min(6, (text.match(FINANCE_WORDS) ?? []).length) + (/\$\s*\d|\b\d+(?:,\d{3})*(?:\s*(?:k|grand|million|thousand))\b/i.test(text) ? 2 : 0) : 0)
+  const q=matchingText(question),hay=matchingText(text),tokens: string[]=hay.match(/[a-z0-9]{3,}/g)??[]
+  const words = [...new Set(q.match(/[a-z0-9]{3,}/g) ?? [])].filter(w => !STOP.has(w))
+  const lexical = words.reduce((n, w) => n + (tokens.includes(w) ? 2 : tokens.some(t=>similar(w,t)) ? .7 : 0), 0)
+  const ruleAnchor=RULE_QUESTION.test(q)&&/401k|403b|retirement/.test(hay)?8:0
+  return lexical + ruleAnchor + (!RULE_QUESTION.test(q) && FINANCE.test(question) ? Math.min(6, (text.match(FINANCE_WORDS) ?? []).length) + (/\$\s*\d|\b\d+(?:,\d{3})*(?:\s*(?:k|grand|million|thousand))\b/i.test(text) ? 2 : 0) : 0)
 }
 
 /** Select complete, overlapping neighborhoods instead of isolated six-second fragments.
@@ -49,7 +62,7 @@ export function connectedEvidence(input: AskInput, budget: number, priorityIds: 
   priorityIds.forEach(id => add(rows.findIndex(t => t.id === id), Math.floor(budget / 5)))
   // Financial summaries must retain the setup of conditional proceeds and the
   // separate actual-balance discussion, even after a long earlier answer.
-  if (input.action === 'ask' && FINANCE.test(input.question)) {
+  if (input.action === 'ask' && FINANCE.test(input.question) && !RULE_QUESTION.test(matchingText(input.question))) {
     for (const pattern of [/\b(?:if|let.s say)\b.{0,100}\b(?:bitcoin|price|sell|cash)\b/i, /\b(?:owe|owed|mortgage|cash balance)\b/i]) {
       const candidates = rows.map((_, i) => i).filter(i => pattern.test(rows[i].text))
       candidates.sort((a, b) => scores[b] - scores[a] || a - b)
@@ -57,6 +70,10 @@ export function connectedEvidence(input: AskInput, budget: number, priorityIds: 
     }
   }
   if (input.action !== 'ask') { add(0); add(rows.length - 1) }
+  // Specific questions spend their first budget on strongest connected matches,
+  // before broad temporal coverage. Otherwise an old generic 'plan' passage can
+  // fill a small budget before the retirement-plan passage near the end.
+  if(input.action==='ask')rows.map((_,i)=>i).sort((a,b)=>scores[b]-scores[a]||rows[b].elapsedMs-rows[a].elapsedMs).filter(i=>scores[i]>0).forEach(i=>add(i,Math.floor(budget*.7)))
   // Topic coverage across the whole recording before filling with additional matches.
   const bins = 10
   for (let bin = 0; bin < bins; bin++) {

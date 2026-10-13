@@ -24,7 +24,8 @@ describe('bounded public meeting search', () => {
     it('enforces single WebSearch before tool execution and rejects every other tool', () => { const d = mkdtempSync(join(tmpdir(), 'web-hook-test-')); try {
         const p = join(d, 'hook.cjs');
         writeFileSync(p, WEB_HOOK_SOURCE);
-        const run = (tool_name: string) => { const r = spawnSync(process.execPath, [p], { input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name }), encoding: 'utf8' }); expect(r.status).toBe(0); return JSON.parse(r.stdout).hookSpecificOutput.permissionDecision; };
+        writeFileSync(join(d, "query.txt"), "public test");
+        const run = (tool_name: string) => { const r = spawnSync(process.execPath, [p], { input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name, tool_input:{query:'public test'} }), encoding: 'utf8' }); expect(r.status).toBe(0); return JSON.parse(r.stdout).hookSpecificOutput.permissionDecision; };
         expect(run('Bash')).toBe('deny');
         expect(run('WebSearch')).toBe('allow');
         expect(run('WebSearch')).toBe('deny');

@@ -10,7 +10,7 @@ export function answerConfidence(raw: unknown, sections: readonly MeetingAskSect
   const uncertain = /\b(?:uncertain|uncertainty|unverified|unclear|ambiguous|misheard|missing|incomplete)\b|not (?:confirmed|established)/i.test(reason)
   const level = !cited ? 'low' : !valid || partial || uncertain ? (v?.level === 'low' ? 'low' : 'limited') : v!.level as string
   const explanation = !cited ? 'No cited evidence supports this answer; treat it as a suggestion.'
-    : valid ? reason + (partial && !/incomplete|coverage/i.test(reason) ? ' Context coverage is incomplete.' : '')
-    : 'Based on the supplied transcript and sources. G2 audio can mishear names and numbers; unclear details need confirmation.'
+    : valid ? reason.split(/\s+/).slice(0,16).join(' ')
+    : 'Based on supplied evidence; unclear details need confirmation.'
   return { label: 'Confidence', text: `${level[0].toUpperCase() + level.slice(1)} — ${explanation}`, sources: [] }
 }

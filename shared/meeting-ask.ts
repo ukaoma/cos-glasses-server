@@ -1,3 +1,4 @@
+export const MEETING_FACT_CHECK_QUESTION = 'Fact check the latest public factual claim in this meeting. Find a readable source and say whether it supports the claim.';
 /** Meeting assistance v2. Additive to the legacy /api/meetings/live-ask contract. */
 export type MeetingAskAction = 'catch_up' | 'summary' | 'questions' | 'actions' | 'ask';
 export type MeetingAskEngine = 'claude' | 'codex' | 'cursor' | 'ollama';
@@ -176,6 +177,8 @@ export interface MeetingAskCapabilities {
     attachmentContext: true;
     webRetrieval: boolean;
     publicTopics?: true;
+    /** Explicit recent-claim Fact check CTA; transport remains action=ask. */
+    factCheck?: true;
     /** 6.71.1: POST /api/meeting-ask/files/media turns uploaded media into meeting files. */
     phoneFiles?: true;
     /** 6.71.1: config carries cosSearch and PUT config {cosSearch} changes it. */

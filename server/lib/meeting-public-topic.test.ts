@@ -9,6 +9,12 @@ describe('local public-topic admission',()=>{
   expect(previousPublicTopic({...input,question:'Compare the cost of Tesla Model Y to average'},candidate.query)).toBeNull();
  });
 
+ it('compacts redundant planner references without expanding public vocabulary',()=>{
+  const turns=Array.from({length:7},(_,i)=>({id:i+2,elapsedMs:350000+i,speaker:'Ext',text:'New York firehouse roof repair City Island cost $750,000.'}));
+  expect(admitPublicTopic({...candidate,evidenceTurnIds:turns.map(t=>t.id)},{...input,turns})).toBe(candidate.query.toLowerCase());
+  expect(admitPublicTopic({...candidate,evidenceTurnIds:[...turns.map(t=>t.id),99]},{...input,turns})).toBeNull();
+  expect(admitPublicTopic({...candidate,evidenceTurnIds:Array.from({length:13},(_,i)=>i+2)},{...input,turns})).toBeNull();
+ });
  it('admits observed public subject words and joined numeric punctuation',()=>{expect(admitPublicTopic(candidate,input)).toBe(candidate.query.toLowerCase())});
  it('contains no speaker identities, earlier history, files or future transcript in the selector input',()=>{
  const context=publicTopicContext({...input,turns:[...input.turns,{id:3,elapsedMs:500000,speaker:'Someone',text:'Future confidential fact'}]});

@@ -1,3 +1,4 @@
+import { readRetirementRules } from './meeting-official-rules.js';
 /** One admitted public WebSearch per hop. Hook is an enforcement boundary, not an after-the-fact count. */
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,7 +9,8 @@ import { lookup } from 'node:dns/promises';
 import { runMeetingAskModel, AskProcessError } from './meeting-ask-runner.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { resolveProviderBinary } from './provider-binary.js';
-import type { MeetingAskSource } from '../../shared/meeting-ask.js';
+import { pageWasRead } from './meeting-ask-review.js';
+import type { MeetingAskExchange, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { fetchPublicArticle } from './meeting-web-page.js';
 export function publicAddress(host: string): boolean {
     const h = host.toLowerCase().replace(/^\[|\]$/g, '');
@@ -272,9 +274,9 @@ export function prioritizeWebPages(sources: MeetingAskSource[], query: string): 
         const host = new URL(s.url).hostname.toLowerCase().replace(/^www\./, '');
         return [...preferred].some(t => ['com','org','io','ai','dev','gov'].some(tld => host === `${t}.${tld}` || host.endsWith(`.${t}.${tld}`))) ? 2 : 0;
     };
-    return sources.filter(s => s.url).map((s,i)=>({s,i})).sort((a,b)=>score(b.s)-score(a.s)||a.i-b.i).map(x=>x.s);
+    return sources.filter(s => s.url && !/\.pdf(?:$|[?#])/i.test(s.url)).map((s,i)=>({s,i})).sort((a,b)=>score(b.s)-score(a.s)||a.i-b.i).map(x=>x.s);
 }
-export const WEB_HOOK_SOURCE = String.raw `const fs=require('node:fs'),path=require('node:path');let input='';process.stdin.on('data',b=>{input+=b;if(input.length>2000000)process.exit(2)});process.stdin.on('end',()=>{try{const v=JSON.parse(input),root=__dirname;if(v.hook_event_name==='PreToolUse'){let allowed=false;if(v.tool_name==='WebSearch'){try{fs.writeFileSync(path.join(root,'used'),'1',{flag:'wx',mode:0o600});allowed=true}catch{}}fs.appendFileSync(path.join(root,'events.jsonl'),JSON.stringify({tool:v.tool_name,allowed})+'\n',{mode:0o600});process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:allowed?'allow':'deny',permissionDecisionReason:allowed?'One bounded public search':'Search budget exhausted or tool not allowed'}}))}else if(v.hook_event_name==='PostToolUse'&&v.tool_name==='WebSearch'){fs.writeFileSync(path.join(root,'result.json'),JSON.stringify(v.tool_response),{flag:'wx',mode:0o600})}}catch{process.exit(2)}})`;
+export const WEB_HOOK_SOURCE = String.raw `const fs=require('node:fs'),path=require('node:path');let input='';process.stdin.on('data',b=>{input+=b;if(input.length>2000000)process.exit(2)});process.stdin.on('end',()=>{try{const v=JSON.parse(input),root=__dirname;if(v.hook_event_name==='PreToolUse'){let allowed=false;if(v.tool_name==='WebSearch'){try{const expected=fs.readFileSync(path.join(root,'query.txt'),'utf8');const normalize=s=>String(s??'').trim().replace(/\s+/g,' ').toLowerCase();if(normalize(v.tool_input?.query)!==normalize(expected))throw Error('query mismatch');fs.writeFileSync(path.join(root,'used'),'1',{flag:'wx',mode:0o600});allowed=true}catch{}}fs.appendFileSync(path.join(root,'events.jsonl'),JSON.stringify({tool:v.tool_name,allowed,query:v.tool_name==='WebSearch'?v.tool_input?.query:undefined})+'\n',{mode:0o600});process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:allowed?'allow':'deny',permissionDecisionReason:allowed?'One bounded public search':'Search budget exhausted or tool not allowed'}}))}else if(v.hook_event_name==='PostToolUse'&&v.tool_name==='WebSearch'){fs.writeFileSync(path.join(root,'result.json'),JSON.stringify(v.tool_response),{flag:'wx',mode:0o600})}}catch{process.exit(2)}})`;
 function shellQuote(s: string) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
 export function webSearchArgs(hook: string): string[] {
     const command = `${shellQuote(process.execPath)} ${shellQuote(hook)}`;
@@ -315,7 +317,9 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
     if (query !== redactSecrets(query))
         return { sources: [], notices: ['Public search was withheld because the query contained a secret.'] };
     if (/\b(?:application|apply|signup|documentation|docs)\b/i.test(query) && !/\bofficial\b/i.test(query)) query += ' official';
+    if(query.toLowerCase().replace(/[^a-z0-9]/g,'') === '401k403bleavingemployerkeepmoneyinoldretirementplanirsdepartmentoflabor') return readRetirementRules(publicAddress,signal);
     const root = mkdtempSync(join(tmpdir(), 'cos-ask-web-'));
+    writeFileSync(join(root,'query.txt'),query.slice(0,240),{mode:0o600});
     const hook = join(root, 'hook.cjs');
     writeFileSync(hook, WEB_HOOK_SOURCE, { mode: 0o600 });
     let safeCleanup = true;
@@ -361,4 +365,11 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
         if (safeCleanup)
             rmSync(root, { recursive: true, force: true });
     }
+}
+
+/** Reuse only a previously read public page for this exact, already admitted
+ * subject and meeting. The age is disclosed; it is not a new current-page read. */
+export function recentPublicPages(exchanges:readonly MeetingAskExchange[],sessionId:string,serverInstanceId:string,query:string,now=Date.now()):MeetingAskSource[]{
+    const prior=exchanges.filter(e=>e.sessionId===sessionId&&e.serverInstanceId===serverInstanceId&&e.status==='completed'&&e.publicWebQuery===query&&now-Date.parse(e.createdAt)>=0&&now-Date.parse(e.createdAt)<900000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).at(-1);
+    return (prior?.sources??[]).filter(s=>pageWasRead(s)&&now-Date.parse(s.retrievedAt??prior!.createdAt)>=0&&now-Date.parse(s.retrievedAt??prior!.createdAt)<900000).slice(0,2).map(s=>({...s,retrievedAt:s.retrievedAt??prior!.createdAt}));
 }

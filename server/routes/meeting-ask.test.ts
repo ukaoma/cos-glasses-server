@@ -15,8 +15,8 @@ import { requireApiToken } from '../lib/api-auth.js';
 import type { AskTranscriptSources } from '../lib/meeting-ask-transcript.js';
 import { MediaStoreError } from '../lib/media-store.js';
 const input = { requestId: 'request_abcdefgh', sessionId: 'meeting_test', serverInstanceId: 'test-server', action: 'ask', question: 'Who reviews?', elapsedMs: 1000, turns: [{ id: 2, elapsedMs: 100, text: 'Review on Friday', speaker: 'Nina' }] };
-async function fixture(transcripts?: AskTranscriptSources, media?: () => any) {
-    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
+async function fixture(transcripts?: AskTranscriptSources, media?: () => any, reviewAnswers = false) {
+    const dir = mkdtempSync(join(tmpdir(), 'ask-http-')), run = vi.fn(async () => ({ text: '{"sections":[{"label":"So what","text":"Nina [T1]"}]}', model: 'haiku' })), runtime = new MeetingAskRuntime({ reviewAnswers, domains:()=>[{id:'quilt',label:'Quilt'},{id:'personal',label:'Personal'}], store: new MeetingAskStore(dir), identity: () => 'test-server', catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku'] }], run, search: async () => ({ sources: [], notices: [] }), admissions: () => true, lease: () => ({ id: 'x', kind: 'meeting_ask', setPhase() { }, release() { } }), ...(media ? { media } : {}) });
     const app = express();
     app.use('/api', requireApiToken('test-token'));
     app.use(express.json({ limit: '1mb' }));
@@ -66,7 +66,7 @@ describe('Meeting Ask v2 HTTP contract', () => {
         expect(one.answer).toMatch(/^\*\*So what:\*\* Nina reviews \[T1\].\n\n\*\*Decided:\*\* Friday review \[T1\].\n\n\*\*Confidence:\*\*/);
         const h = await (await f.request('/history?sessionId=meeting_test&serverInstanceId=test-server')).json();
         expect(h.exchanges[0].sections).toEqual(expected);
-        const reload = new MeetingAskRuntime({ store: (f.runtime as any).deps.store, identity: () => 'test-server' });
+        const reload = new MeetingAskRuntime({ reviewAnswers:false, store: (f.runtime as any).deps.store, identity: () => 'test-server' });
         expect(reload.get(input.requestId).sections).toEqual(expected);
     }
     finally {
@@ -216,3 +216,16 @@ describe('Meeting Ask v2 HTTP contract', () => {
         } finally { await f.close(); }
     });
 });
+
+describe('reviewed HTTP history',()=>{
+ it('persists reviewed source targets and reopens without another inference',async()=>{
+  const f=await fixture(undefined,undefined,true);try{
+   f.run.mockImplementation(async (...args:any[])=>{const system=String(args[2]??'');return {text:JSON.stringify({sections:[{label:'So what',text:'Nina reviews Friday [T1].'}],confidence:{level:'supported',reason:'The review is stated.'},...(system.startsWith('Review a short')?{support:[{id:'T1',quote:'Review on Friday'}]}:{})}),model:'haiku'}})
+   await f.request('/requests',input)
+   let e:any;for(let i=0;i<100;i++){e=(await (await f.request('/requests/'+input.requestId)).json() as any).exchange;if(e.status==='completed')break;await new Promise(r=>setTimeout(r,5))}
+   expect(e.status).toBe('completed');expect(e.sources[0].turnId).toBe(2);expect(e.answer).toContain('Nina reviews Friday');expect(f.run).toHaveBeenCalledTimes(2)
+   const history=await (await f.request('/history?sessionId=meeting_test&serverInstanceId=test-server')).json() as any
+   expect(history.exchanges[0].sources[0].turnId).toBe(2);expect(f.run).toHaveBeenCalledTimes(2)
+  }finally{await f.close()}
+ })
+})
