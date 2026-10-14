@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { readWorkJournal, projectWorkActivity, projectOpenWork, savedDestinationFor, controlSnapshotRevision,
   type WorkActivityCapabilities, type WorkActivityResult } from '../lib/work-activity.js'
 import { listBoard, listBoardWithDates, workBoardCapabilities, setTaskWorkStage, linkTaskMeeting, editWorkTask, TaskRunError, TaskBridgeError,
-  WORK_STAGES, type WorkStage, type WorkMeetingRef, type TaskBoardRow } from '../lib/task-store.js'
+  captureWorkItem, workIntakeCapabilities, type WorkStage, WORK_STAGES, type WorkMeetingRef, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader, WORK_BOARD_READ_LIMITS, WorkBoardTimeoutError, type WorkBoardReader } from '../lib/work-board-reader.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
 import { isSafeDomainName } from '../lib/domains.js'
@@ -21,6 +21,8 @@ export interface WorkBoardDependencies {
   stage: typeof setTaskWorkStage
   link: typeof linkTaskMeeting
   edit: typeof editWorkTask
+  capture: typeof captureWorkItem
+  captureCapabilities: typeof workIntakeCapabilities
   resolveMeeting: (descriptor: MeetingDescriptor) => MeetingDetail | Promise<MeetingDetail>
   /** 6.59.0: the handoff request inbox as the glasses should see it (lib/work-handoff-requests.ts handoffRequestCapabilities). */
   requests: () => Pick<WorkActivityCapabilities, 'requests' | 'requestsInbox' | 'requestsConsumerSeenAt'>
@@ -29,7 +31,7 @@ export interface WorkBoardDependencies {
   now: () => number
 }
 const defaults: WorkBoardDependencies = { journal: () => readWorkJournal(), list: listBoard, capabilities: workBoardCapabilities,
-  stage: setTaskWorkStage, link: linkTaskMeeting, edit: editWorkTask, resolveMeeting: resolveSavedMeetingDetail,
+  stage: setTaskWorkStage, link: linkTaskMeeting, edit: editWorkTask, capture: captureWorkItem, captureCapabilities: workIntakeCapabilities, resolveMeeting: resolveSavedMeetingDetail,
   requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), now: () => Date.now() }
 /** How old a board read the activity and open-work glances accept (the reader shares one read between them). */
 export const WORK_GLANCE_BOARD_AGE_MS = 10_000
@@ -93,6 +95,43 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
     }
     catch (e) { fail(res, e) }
   })
+  // The canonical writer captures the task and its meeting link in one locked write.
+  // Its text+meeting deduplication also makes a retry after a lost response safe.
+  router.post('/work-board/create-from-meeting', async (req, res) => {
+    try {
+      const body = req.body, input = body?.meeting
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).some(k => !['domain', 'text', 'meeting'].includes(k))
+        || Buffer.byteLength(JSON.stringify(body)) > 16_384
+        || typeof body.domain !== 'string' || !isSafeDomainName(body.domain)
+        || typeof body.text !== 'string' || !body.text.trim() || body.text.length > 2000
+        || !input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(k => !['domain','month','filename','recordId','title'].includes(k))
+        || typeof input.domain !== 'string' || !isSafeDomainName(input.domain)
+        || typeof input.month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(input.month)
+        || typeof input.filename !== 'string' || input.filename.length > 255 || !/^[^/\\\x00-\x1f\x7f]+\.md$/.test(input.filename)
+        || typeof input.recordId !== 'string' || !input.recordId || input.recordId.length > 512 || /[\x00-\x1f\x7f]/.test(input.recordId)) {
+        throw new TaskRunError(400, 'invalid_meeting_task', 'Enter a task name, choose a domain and select an exact saved meeting')
+      }
+      const capability = await deps.captureCapabilities()
+      if (capability.bridgeUnavailable) throw new TaskRunError(503, 'task_bridge_unavailable', 'The task bridge is unavailable. Your draft is still here; try again shortly')
+      if (!capability.cardCreation) throw new TaskRunError(409, 'card_creation_unavailable', 'Update the server and canonical task bridge before creating tasks from meetings')
+      const descriptor: MeetingDescriptor = { domain: input.domain, month: input.month, filename: input.filename, recordId: input.recordId }
+      const resolved = await deps.resolveMeeting(descriptor)
+      if (resolved.recordId !== input.recordId) throw new TaskRunError(409, 'meeting_identity_changed', 'The selected meeting changed; refresh before creating the task')
+      const meeting: WorkMeetingRef = { ...descriptor, recordId: input.recordId, title: resolved.title.replace(/\s+/g, ' ').trim().slice(0, 300) }
+      try {
+        const saved = await deps.capture(body.domain, body.text.trim(), meeting)
+        // Never silently attach unrelated, closed, archived or delegated work on a title collision.
+        if (!saved.linked || saved.checked || saved.archived || saved.delegated) {
+          return res.status(409).json({ error: { code: 'meeting_task_collision', message: 'A task with this name already exists. Use Link to existing task, or choose a different name.' }, existingWorkID: `task:${body.domain}:${saved.id}` })
+        }
+        // A renamed task keeps its stable Work identity, even when its text-derived ID changed.
+        let identity = saved.created ? saved.id : (await deps.list()).find(row => row.domain === body.domain && row.id === saved.id)?.workIdentity || saved.id
+        return res.json({ ok: true, ...saved, workIdentity: identity, workID: `task:${body.domain}:${identity}` })
+      } finally { board.invalidate() }
+    } catch (e) { fail(res, e) }
+  })
   for (const action of ['stage', 'meeting', 'edit'] as const) router.post('/work-board/' + action, async (req, res) => {
     try {
       const body = req.body
@@ -127,7 +166,7 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
         if (!descriptor.recordId) throw new TaskRunError(400, 'meeting_identity_required', 'Refresh and select the exact saved meeting')
         const resolved = await deps.resolveMeeting(descriptor)
         if (resolved.recordId !== descriptor.recordId) throw new TaskRunError(409, 'meeting_identity_changed', 'The selected meeting changed; refresh before linking')
-        const meeting: WorkMeetingRef = { ...descriptor, recordId: resolved.recordId, title: resolved.title.replace(/\s+/g, ' ').trim().slice(0, 300) }
+        const meeting: WorkMeetingRef = { ...descriptor, recordId: input.recordId, title: resolved.title.replace(/\s+/g, ' ').trim().slice(0, 300) }
         try { await deps.link(body.domain, body.id, body.expectedText, body.expectedRevision, meeting) } finally { board.invalidate() }
       }
       res.json({ ok: true })

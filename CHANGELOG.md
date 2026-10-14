@@ -1,4 +1,11 @@
-# 6.73.4 (local candidate)
+## 6.73.5 — Tasks from saved meetings (local candidate)
+
+- Add authenticated, bounded creation of a task and its exact source meeting in one canonical locked write.
+- Preserve source files through the existing meeting context store, reuse matching linked tasks on retry, and explicitly report collisions with unrelated or closed work.
+- Return a renamed task's stable Work identity so matched Control 0.5.295/build 348 opens the saved card.
+- Keep existing transcription choices and experimental cue/transcription flags unchanged.
+
+## 6.73.4 (local candidate)
 
 - Add tools-off Sonnet planning and result synthesis for task-level Work chat. Actual delivery uses existing native-session continuation.
 - Preserve independent session status and user ownership of shared task completion.

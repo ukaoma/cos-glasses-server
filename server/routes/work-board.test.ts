@@ -306,3 +306,51 @@ it('task edit requires advertised capability, accepts one exact guarded payload,
   }
   expect(edit).toHaveBeenCalledTimes(1)
 })
+
+
+it('creates a meeting-linked task with one canonical write and no separate link or stage operation', async () => {
+  const capture = vi.fn(async () => ({created:true,id:target.id,linked:true,checked:false,archived:false,delegated:false}))
+  const s = await setup(true, {capture, captureCapabilities:async () => ({linkWrites:true,cardCreation:true})})
+  const response = await s.post('/create-from-meeting', {domain:'quilt',text:'  Prepare bookings data  ',meeting})
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ok:true,linked:true,created:true,workID:`task:quilt:${target.id}`})
+  expect(capture).toHaveBeenCalledExactlyOnceWith('quilt','Prepare bookings data',{...meeting,title:'Canonical title'})
+  expect(s.deps.link).not.toHaveBeenCalled(); expect(s.deps.stage).not.toHaveBeenCalled()
+})
+it('requires authenticated exact meeting identity and a capable bridge before capture', async () => {
+  const capture = vi.fn()
+  const s = await setup(true, {capture,captureCapabilities:async () => ({linkWrites:true,cardCreation:true})})
+  const body = {domain:'quilt',text:'Prepare bookings data',meeting}
+  expect((await fetch(s.base+'/create-from-meeting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).status).toBe(401)
+  for (const bad of [{...body,text:''},{...body,text:'x'.repeat(2001)},{...body,domain:'../quilt'},{...body,run:true},
+    {...body,meeting:{...meeting,filename:'../meeting.md'}},{...body,meeting:{...meeting,month:'2026-13'}}]) {
+    expect((await s.post('/create-from-meeting',bad)).status).toBe(400)
+  }
+  s.deps.resolveMeeting.mockResolvedValue({recordId:'different',title:'Renamed'} as any)
+  expect((await s.post('/create-from-meeting',body)).status).toBe(409)
+  expect(capture).not.toHaveBeenCalled()
+  const old = await setup(true,{capture,captureCapabilities:async () => ({linkWrites:true,cardCreation:false})})
+  expect((await old.post('/create-from-meeting',body)).status).toBe(409)
+  expect(old.deps.resolveMeeting).not.toHaveBeenCalled(); expect(capture).not.toHaveBeenCalled()
+})
+it('a retry reuses a linked task; collisions are explicit and never silently relink existing work', async () => {
+  const capture = vi.fn(async () => ({created:false,id:target.id,linked:true,checked:false,archived:false,delegated:false}))
+  const s = await setup(true,{capture,captureCapabilities:async () => ({linkWrites:true,cardCreation:true})})
+  const body = {domain:'quilt',text:'Prepare bookings data',meeting}
+  expect((await s.post('/create-from-meeting',body)).status).toBe(200)
+  for (const patch of [{linked:false},{checked:true},{archived:true},{delegated:true}]) {
+    capture.mockResolvedValueOnce({created:false,id:target.id,linked:true,checked:false,archived:false,delegated:false,...patch})
+    const response = await s.post('/create-from-meeting',body)
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({error:{code:'meeting_task_collision'},existingWorkID:`task:quilt:${target.id}`})
+  }
+  expect(s.deps.link).not.toHaveBeenCalled()
+})
+
+it('reuses the stable identity of a task renamed after its first meeting capture', async () => {
+  const capture = vi.fn(async () => ({created:false,id:target.id,linked:true,checked:false,archived:false,delegated:false}))
+  const s = await setup(true,{capture,captureCapabilities:async () => ({linkWrites:true,cardCreation:true})})
+  s.deps.list.mockResolvedValue([{id:target.id,domain:'quilt',workIdentity:'c'.repeat(12)}] as any)
+  const response = await s.post('/create-from-meeting',{domain:'quilt',text:'Renamed follow up',meeting})
+  expect(await response.json()).toMatchObject({workIdentity:'c'.repeat(12),workID:'task:quilt:'+ 'c'.repeat(12)})
+})
