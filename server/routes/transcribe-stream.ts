@@ -2065,8 +2065,7 @@ function ownerLabelOrNull(): string | null {
   try { return getOwnerSpeakerLabel() } catch { return null }
 }
 
-function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
-  const policy = readSpeakerPolicy(sessionId).mode
+function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string, policy: SpeakerMode): { speaker: string; similarity: number } {
   if (policy === 'anonymous') return { speaker: 'Ext', similarity: 0 }
   const expectedSpeakers = undefined
   const audioDurationSec = Math.max(0, (audioBuffer.length - 44)) / 32000
@@ -2214,6 +2213,9 @@ async function processStreamChunk(opts: {
     return emptyChunkResponse(alreadyEmpty, sessionId, chunkIndex)
   }
 
+  // Pin identity policy at acceptance, before persistence, ASR or diarization
+  // yields. A later loosening applies to the next chunk, never this audio.
+  const capturePolicy = readSpeakerPolicy(sessionId).mode
   await persistRawSessionAudioChunk(sessionId, chunkIndex, audioBuffer)
   // Commit the received-index ledger only after the canonical raw WAV is
   // durable. A failure is typed non-2xx and a retry remains safe.
@@ -2243,7 +2245,7 @@ async function processStreamChunk(opts: {
   const whisperContext = recentWhisperContext(sessionId, session)
   console.log(`[perf] whisperContext: ${whisperContext.length}b | session.chunks: ${session.chunks.length}`)
 
-  const speakerPromise = Promise.resolve(identifyChunkSpeaker(audioBuffer, sessionId, chunkIndex, clientSpeaker))
+  const speakerPromise = Promise.resolve(identifyChunkSpeaker(audioBuffer, sessionId, chunkIndex, clientSpeaker, capturePolicy))
 
   let rawText = ''
   let words: WhisperWord[] | undefined
@@ -2318,7 +2320,7 @@ async function processStreamChunk(opts: {
         clientSpeaker,
         owner: ownerLabelOrNull(),
         identify: wav => {
-          const policy = readSpeakerPolicy(sessionId).mode
+          const policy = capturePolicy
           if (policy === 'anonymous') return { speaker: 'Ext', similarity: 0 }
           const named = identifySpeaker(wav, undefined, { event: 'nemotron-track', minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined })
           return named ? policyLabel({ speaker: named.speaker, similarity: named.similarity }, policy) : null
@@ -2326,9 +2328,8 @@ async function processStreamChunk(opts: {
       })
     : { speaker: voiceprint.speaker, similarity: voiceprint.similarity }
   if (labels.record) nemotronLive.record({ sessionId, chunkIndex }, labels.record)
-  const currentPolicy = readSpeakerPolicy(sessionId).mode
-  const { speaker, similarity } = policyLabel(labels, currentPolicy)
-  if (labels.segments) labels.segments = labels.segments.map(segment => policyLabel(segment, currentPolicy))
+  const { speaker, similarity } = policyLabel(labels, capturePolicy)
+  if (labels.segments) labels.segments = labels.segments.map(segment => policyLabel(segment, capturePolicy))
 
   if (!trimmedText) {
     console.log(`[hallucination] Filtered (${sanitized.fallbackReason || fallbackReason || 'empty'}): "${rawText.slice(0, 60)}"`)
@@ -2356,7 +2357,7 @@ async function processStreamChunk(opts: {
 
   const chunk: TranscriptChunk = {
     text: trimmedText,
-    speakerPolicy: currentPolicy,
+    speakerPolicy: capturePolicy,
     speaker,
     elapsed,
     similarity,

@@ -27,23 +27,24 @@ const TEXT = 'Yeah I agree with that. So the bookings month came in light again.
 // MU speaks the first 2.6 s (positive samples), Silas the rest (negative samples).
 const AUDIO = wavOf(6, t => (t < 2.8 ? 400 : -400))
 
-async function mount(outcome: LiveDiarizeOutcome, trackSimilarity = 0.83) {
+async function mount(outcome: LiveDiarizeOutcome, trackSimilarity = 0.83, transcribe = async () => ({ text: TEXT, backend: 'server' })) {
   vi.resetModules()
   const root = mkdtempSync(join(tmpdir(), 'cos-nemotron-route-'))
   roots.push(root)
   process.env.COS_DATA_DIR = root
   vi.doMock('../lib/whisper-local.js', () => ({
-    transcribeLocal: vi.fn().mockResolvedValue({ text: TEXT, backend: 'server' }),
+    transcribeLocal: vi.fn(transcribe),
     applyCorrections: (text: string) => text,
   }))
   vi.doMock('../lib/audio-enhance.js', () => ({ enhanceAudio: async (audio: Buffer) => audio }))
+  const identify = vi.fn((wav: Buffer) => wav.length >= 44 + 5 * 32_000
+    ? { speaker: 'MU', similarity: 0.61 }
+    : wav.readInt16LE(44) >= 0 ? { speaker: 'MU', similarity: trackSimilarity } : { speaker: 'Silas Larson', similarity: 0.77 })
   vi.doMock('../lib/speaker-embeddings.js', () => ({
     AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72,
     AUTO_ENROLL_THRESHOLD: 0.88,
     // The whole (mixed) chunk sounds most like MU; each track's own audio is named by its sign.
-    identifySpeaker: (wav: Buffer) => wav.length >= 44 + 5 * 32_000
-      ? { speaker: 'MU', similarity: 0.61 }
-      : wav.readInt16LE(44) >= 0 ? { speaker: 'MU', similarity: trackSimilarity } : { speaker: 'Silas Larson', similarity: 0.77 },
+    identifySpeaker: identify,
     isEmbeddingAvailable: () => true,
     autoEnroll: vi.fn().mockReturnValue({ enrolled: false, reason: 'test' }),
     getEmbeddingCount: () => 3,
@@ -72,7 +73,7 @@ async function mount(outcome: LiveDiarizeOutcome, trackSimilarity = 0.83) {
   server = await new Promise<Server>(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
   const address = server.address()
   const base = typeof address === 'object' && address ? `http://127.0.0.1:${address.port}` : ''
-  return { base, stream, record, diarize, displayed }
+  return { base, stream, record, diarize, displayed, identify }
 }
 
 function post(base: string, sessionId: string, chunkIndex: number): Promise<Record<string, any>> {
@@ -151,5 +152,40 @@ describe('the live chunk response with Nemotron', () => {
     expect(stored.diarizer).toBeUndefined()
     expect(stored.segments).toBeUndefined()
     expect(record).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('accepted audio keeps its identity policy during asynchronous work', () => {
+  it.each(['anonymous', 'high-confidence'] as const)('does not loosen %s audio when policy changes during ASR', async mode => {
+    let started!: () => void
+    let complete!: (value: { text: string; backend: string }) => void
+    const waiting = new Promise<void>(resolve => { started = resolve })
+    const transcription = new Promise<{ text: string; backend: string }>(resolve => { complete = resolve })
+    const transcribe = async () => { started(); return transcription }
+    const { base, stream, identify } = await mount({ ok: true, run: run() }, 0.83, transcribe)
+    const { readSpeakerPolicy, writeSpeakerPolicy } = await import('../lib/meeting-speaker-policy.js')
+    const id = `pending_policy_${mode}`
+    writeSpeakerPolicy(id, mode, 'unset')
+    const upload = post(base, id, 0)
+    await waiting
+    writeSpeakerPolicy(id, 'standard', readSpeakerPolicy(id).revision)
+    complete({ text: TEXT, backend: 'server' })
+    const body = await upload
+    expect(body).toMatchObject({ text: TEXT, speaker: 'Ext' })
+    const chunk = stream.getSessionChunks(id)![0]
+    expect(chunk).toMatchObject({ speakerPolicy: mode, speaker: 'Ext', similarity: 0 })
+    expect(chunk.segments!.length).toBeGreaterThan(0)
+    expect(chunk.segments!.every(segment => segment.speaker === 'Ext' && segment.similarity === 0)).toBe(true)
+    if (mode === 'anonymous') expect(identify).not.toHaveBeenCalled()
+    else {
+      expect(identify.mock.calls.length).toBeGreaterThan(1)
+      for (const call of identify.mock.calls as unknown[][]) expect(call[2]).toMatchObject({ minSimilarity: 0.88 })
+    }
+    // The next accepted chunk may use the user's newly selected Standard mode.
+    const next = await post(base, id, 1)
+    expect(next.speaker).toBe('Silas Larson')
+    expect(stream.getSessionChunks(id)![1].speakerPolicy).toBe('standard')
+    stream.deleteSession(id)
   })
 })
