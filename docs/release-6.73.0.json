@@ -1,0 +1,34 @@
+{
+  "version": "6.73.0",
+  "package": "@gotcos/glasses-server",
+  "channel": "latest",
+  "verifiedAt": "2026-10-14T00:29:12.712125+00:00",
+  "sourceCommit": "abc190564ab43738241744a422c1abbb1dd5f9da",
+  "integrity": "sha512-rsTUV5R5UeStH8ai1niW+nX8qvMmtfcwEP8DYt3ip/gbLDpIKncsyS3YAoh0DOPKvgiOv4pZLb2nLW4+r9gVjA==",
+  "tarballBytes": 4120272,
+  "tarballFiles": 448,
+  "gates": {
+    "testFilesPassed": 447,
+    "testsPassed": 6879,
+    "testsSkipped": 2,
+    "typecheck": "passed",
+    "productionAuditVulnerabilities": 0,
+    "registryIntegrity": "matches frozen artifact",
+    "cleanCacheCliInstall": "passed"
+  },
+  "behavior": "Prompt preview/Fast mode follows meeting Preview; final prompts with Fast mode off follow meeting HQ. Whisper fallback preserves the audio when Parakeet is unavailable.",
+  "companion": "6.10.640; legacy request fields preserved",
+  "control": "0.5.289 build342; existing Update Server resolves npm latest; no new Control binary needed",
+  "runtimeInstall": "Not performed by this publication",
+  "experimentalFlags": "No flag or user transcription setting changed by publication",
+  "rollback": {
+    "server": "6.72.0",
+    "dictationFollowsStt": "COS_DICTATION_FOLLOWS_STT=0"
+  },
+  "outstanding": [
+    "Companion 640 phone/G2/Android acceptance",
+    "Even Hub marketplace upload/public status",
+    "Public website/appcast copy remains on the prior matched release"
+  ],
+  "docs": "README is included in the npm artifact; dictation-stt-contract.md is in the source repository, not the npm inventory."
+}
