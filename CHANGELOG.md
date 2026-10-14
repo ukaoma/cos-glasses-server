@@ -1,3 +1,9 @@
+## 6.73.1 — GPT tier selection correction
+
+- Resolve GPT Max/Frontier to the newest provider-described frontier model and GPT Balanced to the newest workhorse/balanced model. A newer workhorse version no longer displaces a frontier model: GPT-6-Astra serves Max, GPT-6.1-Sol serves Balanced in the current catalog.
+- Keep version-based selection when the provider does not describe both tiers; preserve saved tier preferences, explicit model overrides, discovery refresh, and last-known-good fallback.
+- Server catalog and execution share the corrected selection. Existing companion builds can receive the correction without an EHPK update. No transcription settings or experimental flags change.
+
 ## [6.73.0] - 2026-10-13 - Prompts and dictation follow the speech-to-text settings
 
 Paired clients: none required. Every phone, including the public 618, already accepts the new dictation text (it never checks a model on dictation). COS Control and the phone can read the new `dictation` block in `GET /api/stt-settings` to replace "Dictation is unchanged" in their copy.
