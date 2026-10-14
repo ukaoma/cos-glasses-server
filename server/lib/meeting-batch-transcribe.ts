@@ -23,6 +23,7 @@ import { currentEffectiveStt } from './stt-runtime.js'
 import { transcribeParakeet, type ParakeetResult, type ParakeetRunOptions } from './parakeet.js'
 import { isDeletionProneEngine, resolveHypotheses, RESOLVER_VERSION, type Hypothesis } from './stt-resolver.js'
 import { getVocabulary } from './profile.js'
+import { captureSpeakerMode, policyLabel } from './meeting-speaker-policy.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { isMetalBatchPreempted } from './whisper-metal-gate.js'
 import {
@@ -116,6 +117,20 @@ export function segmentTranscriptChunks(
       segmentStartPosition = position
       continue
     }
+    // Close before the first chunk captured under a different identity policy.
+    // A named Standard chunk must never lend its name to anonymous audio.
+    if (position > segmentStartPosition && captureSpeakerMode(chunk.speakerPolicy) !== captureSpeakerMode(first.chunk.speakerPolicy)) {
+      const window = entries.slice(segmentStartPosition, position)
+      const last = window.at(-1)!
+      segments.push({
+        startChunkIdx: first.chunkIndex, endChunkIdx: last.chunkIndex,
+        startElapsed: first.chunk.elapsed, endElapsed: last.chunk.elapsed,
+        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakerPolicy: captureSpeakerMode(first.chunk.speakerPolicy),
+      })
+      segmentStartPosition = position
+      continue
+    }
     if (chunk.elapsed - first.chunk.elapsed >= targetMs && position > segmentStartPosition) {
       const window = entries.slice(segmentStartPosition, position + 1)
       segments.push({
@@ -123,7 +138,8 @@ export function segmentTranscriptChunks(
         endChunkIdx: entry.chunkIndex,
         startElapsed: first.chunk.elapsed,
         endElapsed: chunk.elapsed,
-        speakers: [...new Set(window.map(item => item.chunk.speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakerPolicy: captureSpeakerMode(first.chunk.speakerPolicy),
       })
       segmentStartPosition = position + 1
     }
@@ -139,7 +155,8 @@ export function segmentTranscriptChunks(
         endChunkIdx: last.chunkIndex,
         startElapsed: first.chunk.elapsed,
         endElapsed: last.chunk.elapsed,
-        speakers: [...new Set(window.map(item => item.chunk.speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakerPolicy: captureSpeakerMode(first.chunk.speakerPolicy),
       })
     }
   }
@@ -173,6 +190,12 @@ export function mapWordsToSpeakers(
   segment: BatchSegment,
   entries: IndexedTranscriptChunk[],
 ): Array<{ word: string; start: number; end: number; speaker: string; similarity: number }> {
+  const window = entries.filter(entry => entry.chunkIndex >= segment.startChunkIdx && entry.chunkIndex <= segment.endChunkIdx)
+  const policies = new Set(window.map(entry => captureSpeakerMode(entry.chunk.speakerPolicy)))
+  const strict = captureSpeakerMode(segment.speakerPolicy) !== 'standard' || [...policies].some(mode => mode !== 'standard')
+  // Defensive gate for caller-provided/cached mixed windows, even though the
+  // segmenter now splits them. Without precise spans, retain words anonymously.
+  const mixedStrict = strict && policies.size > 1
   return words.map(word => {
     const absoluteElapsed = segment.startElapsed + word.start * 1000
     let speaker = segment.speakers[0] || 'Unknown'
@@ -184,14 +207,16 @@ export function mapWordsToSpeakers(
       const distance = Math.abs(chunk.elapsed - absoluteElapsed)
       if (distance < bestDistance) {
         bestDistance = distance
-        speaker = chunk.speaker
-        similarity = Number.isFinite(chunk.similarity) ? chunk.similarity : 0
+        const label = policyLabel(chunk, captureSpeakerMode(chunk.speakerPolicy))
+        speaker = label.speaker
+        similarity = Number.isFinite(label.similarity) ? label.similarity : 0
       }
     }
     if (bestDistance > 3_500) {
-      speaker = segment.speakers[0] || 'Unknown'
+      speaker = strict ? 'Ext' : segment.speakers[0] || 'Unknown'
       similarity = 0
     }
+    if (mixedStrict || captureSpeakerMode(segment.speakerPolicy) === 'anonymous') { speaker = 'Ext'; similarity = 0 }
     return { word: word.word, start: word.start, end: word.end, speaker, similarity }
   })
 }
@@ -322,6 +347,7 @@ function readProgressiveCheckpointMetadata(
     || cached.segment.endChunkIdx !== segment.endChunkIdx
     || cached.segment.startElapsed !== segment.startElapsed
     || cached.segment.endElapsed !== segment.endElapsed
+    || captureSpeakerMode(cached.segment.speakerPolicy) !== captureSpeakerMode(segment.speakerPolicy)
     || !Array.isArray(cached.segment.speakers)
     || cached.segment.speakers.some(speaker => typeof speaker !== 'string')
     || typeof cached.text !== 'string'

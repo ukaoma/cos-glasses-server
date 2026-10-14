@@ -25,7 +25,7 @@ it('a recovered chunk whose text loses words keeps turns that join to the text, 
     // Stripping removes "zzqq" and the turns are refitted.
     { i: 0, c: { text: 'alpha bravo zzqq charlie', speaker: 'Silas Larson', elapsed: 6000, similarity: 0.7, segments: turns('alpha bravo zzqq', 'charlie') } },
     // Stripping rewrites a word: the turns cannot be trusted and are dropped.
-    { i: 1, c: { text: 'delta echo foxtrot', speaker: 'MU', elapsed: 12000, similarity: 0.8, segments: turns('delta echo', 'foxtrot') } },
+    { i: 1, c: { speakerPolicy: 'high-confidence', text: 'delta echo foxtrot', speaker: 'MU', elapsed: 12000, similarity: 0.8, segments: turns('delta echo', 'foxtrot') } },
   ]
   writeFileSync(join(root, 'active-sessions', 'recovery_segments_001.json'), JSON.stringify({
     sessionId: 'recovery_segments_001', startTime: Date.now() - 60_000, lastActivityAt: Date.now() - 1_000, title: '',
@@ -50,6 +50,8 @@ it('a recovered chunk whose text loses words keeps turns that join to the text, 
     { speaker: 'MU', text: 'alpha bravo', startSec: 0, endSec: 2, similarity: 0.8 },
     { speaker: 'Silas Larson', text: 'charlie', startSec: 2, endSec: 5, similarity: 0.7 },
   ])
+  expect(second.speakerPolicy).toBe('high-confidence')
+  expect(stream.getSessionChunkEntries('recovery_segments_001')![1].chunk.speakerPolicy).toBe('high-confidence')
   expect(second.text).toBe('delta eko foxtrot')
   expect(second.segments).toBeUndefined()
   stream.deleteSession('recovery_segments_001')

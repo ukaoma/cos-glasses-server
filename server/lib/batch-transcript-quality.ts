@@ -1,3 +1,4 @@
+import type { SpeakerMode } from './meeting-speaker-policy.js'
 import type { WhisperWord } from './whisper-local.js'
 import type { Disagreement } from './stt-resolver.js'
 
@@ -7,6 +8,7 @@ export interface BatchSegment {
   startElapsed: number
   endElapsed: number
   speakers: string[]
+  speakerPolicy?: SpeakerMode
 }
 
 /** One hypothesis as an engine heard it, before any resolution (6.72.0). */

@@ -570,3 +570,28 @@ describe('meeting content over HTTP', () => {
     expect(r.json.clipboardSummary).toContain('## Who spoke')
   })
 })
+
+
+describe('per-capture speaker policy routes', () => {
+  it('reads legacy Standard, requires selected canonical identity, and refuses stale policy writes', async () => {
+    const id = 'policy_route_001'
+    seedMeeting(id, turns('MU', 'Ext', 4, 1))
+    await startServer()
+    expect(await get(`/api/meeting/${id}/speaker-policy`)).toMatchObject({ status: 200, json: { mode: 'standard', revision: 'unset' } })
+    const review = (await get(`/api/meeting/${id}/speakers`)).json
+    const body = { mode: 'anonymous', expectedPolicyRevision: 'unset', recordId: review.recordId, expectedRevision: review.sourceRevision }
+    expect(await post(`/api/meeting/${id}/speaker-policy`, { ...body, recordId: 'standalone:wrong_record' })).toMatchObject({ status: 409 })
+    expect(await post(`/api/meeting/${id}/speaker-policy`, { ...body, expectedRevision: 'stale' })).toMatchObject({ status: 409 })
+    const saved = await post(`/api/meeting/${id}/speaker-policy`, body)
+    expect(saved).toMatchObject({ status: 200, json: { mode: 'anonymous', revision: expect.stringMatching(/^[a-f0-9]{64}$/) } })
+    expect(await post(`/api/meeting/${id}/speaker-policy`, { ...body, mode: 'standard' })).toMatchObject({ status: 409 })
+    expect((await get(`/api/meeting/${id}/speakers`)).json.speakerPolicy.mode).toBe('anonymous')
+  })
+  it('refuses derived records, missing captures and invalid modes', async () => {
+    await startServer()
+    expect(await get('/api/meeting/not_saved_001/speaker-policy')).toMatchObject({ status: 404 })
+    expect(await post('/api/meeting/not_saved_001/speaker-policy', { mode: 'anonymous', expectedPolicyRevision: 'unset' })).toMatchObject({ status: 404 })
+    expect(await post('/api/meeting/blended:abc123/speaker-policy', { mode: 'anonymous', expectedPolicyRevision: 'unset' })).toMatchObject({ status: 409 })
+    expect(await post('/api/meeting/not_saved_001/speaker-policy', { mode: 'unknown', expectedPolicyRevision: 'unset' })).toMatchObject({ status: 400 })
+  })
+})

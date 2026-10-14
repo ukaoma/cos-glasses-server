@@ -67,6 +67,7 @@ import {
   type TokenTime,
   wavHeader,
 } from './nemotron-segments.js'
+import { captureSpeakerMode, type SpeakerMode } from './meeting-speaker-policy.js'
 import { NEMOTRON_CHANNELS } from './nemotron-cli.js'
 import type { WhisperWord } from './whisper-local.js'
 
@@ -92,6 +93,7 @@ export interface SidecarChunk {
   speaker: string
   elapsed: number
   similarity: number
+  speakerPolicy?: SpeakerMode
   words?: WhisperWord[]
   segments?: ChunkSpeakerSegment[]
   evenHubSpeakerRole?: EvenRole
@@ -631,7 +633,7 @@ export const FINAL_REASON_CODES = [
   'no_transcript', 'already_applied', 'no_chunks', 'nemotron_timeout', 'nemotron_cli_failed',
   'nemotron_bad_output', 'nemotron_spawn_failed', 'nemotron_error', 'no_speaker_words', 'chunk_map_ambiguous',
   'word_mismatch', 'no_change', 'changed_during_pass', 'markdown_write', 'sidecar_restore_failed', 'too_long',
-  'metadata_not_persisted', 'error',
+  'metadata_not_persisted', 'speaker_policy', 'error',
 ] as const
 export type FinalReasonCode = typeof FINAL_REASON_CODES[number]
 const REASON_SET: ReadonlySet<string> = new Set(FINAL_REASON_CODES)
@@ -793,6 +795,13 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   }
   const entries = (Array.isArray(sidecar.chunkEntries) ? sidecar.chunkEntries : []) as SidecarEntry[]
   if (!entries.length) return { status: 'skipped', reason: 'no_chunks' }
+  // Final diarization builds meeting-wide channel/name maps. Earlier Standard
+  // identities cannot safely authorize names for later strict-policy audio.
+  // Preserve the canonical transcript (including earlier names) byte-for-byte.
+  if (entries.some(entry => captureSpeakerMode(entry.chunk.speakerPolicy) !== 'standard')
+    || (Array.isArray(sidecar.chunks) && sidecar.chunks.some((chunk: SidecarChunk) => captureSpeakerMode(chunk.speakerPolicy) !== 'standard'))) {
+    return { status: 'skipped', reason: 'speaker_policy' }
+  }
 
   const timeline = await buildMeetingTimeline(entries, options.audioDir)
   const excluded = timeline.excluded

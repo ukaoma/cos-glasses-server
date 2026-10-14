@@ -213,6 +213,21 @@ describe('the save-time final pass', () => {
     expect(relabelled).toBe('[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1\n[Silas Larson]: alpha6 bravo6 charlie6 delta6\n[Silas Larson]: alpha7 bravo7 charlie7 delta7')
   })
 
+  it.each(['anonymous', 'high-confidence'])('a late %s capture prevents meeting-wide name propagation after Standard audio', async mode => {
+    for (const batch of [true, false]) {
+      const f = meeting({ batch })
+      const sidecar = JSON.parse(f.sidecarText)
+      sidecar.chunkEntries[7].chunk.speakerPolicy = mode
+      const strictText = JSON.stringify(sidecar)
+      writeFileSync(f.sidecarPath, strictText)
+      const run = fakeRun()
+      expect(await runNemotronFinalPass(opts(f, run))).toMatchObject({ status: 'skipped', reason: 'speaker_policy' })
+      expect(run).not.toHaveBeenCalled()
+      expect(readFileSync(f.sidecarPath, 'utf8')).toBe(strictText)
+      expect(readFileSync(f.meetingPath, 'utf8')).toBe(f.markdownText)
+    }
+  })
+
   it('a human correction always wins: a corrected meeting is never relabelled', async () => {
     const f = meeting({ batch: true, correctionRevision: 1 })
     const run = fakeRun()

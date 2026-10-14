@@ -10,3 +10,6 @@ export const VOICEPRINT_MIN_AUDIO_SEC = 2.0
  *  back as the wearer between 0.55 and 0.65 without ever passing owner verify;
  *  6.61.1 refuses that for a split track (it named other people as the wearer). */
 export const OWNER_VERIFY_SIMILARITY = 0.65
+
+/** Existing auto-enrollment floor; strict meeting recognition uses the same bar. */
+export const AUTO_ENROLL_THRESHOLD = 0.88

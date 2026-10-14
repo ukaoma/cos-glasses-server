@@ -42,7 +42,7 @@ const require = createRequire(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 import { DATA_DIR } from './data-dir.js'
-import { OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
+import { AUTO_ENROLL_THRESHOLD, OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
 
 export const SPEAKER_MODEL_FILENAME = '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx'
 
@@ -92,7 +92,8 @@ const SEARCH_THRESHOLD = 0.55
 /** The bar `autoEnroll` enrols at. From 6.45.4 also the bar at which a held
  *  group is offered as a person with one click ("high"): the identifier would
  *  have written that sample itself. */
-export const AUTO_ENROLL_THRESHOLD = 0.88    // High bar — must be very confident before auto-enrolling
+export { AUTO_ENROLL_THRESHOLD } from './voiceprint-floor.js'
+
 /** The live path only ASKS autoEnroll about a chunk above this; autoEnroll
  *  then applies AUTO_ENROLL_THRESHOLD. Named so transcribe-stream and the
  *  held-voice panel read the same number (6.45.4). */
@@ -375,9 +376,10 @@ export function identifySpeaker(
   expectedSpeakers?: string[],
   /** 6.61.0: `event` tags the calibration rows, e.g. 'nemotron-track' for one
    *  Nemotron track's audio, so they are never read as whole-chunk checks. */
-  options: { event?: string } = {},
+  options: { event?: string; minSimilarity?: number } = {},
 ): { speaker: string; similarity: number; embedding?: Float32Array } | null {
   if (!extractor || !manager) return null
+  const minimum = Number.isFinite(options.minSimilarity) ? Math.max(0, Math.min(1, options.minSimilarity!)) : 0
 
   try {
     const embedding = extractEmbeddingFromWav(wavBuffer)
@@ -386,7 +388,7 @@ export function identifySpeaker(
     // If the wearer is enrolled, verify against them first (they're wearing the glasses)
     const owner = getOwnerSpeakerLabel()
     if (manager.contains(owner)) {
-      const isOwner = manager.verify({ name: owner, v: embedding, threshold: VERIFY_THRESHOLD })
+      const isOwner = manager.verify({ name: owner, v: embedding, threshold: Math.max(VERIFY_THRESHOLD, minimum) })
       if (isOwner) {
         const similarity = computeCosineSimilarity(embedding, owner)
         logCalibration(owner, similarity, true, options.event)
@@ -399,7 +401,7 @@ export function identifySpeaker(
       for (const name of expectedSpeakers) {
         if (name === owner) continue // wearer already checked
         if (!manager.contains(name)) continue
-        const matches = manager.verify({ name, v: embedding, threshold: SEARCH_THRESHOLD })
+        const matches = manager.verify({ name, v: embedding, threshold: Math.max(SEARCH_THRESHOLD, minimum) })
         if (matches) {
           const similarity = computeCosineSimilarity(embedding, name)
           logCalibration(name, similarity, true, options.event)
@@ -409,7 +411,7 @@ export function identifySpeaker(
     }
 
     // Full search across all speakers (fallback or no expected speakers)
-    const found = manager.search({ v: embedding, threshold: SEARCH_THRESHOLD })
+    const found = manager.search({ v: embedding, threshold: Math.max(SEARCH_THRESHOLD, minimum) })
     if (found && found.length > 0) {
       const similarity = computeCosineSimilarity(embedding, found)
       logCalibration(found, similarity, true, options.event)

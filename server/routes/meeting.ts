@@ -1,3 +1,4 @@
+import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/meeting/save — finalize an existing transcribe-stream session into
 // the standalone public meeting store. The live transcript and chunk metadata
 // are durable before the session is closed; batch improvement runs afterward.
@@ -952,6 +953,36 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
   // (safeDirectoryRealpath / safeReadFile) instead of reassembling a path from
   // client-supplied domain and filename components.
+  router.get('/meeting/:sessionId/speaker-policy', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) { res.status(400).json({ error: 'Invalid session ID' }); return }
+    if (sessions.getStartTime(sessionId) === null && !findCosOperationsMeetingBySessionId(sessionId) && !store.findBySessionId(sessionId)) {
+      res.status(404).json({ error: 'Meeting not found' }); return
+    }
+    res.set('Cache-Control', 'private, no-store').json(readSpeakerPolicy(sessionId))
+  })
+  router.post('/meeting/:sessionId/speaker-policy', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId) || !isSpeakerMode(req.body?.mode) || typeof req.body?.expectedPolicyRevision !== 'string') {
+      res.status(400).json({ error: 'A valid session, mode and policy revision are required' }); return
+    }
+    const operations = findCosOperationsMeetingBySessionId(sessionId)
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved && sessions.getStartTime(sessionId) === null) { res.status(404).json({ error: 'Meeting not found' }); return }
+    if (operations || saved) {
+      const selected = operations ? `ops:${operations.domain}:${operations.month}:${operations.filename}` : `standalone:${sessionId}`
+      if (req.body?.recordId !== selected) { res.status(409).json({ error: 'Reopen the selected meeting' }); return }
+      const sourceRefusal = sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
+      if (sourceRefusal) { res.status(sourceRefusal.status).json(sourceRefusal.body); return }
+    }
+    try {
+      writeSpeakerPolicy(sessionId, req.body.mode, req.body.expectedPolicyRevision)
+      res.json({ ...readSpeakerPolicy(sessionId), message: 'Matching changed for new audio. Existing names are unchanged.' })
+    } catch (error) { res.status(409).json({ error: String(error) }); }
+  })
+
   router.get('/meeting/:sessionId/speakers', (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
@@ -1041,6 +1072,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       domain,
       filename,
       ...identity,
+      speakerPolicy: readSpeakerPolicy(sessionId),
       reviewIdentityVersion: 1,
       sourceRevision: reviewRevision(operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath, sidecarPath),
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),

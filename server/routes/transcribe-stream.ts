@@ -1,3 +1,5 @@
+import { AUTO_ENROLL_THRESHOLD } from '../lib/voiceprint-floor.js'
+import { readSpeakerPolicy, policyLabel, type SpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/transcribe-stream — Streaming transcription for continuous meeting capture
 // Uses local Whisper. OpenAI API fallback is disabled by default and requires
 // both COS_OPENAI_WHISPER_FALLBACK=1 and a configured key.
@@ -272,6 +274,8 @@ export interface TranscriptChunk {
   speaker: string
   elapsed: number    // ms since session start
   similarity: number // speaker identification confidence (0-1)
+  /** Capture-time policy survives batch and final passes; absent means legacy Standard. */
+  speakerPolicy?: SpeakerMode
   words?: WhisperWord[] // word-level timestamps from DTW alignment
   asrProvider?: 'server-whisper' | 'iphone-whisperkit-beta'
   backend?: string
@@ -2062,14 +2066,16 @@ function ownerLabelOrNull(): string | null {
 }
 
 function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex: number, clientSpeaker: string): { speaker: string; similarity: number } {
+  const policy = readSpeakerPolicy(sessionId).mode
+  if (policy === 'anonymous') return { speaker: 'Ext', similarity: 0 }
   const expectedSpeakers = undefined
   const audioDurationSec = Math.max(0, (audioBuffer.length - 44)) / 32000
-  if (!isEmbeddingAvailable() || audioDurationSec < VOICEPRINT_MIN_AUDIO_SEC) return { speaker: clientSpeaker, similarity: 0 }
+  if (!isEmbeddingAvailable() || audioDurationSec < VOICEPRINT_MIN_AUDIO_SEC) return policyLabel({ speaker: clientSpeaker, similarity: 0 }, policy)
 
   const tEmb = performance.now()
-  const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers)
+  const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers, { minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined })
   console.log(`[perf] identifySpeaker: ${(performance.now() - tEmb).toFixed(1)}ms`)
-  if (!embeddingResult) return { speaker: clientSpeaker, similarity: 0 }
+  if (!embeddingResult) return policyLabel({ speaker: clientSpeaker, similarity: 0 }, policy)
 
   // Bank the embedding before anything else can return. This is the only moment
   // it exists: identifySpeaker computes it per chunk and nothing else keeps it,
@@ -2079,25 +2085,25 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
   if (embeddingResult.embedding) {
     appendChunkEmbedding(sessionId, {
       i: chunkIndex,
-      speaker: embeddingResult.speaker,
+      speaker: policyLabel(embeddingResult, policy).speaker,
       similarity: embeddingResult.similarity,
       embedding: embeddingResult.embedding,
     })
   }
 
-  let speaker = embeddingResult.speaker
+  let speaker = policyLabel(embeddingResult, policy).speaker
   if (speaker !== clientSpeaker) {
     console.log(`[speaker] Embedding: ${speaker} vs Amplitude: ${clientSpeaker} (sim: ${embeddingResult.similarity.toFixed(2)})`)
   }
 
-  if (embeddingResult.similarity >= AUTO_ENROLL_CANDIDATE_SIMILARITY && speaker !== 'Ext') {
+  if (policy === 'standard' && embeddingResult.similarity >= AUTO_ENROLL_CANDIDATE_SIMILARITY && speaker !== 'Ext') {
     const enrollResult = autoEnroll(speaker, audioBuffer, embeddingResult.similarity, sessionId)
     if (enrollResult.enrolled) {
       console.log(`[speaker] Auto-enrolled ${speaker} from G2 mic (sim: ${embeddingResult.similarity.toFixed(3)})`)
     }
   }
 
-  if (speaker !== 'Ext' && embeddingResult.similarity > 0.50) {
+  if (policy === 'standard' && speaker !== 'Ext' && embeddingResult.similarity > 0.50) {
     // Audio has its own count and TTL. A full profile still needs examples
     // from new meetings; deleting/expiring old audio immediately frees a slot.
     try {
@@ -2312,13 +2318,17 @@ async function processStreamChunk(opts: {
         clientSpeaker,
         owner: ownerLabelOrNull(),
         identify: wav => {
-          const named = identifySpeaker(wav, undefined, { event: 'nemotron-track' })
-          return named ? { speaker: named.speaker, similarity: named.similarity } : null
+          const policy = readSpeakerPolicy(sessionId).mode
+          if (policy === 'anonymous') return { speaker: 'Ext', similarity: 0 }
+          const named = identifySpeaker(wav, undefined, { event: 'nemotron-track', minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined })
+          return named ? policyLabel({ speaker: named.speaker, similarity: named.similarity }, policy) : null
         },
       })
     : { speaker: voiceprint.speaker, similarity: voiceprint.similarity }
   if (labels.record) nemotronLive.record({ sessionId, chunkIndex }, labels.record)
-  const { speaker, similarity } = labels
+  const currentPolicy = readSpeakerPolicy(sessionId).mode
+  const { speaker, similarity } = policyLabel(labels, currentPolicy)
+  if (labels.segments) labels.segments = labels.segments.map(segment => policyLabel(segment, currentPolicy))
 
   if (!trimmedText) {
     console.log(`[hallucination] Filtered (${sanitized.fallbackReason || fallbackReason || 'empty'}): "${rawText.slice(0, 60)}"`)
@@ -2346,6 +2356,7 @@ async function processStreamChunk(opts: {
 
   const chunk: TranscriptChunk = {
     text: trimmedText,
+    speakerPolicy: currentPolicy,
     speaker,
     elapsed,
     similarity,

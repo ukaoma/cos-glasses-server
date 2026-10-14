@@ -50,6 +50,7 @@ function fingerprint(seed: number): Float32Array {
 }
 
 async function mountRoute(opts: {
+  enroll?: (...args: unknown[]) => unknown
   identify: (...args: unknown[]) => unknown
 }): Promise<{ base: string; stream: typeof import('./transcribe-stream.js') }> {
   vi.resetModules()
@@ -63,7 +64,7 @@ async function mountRoute(opts: {
     identifySpeaker: opts.identify,
     isEmbeddingAvailable: () => true,
     // Must return the real shape: the route reads .enrolled off it.
-    autoEnroll: vi.fn().mockReturnValue({ enrolled: false, reason: 'test' }),
+    autoEnroll: opts.enroll ?? vi.fn().mockReturnValue({ enrolled: false, reason: 'test' }),
     getEmbeddingCount: () => 3,
   }))
   vi.doMock('../lib/vad-silero.js', () => ({ trimSilence: vi.fn(), isSileroAvailable: () => false }))
@@ -194,5 +195,41 @@ describe('a chunk upload banks its voiceprint', () => {
     expect(existsSync(join(root, 'chunk-embeddings'))).toBe(false)
     expect(stream.getMeetingSessionStatus('wire_off')).toMatchObject({ receivedCount: 1 })
     stream.deleteSession('wire_off')
+  })
+})
+
+
+describe('capture policy on the actual streaming route', () => {
+  it('withholds low-confidence wearer names, persists policy, and prevents automatic training', async () => {
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-policy-stream-')))
+    process.env.COS_DATA_DIR = root
+    const identify = vi.fn().mockReturnValue({ speaker: 'MU', similarity: 0.87, embedding: fingerprint(9) })
+    const enroll = vi.fn().mockReturnValue({ enrolled: false })
+    const { base, stream } = await mountRoute({ identify, enroll })
+    const { writeSpeakerPolicy } = await import('../lib/meeting-speaker-policy.js')
+    writeSpeakerPolicy('strict_stream_001', 'high-confidence', 'unset')
+    expect(await postChunk(base, 'strict_stream_001', 0)).toBe(200)
+    expect(identify).toHaveBeenCalledWith(expect.any(Buffer), undefined, { minSimilarity: 0.88 })
+    expect(stream.getSessionChunks('strict_stream_001')![0]).toMatchObject({ text: 'hello there', speaker: 'Ext', similarity: 0, speakerPolicy: 'high-confidence' })
+    expect(enroll).not.toHaveBeenCalled()
+    expect(existsSync(join(root, 'training-audio', 'MU'))).toBe(false)
+    const saved = JSON.parse(readFileSync(join(root, 'active-sessions', 'strict_stream_001.json'), 'utf8'))
+    expect(saved.chunks[0].speakerPolicy).toBe('high-confidence')
+    stream.deleteSession('strict_stream_001')
+  })
+  it('anonymous mode still transcribes and never invokes identity recognition', async () => {
+    root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-policy-stream-')))
+    process.env.COS_DATA_DIR = root
+    const identify = vi.fn().mockReturnValue({ speaker: 'MU', similarity: 1, embedding: fingerprint(10) })
+    const enroll = vi.fn().mockReturnValue({ enrolled: false })
+    const { base, stream } = await mountRoute({ identify, enroll })
+    const { writeSpeakerPolicy } = await import('../lib/meeting-speaker-policy.js')
+    writeSpeakerPolicy('anonymous_stream_001', 'anonymous', 'unset')
+    expect(await postChunk(base, 'anonymous_stream_001', 0)).toBe(200)
+    expect(stream.getSessionChunks('anonymous_stream_001')![0]).toMatchObject({ text: 'hello there', speaker: 'Ext', similarity: 0, speakerPolicy: 'anonymous' })
+    expect(identify).not.toHaveBeenCalled()
+    expect(enroll).not.toHaveBeenCalled()
+    expect(storedRows('anonymous_stream_001')).toEqual([])
+    stream.deleteSession('anonymous_stream_001')
   })
 })

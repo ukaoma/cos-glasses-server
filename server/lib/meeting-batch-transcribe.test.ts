@@ -235,6 +235,8 @@ describe('progressive meeting HQ checkpoints', () => {
         .toBeNull()
       expect(__progressiveHqTesting.readProgressiveCheckpoint(root, segment, 'different context'))
         .toBeNull()
+      expect(__progressiveHqTesting.readProgressiveCheckpoint(root, { ...segment, speakerPolicy: 'anonymous' }, undefined)).toBeNull()
+      expect(__progressiveHqTesting.readProgressiveCheckpoint(root, { ...segment, speakerPolicy: 'high-confidence' }, undefined)).toBeNull()
       writeFileSync(join(root, 'chunk_0002.wav'), wav(Buffer.alloc(320, 9)))
       expect(__progressiveHqTesting.readProgressiveCheckpoint(root, segment, undefined)).toBeNull()
     } finally {
@@ -281,5 +283,43 @@ describe('progressive meeting HQ checkpoints', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+
+describe('capture-time identity policy survives batch transcription', () => {
+  it('separates Standard, anonymous and high-confidence audio, including sealed partial windows', () => {
+    const source = entries()
+    source[1]!.chunk.speakerPolicy = 'anonymous'
+    source[2]!.chunk.speakerPolicy = 'anonymous'
+    source[3]!.chunk.speakerPolicy = 'high-confidence'
+    source[4]!.chunk.speakerPolicy = 'high-confidence'
+    expect(segmentTranscriptChunks(source, 30_000, true).map(s => [s.startChunkIdx, s.endChunkIdx, s.speakerPolicy])).toEqual([
+      [0, 0, 'standard'], [1, 2, 'anonymous'], [3, 4, 'high-confidence'],
+    ])
+    expect(segmentTranscriptChunks(source, 30_000, false).map(s => [s.startChunkIdx, s.endChunkIdx])).toEqual([[0, 0], [1, 2]])
+  })
+  it('never lends an earlier name to distant or mixed anonymous words', () => {
+    const source = entries().slice(0, 2)
+    source[1]!.chunk.speakerPolicy = 'anonymous'
+    const strict = segmentTranscriptChunks(source)[1]!
+    const distant = [{ word: 'still spoken', start: 5, end: 6, probability: 1 }]
+    expect(mapWordsToSpeakers(distant, strict, source)[0]).toMatchObject({ speaker: 'Ext', similarity: 0 })
+    const mixed: BatchSegment = { startChunkIdx: 0, endChunkIdx: 1, startElapsed: 0, endElapsed: 10_000, speakers: ['MU'] }
+    expect(mapWordsToSpeakers([{ word: 'near old name', start: 0, end: 1, probability: 1 }], mixed, source)[0]).toMatchObject({ speaker: 'Ext', similarity: 0 })
+  })
+  it('retains high-confidence names only near evidence, never by window fallback', () => {
+    const source = entries().slice(0, 2)
+    for (const entry of source) entry.chunk.speakerPolicy = 'high-confidence'
+    source[0]!.chunk.similarity = 0.87
+    source[1]!.chunk.similarity = 0.88
+    const segment = segmentTranscriptChunks(source)[0]!
+    const result = mapWordsToSpeakers([0, 5, 10].map(start => ({ word: 'spoken', start, end: start + 0.2, probability: 1 })), segment, source)
+    expect(result.map(word => [word.speaker, word.similarity])).toEqual([['Ext', 0], ['Ext', 0], ['MU', 0.88]])
+  })
+  it('keeps legacy Standard fallback unchanged', () => {
+    const source = entries().slice(0, 2)
+    const segment = segmentTranscriptChunks(source)[0]!
+    expect(mapWordsToSpeakers([{ word: 'spoken', start: 5, end: 6, probability: 1 }], segment, source)[0]).toMatchObject({ speaker: 'MU', similarity: 0 })
   })
 })

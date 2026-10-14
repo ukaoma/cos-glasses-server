@@ -76,6 +76,17 @@ afterEach(() => {
 })
 
 describe('MeetingStore', () => {
+  it('persists capture identity policy on both raw sidecar projections', () => {
+    const store = new MeetingStore(newRoot())
+    const value = input()
+    value.chunks[1]!.speakerPolicy = 'anonymous'
+    value.chunkEntries![1]!.chunk.speakerPolicy = 'high-confidence'
+    const saved = store.save(value)
+    const sidecar = JSON.parse(readFileSync(saved.sidecarPath, 'utf8'))
+    expect(sidecar.chunks[1].speakerPolicy).toBe('anonymous')
+    expect(sidecar.chunkEntries[1].chunk.speakerPolicy).toBe('high-confidence')
+  })
+
   it('publishes a private markdown+sidecar pair and exposes build199 list/detail shapes', () => {
     const root = newRoot()
     const store = new MeetingStore(root)
