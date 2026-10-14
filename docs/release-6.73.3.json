@@ -1,0 +1,38 @@
+{
+  "version": "6.73.3",
+  "status": "published_verified",
+  "tag": "next",
+  "artifact": "gotcos-glasses-server-6.73.3.tgz",
+  "integrity": "sha512-uQ/tnJ4k/SRxWPzHKC6HGfSSZ7p1IwNGL9PsOND7Q/jjAH1LWQYbWTReu/e2tBnvlQryfm+ty37kdVVqN2N83Q==",
+  "registry_integrity": "sha512-uQ/tnJ4k/SRxWPzHKC6HGfSSZ7p1IwNGL9PsOND7Q/jjAH1LWQYbWTReu/e2tBnvlQryfm+ty37kdVVqN2N83Q==",
+  "sha256": "adddf0f3624299908d0f4f1a86b8d9857d4950fa2472956ca77f372552934887",
+  "files": 449,
+  "bytes": 4123698,
+  "source_commit": "91621579c2c217390677cca05804f11403f9d795",
+  "validation": {
+    "test_files_passed": 448,
+    "tests_passed": 6903,
+    "tests_skipped": 2,
+    "typecheck": "passed",
+    "production_audit_vulnerabilities": 0,
+    "registry_fresh_cache_cli": "passed"
+  },
+  "verified_at": "2026-10-14T11:35:10.252807+00:00",
+  "dist_tags": {
+    "next": "6.73.3",
+    "latest": "6.73.1"
+  },
+  "matched_control_candidate": {
+    "version": "0.5.290",
+    "build": 343,
+    "public_appcast_promotion": "pending physical acceptance"
+  },
+  "companion_compatibility": {
+    "version": "6.10.640",
+    "rebuild_required": false,
+    "reason": "Additive server fields and authenticated policy routes; existing companion contracts retained.",
+    "physical_acceptance": "pending"
+  },
+  "experimental_transcription_and_cue_flags": "remain disabled",
+  "rollback_server": "6.73.1"
+}
