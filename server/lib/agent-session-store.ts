@@ -1671,7 +1671,12 @@ export async function parseAgentSession(
   let title = provider === 'codex' ? (opts.codexThreadName ?? '').trim() : ''
   let project = ''
   let gitBranch = ''
-  let sessionId = path.split('/').pop()?.replace(/\.jsonl$/, '') || ''
+  const filename = path.split('/').pop() || ''
+  // A forked Codex rollout can retain its parent's session_meta. Use the same
+  // filename identity as the list so details, signals and associations target
+  // the child we actually opened. Legacy filenames still use metadata below.
+  const codexFileId = provider === 'codex' ? idFromCodexFilename(filename) : null
+  let sessionId = codexFileId ?? filename.replace(/\.jsonl$/, '')
   let firstPrompt = ''
   let latestAssistant = ''
   let latestReply = ''
@@ -1797,7 +1802,7 @@ export async function parseAgentSession(
       if (obj.type === 'session_meta' && obj.payload && typeof obj.payload === 'object') {
         const payload = obj.payload as Record<string, unknown>
         if (typeof payload.cwd === 'string') project = workspaceLabel(payload.cwd)
-        if (typeof payload.id === 'string' && payload.id) sessionId = payload.id
+        if (!codexFileId && typeof payload.id === 'string' && payload.id) sessionId = payload.id
         const git = payload.git && typeof payload.git === 'object' ? payload.git as Record<string, unknown> : null
         if (git && typeof git.branch === 'string') gitBranch = git.branch
         continue

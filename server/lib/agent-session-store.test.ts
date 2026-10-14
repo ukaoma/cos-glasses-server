@@ -57,6 +57,42 @@ function writeJsonl(path: string, lines: string[]): void {
   writeFileSync(path, lines.join('\n') + '\n')
 }
 
+describe('Codex fork detail identity', () => {
+  const parentId = '11111111-2222-4333-8444-555555555555'
+  const childId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const meta = (id: string) => JSON.stringify({ type: 'session_meta', payload: { id, cwd: '/repo/quilt', git: { branch: 'codex/recovery' } } })
+  const reply = JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Child recovery brief is ready.' }] } })
+
+  it('uses the child filename when cloned metadata still identifies the parent', async () => {
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-fork-detail-')))
+    const file = join(dir, `rollout-2026-10-13T21-45-00-${childId}.jsonl`)
+    writeJsonl(file, [meta(parentId), reply, meta(parentId)])
+    const parsed = await parseAgentSession('codex', file, { codexThreadName: 'Quilt recovery child' })
+    expect(parsed.session_id).toBe(childId)
+    expect(parsed.display_label).toBe('Quilt recovery child')
+    expect(parsed.latest_reply).toBe('Child recovery brief is ready.')
+    expect(parsed.project).toBe('quilt')
+    expect(parsed.git_branch).toBe('codex/recovery')
+  })
+
+  it('keeps normal rollout and filename-only child identities', async () => {
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-fork-detail-')))
+    const parent = join(dir, `rollout-2026-10-13T21-00-00-${parentId}.jsonl`)
+    const child = join(dir, `${childId}.jsonl`)
+    writeJsonl(parent, [meta(parentId), reply])
+    writeJsonl(child, [reply])
+    expect((await parseAgentSession('codex', parent)).session_id).toBe(parentId)
+    expect((await parseAgentSession('codex', child)).session_id).toBe(childId)
+  })
+
+  it('preserves metadata fallback for a legacy filename', async () => {
+    const dir = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-fork-detail-')))
+    const file = join(dir, 'legacy.jsonl')
+    writeJsonl(file, [meta(parentId), reply])
+    expect((await parseAgentSession('codex', file)).session_id).toBe(parentId)
+  })
+})
+
 describe('scratch Cursor folders', () => {
   it('drops empty-window and temp clones', () => {
     expect(isScratchCursorProject('empty-window')).toBe(true)

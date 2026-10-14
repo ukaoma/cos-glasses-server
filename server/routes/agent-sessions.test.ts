@@ -242,6 +242,43 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map(close => close()))
 })
 
+describe('Codex fork detail route canonical identity', () => {
+  it('opens the exact child rollout and refuses a nonexistent child', async () => {
+    const { home, roots } = fixtureHome()
+    const parent = '11111111-2222-4333-8444-555555555555'
+    const child = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const unknown = '99999999-2222-4333-8444-555555555555'
+    const meta = JSON.stringify({ type: 'session_meta', payload: { id: parent, cwd: '/repo/quilt', timestamp: new Date().toISOString() } })
+    const reply = (text: string) => JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } })
+    writeJsonl(join(roots.codexSessions, '2026/10/13', `rollout-2026-10-13T21-00-00-${parent}.jsonl`), [meta, reply('Parent reply must stay separate.')])
+    writeJsonl(join(roots.codexSessions, '2026/10/13', `rollout-2026-10-13T21-45-00-${child}.jsonl`), [meta, reply('Child recovery brief is ready.')])
+    writeJsonl(join(home, '.codex', 'session_index.jsonl'), [JSON.stringify({ id: parent, thread_name: 'Parent thread' }), JSON.stringify({ id: child, thread_name: 'Quilt recovery child' })])
+    const previousHome = process.env.COS_AGENT_SESSIONS_HOME
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    process.env.CODEX_HOME = join(home, '.codex')
+    try {
+      const base = await startSearchServer()
+      const res = await fetch(`${base}/api/agent-sessions/codex/${child}`)
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.provider).toBe('codex')
+      expect(body.session_id).toBe(child)
+      expect(body.slug).toBe(child)
+      expect(body.display_label).toBe('Quilt recovery child')
+      expect(body.latest_reply).toBe('Child recovery brief is ready.')
+      const parentRes = await fetch(`${base}/api/agent-sessions/codex/${parent}`)
+      expect((await parentRes.json()).latest_reply).toBe('Parent reply must stay separate.')
+      expect((await fetch(`${base}/api/agent-sessions/codex/${unknown}`)).status).toBe(404)
+    } finally {
+      if (previousHome === undefined) delete process.env.COS_AGENT_SESSIONS_HOME
+      else process.env.COS_AGENT_SESSIONS_HOME = previousHome
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previousCodexHome
+    }
+  })
+})
+
 describe('agent session list route reports dropped caps', () => {
   it('puts dropped on the wire even when every count is zero', async () => {
     const home = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-agent-list-drops-')))
