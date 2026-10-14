@@ -1,3 +1,8 @@
+# 6.73.4 (local candidate)
+
+- Add tools-off Sonnet planning and result synthesis for task-level Work chat. Actual delivery uses existing native-session continuation.
+- Preserve independent session status and user ownership of shared task completion.
+
 ## 6.73.3 — Speaker identity policy and exact Codex child sessions
 
 - Preserve the original child Codex session when reading completed job details. Control can open the actual result without substituting the parent conversation or starting another model turn.
