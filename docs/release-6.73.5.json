@@ -1,0 +1,39 @@
+{
+  "version": "6.73.5",
+  "status": "published_verified",
+  "tag": "next",
+  "artifact": "gotcos-glasses-server-6.73.5.tgz",
+  "integrity": "sha512-0StANLswAJs3CFvNhx6mfIaiLzC6WC+qJXXK28PH6tWOI8teVTbTfzhaeVRC973cq9e8qCxL3Io9ZKJbmS1gcg==",
+  "registry_integrity": "sha512-0StANLswAJs3CFvNhx6mfIaiLzC6WC+qJXXK28PH6tWOI8teVTbTfzhaeVRC973cq9e8qCxL3Io9ZKJbmS1gcg==",
+  "sha256": "2584262acdb40e853a6e01208ca0266fd68619450b125a0001afdd7736ef55f7",
+  "files": 451,
+  "bytes": 4127131,
+  "source_commit": "d3ca2c2cf29b94d3627b596132b6ebf8cf226e17",
+  "validation": {
+    "test_files_passed": 450,
+    "tests_passed": 6913,
+    "tests_skipped": 2,
+    "typecheck": "passed",
+    "production_audit_vulnerabilities": 0,
+    "registry_fresh_cache_cli": "passed",
+    "public_download_sha256": "matched"
+  },
+  "verified_at": "2026-10-14T23:33:19.899582+00:00",
+  "dist_tags": {
+    "latest": "6.73.1",
+    "next": "6.73.5"
+  },
+  "matched_control_candidate": {
+    "version": "0.5.295",
+    "build": 348,
+    "public_appcast_promotion": "pending remaining physical acceptance"
+  },
+  "companion_compatibility": {
+    "version": "6.10.640",
+    "rebuild_required": false,
+    "reason": "Additive Work routes; existing companion contracts retained.",
+    "physical_acceptance": "pending"
+  },
+  "experimental_transcription_and_cue_flags": "remain disabled",
+  "rollback_server": "6.73.1"
+}
