@@ -1,0 +1,31 @@
+{
+  "version": "6.73.1",
+  "status": "published_verified",
+  "tag": "latest",
+  "artifact": "gotcos-glasses-server-6.73.1.tgz",
+  "integrity": "sha512-zk5qEXg2DFoSeuj3puBMtxRGgLUwOMP+Zo+9mRkfuPJSfLytNC5x00d2g1PHHXi2Q+KjIZL6q/xzGvZrA1eC/A==",
+  "registry_integrity": "sha512-zk5qEXg2DFoSeuj3puBMtxRGgLUwOMP+Zo+9mRkfuPJSfLytNC5x00d2g1PHHXi2Q+KjIZL6q/xzGvZrA1eC/A==",
+  "files": 448,
+  "validation": {
+    "test_files_passed": 447,
+    "tests_passed": 6881,
+    "tests_skipped": 2,
+    "typecheck": "passed",
+    "production_audit_vulnerabilities": 0,
+    "reversal_negative_canary": "failed_as_expected",
+    "actual_catalog_replay": {
+      "codex-frontier": "gpt-6-astra",
+      "codex-balanced": "gpt-6.1-sol"
+    },
+    "fresh_cache_tarball_cli": "passed"
+  },
+  "registry_fresh_cache_cli": "passed",
+  "source_commit": "0a2ee47",
+  "verified_at": "2026-10-14T01:35:06.277674+00:00",
+  "mac_install": "not_performed",
+  "dist_tags": {
+    "next": "6.71.11",
+    "latest": "6.73.1"
+  },
+  "privacy_note": "Private graph lock correction remains a separate local workspace change, outside this npm package."
+}
