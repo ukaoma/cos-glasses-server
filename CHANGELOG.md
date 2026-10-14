@@ -1,3 +1,11 @@
+## 6.73.3 — Speaker identity policy and exact Codex child sessions
+
+- Preserve the original child Codex session when reading completed job details. Control can open the actual result without substituting the parent conversation or starting another model turn.
+- Support Standard, High-confidence only and Anonymous / video identity policies per recording. Capture the policy before asynchronous audio processing and retain it through live chunks, stream decoding and finalization. Anonymous audio remains transcribed without naming or training known voices; strict policies cannot inherit weaker cached identity results.
+- Add authenticated, revision-guarded policy reads and updates for the matched Control 0.5.290 (343). Existing clients keep the standard policy; existing named segments require explicit correction. Global voice profiles remain intact.
+- Fix release metadata after the installed private 6.73.2 candidate failed its changelog/version gate. Preserve that installed artifact; this corrected package uses a new version.
+- No transcription model selections, second-opinion/resolver experiments or cue flags are enabled by this update. Companion 640 remains compatible; physical Control/phone/G2 acceptance remains separate from automated server gates.
+
 ## 6.73.1 — GPT tier selection correction
 
 - Resolve GPT Max/Frontier to the newest provider-described frontier model and GPT Balanced to the newest workhorse/balanced model. A newer workhorse version no longer displaces a frontier model: GPT-6-Astra serves Max, GPT-6.1-Sol serves Balanced in the current catalog.
