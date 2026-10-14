@@ -50,7 +50,7 @@ export interface CodexModelCatalog {
   source: CodexCatalogSource
   refreshedAt: string
   autoUpdates: true
-  selectionPolicy: 'newest-generation-top-two'
+  selectionPolicy: 'capability-tiers-then-newest-generation'
   options: CodexModelOption[]
   refreshError?: string
 }
@@ -93,13 +93,24 @@ function isCapabilityCandidate(model: CodexCatalogModel): boolean {
   return !/(?:fast and affordable|cost-efficient|small,? fast|ultra-fast)/i.test(model.description)
 }
 
-/** Select two full-size models from the newest visible GPT generation. */
+/** Prefer the provider's frontier/workhorse tiers; use generation order when
+ * the catalog does not describe both tiers. A newer workhorse (6.1 Sol) must
+ * not replace the frontier (6 Astra) merely because its version is higher.
+ */
 export function selectTopCodexModels(models: CodexCatalogModel[]): CodexCatalogModel[] {
   const visible = models.filter(model => !model.hidden && versionParts(model.id))
   if (visible.length === 0) return []
 
   const capable = visible.filter(isCapabilityCandidate)
   const pool = capable.length > 0 ? capable : visible
+  const byNewest = (candidates: CodexCatalogModel[]): CodexCatalogModel | undefined =>
+    candidates.slice().sort((a, b) => compareVersionsDesc(versionParts(a.id) ?? [], versionParts(b.id) ?? []))[0]
+  const frontier = byNewest(pool.filter(model => /\bfrontier\b/i.test(model.description)))
+  const balanced = byNewest(pool.filter(model =>
+    !/\bfrontier\b/i.test(model.description) && /\b(workhorse|balanced)\b/i.test(model.description),
+  ))
+  if (frontier && balanced) return [frontier, balanced]
+
   const versions = pool
     .map(model => versionParts(model.id))
     .filter((parts): parts is number[] => !!parts)
@@ -144,7 +155,7 @@ export function buildCodexModelCatalog(
     source,
     refreshedAt,
     autoUpdates: true,
-    selectionPolicy: 'newest-generation-top-two',
+    selectionPolicy: 'capability-tiers-then-newest-generation',
     options,
   }
 }
@@ -163,7 +174,7 @@ function cliDefaultCatalog(refreshError?: string): CodexModelCatalog {
     source: 'cli-default',
     refreshedAt: new Date().toISOString(),
     autoUpdates: true,
-    selectionPolicy: 'newest-generation-top-two',
+    selectionPolicy: 'capability-tiers-then-newest-generation',
     options: [
       { ...common, preference: CODEX_FRONTIER_MODEL, displayName: 'GPT Frontier (auto)' },
       { ...common, preference: CODEX_BALANCED_MODEL, displayName: 'GPT Balanced (auto)', isDefault: false },

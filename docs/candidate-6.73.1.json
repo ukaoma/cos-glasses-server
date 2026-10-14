@@ -1,0 +1,40 @@
+{
+  "version": "6.73.1",
+  "status": "candidate_unpublished",
+  "artifact": "gotcos-glasses-server-6.73.1.tgz",
+  "integrity": "sha512-zk5qEXg2DFoSeuj3puBMtxRGgLUwOMP+Zo+9mRkfuPJSfLytNC5x00d2g1PHHXi2Q+KjIZL6q/xzGvZrA1eC/A==",
+  "files": 448,
+  "added": [],
+  "removed": [],
+  "changed": [
+    "package/CHANGELOG.md",
+    "package/package.json",
+    "package/server/lib/codex-model-catalog.ts"
+  ],
+  "validation": {
+    "test_files_passed": 447,
+    "tests_passed": 6881,
+    "tests_skipped": 2,
+    "typecheck": "passed",
+    "production_audit_vulnerabilities": 0,
+    "reversal_negative_canary": "failed_as_expected",
+    "actual_catalog_replay": {
+      "codex-frontier": "gpt-6-astra",
+      "codex-balanced": "gpt-6.1-sol"
+    },
+    "fresh_cache_tarball_cli": "passed"
+  },
+  "settings_changed": false,
+  "phone_acceptance": "pending",
+  "private_retrieval_validation": {
+    "graph_shared_read_lock": "passed",
+    "graph_query_seconds": 28.9,
+    "bot_memory_search_seconds": 1.46,
+    "bot_memory_results": 2,
+    "meeting_vector_search_seconds": 1.58,
+    "meeting_vector_results": 2,
+    "application_support_write_denial": "passed",
+    "glasses_end_to_end": "pending",
+    "distribution": "local_private_workspace_fix_not_in_npm"
+  }
+}

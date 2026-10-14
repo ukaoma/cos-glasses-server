@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { modelLabel } from '../../shared/model-preference.js'
 import {
   buildCodexModelCatalog,
   getCodexModelCatalog,
@@ -36,6 +37,39 @@ afterEach(() => {
 })
 
 describe('Codex live model catalog', () => {
+  it('keeps frontier Astra in Max and newer workhorse Sol in Balanced, regardless of catalog order', async () => {
+    const models = [
+      { ...model('gpt-6.1-sol', 'Latest workhorse model for coding and everyday work.'), displayName: 'GPT-6.1-Sol' },
+      { ...model('gpt-6-astra', 'Frontier intelligence for the most demanding work.'), displayName: 'GPT-6-Astra' },
+      model('gpt-6-sol', 'Previous generation workhorse model.'),
+      model('gpt-6-luna', 'Fast and affordable model for easier tasks.'),
+      model('gpt-5.6-sol', 'Older generation workhorse model.'),
+    ]
+    for (const ordered of [models, [...models].reverse()]) {
+      const catalog = await refreshCodexModelCatalog(async () => ordered)
+      expect(catalog.options.map(({ preference, id }) => ({ preference, id }))).toEqual([
+        { preference: 'codex-frontier', id: 'gpt-6-astra' },
+        { preference: 'codex-balanced', id: 'gpt-6.1-sol' },
+      ])
+      // Selection drives execution as well as the catalog's visible labels.
+      expect(resolveCodexModelOption('codex-frontier').id).toBe('gpt-6-astra')
+      expect(resolveCodexModelOption('codex-balanced').id).toBe('gpt-6.1-sol')
+      expect(modelLabel('codex-frontier')).toBe('GPT-6-Astra')
+      expect(modelLabel('codex-balanced')).toBe('GPT-6.1 Sol')
+    }
+  })
+
+  it('updates each tier independently and excludes hidden or small candidates', () => {
+    expect(selectTopCodexModels([
+      model('gpt-6-astra', 'Frontier intelligence.'),
+      model('gpt-7-astra', 'Latest frontier intelligence.'),
+      { ...model('gpt-8-astra', 'Frontier intelligence.'), hidden: true },
+      model('gpt-8-mini', 'Small, fast workhorse model.'),
+      model('gpt-7.1-sol', 'Latest workhorse model.'),
+      model('gpt-6.1-sol', 'Previous workhorse model.'),
+    ]).map(item => item.id)).toEqual(['gpt-7-astra', 'gpt-7.1-sol'])
+  })
+
   it('selects two full-size models from the newest generation', () => {
     const models = [
       model('gpt-5.6-sol', 'Latest frontier agentic coding model.', ['high', 'xhigh', 'max', 'ultra']),
