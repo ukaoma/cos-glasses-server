@@ -1,3 +1,10 @@
+## 6.73.11 — Fix a word: the dictionary learns (local candidate)
+
+- Add `POST /api/transcription-glossary/correction` `{heard, written, source}`: learns ONE correction and adds the spelling to the vocabulary in one write, serialized with PUT. A case variant of an existing key is replaced, not duplicated. Same limits as PUT: 500 terms, 100 characters, no URL, email or path spellings (they would join the decoder prompt). `source` is `dictation`, `meeting`, `g2` or `manual`.
+- Add `GET /api/transcription-glossary/recent`: what COS learned, newest first, with source and time. The log lives in the data dir (`transcription-corrections.json`, last 200, atomic, 0600); the dictionary stays in `.cos-profile.json`.
+- Add `POST /api/transcription-glossary/correction/undo` `{id}`: reverts exactly that entry, puts back a replaced case variant, and removes the spelling only if no remaining correction writes it. Refuses with 409 when a newer entry owns the word or it was edited since.
+- Live, meeting and dictation transcription pick a learned word up on the next sentence (decoder and vocab-echo caches are cleared). Pair with Control 0.5.309. 6.73.10 is the Work chat candidate on its own branch. Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.9 — Keep stalled Mac captures recoverable (local candidate)
 
 - Never auto-save or expire a Mac capture (`mac_<uuid>`). COS Control keeps every chunk on the Mac and delivers or recovers it. The 4 h stranded sweep posted the save without the server pin a Mac save requires, read the 400 as final and closed the session; boot recovery closed any session idle past 4 h the same way. A capture stalled at 51 of 1,200 chunks (2026-10-15) would have lost its server-side recovery at 20:12. Both paths now leave Mac captures open (`restoresAtBoot`, sweep guard).
