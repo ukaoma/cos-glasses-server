@@ -36,8 +36,14 @@ export async function transcribeMacParakeet(audio: Buffer, speechSeconds: number
       lane: 'interactive',
       timeoutMs: MAC_PARAKEET_TIMEOUT_MS,
     })
-    if (result.model !== 'parakeet-ultra' || (!result.text.trim() && speechSeconds !== null && speechSeconds >= 0.5)) {
-      throw new ParakeetError('bad_output', 'Parakeet did not return the selected model or words over detected speech')
+    if (result.model !== 'parakeet-ultra') {
+      throw new ParakeetError('bad_output', 'Parakeet did not return the selected model')
+    }
+    // 6.73.8: no words over detected speech (laughter, music, crosstalk) is an answer, not a failure. As a retryable
+    // 503 it replayed the same audio forever and froze every later chunk of a live meeting (2026-10-15, chunk 51).
+    // The saved meeting re-transcribes the full audio with strict Parakeet, so these words are not lost.
+    if (!result.text.trim() && speechSeconds !== null && speechSeconds >= 0.5) {
+      console.warn(`[mac-asr] Parakeet returned no words over ${speechSeconds.toFixed(2)}s of detected speech; recorded empty`)
     }
     return {
       text: result.text,

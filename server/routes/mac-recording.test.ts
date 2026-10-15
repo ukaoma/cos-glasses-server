@@ -145,3 +145,20 @@ it('keeps the existing G2 Whisper canonical chunk path when Parakeet HQ is selec
  const parakeet=await import('../lib/parakeet.js'),whisper=await import('../lib/whisper-local.js')
  expect(parakeet.transcribeParakeet).not.toHaveBeenCalled();expect(whisper.transcribeLocal).toHaveBeenCalledTimes(1)
 })
+it('records Parakeet silence over detected speech as an empty chunk so later chunks are not blocked behind it',async()=>{
+ // 2026-10-15 live meeting: Parakeet returned no words for chunk 51 while Silero heard speech. The server answered
+ // 503 retryable on every replay, Control retried 51 forever, and the live transcript froze for every later chunk.
+ await selectParakeet();await start()
+ const parakeet=await import('../lib/parakeet.js'),whisper=await import('../lib/whisper-local.js')
+ vi.mocked(parakeet.transcribeParakeet).mockResolvedValueOnce({model:'parakeet-ultra',text:'',words:[],wallMs:90} as never)
+ const first='/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wav=wavOf(6,()=>400)
+ const empty=await call(first,wav)
+ expect(empty.status).toBe(200)
+ expect(empty.json).toMatchObject({asrCompleted:true,canonical:false,sessionId:id,chunkIndex:0})
+ expect((await call(first,wav)).json).toMatchObject({asrCompleted:true,canonical:false})
+ expect(parakeet.transcribeParakeet).toHaveBeenCalledTimes(1)
+ const next=await call('/mac-recording/'+id+'/chunks?chunkIndex=1&elapsed=12000',wavOf(6,()=>420))
+ expect(next.status).toBe(200)
+ expect(next.json).toMatchObject({asrCompleted:true,canonical:true,asrProvider:'server-parakeet'})
+ expect(whisper.transcribeLocal).not.toHaveBeenCalled()
+})

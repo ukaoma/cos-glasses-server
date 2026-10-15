@@ -1,6 +1,7 @@
 ## 6.73.8 — Live Ask on Mac recordings (local candidate)
 
 - Accept Mac capture ids (`mac_<uuid>`, the id the Mac recording route issues) in live COS Ask, Ask history, files and orientation, and Work intake Ask evidence. Every Ask on a Mac recording failed with `invalid_session_id`; found in a live meeting 2026-10-15. One shared pattern in `lib/ask-session-id.ts`; traversal-shaped and upper-case ids stay refused.
+- Record Parakeet's no-words answer over detected speech on a Mac chunk as an empty chunk with a `[mac-asr]` warning, instead of a retryable 503. Replays of the same audio failed forever and froze every later chunk of a live meeting (2026-10-15, chunk 51). Real Parakeet failures stay retryable with no Whisper fallback; the saved meeting still re-transcribes the full audio with strict Parakeet.
 - Pair with Control 0.5.306. Transcription-candidate and cue flags stay disabled. No public publication is implied.
 
 ## 6.73.7 — Strict local desktop dictation (local candidate)
