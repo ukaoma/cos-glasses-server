@@ -1,3 +1,10 @@
+## 6.73.6 — Manual Mac recording transport (local candidate)
+
+- Register selected-app Mac system-audio capture with immutable source identity and high-confidence speaker policy before admitting audio.
+- Persist canonical PCM chunk receipts, exact timing and capture provenance through retry, save and meeting context. Reject missing chunks, conflicting retries and source substitution.
+- Keep Mac playback out of automatic G2/Fireflies merges and voice training. Glasses are optional for the matched Control 0.5.301 pilot.
+- Preserve transcription settings and disabled transcription-candidate/cue flags. Signed-host capture and permission acceptance remain local installation gates; this entry does not indicate public availability.
+
 ## 6.73.5 — Tasks from saved meetings (local candidate)
 
 - Add authenticated, bounded creation of a task and its exact source meeting in one canonical locked write.
