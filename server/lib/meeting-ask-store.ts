@@ -8,7 +8,8 @@ import { emptyOrientation } from './meeting-ask-orientation.js';
 import type { MeetingAskOrientation } from '../../shared/meeting-ask.js';
 import { AskError } from './live-cos-ask.js';
 export const ASK_ID = /^[A-Za-z0-9_-]{8,100}$/;
-export const ASK_SESSION = /^meeting_[A-Za-z0-9_-]{1,89}$/;
+export { ASK_SESSION } from './ask-session-id.js';
+import { ASK_SESSION } from './ask-session-id.js';
 export interface AskRecord {
     version: 2;
     fingerprint: string;

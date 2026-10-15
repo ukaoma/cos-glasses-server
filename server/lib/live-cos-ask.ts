@@ -1,4 +1,5 @@
 // On-demand meeting assistance. No poll, background summary, chat persistence or write tools.
+import { MAC_ASK_SESSION } from './ask-session-id.js'
 import { connectedEvidence } from './meeting-ask-evidence.js'
 import { REVIEW_SYSTEM, normalizeReviewConfidence, reviewRepairDiagnostics, reviewProblem, unverifiedReview, isFactCheckCTA, pageWasRead } from './meeting-ask-review.js'
 import { followupContext } from './meeting-ask-followup.js'
@@ -35,7 +36,7 @@ const TASKS: Record<AskAction, string> = {
 }
 export function normalizeAsk(value: unknown): AskInput {
   const v = value as any
-  if (!v || typeof v !== 'object' || typeof v.sessionId !== 'string' || !/^meeting_[A-Za-z0-9_-]{1,100}$/.test(v.sessionId ?? '') || !ASK_ACTIONS.includes(v.action)) throw new AskError('invalid_request')
+  if (!v || typeof v !== 'object' || typeof v.sessionId !== 'string' || !(/^meeting_[A-Za-z0-9_-]{1,100}$/.test(v.sessionId ?? '') || MAC_ASK_SESSION.test(v.sessionId ?? '')) || !ASK_ACTIONS.includes(v.action)) throw new AskError('invalid_request')
   if (typeof v.question !== 'string' || v.question.length > 2000 || (v.action === 'ask' && !v.question.trim())) throw new AskError('invalid_question')
   if (!Number.isFinite(v.elapsedMs) || v.elapsedMs < 0 || v.elapsedMs > 7 * 86400_000) throw new AskError('invalid_time')
   if (!Array.isArray(v.turns) || v.turns.length < 1 || v.turns.length > 6000) throw new AskError('invalid_transcript')

@@ -11,6 +11,7 @@
  * the store down. A user's decision is sticky while it is retained (60 days): a later producer upsert never reopens
  * it, and the producer's own ledger never re-sends a decided item.
  */
+import { ASK_SESSION } from './ask-session-id.js'
 import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
@@ -75,7 +76,7 @@ export function parseIntakeItem(raw: unknown, now = new Date().toISOString()): W
     producedAt: iso(r.producedAt) ?? now, updatedAt: iso(r.updatedAt) ?? now }
   if (r.askEvidence !== undefined) {
     const evidence = r.askEvidence as NonNullable<WorkIntakeItem['askEvidence']>
-    if (!evidence || !/^[A-Za-z0-9_-]{8,100}$/.test(evidence.requestId) || !/^meeting_[A-Za-z0-9_-]{1,89}$/.test(evidence.sessionId)
+    if (!evidence || !/^[A-Za-z0-9_-]{8,100}$/.test(evidence.requestId) || !ASK_SESSION.test(evidence.sessionId)
       || (evidence.question !== undefined && (typeof evidence.question !== 'string' || evidence.question.length > 2000))
       || (evidence.answer !== undefined && (typeof evidence.answer !== 'string' || evidence.answer.length > 6000))
       || !Number.isSafeInteger(evidence.throughMs) || evidence.throughMs < 0 || !Array.isArray(evidence.sources) || evidence.sources.length > 8

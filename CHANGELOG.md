@@ -1,3 +1,8 @@
+## 6.73.8 — Live Ask on Mac recordings (local candidate)
+
+- Accept Mac capture ids (`mac_<uuid>`, the id the Mac recording route issues) in live COS Ask, Ask history, files and orientation, and Work intake Ask evidence. Every Ask on a Mac recording failed with `invalid_session_id`; found in a live meeting 2026-10-15. One shared pattern in `lib/ask-session-id.ts`; traversal-shaped and upper-case ids stay refused.
+- Pair with Control 0.5.306. Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.7 — Strict local desktop dictation (local candidate)
 
 - Advertise the desktop dictation capability before microphone audio is transferred.
