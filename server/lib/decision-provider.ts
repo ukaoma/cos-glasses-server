@@ -1,10 +1,11 @@
 /** Explicit classifier routing. No retry or cross-provider fallback; generative engines do not use this seam. */
-import { mkdirSync, readFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { JevClient, JevError, type JevAnswers } from './jev.js'
 import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { redactSecretText } from './activity-preview.js'
+import { secureExistingPrivateFile } from './secure-user-config.js'
 
 import { resolveSubqKey, SUBQ_MODEL } from './subq-key.js'
 export { SUBQ_MODEL } from './subq-key.js'
@@ -16,7 +17,7 @@ export interface DecisionClient { readonly provider?: DecisionProvider; snapshot
 export class DecisionProviderError extends Error {
   constructor(readonly code: 'decision_invalid_provider' | 'decision_not_configured' | 'decision_cap_reached' | 'decision_breaker_open' |
     'decision_key_rejected' | 'decision_credits_required' | 'decision_rate_limited' | 'decision_request_rejected' | 'decision_unavailable' |
-    'decision_bad_answer' | 'decision_cancelled' | 'decision_images_unsupported') { super(code) }
+    'decision_bad_answer' | 'decision_cancelled' | 'decision_images_unsupported' | 'decision_usage_unavailable') { super(code) }
 }
 export const SUBQ_ENDPOINT = 'https://api.subq.ai/v1/systemone'
 export const SUBQ_LIMITS = { timeoutMs: 20_000, dailyTokens: 1_000_000, breakerFailures: 3, breakerMs: 3_600_000, maxBodyBytes: 13 * 1024 * 1024 } as const
@@ -81,12 +82,28 @@ export class SubqDecisionClient implements DecisionClient {
     private readonly cap = () => { const n = Number(process.env.COS_SUBQ_DAILY_TOKENS); return Number.isFinite(n) && n > 0 ? Math.floor(n) : SUBQ_LIMITS.dailyTokens },
     private readonly timeoutMs: number = SUBQ_LIMITS.timeoutMs) {}
   resetForNewKey(): void { this.failures = 0; this.breakerUntil = 0 }
-  private ledger(): Record<string, number> { try { return JSON.parse(readFileSync(this.usageFile, 'utf8')) } catch { return {} } }
+  private ledger(): Record<string, number> {
+    try {
+      const stat = lstatSync(this.usageFile)
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('unsafe')
+    } catch (e) {
+      if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return {}
+      throw new DecisionProviderError('decision_usage_unavailable')
+    }
+    try {
+      secureExistingPrivateFile(this.usageFile)
+      const value: unknown = JSON.parse(readFileSync(this.usageFile, 'utf8'))
+      if (!isRecord(value) || Object.entries(value).some(([day, count]) => !/^\d{4}-\d{2}-\d{2}$/.test(day) || typeof count !== 'number' || !Number.isFinite(count) || count < 0 || count > Number.MAX_SAFE_INTEGER)) throw new Error('invalid')
+      return value as Record<string, number>
+    } catch { throw new DecisionProviderError('decision_usage_unavailable') }
+  }
   private day(): string { return this.now().toISOString().slice(0, 10) }
   private record(tokens: number): void {
-    const ledger = this.ledger(); ledger[this.day()] = (Number(ledger[this.day()]) || 0) + tokens
-    mkdirSync(dirname(this.usageFile), { recursive: true, mode: 0o700 })
-    durableAtomicWriteFileSync(this.usageFile, JSON.stringify(ledger) + '\n', { mode: 0o600 })
+    try {
+      const ledger = this.ledger(); ledger[this.day()] = (ledger[this.day()] ?? 0) + tokens
+      mkdirSync(dirname(this.usageFile), { recursive: true, mode: 0o700 })
+      durableAtomicWriteFileSync(this.usageFile, JSON.stringify(ledger) + '\n', { mode: 0o600 })
+    } catch { throw new DecisionProviderError('decision_usage_unavailable') }
   }
   private fail(code: DecisionProviderError['code'], breaker = false): never {
     if (breaker && ++this.failures >= SUBQ_LIMITS.breakerFailures) { this.breakerUntil = this.now().getTime() + SUBQ_LIMITS.breakerMs; this.failures = 0 }

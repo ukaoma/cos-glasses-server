@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createDecisionClient, DecisionProviderError, selectedDecisionProvider, SUBQ_ENDPOINT, SUBQ_MODEL, SubqDecisionClient, validateDecisionAnswers } from './decision-provider.js'
@@ -83,6 +83,28 @@ it('reserves concurrent requests before send and refuses over-budget inputs loca
   finish(Response.json({ model: SUBQ_MODEL, answers: { c: answer }, usage: { input_tokens: 10 } })); await first
   const capped = client(undefined, 1)
   await expect(capped.client.ask('x', questions, 1)).rejects.toThrow('decision_cap_reached'); expect(capped.f).not.toHaveBeenCalled()
+})
+it('refuses corrupt or unsafe usage ledgers before egress instead of resetting the daily allowance', async () => {
+  for (const value of ['broken','null','[]','{"2026-10-14":-1}','{"2026-10-14":"123"}','{"unknown":123}','{"2026-10-14":1e309}']) {
+    const {client:c,f,path}=client();writeFileSync(path,value)
+    await expect(c.ask('synthetic',questions,1)).rejects.toThrow('decision_usage_unavailable')
+    expect(f).not.toHaveBeenCalled();expect(readFileSync(path,'utf8')).toBe(value)
+  }
+  for (const kind of ['dangling-link','existing-link','directory']) {
+    const {client:c,f,path}=client();const target=path+'.target'
+    if (kind==='directory') mkdirSync(path)
+    else { if(kind==='existing-link') writeFileSync(target,'{"2026-10-14":99999}');symlinkSync(target,path) }
+    await expect(c.ask('synthetic',questions,1)).rejects.toThrow('decision_usage_unavailable')
+    expect(f).not.toHaveBeenCalled()
+    if(kind==='existing-link') expect(readFileSync(target,'utf8')).toBe('{"2026-10-14":99999}')
+  }
+})
+it('accepts an empty usage ledger and preserves existing daily counts when recording', async () => {
+  const empty=client();writeFileSync(empty.path,'{}');await empty.client.ask('synthetic',questions,1)
+  expect(JSON.parse(readFileSync(empty.path,'utf8'))).toEqual({'2026-10-14':123})
+  const existing=client();writeFileSync(existing.path,'{"2026-10-13":50,"2026-10-14":12}')
+  await existing.client.ask('synthetic',questions,1)
+  expect(JSON.parse(readFileSync(existing.path,'utf8'))).toEqual({'2026-10-13':50,'2026-10-14':135})
 })
 it('propagates provider identity and abstention through existing workflows', async () => {
   const decision = { ask: vi.fn(async () => ({ provider: 'subq' as const, model: SUBQ_MODEL, inputTokens: 12, answers: {

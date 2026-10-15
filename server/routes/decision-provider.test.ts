@@ -69,6 +69,18 @@ it('stores atomic private settings, refuses symlinks/corruption and preserves th
   const target=join(dir,'target');writeFileSync(target,'keep');const link=join(dir,'link');symlinkSync(target,link)
   expect(()=>writeDecisionSettings(next,link)).toThrow();expect(()=>readDecisionSettings(link)).toThrow('decision_settings_unavailable');expect(readFileSync(target,'utf8')).toBe('keep')
 })
+it('defaults only for genuinely missing settings and fails closed for a dangling symlink over HTTP', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'decision-settings-missing-'));dirs.push(dir);const file=join(dir,'settings.json')
+  expect(resolveDecisionSelection('session',{},readDecisionSettings(file))).toEqual({provider:'jev',source:'default'})
+  const target=join(dir,'missing-target');symlinkSync(target,file)
+  expect(()=>readDecisionSettings(file)).toThrow('decision_settings_unavailable')
+  const s=await setup({read:()=>readDecisionSettings(file)})
+  for (const [method,body] of [['GET',undefined],['PATCH',{expectedRevision:decisionSettingsRevision(empty()),provider:'subq'}]] as const) {
+    const response=await s.call(method,body)
+    expect(response.status).toBe(503);expect(await response.json()).toMatchObject({error:{code:'decision_settings_unavailable'}})
+  }
+  expect(s.write).not.toHaveBeenCalled()
+})
 it('resolves saved per-workflow, workflow environment, saved global, global environment, then default', () => {
   const saved:DecisionSettings={schema:1,provider:'subq',overrides:{completion:'jev'}}
   expect(resolveDecisionSelection('completion',{COS_DECISION_PROVIDER_COMPLETION:'subq'},saved)).toEqual({provider:'jev',source:'config'})

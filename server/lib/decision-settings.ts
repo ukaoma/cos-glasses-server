@@ -1,6 +1,6 @@
 /** Private, durable classifier selection. No key storage or account/network changes. */
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
@@ -17,14 +17,22 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const provider = (v: unknown): v is DecisionProvider => v === 'jev' || v === 'subq'
 const settingsFile = () => dataPath('decision-provider.json')
 export function readDecisionSettings(file = settingsFile()): DecisionSettings {
+  // Only an absent directory entry means defaults. A dangling symlink or a file
+  // disappearing after this check must not silently change the selected provider.
+  try {
+    const stat = lstatSync(file)
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('unsafe')
+  } catch (e) {
+    if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return { schema: 1, overrides: {} }
+    throw new DecisionSettingsError('decision_settings_unavailable')
+  }
   try {
     secureExistingPrivateFile(file)
     const value = JSON.parse(readFileSync(file, 'utf8'))
     if (!record(value) || value.schema !== 1 || !record(value.overrides) || Object.keys(value).some(k => !['schema','provider','overrides'].includes(k)) ||
       (value.provider !== undefined && !provider(value.provider)) || Object.entries(value.overrides).some(([key,v]) => !DECISION_WORKFLOWS.includes(key as DecisionUseCase) || !provider(v))) throw new Error('invalid')
     return value as unknown as DecisionSettings
-  } catch (e) {
-    if (e && typeof e === 'object' && 'code' in e && e.code === 'ENOENT') return { schema: 1, overrides: {} }
+  } catch {
     throw new DecisionSettingsError('decision_settings_unavailable')
   }
 }

@@ -53,6 +53,7 @@ export const WORK_SEARCH_MESSAGES: Record<WorkSearchReason, string> = {
   decision_invalid_provider: 'Meaning search has an invalid decision provider setting. Word search still works.',
   decision_not_configured: 'The selected decision provider needs an API key. Word search still works.',
   decision_cap_reached: 'The selected decision provider has used today’s budget. Word search still works.',
+  decision_usage_unavailable: 'The selected decision provider’s usage accounting is unavailable. Word search still works.',
   decision_breaker_open: 'The selected decision provider is paused after repeated failures. Word search still works.',
   decision_key_rejected: 'The selected decision provider did not accept its key. Word search still works.',
   decision_credits_required: 'The selected decision provider needs available credits. Word search still works.',
