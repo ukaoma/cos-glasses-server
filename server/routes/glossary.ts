@@ -7,33 +7,42 @@
 //   PUT /api/transcription-glossary → same shape; PARTIAL (any omitted field is
 //     left unchanged). whisper_corrections is stored as a JSON STRING in the
 //     profile (legacy decoder contract), so the route encodes/decodes it here.
+//   POST /api/transcription-glossary/correction {heard, written, source} → learn
+//     ONE correction and its spelling (6.73.11, Fix a word), logged for undo.
+//   GET  /api/transcription-glossary/recent → { entries } newest first.
+//   POST /api/transcription-glossary/correction/undo {id} → revert that entry.
 
 import { Router } from 'express'
+import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { errMsg } from '../lib/utils.js'
+import { atomicWriteFileSync } from '../lib/atomic-fs.js'
+import { dataPath } from '../lib/data-dir.js'
 import {
   getVocabulary,
   getNegativeRules,
   getWhisperCorrections,
+  loadProfileObject,
   updateProfileFields,
 } from '../lib/profile.js'
+import {
+  MAX_TERMS,
+  MAX_TERM_LEN,
+  appendLog,
+  learnCorrection,
+  looksLikeUrlEmailPath,
+  parseLog,
+  undoCorrection,
+  type CorrectionLogEntry,
+  type GlossaryWords,
+} from '../lib/glossary-learn.js'
 import { resetDecoderCaches } from '../lib/whisper-local.js'
 import { resetVocabEchoCache } from '../lib/hallucination-filter.js'
 import { validateNegativeRule } from '../lib/hallucination-filter.js'
 
 export const glossaryRouter = Router()
 
-const MAX_TERMS = 500
-const MAX_TERM_LEN = 100
 const MAX_RULES = 500
-
-// Positive vocab is injected into the Whisper decoder prompt; URLs/emails/paths
-// there induce ".com"/handle hallucinations on quiet audio — reject them.
-function looksLikeUrlEmailPath(s: string): boolean {
-  return /(?:https?:\/\/|www\.)/i.test(s)
-    || /@[\w.-]+\.\w/.test(s)
-    || /\.(?:com|net|org|io|ai|co|gov|edu|app|dev)\b/i.test(s)
-    || /[/\\]/.test(s)
-}
 
 function readCorrections(): Record<string, string> {
   return getWhisperCorrections()
@@ -138,6 +147,96 @@ glossaryRouter.put('/transcription-glossary', async (req, res) => {
       resetVocabEchoCache()  // vocab matcher in hallucination-filter is profile-derived too
     }))
     return res.json(currentGlossary())
+  } catch (err) {
+    return res.status(500).json({ error: errMsg(err) })
+  }
+})
+
+// ── One-word learning (6.73.11) ──────────────────────────────────────────────
+// The recent-corrections log lives in the data dir (private, atomic, bounded);
+// the dictionary itself stays in .cos-profile.json. Both writes run inside the
+// same putChain as PUT, so a learn can never interleave with a whole-map edit.
+
+function correctionsLogPath(): string {
+  return dataPath('transcription-corrections.json')
+}
+
+function readCorrectionsLog(): CorrectionLogEntry[] {
+  try {
+    return parseLog(JSON.parse(readFileSync(correctionsLogPath(), 'utf-8')))
+  } catch {
+    return []
+  }
+}
+
+function writeCorrectionsLog(entries: CorrectionLogEntry[]): void {
+  atomicWriteFileSync(correctionsLogPath(), JSON.stringify({ version: 1, entries }, null, 2), { mode: 0o600 })
+}
+
+/** The raw stored vocabulary (strings only), so a learn appends without rewriting placeholder handling. */
+function storedWords(): GlossaryWords {
+  const raw = loadProfileObject().vocabulary
+  const vocabulary = Array.isArray(raw) ? raw.filter((term): term is string => typeof term === 'string') : []
+  return { vocabulary, corrections: readCorrections() }
+}
+
+/** Log first, then the profile; a failed profile write puts the old log back. */
+function commitWords(words: GlossaryWords, nextLog: CorrectionLogEntry[], previousLog: CorrectionLogEntry[]): void {
+  writeCorrectionsLog(nextLog)
+  try {
+    updateProfileFields({ vocabulary: words.vocabulary, whisper_corrections: JSON.stringify(words.corrections) })
+  } catch (err) {
+    try { writeCorrectionsLog(previousLog) } catch { /* the profile is unchanged; a stale log row only refuses its own undo */ }
+    throw err
+  }
+  resetDecoderCaches()
+  resetVocabEchoCache()
+}
+
+type Outcome = { status: number; body: unknown }
+
+function serialized(work: () => Outcome): Promise<Outcome> {
+  const run = putChain.catch(() => {}).then(work)
+  putChain = run
+  return run
+}
+
+glossaryRouter.post('/transcription-glossary/correction', async (req, res) => {
+  const body = req.body ?? {}
+  try {
+    const outcome = await serialized(() => {
+      const previousLog = readCorrectionsLog()
+      const learned = learnCorrection(storedWords(), body, { id: randomUUID(), at: new Date().toISOString() })
+      if (!learned.ok) return { status: learned.status, body: { error: learned.error } }
+      if (learned.unchanged) return { status: 200, body: { unchanged: true, entry: null, glossary: currentGlossary() } }
+      commitWords(learned.words, appendLog(previousLog, learned.entry), previousLog)
+      return { status: 200, body: { unchanged: false, entry: learned.entry, glossary: currentGlossary() } }
+    })
+    return res.status(outcome.status).json(outcome.body)
+  } catch (err) {
+    return res.status(500).json({ error: errMsg(err) })
+  }
+})
+
+glossaryRouter.get('/transcription-glossary/recent', (_req, res) => {
+  try {
+    res.json({ entries: readCorrectionsLog() })
+  } catch (err) {
+    res.status(500).json({ error: errMsg(err) })
+  }
+})
+
+glossaryRouter.post('/transcription-glossary/correction/undo', async (req, res) => {
+  const id = (req.body ?? {}).id
+  try {
+    const outcome = await serialized(() => {
+      const previousLog = readCorrectionsLog()
+      const undone = undoCorrection(storedWords(), previousLog, id)
+      if (!undone.ok) return { status: undone.status, body: { error: undone.error } }
+      commitWords(undone.words, undone.log, previousLog)
+      return { status: 200, body: { undone: undone.entry, glossary: currentGlossary() } }
+    })
+    return res.status(outcome.status).json(outcome.body)
   } catch (err) {
     return res.status(500).json({ error: errMsg(err) })
   }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs'
 import { request } from 'node:http'
 import type { Server } from 'node:http'
 import { join } from 'node:path'
@@ -46,6 +46,7 @@ describe('glossary route', () => {
       whisper_corrections: '{"Myles": "Miles"}',
     }))
     process.env.COS_PROFILE_PATH = profilePath
+    process.env.COS_DATA_DIR = join(tmpDir, 'data')
     vi.resetModules()
     resetDecoderCachesSpy = vi.fn()
     vi.doMock('../lib/whisper-local.js', () => ({ resetDecoderCaches: resetDecoderCachesSpy }))
@@ -70,6 +71,7 @@ describe('glossary route', () => {
     vi.doUnmock('../lib/whisper-local.js')
     vi.resetModules()
     delete process.env.COS_PROFILE_PATH
+    delete process.env.COS_DATA_DIR
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -123,5 +125,75 @@ describe('glossary route', () => {
     const res = await httpRequest('PUT', '/api/transcription-glossary', { negative_rules: ['whole:subscribe now', 'replace:POS Nation=>POSNation'] })
     expect(res.status).toBe(200)
     expect(res.json.negative_rules).toEqual(['whole:subscribe now', 'replace:POS Nation=>POSNation'])
+  })
+
+  // ── 6.73.11: Fix a word ──────────────────────────────────────────────────────
+  it('POST correction learns one word: correction, vocabulary, log, cache bust', async () => {
+    const res = await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Whisper', written: 'Wispr', source: 'dictation' })
+    expect(res.status).toBe(200)
+    expect(res.json.unchanged).toBe(false)
+    expect(res.json.entry).toMatchObject({ heard: 'Whisper', written: 'Wispr', source: 'dictation', addedVocabulary: true })
+    expect(res.json.glossary.corrections).toEqual({ Myles: 'Miles', Whisper: 'Wispr' })
+    expect(res.json.glossary.vocabulary).toEqual(['Quilt Software', 'Wispr'])
+    const onDisk = JSON.parse(readFileSync(profilePath, 'utf-8'))
+    expect(JSON.parse(onDisk.whisper_corrections)).toEqual({ Myles: 'Miles', Whisper: 'Wispr' })
+    expect(onDisk.owner_name).toBe('Miles') // untouched key preserved
+    expect(resetDecoderCachesSpy, 'a learned word must reach the decoder without a restart').toHaveBeenCalled()
+    const logPath = join(tmpDir, 'data', 'transcription-corrections.json')
+    expect(statSync(logPath).mode & 0o777, 'the corrections log is private').toBe(0o600)
+    const recent = await httpRequest('GET', '/api/transcription-glossary/recent')
+    expect(recent.json.entries.map((e: any) => e.id)).toEqual([res.json.entry.id])
+  })
+
+  it('GET recent is newest first', async () => {
+    const a = await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Carrot IQ', written: 'CaratIQ', source: 'meeting' })
+    const b = await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Santi', written: 'Sante HQ', source: 'g2' })
+    const recent = await httpRequest('GET', '/api/transcription-glossary/recent')
+    expect(recent.json.entries.map((e: any) => e.id)).toEqual([b.json.entry.id, a.json.entry.id])
+  })
+
+  it('concurrent learns all land (writes share the glossary chain)', async () => {
+    const results = await Promise.all([
+      httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'one', written: 'One', source: 'manual' }),
+      httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'two', written: 'Two', source: 'manual' }),
+      httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'three', written: 'Three', source: 'manual' }),
+    ])
+    expect(results.map(r => r.status)).toEqual([200, 200, 200])
+    const get = await httpRequest('GET', '/api/transcription-glossary')
+    expect(get.json.corrections).toEqual({ Myles: 'Miles', one: 'One', two: 'Two', three: 'Three' })
+    const recent = await httpRequest('GET', '/api/transcription-glossary/recent')
+    expect(recent.json.entries).toHaveLength(3)
+  })
+
+  it('POST correction refuses bad input without writing', async () => {
+    const before = readFileSync(profilePath, 'utf-8')
+    for (const body of [{ heard: 'x', written: 'gotcos.com', source: 'manual' }, { heard: 'x', written: 'y', source: 'nope' }, { heard: 'x' }]) {
+      const res = await httpRequest('POST', '/api/transcription-glossary/correction', body)
+      expect(res.status).toBe(400)
+    }
+    expect(readFileSync(profilePath, 'utf-8')).toBe(before)
+    const recent = await httpRequest('GET', '/api/transcription-glossary/recent')
+    expect(recent.json.entries).toEqual([])
+  })
+
+  it('undo reverts exactly that entry, then refuses a second time', async () => {
+    const learned = await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Whisper', written: 'Wispr', source: 'dictation' })
+    const undo = await httpRequest('POST', '/api/transcription-glossary/correction/undo', { id: learned.json.entry.id })
+    expect(undo.status).toBe(200)
+    expect(undo.json.glossary.corrections).toEqual({ Myles: 'Miles' })
+    expect(undo.json.glossary.vocabulary).toEqual(['Quilt Software'])
+    const recent = await httpRequest('GET', '/api/transcription-glossary/recent')
+    expect(recent.json.entries).toEqual([])
+    const again = await httpRequest('POST', '/api/transcription-glossary/correction/undo', { id: learned.json.entry.id })
+    expect(again.status).toBe(404)
+  })
+
+  it('undo refuses after a hand edit replaced the word', async () => {
+    const learned = await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Whisper', written: 'Wispr', source: 'dictation' })
+    await httpRequest('PUT', '/api/transcription-glossary', { corrections: { Whisper: 'Whispr' } })
+    const undo = await httpRequest('POST', '/api/transcription-glossary/correction/undo', { id: learned.json.entry.id })
+    expect(undo.status).toBe(409)
+    const get = await httpRequest('GET', '/api/transcription-glossary')
+    expect(get.json.corrections).toEqual({ Whisper: 'Whispr' })
   })
 })
