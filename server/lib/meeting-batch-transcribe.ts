@@ -20,6 +20,8 @@ import { measureSpeechSeconds } from './vad-silero.js'
 import { batchTimestampsEnabled } from './whisper-batch-timing.js'
 import { readSttSettings, recordLastSttJob, type FrontEndId, type HqId, type SecondOpinionId } from './stt-settings.js'
 import { currentEffectiveStt } from './stt-runtime.js'
+import { MAC_CAPTURE_ID } from './mac-recording.js'
+import { MacParakeetUnavailableError } from './mac-recording-asr.js'
 import { transcribeParakeet, type ParakeetResult, type ParakeetRunOptions } from './parakeet.js'
 import { isDeletionProneEngine, resolveHypotheses, RESOLVER_VERSION, type Hypothesis } from './stt-resolver.js'
 import { getVocabulary } from './profile.js'
@@ -450,9 +452,15 @@ export interface HqJobPlan {
   secondOpinion: SecondOpinionId
   resolver: boolean
   frontEnd: FrontEndId
+  /** Mac canonical Parakeet must never silently substitute Whisper. */
+  strictPrimary?: true
 }
 
-export function currentHqJobPlan(): HqJobPlan {
+export function currentHqJobPlan(sessionId?: string): HqJobPlan {
+  const selected = readSttSettings()
+  if (sessionId && MAC_CAPTURE_ID.test(sessionId) && selected.hq === 'parakeet-ultra') {
+    return { engine: selected.hq, secondOpinion: selected.secondOpinion, resolver: selected.resolver, frontEnd: selected.frontEnd, strictPrimary: true }
+  }
   const eff = currentEffectiveStt()
   return { engine: eff.hq.engine, secondOpinion: eff.secondOpinion.engine, resolver: eff.resolver, frontEnd: eff.frontEnd }
 }
@@ -668,6 +676,7 @@ async function decodeHqWindow(
     try {
       primary = await parakeetGuarded(job, () => decodeParakeetWindow(deps, input, parakeetTimeout(job), 'parakeet-ultra', true))
     } catch (error) {
+      if (plan.strictPrimary) throw new MacParakeetUnavailableError(error)
       fallbackReason = `parakeet_failed: ${errorReason(error)}`
       console.warn(`[meeting-batch] Parakeet HQ failed for ${segment.startChunkIdx}-${segment.endChunkIdx}; using Large-v3: ${errorReason(error)}`)
       const w = await decodeWhisperWindow(deps, input, previousText, 'large-v3', segment, audioDir)
@@ -766,6 +775,7 @@ export async function transcribeSegments(
   plan: HqJobPlan,
   deps: HqDecodeDeps = defaultHqDeps,
 ): Promise<BatchResult[]> {
+  if (expectedSessionId && MAC_CAPTURE_ID.test(expectedSessionId) && plan.engine === 'parakeet-ultra') plan = { ...plan, strictPrimary: true }
   const results: BatchResult[] = []
   const meetingId = basename(audioDir)
   const job: JobState = { parakeetRan: false, parakeetFailures: 0, parakeetStopped: false }
@@ -809,6 +819,9 @@ export async function transcribeSegments(
         meetingId,
       })
     } catch (error) {
+      // One failed strict Mac window invalidates the HQ candidate; preserve the
+      // already canonical Parakeet chunks, rather than accepting partial text.
+      if (plan.strictPrimary) throw error
       console.error(
         `[meeting-batch] Segment ${segment.startChunkIdx}-${segment.endChunkIdx} failed: `
         + `${error instanceof Error ? error.message : String(error)}`,
@@ -831,9 +844,10 @@ export function recoveryHqJob(
   segments: BatchSegment[],
   entries: IndexedTranscriptChunk[],
   deps: HqDecodeDeps = defaultHqDeps,
+  sessionId?: string,
 ): { plan: HqJobPlan; run: () => Promise<BatchResult[]> } {
-  const plan = currentHqJobPlan()
-  return { plan, run: () => transcribeSegments(quarantineDir, segments, entries, undefined, plan, deps) }
+  const plan = currentHqJobPlan(sessionId)
+  return { plan, run: () => transcribeSegments(quarantineDir, segments, entries, sessionId, plan, deps) }
 }
 
 export function summarizeStt(plan: HqJobPlan, results: readonly BatchResult[], segmentsPlanned = results.length): BatchSttSummary {
@@ -1229,7 +1243,7 @@ export function runMeetingBatchPipeline(
   lease.unref()
   // Frozen at SAVE time: a settings change applies to the next saved meeting,
   // never to one already queued behind another HQ job.
-  const plan = currentHqJobPlan()
+  const plan = currentHqJobPlan(sessionId)
   const job = batchQueueTail.then(() => runMeetingBatchPipelineNow(
     audioDir,
     entries,
@@ -1304,6 +1318,7 @@ async function runMeetingBatchPipelineNow(
       outcome: 'failed',
       reason: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
     })
+    if (plan.strictPrimary) throw error
     return { transcriptionQuality: 'streaming' }
   }
 }

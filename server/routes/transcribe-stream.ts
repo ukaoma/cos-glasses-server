@@ -1,3 +1,4 @@
+import { MacParakeetUnavailableError, transcribeMacParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
 import { MAC_AUDIO, MAC_CAPTURE_ID, persistMacChunkReceipt, macError, registerMacRecording, requireMacRecording, readMacRecording, validateMacWav } from '../lib/mac-recording.js'
 import { AUTO_ENROLL_THRESHOLD } from '../lib/voiceprint-floor.js'
@@ -279,7 +280,7 @@ export interface TranscriptChunk {
   /** Capture-time policy survives batch and final passes; absent means legacy Standard. */
   speakerPolicy?: SpeakerMode
   words?: WhisperWord[] // word-level timestamps from DTW alignment
-  asrProvider?: 'server-whisper' | 'iphone-whisperkit-beta'
+  asrProvider?: 'server-whisper' | 'server-parakeet' | 'iphone-whisperkit-beta'
   backend?: string
   model?: string
   mode?: string
@@ -368,6 +369,8 @@ interface EmptyTranscriptCompletion {
   elapsed: number
   backend?: string
   asrProvider?: string
+  model?: string
+  latencyMs?: number
   fallbackReason?: string
   audioSha256?: string
   canonical: false
@@ -384,6 +387,8 @@ interface StreamChunkCompletionResponse {
   canonical: boolean
   backend?: string
   asrProvider?: string
+  model?: string
+  latencyMs?: number
   fallbackReason?: string
   /** 6.61.0, additive: the chunk's speaker turns in time order. Their texts
    *  joined with one space equal `text`; `speaker` stays the dominant name. */
@@ -1523,7 +1528,11 @@ export function getSessionChunkEntries(sessionId: string): IndexedTranscriptChun
           elapsed: empty.elapsed,
           similarity: 0,
           backend: empty.backend,
-          asrProvider: empty.asrProvider === 'iphone-whisperkit-beta'
+          ...(empty.model ? { model: empty.model } : {}),
+          ...(empty.latencyMs !== undefined ? { latencyMs: empty.latencyMs } : {}),
+          asrProvider: empty.asrProvider === 'server-parakeet'
+            ? 'server-parakeet'
+            : empty.asrProvider === 'iphone-whisperkit-beta'
             ? 'iphone-whisperkit-beta'
             : empty.asrProvider === 'server-whisper'
               ? 'server-whisper'
@@ -1550,6 +1559,9 @@ export function getSessionAsrCompletedIndices(sessionId: string): number[] {
 }
 
 function scheduleSessionProgressiveHq(sessionId: string): void {
+  // Progressive checkpoints are Whisper-only and may not bypass a Mac's
+  // explicit Parakeet choice, even if the separate HQ canary is enabled.
+  if (MAC_CAPTURE_ID.test(sessionId) && readSttSettings().hq === 'parakeet-ultra') return
   // Preserve the default-off contract at the route boundary. In addition to
   // avoiding any cache work, this keeps legacy/local-first transcription
   // independent of the progressive HQ capability surface when the canary is
@@ -2019,6 +2031,8 @@ function canonicalChunkResponse(
     canonical: true,
     backend: existing.backend,
     asrProvider: existing.asrProvider,
+    ...(existing.model ? { model: existing.model } : {}),
+    ...(existing.latencyMs !== undefined ? { latencyMs: existing.latencyMs } : {}),
     fallbackReason: existing.fallbackReason,
     ...(existing.segments?.length ? { segments: existing.segments } : {}),
   }
@@ -2255,7 +2269,7 @@ async function processStreamChunk(opts: {
   let rawText = ''
   let words: WhisperWord[] | undefined
   let backend = 'candidate'
-  let asrProvider: 'server-whisper' | 'iphone-whisperkit-beta' = 'server-whisper'
+  let asrProvider: 'server-whisper' | 'server-parakeet' | 'iphone-whisperkit-beta' = 'server-whisper'
   let model: string | undefined
   let mode: string | undefined
   let latencyMs: number | undefined
@@ -2268,6 +2282,16 @@ async function processStreamChunk(opts: {
     model = candidate.model
     mode = candidate.mode
     latencyMs = candidate.latencyMs
+  } else if (MAC_CAPTURE_ID.test(sessionId) && stt.hq === 'parakeet-ultra') {
+    // Use the stored choice directly. effectiveStt/preview intentionally fall
+    // back when unavailable, which is not an acceptable canonical Mac commit.
+    const result = await transcribeMacParakeet(whisperAudio, quiet.speechSec)
+    rawText = result.text
+    words = result.words
+    backend = result.backend
+    asrProvider = result.asrProvider
+    model = result.model
+    latencyMs = result.latencyMs
   } else {
     const t0 = performance.now()
     const result = await transcribeWithServerWhisper(audioBuffer, whisperAudio, whisperContext, isQuiet)
@@ -2348,6 +2372,8 @@ async function processStreamChunk(opts: {
       elapsed,
       backend,
       asrProvider,
+      ...(model ? { model } : {}),
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
       fallbackReason: sanitized.fallbackReason || fallbackReason,
       audioSha256,
       canonical: false,
@@ -2423,6 +2449,9 @@ async function processStreamChunk(opts: {
 }
 
 function sendStreamError(res: { status: (code: number) => { json: (body: unknown) => unknown } }, err: unknown): unknown {
+  if (err instanceof MacParakeetUnavailableError) {
+    return res.status(err.status).json({ error: err.message, reason: err.reason, retryable: true, model: err.model })
+  }
   if (err instanceof TranscriptionUnavailableError) {
     console.warn(`[transcribe-stream] ${err.message}`)
     return res.status(err.status).json({

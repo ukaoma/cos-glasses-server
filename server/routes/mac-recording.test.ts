@@ -12,6 +12,7 @@ const id='mac_abcdef01-2345-6789-abcd-0123456789ab'
 beforeEach(async()=>{
  root=mkdtempSync(join(tmpdir(),'cos-mac-route-')); process.env.COS_DATA_DIR=root; vi.resetModules(); enroll.mockClear(); identify.mockClear()
  vi.doMock('../lib/server-instance-id.js',()=>({getServerInstanceId:()=> 'server-mac'}))
+ vi.doMock('../lib/parakeet.js',async original=>({...await original<typeof import('../lib/parakeet.js')>(),transcribeParakeet:vi.fn(async()=>({model:'parakeet-ultra',text:'Parakeet heard the selected local engine clearly.',words:[{word:'Parakeet',start:0,end:0.4}],processingSec:0.1,wallMs:120}))}))
  vi.doMock('../lib/whisper-local.js',()=>({transcribeLocal:vi.fn(async()=>({text:'We reviewed the launch plan and agreed on a decision.',backend:'server'})),applyCorrections:(s:string)=>s}))
  vi.doMock('../lib/speaker-embeddings.js',async original=>({...await original<typeof import('../lib/speaker-embeddings.js')>(),AUTO_ENROLL_CANDIDATE_SIMILARITY:0.72,AUTO_ENROLL_THRESHOLD:0.88,identifySpeaker:identify,isEmbeddingAvailable:()=>true,autoEnroll:enroll,getEmbeddingCount:()=>3}))
  vi.doMock('../lib/profile.js',()=>({loadProfileObject:()=>({}),getDomainKeywords:()=>({}),getVocabulary:()=>[],getOwnerName:()=> 'COS',getOwnerSpeakerLabel:()=> 'MU',getWhisperCorrections:()=>''}))
@@ -25,7 +26,7 @@ beforeEach(async()=>{
 })
 afterEach(async()=>{
  await Promise.allSettled(background.splice(0)); await new Promise<void>(resolve=>server?.listening ? server.close(()=>resolve()) : resolve()); vi.resetModules()
- for(const mod of ['server-instance-id','whisper-local','speaker-embeddings','profile','vad-silero','stt-live','nemotron-live','meeting-summary-persistence']) vi.doUnmock('../lib/'+mod+'.js')
+ for(const mod of ['parakeet','server-instance-id','whisper-local','speaker-embeddings','profile','vad-silero','stt-live','nemotron-live','meeting-summary-persistence']) vi.doUnmock('../lib/'+mod+'.js')
  delete process.env.COS_DATA_DIR; rmSync(root,{recursive:true,force:true})
 })
 async function call(path:string,body?:unknown,pin='server-mac'){
@@ -92,4 +93,55 @@ it('restores admitted Mac source, exact timing and strict policy from durable ac
  expect(restarted.getSessionChunks(id)?.[0]).toMatchObject({elapsed:500,audioDurationMs:6000,speaker:'Ext',speakerPolicy:'high-confidence'})
  expect(()=>restarted.assertMacCaptureComplete(id,1)).not.toThrow()
  restarted.deleteSession(id)
+})
+
+async function selectParakeet() {
+ const stt=await import('../lib/stt-settings.js')
+ stt.writeSttSettings({...stt.readSttSettings(),preview:'parakeet',hq:'parakeet-ultra',secondOpinion:'off',resolver:false})
+}
+it('uses selected Parakeet for canonical Mac chunks with the candidate flags disabled and truthful replay provenance',async()=>{
+ const oldIos=process.env.COS_IOS_ASR_CANDIDATES,oldCues=process.env.COS_LIVE_CUES
+ process.env.COS_IOS_ASR_CANDIDATES='0';process.env.COS_LIVE_CUES='0'
+ try {
+  await selectParakeet(); await start()
+  const path='/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wav=wavOf(6,()=>400)
+  const done=await call(path,wav)
+  expect(done.status).toBe(200)
+  expect(done.json).toMatchObject({asrCompleted:true,canonical:true,asrProvider:'server-parakeet',model:'parakeet-ultra',backend:'fluidaudio-coreml',latencyMs:120})
+  expect((await call(path,wav)).json).toEqual(done.json)
+  const parakeet=await import('../lib/parakeet.js'),whisper=await import('../lib/whisper-local.js')
+  expect(parakeet.transcribeParakeet).toHaveBeenCalledTimes(1)
+  expect(parakeet.transcribeParakeet).toHaveBeenCalledWith(expect.any(Buffer),{model:'parakeet-ultra',lane:'interactive',timeoutMs:30000})
+  expect(whisper.transcribeLocal).not.toHaveBeenCalled()
+  expect(stream.getSessionChunks(id)?.[0]).toMatchObject({model:'parakeet-ultra',asrProvider:'server-parakeet',backend:'fluidaudio-coreml'})
+  const saved=await call('/meeting/save',{sessionId:id,expectedChunkCount:1,domain:'personal'})
+  expect(saved.status).toBe(200);await Promise.allSettled(background.splice(0))
+  const sidecar=JSON.parse(readFileSync(join(root,saved.json.filepath.replace(/\.md$/,'.g2-chunks.json')),'utf8'))
+  expect(sidecar.chunks[0]).toMatchObject({model:'parakeet-ultra',asrProvider:'server-parakeet',backend:'fluidaudio-coreml'})
+ } finally {
+  if(oldIos===undefined)delete process.env.COS_IOS_ASR_CANDIDATES;else process.env.COS_IOS_ASR_CANDIDATES=oldIos
+  if(oldCues===undefined)delete process.env.COS_LIVE_CUES;else process.env.COS_LIVE_CUES=oldCues
+ }
+})
+it.each(['not_installed','sandbox_unavailable','busy','timeout','cli_failed','bad_output'] as const)('retains raw Mac WAV and rejects canonical save on selected Parakeet %s without a Whisper fallback',async(reason)=>{
+ await selectParakeet();await start()
+ const parakeet=await import('../lib/parakeet.js'),whisper=await import('../lib/whisper-local.js')
+ vi.mocked(parakeet.transcribeParakeet).mockRejectedValueOnce(new parakeet.ParakeetError(reason,'fixture '+reason))
+ const path='/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wav=wavOf(6,()=>400)
+ const failed=await call(path,wav)
+ expect(failed.status).toBe(503)
+ expect(failed.json).toMatchObject({reason:'mac_parakeet_'+reason,retryable:true,model:'parakeet-ultra'})
+ expect(readFileSync(join(root,'session-audio',id,'chunk_0000.wav'))).toEqual(wav)
+ expect(stream.getSessionChunks(id)??[]).toHaveLength(0)
+ expect((await call('/meeting/save',{sessionId:id,expectedChunkCount:1})).json.reason).toBe('mac_capture_incomplete')
+ expect(whisper.transcribeLocal).not.toHaveBeenCalled()
+ expect((await call(path,wav)).json).toMatchObject({canonical:true,asrProvider:'server-parakeet'})
+ expect(whisper.transcribeLocal).not.toHaveBeenCalled()
+})
+it('keeps the existing G2 Whisper canonical chunk path when Parakeet HQ is selected',async()=>{
+ await selectParakeet()
+ const done=await call('/transcribe-stream?sessionId=g2_engine_regression&chunkIndex=0&elapsed=6000',wavOf(6,()=>400))
+ expect(done.status).toBe(200)
+ const parakeet=await import('../lib/parakeet.js'),whisper=await import('../lib/whisper-local.js')
+ expect(parakeet.transcribeParakeet).not.toHaveBeenCalled();expect(whisper.transcribeLocal).toHaveBeenCalledTimes(1)
 })

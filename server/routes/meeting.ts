@@ -2243,7 +2243,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // decoder serialization — that lives in the queue tail. Chain onto it,
       // or two back-to-back recoveries plus a live post-meeting batch would
       // run parallel 16-thread large-v3 decoders on the user's Mac.
-      const hqJob = recoveryHqJob(quarantineDir, segments, entries)
+      const hqJob = recoveryHqJob(quarantineDir, segments, entries, undefined, sessionId)
       const plan = hqJob.plan
       const results = await enqueueSerializedHqWork(hqJob.run)
       // Batch whisper over a dead session has no streaming baseline to

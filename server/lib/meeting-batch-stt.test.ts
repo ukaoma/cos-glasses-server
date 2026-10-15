@@ -306,3 +306,43 @@ describe('what the resolver saves', () => {
     }
   })
 })
+
+describe('strict Mac Parakeet saved HQ',()=>{
+ const macId='mac_abcdef01-2345-6789-abcd-0123456789ab'
+ it('preserves a selected but unavailable Parakeet HQ plan for Mac; G2 retains its existing fallback',async()=>{
+  const stt=await import('./stt-settings.js')
+  stt.writeSttSettings({...stt.readSttSettings(),hq:'parakeet-ultra',secondOpinion:'off',resolver:false})
+  expect(M.currentHqJobPlan(macId)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off'})
+  expect(M.currentHqJobPlan('g2_legacy').engine).toBe('large-v3')
+  const {d}=deps()
+  expect(M.recoveryHqJob(dir,[segment],entries,d,macId).plan).toMatchObject({engine:'parakeet-ultra',strictPrimary:true})
+ })
+ it('rejects the whole Mac HQ candidate on primary failure instead of replacing canonical Parakeet with Whisper',async()=>{
+  const {d}=deps({parakeet:vi.fn(async()=>{throw new Error('selected Parakeet unavailable')})})
+  await expect(M.transcribeSegments(dir,[segment],entries,macId,plan({engine:'parakeet-ultra',secondOpinion:'off'}),d)).rejects.toThrow('audio is preserved for retry')
+  expect(d.whisper).not.toHaveBeenCalled()
+ })
+ it('does not accept a partial Mac HQ candidate when a later Parakeet window fails',async()=>{
+  const {d}=deps();vi.mocked(d.parakeet).mockImplementationOnce(async(_wav,opts)=>({model:opts.model,text:'we should ship',words:words('we should ship'),processingSec:0.1,wallMs:100})).mockRejectedValueOnce(new Error('busy'))
+  await expect(M.transcribeSegments(dir,[segment,{...segment,startChunkIdx:1}],entries,macId,plan({engine:'parakeet-ultra',secondOpinion:'off'}),d)).rejects.toThrow()
+  expect(d.whisper).not.toHaveBeenCalled()
+ })
+})
+
+it('surfaces selected Mac HQ failure to durable finalization while preserving the canonical chunk evidence and WAVs',async()=>{
+ vi.resetModules()
+ const {ParakeetError}=await import('./parakeet.js')
+ const whisper=vi.fn(),parakeet=vi.fn(async()=>{throw new ParakeetError('busy','batch occupied')})
+ vi.doMock('./parakeet.js',async original=>({...await original<typeof import('./parakeet.js')>(),transcribeParakeet:parakeet}))
+ vi.doMock('./whisper-local.js',async original=>({...await original<typeof import('./whisper-local.js')>(),transcribeHighQuality:whisper}))
+ vi.doMock('./stt-live.js',async original=>({...await original<typeof import('./stt-live.js')>(),asrFrontEnd:async(b:Buffer)=>b}))
+ try {
+  const stt=await import('./stt-settings.js');stt.writeSttSettings({...stt.readSttSettings(),hq:'parakeet-ultra',secondOpinion:'off',resolver:false})
+  const MM=await import('./meeting-batch-transcribe.js')
+  const before=JSON.stringify(entries)
+  await expect(MM.runMeetingBatchPipeline(dir,entries,3,'mac_abcdef01-2345-6789-abcd-0123456789ab')).rejects.toMatchObject({reason:'mac_parakeet_busy',retryable:true})
+  expect(JSON.stringify(entries)).toBe(before);expect(whisper).not.toHaveBeenCalled()
+  const fs=await import('node:fs');expect(fs.existsSync(join(dir,'chunk_0000.wav'))).toBe(true)
+  expect(JSON.parse(fs.readFileSync(join(dir,'_batch_terminal.json'),'utf8'))).toMatchObject({outcome:'failed',reason:expect.stringContaining('audio is preserved for retry')})
+ } finally {vi.doUnmock('./parakeet.js');vi.doUnmock('./whisper-local.js');vi.doUnmock('./stt-live.js')}
+})
