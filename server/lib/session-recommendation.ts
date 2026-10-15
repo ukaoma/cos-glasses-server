@@ -85,7 +85,9 @@ export class SessionRecommender {
   async recommend(input: RecommendationInput): Promise<Recommendation> {
     const sessions = input.sessions
     if (!sessions.length) return { provider: 'none', reason: 'no_sessions' }
-    const key = createHash('sha256').update(JSON.stringify(input)).digest('hex')
+    let client: DecisionClient
+    try { client = this.jev.snapshot?.() ?? this.jev } catch (e) { if (isDecisionFailure(e)) return { provider: 'none', reason: e.code }; throw e }
+    const key = createHash('sha256').update((client.provider ?? 'jev') + '\0' + JSON.stringify(input)).digest('hex')
     const hit = this.cache.get(key)
     if (hit && this.now() - hit.at < RECOMMENDATION_LIMITS.cacheMs) return { ...hit.value, cached: true }
     const state = { task: { text: clip(input.task.text, 1200), domain: input.task.domain, meetings: input.task.meetings.map(t => clip(t, 160)).slice(0, 8) },
@@ -96,7 +98,7 @@ export class SessionRecommender {
       exact: { type: 'choice', criteria: { ...options, none: 'No listed session is doing this task.' }, instructions: EXACT },
     }
     try {
-      const reply = await this.jev.ask(state, questions, estimateJevTokens({ state, questions }))
+      const reply = await client.ask(state, questions, estimateJevTokens({ state, questions }))
       const best = reply.answers.best?.probabilities, exact = reply.answers.exact?.probabilities
       if (!best || !exact) throw new JevError('jev_bad_answer')
       const value = { provider: reply.provider ?? 'jev' as const, model: reply.model ?? 'jev', cached: false, ...decide(best, exact, sessions) }

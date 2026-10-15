@@ -4,24 +4,52 @@ Jev remains the default. SubQ Snap is an explicit opt-in for the server's three 
 
 ## Configuration and rollback
 
-The server reads these settings when creating each workflow client. Restart the server after intentionally changing them. No configuration was changed during this evaluation.
+The authenticated HTTP settings contract applies changes on the next workflow request. Each request snapshots its provider, and caches include provider identity. Environment changes still require a restart. No live configuration was changed during this evaluation.
 
 ```dotenv
 # Default when absent. Explicit values are jev or subq; auto is unsupported.
 COS_DECISION_PROVIDER=jev
 # Optional overrides: SESSION, COMPLETION, SEARCH
 COS_DECISION_PROVIDER_SEARCH=subq
-# SubQ key is environment-only, never copied from the TypeSafe key or saved by the Jev Settings UI.
+# Optional environment key. A separately validated saved SubQ key takes precedence.
 SUBQ_API_KEY=<provide-through-private-runtime-environment>
 # Each SubQ workflow has its own UTC daily budget and private usage ledger.
 COS_SUBQ_DAILY_TOKENS=1000000
 ```
 
-Remove the override or select `jev` and restart to roll back. The global setting applies only to these server decision workflows, not the COS Python interfaces below. Existing Jev key management, ledgers, budgets and `COS_JEV_SEARCH=0` search-off control retain their meanings. Jev key status describes the Jev key only. There is no new Control settings UI in this branch. Treat this as a backend candidate until the installed client is verified to accept provider `subq` in session and completion advice; older clients may recognize only `jev`.
+Select `jev` through the HTTP contract to roll back immediately. For environment-only settings, remove the override or select `jev` and restart. The global setting applies only to these server decision workflows, not the COS Python interfaces below. Existing Jev key management, ledgers, budgets and `COS_JEV_SEARCH=0` search-off control retain their meanings. Jev key status describes the Jev key only. Control must accept provider `jev` or `subq` in session and completion advice; older clients may recognize only `jev`. Client integration and installation are separate from this server implementation.
 
-Explicit provider failure never sends the same input to another provider. An unknown provider value fails client construction. SubQ authentication, credits, quota, request rejection, invalid answer, cancellation, timeout and breaker failures produce structured reasons. Session and completion advice return `provider: none`; search returns `available: false` and keeps word search available. There are no retries or automatic fallback mode. Successful session/completion advice identifies `provider: subq`; existing thresholds and abstention choices stay in place.
+Explicit provider failure never sends the same input to another provider. An unknown provider value fails selection before a request or cache lookup. SubQ authentication, credits, quota, request rejection, invalid answer, cancellation, timeout and breaker failures produce structured reasons. Session and completion advice return `provider: none`; search returns `available: false` and keeps word search available. There are no retries or automatic fallback mode. Successful session/completion/search advice identifies `provider: jev` or `provider: subq`; an empty search identifies `provider: none`; existing thresholds and abstention choices stay in place.
 
 The SubQ client uses only the hardcoded official HTTPS endpoint with redirects refused, a 20-second timeout, a three-failure/hour breaker for transport/schema failures, and separate private token ledgers. It reserves a conservative UTF-8 body-byte estimate before concurrent requests can pass the budget, then records reported input tokens. Uncertain transport outcomes and unreadable successful responses count conservatively. Encoded image bytes make the preflight budget deliberately conservative. Redaction removes recognized secrets, email addresses and common phone formats in string values and keys; it is not a guarantee that arbitrary prose is anonymous. Images require explicit caller input and are never automatically captured, logged or saved by the client.
+
+## Control HTTP contract
+
+All paths below use the existing `X-COS-Token` authentication. Settings mutations use the server's normal mutation lease. Responses set `Cache-Control: private, no-store`. No route echoes keys, key prefixes, or provider response bodies.
+
+`GET /api/decision-provider` returns:
+
+```json
+{
+  "schema": 1,
+  "revision": "<64 lowercase hexadecimal characters>",
+  "provider": "jev",
+  "overrides": {},
+  "effective": {"session":"jev","completion":"jev","search":"jev"},
+  "sources": {"session":"default","completion":"default","search":"default"},
+  "saved": {"provider":null,"overrides":{}},
+  "configured": {"jev":true,"subq":false},
+  "models": {"jev":"jev-1.13.0","subq":"subq-snap-preview"},
+  "keyStatus": {"jev":{"configured":true,"source":"config"},"subq":{"configured":false,"source":"none"}},
+  "capabilities": {"choices":["jev","subq"],"workflows":["session","completion","search"],"hotReload":true,"fallback":false,"subqImages":true,"subqKeySource":"config-or-env"}
+}
+```
+
+`PATCH /api/decision-provider` requires `expectedRevision` from the latest GET and at least one setting. Example: `{"expectedRevision":"<revision>","provider":"subq","overrides":{"completion":"jev"}}`. Provider values are exactly `jev`, `subq`, or null. Null clears that saved choice. Omitted fields remain unchanged. Unknown fields, missing revision, invalid provider or invalid workflow produce HTTP 400 `invalid_decision_settings`. A stale revision produces HTTP 409 `decision_settings_conflict` without writing; reload before retrying. Unreadable/corrupt settings or a failed write produce HTTP 503 `decision_settings_unavailable`; no provider fallback occurs. The successful response has the same shape as GET and a new revision when saved selection changes. Selecting a provider with no configured key is allowed and is reported honestly; its workflows return a not-configured failure rather than switching providers.
+
+Saved selections live in private atomic `data/decision-provider.json`. Precedence for each workflow is saved workflow override, workflow environment, saved global choice, global environment, then Jev. `provider` reports the global choice; `effective` is authoritative per workflow. `overrides`/`saved` show saved choices, while `sources` distinguishes config/environment/default. Returning to a provider can reuse its own still-valid cache but never another provider's cache. A request already in flight finishes with the provider it snapshotted.
+
+`GET /api/subq-key/status` returns `{configured,source,savedAt?,validatedAt?}`. `POST /api/subq-key/set` accepts exactly `{key}` and validates against the official free Models API before saving private `data/subq-key.json` at mode 0600. The key must list `subq-snap-preview`. Success returns `{ok:true,...status}` and resets configured SubQ breakers. `DELETE /api/subq-key` clears the saved key and returns the same safe status. An environment key may remain active after deletion, and status reports `source: env`. A saved key takes precedence; a corrupt or unsafe saved file fails closed rather than silently using a different environment account. Error codes: 400 `invalid_subq_key` or `subq_key_not_accepted` (with numeric `upstreamStatus`), 500 `subq_key_not_saved` or `subq_key_not_removed`. Control can reuse its private stdin helper flow for all key operations. No real key was configured during implementation/tests.
 
 ## Source inventory and boundaries
 
@@ -71,6 +99,6 @@ SubQ reported 1,431 total input tokens, estimated list-price cost $0.00007155 at
 
 ## Validation
 
-79 targeted tests passed across seven files, including 17 new provider tests. `tsc --noEmit` passed. Tests use one Vitest worker, isolated HOME/data directories, and no COS scripts directory. New coverage includes explicit routing/no fallback, provider identity through existing workflows, redaction, typed probability/schema validation, image rejection, official origin/redirect policy, HTTP error taxonomy, concurrent budget reservation, timeout, cancellation, breaker and abstention behavior. Existing Jev/route/search/recommendation/completion regression tests passed.
+The original opt-in seam passed 79 targeted tests across seven files, including 17 provider tests. The integrated settings/key contracts additionally cover authentication, revision conflicts, strict allowlists, defaults/precedence, private atomic storage, unsafe/corrupt files, free model validation, no key echo, and provider-separated caches for all three workflows. Final combined-suite evidence is recorded separately in the release candidate logs. `tsc --noEmit` passed. Tests use one Vitest worker, isolated HOME/data directories, and no COS scripts directory. New coverage includes explicit routing/no fallback, provider identity through existing workflows, redaction, typed probability/schema validation, image rejection, official origin/redirect policy, HTTP error taxonomy, concurrent budget reservation, timeout, cancellation, breaker and abstention behavior. Existing Jev/route/search/recommendation/completion regression tests passed.
 
 The repository's MU architecture drift detector was run as required by the architecture skill. It reported pre-existing LaunchAgent/documentation/recency/git-hygiene drift. Those unrelated findings were not repaired or treated as provider-canary failures.

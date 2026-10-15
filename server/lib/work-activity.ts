@@ -10,7 +10,7 @@ export type WorkHandoffMode = 'continueSession' | 'fork' | 'newSession'
 /** 6.59.0: what COS Control's tracker recorded (its `WorkProgress`, Sources/WorkProgress.swift). */
 export interface WorkActivityProgress {
   reported: 'done' | 'needsInput' | 'blocked' | null
-  reportedBy?: 'session' | 'jev'
+  reportedBy?: 'session' | 'jev' | 'subq'
   /** At most 280 characters and 1,200 UTF-16 units, cleaned as a session name is. The session's own status line, or Jev's reading. */
   evidence?: string
   receivedAt?: string
@@ -167,7 +167,7 @@ function parseProgress(raw: unknown): { projection: WorkActivityProgress | Unrea
   const state = reported === 'done' || reported === 'needsInput' || reported === 'blocked' ? reported : null
   const projection: WorkActivityProgress = { reported: state, paused: paused === true }
   if (state) {
-    if (reportedBy === 'session' || reportedBy === 'jev') projection.reportedBy = reportedBy
+    if (reportedBy === 'session' || reportedBy === 'jev' || reportedBy === 'subq') projection.reportedBy = reportedBy
     const quoted = cleanEvidence(evidence)
     if (quoted) projection.evidence = quoted
   }

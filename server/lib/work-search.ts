@@ -1,4 +1,4 @@
-import { type DecisionClient, createDecisionClient, DecisionProviderError } from './decision-provider.js'
+import { type DecisionClient, type DecisionProvider, createDecisionClient, DecisionProviderError } from './decision-provider.js'
 /**
  * Work search by meaning (6.65.0, Control 0.5.259).
  *
@@ -68,7 +68,7 @@ export const WORK_SEARCH_MESSAGES: Record<WorkSearchReason, string> = {
 
 export interface WorkSearchHit { id: string; p: number }
 export type WorkSearchResult =
-  | { available: true; results: WorkSearchHit[]; none: number | null; cached: boolean; tokens: number }
+  | { available: true; provider?: DecisionProvider | 'none'; results: WorkSearchHit[]; none: number | null; cached: boolean; tokens: number }
   | { available: false; reason: WorkSearchReason; message: string }
 
 export function unavailable(reason: WorkSearchReason): Extract<WorkSearchResult, { available: false }> {
@@ -192,41 +192,43 @@ export function normalizeQuery(query: string): string {
 const PASSED_THROUGH = new Set<string>(['jev_not_configured', 'jev_key_rejected', 'jev_cap_reached', 'jev_breaker_open', 'jev_request_rejected'])
 
 export class WorkSearcher {
-  private cache = new Map<string, { at: number; results: WorkSearchHit[]; none: number | null }>()
+  private cache = new Map<string, { at: number; provider: DecisionProvider; results: WorkSearchHit[]; none: number | null }>()
   private inflight = new Map<string, Promise<WorkSearchResult>>()
   constructor(private readonly jev: DecisionClient, private readonly now: () => number = () => Date.now()) {}
 
   /** One Jev Choice over `candidates` (already selected, at most 254). Never throws for a Jev failure. */
   async search(query: string, candidates: readonly SearchableRow[]): Promise<WorkSearchResult> {
     if (candidates.length > WORK_SEARCH_LIMITS.maxCandidates) return unavailable('too_many_candidates')
-    if (!candidates.length) return { available: true, results: [], none: 1, cached: false, tokens: 0 }
+    if (!candidates.length) return { available: true, provider: 'none', results: [], none: 1, cached: false, tokens: 0 }
+    let client: DecisionClient
+    try { client = this.jev.snapshot?.() ?? this.jev } catch (e) { if (e instanceof DecisionProviderError) return unavailable(e.code); throw e }
     const texts = candidates.map(row => searchOptionText(row.text))
     const set = createHash('sha256').update(JSON.stringify(candidates.map((row, i) => [row.id, texts[i]]))).digest('hex')
-    const key = createHash('sha256').update(normalizeQuery(query) + '\0' + set).digest('hex')
+    const key = createHash('sha256').update((client.provider ?? 'jev') + '\0' + normalizeQuery(query) + '\0' + set).digest('hex')
     const hit = this.cache.get(key)
     if (hit && this.now() - hit.at < WORK_SEARCH_LIMITS.cacheMs) {
-      return { available: true, results: hit.results, none: hit.none, cached: true, tokens: 0 }
+      return { available: true, provider: hit.provider, results: hit.results, none: hit.none, cached: true, tokens: 0 }
     }
     if (hit) this.cache.delete(key)
     // Typing can send the same search twice before the first answers; the second waits for the first.
     const running = this.inflight.get(key)
     if (running) return running
-    const work = this.ask(query, candidates.map(row => row.id), texts, key)
+    const work = this.ask(query, candidates.map(row => row.id), texts, key, client)
     this.inflight.set(key, work)
     try { return await work } finally { this.inflight.delete(key) }
   }
 
-  private async ask(query: string, ids: string[], texts: string[], key: string): Promise<WorkSearchResult> {
+  private async ask(query: string, ids: string[], texts: string[], key: string, client: DecisionClient): Promise<WorkSearchResult> {
     const state = { query: query.trim() }
     const criteria: Record<string, string> = Object.fromEntries(texts.map((text, i) => [`t${i}`, text]))
     criteria.none = WORK_SEARCH_NONE
     const questions = { c: { type: 'choice', instructions: WORK_SEARCH_INSTRUCTIONS, criteria } }
     try {
-      const reply = await this.jev.ask(state, questions, estimateJevTokens({ state, questions }))
+      const reply = await client.ask(state, questions, estimateJevTokens({ state, questions }))
       const { results, none } = rankHits(reply.answers.c?.probabilities, ids)
       if (this.cache.size >= WORK_SEARCH_LIMITS.cacheEntries) this.cache.delete(this.cache.keys().next().value!)
-      this.cache.set(key, { at: this.now(), results, none })
-      return { available: true, results, none, cached: false, tokens: reply.inputTokens }
+      this.cache.set(key, { at: this.now(), provider: reply.provider ?? 'jev', results, none })
+      return { available: true, provider: reply.provider ?? 'jev', results, none, cached: false, tokens: reply.inputTokens }
     } catch (e) {
       if (e instanceof DecisionProviderError) return unavailable(e.code)
       if (!(e instanceof JevError)) throw e

@@ -148,6 +148,8 @@ import { createWorkReviewsRouter } from './routes/work-reviews.js'
 import { createWorkBoardRouter } from './routes/work-board.js'
 import { createWorkIntakeRouter } from './routes/work-intake.js'
 import { createWorkHandoffRequestsRouter } from './routes/work-handoff-requests.js'
+import { createSubqKeyRouter } from './routes/subq-key.js'
+import { createDecisionProviderRouter } from './routes/decision-provider.js'
 import { createJevRouter } from './routes/jev.js'
 import { createWorkChatRouter } from './routes/work-chat.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
@@ -799,6 +801,8 @@ app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
 // (6.57.1), and the Work completion check (6.58.0).
 app.use('/api', createJevRouter(workReviewRuntime ? { review: async id => workReviewRuntime.peek(id) } : {}))
 // Work search by meaning (6.65.0, Control 0.5.259): one Jev Choice over the board's cards, with its own cap, switch and breaker.
+app.use('/api', createDecisionProviderRouter())
+app.use('/api', createSubqKeyRouter())
 app.use('/api', createWorkSearchRouter())
 app.use('/api', createWorkChatRouter())
 app.use('/api', queryRouter)

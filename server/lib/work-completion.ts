@@ -75,7 +75,9 @@ export class CompletionChecker {
     const basis = state.task.doneWhen ? 'done_when' as const : 'task' as const
     if (!state.task.doneWhen && !state.task.text) return { provider: 'none', reason: 'no_task_text' }
     if (!state.reply) return { provider: 'none', reason: 'no_reply' }
-    const key = createHash('sha256').update(JSON.stringify(state)).digest('hex')
+    let client: DecisionClient
+    try { client = this.jev.snapshot?.() ?? this.jev } catch (e) { if (isDecisionFailure(e)) return { provider: 'none', reason: e.code }; throw e }
+    const key = createHash('sha256').update((client.provider ?? 'jev') + '\0' + JSON.stringify(state)).digest('hex')
     const hit = this.cache.get(key)
     if (hit && this.now() - hit.at < COMPLETION_LIMITS.cacheMs) return { ...hit.value, cached: true }
     const questions = {
@@ -86,7 +88,7 @@ export class CompletionChecker {
       } },
     }
     try {
-      const reply = await this.jev.ask(state, questions, estimateJevTokens({ state, questions }))
+      const reply = await client.ask(state, questions, estimateJevTokens({ state, questions }))
       const value = { provider: reply.provider ?? 'jev' as const, model: reply.model ?? 'jev', cached: false, basis, ...decideCompletion(reply.answers.finished?.probabilities) }
       if (this.cache.size >= COMPLETION_LIMITS.cacheEntries) this.cache.delete(this.cache.keys().next().value!)
       this.cache.set(key, { at: this.now(), value })

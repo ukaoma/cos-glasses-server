@@ -134,7 +134,7 @@ describe('WorkSearcher with a fake Jev', () => {
   const ten = Array.from({ length: 10 }, (_, i) => row(ID(i + 1), `Quilt task number ${i + 1}`))
   it('K1: a targeted query returns the intended card first, even at a low p, and keeps weak runners-up', async () => {
     const out = await searcher(vi.fn(live({ t3: 0.47, t7: 0.12, t1: 0.03, t0: 0.015, t2: 0.001, none: 0.364 }, 't3'))).search.search('linkedin article for nick', ten)
-    expect(out).toEqual({ available: true, results: [{ id: ID(4), p: 0.47 }, { id: ID(8), p: 0.12 }, { id: ID(2), p: 0.03 }], none: 0.364, cached: false, tokens: 4_962 })
+    expect(out).toEqual({ available: true, provider: 'jev', results: [{ id: ID(4), p: 0.47 }, { id: ID(8), p: 0.12 }, { id: ID(2), p: 0.03 }], none: 0.364, cached: false, tokens: 4_962 })
   })
   it('K2: a nonsense or off-board query is none-dominant and returns no cards at all', async () => {
     const answers: Array<Record<string, number>> = [{ none: 1, t0: 0, t5: 0 }, { none: 0.9981, t2: 0.0011, t9: 0.0008 }, { none: 0.97, t4: 0.019999 }]
@@ -165,7 +165,7 @@ describe('WorkSearcher with a fake Jev', () => {
     const f = vi.fn(async () => answer({ t0: 0.9, t1: 0.03, t2: 0.01, none: 0.06 }, 8_800))
     const { search } = searcher(f)
     const result = await search.search('  linkedin piece for nick ', [...rows, row(ID(4), 'Card [Work details](cos-work://v1/abc) text')])
-    expect(result).toEqual({ available: true, results: [{ id: ID(1), p: 0.9 }, { id: ID(2), p: 0.03 }], none: 0.06, cached: false, tokens: 8_800 })
+    expect(result).toEqual({ available: true, provider: 'jev', results: [{ id: ID(1), p: 0.9 }, { id: ID(2), p: 0.03 }], none: 0.06, cached: false, tokens: 8_800 })
     const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('https://api.typesafe.ai/v1/systemone')
     expect(JSON.parse(String(init.body))).toEqual({ model: JEV_MODEL, state: { query: 'linkedin piece for nick' }, questions: { c: { type: 'choice',
@@ -212,7 +212,7 @@ describe('WorkSearcher with a fake Jev', () => {
   it('answers without Jev for no cards, and refuses more than 254', async () => {
     const f = vi.fn(async () => answer({}))
     const { search } = searcher(f)
-    expect(await search.search('anything', [])).toEqual({ available: true, results: [], none: 1, cached: false, tokens: 0 })
+    expect(await search.search('anything', [])).toEqual({ available: true, provider: 'none', results: [], none: 1, cached: false, tokens: 0 })
     const many = Array.from({ length: WORK_SEARCH_LIMITS.maxCandidates + 1 }, (_, i) => row(ID(i + 1), `Task ${i}`))
     expect(await search.search('anything', many)).toMatchObject({ available: false, reason: 'too_many_candidates' })
     expect(f).not.toHaveBeenCalled()

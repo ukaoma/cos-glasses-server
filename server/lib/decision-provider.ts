@@ -6,25 +6,24 @@ import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { redactSecretText } from './activity-preview.js'
 
-export type DecisionProvider = 'jev' | 'subq'
-export type DecisionUseCase = 'session' | 'completion' | 'search'
+import { resolveSubqKey, SUBQ_MODEL } from './subq-key.js'
+export { SUBQ_MODEL } from './subq-key.js'
+import { resolveDecisionSelection, type DecisionProvider, type DecisionUseCase } from './decision-settings.js'
+export type { DecisionProvider, DecisionUseCase } from './decision-settings.js'
 export interface DecisionImage { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; base64: string }
 export interface DecisionOptions { signal?: AbortSignal; images?: DecisionImage[] }
-export interface DecisionClient { ask(state: unknown, questions: Record<string, unknown>, estimate: number, options?: DecisionOptions): Promise<JevAnswers> }
+export interface DecisionClient { readonly provider?: DecisionProvider; snapshot?: () => DecisionClient; ask(state: unknown, questions: Record<string, unknown>, estimate: number, options?: DecisionOptions): Promise<JevAnswers> }
 export class DecisionProviderError extends Error {
   constructor(readonly code: 'decision_invalid_provider' | 'decision_not_configured' | 'decision_cap_reached' | 'decision_breaker_open' |
     'decision_key_rejected' | 'decision_credits_required' | 'decision_rate_limited' | 'decision_request_rejected' | 'decision_unavailable' |
     'decision_bad_answer' | 'decision_cancelled' | 'decision_images_unsupported') { super(code) }
 }
 export const SUBQ_ENDPOINT = 'https://api.subq.ai/v1/systemone'
-export const SUBQ_MODEL = 'subq-snap-preview'
 export const SUBQ_LIMITS = { timeoutMs: 20_000, dailyTokens: 1_000_000, breakerFailures: 3, breakerMs: 3_600_000, maxBodyBytes: 13 * 1024 * 1024 } as const
 
 /** No key probing, and no unknown value silently treated as Jev. Per-use-case settings override the global switch. */
 export function selectedDecisionProvider(useCase: DecisionUseCase, env: NodeJS.ProcessEnv = process.env): DecisionProvider {
-  const raw = (env[`COS_DECISION_PROVIDER_${useCase.toUpperCase()}`] ?? env.COS_DECISION_PROVIDER ?? 'jev').trim().toLowerCase()
-  if (raw !== 'jev' && raw !== 'subq') throw new DecisionProviderError('decision_invalid_provider')
-  return raw
+  try { return resolveDecisionSelection(useCase, env).provider } catch { throw new DecisionProviderError('decision_invalid_provider') }
 }
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const probability = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1
@@ -73,13 +72,15 @@ export function validateDecisionAnswers(raw: unknown, questions: Record<string, 
 }
 
 export class SubqDecisionClient implements DecisionClient {
+  readonly provider = 'subq' as const
   private failures = 0
   private breakerUntil = 0
   private reserved = 0
   constructor(private readonly fetchImpl: typeof fetch = fetch, private readonly now: () => Date = () => new Date(),
-    private readonly usageFile = dataPath('subq-decisions-usage.json'), private readonly key = () => process.env.SUBQ_API_KEY?.trim(),
+    private readonly usageFile = dataPath('subq-decisions-usage.json'), private readonly key = () => resolveSubqKey()?.key,
     private readonly cap = () => { const n = Number(process.env.COS_SUBQ_DAILY_TOKENS); return Number.isFinite(n) && n > 0 ? Math.floor(n) : SUBQ_LIMITS.dailyTokens },
     private readonly timeoutMs: number = SUBQ_LIMITS.timeoutMs) {}
+  resetForNewKey(): void { this.failures = 0; this.breakerUntil = 0 }
   private ledger(): Record<string, number> { try { return JSON.parse(readFileSync(this.usageFile, 'utf8')) } catch { return {} } }
   private day(): string { return this.now().toISOString().slice(0, 10) }
   private record(tokens: number): void {
@@ -124,13 +125,22 @@ export class SubqDecisionClient implements DecisionClient {
   }
 }
 
-/** Fixed provider per client/cache lifetime. Jev's existing controls and ledger are reused unchanged. */
+const configuredSubqClients = new Set<SubqDecisionClient>()
+export function resetSubqDecisionClients(): void { configuredSubqClients.forEach(client => client.resetForNewKey()) }
+/** Snapshot selection per workflow request. Separate clients and cache identities prevent stale cross-provider answers. */
 export function createDecisionClient(useCase: DecisionUseCase, jev: Pick<JevClient, 'ask'> = new JevClient(), env: NodeJS.ProcessEnv = process.env): DecisionClient {
-  const provider = selectedDecisionProvider(useCase, env)
-  if (provider === 'subq') return new SubqDecisionClient(fetch, () => new Date(), dataPath(`subq-${useCase}-usage.json`))
-  return { async ask(state, questions, estimate, options) {
-    if (options?.images?.length) throw new DecisionProviderError('decision_images_unsupported')
-    return { ...await jev.ask(state, questions, estimate, options), provider: 'jev' }
-  } }
+  const clients: Partial<Record<DecisionProvider, DecisionClient>> = {}
+  const snapshot = (): DecisionClient => {
+    const selected = selectedDecisionProvider(useCase, env)
+    if (!clients[selected]) clients[selected] = selected === 'subq' ? new SubqDecisionClient(fetch, () => new Date(), dataPath(`subq-${useCase}-usage.json`)) : {
+      provider: 'jev', async ask(state, questions, estimate, options) {
+        if (options?.images?.length) throw new DecisionProviderError('decision_images_unsupported')
+        return { ...await jev.ask(state, questions, estimate, options), provider: 'jev' }
+      },
+    }
+    if (selected === 'subq') configuredSubqClients.add(clients[selected] as SubqDecisionClient)
+    return clients[selected]!
+  }
+  return { snapshot, ask: (state, questions, estimate, options) => snapshot().ask(state, questions, estimate, options) }
 }
 export function isDecisionFailure(error: unknown): error is JevError | DecisionProviderError { return error instanceof JevError || error instanceof DecisionProviderError }

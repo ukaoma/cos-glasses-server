@@ -158,7 +158,7 @@ it('end to end with a fake Jev: results by card id, then the cache, then each de
   const jev = createWorkSearchJevClient(fetchImpl as unknown as typeof fetch, () => new Date('2026-10-06T23:00:00Z'), join(dir, 'usage.json'))
   const s = await setup({ searcher: new WorkSearcher(jev) })
   const first = await (await s.post({ query: 'pet campaign', domain: 'quilt' })).json()
-  expect(first).toEqual({ available: true, results: [{ id: ID(2), p: 0.8 }, { id: ID(1), p: 0.15 }], none: 0.05, cached: false, tokens: 4_321 })
+  expect(first).toEqual({ available: true, provider: 'jev', results: [{ id: ID(2), p: 0.8 }, { id: ID(1), p: 0.15 }], none: 0.05, cached: false, tokens: 4_321 })
   expect(await (await s.post({ query: 'Pet Campaign', domain: 'quilt' })).json()).toMatchObject({ cached: true, tokens: 0 })
   expect(fetchImpl).toHaveBeenCalledTimes(1)
   delete process.env.TYPESAFE_API_KEY

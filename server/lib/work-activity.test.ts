@@ -118,6 +118,7 @@ it('S1 a report kind Control does not know reads as no report, and evidence and 
  const a=one({progress:progress({reported:'celebrating'})})
  expect(a.progress).toMatchObject({reported:null}); expect(a.progress).not.toHaveProperty('evidence'); expect(a.progress).not.toHaveProperty('reportedBy')
  expect(one({progress:progress({reported:'needsInput',reportedBy:'jev'})}).progress).toMatchObject({reported:'needsInput',reportedBy:'jev'})
+ expect(one({progress:progress({reported:'needsInput',reportedBy:'subq'})}).progress).toMatchObject({reported:'needsInput',reportedBy:'subq'})
  const c=one({progress:progress({reported:'blocked',reportedBy:'someone'})})
  expect(reportOf(c.progress)).toBe('blocked'); expect(c.progress).not.toHaveProperty('reportedBy')
 })
