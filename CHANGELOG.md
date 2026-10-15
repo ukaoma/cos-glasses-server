@@ -1,3 +1,9 @@
+## 6.73.10 — Choose the Work chat planner (local candidate)
+
+- Accept an optional `planner` (`sonnet` or `opus`) on `POST /api/work/chat` and run that Claude model, still tools-off. Anything else is a 400 before any model call. Clients that send none keep Sonnet. `GET /api/work/chat` now advertises `planners: ["sonnet","opus"]` and keeps `planner: "sonnet"` as the default; the answer's `model` names what ran. The choice selects the model only and never reaches the prompt.
+- Cost: still one model call per user action, serialized by the existing busy lock (a second request gets 409). Opus costs more per call than Sonnet; nothing new runs on a schedule.
+- Planning still never dispatches. Pair with Control 0.5.308, which reviews every planned assignment before anything is sent. Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.9 — Keep stalled Mac captures recoverable (local candidate)
 
 - Never auto-save or expire a Mac capture (`mac_<uuid>`). COS Control keeps every chunk on the Mac and delivers or recovers it. The 4 h stranded sweep posted the save without the server pin a Mac save requires, read the 400 as final and closed the session; boot recovery closed any session idle past 4 h the same way. A capture stalled at 51 of 1,200 chunks (2026-10-15) would have lost its server-side recovery at 20:12. Both paths now leave Mac captures open (`restoresAtBoot`, sweep guard).

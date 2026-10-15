@@ -18,3 +18,8 @@ it('summaries cannot dispatch and manual targets cannot be automatically assigne
  expect(()=>parseWorkChatAnswer(JSON.stringify({answer:'plan',assignments:[a]}),{...request,sessions:[{...request.sessions[0],automatic:false}]})).toThrow()
  expect(parseWorkChatAnswer('```json\n'+JSON.stringify({answer:'No work has completed.',assignments:[]})+'\n```',request).assignments).toEqual([])
 })
+it('accepts only the advertised planners and keeps older inputs valid',()=>{
+ expect(parseWorkChatInput(input()).planner).toBeUndefined()
+ expect(parseWorkChatInput({...input(),planner:'opus'}).planner).toBe('opus');expect(parseWorkChatInput({...input(),planner:'sonnet'}).planner).toBe('sonnet')
+ for (const planner of ['haiku','OPUS',' opus','',null,undefined]) expect(()=>parseWorkChatInput({...input(),planner})).toThrow()
+})
