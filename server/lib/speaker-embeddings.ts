@@ -376,7 +376,7 @@ export function identifySpeaker(
   expectedSpeakers?: string[],
   /** 6.61.0: `event` tags the calibration rows, e.g. 'nemotron-track' for one
    *  Nemotron track's audio, so they are never read as whole-chunk checks. */
-  options: { event?: string; minSimilarity?: number } = {},
+  options: { event?: string; minSimilarity?: number; prioritizeOwner?: boolean } = {},
 ): { speaker: string; similarity: number; embedding?: Float32Array } | null {
   if (!extractor || !manager) return null
   const minimum = Number.isFinite(options.minSimilarity) ? Math.max(0, Math.min(1, options.minSimilarity!)) : 0
@@ -387,7 +387,7 @@ export function identifySpeaker(
 
     // If the wearer is enrolled, verify against them first (they're wearing the glasses)
     const owner = getOwnerSpeakerLabel()
-    if (manager.contains(owner)) {
+    if (options.prioritizeOwner !== false && manager.contains(owner)) {
       const isOwner = manager.verify({ name: owner, v: embedding, threshold: Math.max(VERIFY_THRESHOLD, minimum) })
       if (isOwner) {
         const similarity = computeCosineSimilarity(embedding, owner)

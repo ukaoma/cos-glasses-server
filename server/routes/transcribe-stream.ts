@@ -1,3 +1,5 @@
+import { getMeetingStore } from '../lib/meeting-store.js'
+import { MAC_AUDIO, MAC_CAPTURE_ID, persistMacChunkReceipt, macError, registerMacRecording, requireMacRecording, readMacRecording, validateMacWav } from '../lib/mac-recording.js'
 import { AUTO_ENROLL_THRESHOLD } from '../lib/voiceprint-floor.js'
 import { readSpeakerPolicy, policyLabel, type SpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/transcribe-stream — Streaming transcription for continuous meeting capture
@@ -286,6 +288,7 @@ export interface TranscriptChunk {
   audioSha256?: string
   canonical?: boolean
   evenHubSpeakerRole?: EvenSpeakerRoleHistogram
+  audioDurationMs?: number
   /** 6.61.0: who spoke when inside this chunk, in time order. Present when
    *  Nemotron separated the chunk's voices; `speaker` is then the dominant name. */
   segments?: ChunkSpeakerSegment[]
@@ -2072,7 +2075,7 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
   if (!isEmbeddingAvailable() || audioDurationSec < VOICEPRINT_MIN_AUDIO_SEC) return policyLabel({ speaker: clientSpeaker, similarity: 0 }, policy)
 
   const tEmb = performance.now()
-  const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers, { minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined })
+  const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers, { minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined, ...(MAC_CAPTURE_ID.test(sessionId) ? { prioritizeOwner: false, event: 'mac-system-audio' } : {}) })
   console.log(`[perf] identifySpeaker: ${(performance.now() - tEmb).toFixed(1)}ms`)
   if (!embeddingResult) return policyLabel({ speaker: clientSpeaker, similarity: 0 }, policy)
 
@@ -2080,8 +2083,9 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
   // it exists: identifySpeaker computes it per chunk and nothing else keeps it,
   // so a correction made later has no acoustic evidence without this write.
   // Deliberately includes 'Ext' — an unidentified voice is the case with no
-  // other way to be trained.
-  if (embeddingResult.embedding) {
+  // other way to be trained. Mac playback is recognition-only: never bank
+  // its voiceprints or create auxiliary training-audio copies.
+  if (embeddingResult.embedding && !MAC_CAPTURE_ID.test(sessionId)) {
     appendChunkEmbedding(sessionId, {
       i: chunkIndex,
       speaker: policyLabel(embeddingResult, policy).speaker,
@@ -2117,7 +2121,7 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
     }
   }
 
-  if (speaker === 'Ext' && audioBuffer.length >= 16000) {
+  if (speaker === 'Ext' && audioBuffer.length >= 16000 && !MAC_CAPTURE_ID.test(sessionId)) {
     const extSessionDir = resolve(EXT_AUDIO_DIR, sessionId)
     ensurePrivateDirectory(extSessionDir)
     const extCount = extAudioCounts.get(sessionId) ?? 0
@@ -2154,6 +2158,7 @@ async function processStreamChunk(opts: {
   clientElapsed?: number
   /** Original client recording start, applied only before canonical chunks. */
   startTimeOverride?: number
+  audioDurationMs?: number
   evenHubSpeakerRole?: EvenSpeakerRoleHistogram
 }): Promise<StreamChunkCompletionResponse> {
   const { sessionId, chunkIndex, clientSpeaker, audioBuffer, candidate } = opts
@@ -2215,7 +2220,7 @@ async function processStreamChunk(opts: {
 
   // Pin identity policy at acceptance, before persistence, ASR or diarization
   // yields. A later loosening applies to the next chunk, never this audio.
-  const capturePolicy = readSpeakerPolicy(sessionId).mode
+  const capturePolicy = MAC_CAPTURE_ID.test(sessionId) ? (requireMacRecording(sessionId), 'high-confidence' as const) : readSpeakerPolicy(sessionId).mode
   await persistRawSessionAudioChunk(sessionId, chunkIndex, audioBuffer)
   // Commit the received-index ledger only after the canonical raw WAV is
   // durable. A failure is typed non-2xx and a retry remains safe.
@@ -2358,6 +2363,7 @@ async function processStreamChunk(opts: {
   const chunk: TranscriptChunk = {
     text: trimmedText,
     speakerPolicy: capturePolicy,
+    ...(opts.audioDurationMs !== undefined ? { audioDurationMs: opts.audioDurationMs } : {}),
     speaker,
     elapsed,
     similarity,
@@ -2507,12 +2513,82 @@ transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
   }
 })
 
+/** Unlike the received ledger, only these canonical completions acknowledge ASR.
+ * A native stop supplies the total captured chunks, including its last tail. */
+export function assertMacCaptureComplete(sessionId: string, expectedChunkCount: unknown): void {
+  if (!Number.isInteger(expectedChunkCount) || Number(expectedChunkCount) < 1 || Number(expectedChunkCount) > 10000) {
+    throw macError(400, 'mac_chunk_count_required', 'Mac save requires the total captured chunk count')
+  }
+  const session = sessions.get(sessionId)
+  const expected = Number(expectedChunkCount)
+  const missingIndices: number[] = []
+  for (let index = 0; index < expected; index++) {
+    if (!session?.chunks[index] && !session?.emptyCompletions?.[String(index)]) missingIndices.push(index)
+  }
+  if (missingIndices.length || (session?.maxChunkIndex ?? -1) >= expected) {
+    throw Object.assign(macError(409, 'mac_capture_incomplete', 'Mac audio is not fully acknowledged; retry pending chunks before saving'), { missingIndices })
+  }
+}
+
+// Manual Mac pilot: independent from iPhone candidate and cue rollout gates.
+transcribeStreamRouter.get('/mac-recording/capabilities', (_req, res) => {
+  res.set('Cache-Control', 'private, no-store').json({ available: true, ...MAC_AUDIO, serverInstanceId: getServerInstanceId() })
+})
+function requireMacPin(req: { get(name: string): string | undefined }): string {
+  const pin = req.get('X-COS-Server-Instance')?.trim()
+  if (!pin) throw macError(400, 'server_identity_pin_required', 'Server identity pin required')
+  return assertPinnedServerIdentity(pin, undefined)
+}
+transcribeStreamRouter.post('/mac-recording/start', (req, res) => {
+  let lease: MaintenanceWorkLease | undefined
+  try {
+    const serverInstanceId = requireMacPin(req)
+    if (typeof req.body?.captureId !== 'string' || !MAC_CAPTURE_ID.test(req.body.captureId)) throw macError(400, 'invalid_capture_id', 'Invalid Mac capture ID')
+    if (isSessionDeleted(req.body.captureId) || getMeetingStore().findBySessionId(req.body.captureId)) throw macError(410, 'session_closed', 'Capture is closed')
+    // An existing non-Mac session may not acquire new source metadata.
+    if (sessions.has(req.body.captureId) && !readMacRecording(req.body.captureId)) throw macError(409, 'mac_capture_conflict', 'Capture ID already exists')
+    lease = acquireRecordingChunkLease({ allowDuringDrain: sessions.has(req.body.captureId) })
+    const { recording, replayed } = registerMacRecording(req.body)
+    const session = getSession(recording.sessionId)
+    if (!session.chunks.some(Boolean)) session.startTime = recording.startTime
+    persistSessionRequired(recording.sessionId)
+    res.json({ ...MAC_AUDIO, ...recording, replayed, serverInstanceId })
+  } catch (error) { sendStreamError(res, error) } finally { lease?.release() }
+})
+const macChunkLocks = new Set<string>()
+transcribeStreamRouter.post('/mac-recording/:captureId/chunks', async (req, res) => {
+  let lease: MaintenanceWorkLease | undefined
+  let locked = false
+  const id = String(req.params.captureId ?? '')
+  try {
+    requireMacPin(req)
+    const recording = requireMacRecording(id)
+    if (isSessionDeleted(id)) throw macError(410, 'session_closed', 'Capture is closed')
+    const chunkIndex = Number(req.query.chunkIndex)
+    validateChunkIndex(chunkIndex)
+    const elapsed = Number(req.query.elapsed)
+    if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed > 24 * 60 * 60 * 1000) throw macError(400, 'invalid_elapsed', 'Valid capture elapsed time required')
+    if (macChunkLocks.has(id)) throw macError(409, 'mac_chunk_in_progress', 'Another chunk is processing; retry the same chunk after its receipt')
+    macChunkLocks.add(id); locked = true
+    lease = acquireRecordingChunkLease({ allowDuringDrain: sessions.has(id) })
+    const audio = await readBoundedRawBody(req, MAC_AUDIO.maxChunkBytes)
+    const duration = validateMacWav(audio)
+    if (elapsed < duration) throw macError(400, 'invalid_elapsed', 'Chunk end precedes its duration')
+    const session = getSession(id)
+    persistMacChunkReceipt(id, { chunkIndex, endElapsed: elapsed, durationMs: duration, audioSha256: sha256Hex(audio) })
+    const prior = session.chunks[chunkIndex] ?? session.emptyCompletions?.[String(chunkIndex)]
+    if (prior?.audioSha256 && prior.audioSha256 !== sha256Hex(audio)) throw macError(409, 'mac_chunk_conflict', 'Chunk index already holds different audio')
+    res.json(await processStreamChunk({ sessionId: id, chunkIndex, clientSpeaker: 'Ext', audioBuffer: audio, clientElapsed: elapsed - duration, audioDurationMs: duration, startTimeOverride: recording.startTime }))
+  } catch (error) { sendStreamError(res, error) } finally { if (locked) macChunkLocks.delete(id); lease?.release() }
+})
+
 transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
   let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     // Reject a wrong Mac before consuming or persisting any upload bytes.
     assertPinnedServerIdentity(req.get('X-COS-Server-Instance'), req.query.serverInstanceId)
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
+    if (sessionId.startsWith('mac_')) throw macError(400, 'mac_transport_required', 'Use the Mac recording transport for Mac captures')
     maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })

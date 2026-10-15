@@ -35,8 +35,8 @@ export async function saveAskFollowUp(raw: unknown, deps: FollowUpDependencies):
   try { meeting = await deps.resolveMeeting(descriptor) } catch { throw new WorkIntakeError('meeting_unavailable', 409) }
   if (meeting.recordId !== descriptor.recordId) throw new WorkIntakeError('meeting_identity_changed', 409)
   const captures = new Set([meeting.sessionId, meeting.sourceSessionId, ...(meeting.g2SessionIds ?? []),
-    ...(meeting.contextKeys ?? []).filter(k => k.startsWith('g2:')).map(k => k.slice(3)),
-    ...(meeting.sources ?? []).filter(s => s.kind === 'g2').map(s => s.id)])
+    ...(meeting.contextKeys ?? []).filter(k => k.startsWith('g2:') || k.startsWith('mac:')).map(k => k.slice(k.indexOf(':') + 1)),
+    ...(meeting.sources ?? []).filter(s => s.kind === 'g2' || s.kind === 'mac').map(s => s.id)])
   if (!captures.has(exchange.sessionId) || meeting.contextAmbiguous) throw new WorkIntakeError('meeting_capture_mismatch', 409)
   const ids = body.sourceIds === undefined ? exchange.sources.slice(0, 8).map(s => s.id) : body.sourceIds
   if (!Array.isArray(ids) || ids.length > 8 || ids.some(id => typeof id !== 'string' || !exchange.sources.some(s => s.id === id))) throw new WorkIntakeError('invalid_follow_up_source', 400)

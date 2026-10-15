@@ -1,3 +1,4 @@
+import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
 import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/meeting/save — finalize an existing transcribe-stream session into
 // the standalone public meeting store. The live transcript and chunk metadata
@@ -29,6 +30,16 @@ import {
 } from '../lib/meeting-audio-archive.js'
 import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
 import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
+
+function requireMacRecordingForSave(sessionId: string, expectedChunkCount: unknown): void {
+  try {
+    requireMacRecording(sessionId)
+    assertMacCaptureComplete(sessionId, expectedChunkCount)
+  } catch (error) {
+    const failure = error as Error & { status?: number; reason?: string }
+    throw new MeetingStoreError(failure.message, failure.status ?? 409, failure.reason ?? 'mac_capture_not_started')
+  }
+}
 
 /**
  * The label a de-attributed voice takes, numbered within its meeting.
@@ -106,6 +117,7 @@ import {
 import {
   analyzeTranscriptGaps,
   deleteSession,
+  assertMacCaptureComplete,
   drainSessionAudioWrites,
   durableSessionRecoveryHasRun,
   getSessionChunkEntries,
@@ -357,7 +369,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
       markCanonicalFinalizationState(current.sidecarPath, 'ops_pending', current.claimPending)
     }
 
-    if (cosOpsPipelineConfigured()) {
+    if (cosOpsPipelineConfigured() && !MAC_CAPTURE_ID.test(current.sessionId)) {
       await handoffMeetingToOperations(current.meetingPath)
     } else {
       // Standalone: no sync_meetings.py to produce summary/topics/decisions.
@@ -370,7 +382,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     // The capture is finished and its files are durable, so the merge engine may score it.
     // Fire-and-forget by contract: the runner queues, defers under a drain or a live
     // capture, and never throws back at the finalization path.
-    triggerMeetingMergeRun('g2_finalized')
+    if (!MAC_CAPTURE_ID.test(current.sessionId)) triggerMeetingMergeRun('g2_finalized')
     runtime.finalizationJobs.remove(current.sessionId)
     finalizationRetryCounts.delete(key)
   }).catch(error => {
@@ -463,6 +475,7 @@ function publicSaveResponse(saved: SavedMeeting, replayed = false): Record<strin
     : 100
   return {
     receiptVersion: 1,
+    ...(saved.sourceType === 'mac_system_audio' ? { sourceType: saved.sourceType, sessionId: saved.captureId, captureId: saved.captureId } : {}),
     serverInstanceId: getServerInstanceId(),
     saved: true,
     // Keep the build199 string field without leaking an absolute host path.
@@ -639,6 +652,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         return
       }
       const pin = suppliedServerPin(req, body?.serverInstanceId)
+      if (MAC_CAPTURE_ID.test(sessionId) && !pin) {
+        res.status(400).json({ error: 'Server identity pin required', reason: 'server_identity_pin_required' })
+        return
+      }
       if (pin && pin !== serverInstanceId) {
         res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
         return
@@ -660,6 +677,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         res.set('Cache-Control', 'private, no-store')
         res.json(publicSaveResponse(alreadySaved, true))
         return
+      }
+      if (MAC_CAPTURE_ID.test(sessionId)) {
+        requireMacRecordingForSave(sessionId, body?.expectedChunkCount)
       }
       if (savingSessions.has(sessionId)) {
         res.status(409).json({ error: 'Meeting save already in progress', reason: 'save_in_progress' })
@@ -689,7 +709,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const chunkEntries = sessions.getChunkEntries(sessionId)
         ?? chunks.map((chunk, chunkIndex) => ({ chunkIndex, chunk }))
       const startTime = sessions.getStartTime(sessionId) ?? Date.now()
-      const durationFromTimeline = chunks.reduce(
+      const macRecording = readMacRecording(sessionId)
+      const durationFromTimeline = macRecording
+        ? macChunkReceipt(sessionId, Number(body?.expectedChunkCount) - 1)?.endElapsed ?? 0
+        : chunks.reduce(
         (maximum, chunk) => Math.max(maximum, chunk?.elapsed ?? 0),
         0,
       )
@@ -697,7 +720,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         ? durationFromTimeline
         : Math.max(0, Date.now() - startTime)
       const integrity = sessions.getIntegrity(sessionId)
-      const needsOperations = cosOpsPipelineConfigured()
+      const needsOperations = cosOpsPipelineConfigured() && !macRecording
       // Standalone saves need a finalization pass too, for summary enrichment.
       // Before 6.37 a standalone save with no audio nulled the job below and
       // never reached the ops_pending slot, so enrichment could never run.
@@ -806,7 +829,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         markCanonicalFinalizationState(saved.sidecarPath, finalizationJob.phase, claimPending)
       } else if (finalizationJob) {
         markCanonicalFinalizationState(saved.sidecarPath, 'complete', false)
-        triggerMeetingMergeRun('g2_finalized')
+        if (!readMacRecording(sessionId)) triggerMeetingMergeRun('g2_finalized')
         finalizationJobs.remove(sessionId)
         finalizationJob = null
       }
@@ -963,6 +986,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   })
   router.post('/meeting/:sessionId/speaker-policy', (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
+    if (MAC_CAPTURE_ID.test(sessionId) && req.body?.mode !== 'high-confidence') { res.status(409).json({ reason: 'mac_capture_policy_locked', error: 'The Mac pilot requires high-confidence voice identity' }); return }
     const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId)
     if (refusal) { res.status(refusal.status).json(refusal.body); return }
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId) || !isSpeakerMode(req.body?.mode) || typeof req.body?.expectedPolicyRevision !== 'string') {
@@ -2170,7 +2194,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
     const capture = synthesizeEntriesFromChunkWavs(quarantineDir)
-    const entries = capture.entries
+    const macCapture = readMacRecording(sessionId)
+    const entries = capture.entries.map(entry => {
+      if (!macCapture) return entry
+      const receipt = macChunkReceipt(sessionId, entry.chunkIndex)
+      return { ...entry, chunk: { ...entry.chunk, speaker: 'Ext', speakerPolicy: 'high-confidence' as const,
+        ...(receipt ? { elapsed: receipt.endElapsed - receipt.durationMs, audioDurationMs: receipt.durationMs } : {}) } }
+    })
     if (entries.length === 0) {
       res.status(422).json({ error: 'Quarantined directory holds no readable chunk audio', reason: 'no_chunk_audio' })
       return
@@ -2242,6 +2272,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // Receipt it and let it clear. The audio stays on disk for its full
         // retention window, so a capture wrongly judged silent is not lost.
         markRecoveredNoSpeech(quarantineDir, entries.length)
+        if (macCapture) closeMacRecording(sessionId)
         console.log(
           `[meeting/orphans] ${sessionId} held no speech `
           + `(${entries.length} chunks, ${Math.round((Date.now() - startedAt) / 1000)}s) `
@@ -2251,7 +2282,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       }
       const recoveredChunks = results.map(item => ({
         text: item.text,
-        speaker: 'Unknown',
+        speaker: macCapture ? 'Ext' : 'Unknown',
+        ...(macCapture ? { speakerPolicy: 'high-confidence' as const } : {}),
         elapsed: item.segment.startElapsed,
         similarity: 0,
         words: item.words,
@@ -2266,8 +2298,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           resolveCosOperationsDir(),
         ),
         transcript,
-        startTime: capture.startTime,
-        durationMs: capture.durationMs,
+        startTime: macCapture?.startTime ?? capture.startTime,
+        durationMs: macCapture ? Math.max(...entries.map(e => e.chunk.elapsed + (e.chunk.audioDurationMs ?? 0))) : capture.durationMs,
         chunks: recoveredChunks,
         chunkEntries: recoveredChunks.map((chunk, position) => ({
           chunkIndex: results[position]?.segment.startChunkIdx ?? position,
@@ -2294,7 +2326,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           },
         })
       } catch { /* display is best-effort */ }
-      if (cosOpsPipelineConfigured()) {
+      if (cosOpsPipelineConfigured() && !macCapture) {
         await handoffMeetingToOperations(saved.filepath)
       } else {
         // Orphan recovery is its own path and never reaches
@@ -2305,7 +2337,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // Control surfaces and warns on before committing a drain.
         await enrichStandaloneMeeting(saved.filepath, Date.now())
       }
-      triggerMeetingMergeRun('orphan_recovered')
+      if (!macCapture) triggerMeetingMergeRun('orphan_recovered')
     }).catch(error => {
       // The quarantined audio is untouched on failure — retry stays possible
       // until the retention clock clears it.

@@ -134,6 +134,7 @@ export function parseMeeting(content: string, filename: string, month: string): 
     // codebase, disagreeing with each other.
     domainAbbr: domainAbbreviation(domain),
     source: parseField(content, 'Source'),
+    ...(parseField(content, 'Capture source') === 'mac_system_audio' ? { sourceType: 'mac_system_audio' as const } : {}),
     duration,
     ...(parseDurationMinutes(duration) !== undefined ? { durationMinutes: parseDurationMinutes(duration) } : {}),
     month,
@@ -171,6 +172,7 @@ export function toMeta(detail: MeetingDetail, sessionId?: string): MeetingMeta {
     domain: detail.domain,
     domainAbbr: detail.domainAbbr,
     source: detail.source,
+    ...(detail.sourceType ? { sourceType: detail.sourceType } : {}),
     duration: detail.duration,
     ...(detail.durationMinutes !== undefined ? { durationMinutes: detail.durationMinutes } : {}),
     month: detail.month,

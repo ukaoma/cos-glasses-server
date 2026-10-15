@@ -282,6 +282,7 @@ export function toEngineSentences(rows: unknown): FirefliesSentenceInput[] {
 }
 
 function g2FromSidecar(doc: Record<string, unknown>, sessionId: string): G2RecordingInput | null {
+  if (doc.sourceType === 'mac_system_audio') return null // Mac pilot never enters the G2-only blend engine.
   const startMs = numberOr(doc.startTime, Number.NaN)
   const durationMs = numberOr(doc.durationMs, Number.NaN)
   if (!Number.isFinite(startMs) || !Number.isFinite(durationMs)) return null

@@ -36,7 +36,7 @@ export interface ClientInstanceRouterDeps {
 
 /** A POST that carries a meeting chunk: a live one, or an iPhone offline chunk replayed. The preview is not one. */
 export function isMeetingChunkPost(method: string, path: string): boolean {
-  return method === 'POST' && (path === '/transcribe-stream' || /^\/transcribe-stream\/offline-sessions\/[^/]+\/chunks$/.test(path))
+  return method === 'POST' && (path === '/transcribe-stream' || /^\/mac-recording\/mac_[0-9a-f-]+\/chunks$/.test(path) || /^\/transcribe-stream\/offline-sessions\/[^/]+\/chunks$/.test(path))
 }
 
 /** `::ffff:100.64.1.2` and `100.64.1.2` are one device. */

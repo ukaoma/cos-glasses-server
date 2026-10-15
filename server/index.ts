@@ -384,6 +384,7 @@ app.use('/api', (req, res, next) => {
     || req.path === '/diagnostics/provider-proof'
     || req.path === '/transcribe'
     || req.path.startsWith('/transcribe-stream')
+    || req.path.startsWith('/mac-recording/')
     || req.path === '/meeting/save'
     // The import run answers 202 and keeps working. It takes its own
     // maintenance lease per page and checks admissions itself, so the global

@@ -67,7 +67,7 @@ function withStandaloneIdentity(meeting: MeetingMeta): MeetingMeta {
 export function withMeetingContext<T extends MeetingMeta>(meeting: T, source: MeetingMeta['librarySource'] = meeting.librarySource): T {
   if (meeting.contextKeys !== undefined) return meeting
   if (source === 'standalone_recordings') {
-    return { ...meeting, ...meetingContextFields(meetingContextKeys({ g2SessionId: meeting.sessionId })) }
+    return { ...meeting, ...meetingContextFields(meetingContextKeys({ g2SessionId: meeting.sessionId, sourceType: meeting.sourceType })) }
   }
   return { ...meeting, ...readOnlyContext() }
 }
@@ -213,7 +213,7 @@ function savedMeetingDetailWithContext(
   const source = detail.librarySource ?? (detail.recordId?.startsWith('standalone:') ? 'standalone_recordings' : undefined)
   if (source === 'standalone_recordings' && detail.contextKeys === undefined) {
     const sessionId = detail.sessionId || store.storedSessionId(descriptor.month, detail.filename || descriptor.filename)
-    return { ...detail, ...meetingContextFields(meetingContextKeys({ g2SessionId: sessionId })) }
+    return { ...detail, ...meetingContextFields(meetingContextKeys({ g2SessionId: sessionId, sourceType: detail.sourceType })) }
   }
   return withMeetingContext(detail, source)
 }

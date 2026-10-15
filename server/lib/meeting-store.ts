@@ -1,3 +1,4 @@
+import { MAC_SOURCE_TYPE, readMacRecording, closeMacRecording } from './mac-recording.js'
 import {
   chmodSync,
   existsSync,
@@ -92,6 +93,7 @@ export interface MeetingMeta {
   domain: string
   domainAbbr: string
   source: string
+  sourceType?: 'mac_system_audio'
   duration: string
   durationMinutes?: number
   month: string
@@ -133,7 +135,7 @@ export interface MeetingMeta {
   /** 0-based position of a split piece inside its source recording. */
   pieceIndex?: number
   /** Inputs of a derived record, for the detail view's source links. */
-  sources?: Array<{ kind: 'g2' | 'fireflies'; id: string; recordId?: string }>
+  sources?: Array<{ kind: 'g2' | 'fireflies' | 'mac'; id: string; recordId?: string }>
   /** Present only when the server can state a truthful local record. */
   canonicalRecord?: string
   /** 6.64.0, additive and read-only. The keys COS Control files a meeting's dropped files under, from source ids the
@@ -192,6 +194,8 @@ export interface SaveMeetingInput {
 }
 
 export interface SavedMeeting {
+  captureId?: string
+  sourceType?: typeof MAC_SOURCE_TYPE
   filepath: string
   sidecarPath: string
   filename: string
@@ -312,10 +316,11 @@ export class MeetingStore {
       .trim()
     if (!transcript) throw new MeetingStoreError('Transcript is empty', 400, 'empty_transcript')
 
+    const mac = readMacRecording(sessionId)
     const parts = localParts(input.startTime)
-    const fallbackTitle = `G2 Recording ${parts.date} ${parts.hourMinute}`
+    const fallbackTitle = `${mac ? 'Mac' : 'G2'} Recording ${parts.date} ${parts.hourMinute}`
     const title = normalizeTitle(input.title, fallbackTitle)
-    const stem = filenameStem(title, `G2_Recording_${parts.hourMinute}`)
+    const stem = filenameStem(title, `${mac ? 'Mac' : 'G2'}_Recording_${parts.hourMinute}`)
     const durationMs = Number.isFinite(input.durationMs) ? Math.max(0, input.durationMs) : 0
     const durationMin = Math.round(durationMs / 60_000)
 
@@ -354,7 +359,8 @@ export class MeetingStore {
       `| **Date** | ${parts.date} |`,
       `| **Time** | ${parts.time} |`,
       `| **Duration** | ${durationMin} minutes |`,
-      '| **Source** | G2 Glasses |',
+      mac ? '| **Source** | Mac System Audio |' : '| **Source** | G2 Glasses |',
+      ...(mac ? ['| **Capture source** | mac_system_audio |', '| **Captured voices** | Other participants only |'] : []),
       `| **Domain** | ${escapeTableValue(domain)} |`,
       `| **Transfer integrity** | ${integrityValue} |`,
       '| **Transcription quality** | streaming |',
@@ -364,7 +370,7 @@ export class MeetingStore {
       // When COS ops is configured, use the private-app pipeline markers so
       // sync_meetings.py --g2-file will enrich (and reclassify domain). Plain
       // "Standalone recording" summaries are treated as already-final and skipped.
-      ...(process.env.COS_SCRIPTS_DIR
+      ...(process.env.COS_SCRIPTS_DIR && !mac
         ? [
             '<!-- g2-needs-domain-review -->',
             '',
@@ -381,6 +387,7 @@ export class MeetingStore {
     const providers = [...new Set(input.chunks.map(chunk => chunk.asrProvider || 'server-whisper'))]
     const sidecar = {
       schemaVersion: 2,
+      ...(mac ? { sourceType: MAC_SOURCE_TYPE, captureSource: mac } : {}),
       sessionId,
       startTime: input.startTime,
       durationMs,
@@ -416,7 +423,9 @@ export class MeetingStore {
       throw error
     }
 
+    if (mac) closeMacRecording(sessionId)
     return {
+      ...(mac ? { captureId: sessionId, sourceType: MAC_SOURCE_TYPE } : {}),
       filepath,
       sidecarPath,
       filename,
@@ -455,6 +464,7 @@ export class MeetingStore {
             ? Math.max(0, sidecar.durationMs)
             : 0
           return {
+            ...(sidecar.sourceType === MAC_SOURCE_TYPE ? { captureId: sessionId, sourceType: MAC_SOURCE_TYPE } : {}),
             filepath: join(monthDir, filename),
             sidecarPath: join(monthDir, sidecarName),
             filename,
