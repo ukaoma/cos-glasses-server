@@ -34,3 +34,14 @@ it('concurrent admission is capped and capability discovery makes no model call'
  expect((await s.post(input)).status).toBe(409);resolve({text:JSON.stringify({answer:'Ready',assignments:[]})});expect((await first).status).toBe(200)
  }finally{s.server.close()}
 })
+it('runs the planner the client picked, defaults older clients to Sonnet and refuses any other model',async()=>{
+ const run=vi.fn(async()=>({text:JSON.stringify({answer:'Planned.',assignments:[]})})),s=await setup(run)
+ try {
+ expect(await (await fetch(s.url,{headers:{'X-Cos-Token':'t'}})).json()).toMatchObject({planner:'sonnet',planners:['sonnet','opus']})
+ const opus=await (await s.post({...input,planner:'opus'})).json()
+ expect((run.mock.calls as any)[0][0]).toEqual({engine:'claude',model:'opus'});expect(opus.model).toBe('claude:opus (requested)');expect(JSON.parse((run.mock.calls as any)[0][1])).not.toHaveProperty('planner')
+ expect(await (await s.post({...input,planner:'sonnet'})).json()).toMatchObject({model:'claude:sonnet (requested)'});expect((run.mock.calls as any)[1][0]).toEqual({engine:'claude',model:'sonnet'})
+ for (const planner of ['haiku','fable','Opus','',null,1]) expect((await s.post({...input,planner})).status).toBe(400)
+ expect(run).toHaveBeenCalledTimes(2)
+ }finally{s.server.close()}
+})

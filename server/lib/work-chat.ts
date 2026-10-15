@@ -5,18 +5,21 @@ export interface WorkChatInput {
   workID: string; revision: string; question: string; context: string;
   sessions: WorkChatSession[]; history: { question: string; answer: string }[];
   updates: { sessionID: string; status: string; detail: string; result: string }[];
-  mode: 'plan' | 'summary'
+  mode: 'plan' | 'summary'; planner?: WorkChatPlanner
 }
+/** Claude models a Control client may pick to plan. Sonnet stays the default for clients that send none. */
+export const WORK_CHAT_PLANNERS = ['sonnet','opus'] as const
+export type WorkChatPlanner = typeof WORK_CHAT_PLANNERS[number]
 export interface WorkChatAnswer { answer: string; assignments: { sessionID: string; prompt: string }[] }
 const SID = /^(claude|codex|cursor):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const text = (v: unknown, n: number): v is string => typeof v === 'string' && v.length <= n && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(v)
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v)
 export function parseWorkChatInput(v: unknown): WorkChatInput {
-  if (!object(v) || Object.keys(v).some(k => !['workID','revision','question','context','sessions','history','updates','mode'].includes(k))
+  if (!object(v) || Object.keys(v).some(k => !['workID','revision','question','context','sessions','history','updates','mode','planner'].includes(k))
     || !text(v.workID,256) || !/^task:[a-z_]+:[a-f0-9]{12}$/.test(v.workID)
     || !text(v.revision,64) || !/^[a-f0-9]{64}$/.test(v.revision)
     || !text(v.question,2000) || !v.question.trim() || !text(v.context,16000)
-    || !['plan','summary'].includes(v.mode) || !Array.isArray(v.sessions) || v.sessions.length>12
+    || !['plan','summary'].includes(v.mode) || ('planner' in v && !(WORK_CHAT_PLANNERS as readonly unknown[]).includes(v.planner)) || !Array.isArray(v.sessions) || v.sessions.length>12
     || !Array.isArray(v.history) || v.history.length>6 || !Array.isArray(v.updates) || v.updates.length>12) throw new Error('invalid_request')
   const ids = new Set<string>()
   for (const s of v.sessions) {
