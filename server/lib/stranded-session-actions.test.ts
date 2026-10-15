@@ -10,6 +10,7 @@ import {
   promoteStrandedSession,
   releaseStrandedState,
   shouldCloseAfterFailedPromote,
+  restoresAtBoot,
   sweepStrandedSessions,
   writeStrandedDraft,
 } from './stranded-session-actions.js'
@@ -259,6 +260,24 @@ describe('a terminal session keeps no stranded state', () => {
   })
 })
 
+describe('boot recovery keeps a Mac capture open', () => {
+  const RETAIN = 4 * 60 * 60_000
+  it('restores a G2 session inside retention and expires it past', () => {
+    expect(restoresAtBoot('meeting_1_x', RETAIN - 1, RETAIN)).toBe(true)
+    expect(restoresAtBoot('meeting_1_x', RETAIN, RETAIN)).toBe(false)
+  })
+  it('restores a Mac capture at any idle age, because Control still holds its audio', () => {
+    expect(restoresAtBoot('mac_43879e59-3039-4f2c-9cd2-4fcc59486d71', 10 * RETAIN, RETAIN)).toBe(true)
+    expect(restoresAtBoot('mac_NOT-A-UUID', 10 * RETAIN, RETAIN)).toBe(false)
+  })
+  it('is the condition the route uses at boot', () => {
+    // Structural: importing routes/transcribe-stream.ts runs boot recovery against the real data home.
+    const route = readFileSync(new URL('../routes/transcribe-stream.ts', import.meta.url).pathname, 'utf8')
+    expect(route.match(/restoresAtBoot\(data\.sessionId, Date\.now\(\) - lastActivityAt, LOCAL_FIRST_MEETING_IDLE_RETENTION_MS\)/g)).toHaveLength(1)
+    expect(route).not.toMatch(/if \(Date\.now\(\) - lastActivityAt < LOCAL_FIRST_MEETING_IDLE_RETENTION_MS\)/)
+  })
+})
+
 describe('the sweep pass, actually executed', () => {
   const session = (over: Record<string, number> = {}) => ({
     lastActivityAt: NOW, startTime: NOW - mins(60), chunkCount: 100, ...over,
@@ -317,6 +336,21 @@ describe('the sweep pass, actually executed', () => {
     const { result, promoted } = sweep({ sessions: [['done', session({ lastActivityAt })]] })
     expect(result.promoted).toEqual(['done'])
     expect(promoted).toEqual([['done', lastActivityAt]])
+  })
+
+  it('leaves a Mac capture to COS Control: no draft, no unattended save, at any age', () => {
+    // 2026-10-15: the unattended save of mac_43879e59 would have been a 400 (no server pin), read as final, and the
+    // session closed with 1,149 chunks still on the Mac. A G2 session of the same age still promotes.
+    const mac = 'mac_43879e59-3039-4f2c-9cd2-4fcc59486d71'
+    const { result, promoted } = sweep({ sessions: [
+      [mac, session({ lastActivityAt: NOW - mins(241) })],
+      ['meeting_1_old', session({ lastActivityAt: NOW - mins(241) })],
+      ['mac_43879e59-0000-0000-0000-000000000000', session({ lastActivityAt: NOW - mins(45) })],
+    ] })
+    expect(result.live).toEqual([mac, 'mac_43879e59-0000-0000-0000-000000000000'])
+    expect(promoted).toEqual([['meeting_1_old', NOW - mins(241)]])
+    expect(result.drafted).toEqual([])
+    expect(listStrandedDrafts(dir)).toHaveLength(0)
   })
 
   it('respects a fresh heartbeat and skips drafting a quiet-but-recording phone', () => {

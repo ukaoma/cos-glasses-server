@@ -1,3 +1,10 @@
+## 6.73.9 — Keep stalled Mac captures recoverable (local candidate)
+
+- Never auto-save or expire a Mac capture (`mac_<uuid>`). COS Control keeps every chunk on the Mac and delivers or recovers it. The 4 h stranded sweep posted the save without the server pin a Mac save requires, read the 400 as final and closed the session; boot recovery closed any session idle past 4 h the same way. A capture stalled at 51 of 1,200 chunks (2026-10-15) would have lost its server-side recovery at 20:12. Both paths now leave Mac captures open (`restoresAtBoot`, sweep guard).
+- Note for 6.73.6 to 6.73.8: the decision provider switch (Jev or SubQ) for Work search, session suggestions and completion checks, with authenticated `/api/decision-provider` and `/api/subq-key` routes, a private 0600 SubQ key file, and `COS_SUBQ_DAILY_TOKENS` (default 1M) capping each workflow's daily usage separately. SubQ sends the decision prompt to SubQ's API. Meeting intake (`work_intake.py`) stays on Jev.
+- Known limitation: in a saved Mac meeting's full-quality Parakeet pass, a window with no words over detected speech still abandons that pass; the meeting saves with its live transcript.
+- Pair with Control 0.5.307. Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.8 — Live Ask on Mac recordings (local candidate)
 
 - Accept Mac capture ids (`mac_<uuid>`, the id the Mac recording route issues) in live COS Ask, Ask history, files and orientation, and Work intake Ask evidence. Every Ask on a Mac recording failed with `invalid_session_id`; found in a live meeting 2026-10-15. One shared pattern in `lib/ask-session-id.ts`; traversal-shaped and upper-case ids stay refused.

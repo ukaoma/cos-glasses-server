@@ -30,6 +30,7 @@ import { resolve } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import { forgetSessionHeartbeat } from './session-heartbeats.js'
 import { classifyStrandedSession, type SessionHeartbeat } from './stranded-sessions.js'
+import { MAC_ASK_SESSION as MAC_CAPTURE } from './ask-session-id.js'
 
 /** Title given to a capture the sweeper saves on the user's behalf. */
 export const STRANDED_PROMOTE_TITLE = 'Auto-saved capture'
@@ -184,6 +185,15 @@ export interface StrandedSweepResult {
  * that decides whether a recording ever becomes a meeting cannot be covered by
  * source-shape assertions alone.
  */
+/**
+ * Boot recovery: does a persisted session come back open? Idle past the retention closes it as expired, except a
+ * Mac capture, whose audio COS Control still holds and may deliver after this restart (6.73.9, same incident as the
+ * sweep guard below).
+ */
+export function restoresAtBoot(sessionId: string, idleMs: number, retentionMs: number): boolean {
+  return MAC_CAPTURE.test(sessionId) || idleMs < retentionMs
+}
+
 export function sweepStrandedSessions(input: StrandedSweepInput): StrandedSweepResult {
   const result: StrandedSweepResult = { drafted: [], promoted: [], live: [] }
   // Only the process that owns the API can save anything, and only it should be
@@ -191,6 +201,11 @@ export function sweepStrandedSessions(input: StrandedSweepInput): StrandedSweepR
   // imported the module, so the pass does nothing rather than half-acting.
   if (!input.token) return result
   for (const [sessionId, session] of input.sessions) {
+    // 6.73.9: a Mac capture belongs to COS Control, which keeps every chunk on the Mac and delivers or recovers it.
+    // The unattended save cannot carry the server pin a Mac save requires, so it got a 400, read that as final and
+    // closed the session as expired: a capture stuck at 51 of 1,200 chunks (2026-10-15) would have lost its
+    // server-side recovery at the 4 h mark. Never draft or promote one.
+    if (MAC_CAPTURE.test(sessionId)) { result.live.push(sessionId); continue }
     const verdict = classifyStrandedSession(
       { lastActivityAt: session.lastActivityAt, heartbeat: input.getHeartbeat(sessionId) },
       input.now,

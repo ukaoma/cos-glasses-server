@@ -22,6 +22,7 @@ import {
   clearStrandedDraft,
   listStrandedDrafts,
   releaseStrandedState,
+  restoresAtBoot,
   shouldCloseAfterFailedPromote,
   sweepStrandedSessions,
   promoteStrandedSession,
@@ -828,7 +829,7 @@ function recoverSessions(): void {
         if (data.sessionId && (hasChunks || Array.isArray(data.receivedIndices) || Number.isFinite(lastActivityAt))) {
           // Active retention is idle-based. Long meetings are not purged merely
           // because their original start time is old.
-          if (Date.now() - lastActivityAt < LOCAL_FIRST_MEETING_IDLE_RETENTION_MS) {
+          if (restoresAtBoot(data.sessionId, Date.now() - lastActivityAt, LOCAL_FIRST_MEETING_IDLE_RETENTION_MS)) {
             const chunks: TranscriptChunk[] = []
             if (indexed) {
               for (const e of indexed) {
