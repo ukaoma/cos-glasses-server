@@ -249,3 +249,7 @@ decode. With HQ `large-v3` and Parakeet as the second opinion, run in parallel: 
 added (Parakeet finishes first), or about 290 ms run after HQ. With HQ `parakeet-ultra` and
 Large-v3 as the second opinion: about 1.3 s added in parallel (p50 1,544 minus 291), 1.5 s
 after. That last case would remove most of Parakeet's speed advantage on the final.
+
+## Native Mac dictation opt-in
+
+The native Mac client first checks `GET /api/transcribe/capabilities` for desktopDictationVersion 1 and localOnly true. It then uses the existing one-shot endpoint with `requiredEngine=parakeet-ultra`. This opt-in caps the actual streamed request body at 3,840,044 bytes and forces local-only execution. A cold, unavailable, busy, failed or incompatible Parakeet decode returns a retryable 503 before any Whisper/cloud path. The shared COS dictionary and hallucination filters still run on successful text. This requirement does not change legacy callers that omit the parameter.

@@ -40,6 +40,27 @@ afterAll(async () => {
 })
 
 describe('one-shot transcription availability contract', () => {
+  it('advertises strict desktop capability before microphone audio is transferred', async () => {
+    const response = await fetch(`${base}/api/transcribe/capabilities`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ desktopDictationVersion: 1, requiredEngines: ['parakeet-ultra'], localOnly: true, dictionary: 'cos' })
+  })
+
+  it('pins local Parakeet for the desktop caller without changing legacy mode', async () => {
+    transcribeAudioBuffer.mockResolvedValueOnce({ text: 'desktop words', engine: 'parakeet-ultra', elapsedMs: 10, audioBytes: 3200 })
+    const response = await fetch(`${base}/api/transcribe?requiredEngine=parakeet-ultra`, { method: 'POST', body: Buffer.alloc(3200, 1) })
+    expect(response.status).toBe(200)
+    expect(transcribeAudioBuffer).toHaveBeenLastCalledWith(expect.any(Buffer), expect.objectContaining({ requiredEngine: 'parakeet-ultra', policy: 'local-only', affectsCircuit: false }))
+  })
+
+  it('refuses unknown engines and overlong microphone payloads before decoding', async () => {
+    const before = transcribeAudioBuffer.mock.calls.length
+    const invalid = await fetch(`${base}/api/transcribe?requiredEngine=other`, { method: 'POST', body: Buffer.alloc(3200, 1) })
+    expect(invalid.status).toBe(400)
+    const oversized = await fetch(`${base}/api/transcribe?requiredEngine=parakeet-ultra`, { method: 'POST', body: Buffer.alloc(3_840_046, 1) })
+    expect(oversized.status).toBe(413)
+    expect(transcribeAudioBuffer.mock.calls.length).toBe(before)
+  })
   it('returns requested and actual quality without replacing legacy fields', async () => {
     transcribeAudioBuffer.mockResolvedValueOnce({
       text: 'fallback transcript',

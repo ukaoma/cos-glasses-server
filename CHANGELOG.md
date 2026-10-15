@@ -1,3 +1,10 @@
+## 6.73.7 — Strict local desktop dictation (local candidate)
+
+- Advertise the desktop dictation capability before microphone audio is transferred.
+- Honor an explicit Parakeet Ultra requirement through the existing COS dictionary and vocabulary pipeline; return a retryable error rather than substituting Whisper or cloud transcription.
+- Bound streamed desktop audio to two minutes of canonical PCM16 WAV data. Preserve legacy transcription behavior for callers without the engine requirement.
+- Pair with Control 0.5.303 for microphone dictation and shared Mac live meeting views. Retain the recording/onboarding/SubQ changes from 6.73.6 and keep transcription-candidate/cue flags disabled. No public publication is implied.
+
 ## 6.73.6 — Manual Mac recording transport (local candidate)
 
 - Register selected-app Mac system-audio capture with immutable source identity and high-confidence speaker policy before admitting audio.

@@ -63,7 +63,7 @@ export type TranscriptionBackendPolicy = 'automatic' | 'local-only'
 
 export class TranscriptionUnavailableError extends Error {
   readonly status = 503
-  constructor(readonly reason: 'local_asr_unavailable' | 'local_asr_restarting' | 'openai_key_missing', message?: string) {
+  constructor(readonly reason: 'local_asr_unavailable' | 'local_asr_restarting' | 'openai_key_missing' | 'parakeet_unavailable', message?: string) {
     super(message ?? reason)
     this.name = 'TranscriptionUnavailableError'
   }
@@ -168,6 +168,8 @@ export async function transcribeAudioBuffer(
     /** A plan snapshot taken by the caller (prompt finalize takes one for every chunk). */
     dictationPlan?: DictationPlan
     sttDeps?: DictationSttDeps
+    /** Desktop dictation pins its selected engine. Never substitute Whisper or upload audio. */
+    requiredEngine?: 'parakeet-ultra'
   } = {},
 ): Promise<TranscribeAudioResult> {
   const requestedMode = opts.mode ?? 'hq'
@@ -193,6 +195,9 @@ export async function transcribeAudioBuffer(
   const sttDeps = opts.sttDeps ?? defaultDictationSttDeps
   const slot = dictationSlotForMode(effectiveMode)
   const plan = opts.dictationPlan && opts.dictationPlan.slot === slot ? opts.dictationPlan : sttDeps.plan(slot)
+  if (opts.requiredEngine && plan.engine !== opts.requiredEngine) {
+    throw new TranscriptionUnavailableError('parakeet_unavailable', 'Parakeet is not ready. Select Parakeet for dictation in Transcription settings and retry.')
+  }
   let engine: DictationEngine = 'whisper'
   let engineReason: string | null = plan.reason
   let decoded = false
@@ -210,6 +215,9 @@ export async function transcribeAudioBuffer(
     }
   }
 
+  if (!decoded && opts.requiredEngine) {
+    throw new TranscriptionUnavailableError('parakeet_unavailable', 'Parakeet could not transcribe this audio. Retry when it is ready; no other engine was used.')
+  }
   if (decoded) {
     // Parakeet ran: nothing below. Its word clocks are not passed to the prompt tail
     // guard, whose confidence rule is calibrated on Whisper token probabilities.
