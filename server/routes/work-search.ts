@@ -8,7 +8,7 @@
 import { Router } from 'express'
 import { listBoard } from '../lib/task-store.js'
 import { isSafeDomainName } from '../lib/domains.js'
-import { queryLength, sharedWorkSearchJevClient, selectCandidates, unavailable, workSearchEnabled, WorkSearcher, WORK_SEARCH_LIMITS,
+import { queryLength, sharedWorkSearchDecisionClient, selectCandidates, unavailable, workSearchEnabled, WorkSearcher, WORK_SEARCH_LIMITS,
   WORK_SEARCH_SCOPES, type WorkSearchResult, type WorkSearchScope } from '../lib/work-search.js'
 
 export interface WorkSearchRouteDependencies {
@@ -23,7 +23,7 @@ const TASK_ID = /^[a-f0-9]{12}$/
 export const WORK_SEARCH_LOG_EVERY_MS = 10 * 60_000
 
 export function createWorkSearchRouter(overrides: Partial<WorkSearchRouteDependencies> = {}): Router {
-  const deps: WorkSearchRouteDependencies = { searcher: new WorkSearcher(sharedWorkSearchJevClient()), list: () => listBoard(),
+  const deps: WorkSearchRouteDependencies = { searcher: new WorkSearcher(sharedWorkSearchDecisionClient()), list: () => listBoard(),
     enabled: () => workSearchEnabled(), ...overrides }
   const router = Router()
   const logged = new Map<string, number>()

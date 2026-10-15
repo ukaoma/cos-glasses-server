@@ -1,3 +1,4 @@
+import { type DecisionClient, createDecisionClient, DecisionProviderError } from './decision-provider.js'
 /**
  * Work search by meaning (6.65.0, Control 0.5.259).
  *
@@ -41,7 +42,7 @@ export const WORK_SEARCH_INSTRUCTIONS = 'The user typed `query` into the search 
 export const WORK_SEARCH_NONE = 'None of these tasks is what the user is looking for.'
 
 export type WorkSearchReason = 'jev_not_configured' | 'jev_key_rejected' | 'jev_cap_reached' | 'jev_breaker_open' | 'jev_request_rejected'
-  | 'jev_unavailable' | 'search_off' | 'too_many_candidates'
+  | 'jev_unavailable' | DecisionProviderError['code'] | 'search_off' | 'too_many_candidates'
 export const WORK_SEARCH_MESSAGES: Record<WorkSearchReason, string> = {
   jev_not_configured: 'Meaning search needs a TypeSafe key. Add one in Settings.',
   jev_key_rejected: 'TypeSafe did not accept the saved key. Check it in Settings. Word search still works.',
@@ -49,6 +50,18 @@ export const WORK_SEARCH_MESSAGES: Record<WorkSearchReason, string> = {
   jev_breaker_open: 'Meaning search is paused for an hour after repeated failures. Word search still works.',
   jev_request_rejected: 'Jev refused this search request. Word search still works.',
   jev_unavailable: 'Meaning search got no answer from Jev. Word search still works.',
+  decision_invalid_provider: 'Meaning search has an invalid decision provider setting. Word search still works.',
+  decision_not_configured: 'The selected decision provider needs an API key. Word search still works.',
+  decision_cap_reached: 'The selected decision provider has used today’s budget. Word search still works.',
+  decision_breaker_open: 'The selected decision provider is paused after repeated failures. Word search still works.',
+  decision_key_rejected: 'The selected decision provider did not accept its key. Word search still works.',
+  decision_credits_required: 'The selected decision provider needs available credits. Word search still works.',
+  decision_rate_limited: 'The selected decision provider is rate limited. Word search still works.',
+  decision_request_rejected: 'The selected decision provider refused this request. Word search still works.',
+  decision_unavailable: 'The selected decision provider could not answer. Word search still works.',
+  decision_bad_answer: 'The selected decision provider returned an unreadable answer. Word search still works.',
+  decision_cancelled: 'Meaning search was cancelled. Word search still works.',
+  decision_images_unsupported: 'The selected decision provider does not accept images. Word search still works.',
   search_off: 'Meaning search is turned off on this server.',
   too_many_candidates: `Meaning search covers up to ${WORK_SEARCH_LIMITS.maxCandidates} cards. Pick a domain to search this view.`,
 }
@@ -181,7 +194,7 @@ const PASSED_THROUGH = new Set<string>(['jev_not_configured', 'jev_key_rejected'
 export class WorkSearcher {
   private cache = new Map<string, { at: number; results: WorkSearchHit[]; none: number | null }>()
   private inflight = new Map<string, Promise<WorkSearchResult>>()
-  constructor(private readonly jev: JevClient, private readonly now: () => number = () => Date.now()) {}
+  constructor(private readonly jev: DecisionClient, private readonly now: () => number = () => Date.now()) {}
 
   /** One Jev Choice over `candidates` (already selected, at most 254). Never throws for a Jev failure. */
   async search(query: string, candidates: readonly SearchableRow[]): Promise<WorkSearchResult> {
@@ -215,6 +228,7 @@ export class WorkSearcher {
       this.cache.set(key, { at: this.now(), results, none })
       return { available: true, results, none, cached: false, tokens: reply.inputTokens }
     } catch (e) {
+      if (e instanceof DecisionProviderError) return unavailable(e.code)
       if (!(e instanceof JevError)) throw e
       // Each says what happened. A 400, 413 or 422 is jev_request_rejected: the request itself was refused, which does
       // not count toward the breaker (jev.ts), because the same cards would be refused again and an outage pause would
@@ -225,3 +239,6 @@ export class WorkSearcher {
     }
   }
 }
+
+let sharedDecisionSearch: DecisionClient | null = null
+export function sharedWorkSearchDecisionClient(): DecisionClient { return sharedDecisionSearch ??= createDecisionClient('search', sharedWorkSearchJevClient()) }

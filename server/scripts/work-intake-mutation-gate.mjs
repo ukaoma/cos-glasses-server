@@ -74,7 +74,7 @@ const mutations = [
   ['completion-cache', DONE, 'if (hit && this.now() - hit.at < COMPLETION_LIMITS.cacheMs) return { ...hit.value, cached: true }', ''],
   ['completion-reply-clipped', DONE, 'reply: clip(input.reply, COMPLETION_LIMITS.reply)', 'reply: input.reply'],
   ['completion-no-reply-no-call', DONE, "if (!state.reply) return { provider: 'none', reason: 'no_reply' }", ''],
-  ['completion-jev-errors-are-reasons', DONE, "if (e instanceof JevError) return { provider: 'none', reason: e.code }", ''],
+  ['completion-jev-errors-are-reasons', DONE, "if (isDecisionFailure(e)) return { provider: 'none', reason: e.code }", ''],
 ]
 try {
   const skip = new Set(['data', 'models', 'certs', 'node_modules'])

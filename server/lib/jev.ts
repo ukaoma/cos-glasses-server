@@ -81,7 +81,7 @@ function dailyCap(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : JEV_LIMITS.defaultDailyTokens
 }
 
-export interface JevAnswers { answers: Record<string, { choice?: string; probabilities?: Record<string, number>; noul?: number }>; model?: string; inputTokens: number }
+export interface JevAnswers { provider?: 'jev' | 'subq'; answers: Record<string, { type?: 'choice' | 'noul' | 'score'; choice?: string; probabilities?: Record<string, number>; noul?: number; confidence?: number; score?: number; legend?: Record<string, unknown> }>; model?: string; inputTokens: number }
 
 /** One Jev client per process: it owns the breaker and the usage ledger. */
 export class JevClient {
@@ -128,14 +128,14 @@ export class JevClient {
   }
 
   /** Ask one request. `estimate` is the caller's input-token estimate, checked against the cap BEFORE sending. */
-  async ask(state: unknown, questions: Record<string, unknown>, estimate: number): Promise<JevAnswers> {
+  async ask(state: unknown, questions: Record<string, unknown>, estimate: number, options?: { signal?: AbortSignal }): Promise<JevAnswers> {
     const key = resolveJevKey()
     if (!key) throw new JevError('jev_not_configured')
     if (this.breakerUntil > this.now().getTime()) throw new JevError('jev_breaker_open')
     if (this.usedToday() + estimate > this.cap()) this.fail('jev_cap_reached', false)
     let res: Response
     try {
-      res = await this.fetchImpl(`${JEV_ENDPOINT}/systemone`, { method: 'POST', signal: AbortSignal.timeout(JEV_LIMITS.timeoutMs),
+      res = await this.fetchImpl(`${JEV_ENDPOINT}/systemone`, { method: 'POST', signal: AbortSignal.any([AbortSignal.timeout(JEV_LIMITS.timeoutMs), ...(options?.signal ? [options.signal] : [])]),
         headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ state, model: JEV_MODEL, questions }) })
     } catch { return this.fail('jev_unavailable', true) }

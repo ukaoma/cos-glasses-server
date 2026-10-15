@@ -1,0 +1,651 @@
+{
+  "scope": "synthetic fixtures only; no production content",
+  "request_cap": 24,
+  "actual_requests": 15,
+  "default_changed": false,
+  "fixtures": {
+    "text": [
+      {
+        "case": "done-checked",
+        "state": {
+          "task": "Create a blue button and verify keyboard activation.",
+          "reply": "Implemented the blue button. Keyboard Enter and Space activation both passed."
+        },
+        "questions": {
+          "finished": {
+            "type": "choice",
+            "instructions": "Does reply show this exact task finished and checked? A plan, partial result, blocker or promise is not_done. Unrelated or insufficient evidence is unclear.",
+            "criteria": {
+              "done": "Exact task finished and checked",
+              "not_done": "Work remains, plan, blocker or promise",
+              "unclear": "Insufficient evidence"
+            }
+          }
+        },
+        "expected": {
+          "finished": "done"
+        }
+      },
+      {
+        "case": "blocked",
+        "state": {
+          "task": "Create a blue button and verify keyboard activation.",
+          "reply": "Implemented styling but keyboard activation fails. I need to fix it."
+        },
+        "questions": {
+          "finished": {
+            "type": "choice",
+            "instructions": "Does reply show this exact task finished and checked? A plan, partial result, blocker or promise is not_done. Unrelated or insufficient evidence is unclear.",
+            "criteria": {
+              "done": "Exact task finished and checked",
+              "not_done": "Work remains, plan, blocker or promise",
+              "unclear": "Insufficient evidence"
+            }
+          }
+        },
+        "expected": {
+          "finished": "not_done"
+        }
+      },
+      {
+        "case": "insufficient",
+        "state": {
+          "task": "Create a blue button and verify keyboard activation.",
+          "reply": "The weather is clear today."
+        },
+        "questions": {
+          "finished": {
+            "type": "choice",
+            "instructions": "Does reply show this exact task finished and checked? A plan, partial result, blocker or promise is not_done. Unrelated or insufficient evidence is unclear.",
+            "criteria": {
+              "done": "Exact task finished and checked",
+              "not_done": "Work remains, plan, blocker or promise",
+              "unclear": "Insufficient evidence"
+            }
+          }
+        },
+        "expected": {
+          "finished": "unclear"
+        }
+      },
+      {
+        "case": "match-context",
+        "state": {
+          "task": "Repair keyboard focus in the Atlas button module",
+          "sessions": [
+            "Atlas button keyboard focus repair",
+            "Write a bakery recipe"
+          ]
+        },
+        "questions": {
+          "best": {
+            "type": "choice",
+            "instructions": "Which session is already working on the exact task? Choose none unless a session matches this deliverable.",
+            "criteria": {
+              "s0": "First session",
+              "s1": "Second session",
+              "none": "No matching session"
+            }
+          }
+        },
+        "expected": {
+          "best": "s0"
+        }
+      },
+      {
+        "case": "match-none",
+        "state": {
+          "task": "Prepare a telescope repair checklist",
+          "sessions": [
+            "Atlas button keyboard focus repair",
+            "Write a bakery recipe"
+          ]
+        },
+        "questions": {
+          "best": {
+            "type": "choice",
+            "instructions": "Which session is already working on the exact task? Choose none unless a session matches this deliverable.",
+            "criteria": {
+              "s0": "First session",
+              "s1": "Second session",
+              "none": "No matching session"
+            }
+          }
+        },
+        "expected": {
+          "best": "none"
+        }
+      },
+      {
+        "case": "search-none",
+        "state": "Find a telescope repair task",
+        "questions": {
+          "c": {
+            "type": "choice",
+            "instructions": "Pick the requested task, or none if absent.",
+            "criteria": {
+              "t0": "Bake a loaf of bread",
+              "t1": "Paint a fence",
+              "none": "No matching task"
+            }
+          }
+        },
+        "expected": {
+          "c": "none"
+        }
+      }
+    ],
+    "images": [
+      {
+        "case": "image-red",
+        "state": "Synthetic flat color test. Judge only supplied pixels.",
+        "images": [
+          {
+            "mediaType": "image/png",
+            "base64": "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAAA+ElEQVR4nO3RMQ0AMAzAsN7lD3QQBqNHLAVAJM/b1WFzfhAPAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANp97RgD0B1VA+gAAAAASUVORK5CYII="
+          }
+        ],
+        "questions": {
+          "color": {
+            "type": "choice",
+            "instructions": "Which color fills the image?",
+            "criteria": {
+              "red": "Mostly red",
+              "blue": "Mostly blue",
+              "unclear": "Neither, or ambiguous"
+            }
+          },
+          "text": {
+            "type": "noul",
+            "instructions": "Does the image contain readable text?",
+            "criteria": {
+              "true": "Readable text visible",
+              "false": "No readable text visible"
+            }
+          }
+        },
+        "expected": {
+          "color": "red",
+          "text": false
+        }
+      },
+      {
+        "case": "image-blue",
+        "state": "Synthetic flat color test. Judge only supplied pixels.",
+        "images": [
+          {
+            "mediaType": "image/png",
+            "base64": "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAAA+ElEQVR4nO3RMQ0AMAzAsN7lD3QQBqNHLAVAJM/u02FzfhAPAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANoBANAOAIB2AAC0AwCgHQAA7QAAaAcAQDsAANp95lsD0NRGvD8AAAAASUVORK5CYII="
+          }
+        ],
+        "questions": {
+          "color": {
+            "type": "choice",
+            "instructions": "Which color fills the image?",
+            "criteria": {
+              "red": "Mostly red",
+              "blue": "Mostly blue",
+              "unclear": "Neither, or ambiguous"
+            }
+          },
+          "text": {
+            "type": "noul",
+            "instructions": "Does the image contain readable text?",
+            "criteria": {
+              "true": "Readable text visible",
+              "false": "No readable text visible"
+            }
+          }
+        },
+        "expected": {
+          "color": "blue",
+          "text": false
+        }
+      }
+    ]
+  },
+  "results": [
+    {
+      "provider": "subq",
+      "case": "plan-is-not-done",
+      "expected": "not_done",
+      "status": 200,
+      "latency_ms": 303,
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "not_done",
+            "probabilities": {
+              "done": 0.012084334157407284,
+              "not_done": 0.9667837023735046,
+              "unclear": 0.021131929010152817
+            },
+            "confidence": 0.950175553560257
+          }
+        },
+        "usage": {
+          "input_tokens": 126,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "jev",
+      "case": "done-checked",
+      "status": 200,
+      "latency_ms": 219,
+      "correct": true,
+      "expected": {
+        "finished": "done"
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "done",
+            "confidence": 0.91,
+            "probabilities": {
+              "done": 0.94,
+              "not_done": 0.0,
+              "unclear": 0.06
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 396,
+          "output_tokens": 40
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "done-checked",
+      "status": 200,
+      "latency_ms": 304,
+      "correct": true,
+      "expected": {
+        "finished": "done"
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "done",
+            "probabilities": {
+              "done": 0.9713104367256165,
+              "not_done": 0.014588690362870693,
+              "unclear": 0.014100845903158188
+            },
+            "confidence": 0.9569656550884247
+          }
+        },
+        "usage": {
+          "input_tokens": 161,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "jev",
+      "case": "blocked",
+      "status": 200,
+      "latency_ms": 160,
+      "correct": true,
+      "expected": {
+        "finished": "not_done"
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "not_done",
+            "confidence": 1.0,
+            "probabilities": {
+              "done": 0.0,
+              "not_done": 1.0,
+              "unclear": 0.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 396,
+          "output_tokens": 41
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "blocked",
+      "status": 200,
+      "latency_ms": 304,
+      "correct": true,
+      "expected": {
+        "finished": "not_done"
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "not_done",
+            "probabilities": {
+              "done": 0.010810663923621178,
+              "not_done": 0.9682348966598511,
+              "unclear": 0.02095434069633484
+            },
+            "confidence": 0.9523523449897766
+          }
+        },
+        "usage": {
+          "input_tokens": 161,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "jev",
+      "case": "insufficient",
+      "status": 200,
+      "latency_ms": 163,
+      "correct": true,
+      "expected": {
+        "finished": "unclear"
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "unclear",
+            "confidence": 0.94,
+            "probabilities": {
+              "done": 0.0,
+              "not_done": 0.04,
+              "unclear": 0.96
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 389,
+          "output_tokens": 41
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "insufficient",
+      "status": 200,
+      "latency_ms": 311,
+      "correct": true,
+      "expected": {
+        "finished": "unclear"
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "finished": {
+            "type": "choice",
+            "choice": "unclear",
+            "probabilities": {
+              "done": 0.01191882137209177,
+              "not_done": 0.03042982891201973,
+              "unclear": 0.9576513171195984
+            },
+            "confidence": 0.9364769756793976
+          }
+        },
+        "usage": {
+          "input_tokens": 154,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "jev",
+      "case": "match-context",
+      "status": 200,
+      "latency_ms": 166,
+      "correct": true,
+      "expected": {
+        "best": "s0"
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "best": {
+            "type": "choice",
+            "choice": "s0",
+            "confidence": 0.95,
+            "probabilities": {
+              "s0": 0.97,
+              "s1": 0.0,
+              "none": 0.03
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 374,
+          "output_tokens": 41
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "match-context",
+      "status": 200,
+      "latency_ms": 310,
+      "correct": true,
+      "expected": {
+        "best": "s0"
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "best": {
+            "type": "choice",
+            "choice": "s0",
+            "probabilities": {
+              "s0": 0.9790194630622864,
+              "s1": 0.0053999596275389194,
+              "none": 0.015580572187900543
+            },
+            "confidence": 0.9685291945934296
+          }
+        },
+        "usage": {
+          "input_tokens": 140,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "jev",
+      "case": "match-none",
+      "status": 200,
+      "latency_ms": 169,
+      "correct": true,
+      "expected": {
+        "best": "none"
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "best": {
+            "type": "choice",
+            "choice": "none",
+            "confidence": 0.91,
+            "probabilities": {
+              "s0": 0.06,
+              "s1": 0.0,
+              "none": 0.94
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 371,
+          "output_tokens": 40
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "match-none",
+      "status": 200,
+      "latency_ms": 298,
+      "correct": true,
+      "expected": {
+        "best": "none"
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "best": {
+            "type": "choice",
+            "choice": "none",
+            "probabilities": {
+              "s0": 0.023499231785535812,
+              "s1": 0.0047980668023228645,
+              "none": 0.9717026352882385
+            },
+            "confidence": 0.9575539529323578
+          }
+        },
+        "usage": {
+          "input_tokens": 137,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "jev",
+      "case": "search-none",
+      "status": 200,
+      "latency_ms": 185,
+      "correct": true,
+      "expected": {
+        "c": "none"
+      },
+      "response": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "c": {
+            "type": "choice",
+            "choice": "none",
+            "confidence": 1.0,
+            "probabilities": {
+              "t0": 0.0,
+              "t1": 0.0,
+              "none": 1.0
+            }
+          }
+        },
+        "usage": {
+          "input_tokens": 338,
+          "output_tokens": 40
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "search-none",
+      "status": 200,
+      "latency_ms": 359,
+      "correct": true,
+      "expected": {
+        "c": "none"
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "c": {
+            "type": "choice",
+            "choice": "none",
+            "probabilities": {
+              "t0": 0.011122598312795162,
+              "t1": 0.011540871113538742,
+              "none": 0.9773364663124084
+            },
+            "confidence": 0.9660046994686127
+          }
+        },
+        "usage": {
+          "input_tokens": 110,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "image-red",
+      "status": 200,
+      "latency_ms": 385,
+      "correct": true,
+      "expected": {
+        "color": "red",
+        "text": false
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "color": {
+            "type": "choice",
+            "choice": "red",
+            "probabilities": {
+              "red": 0.9830684065818787,
+              "blue": 0.0074310279451310635,
+              "unclear": 0.00950052309781313
+            },
+            "confidence": 0.974602609872818
+          },
+          "text": {
+            "type": "noul",
+            "noul": 0.00998428650200367
+          }
+        },
+        "usage": {
+          "input_tokens": 221,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "provider": "subq",
+      "case": "image-blue",
+      "status": 200,
+      "latency_ms": 377,
+      "correct": true,
+      "expected": {
+        "color": "blue",
+        "text": false
+      },
+      "response": {
+        "model": "subq-snap-preview",
+        "answers": {
+          "color": {
+            "type": "choice",
+            "choice": "blue",
+            "probabilities": {
+              "red": 0.007322998717427254,
+              "blue": 0.9820820689201355,
+              "unclear": 0.010594936087727547
+            },
+            "confidence": 0.9731231033802032
+          },
+          "text": {
+            "type": "noul",
+            "noul": 0.011609929613769054
+          }
+        },
+        "usage": {
+          "input_tokens": 221,
+          "output_tokens": 0
+        }
+      }
+    }
+  ]
+}

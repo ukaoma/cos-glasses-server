@@ -11,8 +11,9 @@
  * The task comes from the board and the replies from this server's own session transcripts. The client sends names
  * and a time only.
  */
+import { type DecisionClient, isDecisionFailure } from './decision-provider.js'
 import { createHash } from 'node:crypto'
-import { estimateJevTokens, JevError, type JevClient } from './jev.js'
+import { estimateJevTokens, JevError } from './jev.js'
 import { agentSessionRoots, findAgentSessionFile, LATEST_REPLY_MAX, parseAgentSession, type AgentProvider } from './agent-session-store.js'
 import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn } from './agent-session-turns.js'
 
@@ -23,7 +24,7 @@ export type CompletionChoice = typeof COMPLETION_CHOICES[number]
 export interface CompletionInput { task: { text: string; doneWhen: string }; reply: string }
 /** `basis`: what the reply was read against, the task's Done when or (without one) the task itself. */
 export type CompletionVerdict =
-  | { provider: 'jev'; model: string; verdict: CompletionChoice; confidence: number; basis: 'done_when' | 'task'; cached: boolean }
+  | { provider: 'jev' | 'subq'; model: string; verdict: CompletionChoice; confidence: number; basis: 'done_when' | 'task'; cached: boolean }
   | { provider: 'none'; reason: string }
 
 const AGAINST_DONE_WHEN = "Does the agent's reply in `reply` show that the task in `task` is finished, as `task.doneWhen` defines finished? "
@@ -65,8 +66,8 @@ export async function readRepliesSince(provider: AgentProvider, sessionId: strin
 }
 
 export class CompletionChecker {
-  private cache = new Map<string, { at: number; value: Extract<CompletionVerdict, { provider: 'jev' }> }>()
-  constructor(private readonly jev: JevClient, private readonly now: () => number = () => Date.now()) {}
+  private cache = new Map<string, { at: number; value: Extract<CompletionVerdict, { provider: 'jev' | 'subq' }> }>()
+  constructor(private readonly jev: DecisionClient, private readonly now: () => number = () => Date.now()) {}
 
   async check(input: CompletionInput): Promise<CompletionVerdict> {
     const state = { task: { text: clip(input.task.text, COMPLETION_LIMITS.task), doneWhen: clip(input.task.doneWhen, COMPLETION_LIMITS.doneWhen) },
@@ -86,12 +87,12 @@ export class CompletionChecker {
     }
     try {
       const reply = await this.jev.ask(state, questions, estimateJevTokens({ state, questions }))
-      const value = { provider: 'jev' as const, model: reply.model ?? 'jev', cached: false, basis, ...decideCompletion(reply.answers.finished?.probabilities) }
+      const value = { provider: reply.provider ?? 'jev' as const, model: reply.model ?? 'jev', cached: false, basis, ...decideCompletion(reply.answers.finished?.probabilities) }
       if (this.cache.size >= COMPLETION_LIMITS.cacheEntries) this.cache.delete(this.cache.keys().next().value!)
       this.cache.set(key, { at: this.now(), value })
       return value
     } catch (e) {
-      if (e instanceof JevError) return { provider: 'none', reason: e.code }
+      if (isDecisionFailure(e)) return { provider: 'none', reason: e.code }
       throw e
     }
   }

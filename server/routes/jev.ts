@@ -1,3 +1,4 @@
+import { createDecisionClient } from '../lib/decision-provider.js'
 /**
  * Jev key management (COS Control Settings) and Work session recommendations. Auth comes from the parent /api mount.
  *
@@ -42,8 +43,8 @@ function findTask<T extends { id: string; workIdentity?: string }>(rows: T[], id
 
 export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): Router {
   const jev = overrides.jev ?? sharedJevClient()
-  const deps: JevRouteDependencies = { jev, recommender: new SessionRecommender(jev), list: listBoard, validate: validateJevKey, save: saveJevKey,
-    completion: new CompletionChecker(jev), replies: (provider, sessionId, afterMs) => readRepliesSince(provider, sessionId, afterMs),
+  const deps: JevRouteDependencies = { jev, recommender: new SessionRecommender(createDecisionClient('session', jev)), list: listBoard, validate: validateJevKey, save: saveJevKey,
+    completion: new CompletionChecker(createDecisionClient('completion', jev)), replies: (provider, sessionId, afterMs) => readRepliesSince(provider, sessionId, afterMs),
     searchJev: sharedWorkSearchJevClient(), ...overrides }
   const router = Router()
   router.use(['/jev-key', '/work-board/session-recommendation', '/work-board/completion-check'], (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })

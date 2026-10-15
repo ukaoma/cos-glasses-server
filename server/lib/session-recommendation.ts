@@ -5,8 +5,9 @@
  * checked on Miles's live sessions on 2026-09-28 (a 1:1 task went New, a server bug Continued its server session at
  * 0.91, a hardware-page task Forked the hardware session). A recommendation is advice: nothing is selected or sent.
  */
+import { type DecisionClient, isDecisionFailure } from './decision-provider.js'
 import { createHash } from 'node:crypto'
-import { estimateJevTokens, JevError, type JevClient } from './jev.js'
+import { estimateJevTokens, JevError } from './jev.js'
 import { FORKABLE_PROVIDERS } from './agent-session-binding-store.js'
 
 export const CONTINUE_AT = 0.5  // P(a session is already doing this exact task)
@@ -16,7 +17,7 @@ export const RECOMMENDATION_LIMITS = { sessions: 80, title: 120, summary: 240, c
 export interface CandidateSession { id: string; provider: string; title: string; summary?: string; updated?: string }
 export interface RecommendationInput { task: { text: string; domain: string; meetings: string[] }; sessions: CandidateSession[] }
 export type Recommendation =
-  | { provider: 'jev'; model: string; action: 'continue' | 'fork' | 'new'; sessionId: string | null; confidence: number; reason: string;
+  | { provider: 'jev' | 'subq'; model: string; action: 'continue' | 'fork' | 'new'; sessionId: string | null; confidence: number; reason: string;
       alternatives: Array<{ sessionId: string; p: number }>; cached: boolean }
   | { provider: 'none'; reason: string }
 
@@ -41,7 +42,7 @@ function ranked(probabilities: Record<string, number> | undefined, offered: Set<
 
 /** Pure policy over Jev's two answers. Exported for tests. */
 export function decide(best: Record<string, number>, exact: Record<string, number>, sessions: CandidateSession[]):
-    Omit<Extract<Recommendation, { provider: 'jev' }>, 'provider' | 'model' | 'cached'> {
+    Omit<Extract<Recommendation, { provider: 'jev' | 'subq' }>, 'provider' | 'model' | 'cached'> {
   const offered = new Set(sessions.map((_, i) => `s${i}`))
   const bestRank = ranked(best, offered), exactRank = ranked(exact, offered)
   const idOf = (key: string) => sessions[Number(key.slice(1))].id
@@ -78,8 +79,8 @@ export function parseCandidates(raw: unknown): CandidateSession[] | null {
 }
 
 export class SessionRecommender {
-  private cache = new Map<string, { at: number; value: Extract<Recommendation, { provider: 'jev' }> }>()
-  constructor(private readonly jev: JevClient, private readonly now: () => number = () => Date.now()) {}
+  private cache = new Map<string, { at: number; value: Extract<Recommendation, { provider: 'jev' | 'subq' }> }>()
+  constructor(private readonly jev: DecisionClient, private readonly now: () => number = () => Date.now()) {}
 
   async recommend(input: RecommendationInput): Promise<Recommendation> {
     const sessions = input.sessions
@@ -98,12 +99,12 @@ export class SessionRecommender {
       const reply = await this.jev.ask(state, questions, estimateJevTokens({ state, questions }))
       const best = reply.answers.best?.probabilities, exact = reply.answers.exact?.probabilities
       if (!best || !exact) throw new JevError('jev_bad_answer')
-      const value = { provider: 'jev' as const, model: reply.model ?? 'jev', cached: false, ...decide(best, exact, sessions) }
+      const value = { provider: reply.provider ?? 'jev' as const, model: reply.model ?? 'jev', cached: false, ...decide(best, exact, sessions) }
       if (this.cache.size >= RECOMMENDATION_LIMITS.cacheEntries) this.cache.delete(this.cache.keys().next().value!)
       this.cache.set(key, { at: this.now(), value })
       return value
     } catch (e) {
-      if (e instanceof JevError) return { provider: 'none', reason: e.code }
+      if (isDecisionFailure(e)) return { provider: 'none', reason: e.code }
       throw e
     }
   }
