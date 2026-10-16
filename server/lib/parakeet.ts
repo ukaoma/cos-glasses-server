@@ -20,7 +20,7 @@ import { execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions 
 import { createHash, randomBytes } from 'node:crypto'
 import {
   chmodSync, copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync,
-  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync,
 } from 'node:fs'
 import { homedir, setPriority, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -29,6 +29,7 @@ import { Readable, Transform } from 'node:stream'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { PARAKEET_CLI, PARAKEET_MODELS, type PinnedModel } from './parakeet-manifest.js'
+import { checkDeveloperIdCli, controlCliCandidates, COS_TEAM_ID, findTrustedCli, isCliPathShape, type CliTrustDeps, type CliTrustReason } from './parakeet-cli-trust.js'
 import type { HypWord } from './stt-resolver.js'
 
 export type ParakeetModelId = 'parakeet-ultra'
@@ -57,18 +58,23 @@ function pinned(id: ParakeetModelId): PinnedModel {
 // ── Install state ─────────────────────────────────────────────────────────────
 
 export type InstallPhase = 'idle' | 'downloading' | 'verifying' | 'installed' | 'failed'
+/** 6.74.0: why an install failed, for a client that picks the action from a code. */
+export type InstallErrorCode = 'cancelled' | 'insufficient_disk' | 'sha_mismatch' | 'download_failed' | 'stalled' | 'cli_untrusted' | 'cli_missing' | 'failed'
 export interface InstallProgress {
   state: InstallPhase
   bytesDone: number
   bytesTotal: number
   error: string | null
+  errorCode?: InstallErrorCode | null
   /** Where the bytes came from: files copied from a verified local copy, and files downloaded. */
   source?: { filesLocal: number; filesDownloaded: number; localSources: string[] }
 }
 
 export interface InstallReceipt {
   schema: 1
-  cli: { version: string; sha256: string }
+  /** trust (6.74.0): 'sha256' (absent before 6.74.0) is the pinned upstream bytes;
+   *  'developer-id' is COS Control's signed build, its own hash and size recorded at install. */
+  cli: { version: string; sha256: string; size?: number; trust?: 'sha256' | 'developer-id'; teamId?: string }
   models: Array<{ id: string; revision: string; bytes: number }>
   bytes: number
   installedAt: string
@@ -94,7 +100,7 @@ export function parakeetInstalled(now = Date.now()): { installed: boolean; bytes
   try {
     const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8')) as InstallReceipt
     const sizeOk = (path: string, size: number) => { try { return statSync(path).size === size } catch { return false } }
-    const cliOk = receipt?.schema === 1 && receipt.cli?.sha256 === PARAKEET_CLI.sha256 && sizeOk(parakeetCliPath(), PARAKEET_CLI.size)
+    const cliOk = receipt?.schema === 1 && receiptCliOk(receipt.cli, sizeOk)
     const modelsOk = PARAKEET_MODELS.every(m =>
       receipt.models?.some(r => r.id === m.id && r.revision === m.revision)
       && m.files.every(f => sizeOk(join(parakeetModelDir(m.id as ParakeetModelId), f.path), f.size)))
@@ -102,6 +108,26 @@ export function parakeetInstalled(now = Date.now()): { installed: boolean; bytes
   } catch { /* not installed */ }
   installedCache = { at: now, value }
   return value
+}
+
+/** The receipt's CLI is one this server trusts, and the installed file has its size. */
+function receiptCliOk(cli: InstallReceipt['cli'] | undefined, sizeOk: (path: string, size: number) => boolean): boolean {
+  if (!cli || cli.version !== PARAKEET_CLI.version) return false
+  if (cli.trust === 'developer-id') {
+    return cli.teamId === COS_TEAM_ID && typeof cli.sha256 === 'string' && /^[0-9a-f]{64}$/.test(cli.sha256)
+      && typeof cli.size === 'number' && sizeOk(parakeetCliPath(), cli.size)
+  }
+  return cli.sha256 === PARAKEET_CLI.sha256 && sizeOk(parakeetCliPath(), PARAKEET_CLI.size)
+}
+
+function readReceipt(): InstallReceipt | null {
+  try { return JSON.parse(readFileSync(receiptPath(), 'utf8')) as InstallReceipt } catch { return null }
+}
+
+/** 6.74.0: how the installed CLI was trusted, for GET. */
+export function installedCliTrust(): 'sha256' | 'developer-id' | null {
+  const cli = readReceipt()?.cli
+  return cli ? cli.trust ?? 'sha256' : null
 }
 
 export function resetParakeetInstallCache(): void { installedCache = null; cliHashCache.clear() }
@@ -185,7 +211,32 @@ function modelDirCandidates(model: PinnedModel, sources: string[]): string[] {
 }
 
 export class ParakeetInstallError extends Error {
-  constructor(message: string) { super(message); this.name = 'ParakeetInstallError' }
+  constructor(message: string, readonly code: InstallErrorCode = 'failed') { super(message); this.name = 'ParakeetInstallError' }
+}
+
+/** 6.74.0: an install needs this much free space where it installs (654 MB of model,
+ *  the CLI, a staging copy of each file before the swap, and headroom). */
+export const INSTALL_MIN_FREE_BYTES = 1_500_000_000
+
+/** Free bytes on the volume holding `dir` (its nearest existing ancestor), or null when unknown. */
+export function freeBytesAt(dir: string): number | null {
+  let probe = resolve(dir)
+  for (let i = 0; i < 64; i++) {
+    if (existsSync(probe)) {
+      try { const st = statfsSync(probe); return Number(st.bavail) * Number(st.bsize) } catch { return null }
+    }
+    const up = dirname(probe)
+    if (up === probe) return null
+    probe = up
+  }
+  return null
+}
+
+/** The disk precheck the install route and the installer share. */
+export function parakeetDiskCheck(freeBytes: (dir: string) => number | null = freeBytesAt, required = INSTALL_MIN_FREE_BYTES): { ok: boolean; freeBytes: number | null; requiredBytes: number } {
+  const free = freeBytes(parakeetRoot())
+  // Unknown free space does not block: the per-file writes still fail plainly on a full disk.
+  return { ok: free === null || free >= required, freeBytes: free, requiredBytes: required }
 }
 
 type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; body: ReadableStream<Uint8Array> | null }>
@@ -201,6 +252,12 @@ export interface InstallOptions {
   cliCandidates?: string[]
   fetchImpl?: FetchLike
   idleTimeoutMs?: number
+  /** 6.74.0, tests: codesign and version probes for a Developer ID CLI. */
+  trustDeps?: CliTrustDeps
+  /** 6.74.0, tests: where COS Control's signed CLI may be (defaults to /Applications and ~/Applications). */
+  controlCliCandidates?: string[]
+  /** 6.74.0, tests: free space probe. */
+  freeBytes?: (dir: string) => number | null
 }
 
 /** Start the install, or join the one already running. */
@@ -216,27 +273,53 @@ export function parakeetInstallRunning(): boolean { return installing !== null }
 /** Stop a running install; nothing partial is kept. */
 export function cancelParakeetInstall(): boolean {
   if (!installAbort) return false
-  installAbort.abort(new ParakeetInstallError('The install was cancelled.'))
+  installAbort.abort(new ParakeetInstallError('The install was cancelled.', 'cancelled'))
   return true
 }
 
 async function runInstall(options: InstallOptions, signal: AbortSignal): Promise<void> {
   const root = parakeetRoot()
   const localSources = [...(options.localSources ?? []), ...defaultLocalSources()]
-  progress = { state: 'verifying', bytesDone: 0, bytesTotal: TOTAL_BYTES, error: null, source: { filesLocal: 0, filesDownloaded: 0, localSources: [] } }
-  mkdirSync(root, { recursive: true, mode: 0o700 })
-  const staging = join(root, `.staging-${randomBytes(6).toString('hex')}`)
-  mkdirSync(join(staging, 'bin'), { recursive: true, mode: 0o700 })
+  progress = { state: 'verifying', bytesDone: 0, bytesTotal: TOTAL_BYTES, error: null, errorCode: null, source: { filesLocal: 0, filesDownloaded: 0, localSources: [] } }
   const usedSources = new Set<string>()
+  let staging: string | null = null
   try {
-    // 1. The CLI. FluidAudio publishes no binary, so a pinned local copy is the only source.
+    // 0. Disk precheck (6.74.0), before anything is written.
+    const disk = parakeetDiskCheck(options.freeBytes)
+    if (!disk.ok) {
+      throw new ParakeetInstallError(`Parakeet needs ${formatGb(disk.requiredBytes)} free on this Mac; ${formatGb(disk.freeBytes ?? 0)} is free. Free some space, then install again. Whisper keeps working.`, 'insufficient_disk')
+    }
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    staging = join(root, `.staging-${randomBytes(6).toString('hex')}`)
+    mkdirSync(join(staging, 'bin'), { recursive: true, mode: 0o700 })
+
+    // 1. The CLI. FluidAudio publishes no binary: a SHA-256 pinned local copy, or
+    //    (6.74.0) the build COS Control ships signed with the COS Developer ID.
     const cliTarget = join(staging, 'bin', 'fluidaudiocli')
     const cli = await findPinnedCli([...(options.cliCandidates ?? []), ...(options.localSources ?? []).map(src => fileSize(src) !== null ? src : join(src, 'fluidaudiocli')), ...defaultCliCandidates()])
-    if (!cli) {
-      throw new ParakeetInstallError(`FluidAudio CLI ${PARAKEET_CLI.version} is not on this Mac. It is the same tool speaker separation uses; put it at ~/.cos-glasses/bin/fluidaudiocli, then install again.`)
+    let receiptCli: InstallReceipt['cli']
+    if (cli) {
+      copyFileSync(cli, cliTarget)
+      if (await sha256File(cliTarget) !== PARAKEET_CLI.sha256) throw new ParakeetInstallError('The FluidAudio CLI changed while it was being copied. Try again.')
+      receiptCli = { version: PARAKEET_CLI.version, sha256: PARAKEET_CLI.sha256, size: PARAKEET_CLI.size, trust: 'sha256' }
+    } else {
+      const signedCandidates = [...new Set([...(options.cliCandidates ?? []).filter(isCliPathShape), ...(options.controlCliCandidates ?? controlCliCandidates())])]
+      const signed = await findTrustedCli(signedCandidates, options.trustDeps)
+      if (!signed) {
+        const seen = signedCandidates.find(path => fileSize(path) !== null)
+        if (seen) {
+          const why = await checkDeveloperIdCli(seen, options.trustDeps)
+          const reason: CliTrustReason = why.trusted ? 'signature_invalid' : why.reason
+          throw new ParakeetInstallError(`The speech tool in COS Control did not pass its check (${reason}). Reinstall COS Control, then install again.`, 'cli_untrusted')
+        }
+        throw new ParakeetInstallError(`The speech tool Parakeet needs is not on this Mac. Update COS Control, which includes it, then install again.`, 'cli_missing')
+      }
+      copyFileSync(signed.path, cliTarget)
+      // Prove the copy, not only the source: the installed bytes must be signed and unchanged.
+      const copy = await checkDeveloperIdCli(cliTarget, options.trustDeps)
+      if (!copy.trusted || copy.sha256 !== signed.sha256) throw new ParakeetInstallError('The speech tool changed while it was being copied. Try again.', 'cli_untrusted')
+      receiptCli = { version: PARAKEET_CLI.version, sha256: copy.sha256, size: copy.size, trust: 'developer-id', teamId: COS_TEAM_ID }
     }
-    copyFileSync(cli, cliTarget)
-    if (await sha256File(cliTarget) !== PARAKEET_CLI.sha256) throw new ParakeetInstallError('The FluidAudio CLI changed while it was being copied. Try again.')
     chmodSync(cliTarget, 0o755)
     progress.bytesDone += PARAKEET_CLI.size
 
@@ -246,7 +329,7 @@ async function runInstall(options: InstallOptions, signal: AbortSignal): Promise
     for (const model of PARAKEET_MODELS) {
       const candidates = modelDirCandidates(model, localSources)
       for (const file of model.files) {
-        if (signal.aborted) throw new ParakeetInstallError('The install was cancelled.')
+        if (signal.aborted) throw new ParakeetInstallError('The install was cancelled.', 'cancelled')
         const target = join(staging, 'models', model.id, file.path)
         mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
         let placed = false
@@ -268,12 +351,12 @@ async function runInstall(options: InstallOptions, signal: AbortSignal): Promise
           const url = `https://huggingface.co/${model.repo}/resolve/${model.revision}/${file.path.split('/').map(encodeURIComponent).join('/')}`
           // One controller per file: user cancel, or no bytes for idleMs.
           const ctl = new AbortController()
-          const onCancel = () => ctl.abort(new ParakeetInstallError('The install was cancelled.'))
+          const onCancel = () => ctl.abort(new ParakeetInstallError('The install was cancelled.', 'cancelled'))
           signal.addEventListener('abort', onCancel, { once: true })
           let idle: ReturnType<typeof setTimeout> | null = null
           const arm = () => {
             if (idle) clearTimeout(idle)
-            idle = setTimeout(() => ctl.abort(new ParakeetInstallError(`The download stalled (no data for ${Math.round(idleMs / 1000)} s). Nothing was installed; try again.`)), idleMs)
+            idle = setTimeout(() => ctl.abort(new ParakeetInstallError(`The download stalled (no data for ${Math.round(idleMs / 1000)} s). Nothing was installed; try again.`, 'stalled')), idleMs)
             idle.unref?.()
           }
           arm()
@@ -281,18 +364,20 @@ async function runInstall(options: InstallOptions, signal: AbortSignal): Promise
           let written = 0
           try {
             const res = await fetchImpl(url, { signal: ctl.signal })
-            if (!res.ok || !res.body) throw new ParakeetInstallError(`Download failed (${res.status}) for ${model.id} ${file.path}.`)
+            if (!res.ok || !res.body) throw new ParakeetInstallError(`Download failed (${res.status}) for ${model.id} ${file.path}.`, 'download_failed')
             const counter = new Transform({ transform(chunk, _e, cb) {
               arm()
               written += chunk.length
-              if (written > file.size) { cb(new ParakeetInstallError(`${model.id} ${file.path} is larger than the pinned size.`)); return }
+              if (written > file.size) { cb(new ParakeetInstallError(`${model.id} ${file.path} is larger than the pinned size.`, 'sha_mismatch')); return }
               progress.bytesDone += chunk.length
               cb(null, chunk)
             } })
             await pipeline(Readable.fromWeb(res.body as any), counter, createWriteStream(partial, { mode: 0o600 }), { signal: ctl.signal })
           } catch (error) {
             const why = ctl.signal.reason
-            throw why instanceof ParakeetInstallError ? why : error
+            if (why instanceof ParakeetInstallError) throw why
+            if (error instanceof ParakeetInstallError) throw error
+            throw new ParakeetInstallError(`Download failed for ${model.id} ${file.path}: ${error instanceof Error ? error.message : String(error)}`, 'download_failed')
           } finally {
             if (idle) clearTimeout(idle)
             signal.removeEventListener('abort', onCancel)
@@ -303,7 +388,7 @@ async function runInstall(options: InstallOptions, signal: AbortSignal): Promise
         }
         progress.state = 'verifying'
         if (fileSize(target) !== file.size || await sha256File(target) !== file.sha256) {
-          throw new ParakeetInstallError(`${model.id} ${file.path} does not match its pinned SHA-256. Nothing was installed.`)
+          throw new ParakeetInstallError(`${model.id} ${file.path} does not match its pinned SHA-256. Nothing was installed.`, 'sha_mismatch')
         }
         progress.bytesDone += file.size
       }
@@ -312,7 +397,7 @@ async function runInstall(options: InstallOptions, signal: AbortSignal): Promise
 
     const receipt: InstallReceipt = {
       schema: 1,
-      cli: { version: PARAKEET_CLI.version, sha256: PARAKEET_CLI.sha256 },
+      cli: receiptCli,
       models: PARAKEET_MODELS.map(m => ({ id: m.id, revision: m.revision, bytes: m.files.reduce((n, f) => n + f.size, 0) })),
       bytes: TOTAL_BYTES,
       installedAt: new Date().toISOString(),
@@ -324,19 +409,22 @@ async function runInstall(options: InstallOptions, signal: AbortSignal): Promise
     const current = currentDir()
     const old = existsSync(current) ? join(root, `.old-${Date.now()}-${randomBytes(3).toString('hex')}`) : null
     if (old) renameSync(current, old)
-    renameSync(staging, current)
+    renameSync(staging!, current)
     if (old) rmSync(old, { recursive: true, force: true })
     mkdirSync(parakeetHome(), { recursive: true, mode: 0o700 })
     resetParakeetInstallCache()
     for (const id of warm.keys()) warm.delete(id)
-    progress = { ...progress, state: 'installed', bytesDone: TOTAL_BYTES, bytesTotal: TOTAL_BYTES, error: null }
+    progress = { ...progress, state: 'installed', bytesDone: TOTAL_BYTES, bytesTotal: TOTAL_BYTES, error: null, errorCode: null }
   } catch (error) {
-    rmSync(staging, { recursive: true, force: true })
+    if (staging) rmSync(staging, { recursive: true, force: true })
     const message = error instanceof ParakeetInstallError ? error.message : `Install failed: ${error instanceof Error ? error.message : String(error)}`
-    progress = { ...progress, state: 'failed', bytesTotal: TOTAL_BYTES, error: message, source: progress.source ? { ...progress.source, localSources: [...usedSources] } : undefined }
-    throw new ParakeetInstallError(message)
+    const code: InstallErrorCode = error instanceof ParakeetInstallError ? error.code : 'failed'
+    progress = { ...progress, state: 'failed', bytesTotal: TOTAL_BYTES, error: message, errorCode: code, source: progress.source ? { ...progress.source, localSources: [...usedSources] } : undefined }
+    throw new ParakeetInstallError(message, code)
   }
 }
+
+function formatGb(bytes: number): string { return `${(bytes / 1e9).toFixed(1)} GB` }
 
 /**
  * Boot: put back an install a crash left mid-swap (no `current`, an `.old-*`
@@ -392,6 +480,8 @@ export interface ParakeetRunOptions {
   spawnImpl?: SpawnLike
   /** Tests only: a different sandbox-exec path. There is no environment override. */
   sandboxExec?: string
+  /** 6.74.0 benchmark: called with the child's pid once it is spawned (peak memory sampling). */
+  onSpawn?: (pid: number) => void
 }
 
 const liveChildren = new Set<ChildProcess>()
@@ -537,10 +627,25 @@ export function transcribeParakeet(wav: Buffer, options: ParakeetRunOptions): Pr
 
 async function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
   // The installed CLI's full hash, once per process (and again if it changes on disk).
-  if (!options.spawnImpl && !(await isPinnedCli(parakeetCliPath()))) {
-    throw new ParakeetError('not_installed', 'the installed FluidAudio CLI no longer matches its pinned SHA-256')
+  if (!options.spawnImpl && !(await installedCliIntact())) {
+    throw new ParakeetError('not_installed', 'the installed FluidAudio CLI no longer matches the hash recorded when it was installed')
   }
   return runParakeetChecked(wav, options)
+}
+
+/** The installed CLI is byte for byte what the install verified: the pinned hash, or
+ *  (6.74.0) the hash of the Developer ID build recorded in the receipt. */
+export async function installedCliIntact(path: string = parakeetCliPath()): Promise<boolean> {
+  const cli = readReceipt()?.cli
+  if (cli?.trust !== 'developer-id') return isPinnedCli(path)
+  const st = fileStat(path)
+  if (!st || st.size !== cli.size || cli.teamId !== COS_TEAM_ID) return false
+  const key = `${path}\0${st.size}\0${st.mtimeMs}\0${cli.sha256}`
+  const known = cliHashCache.get(key)
+  if (known !== undefined) return known
+  const ok = await sha256File(path).then(h => h === cli.sha256, () => false)
+  cliHashCache.set(key, ok)
+  return ok
 }
 
 function runParakeetChecked(wav: Buffer, options: ParakeetRunOptions): Promise<ParakeetResult> {
@@ -591,6 +696,7 @@ function runParakeetChecked(wav: Buffer, options: ParakeetRunOptions): Promise<P
     options.signal?.addEventListener('abort', onAbort, { once: true })
     liveChildren.add(child)
     child.once('close', () => liveChildren.delete(child))
+    if (child.pid && options.onSpawn) { try { options.onSpawn(child.pid) } catch { /* sampling only */ } }
     if (child.pid && options.lane !== 'preview' && options.lane !== 'interactive') {
       try { setPriority(child.pid, 10) } catch { /* runs at normal priority */ }
     }

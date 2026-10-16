@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { PassThrough } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -89,7 +89,8 @@ describe('Parakeet install (pinned, hash-checked)', () => {
   it('needs a CLI with the pinned hash; a different binary is never installed', async () => {
     const src = seedSources(dir)
     writeFileSync(src.cli, Buffer.from('fake fluidaudiocli 0.17.5'))
-    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork })).rejects.toThrow(/FluidAudio CLI 0.17.4 is not on this Mac/)
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork, controlCliCandidates: [] })).rejects.toThrow(/speech tool Parakeet needs is not on this Mac/)
+    expect(P.getInstallProgress()).toMatchObject({ state: 'failed', errorCode: 'cli_missing' })
   })
 
   it('reads a truncated model file as not installed', async () => {
@@ -364,5 +365,142 @@ describe.runIf(process.platform === 'darwin')('the sandbox profile, enforced by 
       srv.close()
       for (const d of [work, home, outside]) rmSync(d, { recursive: true, force: true })
     }
+  })
+})
+
+describe('6.74.0: install from COS Control signed CLI, disk precheck, error codes', () => {
+  const COS_TEAM = 'NV3X46LLCR'
+  const signedBytes = Buffer.from('fluidaudiocli 0.17.4 built and signed by COS Control')
+  /** codesign and version probes for a Developer ID build; `team` and `bad` vary the verdict. */
+  const trustDeps = (over: { team?: string; bad?: Set<string> } = {}) => ({
+    display: vi.fn(async (p: string) => ({ code: 0, output: `Identifier=com.gotcos.fluidaudiocli\nInfo.plist entries=2\nTeamIdentifier=${over.team ?? COS_TEAM}\n${over.bad?.has(p) ? 'Signature=adhoc\n' : ''}` })),
+    verify: vi.fn(async () => ({ code: 0, output: '' })),
+    versionOutput: vi.fn(async () => ''),
+    embeddedPlist: vi.fn(() => '<key>CFBundleShortVersionString</key><string>0.17.4</string>'),
+    sha256: async (p: string) => sha(readFileSync(p)),
+  })
+  function control(): string {
+    const p = join(dir, 'COS Control.app', 'Contents', 'Helpers', 'fluidaudiocli')
+    mkdirSync(join(p, '..'), { recursive: true })
+    writeFileSync(p, signedBytes)
+    return p
+  }
+  const plenty = () => 50e9
+
+  it('installs the signed CLI (no SHA pin can match it), records its own hash, and runs only those bytes', async () => {
+    const src = seedSources(dir)
+    const helper = control()
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [], controlCliCandidates: [helper], trustDeps: trustDeps(), fetchImpl: noNetwork, freeBytes: plenty })
+    const receipt = JSON.parse(readFileSync(join(P.parakeetRoot(), 'current', 'install.json'), 'utf8'))
+    expect(receipt.cli).toEqual({ version: '0.17.4', sha256: sha(signedBytes), size: signedBytes.length, trust: 'developer-id', teamId: COS_TEAM })
+    expect(P.parakeetInstalled(Date.now() + 10_000).installed).toBe(true)
+    expect(P.installedCliTrust()).toBe('developer-id')
+    expect(await P.installedCliIntact()).toBe(true)
+    // Tampered after install: same size, other bytes. Parakeet refuses to run it.
+    writeFileSync(P.parakeetCliPath(), Buffer.alloc(signedBytes.length, 7))
+    P.resetParakeetInstallCache()
+    expect(await P.installedCliIntact()).toBe(false)
+  })
+
+  it('a 6.73 receipt (pinned CLI, no trust field) still reads as installed', async () => {
+    const src = seedSources(dir)
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork, freeBytes: plenty })
+    const path = join(P.parakeetRoot(), 'current', 'install.json')
+    const receipt = JSON.parse(readFileSync(path, 'utf8'))
+    expect(receipt.cli.trust).toBe('sha256')
+    writeFileSync(path, JSON.stringify({ ...receipt, cli: { version: '0.17.4', sha256: receipt.cli.sha256 } }))
+    P.resetParakeetInstallCache()
+    expect(P.parakeetInstalled(Date.now() + 10_000).installed).toBe(true)
+    expect(await P.installedCliIntact()).toBe(true)
+  })
+
+  it('a developer-id receipt naming another team is not installed', async () => {
+    const src = seedSources(dir)
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [], controlCliCandidates: [control()], trustDeps: trustDeps(), fetchImpl: noNetwork, freeBytes: plenty })
+    const path = join(P.parakeetRoot(), 'current', 'install.json')
+    const receipt = JSON.parse(readFileSync(path, 'utf8'))
+    writeFileSync(path, JSON.stringify({ ...receipt, cli: { ...receipt.cli, teamId: 'ABCDE12345' } }))
+    P.resetParakeetInstallCache()
+    expect(P.parakeetInstalled(Date.now() + 10_000).installed).toBe(false)
+    expect(await P.installedCliIntact()).toBe(false)
+  })
+
+  it('refuses a CLI from another team, and says the tool did not pass its check', async () => {
+    const src = seedSources(dir)
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [], controlCliCandidates: [control()], trustDeps: trustDeps({ team: 'ABCDE12345' }), fetchImpl: noNetwork, freeBytes: plenty }))
+      .rejects.toMatchObject({ code: 'cli_untrusted', message: expect.stringMatching(/did not pass its check \(wrong_team\)/) })
+    expect(P.getInstallProgress()).toMatchObject({ state: 'failed', errorCode: 'cli_untrusted' })
+    expect(existsSync(join(P.parakeetRoot(), 'current'))).toBe(false)
+  })
+
+  it('refuses an unsigned CLI at the Control path', async () => {
+    const src = seedSources(dir)
+    const helper = control()
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [], controlCliCandidates: [helper], trustDeps: trustDeps({ bad: new Set([helper]) }), fetchImpl: noNetwork, freeBytes: plenty }))
+      .rejects.toMatchObject({ code: 'cli_untrusted', message: expect.stringMatching(/\(unsigned\)/) })
+  })
+
+  it('proves the copy too: a copy that fails its own check is never installed', async () => {
+    const src = seedSources(dir)
+    const helper = control()
+    const d = trustDeps()
+    d.display.mockImplementation(async (p: string) => ({ code: 0, output: `Info.plist entries=2\nTeamIdentifier=${COS_TEAM}\n${p.includes('.staging-') ? 'Signature=adhoc\n' : ''}` }))
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [], controlCliCandidates: [helper], trustDeps: d, fetchImpl: noNetwork, freeBytes: plenty }))
+      .rejects.toMatchObject({ code: 'cli_untrusted', message: expect.stringMatching(/changed while it was being copied/) })
+  })
+
+  it('the SHA-256 pinned hand copy still wins over the Control build', async () => {
+    const src = seedSources(dir)
+    const d = trustDeps()
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], controlCliCandidates: [control()], trustDeps: d, fetchImpl: noNetwork, freeBytes: plenty })
+    expect(P.installedCliTrust()).toBe('sha256')
+    expect(d.display).not.toHaveBeenCalled()
+  })
+
+  it('needs 1.5 GB free before anything is written; a full disk installs nothing', async () => {
+    const src = seedSources(dir)
+    const free = vi.fn(() => 1_499_999_999)
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork, freeBytes: free }))
+      .rejects.toMatchObject({ code: 'insufficient_disk', message: expect.stringMatching(/needs 1\.5 GB free.*Whisper keeps working/) })
+    expect(free).toHaveBeenCalledWith(P.parakeetRoot())
+    expect(P.getInstallProgress()).toMatchObject({ state: 'failed', errorCode: 'insufficient_disk' })
+    expect(existsSync(P.parakeetRoot())).toBe(false)
+    expect(P.parakeetDiskCheck(() => 1_500_000_000)).toEqual({ ok: true, freeBytes: 1_500_000_000, requiredBytes: 1_500_000_000 })
+    expect(P.parakeetDiskCheck(() => null).ok).toBe(true)
+    expect(P.freeBytesAt(join(dir, 'does', 'not', 'exist'))).toBeGreaterThan(0)
+  })
+
+  it('cancel mid-download keeps the existing install and says cancelled', async () => {
+    const src = seedSources(dir)
+    await P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork, freeBytes: plenty })
+    const before = readFileSync(join(P.parakeetRoot(), 'current', 'install.json'), 'utf8')
+    // Reinstall from a source that lacks a file, so it downloads, and cancel during it.
+    rmSync(join(P.parakeetRoot(), 'current', 'install.json'))
+    P.resetParakeetInstallCache()
+    writeFileSync(join(P.parakeetRoot(), 'current', 'install.json'), before)
+    const broken = seedSources(join(dir, 'b'), { corruptB: true })
+    let started!: () => void
+    const begun = new Promise<void>(r => { started = r })
+    const fetchImpl = async (_u: string, init?: { signal?: AbortSignal }) => { started(); return { ok: true, status: 200, body: new ReadableStream<Uint8Array>({ start(c) { init?.signal?.addEventListener('abort', () => c.error(init.signal!.reason)) } }) } }
+    process.env.COS_PARAKEET_LOCAL_SOURCES = ''
+    const run = P.installParakeet({ localSources: [broken.models], cliCandidates: [src.cli], fetchImpl, freeBytes: plenty })
+    await begun
+    expect(P.cancelParakeetInstall()).toBe(true)
+    await expect(run).rejects.toMatchObject({ code: 'cancelled' })
+    expect(P.getInstallProgress()).toMatchObject({ state: 'failed', errorCode: 'cancelled', error: 'The install was cancelled.' })
+    expect(readFileSync(join(P.parakeetRoot(), 'current', 'install.json'), 'utf8')).toBe(before)
+    expect(readdirSync(P.parakeetRoot()).filter(n => n.startsWith('.staging-'))).toEqual([])
+  })
+
+  it('error codes: sha_mismatch, stalled, download_failed', async () => {
+    const src = seedSources(dir, { corruptB: true })
+    const bad = async () => ({ ok: true, status: 200, body: new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array(Buffer.from('model b bytes, a little LONGER'))); c.close() } }) })
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: bad, freeBytes: plenty })).rejects.toMatchObject({ code: 'sha_mismatch' })
+    const stall = async (_u: string, init?: { signal?: AbortSignal }) => ({ ok: true, status: 200, body: new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new Uint8Array([1])); init?.signal?.addEventListener('abort', () => c.error(init.signal!.reason)) } }) })
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: stall, idleTimeoutMs: 30, freeBytes: plenty })).rejects.toMatchObject({ code: 'stalled' })
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: noNetwork, freeBytes: plenty })).rejects.toMatchObject({ code: 'download_failed' })
+    const http = async () => ({ ok: false, status: 404, body: null })
+    await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [src.cli], fetchImpl: http, freeBytes: plenty })).rejects.toMatchObject({ code: 'download_failed' })
+    expect(P.getInstallProgress().errorCode).toBe('download_failed')
   })
 })

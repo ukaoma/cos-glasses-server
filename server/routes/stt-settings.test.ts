@@ -90,7 +90,7 @@ describe('STT settings route (6.72.0)', () => {
     expect(put.json.resolver.enabled).toBe(false)
     const saved = JSON.parse(readFileSync(join(dir, 'stt-settings.json'), 'utf8'))
     const { DEFAULT_STT_SETTINGS: D } = await import('../lib/stt-settings.js')
-    expect(saved).toEqual({ preview: 'parakeet', hq: 'large-v3-legacy', secondOpinion: D.secondOpinion, resolver: false, frontEnd: 'full', quietGate: 'rms' })
+    expect(saved).toEqual({ preview: 'parakeet', hq: 'large-v3-legacy', secondOpinion: D.secondOpinion, resolver: false, frontEnd: 'full', quietGate: 'rms', dictation: 'auto' })
     expect(existsSync(join(dir, 'stt-settings.json.tmp'))).toBe(false)
     expect((await call('GET')).json.frontEnd.selected).toBe('full')
   })
@@ -202,3 +202,99 @@ describe('STT settings route (6.72.0)', () => {
   })
 })
 
+
+describe('6.74.0: Mac dictation setting and the GUI Parakeet install', () => {
+  let disk = { ok: true, freeBytes: 50e9 as number | null, requiredBytes: 1.5e9 }
+  const trusted = (path: string) => ({ trusted: true as const, trust: 'developer-id' as const, path, teamId: 'NV3X46LLCR', version: '0.17.4', versionSource: 'info-plist' as const, sha256: 'a'.repeat(64), size: 1 })
+  const trust = vi.fn(async (path: string): Promise<any> => trusted(path))
+  const pinned = vi.fn(async () => false)
+  const HELPER = '/Applications/COS Control.app/Contents/Helpers/fluidaudiocli'
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cos-stt-settings-674-'))
+    process.env.COS_DATA_DIR = dir
+    process.env.COS_PROFILE_PATH = join(dir, 'profile.json')
+    live = false
+    caps = allCaps({ parakeetInstalled: false })
+    disk = { ok: true, freeBytes: 50e9, requiredBytes: 1.5e9 }
+    install.mockClear(); trust.mockClear(); pinned.mockClear()
+    trust.mockImplementation(async (path: string) => trusted(path))
+    vi.resetModules()
+    const { createSttSettingsRouter } = await import('./stt-settings.js')
+    const app = express()
+    app.use(express.json())
+    app.use('/api', createSttSettingsRouter({ recordingLive: () => live, capabilities: () => caps, install, diskCheck: () => disk, trust, pinned }))
+    await new Promise<void>(res => { server = app.listen(0, '127.0.0.1', () => { const a = server!.address(); if (!a || typeof a === 'string') throw new Error('no addr'); base = `http://127.0.0.1:${a.port}`; res() }) })
+  })
+  afterEach(async () => {
+    await new Promise<void>(res => server ? server.close(() => res()) : res())
+    server = null
+    delete process.env.COS_DATA_DIR
+    delete process.env.COS_PROFILE_PATH
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('GET has dictation.desktop on auto; PUT dictation persists it and refuses an unavailable choice', async () => {
+    const get = await call('GET')
+    expect(get.json.dictation.desktop).toMatchObject({ selected: 'auto', effective: 'whisper', reasonCode: 'parakeet_not_installed' })
+    const refused = await call('PUT', undefined, { dictation: 'parakeet-ultra' })
+    expect(refused.status).toBe(400)
+    expect(refused.json.error).toMatch(/Install Parakeet/)
+    const put = await call('PUT', undefined, { dictation: 'whisper' })
+    expect(put.status).toBe(200)
+    expect(put.json.dictation.desktop).toMatchObject({ selected: 'whisper', effective: 'whisper', reasonCode: null })
+    expect(JSON.parse(readFileSync(join(dir, 'stt-settings.json'), 'utf8')).dictation).toBe('whisper')
+  })
+
+  it('install: 507 with the numbers when the disk is short, before any install starts', async () => {
+    disk = { ok: false, freeBytes: 1e9, requiredBytes: 1.5e9 }
+    const r = await call('POST', '/api/stt-settings/parakeet/install', { cliPath: HELPER, allowDownload: true })
+    expect(r.status).toBe(507)
+    expect(r.json).toMatchObject({ reason: 'insufficient_disk', freeBytes: 1e9, requiredBytes: 1.5e9, error: expect.stringMatching(/1\.5 GB free.*Whisper keeps working/) })
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('install: 422 for an untrusted cliPath, 400 for a path that is not fluidaudiocli', async () => {
+    trust.mockImplementationOnce(async (path: string) => ({ trusted: false, path, reason: 'wrong_team', detail: 'signed by team X' }))
+    const r = await call('POST', '/api/stt-settings/parakeet/install', { cliPath: HELPER, allowDownload: true })
+    expect(r.status).toBe(422)
+    expect(r.json).toMatchObject({ reason: 'cli_untrusted', cli: { trusted: false, reason: 'wrong_team' } })
+    expect(install).not.toHaveBeenCalled()
+    for (const cliPath of ['relative/fluidaudiocli', '/bin/sh', 7]) {
+      expect((await call('POST', '/api/stt-settings/parakeet/install', { cliPath })).status).toBe(400)
+    }
+    expect(trust).toHaveBeenCalledTimes(1)
+  })
+
+  it('install: a trusted cliPath plus allowDownload starts with that CLI and the network allowed', async () => {
+    const r = await call('POST', '/api/stt-settings/parakeet/install', { cliPath: HELPER, allowDownload: true })
+    expect(r.status).toBe(202)
+    expect(install).toHaveBeenCalledWith({ cliCandidates: [HELPER] })
+    install.mockClear()
+    // A SHA-pinned hand copy at cliPath skips the signature check.
+    pinned.mockResolvedValueOnce(true)
+    trust.mockClear()
+    await call('POST', '/api/stt-settings/parakeet/install', { cliPath: '/Users/x/.cos-glasses/bin/fluidaudiocli' })
+    expect(trust).not.toHaveBeenCalled()
+    expect(install).toHaveBeenCalledWith({ cliCandidates: ['/Users/x/.cos-glasses/bin/fluidaudiocli'] })
+  })
+
+  it('install: allowDownload false without a localSource never downloads', async () => {
+    await call('POST', '/api/stt-settings/parakeet/install', { allowDownload: false })
+    expect(install).toHaveBeenCalledWith({ requireLocal: true })
+  })
+
+  it('POST parakeet/cli registers Control CLI and returns the verdict', async () => {
+    const ok = await call('POST', '/api/stt-settings/parakeet/cli', { cliPath: HELPER })
+    expect(ok.status).toBe(200)
+    expect(ok.json).toEqual({ trusted: true, trust: 'developer-id', teamId: 'NV3X46LLCR', version: '0.17.4', versionSource: 'info-plist' })
+    const T = await import('../lib/parakeet-cli-trust.js')
+    expect(T.controlCliCandidates('/h')[0]).toBe(HELPER)
+    trust.mockImplementationOnce(async (path: string) => ({ trusted: false, path, reason: 'unsigned', detail: 'no signature' }))
+    const no = await call('POST', '/api/stt-settings/parakeet/cli', { cliPath: '/Other/fluidaudiocli' })
+    expect(no.status).toBe(422)
+    expect(no.json).toEqual({ trusted: false, reason: 'unsigned', detail: 'no signature' })
+    expect(T.controlCliCandidates('/h')).not.toContain('/Other/fluidaudiocli')
+    expect((await call('POST', '/api/stt-settings/parakeet/cli', { cliPath: '/bin/sh' })).status).toBe(400)
+  })
+})

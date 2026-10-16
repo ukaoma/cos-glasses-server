@@ -22,8 +22,13 @@ import {
 } from './hallucination-filter.js'
 import { getOpenAIKey, tryGetOpenAIKey } from './openai-key.js'
 import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from './transcription-policy.js'
-import { currentDictationPlan, runParakeetDictation, type DictationParakeetOutcome } from './dictation-stt.js'
-import { dictationSlotForMode, type DictationEngine, type DictationPlan, type DictationSlot } from './stt-settings.js'
+import {
+  currentDesktopDictationPlan, currentDesktopFailureHint, currentDictationPlan, runParakeetDictation,
+  type DesktopFailureHint, type DictationParakeetOutcome,
+} from './dictation-stt.js'
+import {
+  dictationSlotForMode, type DesktopDictationId, type DesktopDictationPlan, type DictationEngine, type DictationPlan, type DictationSlot,
+} from './stt-settings.js'
 
 export { OpenAIWhisperBudgetExhaustedError, estimateAudioSeconds }
 
@@ -47,26 +52,61 @@ export interface TranscribeAudioResult {
   engineReason?: string
   /** The setting this decode followed (see DictationPlan.key). */
   dictationKey: string
+  /** 6.74.0, Mac dictation (requiredEngine=local) only: why auto used Whisper instead of Parakeet. */
+  fallbackReason?: string
+  /** 6.74.0, Mac dictation only: the dictation engine setting this decode followed. */
+  dictationSetting?: DesktopDictationId
 }
+
+/** 6.74.0: what a Mac dictation request asks for. parakeet-ultra is COS Control 0.5.316 and
+ *  earlier (Parakeet only, the 6.73.x 503); local is 0.5.317 and later (the dictation setting). */
+export type RequiredEngine = 'parakeet-ultra' | 'local'
 
 /** Injected by tests; production reads the settings and runs Parakeet. */
 export interface DictationSttDeps {
   plan: (slot: DictationSlot) => DictationPlan
   parakeet: (audio: Buffer, plan: DictationPlan) => Promise<DictationParakeetOutcome>
+  /** 6.74.0: the Mac dictation plan (its own setting). Defaults to the production plan. */
+  desktopPlan?: (slot: DictationSlot) => DesktopDictationPlan
+  /** 6.74.0: the action a failed Mac dictation offers. */
+  failureHint?: (kind: 'no_local_engine' | 'parakeet_unavailable', parakeetReason: string | null) => DesktopFailureHint
 }
 export const defaultDictationSttDeps: DictationSttDeps = {
   plan: slot => currentDictationPlan(slot),
   parakeet: (audio, plan) => runParakeetDictation(audio, plan, 'interactive'),
+  desktopPlan: slot => currentDesktopDictationPlan(slot),
+  failureHint: (kind, reason) => currentDesktopFailureHint(kind, reason),
 }
 
 export type TranscriptionBackendPolicy = 'automatic' | 'local-only'
 
 export class TranscriptionUnavailableError extends Error {
   readonly status = 503
-  constructor(readonly reason: 'local_asr_unavailable' | 'local_asr_restarting' | 'openai_key_missing' | 'parakeet_unavailable', message?: string) {
+  constructor(
+    readonly reason: 'local_asr_unavailable' | 'local_asr_restarting' | 'openai_key_missing' | 'parakeet_unavailable' | 'no_local_engine',
+    message?: string,
+    /** 6.74.0, Mac dictation (requiredEngine=local) only. Absent everywhere else, so older bodies are unchanged. */
+    readonly hint?: DesktopFailureHint,
+  ) {
     super(message ?? reason)
     this.name = 'TranscriptionUnavailableError'
   }
+}
+
+/** Plain sentences for Mac dictation failures. COS Control shows them as is. */
+export const DESKTOP_MESSAGES: Record<'no_local_engine' | 'parakeet_unavailable', Record<DesktopFailureHint['action'], string>> = {
+  no_local_engine: {
+    install_parakeet: 'No dictation engine is ready on this Mac. Install Parakeet in Transcription settings.',
+    use_whisper: 'No dictation engine is ready on this Mac. Open Transcription settings to set one up.',
+    retry_when_warm: 'The dictation engine is starting. Try again in a few seconds.',
+    open_transcription_settings: 'No dictation engine is ready on this Mac. Open Transcription settings to set one up.',
+  },
+  parakeet_unavailable: {
+    install_parakeet: 'Dictation is set to Parakeet, which is not installed. Install Parakeet, or choose Automatic in Transcription settings.',
+    use_whisper: 'Dictation is set to Parakeet, which cannot transcribe right now. Choose Automatic or Whisper in Transcription settings.',
+    retry_when_warm: 'Parakeet is warming up. Try again in a few seconds.',
+    open_transcription_settings: 'Dictation is set to Parakeet, which cannot transcribe right now. Open Transcription settings.',
+  },
 }
 
 export class NoSpeechDetectedError extends Error {
@@ -168,8 +208,9 @@ export async function transcribeAudioBuffer(
     /** A plan snapshot taken by the caller (prompt finalize takes one for every chunk). */
     dictationPlan?: DictationPlan
     sttDeps?: DictationSttDeps
-    /** Desktop dictation pins its selected engine. Never substitute Whisper or upload audio. */
-    requiredEngine?: 'parakeet-ultra'
+    /** Mac dictation. Never uploads audio. parakeet-ultra never substitutes Whisper (6.73.x);
+     *  local (6.74.0) follows the dictation setting. */
+    requiredEngine?: RequiredEngine
   } = {},
 ): Promise<TranscribeAudioResult> {
   const requestedMode = opts.mode ?? 'hq'
@@ -194,10 +235,24 @@ export async function transcribeAudioBuffer(
   // per decode; a long clip downgraded to Fast is planned for the Fast slot.
   const sttDeps = opts.sttDeps ?? defaultDictationSttDeps
   const slot = dictationSlotForMode(effectiveMode)
-  const plan = opts.dictationPlan && opts.dictationPlan.slot === slot ? opts.dictationPlan : sttDeps.plan(slot)
-  if (opts.requiredEngine && plan.engine !== opts.requiredEngine) {
+  // 6.74.0: Mac dictation follows its own setting, never the Preview model.
+  const desktop: DesktopDictationPlan | null = opts.requiredEngine
+    ? (sttDeps.desktopPlan ?? defaultDictationSttDeps.desktopPlan!)(slot)
+    : null
+  const plan: DictationPlan = desktop ?? (opts.dictationPlan && opts.dictationPlan.slot === slot ? opts.dictationPlan : sttDeps.plan(slot))
+  // Old Control (requiredEngine=parakeet-ultra) and the explicit parakeet-ultra setting are strict.
+  const legacyStrict = opts.requiredEngine === 'parakeet-ultra'
+  const settingStrict = opts.requiredEngine === 'local' && desktop?.whisperAllowed === false
+  const hint = (kind: 'no_local_engine' | 'parakeet_unavailable', reason: string | null) =>
+    (sttDeps.failureHint ?? defaultDictationSttDeps.failureHint!)(kind, reason)
+  const strictRefusal = (reason: string | null) => {
+    const h = hint('parakeet_unavailable', reason)
+    return new TranscriptionUnavailableError('parakeet_unavailable', DESKTOP_MESSAGES.parakeet_unavailable[h.action], h)
+  }
+  if (legacyStrict && plan.engine !== 'parakeet-ultra') {
     throw new TranscriptionUnavailableError('parakeet_unavailable', 'Parakeet is not ready. Select Parakeet for dictation in Transcription settings and retry.')
   }
+  if (settingStrict && plan.engine !== 'parakeet-ultra') throw strictRefusal(plan.reason)
   let engine: DictationEngine = 'whisper'
   let engineReason: string | null = plan.reason
   let decoded = false
@@ -215,9 +270,15 @@ export async function transcribeAudioBuffer(
     }
   }
 
-  if (!decoded && opts.requiredEngine) {
+  if (!decoded && legacyStrict) {
     throw new TranscriptionUnavailableError('parakeet_unavailable', 'Parakeet could not transcribe this audio. Retry when it is ready; no other engine was used.')
   }
+  if (!decoded && settingStrict) throw strictRefusal(engineReason)
+  // Mac dictation on auto or whisper: local Whisper only, and a Whisper that cannot run is
+  // no_local_engine with one action, never the cloud.
+  const desktopLocal = opts.requiredEngine === 'local'
+  const effectivePolicy: TranscriptionBackendPolicy = desktopLocal ? 'local-only' : policy
+  try {
   if (decoded) {
     // Parakeet ran: nothing below. Its word clocks are not passed to the prompt tail
     // guard, whose confidence rule is calibrated on Whisper token probabilities.
@@ -246,7 +307,7 @@ export async function transcribeAudioBuffer(
         backend = `fast-local-${result.backend}`
         actualQuality = 'fast'
       } catch (localErr: any) {
-        const unavailable = policy === 'local-only'
+        const unavailable = effectivePolicy === 'local-only'
           ? new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
           : unavailableAfterLocalFailure()
         if (unavailable) {
@@ -267,7 +328,7 @@ export async function transcribeAudioBuffer(
       backend = `fast-local-${result.backend}`
       actualQuality = 'fast'
     } catch (localErr: any) {
-      const unavailable = policy === 'local-only'
+      const unavailable = effectivePolicy === 'local-only'
         ? new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
         : unavailableAfterLocalFailure()
       if (unavailable) {
@@ -280,7 +341,7 @@ export async function transcribeAudioBuffer(
       actualQuality = 'cloud'
     }
   } else {
-    const unavailable = policy === 'local-only'
+    const unavailable = effectivePolicy === 'local-only'
       ? new TranscriptionUnavailableError('local_asr_unavailable', 'Local transcription is unavailable; retry after Whisper recovers')
       : unavailableAfterLocalFailure()
     if (unavailable) {
@@ -289,6 +350,13 @@ export async function transcribeAudioBuffer(
     text = await transcribeCloud(audioBuffer)
     backend = 'cloud'
     actualQuality = 'cloud'
+  }
+  } catch (error) {
+    if (desktopLocal && error instanceof TranscriptionUnavailableError) {
+      const h = hint('no_local_engine', engineReason)
+      throw new TranscriptionUnavailableError('no_local_engine', DESKTOP_MESSAGES.no_local_engine[h.action], h)
+    }
+    throw error
   }
 
   if (text && text.length > 0) {
@@ -343,5 +411,8 @@ export async function transcribeAudioBuffer(
     engine,
     ...(engineReason ? { engineReason } : {}),
     dictationKey: plan.key,
+    ...(desktop ? { dictationSetting: desktop.setting } : {}),
+    // A fallback is auto wanting Parakeet and getting Whisper; an explicit whisper setting is not one.
+    ...(desktopLocal && desktop?.setting === 'auto' && engine === 'whisper' && engineReason ? { fallbackReason: engineReason } : {}),
   }
 }

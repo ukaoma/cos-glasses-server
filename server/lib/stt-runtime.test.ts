@@ -9,7 +9,7 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cos-stt-runtime-')); proces
 afterEach(() => { delete process.env.COS_DATA_DIR; rmSync(dir, { recursive: true, force: true }) })
 
 const eff = (engine: 'turbo' | 'parakeet', selected: string = engine, frontEnd: 'highpass' | 'full' = 'highpass'): EffectiveStt => ({
-  settings: { preview: selected as any, hq: 'large-v3', secondOpinion: 'parakeet-ultra', resolver: true, frontEnd, quietGate: 'silero' },
+  settings: { preview: selected as any, hq: 'large-v3', secondOpinion: 'parakeet-ultra', resolver: true, frontEnd, quietGate: 'silero', dictation: 'auto' },
   preview: { engine, reason: null }, hq: { engine: 'large-v3', reason: null }, secondOpinion: { engine: 'parakeet-ultra', reason: null },
   resolver: true, frontEnd, quietGate: 'silero',
 })
@@ -137,7 +137,13 @@ describe('6.73.0: a Parakeet HQ model warms Parakeet too (dictation final uses i
     const S = await import('./stt-settings.js')
     R.setRecordingLiveProbe(() => false)
     expect(R.ensurePreviewWarm()).toBe('started')
+    // 6.74.0: Mac dictation on auto (the default) wants Parakeet warm on its own...
     writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ preview: 'turbo', hq: 'large-v3' }))
+    S.__resetSttSettingsCacheForTests()
+    R.__resetPreviewForTests(); R.setRecordingLiveProbe(() => false)
+    expect(R.ensurePreviewWarm()).toBe('started')
+    // ...and only whisper does not.
+    writeFileSync(join(dir, 'stt-settings.json'), JSON.stringify({ preview: 'turbo', hq: 'large-v3', dictation: 'whisper' }))
     S.__resetSttSettingsCacheForTests()
     expect(R.ensurePreviewWarm()).toBe('skipped')
     vi.doUnmock('./parakeet.js')
@@ -194,13 +200,58 @@ describe('Parakeet install offer', () => {
     const prior = process.env.HOME
     process.env.HOME = dir
     try {
+      vi.doUnmock('./parakeet.js')
       const R = await import('./stt-runtime.js')
       const P = await import('./parakeet.js')
+      const T = await import('./parakeet-cli-trust.js')
+      T.__setApplicationsRootForTests(join(dir, 'Applications')) // no COS Control here either
       await P.findPinnedCli() // nothing at ~/.cos-glasses/bin under this HOME
       const status = R.parakeetStatus(false)
       expect(status.installable).toBe(false)
-      expect(status.note).toMatch(/fluidaudiocli 0\.17\.4/)
+      // 6.74.0: the note names the action (update COS Control), not a path in ~/.cos-glasses.
+      expect(status.note).toMatch(/Update COS Control/)
+      expect(status.note).not.toMatch(/cos-glasses/)
+      T.__resetCliTrustForTests()
     } finally { process.env.HOME = prior }
   })
 })
 
+
+describe('6.74.0: Parakeet install offer with COS Control signed CLI', () => {
+  const fake = (team: string) => ({
+    display: async () => ({ code: 0, output: `Info.plist entries=2\nTeamIdentifier=${team}\n` }),
+    verify: async () => ({ code: 0, output: '' }),
+    versionOutput: async () => '',
+    embeddedPlist: () => '<key>CFBundleShortVersionString</key><string>0.17.4</string>',
+    sha256: async () => 'b'.repeat(64),
+  })
+  it.runIf(process.platform === 'darwin' && process.arch === 'arm64')('is installable once the signed CLI is verified, and the note names the size and that Whisper keeps working', async () => {
+    const prior = process.env.HOME
+    process.env.HOME = dir
+    try {
+      vi.doUnmock('./parakeet.js')
+      const R = await import('./stt-runtime.js')
+      const P = await import('./parakeet.js')
+      const T = await import('./parakeet-cli-trust.js')
+      T.__setApplicationsRootForTests(join(dir, 'Applications'))
+      const helper = join(dir, 'Applications', 'COS Control.app', 'Contents', 'Helpers', 'fluidaudiocli')
+      const { mkdirSync } = await import('node:fs')
+      mkdirSync(join(helper, '..'), { recursive: true })
+      writeFileSync(helper, 'signed')
+      await P.findPinnedCli()
+      await T.trustCli(helper, fake('NV3X46LLCR'))
+      const ok = R.parakeetStatus(false)
+      expect(ok).toMatchObject({ installable: true, cli: { trust: 'developer-id', reason: null } })
+      expect(ok.note).toMatch(/^Install Parakeet \(654 MB\)\..*Dictation uses Whisper until it is ready\.$/)
+      expect(R.parakeetStatus(true).note).toBe('Install after the live recording is saved.')
+      // Another team's build at the same path: not installable, and the note says why.
+      T.__resetCliTrustForTests()
+      T.__setApplicationsRootForTests(join(dir, 'Applications'))
+      await T.trustCli(helper, fake('ABCDE12345'))
+      const no = R.parakeetStatus(false)
+      expect(no).toMatchObject({ installable: false, cli: { trust: null, reason: 'wrong_team' } })
+      expect(no.note).toMatch(/is not signed by COS\. Reinstall COS Control/)
+      T.__resetCliTrustForTests()
+    } finally { process.env.HOME = prior }
+  })
+})

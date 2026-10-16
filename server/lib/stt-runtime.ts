@@ -11,9 +11,10 @@ import {
 import { transcribeWhisperMeetingPreview } from './whisper-preview.js'
 import { asrFrontEnd } from './stt-live.js'
 import {
-  getInstallProgress, parakeetInstalled, parakeetInstallRunning, parakeetWarmState, pinnedCliKnown,
+  getInstallProgress, installedCliTrust, parakeetInstalled, parakeetInstallRunning, parakeetWarmState, pinnedCliKnown,
   PARAKEET_VERSION_LABEL, transcribeParakeet, warmParakeet, type ParakeetModelId,
 } from './parakeet.js'
+import { controlCliCandidates, knownCliTrust, type CliTrust } from './parakeet-cli-trust.js'
 import {
   effectiveStt, readSttSettings, type EffectiveStt, type FrontEndId, type ParakeetStatus,
   type SttCapabilities,
@@ -36,6 +37,8 @@ export const PREVIEW_BREAKER_MAX_MS = 10 * 60_000
 let recordingLiveProbe: () => boolean = () => false
 export function setRecordingLiveProbe(probe: () => boolean): void { recordingLiveProbe = probe }
 function recordingLive(): boolean { try { return recordingLiveProbe() } catch { return true } }
+/** 6.74.0: the benchmark route refuses while a recording is live. Fails closed. */
+export function isRecordingLive(): boolean { return recordingLive() }
 
 // ── Preview breaker and counters ─────────────────────────────────────────────
 const previewStats = { parakeet: 0, parakeetMisses: 0, turboFallbacks: 0, turbo: 0, nonTurboWithheld: 0, empty: 0 }
@@ -93,32 +96,60 @@ export function currentEffectiveStt(): EffectiveStt {
   return effectiveStt(readSttSettings(), currentSttCapabilities())
 }
 
+/** 6.74.0: which CLI an install would use. A SHA-256 pinned hand copy, else COS Control's
+ *  signed build. true or false once known, null while a check runs (GET never blocks). */
+export function installCliKnown(): { known: boolean | null; trust: 'sha256' | 'developer-id' | null; untrusted: CliTrust | null } {
+  const pinned = pinnedCliKnown()
+  if (pinned === true) return { known: true, trust: 'sha256', untrusted: null }
+  let unknown = pinned === null
+  let untrusted: CliTrust | null = null
+  for (const path of controlCliCandidates()) {
+    const t = knownCliTrust(path)
+    if (t === null) { unknown = true; continue }
+    if (t.trusted) return { known: true, trust: 'developer-id', untrusted: null }
+    if (t.reason !== 'missing' && !untrusted) untrusted = t
+  }
+  return { known: unknown ? null : false, trust: null, untrusted }
+}
+
+const UNTRUSTED_NOTE: Record<string, string> = {
+  unsigned: 'is not signed',
+  signature_invalid: 'has a signature that does not verify',
+  wrong_team: 'is not signed by COS',
+  wrong_version: 'is not the FluidAudio 0.17.4 build Parakeet needs',
+}
+
 export function parakeetStatus(live: boolean): ParakeetStatus {
   const installed = parakeetInstalled()
   const progress = getInstallProgress()
   const running = parakeetInstallRunning()
   const sandbox = existsSync('/usr/bin/sandbox-exec')
   const appleSilicon = process.platform === 'darwin' && process.arch === 'arm64'
-  // A button that can never succeed is never offered: the pinned CLI must be on this Mac.
-  const cli = appleSilicon ? pinnedCliKnown() : false
-  const installable = !installed.installed && !running && sandbox && appleSilicon && cli === true
+  // A button that can never succeed is never offered: a trusted CLI must be on this Mac,
+  // a SHA-256 pinned copy or (6.74.0) the signed one COS Control ships.
+  const cli = appleSilicon ? installCliKnown() : { known: false, trust: null, untrusted: null }
+  const installable = !installed.installed && !running && sandbox && appleSilicon && cli.known === true
   const warm = parakeetWarmState(PREVIEW_PARAKEET_MODEL)
+  const untrustedReason = cli.untrusted && !cli.untrusted.trusted ? cli.untrusted.reason : null
   const note = installed.installed
     ? 'Installed. Runs offline on the Neural Engine.'
     : running
-      ? 'Installing.'
+      ? 'Installing. Dictation uses Whisper until it is ready.'
       : !sandbox || !appleSilicon
         ? 'Parakeet needs an Apple silicon Mac.'
-        : cli === false
-          ? 'Parakeet needs FluidAudio fluidaudiocli 0.17.4 at ~/.cos-glasses/bin (the speaker-separation tool); this Mac does not have that build.'
-          : cli === null
-            ? 'Checking this Mac for the FluidAudio CLI.'
+        : cli.known === false
+          ? untrustedReason
+            ? `The speech tool in COS Control ${UNTRUSTED_NOTE[untrustedReason] ?? 'did not pass its check'}. Reinstall COS Control, then install Parakeet.`
+            : 'Parakeet needs the speech tool that comes with COS Control. Update COS Control, then install Parakeet here.'
+          : cli.known === null
+            ? 'Checking this Mac for the speech tool.'
             : live
               ? 'Install after the live recording is saved.'
-              : 'About 654 MB. Installs the pinned model and checks every file.'
+              : 'Install Parakeet (654 MB). It downloads the pinned model, checks every file and runs offline. Dictation uses Whisper until it is ready.'
   return {
     installed: installed.installed,
     installable,
+    cli: { trust: installed.installed ? installedCliTrust() : cli.trust, reason: untrustedReason },
     version: PARAKEET_VERSION_LABEL,
     bytes: installed.installed ? installed.bytes : progress.bytesDone,
     progress: { ...progress, state: installed.installed && !running ? 'installed' : progress.state },
@@ -139,7 +170,8 @@ export const WARM_RETRY_MS = 120_000
 export function ensurePreviewWarm(now = Date.now()): 'started' | 'skipped' | 'deferred' {
   const settings = readSttSettings()
   // 6.73.0: a Parakeet HQ model also warms, because dictation final text uses it only warm.
-  const wanted = settings.preview === 'parakeet' || settings.hq === 'parakeet-ultra'
+  // 6.74.0: so does Mac dictation on auto or parakeet-ultra (the default is auto).
+  const wanted = settings.preview === 'parakeet' || settings.hq === 'parakeet-ultra' || settings.dictation !== 'whisper'
   if (!wanted || !parakeetInstalled().installed) return 'skipped'
   const w = parakeetWarmState(PREVIEW_PARAKEET_MODEL)
   if (w.state === 'warm' || w.state === 'warming') return 'skipped'

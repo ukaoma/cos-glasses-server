@@ -15,11 +15,13 @@
 import { transcribeParakeet, ParakeetError } from './parakeet.js'
 import { asrFrontEnd } from './stt-live.js'
 import {
-  currentSttCapabilities, ensurePreviewWarm, noteParakeetDictationHit, noteParakeetDictationMiss,
+  currentSttCapabilities, ensurePreviewWarm, installCliKnown, noteParakeetDictationHit, noteParakeetDictationMiss,
   PARAKEET_PREVIEW_TIMEOUT_MS, PREVIEW_PARAKEET_MODEL,
 } from './stt-runtime.js'
+import { getWhisperHealth } from './whisper-local.js'
+import { parakeetInstallRunning } from './parakeet.js'
 import {
-  dictationPlan, readSttSettings, type DictationPlan, type DictationSlot, type FrontEndId,
+  desktopDictationPlan, dictationPlan, readSttSettings, type DesktopDictationPlan, type DictationPlan, type DictationSlot, type FrontEndId,
 } from './stt-settings.js'
 
 /** The plan for a dictation decode starting now. A Parakeet selection that is
@@ -35,6 +37,63 @@ export function currentDictationPlan(slot: DictationSlot): DictationPlan {
     plan = { slot, engine: 'whisper', reason: null, frontEnd: 'highpass', key: slot === 'final' ? 'final:large-v3' : `${slot}:turbo` }
   }
   return plan
+}
+
+/** 6.74.0: the plan for a Mac dictation decode starting now (its own setting, not the
+ *  Preview model). A Parakeet that is installed but cold starts warming here. */
+export function currentDesktopDictationPlan(slot: DictationSlot): DesktopDictationPlan {
+  try {
+    const plan = desktopDictationPlan(slot, readSttSettings(), currentSttCapabilities())
+    if (plan.reason === 'parakeet_warming' || plan.reason === 'parakeet_warm_failed') ensurePreviewWarm()
+    return plan
+  } catch (error) {
+    console.warn(`[stt] Mac dictation settings unreadable, using Whisper: ${error instanceof Error ? error.message : error}`)
+    return { slot, engine: 'whisper', reason: null, frontEnd: 'highpass', key: slot === 'final' ? 'final:large-v3' : `${slot}:turbo`, setting: 'auto', whisperAllowed: true }
+  }
+}
+
+/** The one action a Mac dictation failure offers (see the contract). */
+export type DesktopDictationAction = 'install_parakeet' | 'use_whisper' | 'retry_when_warm' | 'open_transcription_settings'
+export interface DesktopFailureHint { action: DesktopDictationAction; retryable: boolean; detail: string }
+export interface DesktopFailureFacts {
+  /** no_local_engine: nothing local could run. parakeet_unavailable: the setting is parakeet-ultra. */
+  kind: 'no_local_engine' | 'parakeet_unavailable'
+  /** The Parakeet reason code (plan or decode), when there is one. */
+  parakeetReason: string | null
+  parakeetInstallable: boolean
+  whisperStarting: boolean
+  whisperPresent: boolean
+}
+
+/** Pure. Retry is offered only when waiting can make it succeed. */
+export function desktopFailureHint(f: DesktopFailureFacts): DesktopFailureHint {
+  const waiting = f.parakeetReason === 'parakeet_warming' || f.parakeetReason === 'parakeet_busy'
+  if (f.kind === 'parakeet_unavailable') {
+    const detail = f.parakeetReason ?? 'parakeet_failed'
+    if (detail === 'parakeet_not_installed') return { action: f.parakeetInstallable ? 'install_parakeet' : 'use_whisper', retryable: false, detail }
+    if (waiting) return { action: 'retry_when_warm', retryable: true, detail }
+    return { action: 'use_whisper', retryable: false, detail }
+  }
+  if (f.whisperStarting) return { action: 'retry_when_warm', retryable: true, detail: 'whisper_starting' }
+  const detail = f.whisperPresent ? 'whisper_unavailable' : 'whisper_missing'
+  if (waiting) return { action: 'retry_when_warm', retryable: true, detail }
+  if (f.parakeetReason === 'parakeet_not_installed' && f.parakeetInstallable) return { action: 'install_parakeet', retryable: false, detail }
+  return { action: 'open_transcription_settings', retryable: false, detail }
+}
+
+/** Production facts for desktopFailureHint. Never throws. */
+export function currentDesktopFailureHint(kind: DesktopFailureFacts['kind'], parakeetReason: string | null): DesktopFailureHint {
+  let whisperStarting = false, whisperPresent = true, parakeetInstallable = false
+  try {
+    const h = getWhisperHealth()
+    whisperStarting = h.restarting || h.startupState === 'preflight' || h.startupState === 'loading'
+    whisperPresent = h.serverConfigured
+  } catch { /* unknown: treat as present and not starting */ }
+  try {
+    const installing = parakeetInstallRunning()
+    parakeetInstallable = installing || (process.platform === 'darwin' && process.arch === 'arm64' && installCliKnown().known === true)
+  } catch { /* not installable */ }
+  return desktopFailureHint({ kind, parakeetReason, parakeetInstallable, whisperStarting, whisperPresent })
 }
 
 /** Parakeet reads 16 kHz mono PCM16 WAV. The browser recorder posts WebM, which stays on Whisper. */

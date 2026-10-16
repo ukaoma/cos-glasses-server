@@ -19,12 +19,15 @@ export const HQ_IDS = ['large-v3', 'large-v3-legacy', 'parakeet-ultra'] as const
 export const SECOND_OPINION_IDS = ['off', 'parakeet-ultra', 'large-v3'] as const
 export const FRONT_END_IDS = ['highpass', 'full'] as const
 export const QUIET_GATE_IDS = ['silero', 'rms'] as const
+/** 6.74.0: the engine for Mac dictation (COS Control). It does not follow the Preview model. */
+export const DICTATION_IDS = ['auto', 'parakeet-ultra', 'whisper'] as const
 
 export type PreviewId = typeof PREVIEW_IDS[number]
 export type HqId = typeof HQ_IDS[number]
 export type SecondOpinionId = typeof SECOND_OPINION_IDS[number]
 export type FrontEndId = typeof FRONT_END_IDS[number]
 export type QuietGateId = typeof QUIET_GATE_IDS[number]
+export type DesktopDictationId = typeof DICTATION_IDS[number]
 
 export interface SttSettings {
   preview: PreviewId
@@ -33,6 +36,8 @@ export interface SttSettings {
   resolver: boolean
   frontEnd: FrontEndId
   quietGate: QuietGateId
+  /** 6.74.0: Mac dictation engine. auto = Parakeet Ultra when installed and warm, else local Whisper. */
+  dictation: DesktopDictationId
 }
 
 /** Items 1 to 3 on. Second opinion off and the resolver off: on the shipped
@@ -47,6 +52,9 @@ export const DEFAULT_STT_SETTINGS: Readonly<SttSettings> = Object.freeze({
   resolver: false,
   frontEnd: 'highpass',
   quietGate: 'silero',
+  // Every install before 6.74.0 has no key and reads as auto, including Macs that
+  // chose Parakeet: auto keeps Parakeet wherever it is installed and warm.
+  dictation: 'auto',
 })
 
 export const STT_SETTINGS_FILE = 'stt-settings.json'
@@ -66,6 +74,7 @@ export function normalizeStoredSettings(raw: unknown): SttSettings {
     resolver: typeof o.resolver === 'boolean' ? o.resolver : DEFAULT_STT_SETTINGS.resolver,
     frontEnd: pick(FRONT_END_IDS, o.frontEnd, DEFAULT_STT_SETTINGS.frontEnd),
     quietGate: pick(QUIET_GATE_IDS, o.quietGate, DEFAULT_STT_SETTINGS.quietGate),
+    dictation: pick(DICTATION_IDS, o.dictation, DEFAULT_STT_SETTINGS.dictation),
   }
 }
 
@@ -209,7 +218,7 @@ export class SttSettingsError extends Error {
   constructor(message: string) { super(message); this.name = 'SttSettingsError' }
 }
 
-const KEYS = ['preview', 'hq', 'secondOpinion', 'resolver', 'frontEnd', 'quietGate'] as const
+const KEYS = ['preview', 'hq', 'secondOpinion', 'resolver', 'frontEnd', 'quietGate', 'dictation'] as const
 
 /**
  * Apply a partial PUT. Throws SttSettingsError with a plain sentence for an
@@ -238,12 +247,14 @@ export function applySettingsPatch(current: SttSettings, body: unknown, c: SttCa
   const second = choose('secondOpinion', SECOND_OPINION_IDS, secondOpinionOptions(c), 'Second opinion')
   const frontEnd = choose('frontEnd', FRONT_END_IDS, FRONT_END_OPTIONS, 'Front end')
   const quietGate = choose('quietGate', QUIET_GATE_IDS, QUIET_GATE_OPTIONS, 'Quiet gate')
+  const dictation = choose('dictation', DICTATION_IDS, desktopDictationOptions(c), 'Dictation engine')
   if ('resolver' in patch && typeof patch.resolver !== 'boolean') throw new SttSettingsError('resolver must be true or false.')
   if (preview) next.preview = preview
   if (hq) next.hq = hq
   if (second) next.secondOpinion = second
   if (frontEnd) next.frontEnd = frontEnd
   if (quietGate) next.quietGate = quietGate
+  if (dictation) next.dictation = dictation
   if (typeof patch.resolver === 'boolean') next.resolver = patch.resolver
   if (engineFamily(next.hq) === engineFamily(next.secondOpinion)) {
     if (second) throw new SttSettingsError('The second opinion must be a different engine from the HQ model.')
@@ -370,6 +381,75 @@ export const DICTATION_REASON_TEXT: Record<string, string> = {
   dictation_disabled_by_env: 'Dictation is held on Whisper on this server (COS_DICTATION_FOLLOWS_STT=0).',
 }
 
+// ── Mac dictation (6.74.0) ────────────────────────────────────────────────────
+//
+// COS Control's dictation has its own setting and never follows the Preview model.
+// auto: Parakeet Ultra when installed, warm and its breaker closed, otherwise the
+// local Whisper live worker for that decode (and a warm-up starts). Never the cloud.
+// parakeet-ultra: Parakeet only, as 6.73.x did; when it cannot run the request fails.
+// whisper: local Whisper only.
+
+/** Whisper weights for the live worker are on this Mac. */
+export function desktopWhisperPresent(c: SttCapabilities): boolean {
+  return c.turboModel || c.liveLargeV3
+}
+
+export function desktopDictationOptions(c: SttCapabilities): SttOption[] {
+  const whisper = desktopWhisperPresent(c)
+  return [
+    { id: 'auto', label: 'Automatic', available: true, experimental: false,
+      note: 'Parakeet Ultra when it is installed and ready, otherwise Whisper on this Mac. Audio never leaves this Mac.' },
+    { id: 'parakeet-ultra', label: 'Parakeet Ultra', available: c.parakeetInstalled, experimental: false,
+      note: c.parakeetInstalled ? 'Parakeet only. While it warms up or is busy, dictation fails instead of using Whisper.' : 'Install Parakeet on this Mac first.' },
+    { id: 'whisper', label: 'Whisper', available: whisper, experimental: false,
+      note: whisper ? 'Whisper on this Mac only, with the names in your COS dictionary.' : 'Whisper weights are missing on this Mac.' },
+  ]
+}
+
+export interface DesktopDictationPlan extends DictationPlan {
+  setting: DesktopDictationId
+  /** Whisper may decode this request: auto and whisper, never parakeet-ultra. */
+  whisperAllowed: boolean
+}
+
+/** Pure: what a Mac dictation decode uses. The engine is chosen once, here. */
+export function desktopDictationPlan(slot: DictationSlot, settings: SttSettings, c: SttCapabilities): DesktopDictationPlan {
+  const setting = settings.dictation
+  const base = { slot, frontEnd: settings.frontEnd, setting, whisperAllowed: setting !== 'parakeet-ultra' }
+  const whisperKey = slot === 'final' ? 'final:large-v3' : `${slot}:turbo`
+  if (setting === 'whisper') return { ...base, engine: 'whisper', reason: null, key: whisperKey }
+  const reason = c.dictationDisabledByEnv ? 'dictation_disabled_by_env'
+    : !c.parakeetInstalled ? 'parakeet_not_installed'
+      : c.parakeetPreviewBreakerOpen ? 'parakeet_breaker_open'
+        : c.parakeetPreviewWarm ? null
+          : c.parakeetPreviewWarmFailed ? 'parakeet_warm_failed'
+            : 'parakeet_warming'
+  if (reason) return { ...base, engine: 'whisper', reason, key: whisperKey }
+  return { ...base, engine: 'parakeet-ultra', reason: null, key: slot === 'final' ? 'final:parakeet-ultra' : `${slot}:parakeet` }
+}
+
+const reasonText = (code: string) => REASON_TEXT[code] ?? DICTATION_REASON_TEXT[code] ?? code
+
+export function desktopDictationView(settings: SttSettings, c: SttCapabilities) {
+  const plan = desktopDictationPlan('fast', settings, c)
+  const effective: DictationEngine | 'none' = plan.engine === 'parakeet-ultra' ? 'parakeet-ultra'
+    : plan.whisperAllowed && desktopWhisperPresent(c) ? 'whisper' : 'none'
+  const code = plan.reason
+  const note = effective === 'parakeet-ultra' ? 'Mac dictation uses Parakeet Ultra on this Mac.'
+    : effective === 'whisper'
+      ? settings.dictation === 'auto' && code ? `Mac dictation uses Whisper on this Mac for now. ${reasonText(code)}` : 'Mac dictation uses Whisper on this Mac.'
+      : settings.dictation === 'parakeet-ultra' ? `Mac dictation waits for Parakeet.${code ? ` ${reasonText(code)}` : ''}`
+        : 'No dictation engine is ready on this Mac. Install Parakeet, or the Whisper weights.'
+  return {
+    selected: settings.dictation,
+    effective,
+    reason: code ? reasonText(code) : null,
+    reasonCode: code,
+    options: desktopDictationOptions(c),
+    note,
+  }
+}
+
 function dictationSlotView(plan: DictationPlan, follows: 'preview' | 'hq') {
   const code = plan.reason
   return { engine: plan.engine, follows, reason: code ? (REASON_TEXT[code] ?? DICTATION_REASON_TEXT[code] ?? code) : null, reasonCode: code }
@@ -381,7 +461,8 @@ export function dictationView(settings: SttSettings, c: SttCapabilities) {
   const final = dictationPlan('final', settings, c)
   const anyParakeet = settings.preview === 'parakeet' || settings.hq === 'parakeet-ultra'
   const name = (p: DictationPlan) => p.engine === 'parakeet-ultra' ? 'Parakeet Ultra' : 'Whisper'
-  const note = `Dictation follows these settings: the live preview and Fast mode use the Preview model (now ${name(preview)}), the final text uses the HQ model (now ${name(final)}). `
+  const note = `Glasses and phone dictation follow these settings: the live preview and Fast mode use the Preview model (now ${name(preview)}), the final text uses the HQ model (now ${name(final)}). `
+    + 'Mac dictation has its own engine setting. '
     + 'Dictation never runs the second opinion or the resolver, and the quiet gate never drops a spoken prompt.'
   return {
     preview: dictationSlotView(preview, 'preview'),
@@ -391,6 +472,8 @@ export function dictationView(settings: SttSettings, c: SttCapabilities) {
     quietGate: 'none' as const,
     secondOpinion: 'off' as const,
     note,
+    /** 6.74.0: COS Control's Mac dictation (POST /api/transcribe?requiredEngine=local). */
+    desktop: desktopDictationView(settings, c),
   }
 }
 
@@ -399,7 +482,9 @@ export interface ParakeetStatus {
   installable: boolean
   version: string
   bytes: number
-  progress: { state: string; bytesDone: number; bytesTotal: number; error: string | null; source?: unknown }
+  progress: { state: string; bytesDone: number; bytesTotal: number; error: string | null; errorCode?: string | null; source?: unknown }
+  /** 6.74.0: how the CLI is (or would be) trusted, and why COS Control's copy was refused. */
+  cli?: { trust: 'sha256' | 'developer-id' | null; reason: string | null }
   warm: { preview: string; error?: string; at?: string }
   preview?: { breaker: { open: boolean; retryAt: string | null; misses: number }; counters: Record<string, number> }
   note: string

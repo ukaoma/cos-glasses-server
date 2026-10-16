@@ -1,4 +1,4 @@
-# Dictation speech-to-text contract (server 6.73.0)
+# Dictation speech-to-text contract (server 6.73.0, Mac dictation 6.74.0)
 
 Status: shipped in 6.73.0 (2026-10-13). The map and phone contract were written first; the
 measured numbers are in the Evidence section at the end.
@@ -253,3 +253,100 @@ after. That last case would remove most of Parakeet's speed advantage on the fin
 ## Native Mac dictation opt-in
 
 The native Mac client first checks `GET /api/transcribe/capabilities` for desktopDictationVersion 1 and localOnly true. It then uses the existing one-shot endpoint with `requiredEngine=parakeet-ultra`. This opt-in caps the actual streamed request body at 3,840,044 bytes and forces local-only execution. A cold, unavailable, busy, failed or incompatible Parakeet decode returns a retryable 503 before any Whisper/cloud path. The shared COS dictionary and hallucination filters still run on successful text. This requirement does not change legacy callers that omit the parameter.
+
+Superseded in 6.74.0 for COS Control 0.5.317 and later: see the next section. The 6.73 behaviour above is kept for `requiredEngine=parakeet-ultra`, except that it now follows the dictation setting instead of the Preview model.
+
+## Mac dictation for every user (6.74.0)
+
+Why: 6.73.7 made Mac dictation Parakeet only, so a Mac without a hand-placed FluidAudio CLI, or one whose Preview model was still Turbo, got a 503 on every dictation (FINDINGS 2026-10-16). Local-only and no silent cloud fallback stay; a local Whisper decode is no longer excluded.
+
+### Setting
+
+`dictation` in `stt-settings.json`: `auto` (default), `parakeet-ultra`, `whisper`. A file without the key (every install before 6.74.0) reads as `auto`. It never follows the Preview model. `PUT /api/stt-settings {"dictation": ...}` refuses `parakeet-ultra` while Parakeet is not installed and `whisper` while this Mac has no Whisper weights; `auto` is always accepted.
+
+`GET /api/stt-settings` adds `dictation.desktop`:
+
+```json
+{ "selected": "auto", "effective": "parakeet-ultra" | "whisper" | "none", "reason": null | "...", "reasonCode": null | "parakeet_warming" | ..., "options": [{ "id", "label", "available", "experimental", "note" }], "note": "plain sentence" }
+```
+
+A Parakeet installed under `auto` or `parakeet-ultra` warms like a Parakeet Preview model (never while a recording is live; a failed warm-up is retried every 2 minutes).
+
+### Capability (preflight before any audio is sent)
+
+`GET /api/transcribe/capabilities`:
+
+```json
+{ "desktopDictationVersion": 1, "desktopDictationVersions": [1, 2], "requiredEngines": ["parakeet-ultra", "local"], "localOnly": true, "dictionary": "cos", "benchmark": 1 }
+```
+
+`desktopDictationVersion` stays 1 because COS Control 0.5.316 and earlier check `== 1` exactly. A client sends `requiredEngine=local` only when `desktopDictationVersions` contains 2; otherwise it keeps the Parakeet-only path.
+
+### Engine policy (`POST /api/transcribe?requiredEngine=...`, raw 16 kHz mono PCM16 WAV, at most 3,840,044 bytes)
+
+The engine is chosen once per request, from one settings snapshot. Every path is local-only: the OpenAI fallback is never used, even when configured.
+
+| Request | Setting | Parakeet installed, warm, breaker closed | Parakeet not installed, warming, warm-up failed, breaker open | Parakeet decode busy or failed | No local engine can run |
+|---|---|---|---|---|---|
+| `local` | `auto` | Parakeet | Whisper, `fallbackReason` = the plan reason, warm-up started | Whisper decodes the same audio, `fallbackReason` = `parakeet_busy`, `parakeet_failed` or `audio_not_pcm_wav` | 503 `no_local_engine` |
+| `local` | `whisper` | Whisper (Parakeet never runs) | Whisper | not applicable | 503 `no_local_engine` |
+| `local` | `parakeet-ultra` | Parakeet | 503 `parakeet_unavailable` with action | 503 `parakeet_unavailable` with action | same |
+| `parakeet-ultra` (0.5.316) | `auto` or `parakeet-ultra` | Parakeet | 503, the 6.73 body | 503, the 6.73 body | same |
+| `parakeet-ultra` (0.5.316) | `whisper` | 503, the 6.73 body | same | same | same |
+| none (phone, glasses) | any | follows the Preview and HQ models as in 6.73 | | | |
+
+Mac dictation uses the Whisper path for the requested mode: `mode=fast` is the live worker (Turbo, or Large-v3 on a Max-tier Mac), `mode=hq` is whisper-cli Large-v3 and then the live worker.
+
+200 adds `engine` (`parakeet-ultra` or `whisper`), `dictationSetting`, and `fallbackReason` only when `auto` wanted Parakeet and Whisper ran. An explicit `whisper` setting is not a fallback.
+
+503 for `requiredEngine=local`:
+
+```json
+{ "error": "plain sentence", "reason": "no_local_engine" | "parakeet_unavailable", "retryable": true | false, "action": "install_parakeet" | "use_whisper" | "retry_when_warm" | "open_transcription_settings", "detail": "whisper_starting" | "whisper_unavailable" | "whisper_missing" | "<parakeet reason code>" }
+```
+
+`retryable` is true only when waiting can make a retry succeed (Parakeet warming or busy, Whisper starting). The `requiredEngine=parakeet-ultra` body is unchanged: `{error, reason: "parakeet_unavailable", retryable: true}` with the two 6.73 messages.
+
+| Kind | Facts | Action |
+|---|---|---|
+| `no_local_engine` | Whisper starting | `retry_when_warm` (retryable) |
+| `no_local_engine` | Parakeet warming or busy | `retry_when_warm` (retryable) |
+| `no_local_engine` | Parakeet not installed and installable | `install_parakeet` |
+| `no_local_engine` | otherwise | `open_transcription_settings` |
+| `parakeet_unavailable` | not installed | `install_parakeet` when installable, else `use_whisper` |
+| `parakeet_unavailable` | warming or busy | `retry_when_warm` (retryable) |
+| `parakeet_unavailable` | warm-up failed, breaker open, decode failed, not PCM WAV, held by env | `use_whisper` |
+
+### Parakeet install from COS Control
+
+FluidAudio is Apache-2.0 and publishes no binary for v0.17.4. COS Control builds `fluidaudiocli` from the pinned source tag and ships it in `Contents/Helpers`, signed with the COS Developer ID (hardened runtime) and notarized with the app. A Developer ID build cannot match the SHA-256 pin, so the server trusts it on all of:
+
+1. `codesign --verify --strict` passes, and passes again with the requirement `anchor apple generic and certificate leaf[subject.OU] = "NV3X46LLCR"` (a self-signed certificate can claim any team; the Apple anchor rules it out).
+2. `codesign -dv` reports `TeamIdentifier=NV3X46LLCR` (read from the shipped COS Control, 2026-10-16), and the signature is not ad hoc.
+3. The version is 0.17.4: `CFBundleShortVersionString` (else `CFBundleVersion`) in an Info.plist embedded in the binary and bound by the signature (`codesign -dv` shows `Info.plist entries=`), else `--version` output, run sandboxed with no network for 5 s. The upstream 0.17.4 CLI answers `Unknown command` to `--version` and `version`, so COS Control's build embeds the plist (link with `-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist`). A bound plist naming another version is final; that binary is never run.
+
+Only a file named `fluidaudiocli` at an absolute path is ever checked. The SHA-256 pinned hand copy (`~/.cos-glasses/bin/fluidaudiocli`, `COS_NEMOTRON_CLI`, a local source) is tried first and needs none of this. The installer copies the chosen CLI into staging and proves the copy again; the receipt records `cli: {version, sha256, size, trust: "developer-id", teamId}` and every Parakeet run checks the installed bytes against that hash. A 6.73 receipt (no `trust`) reads as the pinned build. A server older than 6.74.0 reads a Developer ID receipt as not installed, which fails safe.
+
+Routes:
+
+- `POST /api/stt-settings/parakeet/cli {cliPath}`: 200 `{trusted: true, trust, teamId, version, versionSource}` or 422 `{trusted: false, reason, detail}` (`missing`, `unsigned`, `signature_invalid`, `wrong_team`, `wrong_version`); 400 for a path that is not an absolute `.../fluidaudiocli`. A trusted path is remembered for this process. The server also looks at `/Applications/COS Control.app/Contents/Helpers/fluidaudiocli` and the same under `~/Applications`.
+- `POST /api/stt-settings/parakeet/install {cliPath?, allowDownload?, localSource?}`: 202 started; 409 while recording; 400 bad input; 422 `cli_untrusted`; 507 `insufficient_disk` with `freeBytes` and `requiredBytes` (1.5 GB, checked again by the installer before anything is written). The model comes from the pinned Hugging Face revision, each file SHA-256 checked in staging, then one atomic swap. `allowDownload: false` with no local source never downloads.
+- `DELETE /api/stt-settings/parakeet/install` cancels; nothing partial is kept and the previous install stays.
+- GET `parakeet`: `installable` (a trusted CLI is on this Mac), `note` (safe to show as is), `cli: {trust, reason}`, `progress.errorCode` (`cancelled`, `insufficient_disk`, `sha_mismatch`, `download_failed`, `stalled`, `cli_untrusted`, `cli_missing`, `failed`).
+
+Speaker separation is not changed: it looks for the CLI at `COS_NEMOTRON_CLI`, `~/.cos-glasses/bin/fluidaudiocli` and `PATH` only, so a GUI Parakeet install (CLI under `<data>/stt/parakeet/current/bin`) does not enable it.
+
+### Onboarding check (`POST /api/transcribe/benchmark?engines=whisper,parakeet-ultra`)
+
+Raw 16 kHz mono PCM16 WAV (at most 3,840,044 bytes); `engines` defaults to both. 200:
+
+```json
+{ "audioSeconds": 30, "results": [{ "engine": "whisper" | "parakeet-ultra", "model": "large-v3-turbo" | "large-v3" | "parakeet-ultra", "ran": true, "skipped": "not_installed" | "unavailable" | "busy" | "timeout" | "total_timeout", "error": "...", "elapsedMs": 900, "rtf": 0.03, "peakRssBytes": 314572800 | null, "warmupMs": 18000, "text": "..." }] }
+```
+
+- `rtf` is decode seconds over audio seconds. A cold Parakeet warms first (`warmupMs`); `rtf` is the warm decode.
+- `peakRssBytes` samples the Parakeet CLI process every 50 ms. Whisper reports null: its worker is shared and always resident.
+- `text` is after the COS dictionary corrections and before the hallucination filters, for both engines. Control scores word error rate against its reference.
+- Bounds: one run at a time (409 `benchmark_running`), refused while a recording is live or when one starts mid-run (409 `recording_live`), 60 s per engine, 150 s in all, holds the maintenance lease.
+- One 30 s clip is a sanity check on this Mac, not an engine benchmark.
+

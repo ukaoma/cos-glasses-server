@@ -179,6 +179,8 @@ describe('transcribeAudioBuffer follows the plan (6.73.0)', () => {
 
   const planOf = (slot: 'fast' | 'final' | 'preview', engine: 'whisper' | 'parakeet-ultra', reason: string | null = null): DictationPlan =>
     ({ slot, engine, reason, frontEnd: 'highpass', key: `${slot}:${engine === 'whisper' ? 'turbo' : 'parakeet'}` })
+  const deskOf = (slot: 'fast' | 'final' | 'preview', engine: 'whisper' | 'parakeet-ultra', reason: string | null = null, setting: 'auto' | 'parakeet-ultra' | 'whisper' = 'auto') =>
+    ({ ...planOf(slot, engine, reason), setting, whisperAllowed: setting !== 'parakeet-ultra' })
 
   it('Fast mode asks for the Fast (Preview model) plan and HQ for the final (HQ model) plan', async () => {
     const plan = vi.fn((slot: any) => planOf(slot, 'whisper'))
@@ -219,7 +221,7 @@ describe('transcribeAudioBuffer follows the plan (6.73.0)', () => {
   it('pinned Mac dictation refuses a cold engine and never runs Whisper', async () => {
     const parakeet = vi.fn()
     await expect(transcribeAudioBuffer(wav(2), { mode: 'fast', requiredEngine: 'parakeet-ultra',
-      sttDeps: { plan: s => planOf(s, 'whisper', 'parakeet_warming'), parakeet } }))
+      sttDeps: { plan: s => planOf(s, 'whisper'), desktopPlan: s => deskOf(s, 'whisper', 'parakeet_warming'), parakeet } }))
       .rejects.toMatchObject({ status: 503, reason: 'parakeet_unavailable' })
     expect(parakeet).not.toHaveBeenCalled()
     expect(transcribeLocal).not.toHaveBeenCalled()
@@ -229,7 +231,7 @@ describe('transcribeAudioBuffer follows the plan (6.73.0)', () => {
   it.each(['parakeet_busy', 'parakeet_failed', 'audio_not_pcm_wav'] as const)('pinned Mac dictation refuses %s without engine substitution', async reason => {
     const parakeet = vi.fn(async () => ({ ok: false as const, reason }))
     await expect(transcribeAudioBuffer(wav(2), { mode: 'fast', requiredEngine: 'parakeet-ultra',
-      sttDeps: { plan: s => planOf(s, 'parakeet-ultra'), parakeet } }))
+      sttDeps: { plan: s => planOf(s, 'whisper'), desktopPlan: s => deskOf(s, 'parakeet-ultra'), parakeet } }))
       .rejects.toMatchObject({ status: 503, reason: 'parakeet_unavailable' })
     expect(transcribeLocal).not.toHaveBeenCalled()
     expect(transcribeHighQuality).not.toHaveBeenCalled()
@@ -238,7 +240,7 @@ describe('transcribeAudioBuffer follows the plan (6.73.0)', () => {
   it('pinned Mac dictation uses the shared Parakeet result and correction pipeline', async () => {
     const parakeet = vi.fn(async () => ({ ok: true as const, text: 'Review the launch tomorrow.' }))
     const result = await transcribeAudioBuffer(wav(2), { mode: 'fast', requiredEngine: 'parakeet-ultra',
-      sttDeps: { plan: s => planOf(s, 'parakeet-ultra'), parakeet } })
+      sttDeps: { plan: s => planOf(s, 'whisper'), desktopPlan: s => deskOf(s, 'parakeet-ultra'), parakeet } })
     expect(result).toMatchObject({ text: 'Review the launch tomorrow.', engine: 'parakeet-ultra', backend: 'parakeet-ultra' })
     expect(transcribeLocal).not.toHaveBeenCalled()
   })
