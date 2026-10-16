@@ -32,7 +32,7 @@ Branch `feat/dictation-everyone` (from `feat/work-queue-parallel` 6.73.15). Not 
 
 ## Tests
 
-- Final full server suite (once, after every commit including the identity and diarizer changes; isolated `COS_DATA_DIR` and profile): **Test Files 461 passed (461). Tests 7120 passed, 2 skipped (7122).** Duration 386.43 s. The earlier end-of-feature run, before the follow-ups, was 460 files and 7107 passed, 2 skipped.
+- Final full server suite (once, after every commit including the identity and diarizer changes; isolated `COS_DATA_DIR` and profile): **Test Files 461 passed (461). Tests 7122 passed, 2 skipped (7124).** Duration 388.40 s, at 58108b9. The earlier end-of-feature run, before the follow-ups, was 460 files and 7107 passed, 2 skipped.
 - The first full run, before two fixes: 2 failed and 7103 passed. Both failures were mine:
   - `package-manifest.test.ts` rejected the changelog heading `6.74.0:`. Changed to `6.74.0 -`.
   - `hazard-invariants.test.ts` caught an unguarded `openSync` in the new plist reader. The path comes from a client, so a FIFO would have blocked the server. Fixed with `O_NONBLOCK | O_NOFOLLOW` plus an `fstat` check, and a FIFO test was added.
@@ -52,8 +52,8 @@ Branch `feat/dictation-everyone` (from `feat/work-queue-parallel` 6.73.15). Not 
 
 | Mutant | Result | First killing test |
 |---|---|---|
-| T9 codesign identifier is exact | killed | parakeet-cli-trust.test.ts: refuses another codesign identifier, including the earlier draft name |
-| T10 plist CFBundleIdentifier is exact | killed | parakeet-cli-trust.test.ts: refuses an embedded plist whose CFBundleIdentifier differs |
+| T9 codesign identifier is exact | killed | parakeet-cli-trust.test.ts: refuses another codesign identifier, including the earlier draft name; also refuses the COS Control main app identity (COS team, strict-valid, signed as com.gotcos.control) |
+| T10 plist CFBundleIdentifier is exact | killed | parakeet-cli-trust.test.ts: refuses a plist and signature that disagree, in either direction; refuses an embedded plist whose CFBundleIdentifier differs |
 | T11 only a signature-bound plist counts | killed | parakeet-cli-trust.test.ts: refuses another version, and a plist the signature does not bind |
 | T12 version is exactly 0.17.4 | killed | parakeet-cli-trust.test.ts: refuses another version, and a plist the signature does not bind |
 | T13 identifier constant | killed | parakeet-cli-trust.test.ts: the agreed identity string is exact |
