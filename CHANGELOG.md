@@ -1,3 +1,9 @@
+## 6.73.13 — Work chat picks each assignment's context (local candidate)
+
+- Work chat input accepts optional `items` ({id, kind, label, estTokens}; ids and estimates only, never contents; at most 40; your request, the task and COS instructions required). The planner returns `contextItemIDs` per assignment, a subset of the supplied ids; the fixed three are always added and Control's order is kept; omitted means every item. GET `/api/work/chat` advertises `contextItems: true` and `maxContextItems: 40`. The planner is asked for the smallest set each assignment needs.
+- Work chat's output budget rises from 4,086 to 4,946 tokens so three full selections fit (derived in lib/work-chat.ts).
+- Pair with Control 0.5.312 (Work Context Meter, Plan and send). Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.12 — Atomic dictionary edits and Work chat planner effort (local candidate)
 
 - Work chat plans at a chosen effort: `low`, `medium` or `high` (default `high`, Miles 2026-10-15). GET `/api/work/chat` advertises `efforts`; the answer reports the effort used. Anything else is a 400 before any model call. Higher effort raises cost per plan; still one call per Plan click.
