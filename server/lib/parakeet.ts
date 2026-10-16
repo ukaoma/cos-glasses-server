@@ -633,6 +633,27 @@ async function runParakeet(wav: Buffer, options: ParakeetRunOptions): Promise<Pa
   return runParakeetChecked(wav, options)
 }
 
+/**
+ * 6.74.0, for the diarizer's CLI lookup (synchronous, read on health): the GUI-installed
+ * CLI is trusted only when the install is complete and its bytes are known to match the
+ * receipt (the pinned hash, or the Developer ID build's recorded hash). null while that
+ * hash has not been checked in this process; a check starts in the background.
+ */
+export function installedCliTrustedNow(): boolean | null {
+  if (!parakeetInstalled().installed) return false
+  const path = parakeetCliPath()
+  const st = fileStat(path)
+  if (!st) return false
+  const cli = readReceipt()?.cli
+  const key = cli?.trust === 'developer-id'
+    ? `${path}\0${st.size}\0${st.mtimeMs}\0${cli.sha256}`
+    : `${path}\0${st.size}\0${st.mtimeMs}`
+  const known = cliHashCache.get(key)
+  if (known !== undefined) return known
+  void installedCliIntact(path)
+  return null
+}
+
 /** The installed CLI is byte for byte what the install verified: the pinned hash, or
  *  (6.74.0) the hash of the Developer ID build recorded in the receipt. */
 export async function installedCliIntact(path: string = parakeetCliPath()): Promise<boolean> {

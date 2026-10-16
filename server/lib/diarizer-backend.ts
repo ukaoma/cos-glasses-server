@@ -18,6 +18,8 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readlinkSync, statSync, symlinkSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { installedCliTrustedNow, parakeetCliPath, pinnedCliKnown } from './parakeet.js'
+import { controlCliCandidates, knownCliTrust } from './parakeet-cli-trust.js'
 
 export type DiarizerMode = 'nemotron' | 'embedding'
 
@@ -57,7 +59,7 @@ export function nemotronCliPath(env: NodeJS.ProcessEnv = process.env, home: stri
   const key = env.PATH ?? ''
   const now = Date.now()
   if (whichCache && whichCache.key === key && now - whichCache.at < WHICH_CACHE_MS) {
-    return whichCache.value && existsSync(whichCache.value) ? whichCache.value : null
+    return whichCache.value && existsSync(whichCache.value) ? whichCache.value : trustedParakeetCli(home)
   }
   let value: string | null = null
   try {
@@ -67,7 +69,27 @@ export function nemotronCliPath(env: NodeJS.ProcessEnv = process.env, home: stri
     value = null
   }
   whichCache = { key, at: now, value }
-  return value
+  return value ?? trustedParakeetCli(home)
+}
+
+/**
+ * 6.74.0, after every earlier location: the Parakeet CLI a GUI install put under
+ * <data>/stt/parakeet/current/bin, then COS Control's bundled copy (Contents/Helpers).
+ * Each only when trusted (a verified install receipt, or a Developer ID build of the COS
+ * team, or the SHA-256 pinned bytes). Never runs anything; an unchecked file is skipped
+ * until its background check lands, so a health read never blocks.
+ */
+export function trustedParakeetCli(home: string = homedir()): string | null {
+  try {
+    if (installedCliTrustedNow() === true) return parakeetCliPath()
+  } catch { /* not installed */ }
+  for (const path of controlCliCandidates(home)) {
+    try {
+      if (!existsSync(path)) continue
+      if (knownCliTrust(path)?.trusted || pinnedCliKnown([path]) === true) return path
+    } catch { /* next */ }
+  }
+  return null
 }
 
 const WHICH_CACHE_MS = 60_000
