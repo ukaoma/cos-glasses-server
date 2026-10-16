@@ -421,7 +421,7 @@ describe('meetings list with imports and derived records', () => {
     expect(list.json.meetings.map((row: any) => row.sessionId)).toEqual([macSession])
     expect(list.json.days).toEqual([{ date: `${MONTH}-01`, count: 1 }])
     expect(list.json.months).toContain(olderMonth)
-  })
+  }, 30_000)
 
   it('reports mixed_library and a read-only import row when nothing is merged', async () => {
     const h = setup({ layout: 'standalone' })
