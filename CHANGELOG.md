@@ -1,3 +1,8 @@
+## 6.73.12 — Atomic dictionary edits (local candidate)
+
+- Add `POST /api/transcription-glossary/vocabulary/add` `{term}`, `/vocabulary/remove` `{term}` and `/correction/remove` `{heard}`. Each changes one item inside the same write chain as PUT and learn, so COS Control's Dictionary pane no longer reads the whole dictionary and writes it back (a Fix a word landing in between could be lost). Same limits as learn: 500 terms, 100 UTF-16 units, no URL, email or path in the vocabulary. Hand edits are not logged for undo.
+- Pair with Control 0.5.310. Older servers keep reading and adding corrections from Control; single-word edits, Fix a word and Undo need 6.73.12. Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.11 — Fix a word: the dictionary learns (local candidate)
 
 - Add `POST /api/transcription-glossary/correction` `{heard, written, source}`: learns ONE correction and adds the spelling to the vocabulary in one write, serialized with PUT. A case variant of an existing key is replaced, not duplicated. Same limits as PUT: 500 terms, 100 characters, no URL, email or path spellings (they would join the decoder prompt). `source` is `dictation`, `meeting`, `g2` or `manual`.
