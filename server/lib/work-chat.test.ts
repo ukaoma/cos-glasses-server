@@ -23,3 +23,8 @@ it('accepts only the advertised planners and keeps older inputs valid',()=>{
  expect(parseWorkChatInput({...input(),planner:'opus'}).planner).toBe('opus');expect(parseWorkChatInput({...input(),planner:'sonnet'}).planner).toBe('sonnet')
  for (const planner of ['haiku','OPUS',' opus','',null,undefined]) expect(()=>parseWorkChatInput({...input(),planner})).toThrow()
 })
+it('6.73.12: accepts only low, medium and high effort and keeps older inputs valid',()=>{
+ expect(parseWorkChatInput(input()).effort).toBeUndefined()
+ for (const effort of ['low','medium','high']) expect(parseWorkChatInput({...input(),effort}).effort).toBe(effort)
+ for (const effort of ['xhigh','max','High','',null,undefined,2]) expect(()=>parseWorkChatInput({...input(),effort})).toThrow()
+})

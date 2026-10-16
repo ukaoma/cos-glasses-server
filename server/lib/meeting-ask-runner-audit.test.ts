@@ -27,6 +27,15 @@ describe('Meeting Ask token audit', () => {
         expect(logTokenAudit).toHaveBeenCalledTimes(1);
         expect(vi.mocked(logTokenAudit).mock.calls[0][0]).toMatchObject({ source: 'meeting-ask-web', caller: 'meeting_ask_web', model: 'claude:claude-haiku-5-5', outputChars: 11 });
     });
+    it('6.73.12: Meeting Ask builds its argv with no effort, so the builder keeps low', async () => {
+        const { buildClaudeGistArgs } = await import('./lens-gist-engines.js');
+        vi.mocked(buildClaudeGistArgs).mockClear();
+        await expect(runMeetingAskModel({ engine: 'claude', model: 'haiku' }, 'question', 'system', undefined, undefined, { caller: 'meeting_ask' })).rejects.toThrow('provider_failed');
+        expect(vi.mocked(buildClaudeGistArgs).mock.calls).toEqual([['haiku', 'system', undefined]]);
+        vi.mocked(buildClaudeGistArgs).mockClear();
+        await expect(runMeetingAskModel({ engine: 'claude', model: 'opus' }, 'question', 'system', undefined, undefined, undefined, 'high')).rejects.toThrow('provider_failed');
+        expect(vi.mocked(buildClaudeGistArgs).mock.calls).toEqual([['opus', 'system', 'high']]);
+    });
     it('logs one meeting-ask row for a spawned call that fails', async () => {
         await expect(runMeetingAskModel({ engine: 'claude', model: 'haiku' }, 'question', 'system')).rejects.toThrow('provider_failed');
         expect(logTokenAudit).toHaveBeenCalledTimes(1);

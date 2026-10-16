@@ -45,3 +45,18 @@ it('runs the planner the client picked, defaults older clients to Sonnet and ref
  expect(run).toHaveBeenCalledTimes(2)
  }finally{s.server.close()}
 })
+it('6.73.12: plans at high effort by default, runs the effort the client picked, never leaks it, and refuses any other level',async()=>{
+ const run=vi.fn(async()=>({text:JSON.stringify({answer:'Planned.',assignments:[]})})),s=await setup(run)
+ try {
+ expect(await (await fetch(s.url,{headers:{'X-Cos-Token':'t'}})).json()).toMatchObject({effort:'high',efforts:['low','medium','high']})
+ const plain=await (await s.post(input)).json()
+ expect((run.mock.calls as any)[0][6]).toBe('high');expect(plain.effort).toBe('high')
+ for (const [n,effort] of (['low','medium','high'] as const).entries()) {
+  const body=await (await s.post({...input,planner:'opus',effort})).json()
+  expect((run.mock.calls as any)[n+1][6]).toBe(effort);expect(body.effort).toBe(effort)
+  expect(JSON.parse((run.mock.calls as any)[n+1][1])).not.toHaveProperty('effort')
+ }
+ for (const effort of ['xhigh','max','HIGH',' high','',null,1]) expect((await s.post({...input,effort})).status).toBe(400)
+ expect(run).toHaveBeenCalledTimes(4)
+ }finally{s.server.close()}
+})

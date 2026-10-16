@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveProviderBinary } from './provider-binary.js';
-import { buildClaudeGistArgs, buildCodexGistArgs, parseClaudeGistOutput, parseCodexGistOutput, lensGistChildEnv } from './lens-gist-engines.js';
+import { buildClaudeGistArgs, buildCodexGistArgs, parseClaudeGistOutput, parseCodexGistOutput, lensGistChildEnv, type ClaudeGistEffort } from './lens-gist-engines.js';
 import { logTokenAudit } from './token-audit.js';
 import type { MeetingAskModel } from '../../shared/meeting-ask.js';
 export class AskProcessError extends Error {
@@ -17,7 +17,9 @@ export function runMeetingAskModel(model: MeetingAskModel, prompt: string, syste
 }, audit?: {
     /** Token-audit caller label (6.71.13), e.g. meeting_fact_check_planner_hedge. A failed call appends ":<reason>". */
     caller: string;
-}): Promise<{
+},
+/** 6.73.12: Claude `--effort`. Omitted keeps the builder's low, so Meeting Ask and every older caller are unchanged. */
+effort?: ClaudeGistEffort): Promise<{
     text: string;
     model?: string;
 }> {
@@ -30,7 +32,7 @@ export function runMeetingAskModel(model: MeetingAskModel, prompt: string, syste
     if (!binary.ok)
         return Promise.reject(new AskProcessError('provider_unavailable'));
     const workspace = adapter?.workspace ?? mkdtempSync(join(tmpdir(), 'cos-meeting-ask-'));
-    const args = adapter?.args ?? (provider === 'claude' ? buildClaudeGistArgs(model.model, system) : buildCodexGistArgs(model.model, workspace));
+    const args = adapter?.args ?? (provider === 'claude' ? buildClaudeGistArgs(model.model, system, effort) : buildCodexGistArgs(model.model, workspace));
     // Codex has no system-prompt flag here: trusted instruction is separate, then JSON evidence.
     const stdin = adapter?.stdin ?? (provider === 'claude' ? prompt : `${system}\n\n${prompt}`);
     return new Promise((resolve, reject) => {
