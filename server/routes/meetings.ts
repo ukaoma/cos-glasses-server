@@ -78,6 +78,11 @@ export function withMeetingContext<T extends MeetingMeta>(meeting: T, source: Me
  * a G2 store row is the pipeline's to file, and its operations copy is the row. Operations rows are never deduplicated
  * against each other here, so the operations list keeps exactly the rows it had.
  */
+/** A Mac capture's session id, as routes/meeting.ts keys the pipeline skip. */
+export function isMacCaptureId(sessionId: string | undefined): boolean {
+  return typeof sessionId === 'string' && MAC_CAPTURE_ID.test(sessionId)
+}
+
 export function withMacStoreRows(operations: MeetingMeta[], storeRows: MeetingMeta[], limit: number): MeetingMeta[] {
   const sessions = new Set(operations.map(row => row.sessionId).filter(Boolean))
   const mac = storeRows
@@ -334,7 +339,7 @@ export function createMeetingsRouter(
           // 6.73.14 (Miles 2026-10-15): routes/meeting.ts never hands a Mac recording to the pipeline (MAC_CAPTURE_ID),
           // so on a pipeline Mac it lives only in this store and never appeared in Meetings; Control's hand-off read
           // "Saved meeting not found yet" forever. The store's Mac rows join the operations rows here.
-          const meetings = withMacStoreRows(operationsMeetings, store.list(listOptions), limit)
+          const meetings = withMacStoreRows(operationsMeetings, store.list({ ...listOptions, sessionMatch: isMacCaptureId }), limit)
           // ONLY WHEN THE LIST SAW THE WHOLE MONTH. The row list is capped, and a capped
           // list knows about fewer merged scribes than the month holds, so handing its
           // sessions to an UNCAPPED day count would subtract too little and put the dot
@@ -342,7 +347,15 @@ export function createMeetingsRouter(
           const listSawWholeMonth = rows.length < limit
           res.json({
             meetings: meetings.map(meeting => withMeetingContext(meeting)),
-            months: listCosOperationsMeetingMonths(domain),
+            // 6.73.14: a month holding only Mac recordings still reaches the calendar pager. Only store months the
+            // operations tree lacks are read, so a usual request reads nothing extra.
+            months: (() => {
+              const operationsMonths = listCosOperationsMeetingMonths(domain)
+              const known = new Set(operationsMonths)
+              const macOnly = store.listMonths().filter(month => !known.has(month)
+                && store.list({ month, domain, limit: 1, sessionMatch: isMacCaptureId }).length > 0)
+              return macOnly.length ? uniqueSortedMonths([operationsMonths, macOnly]) : operationsMonths
+            })(),
             // The rows above already read every scribe in this month and told us which
             // sessions the merged ones hold. Handing that over is the difference between
             // one read per file and two on every month request.

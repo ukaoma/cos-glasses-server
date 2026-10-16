@@ -534,12 +534,12 @@ function operationsMergedSessions(
 
 /**
  * 6.73.14: day counts for the store's Mac recordings. A Mac capture never reaches the operations tree, so on a pipeline
- * Mac these rows are counted nowhere else. Read through `list()` (capped at the scoped list limit per month; a month
- * with more Mac recordings than that undercounts its dots, never overcounts).
+ * Mac these rows are counted nowhere else. Read through `list()`, filtered to Mac sessions before its cap (200 per
+ * scoped list): a month with more than 200 Mac recordings undercounts its dots, never overcounts.
  */
 export function macStoreDayCounts(store: MeetingStore, month: string, domain: string): Array<{ date: string; count: number }> {
   const counts = new Map<string, number>()
-  for (const row of store.list({ month, domain, limit: Number.MAX_SAFE_INTEGER })) {
+  for (const row of store.list({ month, domain, limit: Number.MAX_SAFE_INTEGER, sessionMatch: id => typeof id === 'string' && MAC_CAPTURE_ID.test(id) })) {
     // The day from the filename, as the store's own day dots read it (MeetingStore.listDayCounts).
     const date = /^(\d{4}-\d{2}-\d{2})_/.exec(row.filename)?.[1]
     if (!row.sessionId || !MAC_CAPTURE_ID.test(row.sessionId) || !date) continue

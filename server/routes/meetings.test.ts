@@ -400,6 +400,29 @@ describe('meetings list with imports and derived records', () => {
     expect(synced.json.meetings.filter((row: any) => row.sessionId === macSession).map((row: any) => row.librarySource)).toEqual(['cos_operations'])
   })
 
+  it('lists a Mac recording the store cap would cut, and pages to a month holding only Mac recordings', async () => {
+    const h = setup({ layout: 'multi_domain', pipeline: true })
+    // More G2 store rows than the scoped cap (200), all newer than the Mac recording on the 1st.
+    for (let i = 0; i < 205; i += 1) {
+      writeCapture(h.storeMonthDir, `${MONTH}-20_G2_Recording_${String(i).padStart(3, '0')}.md`, `meeting_cap_${String(i).padStart(3, '0')}`, `G2 ${i}`)
+    }
+    const macSession = 'mac_0a0b0c0d-1111-4222-8333-444455556666'
+    writeFileSync(join(h.storeMonthDir, `${MONTH}-01_Mac_recording_aaaa1111.md`), meetingMarkdown('Mac recording', 'personal', 'Mac System Audio'))
+    writeFileSync(join(h.storeMonthDir, `${MONTH}-01_Mac_recording_aaaa1111.g2-chunks.json`),
+      JSON.stringify({ sessionId: macSession, sourceType: 'mac_system_audio', speakers: ['Ext'], durationMs: 60_000, chunks: [] }))
+    const olderMonth = '2026-05'
+    mkdirSync(join(h.storeMonthDir, '..', olderMonth), { recursive: true })
+    writeFileSync(join(h.storeMonthDir, '..', olderMonth, '2026-05-04_Mac_recording_bbbb2222.md'), meetingMarkdown('Mac recording', 'personal', 'Mac System Audio'))
+    writeFileSync(join(h.storeMonthDir, '..', olderMonth, '2026-05-04_Mac_recording_bbbb2222.g2-chunks.json'),
+      JSON.stringify({ sessionId: 'mac_0a0b0c0d-1111-4222-8333-777788889999', sourceType: 'mac_system_audio', speakers: ['Ext'], durationMs: 60_000, chunks: [] }))
+
+    const api = await serve(h.store, h.library)
+    const list = await api(`/api/meetings?limit=200&domain=all&month=${MONTH}`)
+    expect(list.json.meetings.map((row: any) => row.sessionId)).toEqual([macSession])
+    expect(list.json.days).toEqual([{ date: `${MONTH}-01`, count: 1 }])
+    expect(list.json.months).toContain(olderMonth)
+  })
+
   it('reports mixed_library and a read-only import row when nothing is merged', async () => {
     const h = setup({ layout: 'standalone' })
     h.library.writeRecord({

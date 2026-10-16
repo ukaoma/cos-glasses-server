@@ -67,9 +67,16 @@ it('6.73.13: each assignment carries a subset of the supplied items, with the fi
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs:[shot.id]}]}),request).assignments[0].contextItemIDs).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs:[]}]}),request).assignments[0].contextItemIDs).toEqual(['req','task','cos'])
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[a]}),request).assignments[0].contextItemIDs).toEqual(['req','task','cos','file:aaaaaaaaaaaa','meet:bbbbbbbbbbbb'])
- for (const contextItemIDs of [['file:cccccccccccc'],[shot.id,shot.id],'file:aaaaaaaaaaaa',[1],Array(6).fill('req')])
-  expect(()=>parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs}]}),request)).toThrow()
+ // 6.73.14: cleaned, never refused. Unknown ids drop, repeats keep once, a non-list means every item.
+ const pick=(contextItemIDs: unknown)=>parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs}]}),request).assignments[0].contextItemIDs
+ expect(pick(['file:cccccccccccc'])).toEqual(['req','task','cos'])
+ expect(pick(['file:cccccccccccc',shot.id])).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
+ expect(pick([shot.id,shot.id])).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
+ expect(pick(Array(6).fill('req'))).toEqual(['req','task','cos'])
+ for (const malformed of ['file:aaaaaaaaaaaa',[1],null])
+  expect(pick(malformed)).toEqual(['req','task','cos','file:aaaaaaaaaaaa','meet:bbbbbbbbbbbb'])
  const plain=parseWorkChatInput(input())
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[a]}),plain).assignments[0]).not.toHaveProperty('contextItemIDs')
- expect(()=>parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs:['req']}]}),plain)).toThrow()
+ // No items offered (an older Control): the field is ignored, never a refusal.
+ expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs:['req']}]}),plain).assignments[0]).not.toHaveProperty('contextItemIDs')
 })

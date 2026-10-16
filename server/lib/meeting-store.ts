@@ -482,7 +482,8 @@ export class MeetingStore {
     return null
   }
 
-  list(options: { limit?: number; domain?: string; month?: string; day?: string } = {}): MeetingMeta[] {
+  /** `sessionMatch` filters BEFORE the cap (6.73.14: Mac rows were cut by the 200-row cap of every store row). */
+  list(options: { limit?: number; domain?: string; month?: string; day?: string; sessionMatch?: (sessionId: string | undefined) => boolean } = {}): MeetingMeta[] {
     const scoped = Boolean(options.month || options.day)
     const limit = meetingListLimit(options.limit, scoped)
     const domain = options.domain ?? 'all'
@@ -511,7 +512,9 @@ export class MeetingStore {
           const detail = parseMeeting(content, filename, month)
           if (domain !== 'all' && detail.domain !== domain) continue
           if (options.day && detail.date !== options.day) continue
-          meetings.push(toMeta(detail, this.sidecarSessionId(monthDir, monthReal, filename)))
+          const sessionId = this.sidecarSessionId(monthDir, monthReal, filename)
+          if (options.sessionMatch && !options.sessionMatch(sessionId)) continue
+          meetings.push(toMeta(detail, sessionId))
         } catch {
           // One unreadable/corrupt entry must not hide the rest of the store.
         }
