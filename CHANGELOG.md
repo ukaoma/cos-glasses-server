@@ -1,4 +1,7 @@
-## 6.73.12 — Atomic dictionary edits (local candidate)
+## 6.73.12 — Atomic dictionary edits and Work chat planner effort (local candidate)
+
+- Work chat plans at a chosen effort: `low`, `medium` or `high` (default `high`, Miles 2026-10-15). GET `/api/work/chat` advertises `efforts`; the answer reports the effort used. Anything else is a 400 before any model call. Higher effort raises cost per plan; still one call per Plan click.
+- Work chat now thinks at medium and high (6,000 and 16,000 thinking tokens) with an output budget derived from its largest valid plan (4,086 tokens) and a 180-second deadline. Before, every plan ran with thinking off and a 1,400-token cap that could cut a full plan into a 503. Lens gist and Meeting Ask keep exactly their old settings (1,400 / 0 / 45 s, low).
 
 - Add `POST /api/transcription-glossary/vocabulary/add` `{term}`, `/vocabulary/remove` `{term}` and `/correction/remove` `{heard}`. Each changes one item inside the same write chain as PUT and learn, so COS Control's Dictionary pane no longer reads the whole dictionary and writes it back (a Fix a word landing in between could be lost). Same limits as learn: 500 terms, 100 UTF-16 units, no URL, email or path in the vocabulary. Hand edits are not logged for undo.
 - Pair with Control 0.5.310. Older servers keep reading and adding corrections from Control; single-word edits, Fix a word and Undo need 6.73.12. Transcription-candidate and cue flags stay disabled. No public publication is implied.
