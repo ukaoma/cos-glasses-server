@@ -90,3 +90,16 @@ it('6.73.15: advertises queued rounds, shows the planner which sessions have ear
  expect(run).toHaveBeenCalledTimes(1)
  }finally{s.server.close()}
 })
+it('6.73.15: advertises references and passes them to the planner as evidence',async()=>{
+ const ref='claude:aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff'
+ const run=vi.fn(async()=>({text:JSON.stringify({answer:'Uses the reference.',assignments:[]})})),s=await setup(run)
+ try {
+ expect(await (await fetch(s.url,{headers:{'X-Cos-Token':'t'}})).json()).toMatchObject({references:true,maxReferences:6})
+ const references=[{id:ref,title:'IT Retail Gen 2 Modules',summary:'Blog cleanup done.',result:''}]
+ expect((await s.post({...input,references})).status).toBe(200)
+ expect(JSON.parse((run.mock.calls as any)[0][1]).references).toEqual(references)
+ expect((run.mock.calls as any)[0][2]).toContain('never assign to a reference')
+ expect((await s.post({...input,references:[{...references[0],id:'nope'}]})).status).toBe(400)
+ expect(run).toHaveBeenCalledTimes(1)
+ }finally{s.server.close()}
+})

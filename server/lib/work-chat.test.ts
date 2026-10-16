@@ -101,3 +101,15 @@ it('6.73.15: a session may say it still has earlier work open, as a boolean only
  const busy=parseWorkChatInput({...input(),sessions:[{...input().sessions[0],openWork:true}]})
  expect(parseWorkChatAnswer(JSON.stringify({answer:'This waits for its earlier work.',assignments:[{sessionID:id,prompt:'Next step.'}]}),busy).assignments).toHaveLength(1)
 })
+it('6.73.15: reference sessions are bounded read-only evidence and never an assignment target',()=>{
+ const ref='claude:aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff',r={id:ref,title:'IT Retail Gen 2 Modules',summary:'Blog cleanup done.',result:'Changes: 4 files, +120 -30'}
+ expect(parseWorkChatInput(input())).not.toHaveProperty('references')
+ expect(parseWorkChatInput({...input(),references:[r]}).references).toEqual([r])
+ for (const references of [[{...r,id:'bad'}],[r,r],[{...r,id}],[{...r,title:''}],[{...r,title:'x'.repeat(301)}],[{...r,summary:'x'.repeat(2001)}],[{...r,result:'x'.repeat(4001)}],[{...r,extra:1}],Array.from({length:7},(_,n)=>({...r,id:`claude:aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12,'0')}`})),'x',null])
+  expect(()=>parseWorkChatInput({...input(),references})).toThrow()
+ // Six is the bound and is accepted.
+ expect(parseWorkChatInput({...input(),references:Array.from({length:6},(_,n)=>({...r,id:`claude:aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12,'0')}`}))}).references).toHaveLength(6)
+ const request=parseWorkChatInput({...input(),references:[r]})
+ expect(()=>parseWorkChatAnswer(JSON.stringify({answer:'Ask the reference.',assignments:[{sessionID:ref,prompt:'Do it.'}]}),request)).toThrow()
+ expect(parseWorkChatInput({...input(),references:[{...r,summary:'token sk-ant-api03-'+'a'.repeat(90)}]}).references?.[0].summary).not.toContain('sk-ant-api03-'+'a'.repeat(90))
+})

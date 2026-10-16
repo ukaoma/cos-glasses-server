@@ -1,13 +1,14 @@
 import { Router } from 'express'
 import { parseWorkChatInput, parseWorkChatAnswer, WORK_CHAT_SYSTEM, WORK_CHAT_PLANNERS, WORK_CHAT_EFFORTS, WORK_CHAT_DEFAULT_EFFORT,
-  WORK_CHAT_OUTPUT_TOKENS, WORK_CHAT_THINKING_TOKENS, WORK_CHAT_DEADLINE_MS, WORK_CHAT_MAX_ASSIGNMENTS, WORK_CHAT_MAX_ITEMS } from '../lib/work-chat.js'
+  WORK_CHAT_OUTPUT_TOKENS, WORK_CHAT_THINKING_TOKENS, WORK_CHAT_DEADLINE_MS, WORK_CHAT_MAX_ASSIGNMENTS, WORK_CHAT_MAX_ITEMS, WORK_CHAT_MAX_REFERENCES } from '../lib/work-chat.js'
 import { runMeetingAskModel } from '../lib/meeting-ask-runner.js'
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
 export function createWorkChatRouter(deps = {run:runMeetingAskModel, admissions:maintenanceAdmissionsOpen, lease:()=>acquireMaintenanceWork('work_chat')}) {
   const router=Router(); let running=false
   router.use('/work/chat', (_req,res,next)=>{res.set('Cache-Control','private, no-store');next()})
   // 6.73.15: queueRounds means sessions may carry openWork, and the planner routes around sessions with earlier work open.
-  router.get('/work/chat',(_req,res)=>res.json({protocolVersion:1,planner:'sonnet',planners:WORK_CHAT_PLANNERS,effort:WORK_CHAT_DEFAULT_EFFORT,efforts:WORK_CHAT_EFFORTS,automaticProviders:['claude','codex'],maxAssignments:WORK_CHAT_MAX_ASSIGNMENTS,contextItems:true,maxContextItems:WORK_CHAT_MAX_ITEMS,queueRounds:true}))
+  // references means the input may carry read-only reference sessions (never targets).
+  router.get('/work/chat',(_req,res)=>res.json({protocolVersion:1,planner:'sonnet',planners:WORK_CHAT_PLANNERS,effort:WORK_CHAT_DEFAULT_EFFORT,efforts:WORK_CHAT_EFFORTS,automaticProviders:['claude','codex'],maxAssignments:WORK_CHAT_MAX_ASSIGNMENTS,contextItems:true,maxContextItems:WORK_CHAT_MAX_ITEMS,queueRounds:true,references:true,maxReferences:WORK_CHAT_MAX_REFERENCES}))
   router.post('/work/chat',async(req,res)=>{
     let input
     try { if (Buffer.byteLength(JSON.stringify(req.body))>100000) throw new Error(); input=parseWorkChatInput(req.body) }
