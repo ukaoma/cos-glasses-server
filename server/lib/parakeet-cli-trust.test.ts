@@ -48,6 +48,23 @@ describe('checkDeveloperIdCli', () => {
     }
   })
 
+  it('refuses the COS Control main app identity: COS team, strict-valid, but signed as com.gotcos.control', async () => {
+    const d = deps({
+      display: vi.fn(async () => ({ code: 0, output: DEV_ID.replace('Identifier=com.gotcos.control.fluidaudiocli', 'Identifier=com.gotcos.control') })),
+      embeddedPlist: vi.fn(() => PLIST('0.5.317', 'com.gotcos.control')),
+    })
+    expect(await checkDeveloperIdCli(cli, d)).toMatchObject({ trusted: false, reason: 'wrong_identifier', detail: 'signed as com.gotcos.control' })
+  })
+
+  it('refuses a plist and signature that disagree, in either direction', async () => {
+    // Signature right, plist wrong.
+    expect(await checkDeveloperIdCli(cli, deps({ embeddedPlist: vi.fn(() => PLIST('0.17.4', 'com.gotcos.control')) })))
+      .toMatchObject({ trusted: false, reason: 'wrong_identifier', detail: 'its Info.plist names com.gotcos.control' })
+    // Plist right, signature wrong.
+    expect(await checkDeveloperIdCli(cli, deps({ display: vi.fn(async () => ({ code: 0, output: DEV_ID.replace('Identifier=com.gotcos.control.fluidaudiocli', 'Identifier=com.gotcos.control') })) })))
+      .toMatchObject({ trusted: false, reason: 'wrong_identifier', detail: 'signed as com.gotcos.control' })
+  })
+
   it('refuses an embedded plist whose CFBundleIdentifier differs', async () => {
     for (const id of ['com.gotcos.fluidaudiocli', 'com.example.fluidaudiocli']) {
       expect(await checkDeveloperIdCli(cli, deps({ embeddedPlist: vi.fn(() => PLIST('0.17.4', id)) })), id).toMatchObject({ trusted: false, reason: 'wrong_identifier' })
