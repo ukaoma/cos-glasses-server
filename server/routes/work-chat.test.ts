@@ -62,3 +62,17 @@ it('6.73.12: plans at high effort by default, runs the effort the client picked,
  expect(run).toHaveBeenCalledTimes(4)
  }finally{s.server.close()}
 })
+it('6.73.13: advertises context items and returns each assignment selection',async()=>{
+ const id='codex:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+ const run=vi.fn(async()=>({text:JSON.stringify({answer:'Planned.',assignments:[{sessionID:id,prompt:'Check it.',contextItemIDs:['file:aaaaaaaaaaaa']}]})})),s=await setup(run)
+ try {
+ expect(await (await fetch(s.url,{headers:{'X-Cos-Token':'t'}})).json()).toMatchObject({contextItems:true,maxContextItems:40})
+ const items=[{id:'req',kind:'req',label:'Your request',estTokens:9},{id:'task',kind:'task',label:'Task',estTokens:50},{id:'cos',kind:'cos',label:'COS instructions',estTokens:60},
+  {id:'file:aaaaaaaaaaaa',kind:'files',label:'Shot.png',estTokens:1600},{id:'file:bbbbbbbbbbbb',kind:'files',label:'Other.png',estTokens:1600}]
+ const body=await (await s.post({...input,items,sessions:[{id,title:'Implementation',summary:'',status:'idle',automatic:true}]})).json()
+ expect(body.assignments[0].contextItemIDs).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
+ expect(JSON.parse((run.mock.calls as any)[0][1]).items).toEqual(items)
+ expect((await s.post({...input,items:[{id:'file:aaaaaaaaaaaa',kind:'files',label:'Shot.png',estTokens:1}]})).status).toBe(400)
+ expect(run).toHaveBeenCalledTimes(1)
+ }finally{s.server.close()}
+})
