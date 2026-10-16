@@ -143,6 +143,8 @@ export async function runDictationBenchmark(audio: Buffer, engines: BenchmarkEng
   }
 }
 
+/** One line, single spaces: Control tokenizes for its word error rate. */
+const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
 const rtfOf = (ms: number, seconds: number) => seconds > 0 ? Math.round((ms / 1000 / seconds) * 1000) / 1000 : 0
 
 async function runWhisper(audio: Buffer, seconds: number, model: string, budget: number, which: 'timeout' | 'total_timeout', deps: BenchmarkDeps): Promise<BenchmarkEngineResult> {
@@ -154,7 +156,7 @@ async function runWhisper(audio: Buffer, seconds: number, model: string, budget:
   try {
     const r = await within(deps.whisper(audio, ctl.signal), budget, which, ctl)
     const elapsedMs = Math.round(deps.now() - t0)
-    return { ...base, ran: true, elapsedMs, rtf: rtfOf(elapsedMs, seconds), text: r.text }
+    return { ...base, ran: true, elapsedMs, rtf: rtfOf(elapsedMs, seconds), text: oneLine(r.text) }
   } catch (error) {
     if (error instanceof Timeout) return { ...base, ran: false, skipped: error.which }
     return { ...base, ran: false, skipped: 'unavailable', error: error instanceof Error ? error.message.slice(0, 200) : String(error) }
@@ -183,7 +185,7 @@ async function runParakeet(audio: Buffer, seconds: number, budget: number, which
     try {
       const r = await within(deps.parakeet(audio, Math.min(left, parakeetDictationTimeoutMs(audio) * 4), onSpawn, ctl.signal), left, which, ctl)
       const elapsedMs = Math.round(deps.now() - t1)
-      return { ...base, ran: true, elapsedMs, rtf: rtfOf(elapsedMs, seconds), peakRssBytes: peak, ...(warmupMs !== undefined ? { warmupMs } : {}), text: r.text }
+      return { ...base, ran: true, elapsedMs, rtf: rtfOf(elapsedMs, seconds), peakRssBytes: peak, ...(warmupMs !== undefined ? { warmupMs } : {}), text: oneLine(r.text) }
     } finally {
       if (sampler) clearInterval(sampler)
     }

@@ -412,7 +412,8 @@ export async function transcribeAudioBuffer(
     ...(engineReason ? { engineReason } : {}),
     dictationKey: plan.key,
     ...(desktop ? { dictationSetting: desktop.setting } : {}),
-    // A fallback is auto wanting Parakeet and getting Whisper; an explicit whisper setting is not one.
-    ...(desktopLocal && desktop?.setting === 'auto' && engine === 'whisper' && engineReason ? { fallbackReason: engineReason } : {}),
+    // A fallback is auto wanting Parakeet and getting Whisper. Only auto reaches here with a
+    // reason: a whisper plan carries none, and parakeet-ultra refused above.
+    ...(desktopLocal && engine === 'whisper' && engineReason ? { fallbackReason: engineReason } : {}),
   }
 }
