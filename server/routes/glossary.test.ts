@@ -196,4 +196,48 @@ describe('glossary route', () => {
     const get = await httpRequest('GET', '/api/transcription-glossary')
     expect(get.json.corrections).toEqual({ Whisper: 'Whispr' })
   })
+
+  // ── 6.73.12: single-item hand edits ─────────────────────────────────────────
+  it('adds and removes one vocabulary word atomically, keeping everything else', async () => {
+    await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Whisper', written: 'Wispr', source: 'dictation' })
+    resetDecoderCachesSpy.mockClear()
+    const add = await httpRequest('POST', '/api/transcription-glossary/vocabulary/add', { term: 'Jewel360' })
+    expect(add.status).toBe(200)
+    expect(add.json.unchanged).toBe(false)
+    expect(add.json.glossary.vocabulary).toEqual(['Quilt Software', 'Wispr', 'Jewel360'])
+    expect(add.json.glossary.corrections).toEqual({ Myles: 'Miles', Whisper: 'Wispr' })
+    expect(resetDecoderCachesSpy, 'a hand edit must reach the decoder without a restart').toHaveBeenCalled()
+    const again = await httpRequest('POST', '/api/transcription-glossary/vocabulary/add', { term: 'jewel360' })
+    expect(again.json.unchanged).toBe(true)
+    const remove = await httpRequest('POST', '/api/transcription-glossary/vocabulary/remove', { term: 'Quilt Software' })
+    expect(remove.json.glossary.vocabulary).toEqual(['Wispr', 'Jewel360'])
+    const onDisk = JSON.parse(readFileSync(profilePath, 'utf-8'))
+    expect(onDisk.owner_name).toBe('Miles')
+    expect(onDisk.vocabulary).toEqual(['Wispr', 'Jewel360'])
+    // Hand edits are not learned corrections: the undo log only holds the learn.
+    const recent = await httpRequest('GET', '/api/transcription-glossary/recent')
+    expect(recent.json.entries).toHaveLength(1)
+  })
+
+  it('removes one correction and leaves the others', async () => {
+    await httpRequest('POST', '/api/transcription-glossary/correction', { heard: 'Carrot IQ', written: 'CaratIQ', source: 'meeting' })
+    const res = await httpRequest('POST', '/api/transcription-glossary/correction/remove', { heard: 'Myles' })
+    expect(res.status).toBe(200)
+    expect(res.json.glossary.corrections).toEqual({ 'Carrot IQ': 'CaratIQ' })
+    expect(JSON.parse(JSON.parse(readFileSync(profilePath, 'utf-8')).whisper_corrections)).toEqual({ 'Carrot IQ': 'CaratIQ' })
+  })
+
+  it('refuses a bad single edit without writing', async () => {
+    const before = readFileSync(profilePath, 'utf-8')
+    for (const [path, body] of [
+      ['/api/transcription-glossary/vocabulary/add', { term: 'www.posnation.com' }],
+      ['/api/transcription-glossary/vocabulary/add', {}],
+      ['/api/transcription-glossary/vocabulary/remove', { term: 5 }],
+      ['/api/transcription-glossary/correction/remove', { heard: '' }],
+    ] as const) {
+      const res = await httpRequest('POST', path, body)
+      expect(res.status, path).toBe(400)
+    }
+    expect(readFileSync(profilePath, 'utf-8')).toBe(before)
+  })
 })

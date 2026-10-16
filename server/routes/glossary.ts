@@ -11,6 +11,8 @@
 //     ONE correction and its spelling (6.73.11, Fix a word), logged for undo.
 //   GET  /api/transcription-glossary/recent → { entries } newest first.
 //   POST /api/transcription-glossary/correction/undo {id} → revert that entry.
+//   POST /api/transcription-glossary/vocabulary/add {term}, /vocabulary/remove {term},
+//        /correction/remove {heard} → one atomic hand edit (6.73.12), not logged.
 
 import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
@@ -28,10 +30,13 @@ import {
 import {
   MAX_TERMS,
   MAX_TERM_LEN,
+  addVocabulary,
   appendLog,
   learnCorrection,
   looksLikeUrlEmailPath,
   parseLog,
+  removeCorrection,
+  removeVocabulary,
   undoCorrection,
   type CorrectionLogEntry,
   type GlossaryWords,
@@ -241,3 +246,31 @@ glossaryRouter.post('/transcription-glossary/correction/undo', async (req, res) 
     return res.status(500).json({ error: errMsg(err) })
   }
 })
+
+// ── Single-item hand edits (6.73.12) ─────────────────────────────────────────
+// One word or one correction at a time, inside the same chain as PUT and learn,
+// so COS Control never has to read the whole map and write it back.
+function singleEdit(path: string, field: 'term' | 'heard', edit: (words: GlossaryWords, raw: unknown) => ReturnType<typeof addVocabulary>) {
+  glossaryRouter.post(path, async (req, res) => {
+    const raw = (req.body ?? {})[field]
+    try {
+      const outcome = await serialized(() => {
+        const result = edit(storedWords(), raw)
+        if (!result.ok) return { status: result.status, body: { error: result.error } }
+        if (!result.unchanged) {
+          updateProfileFields({ vocabulary: result.words.vocabulary, whisper_corrections: JSON.stringify(result.words.corrections) })
+          resetDecoderCaches()
+          resetVocabEchoCache()
+        }
+        return { status: 200, body: { unchanged: result.unchanged, glossary: currentGlossary() } }
+      })
+      return res.status(outcome.status).json(outcome.body)
+    } catch (err) {
+      return res.status(500).json({ error: errMsg(err) })
+    }
+  })
+}
+
+singleEdit('/transcription-glossary/vocabulary/add', 'term', addVocabulary)
+singleEdit('/transcription-glossary/vocabulary/remove', 'term', removeVocabulary)
+singleEdit('/transcription-glossary/correction/remove', 'heard', removeCorrection)

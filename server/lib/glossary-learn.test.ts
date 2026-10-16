@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   MAX_LOG,
   MAX_TERMS,
+  MAX_TERM_LEN,
+  addVocabulary,
+  removeCorrection,
+  removeVocabulary,
   appendLog,
   learnCorrection,
   parseLog,
@@ -51,8 +55,8 @@ describe('learnCorrection', () => {
       ['a', 'b', 'email', 400],
       ['', 'b', 'dictation', 400],
       ['a', '   ', 'dictation', 400],
-      ['a'.repeat(101), 'b', 'dictation', 400],
-      ['a', 'b'.repeat(101), 'dictation', 400],
+      ['a'.repeat(MAX_TERM_LEN + 1), 'b', 'dictation', 400],
+      ['a', 'b'.repeat(MAX_TERM_LEN + 1), 'dictation', 400],
       ['a\nb', 'c', 'dictation', 400],
       ['same', 'same', 'dictation', 400],
       ['gotcos', 'gotcos.com', 'dictation', 400],
@@ -63,6 +67,13 @@ describe('learnCorrection', () => {
       expect(r.ok, JSON.stringify([heard, written, source])).toBe(false)
       if (!r.ok) expect(r.status).toBe(status)
     }
+  })
+
+  it('accepts exactly MAX_TERM_LEN UTF-16 units, the unit COS Control counts too', () => {
+    expect(learnCorrection(words(), { heard: 'a'.repeat(MAX_TERM_LEN), written: 'b'.repeat(MAX_TERM_LEN), source: 'manual' }, stamp(1)).ok).toBe(true)
+    // An emoji is two UTF-16 units: half as many fit.
+    expect(learnCorrection(words(), { heard: '😀'.repeat(MAX_TERM_LEN / 2), written: 'b', source: 'manual' }, stamp(1)).ok).toBe(true)
+    expect(learnCorrection(words(), { heard: '😀'.repeat(MAX_TERM_LEN / 2 + 1), written: 'b', source: 'manual' }, stamp(1)).ok).toBe(false)
   })
 
   it('accepts every source surface', () => {
@@ -156,5 +167,37 @@ describe('log', () => {
     expect(parseLog(null)).toEqual([])
     expect(parseLog({ entries: 'x' })).toEqual([])
     expect(parseLog({ entries: [good, { id: 1 }, { ...good, source: 'email' }, null] })).toEqual([good])
+  })
+})
+
+describe('single-item edits (6.73.12)', () => {
+  it('adds one word, dedupes case-insensitively, refuses URL and over-long words', () => {
+    const r = addVocabulary(words(['Parakeet'], { Myles: 'Miles' }), ' Wispr ')
+    expect(r).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['Parakeet', 'Wispr'], corrections: { Myles: 'Miles' } } })
+    expect(addVocabulary(words(['wispr']), 'Wispr')).toEqual({ ok: true, unchanged: true })
+    expect(addVocabulary(words(), 'gotcos.com')).toMatchObject({ ok: false, status: 400 })
+    expect(addVocabulary(words(), 'a'.repeat(MAX_TERM_LEN)).ok).toBe(true)
+    expect(addVocabulary(words(), 'a'.repeat(MAX_TERM_LEN + 1))).toMatchObject({ ok: false, status: 400 })
+    expect(addVocabulary(words(), 'a\nb')).toMatchObject({ ok: false, status: 400 })
+    expect(addVocabulary(words(), 7)).toMatchObject({ ok: false, status: 400 })
+  })
+
+  it('respects the vocabulary cap but lets an existing word through', () => {
+    const full = Array.from({ length: MAX_TERMS }, (_, i) => `t${i}`)
+    expect(addVocabulary(words(full), 'New Word')).toMatchObject({ ok: false, status: 409 })
+    expect(addVocabulary(words(full), 'T4')).toEqual({ ok: true, unchanged: true })
+  })
+
+  it('removes the exact word only', () => {
+    expect(removeVocabulary(words(['Wispr', 'wispr flow']), 'Wispr')).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['wispr flow'], corrections: {} } })
+    expect(removeVocabulary(words(['Wispr']), 'wispr')).toEqual({ ok: true, unchanged: true })
+    expect(removeVocabulary(words(['Wispr']), '')).toMatchObject({ ok: false, status: 400 })
+  })
+
+  it('removes a correction by its key, else its case variant, and leaves the rest', () => {
+    const base = words(['Miles'], { Myles: 'Miles', 'carrot iq': 'CaratIQ' })
+    expect(removeCorrection(base, 'Myles')).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['Miles'], corrections: { 'carrot iq': 'CaratIQ' } } })
+    expect(removeCorrection(base, 'Carrot IQ')).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['Miles'], corrections: { Myles: 'Miles' } } })
+    expect(removeCorrection(base, 'nope')).toEqual({ ok: true, unchanged: true })
   })
 })

@@ -164,3 +164,58 @@ export function parseLog(raw: unknown): CorrectionLogEntry[] {
   }
   return out
 }
+
+// ── Single-item edits (6.73.12) ──────────────────────────────────────────────
+// COS Control's Dictionary pane adds or removes ONE word or correction. Each is a
+// pure step over the stored words, run inside the glossary write chain, so a
+// concurrent learn can never be lost the way a client read-then-PUT could lose it.
+// These are hand edits; they are not logged for undo.
+
+export type EditResult =
+  | { ok: true; unchanged: true }
+  | { ok: true; unchanged: false; words: GlossaryWords }
+  | { ok: false; status: number; error: string }
+
+function validTerm(raw: unknown, what: string): { ok: true; value: string } | { ok: false; status: number; error: string } {
+  if (typeof raw !== 'string') return { ok: false, status: 400, error: `${what} must be a string` }
+  const value = raw.trim()
+  if (!value) return { ok: false, status: 400, error: `${what} must not be empty` }
+  if (value.length > MAX_TERM_LEN) return { ok: false, status: 400, error: `${what} is at most ${MAX_TERM_LEN} characters` }
+  if (CONTROL.test(value)) return { ok: false, status: 400, error: `${what} cannot contain line breaks or control characters` }
+  return { ok: true, value }
+}
+
+export function addVocabulary(words: GlossaryWords, raw: unknown): EditResult {
+  const term = validTerm(raw, 'term')
+  if (!term.ok) return term
+  if (looksLikeUrlEmailPath(term.value)) {
+    return { ok: false, status: 400, error: 'a vocabulary word cannot be a URL, email or path; it would join the decoder prompt' }
+  }
+  if (words.vocabulary.some(existing => same(existing, term.value))) return { ok: true, unchanged: true }
+  if (words.vocabulary.length >= MAX_TERMS) {
+    return { ok: false, status: 409, error: `the vocabulary already holds ${MAX_TERMS} terms; remove one first` }
+  }
+  return { ok: true, unchanged: false, words: { vocabulary: [...words.vocabulary, term.value], corrections: { ...words.corrections } } }
+}
+
+/** Removes the exact word; a word that is not there is not an error. */
+export function removeVocabulary(words: GlossaryWords, raw: unknown): EditResult {
+  const term = validTerm(raw, 'term')
+  if (!term.ok) return term
+  const vocabulary = words.vocabulary.filter(existing => existing.trim() !== term.value)
+  if (vocabulary.length === words.vocabulary.length) return { ok: true, unchanged: true }
+  return { ok: true, unchanged: false, words: { vocabulary, corrections: { ...words.corrections } } }
+}
+
+/** Removes the correction for `heard` (its exact key, else its one case variant). */
+export function removeCorrection(words: GlossaryWords, raw: unknown): EditResult {
+  const heard = validTerm(raw, 'heard')
+  if (!heard.ok) return heard
+  const key = heard.value in words.corrections
+    ? heard.value
+    : Object.keys(words.corrections).find(existing => same(existing, heard.value))
+  if (key === undefined) return { ok: true, unchanged: true }
+  const corrections = { ...words.corrections }
+  delete corrections[key]
+  return { ok: true, unchanged: false, words: { vocabulary: [...words.vocabulary], corrections } }
+}
