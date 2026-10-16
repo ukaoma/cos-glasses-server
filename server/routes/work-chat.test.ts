@@ -76,3 +76,17 @@ it('6.73.13: advertises context items and returns each assignment selection',asy
  expect(run).toHaveBeenCalledTimes(1)
  }finally{s.server.close()}
 })
+it('6.73.15: advertises queued rounds, shows the planner which sessions have earlier work open, and tells it to route around them',async()=>{
+ const id='codex:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',free='claude:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+ const run=vi.fn(async()=>({text:JSON.stringify({answer:'Free session takes it.',assignments:[{sessionID:free,prompt:'Do the new idea.'}]})})),s=await setup(run)
+ try {
+ expect(await (await fetch(s.url,{headers:{'X-Cos-Token':'t'}})).json()).toMatchObject({queueRounds:true})
+ const sessions=[{id,title:'Busy',summary:'',status:'working',automatic:true,openWork:true},{id:free,title:'Free',summary:'',status:'idle',automatic:true,openWork:false}]
+ const body=await (await s.post({...input,sessions})).json()
+ expect(body.assignments).toEqual([{sessionID:free,prompt:'Do the new idea.'}])
+ expect(JSON.parse((run.mock.calls as any)[0][1]).sessions.map((x:any)=>x.openWork)).toEqual([true,false])
+ expect((run.mock.calls as any)[0][2]).toContain('openWork:true')
+ expect((await s.post({...input,sessions:[{...sessions[0],openWork:'yes'}]})).status).toBe(400)
+ expect(run).toHaveBeenCalledTimes(1)
+ }finally{s.server.close()}
+})

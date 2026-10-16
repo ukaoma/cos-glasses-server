@@ -1,3 +1,10 @@
+## 6.73.15 — Work chat knows which sessions still have earlier work open (local candidate)
+
+- Work chat input accepts an optional per-session `openWork` (boolean only; anything else is refused): true when that session still has an earlier handoff from this task open (running, queued, unconfirmed, or a delivered reply not yet checked). It reaches the planner as evidence, and the planner is told such an assignment waits until that work resolves and is never delivered mid-turn, to prefer a free automatic session for independent new work, and to say in the answer when an assignment will wait.
+- GET `/api/work/chat` advertises `queueRounds: true`. Control 0.5.316 queues a held send or sends it in parallel only when it sees this; on an older server it keeps the check-first fence and says so.
+- The queue itself is Control's (the round's saved history beside the work journal), dispatched through Control's existing send path, which still parks a turn behind a busy native thread with `session-chat-queue`. Nothing on the server dispatches a queued round, so queued work waits while COS Control is closed.
+- Pair with Control 0.5.316. Older Control sends no `openWork` and is unchanged. Transcription-candidate and cue flags stay disabled. No public publication is implied.
+
 ## 6.73.14 — Saved Mac recordings appear in Meetings; Work chat keeps a plan with a stray item (local candidate)
 
 - A saved Mac recording now lists in Meetings on a Mac whose COS pipeline files G2 recordings (Miles 2026-10-15: the 10:39 PM recording saved but Control said "Saved meeting not found yet" forever). Mac captures never reach the pipeline (routes/meeting.ts, MAC_CAPTURE_ID), and that layout listed only the operations tree. The store's Mac rows now join it (`withMacStoreRows`, standalone identity, an operations copy wins by session), are filtered before the store's 200-row cap, count in the calendar's day dots (`macStoreDayCounts`), and a month holding only Mac recordings reaches the pager. G2 store rows stay the pipeline's.

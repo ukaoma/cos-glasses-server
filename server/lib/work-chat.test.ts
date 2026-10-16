@@ -93,3 +93,11 @@ it('6.73.13: each assignment carries a subset of the supplied items, with the fi
  // No items offered (an older Control): the field is ignored, never a refusal.
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs:['req']}]}),plain).assignments[0]).not.toHaveProperty('contextItemIDs')
 })
+it('6.73.15: a session may say it still has earlier work open, as a boolean only, and older inputs stay valid',()=>{
+ expect(parseWorkChatInput(input()).sessions[0]).not.toHaveProperty('openWork')
+ for (const openWork of [true,false]) expect(parseWorkChatInput({...input(),sessions:[{...input().sessions[0],openWork}]}).sessions[0].openWork).toBe(openWork)
+ for (const openWork of ['true',1,0,null,{},[]]) expect(()=>parseWorkChatInput({...input(),sessions:[{...input().sessions[0],openWork}]})).toThrow()
+ // A busy session is still a valid target: the hold is Control's, the planner only routes around it.
+ const busy=parseWorkChatInput({...input(),sessions:[{...input().sessions[0],openWork:true}]})
+ expect(parseWorkChatAnswer(JSON.stringify({answer:'This waits for its earlier work.',assignments:[{sessionID:id,prompt:'Next step.'}]}),busy).assignments).toHaveLength(1)
+})
