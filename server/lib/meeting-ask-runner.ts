@@ -7,6 +7,25 @@ import { resolveProviderBinary } from './provider-binary.js';
 import { buildClaudeGistArgs, buildCodexGistArgs, parseClaudeGistOutput, parseCodexGistOutput, lensGistChildEnv, type ClaudeGistEffort } from './lens-gist-engines.js';
 import { logTokenAudit } from './token-audit.js';
 import type { MeetingAskModel } from '../../shared/meeting-ask.js';
+/** 6.73.12: how one caller's run is bounded. Omitted fields keep Meeting Ask's budget, unchanged since before 6.73.12. */
+export interface MeetingAskRunBudget {
+    /** Claude `--effort`. Omitted keeps the builder's low. */
+    effort?: ClaudeGistEffort;
+    /** Answer tokens, excluding thinking. The child's CLAUDE_CODE_MAX_OUTPUT_TOKENS is this plus maxThinkingTokens,
+     *  because the model's max_tokens counts thinking too. */
+    maxOutputTokens?: number;
+    /** MAX_THINKING_TOKENS for the child. 0 turns thinking off. */
+    maxThinkingTokens?: number;
+    /** Wall-clock limit before the child is stopped with provider_timeout. */
+    deadlineMs?: number;
+}
+export const MEETING_ASK_DEFAULT_BUDGET = { maxOutputTokens: 1400, maxThinkingTokens: 0, deadlineMs: 45000 } as const;
+/** The child environment's token limits for a budget; the default is exactly '1400' and '0'. */
+export function meetingAskTokenEnv(budget?: MeetingAskRunBudget): { CLAUDE_CODE_MAX_OUTPUT_TOKENS: string; MAX_THINKING_TOKENS: string } {
+    const output = budget?.maxOutputTokens ?? MEETING_ASK_DEFAULT_BUDGET.maxOutputTokens;
+    const thinking = budget?.maxThinkingTokens ?? MEETING_ASK_DEFAULT_BUDGET.maxThinkingTokens;
+    return { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(output + thinking), MAX_THINKING_TOKENS: String(thinking) };
+}
 export class AskProcessError extends Error {
     constructor(message: string, readonly terminationUnconfirmed = false) { super(message); }
 }
@@ -18,8 +37,8 @@ export function runMeetingAskModel(model: MeetingAskModel, prompt: string, syste
     /** Token-audit caller label (6.71.13), e.g. meeting_fact_check_planner_hedge. A failed call appends ":<reason>". */
     caller: string;
 },
-/** 6.73.12: Claude `--effort`. Omitted keeps the builder's low, so Meeting Ask and every older caller are unchanged. */
-effort?: ClaudeGistEffort): Promise<{
+/** 6.73.12: effort, token budget and deadline. Omitted keeps Meeting Ask's, so every older caller is unchanged. */
+budget?: MeetingAskRunBudget): Promise<{
     text: string;
     model?: string;
 }> {
@@ -32,11 +51,11 @@ effort?: ClaudeGistEffort): Promise<{
     if (!binary.ok)
         return Promise.reject(new AskProcessError('provider_unavailable'));
     const workspace = adapter?.workspace ?? mkdtempSync(join(tmpdir(), 'cos-meeting-ask-'));
-    const args = adapter?.args ?? (provider === 'claude' ? buildClaudeGistArgs(model.model, system, effort) : buildCodexGistArgs(model.model, workspace));
+    const args = adapter?.args ?? (provider === 'claude' ? buildClaudeGistArgs(model.model, system, budget?.effort) : buildCodexGistArgs(model.model, workspace));
     // Codex has no system-prompt flag here: trusted instruction is separate, then JSON evidence.
     const stdin = adapter?.stdin ?? (provider === 'claude' ? prompt : `${system}\n\n${prompt}`);
     return new Promise((resolve, reject) => {
-        const child = spawn(binary.path, args, { cwd: workspace, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...lensGistChildEnv(binary.path), CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1400', MAX_THINKING_TOKENS: '0' } });
+        const child = spawn(binary.path, args, { cwd: workspace, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...lensGistChildEnv(binary.path), ...meetingAskTokenEnv(budget) } });
         let stdout = '', failure: string | null = null, done = false, closeSeen = false, code: number | null = null;
         let killTimer: NodeJS.Timeout | undefined, proofTimer: NodeJS.Timeout | undefined;
         const kill = (sig: NodeJS.Signals) => { if (child.pid)
@@ -117,7 +136,7 @@ effort?: ClaudeGistEffort): Promise<{
                 finish(true); }, 50);
         };
         const abort = () => stop('cancelled');
-        const deadline = setTimeout(() => stop('provider_timeout'), 45000);
+        const deadline = setTimeout(() => stop('provider_timeout'), budget?.deadlineMs ?? MEETING_ASK_DEFAULT_BUDGET.deadlineMs);
         signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted)
             abort();

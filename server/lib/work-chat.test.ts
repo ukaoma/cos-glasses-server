@@ -28,3 +28,15 @@ it('6.73.12: accepts only low, medium and high effort and keeps older inputs val
  for (const effort of ['low','medium','high']) expect(parseWorkChatInput({...input(),effort}).effort).toBe(effort)
  for (const effort of ['xhigh','max','High','',null,undefined,2]) expect(()=>parseWorkChatInput({...input(),effort})).toThrow()
 })
+it('6.73.12: the output budget holds the largest valid plan, and effort maps to thinking', async()=>{
+ const { WORK_CHAT_OUTPUT_TOKENS, WORK_CHAT_THINKING_TOKENS, WORK_CHAT_DEADLINE_MS, WORK_CHAT_ANSWER_CHARS, WORK_CHAT_PROMPT_CHARS, WORK_CHAT_MAX_ASSIGNMENTS } = await import('./work-chat.js')
+ const ids=['claude:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1','claude:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee2','claude:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee3']
+ const request=parseWorkChatInput({...input(),sessions:ids.map(id=>({id,title:'T',summary:'',status:'idle',automatic:true}))})
+ const largest=JSON.stringify({answer:'x'.repeat(WORK_CHAT_ANSWER_CHARS),assignments:ids.slice(0,WORK_CHAT_MAX_ASSIGNMENTS).map(sessionID=>({sessionID,prompt:'y'.repeat(WORK_CHAT_PROMPT_CHARS)}))})
+ expect(parseWorkChatAnswer('```json\n'+largest+'\n```',request).assignments).toHaveLength(3)
+ expect(Math.ceil(('```json\n'+largest+'\n```').length/3)).toBeLessThanOrEqual(WORK_CHAT_OUTPUT_TOKENS)
+ expect(WORK_CHAT_OUTPUT_TOKENS).toBe(4086)
+ expect(()=>parseWorkChatAnswer(JSON.stringify({answer:'x'.repeat(WORK_CHAT_ANSWER_CHARS+1),assignments:[]}),request)).toThrow()
+ expect(WORK_CHAT_THINKING_TOKENS).toEqual({low:0,medium:6000,high:16000})
+ expect(WORK_CHAT_DEADLINE_MS).toBe(180000)
+})
