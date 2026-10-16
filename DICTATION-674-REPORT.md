@@ -10,9 +10,10 @@ Branch `feat/dictation-everyone` (from `feat/work-queue-parallel` 6.73.15). Not 
 | Engine policy | `requiredEngine=local`: `auto` uses Parakeet when installed, warm and its breaker closed. Otherwise local Whisper decodes, with `fallbackReason`, and a warm-up starts. Busy and failed decodes also fall back. The path is local-only even when the caller passes no policy. A Whisper failure becomes 503 `no_local_engine` with `action`, `detail` and an honest `retryable`. The explicit `parakeet-ultra` setting is strict. `requiredEngine=parakeet-ultra` keeps the 6.73 bodies and messages, and now follows the dictation setting instead of Preview. Phone and glasses paths are unchanged. | `server/lib/transcribe-audio.ts`, `server/lib/dictation-stt.ts` |
 | Capabilities | `desktopDictationVersion` stays 1 (deviation from the spec). Adds `desktopDictationVersions: [1,2]`, `requiredEngines: ['parakeet-ultra','local']` and `benchmark: 1`. | `server/routes/transcribe.ts` |
 | Warm-up | Parakeet warms when it is installed and dictation is `auto` or `parakeet-ultra`. | `server/lib/stt-runtime.ts` |
-| CLI trust | Checks, in order: `codesign --verify --strict`; the TeamIdentifier is `NV3X46LLCR` (read from `/Applications/COS Control.app`); a second strict verify against `anchor apple generic and certificate leaf[subject.OU] = "NV3X46LLCR"`; version 0.17.4 from a bound `__TEXT,__info_plist`, else sandboxed `--version` output. Only a file named `fluidaudiocli` is ever checked, and it is opened non-blocking with no-follow. | `server/lib/parakeet-cli-trust.ts` (new) |
+| CLI trust | Checks, in order (final identity agreed with the Control builder):<br>1. `codesign --verify --strict` passes.<br>2. The TeamIdentifier is `NV3X46LLCR` (read from `/Applications/COS Control.app`).<br>3. A second strict verify passes against `anchor apple generic and certificate leaf[subject.OU] = "NV3X46LLCR"`.<br>4. The codesign Identifier is exactly `com.gotcos.control.fluidaudiocli`; otherwise `wrong_identifier`.<br>5. A signature-bound embedded Info.plist has CFBundleIdentifier `com.gotcos.control.fluidaudiocli` (otherwise `wrong_identifier`) and CFBundleShortVersionString `0.17.4` (otherwise `wrong_version`).<br>The binary is never run. Only a file named `fluidaudiocli` is ever checked, and it is opened non-blocking with no-follow. | `server/lib/parakeet-cli-trust.ts` (new) |
 | Install | The SHA pin is tried first. Otherwise COS Control's signed CLI is used, and the copy in staging is proved again. The receipt records `trust`, `sha256`, `size` and `teamId`, and every run checks the installed bytes. The installer checks for 1.5 GB free before writing anything. `errorCode` reports what failed. `allowDownload:false` never downloads. | `server/lib/parakeet.ts` |
 | Routes | `POST /api/stt-settings/parakeet/cli`. Install takes `cliPath` and returns 507 (disk) and 422 (untrusted). `POST /api/transcribe/benchmark` runs one engine at a time, refuses while recording, and times out after 60 s per engine and 150 s in all. | `server/routes/stt-settings.ts`, `server/routes/transcribe.ts`, `server/lib/dictation-benchmark.ts` (new) |
+| Speaker separation (separable commit f865c3b) | After the existing lookup order (`COS_NEMOTRON_CLI`, `~/.cos-glasses/bin`, `PATH`, all unchanged), the diarizer also finds:<br>1. the GUI-installed Parakeet CLI, when its receipt is complete and its bytes match;<br>2. COS Control's bundled copy, when it passes the Developer ID check or the SHA pin.<br>Unchecked files are skipped, so lookups never block. | `server/lib/diarizer-backend.ts`, `server/lib/parakeet.ts` |
 | Status copy | The note never points at `~/.cos-glasses/bin`. It names the action ("Install Parakeet (654 MB)...", "Update COS Control...", or why Control's copy was refused). | `server/lib/stt-runtime.ts` |
 | Version | 6.74.0 in `package.json`, both `package-lock.json` fields, and `CHANGELOG.md`. The server reads its version from `package.json`; there is no separate COS_VERSION. | |
 | Contract | New section, "Mac dictation for every user (6.74.0)". | `docs/dictation-stt-contract.md` |
@@ -20,11 +21,18 @@ Branch `feat/dictation-everyone` (from `feat/work-queue-parallel` 6.73.15). Not 
 ## Two deviations from the brief, both forced by evidence
 
 1. **Capability version stays 1.** COS Control 0.5.316 checks `desktopDictationVersion == 1` exactly (`HelperSources/main.swift:15397` in the `ctl-pet-v12-6` release candidate). Advertising 2 would break every old Control. New Control should look for 2 in `desktopDictationVersions` instead.
-2. **fluidaudiocli 0.17.4 has no version command.** On the pinned binary, both `--version` and `version` print `Unknown command`. The server therefore accepts the version from an Info.plist bound into the binary (recommended for Control's build: `-sectcreate __TEXT __info_plist`), or from `--version` output. A bound plist that names another version is final, and that binary is never run.
+2. **fluidaudiocli 0.17.4 has no version command.** On the pinned binary, both `--version` and `version` print `Unknown command`. The final contract therefore requires an Info.plist that is embedded in the binary and bound by its signature (built with `-sectcreate __TEXT __info_plist`), and drops the `--version` fallback. A new test pins exactly what old Control checks: `desktopDictationVersion` exactly 1, `localOnly` true, `parakeet-ultra` in `requiredEngines`, and `engine: parakeet-ultra` in the answer to its request.
+
+**Runtime trust (the parakeet.ts:541 point).** A Developer ID install no longer depends on the SHA pin at run time:
+- The install proves the signed CLI with the full codesign, team, identifier and version check, then proves the copied file again.
+- It records that copy's SHA-256, size and team in the receipt.
+- Every Parakeet run (`installedCliIntact`) checks the installed bytes against that recorded hash. Bytes can only match if they are exactly what passed codesign.
+- Codesign is not re-run on each decode. That would add a process spawn to every dictation.
+- The diarizer lookup applies the same test (`installedCliTrustedNow`), and uses the full check for Control's bundled copy.
 
 ## Tests
 
-- Final full server suite (once, after all changes; isolated `COS_DATA_DIR` and profile): **Test Files 460 passed (460). Tests 7107 passed, 2 skipped (7109).** Duration 384.73 s.
+- Final full server suite (once, after every commit including the identity and diarizer changes; isolated `COS_DATA_DIR` and profile): **Test Files 461 passed (461). Tests 7120 passed, 2 skipped (7122).** Duration 386.43 s. The earlier end-of-feature run, before the follow-ups, was 460 files and 7107 passed, 2 skipped.
 - The first full run, before two fixes: 2 failed and 7103 passed. Both failures were mine:
   - `package-manifest.test.ts` rejected the changelog heading `6.74.0:`. Changed to `6.74.0 -`.
   - `hazard-invariants.test.ts` caught an unguarded `openSync` in the new plist reader. The path comes from a client, so a FIFO would have blocked the server. Fixed with `O_NONBLOCK | O_NOFOLLOW` plus an `fstat` check, and a FIFO test was added.
@@ -39,11 +47,21 @@ Branch `feat/dictation-everyone` (from `feat/work-queue-parallel` 6.73.15). Not 
 - Serial, one mutant at a time, each target asserted to appear exactly once.
 - Baseline before any mutant: the 8 target files, 151 tests, 0 failed.
 - The tree was restored byte for byte after each mutant, and `git status` was clean afterwards.
-- Result: **42 of 43 killed.** P5 survived because its clause was unreachable (a `whisper` plan never carries a reason, and `parakeet-ultra` throws first). The clause was removed rather than kept as a guard nothing can exercise.
+- Result of the first run: **42 of 43 killed.** Two follow-up runs, each with its own green baseline, killed 5 of 5 identity mutants (T9 to T13) and 5 of 5 diarizer mutants (D1 to D5). D3 and D4 first survived; each exposed a missing test (a repeated lookup through the cached PATH search; an intact CLI inside an incomplete install), which was added before they were killed. **Overall: 52 of 53 killed, and the one survivor was an unreachable clause, now removed.** P5 survived because its clause was unreachable (a `whisper` plan never carries a reason, and `parakeet-ultra` throws first). The clause was removed rather than kept as a guard nothing can exercise.
 - Not mutated: the `O_NONBLOCK` flag. Removing it makes the FIFO test block the worker thread forever rather than fail. The FIFO test proves the guarded path returns in under 1 s.
 
 | Mutant | Result | First killing test |
 |---|---|---|
+| T9 codesign identifier is exact | killed | parakeet-cli-trust.test.ts: refuses another codesign identifier, including the earlier draft name |
+| T10 plist CFBundleIdentifier is exact | killed | parakeet-cli-trust.test.ts: refuses an embedded plist whose CFBundleIdentifier differs |
+| T11 only a signature-bound plist counts | killed | parakeet-cli-trust.test.ts: refuses another version, and a plist the signature does not bind |
+| T12 version is exactly 0.17.4 | killed | parakeet-cli-trust.test.ts: refuses another version, and a plist the signature does not bind |
+| T13 identifier constant | killed | parakeet-cli-trust.test.ts: the agreed identity string is exact |
+| D1 GUI-installed CLI only when verified | killed | diarizer-parakeet-cli.test.ts: ignores the GUI-installed CLI while unverified or untrusted |
+| D2 bundled CLI only when trusted | killed | diarizer-parakeet-cli.test.ts: an unchecked bundled CLI is skipped, never run |
+| D3 cached PATH search falls through | killed (after a new test) | diarizer-parakeet-cli.test.ts: a later lookup still finds a CLI that became trusted |
+| D4 installed CLI needs a complete install | killed (after a new test) | parakeet.test.ts: installedCliTrustedNow ... an intact CLI inside an incomplete install |
+| D5 trusted only on a matching hash | killed | parakeet.test.ts: installedCliTrustedNow ... false once tampered |
 | P1 explicit parakeet-ultra is strict | killed | desktop-dictation.test.ts: transcribeAudioBuffer: Mac dictation engine policy and compatibility parakeet-ultra setting with requiredEngine=local is strict: no Whisper, a  |
 | P2 Mac dictation is local-only by itself | killed | desktop-dictation.test.ts: transcribeAudioBuffer: Mac dictation engine policy and compatibility requiredEngine=local is local only by itself, even when the caller passes  |
 | P3 old request refuses a non-Parakeet plan | killed | desktop-dictation.test.ts: transcribeAudioBuffer: Mac dictation engine policy and compatibility old request, setting auto (parakeet_not_installed): the exact 6.73 refusal |
@@ -106,13 +124,21 @@ Setup:
 | `requiredEngine=parakeet-ultra` (old Control) | 503, byte-exact 6.73 body `{"error":"Parakeet is not ready. Select Parakeet for dictation in Transcription settings and retry.","reason":"parakeet_unavailable","retryable":true}` |
 | PUT `dictation: parakeet-ultra` without Parakeet | 400 "Parakeet Ultra is not available: Install Parakeet on this Mac first." |
 | Benchmark | Whisper ran, rtf 0.08, correct text; Parakeet `skipped: not_installed` |
-| Trust, real codesign | upstream ad hoc CLI: `unsigned`. COS Control main binary: `wrong_version` (its bound plist names 0.5.x; never executed). Chrome helper (team EQHXZ8M8AV, strict-valid standalone): `wrong_team`. Slack main binary copied out of its bundle: `signature_invalid`. |
+| Trust, real codesign (rerun under the final rule) | upstream ad hoc CLI: `unsigned`. COS Control main binary: `wrong_identifier` (signed as `com.gotcos.control`; never executed). Chrome helper (team EQHXZ8M8AV, strict-valid standalone): `wrong_team`. Slack main binary copied out of its bundle: `signature_invalid`. |
 | Install with that other-team cliPath | 422 `cli_untrusted`, `cli.reason: wrong_team`; register route 422 |
 | GUI install, real SHA-pinned CLI, real Hugging Face, cancel | 202, downloaded 27.7 MB of 654 MB from the pinned revision, DELETE 202, `errorCode: cancelled`, nothing left under the Parakeet root |
 
-## Speaker separation (diarizer), checked and not changed
+## Speaker separation (diarizer)
 
-`nemotronCliPath` looks only at `COS_NEMOTRON_CLI`, `~/.cos-glasses/bin/fluidaudiocli` and `PATH`. A GUI Parakeet install puts the CLI at `<data>/stt/parakeet/current/bin/fluidaudiocli`, and Control's copy lives in `Contents/Helpers`. The diarizer finds neither, so a GUI install does **not** enable speaker separation on a Mac without the hand-placed CLI. The diarizer also needs its own Nemotron models. Making this work would be a separate, small change: add the installed Parakeet CLI as a candidate. The KNOWN_CLI_SHA256 log line would then report the Developer ID build as "unverified", so that would need the same trust check.
+- **Before the change:** `nemotronCliPath` looked only at `COS_NEMOTRON_CLI`, `~/.cos-glasses/bin` and `PATH`, so a GUI install never enabled speaker separation.
+- **Separable commit f865c3b:** adds the two trusted locations after that order, as the lead asked. Untrusted copies in those paths are ignored, and tests cover another team, another identifier, unverified, and unchecked.
+- **Real run on an isolated data dir and HOME:**
+  - The bundled CLI doesn't exist yet: `/Applications/COS Control.app/Contents/Helpers` is absent on this Mac. A SHA-pinned copy at a scratch `COS Control.app/Contents/Helpers` path stood in for it.
+  - First lookup: `null`. The file is unchecked, so it is skipped and never run.
+  - After the background pin check: the lookup returns that path.
+  - `activeDiarizer` then reports `{requested: nemotron, active: embedding, fallback: models_missing}`.
+- **So speaker separation does not run yet for a new user.** It also needs the Nemotron models (`nemotron-3-diarization`). On Miles's Mac those are present at `~/.cos-glasses/models`, but nothing installs them for a new user. I did not download them.
+- **Not changed:** the diarizer's KNOWN_CLI_SHA256 log line would call a Developer ID build "an unverified build". That is a log line only, left as it was.
 
 ## Risks and open items
 
