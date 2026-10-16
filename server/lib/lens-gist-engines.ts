@@ -200,9 +200,14 @@ function lastJsonObject(stdout: string): any {
 
 // --- Claude ---------------------------------------------------------------------------
 
-export function buildClaudeGistArgs(model: string, system: string): string[] {
+/** `claude -p --effort` levels COS passes (6.73.12). The CLI also takes xhigh and max; COS does not use them. */
+export const CLAUDE_GIST_EFFORTS = ['low', 'medium', 'high'] as const
+export type ClaudeGistEffort = typeof CLAUDE_GIST_EFFORTS[number]
+
+/** `effort` defaults to low, so the lens gist and Meeting Ask argv stay exactly as before 6.73.12. */
+export function buildClaudeGistArgs(model: string, system: string, effort: ClaudeGistEffort = 'low'): string[] {
   return [
-    '-p', '--model', model, '--effort', 'low',
+    '-p', '--model', model, '--effort', effort,
     // No tools: nothing to act on an instruction hidden in the reply, and ~1.2k tokens a
     // call instead of a cache of tool definitions. claude-permissions.ts records an empty
     // --tools causing a spurious compaction and a synthetic 400 on the 2026-08-26 CLI, in

@@ -527,6 +527,13 @@ describe('engines: tools and hooks off (/qa round 1 B1)', () => {
     expect(args).toContain('web_search="disabled"')
   })
 
+  it('6.73.12: the lens gist argv is byte-identical to before (low effort); a caller may pick another effort', () => {
+    const before = ['-p', '--model', 'sonnet', '--effort', 'low', '--tools', '', '--output-format', 'json', '--no-session-persistence',
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--settings', '{"disableAllHooks":true}', '--system-prompt', 'SYS']
+    expect(buildClaudeGistArgs('sonnet', 'SYS')).toEqual(before)
+    expect(buildClaudeGistArgs('opus', 'SYS', 'high')).toEqual(before.map(a => a === 'low' ? 'high' : a === 'sonnet' ? 'opus' : a))
+  })
+
   it('Claude runs with every hook disabled', () => {
     const args = buildClaudeGistArgs('sonnet', 'S')
     expect(JSON.parse(args[args.indexOf('--settings') + 1])).toEqual({ disableAllHooks: true })

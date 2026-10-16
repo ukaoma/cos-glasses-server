@@ -1,12 +1,36 @@
 /** Task-level planning only. This module never dispatches or mutates a task. */
-import { redactSecrets } from './lens-gist-engines.js'
+import { redactSecrets, CLAUDE_GIST_EFFORTS, type ClaudeGistEffort } from './lens-gist-engines.js'
 export interface WorkChatSession { id: string; title: string; summary: string; status: string; automatic: boolean }
 export interface WorkChatInput {
   workID: string; revision: string; question: string; context: string;
   sessions: WorkChatSession[]; history: { question: string; answer: string }[];
   updates: { sessionID: string; status: string; detail: string; result: string }[];
-  mode: 'plan' | 'summary'; planner?: WorkChatPlanner
+  mode: 'plan' | 'summary'; planner?: WorkChatPlanner; effort?: ClaudeGistEffort
 }
+/** The bounds a valid planner answer may use; parseWorkChatAnswer enforces them and the output budget is derived from them. */
+export const WORK_CHAT_ANSWER_CHARS = 6000
+export const WORK_CHAT_PROMPT_CHARS = 2000
+export const WORK_CHAT_MAX_ASSIGNMENTS = 3
+/** 'claude:' plus a 36-character UUID, the longest automatic session ID (SID). */
+const WORK_CHAT_SESSION_ID_CHARS = 43
+/**
+ * Answer tokens for the largest valid plan, derived, not chosen (6.73.12; before, every plan shared Meeting Ask's 1400):
+ *   answer                                   6000
+ *   3 assignments x (prompt 2000 + id 43 + `{"sessionID":"","prompt":""},` 29)   3 x 2072 = 6216
+ *   `{"answer":"","assignments":[]}` 30 + a ```json fence 12                       42
+ *   total 12258 characters / 3 characters per token (conservative; English runs ~4) = 4086, rounded up = 4086
+ */
+export const WORK_CHAT_OUTPUT_TOKENS = Math.ceil((WORK_CHAT_ANSWER_CHARS + WORK_CHAT_MAX_ASSIGNMENTS * (WORK_CHAT_PROMPT_CHARS + WORK_CHAT_SESSION_ID_CHARS + 29) + 30 + 12) / 3)
+/** Thinking tokens by effort: low keeps thinking off; medium and high give it room (Miles chose high, 2026-10-15). */
+export const WORK_CHAT_THINKING_LOW = 0
+export const WORK_CHAT_THINKING_MEDIUM = 6000
+export const WORK_CHAT_THINKING_HIGH = 16000
+export const WORK_CHAT_THINKING_TOKENS: Record<ClaudeGistEffort, number> = { low: WORK_CHAT_THINKING_LOW, medium: WORK_CHAT_THINKING_MEDIUM, high: WORK_CHAT_THINKING_HIGH }
+/** 16000 thinking plus ~4100 answer tokens takes minutes, not Meeting Ask's 45 s. Control's helper waits longer still. */
+export const WORK_CHAT_DEADLINE_MS = 180_000
+/** 6.73.12 (Miles 2026-10-15): planner effort the client may pick. Omitted means high, Work chat's default. */
+export const WORK_CHAT_EFFORTS = CLAUDE_GIST_EFFORTS
+export const WORK_CHAT_DEFAULT_EFFORT: ClaudeGistEffort = 'high'
 /** Claude models a Control client may pick to plan. Sonnet stays the default for clients that send none. */
 export const WORK_CHAT_PLANNERS = ['sonnet','opus'] as const
 export type WorkChatPlanner = typeof WORK_CHAT_PLANNERS[number]
@@ -15,11 +39,12 @@ const SID = /^(claude|codex|cursor):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]
 const text = (v: unknown, n: number): v is string => typeof v === 'string' && v.length <= n && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(v)
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v)
 export function parseWorkChatInput(v: unknown): WorkChatInput {
-  if (!object(v) || Object.keys(v).some(k => !['workID','revision','question','context','sessions','history','updates','mode','planner'].includes(k))
+  if (!object(v) || Object.keys(v).some(k => !['workID','revision','question','context','sessions','history','updates','mode','planner','effort'].includes(k))
     || !text(v.workID,256) || !/^task:[a-z_]+:[a-f0-9]{12}$/.test(v.workID)
     || !text(v.revision,64) || !/^[a-f0-9]{64}$/.test(v.revision)
     || !text(v.question,2000) || !v.question.trim() || !text(v.context,16000)
-    || !['plan','summary'].includes(v.mode) || ('planner' in v && !(WORK_CHAT_PLANNERS as readonly unknown[]).includes(v.planner)) || !Array.isArray(v.sessions) || v.sessions.length>12
+    || !['plan','summary'].includes(v.mode) || ('planner' in v && !(WORK_CHAT_PLANNERS as readonly unknown[]).includes(v.planner))
+    || ('effort' in v && !(WORK_CHAT_EFFORTS as readonly unknown[]).includes(v.effort)) || !Array.isArray(v.sessions) || v.sessions.length>12
     || !Array.isArray(v.history) || v.history.length>6 || !Array.isArray(v.updates) || v.updates.length>12) throw new Error('invalid_request')
   const ids = new Set<string>()
   for (const s of v.sessions) {
@@ -35,13 +60,13 @@ export function parseWorkChatInput(v: unknown): WorkChatInput {
 export function parseWorkChatAnswer(raw: string, input: WorkChatInput): WorkChatAnswer {
   const stripped=raw.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')
   const v: unknown=JSON.parse(stripped)
-  if (!object(v) || Object.keys(v).some(k=>!['answer','assignments'].includes(k)) || !text(v.answer,6000) || !v.answer.trim()
-    || !Array.isArray(v.assignments) || v.assignments.length>3 || (input.mode==='summary' && v.assignments.length)) throw new Error('invalid_answer')
+  if (!object(v) || Object.keys(v).some(k=>!['answer','assignments'].includes(k)) || !text(v.answer,WORK_CHAT_ANSWER_CHARS) || !v.answer.trim()
+    || !Array.isArray(v.assignments) || v.assignments.length>WORK_CHAT_MAX_ASSIGNMENTS || (input.mode==='summary' && v.assignments.length)) throw new Error('invalid_answer')
   const targets=new Set<string>()
   for (const a of v.assignments) {
     const target=input.sessions.find(s=>s.id===a?.sessionID)
     if (!object(a) || Object.keys(a).some(k=>!['sessionID','prompt'].includes(k)) || !target?.automatic || targets.has(a.sessionID)
-      || !text(a.prompt,2000) || !a.prompt.trim() || /COS-WORK/i.test(a.prompt.replace(/[*_`\u200c\u200d]/g,''))) throw new Error('invalid_assignment')
+      || !text(a.prompt,WORK_CHAT_PROMPT_CHARS) || !a.prompt.trim() || /COS-WORK/i.test(a.prompt.replace(/[*_`\u200c\u200d]/g,''))) throw new Error('invalid_assignment')
     targets.add(a.sessionID)
   }
   return { answer:redactSecrets(v.answer), assignments:v.assignments.map(a=>({sessionID:a.sessionID,prompt:redactSecrets(a.prompt)})) }

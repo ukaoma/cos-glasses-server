@@ -2,6 +2,8 @@ import express from 'express'
 import { expect,it,vi } from 'vitest'
 import { type Server } from 'node:http'
 import { createWorkChatRouter } from './work-chat.js'
+import { WORK_CHAT_OUTPUT_TOKENS } from '../lib/work-chat.js'
+const budget=(effort:string,thinking:number)=>({effort,maxOutputTokens:WORK_CHAT_OUTPUT_TOKENS,maxThinkingTokens:thinking,deadlineMs:180000})
 const input={workID:'task:quilt:aaaaaaaaaaaa',revision:'a'.repeat(64),question:'What needs my review?',context:'Evidence only',sessions:[],history:[],updates:[],mode:'plan'}
 async function setup(run:any) {
  const release=vi.fn(),deps={run,admissions:()=>true,lease:()=>({release})}
@@ -43,5 +45,20 @@ it('runs the planner the client picked, defaults older clients to Sonnet and ref
  expect(await (await s.post({...input,planner:'sonnet'})).json()).toMatchObject({model:'claude:sonnet (requested)'});expect((run.mock.calls as any)[1][0]).toEqual({engine:'claude',model:'sonnet'})
  for (const planner of ['haiku','fable','Opus','',null,1]) expect((await s.post({...input,planner})).status).toBe(400)
  expect(run).toHaveBeenCalledTimes(2)
+ }finally{s.server.close()}
+})
+it('6.73.12: plans at high effort by default, runs the effort the client picked, never leaks it, and refuses any other level',async()=>{
+ const run=vi.fn(async()=>({text:JSON.stringify({answer:'Planned.',assignments:[]})})),s=await setup(run)
+ try {
+ expect(await (await fetch(s.url,{headers:{'X-Cos-Token':'t'}})).json()).toMatchObject({effort:'high',efforts:['low','medium','high']})
+ const plain=await (await s.post(input)).json()
+ expect((run.mock.calls as any)[0][6]).toEqual(budget('high',16000));expect(plain.effort).toBe('high')
+ for (const [n,effort] of (['low','medium','high'] as const).entries()) {
+  const body=await (await s.post({...input,planner:'opus',effort})).json()
+  expect((run.mock.calls as any)[n+1][6]).toEqual(budget(effort,{low:0,medium:6000,high:16000}[effort]));expect(body.effort).toBe(effort)
+  expect(JSON.parse((run.mock.calls as any)[n+1][1])).not.toHaveProperty('effort')
+ }
+ for (const effort of ['xhigh','max','HIGH',' high','',null,1]) expect((await s.post({...input,effort})).status).toBe(400)
+ expect(run).toHaveBeenCalledTimes(4)
  }finally{s.server.close()}
 })
