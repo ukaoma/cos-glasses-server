@@ -48,7 +48,7 @@ import {
   importHash,
   importRecordId,
 } from './imported-meeting-library.js'
-import { getMeetingStore, type MeetingMeta, type MeetingStore } from './meeting-store.js'
+import { getMeetingStore, MEETING_LIST_CAP_SCOPED, type MeetingMeta, type MeetingStore } from './meeting-store.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 
 /** The merged-scribe markers live with the scribe reader; re-exported for callers. */
@@ -533,13 +533,48 @@ function operationsMergedSessions(
 }
 
 /**
- * 6.73.14: day counts for the store's Mac recordings. A Mac capture never reaches the operations tree, so on a pipeline
- * Mac these rows are counted nowhere else. Read through `list()`, filtered to Mac sessions before its cap (200 per
- * scoped list): a month with more than 200 Mac recordings undercounts its dots, never overcounts.
+ * Sessions the operations rows of these month folders hold: each scribe's sidecar session (beside it, else under the
+ * server's recordings root by the same name, as `listCosOperationsMeetings` reads it), plus every session a merged
+ * scribe declares. A store Mac row whose session is here is already a row, and a dot, on the operations side.
  */
-export function macStoreDayCounts(store: MeetingStore, month: string, domain: string): Array<{ date: string; count: number }> {
+function operationsHeldSessions(
+  directories: readonly string[],
+  merged: ReadonlySet<string>,
+  recordingsRoot: string = dataPath('recordings'),
+): Set<string> {
+  const sessions = new Set(merged)
+  for (const directory of directories) {
+    let names: string[]
+    try {
+      names = readdirSync(directory).filter(name => name.endsWith('.md'))
+    } catch {
+      continue
+    }
+    for (const filename of names) {
+      const sessionId = droppedSessionId(directory, filename, recordingsRoot)
+      if (sessionId) sessions.add(sessionId)
+    }
+  }
+  return sessions
+}
+
+/**
+ * 6.73.14: day counts for the store's Mac recordings. A Mac capture never reaches the operations tree, so on a pipeline
+ * Mac these rows are counted nowhere else. A session the operations side already holds (`held`, read only when the store
+ * has a Mac recording in this month) is left out, as `withMacStoreRows` leaves its row out, so an operations copy counts
+ * once. Read through `list()`, filtered before its cap (MEETING_LIST_CAP_SCOPED, 200 rows): a month with more than 200
+ * such recordings undercounts its dots; nothing is counted twice.
+ */
+export function macStoreDayCounts(
+  store: MeetingStore,
+  month: string,
+  domain: string,
+  held: () => ReadonlySet<string> = () => new Set(),
+): Array<{ date: string; count: number }> {
   const counts = new Map<string, number>()
-  for (const row of store.list({ month, domain, limit: Number.MAX_SAFE_INTEGER, sessionMatch: id => typeof id === 'string' && MAC_CAPTURE_ID.test(id) })) {
+  let heldSessions: ReadonlySet<string> | undefined
+  const sessionMatch = (id: string | undefined) => typeof id === 'string' && MAC_CAPTURE_ID.test(id) && !(heldSessions ??= held()).has(id)
+  for (const row of store.list({ month, domain, limit: MEETING_LIST_CAP_SCOPED, sessionMatch })) {
     // The day from the filename, as the store's own day dots read it (MeetingStore.listDayCounts).
     const date = /^(\d{4}-\d{2}-\d{2})_/.exec(row.filename)?.[1]
     if (!row.sessionId || !MAC_CAPTURE_ID.test(row.sessionId) || !date) continue
@@ -550,8 +585,10 @@ export function macStoreDayCounts(store: MeetingStore, month: string, domain: st
 
 /**
  * Day counts for one month across every source the list shows, with supersession
- * applied. The list and `probeMeetings` share it so a dot and a row can never
- * disagree about how many meetings a day holds.
+ * applied. The list and `probeMeetings` share it so a dot and a row agree about
+ * how many meetings a day holds: each source is counted by the rule that lists
+ * it. The counts are not capped the way a row page is, except the store's Mac
+ * recordings, which stop at 200 a month (macStoreDayCounts).
  */
 export function supersededDayCounts(
   month: string,
@@ -585,11 +622,13 @@ export function supersededDayCounts(
     // into this layout at all: on a pipeline Mac the operations tree is the one
     // library, and a derived record here would be a second row for one meeting.
     const directories = operationsMonthDirs(month, domain)
+    const merged = operationsMergedSessions(directories, options.declaredSessions)
     return mergeDayCounts([
       listCosOperationsMeetingDays(month, domain),
-      sessionDropCounts(directories, operationsMergedSessions(directories, options.declaredSessions), options.recordingsRoot),
-      // 6.73.14: the store's Mac recordings, which the list now shows (routes/meetings.ts withMacStoreRows).
-      macStoreDayCounts(store, month, domain),
+      sessionDropCounts(directories, merged, options.recordingsRoot),
+      // 6.73.14: the store's Mac recordings, which the list now shows (routes/meetings.ts withMacStoreRows), less any the
+      // operations side already counts.
+      macStoreDayCounts(store, month, domain, () => operationsHeldSessions(directories, merged, options.recordingsRoot)),
     ])
   }
 

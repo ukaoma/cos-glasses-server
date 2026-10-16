@@ -12,14 +12,29 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, afterAll } from 'vitest'
+import { afterEach, describe, expect, it, afterAll, vi } from 'vitest'
 import {
   boundedMeetingSource,
   MEETING_SOURCE_MAX_BYTES,
   MeetingStore,
   MeetingStoreError,
+  storedMeetingTime,
   type SaveMeetingInput,
 } from './meeting-store.js'
+
+// 6.73.14 QA: which markdown files the store opened in full. The real reader still runs; this only records the name,
+// so a test can prove a list never opened a file it had no reason to.
+const markdownReads = vi.hoisted(() => [] as string[])
+vi.mock('./meeting-file-guards.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('./meeting-file-guards.js')>()
+  return {
+    ...actual,
+    safeReadFile: (...args: Parameters<typeof actual.safeReadFile>) => {
+      markdownReads.push(args[2])
+      return actual.safeReadFile(...args)
+    },
+  }
+})
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -262,6 +277,46 @@ describe('MeetingStore', () => {
     const store = new MeetingStore(linkedRoot)
     expect(() => store.save(input())).toThrowError(MeetingStoreError)
     expect(() => store.list()).toThrowError(expect.objectContaining({ code: 'unsafe_recordings_store' }))
+  })
+
+  // 6.73.14 QA: Control polls `?day=` every 3 s during a hand-off, and a pipeline Mac's store holds hundreds of G2
+  // recordings it never lists. Matching the session from the sidecar head first means those are never opened.
+  it('matches sessionMatch on the sidecar before it opens any markdown, and a day reads only its month', () => {
+    const root = newRoot()
+    const store = new MeetingStore(root)
+    const g2 = store.save(input({ sessionId: 'meeting_store_g2' }))
+    const macFile = '2026-07-15_Mac_recording_15370d86.md'
+    writeFileSync(join(root, '2026-07', macFile), '# Mac recording\n\n| **Date** | 2026-07-15 |\n| **Time** | 10:39 PM |\n| **Domain** | personal |\n\n## Transcript\n\n[Ext]: hello\n')
+    writeFileSync(join(root, '2026-07', macFile.replace(/\.md$/, '.g2-chunks.json')),
+      JSON.stringify({ schemaVersion: 2, sourceType: 'mac_system_audio', sessionId: 'mac_50609b33-32bb-4ad3-8b3d-9912cc0bcb21' }))
+    const august = store.save(input({ sessionId: 'meeting_store_august', startTime: new Date(2026, 7, 3, 9, 0).getTime() }))
+
+    markdownReads.length = 0
+    const rows = store.list({ sessionMatch: id => typeof id === 'string' && id.startsWith('mac_') })
+    expect(rows.map(row => row.sessionId)).toEqual(['mac_50609b33-32bb-4ad3-8b3d-9912cc0bcb21'])
+    // The recorder sees reads at all (the Mac file), and none of the G2 recordings the match turned away.
+    expect(markdownReads).toEqual([macFile])
+
+    markdownReads.length = 0
+    expect(store.list({ day: '2026-07-15' }).map(row => row.filename).sort()).toEqual([g2.filename, macFile].sort())
+    expect(markdownReads).not.toContain(august.filename)
+    expect(markdownReads.sort()).toEqual([g2.filename, macFile].sort())
+  })
+
+  it('gives a stored row its start time, in the operations rows\' 24-hour form', () => {
+    const store = new MeetingStore(newRoot())
+    store.save(input({ sessionId: 'meeting_store_evening', title: 'Evening', startTime: new Date(2026, 6, 15, 22, 39).getTime() }))
+    store.save(input({ sessionId: 'meeting_store_morning', title: 'Zebra morning', startTime: new Date(2026, 6, 15, 9, 30).getTime() }))
+    // Newest first by time, not by filename ("Zebra" sorts after "Evening").
+    expect(store.list().map(row => [row.title, row.time])).toEqual([['Evening', '22:39'], ['Zebra morning', '09:30']])
+
+    expect(storedMeetingTime('| **Time** | 12:05 AM |', 'x.md')).toBe('00:05')
+    expect(storedMeetingTime('| **Time** | 12:05 PM |', 'x.md')).toBe('12:05')
+    expect(storedMeetingTime('| **Time** | 14:05 |', 'x.md')).toBe('14:05')
+    expect(storedMeetingTime('| **Date** | 2026-07-15 14:05 |', 'x.md')).toBe('14:05')
+    expect(storedMeetingTime('| **Date** | 2026-07-15 |', '2026-07-15_Mac_Recording_2026-07-15_2239_abcd1234.md')).toBe('22:39')
+    expect(storedMeetingTime('| **Date** | 2026-07-15 |', '2026-07-15_Weekly_planning_abcd1234.md')).toBeUndefined()
+    expect(storedMeetingTime('| **Time** | 13:05 PM |', 'x.md')).toBeUndefined()
   })
 
   it('restores private modes on pre-existing recording directories', () => {

@@ -1,4 +1,4 @@
-import { expect,it } from 'vitest'
+import { expect,it,vi } from 'vitest'
 import { parseWorkChatInput,parseWorkChatAnswer } from './work-chat.js'
 const id='codex:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const fixed=()=>[{id:'req',kind:'req',label:'Your request',estTokens:12},{id:'task',kind:'task',label:'Task, finish line and source',estTokens:80},{id:'cos',kind:'cos',label:'COS instructions',estTokens:60}]
@@ -69,12 +69,25 @@ it('6.73.13: each assignment carries a subset of the supplied items, with the fi
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[a]}),request).assignments[0].contextItemIDs).toEqual(['req','task','cos','file:aaaaaaaaaaaa','meet:bbbbbbbbbbbb'])
  // 6.73.14: cleaned, never refused. Unknown ids drop, repeats keep once, a non-list means every item.
  const pick=(contextItemIDs: unknown)=>parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[{...a,contextItemIDs}]}),request).assignments[0].contextItemIDs
- expect(pick(['file:cccccccccccc'])).toEqual(['req','task','cos'])
- expect(pick(['file:cccccccccccc',shot.id])).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
- expect(pick([shot.id,shot.id])).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
- expect(pick(Array(6).fill('req'))).toEqual(['req','task','cos'])
- for (const malformed of ['file:aaaaaaaaaaaa',[1],null])
-  expect(pick(malformed)).toEqual(['req','task','cos','file:aaaaaaaaaaaa','meet:bbbbbbbbbbbb'])
+ const every=['req','task','cos','file:aaaaaaaaaaaa','meet:bbbbbbbbbbbb']
+ const warn=vi.spyOn(console,'warn').mockImplementation(()=>undefined)
+ try {
+  expect(pick(['file:cccccccccccc',shot.id])).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
+  expect(warn.mock.calls.map(c=>c[0])).toEqual(['[work-chat] planner named 1 unknown context item id(s); dropped'])
+  // Every id unknown: that is no choice, so every item goes (not the fixed three alone).
+  warn.mockClear()
+  expect(pick(['file:cccccccccccc','meet:dddddddddddd'])).toEqual(every)
+  expect(warn.mock.calls.map(c=>c[0])).toEqual(['[work-chat] planner named 2 unknown context item id(s); sending every item'])
+  warn.mockClear()
+  expect(pick([shot.id,shot.id])).toEqual(['req','task','cos','file:aaaaaaaaaaaa'])
+  expect(pick(Array(6).fill('req'))).toEqual(['req','task','cos'])
+  expect(pick([])).toEqual(['req','task','cos'])
+  expect(warn).not.toHaveBeenCalled()
+  // A list that is not all strings is no choice too, even when one of its strings is known.
+  for (const malformed of ['file:aaaaaaaaaaaa',[1],null,[shot.id,1],['file:cccccccccccc',{}]])
+   expect(pick(malformed)).toEqual(every)
+  expect(warn).not.toHaveBeenCalled()
+ } finally { warn.mockRestore() }
  const plain=parseWorkChatInput(input())
  expect(parseWorkChatAnswer(JSON.stringify({answer:'Plan',assignments:[a]}),plain).assignments[0]).not.toHaveProperty('contextItemIDs')
  // No items offered (an older Control): the field is ignored, never a refusal.

@@ -84,6 +84,73 @@ function meetingMarkdown(title: string, domain: string, source: string, extra = 
   ].join('\n')
 }
 
+/**
+ * A Mac recording as MeetingStore.save writes it after finalization, its shape copied from a real save (2026-10-15,
+ * mac_50609b33): the Date line has no time, the Time line is 12-hour, the Capture source line is what makes the row's
+ * sourceType, and the sidecar names the session in captureSource first.
+ */
+function writeSavedMacRecording(monthDir: string, filename: string, sessionId: string, options: { date?: string; time?: string } = {}): void {
+  const date = options.date ?? DATE
+  mkdirSync(monthDir, { recursive: true })
+  writeFileSync(join(monthDir, filename), [
+    '# Mac recording',
+    '',
+    '| Field | Value |',
+    '|-------|-------|',
+    `| **Date** | ${date} |`,
+    `| **Time** | ${options.time ?? '10:39 PM'} |`,
+    '| **Duration** | 25 minutes |',
+    '| **Source** | Mac System Audio |',
+    '| **Capture source** | mac_system_audio |',
+    '| **Captured voices** | Other participants only |',
+    '| **Domain** | personal |',
+    '| **Transfer integrity** | 100% |',
+    '| **Transcription quality** | batch |',
+    '',
+    '## Summary',
+    '',
+    'The speakers discuss shipping disruption and energy policy.',
+    '',
+    '## Topics Discussed',
+    '',
+    '- Shipping disruption',
+    '',
+    '## Attendees',
+    '',
+    '- **Ext**',
+    '',
+    '## Transcript',
+    '',
+    '[Ext]: means this is existential and you know',
+    '',
+  ].join('\n'))
+  const startTime = new Date(`${date}T22:39:30`).getTime()
+  const chunk = { text: 'means this is existential and you know', speakerPolicy: 'high-confidence', audioDurationMs: 6000, speaker: 'Ext', elapsed: 18000, similarity: 0 }
+  writeFileSync(join(monthDir, filename.replace(/\.md$/, '.g2-chunks.json')), JSON.stringify({
+    schemaVersion: 2,
+    sourceType: 'mac_system_audio',
+    captureSource: { version: 1, captureId: sessionId, sessionId, sourceType: 'mac_system_audio', startTime, speakerPolicy: 'high-confidence' },
+    sessionId,
+    startTime,
+    durationMs: 1_511_798,
+    domain: 'personal',
+    title: 'Mac recording',
+    canonicalProvider: 'server-parakeet',
+    providers: ['server-parakeet'],
+    providerCandidates: {},
+    speakers: [],
+    chunks: [chunk],
+    chunkEntries: [{ chunkIndex: 0, chunk }],
+    transferIntegrity: { received: 1, stored: 1, maxIndex: 0, expected: 1, missingIndices: [], completeness: 1 },
+    transcriptionQuality: 'batch',
+    batchApplied: true,
+    streamingWordCount: 7,
+    finalizationState: 'complete',
+    claimPending: false,
+    lifecycleRevision: 1,
+  }, null, 2))
+}
+
 function writeCapture(monthDir: string, filename: string, sessionId: string, title: string, domain = 'personal'): void {
   mkdirSync(monthDir, { recursive: true })
   writeFileSync(join(monthDir, filename), meetingMarkdown(title, domain, 'G2 Glasses'))
@@ -394,10 +461,77 @@ describe('meetings list with imports and derived records', () => {
     // Another domain neither lists nor counts it.
     expect((await api(`/api/meetings?domain=quilt&month=${MONTH}`)).json.meetings).toHaveLength(0)
     expect((await api(`/api/meetings?domain=quilt&month=${MONTH}`)).json.days).toEqual([])
-    // An operations copy of the same session wins, once.
+    // An operations copy of the same session wins, once: one row, and one count in the day's dot.
     writeCapture(h.operationsMonthDir, `${DATE}_Mac_recording.md`, macSession, 'Mac recording')
     const synced = await api(`/api/meetings?limit=50&domain=all&month=${MONTH}`)
     expect(synced.json.meetings.filter((row: any) => row.sessionId === macSession).map((row: any) => row.librarySource)).toEqual(['cos_operations'])
+    expect(synced.json.meetings).toHaveLength(2)
+    expect(synced.json.days).toEqual([{ date: DATE, count: 2 }])
+  })
+
+  // 6.73.14 QA: the query Control sends during a recording hand-off (`limit=200&domain=all&day=`), against a record
+  // shaped like a real save (Time line, Capture source, a finalized sidecar), not a fixture whose Date carries a time.
+  it('finds a saved Mac recording by day, as Control polls for it, with its identity and source', async () => {
+    const h = setup({ layout: 'multi_domain', pipeline: true })
+    const macSession = 'mac_50609b33-32bb-4ad3-8b3d-9912cc0bcb21'
+    writeSavedMacRecording(h.storeMonthDir, `${DATE}_Mac_recording_15370d86.md`, macSession)
+    writeCapture(h.storeMonthDir, `${DATE}_Launch_Review_G2.md`, SESSION, 'Launch review (G2)')
+    writeFileSync(join(h.operationsMonthDir, `${DATE}_Ops_Review.md`), meetingMarkdown('Ops review', 'personal', 'Granola'))
+    // Another day of the month, which a day query must not return.
+    writeSavedMacRecording(h.storeMonthDir, `${MONTH}-02_Mac_recording_0badf00d.md`, 'mac_0a0b0c0d-1111-4222-8333-000000000002', { date: `${MONTH}-02` })
+
+    const api = await serve(h.store, h.library)
+    const day = await api(`/api/meetings?limit=200&domain=all&day=${DATE}`)
+    expect(day.status).toBe(200)
+    const mac = day.json.meetings.filter((row: any) => row.sessionId === macSession)
+    expect(mac).toHaveLength(1)
+    expect(mac[0]).toMatchObject({
+      sessionId: macSession,
+      recordId: `standalone:${macSession}`,
+      sourceType: 'mac_system_audio',
+      librarySource: 'standalone_recordings',
+      date: DATE,
+      time: '22:39',
+    })
+    expect(day.json.meetings.map((row: any) => row.sessionId ?? row.title)).toEqual([macSession, 'Ops review'])
+    expect(day.json.days).toEqual([{ date: `${MONTH}-02`, count: 1 }, { date: DATE, count: 2 }])
+  })
+
+  // A merged scribe that declares a Mac session holds it: the store's row is neither listed nor counted beside it.
+  it('leaves out a Mac recording a merged scribe holds, in the rows and in the dots', async () => {
+    const h = setup({ layout: 'multi_domain', pipeline: true })
+    const macSession = 'mac_50609b33-32bb-4ad3-8b3d-9912cc0bcb21'
+    writeSavedMacRecording(h.storeMonthDir, `${DATE}_Mac_recording_15370d86.md`, macSession)
+    // No sidecar beside the scribe: its row takes the first declared session, so the Mac session is held only by the
+    // declaration.
+    writeFileSync(
+      join(h.operationsMonthDir, `${DATE}_Launch_Review.md`),
+      meetingMarkdown('Launch review', 'personal', 'G2 Glasses + Fireflies',
+        `<!-- g2-session: ${SESSION} -->\n<!-- g2-session: ${macSession} -->\n<!-- merge-action: a_0123456789abcdef -->`),
+    )
+    const api = await serve(h.store, h.library)
+    const month = await api(`/api/meetings?limit=200&domain=all&month=${MONTH}`)
+    expect(month.json.meetings.map((row: any) => row.title)).toEqual(['Launch review'])
+    expect(month.json.days).toEqual([{ date: DATE, count: 1 }])
+  })
+
+  // 6.73.14 QA: a store row carried no time, so a Mac recording sorted at 00:00 of its day, under every operations row
+  // of that day, and the unscoped 20-row list could cut it.
+  it('orders a Mac recording among the same day\'s operations rows by its time', async () => {
+    const h = setup({ layout: 'multi_domain', pipeline: true })
+    const macSession = 'mac_50609b33-32bb-4ad3-8b3d-9912cc0bcb21'
+    writeSavedMacRecording(h.storeMonthDir, `${DATE}_Mac_recording_15370d86.md`, macSession, { time: '10:39 PM' })
+    writeFileSync(join(h.operationsMonthDir, `${DATE}_Late_Review.md`), meetingMarkdown('Late review', 'personal', 'Granola').replace(`${DATE} 14:05`, `${DATE} 23:10`))
+    writeFileSync(join(h.operationsMonthDir, `${DATE}_Morning_Review.md`), meetingMarkdown('Morning review', 'personal', 'Granola').replace(`${DATE} 14:05`, `${DATE} 09:00`))
+    writeCapture(h.operationsMonthDir, `${DATE}_Noon_G2.md`, SESSION, 'Noon capture')
+
+    const api = await serve(h.store, h.library)
+    const titles = (rows: any[]) => rows.map(row => row.title)
+    // Newest first by time: 23:10, the Mac recording at 22:39, the G2 capture at 14:05, then 09:00.
+    expect(titles((await api('/api/meetings?limit=50&domain=all')).json.meetings))
+      .toEqual(['Late review', 'Mac recording', 'Noon capture', 'Morning review'])
+    // A capped list keeps the Mac recording and cuts the oldest operations row instead.
+    expect(titles((await api('/api/meetings?limit=2&domain=all')).json.meetings)).toEqual(['Late review', 'Mac recording'])
   })
 
   it('lists a Mac recording the store cap would cut, and pages to a month holding only Mac recordings', async () => {

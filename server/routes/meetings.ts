@@ -73,21 +73,24 @@ export function withMeetingContext<T extends MeetingMeta>(meeting: T, source: Me
   return { ...meeting, ...readOnlyContext() }
 }
 
-/**
- * Operations rows plus the store's Mac recordings (6.73.14), newest first, capped at `limit`. Only Mac rows are added:
- * a G2 store row is the pipeline's to file, and its operations copy is the row. Operations rows are never deduplicated
- * against each other here, so the operations list keeps exactly the rows it had.
- */
 /** A Mac capture's session id, as routes/meeting.ts keys the pipeline skip. */
 export function isMacCaptureId(sessionId: string | undefined): boolean {
   return typeof sessionId === 'string' && MAC_CAPTURE_ID.test(sessionId)
 }
 
-export function withMacStoreRows(operations: MeetingMeta[], storeRows: MeetingMeta[], limit: number): MeetingMeta[] {
+/**
+ * Operations rows plus the store's Mac recordings (6.73.14), newest first by date and time, capped at `limit`. Only Mac
+ * rows are added: a G2 store row is the pipeline's to file, and its operations copy is the row. A Mac row is left out
+ * when an operations row holds its session, or when `held` does (the sessions merged scribes declare), the same rule
+ * the day count applies (imported-library-rows macStoreDayCounts). Operations rows are never deduplicated against each
+ * other or reordered among themselves, but a newer Mac row can push the oldest of them past `limit`.
+ */
+export function withMacStoreRows(operations: MeetingMeta[], storeRows: MeetingMeta[], limit: number, held: ReadonlySet<string> = new Set()): MeetingMeta[] {
   const sessions = new Set(operations.map(row => row.sessionId).filter(Boolean))
   const mac = storeRows
-    // Keyed like the save route that skips the pipeline (MAC_CAPTURE_ID); list rows carry no sourceType.
-    .filter(row => typeof row.sessionId === 'string' && MAC_CAPTURE_ID.test(row.sessionId) && !sessions.has(row.sessionId))
+    // Keyed on the sidecar's session, as the save route keys the pipeline skip (MAC_CAPTURE_ID). The row's sourceType
+    // comes from the markdown's Capture source line instead, which an edited or older record can lack.
+    .filter(row => isMacCaptureId(row.sessionId) && !sessions.has(row.sessionId) && !held.has(row.sessionId!))
     .map(withStandaloneIdentity)
   if (mac.length === 0) return operations
   return [...operations, ...mac]
@@ -339,7 +342,7 @@ export function createMeetingsRouter(
           // 6.73.14 (Miles 2026-10-15): routes/meeting.ts never hands a Mac recording to the pipeline (MAC_CAPTURE_ID),
           // so on a pipeline Mac it lives only in this store and never appeared in Meetings; Control's hand-off read
           // "Saved meeting not found yet" forever. The store's Mac rows join the operations rows here.
-          const meetings = withMacStoreRows(operationsMeetings, store.list({ ...listOptions, sessionMatch: isMacCaptureId }), limit)
+          const meetings = withMacStoreRows(operationsMeetings, store.list({ ...listOptions, sessionMatch: isMacCaptureId }), limit, declaredSessions)
           // ONLY WHEN THE LIST SAW THE WHOLE MONTH. The row list is capped, and a capped
           // list knows about fewer merged scribes than the month holds, so handing its
           // sessions to an UNCAPPED day count would subtract too little and put the dot

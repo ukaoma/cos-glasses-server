@@ -98,17 +98,20 @@ export function parseWorkChatAnswer(raw: string, input: WorkChatInput): WorkChat
   return { answer:redactSecrets(v.answer), assignments:v.assignments.map(a=>({sessionID:a.sessionID,prompt:redactSecrets(a.prompt),
     ...(input.items ? {contextItemIDs:contextSelection(cleanContextSelection(a.contextItemIDs,input.items),input.items)} : {})})) }
 }
-/** Only ids Control supplied, each once, and only when it supplied items. */
 /**
  * 6.73.14 (QA 2026-10-15): the planner's ids are cleaned, never refused. One unknown or repeated id used to throw away a
- * whole high-effort plan (503). An unknown id names nothing to send, so it is dropped; a repeat is kept once; anything
- * that is not a list of strings means "no choice", which sends every item (the meter shows it, the person reviews it).
+ * whole high-effort plan (503). Only ids Control supplied are kept, each once. Undefined means "no choice", which sends
+ * every item (the meter shows it, the person reviews it): a value that is not a list, a list holding anything but
+ * strings, and a non-empty list none of whose ids Control supplied. An empty list is a choice: the fixed items only.
+ * Dropped ids are counted in the server log, never their values.
  */
 export function cleanContextSelection(ids: unknown, items: WorkChatContextItem[]): string[] | undefined {
-  if (!Array.isArray(ids)) return undefined
+  if (!Array.isArray(ids) || ids.some(id=>typeof id!=='string')) return undefined
   const known=new Set(items.map(i=>i.id)), out: string[]=[]
-  for (const id of ids) if (typeof id==='string' && known.has(id) && !out.includes(id)) out.push(id)
-  return ids.length>0 && out.length===0 && ids.some(id=>typeof id!=='string') ? undefined : out
+  let unknown=0
+  for (const id of ids as string[]) if (!known.has(id)) unknown++; else if (!out.includes(id)) out.push(id)
+  if (unknown>0) console.warn(`[work-chat] planner named ${unknown} unknown context item id(s)${out.length===0 ? '; sending every item' : '; dropped'}`)
+  return ids.length>0 && out.length===0 ? undefined : out
 }
 /** The planner's choice plus the fixed items, in Control's order. Omitted: every item, which the meter then shows. */
 export function contextSelection(ids: string[] | undefined, items: WorkChatContextItem[]): string[] {

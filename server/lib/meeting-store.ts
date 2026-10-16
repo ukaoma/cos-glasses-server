@@ -34,6 +34,8 @@ const DAY_FILE_PREFIX = /^(\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]))_/
 const DOMAIN_HEAD_BYTES = 4096
 const LIST_CAP = 50
 const LIST_CAP_SCOPED = 200
+/** The most rows a month- or day-scoped list returns. Exported so a caller that asks for "all of them" names the cap it gets. */
+export const MEETING_LIST_CAP_SCOPED = LIST_CAP_SCOPED
 
 export function meetingListLimit(limit: number | undefined, scoped: boolean): number {
   const raw = typeof limit === 'number' && Number.isFinite(limit) ? Math.trunc(limit) : 20
@@ -259,6 +261,36 @@ function filenameStem(title: string, fallback: string): string {
   return safe || fallback
 }
 
+function clockTime(hourText: string, minuteText: string, meridiemText = ''): string | undefined {
+  let hour = Number(hourText)
+  const minute = Number(minuteText)
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute > 59) return undefined
+  const meridiem = meridiemText.toUpperCase()
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return undefined
+    if (meridiem === 'AM' && hour === 12) hour = 0
+    if (meridiem === 'PM' && hour !== 12) hour += 12
+  } else if (hour > 23) {
+    return undefined
+  }
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+/**
+ * 6.73.14: a stored recording's start as "HH:MM" (24 h), the form operations rows carry (cos-operations-meetings
+ * extractMeetingDateTime), so a merged list orders a store row by its time and not at 00:00 of its day. Save writes
+ * `**Time** | 10:39 PM`; an older or hand-made record may put the time on the Date line instead; a fallback title
+ * leaves `_YYYY-MM-DD_HHMM` in the filename.
+ */
+export function storedMeetingTime(content: string, filename: string): string | undefined {
+  const field = parseField(content, 'Time').match(/^(\d{1,2}):(\d{2})(?:\s*([AP]M))?$/i)
+  if (field) return clockTime(field[1], field[2], field[3])
+  const dateLine = parseField(content, 'Date').match(/^\d{4}-\d{2}-\d{2}[ T]+(\d{1,2}):(\d{2})(?:\s*([AP]M))?$/i)
+  if (dateLine) return clockTime(dateLine[1], dateLine[2], dateLine[3])
+  const named = filename.match(/_\d{4}-\d{2}-\d{2}_(\d{2})(\d{2})(?:\D|$)/)
+  return named ? clockTime(named[1], named[2]) : undefined
+}
+
 function localParts(timestamp: number): {
   date: string
   month: string
@@ -482,7 +514,11 @@ export class MeetingStore {
     return null
   }
 
-  /** `sessionMatch` filters BEFORE the cap (6.73.14: Mac rows were cut by the 200-row cap of every store row). */
+  /**
+   * `sessionMatch` filters BEFORE the cap (6.73.14: Mac rows were cut by the 200-row cap of every store row), and before
+   * the markdown is read: the session comes from the sidecar's 4 KB head, so a list of Mac rows opens no G2 recording.
+   * A `day` with no `month` reads only that day's month folder; save files every recording under its own date's month.
+   */
   list(options: { limit?: number; domain?: string; month?: string; day?: string; sessionMatch?: (sessionId: string | undefined) => boolean } = {}): MeetingMeta[] {
     const scoped = Boolean(options.month || options.day)
     const limit = meetingListLimit(options.limit, scoped)
@@ -499,29 +535,33 @@ export class MeetingStore {
     const rootReal = this.rootRealpath()
     if (!rootReal) return []
     const meetings: MeetingMeta[] = []
+    const onlyMonth = options.month ?? options.day?.slice(0, 7)
 
     for (const month of readdirSync(this.root).filter(name => MONTH_PATTERN.test(name)).sort().reverse()) {
-      if (options.month && month !== options.month) continue
+      if (onlyMonth && month !== onlyMonth) continue
       const monthDir = join(this.root, month)
       const monthReal = safeDirectoryRealpath(monthDir, rootReal)
       if (!monthReal) continue
       for (const filename of readdirSync(monthDir).filter(name => SAFE_FILENAME_PATTERN.test(name)).sort().reverse()) {
         try {
+          // Matched first when asked: the sidecar head is the cheap read, the markdown the expensive one.
+          const matched = options.sessionMatch ? this.sidecarSessionId(monthDir, monthReal, filename) : undefined
+          if (options.sessionMatch && !options.sessionMatch(matched)) continue
           const content = safeReadFile(monthDir, monthReal, filename)
           if (content === null) continue
           const detail = parseMeeting(content, filename, month)
           if (domain !== 'all' && detail.domain !== domain) continue
           if (options.day && detail.date !== options.day) continue
-          const sessionId = this.sidecarSessionId(monthDir, monthReal, filename)
-          if (options.sessionMatch && !options.sessionMatch(sessionId)) continue
-          meetings.push(toMeta(detail, sessionId))
+          const sessionId = options.sessionMatch ? matched : this.sidecarSessionId(monthDir, monthReal, filename)
+          const time = storedMeetingTime(content, filename)
+          meetings.push({ ...toMeta(detail, sessionId), ...(time ? { time } : {}) })
         } catch {
           // One unreadable/corrupt entry must not hide the rest of the store.
         }
       }
     }
     meetings.sort((left, right) => (
-      right.date.localeCompare(left.date) || right.filename.localeCompare(left.filename)
+      right.date.localeCompare(left.date) || (right.time ?? '').localeCompare(left.time ?? '') || right.filename.localeCompare(left.filename)
     ))
     return meetings.slice(0, limit)
   }
