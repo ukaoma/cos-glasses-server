@@ -58,6 +58,21 @@ describe('one-shot transcription availability contract', () => {
     expect(await response.json()).toEqual({ desktopDictationVersion: 1, desktopDictationVersions: [1, 2], requiredEngines: ['parakeet-ultra', 'local'], localOnly: true, dictionary: 'cos', benchmark: 1 })
   })
 
+  it('old helper contract (COS Control 0.5.316 main.swift:15397) is byte for byte: version exactly 1, localOnly true, Parakeet answers parakeet-ultra', async () => {
+    const raw = await (await fetch(`${base}/api/transcribe/capabilities`)).text()
+    const body = JSON.parse(raw)
+    // The old helper reads these with `as? Int == 1` and `as? Bool == true`.
+    expect(Number.isInteger(body.desktopDictationVersion) && body.desktopDictationVersion === 1).toBe(true)
+    expect(raw).toContain('"desktopDictationVersion":1,')
+    expect(body.localOnly).toBe(true)
+    expect(raw).toContain('"localOnly":true')
+    expect(body.requiredEngines).toContain('parakeet-ultra')
+    transcribeAudioBuffer.mockResolvedValueOnce({ text: 'words', engine: 'parakeet-ultra', backend: 'parakeet-ultra', elapsedMs: 1, audioBytes: 3200 })
+    const ok = await (await fetch(`${base}/api/transcribe?mode=fast&requiredEngine=parakeet-ultra`, { method: 'POST', body: Buffer.alloc(3200, 1) })).json()
+    expect(ok.engine).toBe('parakeet-ultra')
+    expect(ok.text).toBe('words')
+  })
+
   it('pins local Parakeet for the desktop caller without changing legacy mode', async () => {
     transcribeAudioBuffer.mockResolvedValueOnce({ text: 'desktop words', engine: 'parakeet-ultra', elapsedMs: 10, audioBytes: 3200 })
     const response = await fetch(`${base}/api/transcribe?requiredEngine=parakeet-ultra`, { method: 'POST', body: Buffer.alloc(3200, 1) })

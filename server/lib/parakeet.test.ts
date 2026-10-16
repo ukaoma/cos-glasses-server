@@ -373,10 +373,9 @@ describe('6.74.0: install from COS Control signed CLI, disk precheck, error code
   const signedBytes = Buffer.from('fluidaudiocli 0.17.4 built and signed by COS Control')
   /** codesign and version probes for a Developer ID build; `team` and `bad` vary the verdict. */
   const trustDeps = (over: { team?: string; bad?: Set<string> } = {}) => ({
-    display: vi.fn(async (p: string) => ({ code: 0, output: `Identifier=com.gotcos.fluidaudiocli\nInfo.plist entries=2\nTeamIdentifier=${over.team ?? COS_TEAM}\n${over.bad?.has(p) ? 'Signature=adhoc\n' : ''}` })),
+    display: vi.fn(async (p: string) => ({ code: 0, output: `Identifier=com.gotcos.control.fluidaudiocli\nInfo.plist entries=2\nTeamIdentifier=${over.team ?? COS_TEAM}\n${over.bad?.has(p) ? 'Signature=adhoc\n' : ''}` })),
     verify: vi.fn(async () => ({ code: 0, output: '' })),
-    versionOutput: vi.fn(async () => ''),
-    embeddedPlist: vi.fn(() => '<key>CFBundleShortVersionString</key><string>0.17.4</string>'),
+    embeddedPlist: vi.fn(() => '<key>CFBundleIdentifier</key><string>com.gotcos.control.fluidaudiocli</string><key>CFBundleShortVersionString</key><string>0.17.4</string>'),
     sha256: async (p: string) => sha(readFileSync(p)),
   })
   function control(): string {
@@ -444,7 +443,7 @@ describe('6.74.0: install from COS Control signed CLI, disk precheck, error code
     const src = seedSources(dir)
     const helper = control()
     const d = trustDeps()
-    d.display.mockImplementation(async (p: string) => ({ code: 0, output: `Info.plist entries=2\nTeamIdentifier=${COS_TEAM}\n${p.includes('.staging-') ? 'Signature=adhoc\n' : ''}` }))
+    d.display.mockImplementation(async (p: string) => ({ code: 0, output: `Identifier=com.gotcos.control.fluidaudiocli\nInfo.plist entries=2\nTeamIdentifier=${COS_TEAM}\n${p.includes('.staging-') ? 'Signature=adhoc\n' : ''}` }))
     await expect(P.installParakeet({ localSources: [src.models], cliCandidates: [], controlCliCandidates: [helper], trustDeps: d, fetchImpl: noNetwork, freeBytes: plenty }))
       .rejects.toMatchObject({ code: 'cli_untrusted', message: expect.stringMatching(/changed while it was being copied/) })
   })

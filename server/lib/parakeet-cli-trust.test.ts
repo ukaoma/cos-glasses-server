@@ -4,13 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  checkDeveloperIdCli, COS_TEAM_ID, parseCodesignDisplay, plistVersion, readEmbeddedInfoPlist, TRUST_REQUIREMENT,
+  checkDeveloperIdCli, CLI_IDENTIFIER, COS_TEAM_ID, parseCodesignDisplay, plistIdentifier, plistVersion, readEmbeddedInfoPlist, TRUST_REQUIREMENT,
   versionMatches, isCliPathShape, type CliTrustDeps,
 } from './parakeet-cli-trust.js'
 
-const PLIST = (v: string) => `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.gotcos.fluidaudiocli</string><key>CFBundleShortVersionString</key><string>${v}</string></dict></plist>`
+const PLIST = (v: string, id = 'com.gotcos.control.fluidaudiocli') => `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleShortVersionString</key><string>${v}</string></dict></plist>`
 // Real `codesign -dv` shapes (2026-10-16): a Developer ID build with a bound plist, an ad hoc build.
-const DEV_ID = `Executable=/x/fluidaudiocli\nIdentifier=com.gotcos.fluidaudiocli\nFormat=Mach-O thin (arm64)\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+7 location=embedded\nSignature size=9000\nAuthority=Developer ID Application: COS (${COS_TEAM_ID})\nInfo.plist entries=2\nTeamIdentifier=${COS_TEAM_ID}\nSealed Resources=none\n`
+const DEV_ID = `Executable=/x/fluidaudiocli\nIdentifier=com.gotcos.control.fluidaudiocli\nFormat=Mach-O thin (arm64)\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+7 location=embedded\nSignature size=9000\nAuthority=Developer ID Application: COS (${COS_TEAM_ID})\nInfo.plist entries=2\nTeamIdentifier=${COS_TEAM_ID}\nSealed Resources=none\n`
 const ADHOC = 'Executable=/x/fluidaudiocli\nIdentifier=fluidaudiocli\nFormat=Mach-O thin (arm64)\nCodeDirectory v=20400 size=170982 flags=0x20002(adhoc,linker-signed) hashes=5340+0 location=embedded\nSignature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\n'
 
 let dir = '', cli = ''
@@ -21,7 +21,6 @@ function deps(over: Partial<CliTrustDeps> = {}): CliTrustDeps & { [k: string]: a
   return {
     display: vi.fn(async () => ({ code: 0, output: DEV_ID })),
     verify: vi.fn(async () => ({ code: 0, output: '' })),
-    versionOutput: vi.fn(async () => ''),
     embeddedPlist: vi.fn(() => PLIST('0.17.4')),
     sha256: vi.fn(async () => 'a'.repeat(64)),
     ...over,
@@ -29,17 +28,31 @@ function deps(over: Partial<CliTrustDeps> = {}): CliTrustDeps & { [k: string]: a
 }
 
 describe('checkDeveloperIdCli', () => {
-  it('trusts a COS Developer ID build whose bound Info.plist says 0.17.4, and never runs it', async () => {
+  it('the agreed identity string is exact', () => {
+    expect(CLI_IDENTIFIER).toBe('com.gotcos.control.fluidaudiocli')
+    expect(COS_TEAM_ID).toBe('NV3X46LLCR')
+  })
+
+  it('trusts a COS Developer ID build: strict, team, identifier and the bound plist version, and never runs it', async () => {
     const d = deps()
     expect(await checkDeveloperIdCli(cli, d)).toEqual({ trusted: true, trust: 'developer-id', path: cli, teamId: COS_TEAM_ID, version: '0.17.4', versionSource: 'info-plist', sha256: 'a'.repeat(64), size: 12 })
     expect(d.verify).toHaveBeenCalledWith(cli)
     expect(d.verify).toHaveBeenCalledWith(cli, TRUST_REQUIREMENT)
-    expect(d.versionOutput).not.toHaveBeenCalled()
+    expect(d.embeddedPlist).toHaveBeenCalledWith(cli)
   })
 
-  it('accepts --version output when no Info.plist is bound', async () => {
-    const d = deps({ display: vi.fn(async () => ({ code: 0, output: DEV_ID.replace('Info.plist entries=2', 'Info.plist=not bound') })), versionOutput: vi.fn(async () => 'fluidaudiocli 0.17.4\n') })
-    expect(await checkDeveloperIdCli(cli, d)).toMatchObject({ trusted: true, versionSource: 'version-output' })
+  it('refuses another codesign identifier, including the earlier draft name', async () => {
+    for (const id of ['com.gotcos.fluidaudiocli', 'fluidaudiocli', 'com.gotcos.control.fluidaudiocli.x']) {
+      const d = deps({ display: vi.fn(async () => ({ code: 0, output: DEV_ID.replace('Identifier=com.gotcos.control.fluidaudiocli', `Identifier=${id}`) })) })
+      expect(await checkDeveloperIdCli(cli, d), id).toMatchObject({ trusted: false, reason: 'wrong_identifier' })
+    }
+  })
+
+  it('refuses an embedded plist whose CFBundleIdentifier differs', async () => {
+    for (const id of ['com.gotcos.fluidaudiocli', 'com.example.fluidaudiocli']) {
+      expect(await checkDeveloperIdCli(cli, deps({ embeddedPlist: vi.fn(() => PLIST('0.17.4', id)) })), id).toMatchObject({ trusted: false, reason: 'wrong_identifier' })
+    }
+    expect(await checkDeveloperIdCli(cli, deps({ embeddedPlist: vi.fn(() => '<key>CFBundleShortVersionString</key><string>0.17.4</string>') }))).toMatchObject({ trusted: false, reason: 'wrong_identifier' })
   })
 
   it('refuses another team', async () => {
@@ -63,12 +76,14 @@ describe('checkDeveloperIdCli', () => {
     expect(await checkDeveloperIdCli(cli, d)).toMatchObject({ trusted: false, reason: 'signature_invalid', detail: expect.stringMatching(/invalid signature/) })
   })
 
-  it('refuses another version; a bound plist naming one means the binary is never run', async () => {
-    const other = deps({ embeddedPlist: vi.fn(() => PLIST('0.5.316')), versionOutput: vi.fn(async () => '0.17.4') })
-    expect(await checkDeveloperIdCli(cli, other)).toMatchObject({ trusted: false, reason: 'wrong_version' })
-    expect(other.versionOutput).not.toHaveBeenCalled()
-    const unbound = deps({ display: vi.fn(async () => ({ code: 0, output: DEV_ID.replace('Info.plist entries=2', 'Info.plist=not bound') })), versionOutput: vi.fn(async () => '[ERROR] Unknown command: --version') })
+  it('refuses another version, and a plist the signature does not bind', async () => {
+    for (const v of ['0.5.316', '0.17.40', '0.17.3']) {
+      expect(await checkDeveloperIdCli(cli, deps({ embeddedPlist: vi.fn(() => PLIST(v)) })), v).toMatchObject({ trusted: false, reason: 'wrong_version' })
+    }
+    const unbound = deps({ display: vi.fn(async () => ({ code: 0, output: DEV_ID.replace('Info.plist entries=2', 'Info.plist=not bound') })) })
     expect(await checkDeveloperIdCli(cli, unbound)).toMatchObject({ trusted: false, reason: 'wrong_version' })
+    expect(unbound.embeddedPlist).not.toHaveBeenCalled()
+    expect(await checkDeveloperIdCli(cli, deps({ embeddedPlist: vi.fn(() => null) }))).toMatchObject({ trusted: false, reason: 'wrong_version' })
   })
 
   it('a missing file is missing, before any codesign call', async () => {
@@ -83,14 +98,15 @@ describe('helpers', () => {
     for (const ok of ['0.17.4', 'v0.17.4', 'fluidaudiocli 0.17.4\n', 'FluidAudio 0.17.4 (abc)']) expect(versionMatches(ok), ok).toBe(true)
     for (const no of ['0.17.40', '10.17.4', '0.17.4.1', '0.17.3', '', '1.0.17.4']) expect(versionMatches(no), no).toBe(false)
   })
-  it('plistVersion prefers the short version string', () => {
+  it('plist fields', () => {
     expect(plistVersion(PLIST('0.17.4'))).toBe('0.17.4')
-    expect(plistVersion('<key>CFBundleVersion</key><string>7</string>')).toBe('7')
+    expect(plistIdentifier(PLIST('0.17.4'))).toBe('com.gotcos.control.fluidaudiocli')
+    expect(plistVersion('<key>CFBundleVersion</key><string>7</string>')).toBeNull()
     expect(plistVersion('<dict/>')).toBeNull()
   })
   it('parseCodesignDisplay', () => {
-    expect(parseCodesignDisplay(DEV_ID)).toEqual({ teamId: COS_TEAM_ID, adhoc: false, unsigned: false, plistBound: true })
-    expect(parseCodesignDisplay(ADHOC)).toEqual({ teamId: null, adhoc: true, unsigned: false, plistBound: false })
+    expect(parseCodesignDisplay(DEV_ID)).toEqual({ teamId: COS_TEAM_ID, identifier: 'com.gotcos.control.fluidaudiocli', adhoc: false, unsigned: false, plistBound: true })
+    expect(parseCodesignDisplay(ADHOC)).toEqual({ teamId: null, identifier: 'fluidaudiocli', adhoc: true, unsigned: false, plistBound: false })
   })
   it('only an absolute path to a file named fluidaudiocli is ever checked', () => {
     expect(isCliPathShape('/Applications/COS Control.app/Contents/Helpers/fluidaudiocli')).toBe(true)

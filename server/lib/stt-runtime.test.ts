@@ -219,10 +219,9 @@ describe('Parakeet install offer', () => {
 
 describe('6.74.0: Parakeet install offer with COS Control signed CLI', () => {
   const fake = (team: string) => ({
-    display: async () => ({ code: 0, output: `Info.plist entries=2\nTeamIdentifier=${team}\n` }),
+    display: async () => ({ code: 0, output: `Identifier=com.gotcos.control.fluidaudiocli\nInfo.plist entries=2\nTeamIdentifier=${team}\n` }),
     verify: async () => ({ code: 0, output: '' }),
-    versionOutput: async () => '',
-    embeddedPlist: () => '<key>CFBundleShortVersionString</key><string>0.17.4</string>',
+    embeddedPlist: () => '<key>CFBundleIdentifier</key><string>com.gotcos.control.fluidaudiocli</string><key>CFBundleShortVersionString</key><string>0.17.4</string>',
     sha256: async () => 'b'.repeat(64),
   })
   it.runIf(process.platform === 'darwin' && process.arch === 'arm64')('is installable once the signed CLI is verified, and the note names the size and that Whisper keeps working', async () => {

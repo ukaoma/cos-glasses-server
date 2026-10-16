@@ -5,21 +5,22 @@
 // pin (parakeet-manifest.ts) because the signature is part of the bytes, so it is trusted
 // on three proofs instead, all required:
 //
-//   1. `codesign --verify --strict` passes, against the requirement that the leaf
-//      certificate chains to Apple and names the COS team (a self-signed certificate
-//      can claim any team name; `anchor apple generic` is what rules that out).
+//   1. `codesign --verify --strict` passes, and passes again against the requirement
+//      that the leaf certificate chains to Apple and names the COS team (a self-signed
+//      certificate can claim any team name; `anchor apple generic` rules that out).
 //   2. The TeamIdentifier codesign reports is COS_TEAM_ID.
-//   3. Its version is 0.17.4: from an Info.plist embedded in the binary and bound by the
-//      signature (`Info.plist entries=` in codesign's display), or from `--version`
-//      output. The upstream 0.17.4 CLI has no version command, so the embedded
-//      Info.plist is the expected source.
+//   3. The codesign Identifier, and the CFBundleIdentifier of the Info.plist embedded in
+//      the binary, are both CLI_IDENTIFIER.
+//   4. That embedded Info.plist is bound by the signature (`Info.plist entries=`) and its
+//      CFBundleShortVersionString is 0.17.4. The upstream 0.17.4 CLI has no version
+//      command, so the binary is never run to ask.
 //
 // The hand-placed SHA-256 pinned copy (parakeet.ts isPinnedCli) is unchanged.
 
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { constants as fsConstants, createReadStream, fstatSync, mkdtempSync, openSync, readSync, closeSync, rmSync, statSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { constants as fsConstants, createReadStream, fstatSync, openSync, readSync, closeSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Transform } from 'node:stream'
@@ -29,11 +30,13 @@ import { PARAKEET_CLI } from './parakeet-manifest.js'
 export const COS_TEAM_ID = 'NV3X46LLCR'
 export const CODESIGN = '/usr/bin/codesign'
 export const TRUST_REQUIREMENT = `=anchor apple generic and certificate leaf[subject.OU] = "${COS_TEAM_ID}"`
+/** The codesign identifier and embedded CFBundleIdentifier of COS Control's build (agreed with Control). */
+export const CLI_IDENTIFIER = 'com.gotcos.control.fluidaudiocli'
 
-export type CliTrustReason = 'missing' | 'unsigned' | 'signature_invalid' | 'wrong_team' | 'wrong_version'
+export type CliTrustReason = 'missing' | 'unsigned' | 'signature_invalid' | 'wrong_team' | 'wrong_identifier' | 'wrong_version'
 
 export type CliTrust =
-  | { trusted: true; trust: 'developer-id'; path: string; teamId: string; version: string; versionSource: 'info-plist' | 'version-output'; sha256: string; size: number }
+  | { trusted: true; trust: 'developer-id'; path: string; teamId: string; version: string; versionSource: 'info-plist'; sha256: string; size: number }
   | { trusted: false; path: string; reason: CliTrustReason; detail: string }
 
 export interface CliTrustDeps {
@@ -41,8 +44,6 @@ export interface CliTrustDeps {
   display: (path: string) => Promise<{ code: number; output: string }>
   /** codesign --verify --strict [-R requirement]. */
   verify: (path: string, requirement?: string) => Promise<{ code: number; output: string }>
-  /** `<cli> --version`, network denied, bounded. Output text, or '' on any failure. */
-  versionOutput: (path: string) => Promise<string>
   /** The Info.plist embedded in the Mach-O, or null. */
   embeddedPlist: (path: string) => string | null
   sha256: (path: string) => Promise<string>
@@ -63,25 +64,9 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest('hex')
 }
 
-const VERSION_PROFILE = (work: string) =>
-  `(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (subpath "${work.replace(/"/g, '\\"')}") (literal "/dev/null"))`
-
 export const defaultCliTrustDeps: CliTrustDeps = {
   display: path => run(CODESIGN, ['-dv', path], 10_000),
   verify: (path, requirement) => run(CODESIGN, ['--verify', '--strict', ...(requirement ? ['-R', requirement] : []), path], 15_000),
-  versionOutput: async path => {
-    // Only reached after the signature and team checks pass. Still sandboxed: no
-    // network, writes only to a scratch directory, its own HOME, 5 s.
-    const work = mkdtempSync(join(tmpdir(), 'cos-cli-version-'))
-    try {
-      const out = await new Promise<string>(resolve => {
-        execFile('/usr/bin/sandbox-exec', ['-p', VERSION_PROFILE(work), path, '--version'],
-          { timeout: 5_000, maxBuffer: 64 * 1024, cwd: work, env: { HOME: work, TMPDIR: work, PATH: '/usr/bin:/bin' } },
-          (_error, stdout, stderr) => resolve(`${stdout ?? ''}${stderr ?? ''}`))
-      })
-      return out
-    } finally { rmSync(work, { recursive: true, force: true }) }
-  },
   embeddedPlist: path => readEmbeddedInfoPlist(path),
   sha256: sha256File,
 }
@@ -155,14 +140,13 @@ export function readEmbeddedInfoPlist(path: string): string | null {
   } catch { return null } finally { closeSync(fd) }
 }
 
-/** CFBundleShortVersionString (else CFBundleVersion) from an XML plist. */
-export function plistVersion(xml: string): string | null {
-  for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
-    const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]{1,64})</string>`).exec(xml)
-    if (m) return m[1].trim()
-  }
-  return null
+function plistString(xml: string, key: string): string | null {
+  const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]{1,128})</string>`).exec(xml)
+  return m ? m[1].trim() : null
 }
+/** CFBundleShortVersionString from an XML plist. */
+export function plistVersion(xml: string): string | null { return plistString(xml, 'CFBundleShortVersionString') }
+export function plistIdentifier(xml: string): string | null { return plistString(xml, 'CFBundleIdentifier') }
 
 /** 0.17.4 as a whole token, so 0.17.40 or 10.17.4 never pass. */
 export function versionMatches(text: string, want: string = PARAKEET_CLI.version): boolean {
@@ -170,10 +154,11 @@ export function versionMatches(text: string, want: string = PARAKEET_CLI.version
   return new RegExp(`(^|[^0-9.])v?${escaped}(?![0-9]|\\.[0-9])`).test(text)
 }
 
-export function parseCodesignDisplay(output: string): { teamId: string | null; adhoc: boolean; unsigned: boolean; plistBound: boolean } {
+export function parseCodesignDisplay(output: string): { teamId: string | null; identifier: string | null; adhoc: boolean; unsigned: boolean; plistBound: boolean } {
   const team = /^TeamIdentifier=(.+)$/m.exec(output)?.[1]?.trim() ?? null
   return {
     teamId: team && team !== 'not set' ? team : null,
+    identifier: /^Identifier=(.+)$/m.exec(output)?.[1]?.trim() ?? null,
     adhoc: /^Signature=adhoc$/m.test(output) || /flags=0x[0-9a-f]*\([^)]*adhoc/.test(output),
     unsigned: /code object is not signed at all/i.test(output),
     plistBound: /^Info\.plist entries=\d+/m.test(output),
@@ -195,24 +180,18 @@ export async function checkDeveloperIdCli(path: string, deps: CliTrustDeps = def
     if (d.teamId !== COS_TEAM_ID) return no('wrong_team', `signed by team ${d.teamId}`)
     const anchored = await deps.verify(path, TRUST_REQUIREMENT)
     if (anchored.code !== 0) return no('wrong_team', 'the signature does not chain to Apple for the COS team')
-    let version: string | null = null
-    let versionSource: 'info-plist' | 'version-output' = 'info-plist'
-    let plistNamed: string | null = null
-    if (d.plistBound) {
-      const plist = deps.embeddedPlist(path)
-      plistNamed = plist ? plistVersion(plist) : null
-      if (plistNamed && versionMatches(plistNamed)) version = PARAKEET_CLI.version
-    }
-    // A bound Info.plist that names another version is the answer: never run that binary.
-    if (!version && !plistNamed) {
-      const out = await deps.versionOutput(path).catch(() => '')
-      if (versionMatches(out)) { version = PARAKEET_CLI.version; versionSource = 'version-output' }
-    }
-    if (!version) return no('wrong_version', `not FluidAudio ${PARAKEET_CLI.version}`)
+    if (d.identifier !== CLI_IDENTIFIER) return no('wrong_identifier', `signed as ${d.identifier ?? 'no identifier'}`)
+    // Only a plist the signature binds counts; the binary is never run to ask its version.
+    const plist = d.plistBound ? deps.embeddedPlist(path) : null
+    if (!plist) return no('wrong_version', 'no signed Info.plist in the speech tool')
+    const bundleId = plistIdentifier(plist)
+    if (bundleId !== CLI_IDENTIFIER) return no('wrong_identifier', `its Info.plist names ${bundleId ?? 'no identifier'}`)
+    const named = plistVersion(plist)
+    if (!named || !versionMatches(named) || named.replace(/^v/, '') !== PARAKEET_CLI.version) return no('wrong_version', `version ${named ?? 'unknown'}, not FluidAudio ${PARAKEET_CLI.version}`)
     const sha256 = await deps.sha256(path)
     // The bytes hashed must be the bytes checked.
     if (statSync(path).size !== size) return no('signature_invalid', 'the file changed while it was checked')
-    return { trusted: true, trust: 'developer-id', path, teamId: COS_TEAM_ID, version, versionSource, sha256, size }
+    return { trusted: true, trust: 'developer-id', path, teamId: COS_TEAM_ID, version: PARAKEET_CLI.version, versionSource: 'info-plist', sha256, size }
   } catch (error) {
     return no('signature_invalid', error instanceof Error ? error.message.slice(0, 200) : String(error))
   }
