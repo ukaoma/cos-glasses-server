@@ -367,6 +367,39 @@ describe('meetings list with imports and derived records', () => {
     expect(synced.json.days).toEqual([{ date: DATE, count: 2 }])
   })
 
+  // 6.73.14 (Miles 2026-10-15): a saved Mac recording never reaches operations (routes/meeting.ts skips the pipeline
+  // for MAC_CAPTURE_ID), so a pipeline Mac listed only its operations tree and the recording never appeared: Control's
+  // live hand-off said "Saved meeting not found yet" forever. Its store row now lists, and counts, beside operations.
+  it('lists a saved Mac recording on a pipeline Mac, with its day dot, and still not a G2 store copy', async () => {
+    const h = setup({ layout: 'multi_domain', pipeline: true })
+    const macSession = 'mac_50609b33-32bb-4ad3-8b3d-9912cc0bcb21'
+    mkdirSync(h.storeMonthDir, { recursive: true })
+    writeFileSync(join(h.storeMonthDir, `${DATE}_Mac_recording_15370d86.md`), meetingMarkdown('Mac recording', 'personal', 'Mac System Audio'))
+    writeFileSync(join(h.storeMonthDir, `${DATE}_Mac_recording_15370d86.g2-chunks.json`),
+      JSON.stringify({ sessionId: macSession, sourceType: 'mac_system_audio', speakers: ['Ext'], durationMs: 1_511_798, chunks: [] }))
+    // A G2 capture still in the store is the pipeline's to file: never listed from the store on a pipeline Mac.
+    writeCapture(h.storeMonthDir, `${DATE}_Launch_Review_G2.md`, SESSION, 'Launch review (G2)')
+    writeFileSync(join(h.operationsMonthDir, `${DATE}_Ops_Review.md`), meetingMarkdown('Ops review', 'personal', 'Granola'))
+
+    const api = await serve(h.store, h.library)
+    // By month: this file's fixture dates carry a time (`DATE 14:05`), which a `day=` filter never matches.
+    const list = await api(`/api/meetings?limit=50&domain=all&month=${MONTH}`)
+    expect(list.json.source).toBe('cos_operations')
+    const mac = list.json.meetings.filter((row: any) => row.sessionId === macSession)
+    expect(mac).toHaveLength(1)
+    expect(mac[0]).toMatchObject({ librarySource: 'standalone_recordings', recordId: `standalone:${macSession}` })
+    expect(list.json.meetings.some((row: any) => row.sessionId === SESSION)).toBe(false)
+    expect(list.json.meetings).toHaveLength(2)
+    expect((await api(`/api/meetings?month=${MONTH}`)).json.days).toEqual([{ date: DATE, count: 2 }])
+    // Another domain neither lists nor counts it.
+    expect((await api(`/api/meetings?domain=quilt&month=${MONTH}`)).json.meetings).toHaveLength(0)
+    expect((await api(`/api/meetings?domain=quilt&month=${MONTH}`)).json.days).toEqual([])
+    // An operations copy of the same session wins, once.
+    writeCapture(h.operationsMonthDir, `${DATE}_Mac_recording.md`, macSession, 'Mac recording')
+    const synced = await api(`/api/meetings?limit=50&domain=all&month=${MONTH}`)
+    expect(synced.json.meetings.filter((row: any) => row.sessionId === macSession).map((row: any) => row.librarySource)).toEqual(['cos_operations'])
+  })
+
   it('reports mixed_library and a read-only import row when nothing is merged', async () => {
     const h = setup({ layout: 'standalone' })
     h.library.writeRecord({

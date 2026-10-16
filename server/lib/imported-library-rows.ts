@@ -49,6 +49,7 @@ import {
   importRecordId,
 } from './imported-meeting-library.js'
 import { getMeetingStore, type MeetingMeta, type MeetingStore } from './meeting-store.js'
+import { MAC_CAPTURE_ID } from './mac-recording.js'
 
 /** The merged-scribe markers live with the scribe reader; re-exported for callers. */
 export {
@@ -532,6 +533,22 @@ function operationsMergedSessions(
 }
 
 /**
+ * 6.73.14: day counts for the store's Mac recordings. A Mac capture never reaches the operations tree, so on a pipeline
+ * Mac these rows are counted nowhere else. Read through `list()` (capped at the scoped list limit per month; a month
+ * with more Mac recordings than that undercounts its dots, never overcounts).
+ */
+export function macStoreDayCounts(store: MeetingStore, month: string, domain: string): Array<{ date: string; count: number }> {
+  const counts = new Map<string, number>()
+  for (const row of store.list({ month, domain, limit: Number.MAX_SAFE_INTEGER })) {
+    // The day from the filename, as the store's own day dots read it (MeetingStore.listDayCounts).
+    const date = /^(\d{4}-\d{2}-\d{2})_/.exec(row.filename)?.[1]
+    if (!row.sessionId || !MAC_CAPTURE_ID.test(row.sessionId) || !date) continue
+    counts.set(date, (counts.get(date) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, count]) => ({ date, count }))
+}
+
+/**
  * Day counts for one month across every source the list shows, with supersession
  * applied. The list and `probeMeetings` share it so a dot and a row can never
  * disagree about how many meetings a day holds.
@@ -571,6 +588,8 @@ export function supersededDayCounts(
     return mergeDayCounts([
       listCosOperationsMeetingDays(month, domain),
       sessionDropCounts(directories, operationsMergedSessions(directories, options.declaredSessions), options.recordingsRoot),
+      // 6.73.14: the store's Mac recordings, which the list now shows (routes/meetings.ts withMacStoreRows).
+      macStoreDayCounts(store, month, domain),
     ])
   }
 

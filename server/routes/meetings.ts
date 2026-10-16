@@ -18,6 +18,7 @@ import { meetingListLimit } from '../lib/meeting-store.js'
 import { searchMeetingLibrary } from '../lib/meeting-library-search.js'
 import { meetingContextFields, meetingContextKeys, readOnlyContext } from '../lib/meeting-context-keys.js'
 import { g2RecordingsReachOperations } from '../lib/g2-ops-handoff.js'
+import { MAC_CAPTURE_ID } from '../lib/mac-recording.js'
 import {
   type ImportedMeetingLibrary,
   IMPORTED_DOMAIN,
@@ -70,6 +71,23 @@ export function withMeetingContext<T extends MeetingMeta>(meeting: T, source: Me
     return { ...meeting, ...meetingContextFields(meetingContextKeys({ g2SessionId: meeting.sessionId, sourceType: meeting.sourceType })) }
   }
   return { ...meeting, ...readOnlyContext() }
+}
+
+/**
+ * Operations rows plus the store's Mac recordings (6.73.14), newest first, capped at `limit`. Only Mac rows are added:
+ * a G2 store row is the pipeline's to file, and its operations copy is the row. Operations rows are never deduplicated
+ * against each other here, so the operations list keeps exactly the rows it had.
+ */
+export function withMacStoreRows(operations: MeetingMeta[], storeRows: MeetingMeta[], limit: number): MeetingMeta[] {
+  const sessions = new Set(operations.map(row => row.sessionId).filter(Boolean))
+  const mac = storeRows
+    // Keyed like the save route that skips the pipeline (MAC_CAPTURE_ID); list rows carry no sourceType.
+    .filter(row => typeof row.sessionId === 'string' && MAC_CAPTURE_ID.test(row.sessionId) && !sessions.has(row.sessionId))
+    .map(withStandaloneIdentity)
+  if (mac.length === 0) return operations
+  return [...operations, ...mac]
+    .sort((a, b) => `${b.date}T${b.time || '00:00'}`.localeCompare(`${a.date}T${a.time || '00:00'}`) || b.filename.localeCompare(a.filename))
+    .slice(0, Math.max(limit, 1))
 }
 
 function mergeMeetingSources(groups: MeetingMeta[][], limit: number, max = 50): MeetingMeta[] {
@@ -312,7 +330,11 @@ export function createMeetingsRouter(
             day: filters.day,
           })
           const declaredSessions = supersededFromRows(rows).g2Sessions
-          const meetings = dropSupersededRows(rows, { g2Sessions: declaredSessions, importRecordIds: new Set<string>(), isEmpty: declaredSessions.size === 0 })
+          const operationsMeetings = dropSupersededRows(rows, { g2Sessions: declaredSessions, importRecordIds: new Set<string>(), isEmpty: declaredSessions.size === 0 })
+          // 6.73.14 (Miles 2026-10-15): routes/meeting.ts never hands a Mac recording to the pipeline (MAC_CAPTURE_ID),
+          // so on a pipeline Mac it lives only in this store and never appeared in Meetings; Control's hand-off read
+          // "Saved meeting not found yet" forever. The store's Mac rows join the operations rows here.
+          const meetings = withMacStoreRows(operationsMeetings, store.list(listOptions), limit)
           // ONLY WHEN THE LIST SAW THE WHOLE MONTH. The row list is capped, and a capped
           // list knows about fewer merged scribes than the month holds, so handing its
           // sessions to an UNCAPPED day count would subtract too little and put the dot
