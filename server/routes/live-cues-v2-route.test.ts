@@ -33,14 +33,17 @@ describe('live cues v2 routes', () => {
   })
 
   it('with v2 on: start, status, pause, feedback, stop, then a re-start is refused for the ended meeting', async () => {
-    process.env.COS_LIVE_CUES = '1'; process.env.COS_LIVE_CUES_V2 = '1'; delete process.env.ANTHROPIC_API_KEY
+    delete process.env.COS_LIVE_CUES; process.env.COS_LIVE_CUES_V2 = '1'; delete process.env.ANTHROPIC_API_KEY   // v2 needs only its own flag
     const start = await post('/live-cues/start', { sessionId: 'meeting_b' })
     expect(start.status).toBe(200)
-    expect(await start.json()).toMatchObject({ armed: true, sessionId: 'meeting_b', protocol: 2, cuesGenerated: 0, paused: false })
+    expect(await start.json()).toMatchObject({ armed: true, sessionId: 'meeting_b', protocol: 2, cuesGenerated: 0, paused: false, pauseSeq: 0 })
     expect(await (await fetch(base + '/live-cues/status?sessionId=meeting_b')).json())
-      .toMatchObject({ protocol: 2, enabled: true, session: { sessionId: 'meeting_b', paused: false, ended: false, cues: [] } })
+      .toMatchObject({ protocol: 2, enabled: true, session: { sessionId: 'meeting_b', state: 'active', paused: false, ended: false, cues: [] } })
     expect((await post('/live-cues/pause', { sessionId: 'meeting_b' })).status).toBe(400)
-    expect(await (await post('/live-cues/pause', { sessionId: 'meeting_b', paused: true })).json()).toEqual({ ok: true, paused: true })
+    expect((await post('/live-cues/pause', { sessionId: 'meeting_b', paused: true, seq: 0 })).status).toBe(400)
+    expect(await (await post('/live-cues/pause', { sessionId: 'meeting_b', paused: true, seq: 2 })).json()).toEqual({ ok: true, applied: true, paused: true, pauseSeq: 2 })
+    expect(await (await post('/live-cues/pause', { sessionId: 'meeting_b', paused: false, seq: 1 })).json()).toEqual({ ok: true, applied: false, paused: true, pauseSeq: 2 })
+    expect(await (await fetch(base + '/live-cues/status?sessionId=meeting_b')).json()).toMatchObject({ session: { state: 'paused', paused: true, pauseSeq: 2 } })
     expect((await post('/live-cues/feedback', { sessionId: 'meeting_b', cueId: 'x', vote: 'up' })).status).toBe(400)
     expect((await post('/live-cues/feedback', { sessionId: 'meeting_b', cueId: '0f8fad5b-d9cb-469f-a165-70867728950e', vote: 'sideways' })).status).toBe(400)
     expect(await (await post('/live-cues/feedback', { sessionId: 'meeting_b', cueId: '0f8fad5b-d9cb-469f-a165-70867728950e', vote: 'down', reason: 'wrong client' })).json())

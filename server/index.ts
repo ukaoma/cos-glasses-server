@@ -1177,8 +1177,8 @@ async function gracefulShutdown(): Promise<void> {
   // explicitly inside the 8s force-exit budget. Single-flight guarantees at
   // most one tree per session, which fits.
   try {
+    try { shutdownLiveCuesV2() } catch (err) { console.error('[shutdown] live cues v2:', err) }
     await shutdownLiveCues()
-    shutdownLiveCuesV2()
   } catch (error) {
     console.error('[live-cues] shutdown termination failed:', error)
   }

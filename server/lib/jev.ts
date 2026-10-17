@@ -138,12 +138,19 @@ export class JevClient {
       res = await this.fetchImpl(`${JEV_ENDPOINT}/systemone`, { method: 'POST', signal: AbortSignal.any([AbortSignal.timeout(JEV_LIMITS.timeoutMs), ...(options?.signal ? [options.signal] : [])]),
         headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ state, model: JEV_MODEL, questions }) })
-    } catch { return this.fail('jev_unavailable', true) }
+    } catch {
+      // A caller's own cancel (pause, stop, shutdown) is not a Jev failure: it must not grow the breaker.
+      if (options?.signal?.aborted) throw jevCancelled()
+      return this.fail('jev_unavailable', true)
+    }
     if (res.status === 401 || res.status === 403 || res.status === 402) return this.fail('jev_key_rejected', true)
     if (res.status === 400 || res.status === 413 || res.status === 422) return this.fail('jev_request_rejected', false)
     if (!res.ok) return this.fail('jev_unavailable', true)
     let body: { answers?: JevAnswers['answers']; model?: string; usage?: { input_tokens?: number } }
-    try { body = await res.json() } catch { return this.fail('jev_bad_answer', true) }
+    try { body = await res.json() } catch {
+      if (options?.signal?.aborted) throw jevCancelled()
+      return this.fail('jev_bad_answer', true)
+    }
     const used = Number(body.usage?.input_tokens) || estimate  // count something even if usage is missing
     this.record(used)
     if (!body.answers || typeof body.answers !== 'object') return this.fail('jev_bad_answer', true)
@@ -151,6 +158,9 @@ export class JevClient {
     return { answers: body.answers, model: body.model, inputTokens: used }
   }
 }
+
+/** Thrown only when the caller's signal aborted; never counted toward the breaker. */
+export function jevCancelled(): Error { const e = new Error('cancelled'); e.name = 'AbortError'; return e }
 
 let shared: JevClient | null = null
 export function sharedJevClient(): JevClient { return shared ??= new JevClient() }

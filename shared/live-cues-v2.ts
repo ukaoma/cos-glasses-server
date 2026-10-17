@@ -33,12 +33,23 @@ export interface LiveCueV2 {
 /** v1 `coaching_nudge` as the v2 engine emits it for old clients (headline only). */
 export interface LiveCueV1Compat { nudge: string; type: CueKind; priority: 2; cueId: string; sessionId: string; protocol: 2 }
 
+/** `reason` when unavailable: master_flag_off, api_key_in_env, jev_not_configured, claude_not_found, budget_exhausted,
+ *  jev_cap_reached, jev_breaker_open. */
 export interface LiveCuesV2Capability { available: boolean; reason?: string; protocol: 2; model: string }
+
+/** Why cues are not coming for this meeting. `active` means evaluations are running normally (silence is a choice). */
+export type LiveCuesV2SessionState = 'active' | 'paused' | 'ended' | 'stopped'
+export type LiveCuesV2StopReason = 'breaker_open' | 'meeting_cap' | 'budget_exhausted' | 'jev_cap_reached' | 'jev_breaker_open' | 'jev_not_configured'
 
 export interface LiveCuesV2SessionStatus {
   sessionId: string
+  state: LiveCuesV2SessionState
+  /** Present when state is `stopped`. */
+  reason?: LiveCuesV2StopReason
   paused: boolean
   ended: boolean
+  /** The pause request sequence the server last applied (0 when none). */
+  pauseSeq: number
   cues: LiveCueV2[]
   evaluations: number
   writerCalls: number
@@ -47,8 +58,9 @@ export interface LiveCuesV2SessionStatus {
 /** GET /api/live-cues/status?sessionId=X (v2 server). Without sessionId the v1 array shape is unchanged. */
 export interface LiveCuesV2StatusResponse { protocol: 2; enabled: boolean; session: LiveCuesV2SessionStatus | null }
 
-/** POST /api/live-cues/pause */
-export interface LiveCuesPauseRequest { sessionId: string; paused: boolean }
+/** POST /api/live-cues/pause -> { ok, paused, applied, pauseSeq }. `seq` is a per-meeting counter from the phone; the server
+ *  ignores a request whose seq is not newer than the last applied one (applied: false) so out-of-order posts cannot win. */
+export interface LiveCuesPauseRequest { sessionId: string; paused: boolean; seq?: number }
 /** POST /api/live-cues/feedback */
 export interface LiveCuesFeedbackRequest { sessionId: string; cueId: string; vote: 'up' | 'down'; reason?: string }
 

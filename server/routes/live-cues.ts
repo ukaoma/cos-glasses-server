@@ -53,7 +53,7 @@ liveCuesRouter.post('/live-cues/stop', (req, res) => {
   const sessionId = typeof (req.body as { sessionId?: unknown })?.sessionId === 'string'
     ? String((req.body as { sessionId: string }).sessionId).trim()
     : ''
-  if (!sessionId) {
+  if (!sessionId || (liveCuesV2Enabled() && !SESSION_ID.test(sessionId))) {
     return res.status(400).json({ error: 'sessionId required', reason: 'missing_session_id' })
   }
   // Shape matches the existing client stop handler: it reads nudgesGenerated
@@ -77,15 +77,16 @@ liveCuesRouter.get('/live-cues/status', (req, res) => {
   })
 })
 
-// POST /live-cues/pause { sessionId, paused } -> { ok, paused }  (v2 only; the phone keeps its own local pause too)
+// POST /live-cues/pause { sessionId, paused, seq? } -> { ok, paused, applied, pauseSeq }  (v2 only; the phone keeps its own local pause)
 liveCuesRouter.post('/live-cues/pause', (req, res) => {
   const sessionId = bodySessionId(req.body)
   const paused = (req.body as { paused?: unknown })?.paused
-  if (!SESSION_ID.test(sessionId) || typeof paused !== 'boolean') {
+  const seq = (req.body as { seq?: unknown })?.seq
+  if (!SESSION_ID.test(sessionId) || typeof paused !== 'boolean' || (seq !== undefined && !(typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0))) {
     return res.status(400).json({ error: 'sessionId and boolean paused required', reason: 'invalid_request' })
   }
   if (!liveCuesV2Enabled()) return res.status(404).json({ error: 'live cues v2 is off', reason: 'v2_disabled' })
-  return res.json(liveCuesV2().setPaused(sessionId, paused))
+  return res.json(liveCuesV2().setPaused(sessionId, paused, seq as number | undefined))
 })
 
 // POST /live-cues/feedback { sessionId, cueId, vote: 'up'|'down', reason? } -> { ok, knownCue }
