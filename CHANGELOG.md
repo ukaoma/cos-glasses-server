@@ -7,7 +7,7 @@
 - How it stops: 10 cues and 20 writer calls per meeting, 300 writer calls per local week (zone stored at first use; charged before the call, never refunded; an unreadable ledger saturates the week), Jev daily cap `COS_LIVE_CUES_JEV_DAILY_TOKENS` (default 600k) on its own ledger `jev-cues-usage.json`, a 3-failure breaker per meeting (cancel, pause, stale and maintenance are not failures), single flight, 20 s cadence, 45 s cooldown. Refuses to run with `ANTHROPIC_API_KEY` in the environment unless `COS_ALLOW_API_FALLBACK=1`.
 - Stop and save tombstone the meeting (7 days) so trailing chunks never re-arm it; a chunk whose session closed during ASR no longer feeds cues.
 - Logs without transcript text: `live-cues-trace.jsonl` (one row per evaluation, plus feedback rows). The number guard is traced, not enforced, unless `COS_LIVE_CUES_V2_NUMBER_GUARD=withhold`.
-- Tests: `live-cues-v2.test.ts` (20, 14 guards mutation-tested and killed) and `live-cues-v2-route.test.ts` (2). Full suite on this branch: 7117 passed, 18 failed in 14 files outside live cues; the 7 stable ones fail identically on untouched main 6e9a028, the rest pass alone. No version bump and no publication implied.
+- Tests: `live-cues-v2.test.ts` (20 tests; 13 guards mutation-tested, each mutation killed) and `live-cues-v2-route.test.ts` (2). Full suite on this branch: 7117 passed, 18 failed in 14 files outside live cues; the 7 stable ones fail identically on untouched main 6e9a028, the rest pass alone. No version bump and no publication implied.
 
 ## 6.74.0 - Mac dictation works for every user, and Parakeet installs from COS Control (local candidate)
 
