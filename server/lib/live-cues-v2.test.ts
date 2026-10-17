@@ -49,6 +49,18 @@ describe('pure helpers', () => {
   })
 })
 
+describe('wire contract', () => {
+  it('isLiveCueV2 accepts an engine cue and rejects a source without an id, an over-long headline, or a third source', async () => {
+    const { isLiveCueV2 } = await import('../../shared/live-cues-v2.js')
+    const cue = { protocol: 2, cueId: 'c1', sessionId: 'm', headline: 'Name an owner', detail: 'Name an owner today.', kind: 'challenge',
+      sources: [{ id: 'M1', date: '2026-10-01', title: 'Q4' }], gate: 0.9, createdAt: 1, model: 'claude-sonnet-5-5' }
+    expect(isLiveCueV2(cue)).toBe(true)
+    expect(isLiveCueV2({ ...cue, sources: [{ date: '2026-10-01', title: 'Q4' }] })).toBe(false)
+    expect(isLiveCueV2({ ...cue, headline: 'x'.repeat(65) })).toBe(false)
+    expect(isLiveCueV2({ ...cue, sources: [cue.sources[0], cue.sources[0], cue.sources[0]] })).toBe(false)
+  })
+})
+
 describe('durable store', () => {
   let dir: string
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cues-v2-store-')) })

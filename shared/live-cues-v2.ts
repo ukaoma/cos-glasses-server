@@ -13,7 +13,7 @@ export type CueKind = 'reinforce' | 'challenge'
 /** A past meeting the cue drew on (0 to 2 per cue). */
 export interface CueSourceRef { id: string; date: string; title: string }
 
-/** SSE named event `coaching_nudge_v2`, and the rows of GET /api/live-cues/status?sessionId=. */
+/** SSE named event `coaching_nudge_v2` (emitted BEFORE its v1 `coaching_nudge` twin), and the rows of GET /api/live-cues/status?sessionId=. */
 export interface LiveCueV2 {
   protocol: 2
   cueId: string
@@ -60,6 +60,6 @@ export function isLiveCueV2(value: unknown): value is LiveCueV2 {
     && typeof v.detail === 'string' && v.detail.length > 0 && v.detail.length <= CUE_DETAIL_MAX
     && (v.kind === 'reinforce' || v.kind === 'challenge')
     && Array.isArray(v.sources) && v.sources.length <= 2
-    && v.sources.every(s => !!s && typeof (s as CueSourceRef).date === 'string' && typeof (s as CueSourceRef).title === 'string')
+    && v.sources.every(s => !!s && typeof (s as CueSourceRef).id === 'string' && typeof (s as CueSourceRef).date === 'string' && typeof (s as CueSourceRef).title === 'string')
     && typeof v.gate === 'number' && typeof v.createdAt === 'number' && typeof v.model === 'string'
 }
