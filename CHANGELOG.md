@@ -1,3 +1,13 @@
+## 6.76.1 - Stop a glasses meeting from COS Control
+
+Pairs with COS Glasses companion 6.10.644 and COS Control 0.5.321. Includes 6.76.0.
+
+- New routes so COS Control can stop a live G2 meeting without saving it from the Mac. A Mac-side `POST /api/meeting/save` on a live G2 session closes it while the phone keeps recording (lens still REC, later chunks 410 `session_closed`, local-first files the tail as a separate recovery meeting), so Control asks the glasses instead.
+- `POST /api/meeting/sessions/:sessionId/stop-request` records a request and emits the display event `meeting_stop_requested` `{sessionId, requestId, source, claimWindowMs}`; answers 202 `pending`, 200 `saved` (with `saveReceipt`) or `finalizing`, 409 `not_live`, 400 `mac_capture` or `invalid_session_id`. A double click reuses the pending request. It never saves or closes the session itself.
+- `POST .../stop-request/:requestId/claim` `{decision: 'accept'}` or `{decision: 'refuse', reason: not_recording | other_session | stop_in_progress}`: the companion (6.10.644) claims before it stops. A claim is accepted only within 10 s of the request on this server's clock (`STOP_REQUEST_CLAIM_WINDOW_MS`); later, 409 `expired`, so a late phone or a replayed event never stops a meeting Control already reported as not stopped.
+- `GET .../stop-request/:requestId`: Control's poll. `saved` with the receipt once the meeting is saved, else `pending`, `claimed` (`finalizing` while the save runs), `refused` with its reason, or `expired`. Requests are in memory for 10 minutes; a restart forgets them (404 `unknown_request`), which stops nothing.
+- `meeting_stop_requested` is withheld from ticketless display subscribers, like every type but `recording_stop`.
+- Tests: `server/routes/meeting-stop-request.test.ts` (9) over a real router; seven mutants (window ignored, window off by one, a refused request claimable, a not-live session asked, a Mac capture asked, no display event, a request id from another session) each killed.
 ## 6.76.0 - Live COS Ask knows who owns this COS, looks in COS for person questions, and times every phase
 
 - Field report (Queen, 2026-10-17): on her own COS, "Who is Queen Ukaoma?" (heard as "Queen Ukoma") was answered "These sources say nothing about who Queen Ukaoma is" from one transcript passage.

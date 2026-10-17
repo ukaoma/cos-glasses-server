@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
+import { createStopRequestStore, isStopRequestRefusal, STOP_REQUEST_CLAIM_WINDOW_MS, type StopRequest, type StopRequestStore } from '../lib/meeting-stop-requests.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, appliedCorrections, pendingCorrections } from '../lib/meeting-corrections.js'
@@ -240,6 +241,8 @@ export interface MeetingRouteDependencies {
   emit?: typeof emitDisplay
   finalizationJobs?: MeetingFinalizationJobStore
   finalDiarize?: FinalDiarize
+  /** Control's stop requests for live G2 meetings (lib/meeting-stop-requests.ts). */
+  stopRequests?: StopRequestStore
 }
 
 const activeFinalizationJobs = new Set<string>()
@@ -557,6 +560,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const finalDiarize = deps.finalDiarize ?? runNemotronFinalPass
   const router = Router()
   const savingSessions = new Set<string>()
+  const stopRequests = deps.stopRequests ?? createStopRequestStore()
   setNamingSessionLiveness(id => sessions.getStartTime(id) !== null || savingSessions.has(id) || activeFinalizationJobs.has(id))
 
   let recoveryPendingLogged = false
@@ -622,6 +626,114 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       outcome: captureOutcome(state, disposition),
       disposition: publicDisposition(disposition),
     })
+  })
+
+  // ── Stop a live G2 meeting from the Mac (COS Control) ────────────────────────────
+  // The Mac never saves a live G2 session itself (lib/meeting-stop-requests.ts says why).
+  // It asks the glasses: POST records the request and puts `meeting_stop_requested` on the
+  // display bus; the companion claims it within the claim window and runs its own Stop;
+  // Control polls GET until the meeting is saved, or says no glasses answered.
+  const stopRequestBody = (request: StopRequest, extra: Record<string, unknown> = {}) => ({
+    sessionId: request.sessionId,
+    requestId: request.requestId,
+    state: request.state,
+    requestedAt: request.requestedAt,
+    claimedAt: request.claimedAt,
+    refusal: request.refusal,
+    claimWindowMs: STOP_REQUEST_CLAIM_WINDOW_MS,
+    ...extra,
+  })
+  const stopRequestSessionId = (req: { params: Record<string, unknown> }, res: { status(code: number): { json(body: unknown): void } }): string | null => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return null
+    }
+    if (MAC_CAPTURE_ID.test(sessionId)) {
+      // A Mac recording stops from Control itself; it has no glasses to ask.
+      res.status(400).json({ error: 'A Mac recording stops from Record on Mac', reason: 'mac_capture' })
+      return null
+    }
+    return sessionId
+  }
+
+  router.post('/meeting/sessions/:sessionId/stop-request', (req, res) => {
+    const sessionId = stopRequestSessionId(req, res)
+    if (!sessionId) return
+    res.set('Cache-Control', 'private, no-store')
+    const saved = store.findBySessionId(sessionId)
+    if (saved) {
+      res.json({ sessionId, state: 'saved', saveReceipt: publicSaveResponse(saved, true) })
+      return
+    }
+    if (savingSessions.has(sessionId)) {
+      res.json({ sessionId, state: 'finalizing' })
+      return
+    }
+    const live = (sessions.getState ?? defaultSessionState)(sessionId)
+    if (live !== 'active') {
+      res.status(409).json({ error: 'This meeting is not recording', reason: 'not_live', state: live })
+      return
+    }
+    const body = req.body as Record<string, unknown> | undefined
+    const source = typeof body?.source === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(body.source) ? body.source : 'control'
+    const request = stopRequests.request(sessionId, source)
+    try {
+      emit({
+        type: 'meeting_stop_requested',
+        data: { sessionId, requestId: request.requestId, source, claimWindowMs: STOP_REQUEST_CLAIM_WINDOW_MS },
+      })
+    } catch (error) {
+      console.warn('[meeting/stop-request] Display notification failed:', error)
+    }
+    console.log(`[meeting/stop-request] ${source} asked the glasses to stop ${sessionId} (${request.requestId})`)
+    res.status(202).json(stopRequestBody(request))
+  })
+
+  // The companion's answer: `accept` claims the request (then it stops), `refuse` says why not.
+  router.post('/meeting/sessions/:sessionId/stop-request/:requestId/claim', (req, res) => {
+    const sessionId = stopRequestSessionId(req, res)
+    if (!sessionId) return
+    res.set('Cache-Control', 'private, no-store')
+    const requestId = String(req.params.requestId ?? '')
+    const body = req.body as Record<string, unknown> | undefined
+    const decision = body?.decision
+    if (decision !== 'accept' && decision !== 'refuse') {
+      res.status(400).json({ error: 'decision must be accept or refuse', reason: 'invalid_decision' })
+      return
+    }
+    if (decision === 'refuse' && !isStopRequestRefusal(body?.reason)) {
+      res.status(400).json({ error: 'Unknown refusal reason', reason: 'invalid_refusal' })
+      return
+    }
+    const result = decision === 'accept'
+      ? stopRequests.claim(sessionId, requestId)
+      : stopRequests.refuse(sessionId, requestId, body!.reason as Parameters<StopRequestStore['refuse']>[2])
+    if (!result.ok) {
+      const status = result.reason === 'unknown_request' ? 404 : 409
+      res.status(status).json({ error: 'Stop request is not open', reason: result.reason })
+      return
+    }
+    console.log(`[meeting/stop-request] glasses ${decision === 'accept' ? 'claimed' : 'refused'} ${result.request.requestId}${result.request.refusal ? ` (${result.request.refusal})` : ''}`)
+    res.json(stopRequestBody(result.request))
+  })
+
+  // Control's poll. A saved meeting answers `saved` with its receipt, whatever the request says.
+  router.get('/meeting/sessions/:sessionId/stop-request/:requestId', (req, res) => {
+    const sessionId = stopRequestSessionId(req, res)
+    if (!sessionId) return
+    res.set('Cache-Control', 'private, no-store')
+    const request = stopRequests.get(sessionId, String(req.params.requestId ?? ''))
+    if (!request) {
+      res.status(404).json({ error: 'Unknown stop request', reason: 'unknown_request' })
+      return
+    }
+    const saved = store.findBySessionId(sessionId)
+    if (saved) {
+      res.json(stopRequestBody(request, { state: 'saved', saveReceipt: publicSaveResponse(saved, true) }))
+      return
+    }
+    res.json(stopRequestBody(request, savingSessions.has(sessionId) ? { finalizing: true } : {}))
   })
 
   router.post('/meeting/save', async (req, res) => {

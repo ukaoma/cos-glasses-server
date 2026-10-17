@@ -9,6 +9,8 @@ bus.setMaxListeners(20) // Multiple glasses clients
 
 export interface DisplayEvent {
   type: 'chunk' | 'done' | 'error' | 'tool_status' | 'start' | 'session_restore' | 'transcript_chunk' | 'prompt_transcript' | 'recording_start' | 'recording_stop' | 'coaching_nudge' | 'coaching_nudge_v2'
+    // Control asked the glasses to stop a G2 meeting (routes/meeting.ts stop-request).
+    | 'meeting_stop_requested'
   data: Record<string, unknown>
 }
 
