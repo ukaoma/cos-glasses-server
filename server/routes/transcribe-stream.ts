@@ -2443,7 +2443,8 @@ async function processStreamChunk(opts: {
   // block on a cue, and no LLM runs on this path. .catch() is required — a
   // bare `void` on a rejecting promise is an unhandled rejection, which Node
   // throws on by default. All gates live inside the feed.
-  void feedLiveCueTranscript(sessionId, trimmedText, Boolean(fallbackReason)).catch(() => {})
+  // The ASR await above lets a late chunk land after Stop or save; a closed session never feeds cues.
+  if (!isSessionDeleted(sessionId)) void feedLiveCueTranscript(sessionId, trimmedText, Boolean(fallbackReason)).catch(() => {})
 
   console.log(`[perf] TOTAL request: ${(performance.now() - tReq).toFixed(1)}ms | chunk #${chunkIndex} | ${audioBuffer.length}b | rms=${Math.round(rms)} q=${isQuiet ? 1 : 0} gate=${quiet.gate}${quiet.speechSec === null ? '' : ` speech=${quiet.speechSec.toFixed(2)}s`} fe=${stt.frontEnd} | ${asrProvider} | "${trimmedText.slice(0, 50)}"`)
   return canonicalChunkResponse(chunk, sessionId, chunkIndex)

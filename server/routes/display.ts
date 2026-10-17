@@ -28,9 +28,9 @@ export const displayRouter = Router()
  * The projection is the contract: whatever the emitter grows later, only the fields
  * named here can ever leave.
  *
- * The other ten members of the union all carry user content: `transcript_chunk` and
+ * The other eleven members of the union all carry user content: `transcript_chunk` and
  * `prompt_transcript` carry meeting speech with speaker labels, `chunk`/`done` carry
- * answer text, `session_restore` carries conversation state, `coaching_nudge` carries
+ * answer text, `session_restore` carries conversation state, `coaching_nudge` and `coaching_nudge_v2` carry
  * derived guidance, `start` carries session metadata, `tool_status` carries a message,
  * `error` carries error text, and `recording_start` is covered by its own note below.
  *

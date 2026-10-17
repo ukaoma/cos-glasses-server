@@ -120,6 +120,7 @@ import { memoryRouter } from './routes/memory.js'
 import { threadsRouter } from './routes/threads.js'
 import { skillsRouter } from './routes/skills.js'
 import { shutdownLiveCues } from './lib/live-cues-engine.js'
+import { shutdownLiveCuesV2 } from './lib/live-cues-v2.js'
 import { prewarmContext } from './lib/context-builder.js'
 import { preWarmCLI } from './lib/claude-bridge.js'
 import { sweepStaleTurnRequests } from './lib/turn-request.js'
@@ -1177,6 +1178,7 @@ async function gracefulShutdown(): Promise<void> {
   // most one tree per session, which fits.
   try {
     await shutdownLiveCues()
+    shutdownLiveCuesV2()
   } catch (error) {
     console.error('[live-cues] shutdown termination failed:', error)
   }

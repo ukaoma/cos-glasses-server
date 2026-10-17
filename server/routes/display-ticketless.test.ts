@@ -124,6 +124,7 @@ const FIXTURE_BY_TYPE: Record<DisplayEvent['type'], Record<string, unknown>> = {
   done: { text: 'CANARY_DONE' },
   session_restore: { sessionId: 'CANARY_SESSION' },
   coaching_nudge: { text: 'CANARY_NUDGE' },
+  coaching_nudge_v2: { detail: 'CANARY_NUDGE_V2' },
   start: { model: 'CANARY_MODEL', sessionId: 's1' },
   tool_status: { message: 'CANARY_TOOL' },
   error: { error: 'CANARY_ERROR' },

@@ -11,8 +11,8 @@ tombstone on Stop, cancellations are not breaker failures, everything default-of
 2. Jev gate (own JevClient, ledger `jev-cues-usage.json`, cap `COS_LIVE_CUES_JEV_DAILY_TOKENS` default 600k): `act` cue/silent, `lookup`, `kind`. Admit when P(cue) >= `COS_LIVE_CUES_V2_GATE` (default 0.8; pooled dev+held-out: 110/113 silent kept, 51/59 required admitted).
 3. Retrieval: `cue_memory.py` (COS scripts; BM25 + Qdrant dense, RRF k=60, no LLM), queries = window tail + keyword string, 6 s timeout. Failure is non-fatal (cue proceeds without memory).
 4. Jev memory judge: keep notes with P >= 0.8, at most 2.
-5. Writer: one `runLensGistEngine('claude', COS_LIVE_CUES_V2_MODEL || 'sonnet', ...)`, 20 s timeout, writer rules v2/v3 as the system prompt.
-6. Validate: JSON, detail <= 220 chars, memoryIds subset of kept notes, number guard (every multi-digit number appears in the window or memory). Derive headline (<= 64 chars).
+5. Writer: one `runLensGistEngine('claude', COS_LIVE_CUES_V2_MODEL || 'sonnet', ...)`, 20 s timeout. Writer rules v3 by default (held-out, same grader call: unsupported 18 -> 11, useful 48 -> 46, within grader noise); `COS_LIVE_CUES_V2_PROMPT=v2` restores v2.
+6. Validate: JSON, detail <= 220 chars, memoryIds subset of kept notes. Number guard is TRACED, not enforced (it fired on 3 v3 cues, 1 unsupported; ASR writes "300 000"); `COS_LIVE_CUES_V2_NUMBER_GUARD=withhold` enforces. Derive headline (<= 64 chars).
 7. Staleness: drop when the room moved > 120 words during the evaluation.
 8. Emit `coaching_nudge_v2` (LiveCueV2) and v1 `coaching_nudge` with the headline for old clients.
 

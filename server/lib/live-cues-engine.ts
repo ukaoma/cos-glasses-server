@@ -37,6 +37,7 @@ import {
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
+import { liveCuesV2, liveCuesV2Enabled } from './live-cues-v2.js'
 
 // ── Gates ────────────────────────────────────────────────────────────────────
 const MIN_BUFFER_WORDS = 40
@@ -244,6 +245,8 @@ export async function feedLiveCueTranscript(
   text: string,
   asrDegraded = false,
 ): Promise<void> {
+  // v2 (COS_LIVE_CUES_V2=1) owns the feed when enabled; the Composer v1 path below is unchanged otherwise.
+  if (liveCuesV2Enabled()) return liveCuesV2().feed(sessionId, text, asrDegraded)
   let session = sessions.get(sessionId)
   if (!session) {
     if (process.env.COS_LIVE_CUES_AUTO === '1' && liveCuesEnabled()) {
