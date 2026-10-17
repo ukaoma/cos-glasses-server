@@ -1,4 +1,4 @@
-## 6.76.0 - Live COS Ask knows who owns this COS, looks in COS for person questions, and times every phase (local candidate)
+## 6.76.0 - Live COS Ask knows who owns this COS, looks in COS for person questions, and times every phase
 
 - Field report (Queen, 2026-10-17): on her own COS, "Who is Queen Ukaoma?" (heard as "Queen Ukoma") was answered "These sources say nothing about who Queen Ukaoma is" from one transcript passage.
 - Owner card. A typed question gets a `profile` source built from the profile the server already keeps: `owner_name`, `owner_speaker_label`, `home_city`, and the owner's own `system_prompt_context` notes with any sentence holding a street address, zip, phone number or email removed. It is cited with an H id like other COS history, returned in `sources` when cited, and named "COS profile" on the lens From line. No profile name: no card, and the prompt is byte-for-byte as before. Presets never get it.
