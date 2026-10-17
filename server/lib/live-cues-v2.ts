@@ -631,4 +631,9 @@ export function liveCuesV2(): LiveCuesV2Engine {
   return engine
 }
 export function liveCuesV2Capability(): LiveCuesV2Capability { return liveCuesV2().capability() }
+/** What /api/health, /api/models and the status route advertise: NOTHING while v2 is switched off, so a 6.10.642
+ *  companion treats the server exactly like a v1 server (v1 cues keep their own capability and indicator). */
+export function liveCuesV2Advertised(env: NodeJS.ProcessEnv = process.env): LiveCuesV2Capability | undefined {
+  return liveCuesV2Enabled(env) ? liveCuesV2Capability() : undefined
+}
 export function shutdownLiveCuesV2(): void { engine?.shutdown(); unsubscribe?.(); unsubscribe = null; engine = null }

@@ -24,16 +24,19 @@ afterAll(() => { server.close(); shutdownLiveCuesV2(); process.env = saved; rmSy
 const post = (path: string, body: unknown) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 
 describe('live cues v2 routes', () => {
-  it('with v2 off: pause and feedback are 404, and status advertises the v2 capability as off', async () => {
+  it('with v2 off: pause and feedback are 404, and nothing v2 is advertised', async () => {
     delete process.env.COS_LIVE_CUES_V2; process.env.COS_LIVE_CUES = '1'
     expect((await post('/live-cues/pause', { sessionId: 'meeting_a', paused: true })).status).toBe(404)
     expect((await post('/live-cues/feedback', { sessionId: 'meeting_a', cueId: '0f8fad5b-d9cb-469f-a165-70867728950e', vote: 'up' })).status).toBe(404)
-    const status = await (await fetch(base + '/live-cues/status')).json() as { v2: { available: boolean; reason: string; protocol: number } }
-    expect(status.v2).toMatchObject({ available: false, reason: 'master_flag_off', protocol: 2 })
+    const status = await (await fetch(base + '/live-cues/status')).json() as { v2?: unknown }
+    expect(status.v2).toBeUndefined()   // v2 off advertises nothing: a 6.10.642 companion treats this server as v1
+    const { liveCuesV2Advertised } = await import('../lib/live-cues-v2.js')
+    expect(liveCuesV2Advertised({ COS_LIVE_CUES: '1' })).toBeUndefined()
   })
 
   it('with v2 on: start, status, pause, feedback, stop, then a re-start is refused for the ended meeting', async () => {
     delete process.env.COS_LIVE_CUES; process.env.COS_LIVE_CUES_V2 = '1'; delete process.env.ANTHROPIC_API_KEY   // v2 needs only its own flag
+    expect(await (await fetch(base + '/live-cues/status')).json()).toMatchObject({ v2: { available: true, protocol: 2 } })
     const start = await post('/live-cues/start', { sessionId: 'meeting_b' })
     expect(start.status).toBe(200)
     expect(await start.json()).toMatchObject({ armed: true, sessionId: 'meeting_b', protocol: 2, cuesGenerated: 0, paused: false, pauseSeq: 0 })

@@ -68,7 +68,7 @@ import { getServerGenerationId } from '../lib/managed-runtime.js'
 import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
 import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
-import { liveCuesV2Capability } from '../lib/live-cues-v2.js'
+import { liveCuesV2Advertised } from '../lib/live-cues-v2.js'
 import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
 import { getStrandedCaptures } from './transcribe-stream.js'
@@ -496,7 +496,7 @@ healthRouter.get('/health', async (_req, res) => {
       },
       cliDebug: CLI_DEBUG_CAPABILITY,
       liveCues,
-      liveCuesV2: liveCuesV2Capability(),
+      ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
       richMedia: {
         text: true,
         pdf: richMedia.pdf,
@@ -670,7 +670,7 @@ healthRouter.get('/models', async (req, res) => {
       // THIS surface, so a value present only on /api/health leaves the
       // live-cues indicator blind.
       liveCues: liveCuesCapability(),
-      liveCuesV2: liveCuesV2Capability(),
+      ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
       richMedia: {
         video: richMedia.video,
         maxPromptVisuals: MAX_MODEL_IMAGE_INPUTS,

@@ -14,7 +14,7 @@ import {
   LiveCuesArmError,
 } from '../lib/live-cues-engine.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
-import { LiveCuesV2ArmError, liveCuesV2, liveCuesV2Enabled } from '../lib/live-cues-v2.js'
+import { LiveCuesV2ArmError, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled } from '../lib/live-cues-v2.js'
 
 const SESSION_ID = /^[A-Za-z0-9:_-]{3,96}$/
 const CUE_ID = /^[A-Za-z0-9-]{8,64}$/
@@ -73,7 +73,7 @@ liveCuesRouter.get('/live-cues/status', (req, res) => {
   res.json({
     capability: liveCuesCapability(),
     sessions: getLiveCuesStatus(),
-    v2: liveCuesV2().capability(),
+    ...(liveCuesV2Advertised() ? { v2: liveCuesV2Advertised() } : {}),
   })
 })
 
