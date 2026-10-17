@@ -7,11 +7,21 @@ import { resolveAskTranscript, type AskTranscriptSources } from '../lib/meeting-
 import { ASK_SESSION } from '../lib/meeting-ask-store.js';
 import type { MeetingAskExchange, MeetingAskFile } from '../../shared/meeting-ask.js';
 function failure(res: Response, error: unknown) { res.status(error instanceof AskError ? error.status : 503).json({ error: error instanceof AskError ? error.reason : 'meeting_assistant_unavailable' }); }
+/** throughMs is where in the meeting the question was asked, never how long the answer took (6.76.0). */
+export function meetingPosition(ms: number): string {
+    const seconds = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(seconds / 3600), m = Math.floor(seconds / 60) % 60, sec = String(seconds % 60).padStart(2, '0');
+    return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+/** The server's own wall time for one answer, with its phases in order. */
+export function answerTime(t: NonNullable<MeetingAskExchange['timings']>): string {
+    const phases = t.phases.map(p => `${p.phase.replace('_', ' ')}${p.forced ? ' (always for person questions)' : ''}${p.failed ? ' (failed)' : ''} ${(p.ms / 1000).toFixed(1)} s`).join(', ');
+    return `${(t.totalMs / 1000).toFixed(1)} s${phases ? ` (${phases})` : ''}`;
+}
 /** Safe Markdown export. Citations are namespaced to the request because T1 is answer-local. */
 export function exportMeetingAsk(exchanges: MeetingAskExchange[], files: MeetingAskFile[]): string {
     const parts = ['## Meeting assistant history'];
     for (const e of exchanges) {
-        parts.push(`### ${e.createdAt} · ${e.action}\n\nQuestion: ${e.question || e.action}\n\nStatus: ${e.status}\nModel: ${e.model ?? `${e.selectedModel.engine}:${e.selectedModel.model}`}\nTranscript through: ${e.throughMs} ms`);
+        parts.push(`### ${e.createdAt} · ${e.action}\n\nQuestion: ${e.question || e.action}\n\nStatus: ${e.status}\nModel: ${e.model ?? `${e.selectedModel.engine}:${e.selectedModel.model}`}\nTranscript through: ${meetingPosition(e.throughMs)} into the meeting${e.timings ? `\nAnswer time: ${answerTime(e.timings)}` : ''}`);
         if (e.answer)
             parts.push(e.answer.replace(/\[([THFW]\d+)\]/g, (_, id) => `[${e.requestId}:${id}]`));
         for (const s of e.sources)

@@ -40,7 +40,8 @@ export interface MeetingAskSource {
   /** Server-owned accepted post-stop quotation; no live turn target or precise word clock. */
   finalizedTranscript?: boolean
     id: string;
-    kind: 'transcript' | 'memory' | 'meeting' | 'file' | 'web';
+    /** 'profile' (server 6.76.0): the COS owner card from the profile; cited with an H id like other COS history. */
+    kind: 'transcript' | 'memory' | 'meeting' | 'file' | 'web' | 'profile';
     title: string;
     text: string;
     turnId?: number;
@@ -115,6 +116,8 @@ export function meetingAskFromLine(sections: readonly MeetingAskSection[] | unde
         } }));
         parts.push(hosts.length ? `the web, ${hosts.slice(0, 2).join(', ')}` : 'the web');
     }
+    if (used.some(s => s.kind === 'profile'))
+        parts.push('COS profile');
     if (used.some(s => s.kind === 'memory'))
         parts.push('COS memory');
     const meetings = unique(used.filter(s => s.kind === 'meeting').map(s => {
@@ -170,6 +173,8 @@ export interface MeetingAskExchange {
     files: MeetingAskFile[];
     error?: string;
     retryOf?: string;
+    /** Server 6.76.0: how long the answer took on the server and in which phase. Not the meeting position; that is throughMs. */
+    timings?: MeetingAskTimings;
     /** Server 6.71.13 (capabilities.factCheckScope): what a completed Fact check covered. Named-claim checks and follow-ups carry none. */
     factCheckRange?: MeetingAskFactCheckRange;
 }
@@ -178,6 +183,23 @@ export interface MeetingAskExchange {
  * check covers the whole meeting (full); each later one covers only what is new since the last completed
  * check's throughMs. A check that found nothing new still completes with claims 0, so the next one moves on.
  */
+/**
+ * One phase of one answer, in wall-clock ms on the server (6.76.0). plan is a model call that asked for a lookup,
+ * answer the one that wrote the draft, review the grounding check, public_topic the fact-check topic selection,
+ * fact_check the whole fact-check route. forced marks the COS lookup a person question always gets.
+ */
+export interface MeetingAskPhaseTiming {
+    phase: 'plan' | 'answer' | 'review' | 'cos_search' | 'web_search' | 'public_topic' | 'fact_check';
+    ms: number;
+    forced?: true;
+    failed?: true;
+    results?: number;
+}
+export interface MeetingAskTimings {
+    /** From the server starting the request to its final state. */
+    totalMs: number;
+    phases: MeetingAskPhaseTiming[];
+}
 export interface MeetingAskFactCheckRange {
     fromMs: number;
     throughMs: number;
