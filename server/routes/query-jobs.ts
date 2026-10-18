@@ -174,6 +174,8 @@ export function createQueryJobsRouter(
   const router = Router()
   const enabled = options.enabled ?? durableQueryJobsEnabled
   const steerEnabled = options.steerEnabled ?? messagesSteerEnabled
+  // Steers reach a client only when it asks AND the switch is on.
+  const steerRead = (req: Request) => wantsSteer(req) && steerEnabled()
   const heartbeatMs = Math.max(1_000, options.heartbeatMs ?? 15_000)
 
   router.post('/query-jobs', async (req, res) => {
@@ -188,7 +190,7 @@ export function createQueryJobsRouter(
     try {
       const prepared = options.prepareAdmission ? await options.prepareAdmission(req.body) : req.body
       const admission = await coordinator.submit(prepared)
-      return res.status(202).json({ job: forClient(admission.job, wantsTrail(req), wantsSteer(req)) })
+      return res.status(202).json({ job: forClient(admission.job, wantsTrail(req), steerRead(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -204,7 +206,7 @@ export function createQueryJobsRouter(
       const generation = requiredGeneration(req.query.generation)
       const job = await coordinator.getByClientGeneration(clientJobId, generation)
       if (!job) throw new QueryJobNotFoundError(`${clientJobId}:${generation}`)
-      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), steerRead(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -229,7 +231,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.query.generation)
       const job = await coordinator.getSnapshot(jobId, generation)
-      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), steerRead(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -247,7 +249,7 @@ export function createQueryJobsRouter(
     const pendingTrail: QueryJobTrailFrame[] = []
     const trail = wantsTrail(req)
     // 6.78.0: `?steer=1` adds `steer` frames; without it the stream is the 6.77.0 one.
-    const steer = wantsSteer(req) && steerEnabled()
+    const steer = steerRead(req)
     const pendingSteer: QueryJobSteerFrame[] = []
     const writeTrail = (frame: QueryJobTrailFrame) => {
       if (closed || frame.trailSeq <= sentTrailSeq) return
@@ -424,7 +426,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
       const { job } = await coordinator.cancel(jobId, generation)
-      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), steerRead(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -436,7 +438,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
       const job = await coordinator.acknowledge(jobId, generation)
-      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), steerRead(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
