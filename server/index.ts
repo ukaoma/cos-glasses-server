@@ -1153,8 +1153,9 @@ app.get('/', (_req, res) => {
 })
 
 // 6.78.0: crash-loop parking (lib/boot-resume.ts). One gate per process. It opens its boot
-// in startAdmittedRuntime, before any boot resume, and gracefulShutdown marks a clean exit,
-// so only boots that follow a crash count. A Retry of a parked meeting resumes that one job.
+// in startAdmittedRuntime (after the listeners bind, so exits 74 and 75 never count), before
+// any boot resume, and gracefulShutdown marks a clean exit first thing, so only boots that
+// follow a crash count. A Retry of a parked meeting resumes that one job.
 // COS_CRASH_LOOP_PARKING=0 turns it off (default on).
 const bootResume = installBootResumeGate(createBootResumeGate({ path: dataPath(BOOT_RESUME_LEDGER_FILE) }), {
   resume: { meeting_finalization: sessionId => resumeMeetingFinalizationJobs({ sessionId }) },
@@ -1167,6 +1168,10 @@ let gracefulShutdownStarted = false
 async function gracefulShutdown(): Promise<void> {
   if (gracefulShutdownStarted) return
   gracefulShutdownStarted = true
+  // 6.78.0: first, before the 8 s force exit can fire. A SIGTERM/SIGINT shutdown (Update
+  // Server, kickstart -k, bootout) is not a crash loop even if a later step hangs into exit(1),
+  // so the next boot does not count toward crash-loop parking.
+  bootResume.markCleanShutdown()
   const forceExit = setTimeout(() => process.exit(1), 8_000)
   forceExit.unref?.()
   await meetingAskRuntime.shutdown()
@@ -1184,10 +1189,6 @@ async function gracefulShutdown(): Promise<void> {
   } catch (error) {
     console.error('[query-jobs] graceful interruption failed:', error)
   }
-  // 6.78.0: durable state is persisted, so this exit is clean and the next boot does not count
-  // toward crash-loop parking. Before the slow Whisper and TTS stops, so the 8 s force exit
-  // after this point is still a clean exit.
-  bootResume.markCleanShutdown()
   // Live Cues spawns detached trees (Cursor CLI, python with claude -p
   // grandchildren) that would survive this process's death — kill them
   // explicitly inside the 8s force-exit budget. Single-flight guarantees at

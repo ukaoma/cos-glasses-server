@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import express from 'express'
 import type { Server } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -270,6 +270,7 @@ describe('6.78.0: parked boot-resumed work', () => {
   /** A gate whose ledger has one meeting finalization parked after RESTART_LIMIT + 1 crashed boots. */
   function parkedGate(resumed: string[] = []) {
     const ledger = join(dataDir, `boot-resume-${Math.random().toString(36).slice(2)}.json`)
+    writeFileSync(ledger, JSON.stringify({ version: 1, cleanShutdown: false, entries: {} }))
     for (let boot = 0; boot <= RESTART_LIMIT; boot++) {
       const gate = createBootResumeGate({ path: ledger, env: {}, log: () => {} })
       gate.openBoot()
@@ -319,6 +320,29 @@ describe('6.78.0: parked boot-resumed work', () => {
     expect(gate.isParked('meeting_finalization', 'g2-parked-1')).toBe(false)
     const status = await (await fetch(`${base}/api/maintenance/status`)).json() as any
     expect(status.parked).toEqual([])
+  })
+
+  it('Retry is not loopback-only (the phone and the lens can offer it), unlike the drain routes', async () => {
+    const resumed: string[] = []
+    parkedGate(resumed)
+    const { maintenanceRouter } = await import('./maintenance.js')
+    const remote = express()
+    remote.use(express.json())
+    // The phone over Tailscale: same API token gate in production, a non-loopback socket here.
+    remote.use((req, _res, next) => { Object.defineProperty(req.socket, 'remoteAddress', { value: '100.64.0.7', configurable: true }); next() })
+    remote.use('/api', maintenanceRouter)
+    const remoteServer = await new Promise<Server>(resolve => { const value = remote.listen(0, '127.0.0.1', () => resolve(value)) })
+    try {
+      const address = remoteServer.address()
+      const remoteBase = typeof address === 'object' && address ? `http://127.0.0.1:${address.port}` : ''
+      const drain = await fetch(`${remoteBase}/api/maintenance/drain`, { method: 'POST', headers: { 'Content-Type': 'application/json', Connection: 'close' }, body: '{}' })
+      expect(drain.status).toBe(403)
+      const retry = await fetch(`${remoteBase}/api/maintenance/parked/meeting_finalization/g2-parked-1/retry`, { method: 'POST', headers: { Connection: 'close' } })
+      expect(retry.status).toBe(200)
+      expect(resumed).toEqual(['g2-parked-1'])
+    } finally {
+      await new Promise<void>(resolve => remoteServer.close(() => resolve()))
+    }
   })
 
   it('Retry of something not parked is 404 and changes nothing; an unknown kind is 400', async () => {

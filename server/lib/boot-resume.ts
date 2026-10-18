@@ -10,18 +10,25 @@
 //
 // THE RULE. One small ledger in its own file (<data>/boot-resume-ledger.json), so no existing
 // store's schema changes and an older build simply ignores it:
-//   openBoot           once per process, before any boot resume: did the last process exit
-//                      cleanly? Only a boot that follows a crash counts. The graceful-shutdown
-//                      path (SIGTERM/SIGINT, Update Server, phone Restart) marks a clean exit,
-//                      so routine restarts never count.
+//   openBoot           once per process, before any boot resume (startAdmittedRuntime, after
+//                      the listeners bind): did the last process exit cleanly? Only a boot
+//                      that follows a crash counts. The graceful-shutdown path (SIGTERM/SIGINT,
+//                      Update Server, phone Restart) marks a clean exit, so routine restarts
+//                      never count. A missing or quarantined ledger reads as a CLEAN previous
+//                      boot: the guard never invents a crash it did not see.
 //   admit              before resuming one item: the count is written BEFORE the item runs,
 //                      so a resume that kills the process is counted. One count per item per
-//                      boot. A new phase means progress, so the count starts over. An item
-//                      counted on more than RESTART_LIMIT crashed boots is parked: not
+//                      boot. Counts are CONSECUTIVE: a crashed boot adds one only when the
+//                      item's previous count is under CRASH_LOOP_WINDOW_MS old; otherwise the
+//                      count restarts at 1, so unrelated crashes days apart never park
+//                      anything. A new phase means progress, so the count starts over. An
+//                      item counted on more than RESTART_LIMIT crashed boots is parked: not
 //                      resumed, and left in its own store for Retry.
 //   forget             when the item's own store finishes or removes it.
 //   retry              the person's Retry: the count starts over and the item is unparked.
-//   markCleanShutdown  from the graceful-shutdown path.
+//   markCleanShutdown  first thing in the graceful-shutdown path. A clean exit means no crash
+//                      loop, so it also resets the counts of every item admitted this boot.
+//                      Parked items stay parked; only Retry unparks them.
 //
 // FAILS OPEN. The guard must never be the thing that crash-loops the server. A corrupt
 // ledger is quarantined and read as empty, and any read or write error admits the item and
@@ -39,8 +46,10 @@ import { mkdirSync, renameSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 
-/** Crashed boots an item may be resumed on. The next crashed boot parks it. */
+/** Consecutive crashed boots an item may be resumed on. The next one parks it. */
 export const RESTART_LIMIT = 3
+/** Crashed boots count as consecutive only when each comes within this of the item's last count. */
+export const CRASH_LOOP_WINDOW_MS = 30 * 60_000
 /** The ledger's file name under the data directory. */
 export const BOOT_RESUME_LEDGER_FILE = 'boot-resume-ledger.json'
 /** The kinds of boot-resumed work the server gates. */
@@ -66,9 +75,9 @@ export function isCrashLoopParkingEnabled(env: NodeJS.ProcessEnv = process.env):
   return true
 }
 
-/** What the person reads on the lens and phone. No dashes or arrows. */
+/** What the person reads on the lens and phone: fits a 32-column footer lead. No dashes or arrows. */
 export function restartLimitMessage(limit = RESTART_LIMIT): string {
-  return `Stopped: it restarted the server ${limit} times. Retry when ready.`
+  return `Stopped after ${limit} server crashes.`
 }
 
 /** The terminal error of a query job the limit stopped (status `interrupted`). */
@@ -85,6 +94,8 @@ export interface BootResumeEntry {
   reason: string | null
   parkedAt: string | null
   retriedAt: string | null
+  /** When the last crashed boot counted it (the consecutive-window anchor). */
+  lastAttemptAt: string | null
   updatedAt: string
 }
 
@@ -167,6 +178,7 @@ function parseEntry(key: string, raw: unknown): BootResumeEntry | null {
   return {
     kind, id, phase: e.phase, attempts: e.attempts, parked: e.parked,
     reason: text(e.reason), parkedAt: text(e.parkedAt), retriedAt: text(e.retriedAt),
+    lastAttemptAt: text(e.lastAttemptAt),
     updatedAt: text(e.updatedAt) ?? new Date(0).toISOString(),
   }
 }
@@ -292,7 +304,8 @@ class LedgerGate implements BootResumeGate {
     this.opened = true
     try {
       const file = this.ledger()
-      this.crashedBoot = !file.cleanShutdown
+      // Only a ledger this build read back intact can say the last exit was a crash.
+      this.crashedBoot = this.loaded === 'ok' && !file.cleanShutdown
       file.cleanShutdown = false
       this.save('open')
       const entries = Object.values(file.entries)
@@ -331,8 +344,11 @@ class LedgerGate implements BootResumeGate {
       const counts = this.crashedBoot === true && !this.seenThisBoot.has(key)
       this.seenThisBoot.add(key)
       if (counts) {
-        entry ??= { kind, id, phase, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: null, updatedAt: this.iso() }
-        entry.attempts += 1
+        entry ??= { kind, id, phase, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: null, lastAttemptAt: null, updatedAt: this.iso() }
+        const last = entry.lastAttemptAt ? Date.parse(entry.lastAttemptAt) : Number.NaN
+        const consecutive = Number.isFinite(last) && this.now() - last < CRASH_LOOP_WINDOW_MS
+        entry.attempts = consecutive ? entry.attempts + 1 : 1
+        entry.lastAttemptAt = this.iso()
         changed = true
       }
       if (!changed || !entry) return true
@@ -367,6 +383,12 @@ class LedgerGate implements BootResumeGate {
     try {
       const file = this.ledger()
       file.cleanShutdown = true
+      // No crash loop: every item this boot admitted starts over. Parked items stay parked.
+      for (const key of this.seenThisBoot) {
+        const entry = file.entries[key]
+        if (!entry || entry.parked) continue
+        file.entries[key] = { ...entry, attempts: 0, lastAttemptAt: null, updatedAt: this.iso() }
+      }
       this.save('clean_shutdown')
     } catch (error) {
       this.failOpen('clean_shutdown', error)
@@ -418,7 +440,7 @@ class LedgerGate implements BootResumeGate {
       const before = file.entries[key]
       if (!before) return null
       const at = this.iso()
-      const entry: BootResumeEntry = { ...before, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: at, updatedAt: at }
+      const entry: BootResumeEntry = { ...before, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: at, lastAttemptAt: null, updatedAt: at }
       file.entries[key] = entry
       // A failed write still unparks in memory (fails open); the next boot may need Retry again.
       this.save('retry')

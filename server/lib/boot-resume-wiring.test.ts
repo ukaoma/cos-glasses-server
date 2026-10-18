@@ -35,12 +35,14 @@ describe('server/index.ts wires one crash-loop gate per process', () => {
     expect(openAt).toBeLessThan(admitted.indexOf('void initQueryJobRuntime()'))
   })
 
-  it('marks a clean exit after durable query state is persisted and before the slow stops and every exit', () => {
+  it('marks a clean exit FIRST in gracefulShutdown, before the 8 s force exit exists, so every exit after SIGTERM is clean', () => {
     const shutdown = between(index, 'async function gracefulShutdown', "process.on('SIGTERM'")
     const markAt = shutdown.indexOf('bootResume.markCleanShutdown()')
     expect(count(index, 'bootResume.markCleanShutdown()')).toBe(1)
-    expect(markAt).toBeGreaterThan(shutdown.indexOf("await shutdownQueryJobRuntime('server_shutdown')"))
-    expect(markAt).toBeLessThan(shutdown.indexOf('stopWhisperServer()'))
+    expect(markAt).toBeGreaterThan(shutdown.indexOf('gracefulShutdownStarted = true'))
+    expect(markAt).toBeLessThan(shutdown.indexOf('const forceExit = setTimeout(() => process.exit(1), 8_000)'))
+    expect(markAt).toBeLessThan(shutdown.indexOf('await meetingAskRuntime.shutdown()'))
+    expect(markAt).toBeLessThan(shutdown.indexOf("await shutdownQueryJobRuntime('server_shutdown')"))
     expect(markAt).toBeLessThan(shutdown.indexOf('process.exit(0)'))
     // Never from an exit hook: a crash also runs exit hooks, which would count it as clean.
     expect(index).not.toMatch(/process\.(on|once)\('exit'[^\n]*markCleanShutdown/)

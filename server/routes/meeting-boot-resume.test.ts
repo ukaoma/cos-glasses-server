@@ -33,7 +33,10 @@ function fixture(sessionIds = ['g2-crashing-1'], phase: MeetingFinalizationJob['
     store.save({ sessionId, meetingPath, sidecarPath, audioDir: null, streamingWordCount: 12, phase, claimPending: false })
   }
   for (const sessionId of sessionIds) addJob(sessionId)
-  return { root, store, addJob, ledger: join(root, 'data', 'boot-resume-ledger.json') }
+  const ledger = join(root, 'data', 'boot-resume-ledger.json')
+  // The process that saved these jobs opened its boot and then crashed mid-finalization.
+  writeFileSync(ledger, JSON.stringify({ version: 1, cleanShutdown: false, entries: {} }))
+  return { root, store, addJob, ledger }
 }
 
 const gateAt = (ledger: string): BootResumeGate => createBootResumeGate({ path: ledger, env: {}, log: () => {} })
@@ -129,7 +132,7 @@ describe('meeting finalization resume behind the crash-loop gate (6.78.0)', () =
       resumed += started.length
     }
     expect(resumed).toBe(BOOTS)
-    expect(() => readFileSync(ledger)).toThrow()
+    expect(JSON.parse(readFileSync(ledger, 'utf8')).entries).toEqual({})
   })
 
   it('the real resume forgets the count when the store removes a finished job', async () => {

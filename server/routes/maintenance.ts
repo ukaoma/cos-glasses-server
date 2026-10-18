@@ -168,11 +168,12 @@ maintenanceRouter.get('/maintenance/status', (req, res) => {
   res.json(statusSnapshot(operationCredentials(req)))
 })
 
-// 6.78.0: the person's Retry of parked boot-resumed work (lib/boot-resume.ts). Loopback and
-// the API token, like the drain routes. The count starts over; a meeting finalization is
-// resumed again now, and a query job runs again when the app Resumes it.
+// 6.78.0: the person's Retry of parked boot-resumed work (lib/boot-resume.ts). The API
+// token, like GET /maintenance/status, and not loopback-only, so the phone and the lens can
+// offer it; the /api mutation lease still refuses it during a drain. The count starts over;
+// a meeting finalization is resumed again now, and a query job (id = its clientJobId) runs
+// again when the app Resumes it.
 maintenanceRouter.post('/maintenance/parked/:kind/:id/retry', (req, res) => {
-  if (!requireLoopback(req, res)) return
   const { kind, id } = req.params
   if (!isBootResumeKind(kind)) {
     res.status(400).json({ error: 'unknown_parked_kind', retryable: false })

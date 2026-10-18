@@ -31,9 +31,13 @@ const m = (name, file, edits, tests = LIB) => ({ name, file, edits: typeof edits
 
 const mutations = [
   // ── The gate: counting ──
-  m('crashed-boot-counts', GATE, ['      this.crashedBoot = !file.cleanShutdown', '      this.crashedBoot = false'], [...LIB, ...QJ, ...MEET]),
-  m('clean-boot-never-counts', GATE, ['      this.crashedBoot = !file.cleanShutdown', '      this.crashedBoot = true'], [...LIB, ...QJ, ...MEET]),
-  m('count-increments', GATE, ['        entry.attempts += 1', '        entry.attempts += 0'], [...LIB, ...QJ]),
+  m('crashed-boot-counts', GATE, ["      this.crashedBoot = this.loaded === 'ok' && !file.cleanShutdown", '      this.crashedBoot = false'], [...LIB, ...QJ, ...MEET]),
+  m('clean-boot-never-counts', GATE, ["      this.crashedBoot = this.loaded === 'ok' && !file.cleanShutdown", "      this.crashedBoot = this.loaded === 'ok'"], [...LIB, ...QJ, ...MEET]),
+  m('missing-ledger-is-clean', GATE, ["      this.crashedBoot = this.loaded === 'ok' && !file.cleanShutdown", '      this.crashedBoot = !file.cleanShutdown'], [...LIB, ...QJ]),
+  m('count-increments', GATE, ['        entry.attempts = consecutive ? entry.attempts + 1 : 1', '        entry.attempts = consecutive ? entry.attempts : 1'], [...LIB, ...QJ]),
+  m('window-restarts-count', GATE, ['        entry.attempts = consecutive ? entry.attempts + 1 : 1', '        entry.attempts = entry.attempts + 1']),
+  m('window-30-minutes', GATE, ['this.now() - last < CRASH_LOOP_WINDOW_MS', 'this.now() - last < CRASH_LOOP_WINDOW_MS + 2 * 60_000']),
+  m('window-from-last-count', GATE, ['        entry.lastAttemptAt = this.iso()', '        entry.lastAttemptAt ??= this.iso()']),
   m('limit-comparison', GATE, ['      if (entry.attempts > this.limit) {', '      if (entry.attempts >= this.limit) {'], [...LIB, ...QJ]),
   m('phase-reset', GATE, ['      if (entry && entry.phase !== phase) {', '      if (false) {'], [...LIB, ...MEET]),
   m('parked-check', GATE, ['      if (before?.parked) {', '      if (false) {'], [...LIB, ...MEET]),
@@ -42,6 +46,8 @@ const mutations = [
   m('flag-default-on', GATE, ["  if (raw === '0' || raw === 'false' || raw === 'off') return false\n  return true\n", "  if (raw === '0' || raw === 'false' || raw === 'off') return false\n  return false\n"], [...LIB, ...QJ]),
   m('flag-off-forces-off', GATE, ["  if (raw === '0' || raw === 'false' || raw === 'off') return false\n", ''], [...LIB, ...QJ]),
   m('clean-shutdown-write', GATE, ['      file.cleanShutdown = true', '      file.cleanShutdown = false'], [...LIB, ...QJ]),
+  m('clean-shutdown-resets-counts', GATE, ['        if (!entry || entry.parked) continue\n        file.entries[key] =', '        if (true) continue\n        file.entries[key] =']),
+  m('clean-shutdown-keeps-parked', GATE, ['        if (!entry || entry.parked) continue', '        if (!entry) continue']),
   m('open-clears-marker', GATE, ['      file.cleanShutdown = false\n', '']),
   m('wrong-shape-quarantined', GATE, ['          try { renameSync(this.path, quarantinedAs) } catch { quarantinedAs = null }', '          quarantinedAs = null']),
   m('retry-unparks', GATE, ['{ ...before, attempts: 0, parked: false, reason: null,', '{ ...before, attempts: 0, parked: before.parked, reason: null,'], [...LIB, ...ROUTE, ...MEET]),
@@ -77,11 +83,14 @@ const mutations = [
   m('route-404-not-parked', MAINT, ['  if (!gate.isParked(kind, id)) {', '  if (false) {'], ROUTE),
   m('route-400-unknown-kind', MAINT, ['  if (!isBootResumeKind(kind)) {', '  if (false) {'], ROUTE),
   m('route-resumes-meeting', MAINT, ['  const resumed = resumeRetriedItem(kind, id)', '  const resumed = false'], ROUTE),
+  m('route-token-not-loopback', MAINT, ["maintenanceRouter.post('/maintenance/parked/:kind/:id/retry', (req, res) => {\n", "maintenanceRouter.post('/maintenance/parked/:kind/:id/retry', (req, res) => {\n  if (!requireLoopback(req, res)) return\n"], ROUTE),
 
   // ── Composition root (source-shape tests: index.ts cannot be executed) ──
   m('index-open-before-resume', INDEX, ['    bootResume.openBoot()\n    // Resume already-saved meetings whose post-response HQ/operations work\n    // was interrupted by a prior server update or process exit.\n    resumeMeetingFinalizationJobs()',
     '    // Resume already-saved meetings whose post-response HQ/operations work\n    // was interrupted by a prior server update or process exit.\n    resumeMeetingFinalizationJobs()\n    bootResume.openBoot()'], WIRE),
   m('index-clean-shutdown', INDEX, ['  bootResume.markCleanShutdown()\n', ''], WIRE),
+  m('index-marker-at-start', INDEX, [['  bootResume.markCleanShutdown()\n  const forceExit', '  const forceExit'],
+    ['  clearTimeout(forceExit)\n  process.exit(0)', '  bootResume.markCleanShutdown()\n  clearTimeout(forceExit)\n  process.exit(0)']], WIRE),
 ]
 
 const args = process.argv.slice(2)

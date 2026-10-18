@@ -494,6 +494,7 @@ describe('meeting save/list/detail API', () => {
   it('6.78.0: a finished finalization forgets its crash-loop count', async () => {
     const h = await harness({ batch: acceptedBatch() })
     const ledger = join(h.parent, 'boot-resume-ledger.json')
+    writeFileSync(ledger, JSON.stringify({ version: 1, cleanShutdown: false, entries: {} }))
     const gate = installBootResumeGate(createBootResumeGate({ path: ledger, env: {}, log: () => {} }))
     try {
       gate.openBoot()
@@ -534,6 +535,7 @@ describe('meeting save/list/detail API', () => {
 
     // Parked on the boot after RESTART_LIMIT crashed boots that each resumed it.
     const ledger = join(h.parent, 'boot-resume-ledger.json')
+    writeFileSync(ledger, JSON.stringify({ version: 1, cleanShutdown: false, entries: {} }))
     for (let boot = 0; boot <= RESTART_LIMIT; boot++) {
       const gate = createBootResumeGate({ path: ledger, env: {}, log: () => {} })
       gate.openBoot()

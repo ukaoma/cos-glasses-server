@@ -6,7 +6,7 @@
 //
 // Deliberately does not import model-router.js (its graph reaches claude-bridge.ts, which
 // touches /tmp/cos-cli-sessions.json at import); the session lock is injected instead.
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -33,15 +33,18 @@ function request(clientJobId: string, generation = 1): Record<string, unknown> {
   return { clientJobId, generation, query: 'a question whose start crashes the server', sessionId: SESSION, activityToolMode: 'preview' }
 }
 
-/** A prior boot that admitted one question and died before starting it. */
-async function priorBoot(): Promise<{ root: string; ledger: string; clientJobId: string; jobId: string }> {
+/** A prior boot that opened its ledger, admitted one question and died before starting it. */
+async function priorBoot(options: { ledgerAtCrash?: boolean } = {}): Promise<{ root: string; ledger: string; clientJobId: string; jobId: string }> {
   const root = mkdtempSync(join(tmpdir(), 'cos-qj-boot-resume-'))
   roots.push(root)
   const store = new QueryJobStore({ root: join(root, 'query-jobs'), bootId: randomUUID(), requeueNeverStartedOnBoot: true })
   await store.init()
   const clientJobId = randomUUID()
   const { job } = await store.admit(request(clientJobId))
-  return { root, ledger: join(root, 'boot-resume-ledger.json'), clientJobId, jobId: job.jobId }
+  const ledger = join(root, 'boot-resume-ledger.json')
+  // What that process left: it opened its boot (marker cleared) and never shut down cleanly.
+  if (options.ledgerAtCrash !== false) writeFileSync(ledger, JSON.stringify({ version: 1, cleanShutdown: false, entries: {} }))
+  return { root, ledger, clientJobId, jobId: job.jobId }
 }
 
 interface Boot {
@@ -116,7 +119,7 @@ describe('query-job boot requeue behind the crash-loop gate (6.78.0)', () => {
     expect(job.error).toEqual(crashLoopParkedError())
     expect(job.error).toEqual({
       code: 'restart_limit',
-      message: 'Stopped: it restarted the server 3 times. Retry when ready.',
+      message: 'Stopped after 3 server crashes.',
       retryable: true,
       cause: 'crash_loop_parked',
     })
@@ -164,6 +167,14 @@ describe('query-job boot requeue behind the crash-loop gate (6.78.0)', () => {
     expect(b.gate.status('query_job', clientJobId)).toBeNull()
   })
 
+  it('with no ledger yet the first boot is clean: one uncounted hand-back, then 3 counted, then parked', async () => {
+    const { root, ledger, clientJobId } = await priorBoot({ ledgerAtCrash: false })
+    let handedBack = 0
+    for (let i = 0; i < BOOTS; i++) handedBack += (await boot(root, ledger, { start: 'crash' })).handedBack.length
+    expect(handedBack).toBe(RESTART_LIMIT + 1)
+    expect(createBootResumeGate({ path: ledger, env: {}, log: () => {} }).status('query_job', clientJobId)).toMatchObject({ parked: true, attempts: RESTART_LIMIT + 1 })
+  })
+
   it('routine restarts never park a held question (Update Server mid-hold)', async () => {
     const { root, ledger, jobId } = await priorBoot()
     let handedBack = 0
@@ -178,7 +189,7 @@ describe('query-job boot requeue behind the crash-loop gate (6.78.0)', () => {
 
   it('without a gate (and with COS_CRASH_LOOP_PARKING=0) every boot hands it back, as 6.77.0 did, and no ledger is written', async () => {
     for (const options of [{ gated: false }, { env: { COS_CRASH_LOOP_PARKING: '0' } }]) {
-      const { root, ledger, jobId } = await priorBoot()
+      const { root, ledger, jobId } = await priorBoot({ ledgerAtCrash: false })
       let handedBack = 0
       for (let i = 0; i < BOOTS; i++) handedBack += (await boot(root, ledger, { start: 'crash', ...options })).handedBack.length
       expect(handedBack, JSON.stringify(options)).toBe(BOOTS)
