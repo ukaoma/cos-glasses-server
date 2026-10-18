@@ -4,6 +4,8 @@
 // POST /live-cues/start { sessionId }  -> { armed, sessionId, pipelinesUsed }
 // POST /live-cues/stop  { sessionId }  -> { nudgesGenerated, nudges }
 // GET  /live-cues/status               -> engine snapshot + capability
+// GET  /live-cues/v2/settings           -> { enabled, source: env|setting|default, capability }       (6.76.2)
+// POST /live-cues/v2/settings { enabled } -> same shape; 409 { error: 'env_forced' } when env forces v2 on
 
 import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
@@ -14,13 +16,17 @@ import {
   LiveCuesArmError,
 } from '../lib/live-cues-engine.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
-import { LiveCuesV2ArmError, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled } from '../lib/live-cues-v2.js'
+import { LiveCuesV2ArmError, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled, liveCuesV2SettingsView, peekLiveCuesV2, setLiveCuesV2Enabled } from '../lib/live-cues-v2.js'
 
 const SESSION_ID = /^[A-Za-z0-9:_-]{3,96}$/
 const CUE_ID = /^[A-Za-z0-9-]{8,64}$/
 function bodySessionId(body: unknown): string {
   const raw = (body as { sessionId?: unknown })?.sessionId
   return typeof raw === 'string' ? raw.trim() : ''
+}
+/** v2 owns this meeting: v2 is on, or it armed the meeting before v2 was switched off at runtime. */
+function v2Owns(sessionId: string): boolean {
+  return liveCuesV2Enabled() || (peekLiveCuesV2()?.knows(sessionId) ?? false)
 }
 
 export const liveCuesRouter = Router()
@@ -59,14 +65,14 @@ liveCuesRouter.post('/live-cues/stop', (req, res) => {
   // Shape matches the existing client stop handler: it reads nudgesGenerated
   // for its log line and hydrates meetingNudgeHistory from nudges when SSE
   // missed events (the 200-event replay buffer is flooded by transcript_chunk).
-  if (liveCuesV2Enabled()) return res.json(liveCuesV2().end(sessionId))
+  if (v2Owns(sessionId)) return res.json(liveCuesV2().end(sessionId))
   return res.json(disarmLiveCues(sessionId))
 })
 
 liveCuesRouter.get('/live-cues/status', (req, res) => {
   const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId.trim() : ''
   // v2 with a sessionId answers the per-meeting shape; without one the v1 shape is unchanged (plus v2 capability).
-  if (sessionId && liveCuesV2Enabled()) {
+  if (sessionId && v2Owns(sessionId)) {
     if (!SESSION_ID.test(sessionId)) return res.status(400).json({ error: 'invalid sessionId', reason: 'invalid_session_id' })
     return res.json(liveCuesV2().status(sessionId))
   }
@@ -100,4 +106,27 @@ liveCuesRouter.post('/live-cues/feedback', (req, res) => {
   }
   if (!liveCuesV2Enabled()) return res.status(404).json({ error: 'live cues v2 is off', reason: 'v2_disabled' })
   return res.json(liveCuesV2().recordFeedback({ sessionId, cueId, vote: body.vote, reason: body.reason as string | undefined }))
+})
+
+// COS Control's live cues v2 toggle (6.76.2). Token-authenticated like every /api route. The setting lives in this server's
+// data dir (live-cues-v2-settings.json, atomic write) and applies without a restart: /api/health and /api/models advertise
+// liveCuesV2 only while it is on. capability.memory and capability.decisionProvider say where notes and the gate come from.
+liveCuesRouter.get('/live-cues/v2/settings', (_req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  try { return res.json(liveCuesV2SettingsView()) } catch { return res.status(503).json({ error: 'settings_unavailable' }) }
+})
+
+liveCuesRouter.post('/live-cues/v2/settings', (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  const body = req.body as { enabled?: unknown } | undefined
+  if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'invalid_request' })
+  }
+  try {
+    const result = setLiveCuesV2Enabled(body.enabled)
+    if (!result.ok) return res.status(409).json({ error: result.error })
+    return res.json(result.view)
+  } catch {
+    return res.status(500).json({ error: 'settings_write_failed' })
+  }
 })

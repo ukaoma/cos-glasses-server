@@ -82,6 +82,13 @@ export class SubqDecisionClient implements DecisionClient {
     private readonly cap = () => { const n = Number(process.env.COS_SUBQ_DAILY_TOKENS); return Number.isFinite(n) && n > 0 ? Math.floor(n) : SUBQ_LIMITS.dailyTokens },
     private readonly timeoutMs: number = SUBQ_LIMITS.timeoutMs) {}
   resetForNewKey(): void { this.failures = 0; this.breakerUntil = 0 }
+  /** For an honest capability (6.76.2, live cues). An unreadable ledger reads as the cap reached: it fails toward not spending. */
+  status(): { configured: boolean; usedToday: number; dailyCap: number; breakerOpenUntil: number | null } {
+    const dailyCap = this.cap()
+    let usedToday = dailyCap
+    try { usedToday = Number(this.ledger()[this.day()]) || 0 } catch { /* unreadable ledger: saturated */ }
+    return { configured: !!this.key(), usedToday, dailyCap, breakerOpenUntil: this.breakerUntil > this.now().getTime() ? this.breakerUntil : null }
+  }
   private ledger(): Record<string, number> {
     try {
       const stat = lstatSync(this.usageFile)
@@ -144,6 +151,8 @@ export class SubqDecisionClient implements DecisionClient {
 
 const configuredSubqClients = new Set<SubqDecisionClient>()
 export function resetSubqDecisionClients(): void { configuredSubqClients.forEach(client => client.resetForNewKey()) }
+/** A SubQ client built outside createDecisionClient (live cues, 6.76.2) still starts clean when a new key is saved. */
+export function trackSubqDecisionClient(client: SubqDecisionClient): SubqDecisionClient { configuredSubqClients.add(client); return client }
 /** Snapshot selection per workflow request. Separate clients and cache identities prevent stale cross-provider answers. */
 export function createDecisionClient(useCase: DecisionUseCase, jev: Pick<JevClient, 'ask'> = new JevClient(), env: NodeJS.ProcessEnv = process.env): DecisionClient {
   const clients: Partial<Record<DecisionProvider, DecisionClient>> = {}

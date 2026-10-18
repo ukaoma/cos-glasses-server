@@ -1,5 +1,5 @@
 /**
- * Live cues v2 wire contract (server 6.75 candidate, companion 6.10.641 candidate).
+ * Live cues v2 wire contract (server 6.75 candidate, companion 6.10.641 candidate; optional capability fields since 6.76.2).
  * Additive to v1: old clients keep receiving `coaching_nudge` and ignore the new named event.
  * The companion keeps a byte-identical copy at src/lib/live-cues-v2-contract.ts.
  */
@@ -33,13 +33,18 @@ export interface LiveCueV2 {
 /** v1 `coaching_nudge` as the v2 engine emits it for old clients (headline only). */
 export interface LiveCueV1Compat { nudge: string; type: CueKind; priority: 2; cueId: string; sessionId: string; protocol: 2 }
 
-/** `reason` when unavailable: master_flag_off, api_key_in_env, jev_not_configured, claude_not_found, budget_exhausted,
- *  jev_cap_reached, jev_breaker_open. */
-export interface LiveCuesV2Capability { available: boolean; reason?: string; protocol: 2; model: string }
+/** `reason` when unavailable: master_flag_off, api_key_in_env, decision_invalid_provider, decision_not_configured (no key
+ *  for the selected decision provider; jev_not_configured when Jev was chosen and only a SubQ key exists), claude_not_found,
+ *  budget_exhausted, jev_cap_reached, jev_breaker_open, decision_cap_reached, decision_breaker_open (the last two for SubQ).
+ *  Server 6.76.2 adds two optional fields; older servers omit them. `memory`: where past notes come from (cue_memory.py,
+ *  the owner's own COS notes and meetings, or nothing). `decisionProvider`: which classifier runs the gate and the judge. */
+export type LiveCuesV2MemorySource = 'cue_memory' | 'notes' | 'none'
+export interface LiveCuesV2Capability { available: boolean; reason?: string; protocol: 2; model: string; memory?: LiveCuesV2MemorySource; decisionProvider?: 'jev' | 'subq' }
 
 /** Why cues are not coming for this meeting. `active` means evaluations are running normally (silence is a choice). */
 export type LiveCuesV2SessionState = 'active' | 'paused' | 'ended' | 'stopped'
 export type LiveCuesV2StopReason = 'breaker_open' | 'meeting_cap' | 'budget_exhausted' | 'jev_cap_reached' | 'jev_breaker_open' | 'jev_not_configured'
+  | 'decision_cap_reached' | 'decision_breaker_open' | 'decision_not_configured' | 'decision_invalid_provider'
 
 export interface LiveCuesV2SessionStatus {
   sessionId: string

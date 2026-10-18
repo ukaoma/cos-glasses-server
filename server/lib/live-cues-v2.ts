@@ -9,6 +9,12 @@
 // cue, a 45 s wall per evaluation, and no evaluation while a user's own query runs. Each evaluation writes one trace row
 // without transcript text; a skip (paused, breaker, meeting cap, weekly budget, busy) writes one `skip` row per reason
 // per meeting at most every 5 minutes, so the trace can tell those apart from silence.
+//
+// 6.76.2: the switch is also a runtime setting (live-cues-v2-settings.ts; env COS_LIVE_CUES_V2=1 still forces it on), the
+// gate and the judge run on Jev, or on SubQ when COS_DECISION_PROVIDER_CUES=subq or SubQ is the only key (each with its
+// own daily cap and breaker; resolveCuesDecisionProvider), and
+// when cue_memory.py is unavailable, fails or times out the memory arm searches the owner's own COS notes and meetings
+// instead (live-cues-v2-notes.ts; local keyword search, no model call). Each evaluation traces `cueMemorySource`.
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -17,16 +23,23 @@ import { dirname, resolve } from 'node:path'
 import { emitDisplay, onDisplay } from './display-bus.js'
 import { acquireMaintenanceWork, MaintenanceLifecycleError, maintenanceLifecycle, type MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { JevClient, JevError, estimateJevTokens, resolveJevKey, type JevAnswers } from './jev.js'
+import { DecisionProviderError, SubqDecisionClient, trackSubqDecisionClient, type DecisionClient } from './decision-provider.js'
+import type { DecisionProvider } from './decision-settings.js'
+import { resolveSubqKey } from './subq-key.js'
+import { liveCuesV2EnvForced, liveCuesV2Settings, resolveLiveCuesV2, type LiveCuesV2SettingReader, type LiveCuesV2SettingSource } from './live-cues-v2-settings.js'
+import { notesMemory } from './live-cues-v2-notes.js'
+import { meetingLibraryConfigured } from './cos-operations-meetings.js'
+import { getMeetingStore } from './meeting-store.js'
 import { LensGistLimitError, runLensGistEngine } from './lens-gist-engines.js'
 import { resolveProviderBinary } from './provider-binary.js'
-import { COS_SCRIPTS_DIR, PYTHON_BIN } from './python-bridge.js'
+import { COS_SCRIPTS_DIR, PYTHON_BIN, contextSourceAvailable } from './python-bridge.js'
 import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, LIVE_CUES_V2_PROTOCOL, isLiveCueV2,
-  type CueKind, type CueSourceRef, type LiveCueV1Compat, type LiveCueV2, type LiveCuesV2Capability,
+  type CueKind, type CueSourceRef, type LiveCueV1Compat, type LiveCueV2, type LiveCuesV2Capability, type LiveCuesV2MemorySource,
   type LiveCuesV2SessionStatus, type LiveCuesV2StatusResponse, type LiveCuesV2StopReason,
 } from '../../shared/live-cues-v2.js'
 
@@ -60,10 +73,14 @@ export const LIVE_CUES_V2_LIMITS = {
   counterTtlMs: 24 * 60 * 60_000,
   /** ~1.2k gate tokens per evaluation, at most 3 a minute: ~216k an hour, so 1.5M covers ~7 meeting hours (~$0.06). */
   defaultJevDailyTokens: 1_500_000,
+  /** The same ceiling for SubQ, on its own ledger (subq-cues-usage.json). SubQ reserves a byte-based estimate before each
+   *  call and records the input tokens it reports. */
+  defaultSubqDailyTokens: 1_500_000,
 } as const
 
-export function liveCuesV2Enabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.COS_LIVE_CUES_V2 === '1'
+/** On when env COS_LIVE_CUES_V2=1 forces it, else when the saved runtime setting says so (6.76.2). Off by default. */
+export function liveCuesV2Enabled(env: NodeJS.ProcessEnv = process.env, settings: LiveCuesV2SettingReader | null = liveCuesV2Settings()): boolean {
+  return resolveLiveCuesV2(env, settings).enabled
 }
 export function liveCuesV2Gate(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.COS_LIVE_CUES_V2_GATE)
@@ -85,6 +102,29 @@ export function liveCuesV2WeeklyCap(env: NodeJS.ProcessEnv = process.env): numbe
 function jevDailyCap(): number {
   const raw = Number(process.env.COS_LIVE_CUES_JEV_DAILY_TOKENS)
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : LIVE_CUES_V2_LIMITS.defaultJevDailyTokens
+}
+function subqDailyCap(): number {
+  const raw = Number(process.env.COS_LIVE_CUES_SUBQ_DAILY_TOKENS)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : LIVE_CUES_V2_LIMITS.defaultSubqDailyTokens
+}
+
+/**
+ * Which classifier runs the gate and the judge. Cues do NOT follow COS Control's saved decision provider or
+ * COS_DECISION_PROVIDER (Miles 2026-10-17): the 0.8 gate and judge thresholds were calibrated on Jev, there is no SubQ
+ * replay, and SubQ would receive the live transcript window. SubQ runs cues only when env COS_DECISION_PROVIDER_CUES=subq
+ * says so, or when SubQ is the only decision key on this Mac; otherwise Jev. Any other value of that env throws
+ * decision_invalid_provider: never silently Jev.
+ */
+export function resolveCuesDecisionProvider(env: NodeJS.ProcessEnv = process.env,
+  keys: { jev: () => boolean; subq: () => boolean } = { jev: () => !!resolveJevKey(), subq: () => !!resolveSubqKey() }): { provider: DecisionProvider; source: 'env' | 'only_key' | 'default' } {
+  const raw = env.COS_DECISION_PROVIDER_CUES
+  if (raw !== undefined) {
+    const v = raw.trim().toLowerCase()
+    if (v !== 'jev' && v !== 'subq') throw new DecisionProviderError('decision_invalid_provider')
+    return { provider: v, source: 'env' }
+  }
+  if (!keys.jev() && keys.subq()) return { provider: 'subq', source: 'only_key' }
+  return { provider: 'jev', source: 'default' }
 }
 
 // ── Python-style JSON (the replay built every prompt with json.dumps; keep byte parity) ──
@@ -251,17 +291,31 @@ export class LiveCuesV2Store {
 // ── Dependencies (real by default, faked in tests) ──────────────────────────
 export interface GateResult { pCue: number; kind: CueKind; lookup: Record<string, number> | null; tokens: number }
 export interface MemoryResult { notes: MemoryNote[]; denseError?: string; indexAgeH?: number }
+/** cueMemory() codes that mean the script did not answer (missing, failed or timed out), so the notes fallback runs. A dense
+ *  error the script itself reports (its keyword arm still answered) is not one, nor is an empty answer: on Miles's Mac an
+ *  empty cue_memory answer means "no related meeting", and searching his notes instead would change that path. */
+export const CUE_MEMORY_FAILURES: ReadonlySet<string> = new Set(['no_cue_memory_script', 'memory_timeout', 'spawn_failed', 'output_limit', 'bad_output', 'memory_threw'])
+export function cueMemoryFailed(mem: MemoryResult): boolean { return !!mem.denseError && CUE_MEMORY_FAILURES.has(mem.denseError) }
 export interface LiveCuesV2Deps {
-  gate(title: string, window: string, signal: AbortSignal): Promise<GateResult>
+  gate(title: string, window: string, signal: AbortSignal, provider: DecisionProvider): Promise<GateResult>
+  /** cue_memory.py (Miles's COS scripts). */
   memory(window: string, before: string, signal: AbortSignal): Promise<MemoryResult>
-  judge(title: string, window: string, notes: MemoryNote[], signal: AbortSignal): Promise<{ probs: Record<string, number>; tokens: number }>
+  /** The owner's own COS notes and meetings, used only when `memory` did not answer. Local search, no model call. */
+  notes(window: string, before: string, signal: AbortSignal, sessionId: string): Promise<MemoryResult>
+  judge(title: string, window: string, notes: MemoryNote[], signal: AbortSignal, provider: DecisionProvider): Promise<{ probs: Record<string, number>; tokens: number }>
   writer(model: string, system: string, prompt: string, signal: AbortSignal): Promise<{ text: string; costUsd?: number; inputTokens?: number; outputTokens?: number; model?: string }>
   emit(type: 'coaching_nudge' | 'coaching_nudge_v2', data: Record<string, unknown>): void
   lease(): MaintenanceWorkLease | null
   /** True while the user's own query runs (Ask, a durable query): cues wait rather than compete for the provider. */
   busy(): boolean
-  /** The cue Jev client's own state, for an honest capability. */
-  jevState(): { breakerOpen: boolean; capReached: boolean }
+  /** The configured decision provider for cues. Throws DecisionProviderError('decision_invalid_provider'). */
+  decisionProvider(): DecisionProvider
+  /** That provider's cue client: key present, daily cap, breaker. For an honest capability. */
+  decisionState(provider: DecisionProvider): { configured: boolean; breakerOpen: boolean; capReached: boolean }
+  /** Where past notes would come from now, for the capability. */
+  memorySource(): LiveCuesV2MemorySource
+  /** The saved runtime switch (null when none). */
+  settings: LiveCuesV2SettingReader
   warmMemory(): void
   now(): Date
   store: LiveCuesV2Store
@@ -273,26 +327,69 @@ function cleanWindow(text: string): string {
   return text.replace(/^\[\d+\]\s*/gm, '').replace(/\*\*?Speaker \d+:?\*\*?:?|Speaker \d+:/g, '')
 }
 
-function realDeps(): LiveCuesV2Deps {
-  const jev = new JevClient(fetch, () => new Date(), dataPath('jev-cues-usage.json'), jevDailyCap)
-  const traceFile = dataPath('live-cues-trace.jsonl')
+/** The gate and the judge over any decision client. Jev and SubQ take the same request (state plus `choice` questions with
+ *  keyed criteria) and answer the same shape (answers.<name>.probabilities and .choice); SubQ also validates every answer
+ *  against the questions before it returns. Prompts are byte-identical on both. */
+export function cueDecisionCalls(client: Pick<DecisionClient, 'ask'>) {
   return {
-    async gate(title, window, signal) {
+    async gate(title: string, window: string, signal: AbortSignal): Promise<GateResult> {
       const state = { meetingTitle: title, window: window.slice(-LIVE_CUES_V2_LIMITS.windowChars) }
-      const res: JevAnswers = await jev.ask(state, CUE_GATE_QUESTIONS as unknown as Record<string, unknown>, estimateJevTokens({ state, CUE_GATE_QUESTIONS }), { signal })
+      const res: JevAnswers = await client.ask(state, CUE_GATE_QUESTIONS as unknown as Record<string, unknown>, estimateJevTokens({ state, CUE_GATE_QUESTIONS }), { signal })
       const a = res.answers ?? {}
       const kind = a.kind?.choice === 'reinforce' ? 'reinforce' : 'challenge'
       return { pCue: Number(a.act?.probabilities?.cue ?? 0), kind, lookup: a.lookup?.probabilities ?? null, tokens: res.inputTokens }
     },
-    memory: (window, before, signal) => cueMemory(window, before, signal),
-    async judge(title, window, notes, signal) {
+    async judge(title: string, window: string, notes: MemoryNote[], signal: AbortSignal): Promise<{ probs: Record<string, number>; tokens: number }> {
       const criteria: Record<string, string> = Object.fromEntries(notes.map(m => [m.id, `${m.date} ${m.title}: ${m.notes.slice(0, 300)}`]))
       criteria.none = CUE_JUDGE_NONE
       const state = { meetingTitle: title, window: window.slice(-LIVE_CUES_V2_LIMITS.windowChars) }
       const questions = { same: { type: 'choice', instructions: CUE_JUDGE_INSTRUCTIONS, criteria } }
-      const res = await jev.ask(state, questions, estimateJevTokens({ state, questions }), { signal })
+      const res = await client.ask(state, questions, estimateJevTokens({ state, questions }), { signal })
       return { probs: res.answers?.same?.probabilities ?? {}, tokens: res.inputTokens }
     },
+  }
+}
+
+/** Is there anything of the owner's own to search when cue_memory.py is absent: the memory bridge or memory files, a
+ *  configured meeting library, or this server's own saved recordings. */
+function notesAvailable(): boolean {
+  try { if (contextSourceAvailable() !== null) return true } catch { /* next */ }
+  try { if (meetingLibraryConfigured()) return true } catch { /* next */ }
+  try { return getMeetingStore().listMonths().length > 0 } catch { return false }
+}
+
+function realDeps(): LiveCuesV2Deps {
+  const jev = new JevClient(fetch, () => new Date(), dataPath('jev-cues-usage.json'), jevDailyCap)
+  const subq = trackSubqDecisionClient(new SubqDecisionClient(fetch, () => new Date(), dataPath('subq-cues-usage.json'), () => resolveSubqKey()?.key, subqDailyCap))
+  const calls = (provider: DecisionProvider) => cueDecisionCalls(provider === 'subq' ? subq : jev)
+  const traceFile = dataPath('live-cues-trace.jsonl')
+  let memorySourceCache: { at: number; value: LiveCuesV2MemorySource } | null = null
+  return {
+    gate: (title, window, signal, provider) => calls(provider).gate(title, window, signal),
+    memory: (window, before, signal) => cueMemory(window, before, signal),
+    async notes(window, before, signal, sessionId) {
+      const r = await notesMemory(window, before, signal, { sessionId })
+      return { notes: r.notes, ...(r.error ? { denseError: r.error } : {}) }
+    },
+    judge: (title, window, notes, signal, provider) => calls(provider).judge(title, window, notes, signal),
+    decisionProvider: () => resolveCuesDecisionProvider(process.env).provider,
+    decisionState(provider) {
+      if (provider === 'subq') {
+        const st = subq.status()
+        return { configured: st.configured, breakerOpen: st.breakerOpenUntil !== null, capReached: st.usedToday >= st.dailyCap }
+      }
+      const st = jev.status()
+      return { configured: !!resolveJevKey(), breakerOpen: !!st.breakerOpenUntil, capReached: st.usedToday >= st.dailyCap }
+    },
+    memorySource() {
+      // /api/health polls the capability: probe the disk at most once a minute.
+      const nowMs = Date.now()
+      if (memorySourceCache && nowMs - memorySourceCache.at < 60_000) return memorySourceCache.value
+      const value: LiveCuesV2MemorySource = cueMemoryPaths() ? 'cue_memory' : notesAvailable() ? 'notes' : 'none'
+      memorySourceCache = { at: nowMs, value }
+      return value
+    },
+    settings: liveCuesV2Settings(),
     async writer(model, system, prompt, signal) {
       const run = await runLensGistEngine('claude', model, prompt, { system, timeoutMs: LIVE_CUES_V2_LIMITS.writerTimeoutMs, source: 'live-cues-v2', maxOutputTokens: LIVE_CUES_V2_LIMITS.writerMaxOutputTokens, signal })
       return { text: run.text, costUsd: run.usage?.costUsd, inputTokens: run.usage?.inputTokens, outputTokens: run.usage?.outputTokens, model: run.model }
@@ -302,10 +399,6 @@ function realDeps(): LiveCuesV2Deps {
     busy() {
       const active = maintenanceLifecycle.snapshot().activeByKind as Record<string, number>
       return ['durable_query', 'legacy_query', 'openai_query', 'meeting_ask'].some(kind => (active[kind] ?? 0) > 0)
-    },
-    jevState() {
-      const st = jev.status()
-      return { breakerOpen: !!st.breakerOpenUntil, capReached: st.usedToday >= st.dailyCap }
     },
     warmMemory: () => warmCueMemory(),
     now: () => new Date(),
@@ -392,23 +485,40 @@ function isCancel(error: unknown, signal: AbortSignal): boolean {
   return signal.aborted || (error instanceof Error && error.name === 'AbortError')
 }
 
+/** Decision-provider codes that stop cues quietly with a reason (not a failure, so not toward the meeting breaker). The
+ *  provider's own breaker and cap already bound these; counting them would also end the meeting's cues. */
+export const QUIET_DECISION_STOPS: ReadonlySet<string> = new Set(['jev_cap_reached', 'jev_breaker_open', 'jev_not_configured',
+  'decision_cap_reached', 'decision_breaker_open', 'decision_not_configured', 'decision_invalid_provider'])
+/** Abort reason when v2 is switched off at runtime. */
+export const V2_OFF = 'v2_off'
+
 export class LiveCuesV2Engine {
   private readonly sessions = new Map<string, Session>()
   constructor(private readonly deps: LiveCuesV2Deps) {}
 
+  private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }
+
   capability(): LiveCuesV2Capability {
     const model = liveCuesV2Model(this.deps.env)
-    const off = (reason: string): LiveCuesV2Capability => ({ available: false, reason, protocol: LIVE_CUES_V2_PROTOCOL, model })
+    let memory: LiveCuesV2MemorySource = 'none'
+    try { memory = this.deps.memorySource() } catch { memory = 'none' }
+    let provider: DecisionProvider | null = null
+    try { provider = this.deps.decisionProvider() } catch { provider = null }
+    const tail = { protocol: LIVE_CUES_V2_PROTOCOL, model, memory, ...(provider ? { decisionProvider: provider } : {}) }
+    const off = (reason: string): LiveCuesV2Capability => ({ available: false, reason, ...tail })
     try {
-      if (!liveCuesV2Enabled(this.deps.env)) return off('master_flag_off')
+      if (!this.enabled()) return off('master_flag_off')
       if (this.deps.env.ANTHROPIC_API_KEY && this.deps.env.COS_ALLOW_API_FALLBACK !== '1') return off('api_key_in_env')
-      if (!resolveJevKey()) return off('jev_not_configured')
+      if (!provider) return off('decision_invalid_provider')
+      const st = this.deps.decisionState(provider)
+      // jev_not_configured keeps its 6.75 meaning (Jev chosen, no Jev key) only when a SubQ key exists; with no key for
+      // the chosen provider otherwise, the reason is decision_not_configured.
+      if (!st.configured) return off(provider === 'jev' && this.deps.decisionState('subq').configured ? 'jev_not_configured' : 'decision_not_configured')
       if (!resolveProviderBinary('claude').ok) return off('claude_not_found')
       if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return off('budget_exhausted')
-      const jev = this.deps.jevState()
-      if (jev.capReached) return off('jev_cap_reached')
-      if (jev.breakerOpen) return off('jev_breaker_open')
-      return { available: true, protocol: LIVE_CUES_V2_PROTOCOL, model }
+      if (st.capReached) return off(provider === 'jev' ? 'jev_cap_reached' : 'decision_cap_reached')
+      if (st.breakerOpen) return off(provider === 'jev' ? 'jev_breaker_open' : 'decision_breaker_open')
+      return { available: true, ...tail }
     } catch {
       return off('unavailable')
     }
@@ -452,14 +562,14 @@ export class LiveCuesV2Engine {
     const s = this.sessions.get(sessionId)
     const ended = this.deps.store.isEnded(sessionId)
     const paused = this.deps.store.isPaused(sessionId)
-    if (!s && !ended) return { protocol: 2, enabled: liveCuesV2Enabled(this.deps.env), session: null }
+    if (!s && !ended) return { protocol: 2, enabled: this.enabled(), session: null }
     const counters = this.deps.store.counters(sessionId)
     const reason = s ? this.stopReasonOf(s, counters) : null
     const session: LiveCuesV2SessionStatus = {
       sessionId, state: ended ? 'ended' : paused ? 'paused' : reason ? 'stopped' : 'active', ...(reason && !ended && !paused ? { reason } : {}),
       paused, ended, pauseSeq: this.deps.store.pauseSeq(sessionId), cues: s ? [...s.cues] : [], evaluations: s?.evaluations ?? 0, writerCalls: counters.writerCalls,
     }
-    return { protocol: 2, enabled: liveCuesV2Enabled(this.deps.env), session }
+    return { protocol: 2, enabled: this.enabled(), session }
   }
 
   private stopReasonOf(s: Session, counters: { cues: number; writerCalls: number }): LiveCuesV2StopReason | null {
@@ -479,7 +589,7 @@ export class LiveCuesV2Engine {
 
   /** From the ASR path: fire-and-forget, never awaited. All gates live here. */
   async feed(sessionId: string, text: string, asrDegraded = false): Promise<void> {
-    if (!liveCuesV2Enabled(this.deps.env)) return
+    if (!this.enabled()) return
     if (this.deps.store.isEnded(sessionId)) return                    // tombstone before any auto-arm
     let s = this.sessions.get(sessionId)
     if (!s) {
@@ -532,8 +642,11 @@ export class LiveCuesV2Engine {
     wall.unref?.()
     try {
       try { lease = this.deps.lease() } catch (e) { if (e instanceof MaintenanceLifecycleError) { trace.outcome = 'maintenance'; return } throw e }
+      // One provider per evaluation: a settings change applies from the next one, never between the gate and the judge.
+      const provider = this.deps.decisionProvider()
+      trace.decisionProvider = provider
       const t0 = Date.now()
-      const gate = await this.deps.gate(s.title, window, abort.signal)
+      const gate = await this.deps.gate(s.title, window, abort.signal, provider)
       const pCue = Number.isFinite(gate.pCue) ? gate.pCue : 0
       Object.assign(trace, { gateMs: Date.now() - t0, pCue: round(pCue), cueKind: gate.kind, lookup: gate.lookup, gateTokens: gate.tokens })
       if (pCue < liveCuesV2Gate(this.deps.env)) { trace.outcome = 'gate_silent'; s.stopReason = null; return }
@@ -541,12 +654,22 @@ export class LiveCuesV2Engine {
 
       const t1 = Date.now()
       const before = new Date(started + 86_400_000).toLocaleDateString('en-CA')
-      const mem: MemoryResult = await this.deps.memory(window, before, abort.signal).catch((): MemoryResult => ({ notes: [], denseError: 'memory_threw' }))
-      Object.assign(trace, { memoryMs: Date.now() - t1, candidates: mem.notes.length, ...(mem.denseError ? { memoryError: mem.denseError } : {}), ...(mem.indexAgeH !== undefined ? { indexAgeH: mem.indexAgeH } : {}) })
+      let mem: MemoryResult = await this.deps.memory(window, before, abort.signal).catch((): MemoryResult => ({ notes: [], denseError: 'memory_threw' }))
+      Object.assign(trace, { memoryMs: Date.now() - t1, ...(mem.denseError ? { memoryError: mem.denseError } : {}), ...(mem.indexAgeH !== undefined ? { indexAgeH: mem.indexAgeH } : {}) })
+      let source: LiveCuesV2MemorySource = 'cue_memory'
+      if (cueMemoryFailed(mem) && !abort.signal.aborted) {
+        // cue_memory.py did not answer: search the owner's own COS (no model call), inside its own 3 s budget.
+        const tn = Date.now()
+        const found: MemoryResult = await this.deps.notes(window, before, abort.signal, s.sessionId).catch((): MemoryResult => ({ notes: [], denseError: 'notes_threw' }))
+        Object.assign(trace, { notesMs: Date.now() - tn, ...(found.denseError ? { notesError: found.denseError } : {}) })
+        mem = { notes: found.notes }
+        source = 'notes'
+      }
+      Object.assign(trace, { candidates: mem.notes.length, cueMemorySource: mem.notes.length ? source : 'none' })
       let kept: MemoryNote[] = []
       if (mem.notes.length && !abort.signal.aborted) {
         const t2 = Date.now()
-        const judged = await this.deps.judge(s.title, window, mem.notes, abort.signal)
+        const judged = await this.deps.judge(s.title, window, mem.notes, abort.signal, provider)
         Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens })
         kept = mem.notes.filter(m => (judged.probs[m.id] ?? 0) >= L.judgeKeep).slice(0, L.judgeMaxNotes).map((m, i) => ({ ...m, id: `M${i + 1}` }))
       }
@@ -570,7 +693,7 @@ export class LiveCuesV2Engine {
       if (typeof parsed === 'string') { trace.outcome = parsed === 'null' ? 'writer_null' : `withheld_${parsed}`; return }
       const elapsed = this.deps.now().getTime() - started
       if (s.wordsSinceEval > L.staleWords || elapsed > L.staleMs) { trace.outcome = 'stale'; return }
-      if (this.deps.store.isEnded(s.sessionId) || this.deps.store.isPaused(s.sessionId)) { trace.outcome = 'cancelled'; return }
+      if (this.deps.store.isEnded(s.sessionId) || this.deps.store.isPaused(s.sessionId) || !this.enabled()) { trace.outcome = 'cancelled'; return }
 
       const sources: CueSourceRef[] = parsed.memoryIds.map(id => kept.find(m => m.id === id)).filter((m): m is MemoryNote => !!m)
         .map(m => ({ id: sourceId(m), date: m.date, title: m.title }))
@@ -587,18 +710,19 @@ export class LiveCuesV2Engine {
     } catch (error) {
       if (wallHit) { trace.outcome = 'failure'; trace.error = 'wall_timeout'; s.failures += 1; if (s.failures >= L.breakerFailures) s.breaker = true; return }
       if (isCancel(error, abort.signal)) { trace.outcome = 'cancelled'; return }
-      if (error instanceof JevError && ['jev_cap_reached', 'jev_breaker_open', 'jev_not_configured'].includes(error.code)) {
+      if ((error instanceof JevError || error instanceof DecisionProviderError) && QUIET_DECISION_STOPS.has(error.code)) {
         trace.outcome = error.code
         s.stopReason = error.code as LiveCuesV2StopReason
         return
       }
       trace.outcome = 'failure'
-      trace.error = error instanceof JevError ? error.code : error instanceof LensGistLimitError ? 'writer_quota' : 'writer_error'
+      trace.error = error instanceof JevError || error instanceof DecisionProviderError ? error.code : error instanceof LensGistLimitError ? 'writer_quota' : 'writer_error'
       s.failures += 1
       if (error instanceof LensGistLimitError || s.failures >= L.breakerFailures) s.breaker = true
     } finally {
       clearTimeout(wall)
       if (wallHit && trace.outcome === 'cancelled') { trace.outcome = 'failure'; trace.error = 'wall_timeout'; s.failures += 1; if (s.failures >= L.breakerFailures) s.breaker = true }
+      if (trace.outcome === 'cancelled' && abort.signal.reason === V2_OFF) trace.cancelReason = V2_OFF
       s.inFlight = null
       try { lease?.release() } catch { /* released */ }
       trace.totalMs = this.deps.now().getTime() - started
@@ -612,6 +736,18 @@ export class LiveCuesV2Engine {
   }
 
   shutdown(): void { for (const s of this.sessions.values()) s.inFlight?.abort(); this.sessions.clear() }
+
+  /** v2 switched off at runtime (6.76.2): abort every evaluation in flight, so no half-written cue is emitted and every
+   *  lease is released. Sessions are kept (no new evaluation starts while off), so switching back on resumes a running
+   *  meeting from its next evaluation. */
+  suspend(): number {
+    let aborted = 0
+    for (const s of this.sessions.values()) if (s.inFlight) { s.inFlight.abort(V2_OFF); aborted += 1 }
+    return aborted
+  }
+
+  /** Was this meeting armed under v2 in this process? Its stop and status stay v2 even after v2 is switched off. */
+  knows(sessionId: string): boolean { return this.sessions.has(sessionId) }
 }
 
 function round(n: number): number { return Math.round(n * 1000) / 1000 }
@@ -625,12 +761,36 @@ export function liveCuesV2(): LiveCuesV2Engine {
     // A saved meeting ends its cues even when the phone never sent Stop (orphan recovery, Control save).
     unsubscribe = onDisplay(event => {
       const sid = event.type === 'recording_stop' ? event.data?.sessionId : null
-      if (typeof sid === 'string' && sid && liveCuesV2Enabled()) engine?.end(sid)
+      // Also when v2 was switched off mid-meeting: a meeting it armed still ends, so it never lingers as active.
+      if (typeof sid === 'string' && sid && (liveCuesV2Enabled() || engine?.knows(sid))) engine?.end(sid)
     })
   }
   return engine
 }
+/** The engine if it exists, without creating one (a v1-only server never builds the v2 clients). */
+export function peekLiveCuesV2(): LiveCuesV2Engine | null { return engine }
 export function liveCuesV2Capability(): LiveCuesV2Capability { return liveCuesV2().capability() }
+
+/** GET/POST /api/live-cues/v2/settings (COS Control's toggle). */
+export interface LiveCuesV2SettingsResponse { enabled: boolean; source: LiveCuesV2SettingSource; capability: LiveCuesV2Capability }
+export function liveCuesV2SettingsView(env: NodeJS.ProcessEnv = process.env): LiveCuesV2SettingsResponse {
+  const r = resolveLiveCuesV2(env, liveCuesV2Settings())
+  return { enabled: r.enabled, source: r.source, capability: liveCuesV2Capability() }
+}
+/** Save the switch. Off while env forces it on is refused and changes nothing. Turning it off ends cue evaluation for running
+ *  meetings at once; turning it on applies from each meeting's next evaluation. */
+export function setLiveCuesV2Enabled(enabled: boolean, env: NodeJS.ProcessEnv = process.env): { ok: true; view: LiveCuesV2SettingsResponse } | { ok: false; error: 'env_forced' } {
+  if (!enabled && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }
+  const wasOn = liveCuesV2Enabled(env)
+  liveCuesV2Settings().save(enabled)
+  if (wasOn && !liveCuesV2Enabled(env)) {
+    const aborted = engine?.suspend() ?? 0
+    console.log(`[live-cues-v2] switched off by setting; ${aborted} evaluation(s) stopped`)
+  } else if (!wasOn && liveCuesV2Enabled(env)) {
+    console.log('[live-cues-v2] switched on by setting')
+  }
+  return { ok: true, view: liveCuesV2SettingsView(env) }
+}
 /** What /api/health, /api/models and the status route advertise: NOTHING while v2 is switched off, so a 6.10.642
  *  companion treats the server exactly like a v1 server (v1 cues keep their own capability and indicator). */
 export function liveCuesV2Advertised(env: NodeJS.ProcessEnv = process.env): LiveCuesV2Capability | undefined {

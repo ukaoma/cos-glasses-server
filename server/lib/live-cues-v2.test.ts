@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -13,6 +13,7 @@ const contract = await import('../../shared/live-cues-v2.js')
 const { JevError, JEV_MODEL, jevCancelled } = await import('./jev.js')
 const { LensGistLimitError } = await import('./lens-gist-engines.js')
 const { MaintenanceLifecycleError } = await import('./maintenance-lifecycle.js')
+const { DecisionProviderError } = await import('./decision-provider.js')
 const { LiveCuesV2Engine, LiveCuesV2Store, LIVE_CUES_V2_LIMITS: L, cueHeadline, cueMemory, localWeekStart, parseWriterCue, pyJson, sourceId, unsupportedNumbers } = mod
 const { isLiveCueV2, CUE_HEADLINE_MAX, CUE_DETAIL_MAX } = contract
 type Deps = import('./live-cues-v2.js').LiveCuesV2Deps
@@ -29,7 +30,8 @@ describe('pins', () => {
     expect(sha(prompts.CUE_WRITER_SYSTEM_V3)).toBe('62acbdb54d6d2aad0f21b00e7920960b98dc2e723ae075294d5e800e7e5b53f7')
   })
   it('the wire contract matches the companion copy byte for byte (src/lib/live-cues-v2-contract.ts pins the same hash)', () => {
-    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('df08c71277e284099fae9b3e85e26c5d054f8a8acbae806fa4161e918b17ba1d')
+    // 6.76.2: optional capability fields memory and decisionProvider, and four decision_* stop reasons (additive; was df08c712...).
+    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('174728e74100f9ab8067bb7980a15742da73a6155cef0e5eea62c1d7e1a031f7')
   })
   it('the gate threshold was calibrated on jev-1.13.0; a model change needs a new replay', () => {
     expect(JEV_MODEL).toBe('jev-1.13.0')
@@ -177,19 +179,24 @@ describe('engine', () => {
   let clock: number
   let emitted: Array<{ type: string; data: Record<string, unknown> }>
   let traces: Array<Record<string, unknown>>
-  let calls: { gate: number; memory: number; judge: number; writer: number; prompts: string[] }
+  let calls: { gate: number; memory: number; notes: number; judge: number; writer: number; prompts: string[]; providers: string[]; judged: string[][] }
+  let storedSetting: boolean | null
+  let provider: 'jev' | 'subq'
+  let states: Record<'jev' | 'subq', { configured: boolean; breakerOpen: boolean; capReached: boolean }>
+  let notesFound: Array<{ id: string; date: string; title: string; notes: string; key: string }>
   let pCue: number
   let writerText: () => Promise<string>
   let busy: boolean
   let env: NodeJS.ProcessEnv
   function engine(over: Partial<Deps> = {}) {
     const deps: Deps = {
-      gate: async () => { calls.gate++; return { pCue, kind: 'challenge', lookup: null, tokens: 1000 } },
+      gate: async (_t, _w, _s, p) => { calls.gate++; calls.providers.push(`gate:${p}`); return { pCue, kind: 'challenge', lookup: null, tokens: 1000 } },
       memory: async () => { calls.memory++; return { notes: [
         { id: 'M1', date: '2026-10-01', title: 'Kept A', notes: 'Summary: redirect pricing 12% overage', key: 'a.md' },
         { id: 'M2', date: '2026-09-20', title: 'Dropped', notes: 'Summary: unrelated', key: 'b.md' },
         { id: 'M3', date: '2026-09-01', title: 'Kept B', notes: 'Summary: client asked for a cap', key: 'c.md' }] } },
-      judge: async () => { calls.judge++; return { probs: { M1: 0.91, M2: 0.79, M3: 0.85, none: 0.02 }, tokens: 900 } },
+      notes: async () => { calls.notes++; return { notes: notesFound } },
+      judge: async (_t, _w, notes, _s, p) => { calls.judge++; calls.providers.push(`judge:${p}`); calls.judged.push(notes.map(n => n.title)); return { probs: { M1: 0.91, M2: 0.79, M3: 0.85, none: 0.02 }, tokens: 900 } },
       writer: async (_m, _s, prompt) => { calls.writer++; calls.prompts.push(prompt); return { text: await writerText(), costUsd: 0.003, model: 'claude-sonnet-5-5' } },
       emit: (type, data) => {
         if (type === 'coaching_nudge_v2') expect(isLiveCueV2(data), 'every emitted v2 cue passes the shared validator').toBe(true)
@@ -197,7 +204,10 @@ describe('engine', () => {
       },
       lease: () => ({ release: () => {} }) as unknown as import('./maintenance-lifecycle.js').MaintenanceWorkLease,
       busy: () => busy,
-      jevState: () => ({ breakerOpen: false, capReached: false }),
+      decisionProvider: () => provider,
+      decisionState: p => states[p],
+      memorySource: () => 'cue_memory',
+      settings: { stored: () => storedSetting },
       warmMemory: () => {},
       now: () => new Date(clock),
       store: new LiveCuesV2Store(join(dir, 'state.json'), () => new Date(clock)),
@@ -212,7 +222,9 @@ describe('engine', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'cues-v2-engine-'))
     clock = Date.parse('2026-10-14T15:00:00Z')
-    emitted = []; traces = []; calls = { gate: 0, memory: 0, judge: 0, writer: 0, prompts: [] }
+    emitted = []; traces = []; calls = { gate: 0, memory: 0, notes: 0, judge: 0, writer: 0, prompts: [], providers: [], judged: [] }
+    storedSetting = null; provider = 'jev'; notesFound = []
+    states = { jev: { configured: true, breakerOpen: false, capReached: false }, subq: { configured: false, breakerOpen: false, capReached: false } }
     pCue = 0.9; busy = false
     writerText = async () => JSON.stringify({ cue: 'Overage is 12% with no cap set. Name who quotes the cap today.', kind: 'challenge', memoryIds: ['M1', 'M1'] })
     env = { COS_LIVE_CUES_V2: '1' }
@@ -437,7 +449,7 @@ describe('engine', () => {
   it('memory errors are traced, and the cue still runs without memory', async () => {
     const e = engine({ memory: async () => ({ notes: [], denseError: 'memory_timeout' }) }); e.arm('meeting_a')
     await e.feed('meeting_a', words(L.minNewWords))
-    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', candidates: 0, memoryError: 'memory_timeout', kept: 0 })
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', candidates: 0, memoryError: 'memory_timeout', kept: 0, cueMemorySource: 'none' })
     expect(calls.judge).toBe(0)
   })
 
@@ -446,8 +458,10 @@ describe('engine', () => {
     expect(engine().capability()).toMatchObject({ available: false, reason: 'api_key_in_env' })
     env.COS_ALLOW_API_FALLBACK = '1'
     expect(engine().capability()).toMatchObject({ available: true })
-    expect(engine({ jevState: () => ({ breakerOpen: false, capReached: true }) }).capability()).toMatchObject({ available: false, reason: 'jev_cap_reached' })
-    expect(engine({ jevState: () => ({ breakerOpen: true, capReached: false }) }).capability()).toMatchObject({ available: false, reason: 'jev_breaker_open' })
+    states.jev.capReached = true
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'jev_cap_reached' })
+    states.jev = { configured: true, capReached: false, breakerOpen: true }
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'jev_breaker_open' })
   })
 
   it('feedback is recorded with whether the cue is known; no transcript text is traced, even on a writer failure', async () => {
@@ -459,5 +473,260 @@ describe('engine', () => {
     writerText = async () => { throw new Error('claude exited 1: secretword secretword') }
     next(); await e.feed('meeting_a', words(L.minNewWords, 'secretword'))
     expect(JSON.stringify(traces)).not.toContain('secretword')
+  })
+
+  // ── 6.76.2: notes fallback ────────────────────────────────────────────────
+  const POOL = { id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: 'Delgado quoted 18500 and wants a deposit by Friday.', key: 'memory:mem_pool_1' }
+  const OTHER = { id: 'M2', date: '2026-10-02', title: 'Unrelated', notes: 'School pickup rota.', key: 'meeting:standalone:x' }
+  const notesJudge = async (_t: string, _w: string, notes: Array<{ title: string }>, _s: AbortSignal, p: string) => {
+    calls.judge++; calls.providers.push(`judge:${p}`); calls.judged.push(notes.map(n => n.title)); return { probs: { M1: 0.93, M2: 0.1, none: 0.05 }, tokens: 1 }
+  }
+
+  it('notes fallback: every way cue_memory.py fails (missing, timeout, spawn, bad output, output limit, a throw) searches the owner\'s notes, and those go through the same judge and writer', async () => {
+    const failures = ['no_cue_memory_script', 'memory_timeout', 'spawn_failed', 'bad_output', 'output_limit', 'THROW'] as const
+    expect([...mod.CUE_MEMORY_FAILURES].sort()).toEqual(['bad_output', 'memory_threw', 'memory_timeout', 'no_cue_memory_script', 'output_limit', 'spawn_failed'])
+    for (const [i, failure] of failures.entries()) {
+      notesFound = [POOL, OTHER]
+      writerText = async () => JSON.stringify({ cue: 'Delgado wants the deposit by Friday. Decide on the pebble finish first.', kind: 'challenge', memoryIds: ['M1'] })
+      const e = engine({ memory: async () => { calls.memory++; if (failure === 'THROW') throw new Error('boom'); return { notes: [], denseError: failure } }, judge: notesJudge })
+      const sid = `meeting_f${i}`
+      e.arm(sid)
+      const before = { notes: calls.notes, judge: calls.judge, prompts: calls.prompts.length }
+      await e.feed(sid, words(L.minNewWords))
+      expect(calls.notes - before.notes, failure).toBe(1)
+      expect(calls.judge - before.judge, failure).toBe(1)
+      expect(calls.judged.at(-1), failure).toEqual(['Pool resurfacing', 'Unrelated'])
+      const prompt = JSON.parse(calls.prompts.at(-1)!) as { memory: Array<Record<string, string>> }
+      expect(prompt.memory, failure).toEqual([{ id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: POOL.notes }])   // judge kept M1 only; writer keys unchanged
+      expect(evaluations().at(-1), failure).toMatchObject({ outcome: 'cue', cueMemorySource: 'notes', candidates: 2, kept: 1, memoryError: failure === 'THROW' ? 'memory_threw' : failure })
+      const cue = emitted.filter(x => x.type === 'coaching_nudge_v2').at(-1)!.data
+      expect(cue.sources, failure).toEqual([{ id: sourceId(POOL), date: '2026-10-10', title: 'Pool resurfacing' }])
+    }
+  })
+
+  it('cue_memory.py is preferred whenever it answers: with notes, empty, or with its own dense error the notes arm never runs', async () => {
+    const e = engine(); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(evaluations().at(-1)).toMatchObject({ cueMemorySource: 'cue_memory', candidates: 3 })
+    const empty = engine({ memory: async () => ({ notes: [] }) }); empty.arm('meeting_b')
+    await empty.feed('meeting_b', words(L.minNewWords))
+    expect(evaluations().at(-1)).toMatchObject({ cueMemorySource: 'none', candidates: 0 })
+    const dense = engine({ memory: async () => ({ notes: [{ ...POOL }], denseError: 'dense_timeout' }), judge: notesJudge }); dense.arm('meeting_c')
+    await dense.feed('meeting_c', words(L.minNewWords))
+    expect(evaluations().at(-1)).toMatchObject({ cueMemorySource: 'cue_memory', candidates: 1, memoryError: 'dense_timeout' })
+    expect(calls.notes).toBe(0)
+  })
+
+  it('a notes arm that finds nothing is traced as none with its own error, and no note text reaches the trace', async () => {
+    const e = engine({ memory: async () => ({ notes: [], denseError: 'no_cue_memory_script' }), notes: async () => { calls.notes++; return { notes: [], denseError: 'notes_timeout' } } }); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', cueMemorySource: 'none', candidates: 0, notesError: 'notes_timeout' })
+    expect(calls.judge).toBe(0)
+    notesFound = [{ ...POOL, notes: 'secretnote secretnote' }]
+    const f = engine({ memory: async () => ({ notes: [], denseError: 'no_cue_memory_script' }), judge: notesJudge }); f.arm('meeting_b')
+    await f.feed('meeting_b', words(L.minNewWords))
+    expect(evaluations().at(-1)).toMatchObject({ cueMemorySource: 'notes' })
+    expect(JSON.stringify(traces)).not.toContain('secretnote')
+  })
+
+  // ── 6.76.2: runtime switch ────────────────────────────────────────────────
+  it('the saved setting turns v2 on without the env flag, and env COS_LIVE_CUES_V2=1 forces it on over a saved off', async () => {
+    env = {}
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'master_flag_off', memory: 'cue_memory', decisionProvider: 'jev' })
+    storedSetting = true
+    const e = engine(); expect(e.capability()).toMatchObject({ available: true }); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(calls.gate).toBe(1)
+    expect(e.status('meeting_a').enabled).toBe(true)
+    storedSetting = false
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'master_flag_off' })
+    env = { COS_LIVE_CUES_V2: '1' }
+    expect(engine().capability()).toMatchObject({ available: true })
+    expect(mod.liveCuesV2Enabled({ COS_LIVE_CUES_V2: '0' }, { stored: () => true })).toBe(true)     // only '1' forces; anything else defers to the setting
+    expect(mod.liveCuesV2Enabled({ COS_LIVE_CUES_V2: '0' }, { stored: () => null })).toBe(false)
+  })
+
+  it('switching off mid-meeting stops the evaluation in flight cleanly; nothing runs while off; switching on resumes at the next evaluation', async () => {
+    env = {}; storedSetting = true
+    let released = 0
+    let release!: () => void
+    const seen: { signal: AbortSignal | null } = { signal: null }
+    writerText = () => new Promise(r => { release = () => r(JSON.stringify({ cue: 'Name an owner today.' })) })
+    const e = engine({
+      lease: () => ({ release: () => { released++ } }) as unknown as import('./maintenance-lifecycle.js').MaintenanceWorkLease,
+      writer: async (_m, _s, prompt, signal) => { calls.writer++; calls.prompts.push(prompt); seen.signal = signal; return { text: await writerText() } },
+    })
+    e.arm('meeting_a')
+    const run = e.feed('meeting_a', words(L.minNewWords))
+    await vi.waitFor(() => expect(calls.writer).toBe(1))
+    storedSetting = false
+    expect(e.suspend()).toBe(1)
+    expect(seen.signal?.aborted).toBe(true)
+    release(); await run
+    expect(emitted).toEqual([])
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cancelled', cancelReason: 'v2_off' })
+    expect(released).toBe(1)
+    expect(e.suspend()).toBe(0)                                            // nothing left in flight: no stuck state
+    next(); await e.feed('meeting_a', words(L.minNewWords))
+    expect(calls.gate).toBe(1)
+    expect(e.status('meeting_a')).toMatchObject({ enabled: false, session: { state: 'active' } })
+    storedSetting = true
+    writerText = async () => JSON.stringify({ cue: 'Name an owner today.' })
+    next(); await e.feed('meeting_a', words(L.minNewWords))
+    expect(calls.gate).toBe(2)
+    expect(emitted.map(x => x.type)).toEqual(['coaching_nudge_v2', 'coaching_nudge'])
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue' })
+  })
+
+  it('a cue whose writer finished after v2 went off is never emitted, even when no abort reached the writer', async () => {
+    env = {}; storedSetting = true
+    writerText = async () => { storedSetting = false; return JSON.stringify({ cue: 'Name an owner today.' }) }
+    const e = engine(); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(emitted).toEqual([])
+    expect(evaluations().at(-1)?.outcome).toBe('cancelled')
+  })
+
+  // ── 6.76.2: decision provider ─────────────────────────────────────────────
+  it('gate and judge run on the configured provider, one provider per evaluation; a change applies from the next one', async () => {
+    provider = 'subq'; states.subq.configured = true
+    const e = engine({ gate: async (_t, _w, _s, p) => { calls.gate++; calls.providers.push(`gate:${p}`); provider = 'jev'; return { pCue, kind: 'challenge', lookup: null, tokens: 1 } } })
+    e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(calls.providers).toEqual(['gate:subq', 'judge:subq'])          // switched during the gate: the judge kept the snapshot
+    expect(evaluations().at(-1)).toMatchObject({ decisionProvider: 'subq', outcome: 'cue' })
+    next(); await e.feed('meeting_a', words(L.minNewWords))
+    expect(calls.providers.slice(2)).toEqual(['gate:jev', 'judge:jev'])
+    expect(evaluations().at(-1)).toMatchObject({ decisionProvider: 'jev' })
+  })
+
+  it('capability names the provider and gives each provider an honest reason', () => {
+    states = { jev: { configured: false, breakerOpen: false, capReached: false }, subq: { configured: false, breakerOpen: false, capReached: false } }
+    expect(engine().capability()).toEqual({ available: false, reason: 'decision_not_configured', protocol: 2, model: 'claude-sonnet-5-5', memory: 'cue_memory', decisionProvider: 'jev' })
+    states.subq.configured = true                                          // Jev chosen explicitly, only a SubQ key: the 6.75 reason
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'jev_not_configured', decisionProvider: 'jev' })
+    provider = 'subq'; states = { jev: { configured: true, breakerOpen: false, capReached: false }, subq: { configured: false, breakerOpen: false, capReached: false } }
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'decision_not_configured', decisionProvider: 'subq' })
+    states.subq = { configured: true, breakerOpen: false, capReached: true }
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'decision_cap_reached', decisionProvider: 'subq' })
+    states.subq = { configured: true, breakerOpen: true, capReached: false }
+    expect(engine().capability()).toMatchObject({ available: false, reason: 'decision_breaker_open', decisionProvider: 'subq' })
+    states.subq = { configured: true, breakerOpen: false, capReached: false }
+    expect(engine().capability()).toEqual({ available: true, protocol: 2, model: 'claude-sonnet-5-5', memory: 'cue_memory', decisionProvider: 'subq' })
+    states.jev = { configured: true, breakerOpen: true, capReached: true }  // the other provider's state never leaks in
+    expect(engine().capability()).toMatchObject({ available: true })
+    const bad = engine({ decisionProvider: () => { throw new DecisionProviderError('decision_invalid_provider') }, memorySource: () => 'notes' }).capability()
+    expect(bad).toEqual({ available: false, reason: 'decision_invalid_provider', protocol: 2, model: 'claude-sonnet-5-5', memory: 'notes' })
+  })
+
+  it('provider errors at run time: cap, breaker, missing key and an invalid choice stop quietly with a reason; other provider errors count toward the breaker', async () => {
+    for (const code of ['decision_cap_reached', 'decision_breaker_open', 'decision_not_configured'] as const) {
+      const e = engine({ gate: async () => { calls.gate++; throw new DecisionProviderError(code) } }); e.arm(`meeting_${code}`)
+      await e.feed(`meeting_${code}`, words(L.minNewWords))
+      expect(evaluations().at(-1)?.outcome).toBe(code)
+      expect(e.status(`meeting_${code}`).session).toMatchObject({ state: 'stopped', reason: code })
+      for (let i = 0; i < L.breakerFailures; i++) { next(); await e.feed(`meeting_${code}`, words(L.minNewWords)) }
+      expect(e.status(`meeting_${code}`).session?.reason).toBe(code)       // never the meeting breaker
+    }
+    let invalid = false
+    const inv = engine({ decisionProvider: () => { if (invalid) throw new DecisionProviderError('decision_invalid_provider'); return 'jev' } }); inv.arm('meeting_inv')
+    invalid = true                                                         // the choice became unreadable after the meeting armed
+    const gatesBefore = calls.gate
+    await inv.feed('meeting_inv', words(L.minNewWords))
+    expect(calls.gate).toBe(gatesBefore)
+    expect(evaluations().at(-1)?.outcome).toBe('decision_invalid_provider')
+    expect(inv.status('meeting_inv').session).toMatchObject({ state: 'stopped', reason: 'decision_invalid_provider' })
+    const down = engine({ gate: async () => { calls.gate++; throw new DecisionProviderError('decision_unavailable') } }); down.arm('meeting_down')
+    for (let i = 0; i < L.breakerFailures; i++) { await down.feed('meeting_down', words(L.minNewWords)); next() }
+    expect(down.status('meeting_down').session).toMatchObject({ state: 'stopped', reason: 'breaker_open' })
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'failure', error: 'decision_unavailable' })
+  })
+})
+
+describe('decision provider selection and clients (6.76.2)', () => {
+  const noKeys = { jev: () => false, subq: () => false }
+  const bothKeys = { jev: () => true, subq: () => true }
+  const onlySubq = { jev: () => false, subq: () => true }
+  const { resolveCuesDecisionProvider, cueDecisionCalls } = mod
+  it('cues use SubQ only when COS_DECISION_PROVIDER_CUES=subq or SubQ is the only key; the global decision setting and env are ignored', () => {
+    expect(resolveCuesDecisionProvider({}, noKeys)).toEqual({ provider: 'jev', source: 'default' })
+    expect(resolveCuesDecisionProvider({}, bothKeys)).toEqual({ provider: 'jev', source: 'default' })
+    expect(resolveCuesDecisionProvider({}, { jev: () => true, subq: () => false })).toEqual({ provider: 'jev', source: 'default' })
+    expect(resolveCuesDecisionProvider({}, onlySubq)).toEqual({ provider: 'subq', source: 'only_key' })
+    expect(resolveCuesDecisionProvider({ COS_DECISION_PROVIDER: 'subq' }, bothKeys)).toEqual({ provider: 'jev', source: 'default' })   // global env ignored
+    expect(resolveCuesDecisionProvider({ COS_DECISION_PROVIDER_CUES: ' SubQ ' }, bothKeys)).toEqual({ provider: 'subq', source: 'env' })
+    expect(resolveCuesDecisionProvider({ COS_DECISION_PROVIDER_CUES: 'subq' }, noKeys)).toEqual({ provider: 'subq', source: 'env' })   // explicit, even without a key
+    expect(resolveCuesDecisionProvider({ COS_DECISION_PROVIDER_CUES: 'jev' }, onlySubq)).toEqual({ provider: 'jev', source: 'env' })     // explicit Jev beats only-key
+    expect(() => resolveCuesDecisionProvider({ COS_DECISION_PROVIDER_CUES: 'gpt' }, bothKeys)).toThrow('decision_invalid_provider')
+    expect(() => resolveCuesDecisionProvider({ COS_DECISION_PROVIDER_CUES: '' }, bothKeys)).toThrow('decision_invalid_provider')
+  })
+
+  let dir: string
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cues-v2-decision-')) })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+  const gateAnswers = {
+    act: { type: 'choice', choice: 'cue', probabilities: { cue: 0.9, silent: 0.1 }, confidence: 0.9 },
+    lookup: { type: 'choice', choice: 'past_meetings', probabilities: { none: 0.2, past_meetings: 0.7, public_fact: 0.1 }, confidence: 0.7 },
+    kind: { type: 'choice', choice: 'reinforce', probabilities: { reinforce: 0.6, challenge: 0.4 }, confidence: 0.6 },
+  }
+  const judgeAnswers = { same: { type: 'choice', choice: 'M1', probabilities: { M1: 0.85, M2: 0.1, none: 0.05 }, confidence: 0.85 } }
+  const notes = [{ id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: 'Delgado quoted 18500' }, { id: 'M2', date: '2026-10-02', title: 'Other', notes: 'x' }]
+  function recordingFetch(answers: () => unknown, extra: Record<string, unknown>) {
+    const bodies: Array<Record<string, unknown>> = []
+    const f = (async (_url: string, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body))
+      return new Response(JSON.stringify({ answers: answers(), usage: { input_tokens: 500 }, ...extra }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    return { f, bodies }
+  }
+  it('SubQ takes the same gate and judge questions and its validated answers read the same way', async () => {
+    const { SubqDecisionClient, SUBQ_MODEL } = await import('./decision-provider.js')
+    let answers: unknown = gateAnswers
+    const { f, bodies } = recordingFetch(() => answers, { model: SUBQ_MODEL })
+    const subq = new SubqDecisionClient(f, () => new Date('2026-10-17T15:00:00Z'), join(dir, 'subq.json'), () => 'test-key-not-real', () => 1e9)
+    const calls = cueDecisionCalls(subq)
+    const gate = await calls.gate('G2 Recording', 'we should pick the pebble finish', new AbortController().signal)
+    expect(gate).toEqual({ pCue: 0.9, kind: 'reinforce', lookup: { none: 0.2, past_meetings: 0.7, public_fact: 0.1 }, tokens: 500 })
+    expect(bodies[0]).toMatchObject({ model: SUBQ_MODEL, state: { meetingTitle: 'G2 Recording', window: 'we should pick the pebble finish' } })
+    expect(bodies[0].questions).toEqual(prompts.CUE_GATE_QUESTIONS)
+    answers = judgeAnswers
+    const judged = await calls.judge('G2 Recording', 'pebble finish', notes, new AbortController().signal)
+    expect(judged).toEqual({ probs: { M1: 0.85, M2: 0.1, none: 0.05 }, tokens: 500 })
+    expect(Object.keys((bodies[1].questions as { same: { criteria: Record<string, string> } }).same.criteria)).toEqual(['M1', 'M2', 'none'])
+    answers = { same: { type: 'choice', choice: 'M1', probabilities: { M1: 1 }, confidence: 1 } }     // a label missing: SubQ refuses it
+    await expect(calls.judge('t', 'w', notes, new AbortController().signal)).rejects.toMatchObject({ code: 'decision_bad_answer' })
+  })
+  it('Jev takes the identical requests (same questions, same state) and reads the same way', async () => {
+    const { JevClient, JEV_MODEL: model } = await import('./jev.js')
+    const savedKey = process.env.TYPESAFE_API_KEY
+    process.env.TYPESAFE_API_KEY = 'test-key-not-real'   // the client resolves its key internally
+    onTestFinished(() => { if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedKey })
+    let answers: unknown = gateAnswers
+    const { f, bodies } = recordingFetch(() => answers, { model })
+    const jev = new JevClient(f, () => new Date('2026-10-17T15:00:00Z'), join(dir, 'jev.json'), () => 1e9)
+    const calls = cueDecisionCalls(jev)
+    expect(await calls.gate('G2 Recording', 'we should pick the pebble finish', new AbortController().signal)).toEqual({ pCue: 0.9, kind: 'reinforce', lookup: { none: 0.2, past_meetings: 0.7, public_fact: 0.1 }, tokens: 500 })
+    expect(bodies[0]).toMatchObject({ model, state: { meetingTitle: 'G2 Recording', window: 'we should pick the pebble finish' } })
+    expect(bodies[0].questions).toEqual(prompts.CUE_GATE_QUESTIONS)
+    answers = judgeAnswers
+    expect(await calls.judge('G2 Recording', 'pebble finish', notes, new AbortController().signal)).toEqual({ probs: { M1: 0.85, M2: 0.1, none: 0.05 }, tokens: 500 })
+  })
+  it('SubQ keeps its own daily cap and breaker for cues, reports them honestly, and a newly saved key clears its breaker', async () => {
+    const { SubqDecisionClient, trackSubqDecisionClient, resetSubqDecisionClients } = await import('./decision-provider.js')
+    const now = () => new Date('2026-10-17T15:00:00Z')
+    const ledger = join(dir, 'subq-cues.json')
+    writeFileSync(ledger, JSON.stringify({ '2026-10-17': 1000 }) + '\n', { mode: 0o600 })
+    const capped = new SubqDecisionClient((async () => { throw new Error('must not be called') }) as unknown as typeof fetch, now, ledger, () => 'k', () => 1000)
+    expect(capped.status()).toEqual({ configured: true, usedToday: 1000, dailyCap: 1000, breakerOpenUntil: null })
+    await expect(cueDecisionCalls(capped).gate('t', 'w', new AbortController().signal)).rejects.toMatchObject({ code: 'decision_cap_reached' })
+    writeFileSync(ledger, '{not json')
+    expect(capped.status()).toMatchObject({ usedToday: 1000, dailyCap: 1000 })              // an unreadable ledger reads as spent
+    const failing = trackSubqDecisionClient(new SubqDecisionClient((async () => new Response('', { status: 500 })) as unknown as typeof fetch, now, join(dir, 'subq-b.json'), () => 'k', () => 1e9))
+    for (let i = 0; i < 3; i++) await expect(cueDecisionCalls(failing).gate('t', 'w', new AbortController().signal)).rejects.toMatchObject({ code: 'decision_unavailable' })
+    expect(failing.status().breakerOpenUntil).not.toBeNull()
+    await expect(cueDecisionCalls(failing).gate('t', 'w', new AbortController().signal)).rejects.toMatchObject({ code: 'decision_breaker_open' })
+    resetSubqDecisionClients()
+    expect(failing.status().breakerOpenUntil).toBeNull()
+    expect(new SubqDecisionClient(fetch, now, join(dir, 'c.json'), () => undefined, () => 1).status().configured).toBe(false)
   })
 })
