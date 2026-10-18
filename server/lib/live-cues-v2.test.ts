@@ -488,12 +488,15 @@ describe('engine', () => {
     for (const [i, failure] of failures.entries()) {
       notesFound = [POOL, OTHER]
       writerText = async () => JSON.stringify({ cue: 'Delgado wants the deposit by Friday. Decide on the pebble finish first.', kind: 'challenge', memoryIds: ['M1'] })
-      const e = engine({ memory: async () => { calls.memory++; if (failure === 'THROW') throw new Error('boom'); return { notes: [], denseError: failure } }, judge: notesJudge })
+      const asked: Array<[string, string]> = []
+      const e = engine({ memory: async () => { calls.memory++; if (failure === 'THROW') throw new Error('boom'); return { notes: [], denseError: failure } }, judge: notesJudge,
+        notes: async (_w, before, _s, sessionId) => { calls.notes++; asked.push([before, sessionId]); return { notes: notesFound } } })
       const sid = `meeting_f${i}`
       e.arm(sid)
       const before = { notes: calls.notes, judge: calls.judge, prompts: calls.prompts.length }
       await e.feed(sid, words(L.minNewWords))
       expect(calls.notes - before.notes, failure).toBe(1)
+      expect(asked, failure).toEqual([['2026-10-15', sid]])                        // the same date bound as cue_memory.py; the live meeting is excluded by id
       expect(calls.judge - before.judge, failure).toBe(1)
       expect(calls.judged.at(-1), failure).toEqual(['Pool resurfacing', 'Unrelated'])
       const prompt = JSON.parse(calls.prompts.at(-1)!) as { memory: Array<Record<string, string>> }

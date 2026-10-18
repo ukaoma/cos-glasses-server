@@ -347,3 +347,31 @@ describe('display-stream capability advertisement', () => {
     expect(JSON.stringify(body)).not.toContain(TOKEN)
   }, 30_000)
 })
+
+describe('live cues v2 runtime switch on /api/health and /api/models (6.76.2)', () => {
+  it('advertises liveCuesV2 only while the saved setting is on, with no restart, and nothing again once it is off', async () => {
+    const { liveCuesV2Settings } = await import('../lib/live-cues-v2-settings.js')
+    const { shutdownLiveCuesV2 } = await import('../lib/live-cues-v2.js')
+    const read = async () => {
+      const health = await (await fetch(`${base}/api/health`)).json() as { capabilities?: Record<string, unknown> }
+      const models = await (await fetch(`${base}/api/models`)).json() as { capabilities?: Record<string, unknown> }
+      expect(health.capabilities && models.capabilities).toBeTruthy()
+      return [health.capabilities!.liveCuesV2, models.capabilities!.liveCuesV2]
+    }
+    const saved = process.env.COS_LIVE_CUES_V2
+    delete process.env.COS_LIVE_CUES_V2
+    try {
+      expect(await read()).toEqual([undefined, undefined])                       // a v2-off server reads as v1
+      liveCuesV2Settings().save(true)
+      const [health, models] = await read()
+      expect(health).toMatchObject({ protocol: 2, memory: expect.any(String), decisionProvider: expect.stringMatching(/^(jev|subq)$/) })
+      expect(models).toEqual(health)
+      liveCuesV2Settings().save(false)
+      expect(await read()).toEqual([undefined, undefined])
+    } finally {
+      liveCuesV2Settings().save(false)
+      shutdownLiveCuesV2()
+      if (saved === undefined) delete process.env.COS_LIVE_CUES_V2; else process.env.COS_LIVE_CUES_V2 = saved
+    }
+  }, 60_000)
+})

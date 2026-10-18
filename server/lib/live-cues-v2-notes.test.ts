@@ -57,6 +57,12 @@ describe('notesMemory', () => {
     expect(log.some(x => x.startsWith('memories:') && x.includes('delgado'))).toBe(true)
     expect(log.every(x => x === 'bridge' || x.split(':')[1].split(' ').length <= 4)).toBe(true)   // the window itself is never a query
   })
+  it('never more than four candidates, however many match', async () => {
+    const r = await notesMemory(WINDOW, before, new AbortController().signal, { searchers: searchers({
+      memories: async () => Array.from({ length: 6 }, (_, i) => memHit(`m${i}`, `Pool note ${i}`)), meetings: async () => [], bridge: async () => [] }) })
+    expect(r.notes).toHaveLength(4)
+    expect(r.notes.map(n => n.id)).toEqual(['M1', 'M2', 'M3', 'M4'])
+  })
   it('a note found by more than one query or source ranks first', async () => {
     const r = await notesMemory(WINDOW, before, new AbortController().signal, { searchers: searchers({
       memories: async q => (q.split(' ').length > 2 ? [memHit('a', 'Only once')] : []),
@@ -84,9 +90,9 @@ describe('notesMemory', () => {
     expect(seen!.timeoutMs).toBe(120)
     expect(seen!.signal.aborted).toBe(true)
   })
-  it('an aborted evaluation gets nothing, and a window of filler searches nothing', async () => {
-    const ac = new AbortController(); ac.abort()
-    expect(await notesMemory(WINDOW, before, ac.signal, { searchers: searchers() })).toEqual({ notes: [] })
+  it('an evaluation aborted while the search runs gets nothing, and a window of filler searches nothing', async () => {
+    const ac = new AbortController()
+    expect(await notesMemory(WINDOW, before, ac.signal, { searchers: searchers({ memories: async () => { ac.abort(); return [memHit('mem_pool', 'Pool contractor')] } }) })).toEqual({ notes: [] })
     const log: string[] = []
     expect(await notesMemory('um yeah okay so', before, new AbortController().signal, { searchers: searchers({}, log) })).toEqual({ notes: [], error: 'notes_no_terms' })
     expect(log).toEqual([])

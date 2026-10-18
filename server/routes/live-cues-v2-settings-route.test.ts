@@ -97,6 +97,15 @@ describe('live cues v2 settings routes', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
+  it('a saved meeting still ends a meeting v2 armed after v2 was switched off', async () => {
+    await post('/live-cues/v2/settings', { enabled: true })
+    expect((await post('/live-cues/start', { sessionId: 'meeting_s3' })).status).toBe(200)
+    await post('/live-cues/v2/settings', { enabled: false })
+    const { emitDisplay } = await import('../lib/display-bus.js')
+    emitDisplay({ type: 'recording_stop', data: { sessionId: 'meeting_s3' } } as never)
+    expect(await (await get('/live-cues/status?sessionId=meeting_s3')).json()).toMatchObject({ session: { state: 'ended', ended: true } })
+  })
+
   it('with env COS_LIVE_CUES_V2=1 a request to turn it off is 409 env_forced and changes nothing; on is allowed', async () => {
     await post('/live-cues/v2/settings', { enabled: false })
     const before = readFileSync(SETTINGS_FILE, 'utf8')
@@ -156,6 +165,45 @@ describe('live cues v2 settings routes', () => {
       expect((await (await get('/live-cues/v2/settings')).json()).capability).toMatchObject({ available: false, reason: 'decision_not_configured', decisionProvider: 'jev' })
     } finally {
       for (const k of ['COS_DECISION_PROVIDER_CUES', 'COS_DECISION_PROVIDER', 'COS_LIVE_CUES_SUBQ_DAILY_TOKENS', 'SUBQ_API_KEY']) delete process.env[k]
+    }
+  })
+
+  it('the real deps send the gate to the provider they report: SubQ by the cue override, Jev otherwise (network faked)', async () => {
+    const { SUBQ_MODEL } = await import('../lib/decision-provider.js')
+    const { JEV_MODEL } = await import('../lib/jev.js')
+    const realFetch = globalThis.fetch
+    const seen: string[] = []
+    const silent = { act: { type: 'choice', choice: 'silent', probabilities: { cue: 0.1, silent: 0.9 }, confidence: 0.9 },
+      lookup: { type: 'choice', choice: 'none', probabilities: { none: 0.8, past_meetings: 0.1, public_fact: 0.1 }, confidence: 0.8 },
+      kind: { type: 'choice', choice: 'challenge', probabilities: { reinforce: 0.4, challenge: 0.6 }, confidence: 0.6 } }
+    vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+      const u = String(url)
+      const provider = u.startsWith('https://api.subq.ai/') ? 'subq' : u.startsWith('https://api.typesafe.ai/') ? 'jev' : null
+      if (!provider) return realFetch(url as string, init)
+      seen.push(provider)
+      return new Response(JSON.stringify({ model: provider === 'subq' ? SUBQ_MODEL : JEV_MODEL, answers: silent, usage: { input_tokens: 300 } }), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    Object.assign(process.env, { COS_LIVE_CUES_V2: '1', COS_DECISION_PROVIDER_CUES: 'subq', SUBQ_API_KEY: 'test-subq-key-not-real', TYPESAFE_API_KEY: 'test-jev-key-not-real' })
+    try {
+      await restart()                                                              // the engine's clients are built with the faked fetch
+      const { liveCuesV2 } = await import('../lib/live-cues-v2.js')
+      const lastTrace = () => JSON.parse(readFileSync(join(dataDir, 'live-cues-trace.jsonl'), 'utf8').trim().split('\n').at(-1)!) as Record<string, unknown>
+      const speech = Array.from({ length: 45 }, (_, i) => `word${i}`).join(' ')
+      expect((await post('/live-cues/start', { sessionId: 'meeting_p1' })).status).toBe(200)
+      await liveCuesV2().feed('meeting_p1', speech)
+      expect(seen).toEqual(['subq'])
+      expect(lastTrace()).toMatchObject({ kind: 'evaluation', sessionId: 'meeting_p1', decisionProvider: 'subq', outcome: 'gate_silent' })
+      const today = new Date().toISOString().slice(0, 10)
+      expect((JSON.parse(readFileSync(join(dataDir, 'subq-cues-usage.json'), 'utf8')) as Record<string, number>)[today]).toBeGreaterThanOrEqual(300)
+      delete process.env.COS_DECISION_PROVIDER_CUES                                // both keys: Jev
+      expect((await (await get('/live-cues/v2/settings')).json()).capability).toMatchObject({ decisionProvider: 'jev' })
+      expect((await post('/live-cues/start', { sessionId: 'meeting_p2' })).status).toBe(200)
+      await liveCuesV2().feed('meeting_p2', speech)
+      expect(seen).toEqual(['subq', 'jev'])
+      expect(lastTrace()).toMatchObject({ sessionId: 'meeting_p2', decisionProvider: 'jev', outcome: 'gate_silent' })
+    } finally {
+      vi.unstubAllGlobals()
+      for (const k of ['COS_DECISION_PROVIDER_CUES', 'SUBQ_API_KEY', 'TYPESAFE_API_KEY']) delete process.env[k]
     }
   })
 })
