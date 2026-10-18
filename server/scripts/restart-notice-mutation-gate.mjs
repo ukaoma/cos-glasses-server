@@ -53,7 +53,7 @@ const mutations = [
 
   // ── Types: the allowlist, the message, the parser ──
   m('allowlist-keeps-restart-causes', TYPES, ["new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])", "new Set(['crash_loop_parked'])"], [...RESUME, ...NOTICE]),
-  m('restart-message', TYPES, ["export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Retry or resume.'", "export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Prompt preserved; provider was not restarted.'"], [...RESUME, ...NOTICE]),
+  m('restart-message', TYPES, ["export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Tap to retry.'", "export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Prompt preserved; provider was not restarted.'"], [...RESUME, ...NOTICE]),
   m('parser-rejects-unknown-cause', TYPES, ["  if (typeof r.cause !== 'string' || !RESTART_CAUSES.has(r.cause)) return undefined", "  if (typeof r.cause !== 'string') return undefined"]),
   m('parser-bounds-done', TYPES, ['    .slice(-limits.alreadyDoneMax)\n', '']),
 
@@ -86,8 +86,11 @@ const mutations = [
   // ── Switches and wiring ──
   m('notice-default-on', FEATURE, ['  return triState(env.COS_RESTART_NOTICE, true)', '  return triState(env.COS_RESTART_NOTICE, false)'], [...FEAT, ...NOTICE]),
   m('delta-default-off', FEATURE, ['  return triState(env.COS_QUERY_JOB_DELTA_JOURNAL, false)', '  return triState(env.COS_QUERY_JOB_DELTA_JOURNAL, true)'], [...FEAT, ...DELTA, ...OFF]),
-  m('tristate-off-values', FEATURE, ["  if (value === '0' || value === 'false' || value === 'off') return false\n", ''], [...FEAT, ...NOTICE]),
+  m('tristate-off-values', 'server/lib/env-switch.ts', ["  if (value === '0' || value === 'false' || value === 'off') return false\n", ''], [...FEAT, ...NOTICE]),
   m('runtime-uses-journal-factory', RUNTIME, ['  storage: createQueryJobJournalStorage(),\n', ''], WIRE),
+  // ── P7 fixes (S8 the whole message fits the 32-column lead, S10 the cutOffDuring bound is the contract's) ──
+  m('restart-message-fits-lead', TYPES, ['export const QUERY_JOB_RESTART_MESSAGE = \'Server restarted. Tap to retry.\'', 'export const QUERY_JOB_RESTART_MESSAGE = \'Server restarted. Retry or resume.\''], RESUME),
+  m('cutoff-bound-is-contract', TYPES, ['  cutOffDuringChars: 60,', '  cutOffDuringChars: 80,'], RESUME),
 ]
 
 const args = process.argv.slice(2)

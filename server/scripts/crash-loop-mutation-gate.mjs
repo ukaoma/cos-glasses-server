@@ -23,10 +23,13 @@ const QJ = ['server/lib/query-job-coordinator-boot-resume.test.ts']
 const MEET = ['server/routes/meeting-boot-resume.test.ts', 'server/routes/meeting.test.ts']
 const ROUTE = ['server/routes/maintenance.test.ts']
 const WIRE = ['server/lib/boot-resume-wiring.test.ts']
-const ALL = [...LIB, ...QJ, ...MEET, ...ROUTE, ...WIRE]
+const RESTART = ['server/lib/managed-restart.test.ts', 'server/routes/recovery-restart-clean.test.ts']
+const HEALTH = ['server/routes/health-query-jobs.test.ts']
+const ALL = [...LIB, ...QJ, ...MEET, ...ROUTE, ...WIRE, ...RESTART, ...HEALTH]
 const GATE = 'server/lib/boot-resume.ts', COORD = 'server/lib/query-job-coordinator.ts', STORE = 'server/lib/query-job-store.ts'
 const TYPES = 'server/lib/query-job-types.ts', RUNTIME = 'server/lib/query-job-runtime.ts', MEETING = 'server/routes/meeting.ts'
 const MAINT = 'server/routes/maintenance.ts', INDEX = 'server/index.ts'
+const MRESTART = 'server/lib/managed-restart.ts', RECOVERY = 'server/routes/recovery.ts', HEALTHR = 'server/routes/health.ts'
 const m = (name, file, edits, tests = LIB) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
 const mutations = [
@@ -43,15 +46,15 @@ const mutations = [
   m('parked-check', GATE, ['      if (before?.parked) {', '      if (false) {'], [...LIB, ...MEET]),
   m('one-count-per-boot', GATE, ['      const counts = this.crashedBoot === true && !this.seenThisBoot.has(key)', '      const counts = this.crashedBoot === true']),
   m('fail-open-on-write', GATE, ["      if (!this.save('admit')) {", "      if (!this.save('admit') && false) {"]),
-  m('flag-default-on', GATE, ["  if (raw === '0' || raw === 'false' || raw === 'off') return false\n  return true\n", "  if (raw === '0' || raw === 'false' || raw === 'off') return false\n  return false\n"], [...LIB, ...QJ]),
-  m('flag-off-forces-off', GATE, ["  if (raw === '0' || raw === 'false' || raw === 'off') return false\n", ''], [...LIB, ...QJ]),
+  m('flag-default-on', GATE, ['  return readSwitch(env.COS_CRASH_LOOP_PARKING, true)', '  return readSwitch(env.COS_CRASH_LOOP_PARKING, false)'], [...LIB, ...QJ]),
+  m('flag-off-forces-off', GATE, ['  return readSwitch(env.COS_CRASH_LOOP_PARKING, true)', '  return true'], [...LIB, ...QJ]),
   m('clean-shutdown-write', GATE, ['      file.cleanShutdown = true', '      file.cleanShutdown = false'], [...LIB, ...QJ]),
   m('clean-shutdown-resets-counts', GATE, ['        if (!entry || entry.parked) continue\n        file.entries[key] =', '        if (true) continue\n        file.entries[key] =']),
   m('clean-shutdown-keeps-parked', GATE, ['        if (!entry || entry.parked) continue', '        if (!entry) continue']),
   m('open-clears-marker', GATE, ['      file.cleanShutdown = false\n', '']),
   m('wrong-shape-quarantined', GATE, ['          try { renameSync(this.path, quarantinedAs) } catch { quarantinedAs = null }', '          quarantinedAs = null']),
-  m('retry-unparks', GATE, ['{ ...before, attempts: 0, parked: false, reason: null,', '{ ...before, attempts: 0, parked: before.parked, reason: null,'], [...LIB, ...ROUTE, ...MEET]),
-  m('retry-resets-count', GATE, ['{ ...before, attempts: 0, parked: false, reason: null,', '{ ...before, attempts: before.attempts, parked: false, reason: null,'], [...LIB, ...QJ]),
+  m('retry-unparks', GATE, ['{ ...before, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: at,', '{ ...before, attempts: 0, parked: before.parked, reason: null, parkedAt: null, retriedAt: at,'], [...LIB, ...ROUTE, ...MEET]),
+  m('retry-resets-count', GATE, ['{ ...before, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: at,', '{ ...before, attempts: before.attempts, parked: false, reason: null, parkedAt: null, retriedAt: at,'], [...LIB, ...QJ]),
   m('forget-removes', GATE, ["      delete file.entries[key]\n      this.save('forget')", "      this.save('forget')"], [...LIB, ...MEET]),
   m('prune-stale', GATE, ['    if (!Number.isFinite(touched) || nowMs - touched > STALE_MS) delete file.entries[key]', '    if (false) delete file.entries[key]']),
   m('prune-keeps-parked', GATE, ['    if (entry.parked) continue\n', '']),
@@ -92,6 +95,21 @@ const mutations = [
   m('index-clean-shutdown', INDEX, ['  bootResume.markCleanShutdown()\n', ''], WIRE),
   m('index-marker-at-start', INDEX, [['  bootResume.markCleanShutdown()\n  const forceExit', '  const forceExit'],
     ['  clearTimeout(forceExit)\n  process.exit(0)', '  bootResume.markCleanShutdown()\n  clearTimeout(forceExit)\n  process.exit(0)']], WIRE),
+  // ── P7 fixes (S4 a phone Restart is clean, S5 one automatic second chance and the health count) ──
+  m('restart-marks-clean', MRESTART, ['    try { options?.beforeRestart?.() } catch (error) { onError(error) }\n', ''], RESTART),
+  m('restart-clean-after-disable-check', MRESTART, ['    if (process.env.COS_DISABLE_SELF_RESTART === \'1\') return\n    try { options?.beforeRestart?.() } catch (error) { onError(error) }\n', '    try { options?.beforeRestart?.() } catch (error) { onError(error) }\n    if (process.env.COS_DISABLE_SELF_RESTART === \'1\') return\n'], RESTART),
+  m('restart-hook-never-throws', MRESTART, ['    try { options?.beforeRestart?.() } catch (error) { onError(error) }\n', '    options?.beforeRestart?.()\n'], RESTART),
+  m('route-restart-marks-clean', RECOVERY, ['    beforeRestart: () => bootResumeGate().markCleanShutdown(),\n', ''], RESTART),
+  m('auto-unpark-due', GATE, ['        if (!this.secondChanceDue(before)) {', '        if (true) {'], LIB),
+  m('auto-unpark-only-once', GATE, ['    if (!AUTO_UNPARK_KINDS.has(entry.kind) || entry.autoRetriedAt !== null) return false', '    if (!AUTO_UNPARK_KINDS.has(entry.kind)) return false'], LIB),
+  m('auto-unpark-meetings-only', GATE, ['    if (!AUTO_UNPARK_KINDS.has(entry.kind) || entry.autoRetriedAt !== null) return false', '    if (entry.autoRetriedAt !== null) return false'], LIB),
+  m('auto-unpark-after-30-minutes', GATE, ['    return Number.isFinite(parkedAt) && this.now() - parkedAt >= AUTO_UNPARK_AFTER_MS', '    return Number.isFinite(parkedAt) && this.now() - parkedAt > AUTO_UNPARK_AFTER_MS'], LIB),
+  m('auto-unpark-waits', GATE, ['    return Number.isFinite(parkedAt) && this.now() - parkedAt >= AUTO_UNPARK_AFTER_MS', '    return Number.isFinite(parkedAt)'], LIB),
+  m('auto-unpark-fresh-count', GATE, ['        entry = { ...before, attempts: 0, parked: false,', '        entry = { ...before, attempts: before.attempts, parked: false,'], LIB),
+  m('auto-unpark-stamps', GATE, ['lastAttemptAt: null, autoRetriedAt: at, updatedAt: at }', 'lastAttemptAt: null, autoRetriedAt: null, updatedAt: at }'], LIB),
+  m('ledger-keeps-auto-retried', GATE, ['    autoRetriedAt: text(e.autoRetriedAt),', '    autoRetriedAt: null,'], LIB),
+  m('health-parked-count', HEALTHR, ['    crash_loop_parking: crashLoopParkingHealth(),\n', ''], HEALTH),
+  m('health-counts-parked-only', HEALTHR, ['    return { enabled: status.enabled, parked: status.parked.length }', '    return { enabled: status.enabled, parked: 0 }'], HEALTH),
 ]
 
 const args = process.argv.slice(2)

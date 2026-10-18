@@ -30,11 +30,12 @@ const BINDT = ['server/routes/agent-session-bindings-p3.test.ts']
 const INTT = ['server/routes/queue-receipts-integration.test.ts']
 const OFFT = ['server/lib/pi-durable-flags-off.test.ts']
 const WIRET = ['server/lib/pi-durable-sessions-wiring.test.ts']
-const ALL = [...REGT, ...EVT, ...TQLT, ...TQRT, ...BINDT, ...INTT, ...OFFT, ...WIRET]
+const ENVT = ['server/lib/env-switch.test.ts']
+const ALL = [...REGT, ...EVT, ...TQLT, ...TQRT, ...BINDT, ...INTT, ...OFFT, ...WIRET, ...ENVT]
 const REG = 'server/lib/agent-session-binding-registry.ts', EVID = 'server/lib/queue-turn-evidence.ts'
 const TQL = 'server/lib/thread-turn-queue.ts', TQR = 'server/routes/thread-turn-queue.ts'
 const DELIV = 'server/lib/thread-turn-queue-deliver.ts', BIND = 'server/routes/agent-session-bindings.ts'
-const INDEX = 'server/index.ts'
+const INDEX = 'server/index.ts', SWITCH = 'server/lib/env-switch.ts'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
 const mutations = [
@@ -55,9 +56,9 @@ const mutations = [
   // ── Pins a dead boot left (registry) ──
   m('orphan-release-inherited-only', REG, ['        if (!this.inheritedPins.has(`${id}\\u0000${job}`)) return false\n', ''], REGT),
   m('orphan-hold-live-pin-is-null', REG, ['      if (!this.inheritedPins.has(`${record.binding.bindingId}\\u0000${job}`)) return null\n', ''], REGT),
-  m('orphan-window-from-restart', REG, ['    return Math.max(pinned, this.openedAt) + QUERY_JOB_ORPHAN_FENCE_MS', '    return pinned + QUERY_JOB_ORPHAN_FENCE_MS'], REGT),
-  m('orphan-window-21-minutes', REG, ['    return Math.max(pinned, this.openedAt) + QUERY_JOB_ORPHAN_FENCE_MS', '    return Math.max(pinned, this.openedAt)'], [...REGT, ...BINDT, ...INTT]),
-  m('orphan-due-at-the-instant', REG, ['        return now >= this.orphanReleaseAt(record, job)', '        return now > this.orphanReleaseAt(record, job)'], [...REGT, ...BINDT]),
+  m('orphan-window-from-restart', REG, ['    return Math.max(pinned, this.openedAt) + PIN_ORPHAN_FENCE_MS', '    return pinned + PIN_ORPHAN_FENCE_MS'], REGT),
+  m('orphan-window-applied', REG, ['    return Math.max(pinned, this.openedAt) + PIN_ORPHAN_FENCE_MS', '    return Math.max(pinned, this.openedAt)'], [...REGT, ...BINDT, ...INTT]),
+  m('orphan-due-at-the-instant', REG, ['        if (now < this.orphanReleaseAt(record, job)) return false', '        if (now <= this.orphanReleaseAt(record, job)) return false'], [...REGT, ...BINDT]),
   m('orphan-hold-ends-at-release', REG, ['    return releasesAt > now ? { releasesAt } : null', '    return { releasesAt }'], REGT),
   m('orphan-records-ambiguous', REG, ['          turns.set(id, [...ledger, { turnId: meta.clientTurnId, result: orphanReleaseRecord(job), at: now }].slice(-MAX_TURNS_PER_BINDING))\n          recorded += 1\n', '          recorded += 1\n'], [...REGT, ...INTT]),
   m('orphan-keeps-finished-record', REG, ['        if (!known) {', '        if (true) {'], REGT),
@@ -98,7 +99,7 @@ const mutations = [
   m('flag-reconcile-default-on', TQL, ["  return triStateFlag(env, 'COS_QUEUE_RECONCILE', true)", "  return triStateFlag(env, 'COS_QUEUE_RECONCILE', false)"], TQLT),
   m('flag-pin-reap-default-on', TQL, ["  return triStateFlag(env, 'COS_PIN_BOOT_REAP', true)", "  return triStateFlag(env, 'COS_PIN_BOOT_REAP', false)"], TQLT),
   m('flag-resend-default-on', TQL, ["  return triStateFlag(env, 'COS_QUEUE_RESEND', true)", "  return triStateFlag(env, 'COS_QUEUE_RESEND', false)"], TQLT),
-  m('flag-zero-is-off', TQL, ["  if (env[name] === '0') return false\n", ''], [...TQLT, ...OFFT]),
+  m('flag-zero-is-off', TQL, ['  return readSwitch(env[name], fallback)', "  return readSwitch(env[name] === '0' ? undefined : env[name], fallback)"], [...TQLT, ...OFFT]),
   m('prune-keeps-unknown-6h', TQL, ['return now - settled < (unknown ? Math.max(settledRetentionMs, UNKNOWN_DELIVERY_RETENTION_MS) : settledRetentionMs)', 'return now - settled < settledRetentionMs'], [...TQLT, ...TQRT]),
   m('prune-unknown-rule-behind-flag', TQL, ['    const unknown = keepUnknown && (', '    const unknown = ('], TQLT),
   m('copy-never-a-raw-code', TQL, ['? QUEUED_TURN_REASON_COPY[reason] : null', '? QUEUED_TURN_REASON_COPY[reason] : reason'], TQLT),
@@ -167,6 +168,26 @@ const mutations = [
   m('index-evidence-reads-journal', INDEX, ['      attempt: queueAttempt,\n      transcriptLines: queueEvidenceLines,', '      attempt: () => null,\n      transcriptLines: queueEvidenceLines,'], WIRET),
   m('index-attempt-begin-wired', INDEX, ['        agentSessionBindingRegistry.beginAttempt(provider, threadId, clientTurnId, mode, now),', '        true,'], WIRET),
   m('index-receipts-this-boot', INDEX, ['    transcriptLines: queueEvidenceLines,\n    bootId: serverMetrics.bootId,\n  }),', "    transcriptLines: queueEvidenceLines,\n    bootId: 'unknown-boot',\n  }),"], WIRET),
+
+  // ── P7 fixes (S3 one switch reader, S6 the orphan window and the recorded child) ──
+  m('sessions-flags-shared-reader', TQL, ['  return readSwitch(env[name], fallback)', '  if (env[name] === \'1\') return true\n  if (env[name] === \'0\') return false\n  return fallback'], TQLT),
+  m('switch-false-and-off', SWITCH, ['  if (value === \'0\' || value === \'false\' || value === \'off\') return false', '  if (value === \'0\') return false'], [...TQLT, ...ENVT]),
+  m('switch-true-and-on', SWITCH, ['  if (value === \'1\' || value === \'true\' || value === \'on\') return true', '  if (value === \'1\') return true'], [...TQLT, ...ENVT]),
+  m('switch-trims-and-folds-case', SWITCH, ['  const value = (raw ?? \'\').trim().toLowerCase()', '  const value = raw ?? \'\''], [...TQLT, ...ENVT]),
+  m('fence-31-minutes', REG, ['export const PIN_ORPHAN_FENCE_MS = 31 * 60_000', 'export const PIN_ORPHAN_FENCE_MS = 21 * 60_000'], REGT),
+  m('orphan-waits-for-child', REG, ['        return !this.orphanChildRunning(record, job)', '        return true'], [...REGT, ...BINDT]),
+  m('orphan-hold-child-running', REG, ['    if (childRunning) return { releasesAt: Number.NaN, childRunning: true }\n', ''], [...REGT, ...BINDT]),
+  m('child-probe-throw-fails-closed', REG, ['      return this.pinChildProbe(child) !== \'gone\'\n    } catch {\n      return true\n    }', '      return this.pinChildProbe(child) !== \'gone\'\n    } catch {\n      return false\n    }'], REGT),
+  m('probe-esrch-only', REG, ['      if ((error as NodeJS.ErrnoException)?.code === \'ESRCH\') return \'gone\'\n      return \'running\'', '      return \'gone\''], REGT),
+  m('probe-reused-pid-is-gone', REG, ['    return Math.abs(start - child.startMs) > PROC_START_TOLERANCE_MS ? \'gone\' : \'running\'', '    return \'running\''], REGT),
+  m('probe-unmeasured-keeps-hold', REG, ['    if (typeof start !== \'number\' || !Number.isFinite(start)) return \'running\'', '    if (typeof start !== \'number\' || !Number.isFinite(start)) return \'gone\''], REGT),
+  m('note-child-skips-inherited', REG, [' || this.inheritedPins.has(`${record.binding.bindingId}\\u0000${jobId}`)) {', ') {'], REGT),
+  m('note-child-persists', REG, ['      records.set(record.binding.bindingId, { ...record, pinMeta: Object.freeze({ ...record.pinMeta, [jobId]: { ...meta, child: parsed } }) })\n', ''], [...REGT, ...BINDT]),
+  m('hydrate-keeps-child', REG, ['          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId, ...(child ? { child } : {}) }', '          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId }'], [...REGT, ...BINDT]),
+  m('route-notes-child', BIND, ['              try { deps.bindings.notePinChild(bindingId, turnId, { pid, startMs }) } catch { /* the window still bounds the pin */ }\n', ''], BINDT),
+  m('route-note-child-needs-flag', BIND, ['            if (pinBootReapEnabled() && typeof deps.bindings.notePinChild === \'function\') {', '            if (typeof deps.bindings.notePinChild === \'function\') {'], BINDT),
+  m('attach-child-running-copy', BIND, ['      else if (hold?.childRunning === true) extra.reasonCopy = ORPHAN_CHILD_RUNNING_COPY\n', ''], BINDT),
+  m('index-pin-child-probe', INDEX, ['AgentSessionBindingRegistry.open({ pinChildProbe: makePinChildProbe(processStartMs) })', 'AgentSessionBindingRegistry.open({ pinChildProbe: makePinChildProbe() })'], WIRET),
 ]
 
 const args = process.argv.slice(2)

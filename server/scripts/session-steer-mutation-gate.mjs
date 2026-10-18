@@ -81,6 +81,8 @@ const mutations = [
   m('index-probe-reads-prompt', INDEX, ['    waitingOnPrompt: sessionHooksEnabled() ? (signalFor(threadId)?.waiting ?? null) !== null : false,', '    waitingOnPrompt: false,'], WIRET),
   m('index-attach-steer-behind-flag', INDEX, ['  sessionSteer: (provider, threadId, gateReason) => (sessionSteerEnabled() ? steerAvailabilityFor(', '  sessionSteer: (provider, threadId, gateReason) => (true ? steerAvailabilityFor('], WIRET),
   m('index-one-live-transport', INDEX, ['  deliverLiveTurn: liveTurnDeliverer,\n  // 6.51.0', '  deliverLiveTurn: makeLiveTurnDeliverer(nativeHeadDeps),\n  // 6.51.0'], WIRET),
+  // ── P7 S9: the journal_unavailable fallback the contract now lists ──
+  m('steer-journal-unavailable', TQR, ['    return queued202(latest, \'journal_unavailable\')', '    return queued202(latest, \'no_outside_channel\')'], TQRT),
 ]
 
 const args = process.argv.slice(2)

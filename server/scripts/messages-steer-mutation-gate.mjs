@@ -60,7 +60,7 @@ const mutations = [
   m('bridge-reaper', BR, ['      if (!childClosed && !terminationRequested) void terminateProviderProcess(proc)', '      if (false) void terminateProviderProcess(proc)'], BRIDGE),
   m('bridge-reaper-skips-exited', BR, ["  proc.on('close', (code) => {\n    childClosed = true\n", "  proc.on('close', (code) => {\n"], BRIDGE),
   m('bridge-wall-uses-checkpoint', BR, ['      if (steerCheckpoint !== null) return finalize(steerCheckpoint)\n', ''], BRIDGE),
-  m('bridge-terminal-ends-stdin', BR, ['    steerSettling = false\n    endSteerStdin()\n  }', '    steerSettling = false\n  }'], BRIDGE),
+  m('bridge-terminal-ends-stdin', BR, ['      return\n    }\n    endSteerStdin()\n  }', '      return\n    }\n  }'], BRIDGE),
   m('bridge-echo-is-delivery', BR, ['          if (delivered) steerPort!.events.onDelivered?.(delivered)\n', ''], BRIDGE),
   m('bridge-folds-on-result', BR, ['            if (verdict.folded.length > 0) steerPort!.events.onFolded?.(verdict.folded)\n', ''], BRIDGE),
   m('bridge-checkpoints', BR, ['                steerPort!.events.onCheckpoint?.(checkpoint)\n', ''], BRIDGE),
@@ -108,7 +108,7 @@ const mutations = [
   m('steerable-outside-fingerprint', TYPES, ["  'activityToolMode',\n] as const satisfies readonly (keyof QueryJobRequest)[]", "  'activityToolMode', 'steerable',\n] as const satisfies readonly (keyof QueryJobRequest)[]"], [...STORE_T, ...ORIGIN]),
   m('steerable-true-only', TYPES, ['    ...(input.steerable === true ? { steerable: true as const } : {}),', '    ...(input.steerable ? { steerable: true as const } : {}),'], STORE_T),
   m('read-state-not-applied', TYPES, ["  return isTerminalQueryJobStatus(jobStatus) && (state === 'accepted' || state === 'delivered') ? 'not_applied' : state", '  return state'], [...STORE_T, ...COORD_T, ...ROUTE_T]),
-  m('fallback-completed-only', TYPES, ["  if (state === 'not_applied' && jobStatus === 'completed') return 'queue_follow_up'", "  if (state === 'not_applied') return 'queue_follow_up'"], [...STORE_T, ...COORD_T]),
+  m('fallback-completed-only', TYPES, ["  if (steerReadState(journaled, jobStatus) === 'not_applied' && jobStatus === 'completed') return 'queue_follow_up'", "  if (steerReadState(journaled, jobStatus) === 'not_applied') return 'queue_follow_up'"], [...STORE_T, ...COORD_T]),
   m('steer-text-bound', TYPES, ["  if (text.length > QUERY_JOB_STEER_LIMITS.steerChars) throw new QueryJobValidationError('steer_text_too_large')\n", ''], COORD_T),
   m('steer-row-state-allowlist', TYPES, ["  if (typeof r.state !== 'string' || !JOURNALED_STEER_STATES.has(r.state)) return null", "  if (typeof r.state !== 'string') return null"], STORE_T),
 
@@ -126,6 +126,18 @@ const mutations = [
   m('probe-needs-both-options', CLI, ['m.test(help) && /(^|[\\s,])--replay-user-messages', 'm.test(help) || /(^|[\\s,])--replay-user-messages'], FEAT),
   m('runtime-passes-port', RUNTIME, ['      ...(steer ? { steer } : {}),\n', ''], WIRE),
   m('health-advertises-steer', HEALTH, ['        ...steerCapabilityField(durableJobs.enabled),\n', ''], WIRE),
+
+  // ── P7 fixes (S1 fallback, S2 uncovered steers at a terminal, S7 monotonic clock) ──
+  m('fallback-delivered-never', TYPES, ['  if (journaled === \'delivered\') return null\n', ''], [...STORE_T, ...COORD_T]),
+  m('coord-fallback-reads-journal', COORD, ['fallback: steerFallback(steer.state, job.status)', 'fallback: steerFallback(state, job.status)'], COORD_T),
+  m('bridge-uncovered-kills', BR, ['    if (steerTracker && steerTracker.uncovered().length > 0) {\n      abandonUncoveredSteers()\n      return\n    }\n', ''], BRIDGE),
+  m('bridge-uncovered-drops-session', BR, ['    steerPort!.close()\n    if (cliSessionMap.delete(resolvedCliKey)) scheduleCliSessionSave()\n    if (childClosed', '    steerPort!.close()\n    if (childClosed'], BRIDGE),
+  m('bridge-uncovered-spares-closed-child', BR, ['    if (childClosed || terminationRequested || steerKilled) return', '    if (terminationRequested || steerKilled) return'], BRIDGE),
+  m('bridge-reaper-skips-killed', BR, ['    if (!steerPort || steerReaper || childClosed || steerKilled) return', '    if (!steerPort || steerReaper || childClosed) return'], BRIDGE),
+  m('steer-clock-monotonic', STEER, ['  return performance.now()', '  return Date.now()'], [...PURE, ...BRIDGE, ...COORD_T]),
+  m('coord-decide-monotonic', COORD, ['    const now = steerClock()', '    const now = Date.now()'], COORD_T),
+  m('coord-deadline-monotonic', COORD, ['    active.deadlineAt = steerClock() + this.providerTimeoutMs', '    active.deadlineAt = Date.now() + this.providerTimeoutMs'], COORD_T),
+  m('bridge-port-monotonic-start', BR, ['      }, { startedAt: steerStartedAt, wallMaxMs: wallMax })', '      }, { startedAt: startTime, wallMaxMs: wallMax })'], BRIDGE),
 ]
 
 const args = process.argv.slice(2)
