@@ -122,7 +122,9 @@ import {
   type NativeBinding,
 } from '../lib/agent-session-binding-store.js'
 import { boundedContinueNote, CONTINUE_NOTE_HEADER, continueNoteAcknowledged, fallbackContinueNote } from '../lib/continue-plan.js'
-import type { RegistryCheck, RegistryRejection, RegistryResult } from '../lib/agent-session-binding-registry.js'
+import type { PinExtras, RegistryCheck, RegistryRejection, RegistryResult, UnpinExtras } from '../lib/agent-session-binding-registry.js'
+import { pinBootReapEnabled, queueableRefusal, queueReconcileEnabled, sessionSteerEnabled, type SessionSteerAvailability } from '../lib/thread-turn-queue.js'
+import type { TurnReceipt } from '../lib/queue-turn-evidence.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
 import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-thread.js'
@@ -212,9 +214,19 @@ export interface BindingRegistry {
     claim: { bindingId: string; epoch: number; targetKey: string },
     now: number,
   ) => RegistryCheck
-  /** A rejection here is FATAL to the turn, per the registry's own caller contract. */
-  pin?: (bindingId: string, jobId: string, now: number) => RegistryResult
-  unpin?: (bindingId: string, jobId: string, now: number) => RegistryResult
+  /**
+   * A rejection here is FATAL to the turn, per the registry's own caller contract.
+   * 6.78.0: `extras` carries the pin's client turn and opens its attempt in the same commit;
+   * passed only while COS_PIN_BOOT_REAP or COS_QUEUE_RECONCILE is on.
+   */
+  pin?: (bindingId: string, jobId: string, now: number, extras?: PinExtras) => RegistryResult
+  /** 6.78.0: `extras` records how the turn's delivery ended, in the same commit as the release. */
+  unpin?: (bindingId: string, jobId: string, now: number, extras?: UnpinExtras) => RegistryResult
+  /**
+   * 6.78.0: is this target held only by pins a dead boot left, and until when? Optional; the
+   * refusal copy says when the thread frees, or keeps its 6.77 words without it.
+   */
+  orphanPinHold?: (provider: string, nativeThreadId: string, now: number) => { releasesAt: number } | null
 }
 
 /** What attach resolves server-side because plan 4.2 forbids the client sending it. */
@@ -410,6 +422,21 @@ export interface AgentSessionBindingsDeps {
    */
   /** Overrides the env gate. Tests only; production reads threadAttachEnabled(). */
   attachEnabled?: boolean
+
+  /**
+   * 6.78.0 (COS_QUEUE_RECONCILE): was this client turn already sent, or may it have been?
+   * `makeTurnReceiptLookup`: the queue's SETTLED rows (never waiting or delivering), the
+   * attempt journal, and the transcript for an unknown. Consulted after the ledger replay
+   * and before the claim; a hit is replayed, never sent again. Absent: 6.77 behaviour.
+   */
+  turnReceipt?: (provider: string, nativeThreadId: string, clientTurnId: string, prompt: string) => TurnReceipt | null
+
+  /**
+   * 6.78.0 (COS_SESSION_STEER): could a turn go INTO this thread's running turn? Added to an
+   * attach refusal as `steer`. The router also checks the flag itself, so with it off the
+   * field is absent whatever is wired.
+   */
+  sessionSteer?: (provider: string, nativeThreadId: string, gateReason: string) => SessionSteerAvailability | null
 
   ownership?: {
     record: (pid: number, startMs: number) => string
@@ -1607,6 +1634,17 @@ export const CONTINUE_NOTE_BUDGET_MS = 1_500
  */
 export const TURN_QUEUED_COPY = 'Queued to the original thread. It keeps running if you put your phone away.'
 
+/**
+ * 6.78.0: the refusal copy while a pin a dead boot left holds the thread. The time is the
+ * Mac's local clock, rounded UP to the minute, so the thread is never shown free early.
+ * 62 columns or fewer, no em dash, no arrow.
+ */
+export function orphanPinWaitCopy(releasesAt: number): string {
+  const at = new Date(Math.ceil(releasesAt / 60_000) * 60_000)
+  const hour = at.getHours() % 12 || 12
+  return `An earlier run may still be running · frees ${hour}:${String(at.getMinutes()).padStart(2, '0')}`
+}
+
 /** Status of a turn that is admitted and still running. */
 export const TURN_PENDING_COPY = 'Still working on your Mac.'
 
@@ -1878,12 +1916,34 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   const runOccupancy = (provider: string, threadId: string): AttachabilityBody =>
     projectAttachability(routeOccupancy(provider, threadId))
 
-  const refuseAttach = (res: Response, reason: WriteRefusal): void => {
+  const refuseAttach = (res: Response, reason: WriteRefusal, extra: Record<string, unknown> = {}): void => {
     res.status(refusalStatus(reason)).json({
       attached: false,
       reason,
       reasonCopy: writeReasonCopy(reason),
+      ...extra,
     })
+  }
+
+  /**
+   * 6.78.0: what an attach refusal on THIS thread adds. `steer` (COS_SESSION_STEER) on a
+   * refusal a turn may queue behind, from the shared rule. And when the holder is a pin a
+   * dead boot left (COS_PIN_BOOT_REAP), the copy says when it frees instead of telling the
+   * person to detach a chat that no longer exists. Empty with the flags off.
+   */
+  const attachRefusalExtras = (provider: string, threadId: string, reason: WriteRefusal, now: number | null): Record<string, unknown> => {
+    const extra: Record<string, unknown> = {}
+    if (reason === 'native_target_busy' && now !== null && typeof deps.bindings?.orphanPinHold === 'function') {
+      let hold: { releasesAt: number } | null = null
+      try { hold = deps.bindings.orphanPinHold(provider, threadId, now) } catch { hold = null }
+      if (hold && Number.isFinite(hold.releasesAt)) extra.reasonCopy = orphanPinWaitCopy(hold.releasesAt)
+    }
+    if (sessionSteerEnabled() && typeof deps.sessionSteer === 'function' && queueableRefusal(reason)) {
+      let steer: SessionSteerAvailability | null = null
+      try { steer = deps.sessionSteer(provider, threadId, reason) } catch { steer = null }
+      if (steer) extra.steer = steer
+    }
+    return extra
   }
 
   /** Read a finite clock, or null. A route that cannot tell the time refuses. */
@@ -2335,7 +2395,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // or any doubt about whether it has one — is Fork-only, and attach is the
       // gate that makes that true.
       const verdict = runOccupancy(providerParam, threadIdParam)
-      if (!verdict.attachable) return refuseAttach(res, verdict.reason ?? 'probe_failed')
+      if (!verdict.attachable) {
+        const refused = verdict.reason ?? 'probe_failed'
+        return refuseAttach(res, refused, attachRefusalExtras(providerParam, threadIdParam, refused, now))
+      }
 
       // `runOccupancy` already proved both, provider first. These narrow the types
       // rather than re-deciding the rule — a second copy of the id rule is how the
@@ -2352,7 +2415,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // a per-binding fence.
       if (fenced !== null) {
         console.warn(`[agent-session-bindings] fence hit route=attach provider=${providerParam} target=${opaqueRevision(key)}`)
-        return refuseAttach(res, fenced)
+        return refuseAttach(res, fenced, attachRefusalExtras(providerParam, threadIdParam, fenced, now))
       }
 
       const resolve = deps.resolveTarget
@@ -2391,7 +2454,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         ttlMs: attachTtlMs,
         now,
       })
-      if (!created?.binding) return refuseAttach(res, registryRefusal(created?.reason))
+      if (!created?.binding) {
+        const refused = registryRefusal(created?.reason)
+        return refuseAttach(res, refused, attachRefusalExtras(providerParam, threadIdParam, refused, now))
+      }
 
       const activated = deps.bindings.activate!(bindingId, now)
       if (!activated?.binding) {
@@ -2775,6 +2841,17 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
      * alone is backgrounded once the last gate passes.
      */
     let queued = false
+    /**
+     * 6.78.0 (COS_QUEUE_RECONCILE): the attempt journal. Opened with the pin (same commit),
+     * settled with the unpin. Where the turn MAY have gone: `proven` once a hop showed it
+     * arrived; `liveMay` / `spawnMay` once a hop that could have written was entered and did
+     * not prove nothing reached. `not_sent` only when every hop entered said nothing did.
+     */
+    let attemptOpened = false
+    let proven = false
+    let liveMay = false
+    let spawnMay = false
+    const attemptExit = (): 'sent' | 'not_sent' | 'unknown' => (proven ? 'sent' : liveMay || spawnMay ? 'unknown' : 'not_sent')
 
     const respond = (status: number, payload: Record<string, unknown>): void => {
       if (!res.headersSent) {
@@ -2919,6 +2996,46 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return
       }
 
+      // 6.78.0: RECEIPTS, before any gate, claim, pin or hop. The ledger above is dropped
+      // with its binding and records nothing for a pre-202 `live_unverified`; a crash after
+      // the pin leaves no record at all. The receipt covers those (target-scoped attempt
+      // journal, the queue's settled rows), so a phone that retries a key after a reconnect
+      // or a restart can never put the same words in twice. A hit is replayed, never sent:
+      // `delivered` as a completed turn, `unknown` as the ambiguous outcome every client
+      // already treats as "do not send again".
+      if (queueReconcileEnabled() && typeof deps.turnReceipt === 'function') {
+        const owner = deps.bindings.get?.(bindingId) ?? null
+        if (owner && isBindableProvider(owner.provider) && isValidNativeThreadId(owner.nativeThreadId)) {
+          let receipt: TurnReceipt | null
+          try {
+            receipt = deps.turnReceipt(owner.provider, owner.nativeThreadId, clientTurnId, prompt)
+          } catch (error) {
+            // A receipt we could not read is not "never sent". Fail closed: unknown.
+            console.error(`[agent-session-bindings] turn receipt read failed: ${error instanceof Error ? error.message : error}`)
+            receipt = { kind: 'unknown', source: 'attempt' }
+          }
+          if (receipt !== null) {
+            const delivered = receipt.kind === 'delivered'
+            if (!res.headersSent) {
+              res.status(delivered ? 200 : refusalStatus('delivery_ambiguous')).json({
+                turnId,
+                outcome: delivered ? 'completed' : 'ambiguous',
+                deliveryState: delivered ? 'delivered' : 'unknown',
+                retryable: false,
+                changed: false,
+                revision: null,
+                reason: delivered ? null : 'delivery_ambiguous',
+                reasonCopy: delivered ? TURN_SENT_COPY : writeReasonCopy('delivery_ambiguous'),
+                replayed: true,
+                receipt: receipt.source,
+              })
+              console.log(turnTiming(`receipt/${receipt.kind}/${receipt.source}`))
+            }
+            return
+          }
+        }
+      }
+
       // The client-queued-prompt gate, used rather than reimplemented: it is the
       // one place that orders state before epoch before target, and a second
       // opinion here is how the store's own header says the two drifted apart.
@@ -3004,10 +3121,19 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
 
       // A failed pin is FATAL, per the registry's own caller contract: an unpinned
       // binding can expire or be detached mid-turn, which defeats the lease.
-      const pinned = deps.bindings.pin!(bindingId, turnId, now)
+      // 6.78.0: the pin names its client turn (COS_PIN_BOOT_REAP) and opens the attempt
+      // (COS_QUEUE_RECONCILE) in its own commit: on disk before any frame or spawn below.
+      const pinExtras: PinExtras = {
+        ...(pinBootReapEnabled() ? { pinMeta: { clientTurnId } } : {}),
+        ...(queueReconcileEnabled() ? { attempt: { clientTurnId, mode: 'turn' as const } } : {}),
+      }
+      const pinned = Object.keys(pinExtras).length > 0
+        ? deps.bindings.pin!(bindingId, turnId, now, pinExtras)
+        : deps.bindings.pin!(bindingId, turnId, now)
       stage('pin')
       if (!pinned?.binding) return refuseTurn(registryRefusal(pinned?.reason))
       pinnedBindingId = bindingId
+      attemptOpened = pinExtras.attempt !== undefined
 
       // 6.53.0: a cancel that landed during the gate or the head read. Before the live hop,
       // which cannot be recalled once it writes into the open session. Nothing was sent;
@@ -3051,7 +3177,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           live = null
         }
         stage(`live(${live?.reason ?? 'threw'})`)
+        // 6.78.0: a throw is a transport bug, not proof the frame never left.
+        if (live === null) liveMay = true
         if (live?.ok) {
+          proven = true
           // 6.53.3: delivered, so the turn runs in the open session now, and what stops it
           // there is the desk halt marker. The turn itself WAS delivered and says so.
           const latched = latchedHere()
@@ -3071,6 +3200,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           return
         }
         if (live && (live.reason === 'unverified' || live.reason === 'write_failed')) {
+          liveMay = true
           // 6.53.3: something MAY be in the session and the person asked for it to stop: arm
           // the marker as for a landed turn, and settle this turn as cancelled, never as a
           // retryable hold that the queue would send again after the cancel's two minutes.
@@ -3123,7 +3253,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           live = null
         }
         stage(`codex-live(${live?.reason ?? 'threw'})`)
+        // 6.78.0: a row MAY be in the Codex app's queue after a throw or an unverified write.
+        if (live === null || live.reason === 'unverified') liveMay = true
         if (live?.ok) {
+          proven = true
           // 6.53.3: queued in the Codex app, which only the app can stop ("Stop it there").
           const latched = latchedHere()
           if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt, busy: busyCodexHop })
@@ -3221,6 +3354,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
 
       let delivery: Delivery
       deliveryAttempted = true
+      spawnMay = true
       try {
         const result = await deliver({
           turnId,
@@ -3310,7 +3444,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseTurn('turn_cancelled', { retryable: false, deliveryState: 'cancelled' })
       }
 
-      if (delivery.kind === 'aborted') return refuseTurn('provider_never_opened')
+      if (delivery.kind === 'aborted') {
+        // The adapter's own proof that the child never opened the session.
+        spawnMay = false
+        return refuseTurn('provider_never_opened')
+      }
 
       if (delivery.kind === 'ambiguous') {
         // Plan 4.6: the reservation is HELD, not released. A hand-crafted next
@@ -3356,6 +3494,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         after = reread === null ? null : reread.digest
       }
       if (after !== null) guard.acknowledgeHead(bindingId, after)
+      proven = true
 
       // Phase 4 owns Message persistence. Nothing about the prompt or the reply is
       // written, logged or echoed here; the terminal outcome is the whole result.
@@ -3411,7 +3550,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
       if (pinnedBindingId !== null) {
         try {
-          deps.bindings.unpin!(pinnedBindingId, turnId, readNow() ?? requestNow)
+          // 6.78.0: the attempt's exit rides the release, in one commit.
+          if (attemptOpened && clientTurnId !== null) {
+            deps.bindings.unpin!(pinnedBindingId, turnId, readNow() ?? requestNow, { attemptExit: { clientTurnId, exit: attemptExit() } })
+          } else {
+            deps.bindings.unpin!(pinnedBindingId, turnId, readNow() ?? requestNow)
+          }
         } catch (error) {
           console.error(`[agent-session-bindings] unpin failed: ${error instanceof Error ? error.message : error}`)
         }

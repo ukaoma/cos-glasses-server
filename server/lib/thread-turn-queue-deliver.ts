@@ -77,7 +77,7 @@ export async function deliverQueuedTurnOverLoopback(
   turn: QueuedThreadTurn,
   port: number,
   token: string,
-): Promise<{ ok: boolean; reason?: string; serverRetryable?: boolean }> {
+): Promise<{ ok: boolean; reason?: string; serverRetryable?: boolean; replayed?: boolean; deliveryState?: string }> {
   // 6.62.0 /qa (Q3): repeat the parking client's acknowledgement, and only that.
   const noteHeaders: Record<string, string> = turn.continueNoteAck === true ? { 'X-COS-Continue-Note': '1' } : {}
   try {
@@ -131,6 +131,11 @@ export async function deliverQueuedTurnOverLoopback(
       ok: false,
       reason: String(sent.body.reason ?? sent.body.error ?? `turn_${sent.status}`),
       serverRetryable: typeof sent.body.retryable === 'boolean' ? sent.body.retryable : undefined,
+      // 6.78.0: a REPLAY of a key whose delivery is unknown (a receipt, or an ambiguous
+      // ledger record). The drain settles it at once instead of retrying the key until the
+      // attempt ceiling: the route will give the same answer every time, by design.
+      ...(sent.body.replayed === true ? { replayed: true } : {}),
+      ...(typeof sent.body.deliveryState === 'string' ? { deliveryState: sent.body.deliveryState } : {}),
     }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : 'deliver_failed' }

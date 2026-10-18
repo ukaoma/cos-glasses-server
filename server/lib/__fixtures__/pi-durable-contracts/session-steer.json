@@ -1,0 +1,131 @@
+{
+  "_contract": "plan v3.1 section 5.3. Path param is :threadId (native thread id).",
+  "post": {
+    "path": "/api/agent-sessions/:provider/:threadId/queued-turns",
+    "body": {
+      "cosSessionId": "g2-abc",
+      "clientTurnId": "3c2b1a00-0000-4000-8000-000000000001",
+      "prompt": "Also check the tests.",
+      "mode": "steer",
+      "fallback": "queue"
+    }
+  },
+  "replies": {
+    "steered": {
+      "status": 200,
+      "body": {
+        "state": "delivered",
+        "reason": "steered",
+        "clientTurnId": "3c2b1a00-0000-4000-8000-000000000001"
+      }
+    },
+    "fallback_queued": {
+      "status": 202,
+      "body": {
+        "queued": true,
+        "clientTurnId": "3c2b1a00-0000-4000-8000-000000000001",
+        "position": 0,
+        "waitingOn": "native_thread_working",
+        "steerFallback": "permission_pending"
+      }
+    },
+    "unverified": {
+      "status": 200,
+      "body": {
+        "state": "refused",
+        "reason": "steer_unverified",
+        "deliveryState": "unknown",
+        "reasonCopy": "May not have been sent. Read it, then say it again."
+      }
+    },
+    "duplicate": {
+      "status": 409,
+      "body": {
+        "error": "duplicate_turn",
+        "state": "refused",
+        "deliveryState": "unknown",
+        "reasonCopy": "May not have been sent. Read it, then say it again."
+      }
+    }
+  },
+  "attach_refusal": {
+    "attached": false,
+    "reason": "native_thread_working",
+    "reasonCopy": "Your Mac is writing to this thread right now. Wait a few seconds and try again, or fork it.",
+    "steer": {
+      "available": true,
+      "mode": "peer_inbox"
+    }
+  },
+  "attach_refusal_codex": {
+    "attached": false,
+    "reason": "native_thread_working",
+    "reasonCopy": "Your Mac is writing to this thread right now. Wait a few seconds and try again, or fork it.",
+    "steer": {
+      "available": false,
+      "reason": "no_outside_channel"
+    }
+  },
+  "attach_refusal_flag_off": {
+    "attached": false,
+    "reason": "native_thread_working",
+    "reasonCopy": "Your Mac is writing to this thread right now. Wait a few seconds and try again, or fork it."
+  },
+  "steer_unavailable_reasons": [
+    "no_outside_channel",
+    "engine_limit",
+    "permission_pending"
+  ],
+  "queue_row": {
+    "clientTurnId": "3c2b1a00-0000-4000-8000-000000000002",
+    "status": "refused",
+    "reason": "delivery_unknown_after_restart",
+    "reasonCopy": "May not have been sent. Read it, then say it again.",
+    "deliveryState": "unknown",
+    "mode": "queue",
+    "resendOf": null,
+    "resentAs": null,
+    "resendable": true
+  },
+  "resend": {
+    "path": "/api/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId/resend",
+    "body": {
+      "clientTurnId": "3c2b1a00-0000-4000-8000-000000000003",
+      "cosSessionId": "g2-abc",
+      "acknowledge": "may_duplicate"
+    },
+    "replies": {
+      "ok": {
+        "status": 200,
+        "body": {
+          "clientTurnId": "3c2b1a00-0000-4000-8000-000000000003",
+          "status": "waiting",
+          "resendOf": "3c2b1a00-0000-4000-8000-000000000002"
+        }
+      },
+      "not_resendable": {
+        "status": 409,
+        "body": {
+          "error": "not_resendable"
+        }
+      },
+      "acknowledge_required": {
+        "status": 409,
+        "body": {
+          "error": "acknowledge_required"
+        }
+      },
+      "unknown_turn": {
+        "status": 404,
+        "body": {
+          "error": "unknown_turn"
+        }
+      }
+    }
+  },
+  "copy": {
+    "unknown": "May not have been sent. Read it, then say it again.",
+    "pinWait": "An earlier run may still be running · frees 7:52",
+    "maxColumns": 62
+  }
+}

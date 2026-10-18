@@ -93,6 +93,108 @@ export interface QueuedThreadTurn {
    * only for a client that said it would show it. Absent: the 6.61 Ask posture.
    */
   continueNoteAck?: true
+  // ---------------------------------------------------------------- 6.78.0 (P3)
+  // Every field below is OPTIONAL and written only while its flag is on, so with
+  // COS_QUEUE_RECONCILE, COS_QUEUE_RESEND and COS_SESSION_STEER all off a queue file is
+  // byte-for-byte what 6.77.0 writes. A 6.77 server reading a 6.78 file ignores them.
+  /**
+   * Stamped (`1`) when this row entered `delivering` under the attempt journal (6.78.0).
+   * Its ABSENCE on a `delivering` row is the whole point: a row with no stamp was written by
+   * a build that kept no attempt record, so "no attempt on file" proves nothing about it and
+   * the reconcile reads it as unknown, never as unsent.
+   */
+  journal?: 1
+  /** The server boot that moved this row to `delivering`. A different boot means it was cut off. */
+  deliveringBootId?: string
+  /** `unknown`: COS cannot establish whether the words reached the session. Never resent. */
+  deliveryState?: 'unknown'
+  /** `steer`: sent into the running turn through the session's peer inbox. Absent: `queue`. */
+  mode?: 'steer'
+  /** Send again: the row this one was copied from. */
+  resendOf?: string
+  /** Send again: the row that was copied from this one. Set once, and only once. */
+  resentAs?: string
+}
+
+// ------------------------------------------------------------------- 6.78.0 flags
+//
+// Read at CALL time, tri-state like `COS_TRANSCRIPT_CLEANUP`: exactly '1' is on, exactly
+// '0' is off, anything else is the default. One reader per flag, so every caller (routes,
+// registry, drain, health) decides with the same answer in the same tick.
+function triStateFlag(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  if (env[name] === '1') return true
+  if (env[name] === '0') return false
+  return fallback
+}
+
+/** `COS_QUEUE_RECONCILE`: the attempt journal, the restart reconcile, receipts, unknown-row retention and reason copy. Default ON. */
+export function queueReconcileEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return triStateFlag(env, 'COS_QUEUE_RECONCILE', true)
+}
+
+/** `COS_PIN_BOOT_REAP`: release a pin a dead boot left, once its orphan child must be gone (21 min). Default ON. */
+export function pinBootReapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return triStateFlag(env, 'COS_PIN_BOOT_REAP', true)
+}
+
+/** `COS_QUEUE_RESEND`: Send again on a refused or expired row. Default ON. */
+export function queueResendEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return triStateFlag(env, 'COS_QUEUE_RESEND', true)
+}
+
+/** `COS_SESSION_STEER`: steer a busy Claude session through its peer inbox. Default OFF. */
+export function sessionSteerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return triStateFlag(env, 'COS_SESSION_STEER', false)
+}
+
+/**
+ * Reasons whose outcome COS cannot establish. Such a row is never resent and is kept for
+ * UNKNOWN_DELIVERY_RETENTION_MS rather than 30 minutes, because the phone has to be able to
+ * read "may not have been sent" for as long as the person might come back to it.
+ */
+export const UNKNOWN_DELIVERY_REASONS: ReadonlySet<string> = new Set([
+  'delivery_unknown_after_restart',
+  'steer_unverified',
+  'delivery_ambiguous',
+])
+
+/** How long a settled row with an unknown outcome stays readable. */
+export const UNKNOWN_DELIVERY_RETENTION_MS = 6 * 60 * 60 * 1000
+
+/** The lens body is 62 columns; every reason line fits one. */
+export const QUEUED_TURN_REASON_COPY_MAX = 62
+
+/** One line per reason, server-authored. Keys are the reasons a row can carry. */
+const QUEUED_TURN_REASON_COPY: Readonly<Record<string, string>> = {
+  delivery_unknown_after_restart: 'May not have been sent. Read it, then say it again.',
+  steer_unverified: 'May not have been sent. Read it, then say it again.',
+  delivery_ambiguous: 'May not have been sent. Read it, then say it again.',
+  steered: 'Sent into the running turn.',
+  reconciled_after_restart: 'Sent before the server restarted.',
+  requeued_after_restart: 'Not sent before the restart. Waiting to send.',
+  queued_turn_expired: 'Not sent: the thread stayed busy too long.',
+  delivery_attempts_exhausted: 'Not sent: the session refused it five times.',
+  turn_cancelled: 'Cancelled before it was sent.',
+  steer_not_sent: 'Not sent: the session could not take it mid-turn.',
+  native_thread_working: 'Waiting for the current turn to end.',
+  live_desktop_process: 'Waiting for the current turn to end.',
+  native_target_busy: 'Waiting: another COS turn holds this thread.',
+  native_turn_in_progress: 'Waiting: a COS turn is running on this thread.',
+  native_target_fenced: 'Waiting: an earlier turn needs a check on your Mac.',
+}
+
+/**
+ * The reason line for a queue row, or null when there is nothing to say (no reason, or one
+ * this build has no words for: a raw code is never shown as if it were a sentence).
+ */
+export function queuedTurnReasonCopy(reason: string | null | undefined): string | null {
+  if (typeof reason !== 'string' || reason.length === 0) return null
+  return Object.prototype.hasOwnProperty.call(QUEUED_TURN_REASON_COPY, reason) ? QUEUED_TURN_REASON_COPY[reason] : null
+}
+
+/** Every reason with copy, for the column test. */
+export function queuedTurnReasonCopyKeys(): string[] {
+  return Object.keys(QUEUED_TURN_REASON_COPY)
 }
 
 /**
@@ -286,14 +388,61 @@ export function pruneQueue(
   now: number,
   settledRetentionMs: number = 30 * 60 * 1000,
 ): QueuedThreadTurn[] {
+  // 6.78.0: a row whose outcome is unknown stays for six hours (COS_QUEUE_RECONCILE). Read
+  // once per prune, so one pass cannot keep some rows by the new rule and drop others by the old.
+  const keepUnknown = queueReconcileEnabled()
   return queue.filter(t => {
     if (t.status === 'waiting' || t.status === 'delivering') return true
     const settled = typeof t.settledAt === 'number' ? t.settledAt : t.queuedAt
-    return now - settled < settledRetentionMs
+    const unknown = keepUnknown && (t.deliveryState === 'unknown' || (typeof t.reason === 'string' && UNKNOWN_DELIVERY_REASONS.has(t.reason)))
+    return now - settled < (unknown ? Math.max(settledRetentionMs, UNKNOWN_DELIVERY_RETENTION_MS) : settledRetentionMs)
   })
 }
 
 /** Where a waiting turn sits, for the phone's row copy. `0` when it is next. */
 export function queuePosition(queue: readonly QueuedThreadTurn[], clientTurnId: string): number {
   return queue.filter(t => t.status === 'waiting').findIndex(t => t.clientTurnId === clientTurnId)
+}
+
+// ------------------------------------------------------------- 6.78.0 session steer
+
+/** Why a busy session cannot take a steer right now (the wire enum, plan v3.1 section 5.3). */
+export type SessionSteerUnavailable = 'no_outside_channel' | 'engine_limit' | 'permission_pending'
+
+export type SessionSteerAvailability =
+  | { available: true; mode: 'peer_inbox' }
+  | { available: false; reason: SessionSteerUnavailable }
+
+/** Occupancy reasons that mean "a session outside COS is running this thread". Only those can be steered. */
+const STEERABLE_GATE_REASONS: ReadonlySet<string> = new Set(['native_thread_working', 'live_desktop_process'])
+
+/**
+ * Can a turn go INTO the running turn of this thread now (6.78.0, COS_SESSION_STEER)?
+ *
+ * PURE, one rule for the attach refusal's `steer` field and the queued-turns POST, so the
+ * row the lens offers and the answer to the tap agree.
+ *   cursor                      engine_limit: the Stop hook is its only door
+ *   codex                       no_outside_channel: `turn/steer` lives in an app-server COS does not hold
+ *   claude, live hop off        no_outside_channel (`COS_CONTINUE_LIVE=0`)
+ *   claude, not a desk run      no_outside_channel: COS's own binding or turn, a fence, or a
+ *                               thread nobody could measure; nothing outside COS to fold into
+ *   claude, no peer inbox       no_outside_channel
+ *   claude, held on a prompt    permission_pending: a session waiting on a dialog reaches no
+ *                               tool boundary, and the steer verify window (4 s) is far shorter
+ *                               than the hook's wait (630 s); it is queued for the turn's end
+ */
+export function sessionSteerAvailability(input: {
+  provider: string
+  gateReason: string | null
+  continueLive: boolean
+  peerInbox: boolean
+  waitingOnPrompt: boolean
+}): SessionSteerAvailability {
+  if (input.provider === 'cursor') return { available: false, reason: 'engine_limit' }
+  if (input.provider !== 'claude') return { available: false, reason: 'no_outside_channel' }
+  if (!input.continueLive) return { available: false, reason: 'no_outside_channel' }
+  if (typeof input.gateReason !== 'string' || !STEERABLE_GATE_REASONS.has(input.gateReason)) return { available: false, reason: 'no_outside_channel' }
+  if (!input.peerInbox) return { available: false, reason: 'no_outside_channel' }
+  if (input.waitingOnPrompt) return { available: false, reason: 'permission_pending' }
+  return { available: true, mode: 'peer_inbox' }
 }
